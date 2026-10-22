@@ -543,6 +543,7 @@ def test_fix1_h4_receipt_identity_wait_is_bounded(monkeypatch, mode):
         reports_test._mount(env, monkeypatch)
         module = hold_test.match_hold
         s, g, _ = await hold_test.opened_series(env, mode)
+        reporter = await reports_test._deferred_receipt_reporter(env, s, g, monkeypatch)
         monkeypatch.setattr(module, "DB_LOCK_TIMEOUT_MS", 100)
         monkeypatch.setattr(module, "DB_STATEMENT_TIMEOUT_MS", 250)
         monkeypatch.setattr(module, "DB_REQUEST_TIMEOUT_S", 1.0)
@@ -561,7 +562,7 @@ def test_fix1_h4_receipt_identity_wait_is_bounded(monkeypatch, mode):
         try:
             try:
                 response = await asyncio.wait_for(
-                    reports_test.post_report(mode, s, 0, g), timeout=3)
+                    reports_test.post_report(mode, s, reporter, g), timeout=3)
             except asyncio.TimeoutError as exc:
                 raise AssertionError(("FIX1 H4 receipt bound", mode, "watchdog expired")) from exc
             assert response.status_code == 503 and response.json().get("detail") == "database_deadline", (
@@ -575,6 +576,6 @@ def test_fix1_h4_receipt_identity_wait_is_bounded(monkeypatch, mode):
                 "SELECT count(*) FROM " + table + " WHERE room_name=$1", s.room) == 0, (
                     "FIX1 H4 receipt no partial write", mode, table)
         assert not await reports_test.recorded(env, mode, s), ("FIX1 H4 receipt no settlement", mode)
-        retried = await reports_test.post_report(mode, s, 0, g)
+        retried = await reports_test.post_report(mode, s, reporter, g)
         assert retried.status_code == 202, ("FIX1 H4 receipt retry", mode, retried.text)
     hold_test.run_env(monkeypatch, body, prefix="fix1h4bound")

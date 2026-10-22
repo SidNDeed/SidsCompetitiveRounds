@@ -106,6 +106,62 @@ async def post_report(mode, s, i, g=None):
     return await _call("POST", "/api/v1/%s/matches" % mode, s.steam(i), _report(mode, s, i, g))
 
 
+async def _deferred_receipt_reporter(env, s, g, patch, *, reporter=None, held=1):
+    """One controlled fresh class-C set, with a reporter outside its election.
+
+    The absent held seat stays absent for open's premise. Every other member
+    is stamped together, then the production class/freshness query verifies
+    the fixture before any receipt/open, receipt/end or identity barrier.
+    """
+    from datetime import timedelta
+
+    mrw = main._mrw_mod()
+    stamp = await hold_test.dbclock(env)
+    fresh_ids = [s.pid(i) for i in range(len(s.seats)) if i != held]
+    await env.conn.execute(
+        "UPDATE match_seat_presence SET beat_at = $3, present_at = $3"
+        " WHERE room_name = $1 AND player_id = ANY($2::uuid[])", s.room, fresh_ids, stamp)
+    await env.conn.execute(
+        "UPDATE match_seat_presence SET beat_at = $3, present_at = $3"
+        " WHERE room_name = $1 AND player_id = $2", s.room, s.pid(held),
+        stamp - timedelta(seconds=30))
+
+    async def now(db):
+        return stamp
+
+    patch.setattr(main._match_hold, "_ctx_now", now)
+    async with env.sm() as db:
+        fresh = await mrw.fresh_class_c_steams(
+            db, room=s.room, game_id=g, member_ids=[s.pid(i) for i in range(len(s.seats))], now=stamp)
+        assert set(fresh) == {s.steam(i) for i in range(len(s.seats)) if i != held}, (
+            "F1 deferred receipt fresh class-C set", s.mode, len(fresh))
+        assert len(fresh) >= 2, ("F1 deferred receipt needs two fresh members", s.mode)
+        ordered = sorted(fresh, key=mrw.steam_order)
+        chosen = ordered[-1] if reporter is None else s.steam(reporter)
+        seat = next(i for i in range(len(s.seats)) if s.steam(i) == chosen)
+        cls = await mrw.classify(db, room=s.room, game_id=g, reported_game_id=g, reporter_id=s.pid(seat))
+        assert cls == mrw.CLASS_C and chosen in fresh, ("F1 deferred receipt reporter is fresh class C", s.mode)
+        assert chosen != ordered[0], ("F1 deferred receipt reporter is not elected", s.mode, seat)
+    return seat
+
+
+def test_fix3_deferred_receipt_premise_rejects_elected_reporter(monkeypatch):
+    import pytest
+
+    async def body(env):
+        _mount(env, monkeypatch)
+        for mode in ("team", "ovt"):
+            s, g, _ = await hold_test.opened_series(env, mode)
+            fresh = [i for i in range(len(s.seats)) if i != 1]
+            elected = min(fresh, key=lambda i: main._mrw_mod().steam_order(s.steam(i)))
+            with monkeypatch.context() as patch:
+                chosen = await _deferred_receipt_reporter(env, s, g, patch)
+                assert chosen != elected, ("F1 deferred receipt selection", mode)
+                with pytest.raises(AssertionError, match="F1 deferred receipt reporter is not elected"):
+                    await _deferred_receipt_reporter(env, s, g, patch, reporter=elected)
+    hold_test.run_env(monkeypatch, body, prefix="fix3f1premise")
+
+
 async def entered_hold(env, s, i, g, *, at=None):
     """Seat i has an entered hold for (room, G): its reports are class R.
     A supplied clock stamps the whole fixture together; the default keeps
@@ -712,11 +768,12 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                     return result
 
                 with monkeypatch.context() as patch:
+                    reporter = await _deferred_receipt_reporter(env, s, g, patch)
                     attempt = _observe_competing_identity_attempt(patch, env, competing)
                     patch.setattr(mrw, "_causal_hold", causal)
                     patch.setattr(mh, "_open_decide", decide)
                     async def receipt():
-                        return await post_report(mode, s, 2, g)
+                        return await post_report(mode, s, reporter, g)
                     async def opening():
                         return await hold_test.open_hold(env, s, 1, 0, g)
                     actions = {"receipt": receipt, "open": opening}
@@ -761,11 +818,12 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                     return result
 
                 with monkeypatch.context() as patch:
+                    reporter = await _deferred_receipt_reporter(env, s, g, patch)
                     attempt = _observe_competing_identity_attempt(patch, env, competing)
                     patch.setattr(mrw, "_causal_hold", causal)
                     patch.setattr(mh, "_hold_row", holdrow)
                     async def receipt():
-                        return await post_report(mode, s, 2, g)
+                        return await post_report(mode, s, reporter, g)
                     async def ending():
                         return await env.post("/api/v1/match/hold/%s/end" % hid, s.steam(0),
                                               {"steam_id": s.steam(0), "reason": "refused"})
