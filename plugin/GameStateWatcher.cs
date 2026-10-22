@@ -6060,6 +6060,11 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo($"[POLL] Opp: {opponentDisplayName} ({opponentSteamId}) oppRanked={opponentIsRanked}");
         }
 
+        internal static bool TeamReportRouteAllowed(bool offline, bool flagged, bool elected)
+        {
+            return !offline && (flagged || elected);
+        }
+
         private static void OnGameOver(int winnerTeam)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: no result paths
@@ -6442,10 +6447,9 @@ namespace CompetitiveRounds
 
             int duration = (int)(DateTime.UtcNow - matchStartTime).TotalSeconds;
 
-            // When both players have the mod, only the player with the lower
-            // Steam ID reports to avoid duplicates. When the opponent doesn't
-            // have the mod, always report (only we can).
-            bool shouldReport = true;
+            // The legacy election still owns unflagged rooms. Flagged team
+            // rooms let their builders decide which present fighters file.
+            bool electedReporter = true;
             if (opponentSteamIdResolved && !opponentSteamId.StartsWith("photon_"))
             {
                 // Both have real Steam IDs \u2014 check if opponent has the mod
@@ -6472,8 +6476,8 @@ namespace CompetitiveRounds
                     long myId = 0, theirId = 0;
                     long.TryParse(localSteamId, out myId);
                     long.TryParse(opponentSteamId, out theirId);
-                    shouldReport = (myId <= theirId);
-                    if (!shouldReport)
+                    electedReporter = (myId <= theirId);
+                    if (!electedReporter)
                         Plugin.Log.LogInfo("[POLL] Opponent will report this match (lower Steam ID)");
                 }
             }
@@ -6501,8 +6505,10 @@ namespace CompetitiveRounds
             if (isOfflineMatch)
             {
                 Plugin.Log.LogInfo($"[POLL] Skipping match report — offline/practice detected (room='{photonRoomId}')");
-                shouldReport = false;
             }
+            bool shouldReport = !isOfflineMatch && electedReporter;
+            bool teamReportEligible = TeamReportRouteAllowed(isOfflineMatch,
+                TeamHoldRules.Flagged(TeamHoldWriter.CurrentRoom()), electedReporter);
 
             // Every 1v1 client independently submits its own threshold-breaking
             // windows. This immutable snapshot is persisted before networking.
@@ -6510,13 +6516,11 @@ namespace CompetitiveRounds
                 TryDispatchMacroEvidence(reportRoomId);
 
             // ── 2v2 routing ────────────────────────────────────────
-            // If this room has 4 players AND we have an active team series id, route through
-            // the 2v2 match report instead of 1v1. The reporter (lowest Steam ID across the 4)
-            // assembles the canonical t1a/t1b/t2a/t2b ordering by sorting each team's Steam IDs
-            // — server canonicalizes the same way at lock, so the 11-field HMAC byte-matches.
-            // ── 1v2 routing (ovt_ rooms, 3 players) ────────────────────
-            // Solo vs duo is read straight from in-game team sizes (the team
-            // with ONE player is the solo), so no external side state is needed.
+            // The builders validate the present census and any live held seat.
+            // They keep the canonical roster ordering and choose the filer.
+            // ── 1v2 routing (ovt_ rooms) ────────────────────
+            // Present team identities come from the players; the builder
+            // validates any missing held seat against the pinned roster.
             // Handled before the 2v2 route; on success we return.
             try
             {
@@ -6539,15 +6543,10 @@ namespace CompetitiveRounds
                 // NOT be gated on PlayerList==3. An ovt_ room that (e.g. after a DC)
                 // has 2 players at report time would otherwise fall through to the
                 // 1v1 ReportMatch path and mint a phantom 1v1 ranked match/series
-                // (#65/#106 class). Only ATTEMPT the 3-player report when full.
-                if (rn1.StartsWith("ovt_") && shouldReport)
+                // (#65/#106 class). The builder validates a held-seat census.
+                if (rn1.StartsWith("ovt_") && teamReportEligible)
                 {
-                    bool sent = false;
-                    // Census: exactly three FIGHTERS — a spectator must not
-                    // suppress the whole 1v2 report (recon's exact-equality
-                    // class: one extra actor = silent no-rating game).
-                    if (RoomActors.ActiveFighterCount() == 3)
-                        sent = TryReportOvtMatch(reportRoomId, duration);
+                    bool sent = TryReportOvtMatch(reportRoomId, duration);
                     if (!sent)
                         Plugin.Log.LogWarning($"[1v2-REPORT-ROUTE] ovt_ room, report not routed (fighters={RoomActors.ActiveFighterCount()}) — 1v1 fallback banned");
                     EvaluateAchievements(localWon);
@@ -6572,11 +6571,7 @@ namespace CompetitiveRounds
                 catch { }
                 Plugin.Log.LogInfo($"[2v2-REPORT-ROUTE] shouldReport={shouldReport} ActiveTeamSeriesId={(hasSeries ? ApiClient.ActiveTeamSeriesId : "(null)")} PlayerList.Length={playerListLen} cr_ff={roomIsCrFf}");
 
-                if (shouldReport
-                    && hasSeries
-                    // Census: exactly four FIGHTERS (same exact-equality class
-                    // as the 1v2 gate above).
-                    && RoomActors.ActiveFighterCount() == 4)
+                if (teamReportEligible && hasSeries)
                 {
                     routedTeamMatch = TryReportTeamMatch(reportRoomId, duration);
                     if (routedTeamMatch)
@@ -6604,7 +6599,7 @@ namespace CompetitiveRounds
                     // the census below four and kills the report. Nothing is resolved
                     // late any more — see TeamReportPayload. Non-reporters early-return
                     // inside TryRequestContinuationSeries as usual.
-                    if (shouldReport && roomIsCrFf && !hasSeries && playerListLen == 4)
+                    if (teamReportEligible && roomIsCrFf && !hasSeries && playerListLen == 4)
                     {
                         Plugin.Log.LogWarning("[2v2-REPORT-ROUTE] no team series at match end — requesting continuation and deferring report");
                         // Resolve the ENTIRE report HERE and defer only the
@@ -6999,8 +6994,9 @@ namespace CompetitiveRounds
 
         /// <summary>Report a finished 1v2 game. Solo vs duo is determined purely
         /// from in-game team SIZES — the team with one Player is the solo, the
-        /// other two are the duo — so no external side state is needed. Reporter
-        /// is the lowest Steam ID of the three; others route correctly but no-op.</summary>
+        /// other two are the duo. A live held seat comes from the pinned roster.
+        /// Files selects the lowest id in an unflagged room and every present
+        /// fighter in a flagged room.</summary>
         private static bool TryReportOvtMatch(string reportRoomId, int duration)
         {
             // Census: gate + roster from ONE fighter view (converted together
@@ -7065,7 +7061,7 @@ namespace CompetitiveRounds
             var duo = byTeam[duoTeam]; duo.Sort(StringComparer.Ordinal);
             string duoASid = duo[0], duoBSid = duo[1];
 
-            // Reporter election: lowest Steam ID.
+            // Legacy reporter candidate; Files applies the pinned room rule.
             string lowest = null; long lowVal = long.MaxValue;
             foreach (var sid in info.Keys) { if (long.TryParse(sid, out long v) && v < lowVal) { lowVal = v; lowest = sid; } }
             if (lowest == null) lowest = localSteamId;
@@ -8124,7 +8120,7 @@ namespace CompetitiveRounds
                 return null;
             }
 
-            // Reporter election: lowest Steam ID across all 4. (Same rule as 1v1.)
+            // Legacy reporter candidate; Files applies the pinned room rule.
             string lowestSid = null;
             long lowestVal = long.MaxValue;
             foreach (var sid in bySteam.Keys)

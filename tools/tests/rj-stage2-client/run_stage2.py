@@ -26,7 +26,7 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 PLUGIN = os.path.join(REPO, "plugin")
 PROJ = os.path.join(HERE, "Stage2Tests.csproj")
 FILES = {"seat": "SeatDeckLog.cs", "rules": "TeamHoldRules.cs", "net": "TeamHoldNet.cs",
-         "return": "TeamHoldReturn.cs", "writer": "TeamHoldWriter.cs"}
+         "return": "TeamHoldReturn.cs", "writer": "TeamHoldWriter.cs", "watcher": "GameStateWatcher.cs"}
 PROPS = {"seat": "SeatSource", "rules": "RulesSource", "net": "NetSource"}
 
 # Fixture name prefix per piece.
@@ -158,6 +158,11 @@ MUTANTS = [
         "                    if ((a.State == 'b' || a.State == 'e') && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                    if (a.DeadlineS",
         "                    if (a.State == 'b' && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                    if (a.DeadlineS")],
      't3_bound_entered', 't3_replay_bound_then_entered'),
+    # H3: actual OnGameOver dispatch and existing builder validation.
+    ('M-H3a', 'KX6', 'watcher', [('                    bool sent = TryReportOvtMatch(reportRoomId, duration);', '                    bool sent = false;\n                    if (RoomActors.ActiveFighterCount() == 3)\n                        sent = TryReportOvtMatch(reportRoomId, duration);')], 'tx6_route_ovt_held', 'tx6_route_every_returned_filer'),
+    ('M-H3b', 'KX6', 'watcher', [('                if (teamReportEligible && hasSeries)', '                if (teamReportEligible && hasSeries && RoomActors.ActiveFighterCount() == 4)')], 'tx6_route_team_held', 'tx6_route_every_returned_filer'),
+    ('M-H3c', 'KX6', 'watcher', [('return !offline && (flagged || elected);', 'return !offline && elected;')], 'tx6_route_every_returned_filer', 'tx6_route_unflagged_election'),
+    ('M-H3d', 'KX6', 'watcher', [('return !offline && (flagged || elected);', 'return flagged || elected;')], 'tx6_route_offline', 'tx6_route_every_returned_filer'),
     # K3, S3
     ("M3.5", "K3", "rules", [
         ("internal static string SnapshotDigest(Snapshot s) { return Fnv64Hex(s.Format()); }",
@@ -395,6 +400,51 @@ def extract_member(source, signature):
     raise ValueError("unclosed production member " + signature)
 
 
+def gameover_report_source(text):
+    text = text.replace("\r\n", "\n")
+    # All slices are the production source, including the dispatch conditions.
+    lines = text.splitlines(keepends=True)
+    def member(signature):
+        starts = [i for i, line in enumerate(lines) if line.lstrip().startswith(signature)]
+        if len(starts) != 1:
+            raise RuntimeError("H3 member anchor: " + signature)
+        start = starts[0]
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].rstrip() == "        }")
+        return "".join(lines[start:end + 1])
+    def block(source, prefix):
+        ls = source.splitlines(keepends=True)
+        starts = [i for i, line in enumerate(ls) if line.lstrip().startswith(prefix)]
+        if len(starts) != 1:
+            raise RuntimeError("H3 block anchor: " + prefix)
+        start = starts[0]
+        indent = ls[start][:len(ls[start]) - len(ls[start].lstrip())]
+        end = next(i for i in range(start + 1, len(ls)) if ls[i].rstrip() == indent + "}")
+        return "".join(ls[start:end + 1])
+    on = member("private static void OnGameOver(")
+    eligibility = on[on.index("            bool teamReportEligible ="):]
+    eligibility = eligibility[:eligibility.index(";\n") + 2]
+    ovt_route = block(on, 'if (rn1.StartsWith("ovt_")')
+    team_route = block(on, "if (teamReportEligible && hasSeries")
+    ovt = member("private static bool TryReportOvtMatch(")
+    team = member("private static TeamReportPayload BuildTeamReportPayload(")
+    def census_prefix(source):
+        body = source[source.index("{\n") + 2:]
+        return body[:body.index("            var pm = PlayerManager.instance;")]
+    ovt_filer = next(line for line in ovt.splitlines(keepends=True) if "if (!TeamHoldRules.Files(" in line)
+    team_filer = block(team, "if (!TeamHoldRules.Files(")
+    return ("\nnamespace CompetitiveRounds.Stage2Harness {\n"
+        "internal sealed class GameOverReportRouter : GameOverReportRouterBase {\n"
+        + member("internal static bool TeamReportRouteAllowed(")
+        + "internal static void Run() { bool routedTeamMatch = false;\n" + eligibility + ovt_route + team_route + "}\n"
+        + "private static bool TryReportOvtMatch(string reportRoomId, int duration) { OvtCalls++;\n"
+        + census_prefix(ovt) + "string lowest = Lowest;\n" + ovt_filer
+        + "Reported = true; return true; }\n"
+        + "private static bool TryReportTeamMatch(string reportRoomId, int duration) { TeamCalls++; return BuildTeamReportPayload(reportRoomId, duration) != null; }\n"
+        + "private static TeamReportPayload BuildTeamReportPayload(string reportRoomId, int duration) {\n"
+        + census_prefix(team) + "string lowestSid = Lowest;\n" + team_filer
+        + "Reported = true; return new TeamReportPayload { LocalIsReporter = true }; }\n"
+        + member("private static string HeldCensusSid(") + "} }\n")
+
 def gen_production(overrides):
     def read(key):
         with open(overrides.get(key, os.path.join(PLUGIN, FILES[key])), encoding="utf-8-sig") as f:
@@ -427,7 +477,7 @@ internal static bool SurvivorWired = %s;
 %s
 }
 }
-""" % (str(activation_wired).lower(), "\n".join(members), str(survivor_wired).lower(), "\n".join(loop))
+""" % (str(activation_wired).lower(), "\n".join(members), str(survivor_wired).lower(), "\n".join(loop)) + gameover_report_source(read("watcher"))
 
 def build(work, tag, overrides):
     out = os.path.join(work, tag)
