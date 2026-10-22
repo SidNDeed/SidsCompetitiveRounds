@@ -91,6 +91,10 @@ async def _fake_session(request, steam_id, db):
     request.state.scr_session_verified = True
 
 
+class _SessionLookupUnavailable(RuntimeError):
+    """Only the authentication fixture raises this datastore sentinel."""
+
+
 class _SessionLookupErrorDB:
     def __init__(self):
         self.info = {}
@@ -103,7 +107,7 @@ class _SessionLookupErrorDB:
             assert args[1] == {"lock_ms": "5000ms", "statement_ms": "7000ms"}
             self.timeout_setups += 1
             return None
-        raise RuntimeError("session lookup unavailable")
+        raise _SessionLookupUnavailable("session lookup unavailable")
 
 
 class _EmptyResult:
@@ -161,9 +165,17 @@ def test_m2_deadline_covers_checkout_before_any_route_work(monkeypatch):
     async def exercise():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            return await asyncio.wait_for(client.post("/api/v1/match/game/start", json={
+            task = asyncio.create_task(client.post("/api/v1/match/game/start", json={
                 "steam_id": "s2deadline", "mode": "team",
-                "series_id": str(uuid.uuid4()), "room": "deadline-room"}), 0.15)
+                "series_id": str(uuid.uuid4()), "room": "deadline-room"}))
+            try:
+                completed, _ = await asyncio.wait((task,), timeout=0.15)
+                assert task in completed, "FIX3 M2 checkout completes before watchdog"
+                return task.result()
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     response = _run(exercise())
     assert response.status_code == 503
@@ -335,10 +347,19 @@ def test_h1_real_helper_soft_fail_paths_require_verified_session(
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
             route = "/api/v1/match" + path
-            log_only = await client.request(method, route, json=body, params=params)
-            lookup_error = await client.request(
-                method, route, json=body, params=params,
-                headers={"X-Session-Token": "unavailable"})
+            async def unauthorized(headers=None):
+                response = None
+                try:
+                    response = await client.request(
+                        method, route, json=body, params=params, headers=headers)
+                except _SessionLookupUnavailable:
+                    pass
+                assert response is not None, (
+                    "FIX3 H1 unauthorized request must complete", method, path)
+                return response
+
+            log_only = await unauthorized()
+            lookup_error = await unauthorized({"X-Session-Token": "unavailable"})
         for response in (log_only, lookup_error):
             assert response.status_code == 401
             assert response.json() == {"detail": "session_required"}
@@ -476,12 +497,23 @@ def test_t1_4_game_id_chain_rematch_delayed_and_handover(monkeypatch):
     earlier previous G returns the existing successor and mints nothing; a
     promoted master re-posting the same previous G (handover between mint and
     publish) receives the same G, also when both posts race."""
+    from asyncpg import UniqueViolationError
+    from sqlalchemy.exc import IntegrityError
+
     async def body(env):
         for mode in ("team", "ovt"):
             s = await seed_series(env.conn, mode)
             a = await game_start(env, s, 0)
             assert (a["status"], a["seq"], a["minted"]) == ("ok", 1, True), a
-            again = await game_start(env, s, 1)
+            try:
+                again = await game_start(env, s, 1)
+            except IntegrityError as error:
+                cause = error.orig.__cause__
+                if (not isinstance(cause, UniqueViolationError)
+                        or cause.sqlstate != "23505"
+                        or cause.constraint_name != "uq_match_games_first"):
+                    raise
+                assert False, "FIX3 M1.8 repeat first game returns its existing row"
             assert (again["game_id"], again["minted"]) == (a["game_id"], False), again
             b = await game_start(env, s, 0, prev=a["game_id"])          # rematch
             assert b["game_id"] != a["game_id"] and b["seq"] == 2 and b["minted"], b
@@ -687,6 +719,20 @@ def test_t2_1_open_anchor_idempotent_and_refusals(monkeypatch):
     monkeypatch.setattr(match_hold, "datetime", _SkewedDatetime, raising=False)
 
     async def body(env):
+        from sqlalchemy import text
+
+        # Establish a transaction clock before a PostgreSQL wait, then exercise
+        # the actual context clock. The successful open uses another clock.
+        async with env.sm() as clock_db:
+            transaction_at = (await clock_db.execute(text("SELECT now()"))).scalar()
+            await clock_db.execute(text("SELECT pg_sleep(0.05)"))
+            lower = await dbclock(env)
+            observed = await match_hold._ctx_now(clock_db)
+            upper = await dbclock(env)
+            assert transaction_at < lower <= observed <= upper, (
+                "FIX3 M2 context clock follows PostgreSQL wait",
+                transaction_at, lower, observed, upper)
+            await clock_db.rollback()
         s, g, pres = await opened_series(env)
         await env.conn.execute(
             "INSERT INTO queue_leases (player_id, mode, group_id, generation, acquired_at, "
@@ -736,7 +782,9 @@ def test_t2_1_open_anchor_idempotent_and_refusals(monkeypatch):
         async def refusal(r):
             assert r.status_code == 200, r.text
             j = r.json()
-            assert j["status"] == "refused", j
+            assert "status" in j and j["status"] == "refused", (
+                "FIX3 M2.6 open must refuse", j)
+            assert "reason" in j, ("FIX3 M2.6 refusal names reason", j)
             return j["reason"]
 
         assert await refusal(await open_hold(env, s, 1, 0, g)) == "duplicate_game"
@@ -811,6 +859,9 @@ def test_m3_due_prior_game_closes_before_later_open(monkeypatch):
         await backdate_presence(env, expired, 1, 30)
 
         later = (await open_hold(env, expired, 1, 0, g2)).json()
+        assert "status" in later and later["status"] == "opened", (
+            "FIX3 M3 due predecessor permits open", later)
+        assert "repeat" in later, ("FIX3 M3 opened answer names repeat", later)
         assert (later["status"], later["repeat"]) == ("opened", False), later
         old = await hold_db(env, first["hold_id"])
         assert (old["closed_at"], old["closed_reason"], old["held_until"]) == \
@@ -833,6 +884,8 @@ def test_m3_due_prior_game_closes_before_later_open(monkeypatch):
         await backdate_presence(env, bound, 1, 30)
 
         after_bound = (await open_hold(env, bound, 1, 0, gb2)).json()
+        assert "status" in after_bound, (
+            "FIX3 M3 expired bound answer names status", after_bound)
         assert after_bound["status"] == "opened", after_bound
         bound_old = await hold_db(env, bound_first["hold_id"])
         assert (bound_old["closed_at"], bound_old["closed_reason"],
@@ -891,6 +944,8 @@ def test_m3_bind_actor_conflict_uses_live_deadlines(monkeypatch):
 
             answer = await bind(env, s, 1, hid, actor)
             if state != "live":
+                assert "status" in answer, (
+                    "FIX3 M3 bind answer names status", answer)
                 assert answer["status"] == "bound", answer
             else:
                 assert answer == {"status": "refused", "reason": "actor_conflict"}, answer
@@ -982,6 +1037,8 @@ def test_t2_2_closure_once_for_every_reason(monkeypatch):
             j = r.json()
             assert (j["status"], j["closed_reason"], j["already"]) == ("closed", reason, False)
             h = await hold_db(env, hid)
+            assert h is not None and h["closed_at"] is not None, (
+                "FIX3 M2.7 closure persisted", reason)
             assert (h["closed_reason"], h["closed_at"].isoformat()) == (reason, j["closed_at"])
             st = (await env.get("/api/v1/match/hold/%s/state" % hid, s.steam(0),
                                 {"steam_id": s.steam(0)})).json()
@@ -1031,6 +1088,8 @@ def test_t2_2_closure_once_for_every_reason(monkeypatch):
         h = await hold_db(env, hid)
         assert h["held_until"] == until_before, "the sweep moved held_until"
         assert h["closed_at"] == h["bound_at"] + timedelta(seconds=60)
+        assert h is not None and h["closed_at"] is not None, (
+            "FIX3 M2.7 swept closure persisted", hid)
         assert h["closed_at"].isoformat() == st["closed_at"]
 
         late, gl, _ = await opened_series(env)
@@ -1200,6 +1259,7 @@ def test_m6_bad_signature_records_refusal_before_403(monkeypatch):
         row = await env.conn.fetchrow(
             "SELECT room_name, game_id, held_player_id, opener_player_id, outcome, reason, hold_id "
             "FROM match_hold_open_attempts WHERE request_id = $1", rid)
+        assert row is not None, "FIX3 M6 signature refusal has ledger row"
         assert (row["room_name"], row["game_id"], row["held_player_id"],
                 row["opener_player_id"], row["outcome"], row["reason"], row["hold_id"]) == \
             (s.room, uuid.UUID(g), None, s.pid(0), "refused", "bad_signature", None)
@@ -1484,7 +1544,7 @@ def test_t3_1_claim_refusals_grant_and_rotation(monkeypatch):
     async def body(env):
         s, g, hid = await held(env)
         before = await hold_db(env, hid)
-        assert (await claim(env, s, 2, hid))["reason"] == "not_yours"
+        assert await claim(env, s, 2, hid) == {"status": "refused", "reason": 'not_yours'}
         c1 = await claim(env, s, 1, hid)
         assert c1["status"] == "claimed" and len(c1["token"]) == 64, c1
         assert (c1["room_name"], c1["room_region"], c1["slot"], c1["team"], c1["game_id"],
@@ -1507,21 +1567,21 @@ def test_t3_1_claim_refusals_grant_and_rotation(monkeypatch):
         e, ge, hide = await held(env, "ovt")
         await env.post("/api/v1/match/hold/%s/end" % hide, e.steam(0),
                        {"steam_id": e.steam(0), "reason": "survivor_leave"})
-        assert (await claim(env, e, 1, hide))["reason"] == "hold_lapsed"
+        assert await claim(env, e, 1, hide) == {"status": "refused", "reason": 'hold_lapsed'}
         lp, gl, hidl = await held(env)
         await shift_hold(env, hidl, 300)
-        assert (await claim(env, lp, 1, hidl))["reason"] == "hold_lapsed"
+        assert await claim(env, lp, 1, hidl) == {"status": "refused", "reason": 'hold_lapsed'}
         cl, gc, hidc = await held(env)
         await env.conn.execute("UPDATE team_series SET status = 'completed' WHERE id = $1",
                                cl.sid)
-        assert (await claim(env, cl, 1, hidc))["reason"] == "lobby_closed"
+        assert await claim(env, cl, 1, hidc) == {"status": "refused", "reason": 'lobby_closed'}
         om, go, hido = await held(env)
         await env.conn.execute(
             "INSERT INTO queue_leases (player_id, mode, group_id, generation, acquired_at, "
             " renewed_at, expires_at) VALUES ($1, 'ffa', gen_random_uuid(), gen_random_uuid(), "
             " clock_timestamp(), clock_timestamp(), clock_timestamp() + interval '5 minutes')",
             om.pid(1))
-        assert (await claim(env, om, 1, hido))["reason"] == "other_mode"
+        assert await claim(env, om, 1, hido) == {"status": "refused", "reason": 'other_mode'}
         await env.conn.execute(
             "UPDATE queue_leases SET acquired_at = clock_timestamp() - interval '10 minutes',"
             " renewed_at = clock_timestamp() - interval '10 minutes',"
@@ -1531,7 +1591,7 @@ def test_t3_1_claim_refusals_grant_and_rotation(monkeypatch):
         hs, gh, hidh = await held(env, "ovt")
         await env.conn.execute("DELETE FROM ovt_queue WHERE player_id = $1", hs.pid(1))
         await queue_row(env.conn, "team", hs.pid(1), hs.steam(1), "rjs1")
-        assert (await claim(env, hs, 1, hidh))["reason"] == "other_mode"
+        assert await claim(env, hs, 1, hidh) == {"status": "refused", "reason": 'other_mode'}
         await env.conn.execute("DELETE FROM team_queue WHERE player_id = $1", hs.pid(1))
         assert (await claim(env, hs, 1, hidh))["status"] == "claimed"
         r = await env.post("/api/v1/match/hold/%s/claim" % uuid.uuid4(), hs.steam(1),
@@ -1558,12 +1618,15 @@ def test_h2_verifier_lifecycle_on_claim_state_bind_and_entry(monkeypatch, capsys
             by_room = (await env.get(
                 "/api/v1/match/hold/by-room", s.steam(2),
                 {"steam_id": s.steam(2), "room": s.room, "game_id": g})).json()
+            assert all("verifier" in view for view in (state, by_room)), (
+                "FIX3 H2 every view names verifier", state, by_room)
             return state, by_room
 
         before = await views()
         assert [v["verifier"] for v in before] == [None, None]
 
         first = await claim(env, s, 1, hid)
+        assert "verifier" in first, ("FIX3 H2 answer names verifier", "first")
         raw_tokens.append(first["token"])
         first_hash = hashlib.sha256(first["token"].encode()).hexdigest()
         assert first["verifier"] == first_hash
@@ -1572,6 +1635,7 @@ def test_h2_verifier_lifecycle_on_claim_state_bind_and_entry(monkeypatch, capsys
         assert all(first["token"] not in str(v) for v in claimed)
 
         second = await claim(env, s, 1, hid)
+        assert "verifier" in second, ("FIX3 H2 answer names verifier", "second")
         raw_tokens.append(second["token"])
         second_hash = hashlib.sha256(second["token"].encode()).hexdigest()
         assert second["verifier"] == second_hash and second_hash != first_hash
@@ -1581,11 +1645,13 @@ def test_h2_verifier_lifecycle_on_claim_state_bind_and_entry(monkeypatch, capsys
 
         await beat(env, s, 0, seen=[(10, s.steam(0)), (21, s.steam(1))])
         bound = await bind(env, s, 1, hid, 21)
+        assert "verifier" in bound, ("FIX3 H2 answer names verifier", "bound")
         assert bound["verifier"] == second_hash
         bound_views = await views()
         assert [v["verifier"] for v in bound_views] == [second_hash, second_hash]
 
         accepted = await entered(env, s, 1, hid, g, 21)
+        assert "verifier" in accepted, ("FIX3 H2 answer names verifier", "accepted")
         assert accepted["verifier"] is None
         after = await views()
         assert [v["verifier"] for v in after] == [None, None]
@@ -1607,37 +1673,37 @@ def test_t3_7_bind_identity_and_entry(monkeypatch):
     and spends the verifier; nothing binds or enters after the closure."""
     async def body(env):
         s, g, hid = await held(env)
-        assert (await bind(env, s, 1, hid, 21))["reason"] == "not_claimed"
+        assert await bind(env, s, 1, hid, 21) == {"status": "refused", "reason": 'not_claimed'}
         await claim(env, s, 1, hid)
-        assert (await bind(env, s, 2, hid, 21))["reason"] == "not_yours"
-        assert (await bind(env, s, 1, hid, 21))["reason"] == "uncorroborated"
+        assert await bind(env, s, 2, hid, 21) == {"status": "refused", "reason": 'not_yours'}
+        assert await bind(env, s, 1, hid, 21) == {"status": "refused", "reason": 'uncorroborated'}
         await beat(env, s, 0, seen=[(10, s.steam(0)), (21, s.steam(1))])
         await beat(env, s, 3, seen=[(13, s.steam(3)), (22, s.steam(1))])
-        assert (await bind(env, s, 1, hid, 21))["reason"] == "actor_identity_mismatch"
+        assert await bind(env, s, 1, hid, 21) == {"status": "refused", "reason": 'actor_identity_mismatch'}
         await beat(env, s, 3, seen=[(13, s.steam(3)), (21, s.steam(1))])
         await env.conn.execute(
             "UPDATE match_seat_presence SET beat_at = clock_timestamp() - interval '30 seconds'"
             " WHERE room_name = $1 AND player_id = ANY($2::uuid[])", s.room, [s.pid(0), s.pid(3)])
-        assert (await bind(env, s, 1, hid, 21))["reason"] == "uncorroborated"
+        assert await bind(env, s, 1, hid, 21) == {"status": "refused", "reason": 'uncorroborated'}
         await beat(env, s, 0, seen=[(10, s.steam(0)), (21, s.steam(1))])
         b = await bind(env, s, 1, hid, 21)
         assert (b["status"], b["state"], b["seq"], b["bound_actor"]) == ("bound", "bound", 1, 21)
         h = await hold_db(env, hid)
         assert (h["bound_actor"], h["bound_region"], h["seq"]) == (21, "eu", 1)
         assert (await bind(env, s, 1, hid, 21))["status"] == "bound"
-        assert (await bind(env, s, 1, hid, 23))["reason"] == "already_bound"
+        assert await bind(env, s, 1, hid, 23) == {"status": "refused", "reason": 'already_bound'}
         assert (await hold_db(env, hid))["seq"] == 1
 
-        assert (await entered(env, s, 2, hid, g, 21))["reason"] == "not_yours"
-        assert (await entered(env, s, 1, hid, g, 23))["reason"] == "actor_mismatch"
-        assert (await entered(env, s, 1, hid, uuid.uuid4(), 21))["reason"] == "game_mismatch"
+        assert await entered(env, s, 2, hid, g, 21) == {"status": "refused", "reason": 'not_yours'}
+        assert await entered(env, s, 1, hid, g, 23) == {"status": "refused", "reason": 'actor_mismatch'}
+        assert await entered(env, s, 1, hid, uuid.uuid4(), 21) == {"status": "refused", "reason": 'game_mismatch'}
         en = await entered(env, s, 1, hid, g, 21)
         assert (en["status"], en["state"], en["seq"], en["closed_reason"]) == \
             ("entered", "entered", 2, "entered"), en
         h = await hold_db(env, hid)
         assert h["verifier"] is None and h["entered_at"] == h["closed_at"]
-        assert (await entered(env, s, 1, hid, g, 21))["reason"] == "hold_lapsed"
-        assert (await claim(env, s, 1, hid))["reason"] == "hold_lapsed"
+        assert await entered(env, s, 1, hid, g, 21) == {"status": "refused", "reason": 'hold_lapsed'}
+        assert await claim(env, s, 1, hid) == {"status": "refused", "reason": 'hold_lapsed'}
         assert (await hold_db(env, hid))["closed_at"] == h["closed_at"]
         kinds = [(k, o, r) for _, k, o, r in await attempts(env, hid)]
         assert kinds == [
@@ -1657,12 +1723,12 @@ def test_t3_7_bind_identity_and_entry(monkeypatch):
         await env.conn.execute(
             "UPDATE match_seat_presence SET beat_at = clock_timestamp() - interval '30 seconds'"
             " WHERE room_name = $1", u.room)
-        assert (await entered(env, u, 1, hidu, gu, 31))["reason"] == "uncorroborated"
+        assert await entered(env, u, 1, hidu, gu, 31) == {"status": "refused", "reason": 'uncorroborated'}
         await env.conn.execute(
             "UPDATE match_seat_holds SET bound_at = bound_at - interval '61 seconds' WHERE id = $1",
             uuid.UUID(hidu))
         await beat(env, u, 2, seen=[(12, u.steam(2)), (31, u.steam(1))])
-        assert (await entered(env, u, 1, hidu, gu, 31))["reason"] == "hold_lapsed"
+        assert await entered(env, u, 1, hidu, gu, 31) == {"status": "refused", "reason": 'hold_lapsed'}
     run_env(monkeypatch, body)
 
 

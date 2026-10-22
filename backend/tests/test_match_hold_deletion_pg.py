@@ -193,7 +193,9 @@ def test_fix1_h4_beat_deletion_orders_and_survivors(monkeypatch, mode, order, ca
             if order == "deletion_first" and caller == victim:
                 assert result.status_code in (200, 404), ("FIX1 H4 deleted beat", result.text)
                 if result.status_code == 200:
-                    assert result.json().get("status") == "refused", result.text
+                    answer = result.json()
+                    assert "status" in answer and answer["status"] == "refused", (
+                        "FIX3 H4 deleted caller beat must refuse", answer)
             else:
                 assert result.status_code == 200, ("FIX1 H4 live beat", result.text)
         finally:
@@ -328,14 +330,18 @@ def test_fix1_h4_audit_revalidates_deleted_identity(monkeypatch, writer):
             t1_points=1, t2_points=0)
         await _fix1_h4_delete(env, s, 1, monkeypatch)
         async with env.sm() as db:
-            with pytest.raises(hold_test.HTTPException) as caught:
+            caught = None
+            try:
                 if writer == "ledger_final":
                     await module._write_open_attempt(
                         db, req, s.room, s.pid(1), s.pid(0), await module._ctx_now(db),
                         "refused", "other_mode", None)
                 else:
                     await module._claim_open_ledger(db, req, s.room, s.pid(1), s.pid(0))
-            assert caught.value.status_code == 404, ("FIX1 H4 stale audit", writer)
+            except hold_test.HTTPException as error:
+                caught = error
+            assert caught is not None, ("FIX3 H4 deleted audit must refuse", writer)
+            assert caught.status_code == 404, ("FIX1 H4 stale audit", writer)
             await db.rollback()
         await _fix1_h4_clean(env, s, 1)
     hold_test.run_env(monkeypatch, body, prefix="fix1h4audit")
@@ -447,11 +453,16 @@ def test_fix1_h4_terminal_release_preserves_cleared_attribution(monkeypatch):
         async def settled(*args):
             called.append(True)
 
-        async with env.sm() as db:
-            await main._mrw_mod().release_held(
-                db, mode="team", room=s.room, game_id=g,
-                now=await hold_test.match_hold._ctx_now(db), settle=settled)
-            await db.commit()
+        async def mark_settled(*args, **kwargs):
+            assert False, "FIX3 H4 terminal must not rewrite attribution"
+
+        with monkeypatch.context() as patch:
+            patch.setattr(main._mrw_mod(), "_mark_settled", mark_settled)
+            async with env.sm() as db:
+                await main._mrw_mod().release_held(
+                    db, mode="team", room=s.room, game_id=g,
+                    now=await hold_test.match_hold._ctx_now(db), settle=settled)
+                await db.commit()
         win = await env.conn.fetchrow(
             "SELECT settled_at,settled_reporter_id FROM match_report_windows WHERE room_name=$1",
             s.room)

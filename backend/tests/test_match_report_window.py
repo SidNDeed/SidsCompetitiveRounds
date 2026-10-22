@@ -637,10 +637,24 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                         else:
                             call = mrw.supersede_held(
                                 db, mode="team", room=room, game_id=game_id, now=now)
-                        with pytest.raises(HTTPException) as caught:
-                            await asyncio.wait_for(call, 7.5)
+                        task = asyncio.create_task(call)
+                        caught = None
+                        try:
+                            completed, _ = await asyncio.wait((task,), timeout=7.5)
+                            assert task in completed, (
+                                "FIX3 M2 window completes before watchdog", operation)
+                            try:
+                                task.result()
+                            except HTTPException as error:
+                                caught = error
+                        finally:
+                            if not task.done():
+                                task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
                         elapsed = asyncio.get_running_loop().time() - started
-                        assert (caught.value.status_code, caught.value.detail) == \
+                        assert caught is not None, (
+                            "FIX3 M2 blocked window must refuse", operation)
+                        assert (caught.status_code, caught.detail) == \
                             (503, "database_deadline")
                         assert 4.0 <= elapsed < 7.0, (operation, elapsed)
                         assert db.info.get(match_hold._DB_DEADLINE_INFO) is None
