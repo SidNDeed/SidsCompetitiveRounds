@@ -4973,12 +4973,12 @@
   },
   "<color=#88FF88>Sent! Thank you. Filed as <b>#{0}</b>.</color>": {
    "surface": "CompetitiveUI",
-   "location": "SubmitBugReportNow",
+   "location": "OnBugReportAnswer",
    "kind": "TrF"
   },
   "<color=#88FF88>Sent! Thank you.</color>": {
    "surface": "CompetitiveUI",
-   "location": "SubmitBugReportNow",
+   "location": "OnBugReportAnswer",
    "kind": "Tr"
   },
   "<color=#88FF88>{0}/{1} active</color>": {
@@ -7173,12 +7173,12 @@
   },
   "Bug report sent. Thanks!": {
    "surface": "CompetitiveUI",
-   "location": "SubmitBugReportNow",
+   "location": "OnBugReportAnswer",
    "kind": "Tr"
   },
   "Bug report sent. Thanks! (#{0})": {
    "surface": "CompetitiveUI",
-   "location": "SubmitBugReportNow",
+   "location": "OnBugReportAnswer",
    "kind": "TrF"
   },
   "Build Types": {
@@ -9728,7 +9728,7 @@
   },
   "Failed: {0}": {
    "surface": "CompetitiveUI, NativeUI",
-   "location": "CreateShopRow, SubmitBugReportNow",
+   "location": "BugReportFailureStatus, CreateShopRow",
    "kind": "TrF"
   },
   "False": {
