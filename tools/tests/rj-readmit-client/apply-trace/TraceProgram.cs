@@ -253,6 +253,54 @@ namespace CompetitiveRounds
                     ok &= FfaReadmit.Entered == 0 && !ReadmitAdmissionBase._lateEntered;
                 }
             }
+            else if (name == "H1.ack_identity")
+            {
+                replay.State = FfaReplay.ReadmitReplayState.Completed;
+                ReadmitAdmissionBase.ResetAdmission(prepared);
+                FfaReplayAdmission.Propose();
+                FfaReplayAdmission.Ack();
+                ok = ReadmitAdmissionBase.AckCount == 1
+                    && !ReadmitAdmissionBase._replayProposal.HasValue && ReadmitAdmissionBase._replayAck == null;
+                FfaReplayAdmission.Ack();
+                ok &= ReadmitAdmissionBase.AckCount == 1;
+
+                replay.State = FfaReplay.ReadmitReplayState.Running;
+                ReadmitAdmissionBase.ResetAdmission(prepared);
+                FfaReplayAdmission.Propose();
+                var oldAck = ReadmitAdmissionBase._replayAck;
+                FfaReplayAdmission.Propose(ReadmitAdmissionBase.ProposalEvent(2, "c2"));
+                replay.State = FfaReplay.ReadmitReplayState.Completed;
+                ok &= oldAck != null && !oldAck() && ReadmitAdmissionBase.AckCount == 0;
+                FfaReplayAdmission.Ack();
+                ok &= ReadmitAdmissionBase.AckCount == 1 && ReadmitAdmissionBase.AckPayload != null
+                    && (int)ReadmitAdmissionBase.AckPayload[1] == 2 && (string)ReadmitAdmissionBase.AckPayload[2] == "c2"
+                    && !ReadmitAdmissionBase._replayProposal.HasValue && ReadmitAdmissionBase._replayAck == null;
+                FfaReplayAdmission.Ack();
+                ok &= ReadmitAdmissionBase.AckCount == 1;
+
+                replay.State = FfaReplay.ReadmitReplayState.Running;
+                ReadmitAdmissionBase.ResetAdmission(prepared);
+                var foreign = ReadmitAdmissionBase.ProposalEvent();
+                FfaReplayAdmission.Propose(foreign);
+                foreign.Sender = 4;
+                replay.State = FfaReplay.ReadmitReplayState.Completed;
+                FfaReplayAdmission.Ack();
+                ok &= ReadmitAdmissionBase.AckCount == 0 && ReadmitAdmissionBase._replayProposal.HasValue;
+                foreign.Sender = 3;
+                FfaReplayAdmission.Ack();
+                ok &= ReadmitAdmissionBase.AckCount == 1;
+
+                replay.State = FfaReplay.ReadmitReplayState.Running;
+                ReadmitAdmissionBase.ResetAdmission(prepared);
+                FfaReplayAdmission.Propose();
+                var equalAck = ReadmitAdmissionBase._replayAck;
+                FfaReplayAdmission.Propose(ReadmitAdmissionBase.ProposalEvent());
+                replay.State = FfaReplay.ReadmitReplayState.Completed;
+                FfaReplayAdmission.Ack();
+                ok &= ReadmitAdmissionBase.AckCount == 1 && equalAck != null && !equalAck();
+                FfaReplayAdmission.Ack();
+                ok &= ReadmitAdmissionBase.AckCount == 1;
+            }
             else if (name == "H1.master_ack")
             {
                 ReadmitAdmissionBase.ResetAdmission(prepared);

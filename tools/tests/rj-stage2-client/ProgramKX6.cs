@@ -199,7 +199,7 @@ namespace CompetitiveRounds.Stage2Harness
                 return TeamHold.Cut == null ? "" : new TeamHoldRules.HoldKey { HoldId = "hold", Slot = 1, Team = 0, G = "game", State = 'o', Seq = 1 }.Format();
             }
         }
-        protected static class Plugin
+        protected class Plugin
         {
             internal static readonly Logger Log = new Logger();
             internal sealed class Logger

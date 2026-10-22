@@ -84,7 +84,7 @@ namespace CompetitiveRounds
         public void LogWarning(object m) { Trace.Event("warn " + m); }
     }
 
-    internal static class Plugin { internal static readonly LogStub Log = new LogStub(); }
+    internal class Plugin { internal static readonly LogStub Log = new LogStub(); }
 
     internal static class I18n
     {
@@ -180,7 +180,7 @@ namespace CompetitiveRounds
     internal sealed class EventData { internal int Sender; internal object CustomData; }
     internal static class FfaLateRules
     {
-        internal sealed class Proposal { internal string Lobby8, Chain; internal int G, K, N, From; }
+        internal struct Proposal { public string Lobby8, Chain; public int G, K, N, From; }
         internal static bool AllAcks = true, KeptThrows;
         internal static string Refusal;
         internal static bool KeptActorValue(object gate, bool holdsGrant, int actor, object grants, object record, int epoch)
@@ -201,7 +201,7 @@ namespace CompetitiveRounds
     {
         internal sealed class LastHold { internal int G, K; internal bool Done; }
         internal static LastHold _lastHold;
-        internal static FfaLateRules.Proposal _replayProposal;
+        internal static FfaLateRules.Proposal? _replayProposal;
         internal static Func<bool> _replayAck;
         internal static bool HoldsGrant = true, LateArmed, _lateEntered, Lagged, ActorKept = true;
         internal static int _snapK = -1, PointK, PointEpoch = 1, EpochApplied, _pendingSelfKeptGame;
@@ -212,6 +212,7 @@ namespace CompetitiveRounds
         internal const byte EVT_EPOCH_ACK = 56;
         internal static Func<bool> Prepared;
         internal static int AckCount;
+        internal static object[] AckPayload;
         internal static bool LagOutNow() { return Lagged; }
         internal static int MasterActor() { return 3; }
         internal static bool MasterKept() { return true; }
@@ -224,13 +225,14 @@ namespace CompetitiveRounds
         internal static string I(int value) { return value.ToString(); }
         internal static string S(object[] data, int at) { return data[at] as string; }
         internal static int N(object[] data, int at, int fallback) { return data[at] is int value ? value : fallback; }
-        internal static EventData ProposalEvent()
+        internal static EventData ProposalEvent(int epoch = 1, string chain = "c1")
         {
-            return new EventData { Sender = 3, CustomData = new object[] { "lobbyA", 1, "c1", 1, 0 } };
+            return new EventData { Sender = 3, CustomData = new object[] { "lobbyA", epoch, chain, 1, 0 } };
         }
         internal static bool Raise(byte kind, object[] data, RaiseEventOptions options)
         {
             AckCount++;
+            AckPayload = data;
             return true;
         }
         internal static void ResetAdmission(Func<bool> prepared)
@@ -240,7 +242,7 @@ namespace CompetitiveRounds
             _replayProposal = new FfaLateRules.Proposal { Lobby8 = "lobbyA", Chain = "c1", N = 1, G = 1, K = 0, From = 3 };
             HoldsGrant = true; LateArmed = false; _lateEntered = false; Lagged = false; ActorKept = true;
             _snapK = -1; PointK = 0; PointEpoch = 1; EpochApplied = 0; _pendingSelfKeptGame = 1;
-            Prepared = prepared; AckCount = 0; _ackSent.Clear(); _acks.Clear();
+            Prepared = prepared; AckCount = 0; AckPayload = null; _ackSent.Clear(); _acks.Clear();
             FfaLateRules.AllAcks = true; FfaLateRules.Refusal = null; FfaLateRules.KeptThrows = false;
             FfaAssembly.ReadmitLobby = true;
             FfaReadmit.Readmitted = true; FfaReadmit.Entered = 0; FfaAssembly.LateEntered = 0;

@@ -8,6 +8,10 @@ must FAIL and its negative control fixture must PASS (#391). Exit 0 only when
 everything holds.
 
     python tools/tests/rj-stage2-client/run_stage2.py --work <scratch dir> [--piece K0]
+        [--stub-kinds]
+
+--stub-kinds checks declaration kinds and their in-memory mutant only; it
+does not create the required --work folder or invoke a compiler.
 
 --work is required: every build output and mutant copy goes there, never into
 the tree. --piece limits the fixtures and mutants to one piece (K0 to K6);
@@ -15,11 +19,13 @@ without it every piece runs. The K0 run also runs the S0 inventory check (the
 application sites of RPCA_Pick and OFFLINE_Pick) and its negative control.
 """
 import argparse
+import glob
 import hashlib
 import os
 import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
@@ -380,6 +386,304 @@ def inventory(lines):
     return bad
 
 
+def _blank_csharp(text):
+    """Blank comments and literals while preserving offsets and newlines."""
+    chars, size = list(text), len(text)
+
+    def comment(at):
+        if text.startswith('//', at):
+            end = text.find('\n', at + 2)
+            return size if end < 0 else end
+        if text.startswith('/*', at):
+            end = text.find('*/', at + 2)
+            if end < 0:
+                raise ValueError('unclosed C# comment')
+            return end + 2
+        return None
+
+    def literal(at):
+        start = at
+        while at < size and text[at] in '$@':
+            at += 1
+        if at >= size or text[at] not in '\"\'':
+            return None
+        quote, prefix = text[at], text[start:at]
+        verbatim, interpolated = '@' in prefix, '$' in prefix
+        if quote == '\"' and not verbatim and text.startswith('\"\"\"', at):
+            raise ValueError('raw C# literal requires lexer support')
+        at += 1
+        while at < size:
+            if text[at] == quote:
+                if verbatim and at + 1 < size and text[at + 1] == quote:
+                    at += 2
+                    continue
+                return at + 1
+            if not verbatim and text[at] == '\\':
+                at += 2
+                continue
+            if interpolated and text[at] == '{':
+                if text.startswith('{{', at):
+                    at += 2
+                    continue
+                depth = 1
+                at += 1
+                while at < size and depth:
+                    end = comment(at)
+                    if end is None:
+                        end = literal(at)
+                    if end is not None:
+                        at = end
+                        continue
+                    depth += (text[at] == '{') - (text[at] == '}')
+                    at += 1
+                continue
+            at += 1
+        raise ValueError('unclosed C# literal')
+
+    at = 0
+    while at < size:
+        end = comment(at)
+        if end is None:
+            end = literal(at)
+        if end is None:
+            at += 1
+            continue
+        for pos in range(at, end):
+            if chars[pos] not in '\r\n':
+                chars[pos] = ' '
+        at = end
+    return ''.join(chars)
+
+
+def _type_declarations(path, text):
+    code = _blank_csharp(text)
+    pattern = re.compile(
+        r'\bnamespace\s+(?P<namespace>[@\w]+(?:\s*\.\s*[@\w]+)*)\s*(?P<nsend>[{;])'
+        r'|(?P<mods>(?:(?:public|private|protected|internal|static|sealed|abstract|partial|new|unsafe|readonly|ref)\s+)*)'
+        r'\b(?P<kind>class|struct|enum|interface)\s+(?P<name>@?[A-Za-z_]\w*)'
+        r'|(?P<brace>[{}])')
+    scopes, rows, pending, file_namespace = [], [], None, ''
+    for match in pattern.finditer(code):
+        if match.group('namespace'):
+            name = re.sub(r'\s+', '', match.group('namespace')).replace('@', '')
+            if match.group('nsend') == ';':
+                if file_namespace or scopes:
+                    raise ValueError('unsupported nested file namespace: ' + path)
+                file_namespace = name
+            else:
+                scopes.append(('namespace', name))
+        elif match.group('kind'):
+            if pending is not None:
+                raise ValueError('type declaration without a body: ' + path)
+            nesting = [name for kind, name in scopes if kind == 'type']
+            namespace = '.'.join(([file_namespace] if file_namespace else [])
+                                 + [name for kind, name in scopes if kind == 'namespace'])
+            local = '.'.join(nesting + [match.group('name').lstrip('@')])
+            mods, kind = match.group('mods').split(), match.group('kind')
+            static = 'static' in mods
+            # Static classes compare on static; structs and enums are intrinsically sealed.
+            sealed = kind in ('struct', 'enum') or ('sealed' in mods and not static)
+            rows.append(dict(path=path, line=code.count('\n', 0, match.start()) + 1,
+                             name=(namespace + '.' if namespace else '') + local,
+                             local=local, kind=kind, static=static, sealed=sealed, partial='partial' in mods))
+            pending = ('type', match.group('name').lstrip('@'))
+        elif match.group('brace') == '{':
+            scopes.append(pending or ('block', ''))
+            pending = None
+        else:
+            if not scopes:
+                raise ValueError('unmatched C# brace: ' + path)
+            scopes.pop()
+    if scopes or pending:
+        raise ValueError('unclosed C# declaration: ' + path)
+    return rows
+
+
+def _kind(row):
+    return (row['kind'], row['static'], row['sealed'])
+
+
+def _kind_text(kind):
+    return '%s static=%s sealed=%s' % kind
+
+
+def _production_sources(tree):
+    paths = sorted(glob.glob(os.path.join(tree, 'plugin', '**', '*.cs'), recursive=True))
+    return {os.path.relpath(path, tree).replace(os.sep, '/'): open(path, encoding='utf-8-sig').read()
+            for path in paths if not {'obj', 'bin'}.intersection(os.path.relpath(path, tree).split(os.sep))}
+
+
+def _project_sources(tree, project):
+    """Read default Compile property expansions without invoking MSBuild."""
+    root = ET.parse(os.path.join(tree, project)).getroot()
+    folder = os.path.dirname(os.path.join(tree, project)) + os.sep
+    props = {'MSBuildThisFileDirectory': folder}
+    for group in root.findall('PropertyGroup'):
+        for node in group:
+            if node.text is not None and node.tag not in props:
+                props[node.tag] = node.text
+
+    def expand(value):
+        for _ in range(len(props) + 1):
+            updated = re.sub(r'\$\(([^)]+)\)', lambda m: props.get(m.group(1), m.group(0)), value)
+            if updated == value:
+                return value
+            value = updated
+        raise ValueError('cyclic project properties: ' + project)
+
+    linked, sources = set(), set()
+    for node in root.findall('./ItemGroup/Compile'):
+        value = expand(node.attrib.get('Include', '')).replace('\\', os.sep)
+        if '$(' in value:
+            if value not in ('$(ProductionSource)', '$(GenDir)' + os.sep + 'Reducers.cs'):
+                raise ValueError('unresolved Compile source: ' + project)
+            continue  # Generated declarations are censused from actual in-memory source below.
+        path = os.path.normpath(value if os.path.isabs(value) else os.path.join(folder, value))
+        matches = sorted(glob.glob(path))
+        if not matches:
+            raise ValueError('missing Compile source in ' + project)
+        for match in matches:
+            relative = os.path.relpath(match, tree).replace(os.sep, '/')
+            if relative.startswith('../') or not relative.endswith('.cs'):
+                raise ValueError('Compile source outside the C# tree: ' + project)
+            sources.add(relative)
+            if relative.startswith('plugin/'):
+                linked.add(relative)
+    return sources, linked
+
+
+def _stub_kind_rows(stubs, production, mapped, external, harness_only, standins, linked):
+    index = {}
+    for path, text in sorted(production.items()):
+        for row in _type_declarations(path, text):
+            index.setdefault(row['name'], []).append(row)
+
+    def resolve(row):
+        candidates = [row['name'], 'CompetitiveRounds.' + row['local']]
+        parts = row['local'].split('.')
+        if len(parts) > 1 and parts[0] in standins:
+            candidates += ['CompetitiveRounds.' + standins[parts[0]] + '.' + '.'.join(parts[1:]),
+                           'CompetitiveRounds.' + '.'.join(parts[1:])]
+        return [name for name in dict.fromkeys(candidates) if name in index]
+
+    result = []
+    for path, text in sorted(stubs.items()):
+        for row in _type_declarations(path, text):
+            matches, name = resolve(row), row['name']
+            declared = int(name in mapped) + int(name in external) + int(name in harness_only)
+            status, target, expected = 'EQUAL', '-', None
+            if declared > 1:
+                resolution, status = 'AMBIGUOUS', 'DIFFERS'
+            elif path in linked:
+                resolution, target = 'PRODUCTION', name
+            elif name in mapped:
+                resolution, target = 'MAPPED', mapped[name]
+                if matches and matches != [target]:
+                    status = 'DIFFERS'
+            elif name in external or name in harness_only:
+                resolution = 'EXTERNAL' if name in external else 'HARNESS-ONLY'
+                expected = external.get(name)
+                if matches:
+                    status, target = 'DIFFERS', 'SHADOW ' + ','.join(matches)
+            elif len(matches) == 1:
+                resolution, target = 'PRODUCTION', matches[0]
+            else:
+                resolution, status = ('AMBIGUOUS' if matches else 'UNRESOLVED'), 'DIFFERS'
+                target = ','.join(matches) or '-'
+            refs = index.get(target, [])
+            if resolution in ('PRODUCTION', 'MAPPED'):
+                signatures = {_kind(ref) for ref in refs}
+                if not refs or len(signatures) != 1 or (len(refs) > 1 and not all(r['partial'] for r in refs)):
+                    status = 'DIFFERS'
+                else:
+                    expected = _kind(refs[0])
+            if expected is not None and _kind(row) != expected:
+                status = 'DIFFERS'
+            result.append(dict(row, resolution=resolution, target=target, expected=expected,
+                               production_sites=','.join(r['path'] + ':' + str(r['line']) for r in refs) or '-',
+                               status=status))
+    return result
+
+
+def _print_stub_kinds(rows):
+    print('stub file:line | qualified name | stub kind | resolution | production file:line | production kind | verdict')
+    for row in rows:
+        print('%s:%s | %s | %s | %s:%s | %s | %s | %s' % (
+            row['path'], row['line'], row['name'], _kind_text(_kind(row)), row['resolution'], row['target'],
+            row['production_sites'], _kind_text(row['expected']) if row['expected'] is not None else '-', row['status']))
+    counts = {key: sum(r['resolution'] == key for r in rows)
+              for key in ('PRODUCTION', 'MAPPED', 'EXTERNAL', 'HARNESS-ONLY', 'UNRESOLVED', 'AMBIGUOUS')}
+    print('stub kinds: declarations=%d %s differences=%d' % (
+        len(rows), ' '.join('%s=%d' % item for item in counts.items()), sum(r['status'] != 'EQUAL' for r in rows)))
+
+
+def _stub_kind_control(tree, sources, linked, mapped, external, harness_only, standins, mutants, generated):
+    """Run before work-folder creation or build; mutate in-memory copies only."""
+    try:
+        production = _production_sources(tree)
+        stubs = {path: open(os.path.join(tree, path), encoding='utf-8-sig').read() for path in sources}
+        stubs.update({path: production[path] for path in linked})
+        stubs.update(generated)
+        rows = _stub_kind_rows(stubs, production, mapped, external, harness_only, standins, linked)
+        _print_stub_kinds(rows)
+        baseline = bool(rows) and all(r['status'] == 'EQUAL' for r in rows)
+        print('stub-kind control', 'GREEN' if baseline else 'RED')
+        ok = baseline
+        for mid, side, path, old, new, expected_name in mutants:
+            texts = dict(stubs if side == 'stub' else production)
+            raw = texts[path]
+            if raw.count(old) != 1:
+                print('BAD mutant %s: anchor occurs %d times' % (mid, raw.count(old)))
+                ok = False
+                continue
+            texts[path] = raw.replace(old, new, 1)
+            changed = _stub_kind_rows(texts if side == 'stub' else stubs,
+                                      texts if side == 'production' else production,
+                                      mapped, external, harness_only, standins, linked)
+            differences = [r for r in changed if r['status'] != 'EQUAL']
+            hit = baseline and bool(differences) and any(r['name'] == expected_name for r in differences)
+            ok = ok and hit
+            print('%s mutant %s (stub kinds): target %s=%s; control=%s' % (
+                'CAUGHT' if hit else 'MISSED', mid, expected_name, 'RED' if differences else 'GREEN',
+                'GREEN' if baseline else 'RED'))
+        return ok
+    except (OSError, ValueError, KeyError, ET.ParseError) as exc:
+        print('stub-kind control RED:', str(exc))
+        return False
+
+
+def stub_kinds():
+    harness = 'CompetitiveRounds.Stage2Harness.'
+    replay = 'CompetitiveRounds.Stage2Replay.'
+    base = harness + 'GameOverReportRouterBase.'
+    external = {replay + name: ('class', False, True) for name in (
+        'Player', 'CardInfo', 'GM_ArmsRace', 'PlayerManager')}
+    external.update({replay + 'PhotonNetwork': ('class', True, False),
+                     base + 'Photon.Realtime.Player': ('class', False, True)})
+    harness_only = {harness + name for name in (
+        'Program', 'Program.PointSim', 'Program.PointSim.P', 'Program.Seat', 'Program.WriterRig',
+        'Program.SharedFake', 'Program.LiveSim', 'Program.Pl', 'Program.RecordRun', 'GameOverReportRouterBase',
+        'GameOverReportRouter')}
+    # Photon and Realtime are namespace facades represented by harness types.
+    harness_only.update({base + 'Photon', base + 'Photon.Realtime', base + 'Plugin.Logger',
+                         replay + 'PhotonNetwork.Peer', replay + 'Player.Data', replay + 'Player.View'})
+    mapped = {base + 'HeldCut': 'CompetitiveRounds.TeamHoldRules.DropCut'}
+    standins = {'GameOverReportRouterBase': 'GameStateWatcher'}
+    folder = 'tools/tests/rj-stage2-client/'
+    try:
+        sources, linked = _project_sources(REPO, folder + 'Stage2Tests.csproj')
+        sources.update(os.path.relpath(p, REPO).replace(os.sep, '/')
+                       for p in glob.glob(os.path.join(REPO, folder, 'Program*.cs')))
+        generated = {'generated/Production.cs': gen_production({})}
+        mutants = [('M-STUB-3', 'stub', folder + 'ProgramKX6.cs',
+                    'protected sealed class TeamReportPayload', 'protected struct TeamReportPayload',
+                    base + 'TeamReportPayload')]
+        return _stub_kind_control(REPO, sources, linked, mapped, external, harness_only, standins, mutants, generated)
+    except (OSError, ValueError, KeyError, RuntimeError, StopIteration, ET.ParseError) as exc:
+        print('stub-kind control RED:', str(exc))
+        return False
+
+
 def sha(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
@@ -511,7 +815,12 @@ def main():
     # The refit lane logs fixtures and mutants apart: fixtures runs every
     # fixture of the piece (and the K0 inventory), mutants every mutant.
     ap.add_argument("--part", choices=("all", "fixtures", "mutants"), default="all")
+    ap.add_argument("--stub-kinds", action="store_true", help="check all type declarations without building or writing")
     a = ap.parse_args()
+    kinds_ok = stub_kinds()
+    if not kinds_ok or a.stub_kinds:
+        print("RESULT", "PASS" if kinds_ok else "FAIL")
+        return 0 if kinds_ok else 1
     work = os.path.abspath(a.work)
     os.makedirs(work, exist_ok=True)
     head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()

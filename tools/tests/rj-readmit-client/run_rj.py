@@ -16,6 +16,10 @@ unchanged by the run.
 
     python tools/tests/rj-readmit-client/run_rj.py --work <dir>
         [--tree <dir>] [--wt <dir>] [--suite apply|rules|all] [--only <id>,...]
+        [--stub-kinds]
+
+--stub-kinds checks declaration kinds and their in-memory mutants only; it
+does not create the required --work folder or invoke a compiler.
 
 --tree DIR: the source tree to test (plugin/ and this folder), default the
 repository holding this script. --wt DIR: the git worktree whose commit and
@@ -23,10 +27,13 @@ state head the log, default the tree. Every source file read is printed with
 its sha256, so a log names exactly what ran.
 """
 import argparse
+import glob
 import hashlib
 import os
+import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TREE = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
@@ -39,7 +46,7 @@ APPLY_CASES = ["rolling", "local", "remote", "unknown", "quarantined", "nobody",
                "H1.apply_throw", "H1.apply_false", "H1.reset_throw", "H1.room_change",
                "H1.body_replaced", "H1.body_missing", "H1.invalidated", "H1.deck_changed", "H1.identity",
                "H1.admitted_grant", "H1.room_incarnation", "H1.replaced_work", "H1.entered", "H1.ack",
-               "H1.master_ack", "H1.normal_late", "H1.prepare_throw", "H1.legacy_kept_exception"]
+               "H1.master_ack", "H1.normal_late", "H1.prepare_throw", "H1.legacy_kept_exception", "H1.ack_identity"]
 
 # file -> MSBuild property naming its copy, per suite
 SUITE_FILES = {
@@ -89,6 +96,12 @@ MUTANTS = [
     ("M-H1-ack", "H1", "apply", "FfaLateEntry.cs",
      [("            if (!ReadmitBoundaryReady(PrepareReadmitEpoch(p.N))) return;\n", "")],
      "H1.ack", "H1.identity"),
+    ("M-H1-ackref", "H1", "apply", "FfaLateEntry.cs",
+     [("                if (!string.Equals(held.Lobby8, p.Lobby8, StringComparison.Ordinal)\n"
+       "                    || held.N != p.N || !string.Equals(held.Chain, p.Chain, StringComparison.Ordinal)\n"
+       "                    || held.G != p.G || held.K != p.K || held.From != p.From || e.Sender != p.From) return false;\n",
+       "                if (!object.ReferenceEquals(_replayProposal, p) || e.Sender != p.From) return false;\n")],
+     "H1.ack_identity", "H1.identity"),
     ("M-H1-master", "H1", "apply", "FfaLateEntry.cs",
      [("                        && ReadmitBoundaryReady(prepared);\n", "                        ;\n")],
      "H1.master_ack", "H1.identity"),
@@ -220,6 +233,315 @@ MUTANTS = [
 ]
 
 
+def _blank_csharp(text):
+    """Blank comments and literals while preserving offsets and newlines."""
+    chars, size = list(text), len(text)
+
+    def comment(at):
+        if text.startswith('//', at):
+            end = text.find('\n', at + 2)
+            return size if end < 0 else end
+        if text.startswith('/*', at):
+            end = text.find('*/', at + 2)
+            if end < 0:
+                raise ValueError('unclosed C# comment')
+            return end + 2
+        return None
+
+    def literal(at):
+        start = at
+        while at < size and text[at] in '$@':
+            at += 1
+        if at >= size or text[at] not in '\"\'':
+            return None
+        quote, prefix = text[at], text[start:at]
+        verbatim, interpolated = '@' in prefix, '$' in prefix
+        if quote == '\"' and not verbatim and text.startswith('\"\"\"', at):
+            raise ValueError('raw C# literal requires lexer support')
+        at += 1
+        while at < size:
+            if text[at] == quote:
+                if verbatim and at + 1 < size and text[at + 1] == quote:
+                    at += 2
+                    continue
+                return at + 1
+            if not verbatim and text[at] == '\\':
+                at += 2
+                continue
+            if interpolated and text[at] == '{':
+                if text.startswith('{{', at):
+                    at += 2
+                    continue
+                depth = 1
+                at += 1
+                while at < size and depth:
+                    end = comment(at)
+                    if end is None:
+                        end = literal(at)
+                    if end is not None:
+                        at = end
+                        continue
+                    depth += (text[at] == '{') - (text[at] == '}')
+                    at += 1
+                continue
+            at += 1
+        raise ValueError('unclosed C# literal')
+
+    at = 0
+    while at < size:
+        end = comment(at)
+        if end is None:
+            end = literal(at)
+        if end is None:
+            at += 1
+            continue
+        for pos in range(at, end):
+            if chars[pos] not in '\r\n':
+                chars[pos] = ' '
+        at = end
+    return ''.join(chars)
+
+
+def _type_declarations(path, text):
+    code = _blank_csharp(text)
+    pattern = re.compile(
+        r'\bnamespace\s+(?P<namespace>[@\w]+(?:\s*\.\s*[@\w]+)*)\s*(?P<nsend>[{;])'
+        r'|(?P<mods>(?:(?:public|private|protected|internal|static|sealed|abstract|partial|new|unsafe|readonly|ref)\s+)*)'
+        r'\b(?P<kind>class|struct|enum|interface)\s+(?P<name>@?[A-Za-z_]\w*)'
+        r'|(?P<brace>[{}])')
+    scopes, rows, pending, file_namespace = [], [], None, ''
+    for match in pattern.finditer(code):
+        if match.group('namespace'):
+            name = re.sub(r'\s+', '', match.group('namespace')).replace('@', '')
+            if match.group('nsend') == ';':
+                if file_namespace or scopes:
+                    raise ValueError('unsupported nested file namespace: ' + path)
+                file_namespace = name
+            else:
+                scopes.append(('namespace', name))
+        elif match.group('kind'):
+            if pending is not None:
+                raise ValueError('type declaration without a body: ' + path)
+            nesting = [name for kind, name in scopes if kind == 'type']
+            namespace = '.'.join(([file_namespace] if file_namespace else [])
+                                 + [name for kind, name in scopes if kind == 'namespace'])
+            local = '.'.join(nesting + [match.group('name').lstrip('@')])
+            mods, kind = match.group('mods').split(), match.group('kind')
+            static = 'static' in mods
+            # Static classes compare on static; structs and enums are intrinsically sealed.
+            sealed = kind in ('struct', 'enum') or ('sealed' in mods and not static)
+            rows.append(dict(path=path, line=code.count('\n', 0, match.start()) + 1,
+                             name=(namespace + '.' if namespace else '') + local,
+                             local=local, kind=kind, static=static, sealed=sealed, partial='partial' in mods))
+            pending = ('type', match.group('name').lstrip('@'))
+        elif match.group('brace') == '{':
+            scopes.append(pending or ('block', ''))
+            pending = None
+        else:
+            if not scopes:
+                raise ValueError('unmatched C# brace: ' + path)
+            scopes.pop()
+    if scopes or pending:
+        raise ValueError('unclosed C# declaration: ' + path)
+    return rows
+
+
+def _kind(row):
+    return (row['kind'], row['static'], row['sealed'])
+
+
+def _kind_text(kind):
+    return '%s static=%s sealed=%s' % kind
+
+
+def _production_sources(tree):
+    paths = sorted(glob.glob(os.path.join(tree, 'plugin', '**', '*.cs'), recursive=True))
+    return {os.path.relpath(path, tree).replace(os.sep, '/'): open(path, encoding='utf-8-sig').read()
+            for path in paths if not {'obj', 'bin'}.intersection(os.path.relpath(path, tree).split(os.sep))}
+
+
+def _project_sources(tree, project):
+    """Read default Compile property expansions without invoking MSBuild."""
+    root = ET.parse(os.path.join(tree, project)).getroot()
+    folder = os.path.dirname(os.path.join(tree, project)) + os.sep
+    props = {'MSBuildThisFileDirectory': folder}
+    for group in root.findall('PropertyGroup'):
+        for node in group:
+            if node.text is not None and node.tag not in props:
+                props[node.tag] = node.text
+
+    def expand(value):
+        for _ in range(len(props) + 1):
+            updated = re.sub(r'\$\(([^)]+)\)', lambda m: props.get(m.group(1), m.group(0)), value)
+            if updated == value:
+                return value
+            value = updated
+        raise ValueError('cyclic project properties: ' + project)
+
+    linked, sources = set(), set()
+    for node in root.findall('./ItemGroup/Compile'):
+        value = expand(node.attrib.get('Include', '')).replace('\\', os.sep)
+        if '$(' in value:
+            if value not in ('$(ProductionSource)', '$(GenDir)' + os.sep + 'Reducers.cs'):
+                raise ValueError('unresolved Compile source: ' + project)
+            continue  # Generated declarations are censused from actual in-memory source below.
+        path = os.path.normpath(value if os.path.isabs(value) else os.path.join(folder, value))
+        matches = sorted(glob.glob(path))
+        if not matches:
+            raise ValueError('missing Compile source in ' + project)
+        for match in matches:
+            relative = os.path.relpath(match, tree).replace(os.sep, '/')
+            if relative.startswith('../') or not relative.endswith('.cs'):
+                raise ValueError('Compile source outside the C# tree: ' + project)
+            sources.add(relative)
+            if relative.startswith('plugin/'):
+                linked.add(relative)
+    return sources, linked
+
+
+def _stub_kind_rows(stubs, production, mapped, external, harness_only, standins, linked):
+    index = {}
+    for path, text in sorted(production.items()):
+        for row in _type_declarations(path, text):
+            index.setdefault(row['name'], []).append(row)
+
+    def resolve(row):
+        candidates = [row['name'], 'CompetitiveRounds.' + row['local']]
+        parts = row['local'].split('.')
+        if len(parts) > 1 and parts[0] in standins:
+            candidates += ['CompetitiveRounds.' + standins[parts[0]] + '.' + '.'.join(parts[1:]),
+                           'CompetitiveRounds.' + '.'.join(parts[1:])]
+        return [name for name in dict.fromkeys(candidates) if name in index]
+
+    result = []
+    for path, text in sorted(stubs.items()):
+        for row in _type_declarations(path, text):
+            matches, name = resolve(row), row['name']
+            declared = int(name in mapped) + int(name in external) + int(name in harness_only)
+            status, target, expected = 'EQUAL', '-', None
+            if declared > 1:
+                resolution, status = 'AMBIGUOUS', 'DIFFERS'
+            elif path in linked:
+                resolution, target = 'PRODUCTION', name
+            elif name in mapped:
+                resolution, target = 'MAPPED', mapped[name]
+                if matches and matches != [target]:
+                    status = 'DIFFERS'
+            elif name in external or name in harness_only:
+                resolution = 'EXTERNAL' if name in external else 'HARNESS-ONLY'
+                expected = external.get(name)
+                if matches:
+                    status, target = 'DIFFERS', 'SHADOW ' + ','.join(matches)
+            elif len(matches) == 1:
+                resolution, target = 'PRODUCTION', matches[0]
+            else:
+                resolution, status = ('AMBIGUOUS' if matches else 'UNRESOLVED'), 'DIFFERS'
+                target = ','.join(matches) or '-'
+            refs = index.get(target, [])
+            if resolution in ('PRODUCTION', 'MAPPED'):
+                signatures = {_kind(ref) for ref in refs}
+                if not refs or len(signatures) != 1 or (len(refs) > 1 and not all(r['partial'] for r in refs)):
+                    status = 'DIFFERS'
+                else:
+                    expected = _kind(refs[0])
+            if expected is not None and _kind(row) != expected:
+                status = 'DIFFERS'
+            result.append(dict(row, resolution=resolution, target=target, expected=expected,
+                               production_sites=','.join(r['path'] + ':' + str(r['line']) for r in refs) or '-',
+                               status=status))
+    return result
+
+
+def _print_stub_kinds(rows):
+    print('stub file:line | qualified name | stub kind | resolution | production file:line | production kind | verdict')
+    for row in rows:
+        print('%s:%s | %s | %s | %s:%s | %s | %s | %s' % (
+            row['path'], row['line'], row['name'], _kind_text(_kind(row)), row['resolution'], row['target'],
+            row['production_sites'], _kind_text(row['expected']) if row['expected'] is not None else '-', row['status']))
+    counts = {key: sum(r['resolution'] == key for r in rows)
+              for key in ('PRODUCTION', 'MAPPED', 'EXTERNAL', 'HARNESS-ONLY', 'UNRESOLVED', 'AMBIGUOUS')}
+    print('stub kinds: declarations=%d %s differences=%d' % (
+        len(rows), ' '.join('%s=%d' % item for item in counts.items()), sum(r['status'] != 'EQUAL' for r in rows)))
+
+
+def _stub_kind_control(tree, sources, linked, mapped, external, harness_only, standins, mutants, generated):
+    """Run before work-folder creation or build; mutate in-memory copies only."""
+    try:
+        production = _production_sources(tree)
+        stubs = {path: open(os.path.join(tree, path), encoding='utf-8-sig').read() for path in sources}
+        stubs.update({path: production[path] for path in linked})
+        stubs.update(generated)
+        rows = _stub_kind_rows(stubs, production, mapped, external, harness_only, standins, linked)
+        _print_stub_kinds(rows)
+        baseline = bool(rows) and all(r['status'] == 'EQUAL' for r in rows)
+        print('stub-kind control', 'GREEN' if baseline else 'RED')
+        ok = baseline
+        for mid, side, path, old, new, expected_name in mutants:
+            texts = dict(stubs if side == 'stub' else production)
+            raw = texts[path]
+            if raw.count(old) != 1:
+                print('BAD mutant %s: anchor occurs %d times' % (mid, raw.count(old)))
+                ok = False
+                continue
+            texts[path] = raw.replace(old, new, 1)
+            changed = _stub_kind_rows(texts if side == 'stub' else stubs,
+                                      texts if side == 'production' else production,
+                                      mapped, external, harness_only, standins, linked)
+            differences = [r for r in changed if r['status'] != 'EQUAL']
+            hit = baseline and bool(differences) and any(r['name'] == expected_name for r in differences)
+            ok = ok and hit
+            print('%s mutant %s (stub kinds): target %s=%s; control=%s' % (
+                'CAUGHT' if hit else 'MISSED', mid, expected_name, 'RED' if differences else 'GREEN',
+                'GREEN' if baseline else 'RED'))
+        return ok
+    except (OSError, ValueError, KeyError, ET.ParseError) as exc:
+        print('stub-kind control RED:', str(exc))
+        return False
+
+
+def stub_kinds(tree, wt):
+    prefix = 'CompetitiveRounds.'
+    external = {prefix + name: ('class', False, True) for name in (
+        'PhotonView', 'ObjectsToSpawn', 'Gun', 'Holdable', 'Holding', 'WeaponHandler',
+        'CharacterData', 'Player', 'CardInfo', 'CardChoice', 'RaiseEventOptions', 'EventData')}
+    external.update({prefix + 'Color': ('struct', False, True),
+                     prefix + 'GameObject': ('class', False, False),
+                     prefix + 'CardInfo.Rarity': ('enum', False, True),
+                     prefix + 'PhotonNetwork': ('class', True, False)})
+    harness_only = {prefix + name for name in (
+        'OwnerStub', 'LogStub', 'ReadmitAdmissionBase', 'ReducerBase', 'Trace', 'TraceProgram',
+        'OldReducer', 'NewReducer', 'FfaReplay', 'FfaReplayAdmission', 'ReadmitOfferAdapter',
+        'TraceProgram.Fixture', 'CasesC2', 'CasesC3', 'CasesC3.Seat', 'CasesC4', 'CasesC4.Table',
+        'CasesC4z', 'CasesC5', 'CasesC5.Driver', 'CaseFailed', 'Check', 'RulesProgram',
+        'ReadmitOfferAdapterBase', 'ReadmitOfferAdapterBase.Plugin.Logger')}
+    mapped = {prefix + 'ReadmitAdmissionBase.LastHold': prefix + 'FfaLateEntry.Hold'}
+    standins = {'ReadmitAdmissionBase': 'FfaLateEntry', 'ReducerBase': 'FfaMode',
+                'ReadmitOfferAdapterBase': 'FfaReadmit', 'FfaReplay': 'FfaMode'}
+    folder = 'tools/tests/rj-readmit-client/'
+    try:
+        projects = [_project_sources(tree, folder + project)
+                    for project in ('apply-trace/ApplyTrace.csproj', 'rules/RjRules.csproj')]
+        sources = set().union(*(pair[0] for pair in projects))
+        sources.update({folder + 'apply-trace/Stubs.cs', folder + 'apply-trace/TraceProgram.cs'})
+        sources.update(os.path.relpath(p, tree).replace(os.sep, '/')
+                       for p in glob.glob(os.path.join(tree, folder, 'rules', '*.cs')))
+        linked = set().union(*(pair[1] for pair in projects))
+        mode = read_text(os.path.join(tree, 'plugin', 'FfaMode.cs'))
+        late = read_text(os.path.join(tree, 'plugin', 'FfaLateEntry.cs'))
+        adapter = read_text(os.path.join(tree, 'plugin', 'FfaReadmit.cs'))
+        generated = {'generated/Reducers.cs': reducer_source(wt, mode, late),
+                     'generated/ReadmitOfferAdapter.cs': adapter_source(adapter)}
+        mutants = [
+            ('M-STUB-1', 'stub', folder + 'apply-trace/Stubs.cs',
+             'internal struct Proposal', 'internal sealed class Proposal', prefix + 'FfaLateRules.Proposal'),
+            ('M-STUB-2', 'production', 'plugin/FfaLateRules.cs',
+             'internal struct Proposal', 'internal class Proposal', prefix + 'FfaLateRules.Proposal')]
+        return _stub_kind_control(tree, sources, linked, mapped, external, harness_only, standins, mutants, generated)
+    except (OSError, ValueError, KeyError, RuntimeError, StopIteration, ET.ParseError) as exc:
+        print('stub-kind control RED:', str(exc))
+        return False
+
+
 def sha(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
@@ -249,7 +571,7 @@ def extract_statement(text, start):
     return text[begin:text.index(";", begin) + 1]
 
 
-def gen_reducers(wt, new_mode_text, late_text, out_dir):
+def reducer_source(wt, new_mode_text, late_text):
     base = subprocess.run(["git", "-C", wt, "show", BASE + ":plugin/FfaMode.cs"],
                           capture_output=True).stdout.decode("utf-8")
     if not base:
@@ -289,6 +611,7 @@ def gen_reducers(wt, new_mode_text, late_text, out_dir):
         "    internal sealed class FfaReplayAdmission : ReadmitAdmissionBase\n    {\n",
         "        internal static void Ack() { TryAckReadmitProposal(); }\n",
         "        internal static void Propose() { OnProposal(ProposalEvent()); }\n",
+        "        internal static void Propose(EventData e) { OnProposal(e); }\n",
         extract(late_text, "private static void OnProposal("), "\n",
         "        internal static void Entered(int game) { OnSelfKept(game); }\n",
         "        internal static bool Prepare(int epoch) { return PrepareReadmitEpoch(epoch); }\n",
@@ -299,13 +622,29 @@ def gen_reducers(wt, new_mode_text, late_text, out_dir):
         extract(late_text, "private static void TryAckReadmitProposal("), "\n",
         extract(late_text, "private static void OnSelfKept("), "\n",
         "        internal static bool MasterAck(bool prepared)\n        {\n",
-        "            var barrier = new List<int>(); var proposal = _replayProposal; int self = OwnActor();\n",
+        "            if (!_replayProposal.HasValue) return false;\n",
+        "            var barrier = new List<int>(); var proposal = _replayProposal.Value; int self = OwnActor();\n",
         "            List<int> missing; bool ackComplete;\n",
         extract_statement(late_text, "                    ackComplete = FfaLateRules.AckComplete("), "\n",
         "            return ackComplete;\n        }\n    }\n}\n",
     ]
+    return "".join(parts)
+
+
+def gen_reducers(wt, new_mode_text, late_text, out_dir):
+    source = reducer_source(wt, new_mode_text, late_text)
     os.makedirs(out_dir, exist_ok=True)
-    open(os.path.join(out_dir, "Reducers.cs"), "wb").write("".join(parts).encode("utf-8"))
+    open(os.path.join(out_dir, "Reducers.cs"), "wb").write(source.encode("utf-8"))
+
+
+def adapter_source(adapter):
+    content = "\nnamespace CompetitiveRounds\n{\n    internal sealed class ReadmitOfferAdapter : ReadmitOfferAdapterBase\n    {\n"
+    for sig in ("internal static void DiscoverThenProbe(",
+                "internal static FfaReadmitEntryRules.RdmOffer OfferFromPoll(",
+                "internal static bool SuppressesDiscoveryProbe(",
+                "private static FfaReadmitEntryRules.RdmOffer Offer("):
+        content += extract(adapter, sig) + "\n"
+    return content + "    }\n}\n"
 
 
 def build(proj, out, props):
@@ -342,14 +681,7 @@ def prepare(tree, wt, suite, work, tag, texts):
         p = os.path.join(out, f)
         content = texts[f]
         if suite == "rules" and f == "FfaReadmitEntryRules.cs":
-            adapter = texts["FfaReadmit.cs"]
-            content += "\nnamespace CompetitiveRounds\n{\n    internal sealed class ReadmitOfferAdapter : ReadmitOfferAdapterBase\n    {\n"
-            for sig in ("internal static void DiscoverThenProbe(",
-                        "internal static FfaReadmitEntryRules.RdmOffer OfferFromPoll(",
-                        "internal static bool SuppressesDiscoveryProbe(",
-                        "private static FfaReadmitEntryRules.RdmOffer Offer("):
-                content += extract(adapter, sig) + "\n"
-            content += "    }\n}\n"
+            content += adapter_source(texts["FfaReadmit.cs"])
         open(p, "wb").write(content.encode("utf-8"))
         props[prop] = p
     if suite == "apply":
@@ -372,9 +704,14 @@ def main():
     ap.add_argument("--wt", default="")
     ap.add_argument("--suite", default="all")
     ap.add_argument("--only", default="")
+    ap.add_argument("--stub-kinds", action="store_true", help="check all type declarations without building or writing")
     a = ap.parse_args()
     tree = os.path.abspath(a.tree)
     wt = os.path.abspath(a.wt) if a.wt else tree
+    kinds_ok = stub_kinds(tree, wt)
+    if not kinds_ok or a.stub_kinds:
+        print("RESULT", "PASS" if kinds_ok else "FAIL")
+        return 0 if kinds_ok else 1
     work = os.path.abspath(a.work)
     os.makedirs(work, exist_ok=True)
     head = subprocess.run(["git", "-C", wt, "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip()

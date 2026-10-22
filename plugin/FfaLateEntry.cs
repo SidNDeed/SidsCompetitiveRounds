@@ -804,7 +804,11 @@ namespace CompetitiveRounds
             _replayProposal = p;
             _replayAck = () =>
             {
-                if (!object.ReferenceEquals(_replayProposal, p) || e.Sender != p.From) return false;
+                if (!_replayProposal.HasValue) return false;
+                var held = _replayProposal.Value;
+                if (!string.Equals(held.Lobby8, p.Lobby8, StringComparison.Ordinal)
+                    || held.N != p.N || !string.Equals(held.Chain, p.Chain, StringComparison.Ordinal)
+                    || held.G != p.G || held.K != p.K || held.From != p.From || e.Sender != p.From) return false;
                 if (Raise(EVT_EPOCH_ACK, new object[] { p.Lobby8, p.N, p.Chain, p.G, p.K },
                           new RaiseEventOptions { TargetActors = new[] { e.Sender } }))
                 {
@@ -827,13 +831,13 @@ namespace CompetitiveRounds
             return !readmitted || (kept && replayCompleted);
         }
 
-        private static FfaLateRules.Proposal _replayProposal;
+        private static FfaLateRules.Proposal? _replayProposal;
         private static Func<bool> _replayAck;
 
         private static void TryAckReadmitProposal()
         {
-            var p = _replayProposal;
-            if (p == null) { _replayAck = null; return; }
+            if (!_replayProposal.HasValue) { _replayAck = null; return; }
+            var p = _replayProposal.Value;
             if (LagOutNow() || (_lastHold != null && _lastHold.G == p.G && _lastHold.K == p.K && _lastHold.Done))
             {
                 _replayProposal = null;
@@ -1057,7 +1061,7 @@ namespace CompetitiveRounds
         /// the present seats' toast).</summary>
         private static void AfterPair(string src, bool down, int g, int k)
         {
-            if (_replayProposal != null && _replayProposal.G == g && _replayProposal.K == k)
+            if (_replayProposal.HasValue && _replayProposal.Value.G == g && _replayProposal.Value.K == k)
             {
                 _replayProposal = null;
                 _replayAck = null;

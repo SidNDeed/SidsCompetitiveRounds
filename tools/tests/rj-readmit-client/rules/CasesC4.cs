@@ -548,7 +548,7 @@ namespace CompetitiveRounds
         protected static void Ladder(FfaReadmitEntryRules.RdmState before, bool selfKept, string extra) { }
         protected static class MatchTracker { internal static string LocalSteamId = "1001"; }
         protected static class NativeUI { internal static void MarkDirty() { } }
-        protected static class Plugin
+        protected class Plugin
         {
             internal static readonly Logger Log = new Logger();
             internal sealed class Logger { internal void LogWarning(string message) { } }
