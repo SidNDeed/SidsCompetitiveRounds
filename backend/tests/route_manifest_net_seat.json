@@ -1804,7 +1804,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "f8b71e34d2f587cbb6cbccadec55cd96ac73cde0"
+          "421d8800d830b7ebffe388e06d1bd145ccd58361"
         ],
         [
           "/api/v1/ffa/queue/list",
