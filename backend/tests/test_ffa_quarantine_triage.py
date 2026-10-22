@@ -812,10 +812,14 @@ class _Thread(threading.Thread):
     def __init__(self, name, factory):
         super().__init__(name=name, daemon=True)
         self.factory, self.result, self.error, self.done_at = factory, None, None, None
+        self.loop, self.task = None, None
 
     def run(self):
         try:
-            self.result = asyncio.run(self.factory())
+            async def owned():
+                self.loop, self.task = asyncio.get_running_loop(), asyncio.current_task()
+                return await self.factory()
+            self.result = asyncio.run(owned())
         except BaseException as e:   # recorded, never swallowed: the verdict reads it
             self.error = e
         finally:
@@ -842,8 +846,13 @@ async def _observe(url, pid_box, t0_box, cap_s=45.0, timing=None):
             rows = await conn.fetch("SELECT pid, relation, mode, granted FROM pg_locks"
                                     " WHERE locktype = 'relation' AND relation = ANY($1::oid[])", list(names))
             act = await conn.fetchrow("SELECT state FROM pg_stat_activity WHERE pid = $1", p) if p else None
+            capture_pid = timing.get("capture_pid") if timing is not None else None
+            capture_activity = await conn.fetchrow(
+                "SELECT state, wait_event_type, wait_event, pg_blocking_pids(pid) AS blockers"
+                " FROM pg_stat_activity WHERE pid = $1", capture_pid) if capture_pid else None
             samples.append({
                 "tick": tick, "at": time.monotonic(), "pid": p,
+                "capture_activity": dict(capture_activity) if capture_activity is not None else None,
                 "route": sorted({names[r["relation"]] for r in rows if r["pid"] == p and r["granted"]}),
                 "state": act["state"] if act else None,
                 "waiting": sorted({(r["pid"], names[r["relation"]], r["mode"]) for r in rows if not r["granted"]}),
@@ -881,11 +890,15 @@ async def _hold_staggered(url, base_box, ready, n=10, step=0.9, wait_cap=20.0):
             await c.execute("COMMIT")
             released.append(time.monotonic())
     finally:
+        close_errors = []
         for c in conns:
             try:
                 await c.close()
-            except Exception:
-                pass
+            except Exception as error:
+                close_errors.append(error)
+        if close_errors:
+            raise AssertionError(("NO VERDICT: staggered holder connections did not close",
+                                  [type(error).__name__ for error in close_errors])) from close_errors[0]
     return released
 
 
@@ -899,13 +912,16 @@ def _k2c_alter_timing(samples, alter_done):
     return release, alter_run
 
 
+
 async def _hold_capture_key(url, group, t0_box, ready, release_s, timing, wait_cap=20.0):
-    """Release after the same observed ALTER compensation that the verdict
-    uses. A missing observation is a failed premise, never zero compensation."""
+    """Target the calibrated commit using the verdict's observed ALTER run."""
     connection = await _pg(url)
     try:
+        timing["key_pid"] = connection.get_server_pid()
         await connection.execute("BEGIN")
+        timing["holder_key_started"] = time.monotonic()
         await connection.execute("SELECT pg_advisory_xact_lock(hashtext('mrq:' || CAST($1 AS text)))", str(group))
+        timing["holder_key_acquired"] = time.monotonic()
         ready.set()
         start = time.monotonic()
         while True:
@@ -916,13 +932,21 @@ async def _hold_capture_key(url, group, t0_box, ready, release_s, timing, wait_c
             if time.monotonic() - start >= wait_cap:
                 raise AssertionError("K21 premise: no observed route release and ALTER completion")
             await asyncio.sleep(0.005)
-        target = t0 + release_s + alter_run
-        timing["key_plan"] = {"target": target, "alter_run": alter_run, "release_seen": release}
+        tail = timing.get("calibration_tail_s")
+        assert tail is not None and math.isfinite(tail) and tail >= 0, "K21 premise: no measured post-key tail"
+        target_commit = t0 + release_s + alter_run
+        target = target_commit - tail
+        timing["key_plan"] = {"target": target, "target_commit": target_commit, "calibration_tail_s": tail,
+                              "alter_run": alter_run, "release_seen": release}
         delay = target - time.monotonic()
         if delay > 0:
             await asyncio.sleep(delay)
+        timing["holder_commit_started"] = time.monotonic()
+        holder_commit_started_perf = time.perf_counter()
         await connection.execute("COMMIT")
-        return time.monotonic()
+        timing["holder_commit_done"] = time.monotonic()
+        timing["holder_commit_s"] = time.perf_counter() - holder_commit_started_perf
+        return timing["holder_commit_done"]
     finally:
         await connection.close()
 
@@ -939,14 +963,117 @@ async def _alter(url, timing=None):
         await connection.close()
 
 
-async def _capture_elsewhere(dsn, kw):
+
+async def _capture_elsewhere(dsn, kw, timing, ready, go, cancel, *, calibrate=False):
+    """Prepare one retained backend; observe production calls without replacing SQL."""
     eng = create_async_engine(dsn, pool_size=1, max_overflow=0)
+    phases = timing["capture_phases"] = {}
+    phase = None
+    timing["capture_prepare_started"] = time.monotonic()
     try:
-        async with async_sessionmaker(eng, expire_on_commit=False)() as s:
-            outcome = await main._quarantine_report(s, **kw)
-        return outcome, time.monotonic()
+        async with eng.connect() as connection:
+            timing["capture_pid"] = (await connection.execute(text("SELECT pg_backend_pid()"))).scalar()
+            await connection.rollback()
+            async with async_sessionmaker(bind=connection, expire_on_commit=False)() as session:
+                execute_original, commit_original = session.execute, session.commit
+
+                async def execute(statement, *args, **kwargs):
+                    sql = " ".join(str(statement).lower().split())
+                    label = ("advisory_key" if "pg_advisory_xact_lock" in sql else
+                             "pending_count" if "select count(*)" in sql else
+                             "variant_read" if "select payload" in sql and "photon_room_id is null" in sql else
+                             "on_file_read" if "select payload" in sql else
+                             "insert" if sql.startswith("insert into match_report_quarantine") else "other_sql")
+                    stage = {"stage": label, "ordinal": len(phase["stages"]), "started": time.monotonic()}
+                    phase["stages"].append(stage)
+                    started_perf = time.perf_counter()
+                    try:
+                        result = await execute_original(statement, *args, **kwargs)
+                        stage["ok"] = True
+                        return result
+                    except BaseException as error:
+                        stage["error"] = type(error).__name__
+                        raise
+                    finally:
+                        stage["done"] = time.monotonic()
+                        done_perf = time.perf_counter()
+                        stage["seconds"] = done_perf - started_perf
+                        if label == "advisory_key" and stage.get("ok"):
+                            phase["key_started"], phase["key_acquired"] = stage["started"], stage["done"]
+                            phase["key_started_perf"], phase["key_acquired_perf"] = started_perf, done_perf
+
+                async def commit():
+                    stage = {"stage": "commit", "ordinal": len(phase["stages"]), "started": time.monotonic()}
+                    phase["stages"].append(stage)
+                    phase["commit_started"] = stage["started"]
+                    phase["commit_started_perf"] = started_perf = time.perf_counter()
+                    try:
+                        await commit_original()
+                        stage["ok"] = True
+                        phase["commit_done"] = time.monotonic()
+                        phase["commit_done_perf"] = time.perf_counter()
+                    except BaseException as error:
+                        stage["error"] = type(error).__name__
+                        raise
+                    finally:
+                        stage["done"] = phase.get("commit_done", time.monotonic())
+                        done_perf = phase.get("commit_done_perf", time.perf_counter())
+                        stage["seconds"] = done_perf - started_perf
+
+                session.execute, session.commit = execute, commit
+
+                async def capture(label, values):
+                    nonlocal phase
+                    phase = {"stages": [], "started": time.monotonic()}
+                    phases[label] = phase
+                    outcome = await main._quarantine_report(session, **values)
+                    phase["returned"] = time.monotonic()
+                    phase["outcome"] = outcome
+                    return outcome
+
+                # Serialization, connection setup and statement preparation precede t0.
+                prepared_kw = dict(kw, payload=json.dumps(kw["payload"], default=str))
+                if calibrate:
+                    rooms = []
+                    for label in ("warmup", "calibration"):
+                        room_id = "RJTK21_" + label + "_" + uuid.uuid4().hex[:12]
+                        rooms.append(room_id)
+                        payload = dict(kw["payload"], photon_room_id=room_id)
+                        values = dict(kw, photon_room_id=room_id, payload=json.dumps(payload, default=str))
+                        outcome = await capture(label, values)
+                        assert outcome == "recorded", ("K21 calibration capture", label, outcome)
+                    measured = phases["calibration"]
+                    assert ("key_acquired" in measured and "commit_done" in measured
+                            and "key_acquired_perf" in measured and "commit_done_perf" in measured), "K21 calibration stages missing"
+                    timing["calibration_tail_s"] = measured["commit_done_perf"] - measured["key_acquired_perf"]
+                    timing["calibration_commit_s"] = measured["commit_done_perf"] - measured["commit_started_perf"]
+                    # Remove precisely the two calibration rows before the measured route.
+                    await execute_original(text("DELETE FROM match_report_quarantine"
+                                                " WHERE group_id = :g AND photon_room_id IN (:a, :b)"),
+                                           {"g": kw["group_id"], "a": rooms[0], "b": rooms[1]})
+                    await commit_original()
+                timing["capture_prepared"] = time.monotonic()
+                ready.set()
+                waiting = time.monotonic()
+                while not go.is_set():
+                    if cancel.is_set():
+                        return "cancelled", None
+                    if time.monotonic() - waiting >= 30.0:
+                        raise AssertionError("K21 premise: capture dispatch was never released")
+                    await asyncio.sleep(0.005)
+                if cancel.is_set():
+                    return "cancelled", None
+                outcome = await capture("capture", prepared_kw)
+                # The production commit acknowledgement is authoritative; closing
+                # a session, printing and disposing the engine are recorded separately.
+                return outcome, phase.get("commit_done")
+    except BaseException as error:
+        timing["capture_error"] = type(error).__name__
+        raise
     finally:
+        ready.set()
         await eng.dispose()
+        timing["capture_disposed"] = time.monotonic()
 
 
 async def _k2c_show(maker):
@@ -1128,8 +1255,16 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
         event.listen(eng.sync_engine, "before_cursor_execute", on_execute)
         maker = async_sessionmaker(eng, expire_on_commit=False)
         threads = {}
+        capture_ready, capture_go, capture_cancel = threading.Event(), threading.Event(), threading.Event()
         try:
             box["show_before"] = await _k2c_show(maker)
+            threads["capture"] = _Thread("k2c-capture", lambda: _capture_elsewhere(
+                dsn, fx["capture_kw"], box, capture_ready, capture_go, capture_cancel,
+                calibrate=capture_key_until is not None))
+            threads["capture"].start()
+            assert capture_ready.wait(30), "NO VERDICT: capture preparation did not complete"
+            assert box.get("capture_prepared") is not None, (
+                "NO VERDICT: capture preparation failed", box.get("capture_error"), box.get("capture_phases"))
             threads["observer"] = _Thread("k2c-observer", lambda: _observe(url, pid_box, t0_box, timing=box))
             threads["observer"].start()
             if case == "iv":
@@ -1144,7 +1279,6 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                 threads["key"].start()
                 assert key_ready.wait(15), "the K21 holder never took the capture's advisory key"
             threads["alter"] = _Thread("k2c-alter", lambda: _alter(url, box))
-            threads["capture"] = _Thread("k2c-capture", lambda: _capture_elsewhere(dsn, fx["capture_kw"]))
             orig_ended = main._triage_ended_early
 
             def ended_early(exc):
@@ -1173,7 +1307,8 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                 base_box["base"] = box["trigger"]
                 threads["alter"].start()
                 time.sleep(0.15)
-                threads["capture"].start()
+                box["capture_dispatch"] = time.monotonic()
+                capture_go.set()
                 time.sleep(0.10)
                 if case == "i":
                     await asyncio.sleep(0.3)
@@ -1238,6 +1373,8 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                 th = threads.get(name)
                 if th is not None and th.ident is not None:
                     th.join(45)
+            if "holder" in threads and threads["holder"].error is not None:
+                raise AssertionError("NO VERDICT: staggered holder did not complete cleanly") from threads["holder"].error
             box["t0"] = t0_box.get("t0")
             obs = threads["observer"]
             box["samples"] = obs.result or []
@@ -1257,7 +1394,32 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                     detail.append(f"K21 holder error: {threads['key'].error!r}")
             box["show_after"] = await _k2c_show(maker)
         finally:
-            await eng.dispose()
+            capture_cancel.set()
+            capture_go.set()
+            active_workers = [worker for worker in threads.values()
+                              if worker.ident is not None and worker.is_alive()]
+            cleanup_errors = []
+            try:
+                # Cancel all owned workers first, so one blocked cleanup cannot
+                # delay releasing another worker's advisory or relation lock.
+                for worker in active_workers:
+                    loop, task = worker.loop, worker.task
+                    if loop is None or task is None:
+                        worker.join(1)
+                        loop, task = worker.loop, worker.task
+                    if worker.is_alive() and loop is not None and task is not None:
+                        try:
+                            loop.call_soon_threadsafe(task.cancel)
+                        except RuntimeError:
+                            if not loop.is_closed():
+                                cleanup_errors.append(worker.name + ": cancellation refused")
+                for worker in active_workers:
+                    worker.join(15)
+                    if worker.is_alive():
+                        cleanup_errors.append(worker.name + ": thread remains alive")
+                assert not cleanup_errors, ("NO VERDICT: owned workers did not quiesce", cleanup_errors)
+            finally:
+                await eng.dispose()
     printed = capsys.readouterr().out
     detail.extend("route printed: " + ln for ln in printed.splitlines() if ln.startswith("[TRIAGE]"))
     for s in sent:
@@ -1280,6 +1442,31 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
         detail.append("the failed read, as the route saw it: " + " <- ".join(chain))
     if case == "ii":
         detail.extend(_server_log_lines(box.get("route_pid")))
+    capture_phases = {}
+    for name, phase in box.get("capture_phases", {}).items():
+        capture_phases[name] = {
+            "outcome": phase.get("outcome"),
+            "stages": [{key: (round(value - t0, 6) if key in ("started", "done") and t0 is not None
+                             else round(value, 6) if isinstance(value, float) else value)
+                        for key, value in stage.items()} for stage in phase["stages"]]}
+    capture_phase = box.get("capture_phases", {}).get("capture", {})
+    key_wait = (capture_phase["key_acquired_perf"] - capture_phase["key_started_perf"]
+                if "key_acquired_perf" in capture_phase else None)
+    commit_seconds = (capture_phase["commit_done_perf"] - capture_phase["commit_started_perf"]
+                      if "commit_done_perf" in capture_phase else None)
+    key_observed = any(box.get("key_pid") in (sample.get("capture_activity") or {}).get("blockers", [])
+                       for sample in box.get("samples", []))
+    stage_record = {
+        "case": case, "route": route, "phases": capture_phases,
+        "capture_key_wait_s": key_wait, "capture_commit_s": commit_seconds,
+        "capture_key_blocker_observed": key_observed,
+        "calibration_tail_s": box.get("calibration_tail_s"),
+        "calibration_commit_s": box.get("calibration_commit_s"),
+        "holder_commit_s": box.get("holder_commit_s"),
+        "timestamp_clock": "monotonic", "duration_clock": "perf_counter",
+        "clock_resolution_s": {name: time.get_clock_info(name).resolution
+                               for name in ("monotonic", "perf_counter")}}
+    detail.append("K2C-STAGES " + json.dumps(stage_record, sort_keys=True))
     if capture_key_until is not None:
         kr = box.get("key_released")
         kr_rel = None if kr is None or t0 is None else round(kr - t0, 3)
@@ -1294,7 +1481,13 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
             out.update(key_released=None if kr is None or t0 is None else kr - t0,
                        planned_release=planned, planned_alter_run=plan.get("alter_run"),
                        alter_run=alter_run,
-                       capture_done=None if capture_done is None or t0 is None else capture_done - t0)
+                       capture_done=None if capture_done is None or t0 is None else capture_done - t0,
+                       calibration_tail_s=box.get("calibration_tail_s"),
+                       calibration_commit_s=box.get("calibration_commit_s"),
+                       target_commit=None if plan.get("target_commit") is None or t0 is None else plan["target_commit"] - t0,
+                       capture_key_wait_s=key_wait, capture_commit_s=commit_seconds,
+                       capture_key_blocker_observed=key_observed, stage_record=stage_record,
+                       holder_commit_s=stage_record["holder_commit_s"])
     verdict, line = _k2c_verdict(case, route, box)
     _k2c_record(line, detail, capsys)
     return verdict, line
@@ -1311,13 +1504,13 @@ def test_pg_k2c_relation_locks_released_within_5_5s_of_t0(case, route, monkeypat
 # ── K21: a capture committing past K2c's bound is a FAIL (round 2, L2) ─────
 # K2c's verdict fails a capture that commits later than 5.5 s from t0 plus
 # the ALTER's own run, with no slack past that. Case (i) on each route, with
-# the capture's advisory key held by _hold_capture_key until K21_PAST_S past
-# 5.5 s plus the observed ALTER run: the capture commits just after release,
-# inside the 0.5 s
+# the capture's advisory key held until the target commit time less the
+# measured warmed post-key tail. K21_PAST_S is the target commit offset,
+# not verdict slack; the actual production commit must land inside the 0.5 s
 # that 6702efd's verdict still passed. A case is evidence only when that
 # premise held; otherwise it is NO VERDICT, never a pass.
 
-K21_PAST_S = 0.2
+K21_PAST_S = 0.25
 
 
 @pytest.mark.parametrize("route", ["V1", "V2", "D1"])
@@ -1331,8 +1524,21 @@ def test_pg_k21_a_capture_committing_past_the_bound_is_a_fail(route, monkeypatch
     past = None if done is None or alter_run is None else done - K2C_BOUND_S - alter_run
     _k2c_record(f"K21-RECORD route={route} planned_release={seen.get('planned_release')}"
                 f" key_released={released} capture_done={done} alter_run={alter_run}"
-                f" planned_alter_run={seen.get('planned_alter_run')} past_bound={past} verdict={verdict}", [], capsys)
+                f" planned_alter_run={seen.get('planned_alter_run')} past_bound={past} verdict={verdict}"
+                f" calibration_tail_s={seen.get('calibration_tail_s')}"
+                f" calibration_commit_s={seen.get('calibration_commit_s')}"
+                f" target_commit={seen.get('target_commit')}"
+                f" prediction_error={None if done is None or seen.get('target_commit') is None else done - seen['target_commit']}"
+                f" capture_key_wait_s={seen.get('capture_key_wait_s')}"
+                f" capture_commit_s={seen.get('capture_commit_s')}"
+                f" holder_commit_s={seen.get('holder_commit_s')}"
+                f" key_blocker_observed={seen.get('capture_key_blocker_observed')}"
+                f" stages={json.dumps(seen.get('stage_record'), sort_keys=True)}", [], capsys)
     premise = []
+    if not seen.get("capture_key_blocker_observed"):
+        premise.append("the capture was never observed waiting on the holder's advisory key")
+    if seen.get("capture_commit_s") is None or seen.get("capture_key_wait_s") is None:
+        premise.append("the actual key wait or successful commit completion was not measured")
     if alter_run is None or seen.get("planned_alter_run") != alter_run:
         premise.append("the holder and verdict did not share the observed ALTER compensation")
     if f.get("status") != "200":
