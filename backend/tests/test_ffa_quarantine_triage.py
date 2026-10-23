@@ -1501,7 +1501,7 @@ def test_pg_k2c_relation_locks_released_within_5_5s_of_t0(case, route, monkeypat
     assert verdict == "PASS", line
 
 
-# ── K21: a capture committing past K2c's bound is a FAIL (round 2, L2) ─────
+# -- K21: a capture committing past K2c's bound is a FAIL (round 2, L2) -----
 # K2c's verdict fails a capture that commits later than 5.5 s from t0 plus
 # the ALTER's own run, with no slack past that. Case (i) on each route, with
 # the capture's advisory key held until the target commit time less the
