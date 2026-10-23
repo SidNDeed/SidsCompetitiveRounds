@@ -274,7 +274,7 @@ _M1_CASES = (
 class Caller:
     def __iter__(self):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return iter(())
 original = (list[str],)
@@ -289,7 +289,7 @@ trigger(Caller())
 class Caller:
     def __iter__(self):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return iter(())
 original = (dict[str, str],)
@@ -304,7 +304,7 @@ trigger(Caller())
 class Caller:
     def __iter__(self):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return iter(())
 original = (list[str],)
@@ -319,7 +319,7 @@ trigger(Caller())
 class Caller:
     def __iter__(self):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return iter(())
 original = (dict[str, str],)
@@ -336,7 +336,7 @@ _M2_HELPER = """
 class Meta(type):
     def __instancecheck__(cls, instance):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return False
 class C(metaclass=Meta):
@@ -355,7 +355,7 @@ trigger()
 class Caller:
     def __eq__(self, other):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return False
 def trigger(obj):
@@ -368,7 +368,7 @@ trigger(Caller())
 class Caller:
     def __eq__(self, other):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return False
 def trigger(obj):
@@ -384,7 +384,7 @@ _M3_CASES = (
 class Caller:
     def __hash__(self):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return 0
 def trigger(obj):
@@ -397,7 +397,7 @@ trigger(Caller())
 class Caller:
     def __hash__(self):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return 0
 def trigger(obj):
@@ -412,7 +412,7 @@ class Caller:
     def __hash__(self):
         if self.armed:
             if corrupt:
-                setattr(os, target, lambda *args, **kwargs: iter(()))
+                setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
             probe('.')
         return 0
 def trigger(obj):
@@ -428,7 +428,7 @@ class Caller:
     def __hash__(self):
         if self.armed:
             if corrupt:
-                setattr(os, target, lambda *args, **kwargs: iter(()))
+                setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
             probe('.')
         return 0
 def trigger(obj):
@@ -441,7 +441,7 @@ trigger(Caller())
 class Caller:
     def __index__(self):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return 0
 def trigger(obj):
@@ -453,7 +453,7 @@ trigger(Caller())
 class Caller:
     def __index__(self):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return 0
 def trigger(obj):
@@ -466,7 +466,7 @@ trigger(Caller())
 _M4_HELPER = """
 def decorate(value):
     if corrupt:
-        setattr(os, target, lambda *args, **kwargs: iter(()))
+        setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
     probe('.')
     return value
 """
@@ -493,7 +493,7 @@ class Defined:
 class BaseValue:
     def __mro_entries__(self, bases):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return (object,)
 base = BaseValue()
@@ -504,7 +504,7 @@ class Defined(base):
 class Base:
     def __init_subclass__(cls):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
 class Defined(Base):
     pass
@@ -514,7 +514,7 @@ class Meta(type):
     @classmethod
     def __prepare__(metaclass, name, bases):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
         return {}
 class Defined(metaclass=Meta):
@@ -523,7 +523,7 @@ class Defined(metaclass=Meta):
     ("metaclass_call", "make_class", """
 def make_class(name, bases, namespace):
     if corrupt:
-        setattr(os, target, lambda *args, **kwargs: iter(()))
+        setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
     probe('.')
     return type(name, bases, namespace)
 class Defined(metaclass=make_class):
@@ -533,7 +533,7 @@ class Defined(metaclass=make_class):
 class Descriptor:
     def __set_name__(self, owner, name):
         if corrupt:
-            setattr(os, target, lambda *args, **kwargs: iter(()))
+            setattr(mutation_owner, target, lambda *args, **kwargs: iter(()))
         probe('.')
 class Defined:
     value = Descriptor()
@@ -546,7 +546,7 @@ def _run_round17_case(finding, case, target, corrupt):
     label, hook, source = case
     filename = '<review-witness:' + finding + ':' + label + '>'
     module = types.ModuleType('review_witness_' + finding + '_' + label)
-    values = dict(os=os, target=target, corrupt=corrupt, probe=os.path.exists)
+    values = dict(os=os, mutation_owner=os, target=target, corrupt=corrupt, probe=os.path.exists)
     module.__dict__.update(values)
     helper_name = 'review_witness_pattern_helper'
     helper_source = None
@@ -643,3 +643,225 @@ def test_command_verdict_overrides_early_returns(args, clean_code, monkeypatch, 
         os.walk = lambda *a, **k: iter(())
         assert review_needles.main(args) == 3
         assert capsys.readouterr().out == clean_output
+
+
+@pytest.mark.parametrize("corrupt", (False, True), ids=("control", "replacement"))
+def test_snapshot_path_conversion_exit_check(tmp_path, corrupt):
+    """A replacement surviving lstat must be recorded before it restores itself."""
+    (tmp_path / "leaf").write_bytes(b"synthetic")
+    saved = os.scandir
+
+    class Empty:
+        def __enter__(self):
+            return iter(())
+
+        def __exit__(self, *exc):
+            os.scandir = saved
+
+    class Root:
+        def __fspath__(self):
+            if corrupt:
+                os.scandir = lambda path: Empty()
+            return str(tmp_path)
+
+    with tw.expected_trip("os.scandir", require=corrupt) as scope:
+        result = review_needles.snapshot(Root())
+        assert result == ([] if corrupt else [("leaf", b"synthetic")])
+        assert os.scandir is saved
+        assert bool(tw.verdict()) is corrupt
+    if corrupt:
+        assert any(row["kind"] == "exit" and row["caller"]["function"] == "_status"
+                   for row in scope.trips)
+        assert not any(row["kind"] in ("entry", "end", "audit") for row in scope.trips)
+
+
+@pytest.mark.parametrize("corrupt", (False, True), ids=("control", "replacement"))
+@pytest.mark.parametrize("fails", (False, True), ids=("return", "raise"))
+def test_call_exit_check_preserves_result_and_exception(corrupt, fails):
+    saved = os.scandir
+    result = object()
+    error = RuntimeError("synthetic")
+
+    def original():
+        if corrupt:
+            os.scandir = lambda path: iter(())
+        if fails:
+            raise error
+        return result
+
+    call = tw._wrapper("os.lstat", original)
+    with tw.expected_trip("os.scandir", require=corrupt) as scope:
+        try:
+            if fails:
+                with pytest.raises(RuntimeError) as caught:
+                    call()
+                assert caught.value is error
+            else:
+                assert call() is result
+        finally:
+            os.scandir = saved
+    if corrupt:
+        assert all(row["kind"] == "exit" and row["caller"]["function"] ==
+                   "test_call_exit_check_preserves_result_and_exception" for row in scope.trips)
+
+
+@pytest.mark.parametrize("corrupt", (False, True), ids=("control", "replacement"))
+@pytest.mark.parametrize("fails", (False, True), ids=("return", "raise"))
+@pytest.mark.parametrize("method", ("__next__", "send", "throw", "close"))
+def test_lazy_exit_check_preserves_result_and_exception(method, fails, corrupt):
+    saved = os.scandir
+    result = object()
+    error = RuntimeError("synthetic")
+
+    class Iterator:
+        def advance(self, *args):
+            if corrupt:
+                os.scandir = lambda path: iter(())
+            if fails:
+                raise error
+            return result
+
+        __next__ = send = throw = close = advance
+
+    walk = tw._WalkIterator(Iterator())
+    args = (None,) if method in ("send", "throw") else ()
+    with tw.expected_trip("os.scandir", require=corrupt) as scope:
+        try:
+            if fails:
+                with pytest.raises(RuntimeError) as caught:
+                    getattr(walk, method)(*args)
+                assert caught.value is error
+            else:
+                assert getattr(walk, method)(*args) is result
+        finally:
+            os.scandir = saved
+    if corrupt:
+        assert all(row["kind"] == "exit" and row["caller"]["function"] ==
+                   "test_lazy_exit_check_preserves_result_and_exception" for row in scope.trips)
+
+
+_HANDLER_CASES = tuple(
+    (finding, case, helper_source, helper_name)
+    for finding, cases, helper_source, helper_name in (
+        ("m1", _M1_CASES, None, None),
+        ("m2", _M2_CASES, _M2_HELPER, "review_witness_pattern_helper"),
+        ("m3", _M3_CASES, None, None),
+        ("m4", _M4_CASES, _M4_HELPER, "review_witness_definition_helper"),
+    )
+    for case in cases
+)
+
+
+@pytest.mark.parametrize("corrupt", (False, True), ids=("raising-control", "suppressed"))
+@pytest.mark.parametrize("item", _HANDLER_CASES, ids=[row[0] + ":" + row[1][0] for row in _HANDLER_CASES])
+def test_round17_handler_mutation_with_real_enumeration(item, corrupt, tmp_path):
+    """The original hook forms change only the synthetic walk's handler."""
+    finding, (label, hook, source), helper_source, helper_name = item
+    filename = "<review-witness:handler:" + finding + ":" + label + ">"
+    module = types.ModuleType("review_witness_handler")
+    error = review_needles.NoVerdict("synthetic")
+    calls = []
+
+    def raising(error_seen):
+        calls.append(error_seen)
+        raise error
+
+    module._walk_error = raising
+    file_root = tmp_path / "ordinary-file"
+    file_root.write_bytes(b"synthetic")
+    with tw.expected_trip("os.walk", require=False):
+        with pytest.raises(review_needles.NoVerdict) as caught:
+            list(os.walk(file_root, onerror=module._walk_error))
+        assert caught.value is error
+    assert len(calls) == 1 and isinstance(calls[0], OSError)
+    # The literal hooks mutate this module's handler, with no artificial
+    # guarded probe and no OS-binding replacement to stand in for suppression.
+    values = dict(os=os, mutation_owner=module, target="_walk_error", corrupt=corrupt,
+                  probe=lambda path: None)
+    module.__dict__.update(values)
+    helper_needed = (finding == "m2" and label == "imported_class"
+                     or finding == "m4" and label.endswith("_decorator"))
+    missing = object()
+    previous = sys.modules.get(helper_name, missing)
+    with tw.expected_trip("os.walk", require=corrupt) as scope:
+        try:
+            if helper_needed:
+                helper = types.ModuleType(helper_name)
+                helper.__dict__.update(values)
+                exec(compile(helper_source, filename, "exec"), vars(helper))
+                sys.modules[helper_name] = helper
+            exec(compile(source, filename, "exec"), vars(module))
+            if corrupt:
+                assert list(os.walk(file_root, onerror=module._walk_error)) == []
+            else:
+                with pytest.raises(review_needles.NoVerdict) as caught:
+                    list(os.walk(file_root, onerror=module._walk_error))
+                assert caught.value is error
+        finally:
+            if helper_needed:
+                if previous is missing:
+                    sys.modules.pop(helper_name, None)
+                else:
+                    sys.modules[helper_name] = previous
+    if corrupt:
+        assert len(scope.trips) == 1
+        row = scope.trips[0]
+        assert row["kind"] == "suppressed-error" and row["name"] == "os.walk"
+        assert set(row) == {"kind", "name", "caller", "_scope"}
+        assert set(row["caller"]) == {"file", "function", "line"}
+
+
+@pytest.mark.parametrize("form", ("positional", "keyword", "omitted", "none"))
+@pytest.mark.parametrize("fails", (False, True), ids=("healthy-control", "enumeration-error"))
+def test_walk_error_observation_covers_handler_forms(form, fails, tmp_path):
+    root = tmp_path / "ordinary-file" if fails else tmp_path
+    if fails:
+        root.write_bytes(b"synthetic")
+    calls = []
+    with tw.expected_trip("os.walk", require=fails) as scope:
+        if form == "positional":
+            result = list(os.walk(root, True, calls.append))
+        elif form == "keyword":
+            result = list(os.walk(root, onerror=calls.append))
+        elif form == "none":
+            result = list(os.walk(root, onerror=None))
+        else:
+            result = list(os.walk(root))
+    assert bool(result) is not fails
+    assert len(calls) == int(fails and form in ("positional", "keyword"))
+    assert all(row["kind"] == "suppressed-error" for row in scope.trips)
+
+
+@pytest.mark.parametrize("positional", (False, True))
+def test_walk_raising_handler_preserves_exception(positional, tmp_path):
+    root = tmp_path / "ordinary-file"
+    root.write_bytes(b"synthetic")
+    error = KeyboardInterrupt("synthetic")
+
+    def raising(actual):
+        assert isinstance(actual, OSError)
+        raise error
+
+    with tw.expected_trip("os.walk", require=False):
+        with pytest.raises(KeyboardInterrupt) as caught:
+            list(os.walk(root, True, raising) if positional else os.walk(root, onerror=raising))
+        assert caught.value is error
+
+
+def test_non_subject_walk_suppression_keeps_ordinary_policy(tmp_path):
+    module = types.ModuleType("ordinary_walk_caller")
+    exec(compile("def collect():\n    results.append(list(os.walk(root)))\n",
+                 "<ordinary-walk-caller>", "exec"), vars(module))
+    module.os = os
+    root = tmp_path / "ordinary-file"
+    root.write_bytes(b"synthetic")
+    # The worker has only ordinary caller frames, without a subject frame.
+    import threading
+    results = []
+    module.root, module.results = root, results
+    worker = threading.Thread(target=module.collect)
+    before = tw.verdict()
+    worker.start()
+    worker.join()
+    assert results == [[]]
+    assert tw.verdict() == before

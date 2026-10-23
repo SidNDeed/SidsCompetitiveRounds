@@ -114,9 +114,13 @@ class _WalkIterator:
         return self
 
     def _advance(self, method, *args):
-        _entry("os.walk", sys._getframe(2))
-        with _active():
-            return method(*args)
+        frame = sys._getframe(2)
+        _entry("os.walk", frame)
+        try:
+            with _active():
+                return method(*args)
+        finally:
+            _identity("exit", frame)
 
     def __next__(self):
         return self._advance(next, self._iterator)
@@ -141,9 +145,26 @@ def _wrapper(name, original):
     def call(*args, **kwargs):
         frame = sys._getframe(1)
         _entry(name, frame)
-        with _active():
-            result = original(*args, **kwargs)
-        return _WalkIterator(result) if name == "os.walk" else result
+        try:
+            if name == "os.walk" and _guarded_frame(frame) is not None:
+                handler = args[2] if len(args) > 2 else kwargs.get("onerror")
+
+                def onerror(error):
+                    if handler is not None:
+                        handler(error)
+                    # Only an actual enumeration error and a normal handler
+                    # return establish suppression. Raising handlers pass through.
+                    _record("suppressed-error", "os.walk", frame)
+
+                if len(args) > 2:
+                    args = args[:2] + (onerror,) + args[3:]
+                else:
+                    kwargs["onerror"] = onerror
+            with _active():
+                result = original(*args, **kwargs)
+            return _WalkIterator(result) if name == "os.walk" else result
+        finally:
+            _identity("exit", frame)
     return call
 
 
