@@ -395,6 +395,7 @@ CREATE TABLE @S@.ffa_match_players (
     gold_gained INTEGER NOT NULL DEFAULT 0,
     kills INTEGER NOT NULL DEFAULT 0,
     absent BOOLEAN NOT NULL DEFAULT false,
+    exclusion_reasons TEXT[],
     fps_avg SMALLINT,
     ping_avg SMALLINT,
     bullets_fired INTEGER,

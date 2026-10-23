@@ -2702,6 +2702,7 @@ CREATE TABLE ffa_match_players (
     kills INTEGER NOT NULL DEFAULT 0,
     left_early BOOLEAN NOT NULL DEFAULT FALSE,
     absent BOOLEAN NOT NULL DEFAULT FALSE,
+    exclusion_reasons TEXT[],
     -- What _ffa_match_echo reads back as the reporter's own answer.
     placement SMALLINT NOT NULL DEFAULT 0,
     rating_change DOUBLE PRECISION NOT NULL DEFAULT 0,

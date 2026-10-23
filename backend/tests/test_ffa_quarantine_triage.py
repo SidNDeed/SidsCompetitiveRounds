@@ -196,6 +196,7 @@ CREATE TABLE ffa_match_players (
     left_early BOOLEAN NOT NULL DEFAULT FALSE,
     kills INTEGER NOT NULL DEFAULT 0,
     absent BOOLEAN NOT NULL DEFAULT FALSE,
+    exclusion_reasons TEXT[],
     game_points_at_leave SMALLINT,
     PRIMARY KEY (match_id, player_id)
 );
@@ -2521,3 +2522,44 @@ def test_pg_rj_triage_health_carries_the_round_2_marker_on_both_arms(monkeypatch
     assert (down["status"], down["database"]) == ("degraded", "disconnected"), down
     assert up.get("rj_triage") == 2, up
     assert down.get("rj_triage") == 2, down
+
+
+
+
+def test_pg_fix2_stored_assembly_reason_agrees_without_triage_writes(monkeypatch):
+    """T1: the settled assembly snapshot survives an identical capture."""
+    async def body():
+        async with Env(monkeypatch) as env:
+            ids = await env.seats()
+            lid = await env.lobby(games_played=1)
+            incoming = {1: (5, 10, 0, F, F), 2: (2, 4, 0, F, F),
+                        3: (3, 7, 0, F, F)}
+            settled = dict(incoming)
+            settled[3] = (3, 7, 0, F, T)
+            mid = await env.ffa_settle(lid, 1, "Fix2T1", settled, 1, 1, 10)
+            # The same control runs before migration 389: then no snapshot
+            # can be seeded and the final verdict exposes the missing arm.
+            has_snapshot = await env.scalar(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns"
+                " WHERE table_schema = current_schema()"
+                " AND table_name = 'ffa_match_players'"
+                " AND column_name = 'exclusion_reasons')")
+            if has_snapshot:
+                await env.ex(
+                    "UPDATE ffa_match_players SET exclusion_reasons = CAST(:er AS text[])"
+                    " WHERE match_id = :m", {"er": [], "m": mid})
+                await env.ex(
+                    "UPDATE ffa_match_players SET exclusion_reasons = CAST(:er AS text[])"
+                    " WHERE match_id = :m AND player_id = :p",
+                    {"er": ["asm_a"], "m": mid, "p": pid(ids, 3)})
+            qid = await env.ffa_capture(lid, room("Fix2T1", 1), incoming, 1, 1, 20)
+            before = await env.checksums(WATCHED)
+            response = await env.v2("ffa", lid)
+            after = await env.checksums(WATCHED)
+            return mid, qid, response, before, after
+
+    mid, qid, response, before, after = run(body())
+    assert before == after, "the triage route changed a watched table"
+    rows = cap_of(ok(response), qid)["pt3"]["rows"]
+    assert [row["row_id"] for row in rows] == [str(mid)]
+    assert rows[0]["verdict"] == "AGREES", rows
