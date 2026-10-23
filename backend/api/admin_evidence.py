@@ -1233,14 +1233,17 @@ class PopulationCache:
         new = Generation(key=key, gen=self._gen, computed_at=self._clock(),
                          values=values, truncated=truncated, offsets=offsets or {},
                          kind=kind)
-        old = self.live.pop(key, None)
+        old = self.live.get(key)
+        self.live = {k: value for k, value in self.live.items() if k != key}
         self.live[key] = new
         if old is not None:
             self._retire(old)
         same = [g for g in self.live.values() if g.kind == kind]
         while len(same) > CONTRACT_BOUNDS[self.LIVE_MAX[kind]]:
-            oldest = same.pop(0)
-            del self.live[oldest.key]
+            oldest = same[0]
+            same = same[1:]
+            self.live = {k: value for k, value in self.live.items()
+                         if k != oldest.key}
             self._retire(oldest)
         return new
 
@@ -1256,16 +1259,21 @@ class PopulationCache:
                 raise PopulationUnavailable(
                     "budget: %d cached bytes (a %d-byte replacement among them) over %d"
                     % (self.cache_bytes(), nbytes, self.budget))
-            self._released.clear()
+            released = self._released
             try:
-                await asyncio.wait_for(self._released.wait(), remaining)
+                await asyncio.wait_for(released.wait(), remaining)
             except asyncio.TimeoutError:
                 pass
 
     def _retire(self, g):
         g.retired = True
-        for mk in [mk for mk in self.memo if mk[1] == g.key and mk[2] == g.gen]:
-            self.memo_bytes -= self.memo.pop(mk)["_bytes"]
+        kept = collections.OrderedDict()
+        for mk, value in self.memo.items():
+            if mk[1] == g.key and mk[2] == g.gen:
+                self.memo_bytes -= value["_bytes"]
+            else:
+                kept[mk] = value
+        self.memo = kept
         if g.leases:
             self.retired.append(g)
 
@@ -1276,8 +1284,11 @@ class PopulationCache:
     def release(self, g):
         g.leases -= 1
         if g.leases == 0 and g in self.retired:
-            self.retired.remove(g)
-        self._released.set()
+            index = self.retired.index(g)
+            self.retired[index:index + 1] = []
+        released = self._released
+        self._released = asyncio.Event()
+        released.set()
 
     @staticmethod
     def _memo_key(comp, lease):
@@ -1297,14 +1308,21 @@ class PopulationCache:
     def memo_put(self, comp, lease, result, nbytes):
         mk = self._memo_key(comp, lease)
         if mk in self.memo:
-            self.memo_bytes -= self.memo.pop(mk)["_bytes"]
+            self.memo_bytes -= self.memo[mk]["_bytes"]
+            self.memo = collections.OrderedDict(
+                (key, value) for key, value in self.memo.items() if key != mk)
         stored = dict(result, source_key=lease.key, gen=lease.gen,
                       computed_at=lease.computed_at, _bytes=nbytes)
         self.memo[mk] = stored
         self.memo_bytes += nbytes
-        while self.memo_bytes > CONTRACT_BOUNDS["WIN_DERIVED_BYTES_MAX"] and self.memo:
-            _k, old = self.memo.popitem(last=False)
-            self.memo_bytes -= old["_bytes"]
+        if self.memo_bytes > CONTRACT_BOUNDS["WIN_DERIVED_BYTES_MAX"]:
+            kept = collections.OrderedDict()
+            for key, value in self.memo.items():
+                if self.memo_bytes > CONTRACT_BOUNDS["WIN_DERIVED_BYTES_MAX"]:
+                    self.memo_bytes -= value["_bytes"]
+                else:
+                    kept[key] = value
+            self.memo = kept
         return stored
 
     def cache_bytes(self):
@@ -1740,7 +1758,9 @@ class _Report:
 
     def close(self):
         while self.leases:
-            self.cache.release(self.leases.pop())
+            lease = self.leases[-1]
+            self.leases[-1:] = []
+            self.cache.release(lease)
 
 
 async def _game_rows(db, ids):
@@ -1825,8 +1845,10 @@ async def _summary_page(rep, shape, rows, requested, subjects, accounts):
         base = await read_baseline(db, acc, oldest["ended_at"], oldest["id"],
                                    covered=cohort, partner=partner)
         cells = window_cells(rows, acc, basis, base, partner)
-        for c in cells:
-            comp = c.pop("comparability")
+        for cell_index, c in enumerate(cells):
+            comp = c["comparability"]
+            c = {key: value for key, value in c.items() if key != "comparability"}
+            cells[cell_index] = c
             if c["state"] != "ok" or not c["n"]:
                 continue
             w = REPORT_REGISTRY[c["ki"]]

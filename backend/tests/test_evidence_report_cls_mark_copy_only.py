@@ -4188,3 +4188,356 @@ def test_fix8_resolved_dictionary_callback_control():
     frame.callback_effect(node, frame.expr(node), [], [frame.env["box"]])
     assert ref.must_keys == frozenset()
     assert frame.ps.findings == set(), _fmt(frame.ps.findings)
+
+# Fix 9 executes selected actual production definitions without api imports.
+def _fix9_population_namespace():
+    import asyncio
+    import collections
+    import time
+    from array import array
+    from dataclasses import dataclass, field
+
+    wanted = {"CONTRACT_BOUNDS", "SIZING_BASE_RSS_MB", "BASE_RSS_FLOOR_MB",
+              "Generation", "PopulationUnavailable", "budget_bytes", "PopulationCache",
+              "_Report", "_summary_page", "_code"}
+    selected, found = [], set()
+    for node in ast.parse(_read(API), filename=API).body:
+        names = {node.name} if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                                ast.ClassDef)) else set()
+        if isinstance(node, ast.Assign):
+            names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+        if names & wanted:
+            selected.append(node)
+            found |= names & wanted
+    assert found == wanted, (wanted - found, found - wanted)
+    ns = {"__name__": __name__, "asyncio": asyncio, "collections": collections,
+          "time": time, "array": array, "dataclass": dataclass, "field": field}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), API, "exec"), ns)
+    return ns
+
+
+def _fix9_generation(ns, key, gen=1, count=1, leases=0):
+    return ns["Generation"](key=key, gen=gen, computed_at=0.0,
+        values={0: ns["array"]("d", [1.0] * count)}, truncated={}, leases=leases)
+
+
+def test_fix9_publish_preserves_replacement_order_and_live_caps():
+    ns = _fix9_population_namespace()
+    cache = ns["PopulationCache"](clock=lambda: 0.0)
+    bounds = ns["CONTRACT_BOUNDS"]
+    ng, nw = bounds["GAME_SETS_LIVE"], bounds["WINDOW_SOURCES_LIVE"]
+    games = [cache.publish(("game", i), {0: ns["array"]("d", [1.0])}, {})
+             for i in range(ng)]
+    windows = [cache.publish(("window", i), {0: ns["array"]("d", [2.0])}, {},
+                             offsets={0: ns["array"]("i", [0, 1])}) for i in range(nw)]
+    old = cache.lease(games[1])
+    cache.memo_put(("derived",), old, {"pop_rank": 0.5}, 64)
+    cache.in_progress = 24
+    replacement = cache.publish(old.key, {0: ns["array"]("d", [3.0, 4.0])}, {})
+    assert old.retired and old in cache.retired
+    assert replacement.gen > old.gen and cache.current(old.key) is replacement
+    assert cache.memo_get(("derived",), old) is None and cache.memo_bytes == 0
+    assert list(cache.live) == ([g.key for g in games if g is not old]
+                                + [g.key for g in windows] + [old.key])
+    new_game = cache.publish(("game", ng), {0: ns["array"]("d", [5.0])}, {})
+    assert games[0].retired and not replacement.retired and cache.current(new_game.key) is new_game
+    assert all(not g.retired for g in windows)
+    new_window = cache.publish(("window", nw), {0: ns["array"]("d", [6.0])}, {},
+                               offsets={0: ns["array"]("i", [0, 1])})
+    assert windows[0].retired and not new_window.retired
+    assert list(cache.live) == ([g.key for g in games[2:]] + [g.key for g in windows[1:]]
+                                + [old.key, new_game.key, new_window.key])
+    assert sum(g.kind == "game" for g in cache.live.values()) == ng
+    assert sum(g.kind == "window" for g in cache.live.values()) == nw
+    assert cache.cache_bytes() == sum(g.nbytes() for g in cache.live.values()) + old.nbytes() + 24
+
+
+def test_fix9_retire_preserves_source_generation_and_bytes():
+    ns = _fix9_population_namespace()
+    cache = ns["PopulationCache"]()
+    g = _fix9_generation(ns, ("source",), gen=2, leases=1)
+    entries = [((("a",), g.key, 2), {"_bytes": 64}),
+               ((("b",), g.key, 3), {"_bytes": 96}),
+               ((("c",), g.key, 2), {"_bytes": 32}),
+               ((("d",), ("other",), 2), {"_bytes": 48})]
+    cache.memo = ns["collections"].OrderedDict(entries)
+    cache.memo_bytes = sum(v["_bytes"] for _k, v in entries)
+    cache.in_progress = 40
+    cache._retire(g)
+    assert g.retired and cache.retired == [g]
+    assert list(cache.memo.items()) == [entries[1], entries[3]]
+    assert cache.memo_bytes == 144 and cache.cache_bytes() == g.nbytes() + 144 + 40
+    unleased = _fix9_generation(ns, ("unleased",), gen=4)
+    cache._retire(unleased)
+    assert unleased.retired and cache.retired == [g] and cache.memo_bytes == 144
+
+
+def test_fix9_release_preserves_first_match_and_broadcast():
+    ns = _fix9_population_namespace()
+    cache = ns["PopulationCache"]()
+    g = _fix9_generation(ns, ("released",), leases=1)
+    equal_first = _fix9_generation(ns, ("released",), leases=0)
+    equal_last = _fix9_generation(ns, ("released",), leases=0)
+    other = _fix9_generation(ns, ("retained",), gen=2, leases=2)
+    # The distinct neighbors equal g after release decrements its last lease.
+    cache.retired = [equal_first, g, equal_last, other]
+    original = cache.retired
+    cache.in_progress = 16
+    signal = cache._released
+    cache.release(g)
+    assert g.leases == 0 and cache.retired is original and len(cache.retired) == 3
+    assert cache.retired[0] is g and cache.retired[1] is equal_last
+    assert cache.retired[2] is other
+    assert signal.is_set()
+    assert cache.cache_bytes() == g.nbytes() + equal_last.nbytes() + other.nbytes() + 16
+    signal = cache._released
+    cache.release(other)
+    assert other.leases == 1 and len(cache.retired) == 3 and signal.is_set()
+
+
+def test_fix9_memo_put_preserves_lru_and_bytes():
+    ns = _fix9_population_namespace()
+    cache = ns["PopulationCache"]()
+    source = _fix9_generation(ns, ("source",), gen=7)
+    cap = ns["CONTRACT_BOUNDS"]["WIN_DERIVED_BYTES_MAX"]
+    unit = cap // 4
+    for label in ("a", "b", "c"):
+        cache.memo_put((label,), source, {"pop_rank": 0.25}, unit)
+    cache.memo_get(("a",), source)
+    replacement = cache.memo_put(("b",), source, {"pop_rank": 0.75}, unit // 2)
+    assert [k[0] for k in cache.memo] == [("c",), ("a",), ("b",)]
+    assert cache.memo_bytes == 2 * unit + unit // 2
+    stored = cache.memo_put(("d",), source, {"pop_rank": 0.5}, 2 * unit)
+    assert [k[0] for k in cache.memo] == [("a",), ("b",), ("d",)]
+    assert cache.memo_bytes == 3 * unit + unit // 2 and cache.cache_bytes() == cache.memo_bytes
+    assert replacement["pop_rank"] == 0.75
+    assert stored is cache.memo[cache._memo_key(("d",), source)]
+    assert (stored["source_key"], stored["gen"], stored["computed_at"], stored["_bytes"]) == (
+        source.key, source.gen, source.computed_at, 2 * unit)
+    oversized = cache.memo_put(("oversized",), source, {"pop_rank": 0.125}, cap + 1)
+    assert oversized["_bytes"] == cap + 1 and oversized["pop_rank"] == 0.125
+    assert not cache.memo and cache.memo_bytes == 0 and cache.cache_bytes() == 0
+
+
+def test_fix9_admit_preserves_broadcast_newcomer_and_deadline():
+    from types import SimpleNamespace
+
+    ns = _fix9_population_namespace()
+    asyncio, time = ns["asyncio"], ns["time"]
+
+    def make_cache(retired_count):
+        base = ns["CONTRACT_BOUNDS"]["POP_MEM_BUDGET_MB"] / 1.25 - 2 - 80 / (1024 * 1024)
+        cache = ns["PopulationCache"](base_rss_mb=base)
+        cache.live = {("live",): _fix9_generation(ns, ("live",), count=5)}
+        cache.retired = [_fix9_generation(ns, ("old", i), gen=i + 2, count=5, leases=1)
+                         for i in range(retired_count)]
+        cache.in_progress = 40
+        assert cache.budget == 80
+        return cache
+
+    async def eventually(predicate):
+        for _ in range(1000):
+            if predicate():
+                return
+            await asyncio.sleep(0)
+        assert predicate()
+
+    async def pending(event, count):
+        await eventually(lambda: sum(not waiter.done() for waiter in event._waiters) == count)
+
+    async def cancel_tasks(tasks):
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def scenario():
+        cache = make_cache(2)
+        first, second = cache.retired
+        tasks = [asyncio.create_task(cache.admit(40, time.monotonic() + 2)) for _ in range(2)]
+        try:
+            await pending(cache._released, 2)
+            cache.release(first)
+            await pending(cache._released, 2)
+            assert all(not task.done() for task in tasks) and cache.cache_bytes() == 120
+            tasks.append(asyncio.create_task(cache.admit(40, time.monotonic() + 2)))
+            await pending(cache._released, 3)
+            cache.release(second)
+            await asyncio.wait_for(asyncio.gather(*tasks), 0.5)
+            assert cache.cache_bytes() == cache.budget == 80 and cache.in_progress == 40
+        finally:
+            await cancel_tasks(tasks)
+
+        # Gate the actual Event.wait coroutines before starting them. The
+        # newcomer starts after release but before the old waits begin.
+        # Both old tasks must observe that release and recheck the budget.
+        gap = make_cache(2)
+        first, second = gap.retired
+        gate, calls, original_tasks = asyncio.Event(), {}, set()
+
+        async def delayed_wait_for(awaitable, timeout):
+            task = asyncio.current_task()
+            calls[task] = calls.get(task, 0) + 1
+            if task in original_tasks and calls[task] == 1:
+                try:
+                    await gate.wait()
+                except BaseException:
+                    awaitable.close()
+                    raise
+            return await asyncio.wait_for(awaitable, timeout)
+
+        ns["asyncio"] = SimpleNamespace(Event=asyncio.Event,
+            TimeoutError=asyncio.TimeoutError, wait_for=delayed_wait_for)
+        tasks = [asyncio.create_task(gap.admit(40, time.monotonic() + 2)) for _ in range(2)]
+        original_tasks.update(tasks)
+        try:
+            await eventually(lambda: all(calls.get(task, 0) == 1 for task in original_tasks))
+            gap.release(first)
+            assert gap.cache_bytes() == 120 and gap.in_progress == 40
+            newcomer = asyncio.create_task(gap.admit(40, time.monotonic() + 2))
+            tasks.append(newcomer)
+            await eventually(lambda: calls.get(newcomer, 0) == 1)
+            gate.set()
+            await eventually(lambda: all(calls.get(task, 0) >= 2 for task in original_tasks))
+            assert all(not task.done() for task in tasks)
+            gap.release(second)
+            await asyncio.wait_for(asyncio.gather(*tasks), 0.5)
+            assert gap.cache_bytes() == 80 and gap.in_progress == 40
+        finally:
+            await cancel_tasks(tasks)
+            ns["asyncio"] = asyncio
+
+        refused = make_cache(1)
+        before = (refused.cache_bytes(), refused.in_progress, refused.retired[0].leases)
+        with pytest.raises(ns["PopulationUnavailable"], match="budget:"):
+            await asyncio.wait_for(refused.admit(40, time.monotonic() + 0.02), 0.5)
+        assert (refused.cache_bytes(), refused.in_progress, refused.retired[0].leases) == before
+
+    asyncio.run(scenario())
+
+
+def test_fix9_close_preserves_lifo_list_and_exception_state():
+    ns = _fix9_population_namespace()
+    cache = ns["PopulationCache"]()
+    first = _fix9_generation(ns, ("first",), leases=1)
+    last = _fix9_generation(ns, ("last",), gen=2, leases=1)
+
+    class BrokenLease:
+        @property
+        def leases(self):
+            raise RuntimeError("release sentinel")
+
+    report = ns["_Report"](None, cache, 0.0)
+    report.leases.extend([first, BrokenLease(), last])
+    original = report.leases
+    with pytest.raises(RuntimeError, match="release sentinel"):
+        report.close()
+    assert last.leases == 0 and first.leases == 1
+    assert report.leases is original and report.leases == [first]
+    report.close()
+    assert first.leases == 0 and report.leases is original and report.leases == []
+    report.close()
+    assert first.leases == 0 and last.leases == 0
+
+
+def test_fix9_summary_preserves_cells_list_effect():
+    from types import SimpleNamespace
+
+    ns = _fix9_population_namespace()
+    cache = ns["PopulationCache"]()
+    source = _fix9_generation(ns, ("window",), gen=3)
+    comp = ("window-key", "player", 1)
+    cells = [{"ki": 0, "n": 1, "val": 5.0, "state": "ok", "comparability": comp},
+             {"ki": 0, "n": 0, "val": None, "state": "not_recorded",
+              "comparability": ("window-key", "player", 0)}]
+    population = {"pop_rank": 0.25, "pop_n": 4, "pop_p50": 5.0, "pop_p90": 8.0, "pop_p99": 9.0}
+    cache.memo_put(comp, source, population, 64)
+
+    async def flag_rows(_db, _ids):
+        return {}
+
+    async def baseline(_db, _account, _ended, _ident, **_kwargs):
+        return None
+
+    async def leased(actual_cache, _db, _key, _deadline, _basis=None):
+        return actual_cache.lease(source)
+
+    ns.update({"_flag_rows": flag_rows, "read_baseline": baseline, "_leased": leased,
+               "_display_key": lambda: ("display",), "window_cells": lambda *_args: cells,
+               "REPORT_REGISTRY": [SimpleNamespace(base=0, agg="win_median")],
+               "flag_obs": lambda *_args: 0, "wire_row": lambda _kind, cell: dict(cell)})
+    report = ns["_Report"](None, cache, 1.0)
+    rows = [{"id": "game", "ended_at": 0.0}]
+    subjects = {"subject": {"i": 0, "steam_id": None}}
+    windows, summary, computed_at = ns["asyncio"].run(
+        ns["_summary_page"](report, "player", rows, 1, subjects, ("subject",)))
+    assert len(windows) == len(summary) == 1 and computed_at == source.computed_at
+    assert all("comparability" not in cell for cell in cells)
+    assert all(cells[0][key] == value for key, value in population.items())
+    assert cells[1]["state"] == "not_recorded" and cells[1]["n"] == 0
+    assert summary[0]["cells"] == cells
+    assert source.leases == 1 and report.leases == [source]
+    report.close()
+    assert source.leases == 0
+
+
+@pytest.mark.parametrize("operation", ["retire", "replace", "evict"])
+@pytest.mark.parametrize("count", [16, 64])
+def test_fix9_memo_methods_keep_linear_entry_visits(operation, count):
+    from types import SimpleNamespace
+
+    ns = _fix9_population_namespace()
+    ordered = ns["collections"].OrderedDict
+    visits = [0]
+
+    class CountedMemo(ordered):
+        def items(self):
+            for item in super().items():
+                visits[0] += 1
+                yield item
+
+    ns["collections"] = SimpleNamespace(OrderedDict=CountedMemo)
+    cache = ns["PopulationCache"]()
+    generation = _fix9_generation(ns, ("source",), gen=2)
+    for i in range(count):
+        cache.memo[((i,), generation.key, generation.gen)] = {"_bytes": 1}
+    cache.memo_bytes = count
+    ns["CONTRACT_BOUNDS"] = dict(ns["CONTRACT_BOUNDS"], WIN_DERIVED_BYTES_MAX=count)
+    visits[0] = 0
+    if operation == "retire":
+        cache._retire(generation)
+        assert not cache.memo and cache.memo_bytes == 0
+    elif operation == "replace":
+        cache.memo_put((0,), generation, {}, 1)
+        assert len(cache.memo) == count and cache.memo_bytes == count
+    else:
+        cache.memo_put(("oversized",), generation, {}, count + 1)
+        assert not cache.memo and cache.memo_bytes == 0
+    assert visits[0] <= 3 * (count + 1), (operation, count, visits[0])
+
+
+@pytest.mark.parametrize("count", [16, 64])
+def test_fix9_close_keeps_linear_slice_work(count):
+    from types import SimpleNamespace
+
+    ns = _fix9_population_namespace()
+    copied, released = [0], []
+
+    class CountedLeases(list):
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                copied[0] += len(range(*index.indices(len(self))))
+            return super().__getitem__(index)
+
+        def __setitem__(self, index, value):
+            if isinstance(index, slice):
+                copied[0] += len(range(*index.indices(len(self))))
+            return super().__setitem__(index, value)
+
+    report = ns["_Report"](None, SimpleNamespace(release=released.append), 0.0)
+    report.leases = CountedLeases(range(count))
+    original = report.leases
+    report.close()
+    assert report.leases is original and not report.leases
+    assert released == list(reversed(range(count)))
+    assert copied[0] <= 2 * count, (count, copied[0])
