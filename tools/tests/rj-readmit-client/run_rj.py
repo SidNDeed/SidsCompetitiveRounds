@@ -54,18 +54,31 @@ SUITE_FILES = {
     "rules": {"FfaReadmitRules.cs": "RulesSource", "FfaReportRules.cs": "ReportSource",
               "FfaLateRules.cs": "LateSource", "FfaReadmitEntryRules.cs": "EntrySource",
               "RosterCensusRules.cs": "CensusSource", "FfaReadmit.cs": None,
-              "FfaAssembly.cs": None, "ApiClient.cs": None},
+              "FfaAssembly.cs": None, "ApiClient.cs": None, "FfaLateEntry.cs": None},
 }
 
 RELEASE_ROUTE_TARGET = "C4.F2D.release_route_census"
+F2E_ROUTE_TARGET = "C4.F2E.release_route_census"
 RELEASE_ROUTES = (
-    ("release", "FfaAssembly.cs", "internal static void Release(",
-     "FfaReadmit.Abandon(lobby);", "ApiClient.FfaClientClears();"),
+    ("escape", "ApiClient.cs", "private static void TearDownAllQueueBeliefs(",
+     "FfaReadmit.Abandon(null, all: true);", ("IsFfaQueuePolling = false;", "ActiveFfaLobbyId = null;")),
     ("leave", "ApiClient.cs", "public static void FfaLeaveQueue(",
-     "FfaReadmit.Abandon(expectedLobby);", "FfaClientClears();"),
+     "FfaReadmit.Abandon(expectedLobby);", ("FfaClientClears();",)),
+    ("release", "FfaAssembly.cs", "internal static void Release(",
+     "FfaReadmit.Abandon(lobby);", ("ApiClient.FfaClientClears();",)),
     ("depart", "FfaAssembly.cs", "internal static void OnRoomLeft(",
-     "FfaReadmit.Abandon(room, byRoom: true);", None),
+     "FfaReadmit.Abandon(room, byRoom: true);", ("StartHoldActive = false;", "FfaLateEntry.OnRoomLeft(room);")),
+    ("refusal", "FfaReadmit.cs", "private static void Refusal(",
+     "Abandon(State.Lobby);", ("PhotonNetwork.LeaveRoom();", "ApiClient.FfaLeaveQueue(")),
 )
+
+# Legacy site mutants retain their target name and gain the same per-route
+# judgment as the new mutants: only their named row may turn RED.
+MUTANT_ROUTES = {
+    "M-F2D-site-release": "release", "M-F2D-site-leave": "leave", "M-F2D-site-depart": "depart",
+    "M-F2E-site-escape": "escape", "M-F2E-site-leave": "leave", "M-F2E-site-release": "release",
+    "M-F2E-site-depart": "depart", "M-F2E-site-refusal": "refusal", "M-F2E-site-entryfact": "entry-fact",
+}
 
 # (id, piece, suite, file, [(old, new), ...], target case, control case)
 # Each old string occurs exactly once in the file it names.
@@ -219,17 +232,14 @@ MUTANTS = [
      'C4.H2.discovery_fallback', 'C4.H2.poll_result'),
     # ---- merged fix 2d: terminal abandonment and lifecycle callback fences
     ('M-F2D-abandon', 'H1', 'rules', 'FfaReadmit.cs',
-     [('        internal static bool Abandon(string identity, bool byRoom = false)\n'
+     [('        internal static bool Abandon(string identity, bool byRoom = false, bool all = false)\n'
        '        {\n'
-       '            if (!FfaReadmitEntryRules.Abandon(State, identity, byRoom)) return false;\n'
-       '            unchecked { _lifecycleGeneration++; }\n'
-       '            _discoveryInFlight = false;\n'
-       '            _postInFlight = false;\n'
-       '            _discovered = false;\n'
-       '            _nextBindRt = 0f;\n'
-       '            return true;\n'
+       '            if (!FfaReadmitEntryRules.MatchesRelease(State, identity, byRoom, all)) return false;\n'
+       '            if (FfaReadmitEntryRules.KeepEntered(State, FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game))) return false;\n'
+       '            InvalidateMatchingWork();\n'
+       '            return FfaReadmitEntryRules.Abandon(State, identity, byRoom, all);\n'
        '        }\n',
-       '        internal static bool Abandon(string identity, bool byRoom = false)\n'
+       '        internal static bool Abandon(string identity, bool byRoom = false, bool all = false)\n'
        '        {\n'
        '            return false;\n'
        '        }\n')],
@@ -253,6 +263,35 @@ MUTANTS = [
     ('M-F2D-site-depart', 'H1', 'rules', 'FfaAssembly.cs',
      [('            FfaReadmit.Abandon(room, byRoom: true);\n', '')],
      RELEASE_ROUTE_TARGET, 'C4.H2.active_claim_preserved'),
+    # ---- merged fix 2e: state-independent invalidation and playing entry
+    ('M-F2E-site-escape', 'H1', 'rules', 'ApiClient.cs',
+     [('                FfaReadmit.Abandon(null, all: true);\n', '')],
+     F2E_ROUTE_TARGET + '.escape', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2E-site-leave', 'H1', 'rules', 'ApiClient.cs',
+     [('            FfaReadmit.Abandon(expectedLobby);\n', '')],
+     F2E_ROUTE_TARGET + '.leave', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2E-site-release', 'H1', 'rules', 'FfaAssembly.cs',
+     [('            FfaReadmit.Abandon(lobby);\n', '')],
+     F2E_ROUTE_TARGET + '.release', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2E-site-depart', 'H1', 'rules', 'FfaAssembly.cs',
+     [('            FfaReadmit.Abandon(room, byRoom: true);\n', '')],
+     F2E_ROUTE_TARGET + '.depart', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2E-site-refusal', 'H1', 'rules', 'FfaReadmit.cs',
+     [('            Abandon(State.Lobby);\n', '')],
+     F2E_ROUTE_TARGET + '.refusal', 'C4.H2.active_claim_preserved'),
+    ('M-F2E-entrykeep', 'H1', 'rules', 'FfaReadmit.cs',
+     [('            if (FfaReadmitEntryRules.KeepEntered(State, FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game))) return false;\n', '')],
+     'C4.F2E.playing_readmission_kept', 'C4.F2E.escape_roomless_claim'),
+    ('M-F2E-split', 'H1', 'rules', 'FfaReadmit.cs',
+     [('            InvalidateMatchingWork();\n'
+       '            return FfaReadmitEntryRules.Abandon(State, identity, byRoom, all);\n',
+       '            if (!FfaReadmitEntryRules.Abandon(State, identity, byRoom, all)) return false;\n'
+       '            InvalidateMatchingWork();\n'
+       '            return true;\n')],
+     'C4.F2E.lapse_refused_bind', 'C4.H2.active_claim_preserved'),
+    ('M-F2E-site-entryfact', 'H1', 'rules', 'FfaLateEntry.cs',
+     [('            _readmitEnteredLobby = AdmittedLateLobby;\n', '')],
+     F2E_ROUTE_TARGET + '.entry-fact', 'C4.F2E.playing_readmission_kept'),
     # ---- C5 (P5 client rungs of the positive ladder)
     ("M5.c1", "C5", "rules", "FfaReadmitEntryRules.cs",
      [("            if (after == before) return null;\n", "")],
@@ -554,16 +593,19 @@ def stub_kinds(tree, wt):
     external.update({prefix + 'Color': ('struct', False, True),
                      prefix + 'GameObject': ('class', False, False),
                      prefix + 'CardInfo.Rarity': ('enum', False, True),
-                     prefix + 'PhotonNetwork': ('class', True, False)})
+                     prefix + 'PhotonNetwork': ('class', True, False),
+                     prefix + 'ReadmitOfferAdapterBase.Color': ('struct', False, True),
+                     prefix + 'ReadmitOfferAdapterBase.PhotonNetwork': ('class', True, False)})
     harness_only = {prefix + name for name in (
         'OwnerStub', 'LogStub', 'ReadmitAdmissionBase', 'ReducerBase', 'Trace', 'TraceProgram',
         'OldReducer', 'NewReducer', 'FfaReplay', 'FfaReplayAdmission', 'ReadmitOfferAdapter',
         'TraceProgram.Fixture', 'CasesC2', 'CasesC3', 'CasesC3.Seat', 'CasesC4', 'CasesC4.Table',
         'CasesC4z', 'CasesC5', 'CasesC5.Driver', 'CaseFailed', 'Check', 'RulesProgram',
-        'ReadmitOfferAdapterBase', 'ReadmitOfferAdapterBase.Plugin.Logger')}
+        'ReadmitOfferAdapterBase', 'ReadmitOfferAdapterBase.Plugin.Logger',
+        'ReadmitOfferAdapterBase.RoomStub', 'ReadmitOfferAdapterBase.PlayerStub')}
     mapped = {prefix + 'ReadmitAdmissionBase.LastHold': prefix + 'FfaLateEntry.Hold'}
     standins = {'ReadmitAdmissionBase': 'FfaLateEntry', 'ReducerBase': 'FfaMode',
-                'ReadmitOfferAdapterBase': 'FfaReadmit', 'FfaReplay': 'FfaMode'}
+                'ReadmitOfferAdapterBase': 'FfaReadmit', 'ReadmitOfferAdapter': 'FfaReadmit', 'FfaReplay': 'FfaMode'}
     folder = 'tools/tests/rj-readmit-client/'
     try:
         projects = [_project_sources(tree, folder + project)
@@ -577,7 +619,7 @@ def stub_kinds(tree, wt):
         late = read_text(os.path.join(tree, 'plugin', 'FfaLateEntry.cs'))
         adapter = read_text(os.path.join(tree, 'plugin', 'FfaReadmit.cs'))
         generated = {'generated/Reducers.cs': reducer_source(wt, mode, late),
-                     'generated/ReadmitOfferAdapter.cs': adapter_source(adapter)}
+                     'generated/ReadmitOfferAdapter.cs': adapter_source(adapter, late)}
         mutants = [
             ('M-STUB-1', 'stub', folder + 'apply-trace/Stubs.cs',
              'internal struct Proposal', 'internal sealed class Proposal', prefix + 'FfaLateRules.Proposal'),
@@ -612,25 +654,58 @@ def extract(text, sig):
 
 
 def release_route_census(texts):
-    """Count the real synchronous abandonment calls within their release members."""
-    rows, passed = [], 0
-    for route, source, signature, call, clear in RELEASE_ROUTES:
+    """Census each real synchronous route and the completed-entry fact sites."""
+    rows, verdicts = [], {}
+    for route, source, signature, call, clears in RELEASE_ROUTES:
         try:
             member = _blank_csharp(extract(texts[source], signature)).replace("\r\n", "\n")
-            all_calls = re.findall(r'\bFfaReadmit\s*\.\s*Abandon\s*\(', member)
+            all_calls = re.findall(r'\b(?:FfaReadmit\s*\.\s*)?Abandon\s*\(', member)
             count = member.count(call)
             correct = len(all_calls) == 1 and count == 1
-            if clear is not None:
-                correct = correct and member.count(clear) == 1 and member.index(call) < member.index(clear)
-            reason = "calls=%d expected=%d" % (len(all_calls), count)
-            if clear is not None:
-                reason += " before_clear=" + str(correct)
+            before_clear = all(member.count(clear) == 1 and count == 1
+                               and member.index(call) < member.index(clear) for clear in clears)
+            correct = correct and before_clear
+            reason = "calls=%d expected=%d before_clear=%s" % (len(all_calls), count, before_clear)
         except (KeyError, RuntimeError, ValueError) as exc:
             correct, reason = False, str(exc)
-        passed += correct
-        rows.append("%s %s.%s: %s" % ("PASS" if correct else "FAIL", RELEASE_ROUTE_TARGET, route, reason))
-    rows.append("release-route census: %d of %d routes pass" % (passed, len(RELEASE_ROUTES)))
-    return passed == len(RELEASE_ROUTES), "\n".join(rows)
+        verdicts[route] = correct
+        rows.append("%s %s.%s: %s" % ("PASS" if correct else "FAIL", F2E_ROUTE_TARGET, route, reason))
+    try:
+        late = texts["FfaLateEntry.cs"]
+        kept = _blank_csharp(extract(late, "private static void OnSelfKept(")).replace("\r\n", "\n")
+        starts = _blank_csharp(extract(late, "internal static void PrepareReadmitEntry(")).replace("\r\n", "\n")
+        ends = _blank_csharp(extract(late, "internal static void OnRoomLeft(")).replace("\r\n", "\n")
+        completed = "_lateEntered = true;"
+        writes = ("_readmitEnteredLobby = AdmittedLateLobby;", "_readmitEnteredGame = _lateGame;")
+        post = "FfaReadmit.PostEntered("
+        correct = kept.count(completed) == 1 and kept.count(post) == 1
+        correct = correct and all(kept.count(write) == 1 and kept.index(completed) < kept.index(write) < kept.index(post)
+                                  for write in writes)
+        resets = ("_readmitEnteredLobby = null;", "_readmitEnteredGame = 0;")
+        correct = correct and all(member.count(reset) == 1 for member in (starts, ends) for reset in resets)
+        reason = "write_after_entry_before_post_and_both_resets=" + str(correct)
+    except (KeyError, RuntimeError, ValueError) as exc:
+        correct, reason = False, str(exc)
+    verdicts["entry-fact"] = correct
+    rows.append("%s %s.entry-fact: %s" % ("PASS" if correct else "FAIL", F2E_ROUTE_TARGET, reason))
+    legacy = all(verdicts[route] for route in ("release", "leave", "depart"))
+    rows.append("%s %s: legacy release, leave and depart" % ("PASS" if legacy else "FAIL", RELEASE_ROUTE_TARGET))
+    rows.append("release-route census: %d of %d routes pass" % (sum(verdicts.values()), len(verdicts)))
+    return verdicts, "\n".join(rows)
+
+
+def entry_fact_fields(late_text, admission_game=False):
+    """Copy the production declarations needed by the extracted OnSelfKept."""
+    fields = []
+    declarations = ["private static string _readmitEnteredLobby;", "private static int _readmitEnteredGame;"]
+    if admission_game:
+        declarations.append("private static int _lateGame;")
+    for declaration in declarations:
+        matches = [line for line in late_text.splitlines() if line.strip() == declaration]
+        if len(matches) != 1:
+            raise RuntimeError("entry fact declaration must occur once: " + declaration)
+        fields.append(matches[0] + "\n")
+    return "".join(fields)
 
 
 def extract_statement(text, start):
@@ -678,6 +753,7 @@ def reducer_source(wt, new_mode_text, late_text):
         extract(new_mode_text, "internal static IEnumerator ReadmitReplaySteps("), "\n",
         extract(new_mode_text, rc), "\n    }\n",
         "    internal sealed class FfaReplayAdmission : ReadmitAdmissionBase\n    {\n",
+        entry_fact_fields(late_text, admission_game=True),
         "        internal static void Ack() { TryAckReadmitProposal(); }\n",
         "        internal static void Propose() { OnProposal(ProposalEvent()); }\n",
         "        internal static void Propose(EventData e) { OnProposal(e); }\n",
@@ -706,10 +782,14 @@ def gen_reducers(wt, new_mode_text, late_text, out_dir):
     open(os.path.join(out_dir, "Reducers.cs"), "wb").write(source.encode("utf-8"))
 
 
-def adapter_source(adapter):
+def adapter_source(adapter, late):
     content = "\nnamespace CompetitiveRounds\n{\n    internal sealed class ReadmitOfferAdapter : ReadmitOfferAdapterBase\n    {\n"
     content += "        internal static void SendForTest(string step, int actor, int game) { Send(step, actor, game); }\n"
+    content += "        internal static void ActForTest(string step, FfaReadmitEntryRules.RdmNext next) { Act(step, next, null); }\n"
+    content += "        internal static void RefusalForTest(string reason, bool leave) { Refusal(reason, leave); }\n"
+    content += "        internal static void SetEntryFactForTest(string lobby, int game, bool completed, string admittedLobby) { FfaLateEntry.SetForTest(lobby, game, completed, admittedLobby); }\n"
     for sig in ("internal static bool Abandon(",
+                "private static void InvalidateMatchingWork(",
                 "internal static void DiscoverThenProbe(",
                 "internal static FfaReadmitEntryRules.RdmOffer OfferFromPoll(",
                 "internal static bool SuppressesDiscoveryProbe(",
@@ -718,8 +798,20 @@ def adapter_source(adapter):
                 "internal static bool ReadmittedInto(",
                 "internal static void Accept(",
                 "private static void Send(",
-                "private static FfaReadmitEntryRules.RdmAnswer ParseAnswer("):
+                "private static FfaReadmitEntryRules.RdmAnswer ParseAnswer(",
+                "private static void Act(",
+                "private static void Refusal(",
+                "internal static void PostEntered("):
         content += extract(adapter, sig) + "\n"
+    content += "        private static class FfaLateEntry\n        {\n"
+    content += entry_fact_fields(late)
+    content += "        private static bool _lateEntered;\n        private static string AdmittedLateLobby;\n"
+    content += extract(late, "internal static bool ReadmitEntryCompleted(") + "\n"
+    content += "        internal static void SetForTest(string lobby, int game, bool completed, string admittedLobby)\n"
+    content += "        { _readmitEnteredLobby = lobby; _readmitEnteredGame = game; _lateEntered = completed; AdmittedLateLobby = admittedLobby; }\n"
+    content += "        internal static void PrepareReadmitEntry() { PrepareCalls++; }\n"
+    content += "        internal static void OnAdmittedLate(FfaAssembly.Answer answer) { ArmCalls++; }\n"
+    content += "        }\n"
     return content + "    }\n}\n"
 
 
@@ -757,7 +849,7 @@ def prepare(tree, wt, suite, work, tag, texts):
         p = os.path.join(out, f)
         content = texts[f]
         if suite == "rules" and f == "FfaReadmitEntryRules.cs":
-            content += adapter_source(texts["FfaReadmit.cs"])
+            content += adapter_source(texts["FfaReadmit.cs"], texts["FfaLateEntry.cs"])
         open(p, "wb").write(content.encode("utf-8"))
         if prop is not None:
             props[prop] = p
@@ -813,9 +905,9 @@ def main():
     ok = True
     for suite in suites:
         if suite == "rules":
-            routes_ok, routes_out = release_route_census(texts)
+            route_rows, routes_out = release_route_census(texts)
             print(routes_out)
-            ok = ok and routes_ok
+            ok = ok and all(route_rows.values())
         dll = prepare(tree, wt, suite, work, "base", texts)
         if dll is None:
             print("BUILD FAILED (%s base)" % suite)
@@ -858,19 +950,40 @@ def main():
                 print("BAD mutant %s: does not build" % mid)
                 ok = False
                 continue
-            if target == RELEASE_ROUTE_TARGET:
-                routes_ok, tout = release_route_census(mtexts)
-                trc = 0 if routes_ok else 1
+            route = MUTANT_ROUTES.get(mid)
+            siblings_green = True
+            if route is not None:
+                route_rows, tout = release_route_census(mtexts)
+                trc = 0 if route_rows.get(route, True) else 1
+                siblings_green = all(passed for sibling, passed in route_rows.items() if sibling != route)
             else:
                 trc, tout = run_case(mdll, target)
             crc, cout = run_case(mdll, control)
-            hit = trc != 0 and crc == 0
+            extras_green = True
+            extra_cases = []
+            if mid == "M-F2E-site-refusal":
+                extra_cases = [("C4.F2E.lapse_refused_bind", False)]
+            elif mid == "M-F2E-entrykeep":
+                extra_cases = [(case, True) for case in (
+                    "C4.F2E.lapse_refused_bind", "C4.F2E.delayed_after_leave",
+                    "C4.F2E.delayed_after_release", "C4.F2E.delayed_after_depart")]
+            for extra, want_green in extra_cases:
+                erc, eout = run_case(mdll, extra)
+                extras_green = extras_green and ((erc == 0) == want_green)
+                print("additional mutant check %s: %s=%s expected=%s" % (
+                    mid, extra, "GREEN" if erc == 0 else "RED", "GREEN" if want_green else "RED"))
+                if (erc == 0) != want_green:
+                    print("   " + eout[-600:])
+            hit = trc != 0 and crc == 0 and siblings_green and extras_green
             caught += hit
             ok = ok and hit
             print("%s mutant %s (%s): target %s=%s; control %s=%s" % (
                 "CAUGHT" if hit else "MISSED", mid, piece, target, "RED" if trc else "GREEN", control,
                 "GREEN" if crc == 0 else "RED"))
-            if trc:
+            if route is not None:
+                print("   route %s: siblings=%s" % (route, "GREEN" if siblings_green else "RED"))
+                print("   " + "\n   ".join(tout.splitlines()))
+            elif trc:
                 print("   " + "\n   ".join(tout.splitlines()[:4]))
             if not hit:
                 print("   " + tout[-600:])

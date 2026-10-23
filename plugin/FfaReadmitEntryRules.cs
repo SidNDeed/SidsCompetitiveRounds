@@ -296,14 +296,29 @@ namespace CompetitiveRounds
             return Math.Max(0, (int)Math.Ceiling(c.HoldUntil - now));
         }
 
-        /// <summary>End only the active attempt of the released lobby or
-        /// departed claimed room. Keep its lobby/hold terminal suppression;
-        /// abandonment is not a successful entry.</summary>
-        internal static bool Abandon(RdmClient c, string identity, bool byRoom)
+        /// <summary>Release matching ignores the record's state. A global
+        /// teardown matches every identity.</summary>
+        internal static bool MatchesRelease(RdmClient c, string identity, bool byRoom, bool all)
         {
-            if (string.IsNullOrEmpty(identity) || (byRoom ? c.Room : c.Lobby) != identity) return false;
+            return all || (!string.IsNullOrEmpty(identity) && (byRoom ? c.Room : c.Lobby) == identity);
+        }
+
+        /// <summary>A completed local entry keeps its playing lifecycle,
+        /// including the pending entered acknowledgement.</summary>
+        internal static bool KeepEntered(RdmClient c, bool localEntryCompleted)
+        {
+            return localEntryCompleted && (c.State == RdmState.Admitted || c.State == RdmState.Entered);
+        }
+
+        /// <summary>End the active attempt of the released lobby or departed
+        /// claimed room; global teardown also closes an offered bar. Keep its
+        /// lobby/hold terminal suppression; abandonment is not an entry.</summary>
+        internal static bool Abandon(RdmClient c, string identity, bool byRoom, bool all = false)
+        {
+            if (!MatchesRelease(c, identity, byRoom, all)) return false;
             if (c.State != RdmState.Claiming && c.State != RdmState.Claimed
-                && c.State != RdmState.Binding && c.State != RdmState.Admitted) return false;
+                && c.State != RdmState.Binding && c.State != RdmState.Admitted
+                && !(all && c.State == RdmState.Offered)) return false;
             c.State = RdmState.Abandoned;
             c.Token = null;
             return true;

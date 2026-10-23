@@ -189,20 +189,72 @@ namespace CompetitiveRounds
                                                        "kind", "r", "game", "4", "actor", "42");
             ReadmitOfferAdapter.DeliverPost(0, true, answer);
             Check.Eq(FfaReadmitEntryRules.RdmState.Admitted, ReadmitOfferAdapter.State.State, "the real bind callback admits");
-            Check.Eq(FfaReadmitEntryRules.RdmNext.ArmLate, ReadmitOfferAdapter.LastAct, "the real bind callback arms replay");
+            Check.True(ReadmitOfferAdapter.PrepareCalls == 1 && ReadmitOfferAdapter.ArmCalls == 1, "the real Act prepares and arms replay");
             Check.Eq(1, ReadmitOfferAdapter.PostBodies.Count, "failed replay posts no entered");
             Check.True(!ReadmitOfferAdapter.PostBodies[0].Contains("\"entered\""), "only bind was posted");
         }
 
-        private static void F2DRecordUnchanged(FfaReadmitEntryRules.RdmState state)
+        private static void F2DRecordUnchanged(FfaReadmitEntryRules.RdmState state, int generation = 0)
         {
             var c = ReadmitOfferAdapter.State;
             Check.True(c.State == state && c.Lobby == "lobbyA" && c.N == 3 && c.Slot == 1 && c.Token == Token
                        && c.Room == "roomA" && c.Region == "eu" && c.Game == 4 && c.Actor == 42
                        && c.HoldUntil == 80f && c.LastReason == "held", "every unrelated or inactive record field is untouched");
-            Check.True(ReadmitOfferAdapter.Discovered && ReadmitOfferAdapter.DiscoveryInFlight
-                       && ReadmitOfferAdapter.PostInFlight && ReadmitOfferAdapter.NextBind == 7f
-                       && ReadmitOfferAdapter.Generation == 0, "unrelated or inactive lifecycle state is untouched");
+            bool untouched = generation == 0;
+            Check.True(ReadmitOfferAdapter.Discovered == untouched && ReadmitOfferAdapter.DiscoveryInFlight == untouched
+                       && ReadmitOfferAdapter.PostInFlight == untouched && ReadmitOfferAdapter.NextBind == (untouched ? 7f : 0f)
+                       && ReadmitOfferAdapter.Generation == generation, "unrelated work stays whole; matching inactive work is invalidated");
+        }
+
+        // External route bodies are source-censused. Their controls execute the
+        // same extracted invalidation; refusal and its nested leave execute here.
+        private static void F2ERoute(string route, string lobby = "lobbyA", string room = "roomA")
+        {
+            switch (route)
+            {
+                case "escape": ReadmitOfferAdapter.Abandon(null, all: true); break;
+                case "leave": ReadmitOfferAdapter.LeaveForTest(lobby); break;
+                case "release": ReadmitOfferAdapter.Abandon(lobby); break;
+                case "depart": ReadmitOfferAdapter.Abandon(room, byRoom: true); break;
+                case "refusal": ReadmitOfferAdapter.RefusalForTest("hold_lapsed", true); break;
+                default: throw new CaseFailed("unknown route");
+            }
+        }
+
+        private static void F2EDelayed(string route)
+        {
+            foreach (var terminal in new[] { FfaReadmitEntryRules.RdmState.Lapsed, FfaReadmitEntryRules.RdmState.Refused })
+            foreach (bool discovery in new[] { false, true })
+            foreach (bool ok in new[] { false, true })
+            {
+                F2DReset(FfaReadmitEntryRules.RdmState.Binding);
+                if (discovery)
+                {
+                    ReadmitOfferAdapter.HoldDiscovery = true;
+                    ReadmitOfferAdapter.DiscoverThenProbe();
+                }
+                else ReadmitOfferAdapter.SendForTest("bind", 42, 0);
+                var c = ReadmitOfferAdapter.State;
+                c.State = terminal; c.Token = null; c.LastReason = "released";
+                F2ERoute(route);
+                Check.True(ReadmitOfferAdapter.Generation > 0 && !ReadmitOfferAdapter.Discovered
+                           && !ReadmitOfferAdapter.DiscoveryInFlight && !ReadmitOfferAdapter.PostInFlight
+                           && ReadmitOfferAdapter.NextBind == 0f, "the matching terminal work is synchronously invalidated");
+                long generation = ReadmitOfferAdapter.Generation;
+                int probes = ReadmitOfferAdapter.Probes, toasts = ReadmitOfferAdapter.Toasts, polls = ReadmitOfferAdapter.PollCalls;
+                string answer = discovery ? ReadmitOfferAdapter.OfferAnswer("late-discovery", "lobbyB", 1)
+                    : ReadmitOfferAdapter.Answer("late-bind", "status", "refused", "n", "3", "reason", "departed", "hold_s", "6");
+                if (discovery) ReadmitOfferAdapter.DeliverDiscovery(0, ok, answer);
+                else ReadmitOfferAdapter.DeliverPost(0, ok, answer);
+                Check.True(c.State == terminal && c.Lobby == "lobbyA" && c.N == 3 && c.Token == null
+                           && c.Room == "roomA" && c.Slot == 1 && c.Region == "eu" && c.Game == 4 && c.Actor == 42
+                           && c.HoldUntil == 80f && c.LastReason == "released", "the released answer changes no record field");
+                Check.True(ReadmitOfferAdapter.Generation == generation && !ReadmitOfferAdapter.Discovered
+                           && !ReadmitOfferAdapter.DiscoveryInFlight && !ReadmitOfferAdapter.PostInFlight
+                           && ReadmitOfferAdapter.NextBind == 0f && ReadmitOfferAdapter.Probes == probes
+                           && ReadmitOfferAdapter.Toasts == toasts && ReadmitOfferAdapter.PollCalls == polls
+                           && !ReadmitOfferAdapter.QueuePolling, "the released answer changes no flag, clock, probe, toast or poll");
+            }
         }
 
         internal static void Register()
@@ -341,8 +393,8 @@ namespace CompetitiveRounds
                            && ReadmitOfferAdapter.Generation == 1, "abandonment clears both flights, rearms discovery and clears the bind clock");
                 Check.True(!ReadmitOfferAdapter.ClaimedFor("lobbyA") && !ReadmitOfferAdapter.ReadmittedInto("lobbyA"),
                            "an abandoned attempt is neither a live claim nor a successfully entered seat");
-                Check.True(!ReadmitOfferAdapter.Abandon("lobbyA") && ReadmitOfferAdapter.Generation == 1,
-                           "a repeated release does not advance the lifecycle again");
+                Check.True(!ReadmitOfferAdapter.Abandon("lobbyA") && ReadmitOfferAdapter.Generation == 2,
+                           "a repeated release keeps the terminal record and invalidates matching work again");
                 ReadmitOfferAdapter.DiscoveryResponse = ReadmitOfferAdapter.OfferAnswer("next-offer", "lobbyB", 1);
                 ReadmitOfferAdapter.DiscoverThenProbe();
                 Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Offered
@@ -426,8 +478,8 @@ namespace CompetitiveRounds
                     F2DReset(state);
                     ReadmitOfferAdapter.PrimeFlights();
                     Check.True(!ReadmitOfferAdapter.Abandon("lobbyA") && !ReadmitOfferAdapter.Abandon("roomA", byRoom: true),
-                               "a non-active record is untouched even for its own identity");
-                    F2DRecordUnchanged(state);
+                               "a non-active record keeps its state even while its matching work is invalidated");
+                    F2DRecordUnchanged(state, 2);
                     if (state == FfaReadmitEntryRules.RdmState.Entered)
                     {
                         Check.True(ReadmitOfferAdapter.ReadmittedInto("lobbyA"), "successful entry still identifies a readmitted seat");
@@ -480,7 +532,7 @@ namespace CompetitiveRounds
                                && ReadmitOfferAdapter.State.Lobby == "lobbyB" && ReadmitOfferAdapter.State.N == 1
                                && ReadmitOfferAdapter.State.Token == null && ReadmitOfferAdapter.State.Room == null,
                                "the old answer or failure cannot change the new claim with the same hold number");
-                    Check.True(ReadmitOfferAdapter.PostInFlight && ReadmitOfferAdapter.ActCalls == 0,
+                    Check.True(ReadmitOfferAdapter.PostInFlight && ReadmitOfferAdapter.PollCalls == 0,
                                "the old callback cannot clear the new post flight or dispatch an action");
                     string currentAnswer = ReadmitOfferAdapter.Answer("current-claim", "status", "claimed", "n", "1",
                                                                       "token", Token, "room", "roomB", "region", "eu", "slot", "2", "hold_s", "80");
@@ -488,9 +540,159 @@ namespace CompetitiveRounds
                     Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Claimed
                                && ReadmitOfferAdapter.State.Lobby == "lobbyB" && ReadmitOfferAdapter.State.Room == "roomB"
                                && ReadmitOfferAdapter.State.Token == Token && !ReadmitOfferAdapter.PostInFlight
-                               && ReadmitOfferAdapter.ActCalls == 1 && ReadmitOfferAdapter.LastAct == FfaReadmitEntryRules.RdmNext.JoinRoom,
+                               && ReadmitOfferAdapter.PollCalls == 1 && ReadmitOfferAdapter.QueuePolling,
                                "the current generation claim is applied and dispatched normally");
                 }
+            });
+
+            RulesProgram.Add("C4.F2E.escape_roomless_claim", () =>
+            {
+                ReadmitOfferAdapter.Reset(FfaReadmitEntryRules.RdmState.Claiming, "lobbyA", 1);
+                ReadmitOfferAdapter.SendForTest("claim", 0, 0);
+                Check.True(ReadmitOfferAdapter.PostInFlight && ReadmitOfferAdapter.State.Room == null,
+                           "the roomless claim is in flight when escape runs");
+                F2ERoute("escape");
+                long generation = ReadmitOfferAdapter.Generation;
+                Check.True(generation == 1 && !ReadmitOfferAdapter.PostInFlight, "escape invalidates the roomless flight");
+                string answer = ReadmitOfferAdapter.Answer("escaped-claim", "status", "claimed", "n", "1",
+                    "token", Token, "room", "roomA", "region", "eu", "slot", "1", "hold_s", "90");
+                ReadmitOfferAdapter.DeliverPost(0, true, answer);
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Abandoned
+                           && ReadmitOfferAdapter.State.Token == null && ReadmitOfferAdapter.State.Room == null
+                           && ReadmitOfferAdapter.Generation == generation && !ReadmitOfferAdapter.PostInFlight
+                           && ReadmitOfferAdapter.PollCalls == 0 && !ReadmitOfferAdapter.QueuePolling
+                           && ReadmitOfferAdapter.Probes == 0 && ReadmitOfferAdapter.Toasts == 0,
+                           "a released claim cannot install a token or re-arm the escape acknowledgement predicate");
+                ReadmitOfferAdapter.Reset(FfaReadmitEntryRules.RdmState.Offered, "lobbyA", 1);
+                F2ERoute("escape");
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Abandoned,
+                           "global escape also closes an offered bar");
+            });
+            RulesProgram.Add("C4.F2E.lapse_refused_bind", () =>
+            {
+                F2DReset(FfaReadmitEntryRules.RdmState.Binding);
+                ReadmitOfferAdapter.SendForTest("bind", 42, 0);
+                ReadmitOfferAdapter.SetRoomForTest("roomA");
+                // No queue belief remains: the real Refusal site must do the
+                // invalidation before its leave stub receives an absent lobby.
+                var next = FfaReadmitEntryRules.Tick(ReadmitOfferAdapter.State, 100f);
+                Check.Eq(FfaReadmitEntryRules.RdmNext.Leave, next, "the real rule lapses the binding attempt");
+                ReadmitOfferAdapter.ActForTest("lapse", next);
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Lapsed
+                           && ReadmitOfferAdapter.State.LastReason == "hold_lapsed" && ReadmitOfferAdapter.Generation == 1
+                           && !ReadmitOfferAdapter.PostInFlight && !ReadmitOfferAdapter.DiscoveryInFlight
+                           && !ReadmitOfferAdapter.Discovered && ReadmitOfferAdapter.NextBind == 0f
+                           && ReadmitOfferAdapter.RoomLeaves == 1 && ReadmitOfferAdapter.QueueLeaves == 1,
+                           "real Act Leave and Refusal invalidate before leaving even after Tick set Lapsed");
+                long generation = ReadmitOfferAdapter.Generation;
+                int toasts = ReadmitOfferAdapter.Toasts;
+                string answer = ReadmitOfferAdapter.Answer("lapsed-bind", "status", "refused", "n", "3",
+                    "reason", "departed", "hold_s", "6");
+                ReadmitOfferAdapter.DeliverPost(0, true, answer);
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Lapsed
+                           && ReadmitOfferAdapter.State.LastReason == "hold_lapsed" && ReadmitOfferAdapter.State.HoldUntil == 80f
+                           && ReadmitOfferAdapter.State.Token == null && ReadmitOfferAdapter.Generation == generation
+                           && !ReadmitOfferAdapter.PostInFlight && !ReadmitOfferAdapter.DiscoveryInFlight
+                           && !ReadmitOfferAdapter.Discovered && ReadmitOfferAdapter.NextBind == 0f
+                           && ReadmitOfferAdapter.Toasts == toasts && ReadmitOfferAdapter.Probes == 0
+                           && ReadmitOfferAdapter.PollCalls == 0, "a refused bind released by lapse has no late effects");
+            });
+            RulesProgram.Add("C4.F2E.delayed_after_leave", () => F2EDelayed("leave"));
+            RulesProgram.Add("C4.F2E.delayed_after_release", () => F2EDelayed("release"));
+            RulesProgram.Add("C4.F2E.delayed_after_depart", () => F2EDelayed("depart"));
+            RulesProgram.Add("C4.F2E.playing_readmission_kept", () =>
+            {
+                foreach (string route in new[] { "escape", "leave", "release", "depart", "refusal" })
+                {
+                    F2DAdmit();
+                    ReadmitOfferAdapter.SetEntryFactForTest("lobbyA", 4, true, "lobbyA");
+                    ReadmitOfferAdapter.PostEntered(4);
+                    Check.True(ReadmitOfferAdapter.PostInFlight, "the completed local entry has a pending entered acknowledgement");
+                    F2ERoute(route);
+                    Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Admitted
+                               && ReadmitOfferAdapter.State.Token == Token && ReadmitOfferAdapter.PostInFlight
+                               && ReadmitOfferAdapter.Generation == 0, "every route keeps the playing record and its entered flight");
+                    // Departure clears the fact after the route has preserved
+                    // the generation; the already held callback still stands.
+                    if (route == "depart") ReadmitOfferAdapter.SetEntryFactForTest(null, 0, false, null);
+                    string answer = ReadmitOfferAdapter.Answer("entered-ack", "status", "entered", "n", "3");
+                    ReadmitOfferAdapter.DeliverPost(1, true, answer);
+                    Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Entered
+                               && ReadmitOfferAdapter.State.Token == null && !ReadmitOfferAdapter.PostInFlight
+                               && ReadmitOfferAdapter.Generation == 0, "the preserved entered answer spends the token normally");
+                }
+                foreach (int mismatch in new[] { 0, 1, 2, 3 })
+                {
+                    F2DAdmit();
+                    ReadmitOfferAdapter.SetEntryFactForTest(mismatch == 0 ? "lobbyB" : "lobbyA",
+                        mismatch == 1 ? 5 : 4, mismatch != 2, mismatch == 3 ? null : "lobbyA");
+                    ReadmitOfferAdapter.Abandon("lobbyA");
+                    Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Abandoned
+                               && ReadmitOfferAdapter.Generation == 1, "another identity, game or incomplete local entry never preserves the record");
+                }
+            });
+            RulesProgram.Add("C4.F2E.unrelated_identity", () =>
+            {
+                foreach (string route in new[] { "leave", "release", "depart", "refusal" })
+                foreach (var state in new[] { FfaReadmitEntryRules.RdmState.Claiming, FfaReadmitEntryRules.RdmState.Claimed,
+                                             FfaReadmitEntryRules.RdmState.Binding, FfaReadmitEntryRules.RdmState.Admitted })
+                {
+                    F2DReset(state);
+                    string step = state == FfaReadmitEntryRules.RdmState.Claiming ? "claim"
+                        : state == FfaReadmitEntryRules.RdmState.Admitted ? "entered" : "bind";
+                    ReadmitOfferAdapter.SendForTest(step, 42, 4);
+                    if (route == "refusal")
+                    {
+                        // Refusal(true) names State.Lobby, so it cannot be an
+                        // unrelated terminal route. The shared identity check
+                        // and real non-leaving refusal are exercised separately.
+                        Check.True(!ReadmitOfferAdapter.Abandon("lobbyB"), "an unrelated refusal identity invalidates nothing");
+                        ReadmitOfferAdapter.RefusalForTest("other_lobby", false);
+                    }
+                    else F2ERoute(route, "lobbyB", "roomB");
+                    Check.True(ReadmitOfferAdapter.State.State == state && ReadmitOfferAdapter.State.Lobby == "lobbyA"
+                               && ReadmitOfferAdapter.State.Token == Token && ReadmitOfferAdapter.State.Room == "roomA"
+                               && ReadmitOfferAdapter.Generation == 0 && ReadmitOfferAdapter.PostInFlight,
+                               "another identity leaves the live record and its held callback whole");
+                    string status = step == "claim" ? "claimed" : step == "entered" ? "entered" : "admitted_late";
+                    string answer = ReadmitOfferAdapter.Answer("unrelated-answer", "status", status, "n", "3",
+                        "token", Token, "room", "roomA", "region", "eu", "slot", "1", "kind", "r", "game", "4", "actor", "42");
+                    ReadmitOfferAdapter.DeliverPost(0, true, answer);
+                    var expected = step == "claim" ? FfaReadmitEntryRules.RdmState.Claimed
+                        : step == "entered" ? FfaReadmitEntryRules.RdmState.Entered : FfaReadmitEntryRules.RdmState.Admitted;
+                    Check.True(ReadmitOfferAdapter.State.State == expected && !ReadmitOfferAdapter.PostInFlight
+                               && ReadmitOfferAdapter.Generation == 0, "the unrelated record applies its current callback normally");
+                }
+                F2DAdmit();
+                ReadmitOfferAdapter.SetEntryFactForTest("lobbyB", 4, true, "lobbyB");
+                ReadmitOfferAdapter.Abandon("lobbyA");
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Abandoned,
+                           "a completed entry in lobbyB never preserves lobbyA");
+            });
+            RulesProgram.Add("C4.F2E.new_enrollment_after_escape", () =>
+            {
+                ReadmitOfferAdapter.Reset(FfaReadmitEntryRules.RdmState.Claiming, "lobbyA", 1);
+                ReadmitOfferAdapter.SendForTest("claim", 0, 0);
+                F2ERoute("escape");
+                ReadmitOfferAdapter.DiscoveryResponse = ReadmitOfferAdapter.OfferAnswer("fresh-offer", "lobbyB", 1);
+                ReadmitOfferAdapter.DiscoverThenProbe();
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Offered
+                           && ReadmitOfferAdapter.State.Lobby == "lobbyB" && ReadmitOfferAdapter.Probes == 0,
+                           "escape rearms discovery for a genuinely new enrollment");
+                ReadmitOfferAdapter.Accept();
+                string oldAnswer = ReadmitOfferAdapter.Answer("older-claim", "status", "claimed", "n", "1",
+                    "token", Token, "room", "roomA", "hold_s", "90");
+                ReadmitOfferAdapter.DeliverPost(0, true, oldAnswer);
+                Check.True(ReadmitOfferAdapter.State.Lobby == "lobbyB" && ReadmitOfferAdapter.PostInFlight
+                           && ReadmitOfferAdapter.PollCalls == 0, "the old callback cannot interrupt the new claim");
+                string answer = ReadmitOfferAdapter.Answer("fresh-claim", "status", "claimed", "n", "1",
+                    "token", Token, "room", "roomB", "region", "eu", "slot", "1", "hold_s", "90");
+                ReadmitOfferAdapter.DeliverPost(1, true, answer);
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Claimed
+                           && ReadmitOfferAdapter.State.Lobby == "lobbyB" && ReadmitOfferAdapter.State.Token == Token
+                           && ReadmitOfferAdapter.State.Room == "roomB" && ReadmitOfferAdapter.PollCalls == 1
+                           && ReadmitOfferAdapter.QueuePolling && !ReadmitOfferAdapter.PostInFlight,
+                           "only the new generation claim rearms polling");
             });
 
             RulesProgram.Add("C4.T4.5.every_refusal_reason_mapped", () =>
@@ -741,14 +943,16 @@ namespace CompetitiveRounds
         protected static long _lifecycleGeneration;
         protected static float _nextBindRt;
         protected const int PostTimeout = 4;
-        internal static int Probes, ActCalls;
-        internal static FfaReadmitEntryRules.RdmNext LastAct;
+        protected static bool _retryToastShown;
+        internal static int Probes, PollCalls, PrepareCalls, ArmCalls, Toasts, RoomLeaves, QueueLeaves;
+        internal static string ExpectedLobby;
         internal static bool HoldDiscovery;
         internal static string DiscoveryResponse;
         internal static readonly List<Action<bool, string>> DiscoveryCallbacks = new List<Action<bool, string>>();
         internal static readonly List<Action<bool, string>> PostCallbacks = new List<Action<bool, string>>();
         internal static readonly List<string> PostBodies = new List<string>();
         private static readonly Dictionary<string, Dictionary<string, string>> Responses = new Dictionary<string, Dictionary<string, string>>();
+        internal static bool QueuePolling { get { return ApiClient.IsFfaQueuePolling; } }
         internal static bool Discovered { get { return _discovered; } }
         internal static bool DiscoveryInFlight { get { return _discoveryInFlight; } }
         internal static bool PostInFlight { get { return _postInFlight; } }
@@ -759,7 +963,11 @@ namespace CompetitiveRounds
             State = new FfaReadmitEntryRules.RdmClient { State = state, Lobby = lobby, N = n };
             _discovered = _discoveryInFlight = _postInFlight = false;
             _lifecycleGeneration = 0; _nextBindRt = 0f;
-            Probes = ActCalls = 0; LastAct = FfaReadmitEntryRules.RdmNext.None;
+            Probes = PollCalls = PrepareCalls = ArmCalls = Toasts = RoomLeaves = QueueLeaves = 0;
+            ExpectedLobby = null; _retryToastShown = false;
+            PhotonNetwork.InRoom = false; PhotonNetwork.CurrentRoom = null;
+            PhotonNetwork.LocalPlayer = new PlayerStub { ActorNumber = 42 };
+            ReadmitOfferAdapter.SetEntryFactForTest(null, 0, false, null);
             HoldDiscovery = false;
             DiscoveryCallbacks.Clear(); PostCallbacks.Clear(); PostBodies.Clear(); Responses.Clear();
             ApiClient.IsFfaQueuePolling = false;
@@ -798,9 +1006,29 @@ namespace CompetitiveRounds
         protected static float Now() { return 100f; }
         protected static string I(int v) { return v.ToString(CultureInfo.InvariantCulture); }
         protected static void Ladder(FfaReadmitEntryRules.RdmState before, bool selfKept, string extra) { }
-        protected static void Act(string step, FfaReadmitEntryRules.RdmNext next, FfaReadmitEntryRules.RdmAnswer answer)
+        internal static void LeaveForTest(string lobby)
         {
-            ActCalls++; LastAct = next;
+            ExpectedLobby = lobby;
+            ApiClient.FfaLeaveQueue("test_leave");
+        }
+        internal static void SetRoomForTest(string room)
+        {
+            PhotonNetwork.InRoom = room != null;
+            PhotonNetwork.CurrentRoom = room == null ? null : new RoomStub { Name = room };
+        }
+        internal sealed class RoomStub { internal string Name; }
+        internal sealed class PlayerStub { internal int ActorNumber; }
+        protected struct Color { internal Color(float r, float g, float b) { } }
+        protected static class PhotonNetwork
+        {
+            internal static bool InRoom;
+            internal static RoomStub CurrentRoom;
+            internal static PlayerStub LocalPlayer;
+            internal static void LeaveRoom() { RoomLeaves++; }
+        }
+        protected static class CompetitiveUI
+        {
+            internal static void ShowNotification(string message, Color color, float seconds) { Toasts++; }
         }
         protected static class MatchTracker { internal static string LocalSteamId = "1001"; }
         protected static class NativeUI { internal static void MarkDirty() { } }
@@ -808,7 +1036,7 @@ namespace CompetitiveRounds
         protected class Plugin
         {
             internal static readonly Logger Log = new Logger();
-            internal sealed class Logger { internal void LogWarning(string message) { } }
+            internal sealed class Logger { internal void LogWarning(string message) { } internal void LogInfo(string message) { } }
         }
         protected static class ApiClient
         {
@@ -825,9 +1053,22 @@ namespace CompetitiveRounds
                 PostBodies.Add(body); PostCallbacks.Add(done);
             }
             internal static void FfaProbeServerState() { Probes++; }
+            internal static void FfaStartReadmitPoll() { PollCalls++; IsFfaQueuePolling = true; }
+            internal static void FfaLeaveQueue(string label)
+            {
+                QueueLeaves++;
+                ReadmitOfferAdapter.Abandon(ExpectedLobby);
+            }
         }
         protected static class FfaAssembly
         {
+            internal sealed class Answer
+            {
+                internal string Route, Step, Lobby, Room, Status;
+                internal int Assembly, Game;
+                internal float Rt;
+            }
+            internal static string CurrentRoomName() { return PhotonNetwork.CurrentRoom == null ? null : PhotonNetwork.CurrentRoom.Name; }
             internal static Dictionary<string, string> Members(string response)
             {
                 Dictionary<string, string> members;

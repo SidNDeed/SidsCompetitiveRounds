@@ -26,17 +26,26 @@ namespace CompetitiveRounds
         private static float _nextBindRt;
         private static float _lastPresenceRt = -999f;
 
-        /// <summary>Each release route ends its matching attempt synchronously.
-        /// Old callbacks must not change a later lifecycle or its flight flags.</summary>
-        internal static bool Abandon(string identity, bool byRoom = false)
+        /// <summary>Each release invalidates its matching work synchronously,
+        /// unless local entry completed for this playing lifecycle. Released
+        /// callbacks cannot change a later lifecycle or its flight flags.</summary>
+        internal static bool Abandon(string identity, bool byRoom = false, bool all = false)
         {
-            if (!FfaReadmitEntryRules.Abandon(State, identity, byRoom)) return false;
+            if (!FfaReadmitEntryRules.MatchesRelease(State, identity, byRoom, all)) return false;
+            if (FfaReadmitEntryRules.KeepEntered(State, FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game))) return false;
+            InvalidateMatchingWork();
+            return FfaReadmitEntryRules.Abandon(State, identity, byRoom, all);
+        }
+
+        /// <summary>Released work is invalidated even if the state transition
+        /// already ran, as it does before a lapse or refusal leaves.</summary>
+        private static void InvalidateMatchingWork()
+        {
             unchecked { _lifecycleGeneration++; }
             _discoveryInFlight = false;
             _postInFlight = false;
             _discovered = false;
             _nextBindRt = 0f;
-            return true;
         }
 
         /// <summary>The assembly POST timeout (K23: every assembly, presence and
@@ -353,6 +362,7 @@ namespace CompetitiveRounds
             }
             catch { }
             if (!leave) return;
+            Abandon(State.Lobby);
             try
             {
                 if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.Name == State.Room)

@@ -1793,6 +1793,8 @@ namespace CompetitiveRounds
         // ------------------------------------------------------------ the late entry (item 5)
 
         private static bool _lateEntered;
+        private static string _readmitEnteredLobby;
+        private static int _readmitEnteredGame;
         private static int _lateLoads;
         private static int _lateFailures;
         private static float _lateArmedRt;
@@ -1804,6 +1806,14 @@ namespace CompetitiveRounds
         private static int _pendingCallIns;
         private static int _requestSeq = 1;
 
+        /// <summary>The completed local entry belongs to this admission's
+        /// lobby and game, not to a timer or the current room state.</summary>
+        internal static bool ReadmitEntryCompleted(string lobby, int game)
+        {
+            return _lateEntered && !string.IsNullOrEmpty(lobby) && AdmittedLateLobby == lobby
+                   && _readmitEnteredLobby == lobby && _readmitEnteredGame == game;
+        }
+
         /// <summary>V3 P4.3 step 10: a readmission bind of this process's own
         /// seat (a second drop in the same session included) starts a fresh
         /// late entry; the previous entry's latches would otherwise refuse it.</summary>
@@ -1812,6 +1822,8 @@ namespace CompetitiveRounds
             AdmittedLateLobby = null;
             LateArmed = false;
             _lateEntered = false;
+            _readmitEnteredLobby = null;
+            _readmitEnteredGame = 0;
             _lateFailures = 0;
             _pendingSnap = null;
         }
@@ -2234,6 +2246,8 @@ namespace CompetitiveRounds
             if (!ReadmitEnteredReady(FfaReadmit.ReadmittedInto(AdmittedLateLobby), Kept(OwnActor()),
                                     ReadmitActorPrepared(OwnActor(), PointEpoch))) return;
             _lateEntered = true;
+            _readmitEnteredLobby = AdmittedLateLobby;
+            _readmitEnteredGame = _lateGame;
             _pendingSelfKeptGame = 0;
             LateArmed = false;
             JoinTimeline.Step("late_cards", "n=0");
@@ -2297,6 +2311,8 @@ namespace CompetitiveRounds
         /// episode and the per-room state go.</summary>
         internal static void OnRoomLeft(string room)
         {
+            _readmitEnteredLobby = null;
+            _readmitEnteredGame = 0;
             LagOutEnd("room_exit");
             _scale.Clear();
             _latchMaster.Clear();

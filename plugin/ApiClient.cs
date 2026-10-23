@@ -13987,6 +13987,9 @@ namespace CompetitiveRounds
                 ActiveOvt1v2SeriesId = null;
                 try { Plugin.ClearPendingOvtSlot(); } catch { }
 
+                // Release readmission matching work before clearing its identity;
+                // a completed local entry keeps its playing lifecycle.
+                FfaReadmit.Abandon(null, all: true);
                 IsFfaQueuePolling = false;
                 FfaQueueStatus = "";
                 FfaQueueCount = 0; FfaGatherSecondsLeft = -1;
