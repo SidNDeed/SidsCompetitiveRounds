@@ -977,3 +977,180 @@ def test_restore_before_observation_walk_has_no_positive_scope(monkeypatch):
     # Undo replays the manual restoration and then the original replacement.
     assert os.walk is saved
     assert not tw.verdict()
+
+
+# M4 tests exercise the actual conftest hooks and pytest's final return boundary.
+def _outcome_hooks():
+    import conftest as boundary
+    hooks = types.SimpleNamespace(pytest_sessionfinish=boundary.pytest_sessionfinish)
+    if hasattr(boundary, "pytest_unconfigure"):
+        hooks.pytest_unconfigure = boundary.pytest_unconfigure
+    return hooks
+
+
+def _outcome_probe(dirty, status, reset, finish=True):
+    import pluggy
+    from _pytest import hookspec
+
+    manager = pluggy.PluginManager("pytest")
+    manager.add_hookspecs(hookspec)
+    config = types.SimpleNamespace(pluginmanager=manager, stash=pytest.Stash())
+    session = types.SimpleNamespace(config=config, exitstatus=status)
+    manager.register(session, "session")
+    manager.register(_outcome_hooks(), "actual-review-boundary")
+    resumed = []
+
+    class LaterReset:
+        @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+        def pytest_sessionfinish(self, session, exitstatus):
+            yield
+            resumed.append(session.exitstatus)
+            if reset:
+                session.exitstatus = pytest.ExitCode.OK
+
+    # Equal-priority wrappers registered later resume after the review wrapper.
+    manager.register(LaterReset(), "later-reset")
+    with tw.expected_trip("os.walk", require=dirty):
+        if dirty:
+            saved = os.walk
+            os.walk = lambda *args, **kwargs: iter(())
+            try:
+                assert tw.verdict()
+            finally:
+                os.walk = saved
+        if finish:
+            manager.hook.pytest_sessionfinish(session=session, exitstatus=status)
+        after_finish = session.exitstatus
+        manager.hook.pytest_unconfigure(config=config)
+        result = session.exitstatus
+    assert manager.get_plugin("terminalreporter") is None
+    if finish:
+        assert len(resumed) == 1
+        if reset:
+            assert after_finish == pytest.ExitCode.OK
+    else:
+        assert not resumed
+    return result
+
+
+@pytest.mark.parametrize("dirty", (False, True), ids=("benign", "dirty"))
+@pytest.mark.parametrize("reset", (False, True), ids=("unchanged", "late-reset"))
+@pytest.mark.parametrize("status", tuple(pytest.ExitCode), ids=lambda status: status.name)
+def test_final_boundary_preserves_outcomes_without_terminal_reporter(dirty, reset, status):
+    expected = status if status else int(dirty)
+    assert _outcome_probe(dirty, status, reset) == expected
+
+
+@pytest.mark.parametrize("dirty", (False, True), ids=("benign", "dirty"))
+@pytest.mark.parametrize("status", tuple(pytest.ExitCode), ids=lambda status: status.name)
+def test_final_boundary_covers_paths_without_sessionfinish(dirty, status):
+    expected = status if status else int(dirty)
+    assert _outcome_probe(dirty, status, False, finish=False) == expected
+
+
+_M4_PROCESS_CONFTEST = r'''
+import importlib
+import os
+import pathlib
+import sys
+import types
+import pytest
+
+source = pathlib.Path(os.environ["D4_M4_CONFTEST"])
+package = types.ModuleType("review_m4_actual")
+package.__path__ = [str(source.parent)]
+sys.modules[package.__name__] = package
+boundary = importlib.import_module("review_m4_actual.conftest")
+pytest_sessionfinish = boundary.pytest_sessionfinish
+if hasattr(boundary, "pytest_unconfigure"):
+    pytest_unconfigure = boundary.pytest_unconfigure
+
+mode = os.environ["D4_M4_MODE"]
+dirty = os.environ["D4_M4_DIRTY"] == "1"
+
+
+def plant_trip():
+    if dirty:
+        saved = os.walk
+        os.walk = lambda *args, **kwargs: iter(())
+        try:
+            assert boundary.review_tripwire.verdict()
+        finally:
+            os.walk = saved
+
+
+class LaterReset:
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_sessionfinish(self, session, exitstatus):
+        yield
+        session.exitstatus = pytest.ExitCode.OK
+        print("M4 RESET 0")
+
+
+def pytest_configure(config):
+    config.pluginmanager.register(LaterReset(), "later-reset")
+
+
+def pytest_sessionstart(session):
+    assert session.config.pluginmanager.get_plugin("terminalreporter") is None
+    plant_trip()
+    if mode == "early-interrupt":
+        raise KeyboardInterrupt()
+    if mode == "early-internal":
+        raise RuntimeError("synthetic early internal error")
+
+
+def pytest_collection(session):
+    if mode == "internal":
+        raise RuntimeError("synthetic collection internal error")
+'''
+
+_M4_PROCESS_TEST = r'''
+import os
+
+
+def test_first():
+    mode = os.environ["D4_M4_MODE"]
+    if mode == "interrupt":
+        raise KeyboardInterrupt()
+    assert mode != "early-stop"
+
+
+def test_second():
+    assert os.environ["D4_M4_MODE"] != "early-stop", "-x must stop before this test"
+'''
+
+
+@pytest.mark.parametrize("dirty", (False, True), ids=("benign", "dirty"))
+@pytest.mark.parametrize("mode, status", (
+    ("success", 0),
+    ("early-stop", 1),
+    ("interrupt", 2),
+    ("internal", 3),
+    ("early-interrupt", 2),
+    ("early-internal", 3),
+))
+def test_pytest_return_boundary_survives_late_reset(mode, status, dirty, tmp_path, monkeypatch):
+    import conftest as boundary
+    import subprocess
+
+    (tmp_path / "conftest.py").write_text(_M4_PROCESS_CONFTEST, encoding="utf-8")
+    (tmp_path / "test_boundary.py").write_text(_M4_PROCESS_TEST, encoding="utf-8")
+    monkeypatch.setenv("D4_M4_CONFTEST", str(Path(boundary.__file__).resolve()))
+    monkeypatch.setenv("D4_M4_MODE", mode)
+    monkeypatch.setenv("D4_M4_DIRTY", str(int(dirty)))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    command = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+               "-p", "no:terminal", "--confcutdir", str(tmp_path),
+               "--rootdir", str(tmp_path), "-o", "addopts=", str(tmp_path)]
+    if mode == "early-stop":
+        command.append("-x")
+    result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True,
+                            timeout=60, check=False)
+    expected = status if status else int(dirty)
+    assert result.returncode == expected, (mode, dirty, result.stdout, result.stderr)
+    if mode in ("early-interrupt", "early-internal"):
+        assert "M4 RESET 0" not in result.stdout
+    else:
+        assert "M4 RESET 0" in result.stdout

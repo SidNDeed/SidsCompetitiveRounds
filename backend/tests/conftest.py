@@ -35,16 +35,42 @@ for path in (str(API_ROOT), str(BACKEND_ROOT), str(TESTS_ROOT)):
 import review_boot  # noqa: E402,F401
 
 
+_REVIEW_SESSION = pytest.StashKey[object]()
+_REVIEW_EXITSTATUS = pytest.StashKey[object]()
+
+
+def _review_finish_status(session):
+    """Refuse success without replacing an existing error or interruption."""
+    trips = review_tripwire.verdict()
+    if session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = session.config.stash.get(_REVIEW_EXITSTATUS, pytest.ExitCode.OK)
+    if trips and session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    return trips
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_sessionfinish(session, exitstatus):
-    """The runtime proof fails the run independently of terminal reporting."""
+    """Report the runtime verdict and retain the incoming outcome for cleanup."""
+    session.config.stash[_REVIEW_SESSION] = session
+    session.config.stash[_REVIEW_EXITSTATUS] = exitstatus
     yield
-    trips = review_tripwire.verdict()
+    trips = _review_finish_status(session)
     if trips:
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is not None:
             reporter.write_line("review tripwire: non-clean verdict (%d trips)" % len(trips))
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    """Recheck after sessionfinish; later unconfigure mutations are outside this bound."""
+    session = config.stash.get(_REVIEW_SESSION, None)
+    if session is None:
+        # A configure/sessionstart error can skip sessionfinish entirely.
+        session = config.pluginmanager.get_plugin("session")
+    if session is not None:
+        _review_finish_status(session)
 
 
 # Synthetic read failures and count-cap instrumentation replace these exact
