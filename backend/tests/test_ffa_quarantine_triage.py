@@ -370,17 +370,16 @@ async def _pg(url):
 
 
 async def _clean_slate(url):
-    """#753: every case starts from a slate it TAKES -- every other backend
-    on the lane database is terminated first, so a lock a dead case left
-    behind cannot hold this one's DDL."""
+    """#753: terminate only the current role's client backends on the lane database.
+    Another role's session may retain a relation lock; the 5 s DDL timeout
+    then fails the fixture with its own error."""
     conn = await _pg(url)
     try:
-        # 2026-10-20: the role running the suite is not a superuser, so the
-        # sweep names only the backends it can terminate, its own role's
-        # client backends. A superuser session or an autovacuum worker on
-        # the lane database made pg_terminate_backend raise
-        # InsufficientPrivilegeError inside this fixture and turned every
-        # case red before its body ran.
+        # The sweep terminates only the current role's client backends.
+        # Another role's session may retain a relation lock; the 5 s DDL timeout
+        # then fails the fixture with its own error. The previous unfiltered
+        # sweep caused setup failures against superuser-owned processes in
+        # 8 of 114 and 16 of 114 cases in the two recorded runs.
         await conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
                            " WHERE datname = current_database() AND pid <> pg_backend_pid()"
                            " AND backend_type = 'client backend' AND usename = current_user")
@@ -2563,3 +2562,23 @@ def test_pg_fix2_stored_assembly_reason_agrees_without_triage_writes(monkeypatch
     rows = cap_of(ok(response), qid)["pt3"]["rows"]
     assert [row["row_id"] for row in rows] == [str(mid)]
     assert rows[0]["verdict"] == "AGREES", rows
+
+
+
+
+def test_clean_slate_comment_states_current_role_sweep_and_limits():
+    """M2: the cleanup describes its actual reach and remaining blocker."""
+    source = inspect.getsource(_clean_slate)
+    definition = ast.parse(source).body[0]
+    doc = " ".join(ast.get_docstring(definition).lower().split())
+    comments = " ".join(line.strip()[1:].strip().lower()
+                        for line in source.splitlines() if line.lstrip().startswith("#"))
+    comments = " ".join(comments.split())
+    for prose in (doc, comments):
+        for phrase in ("current role", "client backends", "another role",
+                       "relation lock", "5 s", "ddl timeout", "fails the fixture"):
+            assert phrase in prose, (phrase, prose)
+        for promise in ("every other backend", "cannot hold", "every case"):
+            assert promise not in prose, (promise, prose)
+    for phrase in ("setup failures", "superuser-owned", "8 of 114", "16 of 114"):
+        assert phrase in comments, (phrase, comments)
