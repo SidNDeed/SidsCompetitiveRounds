@@ -1937,6 +1937,7 @@ namespace CompetitiveRounds
             string lobby = !string.IsNullOrEmpty(RoomLobbyId) ? RoomLobbyId : (Lock != null ? Lock.Lobby : "");
             if (why == "join_timeout" && !string.IsNullOrEmpty(FfaLateEntry.AdmittedLateLobby))
                 lobby = FfaLateEntry.AdmittedLateLobby;
+            FfaReadmit.Abandon(lobby);
             ApiClient.FfaClientClears();
             if (string.IsNullOrEmpty(lobby)) return;
             _releaseLobby = lobby;
@@ -2105,6 +2106,7 @@ namespace CompetitiveRounds
         /// set are the sitting's and stay.</summary>
         internal static void OnRoomLeft(string room)
         {
+            FfaReadmit.Abandon(room, byRoom: true);
             StartHoldActive = false;
             DropHeld();
             _spawnOpenRoom = null;

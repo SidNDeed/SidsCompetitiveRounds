@@ -198,7 +198,7 @@ namespace CompetitiveRounds
         // ------------------------------------------------------------ the client state machine (P4.2)
 
         /// <summary>Explicit named states (no boolean flags).</summary>
-        internal enum RdmState { None, Offered, Claiming, Claimed, Binding, Admitted, Entered, Refused, Declined, Lapsed }
+        internal enum RdmState { None, Offered, Claiming, Claimed, Binding, Admitted, Entered, Refused, Declined, Lapsed, Abandoned }
 
         internal enum RefusalClass { Released, Ended, Departed, OtherQueue, Retrying, Identity, Other }
 
@@ -276,6 +276,8 @@ namespace CompetitiveRounds
             // Hold numbers are monotonic within a lobby, not across lobbies.
             if (c.State == RdmState.Entered && c.Lobby == lobby && n <= c.N)
                 return RdmOffer.Rejected;
+            if (c.State == RdmState.Abandoned && c.Lobby == lobby && n <= c.N)
+                return RdmOffer.Rejected;
             if (c.State == RdmState.Offered && sameOffer)
             {
                 c.HoldUntil = now + Math.Max(0, holdS);
@@ -292,6 +294,19 @@ namespace CompetitiveRounds
         internal static int SecondsLeft(RdmClient c, float now)
         {
             return Math.Max(0, (int)Math.Ceiling(c.HoldUntil - now));
+        }
+
+        /// <summary>End only the active attempt of the released lobby or
+        /// departed claimed room. Keep its lobby/hold terminal suppression;
+        /// abandonment is not a successful entry.</summary>
+        internal static bool Abandon(RdmClient c, string identity, bool byRoom)
+        {
+            if (string.IsNullOrEmpty(identity) || (byRoom ? c.Room : c.Lobby) != identity) return false;
+            if (c.State != RdmState.Claiming && c.State != RdmState.Claimed
+                && c.State != RdmState.Binding && c.State != RdmState.Admitted) return false;
+            c.State = RdmState.Abandoned;
+            c.Token = null;
+            return true;
         }
 
         /// <summary>The hold ended on the client clock before a bind: the bar

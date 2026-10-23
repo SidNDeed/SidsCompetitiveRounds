@@ -20538,6 +20538,7 @@ namespace CompetitiveRounds
             // anchor). Explicit leave = standing intent: every later signal
             // bends toward OUT until an ack or an authoritative not_in_queue.
             string expectedLobby = !string.IsNullOrEmpty(OpenFfaLobbyId) ? OpenFfaLobbyId : ActiveFfaLobbyId;
+            FfaReadmit.Abandon(expectedLobby);
             _ffaLeaveIntent = true;
             if (!string.IsNullOrEmpty(expectedLobby)) _ffaLeaveTargetLobby = expectedLobby;
             FfaClientClears();

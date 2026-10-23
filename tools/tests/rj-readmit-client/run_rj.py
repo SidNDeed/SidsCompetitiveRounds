@@ -53,8 +53,19 @@ SUITE_FILES = {
     "apply": {"FfaMode.cs": None, "FfaLateEntry.cs": None, "FfaReadmitRules.cs": "RulesSource"},
     "rules": {"FfaReadmitRules.cs": "RulesSource", "FfaReportRules.cs": "ReportSource",
               "FfaLateRules.cs": "LateSource", "FfaReadmitEntryRules.cs": "EntrySource",
-              "RosterCensusRules.cs": "CensusSource", "FfaReadmit.cs": None},
+              "RosterCensusRules.cs": "CensusSource", "FfaReadmit.cs": None,
+              "FfaAssembly.cs": None, "ApiClient.cs": None},
 }
+
+RELEASE_ROUTE_TARGET = "C4.F2D.release_route_census"
+RELEASE_ROUTES = (
+    ("release", "FfaAssembly.cs", "internal static void Release(",
+     "FfaReadmit.Abandon(lobby);", "ApiClient.FfaClientClears();"),
+    ("leave", "ApiClient.cs", "public static void FfaLeaveQueue(",
+     "FfaReadmit.Abandon(expectedLobby);", "FfaClientClears();"),
+    ("depart", "FfaAssembly.cs", "internal static void OnRoomLeft(",
+     "FfaReadmit.Abandon(room, byRoom: true);", None),
+)
 
 # (id, piece, suite, file, [(old, new), ...], target case, control case)
 # Each old string occurs exactly once in the file it names.
@@ -206,6 +217,42 @@ MUTANTS = [
      [('offered = SuppressesDiscoveryProbe(Offer(lobby, slot, n, holdS, "discovery"));',
        'Offer(lobby, slot, n, holdS, "discovery"); offered = true;')],
      'C4.H2.discovery_fallback', 'C4.H2.poll_result'),
+    # ---- merged fix 2d: terminal abandonment and lifecycle callback fences
+    ('M-F2D-abandon', 'H1', 'rules', 'FfaReadmit.cs',
+     [('        internal static bool Abandon(string identity, bool byRoom = false)\n'
+       '        {\n'
+       '            if (!FfaReadmitEntryRules.Abandon(State, identity, byRoom)) return false;\n'
+       '            unchecked { _lifecycleGeneration++; }\n'
+       '            _discoveryInFlight = false;\n'
+       '            _postInFlight = false;\n'
+       '            _discovered = false;\n'
+       '            _nextBindRt = 0f;\n'
+       '            return true;\n'
+       '        }\n',
+       '        internal static bool Abandon(string identity, bool byRoom = false)\n'
+       '        {\n'
+       '            return false;\n'
+       '        }\n')],
+     'C4.F2D.admitted_release_cross_lobby', 'C4.H2.active_claim_preserved'),
+    ('M-F2D-discfence', 'H1', 'rules', 'FfaReadmit.cs',
+     [('                if (generation != _lifecycleGeneration) return;\n'
+       '                _discoveryInFlight = false;\n',
+       '                _discoveryInFlight = false;\n')],
+     'C4.F2D.old_discovery_callback', 'C4.H2.active_claim_preserved'),
+    ('M-F2D-postfence', 'H1', 'rules', 'FfaReadmit.cs',
+     [('                if (generation != _lifecycleGeneration) return;\n'
+       '                _postInFlight = false;\n',
+       '                _postInFlight = false;\n')],
+     'C4.F2D.old_post_callback', 'C4.H2.active_claim_preserved'),
+    ('M-F2D-site-release', 'H1', 'rules', 'FfaAssembly.cs',
+     [('            FfaReadmit.Abandon(lobby);\n', '')],
+     RELEASE_ROUTE_TARGET, 'C4.H2.active_claim_preserved'),
+    ('M-F2D-site-leave', 'H1', 'rules', 'ApiClient.cs',
+     [('            FfaReadmit.Abandon(expectedLobby);\n', '')],
+     RELEASE_ROUTE_TARGET, 'C4.H2.active_claim_preserved'),
+    ('M-F2D-site-depart', 'H1', 'rules', 'FfaAssembly.cs',
+     [('            FfaReadmit.Abandon(room, byRoom: true);\n', '')],
+     RELEASE_ROUTE_TARGET, 'C4.H2.active_claim_preserved'),
     # ---- C5 (P5 client rungs of the positive ladder)
     ("M5.c1", "C5", "rules", "FfaReadmitEntryRules.cs",
      [("            if (after == before) return null;\n", "")],
@@ -564,6 +611,28 @@ def extract(text, sig):
     raise RuntimeError("no end for %r" % sig)
 
 
+def release_route_census(texts):
+    """Count the real synchronous abandonment calls within their release members."""
+    rows, passed = [], 0
+    for route, source, signature, call, clear in RELEASE_ROUTES:
+        try:
+            member = _blank_csharp(extract(texts[source], signature)).replace("\r\n", "\n")
+            all_calls = re.findall(r'\bFfaReadmit\s*\.\s*Abandon\s*\(', member)
+            count = member.count(call)
+            correct = len(all_calls) == 1 and count == 1
+            if clear is not None:
+                correct = correct and member.count(clear) == 1 and member.index(call) < member.index(clear)
+            reason = "calls=%d expected=%d" % (len(all_calls), count)
+            if clear is not None:
+                reason += " before_clear=" + str(correct)
+        except (KeyError, RuntimeError, ValueError) as exc:
+            correct, reason = False, str(exc)
+        passed += correct
+        rows.append("%s %s.%s: %s" % ("PASS" if correct else "FAIL", RELEASE_ROUTE_TARGET, route, reason))
+    rows.append("release-route census: %d of %d routes pass" % (passed, len(RELEASE_ROUTES)))
+    return passed == len(RELEASE_ROUTES), "\n".join(rows)
+
+
 def extract_statement(text, start):
     if text.count(start) != 1:
         raise RuntimeError("statement anchor must occur once: " + start)
@@ -639,10 +708,17 @@ def gen_reducers(wt, new_mode_text, late_text, out_dir):
 
 def adapter_source(adapter):
     content = "\nnamespace CompetitiveRounds\n{\n    internal sealed class ReadmitOfferAdapter : ReadmitOfferAdapterBase\n    {\n"
-    for sig in ("internal static void DiscoverThenProbe(",
+    content += "        internal static void SendForTest(string step, int actor, int game) { Send(step, actor, game); }\n"
+    for sig in ("internal static bool Abandon(",
+                "internal static void DiscoverThenProbe(",
                 "internal static FfaReadmitEntryRules.RdmOffer OfferFromPoll(",
                 "internal static bool SuppressesDiscoveryProbe(",
-                "private static FfaReadmitEntryRules.RdmOffer Offer("):
+                "private static FfaReadmitEntryRules.RdmOffer Offer(",
+                "internal static bool ClaimedFor(",
+                "internal static bool ReadmittedInto(",
+                "internal static void Accept(",
+                "private static void Send(",
+                "private static FfaReadmitEntryRules.RdmAnswer ParseAnswer("):
         content += extract(adapter, sig) + "\n"
     return content + "    }\n}\n"
 
@@ -676,14 +752,15 @@ def prepare(tree, wt, suite, work, tag, texts):
     os.makedirs(out, exist_ok=True)
     props = {}
     for f, prop in SUITE_FILES[suite].items():
-        if prop is None:
+        if prop is None and suite != "rules":
             continue
         p = os.path.join(out, f)
         content = texts[f]
         if suite == "rules" and f == "FfaReadmitEntryRules.cs":
             content += adapter_source(texts["FfaReadmit.cs"])
         open(p, "wb").write(content.encode("utf-8"))
-        props[prop] = p
+        if prop is not None:
+            props[prop] = p
     if suite == "apply":
         gen_reducers(wt, texts["FfaMode.cs"], texts["FfaLateEntry.cs"], os.path.join(out, "gen"))
         props["GenDir"] = os.path.join(out, "gen")
@@ -735,6 +812,10 @@ def main():
     only = set(x for x in a.only.split(",") if x)
     ok = True
     for suite in suites:
+        if suite == "rules":
+            routes_ok, routes_out = release_route_census(texts)
+            print(routes_out)
+            ok = ok and routes_ok
         dll = prepare(tree, wt, suite, work, "base", texts)
         if dll is None:
             print("BUILD FAILED (%s base)" % suite)
@@ -777,7 +858,11 @@ def main():
                 print("BAD mutant %s: does not build" % mid)
                 ok = False
                 continue
-            trc, tout = run_case(mdll, target)
+            if target == RELEASE_ROUTE_TARGET:
+                routes_ok, tout = release_route_census(mtexts)
+                trc = 0 if routes_ok else 1
+            else:
+                trc, tout = run_case(mdll, target)
             crc, cout = run_case(mdll, control)
             hit = trc != 0 and crc == 0
             caught += hit

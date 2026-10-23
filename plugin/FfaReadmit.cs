@@ -22,8 +22,22 @@ namespace CompetitiveRounds
         private static bool _discovered;
         private static bool _discoveryInFlight;
         private static bool _postInFlight;
+        private static long _lifecycleGeneration;
         private static float _nextBindRt;
         private static float _lastPresenceRt = -999f;
+
+        /// <summary>Each release route ends its matching attempt synchronously.
+        /// Old callbacks must not change a later lifecycle or its flight flags.</summary>
+        internal static bool Abandon(string identity, bool byRoom = false)
+        {
+            if (!FfaReadmitEntryRules.Abandon(State, identity, byRoom)) return false;
+            unchecked { _lifecycleGeneration++; }
+            _discoveryInFlight = false;
+            _postInFlight = false;
+            _discovered = false;
+            _nextBindRt = 0f;
+            return true;
+        }
 
         /// <summary>The assembly POST timeout (K23: every assembly, presence and
         /// connect POST passes four seconds), the same constant.</summary>
@@ -53,8 +67,8 @@ namespace CompetitiveRounds
 
         /// <summary>The FFA tab's opener, in place of the bare probe: the
         /// read-only offer GET first; today's probe runs when no offer is
-        /// accepted or already held. Once per launch, as
-        /// the probe is; a seat already polling skips straight to the probe,
+        /// accepted or already held. Entry or abandonment re-arms discovery;
+        /// a seat already polling skips straight to the probe,
         /// and the poll's belt carries the offer for it.</summary>
         internal static void DiscoverThenProbe()
         {
@@ -67,9 +81,11 @@ namespace CompetitiveRounds
             }
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            long generation = _lifecycleGeneration;
             _discoveryInFlight = true;
             ApiClient.FfaReadmitOffer(sid, (ok, resp) =>
             {
+                if (generation != _lifecycleGeneration) return;
                 _discoveryInFlight = false;
                 _discovered = true;
                 bool offered = false;
@@ -213,9 +229,11 @@ namespace CompetitiveRounds
                                                            step, State.N, actor,
                                                            ApiClient.JsonEscapeFullPublic(region), game,
                                                            JoinTimeline.ClientMs());
+            long generation = _lifecycleGeneration;
             _postInFlight = true;
             ApiClient.AsmPost(ApiClient.BaseUrl + "/api/v1/ffa/lobby/" + lobby + "/readmit", body, (ok, resp) =>
             {
+                if (generation != _lifecycleGeneration) return;
                 _postInFlight = false;
                 if (!ok)
                 {
