@@ -131,6 +131,57 @@ _REMOVAL_CALLS = {
     "dict.__delitem__": "__delitem__",
     "dict.clear": "clear",
 }
+
+def _qualified_removal(name):
+    """Imported/builtin removal names outside the credited named-call table."""
+    if name is None:
+        return False
+    while name.endswith(".__call__"):
+        name = name[:-len(".__call__")]
+    if name.startswith("builtins.dict."):
+        name = name[len("builtins."):]
+    return ("." in name and name.rsplit(".", 1)[1] in _REMOVAL_METHODS
+            and name not in _REMOVAL_CALLS)
+
+
+def _removal_resolution(recv, key_node, method):
+    """CLEAN credits retained dictionary arms plus a literal string key.
+
+    Direct/merged receivers, named dict/operator removers, del, __call__,
+    partial and generic callback bindings share this rule. clear/popitem
+    need no key. This model tracks string-key literals; None, synthetic
+    names and other unsupported key constants are refused, never credited
+    merely because their AST node is Constant.
+    Every other binding is refused and loses must-presence.
+    """
+    literal = isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
+    return ("resolved" if _dict_arms(recv) and
+            (not _REMOVAL_METHODS.get(method, True) or literal) else "refused")
+
+
+def _reachable_dictionary_arms(value):
+    """Tracked candidates reachable through retained structure, for refusal."""
+    pending, seen, emitted = [value], set(), set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        for arm in _dict_arms(current):
+            if arm.alias[1].token not in emitted:
+                emitted.add(arm.alias[1].token)
+                yield arm
+        pending.extend(current.parts())
+        alias = current.alias
+        if alias and alias[0] == "method":
+            pending.append(alias[2])
+        elif alias and alias[0] == "partial":
+            pending.extend(alias[1])
+            if len(alias) > 2:
+                pending.append(alias[2])
+                pending.extend(value for _, value in alias[4])
+
+
 _SET_CONTAINMENT_CALLS = frozenset({
     ".issubset", ".issuperset", ".__le__", ".__ge__", "operator.le", "operator.ge"})
 _SET_ORDERED_CALLS = frozenset({".__le__", ".__ge__", "operator.le", "operator.ge"})
@@ -511,7 +562,7 @@ def _callback_evidence(value, methods=(), aliases_only=False):
             name = name[:-len(".__call__")]
         if name.startswith("builtins.dict.") or name in ("builtins.map", "builtins.filter"):
             name = name[len("builtins."):]
-        return name in _REMOVAL_CALLS or name in ("operator.call", "map", "filter", "functools.partial", "partial")
+        return _qualified_removal(name) or name in _REMOVAL_CALLS or name in ("operator.call", "map", "filter", "functools.partial", "partial")
     return bool(value.funcs) and not aliases_only
 
 
@@ -1016,7 +1067,7 @@ class Frame:
         if isinstance(target, ast.Subscript):
             recv = self.expr(target.value)
             key_value = self.expr(target.slice)
-            self.remove_presence(recv, target.slice, key_value)
+            self.remove_presence(recv, target.slice, key_value, target, "__delitem__")
         elif isinstance(target, (ast.Tuple, ast.List)):
             for item in target.elts:
                 self.delete_target(item)
@@ -1226,7 +1277,9 @@ class Frame:
             # One allocation identity is shared by every view of this literal.
             return self.ps.dict_value(
                 self.fk, n, tuple(k.value for k in n.keys), tuple(vals))
-        return V(j.ex_all(), j.im_all(), j.funcs)
+        if len(n.keys) == 1 and n.keys[0] is None and _dict_arms(vals[0]):
+            return self.copy_dictionary(n, vals[0])
+        return self.dynamic_dictionary(n, V(j.ex_all(), j.im_all(), j.funcs))
 
     def e_Starred(self, n):
         return element(self.expr(n.value))
@@ -1336,9 +1389,63 @@ class Frame:
     e_SetComp = e_ListComp
     e_GeneratorExp = e_ListComp
 
-    def e_DictComp(self, n):
-        return self.comp(n, [n.key, n.value])
+    def dynamic_dictionary(self, node, value):
+        """A new construction with no proven must-present source key."""
+        result = self.ps.dict_value(self.fk, node, (), ())
+        ref = result.alias[1]
+        ref.dynamic_update(element(value))
+        ref.remove()
+        return V(value.ex, value.im, result.funcs | value.funcs,
+                 None, None, result.alias)
 
+    def copy_dictionary(self, node, source, excluded=None):
+        """Copy retained slots to a fresh allocation, preserving only proven presence."""
+        arms = _dict_arms(source)
+        if not arms or any(arm.alias[1].keys is None for arm in arms):
+            return self.dynamic_dictionary(node, source)
+        keys = []
+        for arm in arms:
+            for key in arm.alias[1].keys:
+                if key != excluded and key not in keys:
+                    keys.append(key)
+        vals = [vjoin(*[add_im(slot, arm.im) for arm in arms
+                        for slot in (arm.alias[1].read(key),) if slot is not None])
+                for key in keys]
+        result = self.ps.dict_value(self.fk, node, keys, vals)
+        ref = result.alias[1]
+        definite = set.intersection(*(set(arm.alias[1].must_keys) for arm in arms))
+        for key in tuple(ref.must_keys):
+            if key not in definite or key == excluded:
+                ref.remove(key)
+        return V(source.ex, source.im, result.funcs, None, None, result.alias)
+
+    def e_DictComp(self, n):
+        if len(n.generators) == 1:
+            gen = n.generators[0]
+            target = gen.target
+            items = gen.iter
+            identity = (isinstance(target, (ast.Tuple, ast.List)) and len(target.elts) == 2
+                        and all(isinstance(part, ast.Name) for part in target.elts)
+                        and isinstance(n.key, ast.Name) and isinstance(n.value, ast.Name)
+                        and n.key.id == target.elts[0].id and n.value.id == target.elts[1].id)
+            source_items = (isinstance(items, ast.Call) and isinstance(items.func, ast.Attribute)
+                            and items.func.attr == "items" and not items.args and not items.keywords
+                            and not gen.is_async)
+            excluded = None
+            filter_resolved = not gen.ifs
+            if identity and len(gen.ifs) == 1:
+                cond = gen.ifs[0]
+                if isinstance(cond, ast.Compare) and len(cond.ops) == 1 and isinstance(cond.ops[0], ast.NotEq):
+                    left, right = cond.left, cond.comparators[0]
+                    for key_node, literal in ((left, right), (right, left)):
+                        if (isinstance(key_node, ast.Name) and key_node.id == target.elts[0].id
+                                and isinstance(literal, ast.Constant) and isinstance(literal.value, str)):
+                            excluded, filter_resolved = literal.value, True
+            if identity and source_items and filter_resolved:
+                source = self.expr(items.func.value)
+                if _dict_arms(source):
+                    return self.copy_dictionary(n, source, excluded)
+        return self.dynamic_dictionary(n, self.comp(n, [n.key, n.value]))
     # -- calls --
     def e_Call(self, n):
         argvals = []
@@ -1361,6 +1468,78 @@ class Frame:
         self.with_ctx(fn.im,
                       lambda: out.append(self.call_value(n, fn, argvals, kwvals)))
         return add_im(out[0], fn.im)
+
+    def callback_element_node(self, node):
+        """Keep an actual literal element node; never infer one from labels."""
+        if isinstance(node, (ast.Tuple, ast.List)) and node.elts:
+            first = node.elts[0]
+            if all(ast.dump(part, include_attributes=False) ==
+                   ast.dump(first, include_attributes=False) for part in node.elts):
+                return first
+        return ast.copy_location(ast.Name(id="_callback_argument", ctx=ast.Load()), node)
+
+    def callback_arguments(self, nodes, values):
+        """Retain each real literal element at a modeled wrapper invocation."""
+        if nodes and all(isinstance(node, (ast.Tuple, ast.List)) and value.elems is not None
+                         and len(node.elts) == len(value.elems)
+                         for node, value in zip(nodes, values)):
+            return [(list(args), list(actual)) for args, actual in
+                    zip(zip(*(value.elems for value in values)),
+                        zip(*(node.elts for node in nodes)))]
+        return [([element(value) for value in values],
+                 [self.callback_element_node(node) for node in nodes])]
+
+    def callback_binding(self, name, node, argvals):
+        """Actual source arguments for a single invocation of a known reduction."""
+        if name != "functools.reduce" or len(node.args) not in (2, 3) or node.keywords:
+            return None
+        seq_node = node.args[1]
+        seq = argvals[1]
+        if not isinstance(seq_node, (ast.Tuple, ast.List)) or seq.elems is None:
+            return None
+        if len(node.args) == 2 and len(seq_node.elts) == len(seq.elems) == 2:
+            return argvals[0], list(seq.elems), list(seq_node.elts)
+        if len(node.args) == 3 and len(seq_node.elts) == len(seq.elems) == 1:
+            return argvals[0], [argvals[2], seq.elems[0]], [node.args[2], seq_node.elts[0]]
+        return None
+
+    def removal_binding_key(self, binding, seen=frozenset()):
+        """Resolve the real required key through admitted wrapper bindings."""
+        if binding is None:
+            return None
+        target, values, nodes = binding
+        marker = (id(target), tuple(id(value) for value in values), tuple(id(node) for node in nodes))
+        if marker in seen:
+            return None
+        seen = seen | {marker}
+        alias = target.alias
+        if alias and alias[0] == "call_alternatives":
+            keys = [self.removal_binding_key((arm, values, nodes), seen) for arm in alias[1]
+                    if _callback_evidence(arm, aliases_only=True)]
+            if keys and all(isinstance(key, ast.Constant) and isinstance(key.value, str)
+                            and key.value == keys[0].value for key in keys):
+                return keys[0]
+            return None
+        if alias and alias[0] == "method" and alias[1] == "__call__":
+            return self.removal_binding_key((alias[2], values, nodes), seen)
+        if alias and alias[0] == "partial" and len(alias) > 2:
+            return self.removal_binding_key(
+                (alias[2], list(alias[1]) + values, list(alias[3]) + nodes), seen)
+        name = self.callable_name(ast.Constant(value=None), target)
+        while name is not None and name.endswith(".__call__"):
+            name = name[:-len(".__call__")]
+        if name is not None and name.startswith("builtins.dict."):
+            name = name[len("builtins."):]
+        if name == "operator.call" and values:
+            return self.removal_binding_key((values[0], values[1:], nodes[1:]), seen)
+        if alias and alias[0] == "method" and alias[1] in _REMOVAL_METHODS:
+            index = 0 if _dict_arms(alias[2]) else 1
+        elif name in _REMOVAL_CALLS:
+            index = 1
+        else:
+            return None
+        return (nodes[index] if len(nodes) > index and isinstance(nodes[index], ast.Constant)
+                and isinstance(nodes[index].value, str) else None)
 
     def callback_call(self, node, fn, values, nodes=None, keywords=(), kwvals=None):
         nodes = list(nodes) if nodes is not None else [ast.Name(id="_callback_argument", ctx=ast.Load()) for _ in values]
@@ -1392,7 +1571,7 @@ class Frame:
                 origin = origin[:-len(".__call__")]
             if origin in ("builtins.map", "builtins.filter"):
                 origin = origin[len("builtins."):]
-            if origin in _REMOVAL_CALLS or origin in ("operator.call", "map", "filter", "functools.partial", "partial"):
+            if _qualified_removal(origin) or origin in _REMOVAL_CALLS or origin in ("dict", "builtins.dict", "operator.call", "map", "filter", "functools.partial", "partial"):
                 target = V(fn.ex, fn.im, fn.funcs, alias=(fn.alias[0], origin))
                 return self.invoke(n, target, argvals, kwvals)
         if fn.alias and fn.alias[0] == "method" and fn.alias[1] == "__call__":
@@ -1400,7 +1579,12 @@ class Frame:
         if name in _REMOVAL_CALLS or name in ("operator.call", "map", "filter"):
             minimum = 2 if name in ("map", "filter") else 1
             if len(argvals) < minimum:
-                self.ps.flag(self.mod, n, "unresolvable call binding (%s: missing target, receiver or input)" % name)
+                if name in _REMOVAL_CALLS:
+                    candidates = vjoin(*kwvals.values())
+                    self.remove_presence(candidates, None, candidates, n, _REMOVAL_CALLS[name],
+                        "unresolvable call binding (%s: missing target, receiver or input)" % name)
+                else:
+                    self.ps.flag(self.mod, n, "unresolvable call binding (%s: missing target, receiver or input)" % name)
                 return V({D})
         if name == "operator.call" and argvals:
             return self.callback_call(n, selected(argvals[0]), argvals[1:], n.args[1:], n.keywords, kwvals)
@@ -1408,8 +1592,10 @@ class Frame:
             callback = selected(argvals[0])
             absent = name == "filter" and isinstance(n.args[0], ast.Constant) and n.args[0].value is None
             inputs = argvals[1:] if name == "map" else argvals[1:2]
-            returned = V({C}) if absent else self.callback_call(
-                n, callback, [element(v) for v in inputs])
+            input_nodes = n.args[1:] if name == "map" else n.args[1:2]
+            returned = V({C}) if absent else vjoin(*[
+                self.callback_call(n, callback, values, nodes)
+                for values, nodes in self.callback_arguments(input_nodes, inputs)])
             self.third_party(name, n, argvals, kwvals, None)
             if name == "map":
                 return V((), (), (), None, returned)
@@ -1464,7 +1650,7 @@ class Frame:
             recv = V(actual.ex | fn.ex, actual.im | fn.im, actual.funcs, actual.elems, actual.item, actual.alias)
             key_node = n.args[1] if _REMOVAL_METHODS.get(meth, True) and len(n.args) > 1 else None
             key_value = argvals[1] if key_node is not None else V({C})
-            self.remove_presence(recv, key_node, key_value)
+            self.remove_presence(recv, key_node, key_value, n, meth)
             if meth == "clear":
                 return self.mutate(meth, recv, n.args[0], n, argvals[1:], kwvals)
             if meth == "__delitem__":
@@ -1474,7 +1660,7 @@ class Frame:
             meth, recv = fn.alias[1], fn.alias[2]
             recv = V(recv.ex | fn.ex, recv.im | fn.im, recv.funcs, recv.elems, recv.item, recv.alias)
             # methods of the module's own classes are followed
-            if meth in self.mod.methods and not (recv.alias and recv.alias[0] in
+            if meth in self.mod.methods and meth not in _REMOVAL_METHODS and not (recv.alias and recv.alias[0] in
                                                  ("import", "builtin")):
                 out = [self.ps.call_func((self.mod.kind, q),
                                          [selected(value) for value in argvals],
@@ -1493,7 +1679,7 @@ class Frame:
                     effect_node = n.args[0]
                 key_node = effect_args[0] if _REMOVAL_METHODS[meth] and effect_args else None
                 key_value = effect_vals[0] if key_node is not None else V({C})
-                self.remove_presence(effect_recv, key_node, key_value)
+                self.remove_presence(effect_recv, key_node, key_value, n, meth)
                 if meth == "__delitem__":
                     return V({C})
                 if effect_recv is not recv and meth in _MUTATORS:
@@ -1505,8 +1691,17 @@ class Frame:
         if name is None:
             self.ps.flag(self.mod, n, "unresolvable call target (a callable value of no "
                          "known origin)")
-            return V({D})
-        return self.third_party(name, n, argvals, kwvals, None)
+            return vjoin(V({D}), fn, *argvals, *kwvals.values())
+        if _qualified_removal(name):
+            candidates = vjoin(*(argvals + list(kwvals.values())))
+            self.remove_presence(candidates, None, candidates, n, name.rsplit(".", 1)[1],
+                                 "qualified removal callable")
+        result = self.third_party(name, n, argvals, kwvals, None)
+        if name in ("dict", "builtins.dict"):
+            if len(argvals) == 1 and not kwvals and _dict_arms(argvals[0]):
+                return self.copy_dictionary(n, argvals[0])
+            return self.dynamic_dictionary(n, result)
+        return result
 
     def callable_name(self, node, fv):
         if fv.alias and fv.alias[0] in ("import", "builtin"):
@@ -1523,17 +1718,25 @@ class Frame:
             return node.id
         return None
 
-    def remove_presence(self, recv, key_node, key_value):
-        key = key_node.value if isinstance(key_node, ast.Constant) and \
-            isinstance(key_node.value, str) else None
+    def remove_presence(self, recv, key_node, key_value, node=None,
+                        method="__delitem__", refusal=None):
+        """Resolve the credited removal or flag and conservatively demote it."""
+        outcome = "refused" if refusal else _removal_resolution(recv, key_node, method)
+        arms = _dict_arms(recv)
+        if outcome == "refused":
+            reason = refusal or ("no dictionary arm" if not arms else "required literal key unresolved")
+            self.ps.flag(self.mod, node or key_node or ast.Constant(value=None),
+                         "unresolvable removal (%s)" % reason)
+            arms = tuple(_reachable_dictionary_arms(recv))
+        key = key_node.value if outcome == "resolved" and isinstance(key_node, ast.Constant) else None
         seen = set()
-        for arm in _dict_arms(recv):
+        for arm in arms:
             ref = arm.alias[1]
             if ref.token not in seen:
                 seen.add(ref.token)
                 labels = self.ctx | self.order_ctx | recv.im | arm.im | key_value.im
                 ref.remove(key, labels, (key_value.ex | recv.ex | arm.ex) - {C})
-
+        return outcome
     def literal_mutation_slots(self, meth, node, argvals, kwvals):
         """The exact slots changed by a supported literal-key dictionary call.
         None means that the mutation must conservatively forget key identity."""
@@ -1664,10 +1867,13 @@ class Frame:
         candidates = list(argvals) + list(kwvals.values())
         if name not in ("map", "filter"):
             for v in candidates:
+                if name in ("sorted", "min", "max", ".sort") and v is kwvals.get("key"):
+                    continue  # The modeled key invocation below retains its actual argument nodes.
                 if _dict_arms(v) and _callback_evidence(v, aliases_only=True):
                     callback_results[id(v)] = self.callback_call(node, v, first)
                 elif v.alias and _callback_evidence(v, self.mod.methods):
-                    callback_results[id(v)] = self.callback_effect(node, v, first, candidates)
+                    callback_results[id(v)] = self.callback_effect(node, v, first, candidates,
+                                                                  invocation=self.callback_binding(name, node, argvals))
                 else:
                     for fk in v.funcs:
                         called[fk] = self.callback_call(node, V(v.ex, v.im, {fk}), first)
@@ -1675,7 +1881,16 @@ class Frame:
             key = kwvals["key"]
             key_node = next((k.value for k in node.keywords if k.arg == "key"), None)
             if not (isinstance(key_node, ast.Constant) and key_node.value is None):
-                callback_results[id(key)] = self.callback_call(node, key, first)
+                if name in ("min", "max") and len(argvals) > 1:
+                    invocations = [([value], [actual]) for value, actual in zip(argvals, node.args)]
+                elif argvals:
+                    invocations = self.callback_arguments(node.args[:1], argvals[:1])
+                elif recv is not None and isinstance(node.func, ast.Attribute):
+                    invocations = self.callback_arguments([node.func.value], [recv])
+                else:
+                    invocations = [(first, [])]
+                callback_results[id(key)] = vjoin(*[
+                    self.callback_call(node, key, values, nodes) for values, nodes in invocations])
         out = vjoin(V({C}), *result) if result else V({C})
         if name in ("sorted", "min", "max", ".sort") and "key" in kwvals:
             keyret = vjoin(callback_results.get(id(kwvals["key"]), V()),
@@ -1706,7 +1921,7 @@ class Frame:
             ex = (ex - {P}) | {E}
         return V(ex, im, out.funcs)
 
-    def callback_effect(self, node, callback, first, candidates, required=False, seen=frozenset()):
+    def callback_effect(self, node, callback, first, candidates, required=False, seen=frozenset(), invocation=None):
         """Follow a generic callback's binding or refuse the unresolved path."""
         binding = callback.key()
         if binding in seen:
@@ -1721,13 +1936,13 @@ class Frame:
             self.with_ctx(callback.im, lambda: out.extend(
                 self.callback_effect(node, V(arm.ex | callback.ex, arm.im | callback.im,
                                              arm.funcs, arm.elems, arm.item, arm.alias),
-                                     first, candidates, True, seen) for arm in alias[1]))
+                                     first, candidates, True, seen, invocation) for arm in alias[1]))
             return vjoin(*out)
         if alias and alias[0] == "method" and alias[1] == "__call__":
             inner = alias[2]
             selected = V(inner.ex | callback.ex, inner.im | callback.im, inner.funcs,
                          inner.elems, inner.item, inner.alias)
-            return self.callback_effect(node, selected, first, candidates, required, seen)
+            return self.callback_effect(node, selected, first, candidates, required, seen, invocation)
         if alias and alias[0] == "partial":
             if len(alias) > 2:
                 target_alias = alias[2].alias
@@ -1737,7 +1952,7 @@ class Frame:
                             "partial", alias[1], V(arm.ex | alias[2].ex, arm.im | alias[2].im,
                                 arm.funcs, arm.elems, arm.item, arm.alias),
                             alias[3], alias[4], alias[5])),
-                        first, candidates, True, seen) for arm in target_alias[1]])
+                        first, candidates, True, seen, invocation) for arm in target_alias[1]])
                 def fixed(target):
                     ta = target.alias
                     if target.funcs or (ta and ta[0] == "method" and ta[1] in self.mod.methods):
@@ -1762,7 +1977,7 @@ class Frame:
                 selected = V(target.ex | callback.ex, target.im | callback.im, target.funcs,
                              target.elems, target.item, target.alias)
                 return self.callback_effect(node, selected, first, list(alias[1]) + candidates,
-                                            True, seen)
+                                            True, seen, invocation)
             return self.callback_call(node, callback, first)
         name = self.callable_name(ast.Constant(value=None), callback)
         if name is not None and name.startswith("builtins.dict."):
@@ -1791,7 +2006,7 @@ class Frame:
                 return V({D})
             return vjoin(*[self.callback_effect(
                 node, V(target.ex | callback.ex, target.im | callback.im, target.funcs,
-                        target.elems, target.item, target.alias), first, candidates, True, seen)
+                        target.elems, target.item, target.alias), first, candidates, True, seen, invocation)
                 for target in targets])
         if alias and alias[0] == "method" and alias[1] in _REMOVAL_METHODS:
             receivers = [alias[2]] if _dict_arms(alias[2]) else [
@@ -1800,15 +2015,25 @@ class Frame:
         elif name in _REMOVAL_CALLS:
             receivers = [candidate for value in candidates for candidate in (value, element(value))
                          if _dict_arms(candidate)]
+        elif _qualified_removal(name):
+            possible = vjoin(*candidates)
+            self.remove_presence(possible, None, possible, node, name.rsplit(".", 1)[1],
+                                 "qualified removal callback")
+            return possible
         else:
             return self.callback_call(node, callback, first)
         if not receivers:
+            possible = vjoin(callback, *candidates)
+            method = alias[1] if alias and alias[0] == "method" else _REMOVAL_CALLS[name]
+            self.remove_presence(possible, None, possible, node, method, "generic removal binding")
             self.ps.flag(self.mod, node, "unresolvable call target (generic removal binding)")
             return V({D})
         values = [candidate for value in candidates for candidate in (value, element(value))]
         labels = vjoin(*[V(v.ex, v.im) for v in values], V(callback.ex, callback.im))
+        key_node = self.removal_binding_key(invocation)
+        method = alias[1] if alias and alias[0] == "method" else _REMOVAL_CALLS[name]
         self.with_ctx(callback.im, lambda: [
-            self.remove_presence(receiver, None, labels) for receiver in receivers])
+            self.remove_presence(receiver, key_node, labels, node, method) for receiver in receivers])
         return vjoin(*receivers)
 
     def sink(self, node, what, v, klass):
@@ -3047,8 +3272,14 @@ def test_removal_selection_keeps_classification_labels(route, selected, choice):
     lines += ['    result = box.setdefault("rank", "HOT")',
               '    return {"name": %s}' % ('result' if selected == 'returned' else 'box["rank"]'), '']
     findings = _fixture(_REMOVAL_IMPORTS + "\n".join(lines), _BOT_PERMITTED, _WORKER_FIXTURE)
-    assert len(findings) == 1 and "reads K" in str(findings[0]), (
-        route, selected, choice, _fmt(findings))
+    if choice == "dynamic-key" and route != "clear":
+        assert findings == [
+            Finding(("fixture_api.py", 11, "unresolvable removal (required literal key unresolved)")),
+            Finding(("fixture_api.py", 13, "display sink api display slot 'name' reads K")),
+        ], (route, selected, choice, _fmt(findings))
+    else:
+        assert len(findings) == 1 and "reads K" in str(findings[0]), (
+            route, selected, choice, _fmt(findings))
 
 
 @pytest.mark.parametrize("route", ["pop", "del", "dunder", "operator-delitem"])
@@ -3060,7 +3291,10 @@ def test_dynamic_removal_key_keeps_its_explicit_data_provenance(route):
            '    result = box.setdefault("rank", "HOT")\n'
            '    return {"name": result}\n')
     findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
-    assert len(findings) == 1 and "reads D" in str(findings[0]), (route, _fmt(findings))
+    assert findings == [
+        Finding(("fixture_api.py", 10, "unresolvable removal (required literal key unresolved)")),
+        Finding(("fixture_api.py", 12, "display sink api display slot 'name' reads D")),
+    ], (route, _fmt(findings))
 
 
 @pytest.mark.parametrize("route", ["pop", "del", "dunder", "operator-delitem"])
@@ -3191,7 +3425,7 @@ _REMOVAL_CALLBACK_IMPORTS = (_REMOVAL_IMPORTS +
 def _removal_wrapper_api(operation, selected="returned", extra="", constant=False):
     result = "result" if selected == "returned" else 'box["rank"]'
     return (_REMOVAL_CALLBACK_IMPORTS +
-            'def _erase(box):\n    box.pop("rank")\n\n'
+            ('def _erase(box):\n    box.pop("rank")\n\n' if "_erase" in operation else "") +
             'def _noop(value):\n    return None\n\n' + extra +
             'def evidence_report(request: Request, row):\n'
             '    box = {"rank": ' + ('"COLD"' if constant else '0.0') + '}\n' +
@@ -3404,7 +3638,9 @@ _REMOVAL_DELEGATION_HELPERS = (
 @pytest.mark.parametrize("selected", ["returned", "stored"])
 def test_removal_delegation_keeps_explicit_callable_selection(route, selected):
     api = _removal_wrapper_api(_REMOVAL_DELEGATION_SELECTION[route], selected,
-                              extra=_REMOVAL_DELEGATION_HELPERS, constant=True)
+                              extra=(_REMOVAL_DELEGATION_HELPERS if route == "own-method" else
+                                     _REMOVAL_DELEGATION_HELPERS.split("class _Eraser:", 1)[0]),
+                              constant=True)
     findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
     assert len(findings) == 1 and "reads D" in str(findings[0]), (route, selected, _fmt(findings))
 
@@ -3414,7 +3650,8 @@ def test_removal_delegation_keeps_explicit_callable_selection(route, selected):
     'value = row.clear.__call__()', 'value = list(map(dict.clear, (row,)))[0]',
 ])
 def test_delegation_keeps_constant_removal_return_control(operation):
-    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n    ' + operation + '\n'
+    operation = operation.replace("row.clear", "box.clear").replace("(row,)", "(box,)")
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n    box = {"rank": row["rank"]}\n    ' + operation + '\n'
            '    return {"name": value}\n')
     assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
 
@@ -3516,10 +3753,10 @@ _FIX7_GENERIC_REMOVALS = {
     "getattr-type": 'functools.reduce(getattr(type(box), "pop"), ("rank",), box)',
     "getattr-class": 'functools.reduce(getattr(box.__class__, "pop"), ("rank",), box)',
     "operator-bound": 'functools.reduce(operator.call, (box.pop, "rank"))',
-    "operator-type": 'functools.reduce(operator.call, (type(box).pop, box, "rank"))',
-    "operator-class": 'functools.reduce(operator.call, (box.__class__.pop, box, "rank"))',
-    "operator-getattr-type": 'functools.reduce(operator.call, (getattr(type(box), "pop"), box, "rank"))',
-    "operator-getattr-class": 'functools.reduce(operator.call, (getattr(box.__class__, "pop"), box, "rank"))',
+    "operator-type": 'functools.reduce(operator.call, (partial(type(box).pop, box), "rank"))',
+    "operator-class": 'functools.reduce(operator.call, (partial(box.__class__.pop, box), "rank"))',
+    "operator-getattr-type": 'functools.reduce(operator.call, (partial(getattr(type(box), "pop"), box), "rank"))',
+    "operator-getattr-class": 'functools.reduce(operator.call, (partial(getattr(box.__class__, "pop"), box), "rank"))',
     "operator-import": 'functools.reduce(invoke, (box.pop, "rank"))',
     "operator-dunder": 'functools.reduce(operator.call.__call__, (box.pop, "rank"))',
     "partial-type": 'functools.reduce(partial(type(box).pop), ("rank",), box)',
@@ -4189,6 +4426,539 @@ def test_fix8_resolved_dictionary_callback_control():
     assert ref.must_keys == frozenset()
     assert frame.ps.findings == set(), _fmt(frame.ps.findings)
 
+
+_FIX9_QUALIFIED_REMOVALS = [
+    (prefix, method) for prefix in (
+        "collections.OrderedDict", "OrderedDict",
+        "collections.defaultdict", "defaultdict",
+        "collections.abc.MutableMapping", "MutableMapping", "typing.Dict", "Dict")
+    for method in ("pop", "popitem", "clear")
+]
+
+
+def _fix9_removal_api(operation):
+    return ('import collections\nimport collections.abc\nimport typing\n'
+            'from collections import OrderedDict, defaultdict\n'
+            'from collections.abc import MutableMapping\nfrom typing import Dict\n'
+            'class Holder:\n    pass\n\n'
+            'def evidence_report(row):\n'
+            '    box = {"rank": 0.0, "other": 0.0}\n' +
+            ''.join('    ' + line + '\n' for line in operation.splitlines()) +
+            '    result = box.setdefault("rank", row["rank"])\n'
+            '    word = "COLD"\n'
+            '    if result > 0.5:\n        word = "HOT"\n'
+            '    return {"name": word}\n')
+
+
+@pytest.mark.parametrize("operation", [
+    'h = Holder()\nh.box = box\nh.box.pop("rank")',
+    'h = Holder()\nh.box = box\nh.box.clear()',
+    'h = Holder()\nh.box = box\nh.box.popitem()',
+])
+def test_fix9_opaque_removal_refuses(operation):
+    api = _fix9_removal_api(operation)
+    # For popitem the last item must be the key whose absence controls the word.
+    if "popitem" in operation:
+        api = api.replace('{"rank": 0.0, "other": 0.0}', '{"other": 0.0, "rank": 0.0}')
+    namespace = {}
+    exec(api, namespace)
+    assert [namespace["evidence_report"]({"rank": rank}) for rank in (0.0, 1.0)] == [
+        {"name": "COLD"}, {"name": "HOT"}]
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable removal" in str(f) for f in findings), _fmt(findings)
+
+
+def test_fix9_opaque_del_refuses():
+    api = _fix9_removal_api('h = Holder()\nh.box = box\ndel h.box["rank"]')
+    namespace = {}
+    exec(api, namespace)
+    assert [namespace["evidence_report"]({"rank": rank}) for rank in (0.0, 1.0)] == [
+        {"name": "COLD"}, {"name": "HOT"}]
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable removal" in str(f) for f in findings), _fmt(findings)
+
+
+@pytest.mark.parametrize("prefix,method", _FIX9_QUALIFIED_REMOVALS)
+def test_fix9_qualified_removal_refuses(prefix, method):
+    operation = prefix + "." + method + '(box' + (', "rank")' if method == "pop" else ')')
+    api = _fix9_removal_api(operation).replace(
+        '{"rank": 0.0, "other": 0.0}', '{"rank": 0.0}')
+    namespace = {}
+    exec(api, namespace)
+    if "OrderedDict" in prefix:
+        with pytest.raises(TypeError):
+            namespace["evidence_report"]({"rank": 1.0})
+    else:
+        assert [namespace["evidence_report"]({"rank": rank}) for rank in (0.0, 1.0)] == [
+            {"name": "COLD"}, {"name": "HOT"}]
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable removal" in str(f) for f in findings), _fmt(findings)
+
+
+@pytest.mark.parametrize("operation", [
+    'box = {k: v for k, v in box.items() if k != "rank"}',
+    'box = {k: v for k, v in box.items() if "rank" != k}',
+    'box = {k: v for k, v in box.items() if k == "other"}',
+    'box = dict((k, v) for k, v in box.items() if k != "rank")',
+])
+def test_fix9_constructed_dictionary_does_not_keep_removed_presence(operation):
+    api = _fix9_removal_api(operation)
+    namespace = {}
+    exec(api, namespace)
+    assert [namespace["evidence_report"]({"rank": rank}) for rank in (0.0, 1.0)] == [
+        {"name": "COLD"}, {"name": "HOT"}]
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("reads K" in str(f) for f in findings), _fmt(findings)
+
+
+@pytest.mark.parametrize("operation", [
+    'box = {k: v for k, v in box.items()}',
+    'box = {k: v for k, v in box.items() if k != "other"}',
+    'box = dict(box)',
+    'box = {**box}',
+])
+def test_fix9_resolved_copy_controls(operation):
+    assert _fixture(_fix9_removal_api(operation), _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("operation", [
+    'key = row["key"]\nbox.pop(key)',
+    'key = row["key"]\ndel box[key]',
+    'key = row["key"]\ndict.pop(box, key)',
+])
+def test_fix9_unknown_key_refuses_and_demotes(operation):
+    api = _fix9_removal_api(operation)
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable removal" in str(f) for f in findings), _fmt(findings)
+    ref, frame = _removal_state_frame()
+    frame.ps.recording = True
+    frame.block(ast.parse(operation.replace('row["key"]', 'key')).body)
+    assert not ref.must_keys
+
+
+@pytest.mark.parametrize("operation", [
+    'value = partial(row.clear)()', 'value = operator.call(row.clear)',
+    'value = row.clear.__call__()', 'value = list(map(dict.clear, (row,)))[0]',
+])
+def test_fix9_opaque_constant_return_refuses(operation):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n    ' + operation +
+           '\n    return {"name": value}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable removal" in str(f) for f in findings), _fmt(findings)
+
+
+
+
+@pytest.mark.parametrize("key_node", [
+    ast.Constant(value=None),
+    ast.Name(id="_callback_argument", ctx=ast.Load()),
+    ast.Constant(value=1),
+    ast.Constant(value=True),
+])
+def test_fix9_unknown_or_unsupported_callback_key_refuses(key_node):
+    ref, frame = _removal_state_frame()
+    frame.ps.recording = True
+    operation = ast.fix_missing_locations(ast.Expr(value=ast.Call(
+        func=ast.Attribute(value=ast.Name(id="box", ctx=ast.Load()), attr="pop", ctx=ast.Load()),
+        args=[key_node], keywords=[])))
+    frame.block([operation])
+    assert not ref.must_keys
+    assert any("unresolvable removal" in str(f) for f in frame.ps.findings)
+
+
+_FIX9_MALFORMED_GENERIC_REMOVALS = {'operator-type': 'functools.reduce(operator.call, (type(box).pop, box, '
+                  '"rank"))',
+ 'operator-class': 'functools.reduce(operator.call, (box.__class__.pop, box, '
+                   '"rank"))',
+ 'operator-getattr-type': 'functools.reduce(operator.call, (getattr(type(box), '
+                          '"pop"), box, "rank"))',
+ 'operator-getattr-class': 'functools.reduce(operator.call, '
+                           '(getattr(box.__class__, "pop"), box, "rank"))'}
+
+
+@pytest.mark.parametrize("route", list(_FIX9_MALFORMED_GENERIC_REMOVALS))
+@pytest.mark.parametrize("receiver", ["box", "other"])
+def test_fix9_malformed_reduction_requires_the_actual_literal_key(route, receiver):
+    operation = _FIX9_MALFORMED_GENERIC_REMOVALS[route].replace("box", receiver)
+    if receiver == "other":
+        operation = 'other = {"rank": 0.0}\n' + operation
+    findings = _fixture(_removal_wrapper_api(operation), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable removal (required literal key unresolved)" in str(f)
+               for f in findings), (route, receiver, _fmt(findings))
+
+
+@pytest.mark.parametrize("operation", [
+    'list(map(box.pop, ("rank", "other")))',
+    'list(filter(box.pop, ("rank", "other")))',
+    'sorted(("rank", "other"), key=box.pop)',
+    'min(("rank", "other"), key=box.pop)',
+    'max(("rank", "other"), key=box.pop)',
+    'min("rank", "other", key=box.pop)',
+    'max("rank", "other", key=box.pop)',
+])
+def test_fix9_each_literal_wrapper_argument_resolves(operation):
+    ref, frame = _removal_state_frame()
+    frame.ps.recording = True
+    frame.block(ast.parse(operation).body)
+    assert not ref.must_keys
+    assert not frame.ps.findings, _fmt(frame.ps.findings)
+
+
+
+def _fix9_exit_source_inventory():
+    """Map every effect and construction site to a semantic route, independent of lines."""
+    with open(__file__, encoding="utf-8") as stream:
+        parsed = ast.parse(stream.read())
+    frame = next(n for n in parsed.body if isinstance(n, ast.ClassDef) and n.name == "Frame")
+    sites = {}
+    constructors = {
+        ("e_Dict", "dict_value"): "dictionary.literal",
+        ("e_Dict", "copy_dictionary"): "dictionary.unpack-copy",
+        ("e_Dict", "dynamic_dictionary"): "dictionary.dynamic",
+        ("e_DictComp", "copy_dictionary"): "comprehension.copy",
+        ("e_DictComp", "dynamic_dictionary"): "comprehension.dynamic",
+        ("call_value", "copy_dictionary"): "constructor.copy",
+        ("call_value", "dynamic_dictionary"): "constructor.dynamic",
+        ("copy_dictionary", "dynamic_dictionary"): "copy.unknown-source",
+        ("copy_dictionary", "dict_value"): "copy.allocate",
+        ("dynamic_dictionary", "dict_value"): "dynamic.allocate",
+    }
+    expected_effects = {
+        "delete.subscript", "call.missing-receiver", "call.named", "call.method", "call.qualified",
+        "callback.qualified", "callback.no-receiver", "callback.resolved",
+        "effect.demote", "copy.demote", "dynamic.demote",
+    }
+    for fn in frame.body:
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        parents = {child: parent for parent in ast.walk(fn) for child in ast.iter_child_nodes(parent)}
+        for call in ast.walk(fn):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
+                continue
+            method = call.func.attr
+            guards = []
+            parent = parents.get(call)
+            while parent is not None:
+                if isinstance(parent, ast.If):
+                    guards.append(ast.unparse(parent.test))
+                parent = parents.get(parent)
+            if method == "remove_presence":
+                assert len(call.args) >= 5 or {"node", "method"} <= {k.arg for k in call.keywords}, (
+                    "removal metadata not forwarded", fn.name, ast.unparse(call))
+                if fn.name == "delete_target":
+                    assert any("ast.Subscript" in guard for guard in guards), guards
+                    route = "delete.subscript"
+                elif fn.name == "call_value":
+                    if any("len(argvals) < minimum" in guard for guard in guards):
+                        assert any("_REMOVAL_CALLS" in guard for guard in guards), guards
+                        route = "call.missing-receiver"
+                    elif any("_qualified_removal" in guard for guard in guards):
+                        route = "call.qualified"
+                    elif isinstance(call.args[0], ast.Name) and call.args[0].id == "effect_recv":
+                        assert any("_REMOVAL_METHODS" in guard for guard in guards), guards
+                        route = "call.method"
+                    else:
+                        assert any("_REMOVAL_CALLS" in guard for guard in guards), guards
+                        route = "call.named"
+                elif fn.name == "callback_effect":
+                    if any("not receivers" in guard for guard in guards):
+                        route = "callback.no-receiver"
+                    elif any("_qualified_removal" in guard for guard in guards):
+                        route = "callback.qualified"
+                    else:
+                        assert isinstance(call.args[0], ast.Name) and call.args[0].id == "receiver"
+                        route = "callback.resolved"
+                else:
+                    raise AssertionError(("unprobed removal caller", fn.name, ast.unparse(call)))
+                kind = "boundary"
+            elif method == "remove":
+                assert fn.name in ("remove_presence", "copy_dictionary", "dynamic_dictionary"), (fn.name, ast.unparse(call))
+                assert isinstance(call.func.value, ast.Name) and call.func.value.id == "ref"
+                route = {"remove_presence": "effect.demote", "copy_dictionary": "copy.demote",
+                         "dynamic_dictionary": "dynamic.demote"}[fn.name]
+                kind = "reducer"
+            elif (fn.name, method) in constructors:
+                route = constructors[(fn.name, method)]
+                kind = "construction"
+            elif method in ("copy_dictionary", "dynamic_dictionary", "dict_value"):
+                raise AssertionError(("unprobed construction caller", fn.name, ast.unparse(call)))
+            else:
+                continue
+            assert route not in sites, ("duplicate/unprobed route", route)
+            sites[route] = (call.lineno, call.end_lineno, kind)
+    assert set(sites) == expected_effects | set(constructors.values()), sites
+    # Dispatch siblings must still lead into the followed-call graph. Their
+    # semantic probes below exercise the actual literal argument at each edge.
+    dispatch = {
+        ("call_value", "operator.call"): "callback_call",
+        ("call_value", "map"): "callback_call",
+        ("call_value", "__call__"): "invoke",
+        ("call_value", "partial"): "callback_call",
+        ("callback_effect", "__call__"): "callback_effect",
+        ("callback_effect", "partial"): "callback_effect",
+    }
+    for (owner, literal), followed in dispatch.items():
+        fn = next(n for n in frame.body if isinstance(n, ast.FunctionDef) and n.name == owner)
+        branches = [n for n in ast.walk(fn) if isinstance(n, ast.If)
+                    and any(isinstance(v, ast.Constant) and v.value == literal for v in ast.walk(n.test))]
+        assert any(any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                           and c.func.attr == followed for c in ast.walk(branch)) for branch in branches), (
+                               owner, literal, followed)
+    return sites
+
+
+def test_fix9_exit_inventory_semantic_coverage(monkeypatch):
+    """Every source route has an observed effect, refusal or fresh allocation probe."""
+    import inspect
+    sites = _fix9_exit_source_inventory()
+    observed = set()
+    outcomes = set()
+
+    def record(kind, line):
+        matches = [route for route, (first, last, site_kind) in sites.items()
+                   if site_kind == kind and first <= line <= last]
+        assert len(matches) == 1, ("unmapped executed exit", kind, line, matches)
+        observed.add(matches[0])
+        return matches[0]
+
+    original_removal = Frame.remove_presence
+    original_reduce = DictRef.remove
+    original_copy = Frame.copy_dictionary
+    original_dynamic = Frame.dynamic_dictionary
+    original_allocate = Pass.dict_value
+
+    def removal(self, recv, key_node, key_value, *metadata, **kwargs):
+        route = record("boundary", inspect.currentframe().f_back.f_lineno)
+        direct = tuple(arm.alias[1] for arm in _dict_arms(recv))
+        reachable = tuple(arm.alias[1] for arm in _reachable_dictionary_arms(recv))
+        result = original_removal(self, recv, key_node, key_value, *metadata, **kwargs)
+        assert result in ("resolved", "refused"), (route, result)
+        outcomes.add((route, result))
+        method = kwargs.get("method", metadata[1] if len(metadata) > 1 else "__delitem__")
+        if result == "resolved":
+            assert direct, route
+            if _REMOVAL_METHODS.get(method, True):
+                assert isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
+                assert all(key_node.value not in ref.must_keys for ref in direct), route
+            else:
+                assert all(not ref.must_keys for ref in direct), route
+        else:
+            assert all(not ref.must_keys for ref in reachable), route
+            if self.ps.recording:
+                assert any("unresolvable removal" in str(f) for f in self.ps.findings), route
+        return result
+
+    def reduce_presence(self, *args, **kwargs):
+        record("reducer", inspect.currentframe().f_back.f_lineno)
+        return original_reduce(self, *args, **kwargs)
+
+    def construction(original):
+        def followed(self, *args, **kwargs):
+            line = inspect.currentframe().f_back.f_lineno
+            # Direct calls from this test exercise unknown-copy fallback too;
+            # only the interpreter's own construction exits are enumerated.
+            if any(first <= line <= last and kind == "construction"
+                   for first, last, kind in sites.values()):
+                record("construction", line)
+            return original(self, *args, **kwargs)
+        return followed
+
+    monkeypatch.setattr(Frame, "remove_presence", removal)
+    monkeypatch.setattr(DictRef, "remove", reduce_presence)
+    monkeypatch.setattr(Frame, "copy_dictionary", construction(original_copy))
+    monkeypatch.setattr(Frame, "dynamic_dictionary", construction(original_dynamic))
+    monkeypatch.setattr(Pass, "dict_value", construction(original_allocate))
+
+    def state():
+        ref, frame = _removal_state_frame()
+        frame.mod = Module("api", _REMOVAL_CALLBACK_IMPORTS + "import collections\n", "fixture.py", lambda q: False)
+        frame.ps.recording = True
+        return ref, frame
+
+    # Direct, named and dispatch siblings all receive a real literal key.
+    resolved = (
+        'box.pop("rank")', 'dict.pop(box, "rank")', 'builtins.dict.pop(box, "rank")',
+        'del box["rank"]', 'box.pop.__call__("rank")',
+        'dict.pop.__call__(box, "rank")', 'operator.call(box.pop, "rank")',
+        'partial(box.pop, "rank")()', 'partial(dict.pop, box)("rank")',
+        'list(map(box.pop, ("rank",)))', 'list(map(dict.pop, (box,), ("rank",)))',
+        'list(filter(box.pop, ("rank",)))',
+        'sorted(("rank",), key=box.pop)', 'min(("rank",), key=box.pop)',
+        'max(("rank",), key=box.pop)',
+        'functools.reduce(box.pop, ("rank", None))',
+        'functools.reduce(dict.pop, ("rank",), box)',
+        'functools.reduce(operator.call, (box.pop, "rank"))',
+        'functools.reduce(operator.call, (partial(type(box).pop, box), "rank"))',
+        'functools.reduce(partial(dict.pop), ("rank",), box)',
+    )
+    for operation in resolved:
+        ref, frame = state()
+        frame.block(ast.parse(operation).body)
+        assert "rank" not in ref.must_keys, (operation, ref.must_keys)
+        assert not frame.ps.findings, (operation, _fmt(frame.ps.findings))
+    for operation in ('box.clear()', 'box.popitem()'):
+        ref, frame = state()
+        frame.block(ast.parse(operation).body)
+        assert not ref.must_keys and not frame.ps.findings, operation
+
+    for name in list(_REMOVAL_CALLS) + ["builtins." + name for name in _REMOVAL_CALLS
+                                      if name.startswith("dict.")]:
+        for keyword_receiver in (False, True):
+            ref, frame = state()
+            operation = name + ("(receiver=box)" if keyword_receiver else "()")
+            returned = frame.expr(ast.parse(operation).body[0].value)
+            assert len(frame.ps.findings) == 1, (operation, _fmt(frame.ps.findings))
+            diagnostic = str(next(iter(frame.ps.findings)))
+            assert "unresolvable removal" in diagnostic and "unresolvable call binding" in diagnostic
+            assert "missing target, receiver or input" in diagnostic
+            assert returned.flat() == {D}, (operation, returned.flat())
+            assert ref.must_keys == (frozenset() if keyword_receiver else {"rank", "other"}), operation
+
+    for operation in ('box.pop(key)', 'dict.pop(box, key)', 'del box[key]',
+                      'collections.defaultdict.pop(box, "rank")',
+                      'functools.reduce(collections.defaultdict.pop, ("rank",), box)'):
+        ref, frame = state()
+        frame.block(ast.parse(operation).body)
+        assert not ref.must_keys, operation
+        assert any("unresolvable removal" in str(f) for f in frame.ps.findings), operation
+
+    # Generic qualified and zero-receiver tails must reach the shared boundary.
+    ref, frame = state()
+    node = ast.parse('collections.defaultdict.pop').body[0].value
+    callback = frame.expr(node)
+    frame.callback_effect(node, callback, [], [frame.env["box"]])
+    assert not ref.must_keys
+    assert any("unresolvable removal" in str(f) for f in frame.ps.findings)
+    ref, frame = state()
+    frame.env["opaque"] = V({C})
+    node = ast.parse('opaque.pop').body[0].value
+    frame.callback_effect(node, frame.expr(node), [], [V({C})])
+    assert any("unresolvable removal" in str(f) for f in frame.ps.findings)
+    ref, frame = state()
+    node = ast.parse('box.pop').body[0].value
+    callback = frame.expr(node)
+    frame.callback_effect(node, callback, [], [frame.env["box"]],
+                          invocation=(callback, [V({C})], [ast.Constant(value="rank")]))
+    assert ref.must_keys == {"other"} and not frame.ps.findings
+    ref, frame = state()
+    node = ast.parse('box.pop').body[0].value
+    frame.callback_effect(node, frame.expr(node), [], [frame.env["box"]])
+    assert not ref.must_keys
+    assert any("unresolvable removal" in str(f) for f in frame.ps.findings)
+
+    # A no-key invocation cannot borrow a later reduction element as its key.
+    malformed = (
+        'functools.reduce(operator.call, (type(box).pop, box, "rank"))',
+        'functools.reduce(operator.call, (box.__class__.pop, box, "rank"))',
+        'functools.reduce(operator.call, (getattr(type(box), "pop"), box, "rank"))',
+        'functools.reduce(operator.call, (getattr(box.__class__, "pop"), box, "rank"))',
+    )
+    for operation in malformed:
+        ref, frame = state()
+        frame.block(ast.parse(operation).body)
+        assert not ref.must_keys, operation
+        assert any("unresolvable removal" in str(f) and "literal key" in str(f)
+                   for f in frame.ps.findings), (operation, _fmt(frame.ps.findings))
+
+    # E1-E4 witness modules are independent of the direct state probes above.
+    witnesses = (
+        ('h = Holder()\nh.box = box\nh.box.pop("rank")', "unresolvable removal"),
+        ('collections.defaultdict.pop(box, "rank")', "unresolvable removal"),
+        ('box = {k: v for k, v in box.items() if k != "rank"}', "reads K"),
+        ('h = Holder()\nh.box = box\ndel h.box["rank"]', "unresolvable removal"),
+    )
+    for operation, diagnostic in witnesses:
+        findings = _fixture(_fix9_removal_api(operation), _BOT_PERMITTED, _WORKER_FIXTURE)
+        assert any(diagnostic in str(f) for f in findings), (operation, _fmt(findings))
+
+    # Each derived dictionary has its own arm; none may remove source presence.
+    constructions = (
+        ('{}', set()),
+        ('{**box}', {"rank", "other"}),
+        ('{key: 0.0}', set()),
+        ('{k: v for k, v in box.items()}', {"rank", "other"}),
+        ('{k: v for k, v in box.items() if k != "rank"}', {"other"}),
+        ('{k: v for k, v in box.items() if k == "other"}', set()),
+        ('dict(box)', {"rank", "other"}),
+        ('dict((k, v) for k, v in box.items() if k != "rank")', set()),
+    )
+    for expression, definite in constructions:
+        ref, frame = state()
+        value = frame.expr(ast.parse(expression).body[0].value)
+        arms = _dict_arms(value)
+        assert arms and all(arm.alias[1].token != ref.token for arm in arms), expression
+        assert all(set(arm.alias[1].must_keys) == definite for arm in arms), expression
+        assert ref.must_keys == {"rank", "other"}, expression
+    # A may-present copied key exercises copy_dictionary's own presence reducer.
+    ref, frame = state()
+    ref.must_keys = frozenset({"other"})
+    copied = frame.expr(ast.parse('dict(box)').body[0].value)
+    assert all(arm.alias[1].must_keys == {"other"} for arm in _dict_arms(copied))
+    frame.copy_dictionary(ast.parse('{}').body[0].value, V({C}))
+    assert observed == set(sites), ("source routes missing semantic probes", set(sites) - observed)
+    required_outcomes = {
+        ("delete.subscript", "resolved"), ("delete.subscript", "refused"),
+        ("call.missing-receiver", "refused"),
+        ("call.named", "resolved"), ("call.named", "refused"),
+        ("call.method", "resolved"), ("call.method", "refused"),
+        ("call.qualified", "refused"), ("callback.qualified", "refused"),
+        ("callback.no-receiver", "refused"), ("callback.resolved", "resolved"),
+        ("callback.resolved", "refused"),
+    }
+    assert required_outcomes <= outcomes, required_outcomes - outcomes
+    for mode in ("empty-copy", "dynamic"):
+        ref, frame = state()
+        node = ast.parse('dict(box)').body[0].value
+        copied = frame.copy_dictionary(node, frame.env["box"])
+        assert _dict_arms(copied)[0].alias[1].must_keys == {"rank", "other"}
+        if mode == "empty-copy":
+            empty = DictRef(("fixture", "empty"))
+            empty.seed((), ())
+            frame.copy_dictionary(node, V(alias=("dict", empty)))
+        else:
+            frame.dynamic_dictionary(node, V({C}))
+        assert not _dict_arms(copied)[0].alias[1].must_keys, mode
+        assert ref.must_keys == {"rank", "other"}, mode
+    for operation in (
+            'box = dict.__call__((k, v) for k, v in box.items() if k != "rank")',
+            'copies = list(map(dict, (box, {})))\nbox = copies[1]'):
+        findings = _fixture(_fix9_removal_api(operation), _BOT_PERMITTED, _WORKER_FIXTURE)
+        assert any("reads K" in str(f) for f in findings), (operation, _fmt(findings))
+    collision = ('class Unrelated:\n    def pop(self, *args):\n        return None\n' +
+                 _fix9_removal_api('h = Holder()\nh.box = box\nh.box.pop("rank")'))
+    findings = _fixture(collision, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable removal" in str(f) for f in findings), _fmt(findings)
+    for label in (K, O):
+        ref, frame = state()
+        node = ast.parse('unknown(value, named=value)').body[0].value
+        returned = frame.call_value(node, V({label}), [V({label})], {"named": V({label})})
+        assert {D, label} <= returned.flat(), (label, returned.flat())
+        assert any("unresolvable call target" in str(f) for f in frame.ps.findings)
+
+
+@pytest.mark.parametrize("origin", ["target", "positional", "keyword"])
+@pytest.mark.parametrize("label", [D, K, O])
+def test_fix9_unknown_origin_return_keeps_all_argument_labels(origin, label):
+    ref, frame = _removal_state_frame()
+    frame.ps.recording = True
+    node = ast.parse('unknown(value, named=value)').body[0].value
+    target = V({label}) if origin == "target" else V()
+    positional = [V({label})] if origin == "positional" else [V({C})]
+    keyword = {"named": V({label})} if origin == "keyword" else {"named": V({C})}
+    returned = frame.call_value(node, target, positional, keyword)
+    assert {D, label} <= returned.flat(), (origin, label, returned.flat())
+    assert any("unresolvable call target" in str(f) for f in frame.ps.findings)
+
+
+def test_fix9_unknown_origin_constant_control_has_no_class_or_order_label():
+    ref, frame = _removal_state_frame()
+    frame.ps.recording = True
+    node = ast.parse('unknown("chrome")').body[0].value
+    returned = frame.call_value(node, V(), [V({C})], {})
+    assert not (returned.flat() & {K, O}) and D in returned.flat()
+    assert any("unresolvable call target" in str(f) for f in frame.ps.findings)
+
+
 # Fix 9 executes selected actual production definitions without api imports.
 def _fix9_population_namespace():
     import asyncio
@@ -4541,3 +5311,98 @@ def test_fix9_close_keeps_linear_slice_work(count):
     assert report.leases is original and not report.leases
     assert released == list(reversed(range(count)))
     assert copied[0] <= 2 * count, (count, copied[0])
+
+
+@pytest.mark.parametrize("operation", [
+    'collections.defaultdict.pop.__call__(box, "rank")',
+    'collections.defaultdict.pop.__call__.__call__(box, "rank")',
+    'functools.reduce(collections.defaultdict.pop, ("rank",), box)',
+    'functools.reduce(partial(collections.defaultdict.pop, box), ("rank", None))',
+    'list(map(collections.defaultdict.pop, (box,), ("rank",)))',
+    'operator.call(collections.defaultdict.pop, box, "rank")',
+])
+def test_fix9_qualified_removal_wrappers_refuse(operation):
+    source = _REMOVAL_CALLBACK_IMPORTS + _fix9_removal_api(operation)
+    namespace = {}
+    exec(source, namespace)
+    assert [namespace["evidence_report"]({"rank": value}) for value in (0.0, 1.0)] == [
+        {"name": "COLD"}, {"name": "HOT"}]
+    findings = _fixture(source, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable removal" in str(f) for f in findings), _fmt(findings)
+
+
+@pytest.mark.parametrize("operation", [
+    'box = dict.__call__((k, v) for k, v in box.items() if k != "rank")',
+    'box = builtins.dict.__call__((k, v) for k, v in box.items() if k != "rank")',
+    'box = dict.__call__.__call__((k, v) for k, v in box.items() if k != "rank")',
+    'copies = list(map(dict, (box, {})))\nbox = copies[1]',
+    'copies = list(map(dict, (box, [])))\nbox = copies[1]',
+])
+def test_fix9_constructor_siblings_drop_removed_presence(operation):
+    source = 'import builtins\n' + _fix9_removal_api(operation)
+    namespace = {}
+    exec(source, namespace)
+    assert [namespace["evidence_report"]({"rank": value}) for value in (0.0, 1.0)] == [
+        {"name": "COLD"}, {"name": "HOT"}]
+    findings = _fixture(source, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("reads K" in str(f) for f in findings), _fmt(findings)
+
+
+@pytest.mark.parametrize("method", ["pop", "clear", "popitem"])
+@pytest.mark.parametrize("receiver", ["box", "h.box"])
+def test_fix9_unrelated_method_name_cannot_hide_a_removal(method, receiver):
+    call = method + ('("rank")' if method == "pop" else '()')
+    operation = ('h = Holder()\nh.box = box\n' if receiver == "h.box" else '') + receiver + '.' + call
+    source = ('class Unrelated:\n    def ' + method + '(self, *args):\n        return None\n' +
+              _fix9_removal_api(operation).replace('{"rank": 0.0, "other": 0.0}', '{"rank": 0.0}'))
+    namespace = {}
+    exec(source, namespace)
+    assert [namespace["evidence_report"]({"rank": value}) for value in (0.0, 1.0)] == [
+        {"name": "COLD"}, {"name": "HOT"}]
+    findings = _fixture(source, _BOT_PERMITTED, _WORKER_FIXTURE)
+    diagnostic = "unresolvable removal" if receiver == "h.box" else "reads K"
+    assert any(diagnostic in str(f) for f in findings), _fmt(findings)
+
+
+@pytest.mark.parametrize("mode", ["empty-copy", "dynamic"])
+def test_fix9_repeated_constructor_allocation_loses_stale_presence(mode):
+    ref, frame = _removal_state_frame()
+    node = ast.parse('dict(box)').body[0].value
+    copied = frame.expr(node)
+    assert _dict_arms(copied) and _dict_arms(copied)[0].alias[1].must_keys == {"rank", "other"}
+    if mode == "empty-copy":
+        empty = DictRef(("fixture", "empty"))
+        empty.seed((), ())
+        frame.env["box"] = V(alias=("dict", empty))
+    else:
+        frame.env["box"] = V({C})
+    frame.expr(node)
+    assert not _dict_arms(copied)[0].alias[1].must_keys
+    assert ref.must_keys == {"rank", "other"}
+
+
+def test_fix9_generic_opaque_removal_reaches_the_refusal_boundary():
+    source = 'import functools\n' + _fix9_removal_api(
+        'h = Holder()\nh.box = box\nfunctools.reduce(h.box.pop, ("rank", None))')
+    namespace = {}
+    exec(source, namespace)
+    assert [namespace["evidence_report"]({"rank": value}) for value in (0.0, 1.0)] == [
+        {"name": "COLD"}, {"name": "HOT"}]
+    findings = _fixture(source, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable removal" in str(f) for f in findings), _fmt(findings)
+
+
+@pytest.mark.parametrize("name", list(_REMOVAL_CALLS) + [
+    "builtins." + name for name in _REMOVAL_CALLS if name.startswith("dict.")])
+@pytest.mark.parametrize("keyword_receiver", [False, True])
+def test_fix9_missing_named_receiver_reaches_removal_boundary(name, keyword_receiver):
+    ref, frame = _removal_state_frame()
+    frame.ps.recording = True
+    operation = name + ("(receiver=box)" if keyword_receiver else "()")
+    returned = frame.expr(ast.parse(operation).body[0].value)
+    assert len(frame.ps.findings) == 1, (operation, _fmt(frame.ps.findings))
+    diagnostic = str(next(iter(frame.ps.findings)))
+    assert "unresolvable removal" in diagnostic and "unresolvable call binding" in diagnostic
+    assert "missing target, receiver or input" in diagnostic
+    assert returned.flat() == {D}, (operation, returned.flat())
+    assert ref.must_keys == (frozenset() if keyword_receiver else {"rank", "other"}), operation
