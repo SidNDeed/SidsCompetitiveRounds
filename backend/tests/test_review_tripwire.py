@@ -989,11 +989,7 @@ def _outcome_hooks():
 
 
 def _outcome_probe(dirty, status, reset, finish=True):
-    import pluggy
-    from _pytest import hookspec
-
-    manager = pluggy.PluginManager("pytest")
-    manager.add_hookspecs(hookspec)
+    manager = pytest.PytestPluginManager()
     config = types.SimpleNamespace(pluginmanager=manager, stash=pytest.Stash())
     session = types.SimpleNamespace(config=config, exitstatus=status)
     manager.register(session, "session")
