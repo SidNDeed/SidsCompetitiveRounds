@@ -47,9 +47,13 @@ def pytest_sessionfinish(session, exitstatus):
             reporter.write_line("review tripwire: non-clean verdict (%d trips)" % len(trips))
 
 
-# Existing synthetic read-failure tests intentionally replace these exact
-# bindings. Their positive expected-trip scopes preserve the old assertions.
+# Synthetic read failures and count-cap instrumentation replace these exact
+# bindings. Their positive expected-trip scopes preserve the original assertions.
+# The r3 errno-hash test replaces then restores os.walk before observation;
+# monkeypatch undo replays that pair too. Neither interval requires a trip.
 _REVIEW_FAULTS = {
+    ("test_review_rules", "test_l3_enumeration_is_incremental_under_the_count_cap"):
+        ("os.scandir",),
     ("test_review_needles_r3", "test_m5_a_status_failure_is_the_exit_3_refusal_never_absence"):
         ("os.stat", "os.lstat"),
     ("test_review_needles_r3", "test_m5_an_unreadable_directory_under_a_scan_refuses"):

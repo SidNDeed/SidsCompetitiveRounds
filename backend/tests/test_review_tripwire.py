@@ -865,3 +865,115 @@ def test_non_subject_walk_suppression_keeps_ordinary_policy(tmp_path):
     worker.join()
     assert results == [[]]
     assert tw.verdict() == before
+
+# Exact inventory and scope-preservation controls.
+# Scope unit tests isolate only the record sink, preserving the session sink.
+
+@pytest.mark.parametrize("listed", (True, False))
+def test_inventory_count_exact_scope_preserves_the_count_cap(tmp_path, monkeypatch, capsys, listed):
+    import conftest
+    import test_review_rules as rules
+    key = ("test_review_rules", "test_l3_enumeration_is_incremental_under_the_count_cap")
+    records = []
+    monkeypatch.setattr(tw, "_trips", records)
+    if not listed:
+        monkeypatch.delitem(conftest._REVIEW_FAULTS, key, raising=False)
+    with pytest.MonkeyPatch.context() as patch:
+        with conftest._review_fault_scope(*key):
+            rules.test_l3_enumeration_is_incremental_under_the_count_cap(tmp_path, patch)
+    assert bool(tw.verdict()) is not listed
+    assert review_needles.main([]) == (2 if listed else 3)
+    capsys.readouterr()
+
+
+def test_unlisted_replacement_is_not_consumed(tmp_path, monkeypatch):
+    import conftest
+    records = []
+    monkeypatch.setattr(tw, "_trips", records)
+    saved = os.scandir
+    try:
+        with conftest._review_fault_scope("test_review_rules", "UNLISTED"):
+            os.scandir = lambda path: saved(path)
+            os.scandir(tmp_path).close()
+    finally:
+        os.scandir = saved
+    assert records and all(row["name"] == "os.scandir" for row in records)
+    assert tw.verdict() == records
+
+
+def test_expected_scope_retains_prior_trips(monkeypatch):
+    records = []
+    monkeypatch.setattr(tw, "_trips", records)
+    saved = os.walk
+    try:
+        os.walk = lambda *args, **kwargs: iter(())
+        tw.verdict()
+    finally:
+        os.walk = saved
+    prior = tuple(records)
+    with tw.expected_trip("os.walk"):
+        os.walk = lambda *args, **kwargs: iter(())
+    assert tuple(records) == prior and prior
+
+
+def test_expected_scope_retains_unexpected_names(monkeypatch):
+    records = []
+    monkeypatch.setattr(tw, "_trips", records)
+    saved = os.scandir
+    try:
+        with pytest.raises(AssertionError, match="unexpected trip"):
+            with tw.expected_trip("os.walk"):
+                os.scandir = lambda *args, **kwargs: iter(())
+    finally:
+        os.scandir = saved
+    assert records and all(row["name"] == "os.scandir" for row in records)
+
+
+def test_expected_scope_retains_failed_block_trips(monkeypatch):
+    records = []
+    monkeypatch.setattr(tw, "_trips", records)
+    failure = ValueError("synthetic scope failure")
+    with pytest.raises(ValueError) as caught:
+        with tw.expected_trip("os.walk"):
+            os.walk = lambda *args, **kwargs: iter(())
+            raise failure
+    assert caught.value is failure
+    assert records and all(row["name"] == "os.walk" for row in records)
+
+
+def test_expected_scope_retains_foreign_thread_trips(monkeypatch):
+    import threading
+    records = []
+    monkeypatch.setattr(tw, "_trips", records)
+    with tw.expected_trip("os.walk"):
+        os.walk = lambda *args, **kwargs: iter(())
+        worker = threading.Thread(target=tw.verdict)
+        worker.start()
+        worker.join()
+    assert records and all(row["_scope"] is None for row in records)
+    assert all(row["name"] == "os.walk" for row in records)
+
+
+def test_expected_scope_benign_control(monkeypatch):
+    records = []
+    monkeypatch.setattr(tw, "_trips", records)
+    with tw.expected_trip("os.walk", require=False):
+        pass
+    assert not records
+
+
+def test_restore_before_observation_walk_has_no_positive_scope(monkeypatch):
+    import conftest
+    import test_review_needles_r3 as r3
+    key = ("test_review_needles_r3", "test_m5_fix17_a_exact_oserror_errno_masks_cover_direct_and_callback_routes")
+    records = []
+    monkeypatch.setattr(tw, "_trips", records)
+    saved = os.walk
+    with pytest.MonkeyPatch.context() as patch:
+        with conftest._review_fault_scope(*key):
+            r3.test_m5_fix17_a_exact_oserror_errno_masks_cover_direct_and_callback_routes(patch)
+        assert os.walk is saved
+        assert not tw.verdict()
+    # Undo replays the manual restoration and then the original replacement.
+    assert os.walk is saved
+    assert not tw.verdict()
