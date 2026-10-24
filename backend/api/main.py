@@ -7260,6 +7260,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=ffa_finishing_count,
+                              ffa_exclusion_reasons=_FFA_EXCLUSION_REASONS,
                               team_dc_fallback=team_dc_fallback,
                               read_gate=await read_gate.current_mode(db),
                               read_gate_build=read_gate.READ_GATE_BUILD,
@@ -7296,6 +7297,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
+                              ffa_exclusion_reasons=_FFA_EXCLUSION_REASONS,
                               team_dc_fallback=_TEAM_DC_FALLBACK_LAST,
                               read_gate=read_gate.mode_word(),
                               read_gate_build=read_gate.READ_GATE_BUILD,
@@ -59427,6 +59429,37 @@ _FFA_GAME_NUMBER = _ffa_game_number_marker(
 # Its sibling _OVT_SOLO_SPLIT (the /health `ovt_solo_split` word) is derived
 # the same way, from two of submit_ovt_match's compiled string constants, and
 # is defined right after that endpoint.
+
+
+# -- The FFA grace build marker (/health `ffa_exclusion_reasons`) ----------
+# The grace batch adds no route and no key to a GET answer both builds serve,
+# so this word tells the release train the grace build from the one before it.
+# Both health arms report it; nothing but the train reads it (#306).
+#
+# DERIVED, never written down (#342): 1 when submit_ffa_match's one compiled
+# ffa_match_players INSERT names migration 389's exclusion_reasons column,
+# else 0. Reading the column list of the compiled literal means a comment
+# beside that statement cannot move the value.
+def _ffa_match_players_insert_literal(code) -> str:
+    """The one ffa_match_players INSERT among `code`'s string constants, or ''.
+
+    None found, or more than one, is '': the marker cannot say which of two
+    statements it describes."""
+    found = [c for c in code.co_consts
+             if isinstance(c, str) and (m := _FFA_GN_INSERT_HEAD.match(c))
+             and m.group(1).lower() == "ffa_match_players"]
+    return found[0] if len(found) == 1 else ""
+
+
+def _ffa_exclusion_reasons_marker(insert_sql: str) -> int:
+    """1 when the insert column list names exclusion_reasons, else 0."""
+    head = _FFA_GN_INSERT_HEAD.match(insert_sql or "")
+    columns = {c.strip().lower() for c in head.group(2).split(",")} if head else set()
+    return int("exclusion_reasons" in columns)
+
+
+_FFA_EXCLUSION_REASONS = _ffa_exclusion_reasons_marker(
+    _ffa_match_players_insert_literal(submit_ffa_match.__code__))
 
 
 # -- The FFA finishing-count marker (/health `ffa_finishing_count`) ---------

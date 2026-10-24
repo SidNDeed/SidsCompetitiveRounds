@@ -904,6 +904,13 @@ class HealthResponse(BaseModel):
     # it raises instead of silently leaving the key out. Absent on any build
     # before that batch, which is how the train reads the old build.
     ffa_game_number: int
+    # ffa_exclusion_reasons: whether this build stores the grace exclusions
+    # (main._FFA_EXCLUSION_REASONS; 1 = the settlement insert names migration
+    # 389's exclusion_reasons column). DERIVED from the compiled literal on
+    # import, never written down (#342); read only by the release train (#306).
+    # Required on both health arms. Absent on any build before the grace
+    # landing, which is how the train reads the old build.
+    ffa_exclusion_reasons: int
     # ovt_solo_split: whether this build refuses a 1v2 report that moves another
     # player into the solo seat once the series holds a recorded game
     # (main._OVT_SOLO_SPLIT; 1 = submit_ovt_match's compiled constants carry the
