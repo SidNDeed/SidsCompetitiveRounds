@@ -880,6 +880,18 @@ class HealthResponse(BaseModel):
     # without a default, so an answer built without it raises instead of
     # leaving the key out. Absent on any build before it.
     pc_card_art: int
+    # pc_art_rect: release-train verification plumbing for bug 408 (the top
+    # card's art geometry): the art rect of the layout this box's renderer
+    # LOADED, "x0,y0,x1,y1" (main._pc_art_rect_word -> pc_face.card_art_rect,
+    # rects.badge_art_back), DERIVED at every request, never a constant
+    # (#342); null when the renderer module did not import. It tells a box on
+    # this geometry from a box on another one even when both draw their own
+    # bundle healthily, which pc_card_art (unchanged in meaning) cannot. Equal
+    # on both roles and both arms; it needs no database. Read by nothing but
+    # the train (#306). Declared without a default, so an answer built
+    # without it raises instead of leaving the key out. Absent on any build
+    # before it.
+    pc_art_rect: str | None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
@@ -933,13 +945,15 @@ class HealthResponse(BaseModel):
     # (#441: the value a broken feature reports must not look like success).
     # Absent on any build before this batch, which is how the old build reads.
     pc_card_themes: str | None = None
-    # ladder_hook: how many of the four rated completion paths credit the worn
-    # title ladder in this build (main._LADDER_HOOK; 4 = submit_match,
-    # submit_team_match, _complete_team_series_with_ratings and
-    # submit_ffa_match each call title_ladders.record_completed_games, v1.41.0
-    # item 12). DERIVED from those four functions' compiled code when main is
-    # imported, never written down, so a build that lost a site's call reads
-    # less than 4 (#342). The release train's build discriminator for the
+    # ladder_hook: how many of the ranked game-reporting paths credit the worn
+    # title ladder in this build (main._LADDER_HOOK). 3 since the title ladders
+    # build (board row 29): submit_match, submit_team_match and
+    # submit_ffa_match each call title_ladders.record_completed_games once per
+    # game; it read 4 on the series-unit build (v1.41.0 item 12), whose fourth
+    # site, _complete_team_series_with_ratings, plays no game. DERIVED from
+    # those functions' compiled code when main is imported, never written
+    # down, so a build that lost a site's call reads less (#342). The release
+    # train's build discriminator for the
     # ladder-hook batch, which adds no route and no key to a GET answer both
     # builds serve; equal on both boxes by construction, and read by nothing
     # else (#306). Declared without a default, so building the answer without
@@ -977,6 +991,24 @@ class HealthResponse(BaseModel):
     # silently leaving the key out. Absent on any build before this batch,
     # which is how the train reads the old build.
     ffa_finishing_count: int
+    # read_gate: the verified-reads stage this box acts on (read_gate.py):
+    # off | log | enforce, or unknown while this process has never read the
+    # stage (gated reads then answer 503). The connected arm reads the stage
+    # (TTL-cached); the degraded arm answers the cached value with no I/O.
+    # read_gate_build: the lane's fixed build marker ("vr1"), equal on both
+    # boxes by construction; read by the release train and nothing else
+    # (#306). Both declared without a default, so a constructor that omits
+    # either raises instead of silently leaving the key out; absent on any
+    # build before verified reads.
+    read_gate: str
+    read_gate_build: str
+    # binder_standings: item 20's fixed build marker (1): this build attaches
+    # the subjects' standings to the collection read. The collection route
+    # needs a signed request on every build and answers an unsigned probe
+    # alike on old and new, so this word is the release train's build
+    # discriminator; read by the train and nothing else (#306). Required, so
+    # a constructor that omits it raises; absent on any build before item 20.
+    binder_standings: int
     # pc_motion: how many of the dance-card motion routes are registered on
     # this app (main._PC_MOTION_ROUTES, design S11.3): the motion upload, the
     # per-visit motion read, the atlas, the selection and the bot's motion
@@ -988,6 +1020,15 @@ class HealthResponse(BaseModel):
     # without it raises instead of silently leaving the key out. Absent on
     # any build before that batch, which is how the old build reads.
     pc_motion: int
+    # title_ladders: how many ladders the catalogue this build serves holds
+    # (main._title_ladders_health_word -> title_ladders.LADDERS): 32 on the
+    # five-tier build (board row 29). DERIVED on every request from the list
+    # the read route and the hook read, never written down (#342). The build
+    # discriminator for the title ladders batch, which adds no route; equal on
+    # both boxes by construction and read by nothing else (#306). Declared
+    # without a default, so building the answer without it raises instead of
+    # silently leaving the key out. Absent on any build before that batch.
+    title_ladders: int
     # janitor_selftest: the verdict of this api process's boot janitor SQL
     # self-test (main._janitor_selftest_marker; 1 = it ran and every statement
     # passed, 0 = it ran and did not pass, 2 = skipped on the read replica,
@@ -1020,6 +1061,17 @@ class HealthResponse(BaseModel):
     # Absent on any build before that batch, which is how the train reads the
     # old build.
     connect_failure: int
+    # auto_log: the automatic post-match log upload (main._auto_log_health_word).
+    # auto_logs.AUTO_LOG_REVISION when POST /api/v1/logs/auto is MOUNTED on the
+    # app that answers -- read from the routing table on every request, never
+    # written down (#342) -- and 0 when the module is present but its route is
+    # not. 1 = the revival build (the hotfix merged with main e9a3f1e1,
+    # migration 373). Code-only and role-blind, so both boxes answer it alike
+    # and the release train can read it through the edge; read by nothing else
+    # (#306). Declared without a default, so building the answer without it
+    # raises instead of silently leaving the key out. Absent on any build
+    # before it, which is how the train reads the old build.
+    auto_log: int
     # seat_evidence: whether this build serves the seat-evidence lane
     # (main._seat_evidence_health_word; 1 = the four seat-evidence routes are
     # registered on the app, else 0). DERIVED on every request; equal on both
@@ -1169,6 +1221,15 @@ class AchievementListResponse(BaseModel):
 
 # ── Bug reports (v1.26.7) ─────────────────────────────────────
 
+# The log-bundle ceiling, in CHARACTERS, pre-gzip. Named because there are
+# THREE different clamps on BugReportRequest below -- 64 for the short
+# identity fields, 8000 for the free-text ones and this one for the log --
+# and a plan citing the wrong one of them is what this constant exists to
+# stop. backend/api/auto_logs.py imports it so the automatic upload and the
+# bug form cannot end up with two different ideas of how much log fits.
+BUG_REPORT_LOG_MAX_CHARS = 12_000_000
+
+
 class BugReportRequest(BaseModel):
     """In-game bug report submission. log_text is optional plain-text — server
     gzips it before persisting to disk.
@@ -1227,12 +1288,13 @@ class BugReportRequest(BaseModel):
     @classmethod
     def _clamp_log(cls, v):
         # Keep the TAIL of the log — the most recent events are what matter for a
-        # bug report. 12MB pre-gzip ceiling (matches the prior intent) but as a
-        # truncation, not a 422-triggering hard cap.
+        # bug report. BUG_REPORT_LOG_MAX_CHARS pre-gzip, applied as a truncation
+        # and not as a 422-triggering hard cap -- AFTER the credential rule, so
+        # a ticket straddling the cut is never stored in part.
         if isinstance(v, str):
             v = _schema_logred.redact_credentials(v)    # the rule, over the log as sent
-            if len(v) > 12_000_000:
-                v = v[-12_000_000:]                     # then the tail is kept
+            if len(v) > BUG_REPORT_LOG_MAX_CHARS:
+                v = v[-BUG_REPORT_LOG_MAX_CHARS:]       # then the tail is kept
         return v
 
 

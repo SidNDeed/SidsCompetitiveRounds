@@ -123,6 +123,13 @@ def test_one_pass_stays_affordable():
     repo. It is here so that adding a directory of binaries to one of the
     roots shows up as a failing test rather than as two slow passes per run
     that nobody attributes.
+
+    The ceiling was 40 MiB until the verified-reads lane met main e9a3f1e1:
+    the merged walk measured 40.09 MiB across 720 files as working files on
+    a core.autocrlf=true checkout (39.58 MiB as committed blobs), every file
+    tracked, no new binary directory -- the growth this docstring expects.
+    46 MiB keeps about 6 MiB of headroom; the 29 MiB of fonts the walk
+    excludes, or another set of card PNGs, would still cross it.
     """
     # Ceiling from the measured budget (fix pass 4, logs d4-fix4-walk-measure.log
     # and d4-fix4-walk-commit.log): the fix-pass-4 working tree on 9b8e3cb0 reads
@@ -132,9 +139,15 @@ def test_one_pass_stays_affordable():
     # client's state-space fixture, 0.21 MiB). The ceiling is the measured total
     # plus about one lane of the same size per dependent lane still to land
     # (three), rounded up: 44 MiB.
+    # Seat evidence LAND merge pass (2026-10-24): the merged walk (the lane
+    # 44d5843b with main 93b84eb0) measures 42.80 MiB over 789 files on a CRLF
+    # checkout (trunk 41.16 MiB over 742, the lane 41.19 MiB over 742), by this
+    # function called outside pytest; the 2026-10-19 rehearsal (lane 520d5d31 with
+    # main ca00e375) measured 42.74 MiB over 788. The trunk's 46 MiB ceiling holds
+    # it with about 3 MiB of headroom and stands; the lane's 44 MiB is not carried.
     stamps = ct._source_stamps()
     total = sum(size for size, _digest in stamps.values())
-    assert total < 44 * 1024 * 1024, (
+    assert total < 46 * 1024 * 1024, (
         "one tree-movement pass now reads %.1f MiB across %d files, and it runs "
         "twice per session" % (total / 1048576.0, len(stamps)))
 

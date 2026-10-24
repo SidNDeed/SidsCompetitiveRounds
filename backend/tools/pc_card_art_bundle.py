@@ -85,11 +85,11 @@ def is_english(code) -> bool:
 
 
 def compose(thumb: Image.Image, backing=None) -> Image.Image:
-    """One 80x104 opaque patch: the backing colour, and the thumbnail fitted
+    """One opaque patch of pc_face.card_art_size(): the backing colour, and the thumbnail fitted
     into the art box with its aspect kept and centred (Unity preserveAspect),
     at pc_face.card_art_fit_box."""
     back = tuple(backing or pc_face.card_art_backing_rgb()) + (255,)
-    patch = Image.new("RGBA", (pc_face.CARD_ART_W, pc_face.CARD_ART_H), back)
+    patch = Image.new("RGBA", pc_face.card_art_size(), back)
     thumb = thumb.convert("RGBA")
     x0, y0, x1, y1 = pc_face.card_art_fit_box(thumb.width, thumb.height)
     fitted = thumb.resize((x1 - x0, y1 - y0), Image.Resampling.LANCZOS)
@@ -318,6 +318,13 @@ def validate(bundle_dir: Path, harvest_dir: Path | None = None, sql_dir: Path | 
     except ValueError as exc:
         say(f"FAIL provenance: {exc}")
         fails += 1
+    want_geometry = pc_face.card_art_geometry_record()
+    if isinstance(index, dict) and index.get("geometry") == want_geometry:
+        say(f"PASS geometry: {json.dumps(want_geometry, sort_keys=True)}")
+    else:
+        got = index.get("geometry") if isinstance(index, dict) else None
+        say(f"FAIL geometry: the bundle was cut for {got!r}, the layout is {want_geometry!r}")
+        fails += 1
     server = server_card_names(sql_dir)
     if server is None:
         say("NOTE server card table: migration 333 is not reachable here; card_art_names.json stands for it")
@@ -372,7 +379,7 @@ def validate(bundle_dir: Path, harvest_dir: Path | None = None, sql_dir: Path | 
             else:
                 say(f"PASS harvest {Path(harvest_dir).name}: every patch re-composes byte-identically")
     stamps = pc_face._card_art_stamps(bundle_dir)
-    verdict = pc_face._card_art_bundle_at(str(bundle_dir), names, stamps)
+    verdict = pc_face._card_art_bundle_at(str(bundle_dir), names, pc_face.card_art_geometry(), stamps)
     digest_file = bundle_dir / pc_face.CARD_ART_DIGEST_FILE
     recorded = digest_file.read_text(encoding="ascii").strip() if digest_file.is_file() else "<none>"
     say(f"entries={len(cards)} expected={len(names)} entry_fails={fails}")

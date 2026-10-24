@@ -315,9 +315,16 @@ async def _drop_scratch_db(raw: str, name: str) -> bool:
     assert name.startswith(LANE_MARKER_PREFIX), name
     conn = await asyncpg.connect(raw)
     try:
+        # #940: the sweep names only this role's own client backends. Run by a
+        # role that is not a superuser (the seat role), an unfiltered sweep
+        # raises InsufficientPrivilegeError while a superuser session or an
+        # autovacuum worker is on the database; a superuser DSN sees no such
+        # error. A skipped session that stays connected through the drop's wait
+        # makes the drop below fail with its own error.
         await conn.execute(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            "WHERE datname = $1 AND pid <> pg_backend_pid()", name)
+            "WHERE datname = $1 AND pid <> pg_backend_pid() "
+            "AND backend_type = 'client backend' AND usename = current_user", name)
         await conn.execute('DROP DATABASE IF EXISTS "%s"' % name)
         still_there = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", name)
     finally:

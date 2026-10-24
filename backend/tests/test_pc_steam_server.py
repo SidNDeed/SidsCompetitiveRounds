@@ -635,6 +635,7 @@ def test_priming_waits_for_its_deadline_and_the_attempt_finishes_behind_it(monke
 def test_the_sweep_word_is_earned_by_completed_work(monkeypatch):
     st = main._PC_STEAM_SWEEP_STATE
     monkeypatch.setitem(st, "clean_at", None)
+    monkeypatch.setitem(st, "started_at", None)   # a loop start stamped earlier ages into `stale` (v4.1 §2)
     monkeypatch.setitem(st, "error", None)
     monkeypatch.setattr(main, "IS_REPLICA", False)
     monkeypatch.delenv("PC_STEAM_SWEEP", raising=False)
@@ -4260,7 +4261,11 @@ def test_the_release_train_asserts_the_indexes_and_the_render_word_on_both_roles
     assert 'if edge in ("000", ""):' in edge and 'if edge == "404":' in edge   # the route batch's half
     assert "for key, want in edge_markers():" in edge                          # the no-route batch's half
     assert "294 must run" not in src   # the i18n gate names the selected batch's files, not a stale migration
-    assert "def index_state(host):" in src and "FROM pg_indexes WHERE schemaname = 'public'" in src
+    # the index probe is scoped by schema: the literal `public` it named until the automatic-log
+    # hotfix's round 7, or the schema the train now derives from both database roles and passes in
+    assert "def index_state(host):" in src and (
+        "FROM pg_indexes WHERE schemaname = 'public'" in src
+        or "FROM pg_indexes WHERE schemaname = %s AND " in src)
     assert src.count("index_state(host)") == 4   # its definition, the check, the schema postcondition, the verify
     assert 'EXPECT_INDEXES = list(batch.get("expect_indexes", []))' in src
     assert "len(idx) != len(EXPECT_INDEXES)" in src and "len(idx) == len(EXPECT_INDEXES)" in src

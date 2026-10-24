@@ -3004,49 +3004,85 @@ def test_mod_version_advertises_no_series_status_capability():
     the returned mapping is exactly the two version numbers plus that one
     field, so any other key -- the series-status flag above all -- turns it
     red.
+
+    Verified reads adds two keys, `read_gate` (the stage this box acts on) and
+    `read_gate_open` (the GET templates its read gate never refuses for want of
+    a read credential), and ONLY for a request whose X-Mod-Version is the
+    advert version or later: every other request gets exactly the three keys
+    above, byte for byte as before the read gate. They are the client's one
+    signal for OPEN versus gated (requirement 32). Both boxes read the stage
+    from the same replicated runtime_settings row and serve the same route
+    table, and the client treats the advert as a hint: a gate refusal from
+    whichever box answers latches enforce on its own
+    (ReadGateRules.OnRefusal), so a later request never depends on this
+    answer's box. Pinned here by name, by value and by its condition.
+
+    The connect-failure landing adds one key of its own, `join_region_guard`,
+    set only while JOIN_REGION_GUARD is true; it ships False, so with the
+    shipped value neither request kind sees it. Pinned below the same way.
     """
     node = node_named("get_mod_version")
     joined = "\n".join(code_lines_of(node))
     assert "series_status_readonly" not in joined, joined
     returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
     assert len(returns) == 1, [ast.unparse(r) for r in returns]
-    answer = returns[0].value
-    # Since the connect-failure landing the route builds the same mapping as
-    # `body` and sets ONE key more, "join_region_guard", only while
-    # JOIN_REGION_GUARD (the joiner's region guard; it ships False). A dict
-    # literal cannot carry a conditional key except through a ** entry, whose
-    # key this pin could not name, so the pin is restated for that shape
-    # rather than the route rewritten: the one return is `body`; `body` is
-    # bound exactly once, to a dict literal, which the checks below read; the
-    # only other write to it is body['join_region_guard'] = 1, alone under
-    # `if JOIN_REGION_GUARD:`; and no method is called on it. Any other key --
-    # the series-status flag above all -- still turns this red.
-    if isinstance(answer, ast.Name):
-        assert answer.id == "body", ast.unparse(returns[0])
-        binds = [n for n in ast.walk(node) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
-                 and any(isinstance(t, ast.Name) and t.id == "body"
-                         for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
-        assert len(binds) == 1 and isinstance(binds[0], ast.Assign), [
-            ast.unparse(b) for b in binds]
-        writes = [n for n in ast.walk(node) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
-                  and any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
-                          and t.value.id == "body"
-                          for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
-        assert [ast.unparse(w) for w in writes] == ["body['join_region_guard'] = 1"], [
-            ast.unparse(w) for w in writes]
-        guards = [n for n in ast.walk(node) if isinstance(n, ast.If) and n.body == writes]
-        assert len(guards) == 1 and ast.unparse(guards[0].test) == "JOIN_REGION_GUARD", [
-            ast.unparse(g.test) for g in guards]
-        calls = [n for n in ast.walk(node) if isinstance(n, ast.Call)
-                 and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
-                 and n.func.value.id == "body"]
-        assert calls == [], [ast.unparse(c) for c in calls]
-        answer = binds[0].value
-    assert isinstance(answer, ast.Dict), ast.unparse(returns[0])
+    # The one return is `body`; `body` is bound exactly once, by a plain
+    # assignment to a dict literal, which the checks below read; and no
+    # method is called on it. The only other writes to it are subscript
+    # writes, pinned below: the read gate's two advert keys under the version
+    # condition and, since the connect-failure landing, "join_region_guard"
+    # alone under `if JOIN_REGION_GUARD:` (the joiner's region guard; it ships
+    # False). A dict literal cannot carry a conditional key except through a
+    # ** entry, whose key this pin could not name, so the pin is stated for
+    # that shape rather than the route rewritten. Any other key -- the
+    # series-status flag above all -- still turns this red.
+    assert ast.unparse(returns[0].value) == "body", ast.unparse(returns[0])
+    binds = [n for n in ast.walk(node) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+             and any(isinstance(t, ast.Name) and t.id == "body"
+                     for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+    assert len(binds) == 1 and isinstance(binds[0], ast.Assign), [ast.unparse(b) for b in binds]
+    assert [ast.unparse(t) for t in binds[0].targets] == ["body"], ast.unparse(binds[0])
+    calls = [n for n in ast.walk(node) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+             and n.func.value.id == "body"]
+    assert calls == [], [ast.unparse(c) for c in calls]
+    answer = binds[0].value
+    assert isinstance(answer, ast.Dict), ast.unparse(binds[0])
     keys = sorted(ast.unparse(k) for k in answer.keys)
     assert keys == sorted(["'version'", "'min_version'",
                            "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD"]), keys
     values = {ast.unparse(k): ast.unparse(v) for k, v in zip(answer.keys, answer.values)}
+    # The advert: exactly two subscript writes to body, both under the one
+    # version condition; the region guard key is the only other subscript
+    # write, alone under its own condition.
+    sent = [n for n in ast.walk(node) if isinstance(n, ast.Assign)
+            and [ast.unparse(t) for t in n.targets] == ["sent_version"]]
+    assert len(sent) == 1 and ast.unparse(sent[0].value) == (
+        "request.headers.get('x-mod-version') if request is not None else None"), \
+        [ast.unparse(s) for s in sent]
+    ifs = [n for n in ast.walk(node) if isinstance(n, ast.If)
+           and ast.unparse(n.test) == "read_gate.advert_requested(sent_version)"]
+    assert len(ifs) == 1, [ast.unparse(n.test) for n in ast.walk(node) if isinstance(n, ast.If)]
+    subscript_writes = [n for n in ast.walk(node)
+                        if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                        and any(isinstance(t, ast.Subscript)
+                                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+    assert sorted(ast.unparse(w) for w in subscript_writes) == sorted([
+        "body['read_gate'] = await read_gate.current_mode()",
+        "body['read_gate_open'] = read_gate.ungated_templates(app.routes)",
+        "body['join_region_guard'] = 1"]), [ast.unparse(w) for w in subscript_writes]
+    writes = {ast.unparse(t): ast.unparse(n.value) for n in subscript_writes
+              if isinstance(n, ast.Assign) for t in n.targets
+              if ast.unparse(t).startswith("body['read_gate")}
+    assert writes == {"body['read_gate']": "await read_gate.current_mode()",
+                      "body['read_gate_open']": "read_gate.ungated_templates(app.routes)"}, writes
+    in_if = {ast.unparse(t) for s in ifs[0].body if isinstance(s, ast.Assign) for t in s.targets}
+    assert in_if == set(writes), in_if
+    assert len(ifs[0].body) == 2, [ast.unparse(s) for s in ifs[0].body]
+    guards = [n for n in ast.walk(node) if isinstance(n, ast.If)
+              and ast.unparse(n.test) == "JOIN_REGION_GUARD"]
+    assert len(guards) == 1 and [ast.unparse(s) for s in guards[0].body] == [
+        "body['join_region_guard'] = 1"], [ast.unparse(g) for g in guards]
     # The two version numbers are the two constants, not a literal.
     assert values["'version'"] == "LATEST_MOD_VERSION", values
     assert values["'min_version'"] == "MIN_MOD_VERSION_EFFECTIVE", values

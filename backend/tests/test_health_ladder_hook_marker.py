@@ -3,22 +3,24 @@
 The ladder-hook batch (v1.41.0 item 12, server half) adds no route and no key
 to any GET answer both builds serve: the title-ladder route answers on the
 build before it, from the same tables, and a credit is written only inside a
-rated completion. So `ladder_hook` is the release train's build discriminator
-for the batch -- absent on the build before it, 4 on this one, on both roles
--- and the train reads any other value as the old build.
+rated completion. So `ladder_hook` was the release train's build discriminator
+for that batch -- absent on the build before it, 4 on it, on both roles. The
+title ladders build (board row 29) moved the credit to one per ranked GAME at
+the three game-reporting paths, so the word reads 3 from that build on; that
+build's own discriminator is its `title_ladders` word.
 
-The value is DERIVED (#342): how many of the four rated completion functions
-(test_title_ladders.COMPLETION_SITES) load the hook's name,
-record_completed_games, in their own compiled code. A literal 4 would read 4
+The value is DERIVED (#342): how many of the three ranked game-reporting
+functions (test_title_ladders.COMPLETION_SITES) load the hook's name,
+record_completed_games, in their own compiled code. A literal 3 would read 3
 on a build that had lost a site's call, which is the deploy this word exists
 to tell apart. It is read from code objects, so a comment or a docstring
 naming the hook cannot move it. The count is title_ladders.hooked_site_count,
 beside the hook, and the name it counts is read off the hook function, so
-main.py names the hook at its four awaited calls and nowhere else -- the
+main.py names the hook at its three awaited calls and nowhere else -- the
 whole-file test in test_title_ladders.py holds main.py to that, and it is
 what refused this word's first form, a helper in main.py that typed the name
 as a string. The controls compile the real functions again in-process with
-one call taken out (3), and probes that name the hook only in prose (0); the
+one call taken out (2), and probes that name the hook only in prose (0); the
 health arms are checked with the constant moved.
 """
 import ast
@@ -100,11 +102,11 @@ def _without_the_call(name):
     return namespace[name]
 
 
-def test_the_marker_is_derived_from_the_four_sites_and_reads_4_here():
-    """Derived, bound once, over exactly the four sites, and 4 at this tip.
+def test_the_marker_is_derived_from_the_three_sites_and_reads_3_here():
+    """Derived, bound once, over exactly the three sites, and 3 at this tip.
 
     The binding has to be a CALL of the count with no number anywhere in
-    it, over a tuple naming exactly COMPLETION_SITES' four functions, and
+    it, over a tuple naming exactly COMPLETION_SITES' three functions, and
     nothing may rebind either name afterwards. The name the count looks for
     is the hook's own, read off the function in title_ladders.py rather than
     typed there a second time."""
@@ -126,8 +128,8 @@ def test_the_marker_is_derived_from_the_four_sites_and_reads_4_here():
     assert main._LADDER_HOOK_SITES == tuple(getattr(main, n) for n in names)
     for fn in main._LADDER_HOOK_SITES:
         assert HOOK in fn.__code__.co_names, fn.__name__
-    assert main._LADDER_HOOK == 4
-    assert title_ladders.hooked_site_count(main._LADDER_HOOK_SITES) == 4
+    assert main._LADDER_HOOK == 3
+    assert title_ladders.hooked_site_count(main._LADDER_HOOK_SITES) == 3
 
     tl_tree = ast.parse(TL_PY.read_text(encoding="utf-8"))
     hook_name = _binding(tl_tree, "_HOOK_NAME")
@@ -136,20 +138,21 @@ def test_the_marker_is_derived_from_the_four_sites_and_reads_4_here():
 
 
 def test_the_derivation_counts_each_hooked_site_and_nothing_beside_it():
-    """Each real site with its call taken out reads 3 beside the other three;
-    the unhooked 1v2 endpoint and an empty set read 0; a probe naming the
-    hook in a docstring, a comment and a getattr string reads 0, and one
-    that calls it reads 1."""
+    """Each real site with its call taken out reads 2 beside the other two;
+    the unhooked 1v2 endpoint, the unhooked 2v2 settlement and an empty set
+    read 0; a probe naming the hook in a docstring, a comment and a getattr
+    string reads 0, and one that calls it reads 1."""
     count = title_ladders.hooked_site_count
-    four = main._LADDER_HOOK_SITES
-    assert count(four) == 4
+    three = main._LADDER_HOOK_SITES
+    assert count(three) == 3
     for name in COMPLETION_SITES.values():
         variant = _without_the_call(name)
         assert HOOK not in variant.__code__.co_names, name
-        rest = tuple(fn for fn in four if fn.__name__ != name)
-        assert len(rest) == 3, name
-        assert count(rest + (variant,)) == 3, name
+        rest = tuple(fn for fn in three if fn.__name__ != name)
+        assert len(rest) == 2, name
+        assert count(rest + (variant,)) == 2, name
     assert count((main.submit_ovt_match,)) == 0
+    assert count((main._complete_team_series_with_ratings,)) == 0
     assert count(()) == 0
 
     def probe(source):
@@ -169,11 +172,11 @@ def test_the_derivation_counts_each_hooked_site_and_nothing_beside_it():
 
 
 def test_both_health_arms_report_the_constant(monkeypatch):
-    """ok AND degraded, and what they report is the constant, not a 4 typed
+    """ok AND degraded, and what they report is the constant, not a 3 typed
     beside it: moved to 0, both answers move with it."""
     up, down = _health()
     assert (up["status"], down["status"]) == ("ok", "degraded")
-    assert (up["ladder_hook"], down["ladder_hook"]) == (4, 4)
+    assert (up["ladder_hook"], down["ladder_hook"]) == (3, 3)
     monkeypatch.setattr(main, "_LADDER_HOOK", 0)
     up0, down0 = _health()
     assert (up0["ladder_hook"], down0["ladder_hook"]) == (0, 0)

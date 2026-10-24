@@ -259,6 +259,34 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
 
 @pytest.fixture(autouse=True)
+def _read_gate_stage_known():
+    """Verified reads: production reads the read gate's stage through its own
+    short session on `database.async_session`, and a node that has never read
+    it answers 503 read_gate_unavailable on gated GETs (requirement 14). A
+    test harness that points only `get_db` at its own database leaves that
+    session aimed at nothing, so every gated GET it sends would 503 -- or not,
+    depending on whether an earlier test in the process happened to load the
+    stage. Each test therefore starts with the stage known as `off`, the
+    production default; a failed refresh keeps a known stage, so it stays
+    `off`. The read gate's own tests set the stage they exercise themselves
+    (read_gate_testkit.gate_env, mode_cache_set) after this runs. The cache is
+    restored whole afterwards.
+
+    Only when `read_gate` is already imported, like the fixture below."""
+    rg = sys.modules.get("read_gate")
+    if rg is None or not hasattr(rg, "_mode_cache"):
+        yield
+        return
+    before = dict(rg._mode_cache)
+    rg._mode_cache.update({"value": "off", "loaded": True, "at": rg._mono()})
+    try:
+        yield
+    finally:
+        rg._mode_cache.clear()
+        rg._mode_cache.update(before)
+
+
+@pytest.fixture(autouse=True)
 def _pc_card_themes_loaded():
     """Production loads the card -> ink map once at startup and every face
     route refuses while it is empty, because that colour is part of
@@ -304,4 +332,38 @@ def _pc_trade_schema_unlatched():
         yield
     finally:
         main._PC_TRADE_SCHEMA_FOUND = before
+
+
+@pytest.fixture(autouse=True)
+def _pc_steam_sweep_state_isolated():
+    """The sweep's health word (main._pc_steam_sweep_word) is computed from
+    process state AND the clock: _PC_STEAM_SWEEP_STATE's clean_at and
+    started_at are time.monotonic() stamps that read `stale` once more than
+    _PC_STEAM_STALE_S has passed, and the breaker's pause expires on the
+    same clock. A test that runs the real batch, process or loop stamps
+    them, so a later test's word depended on how long ago that earlier test
+    ran -- a whole suite read `running` and then `stale` inside one test.
+    At the end of every test the dict and the breaker's fields are put back
+    as that test found them (a task the test leaves running past its end can
+    still stamp them afterwards; none is known to).
+
+    Only when `main` is already imported, as above."""
+    main = sys.modules.get("main")
+    if main is None or not hasattr(main, "_PC_STEAM_SWEEP_STATE"):
+        yield
+        return
+    state = main._PC_STEAM_SWEEP_STATE
+    before = dict(state)
+    breaker = getattr(main, "_pc_steam_breaker", None)
+    breaker_before = None
+    if breaker is not None:
+        breaker_before = {k: (dict(v) if isinstance(v, dict) else v) for k, v in vars(breaker).items()}
+    try:
+        yield
+    finally:
+        state.clear()
+        state.update(before)
+        if breaker is not None:
+            vars(breaker).clear()
+            vars(breaker).update(breaker_before)
 

@@ -10,9 +10,9 @@ and this file does:
     route's OWN 404, {"detail": "Player not found"}; a build without the
     mount answers a routing 404, {"detail": "Not Found"}, and the two are told
     apart here on the same request stack.
-  * that what the route reads exists once migration 331 is RUN -- executed,
+  * that what the route reads exists once migrations 331 and 365 are RUN -- executed,
     not parsed -- on the PostgreSQL major the primary runs, and that the item
-    ids the route reports are the rows 331 inserted.
+    ids the route reports are the rows they inserted.
   * that the route is a READ of one snapshot. Every statement it sends is
     captured at the cursor: the first is exactly the SET TRANSACTION that
     makes the request REPEATABLE READ and READ ONLY, each one after it is a
@@ -31,7 +31,7 @@ and this file does:
     same rows reads nothing owned.
 
 The schema is the ladder suite's own live harness (LADDER_PREREQ, then the
-331 file), with one widening: the route's `select(Player)` names every column
+331 and 365 files), with one widening: the route's `select(Player)` names every column
 the Player model maps, and LADDER_PREREQ's `players` carries only the four the
 hook needs. The rest are added nullable and default-free from the model
 itself, so a column added to the model later cannot break this file silently.
@@ -70,7 +70,7 @@ import title_ladders as tl  # noqa: E402
 from models import Player  # noqa: E402
 # Reused, not copied: the route is exercised on exactly the schema the hook's
 # live tests run migration 331 on.
-from test_title_ladders import LADDER_PREREQ, MIGRATION  # noqa: E402
+from test_title_ladders import LADDER_PREREQ, MIGRATION, MIGRATION_365  # noqa: E402
 import ladder_pg_harness as harness  # noqa: E402
 
 try:
@@ -127,11 +127,13 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-# -- the schema: LADDER_PREREQ, players widened to the model, then 331 --------
+# -- the schema: LADDER_PREREQ, players widened to the model, then 331, 365 ---
 
 async def _build(case):
     """Into case.schema, on case.conn (bound to it): LADDER_PREREQ, players
-    widened to the model, then the 331 file as written. Sealed, so the drop's
+    widened to the model, then the 331 and 365 files as written, in that
+    order (365 is the five-tier catalogue the module describes). Sealed, so
+    the drop's
     census knows what the case created."""
     conn, schema = case.conn, case.schema
     await conn.execute(LADDER_PREREQ)
@@ -145,12 +147,13 @@ async def _build(case):
                                % (harness.quoted(schema), col.name,
                                   col.type.compile(dialect=dialect)))
     await conn.execute(io.open(MIGRATION, encoding="utf-8").read())
+    await conn.execute(io.open(MIGRATION_365, encoding="utf-8").read())
     await case.seal()
 
 
 async def _seed(conn):
-    """KNOWN owns the first three rat rungs, has 30 series on rat and wears
-    rung 3; BARE owns nothing and has no progress row. Returns 331's sku->id
+    """KNOWN owns the first three rat rungs, has 50 games on rat and wears
+    rung 3; BARE owns nothing and has no progress row. Returns the sku->id
     map and KNOWN's owned skus."""
     ids = {r["sku"]: r["id"] for r in await conn.fetch(
         "SELECT sku, id FROM shop_items WHERE sku = ANY($1::varchar[])",
@@ -165,7 +168,7 @@ async def _seed(conn):
             "VALUES ($1, $2, 0)", known, ids[sku])
     await conn.execute(
         "INSERT INTO title_ladder_progress (player_id, line, games, tier) "
-        "VALUES ($1, 'rat', 30, 3)", known)
+        "VALUES ($1, 'rat', 50, 3)", known)
     await conn.execute("UPDATE players SET active_title_id = $1 WHERE id = $2",
                        ids["title_ladder_rat_3"], known)
     return ids, owned
@@ -283,10 +286,11 @@ def _fresh_rate_buckets(monkeypatch):
 
 # -- the cases ----------------------------------------------------------------
 
-def test_pg_migration_331_creates_what_the_route_reads():
-    """The route reads `title_ladder_progress` and 331's 48 `shop_items`
-    rows (players and player_items predate it). Asserted after a fresh run of
-    the real file, before any request."""
+def test_pg_migrations_331_and_365_create_what_the_route_reads():
+    """The route reads `title_ladder_progress` (331's, with 365's `streak`)
+    and the catalogue's 160 `shop_items` rows (players and player_items
+    predate them). Asserted after a fresh run of the real files, before any
+    request."""
     _require_live_pg()
 
     async def _go():
@@ -308,8 +312,9 @@ def test_pg_migration_331_creates_what_the_route_reads():
     regs, cols, skus = _run(_go())
     assert regs == {"title_ladders": True, "title_ladder_progress": True,
                     "title_ladder_credits": True}, regs
-    assert cols == ["player_id", "line", "games", "tier", "updated_at"], cols
-    assert skus == len(tl.ALL_SKUS) == 48, (skus, len(tl.ALL_SKUS))
+    assert cols == ["player_id", "line", "games", "tier", "updated_at", "streak",
+                    "streak_at"], cols
+    assert skus == len(tl.ALL_SKUS) == 160, (skus, len(tl.ALL_SKUS))
 
 
 def test_pg_a_known_player_is_a_200_with_their_ladder_rows():
@@ -324,12 +329,12 @@ def test_pg_a_known_player_is_a_200_with_their_ladder_rows():
     assert body["active_line"] == "rat"
     assert [ln["line"] for ln in body["ladders"]] == [ld["line"] for ld in tl.LADDERS]
     rat = _line(body, "rat")
-    assert (rat["games"], rat["tier"]) == (30, 3), rat
-    assert (rat["next_tier"], rat["next_threshold"], rat["games_to_next"]) == (4, 75, 45), rat
-    assert rat["next_names"] == ["Rat King", "Rat Queen"], rat["next_names"]
+    assert (rat["games"], rat["tier"]) == (50, 3), rat
+    assert (rat["next_tier"], rat["next_threshold"], rat["games_to_next"]) == (4, 100, 50), rat
+    assert rat["next_names"] == ["Rat Lord"], rat["next_names"]
     assert [r["sku"] for r in rat["rungs"] if r["owned"]] == owned
     assert [r["sku"] for r in rat["rungs"] if r["active"]] == ["title_ladder_rat_3"]
-    # Every item id is the row migration 331 inserted, read back through the
+    # Every item id is the row the migrations inserted, read back through the
     # route: the answer came from this database, not from the catalogue module.
     for ln in body["ladders"]:
         for r in ln["rungs"]:
@@ -344,7 +349,7 @@ def test_pg_a_known_player_is_a_200_with_their_ladder_rows():
 
 
 def test_pg_a_player_with_no_titles_gets_every_line_with_nothing_owned():
-    """No titles is not an empty answer: all eight lines, all 48 rungs,
+    """No titles is not an empty answer: all 32 ladders, all 160 rungs,
     games 0, tier 1, nothing owned or worn. The route never answers an empty
     `ladders` list for a player it knows."""
     _require_live_pg()
@@ -353,8 +358,8 @@ def test_pg_a_player_with_no_titles_gets_every_line_with_nothing_owned():
     _log_sql("player with no titles", sql)
     assert status == 200, (status, body)
     assert body["steam_id"] == BARE and body["active_line"] is None
-    assert len(body["ladders"]) == 8
-    assert sum(len(ln["rungs"]) for ln in body["ladders"]) == 48
+    assert len(body["ladders"]) == 32
+    assert sum(len(ln["rungs"]) for ln in body["ladders"]) == 160
     for ln in body["ladders"]:
         assert (ln["games"], ln["tier"]) == (0, 1), ln["line"]
         assert not any(r["owned"] or r["active"] for r in ln["rungs"]), ln["line"]
@@ -382,17 +387,17 @@ def test_pg_an_unknown_steam_id_is_the_routes_own_404():
 
 # -- one snapshot: a request racing a ladder credit (D9) ------------------------
 
-OLD_RAT = (9, 1, ["title_ladder_rat_1"], ["title_ladder_rat_1"])
-NEW_RAT = (10, 2, ["title_ladder_rat_1", "title_ladder_rat_2"], ["title_ladder_rat_2"])
+OLD_RAT = (14, 1, ["title_ladder_rat_1"], ["title_ladder_rat_1"])
+NEW_RAT = (15, 2, ["title_ladder_rat_1", "title_ladder_rat_2"], ["title_ladder_rat_2"])
 # Games and tier after the credit, ownership and the worn title before it.
-MIXED_RAT = (10, 2, ["title_ladder_rat_1"], ["title_ladder_rat_1"])
+MIXED_RAT = (15, 2, ["title_ladder_rat_1"], ["title_ladder_rat_1"])
 WORN_READS = [["players"], ["shop_items", "player_items"], ["shop_items"],
               ["title_ladder_progress"], ["shop_items"]]
 
 
 async def _seed_racer(conn, ids):
-    """RACER owns and wears rat rung 1 at 9 games, so the tenth credited
-    series moves games, tier, ownership and the worn title in one commit."""
+    """RACER owns and wears rat rung 1 at 14 games, so the fifteenth credited
+    game moves games, tier, ownership and the worn title in one commit."""
     pid = await conn.fetchval(
         "INSERT INTO players (steam_id) VALUES ($1) RETURNING id", RACER)
     await conn.execute(
@@ -400,7 +405,7 @@ async def _seed_racer(conn, ids):
         "VALUES ($1, $2, 0)", pid, ids["title_ladder_rat_1"])
     await conn.execute(
         "INSERT INTO title_ladder_progress (player_id, line, games, tier) "
-        "VALUES ($1, 'rat', 9, 1)", pid)
+        "VALUES ($1, 'rat', 14, 1)", pid)
     await conn.execute("UPDATE players SET active_title_id = $1 WHERE id = $2",
                        ids["title_ladder_rat_1"], pid)
     return pid
@@ -485,9 +490,9 @@ async def _race(k, control=False):
 
 @pytest.mark.parametrize("k", [1, 2, 3, 4, 5])
 def test_pg_a_request_racing_a_credit_answers_one_committed_state(k):
-    """D9 (design V3 section 7a, test 1). RACER wears rat rung 1 at 9 games.
+    """D9 (design V3 section 7a, test 1). RACER wears rat rung 1 at 14 games.
     A request pauses after its statement k while a second connection runs
-    the real record_completed_games for RACER and commits: games 10, tier 2,
+    the real record_completed_games for RACER and commits: games 15, tier 2,
     rung 2 granted and worn. The paused answer must equal the answer before
     that commit (OLD) or the one after it (NEW), whole -- and which one is
     fixed. k = 1 pauses after the SET, before any SELECT has taken the
@@ -519,7 +524,7 @@ def test_pg_without_the_snapshot_the_same_race_reads_a_mixed_state():
     """#391's negative control for the race above (design V3 section 7a,
     test 2): the same race paused after statement 3, with SELECT 1 sent in
     place of the SET, so the request runs READ COMMITTED with every other
-    statement where it was. It must read the state no commit had -- games 10
+    statement where it was. It must read the state no commit had -- games 15
     and tier 2 from after the credit, the ownership and the worn title from
     before it -- which is neither OLD nor NEW. An OLD or NEW answer here
     means the race is not interleaving at all, and this fails."""
@@ -579,7 +584,7 @@ def _ownership(body):
 def test_pg_the_exempt_account_reads_its_worn_entry_rung_as_owned():
     """D7 (design V3 section 7). The exempt account wears rat rung 1 with no
     player_items row. Its answer reads that rung owned AND active, as
-    /shop/items reports it; every entry rung owned; and all forty
+    /shop/items reports it; every entry rung owned; and all 128
     granted-only rungs unowned, because the exemption stops at them. PLAIN,
     with the same rows under an ordinary id, reads nothing owned: the
     exemption, not a row, is what answers owned here."""
@@ -591,7 +596,7 @@ def test_pg_the_exempt_account_reads_its_worn_entry_rung_as_owned():
     assert (x_status, p_status) == (200, 200), (x_status, p_status)
     exempt, ordinary = _ownership(x_body), _ownership(p_body)
     del x_body, p_body
-    assert len(ENTRY_SKUS) == 8 and len(tl.GRANTED_ONLY_SKUS) == 40
+    assert len(ENTRY_SKUS) == 32 and len(tl.GRANTED_ONLY_SKUS) == 128
     assert sorted(ENTRY_SKUS + sorted(tl.GRANTED_ONLY_SKUS)) == sorted(tl.ALL_SKUS)
     assert exempt == (ENTRY_SKUS, ["title_ladder_rat_1"], "rat"), exempt
     assert ordinary == ([], ["title_ladder_rat_1"], "rat"), ordinary
@@ -603,7 +608,7 @@ def test_pg_the_exempt_reading_comes_from_the_shared_predicate(monkeypatch):
     """Control for the case above: the same rows, with main._auto_owned made
     to answer False, read nothing owned for the exempt account either. So
     the owned rungs above came through the shared predicate, which the route
-    consulted for every rung neither account holds a row for: 48 each."""
+    consulted for every rung neither account holds a row for: 160 each."""
     _require_live_pg()
     asked = []
 

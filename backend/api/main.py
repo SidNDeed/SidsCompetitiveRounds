@@ -3699,7 +3699,7 @@ async def lifespan(app: FastAPI):
             # work; the replica is a read surface and nothing more.
             print("[REPLICA] BOOTING AS READ REPLICA: write schedulers disabled "
                   "(queue_cleanup, team_queue_cleanup, tournament_tick, "
-                  "min_version_autoraise, janitor self-test)")
+                  "min_version_autoraise, auto_log_retention, janitor self-test)")
             # The review worker writes, so it is primary-only. This line is
             # the standby's POSITIVE signal that it took this branch and
             # started no worker (an absent pass line alone cannot tell a
@@ -3771,6 +3771,23 @@ async def lifespan(app: FastAPI):
             # stack imported; the health word says which of those it is.
             if not IS_REPLICA and _pcs is not None:
                 tasks.append(asyncio.create_task(_pc_steam_sweep_loop()))
+            # Automatic post-match log retention (v1.41.0 Item 3). PRIMARY
+            # ONLY: every pass DELETEs, and a delete raises in recovery. This
+            # is the ONLY thing that enforces the fourteen-day rule -- the
+            # opportunistic prune inside the upload route collects nothing once
+            # uploads stop, which is precisely when a corpus needs collecting.
+            #
+            # WHAT TO GREP FOR, because a sweep failing every hour and a sweep
+            # with nothing to do are equally quiet otherwise:
+            # `[AUTO-LOG] retention sweep armed` once at boot, one
+            # `[AUTO-LOG] retention sweep:` line per pass including the empty
+            # ones, and `[AUTO-LOG] retention sweep FAILED` with a consecutive
+            # count when a pass dies. Those are the lines that exist because
+            # the loop catches its own per-pass errors; _supervised is the
+            # backstop for what escapes the loop entirely, and its restart line
+            # is NOT this sweep's failure signal.
+            tasks.append(asyncio.create_task(
+                _supervised("auto_log_retention", _auto_logs.auto_log_retention_loop)))
         # Awaited, before anything can render: a face keyed off a colour
         # this box has not read yet is a promise about pixels it cannot make.
         if _pcf is not None:
@@ -4550,7 +4567,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:48033 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:49198 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4616,7 +4633,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:47845 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:49010 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4686,7 +4703,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:47748 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:48913 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -5870,6 +5887,12 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+# Verified reads (board row 33, item b): every GET route this app registers
+# carries the read gate once, through the route class -- set here, before the
+# first route decorator, so a new GET route is gated by default. The two
+# routers included below are built with the same class. See read_gate.py.
+import read_gate
+app.router.route_class = read_gate.ReadGateRoute
 
 app.add_middleware(
     CORSMiddleware,
@@ -5887,18 +5910,31 @@ app.add_middleware(
 from tournaments import router as tournaments_router
 app.include_router(tournaments_router)
 
+# Opt-in automatic post-match log upload (v1.41.0 Item 3). LIVE, not inert:
+# the client half is in the v1.41.0 client lane build 46f54d4 on Sid's desktop
+# and the opt-in setting is switched on there, so POST /api/v1/logs/auto
+# receives real traffic. The module's own docstring says what a working call
+# looks like and what it prints. The module object is bound as well as the
+# routers because lifespan starts its retention sweep.
+import auto_logs as _auto_logs
+from auto_logs import router as auto_logs_router, internal_router as auto_logs_internal_router
+app.include_router(auto_logs_router)
+app.include_router(auto_logs_internal_router)
 # Animal title ladders (v1.41.0 item 12): the READ route,
 # GET /api/v1/players/{steam_id}/title-ladders, which the Titles tab draws its
 # progress bars from. Pure read, no writes, safe on the replica: one
 # REPEATABLE READ, READ ONLY snapshot per request.
 #
-# The module's per-series completion hook is not called from here. The four
-# rated completion paths call it themselves -- submit_match (1v1),
-# submit_team_match and _complete_team_series_with_ratings (2v2) and
+# The module's per-game credit hook (title_ladders.record_completed_games) is
+# not called from here. THREE ranked-game sites call it themselves, once per
+# accepted ranked game -- submit_match (1v1), submit_team_match (2v2) and
 # submit_ffa_match (FFA) -- each inside a savepoint of its own, so a failed
-# credit is logged and dropped and never costs the completion. 1v2 reports
-# unrated and is not hooked. test_title_ladders.py asserts that set per mode,
-# each call's reference id, and exactly four calls in this file.
+# credit is logged and dropped and never costs the game. The after-the-fact
+# 2v2 settlement (_complete_team_series_with_ratings: admin completion, lead
+# forfeit) plays no game and is deliberately NOT hooked; crediting it would
+# grant progress for a game nobody played. 1v2 reports unrated and is not
+# hooked. test_title_ladders.py asserts exactly that set of three per mode,
+# each call's reference id, and exactly three calls in this file.
 import title_ladders
 app.include_router(title_ladders.router)
 
@@ -6060,6 +6096,16 @@ _VERSION_GATE_BYPASS = frozenset({
     # Aug 7 item 1: below-min clients (the ones being told to update) are a
     # prime audience for a standing "update out / server issue" notice.
     "/api/v1/alerts/active",
+    # Verified reads control routes (reviewed addition): the operator key
+    # issue, revoke and list, the read-gate stage, and the census read. Each
+    # carries the admin signature (_require_admin) and its caller is the seat's
+    # admin script, which is not the mod and has no mod version. Exact paths;
+    # the rate limiter's own list gains nothing.
+    "/api/v1/admin/operators/keys",
+    "/api/v1/admin/operators/keys/revoke",
+    "/api/v1/admin/operators",
+    "/api/v1/admin/read-gate/mode",
+    "/api/v1/admin/read-census",
 })
 
 
@@ -6352,6 +6398,14 @@ _RL_SENSITIVE_PREFIXES = (
     # would throttle every player read. The trailing slash keeps it from
     # matching any sibling path.
     "/api/v1/h2h/",
+    # Automatic post-match log upload: a single accepted request can carry up
+    # to 14 MiB and writes a disk artifact, so it belongs in the tighter
+    # bucket rather than the 150/10s one it inherited. THE TRAILING SLASH IS
+    # LOAD-BEARING for the same reason as /bug-reports/ above. It does not
+    # cover /api/v1/internal/logs (a different prefix), whose callers carry
+    # X-Internal-Key and bypass the limiter anyway. A real client uploads once
+    # per match, so 20/10s is nowhere near binding.
+    "/api/v1/logs/",
     "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
     "/api/v1/ffa/bets",
     # Lobby-phase wagers (migration 207). startswith also covers
@@ -6416,6 +6470,21 @@ def _rl_client_address(request) -> str:
 
 
 @app.middleware("http")
+async def read_gate_cache_control(request: Request, call_next):
+    """Verified reads: a gated response the read gate marked (every gated read
+    under `enforce`, and the probe route in every stage) carries
+    `Cache-Control: no-store, private`, so no cache between the client and
+    this box can answer a later request with it. The gate's own refusals carry
+    the header themselves. In `off` and `log` nothing is marked, so gated
+    responses are byte-identical to what they were. Registered first, so it is
+    the innermost http middleware."""
+    response = await call_next(request)
+    if getattr(request.state, "read_gate_no_store", False):
+        response.headers["Cache-Control"] = read_gate.NO_STORE
+    return response
+
+
+@app.middleware("http")
 async def rate_limit_gate(request: Request, call_next):
     path = request.url.path
     # /api/v1/internal/* — AUTH BEFORE PARSE (Codex Aug-18 review; learning
@@ -6442,9 +6511,37 @@ async def rate_limit_gate(request: Request, call_next):
         return await call_next(request)   # authorized bot — exempt from RL
     if (not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS:
         return await call_next(request)
+    refusal = _rl_charge(request)
+    if refusal is not None:
+        return refusal
+    return await call_next(request)
+
+
+def _rl_charge(request, force: bool = False):
+    """Charge this request (or chat socket) to its per-address bucket, at most
+    ONCE per connection: the answer is None when it may proceed, else the
+    refusal response (413, 429, or the motion latch's 503). A connection
+    already charged is not charged again, so the version gate's charge ahead
+    of an operator-key lookup and rate_limit_gate's own charge are one charge.
+
+    rate_limit_gate calls it for every /api/v1/ path outside
+    _RATE_LIMIT_BYPASS. `force` charges a path in that bypass too: the version
+    gate passes it before the operator-key exemption lookup, and the read gate
+    (app.state.lookup_charge) before a credential lookup that would read the
+    database on a connection nothing has charged. A valid internal key is
+    never charged, as before. The once-per-connection mark lives on the
+    request's state; an object with url, client and headers but no state
+    (what rate_limit_gate accepted before this function) is charged on every
+    call."""
+    state = getattr(request, "state", None)
+    if state is not None and getattr(state, "rl_charged", False):
+        return None
+    path = request.url.path
+    if not force and ((not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS):
+        return None
     internal_key = request.headers.get("X-Internal-Key")
     if internal_key and internal_key == os.getenv("API_SECRET_KEY", ""):
-        return await call_next(request)   # bot is exempt
+        return None   # bot is exempt
     # Cheap body-size gate (header only; the proxy enforces the real limit).
     cl = request.headers.get("content-length")
     if cl:
@@ -6500,6 +6597,8 @@ async def rate_limit_gate(request: Request, call_next):
             headers={"Retry-After": str(int(window))},
         )
     dq.append(now)
+    if state is not None:
+        state.rl_charged = True
     # Periodic prune of idle buckets so the dict can't grow unbounded.
     if now - _RL_LAST_PRUNE[0] > 60:
         _RL_LAST_PRUNE[0] = now
@@ -6511,7 +6610,16 @@ async def rate_limit_gate(request: Request, call_next):
                 del _RL_BUCKETS[k]
         for k in [k for k, until in _RL_MOTION_LATCH.items() if until <= now]:
             del _RL_MOTION_LATCH[k]
-    return await call_next(request)
+    return None
+
+
+# Verified reads: the read gate charges a credential lookup that would read the
+# database on a connection nothing has charged yet (a route in
+# _RATE_LIMIT_BYPASS, the chat socket) to the same per-address buckets. The
+# charge is held by this app and the read gate reads it from the app serving
+# the connection, so importing this file a second time (as api.main) gives that
+# second app its own charge and leaves this app's charge unchanged.
+app.state.lookup_charge = lambda conn: _rl_charge(conn, force=True) is None
 
 
 @app.middleware("http")
@@ -6551,6 +6659,22 @@ async def version_gate(request: Request, call_next):
         return await call_next(request)
     sent = request.headers.get("X-Mod-Version")
     if not sent:
+        # Verified reads: a GET carrying a LIVE operator key (validated through
+        # the read gate's own verifier and cache) needs no mod version, unless
+        # its route is WRITE_ON_GET, PLAYER or BOT_ONLY. Every other request
+        # with no version, an unissued or revoked key included, gets the 426
+        # below exactly as before. The verdict rides request.state to the gate.
+        # The per-address limiter charges the request BEFORE that lookup (it
+        # is the request's one charge: rate_limit_gate does not charge it
+        # again), so repeated unissued keys answer 429 and stop reaching the
+        # operator table. /internal/ paths and a valid internal key returned
+        # above, so the internal key is still checked before any body is read.
+        if request.method == "GET" and request.headers.get("X-Operator-Key"):
+            refusal = _rl_charge(request, force=True)
+            if refusal is not None:
+                return refusal
+        if await read_gate.operator_version_exempt(request, app):
+            return await call_next(request)
         if REQUIRE_MOD_VERSION:
             return JSONResponse(
                 status_code=426,
@@ -7085,8 +7209,8 @@ _FFA_HOLD_FENCES = 1
 # Raise it when a later round of the view must be proven deployed.
 _RJ_TRIAGE_MARKER = 2
 # Its sibling _LADDER_HOOK (the /health `ladder_hook` word) is DERIVED from the
-# compiled code of the four rated completion functions, so it is defined after
-# the last of them in this file, submit_team_match.
+# compiled code of the three ranked game-reporting functions, so it is defined
+# after the last of them in this file, submit_team_match.
 # Its sibling _CONNECT_FAILURE (the /health `connect_failure` word) is DERIVED
 # from the compiled code of the eight I2 writers' entry functions, so it is
 # defined beside _LADDER_HOOK, after the last of them.
@@ -7154,6 +7278,39 @@ def _janitor_selftest_marker() -> int:
 _JANITOR_SELFTEST_BUILD = 1
 
 
+def _title_ladders_health_word() -> int:
+    """/health `title_ladders`: how many ladders the catalogue this build
+    SERVES holds (title_ladders.LADDERS, the list the read route and the hook
+    read), DERIVED at request time and never written down (#342): 32 on the
+    five-tier build (board row 29), absent on any build before it. The title
+    ladders batch adds no route, so this is its release-train build word;
+    nothing else reads it (#306). Code-only, so both arms answer it alike."""
+    return title_ladders.ladder_count()
+
+
+def _auto_log_health_word() -> int:
+    """/health `auto_log`: auto_logs.AUTO_LOG_REVISION when this app's routing
+    table carries POST /api/v1/logs/auto -- the route the v1.41.0 client's
+    post-match upload calls -- and 0 when it does not. DERIVED from app.routes
+    on every request, never written down (#342), so a build that imports the
+    module but stops mounting its router reads 0 rather than the revision.
+    The handler is matched by its module and qualified name, not by naming
+    the function object: a reference to it would put the upload handler,
+    its writers and its session check inside /health's reviewed closure
+    (the read-gate inventory), and /health calls none of them.
+    Code-only and role-blind: both arms of /health answer it, alike on both
+    boxes, which is what lets the release train read it through the edge.
+    Read by nothing but the train (#306)."""
+    for r in app.routes:
+        ep = getattr(r, "endpoint", None)
+        if (getattr(r, "path", None) == "/api/v1/logs/auto"
+                and "POST" in (getattr(r, "methods", None) or ())
+                and getattr(ep, "__module__", None) == _auto_logs.__name__
+                and getattr(ep, "__qualname__", None) == "upload_auto_log"):
+            return _auto_logs.AUTO_LOG_REVISION
+    return 0
+
+
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
 async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
@@ -7173,6 +7330,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
+                              auto_log=_auto_log_health_word(),
                               seat_evidence=_seat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7181,11 +7339,16 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=await _pc_trading_word(db),
                               discord_fix=await _discord_fix_probe(db),
                               pc_card_art=await _pc_card_art_word(),
+                              pc_art_rect=_pc_art_rect_word(),
                               pc_motion=_pc_motion_health_word(),
+                              title_ladders=_title_ladders_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=ffa_finishing_count,
-                              team_dc_fallback=team_dc_fallback)
+                              team_dc_fallback=team_dc_fallback,
+                              read_gate=await read_gate.current_mode(db),
+                              read_gate_build=read_gate.READ_GATE_BUILD,
+                              binder_standings=_BINDER_STANDINGS_BUILD)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -7206,6 +7369,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
+                              auto_log=_auto_log_health_word(),
                               seat_evidence=_seat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7214,17 +7378,22 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_trading=_pc_trading_word_cached(),
                               discord_fix=_DISCORD_FIX_LAST,
                               pc_card_art=await _pc_card_art_word(),
+                              pc_art_rect=_pc_art_rect_word(),
                               pc_motion=_pc_motion_health_word(),
+                              title_ladders=_title_ladders_health_word(),
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
-                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
+                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST,
+                              read_gate=read_gate.mode_word(),
+                              read_gate_build=read_gate.READ_GATE_BUILD,
+                              binder_standings=_BINDER_STANDINGS_BUILD)
 
 
 LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
-async def get_mod_version():
+async def get_mod_version(request: Request = None):
     """Returns the latest recommended mod version, the gating floor, and the
     capability flags a client must see BEFORE it changes what it puts on the
     wire.
@@ -7270,6 +7439,18 @@ async def get_mod_version():
         # first spelling went when the client lane landed on this tree.
         _INVOLUNTARY_CAUSE_CAPABILITY_FIELD: _involuntary,
     }
+    # Verified reads: the stage this box acts on (off | log | enforce |
+    # unknown), which a running client polls to learn a flip or a rollback, and
+    # the GET templates the gate never refuses for want of a read credential
+    # (from the live routing table). Present only for a request whose
+    # X-Mod-Version is READ_GATE_ADVERT_MIN or later; any other request (older,
+    # absent, unparseable) and a bare call with no request get the body above
+    # byte for byte. The header selects the response SHAPE only: both fields
+    # are readable by anyone, and nothing is admitted or refused on it.
+    sent_version = request.headers.get("x-mod-version") if request is not None else None
+    if read_gate.advert_requested(sent_version):
+        body["read_gate"] = await read_gate.current_mode()
+        body["read_gate_open"] = read_gate.ungated_templates(app.routes)
     # The joiner's region guard (connect-failure D3): advertised only while
     # this server enforces it. JOIN_REGION_GUARD ships False, so the answer
     # carries no such key and a gated joiner only logs a region mismatch.
@@ -9028,6 +9209,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # (the old response hardcoded "+5"/"+1" while 10/+2 was credited).
     _series_gold_winner = 0
     _series_gold_loser = 0
+    _ladder_series_gold: dict = {}
     _series_gold_winner_labels: list[str] = []
     _series_gold_loser_labels: list[str] = []
 
@@ -9238,6 +9420,10 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             _series_gold_loser_labels.insert(0, f"Series loss +{loser_bonus}")
             _series_gold_winner = winner_bonus
             _series_gold_loser = loser_bonus
+            # Title ladders (Gold Rush): this game's series-result gold per
+            # player, as credited just below.
+            _ladder_series_gold[str(series_winner.id)] = winner_bonus
+            _ladder_series_gold[str(series_loser.id)] = max(0, loser_bonus)
 
             # r4 find 1: atomic delta + expire — an absolute ORM write here
             # flushes a STALE total and erases any credit committed in
@@ -9284,17 +9470,39 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                         label="1v1-complete")
             except Exception as pcex:
                 print(f"[PC-EARNED] 1v1 grant failed for series {series.id}: {pcex}")
-            _lref = "?"
-            try:
-                _lref = str(series.id)
-                _lpids = [p1.id, p2.id]
-                async with db.begin_nested():
-                    await title_ladders.record_completed_games(
-                        db, _lpids, mode="1v1", reference_id=_lref)
-            except Exception as _lex:
-                print(f"[LADDER-CREDIT] 1v1 credit dropped (series={_lref}): {_lex}")
         else:
             series_status = "active"
+
+    # Title ladders: one credit per ranked GAME (board row 29), keyed on this
+    # game's own id, for both seats from the one report. Here, after every
+    # gold amount of this game is credited -- xp gold, level reward,
+    # achievement gold paid while recording it, and the series result when
+    # this game completed one -- so the Gold Rush ladder is passed their sum
+    # (play_gold) and never reads the ledger; before the commit, so a
+    # duplicate report's rollback takes the credits with it.
+    if report.is_ranked:
+        _lref = "?"
+        try:
+            _lref = str(match.id)
+            _lpids = [p1.id, p2.id]
+
+            def _lplay(pid, xp_gold, lvl_gold):
+                return (max(0, int(xp_gold or 0)) + max(0, int(lvl_gold or 0))
+                        + int(_ladder_series_gold.get(str(pid), 0))
+                        + _ladder_achievement_gold(db, pid))
+            _lrows = {
+                str(p1.id): {**title_ladders.game_row_1v1(
+                    match, p1.id, [_canon_card_name(c.card_name) for c in report.player1.cards]),
+                    "play_gold": _lplay(p1.id, gold_p1, level_gold_p1)},
+                str(p2.id): {**title_ladders.game_row_1v1(
+                    match, p2.id, [_canon_card_name(c.card_name) for c in report.player2.cards]),
+                    "play_gold": _lplay(p2.id, gold_p2, level_gold_p2)},
+            }
+            async with db.begin_nested():
+                await title_ladders.record_completed_games(
+                    db, _lpids, mode="1v1", reference_id=_lref, rows=_lrows)
+        except Exception as _lex:
+            print(f"[LADDER-CREDIT] 1v1 credit dropped (game={_lref}): {_lex}")
 
     try:
         await db.commit()
@@ -9334,6 +9542,9 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # Set before the try so the post-rating blocks below can never NameError
         # on it if the rating pass throws before the authoritative re-read.
         _series_still_valid = True
+        # Achievement gold this pass pays reaches this game's Gold Rush count
+        # through _ladder_commit_with_late_gold at each of its commits.
+        _ladder_late_mark = _ladder_achievement_mark(db)
         # Inline recalculation for the two series players
         try:
             # This is a NEW transaction (the match write committed above), so
@@ -9456,7 +9667,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 await _grant_rating_achievements(db, p1.id, new_r1)
                 await _grant_rating_achievements(db, p2.id, new_r2)
 
-            await db.commit()
+            await _ladder_commit_with_late_gold(db, match.id, _ladder_late_mark, "rating")
         except Exception as ex:
             print(f"Series Glicko update error: {ex}")
 
@@ -9478,12 +9689,15 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 )).scalar_one_or_none()
                 slayer_key = SLAYER_TARGETS.get(loser_steam or "")
                 if slayer_key and winner_steam and winner_steam != loser_steam:
+                    _ladder_late_mark = _ladder_achievement_mark(db)
                     if await _grant_achievement_inline(db, series.winner_id, slayer_key):
-                        await db.commit()
+                        await _ladder_commit_with_late_gold(
+                            db, match.id, _ladder_late_mark, "slayer")
                         print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
                 # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
                 if winner_steam:
                     streak = await get_ranked_streak(db, winner_steam)
+                    _ladder_late_mark = _ladder_achievement_mark(db)
                     granted_streak = False
                     if streak >= 25:
                         granted_streak |= await _grant_achievement_inline(db, series.winner_id, "on_fire")
@@ -9492,7 +9706,8 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                     if streak >= 100:
                         granted_streak |= await _grant_achievement_inline(db, series.winner_id, "immortal")
                     if granted_streak:
-                        await db.commit()
+                        await _ladder_commit_with_late_gold(
+                            db, match.id, _ladder_late_mark, "streak")
                         print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
         except Exception as ex:
             print(f"Slayer auto-grant error: {ex}")
@@ -20604,6 +20819,22 @@ async def get_recent_multimode_series(
     return {"entries": entries[:limit]}
 
 
+def _ws_chat_charge(ws) -> bool:
+    """Charge the chat socket's address to the per-address limiter before
+    database work the socket is about to cause: True when that work may run.
+    HTTP middleware never runs for a socket, so ws_chat charges here: once
+    at connect, before the socket's first database access, then once per auth
+    frame and once per chat message that passed the connection's spam gate,
+    each before that frame's own lookups. The once-per-connection mark is
+    cleared first because every one of those is a separate unit of database
+    work. A valid internal key is never charged (_rl_charge), so the bot's
+    socket is unaffected."""
+    state = getattr(ws, "state", None)
+    if state is not None:
+        state.rl_charged = False
+    return _rl_charge(ws, force=True) is None
+
+
 @app.websocket("/api/v1/ws/chat")
 async def ws_chat(ws: WebSocket):
     """Mod <-> server chat channel. Messages are broadcast fan-out style."""
@@ -20619,8 +20850,21 @@ async def ws_chat(ws: WebSocket):
         if sent and _parse_version(sent) < _parse_version(MIN_MOD_VERSION_EFFECTIVE):
             await ws.close(code=1008, reason="outdated")
             return
+    # The per-address limiter, before this socket's first database access (the
+    # credential count and the lockdown snapshot below). A refused charge is
+    # accepted and closed 1013 rate_limited -- the read gate's lookup_limited
+    # close -- so the client retries later and the handshake itself answers
+    # 101, not a refusal status; nothing below runs.
+    if not _ws_chat_charge(ws):
+        await ws.accept()
+        await ws.close(code=1013, reason="rate_limited")
+        return
     await chat_manager.connect(ws)
     print(f"[CHAT] subscriber connected (total={chat_manager.count})")
+    # Verified reads: the socket's outbound read side is COUNTED in log and
+    # enforce by its connect-time credential class; nothing here refuses, and
+    # the inbound path below is unchanged. Never raises.
+    await read_gate.count_socket(ws)
     # Lockdown snapshot for LATE JOINERS (D1 F15): the toggle broadcast only
     # reaches sockets connected at that moment, so every new socket is told
     # the current state up front — in BOTH states, because ChatClient.ChatLocked
@@ -20657,7 +20901,10 @@ async def ws_chat(ws: WebSocket):
             if data.get("type") == "auth":
                 claim = str(data.get("steam_id", ""))[:20]
                 token = str(data.get("token", ""))[:128]
-                if claim and token:
+                # Each auth frame's session read is charged first; a refused
+                # charge skips the read, so the socket's identity stays what
+                # it was, as after a failed check.
+                if claim and token and _ws_chat_charge(ws):
                     try:
                         from database import async_session
                         async with async_session() as _adb:
@@ -20718,6 +20965,12 @@ async def ws_chat(ws: WebSocket):
             # so spam bursts never turn into DB load.
             if not _chat_spam_ok(id(ws), message):
                 print(f"[CHAT] rate-limited {display_name} ({steam_id})")
+                continue
+            # The address is charged before this message's ban, mute and
+            # metadata reads and its insert; a refused charge drops the
+            # message silently, as the spam gate does.
+            if not _ws_chat_charge(ws):
+                print(f"[CHAT] address rate-limited {display_name} ({steam_id})")
                 continue
             # Banned players can't chat. Silently drop — telling them they're banned would
             # encourage griefing on alts. The mod's queue-join 409 is the primary signal.
@@ -25830,13 +26083,16 @@ def _is_shop_owner(steam_id: str | None) -> bool:
 # ── The one carve-out from that exemption ──────────────────────────
 #
 # Title-ladder rungs above the first are PROGRESSION, not cosmetics: each one
-# is granted by finishing a number of rated series while wearing the rung
-# below it. The shop-owner exemption above does two things that are wrong for
+# is granted by playing a number of ranked games while wearing a rung of its
+# ladder. The shop-owner exemption above does two things that are wrong for
 # such a row — it lists the whole `rotation_pool = 'achievement'` pool to the
 # exempt account whether owned or not, and it skips the ownership check on
-# equip — and the combination means an exempt account is listed all forty
-# higher rungs and can equip any of them without the ladder ever having
+# equip — and the combination means an exempt account is listed every
+# higher rung and can equip any of them without the ladder ever having
 # advanced. A rung that can be worn without being earned is not a rung.
+# The two titles migration 366 retires (title_ladders.RETIRED_SKUS) are
+# carved out too: retired means nobody can equip one, an exempt account
+# included (board row 29).
 #
 # The set is imported from `title_ladders`, which is the module that DEFINES
 # the catalogue, rather than matched on the `title_ladder_` sku prefix: a
@@ -25844,11 +26100,12 @@ def _is_shop_owner(steam_id: str | None) -> bool:
 # a rename silently empties, which is the shape of a check that cannot fail
 # (#306/#342). This import wires nothing by itself: the ladder's read route is
 # mounted by the one include_router line beside the tournaments router, and
-# the progression hook is called from the four rated completion paths
+# the progression hook is called from the three ranked game-reporting paths
 # themselves; that module's docstring records every production reference.
 import title_ladders as _title_ladders
 
 _GRANTED_ONLY_TITLE_SKUS = _title_ladders.GRANTED_ONLY_SKUS
+_NOT_AUTO_OWNED_SKUS = _title_ladders.NOT_AUTO_OWNED_SKUS
 
 
 def _auto_owned(steam_id: str | None, sku: str | None) -> bool:
@@ -25875,7 +26132,7 @@ def _auto_owned(steam_id: str | None, sku: str | None) -> bool:
     """
     if not _is_shop_owner(steam_id):
         return False
-    return sku not in _GRANTED_ONLY_TITLE_SKUS
+    return sku not in _NOT_AUTO_OWNED_SKUS
 
 
 @app.get("/api/v1/shop/items", tags=["Shop"])
@@ -26216,44 +26473,31 @@ _PC_POOL_MEMBER_SQL = """(p.deleted_at IS NULL
 # its tie-breaker (rating, then player id); the card's W/L (`series`) is the
 # truthful record and excludes invalidated series, as pool_rank's
 # has-a-series rule does (design v4 §2).
-_PC_SNAPSHOT_SELECT_SQL = """
-    WITH pool AS (
-        SELECT p.id AS player_id, gr.rating, gr.peak_rating,
-               si.sku AS title_sku, si.name AS title_name, si.preview_color AS title_color
-          FROM players p
-          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
-          LEFT JOIN shop_items si ON si.id = p.active_title_id
-         WHERE """ + _PC_POOL_MEMBER_SQL + """
-    ),
-    series AS (
-        SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
-          FROM (
-              SELECT rs.player1_id AS player_id,
-                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END AS won,
-                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END AS lost
-                FROM ranked_series rs
-               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
-              UNION ALL
-              SELECT rs.player2_id,
-                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END,
-                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END
-                FROM ranked_series rs
-               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
-          ) s
-         GROUP BY s.player_id
-    ),
+#
+# THE BOARD A CARD'S RANK MEANS, as ONE text, in the spelling
+# `_PC_POOL_STEAM_ID_SQL` already uses. Two statements stand on it: the
+# snapshot's select below, which freezes `board_rank` onto a print at mint,
+# and `_PC_BOARD_RANKS_SQL`, which answers "where does this subject stand
+# TODAY" for the binder's rating-position sort (item 20 §3.2). A card prints
+# one of those numbers and the binder orders by the other, so the two have to
+# be the same board by construction rather than by two texts agreeing — a
+# drift in `:min_matches`, in the activity clause or in the ROW_NUMBER
+# ordering would put a card in a group its own printed rank contradicts.
+# test_binder_rating_sort.py pins this text character for character and pins
+# that both consumers interpolate it, the way test_pc_no_steam_no_card.py:319
+# pins the pool's id clause.
+#
+# It is the TAIL of the snapshot's WITH list on purpose: `board` has to be the
+# last CTE for `_PC_BOARD_RANKS_SQL` to append its own SELECT. `top` moved
+# above `series` for the same reason; no CTE here reads another except
+# `board`, which reads the two above it, so the order is free to change.
+_PC_BOARD_CTE_SQL = """
     legacy AS (
         SELECT p.id AS player_id, COUNT(m.id) AS total
           FROM players p
           JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id)
                         AND m.is_ranked = true AND m.series_id IS NULL
          GROUP BY p.id
-    ),
-    top AS (
-        SELECT DISTINCT ON (mc.player_id) mc.player_id, mc.card_name
-          FROM (SELECT player_id, card_name, COUNT(*) AS n
-                  FROM match_cards GROUP BY player_id, card_name) mc
-         ORDER BY mc.player_id, mc.n DESC, mc.card_name
     ),
     board_series AS (
         SELECT s.player_id, COUNT(*) AS total
@@ -26272,7 +26516,58 @@ _PC_SNAPSHOT_SELECT_SQL = """
            AND COALESCE(se.total, 0) + COALESCE(lg.total, 0) >= CAST(:min_matches AS integer)
            AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
     )
-    SELECT pool.player_id,
+"""
+
+#
+# THE PARENTHESES AROUND THE TAIL ARE LOAD-BEARING, and they are not style.
+# `_janitor_sql_inventory` resolves every janitor `text(...)` argument
+# statically and refuses a call it cannot fold; its constant folder gives up
+# past a depth of 8, and `+` is left-associative, so each term appended after
+# `_PC_POOL_MEMBER_SQL` pushes that name — and the `_PC_POOL_STEAM_ID_SQL`
+# inside it — one level deeper. Written flat, the two extra terms this change
+# adds put the pool's id clause at depth 9 and `_pc_take_snapshot` turns up in
+# the self-test's `dynamic` list, i.e. the boot-time EXPLAIN sweep silently
+# stops covering the snapshot. Bracketing the tail keeps the left spine the
+# length it was, so the pool clause resolves at exactly the depth it always
+# did. test_pc_no_steam_no_card.py's
+# test_the_boot_self_test_explains_both_of_the_janitors_pool_reads is the
+# check that fails if this is ever flattened.
+#
+# The fragment already ends in a newline, so the literal that follows it opens
+# straight on `    SELECT` — without that the statement would grow a blank line
+# the pre-item-20 text did not have.
+_PC_SNAPSHOT_SELECT_SQL = """
+    WITH pool AS (
+        SELECT p.id AS player_id, gr.rating, gr.peak_rating,
+               si.sku AS title_sku, si.name AS title_name, si.preview_color AS title_color
+          FROM players p
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+         WHERE """ + _PC_POOL_MEMBER_SQL + ("""
+    ),
+    top AS (
+        SELECT DISTINCT ON (mc.player_id) mc.player_id, mc.card_name
+          FROM (SELECT player_id, card_name, COUNT(*) AS n
+                  FROM match_cards GROUP BY player_id, card_name) mc
+         ORDER BY mc.player_id, mc.n DESC, mc.card_name
+    ),
+    series AS (
+        SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
+          FROM (
+              SELECT rs.player1_id AS player_id,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END AS won,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END AS lost
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+              UNION ALL
+              SELECT rs.player2_id,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+          ) s
+         GROUP BY s.player_id
+    ),""" + _PC_BOARD_CTE_SQL + """    SELECT pool.player_id,
            ROW_NUMBER() OVER (ORDER BY (COALESCE(series.total, 0) > 0) DESC,
                                        pool.rating DESC NULLS LAST,
                                        pool.peak_rating DESC NULLS LAST,
@@ -26287,7 +26582,235 @@ _PC_SNAPSHOT_SELECT_SQL = """
       LEFT JOIN top ON top.player_id = pool.player_id
       LEFT JOIN board ON board.player_id = pool.player_id
      ORDER BY pool_rank
+""")
+
+# ── the binder's rating-position sort: the subject's standings TODAY ──────────
+# Item 20 §3.2. The collection answer carries, per print, where the subject
+# stands on the card's own board right now — which is not what the print row
+# holds: `pr.board_rank` and `pr.rating` are the MINT-TIME snapshot, frozen,
+# and pc_face draws that frozen number on the card. Two statements, not one,
+# because the two halves have very different costs.
+
+# (a) The heavy half: the whole board, ranked, over the shared CTE above. It
+# stands on a full aggregate over `matches` and a full GROUP BY over every
+# completed `ranked_series`, and `WHERE p.id = ANY(...)` would reduce none of
+# it because the ROW_NUMBER window is computed before any such join. So it is
+# never per-subject and never per-request; it is computed for the whole board
+# and cached for `_PC_STANDINGS_TTL_S`.
+_PC_BOARD_RANKS_SQL = "WITH" + _PC_BOARD_CTE_SQL + """
+    SELECT player_id, board_rank FROM board
 """
+
+# MEASURED on this seat's local PostgreSQL 16.9 (2026-09-20, database
+# item20test, rebuilt and re-measured seven times; the full table is in the
+# design's §3.2, and `backend/tests/item20_board_cost.py` re-derives it).
+#
+# The fixture the bound is set against DOMINATES production on every axis the
+# cost scales on, which is the only thing that makes it a bound: 9,000 players
+# and 9,000 glicko rows against the primary's 5,130 and 5,130, 40,000 matches
+# against 16,401, 38,000 ranked_series against 2,217, and 846 eligible board
+# rows against 98 (all read from the primary through `sql-readonly:`).
+#
+# Statement (a) there: median of medians 275.3 ms over three builds of ten
+# timed runs, worst single sample 345.8 ms, ~92k shared buffer hits of which
+# ~90k are the `legacy` arm alone.
+#
+# The TTL is chosen against the SPREAD rather than a median, and the difference
+# is the whole argument: at 30 s the median run costs 0.92% of a pool
+# connection-minute, which passes, but the worst observed run costs 1.15%,
+# which does not. At 60 s the median is 0.46% and the worst run 0.58% — inside
+# the ~1% bar at every one of the seventy samples taken. 60 is the smallest
+# value that holds at the worst observation and not merely at the typical one.
+_PC_STANDINGS_TTL_S = 60
+
+# A refresh that RAISES is cached too, for this much shorter window (Codex
+# item 20 round 1, LOW 2; 5 s is the value the land brief names, the design
+# names none). Without it a failed refresh leaves nothing behind, so every
+# cold caller queued on the one lock runs the same failing heavy statement in
+# turn, each holding a pool connection while it does. With it, callers inside
+# the window answer at once with no statement, the attach helper turns that
+# into `subject_standings: false` (the existing degraded answer, five sorts),
+# and the first caller after the window retries once. Short on purpose: the
+# stamp only bounds retries of a statement that just failed, it must not keep
+# the sixth sort away for a TTL after the database recovers.
+_PC_STANDINGS_FAIL_TTL_S = 5
+
+# The /health word `binder_standings` (schemas.HealthResponse): a code
+# constant, so both arms answer it with no database. It exists to be probed
+# by the release train and has no other reader (#306).
+_BINDER_STANDINGS_BUILD = 1
+
+# The cache is keyed on WHAT IT WAS COMPUTED WITH, never on a module global
+# read back at call time (#744): an entry is
+# (min_matches, active_days) -> (expires_at_monotonic, {player_id: board_rank}),
+# or (expires_at_monotonic, None) for a refresh that failed inside the last
+# `_PC_STANDINGS_FAIL_TTL_S`, so a request whose binds differ MISSES rather
+# than being handed someone else's board. No functools cache anywhere near it — an unbounded path-blind
+# cache is the shape that answered with stand-in fonts for the rest of a
+# process. Unbounded growth is not a concern here for a reason that is checked
+# rather than assumed: the only writer is `_pc_board_ranks`, whose key comes
+# from two module constants, so the map holds one entry per distinct
+# configuration this process has ever run under.
+_PC_BOARD_RANKS_CACHE: dict = {}
+_PC_BOARD_RANKS_LOCK = asyncio.Lock()
+
+# (b) The cheap half, run per collection read, over the few hundred distinct
+# subjects of the rows just fetched. `board_rank` comes from (a)'s map, so this
+# statement never touches `matches` or `ranked_series` at all — which is what
+# makes it cheap, and it is a property of the TEXT rather than of a plan.
+#
+# It is deliberately NOT described here as a primary-key lookup. Measured at
+# 3,000 players / 300 ids, the planner reads `players` sequentially (112 pages)
+# in preference to 300 `players_pkey` descents, and it is right to: forcing the
+# index with `enable_seqscan=off` more than doubles server-side execution
+# (2.676 ms against 1.215 ms) and reads 3,032 buffers instead of 140. An
+# `unnest(...) JOIN players` rewrite is no better — it scans all 3,000 rather
+# than 300. The plan is the planner's to choose and it moves with the table;
+# the bound that does NOT move is the absence of the two aggregate tables
+# above, which is why the test pins the statement's text and not its plan.
+# 140 shared buffers here against ~92,245 for (a), a factor of 659.
+#
+# The `inactive` expression is the leaderboard's own SELECT-LIST form, lifted
+# character for character — deliberately NOT the WHERE-clause form, whose
+# `OR CAST(:include_inactive AS boolean)` disjunct belongs to a display toggle
+# this statement has nothing to do with. Every bind is typed and none is
+# string-built (#448).
+_PC_SUBJECT_STANDINGS_SQL = """
+    SELECT p.id AS player_id,
+           CASE WHEN p.deleted_at IS NULL THEN gr.rating END       AS rating,
+           (gr.player_id IS NOT NULL AND p.deleted_at IS NULL)     AS rated,
+           NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer)))
+                                                                   AS inactive
+      FROM players p
+      LEFT JOIN glicko_ratings gr ON gr.player_id = p.id AND p.deleted_at IS NULL
+     WHERE p.id = ANY(CAST(:subject_ids AS uuid[]))
+"""
+
+
+async def _pc_board_ranks(db: AsyncSession, *, min_matches: int, active_days: int) -> dict:
+    """{player_id: board_rank} for the whole board, at most once per TTL.
+
+    The expiry is re-checked AFTER the lock is acquired, not only before it:
+    twenty binder tabs opening together all miss the first check, queue on the
+    lock, and the nineteen that wake up behind the winner must see the entry it
+    just wrote rather than each running the statement again. Without the second
+    check the lock would serialise twenty executions instead of collapsing them
+    into one, which is worse than no lock at all.
+
+    `time.monotonic` rather than wall clock: a clock step must not make an
+    entry immortal, and comparing monotonic to monotonic is the only comparison
+    that holds across one.
+
+    ONE lock for every key, not one per key. A refresh under a second
+    configuration therefore waits behind the first, which is acceptable
+    because the map holds one entry per distinct (min_matches, active_days)
+    this process has ever run under: in production that is a single entry, and
+    the second only ever appears under a test that redirects a global. A
+    per-key lock would buy concurrency between configurations that do not
+    exist, at the price of a second structure to keep in step with the cache.
+
+    A refresh that raises stamps a failure entry for `_PC_STANDINGS_FAIL_TTL_S`
+    and re-raises; a caller that finds that stamp raises `_PcBoardUnavailable`
+    without running the statement. Both are exceptions on purpose: they reach
+    the collection route through `_pc_subject_standings` and the attach helper
+    below it, which already turns any exception into
+    `subject_standings: false`. A cancelled refresh (BaseException) stamps
+    nothing, since it says nothing about the statement."""
+    key = (int(min_matches), int(active_days))
+    hit = _PC_BOARD_RANKS_CACHE.get(key)
+    if hit is not None and hit[0] > time.monotonic():
+        return _pc_board_hit(hit)
+    async with _PC_BOARD_RANKS_LOCK:
+        hit = _PC_BOARD_RANKS_CACHE.get(key)
+        if hit is not None and hit[0] > time.monotonic():
+            return _pc_board_hit(hit)
+        try:
+            rows = (await db.execute(text(_PC_BOARD_RANKS_SQL),
+                                     {"min_matches": key[0], "active_days": key[1]})).mappings().all()
+        except Exception:
+            _PC_BOARD_RANKS_CACHE[key] = (time.monotonic() + _PC_STANDINGS_FAIL_TTL_S, None)
+            raise
+        ranks = {str(r["player_id"]): int(r["board_rank"]) for r in rows}
+        _PC_BOARD_RANKS_CACHE[key] = (time.monotonic() + _PC_STANDINGS_TTL_S, ranks)
+        return ranks
+
+
+class _PcBoardUnavailable(RuntimeError):
+    """The board refresh failed inside the last `_PC_STANDINGS_FAIL_TTL_S`."""
+
+
+def _pc_board_hit(hit) -> dict:
+    """The map of a live cache entry, or `_PcBoardUnavailable` for a failure stamp."""
+    if hit[1] is None:
+        raise _PcBoardUnavailable("board refresh failed recently; retried after the stamp expires")
+    return hit[1]
+
+
+async def _pc_subject_standings(db: AsyncSession, subject_ids) -> dict:
+    """{player_id: {board_rank, rating, inactive}} for the given subjects.
+
+    `board_rank` is None for a subject the board does not hold — off it, below
+    the match minimum, deleted, or not seen inside the activity window. `rating`
+    is None unless the subject has a live rating row, which is what `rated`
+    decides: a subject who deleted their data has neither.
+
+    The binds are read HERE and passed down as the cache key, so a test that
+    redirects `LEADERBOARD_ACTIVE_DAYS` changes the key and misses rather than
+    being served the board computed under the old value (#744)."""
+    ids = sorted({str(s) for s in subject_ids if s})
+    if not ids:
+        return {}
+    min_matches, active_days = _PC_POOL_MIN_MATCHES, LEADERBOARD_ACTIVE_DAYS
+    ranks = await _pc_board_ranks(db, min_matches=min_matches, active_days=active_days)
+    rows = (await db.execute(text(_PC_SUBJECT_STANDINGS_SQL),
+                             {"active_days": active_days, "subject_ids": ids})).mappings().all()
+    out = {}
+    for r in rows:
+        pid = str(r["player_id"])
+        # The cached board map is a HINT, up to one TTL old; this live row is
+        # the authority. A subject who lost their rating row or deleted their
+        # data inside the TTL is `rated` false here while the map still holds
+        # their old rank, and a rank beside a null rating would sort the card
+        # as a rated one. So no rank without a live rating. A subject with no
+        # live row at all is absent from `rows` and gets no entry.
+        out[pid] = {"board_rank": (ranks.get(pid) if r["rated"] else None),
+                    "rating": (_pc_num(r["rating"]) if r["rated"] else None),
+                    "inactive": bool(r["inactive"])}
+    return out
+
+
+async def _pc_attach_subject_standings(db: AsyncSession, prints: list) -> bool:
+    """Put each subject's standings TODAY onto the prints, and say whether it
+    worked. The return value is what the answer's `subject_standings` flag is
+    built from — a computed bool on the one path that holds both a board map
+    and a completed per-subject read, never a literal on a return path, so a
+    box that could not compute them cannot claim it did.
+
+    A fact about the SUBJECT, not about the print, so it is not a column on
+    `pc_prints` and cannot come out of the face select. Attached after
+    `_pc_print_dict` has run, which is the shape `_pc_prints_of_pack` already
+    uses for `dup_at_pull`, and keyed by subject id rather than by position.
+
+    Which way the unhandled case fails: a refresh that raises returns False and
+    the binder still paints, with its five existing sorts — the sixth is simply
+    not offered. Expiring by default, never blocking by default (#276): the
+    refusal costs one ordering, and a guard is judged by what its refusal
+    costs (#430)."""
+    try:
+        standings = await _pc_subject_standings(
+            db, {p.get("subject_player_id") for p in prints})
+    except Exception as ex:   # noqa: BLE001 - any failure means "no standings"
+        print(f"[PC] subject standings unavailable: {ex}")
+        return False
+    for p in prints:
+        st = standings.get(p.get("subject_player_id"))
+        if st is None:
+            continue
+        p["subject_board_rank"] = st["board_rank"]
+        p["subject_rating"] = st["rating"]
+        p["subject_inactive"] = st["inactive"]
+    return True
+
 
 _PC_MEMBER_INSERT_SQL = """
     INSERT INTO pc_pool_members (snapshot_id, player_id, pool_rank, rarity, rating, peak_rating,
@@ -28271,11 +28794,16 @@ async def pc_collection(
         """), {"owner": owner_pid})).all()}
         for p in prints:
             p["traded"] = p["print_id"] in traded
+    # Item 20: where each subject stands on the card's own board TODAY, so the
+    # binder can order by position. THIS ROUTE ONLY -- a pack-open answer and
+    # /pc/card go through the same `_pc_print_dict` and must keep their present
+    # shape, which is why the attach lives here and not in that helper.
+    standings = await _pc_attach_subject_standings(db, prints)
     counts = {k: 0 for k in _pc.RARITIES}
     for p in prints:
         counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
     return {"owner_name": _pcp.public_render_name(owner_name) or _pc_neutral_name(ctx),
-            "public": public, "locale": ctx["locale"],
+            "public": public, "locale": ctx["locale"], "subject_standings": standings,
             "count": len(prints), "by_rarity": counts, "prints": prints}
 
 
@@ -30026,6 +30554,20 @@ async def _pc_card_art_word() -> int:
         return int(result["word"])
     except Exception:
         return 0
+
+
+def _pc_art_rect_word() -> str | None:
+    """The /health word pc_art_rect (bug 408): the top-card art rect of the
+    layout this process's renderer LOADED, "x0,y0,x1,y1" -- see
+    HealthResponse.pc_art_rect. Read from pc_face at every call, never a
+    constant here (#342). None when the renderer module did not import.
+    Needs no database, so both arms answer it the same way."""
+    if _pcf is None:
+        return None
+    try:
+        return _pcf.card_art_rect_word()
+    except Exception:
+        return None
 
 
 async def _pc_labels(db: AsyncSession, locale: str) -> dict:
@@ -40603,6 +41145,79 @@ async def _achievement_payment_eligible(db: AsyncSession, player_id, achievement
     return paid == 0 or clawed >= paid
 
 
+# -- Achievement gold paid while a game is being recorded (title ladders) -----
+# The Gold Rush ladder counts the play gold of each ranked game, achievement
+# gold included (board row 29, round 2 finding 3). The three game-reporting
+# paths pass that sum to title_ladders.record_completed_games as a number they
+# already hold, so the hook never reads the ledger (finding 9). The achievement
+# part is the one amount those paths do not compute themselves: it is paid
+# here, inside _grant_achievement_inline, so this note records it on the
+# request's own session, per player, as it is paid. A caller reads it with
+# _ladder_achievement_gold. A path that grants achievements inside a savepoint
+# that can roll back takes a _ladder_achievement_mark before it and restores
+# it on the rollback, so gold that was rolled back is never counted.
+_LADDER_ACH_GOLD = "scr_ladder_achievement_gold"
+
+
+def _ladder_note_bag(db):
+    """The session's info dict, or None for a stand-in session without one
+    (unit-test fakes): no note is then kept and every read answers 0."""
+    info = getattr(db, "info", None)
+    return info if isinstance(info, dict) else None
+
+
+def _note_ladder_achievement_gold(db, player_id, amount: int) -> None:
+    info = _ladder_note_bag(db)
+    if info is None:
+        return
+    note = info.setdefault(_LADDER_ACH_GOLD, {})
+    note[str(player_id)] = note.get(str(player_id), 0) + int(amount)
+
+
+def _ladder_achievement_gold(db, player_id) -> int:
+    info = _ladder_note_bag(db)
+    return int(((info or {}).get(_LADDER_ACH_GOLD) or {}).get(str(player_id), 0))
+
+
+def _ladder_achievement_mark(db) -> dict:
+    info = _ladder_note_bag(db)
+    return dict((info or {}).get(_LADDER_ACH_GOLD) or {})
+
+
+def _ladder_achievement_restore(db, mark: dict) -> None:
+    info = _ladder_note_bag(db)
+    if info is not None:
+        info[_LADDER_ACH_GOLD] = dict(mark)
+
+
+async def _ladder_commit_with_late_gold(db, game_ref, mark: dict, source: str) -> None:
+    """Commit one block of submit_match's post-commit rating pass (source
+    rating, slayer or streak), first adding the achievement gold that block
+    paid since `mark` to the Gold Rush count of the game that completed the
+    series (title_ladders.record_late_play_gold, round 3 finding 1). The game
+    was claimed before this pass ran, so this gold would otherwise never
+    reach it. The supplement rides the same commit as the payout: both land
+    or neither does. A fault in the supplement alone is dropped with its own
+    savepoint and the payout still commits. A failed commit restores the
+    note to `mark` and re-raises to the block's own handler."""
+    now = _ladder_achievement_mark(db)
+    for pid_s in sorted(now):
+        amount = int(now.get(pid_s, 0)) - int(mark.get(pid_s, 0))
+        if amount <= 0:
+            continue
+        try:
+            async with db.begin_nested():
+                await title_ladders.record_late_play_gold(
+                    db, uuid.UUID(pid_s), game_ref=str(game_ref), source=source, amount=amount)
+        except Exception as _lex:
+            print(f"[LADDER-CREDIT] 1v1 late {source} gold dropped (game={game_ref}): {_lex}")
+    try:
+        await db.commit()
+    except Exception:
+        _ladder_achievement_restore(db, mark)
+        raise
+
+
 async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key: str) -> bool:
     """Idempotent inline grant — insert PlayerAchievement row (+ gold when the
     key pays anything), no commit.
@@ -40643,6 +41258,7 @@ async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key
             player_id=player_id, amount=gold_amt,
             reason="achievement", reference_id=achievement_key,
         ))
+        _note_ladder_achievement_gold(db, player_id, gold_amt)
     # Achievement-gated titles (Sid Slayer / Stan Slayer) become equippable
     # the moment the achievement lands, whatever the grant path.
     title_sku = ACHIEVEMENT_TITLE_SKUS.get(achievement_key)
@@ -40981,10 +41597,12 @@ _SCRUB_STEAMID_RE = _re.compile(r"\b[0-9]{17}\b")
 
 
 def _read_bug_log_sync(path_str: str) -> str:
-    """Blocking gunzip of a stored bundle. MUST be driven through
-    asyncio.to_thread: this API runs ONE uvicorn worker on purpose (#125) and
-    a stored blob can be megabytes, so doing it inline stalls the event loop
-    for the whole community while one admin opens one report.
+    """Blocking gunzip of a stored bundle. MUST be driven off the event loop:
+    this API runs ONE uvicorn worker on purpose (#125) and a stored blob can
+    be megabytes, so doing it inline stalls the event loop for the whole
+    community while one admin opens one report. Both readers drive it on the
+    auto-log module's volume pool, with a ceiling on the wait (R7-M4's
+    class), because it is a call on the same volume the log writers use.
 
     Overflow keeps the TAIL. A log's recent lines are the ones that explain
     the crash; head-truncating a bundle discards the part being asked about.
@@ -41118,8 +41736,21 @@ async def _scrub_bug_log(db: AsyncSession, body: str) -> tuple:
     593 ms, and switching the id scan from findall to finditer removes most of
     what remained. So this reduces the stall substantially -- it does not make
     the loop free. Do not read this function as non-blocking.
+
+    SINCE ROUND 8 NEITHER PASS IS WAITED FOR WITHOUT A CEILING OR WITH A
+    POOLED CONNECTION CHECKED OUT (R7-M4's class; the two admin readers are
+    the only callers). Both passes run on the auto-log module's CPU pool --
+    not the event loop's default executor -- each waited for at most
+    `AUTO_LOG_CPU_WAIT_S`; past it this raises `TimeoutError`, which the
+    detail pane reads as a log read error and the download answers 503. And
+    the probe's transaction is ENDED before pass two: the probe is a read,
+    and nothing either caller does afterwards needs that transaction, so
+    pass two waits holding no connection. Pass one needs no such step --
+    both callers end their read before the volume hop that precedes it.
     """
-    body, counts, ids = await asyncio.to_thread(_scrub_pass_one, body)
+    body, counts, ids = await _auto_logs._hop(
+        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,
+        _scrub_pass_one, body)
     if not body:
         return body, counts
 
@@ -41146,7 +41777,12 @@ async def _scrub_bug_log(db: AsyncSession, body: str) -> tuple:
         # Redact whatever was already PROVEN deleted and stop probing. Partial
         # redaction beats abandoning the pass and serving every id unredacted.
         print(f"[BUG-LOG] purge probe failed (partial redaction applied): {type(ex).__name__}")
-    body = await asyncio.to_thread(_scrub_pass_two, body, purged, counts)
+    # THE PROBE'S TRANSACTION ENDS HERE, before pass two is waited for: the
+    # rollback returns its connection to the pool (R7-M4's class).
+    await _auto_logs._end_transaction(db)
+    body = await _auto_logs._hop(
+        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,
+        _scrub_pass_two, body, purged, counts)
     return body, counts
 BUG_REPORT_PER_STEAM_PER_DAY = 10
 BUG_REPORT_VALID_SEVERITIES = ("low", "medium", "high", "crash")
@@ -41164,22 +41800,35 @@ def _bug_report_log_path(report_id: str) -> _pathlib.Path:
 @app.post("/api/v1/bug-reports", tags=["Bug Reports"])
 async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Player-submitted bug report. Idempotent only on (steam_id, description)
-    dupes — sliding window rate-limits flooding."""
+    dupes — sliding window rate-limits flooding.
+
+    NO WAIT ON THE VOLUME IS MADE WITH A POOLED CONNECTION CHECKED OUT
+    (R7-M4). Until round 7 this handler INSERTed the row first -- for the id
+    the attachment is named after -- and then did the attachment's whole
+    durable sequence inside that open transaction, so a player's form held a
+    connection for as long as the volume took, and thirty of them held the
+    whole 20 + 10 pool. The work is now three phases:
+
+      T1   the reads that decide whether the report is taken at all (the
+           admin exemption, the rate limit), ENDED before any volume work;
+      the attachment, with no transaction open: the gzip on the auto-log
+           module's CPU pool, then the directory, the marker, the bytes and
+           their flushes on its volume pool, every wait with a ceiling;
+      T2   the player's row, the mod-seen stamp, the report and its event,
+           committed together -- and only then the marker's clear, with a
+           ceiling of its own.
+
+    The row's id is chosen here rather than by a flush, which is what lets
+    the attachment be written before the row exists. A wait that passes its
+    ceiling is an attachment that could not be stored, recorded on the row
+    in the three-state encoding below; the report itself is still filed.
+    """
     severity = req.severity.lower() if req.severity else "medium"
     category = req.category.lower() if req.category else "other"
     if severity not in BUG_REPORT_VALID_SEVERITIES:
         severity = "medium"
     if category not in BUG_REPORT_VALID_CATEGORIES:
         category = "other"
-
-    # Resolve player if known — bug reports tolerate unknown senders so
-    # first-launch players can still report.
-    player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
-    player = player.scalar_one_or_none()
-    if player:
-        # Bug reports accept an arbitrary subject id and tolerate missing
-        # sessions, so this may mark mod-seen/Beta but cannot stamp a version.
-        await _mark_mod_seen(db, player)
 
     # Rate limit: 10 reports per 24h per Steam ID. Returns 429 so the client
     # can show a "slow down" toast. Admins are exempt (July 28, Sid hit the
@@ -41208,6 +41857,16 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
         if (recent.scalar() or 0) >= BUG_REPORT_PER_STEAM_PER_DAY:
             raise HTTPException(status_code=429, detail=f"Limit is {BUG_REPORT_PER_STEAM_PER_DAY} reports per 24h — try again later")
 
+    # T1 ENDS HERE, BEFORE ANY WORK ON THE VOLUME (R7-M4). Everything above
+    # was a READ -- the admin row, the strict session check under its own
+    # savepoint, the count -- so ending the transaction discards nothing and
+    # returns the connection. The writes this request makes (the mod-seen
+    # stamp, the report, its event) all happen in T2, after the attachment,
+    # in one transaction; a report refused 429 above therefore persists
+    # nothing, exactly as before, when the refusal's own rollback discarded
+    # the mod-seen stamp taken ahead of it.
+    await _auto_logs._end_transaction(db)
+
     log_filename: str | None = None
     log_bytes_stored: int | None = None
     # No credential reaches storage (the bug-log posture above): the Steam
@@ -41218,47 +41877,490 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
     # rule too little of a ticket to recognise -- so none of the three, as the
     # flush (the row) and the open() (the file) below write them, carries one.
     log_blob = (req.log_text or "").strip()
-    description = req.description.strip()
-    repro_steps = (req.repro_steps or "").strip() or None
+    # THE ROW'S ID IS CHOSEN HERE, not by a flush. The attachment is named
+    # after it and is written BEFORE the row exists -- that ordering is what
+    # keeps the connection out of the volume work -- and the model's own
+    # default is this same `uuid4`, so nothing about the id changes but when
+    # it is drawn.
+    report_id = uuid.uuid4()
+    row_log_filename: str | None = None
+    row_log_bytes: int | None = None
 
-    report = BugReport(
-        player_id=player.id if player else None,
-        steam_id=req.steam_id,
-        display_name=req.display_name or (player.display_name if player else None),
-        mod_version=req.mod_version,
-        game_version=req.game_version,
-        severity=severity,
-        category=category,
-        description=description,
-        repro_steps=repro_steps,
-    )
-    db.add(report)
-    await db.flush()  # need report.id for the filename
+    attempted_path = None
+    # THE ATTACHMENT'S CLAIM, shared with the auto-log module's write path:
+    # its lock and its `discarded` flag are what make a store and a cleanup
+    # that OVERLAP safe -- and since round 8 they can overlap, because a wait
+    # that passes its ceiling stops waiting while the thread goes on. A
+    # cleanup sets `discarded` under the lock before it removes anything, so
+    # a store still queued behind it creates nothing and a store still
+    # running finishes before the removal starts.
+    own = None
+    # EVERY WORKER THIS REQUEST STARTS on the attachment's files, so the name
+    # is released only when the last of them has ended (the `finally`).
+    hops: list = []
+    committed = False
+    # ONE `try` FROM THE REGISTRATION TO THE COMMIT, and its `finally` is the
+    # only place the attachment's in-flight registration is released.
+    #
+    # It used to be released by a `finally` around the commit alone, beside a
+    # comment arguing that the stretch before it could not raise. It could:
+    # the failure arm's own statements and the event's `db.add` run in that
+    # stretch, and any of them raising ended the request with the name still
+    # registered, so every sweep for the rest of the process skipped a marked,
+    # unreferenced attachment. Every statement from the registration to the
+    # commit is now inside this `try`, whatever it is (round-6 LOW 3).
+    #
+    # WHAT THE `finally` DOES, stated for every path (#351): after a commit
+    # that RETURNED it clears the marker, on a worker thread, waited for with
+    # a ceiling, and on no other path; and on every path it drops the name
+    # -- at once when no worker is still touching the attachment's files,
+    # and otherwise when the last worker this request started finishes (the
+    # store, the partial file's removal, or the marker's clear), because a
+    # request cancelled -- or a wait that passed its ceiling -- while a
+    # thread is still creating or removing one of those files must not
+    # unregister it. Wherever the marker stays, it is what makes the
+    # unreferenced file collectable.
+    try:
+        if log_blob:
+            try:
+                # THE GZIP FIRST, ON THE AUTO-LOG MODULE'S CPU POOL, WITH A
+                # CEILING. It touches nothing on the volume, so a pass that
+                # does not finish in time is an attachment that was never
+                # started: no file exists and nothing is registered.
+                data = await _auto_logs._hop(
+                    _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,
+                    _gzip.compress, log_blob.encode("utf-8", errors="replace"))
 
-    if log_blob:
-        try:
-            path = _bug_report_log_path(str(report.id))
-            data = _gzip.compress(log_blob.encode("utf-8", errors="replace"))
-            with open(path, "wb") as f:
-                f.write(data)
-            log_filename = path.name
-            log_bytes_stored = len(data)
-            report.log_filename = log_filename
-            report.log_bytes = log_bytes_stored
-        except Exception as ex:
-            print(f"[BUG-REPORT] log persistence failed for {report.id}: {ex}")
+                # ONE CEILING FOR THE ATTACHMENT'S VOLUME WORK, spent by each
+                # of its waits in turn -- the directory, then the durable
+                # sequence -- so the two cannot sum past it however the time
+                # falls between them (`_span_budget`, the upload's own rule).
+                attach_deadline = (time.monotonic()
+                                   + _auto_logs.AUTO_LOG_VOLUME_WAIT_S)
 
-    # Seed the activity log with a "created" event so the timeline is complete.
-    db.add(BugReportEvent(
-        bug_report_id=report.id,
-        actor_steam_id=req.steam_id,
-        actor_name=req.display_name or req.steam_id or "Unknown",
-        event_type="created",
-        new_status="open",
-        comment=None,
-    ))
+                # THE PATH IS RESOLVED ON A WORKER THREAD TOO.
+                # `_bug_report_log_path` creates the directory, and a
+                # `mkdir` on a contended volume blocks for as long as the
+                # volume does, like every other call on it (round-6 MEDIUM
+                # 3's class, swept in round 7). Nothing is registered or
+                # stamped yet, so a request cancelled here has nothing to
+                # release. Since round 8 it runs on the volume pool, with no
+                # transaction open and a ceiling on the wait (R7-M4).
+                path = await _auto_logs._hop(
+                    _auto_logs._VOLUME_POOL,
+                    _auto_logs._span_budget(attach_deadline),
+                    _bug_report_log_path, str(report_id))
+                attempted_path = path
+                own = _auto_logs._MarkedBlob(path)
+                # REGISTERED BEFORE THE MARKER EXISTS, which is the upload
+                # path's order (`_reserve_stamp_and_write`). The sweep skips a
+                # registered name at any age, so there is no instant at which
+                # this request's marker is on the volume and its name is not
+                # protected -- including while the worker below is running.
+                _auto_logs._MARKERS_IN_FLIGHT.add(path.name)
 
-    await db.commit()
+                def _store_attachment():
+                    """The attachment's durable sequence up to the commit, on
+                    a worker thread: the marker's stamp and its two flushes,
+                    the blob's bytes, its contents flush and its directory
+                    flush.
+
+                    The api runs one asynchronous worker (#125), and every
+                    step here can block for as long as a contended or
+                    recovering volume takes. Run on the loop, that was every
+                    other request in the process -- queue polls, match
+                    reports -- waiting behind one player's attachment
+                    (round-6 MEDIUM 3). The ORDER inside is unchanged: the
+                    stamp before the first byte, the contents, the entry;
+                    the row commits on the loop after this has returned, and
+                    the marker is cleared after that, on a worker of its own
+                    (the `finally` below).
+
+                    UNDER THE CLAIM'S LOCK, AND NOT AT ALL ONCE IT IS
+                    DISCARDED (round 8). The wait for this call has a
+                    ceiling, and a cleanup that starts after the ceiling
+                    must not race a store that is still running or still
+                    queued: the lock makes them take turns, and the flag
+                    makes a store that comes second create nothing."""
+                    with own.lock:
+                        if own.discarded:
+                            return 0
+                        # THE MARKER GOES BEFORE THE FIRST BYTE, which is the
+                        # upload path's own order applied here (#432: the
+                        # defect is the class, not the line that was flagged).
+                        #
+                        # A process or host stop between `open()` and the
+                        # cleanup arm below leaves a PREFIX of this gzip
+                        # stream on the volume with no row naming it -- and
+                        # the player-report path has no sweep of its own,
+                        # while the automatic path's sweep walks the MARKER
+                        # SET and `prune_auto_logs` walks kind='auto' ROWS.
+                        # Neither can see an unmarked, unreferenced file, so
+                        # that prefix would be permanent, on the volume this
+                        # route is most protective of. Stamping first makes it
+                        # discoverable from before it has any bytes: the sweep
+                        # finds a marker whose blob no row names and takes
+                        # both.
+                        #
+                        # AND THE MARKER IS CLEARED ONLY AFTER THE COMMIT,
+                        # below. Between the two the file is marked and
+                        # unreferenced, which is a state the sweep collects --
+                        # so the window is covered by the in-flight
+                        # registration above and by the sweep's age gate
+                        # rather than by nothing.
+                        #
+                        # `_stamp_marker` is DURABLE and it RAISES rather than
+                        # swallowing, so a volume that cannot carry the marker
+                        # refuses the attachment through the same arm every
+                        # other write failure uses, instead of writing a file
+                        # nothing could ever find.
+                        _auto_logs._stamp_marker(path)
+                        own.marked = True
+                        # AND THE BLOB IS MADE DURABLE BEFORE THE ROW NAMES
+                        # IT, which is the rest of the upload path's order
+                        # (`_write_blob`): the contents flushed, then the
+                        # directory entry that names them. `write()` and
+                        # `close()` promise nothing about either, so a host
+                        # stop after the commit below could otherwise recover
+                        # a row that names an attachment the volume holds
+                        # empty, truncated or not at all -- a report whose log
+                        # the database says it has (#507). A flush that
+                        # refuses raises into the arm below, the same arm a
+                        # failed write takes, so the row never claims bytes
+                        # the filesystem did not promise.
+                        with open(path, "wb") as f:
+                            f.write(data)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        _auto_logs._fsync_dir(_pathlib.Path(path).parent)
+                        own.written = True
+                        return len(data)
+
+                # A WORKER OF ITS OWN, AWAITED THROUGH `asyncio.shield` WITH A
+                # CEILING, the upload path's own shape. Cancelling this request
+                # -- or the ceiling passing -- cannot stop a worker thread, so
+                # it does not pretend to: the thread runs to its end, the
+                # `finally` below keeps the name registered until it has, and
+                # `_drain_section_error` consumes an exception nobody is left
+                # to read. A store that has not returned by the ceiling is an
+                # attachment that was not stored, and the arm below discards
+                # it under the claim's lock.
+                hop = _auto_logs._start(_auto_logs._VOLUME_POOL,
+                                        _store_attachment)
+                hops.append(hop)
+                stored = await asyncio.wait_for(
+                    asyncio.shield(hop),
+                    _auto_logs._span_budget(attach_deadline))
+                if not own.written:
+                    raise RuntimeError("the attachment was discarded before "
+                                       "it was written")
+                log_bytes_stored = stored
+                log_filename = path.name
+                row_log_filename = log_filename
+                row_log_bytes = log_bytes_stored
+            except Exception as ex:
+                # A LOG WAS ATTACHED AND IT WAS NOT STORED, and the row has to
+                # say so -- including which of the two ways it failed.
+                #
+                # Falling through leaves log_filename NULL, which is the SAME
+                # state as a report filed with no log at all. An admin opening
+                # the row a week later sees "no attachment" and has no way to
+                # know one was sent, so a player who attached their log and
+                # describes a crash looks like a player who did not bother.
+                # The api log line below is the only record, and it is thirty
+                # thousand lines away by the time anybody looks.
+                #
+                # THE ROW ENCODES THREE STATES, one per thing that can have
+                # happened to the attachment, and none of them needs a schema
+                # change:
+                #
+                #   filename NULL, bytes NULL -- nothing was attached;
+                #   filename NULL, bytes 0    -- attached, lost, and NOTHING
+                #                                of it is on the volume: the
+                #                                partial file was removed and
+                #                                the removal is DURABLE;
+                #   filename SET,  bytes NULL -- attached, the write failed,
+                #                                and the partial file could
+                #                                NOT be taken off the volume,
+                #                                so the row NAMES it.
+                #
+                # 0 is unreachable for a stored blob -- this arm only runs
+                # when a non-empty log_blob was sent, and gzip of anything is
+                # never zero bytes -- so it cannot be confused with a real
+                # attachment.
+                #
+                # The response carries `log_persisted: false` in all three
+                # cases: it is derived from the LOCAL `log_filename`, which
+                # this arm never sets, so the client is told the log was not
+                # persisted even in the third state, where the row names a
+                # truncated file. That is the truth from the client's side and
+                # from the row's side at the same time.
+                #
+                # AND THE PARTIAL FILE GOES BEFORE THE ROW COMMITS, DURABLY.
+                # `open()` can succeed and `write()`, `flush()` or either of
+                # the two durability barriers above fail, which leaves a
+                # prefix of the gzip stream on the volume -- or a whole one
+                # the filesystem never promised, which is no better. That
+                # prefix is MARKED before it has any bytes, so the orphan
+                # sweep can find it even if this arm never runs -- but the arm
+                # is still what makes the ordinary case deterministic, and it
+                # is what decides whether the row names the file or disclaims
+                # it. The sweep is the floor, not the plan: it waits out the
+                # age gate, while this runs now.
+                #
+                # THREE THINGS MAKE THE UNREFERENCED PREFIX UNREACHABLE RATHER
+                # THAN UNLIKELY.
+                #
+                #   * The marker, stamped before `open()`. Even a host stop
+                #     between the first byte and this arm leaves a file the
+                #     sweep can name.
+                #
+                #   * The unlink is followed by a DIRECTORY FLUSH before the
+                #     row commits. Issuing the unlink first is a call order;
+                #     an entry removal is not durable until the directory is
+                #     flushed, so a host that stops after the commit could
+                #     otherwise recover the file with the row already saying
+                #     log_bytes=0 over it -- the same unreferenced prefix, one
+                #     step later (#507).
+                #   * An unlink that RAISES anything but FileNotFoundError
+                #     leaves the file where it is, so the row KEEPS THE
+                #     REFERENCE instead of dropping it. A named file is an
+                #     ordinary attachment of this report: an admin can see it,
+                #     the report's own lifecycle governs it, and it is not a
+                #     residue class no tick can reach. log_bytes is left NULL
+                #     rather than set to 0, because 0 is the claim that nothing
+                #     is on the volume and this arm cannot make it.
+                #
+                # A flush that itself refuses is treated exactly like a
+                # refused unlink: the removal cannot be proved, so the
+                # reference stays -- and that is a SEPARATE except arm rather
+                # than a shared one, because `FileNotFoundError` from the
+                # flush and `FileNotFoundError` from the unlink are opposite
+                # facts.
+                #
+                # AND SO IS A REMOVAL WHOSE WAIT PASSES ITS CEILING (round 8).
+                # The removal goes on in its thread and may yet succeed, but
+                # nothing here can say so before the row commits, so the row
+                # KEEPS the reference: the conservative reading, the one the
+                # refused flush already takes (#430/#276).
+                removed = "no file was created"
+                keep_reference = False
+                if own is not None:
+                    # THE UNLINK AND THE FLUSH ARE TWO STATEMENTS WITH TWO
+                    # ANSWERS, and round 6 separated them because one `except
+                    # FileNotFoundError` over both read the WRONG failure as
+                    # the harmless one. `FileNotFoundError` is an `OSError`,
+                    # so a flush that raised it AFTER a successful unlink --
+                    # the directory replaced under a recovering mount, the
+                    # container losing the subtree -- landed in the arm that
+                    # means "no file was created" and committed
+                    # `log_bytes = 0`: the claim that nothing is on the
+                    # volume, made over a removal the filesystem never
+                    # promised, which a recovery can undo.
+                    #
+                    # Read separately they say different things. The UNLINK's
+                    # own FileNotFoundError means the file never existed, and
+                    # the reference may drop. A FLUSH failure of any kind,
+                    # including that one, means the removal cannot be proved,
+                    # and the reference STAYS -- the same conservative
+                    # direction the retention pass takes for the same reason
+                    # (#430/#276).
+                    #
+                    # BOTH RUN ON A WORKER THREAD TOO: the cleanup's directory
+                    # flush is the same barrier on the same volume as the
+                    # stored path's, and it would stall the loop the same way.
+                    # And both run UNDER THE CLAIM'S LOCK with `discarded` set
+                    # first (round 8), so a store still queued creates nothing
+                    # and a store still running finishes before this starts.
+                    def _discard_partial():
+                        with own.lock:
+                            own.discarded = True
+                            removed = "no file was created"
+                            keep_reference = False
+                            try:
+                                os.unlink(str(attempted_path))
+                            except FileNotFoundError:
+                                removed = "no file was created"
+                            except OSError as rm:
+                                # THE REFERENCE STAYS. The file may still be on the
+                                # volume and the row is now the thing that names
+                                # it, so it is referenced rather than unreachable.
+                                # The operator line says so as well, because the
+                                # file is a truncated gzip and a download of it
+                                # will fail.
+                                keep_reference = True
+                                removed = (f"the partial file {attempted_path.name} could "
+                                           f"NOT be removed ({type(rm).__name__}), so the "
+                                           f"row now NAMES it rather than leaving it "
+                                           f"unreferenced; it is a truncated gzip and will "
+                                           f"not download cleanly")
+                            else:
+                                try:
+                                    _auto_logs._fsync_dir(
+                                        _pathlib.Path(attempted_path).parent)
+                                    removed = "the partial file was removed durably"
+                                except OSError as fx:
+                                    keep_reference = True
+                                    removed = (f"the partial file {attempted_path.name} "
+                                               f"was unlinked and the directory would NOT "
+                                               f"flush ({type(fx).__name__}), so the "
+                                               f"removal is not durable and the row KEEPS "
+                                               f"the reference; if the volume recovers the "
+                                               f"entry it is a truncated gzip this report "
+                                               f"names, and if it does not the row names a "
+                                               f"file that is gone")
+                            return removed, keep_reference
+
+                    hop = _auto_logs._start(_auto_logs._VOLUME_POOL,
+                                            _discard_partial)
+                    hops.append(hop)
+                    try:
+                        removed, keep_reference = await asyncio.wait_for(
+                            asyncio.shield(hop),
+                            _auto_logs.AUTO_LOG_VOLUME_WAIT_S)
+                    except Exception as dx:
+                        keep_reference = True
+                        removed = (f"the removal of the partial file "
+                                   f"{attempted_path.name} did not finish "
+                                   f"within {_auto_logs.AUTO_LOG_VOLUME_WAIT_S}s "
+                                   f"({type(dx).__name__}) and goes on in its "
+                                   f"thread, so the row KEEPS the reference: "
+                                   f"nothing here can say the file is gone "
+                                   f"before the row commits")
+                if keep_reference:
+                    row_log_filename = attempted_path.name
+                    print(f"[BUG-REPORT] log persistence FAILED for {report_id}: "
+                          f"{type(ex).__name__} {ex}; {removed}; the row is committed "
+                          f"naming that file with log_bytes NULL, because 0 would "
+                          f"claim the volume is clean and this arm cannot claim that")
+                else:
+                    row_log_bytes = 0
+                    print(f"[BUG-REPORT] log persistence FAILED for {report_id}: "
+                          f"{type(ex).__name__} {ex}; {removed}; the row is committed "
+                          f"with log_bytes=0 to record that a log was attached and "
+                          f"could not be stored")
+
+        # T2: THE WRITES, TOGETHER, AFTER THE VOLUME WORK (R7-M4).
+        #
+        # Resolve player if known — bug reports tolerate unknown senders so
+        # first-launch players can still report. Read HERE, in the
+        # transaction that writes, and not carried over from T1: nothing
+        # before this point needs the row, and an object read in a
+        # transaction that has since ended is a snapshot this one would be
+        # acting on (#208).
+        player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
+        player = player.scalar_one_or_none()
+        if player:
+            # Bug reports accept an arbitrary subject id and tolerate missing
+            # sessions, so this may mark mod-seen/Beta but cannot stamp a version.
+            await _mark_mod_seen(db, player)
+
+        report = BugReport(
+            id=report_id,
+            player_id=player.id if player else None,
+            steam_id=req.steam_id,
+            display_name=req.display_name or (player.display_name if player else None),
+            mod_version=req.mod_version,
+            game_version=req.game_version,
+            severity=severity,
+            category=category,
+            description=req.description.strip(),
+            repro_steps=(req.repro_steps or "").strip() or None,
+            log_filename=row_log_filename,
+            log_bytes=row_log_bytes,
+        )
+        db.add(report)
+        await db.flush()
+
+        # Seed the activity log with a "created" event so the timeline is complete.
+        db.add(BugReportEvent(
+            bug_report_id=report.id,
+            actor_steam_id=req.steam_id,
+            actor_name=req.display_name or req.steam_id or "Unknown",
+            event_type="created",
+            new_status="open",
+            comment=None,
+        ))
+
+        # THE MARKER IS REMOVED AFTER THE REFERENCE IS COMMITTED, AND ONLY
+        # THEN, in the `finally` below.
+        #
+        # A crash before the commit leaves a marked file no row names, which
+        # the orphan sweep collects. A crash after it leaves a marked file a
+        # row DOES name, which the sweep clears and does not touch. Clearing
+        # the marker before the commit would open the window this stamp exists
+        # to close, so the order is the upload path's: stamp, write, commit,
+        # clear.
+        #
+        # WHEN THE SWEEP COLLECTS WHAT A FAILED REQUEST LEAVES, read off the
+        # sweep's own code (`prune_orphan_blobs`, `_marker_candidates`)
+        # rather than hoped for -- not "on the first sweep", and not
+        # necessarily in the next process life. A marker is a candidate only
+        # while no request of the running process holds its name and only
+        # once it is older than `_ORPHAN_MIN_AGE_S` (the sweep interval plus
+        # twice the marked-span deadline). Each pass then reaches a window of
+        # at most `_ORPHAN_SCAN_BOUND` marker names, taken in name order after
+        # a cursor that moves on across passes and resolved oldest first, and
+        # removes at most `_ORPHAN_BATCH` blobs. So a marked residue waits for
+        # the age gate, then for the window to reach it, then for removal
+        # budget in that window: delayed, never permanent.
+        await db.commit()
+        committed = True
+    finally:
+        if own is not None:
+            if committed:
+                # THE MARKER'S CLEAR RUNS ON A WORKER THREAD, like every
+                # other call this request makes on the volume: it is an
+                # unlink in the same directory, and the last step of the
+                # sequence -- `_clear_marker`, the upload path's own, under
+                # the claim's lock. It becomes a worker the release below
+                # waits for, so the name stays registered until the last
+                # thread this request started has finished with the
+                # attachment's files -- a cancellation that ends the wait
+                # ends only the wait -- and it is told NOT to drop the name
+                # itself (`release_name=False`), because the release below is
+                # the one place that knows when the last of them has ended.
+                #
+                # It is scheduled whenever the row has committed, not only
+                # when this request saw the marker stamped. The one way a
+                # committed row meets a store that is still running is a
+                # store whose wait passed its ceiling, and then the arm above
+                # started a removal behind it. The three take the claim's
+                # lock in turn, in whatever order the pool runs them, and no
+                # order leaves a blob that nothing names: a clear that runs
+                # after the store removes the marker it stamped, and one that
+                # runs before it leaves that marker -- beside a blob the
+                # removal takes -- for the sweep, which clears a marker whose
+                # blob is gone.
+                hops.append(_auto_logs._start(_auto_logs._VOLUME_POOL,
+                                              _auto_logs._clear_marker, own,
+                                              False))
+            _in_flight = attempted_path.name
+            _running = [h for h in hops if not h.done()]
+            if _running:
+                _left = [len(_running)]
+
+                def _release_after(_t):
+                    _left[0] -= 1
+                    if _left[0] == 0:
+                        _auto_logs._MARKERS_IN_FLIGHT.discard(_in_flight)
+
+                for h in _running:
+                    h.add_done_callback(_release_after)
+            else:
+                _auto_logs._MARKERS_IN_FLIGHT.discard(_in_flight)
+            if committed:
+                # A CEILING ON THIS WAIT TOO, and the report stands either
+                # way: the row is committed, so a marker still on the volume
+                # is one the sweep finds a row for and clears.
+                try:
+                    await asyncio.wait_for(asyncio.shield(hops[-1]),
+                                           _auto_logs.AUTO_LOG_VOLUME_WAIT_S)
+                except Exception as cx:
+                    print(f"[BUG-REPORT] the attachment marker for {report_id} "
+                          f"was not cleared ({type(cx).__name__}); the report "
+                          f"stands, and the orphan sweep clears the marker over "
+                          f"the committed row")
     # Re-read so we have the DB-assigned bug_number.
     await db.refresh(report)
     print(f"[BUG-REPORT] #{report.bug_number} ({report.id}) {severity}/{category} from {req.steam_id} ({req.display_name}) " +
@@ -41277,6 +42379,22 @@ async def list_bug_reports(
     hmac_signature: str | None = Query(None),
     status: str | None = Query(None, max_length=16),
     severity: str | None = Query(None, max_length=16),
+    # WHAT PUT THE ROW HERE, as a filter and not only as a field.
+    #
+    # One opted-in seat can write up to twelve automatic uploads a day --
+    # more in a day than the bug form produces in a month -- and they are
+    # written 'open'/'low'/'other', which is exactly what an untriaged player
+    # report looks like. So neither `status` nor `severity` separates them,
+    # and page one of a DESC-by-created_at list is fifty machine rows with a
+    # player's two-day-old ticket sitting on page three.
+    #
+    # Carrying `kind` on the summary row was not enough by itself: it lets an
+    # admin SEE which row is which once the page has been fetched, and that
+    # field's default in schemas.py exists precisely so an OLDER admin client
+    # ignores the key. This parameter is what makes the two separable by
+    # QUERY. Omitted, the list is unchanged and shows both -- an admin should
+    # be able to see automatic uploads, just not have to wade through them.
+    kind: str | None = Query(None, max_length=16),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -41295,13 +42413,24 @@ async def list_bug_reports(
     if severity:
         filters.append("severity = :severity")
         params["severity"] = severity.lower()
+    if kind:
+        filters.append("kind = :kind")
+        params["kind"] = kind.lower()
     where = " WHERE " + " AND ".join(filters) if filters else ""
     # `kind` is SELECTed and carried out: an automatic post-match upload
     # (migration 336) and a player-filed ticket are otherwise the same row in
     # this list, and the triage actions beside them -- status, comment -- mean
-    # completely different things for the two. The list is deliberately NOT
-    # filtered to kind='report': an admin should be able to see automatic
-    # uploads, just not mistake one for a ticket somebody is waiting on.
+    # completely different things for the two. The list is deliberately not
+    # filtered to kind='report' BY DEFAULT -- an admin should be able to see
+    # automatic uploads, just not mistake one for a ticket somebody is waiting
+    # on, and not have to page past them to find one. `?kind=report` is the
+    # filter that does the second half; the default answers as it always did.
+    #
+    # AN OLD API BOX IGNORES AN UNKNOWN QUERY PARAMETER AND ANSWERS 200 (#266).
+    # A new admin client asking for `kind=report` against a box that has not
+    # been deployed yet gets the UNFILTERED list back, looking filtered. That
+    # is the standby-drift signature exactly, and it is why this endpoint has
+    # to be live on both boxes before the filter is trusted.
     rows = await db.execute(
         text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
                         severity, category, status, description,
@@ -41361,7 +42490,7 @@ async def recent_bug_report_events(
     # linked player's discord_id attached -- which DMs them that staff acted
     # on 'your report' for something they never filed and cannot see.
     # Filtering the feed is the fix rather than filtering in the bot: the
-    # reporter_discord_id join above is what makes the row deliverable, and
+    # reporter_discord_id join below is what makes the row deliverable, and
     # it should not be built for a row that is not a player's ticket.
     if unnotified:
         where = ("br.kind = 'report' AND bre.notified_at IS NULL "
@@ -41567,13 +42696,30 @@ async def get_bug_report(
             # endpoint while this one stayed as-is would make the scrub a
             # rendering suggestion rather than a control (#159's shape).
             #
-            # to_thread: this gunzip used to run inline on the single worker.
+            # Off the loop: this gunzip used to run inline on the single
+            # worker. Since round 8 it runs on the auto-log module's VOLUME
+            # POOL, with a ceiling on the wait and no pooled connection held
+            # across it (R7-M4's class): the read is a call on the same volume
+            # the two log writers use, so a volume that stops answering holds
+            # threads of that pool and never the event loop's default
+            # executor, and the transaction the row was read in -- a READ --
+            # is ended first. A read that does not return in time is a read
+            # error on the pane like any other, and so is a scrub pass that
+            # does not finish (`_scrub_bug_log`: its passes run on the CPU
+            # pool under their own ceiling, with no connection held).
             path = _pathlib.Path(BUG_REPORT_LOG_DIR) / row["log_filename"]
-            raw = await asyncio.to_thread(_read_bug_log_sync, str(path))
+            await _auto_logs._end_transaction(db)
+            raw = await _auto_logs._hop(
+                _auto_logs._VOLUME_POOL, _auto_logs.AUTO_LOG_VOLUME_WAIT_S,
+                _read_bug_log_sync, str(path))
             log_text, _scrub_counts = await _scrub_bug_log(db, raw)
             log_scrubbed = True
         except Exception as ex:
-            log_text = f"[log read error: {ex}]"
+            # The MESSAGE when there is one, the exception's NAME when there
+            # is not: a ceiling's TimeoutError carries no message, and an
+            # exception object is always truthy, so `ex or name` never took
+            # the name and the pane read "[log read error: ]".
+            log_text = f"[log read error: {str(ex) or type(ex).__name__}]"
 
     # Activity timeline — chronological so the UI can render top-down.
     ev_rows = (await db.execute(
@@ -41722,10 +42868,23 @@ async def download_bug_report_log(
     # traversal. Keep it that way: never accept a filename or path component
     # from the caller.
     path = _pathlib.Path(BUG_REPORT_LOG_DIR) / row["log_filename"]
+    # ON THE AUTO-LOG MODULE'S VOLUME POOL, with a ceiling and no pooled
+    # connection held across it (R7-M4's class): the transaction the row was
+    # read in is ended first, and a volume that does not answer holds a
+    # thread of that pool, never the event loop's default executor. A read
+    # that does not return in time is a 503 -- the volume, not the request,
+    # is what failed.
+    await _auto_logs._end_transaction(db)
     try:
-        raw = await asyncio.to_thread(_read_bug_log_sync, str(path))
+        raw = await _auto_logs._hop(
+            _auto_logs._VOLUME_POOL, _auto_logs.AUTO_LOG_VOLUME_WAIT_S,
+            _read_bug_log_sync, str(path))
     except ValueError as ex:
         raise HTTPException(413, str(ex))
+    except TimeoutError:
+        print(f"[BUG-LOG] read of #{row['bug_number']} did not return within "
+              f"{_auto_logs.AUTO_LOG_VOLUME_WAIT_S}s")
+        raise HTTPException(503, "Log storage unavailable")
     except Exception as ex:
         print(f"[BUG-LOG] read failed for #{row['bug_number']}: {type(ex).__name__}: {ex}")
         raise HTTPException(500, "Log read failed")
@@ -41734,7 +42893,15 @@ async def download_bug_report_log(
         # from "no attachment" above so the two are diagnosable apart.
         raise HTTPException(410, "Log attachment is recorded but missing on disk")
 
-    body, counts = await _scrub_bug_log(db, raw)
+    try:
+        body, counts = await _scrub_bug_log(db, raw)
+    except TimeoutError:
+        # A scrub pass that did not finish within its ceiling: the CPU pool is
+        # busy or the bundle is pathological, and the answer is the same
+        # "try again" the volume's ceiling gives. Never the unscrubbed body.
+        print(f"[BUG-LOG] scrub of #{row['bug_number']} did not finish within "
+              f"{_auto_logs.AUTO_LOG_CPU_WAIT_S}s")
+        raise HTTPException(503, "Log scrub unavailable")
     print(f"[BUG-LOG] #{row['bug_number']} downloaded by {admin_steam_id} "
           f"({len(body)} chars; redacted credential={counts['credential']} os_user={counts['os_user']} "
           f"discord={counts['discord_id']} deleted_steam={counts['deleted_steam_id']})")
@@ -45088,12 +46255,10 @@ async def _complete_team_series_with_ratings(
                 label=f"team-{reason}")
     except Exception as pcex:
         print(f"[PC-EARNED] team grant failed for {series_uuid} ({reason}): {pcex}")
-    try:
-        async with db.begin_nested():
-            await title_ladders.record_completed_games(
-                db, gids, mode="2v2-settled", reference_id=str(series_uuid))
-    except Exception as _lex:
-        print(f"[LADDER-CREDIT] 2v2-settled credit dropped for {series_uuid} ({reason}): {_lex}")
+    # Title ladders count ranked GAMES (board row 29): this settlement completes
+    # a series after a forfeit or a disconnect and plays no game, and every game
+    # of the series was credited by submit_team_match when it was reported. So
+    # there is deliberately no ladder credit here.
 
     # Free the queue rows.
     await _lock_queue_rows_ordered(db, "team_queue", gids)
@@ -48140,7 +49305,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4655 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4672 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -58104,6 +59269,9 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # question was moot because they were 0g — true for one day, and exactly the
     # kind of "no money moves here" claim that must not be left standing once it
     # stops being true.)
+    # Title ladders (Gold Rush): this savepoint can roll its grants back, so
+    # the achievement-gold note is marked here and restored on the rollback.
+    _ffa_ach_mark = _ladder_achievement_mark(db)
     try:
         if rated:
             await db.flush()
@@ -58205,6 +59373,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                             await _grant_achievement_inline(
                                 db, _ach_pid, "ffa_half_point_heartbreak")
     except Exception as _ach_ex:
+        _ladder_achievement_restore(db, _ffa_ach_mark)
         print(f"[FFA-ACH] achievement evaluation failed (report unaffected): {_ach_ex}")
     # Player Cards (WP-D): the earned-pack roll for a RANKED FFA match (own
     # savepoint; reconciled from the match row if it is lost).
@@ -58218,11 +59387,23 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             print(f"[PC-EARNED] ffa grant failed for {match_id}: {pcex}")
     if rated:
         try:
+            # One credit per ranked GAME (board row 29): the game's own id,
+            # the winner seat, and the play gold this report credited each
+            # seat for this game (xp, placement and level gold from
+            # award_info, plus achievement gold paid above) as one number.
+            _lrated = [p for p in report.players if p.steam_id not in unrated]
+            _lrows = {
+                str(id_by_steam[p.steam_id]): {
+                    "won": p.steam_id == report.winner_steam_id,
+                    "lost": p.steam_id != report.winner_steam_id,
+                    "play_gold": (max(0, int(award_info.get(p.steam_id, (0, 0))[1] or 0))
+                                  + _ladder_achievement_gold(db, id_by_steam[p.steam_id])),
+                } for p in _lrated
+            }
             async with db.begin_nested():
                 await title_ladders.record_completed_games(
-                    db, [id_by_steam[p.steam_id] for p in report.players
-                         if p.steam_id not in unrated],
-                    mode="ffa", reference_id=str(lobby_uuid))  # the sitting's id, not the game's
+                    db, [id_by_steam[p.steam_id] for p in _lrated],
+                    mode="ffa", reference_id=str(match_id), rows=_lrows)
         except Exception as _lex:
             print(f"[LADDER-CREDIT] ffa credit dropped for lobby {lobby_uuid} (match {match_id}): {_lex}")
 
@@ -60970,6 +62151,9 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     # can render +Ng/+Nxp beside each player's name in their own series).
     series_xp_by_pid: dict = {}
     series_gold_by_pid: dict = {}
+    # Title ladders (Gold Rush): this game's play gold per player as it is
+    # credited below (xp gold, level reward, then the series result).
+    _ladder_play_gold: dict = {}
     # July 20 item 6: opposing-TEAM tier multiplier (avg of the two opposing
     # players' 2v2 ratings, pre-update — 2v2 Glicko only applies at series
     # completion, later than this block). Missing rating rows default 1500.
@@ -61021,6 +62205,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                         player_id=p.id, amount=lvl_reward,
                         reason="level_reward", reference_id=str(new_match.id),
                     ))
+                    _ladder_play_gold[str(p.id)] = _ladder_play_gold.get(str(p.id), 0) + lvl_reward
             # 100 XP = 1 gold conversion (mirrors submit_match logic).
             gold_delta = (new_xp // 100) - (old_xp // 100)
             if gold_delta > 0:
@@ -61034,6 +62219,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     reason="team_xp", reference_id=str(new_match.id),
                 ))
                 series_gold_by_pid[p.id] = series_gold_by_pid.get(p.id, 0) + gold_delta
+                _ladder_play_gold[str(p.id)] = _ladder_play_gold.get(str(p.id), 0) + gold_delta
     except Exception as xpex:
         print(f"[TEAM-ECON] per-match XP failed for match {new_match.id}: {xpex}")
 
@@ -61326,6 +62512,11 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     "t2b_g": bonus_by_pid.get(slot_pid["t2b"], 0),
                 })
                 await db.flush()
+            # The savepoint released: the series gold stands, so it is this
+            # game's play gold too (title ladders, Gold Rush). A rolled-back
+            # savepoint never reaches this line.
+            for _bp, _bg in bonus_by_pid.items():
+                _ladder_play_gold[str(_bp)] = _ladder_play_gold.get(str(_bp), 0) + max(0, int(_bg))
         except Exception as gex:
             print(f"[TEAM-ECON] series-bonus gold failed for {series_uuid}: {gex}")
         # Player Cards (WP-D): the earned-pack roll for the completed series
@@ -61339,12 +62530,6 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     label="team-complete")
         except Exception as pcex:
             print(f"[PC-EARNED] team grant failed for {series_uuid}: {pcex}")
-        try:
-            async with db.begin_nested():
-                await title_ladders.record_completed_games(
-                    db, gids, mode="2v2", reference_id=str(series_uuid))
-        except Exception as _lex:
-            print(f"[LADDER-CREDIT] 2v2 credit dropped for {series_uuid}: {_lex}")
 
         # Free the queue rows so all 4 can re-queue.
         await _lock_queue_rows_ordered(
@@ -61456,6 +62641,28 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
             rebalance_assignments = None
             print(f"[TEAM-REBALANCE] error: {rex}")
 
+    # Title ladders: one credit per ranked GAME (board row 29), keyed on this
+    # team_matches row's own id, for all four seats; every 2v2 game is ranked
+    # (is_ranked=True above). After this game's gold is credited (team_xp,
+    # level, achievement gold paid while recording it, and the series result
+    # when this game completed the series), passed as one play_gold number;
+    # before the commit.
+    _lref = "?"
+    try:
+        _lref = str(new_match.id)
+        _lrows = {}
+        for _lp, _lteam in ((p_t1a, 1), (p_t1b, 1), (p_t2a, 2), (p_t2b, 2)):
+            _lrows[str(_lp.id)] = {"won": report.winner_team == _lteam,
+                                   "lost": report.winner_team != _lteam,
+                                   "play_gold": (_ladder_play_gold.get(str(_lp.id), 0)
+                                                 + _ladder_achievement_gold(db, _lp.id))}
+        async with db.begin_nested():
+            await title_ladders.record_completed_games(
+                db, [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id],
+                mode="2v2", reference_id=_lref, rows=_lrows)
+    except Exception as _lex:
+        print(f"[LADDER-CREDIT] 2v2 credit dropped (game={_lref}, series={series_uuid}): {_lex}")
+
     await db.commit()
 
     # Build response: series_score from the reporter's team perspective.
@@ -61480,27 +62687,24 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
 
 
 # -- The title-ladder hook build marker (/health `ladder_hook`) --------------
-# v1.41.0 item 12's server half credits the worn title ladder from every rated
-# completion path, through title_ladders.record_completed_games: submit_match
-# (1v1), submit_team_match (2v2), _complete_team_series_with_ratings (2v2
-# settled by the admin route or a lead forfeit) and submit_ffa_match (FFA,
-# once per sitting). The batch adds no route and no key to any GET answer both
-# builds serve -- the title-ladder route answers on the build before it, from
-# the same tables -- so this word is what tells the new build from the old
-# one. The release train asserts it on both roles and reads any value but the
-# expected one as the old build; nothing else reads it (#306).
+# The worn title ladder is credited once per ranked GAME (board row 29) from
+# the three ranked game-reporting paths, through
+# title_ladders.record_completed_games: submit_match (1v1), submit_team_match
+# (2v2) and submit_ffa_match (FFA). The after-the-fact 2v2 settlement
+# (_complete_team_series_with_ratings) plays no game and is no longer a site;
+# it was the fourth while ladders counted series (v1.41.0 item 12).
 #
-# DERIVED, never written down (#342): how many of those four functions' own
-# compiled code loads the hook's name -- 4 on this build, 0 on the build
-# before it, and between the two on a build that lost a site's call. It is
-# read from each function's code object (the names the function loads), not
-# from its source text, so a comment or a docstring naming the hook cannot
-# move the value. The count is title_ladders.hooked_site_count, kept beside
-# the hook so that this file names the hook at its four awaited calls and
-# nowhere else (test_title_ladders.py's whole-file test). health_check reads
-# the word at request time, so it is bound here, after the last of the four.
-_LADDER_HOOK_SITES = (submit_match, submit_team_match,
-                      _complete_team_series_with_ratings, submit_ffa_match)
+# DERIVED, never written down (#342): how many of those three functions' own
+# compiled code loads the hook's name -- 3 on this build (4 sites on the
+# series-unit build before it, 0 before that). It is read from each function's
+# code object (the names the function loads), not from its source text, so a
+# comment or a docstring naming the hook cannot move the value. The count is
+# title_ladders.hooked_site_count, kept beside the hook so that this file
+# names the hook at its three awaited calls and nowhere else
+# (test_title_ladders.py's whole-file test). health_check reads the word at
+# request time, so it is bound here, after the last of the three. The title
+# ladders batch's own build word is `title_ladders` (_title_ladders_health_word).
+_LADDER_HOOK_SITES = (submit_match, submit_team_match, submit_ffa_match)
 _LADDER_HOOK = title_ladders.hooked_site_count(_LADDER_HOOK_SITES)
 # CONNECT-FAILURE, reported on /health as `connect_failure` (the connect-
 # failure design, V11). A marker whose only purpose is to be probed (#306):
@@ -68413,3 +69617,180 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int]:
         " RETURNING 1"
     ), {"days": MAIL_CENSOR_HITS_KEEP_DAYS})).fetchall()
     return len(expired), len(purged), len(hits)
+
+
+# -- Verified reads: operator keys, the read-gate stage, census, probe ---------
+#
+# Board row 33, item b. The gate itself, its route classes and its census live
+# in read_gate.py; these are its control routes. Every one carries the admin
+# signature (_require_admin) except the probe, which is the gate's canary. The
+# four admin paths and the census read are in _VERSION_GATE_BYPASS (their
+# caller is the seat's admin script, which has no mod version); the rate
+# limiter's own bypass list gains nothing. The POSTs land on the primary (the
+# standby's replica_write_gate refuses them); the census read answers on
+# either box from that process's memory.
+
+class _OperatorKeyIssueReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    operator_name: str = Field(..., max_length=64)
+    contact: str = Field(..., min_length=1, max_length=200)
+
+
+class _OperatorKeyRevokeReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    id: int
+
+
+class _ReadGateModeReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    mode: str = Field(..., max_length=16)
+
+
+@app.post("/api/v1/admin/operators/keys", tags=["Admin"])
+async def admin_operator_key_issue(req: _OperatorKeyIssueReq, db: AsyncSession = Depends(get_db)):
+    """Issue an operator key into the operator's free slot (1 or 2). The key is
+    answered ONCE; only its sha256 is stored. The operator name is
+    canonicalised (read_gate.canonical_operator_name) before the signature
+    check, the advisory lock, the insert and the audit row, so `SCRMOD` and
+    `scrmod` are one operator. With both slots live: 409 two_live_keys, and
+    the partial unique index refuses a racing third insert the same way."""
+    try:
+        name = read_gate.canonical_operator_name(req.operator_name)
+    except ValueError as ex:
+        raise HTTPException(status_code=422, detail=str(ex))
+    await _require_admin(db, req.admin_steam_id, "operator_key_issue", name, req.hmac_signature)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": "opkey:" + name})
+    live = {int(r[0]) for r in (await db.execute(text(
+        "SELECT slot FROM api_operator_keys WHERE operator_name = :n AND revoked_at IS NULL"
+    ), {"n": name})).all()}
+    free = [s for s in (1, 2) if s not in live]
+    if not free:
+        raise HTTPException(status_code=409, detail="two_live_keys")
+    key, key_hash, hint = read_gate.new_operator_key()
+    try:
+        async with db.begin_nested():
+            new_id = (await db.execute(text(
+                "INSERT INTO api_operator_keys"
+                " (operator_name, contact, slot, key_hash, key_hint, created_by)"
+                " VALUES (:n, :c, :s, :h, :hint, :by) RETURNING id"
+            ), {"n": name, "c": req.contact.strip(), "s": free[0], "h": key_hash,
+                "hint": hint, "by": req.admin_steam_id[:20]})).scalar()
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="two_live_keys")
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="operator_key_issue",
+                            details={"operator": name, "slot": free[0], "id": int(new_id),
+                                     "hint": hint})
+    await db.commit()
+    return {"id": int(new_id), "operator_name": name, "slot": free[0],
+            "key": key, "key_hint": hint}
+
+
+@app.post("/api/v1/admin/operators/keys/revoke", tags=["Admin"])
+async def admin_operator_key_revoke(req: _OperatorKeyRevokeReq, db: AsyncSession = Depends(get_db)):
+    """Revoke one live operator key by id. This box stops accepting it at
+    once; the other box within the 60 s positive-cache bound after the change
+    reaches its database."""
+    await _require_admin(db, req.admin_steam_id, "operator_key_revoke", str(req.id),
+                         req.hmac_signature)
+    row = (await db.execute(text(
+        "UPDATE api_operator_keys SET revoked_at = now(), revoked_by = :by"
+        " WHERE id = :id AND revoked_at IS NULL RETURNING operator_name, slot"
+    ), {"id": req.id, "by": req.admin_steam_id[:20]})).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no_live_key")
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="operator_key_revoke",
+                            details={"operator": row[0], "slot": int(row[1]), "id": req.id})
+    await db.commit()
+    read_gate.forget_operator_key_id(req.id)
+    return {"id": req.id, "operator_name": row[0], "slot": int(row[1]), "revoked": True}
+
+
+@app.get("/api/v1/admin/operators", tags=["Admin"])
+async def admin_operator_list(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Every operator key row, live and revoked, newest first. Never the hash."""
+    await _require_admin(db, admin_steam_id, "operator_key_list", "", hmac_signature)
+    rows = (await db.execute(text(
+        "SELECT id, operator_name, contact, slot, key_hint, created_at, created_by,"
+        "       revoked_at, revoked_by"
+        "  FROM api_operator_keys ORDER BY id DESC"
+    ))).mappings().all()
+    return {"operators": [{
+        "id": int(r["id"]), "operator_name": r["operator_name"], "contact": r["contact"],
+        "slot": int(r["slot"]), "key_hint": r["key_hint"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "created_by": r["created_by"],
+        "revoked_at": r["revoked_at"].isoformat() if r["revoked_at"] else None,
+        "revoked_by": r["revoked_by"],
+    } for r in rows]}
+
+
+def _read_gate_enforce_blocker() -> str | None:
+    """Why `enforce` may not be set yet, or None. Checked by the mode route
+    before it writes anything."""
+    floor = read_gate.READ_GATE_CLIENT_MIN
+    if floor is None:
+        return "client_floor_unnamed"
+    if _parse_version(MIN_MOD_VERSION_EFFECTIVE) < _parse_version(floor):
+        return "client_floor_below_read_gate"
+    if not read_gate.SOCKET_READ_GATE_BUILT:
+        return "socket_read_gate_absent"
+    return None
+
+
+@app.post("/api/v1/admin/read-gate/mode", tags=["Admin"])
+async def admin_read_gate_mode(req: _ReadGateModeReq, db: AsyncSession = Depends(get_db)):
+    """Set the verified-reads stage (off | log | enforce) for both boxes: one
+    runtime_settings row, read by each box through a 15 s TTL cache, no deploy
+    and no restart. Rollback is this route with `log`. `enforce` is refused
+    with 409 while the client floor is unnamed or below it, or while the chat
+    socket's read gate is not built; a refusal leaves the row unchanged."""
+    mode = (req.mode or "").strip().lower()
+    if mode not in read_gate.MODES:
+        raise HTTPException(status_code=422, detail="mode must be off, log or enforce")
+    await _require_admin(db, req.admin_steam_id, "read_gate_mode", mode, req.hmac_signature)
+    if mode == "enforce":
+        blocker = _read_gate_enforce_blocker()
+        if blocker is not None:
+            raise HTTPException(status_code=409, detail=blocker)
+    await db.execute(text(
+        "INSERT INTO runtime_settings (key, value) VALUES ('read_gate_mode', :v)"
+        " ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW()"
+    ), {"v": mode})
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="read_gate_mode",
+                            details={"mode": mode})
+    await db.commit()
+    read_gate.mode_cache_set(mode)
+    return {"mode": mode, "node": "standby" if IS_REPLICA else "primary"}
+
+
+@app.get("/api/v1/admin/read-census", tags=["Admin"])
+async def admin_read_census(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """This process's read census since it started (read_gate.census_snapshot):
+    node, boot_id, since, mode, counts by (route, method, class, key id,
+    version header present, refused), distinct sources per (class, hour) and
+    agents per unverified class. Readable on either box."""
+    await _require_admin(db, admin_steam_id, "read_census", "", hmac_signature)
+    return read_gate.census_snapshot(await read_gate.current_mode())
+
+
+@app.get(read_gate.PROBE_PATH, tags=["System"])
+async def read_gate_probe(request: Request):
+    """The read gate's canary. Class PROBE: the gate requires one valid
+    credential (internal key, session or operator key) in EVERY stage, counts
+    it, and this answers who it decided the caller was, and nothing else."""
+    cred = getattr(request.state, "read_gate_credential", None) or ("", "")
+    return JSONResponse(
+        {"node": "standby" if IS_REPLICA else "primary", "boot_id": read_gate.BOOT_ID,
+         "mode": read_gate.mode_word(), "credential_class": cred[0], "key_id": cred[1]},
+        headers={"Cache-Control": read_gate.NO_STORE})
