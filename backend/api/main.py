@@ -64012,8 +64012,10 @@ def _triage_row_verdict(report, kills_signed: bool, ids_by_steam: dict, row, row
 def _triage_capture_verdict(report, kills_signed: bool, ids_by_steam: dict,
                             other, other_signed: bool, other_ids: dict) -> str:
     """Compare the report-derived exclusions of two unsettled payloads
-    symmetrically, using _ffa_leave_decision's ghost-and-grace union.
-    Neither payload supplies a historical settlement assembly snapshot."""
+    directionally, using _ffa_leave_decision's ghost-and-grace union.
+    The incoming report receives either-reading tolerance; the other payload
+    supplies its own signature reading. Neither payload supplies a historical
+    settlement assembly snapshot."""
     if set(ids_by_steam.values()) != set(other_ids.values()):
         return "ROSTER DIFFERS"
     ghosts, graced, _ = _ffa_leave_decision(

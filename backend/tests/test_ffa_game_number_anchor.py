@@ -1199,8 +1199,8 @@ def test_a_roster_difference_is_a_contradiction_either_way():
     assert main._ffa_report_contradiction(S3, _vec(short), _report(ROW_A, S3), False) is not None
 
 
-def test_the_detector_is_symmetric():
-    # Whichever of the two verified rows had settled first, the other is a
+def test_differing_winners_are_a_contradiction_in_both_orders():
+    # For these differing-winner reports, either settlement order is a
     # contradiction: the detector reports a disagreement, it never ranks the
     # two accounts.
     assert main._ffa_report_contradiction(S3, _vec(ROW_A), _report(ROW_B, S1), False) is not None
@@ -3856,7 +3856,7 @@ def test_raw_left_early_is_not_a_contradiction_when_the_decision_agrees():
     rec = _vec(ROW_A, leave={S2: (True, False)})
     same_decision = _report(ROW_A, S3, leave={S2: (False, False, None)})
     assert main._ffa_report_contradiction(S3, rec, same_decision, True) is None
-    # ...and the other way round, because the detector is symmetric.
+    # This above-threshold case also agrees in the reverse order.
     rec_plain = _vec(ROW_A)
     claimed = _report(ROW_A, S3, leave={S2: (True, False, gp)})
     assert main._ffa_report_contradiction(S3, rec_plain, claimed, True) is None
@@ -7934,3 +7934,25 @@ def test_fix2d_m3_rationale_names_the_finishing_count_effect():
     assert "the first stored settlement stands" in source
     assert "it moves no rating, gold, XP, placement or beaten count" not in source
     assert "neither of which any settlement reads" not in source
+
+
+def test_fix2d_m4_capture_comparison_is_directional_in_both_orders():
+    """Incoming either-reading tolerance can make the two orders disagree."""
+    rows = {S1: (0, 0, 1), S2: (5, 10, 0), S3: (0, 0, 0)}
+    absent = _report(rows, S2, leave={S1: (True, True, None)})
+    present = _report(rows, S2, leave={S1: (True, False, None)})
+    ids = {sid: sid for sid in rows}
+    assert main._triage_capture_verdict(
+        absent, False, ids, present, False, ids) == "AGREES"
+    assert main._triage_capture_verdict(
+        present, False, ids, absent, False, ids) == (
+            f"{S1} did-not-play=False vs recorded True")
+
+
+def test_fix2d_m4_capture_docstring_states_the_direction():
+    source = " ".join(inspect.getsource(main._triage_capture_verdict).split())
+    assert "directionally" in source
+    assert "The incoming report receives either-reading tolerance" in source
+    assert "the other payload supplies its own signature reading" in source
+    assert "Neither payload supplies a historical settlement assembly snapshot" in source
+    assert "symmetrically" not in source
