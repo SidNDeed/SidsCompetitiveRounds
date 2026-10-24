@@ -1080,9 +1080,9 @@ class HealthResponse(BaseModel):
     # leaving the key out. Absent on any build before the lane.
     seat_evidence: int
     # review_eval: 8 hex of the review code's file digest
-    # (review_rules.review_eval: review_measures.py and review_rules.py, by
-    # file). Equal on both roles; the build discriminator through the edge.
-    # No default, as above.
+    # (review_rules.review_eval: review_boot.py, review_measures.py and
+    # review_rules.py, by file). Equal on both roles; the build discriminator
+    # through the edge. No default, as above.
     review_eval: str
     # review_rules: the loaded review rules revision id, or "absent" (none
     # staged) or "refused" (the staged one failed a check). It reads the id

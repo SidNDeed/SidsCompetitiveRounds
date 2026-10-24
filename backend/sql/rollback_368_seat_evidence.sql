@@ -24,6 +24,7 @@
 -- worker posted are NOT removed (the audit log is append-only).
 
 BEGIN;
+SET LOCAL lock_timeout = '5s';
 
 DO $$
 BEGIN

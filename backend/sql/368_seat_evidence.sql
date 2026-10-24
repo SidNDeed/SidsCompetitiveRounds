@@ -43,6 +43,7 @@
 -- Re-runnable: IF NOT EXISTS throughout; a second run writes no row.
 
 BEGIN;
+SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE IF NOT EXISTS seat_evidence (
     id                 BIGSERIAL    PRIMARY KEY,
