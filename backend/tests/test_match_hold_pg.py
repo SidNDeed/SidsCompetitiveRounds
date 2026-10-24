@@ -316,15 +316,15 @@ def test_m2_gate_loser_rearms_transaction_timeouts(monkeypatch):
      {"request_id": "authreq1", "opener_steam_id": "s2auth", "mode": "team", "room": "r",
       "game_id": str(uuid.uuid4()), "held_steam_id": "s2held", "slot": 0, "team": 0,
       "t1_points": 0, "t2_points": 0, "hmac": "invalid"}, None),
-    ("GET", f"/hold/{uuid.uuid4()}/state", None, {"steam_id": "s2auth"}),
+    pytest.param("GET", f"/hold/{uuid.uuid4()}/state", None, {"steam_id": "s2auth"}, id="state"),
     ("GET", "/hold/by-room", None,
      {"room": "r", "game_id": str(uuid.uuid4()), "steam_id": "s2auth"}),
-    ("POST", f"/hold/{uuid.uuid4()}/end", {"steam_id": "s2auth", "reason": "refused"}, None),
+    pytest.param("POST", f"/hold/{uuid.uuid4()}/end", {"steam_id": "s2auth", "reason": "refused"}, None, id="end"),
     ("GET", "/hold/mine", None, {"steam_id": "s2auth"}),
-    ("POST", f"/hold/{uuid.uuid4()}/claim", {"steam_id": "s2auth"}, None),
-    ("POST", f"/hold/{uuid.uuid4()}/bind", {"steam_id": "s2auth", "actor": 1}, None),
-    ("POST", f"/hold/{uuid.uuid4()}/entered",
-     {"steam_id": "s2auth", "game_id": str(uuid.uuid4()), "actor": 1}, None),
+    pytest.param("POST", f"/hold/{uuid.uuid4()}/claim", {"steam_id": "s2auth"}, None, id="claim"),
+    pytest.param("POST", f"/hold/{uuid.uuid4()}/bind", {"steam_id": "s2auth", "actor": 1}, None, id="bind"),
+    pytest.param("POST", f"/hold/{uuid.uuid4()}/entered",
+     {"steam_id": "s2auth", "game_id": str(uuid.uuid4()), "actor": 1}, None, id="entered"),
 ])
 def test_h1_real_helper_soft_fail_paths_require_verified_session(
         monkeypatch, method, path, body, params):
