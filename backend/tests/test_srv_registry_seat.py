@@ -910,3 +910,412 @@ def test_srv_k21_old_slack_triplet(route, tmp_path, capsys):
     # The 125 registry identities remain unchanged. This additional seat case
     # uses their same isolated children, strict classification and cleanup.
     test_srv_registry_row("C", row["row"], row, tmp_path, capsys)
+
+
+# Diagnostic replays are additional controls, outside the registry identities.
+def _f4_replay_cases():
+    rows = (
+        ("BIND-control", "MERGED.FIX1.H4.BIND", "control", "20261021T134407Z"),
+        ("END-control", "MERGED.FIX1.H4.END", "control", "20261021T141737Z"),
+        ("SEEN-control", "MERGED.FIX1.H4.SEEN", "control", "20261021T143523Z"),
+        ("CLAIM_AUDIT-twin", "MERGED.FIX1.H4.CLAIM_AUDIT", "twin", "20261021T160011Z"),
+    )
+    return [(leg + "-" + setting_pass, mid, kind, setting_pass, run)
+            for leg, mid, kind, run in rows for setting_pass in ("A", "B")]
+
+
+def _f4_connection_event(path, record):
+    with open(path, "a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(record, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _f4_connection_kind(process, context):
+    # Function names establish the connection path without disclosing arguments.
+    frames = []
+    frame = sys._getframe(1)
+    while frame is not None:
+        filename = Path(frame.f_code.co_filename).name
+        name = frame.f_code.co_name
+        if filename in ("cf_pool.py", "cf_pg.py", "ladder_pg_harness.py"):
+            frames.append(filename + ":" + name)
+        elif filename == "test_srv_registry_seat.py" and name in (
+                "_registry_database_begin", "_registry_database_finish", "_database_waits", "observe"):
+            frames.append(filename + ":" + name)
+        frame = frame.f_back
+    pool_phase = None
+    target = os.environ.get("SRV_REGISTRY_POOL_EVENTS")
+    if target:
+        try:
+            lines = Path(target).read_text(encoding="utf-8").splitlines()
+            if lines:
+                latest = json.loads(lines[-1])
+                pool_phase = {key: latest.get(key) for key in ("phase", "event")}
+        except (OSError, ValueError):
+            pool_phase = None
+    if process == "parent":
+        kind = "wait-sample" if "test_srv_registry_seat.py:_database_waits" in frames else context.get("phase", "unknown")
+    elif "cf_pg.py:build" in frames:
+        kind = "orm-build"
+    elif "cf_pool.py:_build" in frames:
+        kind = "pool-build"
+    elif any(x in frames for x in ("cf_pool.py:_drop", "cf_pool.py:_drop_declared")):
+        kind = "pool-cleanup"
+    elif "cf_pool.py:open" in frames:
+        kind = "pool-case"
+    elif frames and frames[0] == "cf_pool.py:checkout":
+        kind = "pool-meta"
+    elif "ladder_pg_harness.py:connect_bound" in frames:
+        kind = "schema-bound"
+    elif pool_phase == {"phase": "build", "event": "start"}:
+        # SQLAlchemy can resume the connect awaitable across a greenlet boundary.
+        # The durable pool phase still places this engine connection in build.
+        kind = "orm-build"
+    else:
+        kind = "test-engine"
+    return kind, frames, pool_phase
+
+
+def _f4_connection_probe(path, setting_pass, process, context):
+    """Install only for this diagnostic: observe every asyncpg connection."""
+    import asyncpg
+    assert setting_pass in ("A", "B") and process in ("parent", "child")
+    original = asyncpg.connect
+    serials = itertools.count(1)
+    _f4_connection_event(path, {"event": "observer", "process": process,
+                                "pass": setting_pass})
+
+    async def connected(*args, **kwargs):
+        serial = next(serials)
+        kind, frames, pool_phase = _f4_connection_kind(process, context)
+        identity = {"process": process, "serial": serial, "kind": kind,
+                    "callers": frames, "pool_phase": pool_phase}
+        _f4_connection_event(path, {**identity, "event": "attempt"})
+        if setting_pass == "B":
+            kwargs = {**kwargs, "server_settings": {
+                **(kwargs.get("server_settings") or {}), "synchronous_commit": "on"}}
+        try:
+            connection = await original(*args, **kwargs)
+        except BaseException as error:
+            _f4_connection_event(path, {**identity, "event": "connect-error",
+                                        "exception": type(error).__name__})
+            raise
+        try:
+            _f4_connection_event(path, {**identity, "event": "opened"})
+            value = await connection.fetchval("SHOW synchronous_commit")
+            _f4_connection_event(path, {**identity, "event": "show",
+                                        "synchronous_commit": value})
+            if setting_pass == "B" and value != "on":
+                raise AssertionError("F4 connection setting is not on")
+            return connection
+        except BaseException as error:
+            try:
+                _f4_connection_event(path, {**identity, "event": "probe-error",
+                                            "exception": type(error).__name__})
+            finally:
+                await connection.close()
+            raise
+
+    asyncpg.connect = connected
+
+    def restore():
+        changed = asyncpg.connect is not connected
+        asyncpg.connect = original
+        _f4_connection_event(path, {"event": "observer-restored", "process": process,
+                                    "changed_before_restore": changed})
+        assert not changed, "F4 connection observer was replaced"
+
+    return restore
+
+
+def _f4_connection_audit(paths, setting_pass, *, child_terminated=False):
+    records, reasons = [], []
+    if not paths:
+        reasons.append("no-connection-records")
+    for process, path in paths.items():
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            reasons.append(process + ":missing-record-file")
+            continue
+        process_records = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+                assert isinstance(record, dict) and record.get("process") == process
+            except (ValueError, AssertionError):
+                reasons.append(process + ":invalid-record")
+                continue
+            records.append(record)
+            process_records.append(record)
+        observers = [r for r in process_records if r.get("event") == "observer"]
+        restored = [r for r in process_records if r.get("event") == "observer-restored"]
+        if len(observers) != 1 or observers[0].get("pass") != setting_pass:
+            reasons.append(process + ":observer-not-proved")
+        killed_child = process == "child" and child_terminated and not restored
+        if not killed_child and (len(restored) != 1 or restored[0].get("changed_before_restore") is not False):
+            reasons.append(process + ":observer-restoration-not-proved")
+        serials = {r.get("serial") for r in process_records if "serial" in r}
+        if not serials:
+            reasons.append(process + ":no-connections-observed")
+        for serial in serials:
+            connection = [r for r in process_records if r.get("serial") == serial]
+            events = [r.get("event") for r in connection]
+            if events != ["attempt", "opened", "show"]:
+                reasons.append(process + ":incomplete-connection-" + str(serial))
+                continue
+            kinds = [item.get("kind") for item in connection]
+            if not all(isinstance(kind, str) and kind for kind in kinds) or len(set(kinds)) != 1:
+                reasons.append(process + ":missing-or-changing-kind-" + str(serial))
+            if setting_pass == "B" and connection[-1].get("synchronous_commit") != "on":
+                reasons.append(process + ":setting-not-on-" + str(serial))
+            if not isinstance(connection[-1].get("synchronous_commit"), str):
+                reasons.append(process + ":missing-setting-" + str(serial))
+    return {"status": "COMPLETE" if not reasons else "NO VERDICT",
+            "reasons": sorted(set(reasons)), "records": records}
+
+
+def _f4_replay_selected(observed, expected):
+    reports = observed.get("reports", [])
+    calls = [r for r in reports if r.get("phase") == "call"]
+    actual = [r.get("node", "").split("::", 1)[-1] for r in calls]
+    return (not observed.get("collection_errors")
+            and observed.get("collected") == len(expected)
+            and len(actual) == len(expected) and set(actual) == set(expected)
+            and all(r.get("outcome") == "passed" for r in reports)
+            and len({r.get("node") for r in calls}) == len(expected))
+
+
+def _f4_parent_phase(context, record, phase, event):
+    context["phase"] = phase
+    record.setdefault("parent_phase_events", []).append(
+        {"phase": phase, "event": event, "monotonic": time.monotonic()})
+
+
+def _f4_replay_public(value, scratch):
+    """Keep stack frames and locations while making scratch locations portable."""
+    if isinstance(value, float):
+        return round(value, 6)
+    if isinstance(value, dict):
+        return {key: _f4_replay_public(item, scratch) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_f4_replay_public(item, scratch) for item in value]
+    if isinstance(value, str):
+        import re
+        value = value.replace(str(scratch), "<scratch>").replace(scratch.as_posix(), "<scratch>")
+        for prefix in sorted({sys.prefix, sys.base_prefix}, key=len, reverse=True):
+            value = value.replace(prefix, "<python>").replace(Path(prefix).as_posix(), "<python>")
+        def portable_frame(match):
+            location = match.group(2)
+            if Path(location).is_absolute() or re.match(r"^[A-Za-z]:[/\\]", location):
+                location = "<external>/" + re.split(r"[/\\]", location)[-1]
+            return match.group(1) + '"' + location + '"' + match.group(3)
+        return re.sub(r'(?m)^(\s*File )"([^"]+)"(, line \d+)', portable_frame, value)
+    return value
+
+
+def _f4_replay_command(copied, parent, row, selection):
+    """The real unsplit command, shared with DSN-free collection proofs."""
+    plugin = copied / "tests" / "_srv_f4_connections.py"
+    plugin.write_text(
+        "import os\n"
+        "from test_srv_registry_seat import _f4_connection_probe\n"
+        "_restore = _f4_connection_probe(os.environ['SRV_F4_REPLAY_CONNECTIONS'], "
+        "os.environ['SRV_F4_REPLAY_PASS'], 'child', {})\n"
+        "def pytest_unconfigure(config):\n"
+        "    _restore()\n", encoding="ascii", newline="\n")
+    return [sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider",
+               "-p", "_srv_f4_connections", "-p", "test_srv_registry_seat",
+               "-q", "-rf", "--rootdir", str(copied),
+               "--basetemp", str(parent / "temp"),
+               "-o", "junit_family=xunit1", "--junitxml", str(parent / "junit.xml"),
+               str(copied / "tests" / row[4]), "-k", selection]
+
+
+@pytest.mark.parametrize("leg,mid,kind,setting_pass,historical_run", _f4_replay_cases(),
+                         ids=[row[0] for row in _f4_replay_cases()])
+def test_srv_f4_unsplit_replay(leg, mid, kind, setting_pass, historical_run, tmp_path, capsys):
+    """Replay one former unsplit selection as a diagnostic, never a registry row."""
+    row = U.MUTANTS[mid]
+    _require_live_case("U", row)
+    scratch = Path(os.environ.get("MATCH_HOLD_SCRATCH") or tmp_path)
+    parent = None
+    paths = {}
+    context = {"phase": "initialization"}
+    restore = None
+    cleanup_allowed = True
+    failure = None
+    phases = {"active": None, "events": [], "reports": [], "pool_events": [], "stack": ""}
+    observed = {}
+    record = {"leg": leg, "row": mid, "kind": kind, "pass": setting_pass,
+              "historical_host": "scr-seat-2", "historical_run_id": historical_run,
+              "historical_verdict": "TIMEOUT", "selection": "census or (" + row[5] + ")",
+              "verdict": None, "returncode": None, "seconds": 0, "budget_seconds": TIMEOUT_S,
+              "active": None, "last_phase": None, "call_durations": [],
+              "maximum_call_seconds": None, "pool_events": [], "database_waits": [],
+              "stack": "", "synchronous_commit": None, "selected_nodes_passed": False,
+              "database_verified_after": False, "admission": "NO VERDICT"}
+    started = time.monotonic()
+    old_pool_target = os.environ.get("SRV_REGISTRY_POOL_EVENTS")
+    parent_pool_target = None
+    try:
+        _preflight("U", mid, row, {})
+        assert scratch.is_absolute() and not scratch.resolve().is_relative_to(BACKEND.parent)
+        scratch.mkdir(parents=True, exist_ok=True)
+        parent = Path(tempfile.mkdtemp(prefix="f4_", dir=scratch))
+        paths = {"parent": parent / "parent.connections.jsonl",
+                 "child": parent / "child.connections.jsonl"}
+        parent_pool_target = parent / "parent.pool.jsonl"
+        os.environ["SRV_REGISTRY_POOL_EVENTS"] = str(parent_pool_target)
+        copied = parent / "backend"
+        shutil.copytree(BACKEND, copied, ignore=IGNORE)
+        if kind == "twin":
+            module = row[1]
+            target = copied / ("sql" if module.endswith(".sql") else "api") / module
+            original = target.read_text(encoding="utf-8-sig")
+            planted = U._plant(original, row[3], mid, kind)
+            target.write_text(planted, encoding="utf-8", newline="\n")
+        env = dict(os.environ)
+        for name in ("PYTHONPATH", "MATCH_HOLD_SRC", "SRV_REGISTRY_REPORT", *U.SQL_ENV.values()):
+            env.pop(name, None)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["MATCH_HOLD_SCRATCH"] = str(parent / "nested")
+        observations_path = parent / "observations.json"
+        env["SRV_REGISTRY_REPORT"] = str(observations_path)
+        env["SRV_REGISTRY_POOL_EVENTS"] = str(observations_path) + ".pool.jsonl"
+        env["SRV_F4_REPLAY_CONNECTIONS"] = str(paths["child"])
+        env["SRV_F4_REPLAY_PASS"] = setting_pass
+        assert env.get("CF_PG_POOL", "1") != "0", "F4 replay requires the historical pool path"
+        command = _f4_replay_command(copied, parent, row, record["selection"])
+        restore = _f4_connection_probe(paths["parent"], setting_pass, "parent", context)
+        _f4_parent_phase(context, record, "server-setting", "start")
+        async def current_setting():
+            import asyncpg
+            dsn, _ = _database_spec(row[4], env)
+            connection = await asyncpg.connect(dsn, timeout=10, command_timeout=10)
+            try:
+                return await connection.fetchval("SHOW synchronous_commit")
+            finally:
+                await connection.close()
+        record["synchronous_commit"] = asyncio.run(current_setting())
+        _f4_parent_phase(context, record, "server-setting", "end")
+        _f4_parent_phase(context, record, "database-begin", "start")
+        lifecycle = _registry_database_begin(row[4], env, "F4/" + leg)
+        _f4_parent_phase(context, record, "database-begin", "end")
+        record["database_verified_before"] = lifecycle["verified"]
+        record["recovered_before"] = lifecycle["recovered"]
+        record["seat_lock_first_line"] = _read_seat_hold()
+        _f4_parent_phase(context, record, "child-run", "start")
+        child_started = time.monotonic()
+        try:
+            result = _run_registry_child(command, cwd=copied / "tests", env=env)
+        except subprocess.TimeoutExpired as error:
+            _f4_parent_phase(context, record, "child-run", "timeout")
+            record["verdict"] = "TIMEOUT"
+            record["seconds"] = time.monotonic() - child_started
+            phases = _phase_evidence(observations_path)
+            observed = U.read_registry_run(observations_path)
+            record["database_waits"] = getattr(error, "database_waits", [])
+            # The killed child's phase snapshot precedes owned recovery.
+            _f4_parent_phase(context, record, "database-recovery-begin", "start")
+            recovered = _registry_database_begin(row[4], env, "F4/recover/" + leg)
+            _f4_parent_phase(context, record, "database-recovery-begin", "end")
+            record["recovery"] = {"recovered": recovered["recovered"],
+                                  "verified": recovered["verified"]}
+            _f4_parent_phase(context, record, "database-recovery-finish", "start")
+            finished = _registry_database_finish(row[4], env, recovered)
+            _f4_parent_phase(context, record, "database-recovery-finish", "end")
+            record["database_verified_after"] = finished["verified"]
+        else:
+            _f4_parent_phase(context, record, "child-run", "end")
+            record["verdict"] = "COMPLETED"
+            record["returncode"] = result.returncode
+            record["seconds"] = time.monotonic() - child_started
+            phases = _phase_evidence(observations_path)
+            observed = U.read_registry_run(observations_path)
+            record["selected_nodes_passed"] = _f4_replay_selected(observed, U.BOUNDED_NODES[mid])
+            _f4_parent_phase(context, record, "wait-sample", "start")
+            record["database_waits"] = _database_waits(env)
+            _f4_parent_phase(context, record, "wait-sample", "end")
+            _f4_parent_phase(context, record, "database-finish", "start")
+            finished = _registry_database_finish(row[4], env, lifecycle)
+            _f4_parent_phase(context, record, "database-finish", "end")
+            record["database_verified_after"] = finished["verified"]
+    except BaseException as error:
+        failure = error
+        cleanup_allowed = not isinstance(error, _RegistryScratchRetained)
+        record["exception"] = type(error).__name__
+        record["scratch_retained"] = not cleanup_allowed
+        record["owned_child_pid"] = getattr(error, "owned_child_pid", None)
+    finally:
+        if restore is not None:
+            try:
+                restore()
+            except BaseException as error:
+                record["observer_restore_error"] = type(error).__name__
+                failure = failure or error
+        if old_pool_target is None:
+            os.environ.pop("SRV_REGISTRY_POOL_EVENTS", None)
+        else:
+            os.environ["SRV_REGISTRY_POOL_EVENTS"] = old_pool_target
+        record["connection_settings"] = _f4_connection_audit(
+            paths, setting_pass, child_terminated=record["verdict"] == "TIMEOUT")
+        record["parent_pool_events"] = []
+        if parent_pool_target is not None and parent_pool_target.exists():
+            try:
+                record["parent_pool_events"] = [json.loads(line) for line in
+                    parent_pool_target.read_text(encoding="utf-8").splitlines()]
+            except (OSError, ValueError) as error:
+                record["parent_pool_record_error"] = type(error).__name__
+                failure = failure or error
+        record["active"] = phases["active"]
+        phase_events = [event for event in phases["events"] if "phase" in event]
+        record["last_phase"] = phase_events[-1] if phase_events else None
+        record["phase_events"] = phases["events"]
+        record["pool_events"] = phases["pool_events"]
+        record["pool_build_started"] = any(
+            event.get("phase") == "build" and event.get("event") == "start"
+            for event in phases["pool_events"])
+        record["build_connection_records"] = [
+            item for item in record["connection_settings"]["records"]
+            if item.get("process") == "child" and item.get("event") == "show"
+            and (item.get("kind") in ("pool-build", "orm-build")
+                 or item.get("pool_phase") == {"phase": "build", "event": "start"})]
+        if record["pool_build_started"] and not record["build_connection_records"]:
+            record["connection_settings"]["status"] = "NO VERDICT"
+            record["connection_settings"]["reasons"].append("build-connection-record-missing")
+        record["stack"] = phases["stack"]
+        record["child_collected"] = observed.get("collected", 0)
+        record["child_collection_errors"] = observed.get("collection_errors", [])
+        record["child_reports"] = [
+            {key: item.get(key) for key in
+             ("node", "phase", "outcome", "exception", "tag", "assertion", "seconds")}
+            for item in phases["reports"]]
+        record["call_durations"] = [
+            {"node": item["node"], "seconds": item["seconds"], "outcome": item["outcome"]}
+            for item in phases["reports"] if item.get("phase") == "call"]
+        record["maximum_call_seconds"] = max(
+            (item["seconds"] for item in record["call_durations"]), default=None)
+        record["total_seconds"] = time.monotonic() - started
+        if (failure is None and record["connection_settings"]["status"] == "COMPLETE"
+                and record["verdict"] == "COMPLETED" and record["returncode"] == 0
+                and record["selected_nodes_passed"] and record["database_verified_after"]):
+            record["admission"] = "COMPLETED"
+        record = _f4_replay_public(record, parent or scratch)
+        if cleanup_allowed and parent is not None:
+            try:
+                shutil.rmtree(parent)
+                assert not parent.exists(), "F4 diagnostic scratch remains"
+                record["scratch_removed"] = True
+            except BaseException as error:
+                failure = failure or error
+                record["cleanup_error"] = type(error).__name__
+                record["admission"] = "NO VERDICT"
+        with capsys.disabled():
+            print("REGISTRY REPLAY " + json.dumps(record, sort_keys=True), flush=True)
+    if failure is not None:
+        raise failure
+    assert record["verdict"] == "COMPLETED", "F4 unsplit replay TIMEOUT"
+    assert record["admission"] == "COMPLETED", "F4 unsplit replay NO VERDICT"
