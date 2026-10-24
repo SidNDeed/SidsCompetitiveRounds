@@ -303,11 +303,19 @@ namespace CompetitiveRounds
             return all || (!string.IsNullOrEmpty(identity) && (byRoom ? c.Room : c.Lobby) == identity);
         }
 
-        /// <summary>A completed local entry keeps its playing lifecycle,
-        /// including the pending entered acknowledgement.</summary>
-        internal static bool KeepEntered(RdmClient c, bool localEntryCompleted)
+        /// <summary>A completed local entry keeps its playing lifecycle. A room
+        /// departure also requires a pending entered POST while still Admitted.</summary>
+        internal static bool KeepEntered(RdmClient c, bool localEntryCompleted, bool byRoom = false, bool enteredPostPending = false)
         {
-            return localEntryCompleted && (c.State == RdmState.Admitted || c.State == RdmState.Entered);
+            return localEntryCompleted && (c.State == RdmState.Entered
+                   || (c.State == RdmState.Admitted && (!byRoom || enteredPostPending)));
+        }
+
+        /// <summary>An ended entered request retires a still-Admitted record
+        /// once its local entry fact has reset.</summary>
+        internal static bool ShouldRetireEntered(RdmClient c, bool localEntryCompleted)
+        {
+            return c.State == RdmState.Admitted && !localEntryCompleted;
         }
 
         /// <summary>End the active attempt of the released lobby or departed

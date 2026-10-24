@@ -22,17 +22,22 @@ namespace CompetitiveRounds
         private static bool _discovered;
         private static bool _discoveryInFlight;
         private static bool _postInFlight;
+        private static bool _enteredPostPending;
+        private static long _enteredPostGeneration;
+        private static string _enteredPostLobby;
+        private static int _enteredPostGame;
         private static long _lifecycleGeneration;
         private static float _nextBindRt;
         private static float _lastPresenceRt = -999f;
 
         /// <summary>Each release invalidates its matching work synchronously,
-        /// unless local entry completed for this playing lifecycle. Released
-        /// callbacks cannot change a later lifecycle or its flight flags.</summary>
+        /// unless local entry completed for this playing lifecycle. A room
+        /// departure keeps Admitted only while its entered POST is pending.
+        /// Released callbacks cannot change a later lifecycle or its flight flags.</summary>
         internal static bool Abandon(string identity, bool byRoom = false, bool all = false)
         {
             if (!FfaReadmitEntryRules.MatchesRelease(State, identity, byRoom, all)) return false;
-            if (FfaReadmitEntryRules.KeepEntered(State, FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game))) return false;
+            if (FfaReadmitEntryRules.KeepEntered(State, FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game), byRoom, EnteredPostPending())) return false;
             InvalidateMatchingWork();
             return FfaReadmitEntryRules.Abandon(State, identity, byRoom, all);
         }
@@ -44,8 +49,51 @@ namespace CompetitiveRounds
             unchecked { _lifecycleGeneration++; }
             _discoveryInFlight = false;
             _postInFlight = false;
+            _enteredPostPending = false;
+            _enteredPostGeneration = 0;
+            _enteredPostLobby = null;
+            _enteredPostGame = 0;
             _discovered = false;
             _nextBindRt = 0f;
+        }
+
+        private static bool EnteredPostPending()
+        {
+            return _enteredPostPending && _enteredPostGeneration == _lifecycleGeneration
+                   && _enteredPostLobby == State.Lobby && _enteredPostGame == State.Game;
+        }
+
+        /// <summary>The caller supplies the entered callback fence or the
+        /// request termination guard; this member makes no scope comparison.</summary>
+        private static void FinalizeEntered(bool retire = true)
+        {
+            _enteredPostPending = false;
+            _enteredPostGeneration = 0;
+            _enteredPostLobby = null;
+            _enteredPostGame = 0;
+            _postInFlight = false;
+            if (retire && FfaReadmitEntryRules.ShouldRetireEntered(State,
+                    FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game)))
+                Abandon(State.Lobby);
+        }
+
+        /// <summary>The active request runs under this iterator's finally.
+        /// Host destruction need not run that finally.</summary>
+        private static System.Collections.IEnumerator CompleteEnteredRequest(System.Collections.IEnumerator request, Action terminated)
+        {
+            try
+            {
+                while (request.MoveNext()) yield return request.Current;
+            }
+            finally
+            {
+                try
+                {
+                    var disposable = request as IDisposable;
+                    if (disposable != null) disposable.Dispose();
+                }
+                finally { terminated(); }
+            }
         }
 
         /// <summary>The assembly POST timeout (K23: every assembly, presence and
@@ -239,26 +287,89 @@ namespace CompetitiveRounds
                                                            ApiClient.JsonEscapeFullPublic(region), game,
                                                            JoinTimeline.ClientMs());
             long generation = _lifecycleGeneration;
-            _postInFlight = true;
-            ApiClient.AsmPost(ApiClient.BaseUrl + "/api/v1/ffa/lobby/" + lobby + "/readmit", body, (ok, resp) =>
+            bool entered = step == "entered";
+            int enteredGame = State.Game;
+            bool completed = false;
+            Action terminated = null;
+            Func<System.Collections.IEnumerator, System.Collections.IEnumerator> wrap = null;
+            if (entered)
+            {
+                terminated = () =>
+                {
+                    if (completed) return;
+                    completed = true;
+                    if (generation != _lifecycleGeneration || State.Lobby != lobby || State.Game != enteredGame) return;
+                    FinalizeEntered(); // entered termination
+                };
+                wrap = request => CompleteEnteredRequest(request, terminated);
+            }
+            Action<bool, string> callback = (ok, resp) =>
             {
                 if (generation != _lifecycleGeneration) return;
                 _postInFlight = false;
-                if (!ok)
+                try
                 {
-                    Plugin.Log.LogWarning("[FFA-RDM] " + step + " post failed: " + (resp ?? "") );
-                    if (step == "claim" && State.State == FfaReadmitEntryRules.RdmState.Claiming)
-                        State.State = FfaReadmitEntryRules.RdmState.Offered;   // the bar stays; the player may retry
-                    return;
+                    if (!ok)
+                    {
+                        Plugin.Log.LogWarning("[FFA-RDM] " + step + " post failed: " + (resp ?? "") );
+                        if (step == "claim" && State.State == FfaReadmitEntryRules.RdmState.Claiming)
+                            State.State = FfaReadmitEntryRules.RdmState.Offered;   // the bar stays; the player may retry
+                        if (entered)
+                        {
+                            completed = true;
+                            FinalizeEntered(); // entered transport
+                        }
+                        return;
+                    }
+                    FfaReadmitEntryRules.RdmAnswer a = null;
+                    try { a = ParseAnswer(resp); } catch (Exception ex) { Plugin.Log.LogWarning("[FFA-RDM] answer parse: " + ex.Message); }
+                    if (a == null)
+                    {
+                        if (entered)
+                        {
+                            completed = true;
+                            FinalizeEntered(); // entered malformed
+                        }
+                        return;
+                    }
+                    var before = State.State;
+                    var next = FfaReadmitEntryRules.OnAnswer(State, step, a, Now());
+                    Ladder(before, false, null);
+                    Act(step, next, a);
+                    if (entered)
+                    {
+                        completed = true;
+                        if (State.State == FfaReadmitEntryRules.RdmState.Entered)
+                            FinalizeEntered(false);
+                        else if (a.Status == "refused")
+                            FinalizeEntered(); // entered refused
+                        else
+                            FinalizeEntered(); // entered unexpected
+                    }
                 }
-                FfaReadmitEntryRules.RdmAnswer a = null;
-                try { a = ParseAnswer(resp); } catch (Exception ex) { Plugin.Log.LogWarning("[FFA-RDM] answer parse: " + ex.Message); }
-                if (a == null) return;
-                var before = State.State;
-                var next = FfaReadmitEntryRules.OnAnswer(State, step, a, Now());
-                Ladder(before, false, null);
-                Act(step, next, a);
-            }, timeout: PostTimeout);
+                finally
+                {
+                    if (entered && !completed) terminated();
+                }
+            };
+            _postInFlight = true;
+            if (entered)
+            {
+                _enteredPostPending = true;
+                _enteredPostGeneration = generation;
+                _enteredPostLobby = lobby;
+                _enteredPostGame = enteredGame;
+            }
+            try
+            {
+                ApiClient.AsmPost(ApiClient.BaseUrl + "/api/v1/ffa/lobby/" + lobby + "/readmit", body, callback,
+                                  timeout: PostTimeout, wrap: wrap);
+            }
+            catch
+            {
+                if (entered) terminated();
+                throw;
+            }
         }
 
         private static FfaReadmitEntryRules.RdmAnswer ParseAnswer(string resp)

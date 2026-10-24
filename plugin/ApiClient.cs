@@ -25730,10 +25730,12 @@ namespace CompetitiveRounds
         /// with its own timeout (seconds), the same consent, transport,
         /// version-gate and session handling as every POST, and the same
         /// "HTTP code: body" error format.</summary>
-        public static void AsmPost(string url, string json, Action<bool, string> callback, int timeout = 20)
+        public static void AsmPost(string url, string json, Action<bool, string> callback, int timeout = 20,
+                                   Func<System.Collections.IEnumerator, System.Collections.IEnumerator> wrap = null)
         {
             if (Plugin.Instance == null) { try { callback?.Invoke(false, "no plugin"); } catch { } return; }
-            Plugin.Instance.StartCoroutine(PostRequest(url, json, callback ?? ((ok, r) => { }), timeoutSeconds: timeout));
+            var request = PostRequest(url, json, callback ?? ((ok, r) => { }), timeoutSeconds: timeout);
+            Plugin.Instance.StartCoroutine(wrap == null ? request : wrap(request));
         }
         public static int FindMatchingBracketStringAwarePublic(string s, int openPos) => FindMatchingBracketStringAware(s, openPos);
         public static int FindMatchingBraceStringAwarePublic(string s, int openPos) => FindMatchingBraceStringAware(s, openPos);

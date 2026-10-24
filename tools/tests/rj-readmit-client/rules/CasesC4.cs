@@ -257,6 +257,133 @@ namespace CompetitiveRounds
             }
         }
 
+        private static void F2GStartEntered(bool post = true)
+        {
+            F2DAdmit();
+            ReadmitOfferAdapter.SetEntryFactForTest("lobbyA", 4, true, "lobbyA");
+            if (post) ReadmitOfferAdapter.PostEntered(4);
+        }
+
+        private static string F2GAnswer(string kind, int variant = 0)
+        {
+            if (kind == "transport" || (kind == "malformed" && variant == 0)) return null;
+            if (kind == "malformed") return variant == 1 ? "unparsed-body"
+                : ReadmitOfferAdapter.Reply("missing-readmit", "status", "entered");
+            string status = kind == "success" ? "entered" : kind == "refused" ? "refused"
+                : variant == 1 ? "entered" : variant == 2 ? "claimed" : variant == 3 ? "admitted_late" : "unexpected";
+            return ReadmitOfferAdapter.Answer("f2g-answer", "status", status,
+                "n", kind == "unexpected" && variant == 1 ? "4" : "3", "reason", "departed");
+        }
+
+        private static void F2GDepart()
+        {
+            // FfaAssembly.OnRoomLeft calls Abandon before FfaLateEntry clears the fact.
+            ReadmitOfferAdapter.Abandon("roomA", byRoom: true);
+            ReadmitOfferAdapter.SetEntryFactForTest(null, 0, false, null);
+        }
+
+        private static void F2GRetired(long generation, bool greaterHold)
+        {
+            var c = ReadmitOfferAdapter.State;
+            Check.True(c.State == FfaReadmitEntryRules.RdmState.Abandoned && c.Token == null
+                       && c.Lobby == "lobbyA" && c.N == 3, "retirement spends the token and retains terminal suppression");
+            Check.True(ReadmitOfferAdapter.Generation == generation + 1 && !ReadmitOfferAdapter.PostInFlight
+                       && !ReadmitOfferAdapter.EnteredPending && !ReadmitOfferAdapter.DiscoveryInFlight
+                       && !ReadmitOfferAdapter.Discovered && ReadmitOfferAdapter.NextBind == 0f,
+                       "retirement invalidates work, completes entered ownership and rearms discovery");
+            Check.True(!ReadmitOfferAdapter.ClaimedFor("lobbyA") && !ReadmitOfferAdapter.ReadmittedInto("lobbyA"),
+                       "retirement is not a live claim or an entered seat");
+            foreach (int hold in new[] { 2, 3 })
+                Check.Eq(FfaReadmitEntryRules.RdmOffer.Rejected,
+                    ReadmitOfferAdapter.OfferFromPoll("lobbyA", 1, hold, 90), "same and lower abandoned holds stay closed");
+            Check.Eq(FfaReadmitEntryRules.RdmOffer.Accepted,
+                ReadmitOfferAdapter.OfferFromPoll(greaterHold ? "lobbyA" : "lobbyB", 2, greaterHold ? 4 : 1, 90),
+                "a greater hold or another lobby is accepted after retirement");
+        }
+
+        private static void F2GFailure(string kind, bool afterDeparture)
+        {
+            int variants = kind == "malformed" ? 3 : kind == "unexpected" ? 4 : 1;
+            for (int variant = 0; variant < variants; variant++)
+            foreach (bool greaterHold in new[] { false, true })
+            {
+                F2GStartEntered();
+                long generation = ReadmitOfferAdapter.Generation;
+                if (afterDeparture)
+                {
+                    ReadmitOfferAdapter.Abandon("roomA", byRoom: true);
+                    Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Admitted
+                               && ReadmitOfferAdapter.State.Token == Token && ReadmitOfferAdapter.PostInFlight
+                               && ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.Generation == generation,
+                               "departure preserves the genuinely pending acknowledgement before clearing its entry fact");
+                    ReadmitOfferAdapter.SetEntryFactForTest(null, 0, false, null);
+                }
+                ReadmitOfferAdapter.DeliverPost(1, kind != "transport", F2GAnswer(kind, variant));
+                if (!afterDeparture)
+                {
+                    Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Admitted
+                               && ReadmitOfferAdapter.State.Token == Token && !ReadmitOfferAdapter.PostInFlight
+                               && !ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.Generation == generation,
+                               "a failed acknowledgement completes its marker while the live entry stays admitted");
+                    F2GDepart();
+                }
+                F2GRetired(generation, greaterHold);
+            }
+        }
+
+        private static string F2GRecord()
+        {
+            var c = ReadmitOfferAdapter.State;
+            return string.Join("|", c.State, c.Lobby, c.N, c.Slot, c.Token, c.Room, c.Region,
+                               c.Game, c.Actor, c.HoldUntil, c.LastReason);
+        }
+
+        private static void F2GStale(bool termination)
+        {
+            foreach (string kind in termination ? new[] { "cancel" }
+                     : new[] { "transport", "malformed", "refused", "unexpected", "success" })
+            {
+                F2GStartEntered();
+                F2GDepart();
+                Check.True(ReadmitOfferAdapter.Abandon("lobbyA"), "a matching release after fact reset retires the old pending entry");
+                string lobby = termination ? "lobbyA" : "lobbyB";
+                int hold = termination ? 4 : 3;
+                Check.Eq(FfaReadmitEntryRules.RdmOffer.Accepted,
+                    ReadmitOfferAdapter.OfferFromPoll(lobby, 2, hold, 90), "a production offer opens the replacement lifecycle");
+                ReadmitOfferAdapter.Accept();
+                ReadmitOfferAdapter.DeliverPost(2, true, ReadmitOfferAdapter.Answer("new-claim", "status", "claimed",
+                    "n", I(hold), "token", Token, "room", "roomB", "region", "eu", "slot", "2", "hold_s", "80"));
+                ReadmitOfferAdapter.SendForTest("bind", 42, 0);
+                ReadmitOfferAdapter.DeliverPost(3, true, ReadmitOfferAdapter.Answer("new-bind", "status", "admitted_late",
+                    "n", I(hold), "kind", "r", "game", "4", "actor", "42"));
+                ReadmitOfferAdapter.SetEntryFactForTest(lobby, 4, true, lobby);
+                ReadmitOfferAdapter.PostEntered(4);
+                string record = F2GRecord();
+                long generation = ReadmitOfferAdapter.Generation;
+                long pendingGeneration = ReadmitOfferAdapter.EnteredGeneration;
+                string pendingLobby = ReadmitOfferAdapter.EnteredLobby;
+                int pendingGame = ReadmitOfferAdapter.EnteredGame;
+                bool discovered = ReadmitOfferAdapter.Discovered, discoveryFlight = ReadmitOfferAdapter.DiscoveryInFlight;
+                float nextBind = ReadmitOfferAdapter.NextBind;
+                int probes = ReadmitOfferAdapter.Probes, toasts = ReadmitOfferAdapter.Toasts, polls = ReadmitOfferAdapter.PollCalls;
+                if (termination) ReadmitOfferAdapter.EndPostWithoutCallback(1);
+                else ReadmitOfferAdapter.DeliverPost(1, kind != "transport", F2GAnswer(kind));
+                Check.Eq(record, F2GRecord(), "the old request cannot change any current record field");
+                Check.True(ReadmitOfferAdapter.Generation == generation && ReadmitOfferAdapter.PostInFlight
+                           && ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.EnteredGeneration == pendingGeneration
+                           && ReadmitOfferAdapter.EnteredLobby == pendingLobby && ReadmitOfferAdapter.EnteredGame == pendingGame
+                           && ReadmitOfferAdapter.Discovered == discovered && ReadmitOfferAdapter.DiscoveryInFlight == discoveryFlight
+                           && ReadmitOfferAdapter.NextBind == nextBind && ReadmitOfferAdapter.Probes == probes
+                           && ReadmitOfferAdapter.Toasts == toasts && ReadmitOfferAdapter.PollCalls == polls,
+                           "the old request cannot complete or alter current flights, ownership, generation, clocks or dispatch");
+                ReadmitOfferAdapter.DeliverPost(4, true, ReadmitOfferAdapter.Answer("new-entered", "status", "entered", "n", I(hold)));
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Entered
+                           && ReadmitOfferAdapter.State.Token == null && !ReadmitOfferAdapter.PostInFlight
+                           && !ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.Generation == generation,
+                           "the replacement request completes normally on its own answer");
+            }
+        }
+
         internal static void Register()
         {
             // ---------------------------------------------------------- C4a (P4.6)
@@ -695,6 +822,93 @@ namespace CompetitiveRounds
                            "only the new generation claim rearms polling");
             });
 
+            RulesProgram.Add("C4.F2G.fail_before_departure.transport", () => F2GFailure("transport", false));
+            RulesProgram.Add("C4.F2G.fail_before_departure.malformed", () => F2GFailure("malformed", false));
+            RulesProgram.Add("C4.F2G.fail_before_departure.refused", () => F2GFailure("refused", false));
+            RulesProgram.Add("C4.F2G.fail_before_departure.unexpected", () => F2GFailure("unexpected", false));
+            RulesProgram.Add("C4.F2G.fail_after_departure.transport", () => F2GFailure("transport", true));
+            RulesProgram.Add("C4.F2G.fail_after_departure.malformed", () => F2GFailure("malformed", true));
+            RulesProgram.Add("C4.F2G.fail_after_departure.refused", () => F2GFailure("refused", true));
+            RulesProgram.Add("C4.F2G.fail_after_departure.unexpected", () => F2GFailure("unexpected", true));
+            RulesProgram.Add("C4.F2G.departure_no_pending_retires", () =>
+            {
+                foreach (bool greaterHold in new[] { false, true })
+                {
+                    F2GStartEntered(false);
+                    long generation = ReadmitOfferAdapter.Generation;
+                    Check.True(!ReadmitOfferAdapter.EnteredPending && !ReadmitOfferAdapter.PostInFlight,
+                               "completed local entry alone is not a pending acknowledgement");
+                    F2GDepart();
+                    F2GRetired(generation, greaterHold);
+                }
+            });
+            RulesProgram.Add("C4.F2G.departure_pending_success", () =>
+            {
+                F2GStartEntered();
+                long generation = ReadmitOfferAdapter.Generation;
+                F2GDepart();
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Admitted
+                           && ReadmitOfferAdapter.State.Token == Token && ReadmitOfferAdapter.PostInFlight
+                           && ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.Generation == generation,
+                           "matching departure keeps the pending entered acknowledgement");
+                ReadmitOfferAdapter.DeliverPost(1, true, F2GAnswer("success"));
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Entered
+                           && ReadmitOfferAdapter.State.Token == null && !ReadmitOfferAdapter.PostInFlight
+                           && !ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.Generation == generation,
+                           "late success keeps the ruled Admitted to Entered transition without invalidation");
+                Check.Eq(FfaReadmitEntryRules.RdmOffer.Rejected,
+                    ReadmitOfferAdapter.OfferFromPoll("lobbyA", 1, 3, 90), "entered suppression keeps the same hold closed");
+                Check.Eq(FfaReadmitEntryRules.RdmOffer.Accepted,
+                    ReadmitOfferAdapter.OfferFromPoll("lobbyB", 2, 1, 90), "entered suppression permits another lobby");
+            });
+            RulesProgram.Add("C4.F2G.ended_without_callback", () =>
+            {
+                foreach (bool afterDeparture in new[] { false, true })
+                {
+                    F2GStartEntered();
+                    long generation = ReadmitOfferAdapter.Generation;
+                    if (afterDeparture) F2GDepart();
+                    ReadmitOfferAdapter.EndPostWithoutCallback(1);
+                    if (!afterDeparture)
+                    {
+                        Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Admitted
+                                   && !ReadmitOfferAdapter.PostInFlight && !ReadmitOfferAdapter.EnteredPending
+                                   && ReadmitOfferAdapter.Generation == generation,
+                                   "termination without a callback completes ownership while the entry is live");
+                        F2GDepart();
+                    }
+                    F2GRetired(generation, false);
+                }
+                // DeliverPost resumes the actual request wrapper immediately after its callback.
+                // No intervening state edit or duplicate callback is used to expose the once guard.
+                F2GStartEntered();
+                long successGeneration = ReadmitOfferAdapter.Generation;
+                ReadmitOfferAdapter.DeliverPost(1, true, F2GAnswer("success"));
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Entered
+                           && ReadmitOfferAdapter.State.Token == null && !ReadmitOfferAdapter.PostInFlight
+                           && !ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.Generation == successGeneration,
+                           "callback followed by iterator termination has the callback-only successful outcome");
+            });
+            RulesProgram.Add("C4.F2G.stale_entered_callback", () => F2GStale(false));
+            RulesProgram.Add("C4.F2G.stale_entered_termination", () => F2GStale(true));
+            RulesProgram.Add("C4.F2G.unrelated_departure_pending", () =>
+            {
+                F2GStartEntered();
+                string record = F2GRecord();
+                long generation = ReadmitOfferAdapter.Generation;
+                Check.True(!ReadmitOfferAdapter.Abandon("roomB", byRoom: true), "another room does not match this entry");
+                Check.Eq(record, F2GRecord(), "an unrelated departure keeps every record field");
+                Check.True(ReadmitOfferAdapter.PostInFlight && ReadmitOfferAdapter.EnteredPending
+                           && ReadmitOfferAdapter.EnteredGeneration == generation
+                           && ReadmitOfferAdapter.EnteredLobby == "lobbyA" && ReadmitOfferAdapter.EnteredGame == 4
+                           && ReadmitOfferAdapter.Generation == generation, "an unrelated departure keeps pending ownership");
+                ReadmitOfferAdapter.SetEntryFactForTest(null, 0, false, null);
+                ReadmitOfferAdapter.DeliverPost(1, true, F2GAnswer("success"));
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Entered
+                           && !ReadmitOfferAdapter.PostInFlight && !ReadmitOfferAdapter.EnteredPending
+                           && ReadmitOfferAdapter.Generation == generation, "its own success still applies normally");
+            });
+
             RulesProgram.Add("C4.T4.5.every_refusal_reason_mapped", () =>
             {
                 var want = new Dictionary<string, FfaReadmitEntryRules.RefusalClass>
@@ -941,6 +1155,10 @@ namespace CompetitiveRounds
         internal static FfaReadmitEntryRules.RdmClient State;
         protected static bool _discovered, _discoveryInFlight, _postInFlight;
         protected static long _lifecycleGeneration;
+        protected static bool _enteredPostPending;
+        protected static long _enteredPostGeneration;
+        protected static string _enteredPostLobby;
+        protected static int _enteredPostGame;
         protected static float _nextBindRt;
         protected const int PostTimeout = 4;
         protected static bool _retryToastShown;
@@ -951,25 +1169,31 @@ namespace CompetitiveRounds
         internal static readonly List<Action<bool, string>> DiscoveryCallbacks = new List<Action<bool, string>>();
         internal static readonly List<Action<bool, string>> PostCallbacks = new List<Action<bool, string>>();
         internal static readonly List<string> PostBodies = new List<string>();
+        private static readonly List<System.Collections.IEnumerator> PostRequests = new List<System.Collections.IEnumerator>();
         private static readonly Dictionary<string, Dictionary<string, string>> Responses = new Dictionary<string, Dictionary<string, string>>();
         internal static bool QueuePolling { get { return ApiClient.IsFfaQueuePolling; } }
         internal static bool Discovered { get { return _discovered; } }
         internal static bool DiscoveryInFlight { get { return _discoveryInFlight; } }
         internal static bool PostInFlight { get { return _postInFlight; } }
         internal static long Generation { get { return _lifecycleGeneration; } }
+        internal static bool EnteredPending { get { return _enteredPostPending; } }
+        internal static long EnteredGeneration { get { return _enteredPostGeneration; } }
+        internal static string EnteredLobby { get { return _enteredPostLobby; } }
+        internal static int EnteredGame { get { return _enteredPostGame; } }
         internal static float NextBind { get { return _nextBindRt; } }
         internal static void Reset(FfaReadmitEntryRules.RdmState state, string lobby, int n)
         {
             State = new FfaReadmitEntryRules.RdmClient { State = state, Lobby = lobby, N = n };
             _discovered = _discoveryInFlight = _postInFlight = false;
             _lifecycleGeneration = 0; _nextBindRt = 0f;
+            _enteredPostPending = false; _enteredPostGeneration = 0; _enteredPostLobby = null; _enteredPostGame = 0;
             Probes = PollCalls = PrepareCalls = ArmCalls = Toasts = RoomLeaves = QueueLeaves = 0;
             ExpectedLobby = null; _retryToastShown = false;
             PhotonNetwork.InRoom = false; PhotonNetwork.CurrentRoom = null;
             PhotonNetwork.LocalPlayer = new PlayerStub { ActorNumber = 42 };
             ReadmitOfferAdapter.SetEntryFactForTest(null, 0, false, null);
             HoldDiscovery = false;
-            DiscoveryCallbacks.Clear(); PostCallbacks.Clear(); PostBodies.Clear(); Responses.Clear();
+            DiscoveryCallbacks.Clear(); PostCallbacks.Clear(); PostBodies.Clear(); PostRequests.Clear(); Responses.Clear();
             ApiClient.IsFfaQueuePolling = false;
             DiscoveryResponse = OfferAnswer("offer", "lobbyA", 1);
         }
@@ -1001,7 +1225,28 @@ namespace CompetitiveRounds
         internal static void DeliverPost(int at, bool ok, string response)
         {
             var callback = PostCallbacks[at]; PostCallbacks[at] = null;
-            callback(ok, response);
+            try { callback(ok, response); }
+            finally
+            {
+                var request = PostRequests[at]; PostRequests[at] = null;
+                if (request != null) request.MoveNext();
+            }
+        }
+        internal static void EndPostWithoutCallback(int at)
+        {
+            PostCallbacks[at] = null;
+            var request = PostRequests[at]; PostRequests[at] = null;
+            var disposable = request as IDisposable;
+            if (disposable != null) disposable.Dispose();
+        }
+        private sealed class PostRequestStub : System.Collections.IEnumerator, IDisposable
+        {
+            private readonly int _at;
+            internal PostRequestStub(int at) { _at = at; }
+            public object Current { get { return null; } }
+            public bool MoveNext() { return PostCallbacks[_at] != null; }
+            public void Reset() { throw new NotSupportedException(); }
+            public void Dispose() { }
         }
         protected static float Now() { return 100f; }
         protected static string I(int v) { return v.ToString(CultureInfo.InvariantCulture); }
@@ -1048,9 +1293,15 @@ namespace CompetitiveRounds
                 if (HoldDiscovery) DiscoveryCallbacks.Add(done);
                 else done(true, DiscoveryResponse);
             }
-            internal static void AsmPost(string url, string body, Action<bool, string> done, int timeout)
+            internal static void AsmPost(string url, string body, Action<bool, string> done, int timeout,
+                Func<System.Collections.IEnumerator, System.Collections.IEnumerator> wrap = null)
             {
+                int at = PostCallbacks.Count;
                 PostBodies.Add(body); PostCallbacks.Add(done);
+                System.Collections.IEnumerator request = new PostRequestStub(at);
+                if (wrap != null) request = wrap(request);
+                PostRequests.Add(request);
+                request.MoveNext();
             }
             internal static void FfaProbeServerState() { Probes++; }
             internal static void FfaStartReadmitPoll() { PollCalls++; IsFfaQueuePolling = true; }

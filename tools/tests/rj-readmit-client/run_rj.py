@@ -59,6 +59,7 @@ SUITE_FILES = {
 
 RELEASE_ROUTE_TARGET = "C4.F2D.release_route_census"
 F2E_ROUTE_TARGET = "C4.F2E.release_route_census"
+F2G_ROUTE_TARGET = "C4.F2G.release_route_census"
 RELEASE_ROUTES = (
     ("escape", "ApiClient.cs", "private static void TearDownAllQueueBeliefs(",
      "FfaReadmit.Abandon(null, all: true);", ("IsFfaQueuePolling = false;", "ActiveFfaLobbyId = null;")),
@@ -78,6 +79,8 @@ MUTANT_ROUTES = {
     "M-F2D-site-release": "release", "M-F2D-site-leave": "leave", "M-F2D-site-depart": "depart",
     "M-F2E-site-escape": "escape", "M-F2E-site-leave": "leave", "M-F2E-site-release": "release",
     "M-F2E-site-depart": "depart", "M-F2E-site-refusal": "refusal", "M-F2E-site-entryfact": "entry-fact",
+    "M-F2G-reset-prepare": "entry-fact", "M-F2G-reset-roomleft": "entry-fact",
+    "M-F2G-site-termination": "entered-termination",
 }
 
 # (id, piece, suite, file, [(old, new), ...], target case, control case)
@@ -235,7 +238,7 @@ MUTANTS = [
      [('        internal static bool Abandon(string identity, bool byRoom = false, bool all = false)\n'
        '        {\n'
        '            if (!FfaReadmitEntryRules.MatchesRelease(State, identity, byRoom, all)) return false;\n'
-       '            if (FfaReadmitEntryRules.KeepEntered(State, FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game))) return false;\n'
+       '            if (FfaReadmitEntryRules.KeepEntered(State, FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game), byRoom, EnteredPostPending())) return false;\n'
        '            InvalidateMatchingWork();\n'
        '            return FfaReadmitEntryRules.Abandon(State, identity, byRoom, all);\n'
        '        }\n',
@@ -277,10 +280,11 @@ MUTANTS = [
      [('            FfaReadmit.Abandon(room, byRoom: true);\n', '')],
      F2E_ROUTE_TARGET + '.depart', 'C4.F2E.playing_readmission_kept'),
     ('M-F2E-site-refusal', 'H1', 'rules', 'FfaReadmit.cs',
-     [('            Abandon(State.Lobby);\n', '')],
+     [('            if (!leave) return;\n            Abandon(State.Lobby);\n',
+       '            if (!leave) return;\n')],
      F2E_ROUTE_TARGET + '.refusal', 'C4.H2.active_claim_preserved'),
     ('M-F2E-entrykeep', 'H1', 'rules', 'FfaReadmit.cs',
-     [('            if (FfaReadmitEntryRules.KeepEntered(State, FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game))) return false;\n', '')],
+     [('            if (FfaReadmitEntryRules.KeepEntered(State, FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game), byRoom, EnteredPostPending())) return false;\n', '')],
      'C4.F2E.playing_readmission_kept', 'C4.F2E.escape_roomless_claim'),
     ('M-F2E-split', 'H1', 'rules', 'FfaReadmit.cs',
      [('            InvalidateMatchingWork();\n'
@@ -292,6 +296,40 @@ MUTANTS = [
     ('M-F2E-site-entryfact', 'H1', 'rules', 'FfaLateEntry.cs',
      [('            _readmitEnteredLobby = AdmittedLateLobby;\n', '')],
      F2E_ROUTE_TARGET + '.entry-fact', 'C4.F2E.playing_readmission_kept'),
+    # ---- merged fix 2g: entered completion, departure and request termination
+    ('M-F2G-departure', 'H1', 'rules', 'FfaReadmitEntryRules.cs',
+     [('(!byRoom || enteredPostPending)', 'true')],
+     'C4.F2G.departure_no_pending_retires', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-final-transport', 'H1', 'rules', 'FfaReadmit.cs',
+     [('FinalizeEntered(); // entered transport', 'FinalizeEntered(false); // entered transport')],
+     'C4.F2G.fail_after_departure.transport', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-final-malformed', 'H1', 'rules', 'FfaReadmit.cs',
+     [('FinalizeEntered(); // entered malformed', 'FinalizeEntered(false); // entered malformed')],
+     'C4.F2G.fail_after_departure.malformed', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-final-refused', 'H1', 'rules', 'FfaReadmit.cs',
+     [('FinalizeEntered(); // entered refused', 'FinalizeEntered(false); // entered refused')],
+     'C4.F2G.fail_after_departure.refused', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-final-unexpected', 'H1', 'rules', 'FfaReadmit.cs',
+     [('FinalizeEntered(); // entered unexpected', 'FinalizeEntered(false); // entered unexpected')],
+     'C4.F2G.fail_after_departure.unexpected', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-cancel', 'H1', 'rules', 'FfaReadmit.cs',
+     [('                    FinalizeEntered(); // entered termination\n', '')],
+     'C4.F2G.ended_without_callback', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-fence', 'H1', 'rules', 'FfaReadmit.cs',
+     [('                if (generation != _lifecycleGeneration) return;\n                _postInFlight = false;\n', '                _postInFlight = false;\n')],
+     'C4.F2G.stale_entered_callback', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-cancel-fence', 'H1', 'rules', 'FfaReadmit.cs',
+     [('if (generation != _lifecycleGeneration || State.Lobby != lobby || State.Game != enteredGame) return;', 'if (State.Lobby != lobby || State.Game != enteredGame) return;')],
+     'C4.F2G.stale_entered_termination', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-reset-prepare', 'H1', 'rules', 'FfaLateEntry.cs',
+     [('            _lateEntered = false;\n            _readmitEnteredLobby = null;\n            _readmitEnteredGame = 0;\n            _lateFailures = 0;\n', '            _lateEntered = false;\n            _lateFailures = 0;\n')],
+     'C4.F2E.release_route_census.entry-fact', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-reset-roomleft', 'H1', 'rules', 'FfaLateEntry.cs',
+     [('        internal static void OnRoomLeft(string room)\n        {\n            _readmitEnteredLobby = null;\n            _readmitEnteredGame = 0;\n', '        internal static void OnRoomLeft(string room)\n        {\n')],
+     'C4.F2E.release_route_census.entry-fact', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2G-site-termination', 'H1', 'rules', 'ApiClient.cs',
+     [('            Plugin.Instance.StartCoroutine(wrap == null ? request : wrap(request));\n', '            Plugin.Instance.StartCoroutine(request);\n')],
+     'C4.F2G.release_route_census.entered-termination', 'C4.F2E.playing_readmission_kept'),
     # ---- C5 (P5 client rungs of the positive ladder)
     ("M5.c1", "C5", "rules", "FfaReadmitEntryRules.cs",
      [("            if (after == before) return null;\n", "")],
@@ -602,7 +640,8 @@ def stub_kinds(tree, wt):
         'TraceProgram.Fixture', 'CasesC2', 'CasesC3', 'CasesC3.Seat', 'CasesC4', 'CasesC4.Table',
         'CasesC4z', 'CasesC5', 'CasesC5.Driver', 'CaseFailed', 'Check', 'RulesProgram',
         'ReadmitOfferAdapterBase', 'ReadmitOfferAdapterBase.Plugin.Logger',
-        'ReadmitOfferAdapterBase.RoomStub', 'ReadmitOfferAdapterBase.PlayerStub')}
+        'ReadmitOfferAdapterBase.RoomStub', 'ReadmitOfferAdapterBase.PlayerStub',
+        'ReadmitOfferAdapterBase.PostRequestStub')}
     mapped = {prefix + 'ReadmitAdmissionBase.LastHold': prefix + 'FfaLateEntry.Hold'}
     standins = {'ReadmitAdmissionBase': 'FfaLateEntry', 'ReducerBase': 'FfaMode',
                 'ReadmitOfferAdapterBase': 'FfaReadmit', 'ReadmitOfferAdapter': 'FfaReadmit', 'FfaReplay': 'FfaMode'}
@@ -688,6 +727,19 @@ def release_route_census(texts):
         correct, reason = False, str(exc)
     verdicts["entry-fact"] = correct
     rows.append("%s %s.entry-fact: %s" % ("PASS" if correct else "FAIL", F2E_ROUTE_TARGET, reason))
+    try:
+        member = _blank_csharp(extract(texts["ApiClient.cs"], "public static void AsmPost(")).replace("\r\n", "\n")
+        factory = "var request = PostRequest(url, json, callback ?? ((ok, r) => { }), timeoutSeconds: timeout);"
+        launch = "Plugin.Instance.StartCoroutine(wrap == null ? request : wrap(request));"
+        no_host = "if (Plugin.Instance == null)"
+        correct = member.count(factory) == 1 and member.count(launch) == 1 and member.count(no_host) == 1
+        correct = correct and member.count("StartCoroutine(") == 1 and member.count("wrap(request)") == 1
+        correct = correct and member.index(no_host) < member.index(factory) < member.index(launch)
+        reason = "request_factory_then_optional_wrapper_launch=" + str(correct)
+    except (KeyError, RuntimeError, ValueError) as exc:
+        correct, reason = False, str(exc)
+    verdicts["entered-termination"] = correct
+    rows.append("%s %s.entered-termination: %s" % ("PASS" if correct else "FAIL", F2G_ROUTE_TARGET, reason))
     legacy = all(verdicts[route] for route in ("release", "leave", "depart"))
     rows.append("%s %s: legacy release, leave and depart" % ("PASS" if legacy else "FAIL", RELEASE_ROUTE_TARGET))
     rows.append("release-route census: %d of %d routes pass" % (sum(verdicts.values()), len(verdicts)))
@@ -790,6 +842,9 @@ def adapter_source(adapter, late):
     content += "        internal static void SetEntryFactForTest(string lobby, int game, bool completed, string admittedLobby) { FfaLateEntry.SetForTest(lobby, game, completed, admittedLobby); }\n"
     for sig in ("internal static bool Abandon(",
                 "private static void InvalidateMatchingWork(",
+                "private static bool EnteredPostPending(",
+                "private static void FinalizeEntered(",
+                "private static System.Collections.IEnumerator CompleteEnteredRequest(",
                 "internal static void DiscoverThenProbe(",
                 "internal static FfaReadmitEntryRules.RdmOffer OfferFromPoll(",
                 "internal static bool SuppressesDiscoveryProbe(",
@@ -967,6 +1022,23 @@ def main():
                 extra_cases = [(case, True) for case in (
                     "C4.F2E.lapse_refused_bind", "C4.F2E.delayed_after_leave",
                     "C4.F2E.delayed_after_release", "C4.F2E.delayed_after_depart")]
+            if mid == "M-F2G-departure":
+                extra_cases = [("C4.F2G.fail_before_departure." + kind, False)
+                               for kind in ("transport", "malformed", "refused", "unexpected")]
+                extra_cases += [("C4.F2G.fail_after_departure." + kind, True)
+                                for kind in ("transport", "malformed", "refused", "unexpected")]
+            elif mid.startswith("M-F2G-final-"):
+                removed = mid[len("M-F2G-final-"):]
+                extra_cases = [("C4.F2G.fail_after_departure." + kind, True)
+                               for kind in ("transport", "malformed", "refused", "unexpected") if kind != removed]
+                extra_cases += [("C4.F2G.fail_before_departure." + kind, True)
+                                for kind in ("transport", "malformed", "refused", "unexpected")]
+            elif mid in ("M-F2G-cancel", "M-F2G-cancel-fence", "M-F2G-fence"):
+                extra_cases = [("C4.F2G.fail_after_departure." + kind, True)
+                               for kind in ("transport", "malformed", "refused", "unexpected")]
+            if mid.startswith("M-F2G-"):
+                extra_cases += [("C4.F2G.departure_pending_success", True),
+                                ("C4.F2G.unrelated_departure_pending", True)]
             for extra, want_green in extra_cases:
                 erc, eout = run_case(mdll, extra)
                 extras_green = extras_green and ((erc == 0) == want_green)
