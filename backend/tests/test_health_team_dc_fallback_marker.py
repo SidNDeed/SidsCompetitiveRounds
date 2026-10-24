@@ -623,7 +623,8 @@ def _copy_tree(dst: pathlib.Path) -> pathlib.Path:
     api = dst / "backend" / "api"
     sql = dst / "backend" / "sql"
     tests = dst / "backend" / "tests"
-    for d in (api, sql, tests):
+    tools = dst / "backend" / "tools"
+    for d in (api, sql, tests, tools):
         d.mkdir(parents=True)
     for p in (BACKEND / "api").glob("*.py"):
         shutil.copyfile(p, api / p.name)
@@ -631,6 +632,7 @@ def _copy_tree(dst: pathlib.Path) -> pathlib.Path:
         shutil.copyfile(p, sql / p.name)
     for name in ("conftest.py", "pc_themes_data.py", pathlib.Path(__file__).name):
         shutil.copyfile(BACKEND / "tests" / name, tests / name)
+    shutil.copyfile(BACKEND / "tools" / "review_tripwire.py", tools / "review_tripwire.py")
     return api / "main.py"
 
 

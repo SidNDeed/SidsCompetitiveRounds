@@ -235,7 +235,8 @@ def _copy_tree(dst: pathlib.Path) -> pathlib.Path:
     api = dst / "backend" / "api"
     sql = dst / "backend" / "sql"
     tests = dst / "backend" / "tests"
-    for d in (api, sql, tests):
+    tools = dst / "backend" / "tools"
+    for d in (api, sql, tests, tools):
         d.mkdir(parents=True)
     for p in (BACKEND / "api").glob("*.py"):
         shutil.copyfile(p, api / p.name)
@@ -243,6 +244,7 @@ def _copy_tree(dst: pathlib.Path) -> pathlib.Path:
         shutil.copyfile(p, sql / p.name)
     for name in ("conftest.py", "pc_themes_data.py", "test_ffa_game_number_anchor.py"):
         shutil.copyfile(BACKEND / "tests" / name, tests / name)
+    shutil.copyfile(BACKEND / "tools" / "review_tripwire.py", tools / "review_tripwire.py")
     return api / "main.py"
 
 
@@ -327,3 +329,106 @@ def test_the_controls_run_on_a_copy_in_both_directions(tmp_path):
 
     assert _sha256(MAIN_PY.read_bytes()) == before
     print("worktree main.py sha256 %s, unchanged by the controls" % before[:16])
+
+
+
+def _conftest_copy_sites(sources):
+    """Find copies by operation and resolve each helper's local path bindings."""
+    sites, missing = [], []
+    for filename, source in sources.items():
+        tree = ast.parse(source, filename=filename)
+        for function in ast.walk(tree):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            nodes = []
+
+            def visit(node):
+                # A nested helper's copy does not protect its enclosing helper.
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    return
+                nodes.append(node)
+                for child in ast.iter_child_nodes(node):
+                    visit(child)
+
+            for statement in function.body:
+                visit(statement)
+            bindings = {}
+            for node in nodes:
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            bindings[target.id] = node.value
+                elif isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name):
+                    bindings[node.target.id] = node.iter
+
+            def paths(node, seen=frozenset()):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    return {node.value}
+                if isinstance(node, ast.Name):
+                    if node.id in bindings and node.id not in seen:
+                        return paths(bindings[node.id], seen | {node.id})
+                    return {"<%s>" % node.id}
+                if isinstance(node, (ast.Tuple, ast.List)):
+                    return {p for item in node.elts for p in paths(item, seen)}
+                if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+                    return {a + "/" + b for a in paths(node.left, seen)
+                            for b in paths(node.right, seen)}
+                return set()
+
+            copies = set()
+            for node in nodes:
+                if not isinstance(node, ast.Call) or len(node.args) < 2:
+                    continue
+                name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                        else node.func.id if isinstance(node.func, ast.Name) else "")
+                if name in ("copyfile", "copy", "copy2"):
+                    copies.update((src, dst) for src in paths(node.args[0])
+                                  for dst in paths(node.args[1]))
+            conftests = [(src, dst) for src, dst in copies
+                         if src.rsplit("/", 1)[-1] == "conftest.py"
+                         and dst.rsplit("/", 1)[-1] == "conftest.py"]
+            if not conftests:
+                continue
+            site = "%s:%d:%s" % (filename, function.lineno, function.name)
+            sites.append(site)
+            for src, dst in conftests:
+                sibling = tuple(p.rsplit("/", 2)[0] + "/tools/review_tripwire.py"
+                                for p in (src, dst))
+                if sibling not in copies:
+                    missing.append(site)
+    if missing:
+        raise AssertionError("conftest copier missing review_tripwire.py: " + ", ".join(missing))
+    return sorted(sites)
+
+
+def test_every_conftest_copy_carries_the_review_tripwire():
+    sources = {p.name: p.read_text(encoding="utf-8-sig")
+               for p in sorted((BACKEND / "tests").glob("*.py"))}
+    sites = _conftest_copy_sites(sources)
+    assert sites, "the conftest-copy sweep found no helpers"
+    print("conftest-copy sweep: %d files, %d sibling functions" % (len(sources), len(sites)))
+    for site in sites:
+        print(site)
+    planted = (
+        "def _planted_conftest_copier(dst):\n"
+        "    tests = dst / 'tests'\n"
+        "    for name in ('conftest.py', 'test_control.py'):\n"
+        "        shutil.copyfile(BACKEND / 'tests' / name, tests / name)\n"
+    )
+    negative = dict(sources, planted_copier=planted)
+    try:
+        _conftest_copy_sites(negative)
+    except AssertionError as exc:
+        assert str(exc) == (
+            "conftest copier missing review_tripwire.py: "
+            "planted_copier:1:_planted_conftest_copier"), str(exc)
+        print("planted negative refused: %s" % exc)
+    else:
+        raise AssertionError("the sweep admitted the planted conftest copier")
+    negative["planted_copier"] += (
+        "    tools = dst / 'tools'\n"
+        "    shutil.copyfile(BACKEND / 'tools' / 'review_tripwire.py', "
+        "tools / 'review_tripwire.py')\n"
+    )
+    assert len(_conftest_copy_sites(negative)) == len(sites) + 1
+    print("planted positive twin accepted")
