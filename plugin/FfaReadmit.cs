@@ -26,6 +26,8 @@ namespace CompetitiveRounds
         private static long _enteredPostGeneration;
         private static string _enteredPostLobby;
         private static int _enteredPostGame;
+        private static object _enteredPostHost;
+        private static Action _enteredPostTerminated;
         private static long _lifecycleGeneration;
         private static float _nextBindRt;
         private static float _lastPresenceRt = -999f;
@@ -53,6 +55,8 @@ namespace CompetitiveRounds
             _enteredPostGeneration = 0;
             _enteredPostLobby = null;
             _enteredPostGame = 0;
+            _enteredPostHost = null;
+            _enteredPostTerminated = null;
             _discovered = false;
             _nextBindRt = 0f;
         }
@@ -71,14 +75,24 @@ namespace CompetitiveRounds
             _enteredPostGeneration = 0;
             _enteredPostLobby = null;
             _enteredPostGame = 0;
+            _enteredPostHost = null;
+            _enteredPostTerminated = null;
             _postInFlight = false;
             if (retire && FfaReadmitEntryRules.ShouldRetireEntered(State,
                     FfaLateEntry.ReadmitEntryCompleted(State.Lobby, State.Game)))
                 Abandon(State.Lobby);
         }
 
+        /// <summary>Only the host driving the pending entered request ends it here.
+        /// The saved action supplies the same once-only guard as iterator termination.</summary>
+        internal static void OnHostDestroyed(object host)
+        {
+            if (!ReferenceEquals(_enteredPostHost, host)) return;
+            _enteredPostTerminated?.Invoke();
+        }
+
         /// <summary>The active request runs under this iterator's finally.
-        /// Host destruction need not run that finally.</summary>
+        /// Host destruction uses OnHostDestroyed because it need not run this finally.</summary>
         private static System.Collections.IEnumerator CompleteEnteredRequest(System.Collections.IEnumerator request, Action terminated)
         {
             try
@@ -291,7 +305,7 @@ namespace CompetitiveRounds
             int enteredGame = State.Game;
             bool completed = false;
             Action terminated = null;
-            Func<System.Collections.IEnumerator, System.Collections.IEnumerator> wrap = null;
+            Func<object, System.Collections.IEnumerator, System.Collections.IEnumerator> wrap = null;
             if (entered)
             {
                 terminated = () =>
@@ -301,7 +315,12 @@ namespace CompetitiveRounds
                     if (generation != _lifecycleGeneration || State.Lobby != lobby || State.Game != enteredGame) return;
                     FinalizeEntered(); // entered termination
                 };
-                wrap = request => CompleteEnteredRequest(request, terminated);
+                wrap = (host, request) =>
+                {
+                    _enteredPostHost = host;
+                    _enteredPostTerminated = terminated;
+                    return CompleteEnteredRequest(request, terminated);
+                };
             }
             Action<bool, string> callback = (ok, resp) =>
             {

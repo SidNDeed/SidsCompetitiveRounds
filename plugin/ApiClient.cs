@@ -25731,11 +25731,12 @@ namespace CompetitiveRounds
         /// version-gate and session handling as every POST, and the same
         /// "HTTP code: body" error format.</summary>
         public static void AsmPost(string url, string json, Action<bool, string> callback, int timeout = 20,
-                                   Func<System.Collections.IEnumerator, System.Collections.IEnumerator> wrap = null)
+                                   Func<object, System.Collections.IEnumerator, System.Collections.IEnumerator> wrap = null)
         {
-            if (Plugin.Instance == null) { try { callback?.Invoke(false, "no plugin"); } catch { } return; }
+            var host = Plugin.Instance;
+            if (host == null) { try { callback?.Invoke(false, "no plugin"); } catch { } return; }
             var request = PostRequest(url, json, callback ?? ((ok, r) => { }), timeoutSeconds: timeout);
-            Plugin.Instance.StartCoroutine(wrap == null ? request : wrap(request));
+            host.StartCoroutine(wrap == null ? request : wrap(host, request));
         }
         public static int FindMatchingBracketStringAwarePublic(string s, int openPos) => FindMatchingBracketStringAware(s, openPos);
         public static int FindMatchingBraceStringAwarePublic(string s, int openPos) => FindMatchingBraceStringAware(s, openPos);

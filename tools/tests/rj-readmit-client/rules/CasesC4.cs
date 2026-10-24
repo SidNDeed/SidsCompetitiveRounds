@@ -384,6 +384,149 @@ namespace CompetitiveRounds
             }
         }
 
+        private static string F2HSnapshot()
+        {
+            return string.Join("|", F2GRecord(), ReadmitOfferAdapter.Generation,
+                ReadmitOfferAdapter.PostInFlight, ReadmitOfferAdapter.EnteredPending,
+                ReadmitOfferAdapter.EnteredGeneration, ReadmitOfferAdapter.EnteredLobby,
+                ReadmitOfferAdapter.EnteredGame, ReadmitOfferAdapter.Discovered,
+                ReadmitOfferAdapter.DiscoveryInFlight, ReadmitOfferAdapter.NextBind,
+                ReadmitOfferAdapter.Probes, ReadmitOfferAdapter.Toasts, ReadmitOfferAdapter.PollCalls,
+                ReadmitOfferAdapter.QueuePolling, ReadmitOfferAdapter.PrepareCalls, ReadmitOfferAdapter.ArmCalls);
+        }
+
+        private static void F2HHostLoss(bool afterDeparture)
+        {
+            foreach (bool greaterHold in new[] { false, true })
+            {
+                F2GStartEntered();
+                object hostA = ReadmitOfferAdapter.CurrentHost;
+                long generation = ReadmitOfferAdapter.Generation;
+                if (afterDeparture)
+                {
+                    F2GDepart();
+                    Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Admitted
+                               && ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.PostInFlight
+                               && ReadmitOfferAdapter.Generation == generation,
+                               "departure keeps the request pending until its actual host is destroyed");
+                }
+                ReadmitOfferAdapter.DestroyHostForTest(hostA);
+                if (!afterDeparture)
+                {
+                    Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Admitted
+                               && ReadmitOfferAdapter.State.Token == Token && !ReadmitOfferAdapter.EnteredPending
+                               && !ReadmitOfferAdapter.PostInFlight && ReadmitOfferAdapter.Generation == generation,
+                               "host destruction completes pending work while the local entry remains live");
+                    F2GDepart();
+                }
+                F2GRetired(generation, greaterHold);
+            }
+        }
+
+        private static void F2HStaleHost()
+        {
+            F2GStartEntered(false);
+            object hostA = ReadmitOfferAdapter.CurrentHost;
+            object hostB = new object();
+            ReadmitOfferAdapter.CurrentHost = hostB;
+            ReadmitOfferAdapter.PostEntered(4);
+            string snapshot = F2HSnapshot();
+            ReadmitOfferAdapter.DestroyHostForTest(hostA);
+            Check.Eq(snapshot, F2HSnapshot(), "a non-owning old host changes no current record, marker or work");
+            ReadmitOfferAdapter.DeliverPost(1, true, F2GAnswer("success"));
+            Check.Eq(FfaReadmitEntryRules.RdmState.Entered, ReadmitOfferAdapter.State.State,
+                     "the replacement host request completes on its own answer");
+            snapshot = F2HSnapshot();
+            ReadmitOfferAdapter.DestroyHostForTest(hostB);
+            Check.Eq(snapshot, F2HSnapshot(), "host loss after the callback finalizes nothing twice");
+
+            F2GStartEntered();
+            hostA = ReadmitOfferAdapter.CurrentHost;
+            F2GDepart();
+            Check.True(ReadmitOfferAdapter.Abandon("lobbyA"), "a matching release ends the older lifecycle");
+            ReadmitOfferAdapter.CurrentHost = hostB = new object();
+            Check.Eq(FfaReadmitEntryRules.RdmOffer.Accepted,
+                ReadmitOfferAdapter.OfferFromPoll("lobbyB", 2, 1, 90), "the replacement lifecycle opens normally");
+            ReadmitOfferAdapter.Accept();
+            ReadmitOfferAdapter.DeliverPost(2, true, ReadmitOfferAdapter.Answer("host-new-claim", "status", "claimed",
+                "n", "1", "token", Token, "room", "roomB", "region", "eu", "slot", "2", "hold_s", "80"));
+            ReadmitOfferAdapter.SendForTest("bind", 42, 0);
+            ReadmitOfferAdapter.DeliverPost(3, true, ReadmitOfferAdapter.Answer("host-new-bind", "status", "admitted_late",
+                "n", "1", "kind", "r", "game", "4", "actor", "42"));
+            ReadmitOfferAdapter.SetEntryFactForTest("lobbyB", 4, true, "lobbyB");
+            ReadmitOfferAdapter.PostEntered(4);
+            snapshot = F2HSnapshot();
+            ReadmitOfferAdapter.DestroyHostForTest(hostA);
+            Check.Eq(snapshot, F2HSnapshot(), "destruction of an older lifecycle host cannot complete the current request");
+            ReadmitOfferAdapter.DeliverPost(4, true, ReadmitOfferAdapter.Answer("host-new-entered", "status", "entered", "n", "1"));
+            Check.Eq(FfaReadmitEntryRules.RdmState.Entered, ReadmitOfferAdapter.State.State,
+                     "the current lifecycle receives its own success");
+
+            F2GStartEntered();
+            hostA = ReadmitOfferAdapter.CurrentHost;
+            long generation = ReadmitOfferAdapter.Generation;
+            ReadmitOfferAdapter.CurrentHost = new object();
+            F2GDepart();
+            ReadmitOfferAdapter.DestroyHostForTest(hostA);
+            F2GRetired(generation, false);
+
+            F2GStartEntered();
+            hostA = ReadmitOfferAdapter.CurrentHost;
+            F2GDepart();
+            ReadmitOfferAdapter.EndPostWithoutCallback(1);
+            snapshot = F2HSnapshot();
+            ReadmitOfferAdapter.DestroyHostForTest(hostA);
+            Check.Eq(snapshot, F2HSnapshot(), "host loss after iterator disposal finalizes nothing twice");
+        }
+
+        private static void F2HFailedStart()
+        {
+            foreach (bool missingHost in new[] { true, false })
+            {
+                F2GStartEntered(false);
+                object hostA = ReadmitOfferAdapter.CurrentHost;
+                long generation = ReadmitOfferAdapter.Generation;
+                if (missingHost) ReadmitOfferAdapter.CurrentHost = null;
+                else ReadmitOfferAdapter.ThrowOnPostStart = true;
+                bool threw = false;
+                try { ReadmitOfferAdapter.PostEntered(4); }
+                catch (InvalidOperationException) { threw = true; }
+                Check.Eq(!missingHost, threw, "only the throwing start propagates its failure");
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Admitted
+                           && ReadmitOfferAdapter.State.Token == Token && !ReadmitOfferAdapter.PostInFlight
+                           && !ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.Generation == generation,
+                           "a null host or throwing start completes the pending marker synchronously");
+                string snapshot = F2HSnapshot();
+                ReadmitOfferAdapter.DestroyHostForTest(hostA);
+                ReadmitOfferAdapter.DestroyHostForTest(new object());
+                Check.Eq(snapshot, F2HSnapshot(), "teardown after a failed start has no second completion");
+                F2GDepart();
+                F2GRetired(generation, false);
+            }
+        }
+
+        private static void F2HSiblingPreservation()
+        {
+            foreach (string route in new[] { "escape", "leave", "release", "refusal" })
+            {
+                F2GStartEntered();
+                object hostA = ReadmitOfferAdapter.CurrentHost;
+                long generation = ReadmitOfferAdapter.Generation;
+                string record = F2GRecord();
+                F2ERoute(route);
+                Check.Eq(record, F2GRecord(), "the ruled sibling release keeps the playing record");
+                Check.True(ReadmitOfferAdapter.EnteredPending && ReadmitOfferAdapter.PostInFlight
+                           && ReadmitOfferAdapter.Generation == generation,
+                           "the ruled sibling release preserves the genuinely pending acknowledgement");
+                ReadmitOfferAdapter.DestroyHostForTest(hostA);
+                Check.True(ReadmitOfferAdapter.State.State == FfaReadmitEntryRules.RdmState.Admitted
+                           && !ReadmitOfferAdapter.EnteredPending && !ReadmitOfferAdapter.PostInFlight,
+                           "the preserved request still belongs to its actual destroyed host");
+                F2GDepart();
+                F2GRetired(generation, false);
+            }
+        }
+
         internal static void Register()
         {
             // ---------------------------------------------------------- C4a (P4.6)
@@ -909,6 +1052,12 @@ namespace CompetitiveRounds
                            && ReadmitOfferAdapter.Generation == generation, "its own success still applies normally");
             });
 
+            RulesProgram.Add("C4.F2H.host_lost_before_departure", () => F2HHostLoss(false));
+            RulesProgram.Add("C4.F2H.host_lost_after_departure", () => F2HHostLoss(true));
+            RulesProgram.Add("C4.F2H.stale_host_completion", () => F2HStaleHost());
+            RulesProgram.Add("C4.F2H.failed_start", () => F2HFailedStart());
+            RulesProgram.Add("C4.F2H.sibling_preservation", () => F2HSiblingPreservation());
+
             RulesProgram.Add("C4.T4.5.every_refusal_reason_mapped", () =>
             {
                 var want = new Dictionary<string, FfaReadmitEntryRules.RefusalClass>
@@ -1159,6 +1308,8 @@ namespace CompetitiveRounds
         protected static long _enteredPostGeneration;
         protected static string _enteredPostLobby;
         protected static int _enteredPostGame;
+        protected static object _enteredPostHost;
+        protected static Action _enteredPostTerminated;
         protected static float _nextBindRt;
         protected const int PostTimeout = 4;
         protected static bool _retryToastShown;
@@ -1170,6 +1321,9 @@ namespace CompetitiveRounds
         internal static readonly List<Action<bool, string>> PostCallbacks = new List<Action<bool, string>>();
         internal static readonly List<string> PostBodies = new List<string>();
         private static readonly List<System.Collections.IEnumerator> PostRequests = new List<System.Collections.IEnumerator>();
+        private static readonly List<object> PostHosts = new List<object>();
+        internal static bool ThrowOnPostStart;
+        internal static object CurrentHost { get { return Plugin.Instance; } set { Plugin.Instance = value; } }
         private static readonly Dictionary<string, Dictionary<string, string>> Responses = new Dictionary<string, Dictionary<string, string>>();
         internal static bool QueuePolling { get { return ApiClient.IsFfaQueuePolling; } }
         internal static bool Discovered { get { return _discovered; } }
@@ -1187,13 +1341,15 @@ namespace CompetitiveRounds
             _discovered = _discoveryInFlight = _postInFlight = false;
             _lifecycleGeneration = 0; _nextBindRt = 0f;
             _enteredPostPending = false; _enteredPostGeneration = 0; _enteredPostLobby = null; _enteredPostGame = 0;
+            _enteredPostHost = null; _enteredPostTerminated = null;
+            Plugin.Instance = new object(); ThrowOnPostStart = false;
             Probes = PollCalls = PrepareCalls = ArmCalls = Toasts = RoomLeaves = QueueLeaves = 0;
             ExpectedLobby = null; _retryToastShown = false;
             PhotonNetwork.InRoom = false; PhotonNetwork.CurrentRoom = null;
             PhotonNetwork.LocalPlayer = new PlayerStub { ActorNumber = 42 };
             ReadmitOfferAdapter.SetEntryFactForTest(null, 0, false, null);
             HoldDiscovery = false;
-            DiscoveryCallbacks.Clear(); PostCallbacks.Clear(); PostBodies.Clear(); PostRequests.Clear(); Responses.Clear();
+            DiscoveryCallbacks.Clear(); PostCallbacks.Clear(); PostBodies.Clear(); PostRequests.Clear(); PostHosts.Clear(); Responses.Clear();
             ApiClient.IsFfaQueuePolling = false;
             DiscoveryResponse = OfferAnswer("offer", "lobbyA", 1);
         }
@@ -1239,6 +1395,17 @@ namespace CompetitiveRounds
             var disposable = request as IDisposable;
             if (disposable != null) disposable.Dispose();
         }
+        internal static void DestroyHostForTest(object host)
+        {
+            // Host loss stops its requests without a callback, Dispose or MoveNext.
+            for (int at = 0; at < PostHosts.Count; at++)
+            {
+                if (!ReferenceEquals(PostHosts[at], host)) continue;
+                PostCallbacks[at] = null;
+                PostRequests[at] = null;
+            }
+            ReadmitOfferAdapter.OnHostDestroyed(host);
+        }
         private sealed class PostRequestStub : System.Collections.IEnumerator, IDisposable
         {
             private readonly int _at;
@@ -1280,6 +1447,7 @@ namespace CompetitiveRounds
         protected static class JoinTimeline { internal static int ClientMs() { return 50; } }
         protected class Plugin
         {
+            internal static object Instance;
             internal static readonly Logger Log = new Logger();
             internal sealed class Logger { internal void LogWarning(string message) { } internal void LogInfo(string message) { } }
         }
@@ -1294,13 +1462,16 @@ namespace CompetitiveRounds
                 else done(true, DiscoveryResponse);
             }
             internal static void AsmPost(string url, string body, Action<bool, string> done, int timeout,
-                Func<System.Collections.IEnumerator, System.Collections.IEnumerator> wrap = null)
+                Func<object, System.Collections.IEnumerator, System.Collections.IEnumerator> wrap = null)
             {
+                object host = Plugin.Instance;
+                if (host == null) { try { done?.Invoke(false, "no plugin"); } catch { } return; }
                 int at = PostCallbacks.Count;
-                PostBodies.Add(body); PostCallbacks.Add(done);
+                PostBodies.Add(body); PostCallbacks.Add(done); PostHosts.Add(host);
                 System.Collections.IEnumerator request = new PostRequestStub(at);
-                if (wrap != null) request = wrap(request);
+                if (wrap != null) request = wrap(host, request);
                 PostRequests.Add(request);
+                if (ThrowOnPostStart) throw new InvalidOperationException("test start failure");
                 request.MoveNext();
             }
             internal static void FfaProbeServerState() { Probes++; }

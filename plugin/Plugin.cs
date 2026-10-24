@@ -4044,6 +4044,8 @@ namespace CompetitiveRounds
             try { PortraitRender.OnHostDestroyed(this); } catch { }
             // The animated player-colour loop, when this host runs it, stops here too.
             try { PlayerColorCosmetic.OnHostDestroyed(this); } catch { }
+            // Finalize this host's entered request before this teardown creates its replacement.
+            try { FfaReadmit.OnHostDestroyed(this); } catch { }
             Plugin.Log.LogWarning("[PERSIST] Destroyed! Attempting respawn...");
             MainMenuInjector.Reset();
 

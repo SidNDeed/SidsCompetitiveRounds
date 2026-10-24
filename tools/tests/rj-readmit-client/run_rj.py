@@ -54,12 +54,13 @@ SUITE_FILES = {
     "rules": {"FfaReadmitRules.cs": "RulesSource", "FfaReportRules.cs": "ReportSource",
               "FfaLateRules.cs": "LateSource", "FfaReadmitEntryRules.cs": "EntrySource",
               "RosterCensusRules.cs": "CensusSource", "FfaReadmit.cs": None,
-              "FfaAssembly.cs": None, "ApiClient.cs": None, "FfaLateEntry.cs": None},
+              "FfaAssembly.cs": None, "ApiClient.cs": None, "FfaLateEntry.cs": None, "Plugin.cs": None},
 }
 
 RELEASE_ROUTE_TARGET = "C4.F2D.release_route_census"
 F2E_ROUTE_TARGET = "C4.F2E.release_route_census"
 F2G_ROUTE_TARGET = "C4.F2G.release_route_census"
+F2H_ROUTE_TARGET = "C4.F2H.host_route_census"
 RELEASE_ROUTES = (
     ("escape", "ApiClient.cs", "private static void TearDownAllQueueBeliefs(",
      "FfaReadmit.Abandon(null, all: true);", ("IsFfaQueuePolling = false;", "ActiveFfaLobbyId = null;")),
@@ -81,6 +82,8 @@ MUTANT_ROUTES = {
     "M-F2E-site-depart": "depart", "M-F2E-site-refusal": "refusal", "M-F2E-site-entryfact": "entry-fact",
     "M-F2G-reset-prepare": "entry-fact", "M-F2G-reset-roomleft": "entry-fact",
     "M-F2G-site-termination": "entered-termination",
+    "M-F2H-hook": "host-destruction", "M-F2H-hook-order": "host-destruction",
+    "M-F2H-binding": "entered-host-binding",
 }
 
 # (id, piece, suite, file, [(old, new), ...], target case, control case)
@@ -328,8 +331,34 @@ MUTANTS = [
      [('        internal static void OnRoomLeft(string room)\n        {\n            _readmitEnteredLobby = null;\n            _readmitEnteredGame = 0;\n', '        internal static void OnRoomLeft(string room)\n        {\n')],
      'C4.F2E.release_route_census.entry-fact', 'C4.F2E.playing_readmission_kept'),
     ('M-F2G-site-termination', 'H1', 'rules', 'ApiClient.cs',
-     [('            Plugin.Instance.StartCoroutine(wrap == null ? request : wrap(request));\n', '            Plugin.Instance.StartCoroutine(request);\n')],
+     [('            host.StartCoroutine(wrap == null ? request : wrap(host, request));\n', '            host.StartCoroutine(request);\n')],
      'C4.F2G.release_route_census.entered-termination', 'C4.F2E.playing_readmission_kept'),
+    # ---- merged fix 2h: actual host ownership and synchronous host teardown
+    ('M-F2H-hook', 'H1', 'rules', 'Plugin.cs',
+     [('            try { FfaReadmit.OnHostDestroyed(this); } catch { }\n', '')],
+     F2H_ROUTE_TARGET + '.host-destruction', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2H-hook-order', 'H1', 'rules', 'Plugin.cs',
+     [('            try { FfaReadmit.OnHostDestroyed(this); } catch { }\n', ''),
+      ('                Plugin.Instance = newInstance;\n',
+       '                Plugin.Instance = newInstance;\n'
+       '                try { FfaReadmit.OnHostDestroyed(this); } catch { }\n')],
+     F2H_ROUTE_TARGET + '.host-destruction', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2H-hostterm', 'H1', 'rules', 'FfaReadmit.cs',
+     [('        internal static void OnHostDestroyed(object host)\n'
+       '        {\n'
+       '            if (!ReferenceEquals(_enteredPostHost, host)) return;\n'
+       '            _enteredPostTerminated?.Invoke();\n'
+       '        }\n',
+       '        internal static void OnHostDestroyed(object host)\n'
+       '        {\n'
+       '        }\n')],
+     'C4.F2H.host_lost_after_departure', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2H-ownership', 'H1', 'rules', 'FfaReadmit.cs',
+     [('            if (!ReferenceEquals(_enteredPostHost, host)) return;\n', '')],
+     'C4.F2H.stale_host_completion', 'C4.F2E.playing_readmission_kept'),
+    ('M-F2H-binding', 'H1', 'rules', 'ApiClient.cs',
+     [('wrap(host, request)', 'wrap(null, request)')],
+     F2H_ROUTE_TARGET + '.entered-host-binding', 'C4.F2E.playing_readmission_kept'),
     # ---- C5 (P5 client rungs of the positive ladder)
     ("M5.c1", "C5", "rules", "FfaReadmitEntryRules.cs",
      [("            if (after == before) return null;\n", "")],
@@ -692,6 +721,23 @@ def extract(text, sig):
     raise RuntimeError("no end for %r" % sig)
 
 
+def extract_class_member(text, name, signature):
+    """Limit a named member lookup to the body of its production class."""
+    code = _blank_csharp(text)
+    declarations = list(re.finditer(r'\bclass\s+' + re.escape(name) + r'\b', code))
+    if len(declarations) != 1:
+        raise RuntimeError("class %s occurs %d times" % (name, len(declarations)))
+    begin = code.index('{', declarations[0].end())
+    depth = 1
+    end = begin + 1
+    while end < len(code) and depth:
+        depth += (code[end] == '{') - (code[end] == '}')
+        end += 1
+    if depth:
+        raise RuntimeError("unclosed class " + name)
+    return extract(text[begin + 1:end - 1], signature)
+
+
 def release_route_census(texts):
     """Census each real synchronous route and the completed-entry fact sites."""
     rows, verdicts = [], {}
@@ -730,16 +776,51 @@ def release_route_census(texts):
     try:
         member = _blank_csharp(extract(texts["ApiClient.cs"], "public static void AsmPost(")).replace("\r\n", "\n")
         factory = "var request = PostRequest(url, json, callback ?? ((ok, r) => { }), timeoutSeconds: timeout);"
-        launch = "Plugin.Instance.StartCoroutine(wrap == null ? request : wrap(request));"
-        no_host = "if (Plugin.Instance == null)"
-        correct = member.count(factory) == 1 and member.count(launch) == 1 and member.count(no_host) == 1
-        correct = correct and member.count("StartCoroutine(") == 1 and member.count("wrap(request)") == 1
-        correct = correct and member.index(no_host) < member.index(factory) < member.index(launch)
+        launches = list(re.finditer(
+            r'host\.StartCoroutine\(wrap == null \? request : wrap\([^,()]+, request\)\);', member))
+        no_host = "if (host == null)"
+        correct = member.count(factory) == 1 and len(launches) == 1 and member.count(no_host) == 1
+        correct = correct and member.count("StartCoroutine(") == 1
+        correct = correct and member.index(no_host) < member.index(factory) < launches[0].start()
         reason = "request_factory_then_optional_wrapper_launch=" + str(correct)
     except (KeyError, RuntimeError, ValueError) as exc:
         correct, reason = False, str(exc)
     verdicts["entered-termination"] = correct
     rows.append("%s %s.entered-termination: %s" % ("PASS" if correct else "FAIL", F2G_ROUTE_TARGET, reason))
+    try:
+        member = _blank_csharp(extract_class_member(texts["Plugin.cs"], "CompetitiveRoundsBehaviour",
+                                                    "private void OnDestroy(")).replace("\r\n", "\n")
+        hooks = list(re.finditer(
+            r'try\s*\{\s*FfaReadmit\.OnHostDestroyed\(this\);\s*\}\s*catch\s*\{\s*\}', member))
+        calls = re.findall(r'\bFfaReadmit\s*\.\s*OnHostDestroyed\s*\(', member)
+        creation, assignment = "new GameObject(", "Plugin.Instance = newInstance;"
+        correct = len(hooks) == 1 and len(calls) == 1
+        correct = correct and member.count(creation) == 1 and member.count(assignment) == 1
+        if correct:
+            prefix = member[:hooks[0].start()]
+            correct = prefix.count('{') - prefix.count('}') == 1
+            correct = correct and hooks[0].end() < member.index(creation) < member.index(assignment)
+        reason = "own_try_once_with_this_before_respawn=" + str(correct)
+    except (KeyError, RuntimeError, ValueError) as exc:
+        correct, reason = False, str(exc)
+    verdicts["host-destruction"] = correct
+    rows.append("%s %s.host-destruction: %s" % ("PASS" if correct else "FAIL", F2H_ROUTE_TARGET, reason))
+    try:
+        member = _blank_csharp(extract(texts["ApiClient.cs"], "public static void AsmPost(")).replace("\r\n", "\n")
+        capture, no_host = "var host = Plugin.Instance;", "if (host == null)"
+        receivers = re.findall(r'\b([A-Za-z_]\w*)\.StartCoroutine\(', member)
+        bindings = re.findall(r'\bwrap\(\s*([^,()]+)\s*,\s*request\)', member)
+        correct = member.count(capture) == 1 and member.count("Plugin.Instance") == 1
+        correct = correct and member.count(no_host) == 1 and receivers == ["host"]
+        correct = correct and member.index(capture) < member.index(no_host) < member.index("host.StartCoroutine(")
+        # The termination row requires the wrapper call. This row independently
+        # checks the host identity whenever that call is present.
+        correct = correct and len(bindings) <= 1 and all(value.strip() == "host" for value in bindings)
+        reason = "captured_launch_receiver_is_wrapper_host=" + str(correct)
+    except (KeyError, RuntimeError, ValueError) as exc:
+        correct, reason = False, str(exc)
+    verdicts["entered-host-binding"] = correct
+    rows.append("%s %s.entered-host-binding: %s" % ("PASS" if correct else "FAIL", F2H_ROUTE_TARGET, reason))
     legacy = all(verdicts[route] for route in ("release", "leave", "depart"))
     rows.append("%s %s: legacy release, leave and depart" % ("PASS" if legacy else "FAIL", RELEASE_ROUTE_TARGET))
     rows.append("release-route census: %d of %d routes pass" % (sum(verdicts.values()), len(verdicts)))
@@ -844,6 +925,7 @@ def adapter_source(adapter, late):
                 "private static void InvalidateMatchingWork(",
                 "private static bool EnteredPostPending(",
                 "private static void FinalizeEntered(",
+                "internal static void OnHostDestroyed(",
                 "private static System.Collections.IEnumerator CompleteEnteredRequest(",
                 "internal static void DiscoverThenProbe(",
                 "internal static FfaReadmitEntryRules.RdmOffer OfferFromPoll(",
@@ -1039,6 +1121,12 @@ def main():
             if mid.startswith("M-F2G-"):
                 extra_cases += [("C4.F2G.departure_pending_success", True),
                                 ("C4.F2G.unrelated_departure_pending", True)]
+            if mid.startswith("M-F2H-"):
+                extra_cases += [(case, True) for case in (
+                    "C4.F2E.playing_readmission_kept", "C4.F2G.departure_pending_success",
+                    "C4.F2E.unrelated_identity", "C4.F2G.unrelated_departure_pending")]
+                if mid == "M-F2H-hostterm":
+                    extra_cases.append(("C4.F2H.host_lost_before_departure", False))
             for extra, want_green in extra_cases:
                 erc, eout = run_case(mdll, extra)
                 extras_green = extras_green and ((erc == 0) == want_green)
