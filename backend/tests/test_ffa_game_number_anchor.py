@@ -3016,9 +3016,10 @@ def test_pg_the_recorded_vector_reads_back_for_the_comparison():
     # this a contradiction on the strength of the raw flag; it is not one, and
     # the sentence that justified it here ("the settlement it asks for is a
     # different one") was the claim round 5 refuted. S2's stored absent is
-    # False either way, so the seat is rated, paid and counted identically —
-    # the only difference is the stored flag and the history line drawn from
-    # it. See test_raw_left_early_is_not_a_contradiction_when_the_decision_
+    # False either way, so rating, game gold, game XP, placement and beaten
+    # count agree. Raw left_early can still change the finishing count and
+    # achievement gold; an accepted replay keeps the first stored settlement.
+    # See test_raw_left_early_is_not_a_contradiction_when_the_decision_
     # agrees for the cost of the refusal this used to produce.
     assert main._ffa_report_contradiction(S3, vec, _report(ROW_A, S3), True) is None
     # What a leave difference that DOES change the settlement still is: S2
@@ -3840,15 +3841,14 @@ def test_a_refusal_raised_out_of_the_skew_refund_still_carries_the_progress():
 def test_raw_left_early_is_not_a_contradiction_when_the_decision_agrees():
     """Control: left-early-compared-raw (r5).
 
-    _ffa_report_contradiction's docstring says WHAT IS COMPARED IS WHAT THE
-    SETTLEMENT ACTS ON, and round 4 then compared raw `left_early` as well as
-    the effective decision. With the decision equal, left_early moves no
-    rating, gold, XP, placement or beaten count — only the stored flag and
-    whether game_points_at_leave is kept beside it. It is unsigned, outside
-    the frozen canonical, and two honest clients of a seat that drops on the
-    winning point really do differ on it; the cost of calling that a
-    contradiction is a terminal 409 to an honest reporter, a spent quarantine
-    row and an operator review item over one identical settlement (#430)."""
+    With the effective decision equal, raw left_early changes no rating,
+    game gold, game XP, placement or beaten count, but it can change the
+    finishing count and achievement gold. It also changes the stored flag
+    and whether game_points_at_leave is kept beside it. The unsigned flag is
+    outside the frozen canonical, and honest clients can disagree about a
+    seat that drops on the winning point. Refusing that difference costs an
+    honest reporter a terminal 409, a quarantine row and an operator review
+    item (#430). An accepted replay keeps the first stored settlement."""
     # Above the grace threshold, so neither reading marks the seat unrated:
     # the two reports reach the SAME effective decision and differ only in the
     # raw claim.
@@ -7897,3 +7897,40 @@ def test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields():
     for name, ex in (("both attempts failed", arm1), ("the lobby is gone", arm2)):
         body = json.loads(bytes(asyncio.run(handler(None, ex)).body))
         assert set(body) == {"detail"}, (name, body)
+
+
+def test_fix2d_m3_raw_left_early_moves_the_finishing_count_not_the_comparison():
+    """Equal comparison can hide a finishing-count and achievement-gold change."""
+    fourth = "seat-four"
+    rows = {S1: (5, 10, 0), S2: (0, 0, 0), S3: (0, 0, 0),
+            fourth: (0, 0, 0)}
+    stayed = _report(rows, S1)
+    left = _report(rows, S1, leave={S2: (True, False, None)})
+    stayed.ranked = left.ranked = True
+    snapshots = {sid: set() for sid in rows}
+    for report in (stayed, left):
+        assert main._ffa_report_contradiction(
+            S1, _vec(rows), report, False, stored_reasons=snapshots) is None
+    before = main._ffa_finishing_count(set(rows), set(), stayed)
+    after = main._ffa_finishing_count(set(rows), set(), left)
+    assert before == (4, 4, 4)
+    assert after == (3, 4, 3)
+    # Read the live grant loop's thresholds, rather than restating a tier here.
+    loops = [node for node in ast.walk(ast.parse(inspect.getsource(main.submit_ffa_match)))
+             if isinstance(node, ast.For) and isinstance(node.target, ast.Tuple)
+             and [getattr(item, "id", None) for item in node.target.elts]
+             == ["_need", "_key"]]
+    assert len(loops) == 1
+    tiers = ast.literal_eval(loops[0].iter)
+    assert "ffa_shutout_4" in {key for need, key in tiers if before[0] >= need}
+    assert "ffa_shutout_4" not in {key for need, key in tiers if after[0] >= need}
+    assert main.ACHIEVEMENT_GOLD_OVERRIDES["ffa_shutout_4"] == 300
+
+
+def test_fix2d_m3_rationale_names_the_finishing_count_effect():
+    source = " ".join(inspect.getsource(main._ffa_report_contradiction).split())
+    assert "changes no rating, game gold, game XP, placement or beaten count" in source
+    assert "can change the finishing count and therefore achievement grants and achievement gold" in source
+    assert "the first stored settlement stands" in source
+    assert "it moves no rating, gold, XP, placement or beaten count" not in source
+    assert "neither of which any settlement reads" not in source

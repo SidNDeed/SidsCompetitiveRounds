@@ -57882,16 +57882,18 @@ def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
     observation, outside the frozen HMAC canonical, that two honest clients of
     one game genuinely differ on — a seat that drops on the winning point is
     "left early" to one machine and "the game was already over" to the other.
-    With the effective decision above equal, it moves no rating, gold, XP,
-    placement or beaten count: all it changes is the stored flag and whether
-    `game_points_at_leave` is kept beside it, neither of which any settlement
-    reads. It is displayed in match history, so a difference is a real
-    difference — but the cost of calling it a contradiction is a terminal 409
-    to an honest reporter, no result figures for it, and a spent quarantine row
-    and operator review item, over two reports that describe one identical
-    settlement (#430). The claim is still the INPUT to the decision that is
-    compared, so a left_early difference that changes who played is caught
-    there, where it means something.
+    With the effective decision above equal, a raw left_early difference
+    changes no rating, game gold, game XP, placement or beaten count. It
+    can change the finishing count and therefore achievement grants and
+    achievement gold. It also changes the stored flag and whether
+    `game_points_at_leave` is kept beside it. These reports need not produce
+    identical achievements if settled independently. Raw left_early remains
+    uncompared: refusing an honest reporter costs a terminal 409, no result
+    figures, and a spent quarantine row and operator review item (#430).
+    An accepted replay never re-settles; the first stored settlement stands.
+    The claim is still the INPUT to the decision that is compared, so a
+    left_early difference that changes who played is caught there, where it
+    means something.
 
     Timings and telemetry are never compared: they differ routinely and none of
     them is paid. `game_points_at_leave` is not compared as a NUMBER for the
