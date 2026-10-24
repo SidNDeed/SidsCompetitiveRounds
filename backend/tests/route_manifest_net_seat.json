@@ -3611,6 +3611,48 @@
           "543598e61ca4687bfba1457fa0810648f137ff66"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "seat evidence (contract V2, backend/api/seat_evidence.py): the two seat routes answer fixed status bodies; the admin view projects seat_evidence rows, their game-scope findings, compat rows and, from matches, only id, player ids, rounds won and is_ranked; the digest registration answers a status. Static source review: no W1 private Match column is read by or reaches any of these outputs.",
+      "routes": [
+        [
+          "/api/v1/admin/release-digests",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_register_release_digest",
+          "7bcc87a90d1fc5146dc2bc8bb33cc85cf56a93f3"
+        ],
+        [
+          "/api/v1/admin/seat-evidence",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_seat_evidence",
+          "160ab63dd6a10897c3de6f12eeb9cb8fea0c4c2b"
+        ],
+        [
+          "/api/v1/client/compat-outcome",
+          [
+            "POST"
+          ],
+          "main",
+          "submit_compat_outcome",
+          "3f9a1d052b1d955e4bcb463e445b36fbfc442ae8"
+        ],
+        [
+          "/api/v1/matches/seat-evidence",
+          [
+            "POST"
+          ],
+          "main",
+          "submit_seat_evidence",
+          "89a91277e5469ca89b9ac60922b56a404e47feda"
+        ]
+      ]
     }
   ],
   "entry_points": {
