@@ -76,6 +76,7 @@ CREATE TABLE ffa_match_players (
     damage_dealt_timeline VARCHAR(1024),
     kill_timeline         VARCHAR(512),
     absent                BOOLEAN NOT NULL DEFAULT false,
+    exclusion_reasons     TEXT[],
     color_name            VARCHAR(40),
     color_hex             VARCHAR(9),
     end_stats             TEXT,
