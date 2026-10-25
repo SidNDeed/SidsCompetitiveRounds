@@ -752,7 +752,12 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # lane: the union of the lane's 390 and main 6bb8208f's 394 over their
     # shared 388 (main e9a3f1e1) is 396: the trunk's 394 plus the lane's 2,
     # confirmed by the re-pin dry run
-    assert len(manifest) == 396
+    # seat evidence V2 (claude/seat-evidence-server-v2): +4 (the seat record and compat outcome routes, the
+    # admin seat-evidence view and the release digest registration; 388 before)
+    # seat evidence LAND merge pass (2026-10-19), merge of the lane 520d5d31 with main ca00e375: the
+    # union of main's 396 and the lane's 392 over their shared 388 (14127702) is 400: the trunk's 396
+    # plus the lane's 4, measured by the precommit route measurement and confirmed by the re-pin dry run
+    assert len(manifest) == 400
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -782,7 +787,11 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # and main 6bb8208f's 393 over their shared 387 is 395: the trunk's 393
     # plus the lane's 2 (both statically-nonconsumer), confirmed by the
     # re-pin dry run
-    assert len(static) == 395
+    # seat evidence V2 (claude/seat-evidence-server-v2): +4, all statically-nonconsumer (387 before)
+    # seat evidence LAND merge pass (2026-10-19): the union of main's 395 and the lane's 391 over their
+    # shared 387 is 399: the trunk's 395 plus the lane's 4 (all statically-nonconsumer), measured by
+    # the precommit route measurement and confirmed by the re-pin dry run
+    assert len(static) == 399
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -1323,7 +1332,17 @@ def test_the_helper_closure_stays_affordable():
     # on 365 (see the code worst bound); nothing either side reached is
     # missing. The bound moves to 153, ~5% over the measurement, for that
     # reason and no other.
-    assert all_median <= 153, f"median closure {all_median} of {total}"
+    # Seat evidence LAND merge pass (2026-10-19), the lane 520d5d31 with
+    # main ca00e375: 159 measured (POST /api/v1/tournaments/{tournament_id}/
+    # matches/{match_id}/forfeit: 124 at the base 14127702, 135 on the lane,
+    # 148 on the trunk; 191 routes above it). Nothing on the route is new to
+    # both sides; the merge adds 11 names over the trunk, every one an
+    # IMPORT-tier binding of the lane's new modules folded in by name
+    # (seat_evidence, review_rules, review_boot and build_no_bytecode binding
+    # os, time, hashlib, datetime, timezone, text); the code median stays 76
+    # (76 on the trunk). The bound moves to 167, ~5%
+    # over the measurement, for that reason and no other.
+    assert all_median <= 167, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1509,7 +1528,14 @@ def test_the_helper_closure_stays_affordable():
     # the trunk), 39 routes above it; the same by-name fold as the median
     # above. The bound moves to 256, ~5% over the measurement, for that
     # reason and no other.
-    assert all_p90 <= 256, f"p90 closure {all_p90} of {total}"
+    # Seat evidence LAND merge pass (2026-10-19): 259 measured on GET
+    # /api/v1/ovt/queue/poll/{steam_id} (145 at the base, 160 on the lane,
+    # 243 on the trunk), 39 routes above it; the merge adds 16 names to it
+    # over the trunk, every one IMPORT-tier and one of them
+    # (seat_evidence.hmac) on neither side, the same by-name fold as the
+    # median above. The bound moves to 272,
+    # ~5% over the measurement, for that reason and no other.
+    assert all_p90 <= 272, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -1567,6 +1593,24 @@ def test_the_helper_closure_stays_affordable():
     # the union plus read_gate.uuid by name). GET /api/v1/pc/packs/result,
     # the trunk's worst (562), measures 579. The bound moves to 642, ~5%
     # over the measurement, for that reason and no other.
+    # Seat evidence V2 (claude/seat-evidence-server-v2, 2026-10-02): the same
+    # route measured 503 at the base 14127702 and 526 on the lane -- +23, and
+    # all 23 are IMPORT leaves: the five new modules (seat_evidence and the
+    # four review modules) each bind stdlib names every route already
+    # references (json, os, hashlib, datetime, timezone, time, math, hmac,
+    # uuid, secrets, stat, text), and the walk folds in every module that binds
+    # a shared name. No code binding of the new modules reaches an existing
+    # route: after the review modules' generic function names were made
+    # distinctive, the code tier moves only on the four new routes and
+    # /api/v1/health (median 22 / p90 97 / worst 370, all under their bounds).
+    # Whole closure over 391 routes: median 76 -> 86, p90 197 -> 196. The
+    # bound moves to 556, ~6% over the measurement, for that reason and no
+    # other; the median and p90 bounds stay.
+    # Seat evidence LAND merge pass (2026-10-19), the lane 520d5d31 with
+    # main ca00e375: 596 measured on GET /api/v1/pc/packs/result (579 on the
+    # trunk; on the lane and at the base the worst is POST
+    # /api/v1/pc/packs/open, 521 and 503). Inside 642, so the bound stays;
+    # the lane's 556 does not apply to the merged tree.
     assert all_worst <= 642, f"worst closure {all_worst} of {total}"
 
 

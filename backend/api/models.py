@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    BigInteger, Boolean, CheckConstraint, Column, DateTime, Double, FetchedValue, Float, ForeignKey, Index, Integer,
+    BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, Double, FetchedValue, Float, ForeignKey, Index, Integer,
     SmallInteger, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -1478,3 +1478,141 @@ class MailInboxRev(Base):
     recipient_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
     rev = Column(BigInteger, nullable=False, default=0)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+# -- Seat evidence and the review worker (migration 368) ---------------------
+# Declared to match 368_seat_evidence.sql column for column, constraints
+# included, so an ORM-created table (a test harness's create_all) holds the
+# same rules the migration writes. The api reads and writes these tables with
+# SQL text in seat_evidence.py; every column that SQL assigns is declared here.
+
+class SeatEvidence(Base):
+    __tablename__ = "seat_evidence"
+    __table_args__ = (
+        UniqueConstraint("stable_game_key", "seat_player_id", name="seat_evidence_one_per_seat"),
+        CheckConstraint("seat_player_id <> other_player_id", name="seat_evidence_two_seats"),
+        Index("ix_seat_evidence_attach", "attach_key"),
+        Index("ix_seat_evidence_seat_time", "seat_player_id", "received_at"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    stable_game_key = Column(String(60), nullable=False)
+    attach_key = Column(String(64), nullable=False)
+    seat_player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    other_player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    header_mod_version = Column(String(16), nullable=True)
+    build_version = Column(String(16), nullable=True)
+    build_variant = Column(String(16), nullable=True)
+    build_commit = Column(String(12), nullable=True)
+    dll_sha256 = Column(String(64), nullable=True)
+    dll_hash_state = Column(String(12), nullable=False, default="absent", server_default="absent")
+    compat_outcome = Column(String(8), nullable=False, default="absent", server_default="absent")
+    payload = Column(JSONB, nullable=False)
+    payload_sha256 = Column(String(64), nullable=False)
+    payload_bytes = Column(Integer, nullable=False, default=0, server_default="0")
+    conflict_at = Column(DateTime(timezone=True), nullable=True)
+    conflict_kind = Column(String(16), nullable=True)
+    lists_purged_at = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class SeatEvidenceGame(Base):
+    __tablename__ = "seat_evidence_games"
+    __table_args__ = (
+        CheckConstraint("pair_lo < pair_hi", name="seat_evidence_games_order"),
+    )
+
+    stable_game_key = Column(String(60), primary_key=True)
+    pair_lo = Column(UUID(as_uuid=True), primary_key=True)
+    pair_hi = Column(UUID(as_uuid=True), primary_key=True)
+    match_id = Column(UUID(as_uuid=True), nullable=True)
+    signature = Column(String(200), nullable=True)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    finalized_at = Column(DateTime(timezone=True), nullable=True)
+    evaluated_rev = Column(String(16), nullable=True)
+
+
+class SeatEvidenceFinding(Base):
+    __tablename__ = "seat_evidence_findings"
+    __table_args__ = (
+        UniqueConstraint("scope", "dedup_key", "rule_id", name="seat_evidence_findings_once"),
+        CheckConstraint("scope IN ('game', 'sitting')", name="seat_evidence_findings_scope"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    scope = Column(String(8), nullable=False, default="game", server_default="game")
+    dedup_key = Column(String(160), nullable=False)
+    rule_id = Column(String(16), nullable=False)
+    rules_rev = Column(String(16), nullable=False)
+    match_id = Column(UUID(as_uuid=True), nullable=True)
+    details = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    computed_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    changed_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    flag_id = Column(UUID(as_uuid=True), nullable=True)
+
+
+class ModReleaseDigest(Base):
+    __tablename__ = "mod_release_digests"
+
+    version = Column(String(16), primary_key=True)
+    variant = Column(String(16), primary_key=True, default="STANDALONE", server_default="STANDALONE")
+    commit_sha = Column(String(12), primary_key=True, default="", server_default="")
+    dll_sha256 = Column(String(64), primary_key=True)
+    source = Column(String(16), nullable=False, default="release", server_default="release")
+    registered_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ClientCompatEvent(Base):
+    __tablename__ = "client_compat_events"
+    __table_args__ = (
+        UniqueConstraint("player_id", "hour_bucket", name="client_compat_events_hourly"),
+        CheckConstraint("outcome IN ('finding', 'not_run')", name="client_compat_events_outcome"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    outcome = Column(String(8), nullable=False, default="not_run", server_default="not_run")
+    other_plugin_count = Column(SmallInteger, nullable=False, default=0, server_default="0")
+    other_plugins = Column(Text, nullable=True)
+    mod_version = Column(String(16), nullable=True)
+    hour_bucket = Column(DateTime(timezone=True), nullable=False)
+    received_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ReviewSittingDirty(Base):
+    __tablename__ = "review_sitting_dirty"
+    __table_args__ = (
+        Index("ix_review_sitting_dirty_marked", "marked_at"),
+    )
+
+    pair_lo = Column(UUID(as_uuid=True), primary_key=True)
+    pair_hi = Column(UUID(as_uuid=True), primary_key=True)
+    day = Column(Date, primary_key=True)
+    marked_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ReviewSeen(Base):
+    __tablename__ = "review_seen"
+    __table_args__ = (
+        Index("ix_review_seen_created", "created_at"),
+    )
+
+    match_id = Column(UUID(as_uuid=True), primary_key=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ReviewCursor(Base):
+    __tablename__ = "review_cursor"
+
+    name = Column(String(16), primary_key=True)
+    rules_rev = Column(String(16), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class SeatEvidenceSeededKey(Base):
+    __tablename__ = "seat_evidence_seeded_keys"
+
+    key = Column(String(64), primary_key=True)
+    seeded_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))

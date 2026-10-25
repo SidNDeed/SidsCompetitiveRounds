@@ -33,6 +33,14 @@ FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1
 
 WORKDIR /app
 
+# No bytecode cache in this image, ever: the review loader binds a rules
+# revision to the SOURCE bytes of its code and refuses while a cache of that
+# code could load in its place. The build context excludes every cache
+# (.dockerignore), nothing here writes one (this variable, set before any
+# Python runs), and the check after the code copy fails the build if one
+# exists anyway (build_no_bytecode.py).
+ENV PYTHONDONTWRITEBYTECODE=1
+
 # Text shaping for the Player Cards renderer. Pillow's manylinux wheel bundles
 # libraqm and HarfBuzz but loads libfribidi at RUNTIME, so without this package
 # the renderer falls back to Pillow's "basic" layout engine, /api/v1/health
@@ -64,6 +72,7 @@ RUN python assets/fonts/fetch_fonts.py
 
 # Copy application code
 COPY . .
+RUN python -B build_no_bytecode.py /app
 
 # Run with uvicorn.
 #

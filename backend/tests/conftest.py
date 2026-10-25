@@ -4,11 +4,17 @@ The production modules intentionally use flat imports (``from models import``),
 so tests mirror the process layout used by uvicorn and the Discord bot.
 """
 
-from pathlib import Path
-import hashlib
 import os
 import sys
 
+# Install before pytest, review_boot, and every collected test module. Plain
+# Python review drivers import this conftest too; a pytest plugin is too late.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+import review_tripwire  # noqa: E402
+
+from pathlib import Path
+import contextlib
+import hashlib
 import pytest
 
 
@@ -19,6 +25,83 @@ TESTS_ROOT = Path(__file__).resolve().parent
 for path in (str(API_ROOT), str(BACKEND_ROOT), str(TESTS_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
+
+# ── The review closure executes from source only ─────────────────────────
+#
+# review_boot must be installed before any review closure module
+# (review_measures, review_rules) is imported, or the rules loader refuses
+# every revision in the process (review_boot.py). Importing it here, before
+# any test module is collected, installs it for the whole run.
+import review_boot  # noqa: E402,F401
+
+
+_REVIEW_SESSION = pytest.StashKey[object]()
+_REVIEW_EXITSTATUS = pytest.StashKey[object]()
+
+
+def _review_finish_status(session):
+    """Refuse success without replacing an existing error or interruption."""
+    trips = review_tripwire.verdict()
+    if session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = session.config.stash.get(_REVIEW_EXITSTATUS, pytest.ExitCode.OK)
+    if trips and session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    return trips
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_sessionfinish(session, exitstatus):
+    """Report the runtime verdict and retain the incoming outcome for cleanup."""
+    session.config.stash[_REVIEW_SESSION] = session
+    session.config.stash[_REVIEW_EXITSTATUS] = exitstatus
+    yield
+    trips = _review_finish_status(session)
+    if trips:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line("review tripwire: non-clean verdict (%d trips)" % len(trips))
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    """Recheck after sessionfinish; later unconfigure mutations are outside this bound."""
+    session = config.stash.get(_REVIEW_SESSION, None)
+    if session is None:
+        # A configure/sessionstart error can skip sessionfinish entirely.
+        session = config.pluginmanager.get_plugin("session")
+    if session is not None:
+        _review_finish_status(session)
+
+
+# Synthetic read failures and count-cap instrumentation replace these exact
+# bindings. Their positive expected-trip scopes preserve the original assertions.
+# The r3 errno-hash test replaces then restores os.walk before observation;
+# monkeypatch undo replays that pair too. Neither interval requires a trip.
+_REVIEW_FAULTS = {
+    ("test_review_rules", "test_l3_enumeration_is_incremental_under_the_count_cap"):
+        ("os.scandir",),
+    ("test_review_needles_r3", "test_m5_a_status_failure_is_the_exit_3_refusal_never_absence"):
+        ("os.stat", "os.lstat"),
+    ("test_review_needles_r3", "test_m5_an_unreadable_directory_under_a_scan_refuses"):
+        ("os.scandir",),
+    ("test_review_needles_r3", "test_m5_the_build_tool_does_not_read_an_unreadable_draft_table_dir_as_absent"):
+        ("os.stat",),
+    ("test_review_needles_r5", "test_m4b_fix5_every_entry_that_is_not_a_regular_file_or_directory_is_refused"):
+        ("os.lstat",),
+}
+
+
+def _review_fault_scope(module, test):
+    names = _REVIEW_FAULTS.get((module, test))
+    return review_tripwire.expected_trip(*names) if names else contextlib.nullcontext()
+
+
+@pytest.fixture(autouse=True)
+def _review_expected_fault(request, monkeypatch):
+    # This fixture depends on monkeypatch so it closes before undo restores the
+    # deliberate replacements. Only the named fault tests can consume trips.
+    with _review_fault_scope(request.module.__name__, request.node.originalname):
+        yield
 
 
 # ── The tree this run is reading ─────────────────────────────────────────

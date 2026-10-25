@@ -1072,6 +1072,22 @@ class HealthResponse(BaseModel):
     # raises instead of silently leaving the key out. Absent on any build
     # before it, which is how the train reads the old build.
     auto_log: int
+    # seat_evidence: whether this build serves the seat-evidence lane
+    # (main._seat_evidence_health_word; 1 = the four seat-evidence routes are
+    # registered on the app, else 0). DERIVED on every request; equal on both
+    # roles by construction; read by nothing else. Declared without a
+    # default, so building the answer without it raises instead of silently
+    # leaving the key out. Absent on any build before the lane.
+    seat_evidence: int
+    # review_eval: 8 hex of the review code's file digest
+    # (review_rules.review_eval: review_boot.py, review_measures.py and
+    # review_rules.py, by file). Equal on both roles; the build discriminator
+    # through the edge. No default, as above.
+    review_eval: str
+    # review_rules: the loaded review rules revision id, or "absent" (none
+    # staged) or "refused" (the staged one failed a check). It reads the id
+    # only, never anything about the revision's contents. No default.
+    review_rules: str
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

@@ -1,0 +1,8 @@
+small
+cap160
+over160_wide
+empty
+nulls
+pub_omit_seed
+end_left
+end_closing_over
