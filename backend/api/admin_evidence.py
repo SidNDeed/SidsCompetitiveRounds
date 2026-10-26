@@ -1857,10 +1857,11 @@ async def _summary_page(rep, shape, rows, requested, subjects, accounts):
                 dist = window_population(source.values.get(w.base, array("d")),
                                          source.offsets.get(w.base, array("i", [0])),
                                          w.agg.split(".")[0], c["n"])
-                r = rep.cache.memo_put(comp, source, pop_measures(dist, c["val"]),
+                r = rep.cache.memo_put(comp, source, {"distribution": dist},
                                        len(dist) * 8 + 64)
+            measures = pop_measures(r["distribution"], c["val"])
             for k in ("pop_rank", "pop_n", "pop_p50", "pop_p90", "pop_p99"):
-                c[k] = r[k]
+                c[k] = measures[k]
         windows.append({"oi": oi, "basis": basis,
                         "subj": ["seat", index[str(acc)],
                                  index[str(partner)] if partner is not None else None],

@@ -5210,18 +5210,210 @@ def test_fix9_close_preserves_lifo_list_and_exception_state():
     assert first.leases == 0 and last.leases == 0
 
 
+# Fix 10 M24: actual summary/population definitions, with database I/O stubbed.
+def _fix10_m24_population_namespace():
+    import math
+
+    ns = _fix9_population_namespace()
+    wanted = {"DISPLAY_DEFAULTS", "comparability_key", "aer_seat_of",
+              "aer_reporter_seat", "_aer_other", "_timeline_display",
+              "_display_value", "_applies", "seat_value", "mid_rank",
+              "own_measures", "window_values", "window_stat", "window_cells",
+              "window_population", "_quantile", "pop_measures"}
+    selected, found = [], set()
+    for node in ast.parse(_read(API), filename=API).body:
+        names = {node.name} if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                                ast.ClassDef)) else set()
+        if isinstance(node, ast.Assign):
+            names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+        if names & wanted:
+            selected.append(node)
+            found |= names & wanted
+    assert found == wanted, (wanted - found, found - wanted)
+    ns["math"] = math
+    exec(compile(ast.Module(body=selected, type_ignores=[]), API, "exec"), ns)
+    return ns
+
+
+def _fix10_m24_summary_fixture(basis):
+    from types import SimpleNamespace
+
+    ns = _fix10_m24_population_namespace()
+    cache = ns["PopulationCache"](clock=lambda: 12.0)
+    source = cache.publish(("display", basis), {0: ns["array"]("d", [10.0, 30.0])}, {},
+                           offsets={0: ns["array"]("i", [0, 1, 2])})
+    base = SimpleNamespace(ki=0, is_window=False, kind="R", prov="SELF",
+        decl=SimpleNamespace(subject="same", presence="reporter", column="{s}_value"))
+    window = SimpleNamespace(ki=1, is_window=True, scope="seat", bases=("pair", "player"),
+                             base=0, agg="win_median.cell", key="fixture-self-window")
+    rows = [
+        {"id": "game-first", "ended_at": 2.0, "player1_id": "first", "player2_id": "second",
+         "reported_by": "first", "p1_value": 10.0, "p2_value": None},
+        {"id": "game-second", "ended_at": 1.0, "player1_id": "first", "player2_id": "second",
+         "reported_by": "second", "p1_value": None, "p2_value": 30.0},
+    ]
+    subjects = {"first": {"i": 0, "steam_id": None}, "second": {"i": 1, "steam_id": None}}
+    visits, distributions, lease_requests = [], [], []
+    actual_population = ns["window_population"]
+
+    async def flag_rows(_db, _ids):
+        return {}
+
+    async def baseline(_db, account, _ended, _ident, **kwargs):
+        visits.append((account, kwargs["partner"]))
+        return None
+
+    async def leased(actual_cache, _db, key, _deadline, basis=None):
+        assert actual_cache is cache and key == source.key and basis == source.key[-1]
+        lease_requests.append((key, source.gen, basis))
+        return actual_cache.lease(source)
+
+    def population(values, offsets, agg, n):
+        result = actual_population(values, offsets, agg, n)
+        distributions.append((tuple(result), agg, n))
+        return result
+
+    ns.update({"_flag_rows": flag_rows, "read_baseline": baseline, "_leased": leased,
+               "_display_key": lambda: ("display",), "REPORT_REGISTRY": [base, window],
+               "flag_obs": lambda *_args: 0, "wire_row": lambda _kind, cell: dict(cell),
+               "window_population": population})
+    assert [ns["aer_reporter_seat"](row) for row in rows] == ["p1", "p2"]
+    assert ns["window_values"](base, rows, "first", "second") == [10.0]
+    assert ns["window_values"](base, rows, "second", "first") == [30.0]
+    return ns, cache, source, rows, subjects, visits, distributions, lease_requests
+
+
+@pytest.mark.parametrize("shape", ["pair", "player"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("warm", [False, True])
+def test_fix10_m24_summary_ranks_each_subject_in_shared_distribution(shape, reverse, warm):
+    ns, cache, source, rows, subjects, visits, distributions, lease_requests = (
+        _fix10_m24_summary_fixture(shape))
+    order = ("second", "first") if reverse else ("first", "second")
+    expected_visits = ([(order[0], order[1]), (order[1], order[0])] if shape == "pair" else
+                       [(account, None) for account in order])
+
+    async def request(accounts):
+        report = ns["_Report"](None, cache, 1.0)
+        try:
+            windows, summaries, computed_at = await ns["_summary_page"](
+                report, shape, rows, 2, subjects, accounts)
+            assert computed_at == source.computed_at == 12.0
+            assert source.leases == 1 and report.leases == [source]
+            assert len(windows) == len(summaries) == (2 if shape == "pair" else 1)
+            result = {}
+            for window, summary in zip(windows, summaries):
+                assert window["oi"] == summary["oi"] and window["basis"] == shape
+                assert window["covered"] == window["games"] == 2
+                assert len(summary["cells"]) == 1
+                cell = summary["cells"][0]
+                assert "comparability" not in cell
+                result[window["subj"][1]] = cell
+            return result
+        finally:
+            report.close()
+            assert source.leases == 0 and report.leases == []
+
+    async def round_trip():
+        if shape == "pair":
+            return await request(order)
+        result = {}
+        for account in order:
+            result.update(await request((account,)))
+        return result
+
+    async def scenario():
+        if warm:
+            await round_trip()
+            assert len(cache.memo) == 1 and len(distributions) == 1
+        cells = await round_trip()
+        # Subject assertions precede storage assertions, so the BASE failure is
+        # the reused subject rank, never an absent new-format cache field.
+        assert set(cells) == {0, 1}
+        expected = {0: (10.0, 0.25), 1: (30.0, 0.75)}
+        for subject, (value, _rank) in expected.items():
+            cell = cells[subject]
+            assert (cell["val"], cell["n"], cell["state"]) == (value, 1, "ok")
+            assert (cell["pop_n"], cell["pop_p50"], cell["pop_p90"], cell["pop_p99"]) == (
+                2, 10.0, 30.0, 30.0)
+        for account in order:
+            subject = subjects[account]["i"]
+            cell = cells[subject]
+            assert cell["pop_rank"] == expected[subject][1], (
+                shape, reverse, warm, subject, cell)
+        comp = ns["comparability_key"]("fixture-self-window", shape, 1)
+        assert len(cache.memo) == 1
+        stored = cache.memo_get(comp, source)
+        assert stored is not None and tuple(stored["distribution"]) == (10.0, 30.0)
+        assert "pop_rank" not in stored
+        assert (stored["source_key"], stored["gen"], stored["computed_at"]) == (
+            ("display", shape), source.gen, 12.0)
+        assert source.gen == 1 and cache._memo_key(comp, source) == (comp, source.key, 1)
+        assert stored["_bytes"] == cache.memo_bytes == 80
+        assert cache.cache_bytes() == source.nbytes() + 80
+        assert distributions == [((10.0, 30.0), "win_median", 1)]
+        assert visits == expected_visits * (2 if warm else 1)
+        assert lease_requests == [(source.key, source.gen, shape)] * (
+            (1 if shape == "pair" else 2) * (2 if warm else 1))
+        assert source.leases == 0
+
+    ns["asyncio"].run(scenario())
+
+
+@pytest.mark.parametrize("different", ["comparator", "source", "generation"])
+def test_fix10_m24_memo_key_keeps_independent_distributions(different):
+    ns = _fix10_m24_population_namespace()
+    cache = ns["PopulationCache"]()
+    first = _fix9_generation(ns, ("source-first",), gen=3)
+    second = _fix9_generation(ns, ("source-second",) if different == "source" else first.key,
+                              gen=4 if different == "generation" else first.gen)
+    comp_first = ("comparison-first",)
+    comp_second = ("comparison-second",) if different == "comparator" else comp_first
+    first_stored = cache.memo_put(comp_first, first,
+        {"distribution": ns["array"]("d", [10.0, 30.0])}, 80)
+    second_stored = cache.memo_put(comp_second, second,
+        {"distribution": ns["array"]("d", [20.0, 40.0])}, 80)
+    assert cache.memo_get(comp_first, first) is first_stored
+    assert cache.memo_get(comp_second, second) is second_stored
+    assert tuple(first_stored["distribution"]) == (10.0, 30.0)
+    assert tuple(second_stored["distribution"]) == (20.0, 40.0)
+    assert len(cache.memo) == 2 and cache.memo_bytes == 160
+
+
+@pytest.mark.parametrize("field", ["source_key", "gen", "computed_at"])
+def test_fix10_m24_memo_rejects_stale_distribution_metadata(field):
+    ns = _fix10_m24_population_namespace()
+    cache = ns["PopulationCache"]()
+    source = _fix9_generation(ns, ("source",), gen=7)
+    first = cache.memo_put(("first",), source, {"distribution": ns["array"]("d", [10.0])}, 72)
+    cache.memo_put(("second",), source, {"distribution": ns["array"]("d", [30.0])}, 72)
+    original = first[field]
+    first[field] = ("stale",) if field == "source_key" else original + 1
+    before = list(cache.memo)
+    assert cache.memo_get(("first",), source) is None
+    assert list(cache.memo) == before and cache.memo_bytes == 144
+    first[field] = original
+    assert cache.memo_get(("first",), source) is first
+    assert list(cache.memo) == before[1:] + before[:1]
+    assert cache.memo_bytes == 144
+
+
 def test_fix9_summary_preserves_cells_list_effect():
     from types import SimpleNamespace
 
-    ns = _fix9_population_namespace()
+    ns = _fix10_m24_population_namespace()
     cache = ns["PopulationCache"]()
     source = _fix9_generation(ns, ("window",), gen=3)
     comp = ("window-key", "player", 1)
     cells = [{"ki": 0, "n": 1, "val": 5.0, "state": "ok", "comparability": comp},
              {"ki": 0, "n": 0, "val": None, "state": "not_recorded",
               "comparability": ("window-key", "player", 0)}]
-    population = {"pop_rank": 0.25, "pop_n": 4, "pop_p50": 5.0, "pop_p90": 8.0, "pop_p99": 9.0}
-    cache.memo_put(comp, source, population, 64)
+    population = {"pop_rank": 0.25, "pop_n": 4, "pop_p50": 5.0, "pop_p90": 9.0, "pop_p99": 9.0}
+    # INTEGRATOR-RULINGS-AE-FIX10.md authorizes this coherent prior-subject preload:
+    # prior SELF 9 ranks 0.875; current SELF 5 must rank 0.25, with p90/p99 both 9.
+    distribution = ns["array"]("d", [5.0, 5.0, 8.0, 9.0])
+    cached = {"distribution": distribution, **ns["pop_measures"](distribution, 9.0)}
+    cache.memo_put(comp, source, cached, 96)
 
     async def flag_rows(_db, _ids):
         return {}
