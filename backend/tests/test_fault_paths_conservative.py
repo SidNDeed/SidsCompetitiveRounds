@@ -659,12 +659,12 @@ def test_only_one_caller_may_catch_the_session_check_and_it_is_named():
 
     _asm_run (the FFA assembly runner, v1.41.0) is the second, named for its
     polarity too: the session check sits inside its deadline try so a slow
-    check counts against the assembly deadline, but the only handler there
-    that does not re-raise is the one for _AsmDeadline, which the session
-    check never raises; an HTTPException is rolled back and re-raised, and
-    anything else is re-raised unless its SQLSTATE maps to an assembly stage,
-    in which case the answer is 503 asm_deadline -- a refusal, never an
-    admission.
+    check counts against the assembly deadline, and no handler there turns
+    an error into an admission. An HTTPException is rolled back and
+    re-raised; anything else is re-raised unless its SQLSTATE maps to an
+    assembly stage; and the two handlers that do return -- the one for
+    _AsmDeadline, which the session check never raises, and the one for a
+    mapped SQLSTATE -- answer 503 asm_deadline, a refusal.
 
     Control: wrap any other `await _check_steam_session(...)` in a
     `try/except Exception: pass` -> RED."""

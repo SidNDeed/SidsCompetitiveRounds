@@ -198,9 +198,9 @@ def _printing_tracebacks(app):
     answered instead of failing in the request coroutine, but httpx then
     swallows the exception whole: a failing row read as
     (500, 'Internal Server Error') with nothing to go on (2026-10-27, the
-    quorum rows on the v1.41.0 candidate). The traceback goes to stdout on
-    the way out, where pytest captures it per row; the status the client
-    sees is unchanged."""
+    quorum rows on the v1.41.0 candidate). The traceback goes to stderr on
+    the way out (traceback.print_exc), where pytest captures it per row;
+    the status the client sees is unchanged."""
     async def wrapped(scope, receive, send):
         try:
             await app(scope, receive, send)
