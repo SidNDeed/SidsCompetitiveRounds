@@ -1806,98 +1806,137 @@ def test_pg_r1_a_fault_in_game_one_costs_only_game_ones_credit(opened, monkeypat
             s, run["got2"][s])
 
 
-async def _r3_run(how, tag):
-    """A 1v1 series to completion with the rating pass forced one way: game
-    1 on the case's own sessions, the deciding report on a session whose
-    commit, for `how` == "skip", invalidates the series from another
-    connection as soon as the completion is on disk -- a reversal landing in
-    the one gap between the completion's commit and the rating pass."""
+async def _r3_run(how, tag, armed=None):
+    """A 1v1 series to completion with the deciding report forced one way;
+    game 1 runs on the case's own sessions. For `how` == "fail", `armed`
+    holds the switch of the test's rating-calculation fault: the deciding
+    report is sent once with the fault armed and, after the state is read,
+    once more with it lifted. For `how` == "one_commit", the deciding report
+    runs on a session that counts its commits and, before each, reads from
+    another connection what the database holds at that moment."""
     async with _case() as (schema, sm):
         ids = await _seed(sm)
         seeded, _ = await _look(schema)
         g1 = await _submit(sm, main.submit_match, _report_1v1("ranked_lh%s_000001_r1" % tag))
         assert g1[1] is None and g1[0].series_status == "active", g1
-        _mid, mid_econ = await _look(schema)
-        reversed_ = []
+        mid, mid_econ = await _look(schema)
+        seen = []
 
-        class _ReverseBetween(AsyncSession):
+        class _Counting(AsyncSession):
             async def commit(self):
-                await super().commit()
-                if reversed_:
-                    return
                 conn = await harness.connect_bound(DSN, schema)
                 try:
-                    done = await conn.execute(
-                        "UPDATE ranked_series SET invalidated_at = NOW() "
-                        " WHERE status = 'completed' AND invalidated_at IS NULL")
+                    seen.append((
+                        await conn.fetchval("SELECT COUNT(*) FROM matches"),
+                        await conn.fetchval(
+                            "SELECT COUNT(*) FROM ranked_series WHERE status = 'completed'"),
+                        await conn.fetchval("SELECT COUNT(*) FROM rating_history"),
+                    ))
                 finally:
                     await conn.close()
-                if done == "UPDATE 1":
-                    reversed_.append(True)
-        engine = harness.bound_engine(DSN, schema) if how == "skip" else None
+                await super().commit()
+        engine = harness.bound_engine(DSN, schema) if how == "one_commit" else None
         deciding = sm if engine is None else async_sessionmaker(
-            engine, expire_on_commit=False, class_=_ReverseBetween)
+            engine, expire_on_commit=False, class_=_Counting)
         try:
             g2 = await _submit(deciding, main.submit_match,
                                _report_1v1("ranked_lh%s_000002_r2" % tag))
+            refused, refused_econ = await _look(schema)
+            g3 = None
+            if how == "fail":
+                armed[0] = False
+                g3 = await _submit(deciding, main.submit_match,
+                                   _report_1v1("ranked_lh%s_000002_r2" % tag))
         finally:
             if engine is not None:
                 await engine.dispose()
         after, econ = await _look(schema)
-        refs = [str(g[0].match_id) for g in (g1, g2) if g[1] is None]
-        return dict(seeded=seeded, mid_econ=mid_econ, g2=g2, after=after, econ=econ,
-                    reversed=bool(reversed_), refs=refs)
+        refs = [str(g[0].match_id) for g in (g1, g2, g3) if g is not None and g[1] is None]
+        return dict(seeded=seeded, mid=mid, mid_econ=mid_econ, g2=g2, g3=g3,
+                    refused=refused, refused_econ=refused_econ, after=after, econ=econ,
+                    seen=seen, refs=refs)
 
 
-@pytest.mark.parametrize("how", ["fail", "skip"])
-def test_pg_r3_the_1v1_credit_stands_when_the_rating_pass_does_not_run(opened, monkeypatch,
-                                                                       how):
+@pytest.mark.parametrize("how", ["fail", "one_commit"])
+def test_pg_r3_the_1v1_credit_rides_the_reports_one_commit(opened, monkeypatch, how):
     """LOW-R3 (design V3 section 12.6): "Forcing the 1v1 T2 pass to fail or
     take the skip at `backend/api/main.py:8338-8350` leaves the T1 credit
     committed without a rating update; the credit must not cause a match,
     gold or unrelated-ladder mutation." (The line numbers are the base
-    tree's.) The 1v1 rating pass is the second transaction,
-    after the completion's commit. Forced to FAIL (the rating calculation
-    raises) or to take its SKIP (the series is invalidated between the two
-    transactions -- what the pass's authoritative re-read exists to catch),
-    the credits committed with the two games stand: both players +2, one
-    keyed by each game, and nobody else's ladder moves -- while the ratings stay
-    where game 1 left them and no rating history is written. And the credit
-    causes nothing else: the same run with the hook made a no-op answers the
-    same and commits the same matches, series, XP, gold, items and ratings."""
+    tree's.) Re-read for the tree this file runs on: the v1.41.0 candidate
+    (0266237e) moved the 1v1 rating pass INSIDE the report's transaction --
+    _apply_series_rating_pass, no savepoint, no swallow -- so the deciding
+    report has no second transaction, no gap between a match commit and the
+    rating pass, and no skip; a reversal landing in that gap cannot happen.
+    What the credit must not do is unchanged and is proven at the two places
+    the old shape had. FAIL: the rating calculation raises inside the
+    deciding report, and the report is refused whole (the RuntimeError is
+    its answer): no second match row, no completion, no rating, no history
+    and no credit for game 2 either -- the ladder and the economy read
+    exactly as they did after game 1, so the credit never stands without
+    the rating it was paid with. Sent again with the fault lifted, the same
+    report is an ordinary first report: the series completes, both ratings
+    move, two history rows are written and each player's second credit
+    lands under the RETRY's match id. ONE COMMIT: the deciding report
+    commits exactly once, and at the moment of that commit another
+    connection still sees only game 1 -- one match, no completed series, no
+    history. Either way the credit causes nothing else: the same run with
+    the hook made a no-op answers the same and commits the same matches,
+    series, XP, gold, items and ratings."""
     _require_live_pg()
-    if how == "fail":
-        def _refuse(*a, **k):
+    armed = [how == "fail"]
+    real = main.calculate_new_rating
+
+    def _calc(*a, **k):
+        if armed[0]:
             raise RuntimeError("ladder hooks: rating pass refused")
-        monkeypatch.setattr(main, "calculate_new_rating", _refuse)
-    live = _run(_r3_run(how, "R"))
+        return real(*a, **k)
+    monkeypatch.setattr(main, "calculate_new_rating", _calc)
+    live = _run(_r3_run(how, "R", armed))
 
     async def _no_hook(db, player_ids, *, mode, reference_id, rows=None):
         return []
     monkeypatch.setattr(tl, HOOK, _no_hook)
-    inert = _run(_r3_run(how, "R"))
+    armed[0] = how == "fail"
+    inert = _run(_r3_run(how, "R", armed))
 
-    forced = {"fail": "Series Glicko update error",
-              "skip": "was invalidated/changed between the match commit and the rating pass"}
     for label, run in (("hook live", live), ("hook no-op", inert)):
-        assert run["g2"][1] is None and run["g2"][0].series_status == "completed", (
-            label, run["g2"])
-        assert any(forced[how] in ln for ln in run["g2"][2]), (
-            "the rating pass did not take the forced path", label, how, run["g2"][2])
-        assert run["reversed"] == (how == "skip"), (label, run["reversed"])
+        if how == "fail":
+            assert run["g2"][0] is None and isinstance(run["g2"][1], RuntimeError), (
+                label, run["g2"])
+            assert "rating pass refused" in str(run["g2"][1]), (label, run["g2"][1])
+            assert run["refused_econ"] == run["mid_econ"], (
+                "R3: the refused report committed a match, series, XP, gold, item or rating",
+                label)
+            assert run["refused"] == run["mid"], (
+                "R3: the refused report left ladder state behind", label, run["refused"])
+            assert run["g3"][1] is None and run["g3"][0].series_status == "completed", (
+                label, run["g3"])
+        else:
+            assert run["g2"][1] is None and run["g2"][0].series_status == "completed", (
+                label, run["g2"])
+            assert run["seen"] == [(1, 0, 0)], (
+                "R3: the deciding report did not commit exactly once, after all of its work",
+                label, run["seen"])
+    deciding = "g3" if how == "fail" else "g2"
     ok, want = _plus_n(live["seeded"], live["after"], [P1, P2], 2)
-    assert ok, ("R3: the committed credit did not stand", live["after"]["progress"], want)
+    assert ok, ("R3: the two credits did not land", live["after"]["progress"], want)
     assert len(live["refs"]) == 2, live["refs"]
+    assert live["refs"][1] == str(live[deciding][0].match_id), (live["refs"], live[deciding])
     for ref in live["refs"]:
         assert _credited(live["after"], ref, "1v1", [P1, P2]), live["after"]["credits"]
     assert len(live["after"]["credits"]) == 4, live["after"]["credits"]
-    for table in ("glicko_ratings", "glicko_ratings_2v2", "glicko_ratings_ffa"):
-        assert live["econ"][table] == live["mid_econ"][table], ("R3: a rating moved", table)
-    assert live["econ"]["rating_history"] == 0, live["econ"]["rating_history"]
+    assert live["econ"]["glicko_ratings"] != live["mid_econ"]["glicko_ratings"], (
+        "R3: the completion did not rate", live["econ"]["glicko_ratings"])
+    for table in ("glicko_ratings_2v2", "glicko_ratings_ffa"):
+        assert live["econ"][table] == live["mid_econ"][table], ("R3: an unrelated rating moved",
+                                                                table)
+    assert live["econ"]["rating_history"] == 2, live["econ"]["rating_history"]
     assert inert["after"] == inert["seeded"], inert["after"]
     assert live["econ"] == inert["econ"], (
         "R3: the credit changed a match, series, XP, gold, item or rating")
     assert _answer_digest([live["g2"]]) == _answer_digest([inert["g2"]])
+    assert _answer_digest([live[deciding]]) == _answer_digest([inert[deciding]])
 
 
 @contextlib.asynccontextmanager
@@ -2174,11 +2213,32 @@ def test_pg_m6_slayer_and_streak_late_gold_share_the_one_commit(opened, monkeypa
     _run(_go())
 
 
-def test_m6_the_lanes_rating_pass_handler_puts_the_note_back():
-    """The lane savepoints submit_match's rating pass and its handler
-    continues, so after a rolled-back pass the achievement-gold note is
-    returned to the mark taken before it (merge pass 6, edit (c))."""
+def test_m6_the_rating_pass_and_its_gold_supplement_ride_the_reports_one_commit():
+    """Merge pass 6, edit (c), re-read for this tree. The lane savepointed
+    submit_match's rating pass under a handler that printed and carried on,
+    and had that handler put the achievement-gold note back to the mark
+    taken before the pass. The v1.41.0 candidate (0266237e) runs the pass
+    INSIDE the report's transaction with no savepoint and no handler: a
+    failure propagates and the report rolls back whole, note and all. So
+    the mark is taken, the pass runs, the rating supplement is added from
+    that mark, the slayer and streak supplements follow from their own
+    marks, and the report's first commit after the pass carries all three.
+    Nothing restores the note, because nothing continues past a failed
+    pass; the helper that committed one block and restored the note on
+    failure had no caller left and is gone."""
     src = io.open(MAIN_PY, encoding="utf-8").read()
-    i = src.index('print(f"Series Glicko update error: {ex}")')
-    assert "_ladder_achievement_restore(db, _ladder_late_mark)" in src[i:i + 600]
-    assert src.count("_ladder_achievement_restore(db, _ladder_late_mark)") == 1
+    call = "await _apply_series_rating_pass(db, series, p1, p2)"
+    assert src.count(call) == 1, src.count(call)
+    i = src.index(call)
+    assert "_ladder_late_mark = _ladder_achievement_mark(db)" in src[i - 400:i], src[i - 400:i]
+    seg = src[i:src.index("await db.commit()", i)]
+    assert ("_ladder_add_late_gold(\n            db, match.id, _ladder_late_mark, "
+            "_ladder_achievement_mark(db), \"rating\")") in seg[:400], seg[:400]
+    assert seg.count("_ladder_add_late_gold(") == 3, seg.count("_ladder_add_late_gold(")
+    for source in ("\"rating\")", "\"slayer\")", "\"streak\")"):
+        assert seg.count(source) == 1, (source, seg.count(source))
+    for absent in ("except", "begin_nested", "_ladder_achievement_restore("):
+        assert absent not in seg, (absent, seg)
+    assert "Series Glicko update error" not in src
+    assert "_ladder_commit_with_late_gold" not in src
+    assert "_ladder_achievement_restore(db, _ladder_late_mark)" not in src

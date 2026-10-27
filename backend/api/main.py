@@ -44666,27 +44666,6 @@ async def _ladder_add_late_gold(db, game_ref, mark: dict, upto: dict, source: st
             print(f"[LADDER-CREDIT] 1v1 late {source} gold dropped (game={game_ref}): {_lex}")
 
 
-async def _ladder_commit_with_late_gold(db, game_ref, mark: dict, source: str,
-                                        restore_to: dict = None) -> None:
-    """Commit one block of submit_match's post-commit rating pass (source
-    rating, slayer or streak), first adding the achievement gold that block
-    paid since `mark` to the Gold Rush count of the game that completed the
-    series (title_ladders.record_late_play_gold, round 3 finding 1). The game
-    was claimed before this pass ran, so this gold would otherwise never
-    reach it. The supplement rides the same commit as the payout: both land
-    or neither does. A fault in the supplement alone is dropped with its own
-    savepoint and the payout still commits. A failed commit restores the
-    note to `mark` and re-raises to the block's own handler.
-    A caller that adds an earlier source's supplement to the same commit
-    (_ladder_add_late_gold) passes that source's mark as `restore_to`."""
-    await _ladder_add_late_gold(db, game_ref, mark, _ladder_achievement_mark(db), source)
-    try:
-        await db.commit()
-    except Exception:
-        _ladder_achievement_restore(db, mark if restore_to is None else restore_to)
-        raise
-
-
 async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key: str) -> bool:
     """Idempotent inline grant — insert PlayerAchievement row (+ gold when the
     key pays anything), no commit.
