@@ -48,6 +48,9 @@ namespace CompetitiveRounds
         {
             public string body = "";
             public string inReplyTo;
+            /// <summary>Item 5: "game" or "discord". Empty from a server that
+            /// predates the relay, which the reader treats as "game".</summary>
+            public string via = "";
             public List<Person> to = new List<Person>(), cc = new List<Person>();
         }
 
@@ -62,6 +65,11 @@ namespace CompetitiveRounds
             public int unread;
             public string revision = "";
             public string mailFrom;                                 // optional; null when the server omits it
+            // Item 5. Raw JSON tokens ("true"/"false"), null when the server
+            // omits them -- so an older server leaves the cached preference
+            // alone instead of an absent key reading as "off".
+            public string discordRelay;
+            public string discordLinked;
         }
 
         public class Block
@@ -246,6 +254,7 @@ namespace CompetitiveRounds
             Members(json, out m);
             msg.body = Str(m, "body") ?? "";
             msg.inReplyTo = Str(m, "in_reply_to");
+            msg.via = Str(m, "via") ?? "";
             string to = Raw(m, "to"), cc = Raw(m, "cc");
             if (IsArray(to)) msg.to = ParsePeople(to);
             if (IsArray(cc)) msg.cc = ParsePeople(cc);
@@ -294,6 +303,8 @@ namespace CompetitiveRounds
                 unread = Int(m, "unread"),
                 revision = Str(m, "revision") ?? "",
                 mailFrom = Str(m, "mail_from"),
+                discordRelay = Raw(m, "discord_relay"),
+                discordLinked = Raw(m, "discord_linked"),
             };
         }
 
@@ -586,8 +597,25 @@ namespace CompetitiveRounds
 
         public static void PutSettings(string mailFrom, Action<bool, string> cb)
         {
+            // Item 13 round 2 (design T5-e, T7-c): while a settings test drives the
+            // page this PUT reaches a stub, answered after one round trip.
+            if (NativeUI.SettingsTestRunning) { NativeUI.SettingsStubPut("mail_from=" + mailFrom, cb); return; }
             if (!Ready(cb)) return;
             ApiClient.SessionSend("PUT", $"{Base}/api/v1/mail/settings", $"{{\"mail_from\":\"{J(mailFrom)}\"}}", cb);
+        }
+
+        /// <summary>Item 5: the Discord relay switch. Sends ONLY that field.
+        /// The route treats an absent field as "leave alone", so toggling the
+        /// relay cannot disturb "who can mail me" -- and this method exists
+        /// rather than an extra argument on PutSettings so there is no way to
+        /// send a stale mail_from alongside it.</summary>
+        public static void PutRelay(bool enabled, Action<bool, string> cb)
+        {
+            // Item 13 round 2 (design T5-e): the same stub while a settings test runs.
+            if (NativeUI.SettingsTestRunning) { NativeUI.SettingsStubPut("discord_relay=" + (enabled ? "true" : "false"), cb); return; }
+            if (!Ready(cb)) return;
+            ApiClient.SessionSend("PUT", $"{Base}/api/v1/mail/settings",
+                                  $"{{\"discord_relay\":{(enabled ? "true" : "false")}}}", cb);
         }
 
         // ── "Who can mail me" cache ─────────────────────────────────────────
@@ -611,6 +639,30 @@ namespace CompetitiveRounds
                 try { PlayerPrefs.SetString(PrefKey("From"), v); } catch { }
             }
         }
+
+        /// <summary>Item 5: whether new in-game mail is also DMed on Discord.
+        /// Cached per account like <see cref="MailFrom"/> and overwritten
+        /// whenever /mail/status carries the server's value. Defaults TRUE to
+        /// match the column default (migration 330): a fresh install must not
+        /// draw the switch off while the server has it on.</summary>
+        public static bool DiscordRelay
+        {
+            get { try { return PlayerPrefs.GetInt(PrefKey("Relay"), 1) != 0; } catch { return true; } }
+            set { try { PlayerPrefs.SetInt(PrefKey("Relay"), value ? 1 : 0); } catch { } }
+        }
+
+        /// <summary>Whether this account has a linked Discord at all. A server
+        /// FACT, not a preference, so deliberately NOT persisted: a stale
+        /// cached "linked" would draw an actionable switch for someone who
+        /// cannot use it. False until a status poll says otherwise.</summary>
+        public static bool DiscordLinked;
+
+        /// <summary>Whether ANY status poll has landed this session.
+        /// <see cref="DiscordLinked"/> is a server fact that starts false, so
+        /// without this "not linked" and "not asked yet" are the same value
+        /// and the Settings row tells a linked player to go and link. Set
+        /// once, never cleared: the answer does not become unknown again.</summary>
+        public static bool StatusEverSeen;
 
         internal static string PrefKey(string what)
         {
@@ -660,7 +712,21 @@ namespace CompetitiveRounds
                 pollInFlight = false;
                 if (!ok || st == null) return;
                 Last = st;
+                // A poll can be the FIRST time this client learns whether
+                // the account has a linked Discord, or can flip either flag
+                // after a `/mail relay off` in Discord. The Settings row is
+                // the only place both are shown and it repaints on demand,
+                // so a change that nothing marks dirty is a stale row.
+                bool wasSeen = StatusEverSeen;
+                bool oldRelay = DiscordRelay, oldLinked = DiscordLinked;
+                StatusEverSeen = true;
                 if (st.mailFrom != null) MailFrom = st.mailFrom;
+                if (st.discordRelay != null) DiscordRelay = st.discordRelay == "true";
+                if (st.discordLinked != null) DiscordLinked = st.discordLinked == "true";
+                if (!wasSeen || DiscordRelay != oldRelay || DiscordLinked != oldLinked)
+                {
+                    try { NativeUI.MarkDirty(); } catch { }
+                }
                 try { MailUI.OnStatus(st); }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[MAIL] status handler: {ex.Message}"); }
             });

@@ -1541,8 +1541,10 @@ def test_the_initial_delay_set_stays_small_and_explicit():
 
     src = API_CLIENT_CS.read_text(encoding="utf-8")
     sites = src.count("EnqueueFailedReport(")
-    # declaration + macro evidence + four match-report paths + the disconnect report
-    assert sites == 7, f"{sites} EnqueueFailedReport references, expected 7"
+    # declaration + macro evidence + four match-report paths + the disconnect
+    # report + the broadcast-only TestQueueReport witness lever (board row 27
+    # round 2), which queues through the same call as ReportMatch's failure branch
+    assert sites == 8, f"{sites} EnqueueFailedReport references, expected 8"
 
 
 def test_the_server_half_of_the_finding_holds_the_replay_safety():
@@ -1673,7 +1675,7 @@ def test_the_supervisor_is_owned_by_a_host_and_not_by_a_latch():
     )
 
     enqueue = _cs_method_body(API_CLIENT_CS, "public static void EnqueueFailedReport(string url, string json)")
-    dup = enqueue.index("if (pending.url == url && pending.json == json)")
+    dup = enqueue.index("if (SameQueuedReport(pending.url, pending.json, url, json))")
     assert enqueue.index("EnsureOutboxLoop();") < dup, (
         "the duplicate enqueue returns before it can re-arm the driver"
     )
@@ -1866,7 +1868,7 @@ def test_a_complete_temp_is_recovered_because_it_is_the_newer_queue():
     union = _cs_method_body(
         API_CLIENT_CS,
         "private static OutboxGeneration Union(OutboxGeneration newer, OutboxGeneration older)")
-    assert "n.url == e.url && n.json == e.json" in union, (
+    assert "SameQueuedReport(n.url, n.json, e.url, e.json)" in union, (
         "the union has to merge by identity or the same report is queued twice"
     )
     assert union.index("new List<PendingReport>(newer.entries)") < union.index("foreach (var e in older.entries)"), (
@@ -2235,12 +2237,12 @@ def test_the_queue_is_read_from_disk_once_per_process():
     )
     ident = _cs_method_body(
         API_CLIENT_CS, "private static bool OutboxAlreadyQueued(string url, string json)")
-    assert "p.url == url && p.json == json" in ident, (
+    assert "SameQueuedReport(p.url, p.json, url, json)" in ident, (
         "identity must match what RemovePendingReport matches on, or the two "
         "disagree about what the same report is"
     )
     remove = _cs_method_body(API_CLIENT_CS, "private static void RemovePendingReport(string url, string json)")
-    assert "pending.url != url || pending.json != json" in remove, (
+    assert "if (!SameQueuedReport(pending.url, pending.json, url, json)) continue;" in remove, (
         "the removal side changed its idea of identity; the merge must follow"
     )
 

@@ -73,6 +73,29 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>IsBroadcastIdentity for a caller that can run before
+        /// GameStateWatcher.Initialize has resolved LocalSteamId (board row 27:
+        /// the boot secure check starts in ApiClient.Initialize, which
+        /// DoInitialize calls first, so the property still reads false there).
+        /// When the property says no, the id is read from Steamworks directly:
+        /// a plain read with no side effects; a Steamworks that is not up yet
+        /// throws or reads 0, and that answers false. Does not latch - the
+        /// property latches as before once the id resolves.</summary>
+        internal static bool IsBroadcastIdentityAtBoot()
+        {
+            if (IsBroadcastIdentity) return true;
+            try
+            {
+                ulong id = Steamworks.SteamUser.GetSteamID().m_SteamID;
+                if (id == 0) return false;
+                string sid = id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                for (int i = 0; i < BroadcastAccounts.Length; i++)
+                    if (string.Equals(BroadcastAccounts[i], sid, StringComparison.Ordinal)) return true;
+            }
+            catch { }
+            return false;
+        }
+
         /// <summary>r3 finding 10 (idle-throttle gate): any non-Idle director
         /// state — granting, joining, watching, leaving, recovering — means
         /// this seat is NOT out of play. Regular players' director never
@@ -1441,6 +1464,15 @@ namespace CompetitiveRounds
         // emits the plain "w1-w2" the bot's overlay wants, not localized UI).
         private static string _cachedSeriesScore = "";
         private static float _seriesScoreCachedAt = -999f;
+        // Report L13: the watched fighters' ranked-series state beside the
+        // score, live | none | unknown (IdentityClockCore.SeriesStatus). An
+        // empty score is NOT "none": only a completed, fresh read that holds
+        // no series of theirs is. Recomputed with the score.
+        private static string _cachedSeriesStatus = "unknown";
+        private const double SERIES_READ_FRESH_S = 60.0;
+        // the read generation the cached status was computed from: any read
+        // completed since (a failed one included) recomputes it at once
+        private static long _seriesGenSeen = -1;
 
         private static void TickLease()
         {
@@ -1554,6 +1586,7 @@ namespace CompetitiveRounds
             sb.Append(']');
             sb.Append(",\"is_tournament\":").Append(haveGame && meta.is_tournament ? "true" : "false");
             sb.Append(",\"series_score\":\"").Append(LeaseEscape(ComputeSeriesScore())).Append('"');
+            sb.Append(",\"series_status\":\"").Append(_cachedSeriesStatus).Append('"');
             sb.Append(",\"phase\":\"").Append(haveGame ? LeaseEscape(meta.phase) : "").Append('"');
             // W7 report payload (D1 deltas f14/f15/f19): rides ONLY while a
             // report is VISIBLY on screen — state Idle AND the engine Active
@@ -1708,9 +1741,12 @@ namespace CompetitiveRounds
         /// FFA / feed lag).</summary>
         private static string ComputeSeriesScore()
         {
-            if (Time.realtimeSinceStartup - _seriesScoreCachedAt < 5f) return _cachedSeriesScore;
+            long gen = ApiClient.ActiveSeriesReadGen;
+            if (IdentityClockCore.SeriesCacheFresh(Time.realtimeSinceStartup - _seriesScoreCachedAt, 5.0, gen, _seriesGenSeen)) return _cachedSeriesScore;
             _seriesScoreCachedAt = Time.realtimeSinceStartup;
+            _seriesGenSeen = gen;
             _cachedSeriesScore = "";
+            _cachedSeriesStatus = "unknown";
             try
             {
                 var sids = SpectatorSync.FighterSteamIds;
@@ -1738,6 +1774,9 @@ namespace CompetitiveRounds
                                 break;
                             }
                         }
+                    // L13: tri-state, decided by the read's own completion and age
+                    _cachedSeriesStatus = IdentityClockCore.SeriesStatus(true, _cachedSeriesScore.Length > 0, list != null,
+                        ApiClient.ActiveSeriesReadOk, Time.realtimeSinceStartup - ApiClient.ActiveSeriesReadAt, SERIES_READ_FRESH_S);
                 }
                 else if (mode == "2v2")
                 {
@@ -1756,9 +1795,11 @@ namespace CompetitiveRounds
                                 break;
                             }
                         }
+                    // the team read carries no completion stamp: a match is live, else unknown
+                    if (_cachedSeriesScore.Length > 0) _cachedSeriesStatus = "live";
                 }
             }
-            catch { _cachedSeriesScore = ""; }
+            catch { _cachedSeriesScore = ""; _cachedSeriesStatus = "unknown"; }
             return _cachedSeriesScore;
         }
     }

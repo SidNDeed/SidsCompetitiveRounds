@@ -15,6 +15,8 @@ import importlib.util
 import pathlib
 import re
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLIENT = ROOT / "plugin" / "PlayerCardsUI.cs"
 API = ROOT / "plugin" / "ApiClient.cs"
@@ -218,7 +220,12 @@ def test_the_intent_and_answer_rules_are_pinned_in_the_client():
     # the price gate keys on when the /pc/me that produced the cache LEFT
     assert "ApiClient.PcMeDispatchedAt <= priceChangedAt" in src
     assert "PcMeDispatchedAt = dispatched;" in api and "PcMeDispatchedAt = -1f;" in api
-    assert api.count("int epoch = _pcCacheEpoch;") == 6   # + FetchPcPacks, the pack history pager (Sept 12); + PcDanceSelect (dance cards)
+    # + FetchPcPacks, the pack history pager (Sept 12); + the five card
+    # trading calls (PcTradeSummary, PcTrades, PcTradePropose, PcTradeAct,
+    # FetchPcCollectionOf), each fenced on the epoch it was dispatched under;
+    # + PcDiscardBatch, whose balance write into the cache is fenced the same
+    # way (board row 25); + PcDanceSelect (dance cards)
+    assert api.count("int epoch = _pcCacheEpoch;") == 12
     # dance cards: the dance pick writes the cached /pc/me only under the epoch it read
     pick = api[api.index("public static void PcDanceSelect("):]
     pick = pick[:pick.index("\n        }\n")]
@@ -243,6 +250,243 @@ def test_the_intent_and_answer_rules_are_pinned_in_the_client():
         assert key in blob, key
     assert "Another account's pack is still being resolved" not in blob
     assert '"kind|ref|pay|price|unix|owner"' in (ROOT / "plugin" / "Plugin.cs").read_text(encoding="utf-8")
+
+
+def test_the_compose_freezes_and_the_busy_retry_is_fenced_while_an_attempt_is_pending():
+    """Card trading round 2, TC-M1. The freeze: from Send's commit through
+    its answer, or through the busy retry's answer, Back, the pickers and a
+    new compose are ignored by the `if (tradeActInFlight)` rule the accept
+    and close clicks already follow. The fence: the busy retry asks
+    PcTradeRules.RetryCheck (executed by the rules harness) BEFORE it runs,
+    and a dropped proposal retry releases the attempt and shows busy. Each
+    pin is asserted inside its own method, so a gate moved or removed reds
+    it (a repair without a reverting test is decoration)."""
+    src = CLIENT.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    gate = 'if (tradeActInFlight) { FrozenInput("%s"); return; }'
+
+    def body(sig):
+        return _span(src, sig, end)
+
+    back = body("private static void OnComposeBack()")
+    assert gate % "back" in back and back.index(gate % "back") < back.index("EndCompose();")
+    pick = body("private static void ToggleComposeCard(Tile t, bool mine)")
+    assert "if (p == null || !composing" in pick
+    assert pick.index("if (p == null || !composing") < pick.index(gate % "pick") < pick.index("var side = ")
+    new = body("private static void StartCompose(string toSteamId, string name, string preselect)")
+    assert new.index(gate % "new") < new.index("EndCompose();")
+    search = body("private static void StartTradeSearch(string preselect)")
+    assert search.index(gate % "search") < search.index("CompetitiveUI.OpenPlayerSearch(")
+    # the real Back button and the lever's "back" are the one frozen handler
+    assert '"Back", 14f, C_WHITE, C_BTN, OnComposeBack, sizeDelta' in src
+    assert 'case "back": OnComposeBack(); break;' in src
+    assert "() => { EndCompose(); NativeUI.MarkDirty(); }" not in src
+    # the fence runs before the retry does
+    co = body("private static IEnumerator RetryCo(int ep, int seq, string terms, Action a, Action dropped)")
+    check = "PcTradeRules.RetryCheck(ep, uiEpoch, seq, composeSeq, terms, termsNow)"
+    assert check in co and co.index(check) < co.index("try { a(); }")
+    assert "PcTradeRules.TermsKey(composeTo, composeGive, composeGet)" in co
+    assert co.index("PcTradeRules.RetryVerdict.ComposeChanged") < co.index("try { a(); }")
+    # three retry sites: the proposal (fenced on its compose and terms), the
+    # trade actions (identity only) and the binder read (its compose only)
+    assert src.count("RetryLater(ep") == 3
+    propose = body("private static void ProposeNow(")
+    assert "RetryLater(ep, seq, PcTradeRules.TermsKey(to, give, get)," in propose
+    assert "ProposeNow(id, to, give, get, nonce, seq, true), ProposeRetryDropped);" in propose
+    act = body("private static void TradeAct(")
+    assert "RetryLater(ep, PcTradeRules.NoComposeFence, null, () => TradeAct(action, id, t, true), null);" in act
+    assert "RetryLater(ep, seq, null, () => FetchTheirBinder(id, seq), null);" in src
+    dropped = body("private static void ProposeRetryDropped()")
+    assert "tradeActInFlight = false;" in dropped and 'Say(ReasonText("busy"), C_WARN);' in dropped
+    # the nonce stays bound to the same key the retry compares
+    assert "string key = PcTradeRules.TermsKey(composeTo, give, get);" in src
+
+
+def test_the_trades_cache_takes_an_answer_only_through_the_ordering_fence():
+    """Card trading round 2, TC-L1. Both trades reads take a dispatch number
+    when they are SENT (after the throttle and in-flight returns, which send
+    nothing), and each cache slot is written only when
+    PcTradeRules.TradeCacheFence (executed by the rules harness) takes the
+    answer, so a late full answer cannot put a newer summary back. An answer
+    kept out moves no FetchedAt stamp, and one kept-out full answer is asked
+    again, never a chain of them."""
+    api = API.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    summary = _span(api, "public static void PcTradeSummary(", end)
+    full = _span(api, "public static void PcTrades(string steamId, bool force, Action<bool, string> callback)", end)
+    dispatch = "int order = pcTradeFence.Dispatch();"
+    assert summary.index("pcTradeSummaryInFlight = true;") < summary.index(dispatch)
+    assert full.index("pcTradesInFlight = true;") < full.index(dispatch)
+    # round 3 re-pin (TC-L5): each slot is written only where the landing
+    # (LandSummary / LandFull, which reach TakeSummary / TakeFull) let the
+    # answer through; the properties pinned here are unchanged
+    assert ("else if (ok) { CachedPcTradeSummary = s; "
+            "PcTradeSummaryFetchedAt = Time.realtimeSinceStartup; PcTradeSummaryError = null; }") in summary
+    assert summary.index("bool keptOut = !pcTradeFence.LandSummary(order,") < summary.index("CachedPcTradeSummary = s;")
+    fenced = _span(full, "bool keptOut = !pcTradeFence.LandFull(order,", "else { PcTradesError = resp;")
+    assert fenced.index("if (keptOut)") < fenced.index("else if (ok)")
+    fenced = fenced[fenced.index("else if (ok)"):]
+    for write in ("CachedPcTrades = f;", "PcTradesFetchedAt = Time.realtimeSinceStartup;",
+                  "CachedPcTradeSummary = f;", "PcTradeSummaryFetchedAt = PcTradesFetchedAt;"):
+        assert write in fenced, write
+    # the two slots are written nowhere else but the clear
+    assert api.count("CachedPcTradeSummary = ") == 3 and api.count("CachedPcTrades = ") == 2
+    assert "CachedPcTradeSummary = null; CachedPcTrades = null;" in api
+    clear = _span(api, "private static void ClearPcTradeCaches()", end)
+    assert "pcTradeFence.Clear(); pcTradesStaleReask = false;" in clear
+    # one re-ask per kept-out success: the re-ask's own answer is marked
+    assert "bool reask = pcTradesStaleReask; pcTradesStaleReask = false;" in full
+    assert "bool reaskNow = keptOut && ok && !reask;" in full and "if (again || reaskNow)" in full
+    assert "pcTradesStaleReask = reaskNow;" in full
+
+
+def test_the_trades_entry_edge_is_re_armed_by_the_close_and_by_every_frame_off_the_view():
+    """Card trading round 2, TC-L2. Every entry to the Trades view forces the
+    full read (C12). The edge (PcTradeRules.TradesEntryEdge, executed by the
+    rules harness) is re-armed by the overlay closing and by a frame off the
+    view - tracked on every MaybeTick call, ahead of its two-second throttle,
+    as the Settings edge is - and the read it owes goes through
+    PcTradeRules.FullReadDue and is marked issued."""
+    src = CLIENT.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    closed = _span(src, "internal static void OnOverlayClosed()", end)
+    assert "tradesEdge.OverlayClosed();" in closed
+    tick = _span(src, "internal static void MaybeTick(bool onTab, bool onSettings)", end)
+    frame = "tradesEdge.Frame(onTab && view == View.Trades);"
+    assert frame in tick and tick.index(frame) < tick.index("if (Time.unscaledTime < tickAt) return;")
+    trades = _span(src, "private static void TickTrades(string id, bool onTab)", end)
+    assert "bool owed = tradesEdge.Tick(onTrades, Now);" in trades
+    due = "PcTradeRules.FullReadDue(onTrades, PcTradeRules.ReadsAllowed(tradeDiscovery), owed, Now, tradesFullAt)"
+    assert trades.index(due) < trades.index("ReadTrades(id, owed);") < trades.index("tradesEdge.ReadIssued();")
+    reset = _span(src, "private static void ResetTrades()", end)
+    assert "tradesEdge.Reset();" in reset
+    # the proxy's own fields are gone: the edge has one owner
+    assert "lastOnTrades" not in src and "lastTradesTickAt" not in src
+
+
+def test_every_deferred_trades_and_binder_re_read_is_bound_to_its_identity_generation():
+    """Card trading round 3, TC-M2. The trades re-ask and the binder re-read
+    are sent one frame after the answer that scheduled them. Each carries the
+    Player Cards generation captured when it was scheduled - the dispatch
+    epoch, which the epoch check above the scheduling line has just proved
+    current - and after the yield asks PcTradeRules.GenerationCurrent
+    (executed by the rules harness) before it sends anything; a mismatch drops
+    it with its decisive line. The sweep's other half: an answer from before an
+    edge releases no latch and consumes no remembered demand (both edges
+    release them), so it cannot free a read or swallow a demand that belongs
+    to the new generation. Item 18 fix pass 4 (finding 7) adds the balance
+    demand's re-read, bound the same way."""
+    api = API.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    check = "if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))"
+    # (a) and (b): each deferred re-read checks the generation after its one
+    # yield and before its one send, and logs the drop in its own family
+    for sig, line, send in (
+            ("private static IEnumerator RefetchTradesNextFrame(string steamId, int genAtSchedule)",
+             '"[PC-TRADE-SENTINEL] stale-generation dropped kind=trades gen_at_schedule="',
+             "PcTrades(steamId, true, null);"),
+            ("private static IEnumerator RefetchCollectionNextFrame(string steamId, int genAtSchedule)",
+             '"[PC] collection deferred re-read dropped: identity changed gen_at_schedule="',
+             "FetchPcCollection(steamId, true);")):
+        co = _span(api, sig, end)
+        for piece in ("yield return null;", check, line, "yield break;", send):
+            assert co.count(piece) == 1, (sig, piece)
+        assert (co.index("yield return null;") < co.index(check) < co.index(line)
+                < co.index("yield break;") < co.index(send)), sig
+    # Item 18 fix pass 4, finding 7: the balance demand's re-read
+    # (RefetchPcMeNextFrame) is bound the same way: its one yield, then the
+    # generation check and its own drop line, before its one send. It also
+    # sends nothing while a /pc/me read is on the wire: that latch is
+    # released by a landing, stale or not, never by an edge, so a read on the
+    # wire by then was sent after the landing that scheduled this one, and it
+    # answers the demand. The scheduling line binds the generation current at
+    # that landing, the one PcReadDemand.Landed has just matched the demand
+    # to; gate q5 (test_pc_quick_shard.py) pins its two callers.
+    me_drop = '"[PC] me deferred re-read dropped: identity changed gen_at_schedule="'
+    co = _span(api, "private static IEnumerator RefetchPcMeNextFrame(string steamId, int genAtSchedule)", end)
+    for piece in ("yield return null;", check, me_drop, "if (pcMeInFlight)", "FetchPcMe(steamId, true);"):
+        assert co.count(piece) == 1, piece
+    assert co.count("yield break;") == 2
+    assert (co.index("yield return null;") < co.index(check) < co.index(me_drop) < co.index("yield break;")
+            < co.index("if (pcMeInFlight)") < co.index("FetchPcMe(steamId, true);"))
+    assert api.count("StartCoroutine(RefetchPcMeNextFrame(steamId, _pcCacheEpoch));") == 1
+    # three definitions and three scheduling lines, nothing else
+    assert api.count("NextFrame(") == 6
+    # (c): each scheduling line passes the callback's own dispatch epoch, below
+    # the epoch check that proved it current; the latch and the remembered
+    # demand are released only below that check too
+    for sig, drop, latch, sched in (
+            ("public static void FetchPcCollection(string steamId, bool force = false, Action<bool, string> callback = null)",
+             '"[PC] collection answer dropped: identity changed"',
+             "pcCollInFlight = false;\n                bool again = pcCollForceAgain; pcCollForceAgain = false;",
+             "Plugin.Instance.StartCoroutine(RefetchCollectionNextFrame(who, epoch));"),
+            ("public static void PcTrades(string steamId, bool force, Action<bool, string> callback)",
+             '"[PC] trades answer dropped: identity changed"',
+             "pcTradesInFlight = false;\n                bool again = pcTradesForceAgain; pcTradesForceAgain = false;",
+             "Plugin.Instance.StartCoroutine(RefetchTradesNextFrame(who, epoch));")):
+        body = _span(api, sig, end)
+        assert body.count(latch) == 1 and body.count(sched) == 1, sig
+        assert body.index("if (epoch != _pcCacheEpoch)") < body.index(drop) < body.index(latch) < body.index(sched), sig
+    for sig, latch in (
+            ("public static void PcTradeSummary(", "pcTradeSummaryInFlight = false;"),
+            ("public static void FetchPcCollectionOf(string steamId, string subjectSteamId, Action<bool, string> callback)",
+             "pcCollOfInFlight = false;")):
+        body = _span(api, sig, end)
+        assert body.count(latch) == 1, sig
+        assert body.index("if (epoch != _pcCacheEpoch)") < body.index(latch), sig
+    # both edges advance the generation, clear, and then release every latch
+    release = _span(api, "private static void ReleasePcReadLatches()", end)
+    for latch in ("pcTradeSummaryInFlight = false;", "pcTradesInFlight = false;", "pcCollInFlight = false;",
+                  "pcCollForceAgain = false;", "pcCollOfInFlight = false;"):
+        assert latch in release, latch
+    assert "pcTradesForceAgain = false;" in _span(api, "private static void ClearPcTradeCaches()", end)
+    assert api.count("_pcCacheEpoch++;") == 2 and api.count("ReleasePcReadLatches();") == 2
+    ident = _span(api, "internal static void OnLocalIdentityChanged()", end)
+    assert ident.index("_pcCacheEpoch++;") < ident.index("ClearPcTradeCaches();") < ident.index("ReleasePcReadLatches();")
+    assert ("                _pcCacheEpoch++;\n                CachedPcMe = null; CachedPcCollection = null;\n"
+            "                ClearPcTradeCaches();\n                ReleasePcReadLatches();\n") in api
+
+
+def test_the_trades_reads_land_state_bearing_failures_through_the_same_fence():
+    """Card trading round 3, TC-L5. Each trades answer, success or failure,
+    lands through PcTradeRules.TradeCacheFence exactly once (LandSummary /
+    LandFull, executed by the rules harness), after the parse and before any
+    write. An answer the fence keeps out writes no cache and no error string,
+    and its callback hears ApiClient.PcStaleOrder, which TradeReadLanded
+    ignores before it classifies anything, so a stale 404 or 503 behind a
+    newer answer can neither eject the view nor move the recheck. Only a
+    success kept out is asked again."""
+    api = API.read_text(encoding="utf-8")
+    src = CLIENT.read_text(encoding="utf-8")
+    end = "\n        }\n"
+    assert 'internal const string PcStaleOrder = "stale-order";' in api
+    # TakeSummary / TakeFull are reached only through the two landings
+    assert api.count("pcTradeFence.Take") == 0
+    tail = "(order, ok, ok ? 200 : PcHttpCode(resp), ok ? null : PcTradeErrorCode(resp));"
+    for sig, land, parse, cache, error in (
+            ("public static void PcTradeSummary(",
+             "bool keptOut = !pcTradeFence.LandSummary" + tail,
+             'if (ok) { s = ParsePcTradeSummary(resp); if (s == null) { ok = false; resp = "parse"; } }',
+             "else if (ok) { CachedPcTradeSummary = s;", "PcTradeSummaryError = resp;"),
+            ("public static void PcTrades(string steamId, bool force, Action<bool, string> callback)",
+             "bool keptOut = !pcTradeFence.LandFull" + tail,
+             'if (ok) { f = ParsePcTradeFull(resp); if (f == null) { ok = false; resp = "parse"; } }',
+             "CachedPcTrades = f;", "PcTradesError = resp;")):
+        body = _span(api, sig, end)
+        assert body.count(land) == 1 and body.count("pcTradeFence.Land") == 1, sig
+        assert body.count(error) == 1, sig
+        assert (body.index("if (epoch != _pcCacheEpoch)") < body.index(parse) < body.index(land)
+                < body.index("if (keptOut)") < body.index(cache) < body.index(error)), sig
+        assert body.count("callback?.Invoke(!keptOut && ok, keptOut ? PcStaleOrder : resp);") == 1, sig
+        assert 'stale answer kept out kind=' in body and ' outcome=" + (ok ? "ok" : "fail")' in body, sig
+    full = _span(api, "public static void PcTrades(string steamId, bool force, Action<bool, string> callback)", end)
+    assert "bool reaskNow = keptOut && ok && !reask;" in full and "if (again || reaskNow)" in full
+    assert "pcTradesStaleReask = reaskNow;" in full
+    # the landing handler ignores the sentinel before it classifies anything
+    landed = _span(src, "private static void TradeReadLanded(string kind, bool ok, string resp)", end)
+    ignore = 'resp == "stale-identity" || resp == ApiClient.PcStaleOrder)) return;'
+    assert landed.count(ignore) == 1
+    assert landed.index(ignore) < landed.index("PcTradeRules.Classify(")
 
 
 def test_the_binder_tile_layout_repairs_are_pinned_one_by_one():
@@ -420,7 +664,11 @@ def test_the_info_library_states_what_the_cards_settings_actually_do():
     nxt = src.find("new Category {", start + 1)
     cat = src[start:nxt if nxt >= 0 else len(src)]
     assert re.search(r'Key = "cards",\s+Title = \(\) => I18n\.Tr\("Player Cards"\),\s+Body = \(\) => CardsIntro \+ "\\n\\n" \+ CardsPacks', cat)
-    assert re.search(r'Key = "cards-face",\s+Title = \(\) => I18n\.Tr\("Reading a card"\),\s+Body = \(\) => CardsFace', cat)
+    # Since item 20 the page is COMPOSED: the binder-sort block is its own key
+    # beside CardsFace rather than three more lines inside it, so the page's
+    # four shipped translations survive the addition. See
+    # test_the_reading_a_card_page_keeps_its_translated_body below.
+    assert re.search(r'Key = "cards-face",\s+Title = \(\) => I18n\.Tr\("Reading a card"\),\s+Body = \(\) => CardsFace \+ "\\n\\n" \+ CardsBinderSort', cat)
     assert re.search(r'Key = "cards-pictures",\s+Title = \(\) => I18n\.Tr\("Card pictures & settings"\),\s+Body = \(\) => CardsPictures', cat)
     # frozen vs live
     assert "rating, record, rank tier, top card and title as they were that day" in src
@@ -488,3 +736,165 @@ def test_the_renderer_fences_its_pixel_inputs_and_keeps_a_refused_request_armed(
     tick = ui[ui.index("internal static void MaybeTick("):]
     tick = tick[:tick.index("\n        }\n")]
     assert tick.index("if (!onSettings) settingsVisited = false;") < tick.index("if (Time.unscaledTime < tickAt) return;")
+
+
+def test_a_partial_preset_row_is_derived_again_not_kept_for_the_process():
+    """v1.41.0 beta round 3 finding 10. PresetSlotCount cached any bounded
+    count for good, so a row first seen half-built (three of eight
+    portraits) answered three for the rest of the process and kept
+    PresetCountIsCredible false until a restart. A count below the shipped
+    one is now provisional: derived again at most once a second, kept rather
+    than traded for the fallback when a sweep finds no row, and only a count
+    at or above the shipped one is final. A shape pin only: the round-3
+    harness runs the method, and [PRESET-SLOT-SENTINEL] runs it in game.
+
+    MUTATION: put round 2's `if (_presetSlots > 0) return _presetSlots;`
+    back at the top, or drop the retry window. Must fail."""
+    pr = PORTRAIT.read_text(encoding="utf-8")
+    body = _span(pr, "internal static int PresetSlotCount()",
+                 "internal static bool PresetCountIsCredible()")
+    code = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("//"))
+    assert "if (_presetSlots >= PresetSlotsFallback) return _presetSlots;" in code, (
+        "a count below the shipped one is final again")
+    assert "if (_presetSlots > 0) return _presetSlots;" not in code, (
+        "any cached count answers for the rest of the process again")
+    assert "if (now < _presetSlotsRetryAt) return _presetSlots;" in code, (
+        "a provisional count is no longer answered from the cache inside its window")
+    assert code.count("_presetSlotsRetryAt = now + PresetSlotsRetrySeconds;") == 2, (
+        "the retry window is not stamped both when a sweep runs and when a count is cached")
+    assert "if (slots <= 0) return _presetSlots > 0 ? _presetSlots : PresetSlotsFallback;" in code, (
+        "a sweep that finds no row trades a provisional count for the fallback")
+    assert "private const float PresetSlotsRetrySeconds = 1f;" in pr
+    assert ("internal static bool PresetCountIsCredible() "
+            "{ return _presetSlots >= PresetSlotsFallback; }") in pr
+
+
+# ── item 20: the wiki page's translations are an asset, not a comment ────────
+
+CATALOGUES = ROOT / "plugin" / "I18nCatalogues.cs"
+
+
+def _verbatim_literal(src, marker):
+    """The @"..." literal that follows `marker`, with "" unescaped.
+
+    Read with universal newlines, which is what the catalogue keys are: the
+    working tree is CRLF, so a verbatim literal carries carriage returns at
+    runtime and I18n normalizes them away before the dictionary lookup (see
+    I18n.NormalizeLf and the comment above it).
+    """
+    i = src.index(marker)
+    j = src.index('@"', i) + 2
+    out, k = [], j
+    while k < len(src):
+        c = src[k]
+        if c == '"':
+            if k + 1 < len(src) and src[k + 1] == '"':
+                out.append('"')
+                k += 2
+                continue
+            break
+        out.append(c)
+        k += 1
+    return "".join(out)
+
+
+def _unescape_cs(s):
+    out, i = [], 0
+    while i < len(s):
+        if s[i] == "\\":
+            out.append({"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\"}
+                       .get(s[i + 1], s[i + 1]))
+            i += 2
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+# One catalogue entry: ["<escaped key>"] = "<escaped value>".
+_ENTRY = r'\s*\["((?:[^"\\]|\\.)*)"\]\s*=\s*"((?:[^"\\]|\\.)*)"'
+
+
+def _catalogue_rows(cat_src):
+    """(line, key, value) for every catalogue entry, keys unescaped."""
+    rows = []
+    for n, line in enumerate(cat_src.split("\n"), 1):
+        m = re.match(_ENTRY, line)
+        if m:
+            rows.append((n, _unescape_cs(m.group(1)), _unescape_cs(m.group(2))))
+    return rows
+
+
+def _assert_page_keeps_its_translations(info, cat):
+    """The gate itself, over the two sources, so the control below can feed it
+    a mutated COPY and require it to raise."""
+    face = _verbatim_literal(info, "private static string CardsFace")
+    rows = _catalogue_rows(cat)
+
+    live = [n for n, key, _ in rows if key == face]
+    assert len(live) == 4, (
+        "the 'Reading a card' body is keyed in %d catalogues, not 4 -- an edit "
+        "to the CardsFace literal has stranded its translations. Lines still "
+        "matching: %s" % (len(live), live))
+    # every one of them is actually translated, not a copy of the English
+    for n, key, value in rows:
+        if key == face:
+            assert value != face, "line %d left the page as the English source" % n
+
+    # the composed block is its own key, in four locales, and is NOT part of
+    # the page's key -- which is the whole mechanism this test protects
+    binder = _verbatim_literal(info, "private static string CardsBinderSort")
+    assert binder not in face and face not in binder
+    assert len([n for n, key, _ in rows if key == binder]) == 4, (
+        "the binder-sort block is not drafted in all four locales")
+
+
+def test_the_reading_a_card_page_keeps_its_translated_body():
+    """The "Reading a card" body must still be the string four locales are
+    keyed on.
+
+    A translation key IS the English source string, so ONE editorial tweak
+    inside this 1,786-character literal retires four long-form translations at
+    once and hands the whole page back to English -- and there is proof it has
+    happened here before: four keys for an older wording of this same page sit
+    stranded in the catalogues beside the live ones, matching no current
+    source. That is why the match is BY VALUE and not by line number.
+
+    Item 20's own addition is the shape that does not do this: its block is a
+    separate key composed into the article, so adding a bullet THERE leaves
+    all four of these alone. Adding one inside CardsFace reds this test and
+    names the locales it would have cost.
+    """
+    _assert_page_keeps_its_translations(
+        INFO.read_text(encoding="utf-8"),
+        CATALOGUES.read_text(encoding="utf-8"))
+
+
+def test_a_bullet_inside_the_page_body_reds_it_and_the_same_bullet_elsewhere_does_not():
+    """The control pair, both halves run against COPIES (#391).
+
+    Without the first half the gate could be passing because its needle
+    drifted rather than because the page is intact. Without the second it
+    would not show that item 20's composed block is the shape that costs
+    nothing -- which is the reason the block exists.
+    """
+    info = INFO.read_text(encoding="utf-8")
+    cat = CATALOGUES.read_text(encoding="utf-8")
+    bullet = "\r\n- A line added by a later editor."
+
+    face_decl = "private static string CardsFace"
+    face = _verbatim_literal(info, face_decl)
+    inside_page = info.replace(face + '");', face + bullet + '");', 1)
+    assert inside_page != info, "the mutation did not apply"
+    with pytest.raises(AssertionError):
+        _assert_page_keeps_its_translations(inside_page, cat)
+
+    binder = _verbatim_literal(info, "private static string CardsBinderSort")
+    inside_block = info.replace(binder + '");', binder + bullet + '");', 1)
+    assert inside_block != info, "the control mutation did not apply"
+    # the page's four keys are untouched, so the gate's page half still passes;
+    # only the new block's own four drafts are now stale, which is what the
+    # one-key churn of composing a block costs.
+    face_after = _verbatim_literal(inside_block, face_decl)
+    assert face_after == face, (
+        "adding a bullet to the binder-sort block changed the PAGE's key")

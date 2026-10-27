@@ -667,15 +667,38 @@ async def _get_signup_for(db: AsyncSession, tournament_id: uuid.UUID, player_id:
     return (await db.execute(q)).scalar_one_or_none()
 
 
-async def _queue_channel_post(db: AsyncSession, content: str) -> None:
+async def _queue_channel_post(db: AsyncSession, content: str,
+                              contain: bool = True) -> None:
     """Queue a Discord post on the pending_channel_posts bus (v1.32). Rides
     the CALLER's session/transaction so the post commits (or rolls back)
-    together with the event it announces. Never raises — a feed failure must
-    not break a signup."""
-    try:
+    together with the event it announces.
+
+    `contain=True` (the default, and the original behaviour) is for a post that
+    decorates an event which stands on its own: a signup is still a signup if
+    the feed never hears about it, so a failure here is savepointed and
+    swallowed. The feed is a BUS — if inserting on it fails persistently it
+    fails for every producer, and no single producer should be the one that
+    hard-blocks on it.
+
+    `contain=False` raises instead, so the caller's own unit of work goes back
+    with it. Exactly ONE caller needs that, and not because its post is
+    important: `_maybe_announce_sync_agreement` holds a ONE-SHOT marker in the
+    same breath, so a post that fails while the claim commits does not merely
+    lose an announcement, it makes the announcement unrepeatable for ever (r3
+    HIGH). It calls this from inside a savepoint of its own, which is what makes
+    the all-or-nothing actually hold; there is no `contain=False` caller that
+    does not, and adding one without a savepoint would be a rollback that
+    reaches further than intended (r4 finding)."""
+    if not contain:
         await db.execute(text(
             "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:c, :t)"
         ), {"c": str(TOURNAMENT_FEED_CHANNEL_ID), "t": content[:1900]})
+        return
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:c, :t)"
+            ), {"c": str(TOURNAMENT_FEED_CHANNEL_ID), "t": content[:1900]})
     except Exception as e:
         print(f"[TOURNAMENT] channel post queue failed: {e}")
 
@@ -683,25 +706,39 @@ async def _queue_channel_post(db: AsyncSession, content: str) -> None:
 async def _confirmed_count(db: AsyncSession, tournament_id: uuid.UUID) -> int:
     """Count of confirmed (non-speculative) signups. Autoflush makes pending
     in-session signup/speculation mutations visible to this query."""
-    return (await db.execute(
-        select(func.count()).select_from(TournamentSignup).where(and_(
-            TournamentSignup.tournament_id == tournament_id,
-            TournamentSignup.is_speculative == False,  # noqa: E712
-        ))
-    )).scalar() or 0
+    # Savepointed (#235): the feed-post callers swallow a failure here, and a
+    # swallowed statement error would otherwise abort the caller's whole
+    # transaction. The exception still propagates to whatever handler the
+    # caller has — only the poisoning is contained.
+    async with db.begin_nested():
+        return (await db.execute(
+            select(func.count()).select_from(TournamentSignup).where(and_(
+                TournamentSignup.tournament_id == tournament_id,
+                TournamentSignup.is_speculative == False,  # noqa: E712
+            ))
+        )).scalar() or 0
 
 
 async def _confirmed_mentions(db: AsyncSession, tournament_id: uuid.UUID) -> str:
     """'<@id> <@id> ...' for every confirmed signup. discord_id is gated at
     signup time so it's effectively always present; missing ones are skipped."""
-    rows = (await db.execute(
-        select(Player.discord_id)
-        .join(TournamentSignup, TournamentSignup.player_id == Player.id)
-        .where(and_(
-            TournamentSignup.tournament_id == tournament_id,
-            TournamentSignup.is_speculative == False,  # noqa: E712
-        ))
-    )).scalars().all()
+    # Savepointed (#235) because a caller MAY swallow, not because they all do:
+    # a swallowed statement error would otherwise abort the caller's whole
+    # transaction. The exception always propagates — only the poisoning is
+    # contained — and what happens to it after that is the caller's decision.
+    # `_push_back` swallows it (the date moves whether or not the feed hears);
+    # `_maybe_announce_sync_agreement` lets it abandon the announcement before
+    # any claim is taken. Saying "every caller swallows" was true when it was
+    # written and stopped being true in this same batch (r4 finding).
+    async with db.begin_nested():
+        rows = (await db.execute(
+            select(Player.discord_id)
+            .join(TournamentSignup, TournamentSignup.player_id == Player.id)
+            .where(and_(
+                TournamentSignup.tournament_id == tournament_id,
+                TournamentSignup.is_speculative == False,  # noqa: E712
+            ))
+        )).scalars().all()
     return " ".join(f"<@{d}>" for d in rows if d)
 
 
@@ -713,7 +750,8 @@ async def _confirmed_mentions(db: AsyncSession, tournament_id: uuid.UUID) -> str
 # lock's own eligible tally (_eligible_slot_tallies). The bot builds the same
 # sentence for the lines it composes (discord_bot.py _tsync_rule; the bot
 # image carries discord_bot.py alone, so it cannot import this module):
-# test_row32_e pins the two byte-equal over every progress shape. ASCII only.
+# test_row32_e_the_server_states_the_bots_start_rule_sentence_byte_for_byte
+# pins the two byte-equal over every progress shape. ASCII only.
 TSYNC_VOTE_HOW = "Vote for every time you can make in F5 -> Tournaments."
 
 
@@ -1179,9 +1217,11 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
     async def _push_back(reason: str, consensus: Optional[str] = None) -> None:
         # `reason` goes to the log; a sync tournament's channel post names
         # the consensus instead (`consensus`, row 32: "no start time had 8
-        # players agreeing on it"; a force start, which skips the vote, keeps
-        # `reason`) and states the start rule with the tally its carried
-        # votes hold at the new times.
+        # players agreeing on it") and states the start rule with the tally
+        # its carried votes hold at the new times. Only the due-time tick
+        # reaches this closure: a forced lock that cannot lock returns before
+        # it (the force-lock declined branch below), and the post-kick
+        # recheck sits on the not-force sync path.
         # Pushback path. Status stays "voting" so the cron re-enters this
         # function next week. (Round-20 find 1: factored into a closure so
         # the post-kick eligible-minimum recheck can push back too.)
@@ -1226,8 +1266,28 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
               f"pushing lock_at to {t.lock_at.isoformat()} "
               f"(kind={t.kind}). Status stays voting.")
         # Discord feed (v1.32): the pushback keeps status='voting' so the
-        # bot's status-diff never sees it — this post is the ONLY signal
-        # signed-up players get that the date moved.
+        # bot's status-diff never sees it, so this post is the only PUSH
+        # notification signed-up players get that the date moved.
+        #
+        # BEST-EFFORT, deliberately, after being strict for one round.
+        #
+        # r3 made this raise, on the strength of the sentence above calling it
+        # "the ONLY signal signed-up players get". That sentence is false: the
+        # client's tournament tab renders "Signups close: {lock_at}" straight
+        # from the row (NativeUI ~25488), so this post is the only PUSH
+        # notification, not the only signal. Holding a date move hostage to it
+        # bought nothing and cost a great deal — `pending_channel_posts` is a
+        # BUS, a persistent fault on it is isolated from the rest of the
+        # schema, and a strict post would then roll back every retry and leave
+        # an otherwise healthy tournament stuck in voting for ever (r4 finding).
+        #
+        # So the diagnosis, not the control flow, was the defect. Swallow the
+        # failure, keep the date move, and say loudly that it went unannounced
+        # so the gap is visible in the log rather than inferred from silence.
+        # The whole announcement, not just the INSERT: _confirmed_mentions can
+        # raise too, and "the date moves whether or not the feed hears about it"
+        # has to cover every way the announcement can fail, not only the one
+        # _queue_channel_post contains for itself.
         try:
             mentions = await _confirmed_mentions(db, t.id)
             if t.kind == "async":
@@ -1240,36 +1300,55 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
                        "works for you." if t.kind == "sync" else "")
             said = reason
             if t.kind == "sync":
-                # A force start skips the time vote, so its push-back keeps
-                # the eligible count that stopped it.
-                said = consensus or (reason if force else
-                                     f"no start time had {t.min_players} players agreeing on it")
+                said = consensus or f"no start time had {t.min_players} players agreeing on it"
                 rule = _tsync_rule(t.min_players, await _eligible_slot_tallies(db, t.id, now))
                 when_sentence = f"{when_sentence} {rule} {TSYNC_VOTE_HOW}"
             await _queue_channel_post(
                 db,
                 f"{prefix} {_kind_label(t.kind)} tournament has been pushed "
                 f"back: {said}. {when_sentence}{carried}")
-        except Exception as e:
-            print(f"[TOURNAMENT] pushback feed post failed: {e}")
+        except Exception as _fex:
+            print(f"[TOURNAMENT] {t.id} pushback ANNOUNCEMENT FAILED — the date "
+                  f"still moved and nobody was pushed a notice; the new "
+                  f"'Signups close' is visible in the client's tournament tab: {_fex}")
         # Adversarial review fix: the availability-check notices are deduped by
         # UNIQUE(tournament_id, player_id, notice_type), so a pushed-back
         # tournament re-entering the 24-96h window a week later would never
         # re-ask anyone. The date moved — every prior availability answer is
         # stale — so drop the old notices (sent and unsent alike) and let the
         # tick re-queue fresh ones for the new date.
-        try:
-            await db.execute(
-                text("DELETE FROM tournament_notices "
-                     "WHERE tournament_id = :tid "
-                     "AND notice_type = 'availability_check'"),
-                {"tid": t.id},
-            )
-        except Exception as e:
-            print(f"[TOURNAMENT] pushback notice reset failed: {e}")
+        # Also not best-effort, and for the same reason as the post above. The
+        # UNIQUE(tournament_id, player_id, notice_type) dedupe means a surviving
+        # row does not merely delay the re-ask — it CANCELS it permanently, so a
+        # contained failure here committed a tournament that can never ask anyone
+        # about the new date again (r3 finding). Raising puts the date back where
+        # the stale notices still describe it, which is at least consistent, and
+        # the next tick retries the pair together.
+        await db.execute(
+            text("DELETE FROM tournament_notices "
+                 "WHERE tournament_id = :tid "
+                 "AND notice_type = 'availability_check'"),
+            {"tid": t.id},
+        )
         return
 
     if pushback_reason is not None:
+        if force:
+            # A FORCED lock that cannot lock is a no-op, never a date change.
+            #
+            # _push_back is a TICK operation: everything it does is safe because
+            # the tick re-selects on `status='voting' AND lock_at <= now` and
+            # redoes it. `force=True` arrives from force_vote, a REQUEST, whose
+            # retry semantics are nothing like that — a rollback there discards
+            # the deciding force-vote row, and if lock_at is still in the future
+            # the tick does not revisit the tournament at all, so the promised
+            # recomputation simply never happens (r4 finding). The force caller
+            # already refuses below min_players; it counts signups BEFORE the
+            # ban filter above, which is the one way it can still get here.
+            # Leaving the row untouched lets the tick handle it when due.
+            print(f"[TOURNAMENT] {t.id} force-lock declined ({pushback_reason}) — "
+                  f"leaving the tournament untouched for the due-time tick")
+            return
         await _push_back(pushback_reason)
         return
 
@@ -1311,15 +1390,16 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             # exactly the cohort NOT watching the tab at the agreed time,
             # so a channel post alone would never reach them.
             try:
-                for kr in kicked_rows:
-                    await db.execute(text(
-                        "INSERT INTO pending_dms (steam_id, content) "
-                        "VALUES (:sid, :c)"
-                    ), {"sid": kr.steam_id, "c": (
-                        f"The Synchronized tournament locked for "
-                        f"{_dts(winning_slot)} — a time you didn't mark as "
-                        f"available — so your signup was removed. No "
-                        f"penalty. Sign up again next week!")})
+                async with db.begin_nested():
+                    for kr in kicked_rows:
+                        await db.execute(text(
+                            "INSERT INTO pending_dms (steam_id, content) "
+                            "VALUES (:sid, :c)"
+                        ), {"sid": kr.steam_id, "c": (
+                            f"The Synchronized tournament locked for "
+                            f"{_dts(winning_slot)} — a time you didn't mark as "
+                            f"available — so your signup was removed. No "
+                            f"penalty. Sign up again next week!")})
             except Exception as e:
                 print(f"[TOURNAMENT] kick DMs failed: {e}")
             try:
@@ -3201,7 +3281,21 @@ async def _ensure_next_tournament(db: AsyncSession) -> None:
     tournament exists in voting/locked/running state OR if a scheduled one is
     already queued for a future date within the next 14 days.
 
-    Also drives async tournament creation on the ASYNC_CADENCE_DAYS schedule."""
+    Also drives async tournament creation — which follows the BRACKET, not a
+    calendar. Two gates, in this order (see the bottom of this function):
+
+      * 24 hours since the previous async tournament's created_at, whatever
+        state it ended in. This one always applies.
+      * ASYNC_POST_COMPLETION_DAYS since its ended_at — but ONLY when that
+        tournament is status 'completed' AND carries an ended_at. A CANCELLED
+        bracket, or a completed row whose ended_at was never written, is held
+        by the 24-hour net alone, so the next one can open the following day.
+
+    "Opens N days after the previous one ends" is therefore the ordinary path,
+    not one rule covering every row. ASYNC_CADENCE_DAYS is legacy and drives
+    nothing; this line named it for months after the post-completion rule
+    replaced it, which is how the FAQ ended up telling players "every ~6
+    weeks" (item 11)."""
     now = datetime.now(timezone.utc)
     # Active already?
     aq = select(Tournament).where(and_(
@@ -3829,9 +3923,10 @@ async def _match_is_async(db: AsyncSession, m: TournamentMatch) -> bool:
     recoverable by an admin, while a wrongly-forfeited sync match is not.
     """
     try:
-        return (await db.execute(
-            text("SELECT kind FROM tournaments WHERE id = :tid"),
-            {"tid": str(m.tournament_id)})).scalar_one_or_none() == "async"
+        async with db.begin_nested():
+            return (await db.execute(
+                text("SELECT kind FROM tournaments WHERE id = :tid"),
+                {"tid": str(m.tournament_id)})).scalar_one_or_none() == "async"
     except Exception as ex:
         print(f"[TOURNAMENT] kind lookup failed for match {m.id}: {ex}")
         return False
@@ -4433,7 +4528,11 @@ async def _sync_agreement_reached(db: AsyncSession, t: Tournament) -> bool:
     predicate, _eligible_slot_tallies (lockable slots, confirmed entrants
     with no active ban - round 4, fix 3).
     """
-    tallies = await _eligible_slot_tallies(db, t.id, datetime.now(timezone.utc))
+    # Savepointed (#235): the only caller swallows a failure here, and a
+    # swallowed statement error would otherwise abort the whole request's
+    # transaction instead of degrading to "no agreement announced".
+    async with db.begin_nested():
+        tallies = await _eligible_slot_tallies(db, t.id, datetime.now(timezone.utc))
     return any(votes >= int(t.min_players) for _slot, votes in tallies)
 
 
@@ -4459,35 +4558,60 @@ async def _maybe_announce_sync_agreement(db: AsyncSession, t: Tournament) -> Non
     try:
         if not await _sync_agreement_reached(db, t):
             return
-        # Claim the marker ATOMICALLY. The in-Python `is not None` check above
-        # is only a cheap early-out: two concurrent voters can both read a NULL
-        # marker and both queue the post (Codex Aug-7b, MEDIUM, CONFIRMED). A
-        # conditional UPDATE ... WHERE agreement_announced_at IS NULL RETURNING
-        # lets exactly one transaction win; the loser gets no row and returns
-        # silently. Both this and the post ride the caller's transaction, so a
-        # rollback un-claims the marker rather than losing the announcement.
-        claimed = (await db.execute(text(
-            "UPDATE tournaments SET agreement_announced_at = NOW()"
-            " WHERE id = :tid AND agreement_announced_at IS NULL"
-            " RETURNING id"), {"tid": t.id})).first()
-        if claimed is None:
-            return
-        t.agreement_announced_at = datetime.now(timezone.utc)
+        # Read FIRST. _confirmed_mentions needs no claim, and doing it before
+        # the claim is what lets the claim and the post be ONE unit of work
+        # below instead of two joined by a compensating write.
         mentions = await _confirmed_mentions(db, t.id)
         # DELIBERATELY NAMES NO TIME. The winning slot is not decided until the
         # lock runs, votes can still change until then, and this message cannot
         # be corrected once sent. Announcing the milestone without a promise is
         # the only version that stays true — the lock's own DM delivers the
         # actual start time to every entrant.
-        await _queue_channel_post(
-            db,
+        body = (
             f"{mentions} — enough entrants have agreed on a start time! The "
             f"exact slot is locked in {_dts(t.lock_at)}; the bot DMs everyone "
             f"the final time then. Votes are still open until lock, and "
             f"entrants who did not vote for the winning slot are removed, so "
             f"make sure your availability covers every time you could play.")
+        # ONE SAVEPOINT FOR THE CLAIM AND THE POST.
+        #
+        # The claim is ATOMIC on its own: the in-Python `is not None` check
+        # above is only a cheap early-out, and two concurrent voters can both
+        # read a NULL marker (Codex Aug-7b). A conditional UPDATE ... WHERE
+        # agreement_announced_at IS NULL RETURNING lets exactly one transaction
+        # win; the loser gets no row and returns.
+        #
+        # What changed: the claim and the post used to be separate units held
+        # together by a `finally` that wrote the marker back to NULL. That
+        # compensating write was itself savepointed — which is precisely what
+        # made it unsafe. The savepoint exists so a failure does NOT doom the
+        # transaction, so a release that failed for a contained reason (a lock
+        # or statement timeout) was absorbed, the caller's signup or vote
+        # committed normally, and the claim committed with nothing ever posted;
+        # the guard at the top then refuses every retry, permanently (r3 HIGH).
+        #
+        # Sharing one savepoint deletes the whole problem rather than guarding
+        # it: if the INSERT fails, the SAVEPOINT rollback takes the UPDATE with
+        # it, so there is no claim left to give back and nothing to compensate.
+        # `contain=False` is what makes that true — the contained form would
+        # swallow the INSERT failure and let the claim commit alone.
+        async with db.begin_nested():
+            claimed = (await db.execute(text(
+                "UPDATE tournaments SET agreement_announced_at = NOW()"
+                " WHERE id = :tid AND agreement_announced_at IS NULL"
+                " RETURNING id"), {"tid": t.id})).first()
+            if claimed is None:
+                return          # matched no row: nothing written, savepoint released
+            await _queue_channel_post(db, body, contain=False)
+        # Only now, with both writes committed to the enclosing transaction, does
+        # the ORM object get the value. Setting it before the block would leave a
+        # Python-side claim that a SAVEPOINT rollback cannot undo, and the next
+        # autoflush would write it straight back out.
+        t.agreement_announced_at = datetime.now(timezone.utc)
     except Exception as e:
         print(f"[TOURNAMENT] agreement announce failed: {e}")
+
+
 
 
 @router.post("/{tournament_id}/unsignup", response_model=TournamentCurrentResponse)

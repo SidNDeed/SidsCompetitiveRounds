@@ -366,6 +366,9 @@ CREATE TABLE @S@.ffa_matches (
     game_number SMALLINT,
     score_target_frozen SMALLINT,
     score_target_played SMALLINT,
+    -- the v1.41.0 beta's migration 360 (the settings each game was played under);
+    -- the report's INSERT writes it on the merged tree
+    settings_frozen JSONB,
     duration_seconds INTEGER,
     game_version VARCHAR(32),
     region VARCHAR(8),

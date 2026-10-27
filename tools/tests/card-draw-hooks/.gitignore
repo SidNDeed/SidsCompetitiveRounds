@@ -1,0 +1,4 @@
+# Build output and generated hook sources. run_hooks.py regenerates all of it.
+bin/
+obj/
+work/

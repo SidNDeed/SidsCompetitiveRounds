@@ -121,11 +121,15 @@ namespace CompetitiveRounds
         /// this client does not know, the route is the conservative one: never a
         /// motion capture, never a base still over a still that is current
         /// (ownedHere true, canDance false: Current or Fallback). The server
-        /// names a selection only while the player holds it (S2.9).</summary>
+        /// names a selection only while the player holds it (S2.9).
+        /// `transient`: the job cannot run now for a reason that ends by
+        /// itself -- the ownership read is still unanswered, or a HoldOff hold
+        /// is the only term that stops this seat -- so a Fallback or a None is
+        /// retried rather than settled (StillOnlyRoute's Wait).</summary>
         private static DanceMotionCore.Need DanceDecision(ApiClient.PcMe me, string baseDescriptor, out string sku, out int idx,
-                                                          out string danceDesc, out bool defer)
+                                                          out string danceDesc, out bool defer, out bool transient)
         {
-            sku = ""; idx = -1; danceDesc = null; defer = false;
+            sku = ""; idx = -1; danceDesc = null; defer = false; transient = false;
             bool supported = me != null && me.dance_supported;
             if (supported) sku = me.pc_dance_sku ?? "";
             if (!supported || sku.Length == 0)
@@ -143,22 +147,68 @@ namespace CompetitiveRounds
                 {
                     if (DanceMayDefer()) { defer = true; return DanceMotionCore.Need.None; }
                     owned = true; can = false;
+                    transient = !remembered;
                 }
-                else { owned = list.Contains(idx); can = DanceSeatCan(); }
+                else
+                {
+                    owned = list.Contains(idx); can = DanceSeatCan();
+                    transient = owned && !can && !remembered && DanceSeatWaits();
+                }
             }
             return DanceMotionCore.Decide(true, sku, owned, me.pc_motion, me.portrait_hash, me.portrait_descriptor, danceDesc,
                                           DanceEmotes.MOTION_RECIPE, can, remembered);
         }
 
+        /// <summary>DanceSeatCan's terms with the hold as the only one that
+        /// fails: the seat can capture once the hold ends.</summary>
+        private static bool DanceSeatWaits()
+        {
+            try
+            {
+                return SystemInfo.supportsAsyncGPUReadback && GradeBaked && _danceOrientation >= 0
+                    && !_danceSessionStop && Time.realtimeSinceStartup < _danceHoldUntil;
+            }
+            catch { return false; }
+        }
+
+        private static string _danceStillOnlyNoted;
+
+        /// <summary>Report 1 (2026-09-30): the still-only path while a dance is
+        /// selected and the dance job did not start. Nothing is uploaded -- a
+        /// base still would unbind the stored motion (DanceMotionCore.
+        /// DanceSelected). The Settings preview is still rendered, without an
+        /// upload, when it does not show the current inputs. False only when no
+        /// dance is selected: the product path decides as before. `settled`
+        /// comes back false for Wait (the caller keeps its check armed) and
+        /// true for Nothing.</summary>
+        private static bool DanceStillOnly(ApiClient.PcMe me, string want, string sku, string why, bool transient, out bool settled)
+        {
+            settled = true;
+            var route = DanceMotionCore.StillOnlyRoute(me != null && me.dance_supported, me == null ? null : me.pc_dance_sku, transient);
+            if (route == DanceMotionCore.StillOnly.Base) return false;
+            settled = route == DanceMotionCore.StillOnly.Nothing;
+            LastResult = settled ? "not sent: the dance cannot be captured on this seat now" : "waiting to capture the dance";
+            string note = why + "|" + route + "|" + sku + "|" + want;
+            if (note != _danceStillOnlyNoted)
+            {
+                _danceStillOnlyNoted = note;
+                Plugin.Log.LogInfo("[DANCE] " + why + ": no base still sent, dance " + sku + " selected (" + route
+                                   + ", last dance result: " + (DanceLastResult.Length > 0 ? DanceLastResult : "-") + ")");
+            }
+            if (want != null && (PreviewTex == null || PreviewDescriptor != want)) Start("preview", false);
+            return true;
+        }
+
         /// <summary>The visit check's dance half (Tick). True when the visit is
         /// settled here -- a dance job started or was re-armed, the dance picture
-        /// is current, a Fallback's still is current, or the check is deferred;
-        /// false when the product path decides as before (no dance selected, an
-        /// older server, or a Fallback whose still is behind).</summary>
+        /// is current, a Fallback's still is current, the check is deferred, or
+        /// a dance is selected and the still-only path sends nothing
+        /// (DanceStillOnly); false when the product path decides as before (no
+        /// dance selected, or an older server).</summary>
         private static bool DanceVisit(ApiClient.PcMe me, string want)
         {
-            string sku, danceDesc; int idx; bool defer;
-            var need = DanceDecision(me, want, out sku, out idx, out danceDesc, out defer);
+            string sku, danceDesc; int idx; bool defer, transient, settled;
+            var need = DanceDecision(me, want, out sku, out idx, out danceDesc, out defer, out transient);
             if (defer) { _pendingCheck = true; _checkedVisit = -1; return true; }
             switch (need)
             {
@@ -170,33 +220,46 @@ namespace CompetitiveRounds
                     if (PreviewTex == null) Start("preview", false);
                     return true;
                 case DanceMotionCore.Need.Fallback:
-                    if (!DanceMotionCore.StillCurrent(me.portrait_hash, me.portrait_descriptor, want, danceDesc)) return false;
-                    LastResult = "picture current";
-                    if (PreviewTex == null) Start("preview", false);
-                    return true;
-                default:
-                    return false;
+                    if (DanceMotionCore.StillCurrent(me.portrait_hash, me.portrait_descriptor, want, danceDesc))
+                    {
+                        LastResult = "picture current";
+                        if (PreviewTex == null) Start("preview", false);
+                        return true;
+                    }
+                    break;
             }
+            // None or a Fallback whose still is behind: with a dance selected the
+            // still-only path sends nothing (report 1); a Wait re-arms the check.
+            if (!DanceStillOnly(me, want, sku, "visit", transient, out settled)) return false;
+            if (!settled) { _refreshAt = Time.realtimeSinceStartup + 5f; _refreshWhy = "visit"; }
+            return true;
         }
 
         /// <summary>A matured refresh (Tick): the dance job when a motion is
-        /// needed, nothing when the dance picture is current, else the product
-        /// path as before (a Fallback re-renders the base still, as a refresh
-        /// always did). False keeps the refresh armed (busy, refused, deferred).</summary>
+        /// needed, nothing when the dance picture is current; with a dance
+        /// selected and the job unable to run, nothing is sent (DanceStillOnly:
+        /// a Wait keeps the refresh armed); with no dance selected, the product
+        /// path as before. An unread /pc/me keeps the refresh armed: whether a
+        /// dance is selected is not known yet, and a base still over a bound
+        /// motion unbinds it. False keeps the refresh armed (busy, refused,
+        /// deferred, waiting).</summary>
         private static bool RefreshStart(string why)
         {
             var me = ApiClient.CachedPcMe;
-            if (me != null && me.dance_supported && !string.IsNullOrEmpty(me.pc_dance_sku))
+            if (me == null) return false;
+            if (DanceMotionCore.DanceSelected(me.dance_supported, me.pc_dance_sku))
             {
                 string want = BuildDescriptor(CurrentPreset());
-                if (want != null)
-                {
-                    string sku, danceDesc; int idx; bool defer;
-                    var need = DanceDecision(me, want, out sku, out idx, out danceDesc, out defer);
-                    if (defer) return false;
-                    if (need == DanceMotionCore.Need.Needed) return StartDance(why, sku, idx, null);
-                    if (need == DanceMotionCore.Need.Current) { LastResult = "picture current (dancing)"; return true; }
-                }
+                if (want == null) { LastResult = "no picture: the character is not readable yet"; return true; }
+                string sku, danceDesc; int idx; bool defer, transient, settled;
+                var need = DanceDecision(me, want, out sku, out idx, out danceDesc, out defer, out transient);
+                if (defer) return false;
+                if (need == DanceMotionCore.Need.Needed) return StartDance(why, sku, idx, null);
+                if (need == DanceMotionCore.Need.Current) { LastResult = "picture current (dancing)"; return true; }
+                if (need == DanceMotionCore.Need.Fallback
+                    && DanceMotionCore.StillCurrent(me.portrait_hash, me.portrait_descriptor, want, danceDesc))
+                { LastResult = "picture current"; return true; }
+                if (DanceStillOnly(me, want, sku, why, transient, out settled)) return settled;
             }
             return Start(why, true);
         }
@@ -240,6 +303,329 @@ namespace CompetitiveRounds
             internal int multi;           // S2F3 (round two), evidence lever only: each frame's black pass rendered this many more times, same state, compared
             internal int jobs = -1;       // S2F3 (round two), evidence lever only: the job worker count held for the capture (-1: unchanged)
             internal bool msaa4;          // S2F3 (round two), lever only: T36's mutant arm -- the frames and the still through the old 4x MSAA targets
+            internal bool fitSolid;       // bug 405, lever only: the mutant arm -- the frame fitted to the solids alone (the fit before the fix)
+            internal float fitGrow = -1f; // bug 405, lever only: the growth cap for this capture (-1: DANCE_FIT_GROW_MAX)
+            internal string effect;       // bug 405, lever only (local): this effect sku on the rig instead of the equipped one
+            internal string color;        // bug 405, lever only (local): "sku:hex" -- this colour on the rig instead of the equipped one
+        }
+
+        // -- bug 405: nothing drawn reaches the edge band -------------------------
+        // The frame is fitted to the SOLID renderers (learning #629: a particle
+        // renderer's bounds are emitter-sized and would shrink the character to
+        // a third of the frame). A worn effect's particles (measured: the
+        // bubbles, which rise past the top of that square) could then straddle
+        // the 2 px edge band the server refuses (motion_edge), and such a
+        // capture was refused by its own self-check. The particles are pinned
+        // and paused before the pre-pass, so what each one draws is measured
+        // from the particle itself -- its position, its current size and the
+        // renderer's mode -- at every pose; DanceMotionCore.FitDrawn keeps the
+        // solid square and every particle whose box stays clear of the band,
+        // and the rest are removed before the first frame renders.
+
+        /// <summary>Pixels along every edge of the 590 frame that no measured
+        /// particle box may enter: the server's band plus two for the 2x2
+        /// supersample resolve and the box estimate's rounding.</summary>
+        private const int DANCE_CLEAR_PX = DanceMotionCore.EDGE_MARGIN + 2;
+        /// <summary>How far the frame may grow past the solid square to hold
+        /// particles: 1, not at all. Measured on all eight dances with the
+        /// bubbles: at 1.25 six of eight still had a bubble no growth held, and
+        /// the dancer shrank (lit 7.0% against 10.9%); at 1 the dancer keeps
+        /// its size and only bubbles at or past the edge are removed. The
+        /// lever's fitgrow= option measures other values.</summary>
+        private const float DANCE_FIT_GROW_MAX = 1f;
+
+        private sealed class DanceDrawnSys
+        {
+            internal ParticleSystem Ps;
+            internal string Name;
+            internal ParticleSystem.Particle[] Parts;
+            internal int Count;
+            internal float[] Radius;                  // the drawn half-extent in the system's own units; < 0: draws nothing (alpha 0)
+            internal float[] MinX, MinY, MaxX, MaxY;  // world box over every pose measured
+            internal bool Posed;
+            internal bool Masked;                     // drawn only inside the rig's sprite masks (the body's skin particles)
+            internal string Mode;
+            internal int Measured;                    // particles with a box
+            internal float BMinX = float.MaxValue, BMinY = float.MaxValue, BMaxX = float.MinValue, BMaxY = float.MinValue;
+        }
+
+        private sealed class DanceDrawn
+        {
+            internal readonly List<DanceDrawnSys> Systems = new List<DanceDrawnSys>();
+            internal int Particles, Hidden, Culled, Poses, Trails;
+            internal bool Any;
+            internal float MinX = float.MaxValue, MinY = float.MaxValue, MaxX = float.MinValue, MaxY = float.MinValue;
+            internal string Failure;
+            internal string Mode = "solid";
+
+            internal string Summary()
+            {
+                var sb = new StringBuilder();
+                sb.Append("drawn systems=").Append(Systems.Count).Append(" particles=").Append(Particles).Append(" hidden=").Append(Hidden)
+                  .Append(" poses=").Append(Poses).Append(" trails=").Append(Trails).Append(" mode=").Append(Mode).Append(" culled=").Append(Culled)
+                  .Append(Any ? " box=" + Box(MinX, MinY, MaxX, MaxY) : " box=none");
+                // each system's own box (bounded: one entry per drawing system of the rig)
+                foreach (var s in Systems)
+                    sb.Append(" sys[").Append(s.Name).Append(' ').Append(s.Mode).Append(s.Masked ? " masked" : "").Append(" n=").Append(s.Count)
+                      .Append(" boxed=").Append(s.Measured).Append("]=").Append(s.Measured > 0 ? Box(s.BMinX, s.BMinY, s.BMaxX, s.BMaxY) : "none");
+                if (Failure != null) sb.Append(" failure=\"").Append(Failure.Replace('"', '\'')).Append('"');
+                return sb.ToString();
+            }
+
+            private static string Box(float x0, float y0, float x1, float y1)
+            {
+                return "(" + (x0 - PARK.x).ToString("F2") + "," + (y0 - PARK.y).ToString("F2") + ")..(" + (x1 - PARK.x).ToString("F2") + "," + (y1 - PARK.y).ToString("F2") + ")";
+            }
+        }
+
+        /// <summary>The pinned particle systems that draw (active, with an
+        /// enabled renderer), each particle's drawn half-extent read once: the
+        /// systems are paused, so a particle's local state holds for the rest
+        /// of the capture and only the system's transform moves with a pose.
+        /// The half-extent is conservative for the quad modes (half the 3D
+        /// size's diagonal, whatever the rotation); a stretched particle adds
+        /// its length and velocity terms, a mesh particle its mesh's reach; the
+        /// renderer's pivot is added on top. A particle whose current alpha is
+        /// 0 draws nothing and is not measured.</summary>
+        private static DanceDrawn DanceDrawnSnap()
+        {
+            var d = new DanceDrawn();
+            try
+            {
+                foreach (var p in _pinned)
+                {
+                    var ps = p.ps;
+                    if (ps == null || !ps.gameObject.activeInHierarchy) continue;
+                    var psr = ps.GetComponent<ParticleSystemRenderer>();
+                    if (psr == null || !psr.enabled) continue;
+                    if (ps.trails.enabled) d.Trails++;   // a trail's reach is not measured: counted so the line says so
+                    var s = new DanceDrawnSys { Ps = ps, Name = PsName(ps), Mode = psr.renderMode.ToString(),
+                                                Masked = psr.maskInteraction == SpriteMaskInteraction.VisibleInsideMask };
+                    int n = ps.particleCount;
+                    s.Parts = new ParticleSystem.Particle[Math.Max(1, n)];
+                    s.Count = n > 0 ? ps.GetParticles(s.Parts) : 0;
+                    s.Radius = new float[s.Count];
+                    s.MinX = new float[s.Count]; s.MinY = new float[s.Count]; s.MaxX = new float[s.Count]; s.MaxY = new float[s.Count];
+                    float meshReach = 1f;
+                    if (psr.renderMode == ParticleSystemRenderMode.Mesh && psr.mesh != null)
+                        meshReach = psr.mesh.bounds.center.magnitude + psr.mesh.bounds.extents.magnitude;
+                    float pivot = psr.pivot.magnitude;
+                    for (int i = 0; i < s.Count; i++)
+                    {
+                        var q = s.Parts[i];
+                        s.MinX[i] = s.MinY[i] = float.MaxValue; s.MaxX[i] = s.MaxY[i] = float.MinValue;
+                        if (q.GetCurrentColor(ps).a == 0) { s.Radius[i] = -1f; d.Hidden++; continue; }
+                        Vector3 sz = q.GetCurrentSize3D(ps);
+                        float big = Mathf.Max(Mathf.Abs(sz.x), Mathf.Abs(sz.y), Mathf.Abs(sz.z));
+                        float r;
+                        if (psr.renderMode == ParticleSystemRenderMode.Mesh) r = big * meshReach;
+                        else if (psr.renderMode == ParticleSystemRenderMode.Stretch)
+                            r = 0.5f * sz.magnitude + big * Mathf.Abs(psr.lengthScale) + q.totalVelocity.magnitude * Mathf.Abs(psr.velocityScale);
+                        else r = 0.5f * sz.magnitude;
+                        s.Radius[i] = r + pivot * big;
+                        d.Particles++;
+                    }
+                    d.Systems.Add(s);
+                }
+            }
+            catch (Exception ex) { d.Failure = "snap threw " + ex.GetType().Name + ": " + Trunc(ex.Message, 80); }
+            return d;
+        }
+
+        /// <summary>One pose: every measured particle's world box (its local
+        /// position through the system's render transform for its scaling
+        /// mode, its half-extent scaled alike) united into its own box and
+        /// into the whole. A system drawn only inside sprite masks (the body's
+        /// skin particles) draws nowhere outside the rig's masks, so its boxes
+        /// are cut to the masks' united bounds at this pose, and a box outside
+        /// them draws nothing; with no live mask found, the box stands whole.</summary>
+        private static void DanceDrawnPose(DanceDrawn d, GameObject clone)
+        {
+            if (d == null || d.Failure != null) return;
+            try
+            {
+                d.Poses++;
+                bool anyMasked = false;
+                foreach (var s in d.Systems) anyMasked |= s.Masked;
+                bool haveMask = false;
+                Bounds mask = default(Bounds);
+                if (anyMasked && clone != null)
+                {
+                    Vector3 rigPos = clone.transform.position;
+                    foreach (var r in AllRenderers(clone))
+                    {
+                        if (!IsMask(r) || !r.enabled || !r.gameObject.activeInHierarchy) continue;
+                        var rb = r.bounds;
+                        if (rb.size.x > 500f || rb.size.y > 500f || Vector3.Distance(rb.center, rigPos) > 15f) continue;   // SolidBounds' outlier rule
+                        if (!haveMask) { mask = rb; haveMask = true; } else mask.Encapsulate(rb);
+                    }
+                }
+                foreach (var s in d.Systems)
+                {
+                    if (s.Ps == null) { d.Failure = "a measured system was destroyed: " + s.Name; return; }
+                    var t = s.Ps.transform;
+                    Matrix4x4 m; Vector3 sc;
+                    var mode = s.Ps.main.scalingMode;
+                    if (mode == ParticleSystemScalingMode.Hierarchy) { m = t.localToWorldMatrix; sc = t.lossyScale; }
+                    else if (mode == ParticleSystemScalingMode.Local) { sc = t.localScale; m = Matrix4x4.TRS(t.position, t.rotation, sc); }
+                    else { sc = Vector3.one; m = Matrix4x4.TRS(t.position, t.rotation, sc); }
+                    float k = Mathf.Max(Mathf.Abs(sc.x), Mathf.Abs(sc.y), Mathf.Abs(sc.z));
+                    for (int i = 0; i < s.Count; i++)
+                    {
+                        if (s.Radius[i] < 0f) continue;
+                        Vector3 c = m.MultiplyPoint3x4(s.Parts[i].position);
+                        float r = s.Radius[i] * k;
+                        float x0 = c.x - r, y0 = c.y - r, x1 = c.x + r, y1 = c.y + r;
+                        if (s.Masked && haveMask)
+                        {
+                            x0 = Mathf.Max(x0, mask.min.x); y0 = Mathf.Max(y0, mask.min.y);
+                            x1 = Mathf.Min(x1, mask.max.x); y1 = Mathf.Min(y1, mask.max.y);
+                            if (x0 > x1 || y0 > y1) continue;   // wholly outside every mask: nothing drawn at this pose
+                        }
+                        if (x0 < s.MinX[i]) s.MinX[i] = x0;
+                        if (y0 < s.MinY[i]) s.MinY[i] = y0;
+                        if (x1 > s.MaxX[i]) s.MaxX[i] = x1;
+                        if (y1 > s.MaxY[i]) s.MaxY[i] = y1;
+                        if (s.MinX[i] < s.BMinX) s.BMinX = s.MinX[i];
+                        if (s.MinY[i] < s.BMinY) s.BMinY = s.MinY[i];
+                        if (s.MaxX[i] > s.BMaxX) s.BMaxX = s.MaxX[i];
+                        if (s.MaxY[i] > s.BMaxY) s.BMaxY = s.MaxY[i];
+                        if (s.MinX[i] < d.MinX) d.MinX = s.MinX[i];
+                        if (s.MinY[i] < d.MinY) d.MinY = s.MinY[i];
+                        if (s.MaxX[i] > d.MaxX) d.MaxX = s.MaxX[i];
+                        if (s.MaxY[i] > d.MaxY) d.MaxY = s.MaxY[i];
+                        d.Any = true;
+                    }
+                    s.Posed = true;
+                    int boxed = 0;
+                    for (int i = 0; i < s.Count; i++) if (s.Radius[i] >= 0f && s.MinX[i] <= s.MaxX[i]) boxed++;
+                    s.Measured = boxed;
+                }
+            }
+            catch (Exception ex) { d.Failure = "pose threw " + ex.GetType().Name + ": " + Trunc(ex.Message, 80); }
+        }
+
+        /// <summary>The capture's square: DanceMotionCore.FitDrawn over the
+        /// solid square and every measured particle box, then each particle the
+        /// square cannot hold removed from its paused system, so nothing drawn
+        /// reaches the band. With no measurement (it failed, or the lever's
+        /// fitSolid arm), the solid square as before. `cullFail` is set when a
+        /// removal did not take; the capture then stops.</summary>
+        private static Bounds DanceFitDrawn(DanceDrawn d, Bounds solid, DanceOpts opt, out string cullFail)
+        {
+            cullFail = null;
+            if (opt.fitSolid) { if (d != null) d.Mode = "solid(lever)"; return solid; }
+            if (d == null || d.Failure != null || !d.Any) return solid;
+            var boxes = new List<DanceMotionCore.Box>();
+            var owner = new List<DanceDrawnSys>();
+            var index = new List<int>();
+            foreach (var s in d.Systems)
+                for (int i = 0; i < s.Count; i++)
+                {
+                    if (s.Radius[i] < 0f || s.MinX[i] > s.MaxX[i]) continue;
+                    boxes.Add(new DanceMotionCore.Box(s.MinX[i], s.MinY[i], s.MaxX[i], s.MaxY[i]));
+                    owner.Add(s); index.Add(i);
+                }
+            var keep = new bool[boxes.Count];
+            float cx, cy, side;
+            var mode = DanceMotionCore.FitDrawn(solid.center.x, solid.center.y, solid.size.x, boxes, DANCE_CLEAR_PX, DANCE_EDGE,
+                                                opt.fitGrow > 0f ? opt.fitGrow : DANCE_FIT_GROW_MAX, keep, out cx, out cy, out side);
+            d.Mode = mode == DanceMotionCore.FitMode.Solid ? "solid" : mode == DanceMotionCore.FitMode.Grown ? "grown" : "capped";
+            var drop = new Dictionary<DanceDrawnSys, HashSet<int>>();
+            for (int j = 0; j < boxes.Count; j++)
+            {
+                if (keep[j]) continue;
+                HashSet<int> set;
+                if (!drop.TryGetValue(owner[j], out set)) { set = new HashSet<int>(); drop[owner[j]] = set; }
+                set.Add(index[j]);
+            }
+            foreach (var kv in drop)
+            {
+                var s = kv.Key;
+                var kept = new ParticleSystem.Particle[Math.Max(1, s.Count)];
+                int n = 0;
+                for (int i = 0; i < s.Count; i++) if (!kv.Value.Contains(i)) kept[n++] = s.Parts[i];
+                try { s.Ps.SetParticles(kept, n); }
+                catch (Exception ex) { cullFail = "particles could not be kept out of the frame: " + ex.GetType().Name; return solid; }
+                if (s.Ps.particleCount != n) { cullFail = "particles could not be kept out of the frame: " + s.Name + " holds " + s.Ps.particleCount + ", not " + n; return solid; }
+                d.Culled += s.Count - n;
+            }
+            return new Bounds(new Vector3(cx, cy, PARK.z), new Vector3(side, side, 1f));
+        }
+
+        /// <summary>The [DANCE-FIT] line: the sku, the solid bounds (united
+        /// over every pose), the drawn particles' box, the two united ("all"),
+        /// the solid square's side and the fit's, the mode and what was kept
+        /// out; on a band refusal, the first band pixel (column, row from the
+        /// top, alpha) of the first refused frame and the measured system whose
+        /// box holds that pixel ("none measured" when none does). No player
+        /// identity.</summary>
+        private static string DanceFitLine(string sku, DanceOpts opt, DanceDrawn d, Bounds solidUnion, Bounds solidFit, Bounds fit,
+                                           DanceMotionCore.FrameOut[] frames, bool ok)
+        {
+            var sb = new StringBuilder();
+            sb.Append("sku=").Append(sku).Append(" tag=").Append(opt.tag).Append(" result=").Append(ok ? "ok" : "fail");
+            sb.Append(" solid=").Append(V(solidUnion.min - PARK)).Append("..").Append(V(solidUnion.max - PARK));
+            if (d != null && d.Any)
+            {
+                var all = solidUnion;
+                all.Encapsulate(new Vector3(d.MinX, d.MinY, solidUnion.center.z));
+                all.Encapsulate(new Vector3(d.MaxX, d.MaxY, solidUnion.center.z));
+                sb.Append(" all=").Append(V(all.min - PARK)).Append("..").Append(V(all.max - PARK));
+            }
+            else sb.Append(" all=solid");
+            sb.Append(" solid_side=").Append(solidFit.size.x.ToString("F3")).Append(" fit_side=").Append(fit.size.x.ToString("F3"))
+              .Append(" fit_centre=").Append(V(fit.center - PARK)).Append(" fit_px=").Append(DANCE_EDGE)
+              .Append(" grow_max=").Append((opt.fitGrow > 0f ? opt.fitGrow : DANCE_FIT_GROW_MAX).ToString("F2"));
+            if (d != null) sb.Append(' ').Append(d.Summary());
+            if (frames != null)
+                for (int k = 0; k < frames.Length; k++)
+                {
+                    var f = frames[k];
+                    if (f == null || f.EdgeClear) continue;
+                    sb.Append(" band=frame ").Append(k).Append(" px=(").Append(f.EdgeX).Append(',').Append(f.EdgeY).Append(") alpha=").Append(f.EdgeA);
+                    float side = fit.size.x;
+                    float wx = fit.min.x + (f.EdgeX + 0.5f) / DANCE_EDGE * side;
+                    float wy = fit.max.y - (f.EdgeY + 0.5f) / DANCE_EDGE * side;
+                    sb.Append(" at=(").Append((wx - PARK.x).ToString("F2")).Append(',').Append((wy - PARK.y).ToString("F2")).Append(')');
+                    string who = null;
+                    if (d != null)
+                        foreach (var s in d.Systems)
+                        {
+                            for (int i = 0; i < s.Count && who == null; i++)
+                                if (s.Radius[i] >= 0f && wx >= s.MinX[i] && wx <= s.MaxX[i] && wy >= s.MinY[i] && wy <= s.MaxY[i]) who = s.Name;
+                            if (who != null) break;
+                        }
+                    sb.Append(" owner=").Append(who ?? "none measured");
+                    break;
+                }
+            return sb.ToString();
+        }
+
+        /// <summary>The lever's input arm (bug 405 witness): the capture's
+        /// inputs name `effect` as the equipped effect and `color` ("sku:hex")
+        /// as the equipped colour when given, the descriptor with them, so a
+        /// local capture draws them. Nothing is selected or sent.</summary>
+        private static void DanceDevInputs(Inputs inp, string effect, string color)
+        {
+            if (inp == null || inp.refusal != null || inp.descriptor == null) return;
+            if (effect != null)
+            {
+                string was = "|effect=" + inp.effectSku + "|";
+                inp.effectSku = effect;
+                inp.descriptor = inp.descriptor.Replace(was, "|effect=" + effect + "|");
+            }
+            if (color != null)
+            {
+                int colon = color.IndexOf(':');
+                string sku = colon > 0 ? color.Substring(0, colon) : "";
+                string hex = colon > 0 ? color.Substring(colon + 1).ToLowerInvariant() : "";
+                string was = "|color=" + inp.colorSku + ":" + inp.colorHex + "|";
+                inp.colorSku = sku; inp.colorHex = hex;
+                inp.descriptor = inp.descriptor.Replace(was, "|color=" + sku + ":" + hex + "|");
+            }
+            Plugin.Log.LogInfo("[DANCE-FIT] lever effect=" + (effect == null ? "equipped" : effect.Length == 0 ? "none" : effect)
+                               + " color=" + (color == null ? "equipped" : color.Length == 0 ? "none" : color));
         }
 
         // S2F5 (round two): the capture path's one-time costs in a process --
@@ -686,11 +1072,13 @@ namespace CompetitiveRounds
 
             /// <summary>Finding L1 then the baseline: the rig's remembered deltas
             /// undone once, the targets written back to the frozen baseline with
-            /// their spring velocity zeroed.</summary>
+            /// their spring velocity zeroed. Each baseline write forgets the
+            /// delta it supersedes (RR-LAND-1, DanceEmotes.WriteArmBaseline), so
+            /// an entry still owed after the undo is never subtracted from it.</summary>
             internal void Rest(Transform rigRoot)
             {
                 DanceEmotes.RestorePortraitRig(rigRoot);
-                L.target.position = BaseL; R.target.position = BaseR;
+                DanceEmotes.WriteArmBaseline(L.target, BaseL); DanceEmotes.WriteArmBaseline(R.target, BaseR);
                 L.velolcity = Vector3.zero; R.velolcity = Vector3.zero;
             }
         }
@@ -744,6 +1132,7 @@ namespace CompetitiveRounds
             string steam = MatchTracker.LocalSteamId;
             string key = DanceStateKey();
             var inp = Capture(CurrentPreset());
+            if (opt.local && (opt.effect != null || opt.color != null)) DanceDevInputs(inp, opt.effect, opt.color);   // lever only: nothing is uploaded or selected
             string baseDesc = inp.descriptor;
             string danceDesc = DanceDescriptor(baseDesc, sku);
             int ms = DanceEmotes.CaptureMs[idx], n = DanceEmotes.CaptureFrames(idx);
@@ -762,6 +1151,9 @@ namespace CompetitiveRounds
             bool timing = false;
             int headerLength = 0;
             string rootsLine = "";
+            DanceDrawn drawn = null;                              // bug 405: what the particles draw, measured at every pose
+            Bounds solidUnion = default(Bounds), solidFit = default(Bounds), fitMade = default(Bounds);
+            bool fitDone = false;
             try
             {
                 if (inp.refusal != null) { fail = "no picture: " + inp.refusal; yield break; }
@@ -823,6 +1215,7 @@ namespace CompetitiveRounds
                 if (!EffectReady(inp.effectSku, aura, clone)) { fail = "effect not applied as captured"; remember = true; yield break; }
                 if (!LegsPlanted(out _legSummary)) { fail = "legs not planted " + _legSummary; remember = true; yield break; }
                 if (!rig.Pinned(gunStill)) { fail = "rig not pinned " + _gunSummary; remember = true; yield break; }
+                drawn = DanceDrawnSnap();                         // the pinned particles: paused, so their local state holds from here on
 
                 // S1.4 step 3: the frozen baseline
                 var arms = DanceFindArms(clone);
@@ -853,12 +1246,22 @@ namespace CompetitiveRounds
                     Bounds b;
                     if (!SolidBounds(scratch, clone, out b)) { fail = "no bounds at pose " + k; remember = true; yield break; }
                     if (!any) { union = b; any = true; } else union.Encapsulate(b);
+                    DanceDrawnPose(drawn, clone);
                 }
                 arms.Rest(rigRoot);
                 DanceEmotes.PortraitPose = null;
-                Bounds fit = SquareFit(union, 1.3f);
+                // Bug 405: the solid square, then grown to hold what the
+                // particles draw at every pose, and what it still cannot hold
+                // kept out of the capture (DanceFitDrawn).
+                solidUnion = union;
+                solidFit = SquareFit(union, 1.3f);
+                string cullFail;
+                Bounds fit = DanceFitDrawn(drawn, solidFit, opt, out cullFail);
+                fitMade = fit; fitDone = true;
+                if (cullFail != null) { fail = cullFail; remember = true; yield break; }
                 rep.Append("dance union: ").Append(V(union.min - PARK)).Append("..").Append(V(union.max - PARK))
-                   .Append(" fit side=").Append(fit.size.x.ToString("F2")).Append('\n');
+                   .Append(" fit side=").Append(fit.size.x.ToString("F2")).Append(" solid side=").Append(solidFit.size.x.ToString("F2"))
+                   .Append(' ').Append(drawn.Summary()).Append('\n');
 
                 // S1.4 step 5: one camera for both products. Finding S2F4: made
                 // all in one frame, the targets and buffers measured 21-61 ms of
@@ -1062,6 +1465,12 @@ namespace CompetitiveRounds
                                    + " elapsed=" + (Time.realtimeSinceStartup - t0).ToString("F2") + "s"
                                    + (fail != null ? " result=" + outcome : ""));
                 foreach (var e in _errs) Plugin.Log.LogWarning("[DANCE]   " + e);
+                // Bug 405: a capture refused at the edge band says on the
+                // player's own log which pixel, the bounds and the fit (one
+                // line per capture); a lever capture always says it.
+                bool edgeFail = checkFail != null && checkFail.Contains("edge band");
+                if ((edgeFail || (opt.local && !opt.warmup)) && fitDone)
+                    Plugin.Log.LogInfo("[DANCE-FIT] " + DanceFitLine(sku, opt, drawn, solidUnion, solidFit, fitMade, frames, fail == null));
                 if (opt.local && !opt.warmup) DanceDevReport(opt, sku, rep, fail, still, frames, n, ms, clock, rootsBefore, remember, tdLine);
                 if (stale && !opt.warmup) Abandon(key);
                 _renderClaim.Drop(gen);

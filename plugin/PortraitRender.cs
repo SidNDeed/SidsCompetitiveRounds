@@ -285,10 +285,18 @@ namespace CompetitiveRounds
         // Unity's fixed-timestep option off and prewarm off, and seeds each from
         // its own path with no collision bump. The table and the length are
         // RECIPE 2's.
+        // 4: the frame is centred horizontally on the rig transform instead of on
+        // the solid union, and its half-extent reaches the union's far side from
+        // there (ComputeBounds), so a gun or a one-sided cosmetic widens the frame
+        // instead of sliding the body off centre. Every other input -- rig, matte,
+        // pins, table, length -- is RECIPE 3's. Bumped although no r=3 picture is
+        // known to be stored: 3 is already written down as a byte contract here and
+        // in backend/tests/test_portrait_grade_recipe.py's ledger, and the cost of
+        // being wrong about some dev upload is a portrait that never re-renders.
         // A change to any of these once ANY picture is stored under this RECIPE
         // (a dev build's upload included) needs a bump: check the stored
         // descriptors before folding one under the same number.
-        internal const int RECIPE = 3;
+        internal const int RECIPE = 4;
         // The particle snapshot length: the live particle systems on the rig and
         // every sub-emitter they reach are re-simulated from a restart for this
         // long, in PARTICLE_STEP_MS increments, with prewarm off (PinParticles).
@@ -339,7 +347,26 @@ namespace CompetitiveRounds
         {
             get { return _pendingCheck || _refreshAt >= 0f || Rendering || UploadInFlight; }
         }
+
+        /// <summary>A NEW look is on its way to the server: a preset change is
+        /// still debouncing, a render that will upload is running, or an upload
+        /// is in flight. Narrower than <see cref="Preparing"/> on purpose: the
+        /// visit check that has not run yet and a preview-only render (the
+        /// stored picture already current) change nothing the server holds.
+        /// The Settings full card (board row 24) shows the live picture with a
+        /// pending note while this holds and the server's card once it clears.
+        /// Every term expires on its own, as Preparing's do.</summary>
+        internal static bool LookPending
+        {
+            get { return _refreshAt >= 0f || UploadInFlight || (Rendering && _productUploads); }
+        }
+        private static bool _productUploads;   // the product render holding the claim will upload (StartProduct)
         internal static Texture2D PreviewTex { get; private set; }   // reduce(4) of the last matte (295x295)
+        /// <summary>The descriptor of the inputs <see cref="PreviewTex"/> was
+        /// drawn from, set with it; null with it. Compared with the stored
+        /// portrait_descriptor it says whether the picture on screen is the one
+        /// the server holds.</summary>
+        internal static string PreviewDescriptor { get; private set; }
         internal static int PreviewSerial { get; private set; }
         internal static string LastResult { get; private set; } = "";
         private static int _visitId, _checkedVisit = -1;
@@ -363,16 +390,319 @@ namespace CompetitiveRounds
             // texture is destroyed and the binding invalidated in one step --
             // dropping the reference alone left the old face painted.
             var old = PreviewTex;
-            PreviewTex = null; PreviewSerial++;
+            PreviewTex = null; PreviewDescriptor = null; PreviewSerial++;
             if (old != null) { try { UnityEngine.Object.Destroy(old); } catch { } }
         }
 
         /// <summary>The preset row changed (§3.4): re-render and upload, debounced 1.5 s.</summary>
         internal static void RequestRefresh(string why) { _refreshAt = Time.realtimeSinceStartup + 1.5f; _refreshWhy = why; }
 
+        private const int PresetSlotsFallback = 8;
+        private static int _presetSlots;
+        /// <summary>The earliest moment a cached count BELOW <c>PresetSlotsFallback</c>
+        /// may be derived again (v1.41.0 beta round 3, finding 10): such a count is
+        /// provisional, and PresetSlotCount says why.</summary>
+        private static float _presetSlotsRetryAt;
+        private const float PresetSlotsRetrySeconds = 1f;
+        /// <summary>One-shot: an out-of-range saved preset has been written back
+        /// as -1, so it is not re-logged or re-written on every read.</summary>
+        private static bool _presetMigrated;
+        /// <summary>When discovery last swept the portrait objects
+        /// (Time.realtimeSinceStartup), -999 before the first sweep. The sweep
+        /// walks every loaded CharacterCreatorPortrait, so it is not free to run
+        /// on every call — but it is not permitted to run ONCE either (see
+        /// PresetSlotCount). The rate limit itself is <c>_presetSlotsRetryAt</c>;
+        /// this stamp is how RunPresetSlotSentinel tells a count answered from the
+        /// cache from one derived again.</summary>
+        private static float _presetSweptAt = -999f;
+        /// <summary>The provisional count in force (below
+        /// <c>PresetSlotsFallback</c>), 0 once the count is final. The sentinel
+        /// checks that it clears when a complete row is derived.</summary>
+        private static int _presetProvisional;
+
+        /// <summary>How many preset slots a player can actually AUTHOR (bug #370).
+        ///
+        /// <para><c>CharacterCreatorHandler.playerFaces</c> is declared length 10, and
+        /// the picker used to offer all ten — but the array length is not the number of
+        /// slots the character creator lets you fill. A portrait button writes the slot
+        /// given by its OWN sibling index (<c>CharacterCreatorPortrait.Start</c>:
+        /// <c>GetFacePreset(transform.GetSiblingIndex())</c>, and
+        /// <c>SelectFace(..., GetSiblingIndex())</c> on click), and the shipped menu
+        /// grids hold eight buttons each. Slots 8 and 9 therefore exist in the array and
+        /// can never be written, so pinning them rendered an empty face.</para>
+        ///
+        /// <para>Derived, never hardcoded (#342/#431): the writable slots ARE the sibling
+        /// indices in use, so the count is <c>max(siblingIndex) + 1</c> over the live
+        /// portrait buttons. The buttons are inactive most of the time, hence
+        /// <c>FindObjectsOfTypeAll</c> rather than <c>FindObjectsOfType</c>. Clamped to
+        /// the array so a discovery that over-reports can never index out of bounds.
+        /// CACHED only once it has been bounded against <c>playerFaces</c>: the fallback
+        /// answer, and the answer given while that array is unreadable, are deliberately
+        /// returned UNCACHED so a seat that asks before the menu exists cannot freeze a
+        /// guess for the process. ("Cached on the first non-zero answer" is what this
+        /// said before r5, and it described neither path.) The fallback is the shipped
+        /// count, so the feature stays correct even on a seat where the menu has not been
+        /// built yet.</para>
+        ///
+        /// <para>A bounded count BELOW the shipped one is cached only PROVISIONALLY
+        /// (v1.41.0 beta round 3, finding 10). Cached for good, the first sighting of a
+        /// row still being built was this function's answer for the rest of the process:
+        /// three of eight portraits seen once meant three slots, and PresetCountIsCredible
+        /// false, until the game restarted. Such a count is derived again at most once
+        /// every <c>PresetSlotsRetrySeconds</c> and answered from the cache in between;
+        /// only a count at or above the shipped one is final. A sweep that finds no row
+        /// keeps the provisional count rather than trading it for the fallback. A creator
+        /// that genuinely has fewer slots costs one sweep a second while something
+        /// asks.</para></summary>
+        internal static int PresetSlotCount()
+        {
+            // ONLY A CREDIBLE COUNT IS FINAL. The 886bed8 client half (an r2 LOW)
+            // and v1.41.0 beta round 3 finding 10 found the same defect in r5's
+            // method and fixed it twice; this is the one mechanism the merge
+            // keeps. r5 removed the magnitude floor and cached whatever discovery
+            // returned, which made the two "self-heals on the next visit"
+            // guarantees below false for the case they were written for: a row
+            // caught mid-build reports two to seven, that number became
+            // process-lifetime state, PresetCountIsCredible() was false forever,
+            // and Tick()'s publish arm answered "waiting for the character
+            // creator" for the rest of the session while a perfectly valid saved
+            // preset never rendered. r5's objection to the floor was COST, not
+            // correctness -- re-sweeping every portrait object on every call --
+            // so the answer is a rate limit rather than a freeze: a provisional
+            // count answers from the cache, and discovery runs again at most once
+            // every PresetSlotsRetrySeconds until it produces one that can be
+            // trusted. _presetSweptAt records when a sweep last ran and
+            // _presetProvisional the provisional count in force (0 once the count
+            // is final); RunPresetSlotSentinel reads both.
+            if (_presetSlots >= PresetSlotsFallback) return _presetSlots;
+            float now = Time.realtimeSinceStartup;
+            if (_presetSlots > 0)
+            {
+                if (now < _presetSlotsRetryAt) return _presetSlots;
+                _presetSlotsRetryAt = now + PresetSlotsRetrySeconds;
+            }
+            _presetSweptAt = now;
+            int slots = 0;
+            try
+            {
+                var portraits = Resources.FindObjectsOfTypeAll<CharacterCreatorPortrait>();
+                if (portraits != null)
+                {
+                    // ONE grid, not every portrait ever loaded. FindObjectsOfTypeAll
+                    // sweeps prefab ASSETS as well as every loaded scene, so a global
+                    // maximum conflates unrelated and half-built grids — a foreign
+                    // portrait sitting at sibling index 9 would cache 10 for the rest
+                    // of the process and hand out blank slots (r1 finding). Scene
+                    // objects only, bucketed by parent, answer from the biggest bucket:
+                    // the real character-creator row.
+                    var seen = new Dictionary<Transform, int>();     // parent -> portraits in it
+                    var highest = new Dictionary<Transform, int>();  // parent -> max sibling index + 1
+                    for (int i = 0; i < portraits.Length; i++)
+                    {
+                        var p = portraits[i];
+                        if (p == null) continue;
+                        if (!p.gameObject.scene.IsValid()) continue;   // a prefab asset is not a built menu
+                        var parent = p.transform.parent;
+                        if (parent == null) continue;
+                        int c; seen.TryGetValue(parent, out c); seen[parent] = c + 1;
+                        int m; highest.TryGetValue(parent, out m);
+                        int idx = p.transform.GetSiblingIndex() + 1;
+                        if (idx > m) highest[parent] = idx;
+                    }
+                    Transform grid = null; int gridCount = 0;
+                    foreach (var kv in seen)
+                        if (kv.Value > gridCount) { gridCount = kv.Value; grid = kv.Key; }
+                    // The sibling index IS the face id — CharacterCreatorPortrait.Start
+                    // passes it straight to GetFacePreset — so the bound is the highest
+                    // index in that row, not how many portraits the row happens to hold.
+                    // A lone portrait is a row still being built: refuse it rather than
+                    // cache 1 and hide every other slot for the session.
+                    if (grid != null && gridCount >= 2) slots = highest[grid];
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PC] preset slot discovery threw: {ex.Message}"); slots = 0; }
+
+            // Menu not built yet, or no row found this time: never cache a guess, and
+            // keep a provisional count rather than trading it for the fallback.
+            if (slots <= 0) return _presetSlots > 0 ? _presetSlots : PresetSlotsFallback;
+
+            // Never CACHE a number that could not be bounded. playerFaces is the array
+            // every lookup below indexes; with it absent the discovered value is an
+            // unchecked guess, and caching a guess makes it permanent (r1 finding).
+            // Answer this call from it, bounded by the shipped count, and try again next
+            // time rather than freezing it.
+            PlayerFace[] faces = null;
+            try { var cch = CharacterCreatorHandler.instance; if (cch != null) faces = cch.playerFaces; }
+            catch { }
+            if (faces == null) return Mathf.Min(slots, PresetSlotsFallback);
+            if (slots > faces.Length) slots = faces.Length;
+            if (slots < PresetSlotsFallback)
+            {
+                // Below the count this build ships knowing about. Answer with it,
+                // but as a PROVISIONAL value: a half-built row and a genuinely
+                // smaller future creator are indistinguishable from here, and only
+                // one of them stops changing. It is cached below, and derived again
+                // once the retry window stamped here has passed;
+                // PresetCountIsCredible() stays false either way, so neither
+                // irreversible consumer acts on it.
+                _presetProvisional = slots;
+                _presetSlotsRetryAt = now + PresetSlotsRetrySeconds;
+            }
+            else _presetProvisional = 0;
+            // NO MAGNITUDE FLOOR HERE (r5 method change). r4 returned the shipped
+            // count for any discovery below it, on the reasoning that a small row is
+            // a half-built row. Two things were wrong with that. A genuinely complete
+            // future grid of two to seven slots was then reported as eight forever
+            // and never cached — offering presets that do not exist and re-sweeping
+            // every portrait object on every call. And the `faces == null` return one
+            // line above sits BEFORE the floor, so the case the floor existed to
+            // catch walked straight past it anyway.
+            //
+            // The size of a number was never evidence about whether discovery had
+            // finished; a complete three-slot row and a half-built eight-slot row are
+            // indistinguishable from here. So this function no longer pretends to
+            // know. It answers with what it found, bounded by the array that actually
+            // limits face ids, and caches that -- for good at or above the shipped
+            // count, provisionally below it (finding 10). The judgement that DID depend on
+            // completeness — may an irreversible action run off this number — moved
+            // to PresetCountIsCredible, where both destructive consumers now ask.
+            if (slots != _presetSlots)
+                Plugin.Log.LogInfo($"[PC] preset slots discovered: {slots}"
+                    + (slots < PresetSlotsFallback ? " (provisional: derived again until the row is complete)" : ""));
+            _presetSlots = slots;
+            return slots;
+        }
+
+        /// <summary>True when the discovered slot count may drive an IRREVERSIBLE
+        /// action — rewriting the player's saved setting, or publishing a portrait
+        /// over the one the server already holds.
+        ///
+        /// <para>A count at or above the number this build ships knowing about can
+        /// only come from a finished row; anything below it has two possible causes
+        /// (a half-built row, or a future build with a genuinely smaller creator) and
+        /// this client cannot tell them apart. Both destructive consumers therefore
+        /// refuse to act rather than guess, and both self-heal: the row finishes
+        /// building within a frame or two and the next visit re-derives. RENDERING is
+        /// deliberately NOT gated on this — showing the player's own character while
+        /// the menu builds costs nothing and reverses itself.</para></summary>
+        internal static bool PresetCountIsCredible() { return _presetSlots >= PresetSlotsFallback; }
+
+        /// <summary>[PRESET-SLOT-SENTINEL] (v1.41.0 beta round 3, finding 10): runs
+        /// PresetSlotCount against the game's REAL portrait row. It derives the count from
+        /// scratch, then plants a provisional sighting of a partial row (three slots) and
+        /// checks that it is answered from the cache inside the retry window, with no
+        /// sweep, and derived again from the real row by a sweep once the window has
+        /// passed, which also clears the provisional record. The four fields it moves are
+        /// put back. Inconclusive, not failed, when no complete row exists to derive from.</summary>
+        internal static string RunPresetSlotSentinel(out bool pass)
+        {
+            pass = false;
+            int savedSlots = _presetSlots, savedProvisional = _presetProvisional;
+            float savedAt = _presetSlotsRetryAt, savedSwept = _presetSweptAt;
+            try
+            {
+                _presetSlots = 0; _presetSlotsRetryAt = 0f;
+                int real = PresetSlotCount();
+                if (_presetSlots < PresetSlotsFallback)
+                    return $"INCONCLUSIVE: no complete portrait row to derive from (answer {real}, cached {_presetSlots})";
+                var fails = new List<string>();
+                _presetSlots = 3; _presetProvisional = 3; _presetSlotsRetryAt = Time.realtimeSinceStartup + 60f;
+                _presetSweptAt = -1f;   // a sweep overwrites this with a time, which is never negative
+                int held = PresetSlotCount();
+                bool sweptInside = _presetSweptAt != -1f;
+                if (held != 3 || PresetCountIsCredible() || sweptInside)
+                    fails.Add($"inside the window: {held}, credible {PresetCountIsCredible()}, swept {sweptInside} (want 3, False, False)");
+                _presetSlotsRetryAt = Time.realtimeSinceStartup - 1f;
+                _presetSweptAt = -1f;
+                int again = PresetSlotCount();
+                bool sweptAfter = _presetSweptAt >= 0f;
+                if (again != real || !PresetCountIsCredible() || !sweptAfter || _presetProvisional != 0)
+                    fails.Add($"after the window: {again}, credible {PresetCountIsCredible()}, swept {sweptAfter}, "
+                              + $"provisional {_presetProvisional} (want {real}, True, True, 0)");
+                int settled = PresetSlotCount();
+                if (settled != real) fails.Add($"once final: {settled} (want {real})");
+                pass = fails.Count == 0;
+                return pass
+                    ? $"PASS: 3 checks (a partial row's count is held inside the window with no sweep, and derived "
+                      + $"again by a sweep of the real row after it, which has {real} slots; the derived count is then "
+                      + "final and the provisional record clear)"
+                    : "FAIL: " + string.Join("; ", fails);
+            }
+            catch (Exception ex) { return "FAIL: threw " + ex.Message; }
+            finally
+            {
+                _presetSlots = savedSlots; _presetSlotsRetryAt = savedAt;
+                _presetProvisional = savedProvisional; _presetSweptAt = savedSwept;
+            }
+        }
+
+        internal static void DevPresetSlotSentinelTest()
+        {
+            bool pass;
+            string result = RunPresetSlotSentinel(out pass);
+            if (pass) Plugin.Log.LogInfo("[PRESET-SLOT-SENTINEL] " + result);
+            else Plugin.Log.LogWarning("[PRESET-SLOT-SENTINEL] " + result);
+        }
+
         internal static int CurrentPreset()
         {
-            try { var c = Plugin.PortraitPreset; return c != null ? Mathf.Clamp(c.Value, -1, 9) : -1; } catch { return -1; }
+            // An out-of-range saved value resolves to -1 ("follow the selected
+            // character"), NOT to the nearest real slot. Clamping looked tidier and was
+            // wrong: the UI used to offer ten options for eight real slots (#370), so
+            // saved 8s and 9s exist in the wild, and clamping silently rewrote them to
+            // slot 7 — merely opening Collection or Settings would then render and
+            // UPLOAD slot 7's authored face over a card the player never touched
+            // (r1 finding). -1 is the pre-#370 default: it shows their own character
+            // and changes nothing until they pick a slot that exists.
+            try
+            {
+                var c = Plugin.PortraitPreset;
+                if (c == null) return -1;
+                int v = c.Value;
+                if (v >= 0 && v < PresetSlotCount()) return v;
+                // Out of range. Persist the correction ONCE so the saved
+                // setting stops naming a slot that does not exist — otherwise
+                // this resolves to Follow on every read while the config still
+                // says 9, and the descriptor check in Tick() re-derives the
+                // same difference on every visit.
+                //
+                // Gated on a DISCOVERED count, never on the fallback: writing
+                // the config off a guess would delete a legitimate setting on
+                // some future build whose creator has more slots than the
+                // eight this one ships. Until discovery happens the value is
+                // still treated as out of range for RENDERING (safe — it shows
+                // the player's own character) but is left on disk untouched.
+                //
+                // The one corrective upload this causes is intended: a card
+                // sitting on preset 8 or 9 is showing a face the player could
+                // never have authored (#370 — the UI offered ten options for
+                // eight real slots), and replacing it with their actual
+                // character is the repair, not a side effect.
+                // `_presetSlots > 0` is not the same test as "the number is
+                // credible". The discovery refuses a ONE-portrait bucket because a
+                // row of one is a row still being built — but a row of three is
+                // also a row still being built, and it passes: 3 is the count until
+                // the row is seen again (round 3 finding 10; it used to be the count
+                // for the process), and a legitimate saved preset of 5 read against it
+                // would be written to -1 and gone. Rendering can afford a wrong small
+                // count (it shows the
+                // player's own character); an irreversible write to their config
+                // cannot, so the two stop sharing a gate here. Corroborate against
+                // the count this build ships knowing about: a discovery at or above
+                // PresetSlotsFallback is a complete row, and anything below it is
+                // the shape only a half-built one produces. A future build with
+                // genuinely fewer slots simply keeps the saved value on disk and
+                // renders Follow — the direction this whole function already takes.
+                if (v != -1 && PresetCountIsCredible() && !_presetMigrated)
+                {
+                    _presetMigrated = true;
+                    try { c.Value = -1; } catch { }
+                    Plugin.Log.LogInfo($"[PC] saved portrait preset {v} is not an authorable "
+                        + $"slot (0..{_presetSlots - 1} exist) — reset to follow the selected character");
+                }
+                return -1;
+            }
+            catch { return -1; }
         }
 
         /// <summary>Runs the teardown a coroutine owed but never reached. Safe
@@ -481,15 +811,38 @@ namespace CompetitiveRounds
             if (_checkedVisit == _visitId) return;
             _checkedVisit = _visitId;
             if (!string.IsNullOrEmpty(me.portrait_locked_until)) { LastResult = "picture locked"; return; }
+            // An UNCREDIBLE slot count must not drive an UPLOAD. CurrentPreset()
+            // resolves a saved value the count rejects down to Follow, which is the
+            // right thing to RENDER — it shows the player's own character — but the
+            // wrong thing to PUBLISH: while the creator row is still building, the
+            // count is small, a perfectly legitimate saved preset reads as out of
+            // range, and this visit would overwrite a good server-side portrait with
+            // Follow's descriptor for the rest of the process. Migration already
+            // refuses an uncredible count; this is the same refusal for the OTHER
+            // irreversible consumer, which had been left sharing that assumption
+            // without its gate (r5 finding). Narrow on purpose — it fires only when
+            // the count is what rejects the saved value, so a future build with
+            // genuinely fewer slots still publishes its in-range presets normally.
+            // Deferred, not dropped: the next visit re-derives, exactly as the
+            // refused-capture path below does.
+            int savedPreset = -1;
+            try { var pc = Plugin.PortraitPreset; if (pc != null) savedPreset = pc.Value; } catch { }
+            if (savedPreset >= 0 && savedPreset >= PresetSlotCount() && !PresetCountIsCredible())
+            {
+                LastResult = "waiting for the character creator";
+                return;
+            }
             string want = BuildDescriptor(CurrentPreset());
             // A refused capture leaves LastResult saying why and does NOT
             // render. _pendingCheck is already false, so this visit does not
             // spin; the next visit (or a preset change) tries again, which is
             // what makes "art not loaded yet" self-correcting.
             if (want == null) return;
-            // Dance cards (design S1.2): a selected, owned dance decides here --
-            // the dance job, a current dance picture, or a Fallback whose still
-            // is current; otherwise the product path below, as before.
+            // Dance cards (design S1.2): a selected dance decides here -- the
+            // dance job, a current dance picture, a Fallback whose still is
+            // current, or no upload at all (report 1: a base still over a bound
+            // motion unbinds it); with no dance selected, the product path
+            // below, as before.
             if (DanceVisit(me, want)) return;
             if (!string.IsNullOrEmpty(me.portrait_hash) && me.portrait_descriptor == want)
             {
@@ -534,7 +887,17 @@ namespace CompetitiveRounds
         /// uploaded the capture taken under the old value. Pairs of ad-hoc
         /// checks are exactly how the next one gets forgotten, so there is one
         /// key and one comparison. (The picture setting was a term until
-        /// 2026-09-13; there is no such setting any more.)</summary>
+        /// 2026-09-13; there is no such setting any more.)
+        ///
+        /// <para>-1 (Follow) IS a value of this key, deliberately, and the claim
+        /// made for #370 is narrower than it was once written (r2 LOW). What holds
+        /// is that -1 never crosses the wire, never reaches a filename and never
+        /// enters the server-visible descriptor: BuildDescriptor resolves it to the
+        /// selected character's face ids, and neither schemas.py nor main.py has a
+        /// preset field at all. What does NOT hold is "-1 never enters a cache
+        /// key" — this is a process-local staleness key, and Follow must be able
+        /// to invalidate it when the player changes the selected character, so
+        /// excluding -1 would be a defect rather than hygiene.</para></summary>
         private static string StateKey()
         {
             return (MatchTracker.LocalSteamId ?? "")
@@ -566,8 +929,12 @@ namespace CompetitiveRounds
                 int preset = CurrentPreset();
                 if (cch != null)
                 {
-                    if (preset >= 0 && cch.playerFaces != null && preset < cch.playerFaces.Length) f = cch.playerFaces[preset];
-                    else if (cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0) f = cch.selectedPlayerFaces[0];
+                    // Bounded by the AUTHORABLE slot count, not the array length (#370):
+                    // playerFaces has ten entries but only the first PresetSlotCount() of
+                    // them can be filled in the character creator. The array bound stays as
+                    // well so a discovery that over-reports can never index out of range.
+                    if (preset >= 0 && preset < PresetSlotCount() && cch.playerFaces != null && preset < cch.playerFaces.Length) f = cch.playerFaces[preset];
+                    else f = AvatarDefaults.FaceForFollow();   // item 19: the face a forced room switch displaced, else the live selection
                 }
                 if (f != null)
                     face = f.eyeID + ":" + f.mouthID + ":" + f.detailID + ":" + f.detail2ID + ";"
@@ -666,8 +1033,12 @@ namespace CompetitiveRounds
                 if (cch != null)
                 {
                     // the config value IS the index: -1 follows the live selection
-                    if (preset >= 0 && cch.playerFaces != null && preset < cch.playerFaces.Length) f = cch.playerFaces[preset];
-                    else if (cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0) f = cch.selectedPlayerFaces[0];
+                    // Bounded by the AUTHORABLE slot count, not the array length (#370):
+                    // playerFaces has ten entries but only the first PresetSlotCount() of
+                    // them can be filled in the character creator. The array bound stays as
+                    // well so a discovery that over-reports can never index out of range.
+                    if (preset >= 0 && preset < PresetSlotCount() && cch.playerFaces != null && preset < cch.playerFaces.Length) f = cch.playerFaces[preset];
+                    else f = AvatarDefaults.FaceForFollow();   // item 19: the face a forced room switch displaced, else the live selection
                 }
             }
             catch { f = null; }
@@ -860,6 +1231,7 @@ namespace CompetitiveRounds
 
         private static IEnumerator ProductRun(string why, bool upload, int gen, bool lever)
         {
+            _productUploads = upload;   // runs inside StartProduct's StartCoroutine, before the first yield (LookPending)
             var rep = new StringBuilder();
             _errCount = 0; _errs.Clear();
             _cleanupOwed = true;
@@ -935,7 +1307,7 @@ namespace CompetitiveRounds
                 LogGradeProbe();
                 if (lit < 0.02f || lit > 0.60f) { LastResult = "render discarded: lit " + (100f * lit).ToString("F1") + "%"; matte = null; yield break; }
                 var prev = PreviewTex;
-                PreviewTex = Reduce4(px, DEFAULT_SIZE); PreviewSerial++;
+                PreviewTex = Reduce4(px, DEFAULT_SIZE); PreviewDescriptor = descriptor; PreviewSerial++;
                 if (prev != null) UnityEngine.Object.Destroy(prev);
                 Teardown(rep);
                 yield return null;                           // deferred Destroy lands
@@ -950,6 +1322,7 @@ namespace CompetitiveRounds
                 if (!_renderClaim.HeldByOther(gen))
                 {
                     _cleanupOwed = false;
+                    _productUploads = false;   // the upload, if any, starts below in this same step (LookPending)
                     Application.logMessageReceived -= OnLog;
                     Teardown(rep);
                 }
@@ -973,7 +1346,25 @@ namespace CompetitiveRounds
 
         private static void Upload(string key, string descriptor, byte[] png, string why)
         {
-            // Every upload, the retry included, passes here. A build whose grade
+            // Every base-still upload, the retry and the dev lever included,
+            // passes here, and it is the one base-still sender (the dance job's
+            // still goes through DanceApiPort.UploadStill under the dance
+            // descriptor). While a dance is selected -- or while /pc/me is unread,
+            // so a selection cannot be ruled out -- a base still is never sent:
+            // the server would store it over the dance still and the motion
+            // bound to that still would read "no motion" everywhere (report 1,
+            // 2026-09-30; DanceMotionCore.DanceSelected). The decision layer
+            // (DanceVisit, RefreshStart) already routes around this; this is
+            // the backstop for every caller.
+            var pcMe = ApiClient.CachedPcMe;
+            if (pcMe == null || DanceMotionCore.DanceSelected(pcMe.dance_supported, pcMe.pc_dance_sku))
+            {
+                LastResult = pcMe == null ? "not sent: the card state is not read yet" : "not sent: a dance is selected";
+                Plugin.Log.LogInfo("[PORTRAIT] " + why + ": base still not sent ("
+                                   + (pcMe == null ? "no /pc/me yet" : "dance " + pcMe.pc_dance_sku + " selected") + ")");
+                return;
+            }
+            // A build whose grade
             // table is still the identity placeholder, or whose compiled table
             // LoadGrade rejected (length, digest, marker, or not the table
             // RECIPE_GRADE_FNV names), renders ungraded pixels, and the server
@@ -1642,7 +2033,10 @@ namespace CompetitiveRounds
             var cch = CharacterCreatorHandler.instance;
             if (cch == null) { rep.Append("no CharacterCreatorHandler.instance\n"); return null; }
             PlayerFace f = null;
-            if (preset >= 0 && cch.playerFaces != null && preset < cch.playerFaces.Length) f = cch.playerFaces[preset];
+            // Same authorable bound as the two live callers (#370). The dev lever parses
+            // preset=N unbounded, so this is the only thing standing between it and a
+            // blank face captured from an unwritable slot.
+            if (preset >= 0 && preset < PresetSlotCount() && cch.playerFaces != null && preset < cch.playerFaces.Length) f = cch.playerFaces[preset];
             else if (cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0) f = cch.selectedPlayerFaces[0];
             rep.Append("face: ").Append(FaceStr(f)).Append('\n');
             return f;
@@ -1926,7 +2320,7 @@ namespace CompetitiveRounds
                     if ((h.rig.transform.position.x > rx) == (a.transform.position.x > rx)) { g.gunSide++; continue; }   // the gun side, as Update decides it
                     Vector3 rest = a.transform.parent.TransformPoint(a.startPos);
                     if ((a.target.position - rest).sqrMagnitude > e2 || a.velolcity.sqrMagnitude > e2 || a.sinceRaise < 0.3f) g.armMoved = true;
-                    a.target.position = rest;
+                    DanceEmotes.WriteArmBaseline(a.target, rest);   // forgets a dance delta still owed on it (RR-LAND-1)
                     a.velolcity = Vector3.zero;
                     if (a.sinceRaise < 0.3f) a.sinceRaise = 0.3f;
                     g.free++;
@@ -2921,9 +3315,68 @@ namespace CompetitiveRounds
             fit = new Bounds(PARK, Vector3.one);
             Bounds use;
             if (!SolidBounds(rep, clone, out use)) return false;
-            fit = SquareFit(use, pad);
-            rep.Append("fit centre=").Append(V(fit.center - PARK)).Append(" side=").Append(fit.size.x.ToString("F2")).Append('\n');
+            fit = BodyCentredFit(rep, use, pad, clone.transform.position.x);
             return true;
+        }
+
+        /// <summary>The still portrait's frame (RECIPE 4): square, padded, and
+        /// centred horizontally on the BODY rather than on `use`. The dance
+        /// capture frames with SquareFit instead: its framing is part of
+        /// MOTION_RECIPE 1, which the server's pc_motion carries too, so moving
+        /// it is a recipe bump on both sides and not a client edit.</summary>
+        private static Bounds BodyCentredFit(StringBuilder rep, Bounds use, float pad, float rigX)
+        {
+            // Horizontally the frame is centred on the BODY, not on that union. The union
+            // carries the gun (reserved to about +1.9 above, hand at +1.2), the free arm and
+            // any one-sided cosmetic, so centring on it put the body left of centre in every
+            // run recorded at r=2: fit centre x +0.25 and +0.37 on sides of 4.28 and 4.59,
+            // the rig 6.0% and 8.2% of the width left of it. Those figures are read out of
+            // the per-run portrait reports this file writes next to the game, which are run
+            // output and not carried by the repo -- re-read them from a run rather than
+            // taking them from a comment.
+            //
+            // rigX stands in for the body centre because the skin is built at the rig
+            // transform. That holds for a rig this code assembled, and nothing here proves
+            // it for every rig it may be handed, which is why the fallback just below asks
+            // the GEOMETRY one question: does the rig transform lie INSIDE the span being
+            // framed? If it does not, nothing being framed straddles it, so it cannot be
+            // the body's centre, and the union centre is used instead.
+            //
+            // That is the whole of what the fallback detects, and it is narrower than the
+            // shapes it is reached by. It catches a rig transform OUTSIDE the span -- what a
+            // re-root far enough to leave it produces, and what a clone whose skin never
+            // spawned produces only when nothing else framed (limbs, gun, cosmetics)
+            // straddles the rig. A transform left INSIDE the span is NOT caught: the frame
+            // centres on rigX, whatever that is on such a rig. The only thing that shows
+            // it is the report line below -- a bodyCx away from unionCx with no "using the
+            // union centre" line before it. Nothing here tests it and nothing claims to.
+            //
+            // An earlier version of this comment also offered a matte-erosion measurement
+            // (a body core on rig x -0.006, bbox mid -0.004, "the same at every erosion
+            // depth from 20 to 56 px"). Eroding the checked-in mattes does not reproduce
+            // it -- the centre moves across those depths -- so whatever that run measured,
+            // it is not something this tree shows, and it is no longer claimed.
+            float bodyCx = rigX;
+            if (bodyCx < use.min.x || bodyCx > use.max.x)
+            {
+                // Nothing being framed straddles the rig transform, so it is not the body's
+                // centre on this rig (re-rooted, or a clone whose skin never spawned). Frame on
+                // the union instead; this must not cost a render.
+                rep.Append("body centre: rig x=").Append((bodyCx - PARK.x).ToString("F2"))
+                   .Append(" is outside the framed span, using the union centre\n");
+                bodyCx = use.center.x;
+            }
+            // Square, and symmetric about the body centre: the half-extent has to reach the
+            // union's FAR side, so an off-centre gun or cosmetic costs scale and never a crop.
+            // With bodyCx == use.center.x this is the previous side exactly (the 0.25f floor is
+            // the old 0.5f one, halved), so the change is only ever the off-centre case.
+            float half = Mathf.Max(use.max.x - bodyCx, bodyCx - use.min.x);
+            float side = Mathf.Max(half, use.size.y * 0.5f, 0.25f) * 2f * pad;
+            var fit = new Bounds(new Vector3(bodyCx, use.center.y, PARK.z), new Vector3(side, side, 1f));
+            rep.Append("fit centre=").Append(V(fit.center - PARK)).Append(" side=").Append(side.ToString("F2"))
+               .Append(" bodyCx=").Append((bodyCx - PARK.x).ToString("F2"))
+               .Append(" unionCx=").Append((use.center.x - PARK.x).ToString("F2")).Append('\n');
+            return fit;
         }
 
         /// <summary>The square frame around `use`, padded: its side is the
@@ -3496,9 +3949,10 @@ namespace CompetitiveRounds
                     for (int k = 0; k < n; k++)
                     {
                         float t = k * ms / 1000f;
-                        // L1: undo the rig's remembered deltas once, then the baseline
+                        // L1: undo the rig's remembered deltas once, then the baseline,
+                        // which forgets any delta still owed (RR-LAND-1)
                         DanceEmotes.RestorePortraitRig(rigRoot);
-                        armL.target.position = baseL; armR.target.position = baseR;
+                        DanceEmotes.WriteArmBaseline(armL.target, baseL); DanceEmotes.WriteArmBaseline(armR.target, baseR);
                         armL.velolcity = Vector3.zero; armR.velolcity = Vector3.zero;
                         Vector2 body, al, ar; float rot;
                         DanceEmotes.EvaluateClamped(idx, t, out body, out rot, out al, out ar);

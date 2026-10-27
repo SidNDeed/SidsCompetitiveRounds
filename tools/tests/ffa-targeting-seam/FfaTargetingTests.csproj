@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Bugs 437-439 - console harness for the FFA enemy resolver.
+
+       It compiles the REAL plugin/FfaTargetingSeam.cs and
+       plugin/ProximityVictimSeam.cs, not copies, so the shipped path is the
+       tested path. run-tests.ps1 overrides FfaSeamSource or VictimSeamSource
+       to point at a generated mutant.
+
+       Paths are RELATIVE to this file so no local directory reaches a tracked
+       file. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>FfaTargetingTests</AssemblyName>
+    <RootNamespace>FfaTargetingTests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(FfaSeamSource)' == ''">
+    <FfaSeamSource>$(MSBuildThisFileDirectory)..\..\..\plugin\FfaTargetingSeam.cs</FfaSeamSource>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(VictimSeamSource)' == ''">
+    <VictimSeamSource>$(MSBuildThisFileDirectory)..\..\..\plugin\ProximityVictimSeam.cs</VictimSeamSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(FfaSeamSource)" />
+    <Compile Include="$(VictimSeamSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,1899 @@
+using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace CompetitiveRounds
+{
+    /// <summary>
+    /// Item 18, shard on the fly in the card pull tab: the decisions the
+    /// strip's per-card Discard button makes, kept free of Unity, Photon,
+    /// BepInEx and I18n so they run under a plain compiler. PlayerCardsUI
+    /// hands them plain values and acts on what comes back; the same SelfTest
+    /// runs under tools/client-rules-harness, so the rules are EXECUTED rather
+    /// than asserted about as source text (#391).
+    ///
+    /// The send itself is the batch shard's (board row 25,
+    /// ApiClient.PcDiscardBatch) with ONE print: one server transaction, the
+    /// credit one delta (#326), keyed by a nonce kept for that print until an
+    /// answer arrives, so the same card asked again after a lost answer is a
+    /// replay the server answers from its stored row and never pays twice.
+    /// </summary>
+    internal static class PcQuickShardRules
+    {
+        /// <summary>The armed-request identity of one strip card, in the
+        /// namespace the batch shard's arming already uses ("pack|...",
+        /// "sel|..."), so arming one control disarms the others.</summary>
+        internal static string ArmSet(string printId)
+        {
+            return "one|" + (printId ?? "");
+        }
+
+        /// <summary>Whether a tile shows its Discard button. The binder keeps
+        /// its rule exactly (hidden only while the binder's Select mode picks
+        /// cards; the binder never holds a discarded print). The pull strip
+        /// ignores the binder's Select mode, and hides the button on a print
+        /// that is discarded or that the server has named as no longer the
+        /// player's (a refused shard), since a click there can only be
+        /// refused.</summary>
+        internal static bool DiscardOffered(bool quickSurface, bool discarded, bool gone, bool selecting)
+        {
+            if (quickSurface) return !discarded && !gone;
+            return !discarded && !selecting;
+        }
+
+        /// <summary>Whether a refused or unanswered strip shard reads the
+        /// collection and the balance back (once, after the answer; never
+        /// concurrently with the shard itself). The screen is never changed
+        /// before the server answers, so a failure leaves the card and the
+        /// balance as they were; this decides whether they are then re-read.
+        ///   * rate_limited: refused by the rate gate before the route ran, so
+        ///     nothing happened and the screen is already right, and a read
+        ///     now would be charged to the same bucket that just refused us
+        ///     (the shape reports 364 and 368 describe). No read.
+        ///   * session_required, not_ready: never sent, or refused before the
+        ///     actor was read. No read.
+        ///   * transport, given_up: no answer, so whether the shard applied is
+        ///     unknown. Read back.
+        ///   * every other code (not_owned, key_reused, the route missing, a
+        ///     5xx): the local copy may be what was wrong. Read back.
+        /// A null code is a success, which the answer itself describes: no
+        /// read.</summary>
+        internal static bool ReadBackAfter(string code)
+        {
+            if (code == null) return false;
+            switch (code)
+            {
+                case "rate_limited":
+                case "session_required":
+                case "not_ready":
+                    return false;
+                default:
+                    return true;
+            }
+        }
+
+        /// <summary>Whether the strip card's nonce is kept after an answer, so
+        /// the next send for that card is the same key (a replay). Kept on
+        /// every failure but key_reused: a lost answer, a rate limit, a 5xx or
+        /// a not_owned all leave the server either with this key's row (a
+        /// replay answers it) or without it (the key is unused). key_reused
+        /// means the key's row names other prints, so it can never answer
+        /// this card. A success ends the key's life.</summary>
+        internal static bool KeepKeyAfter(string code)
+        {
+            if (code == null) return false;
+            return code != "key_reused";
+        }
+
+        /// <summary>Requests one strip shard sends, including what its answer
+        /// triggers: the shard itself, plus the two read-backs (collection and
+        /// balance) when ReadBackAfter says so. Never a retry: a second send
+        /// takes two more clicks.</summary>
+        internal static int RequestsFor(string code)
+        {
+            return 1 + (ReadBackAfter(code) ? 2 : 0);
+        }
+
+        /// <summary>The pull tab's Shard dupes (fix pass 1, finding 3; design
+        /// section 2.3's pull-wide control, sent through the batch shard's
+        /// route): which of the shown pack's prints are DUPLICATES, so that
+        /// one live copy of every exact face survives.
+        ///   pageFaceKeys   the pack's prints in display order, each print's
+        ///                  exact face (PlayerCardsUI.FaceKey: card, rarity,
+        ///                  foil, signed), null for a print that is not live
+        ///                  (discarded, or named gone by the server);
+        ///   pagePrintIds   parallel to pageFaceKeys;
+        ///   liveCountByFaceKey  the player's live copies of each face, over
+        ///                  the whole collection;
+        ///   livePrintIds   the collection's live print ids.
+        /// liveCountByFaceKey and livePrintIds come from ONE collection read
+        /// (PlayerCardsUI.PackDupeIds builds both in one walk).
+        /// Fix pass 2, finding 2: that read is the CURRENT ownership of the
+        /// pack's prints. The pack history describes a print as the pull made
+        /// it, so a print traded away since still reads live there. A page
+        /// print that is not in livePrintIds is not the player's now (traded
+        /// away, or a read from before the pack): it is neither taken nor
+        /// counted, and it never makes the action not ready. A print traded
+        /// away and back is in the read again, so it counts. ready is false
+        /// (and the list empty) only when an input is missing. Walking the
+        /// owned page prints in display order, a print is taken only while its
+        /// face has MORE than one live copy left, so the first owned copy in
+        /// order of a face new to the player is kept, and a face the binder
+        /// holds outside this pack has every owned pack copy taken while that
+        /// copy survives. Never the last copy: within the read, what is left
+        /// of every face is at least one.</summary>
+        internal static List<string> DuplicateShardIds(IList<string> pageFaceKeys, IList<string> pagePrintIds,
+            IDictionary<string, int> liveCountByFaceKey, ICollection<string> livePrintIds, out bool ready)
+        {
+            var queue = new List<string>();
+            ready = false;
+            if (pageFaceKeys == null || pagePrintIds == null || pageFaceKeys.Count != pagePrintIds.Count
+                || liveCountByFaceKey == null || livePrintIds == null) return queue;
+            ready = true;
+            // the page as the player owns it now: a face for an owned live print, null otherwise
+            var owned = new string[pageFaceKeys.Count];
+            for (int i = 0; i < pageFaceKeys.Count; i++)
+                owned[i] = pageFaceKeys[i] != null && pagePrintIds[i] != null && livePrintIds.Contains(pagePrintIds[i]) ? pageFaceKeys[i] : null;
+            var onPage = new Dictionary<string, int>(StringComparer.Ordinal);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < owned.Length; i++)
+            {
+                string k = owned[i];
+                if (k == null || !seen.Add(pagePrintIds[i])) continue;
+                int m; onPage.TryGetValue(k, out m); onPage[k] = m + 1;
+            }
+            // A face the binder also holds OUTSIDE this pack keeps that copy,
+            // so every page copy goes; a face only this pack holds keeps its
+            // FIRST page copy in display order. A count below the page's own
+            // copies disagrees with the page: nothing of that face is taken.
+            var kept = new HashSet<string>(StringComparer.Ordinal);
+            seen.Clear();
+            for (int i = 0; i < owned.Length; i++)
+            {
+                string k = owned[i];
+                if (k == null || !seen.Add(pagePrintIds[i])) continue;
+                int total; liveCountByFaceKey.TryGetValue(k, out total);
+                int outside = total - onPage[k];
+                if (outside < 0) continue;
+                if (outside == 0 && kept.Add(k)) continue;
+                queue.Add(pagePrintIds[i]);
+            }
+            return queue;
+        }
+
+        /// <summary>Fix pass 2, finding 2: whether the Shard dupes button is
+        /// up -- a ready answer naming at least one duplicate and no more than
+        /// one batch may carry. A pack whose only duplicate was traded away
+        /// has none, so the button is hidden; a pack with other owned
+        /// duplicates shows it.</summary>
+        internal static bool DupesOffered(bool ready, int count, int cap)
+        {
+            return ready && count > 0 && count <= cap;
+        }
+
+        /// <summary>Fix pass 3, finding 2: PlayerCardsUI.PackDupeIds' two
+        /// walks, free of Unity, with the not_owned tombstones applied to
+        /// both, so the client rules harness drives the whole path the
+        /// button reads and not the duplicate rule alone.
+        ///   pageFaceKeys / pagePrintIds  the shown pack's prints in display
+        ///                  order; a face is null for a print the strip itself
+        ///                  knows is not live (discarded, no usable id);
+        ///   colFaceKeys / colPrintIds    the collection read's prints,
+        ///                  parallel; both null for a print the read does not
+        ///                  hold live (discarded);
+        ///   gone           the tombstones (PcShardTombstones): prints a
+        ///                  refused shard named not_owned that no collection
+        ///                  read dispatched after that refusal has held since.
+        /// A tombstoned print is neither taken nor counted on either walk;
+        /// what is left goes through DuplicateShardIds, sorted. ready is false
+        /// (and the list empty) when an input is missing.</summary>
+        internal static List<string> PackDupes(IList<string> pageFaceKeys, IList<string> pagePrintIds,
+            IList<string> colFaceKeys, IList<string> colPrintIds, PcShardTombstones gone, out bool ready)
+        {
+            ready = false;
+            if (pageFaceKeys == null || pagePrintIds == null || pageFaceKeys.Count != pagePrintIds.Count
+                || colFaceKeys == null || colPrintIds == null || colFaceKeys.Count != colPrintIds.Count || gone == null)
+                return new List<string>();
+            var faces = new List<string>(pageFaceKeys.Count);
+            for (int i = 0; i < pageFaceKeys.Count; i++)
+                faces.Add(pageFaceKeys[i] != null && !gone.Contains(pagePrintIds[i]) ? pageFaceKeys[i] : null);
+            var held = new HashSet<string>(StringComparer.Ordinal);
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int i = 0; i < colPrintIds.Count; i++)
+            {
+                string c = colPrintIds[i], k = colFaceKeys[i];
+                if (c == null || k == null || gone.Contains(c) || !held.Add(c)) continue;
+                int n; counts.TryGetValue(k, out n); counts[k] = n + 1;
+            }
+            var ids = DuplicateShardIds(faces, pagePrintIds, counts, held, out ready);
+            ids.Sort(StringComparer.Ordinal);
+            return ids;
+        }
+
+        /// <summary>Fix pass 3, finding 4: whether a single-discard step's
+        /// answer is the CURRENT run's -- the predicate ApiClient.PcDiscard
+        /// tests (PcShardFlight.Admits, PcDiscardBatch's rule) before it
+        /// writes the answer's balance into the cache and moves the answer
+        /// fence. The identity the step was sent under is still the current
+        /// one, a run is out, and the run's serial is the one the step was
+        /// sent with. The 25 s give-up bumps the serial and ends the run
+        /// (PlayerCardsUI.RetireStuckLatches), so a retired run's late success
+        /// changes neither the cached balance nor the fence.</summary>
+        internal static bool DiscardStepCurrent(bool sameIdentity, bool runOut, int sentSerial, int runSerial)
+        {
+            return sameIdentity && runOut && sentSerial == runSerial;
+        }
+
+        // -- self-test (EXECUTED by tools/client-rules-harness) --------------
+
+        internal sealed class SelfTestResult
+        {
+            internal int Passed;
+            internal int Failed;
+            internal readonly StringBuilder Report = new StringBuilder();
+        }
+
+        /// <summary>The strip's button as a pass that "unified" the two
+        /// surfaces would write it, reading the binder's Select mode and not
+        /// the refused set. The NEGATIVE CONTROL for the visibility cases:
+        /// it must disagree with DiscardOffered on the cases that name a
+        /// difference (#391). Never called by anything that paints.</summary>
+        private static bool OfferedAsTheBinder(bool discarded, bool gone, bool selecting)
+        {
+            return !discarded && !selecting;
+        }
+
+        /// <summary>A read-back on every failure, the drop client's shape
+        /// (each discard answer followed by two refetches). NEGATIVE CONTROL
+        /// for the request-count cases. Never called by anything that
+        /// sends.</summary>
+        private static int RequestsWithAlwaysReadBack(string code)
+        {
+            return code == null ? 1 : 3;
+        }
+
+        /// <summary>Every live print of the pack, the Shard pack's set
+        /// (PlayerCardsUI.PackShardIds), which is all the pull-wide action
+        /// 6804a7e7 offered. NEGATIVE CONTROL for the duplicate cases: on a
+        /// pack holding a unique or last copy it must disagree with
+        /// DuplicateShardIds. Never called by anything that sends.</summary>
+        private static List<string> AllLivePrints(IList<string> pageFaceKeys, IList<string> pagePrintIds)
+        {
+            var all = new List<string>();
+            for (int i = 0; i < pageFaceKeys.Count; i++) if (pageFaceKeys[i] != null) all.Add(pagePrintIds[i]);
+            return all;
+        }
+
+        internal static SelfTestResult SelfTest()
+        {
+            var r = new SelfTestResult();
+
+            // visibility: the strip
+            Check(r, "strip: a live print offers Discard", DiscardOffered(true, false, false, false), "");
+            Check(r, "strip: a discarded print does not", !DiscardOffered(true, true, false, false), "");
+            Check(r, "strip: a print the server named gone does not", !DiscardOffered(true, false, true, false), "");
+            Check(r, "strip: the binder's Select mode does not hide it", DiscardOffered(true, false, false, true), "");
+            Check(r, "control: the binder's rule WOULD hide it in Select mode",
+                  OfferedAsTheBinder(false, false, true) != DiscardOffered(true, false, false, true), "");
+            Check(r, "control: the binder's rule WOULD offer a gone print",
+                  OfferedAsTheBinder(false, true, false) != DiscardOffered(true, false, true, false), "");
+            // visibility: the binder, unchanged
+            Check(r, "binder: a live print offers Discard", DiscardOffered(false, false, false, false), "");
+            Check(r, "binder: Select mode hides it", !DiscardOffered(false, false, false, true), "");
+            Check(r, "binder: a gone print keeps it (its own refusal refreshes)", DiscardOffered(false, false, true, false), "");
+            Check(r, "binder: the refused set never changes its answer, on every input", BinderUnchanged(), "");
+
+            // the arm identity
+            Check(r, "arm: one card's set names the card", ArmSet("abc-1") == "one|abc-1", ArmSet("abc-1"));
+            Check(r, "arm: two cards never share a set", ArmSet("abc-1") != ArmSet("abc-2"), "");
+            Check(r, "arm: never a pack or a selection set",
+                  !ArmSet("x").StartsWith("pack|", StringComparison.Ordinal) && !ArmSet("x").StartsWith("sel|", StringComparison.Ordinal), ArmSet("x"));
+
+            // read-back and request count
+            Check(r, "success: one request, no read", RequestsFor(null) == 1 && !ReadBackAfter(null), RequestsFor(null).ToString());
+            Check(r, "rate_limited: one request, no read", RequestsFor("rate_limited") == 1, RequestsFor("rate_limited").ToString());
+            Check(r, "session_required: no read", !ReadBackAfter("session_required"), "");
+            Check(r, "transport: read back (unknown outcome)", ReadBackAfter("transport") && RequestsFor("transport") == 3, RequestsFor("transport").ToString());
+            Check(r, "given_up: read back (unknown outcome)", ReadBackAfter("given_up"), "");
+            Check(r, "not_owned: read back", ReadBackAfter("not_owned"), "");
+            Check(r, "key_reused: read back", ReadBackAfter("key_reused"), "");
+            Check(r, "an unknown code fails toward reading back", ReadBackAfter("http"), "");
+            Check(r, "control: the always-read shape costs three on a rate limit",
+                  RequestsWithAlwaysReadBack("rate_limited") == 3 && RequestsWithAlwaysReadBack("rate_limited") != RequestsFor("rate_limited"), "");
+            Check(r, "control: and agrees on success", RequestsWithAlwaysReadBack(null) == RequestsFor(null), "");
+
+            // the key
+            Check(r, "key: a success ends it", !KeepKeyAfter(null), "");
+            Check(r, "key: kept after a lost answer (the retry is a replay)", KeepKeyAfter("transport") && KeepKeyAfter("given_up"), "");
+            Check(r, "key: kept after a rate limit", KeepKeyAfter("rate_limited"), "");
+            Check(r, "key: dropped after key_reused", !KeepKeyAfter("key_reused"), "");
+
+            FlightCases(r);
+            DupesCases(r);
+            RecoveryCases(r);
+            TombstoneCases(r);
+            DiscardLateCases(r);
+            SettingsLateCases(r);
+            MeDemandCases(r);
+            DanceSelectCases(r);
+            return r;
+        }
+
+        // -- fix pass 4, finding 7: a balance read asked while one flies -----
+
+        /// <summary>ApiClient's /pc/me read path, step for step, over the
+        /// classes it runs (PcReadDemand, PcCacheFence), the server's balance
+        /// a number and every step one tick of a clock. Ask is FetchPcMe(id,
+        /// true). Serve is the server reading the balance for the read on the
+        /// wire, so a snapshot can predate whatever happens while that read
+        /// flies (Land serves it if nothing did). Land is the answer landing
+        /// (ok false: a failed answer). Frame is the next frame: the deferred
+        /// re-read (RefetchPcMeNextFrame), then the owed read
+        /// (PcSendOwedReads; no shard or discard is out). Edge is an identity
+        /// or consent edge (ReleasePcReadLatches; the read latch stays until
+        /// the read on the wire lands, as FetchPcMe's landing clears it).
+        /// latch false is the NEGATIVE CONTROL: FetchPcMe as 59fcf3f6 wrote
+        /// it, which answered a forced ask made while a read flew "in-flight"
+        /// and remembered nothing. Fix pass 5 (finding 10) adds each ask's
+        /// callback (heard as FetchPcMe hears it: the read's own on its
+        /// landing, a forced ask's made while a read flew from the first read
+        /// dispatched after it, PcReadDemand.Answered) and the dance the
+        /// server holds beside the balance (SelectDance; the snapshot carries
+        /// both). latch true with retain false is that pass's NEGATIVE
+        /// CONTROL: FetchPcMe as cdac2efd wrote it, which recorded the demand
+        /// and answered a forced ask's callback "in-flight" at once. Never
+        /// called by anything that sends.</summary>
+        private sealed class MeReadPath
+        {
+            private readonly bool latch, retain;
+            private readonly PcReadDemand demand = new PcReadDemand();
+            private readonly PcCacheFence fence = new PcCacheFence();
+            internal int Server = 100, Cache = 100, CacheAt, Clock, Sent, Drops, Gen = 1;
+            internal bool InFlight, Owed, HasCache = true;
+            internal string ServerSku = "", CacheSku = "";   // the dance the server holds, and the cached one
+            internal string Deferred;          // the identity a deferred re-read is for
+            private int deferredGen, flyRead, flyStamp, flyGen, snap, snapAt;
+            private string snapSku = "";
+            private bool served;
+            private Action<bool, string> flyCb, owedCb;   // the read on the wire's own callback, and the owed read's
+
+            internal MeReadPath(bool latch) : this(latch, latch) { }
+
+            internal MeReadPath(bool latch, bool retain) { this.latch = latch; this.retain = retain; }
+
+            internal bool DemandOpen { get { return demand.Open; } }
+
+            internal int Waiting { get { return demand.Waiting; } }
+
+            internal void Ask(string who) { Ask(who, null); }
+
+            internal void Ask(string who, Action<bool, string> cb)
+            {
+                Clock++;
+                if (InFlight)
+                {
+                    if (latch && retain) { demand.Demand(who, Gen, cb); return; }
+                    if (latch) demand.Demand(who, Gen);
+                    if (cb != null) cb(false, "in-flight");
+                    return;
+                }
+                InFlight = true; served = false; Sent++;
+                flyGen = Gen; flyStamp = fence.Stamp(); flyRead = demand.Dispatched(); flyCb = cb;
+            }
+
+            internal void Serve()
+            {
+                Clock++;
+                if (InFlight && !served) { served = true; snap = Server; snapSku = ServerSku; snapAt = Clock; }
+            }
+
+            /// <summary>A shard commits on the server; no answer of it is
+            /// admitted here, so nothing moves the fence.</summary>
+            internal void CommitUnanswered(int d) { Clock++; Server += d; }
+
+            /// <summary>A dance selection commits on the server. Its answer
+            /// writes only the cached item id (ApiClient.PcDanceSelect), never
+            /// the dance, and moves no fence.</summary>
+            internal void SelectDance(string sku) { Clock++; ServerSku = sku ?? ""; }
+
+            /// <summary>A shard's or a discard's answer is admitted: its
+            /// balance installed, the fence moved.</summary>
+            internal void ConfirmedWrite(int d) { Clock++; Server += d; Cache = Server; CacheAt = Clock; fence.Wrote(); }
+
+            internal void Land(bool ok)
+            {
+                if (!InFlight) return;
+                if (!served) Serve();
+                Clock++;
+                InFlight = false;
+                var cb = flyCb; flyCb = null;
+                string again = demand.Landed(flyRead, Gen);
+                if (flyGen != Gen) { Defer(again); if (cb != null) cb(false, "stale-identity"); return; }
+                if (ok && !fence.Admits(flyStamp)) { Owed = true; Drops++; if (cb != null) owedCb += cb; return; }
+                Defer(again);
+                if (ok) { Cache = snap; CacheAt = snapAt; CacheSku = snapSku; HasCache = true; }
+                string resp = ok ? "me" : "failed";
+                if (cb != null) cb(ok, resp);
+                if (!retain) return;
+                var due = demand.Answered(flyRead, Gen);
+                if (due != null) foreach (var w in due) w(ok, resp);
+            }
+
+            private void Defer(string who)
+            {
+                if (who != null) { Deferred = who; deferredGen = Gen; }
+            }
+
+            internal void Frame()
+            {
+                Clock++;
+                if (Deferred != null)
+                {
+                    string who = Deferred; Deferred = null;
+                    if (deferredGen == Gen && !InFlight) Ask(who);
+                }
+                if (Owed && !InFlight) { Owed = false; var cb = owedCb; owedCb = null; Ask("me", cb); }
+            }
+
+            internal void Edge()
+            {
+                Clock++; Gen++; demand.Clear(); Owed = false; owedCb = null;
+                Cache = 0; CacheAt = Clock; HasCache = false; CacheSku = "";
+            }
+        }
+
+        /// <summary>The overlap round 4 named (finding 7). The tab's 30 s
+        /// read is dispatched and served at 100. A strip shard commits on the
+        /// server (115) and its answer is never admitted (lost, then given up
+        /// at 25 s), so nothing moves the fence. The give-up's balance
+        /// read-back, FetchPcMe(id, true), is asked while the 30 s read still
+        /// flies. That older read lands (olderOk false: it fails), then the
+        /// next frame, and the read it sends lands.</summary>
+        private static void MeOverlap(bool latch, bool olderOk, out int afterOlder, out bool deferred, out int balance, out int sent)
+        {
+            var m = new MeReadPath(latch);
+            m.Ask("me");
+            m.Serve();
+            m.CommitUnanswered(15);
+            m.Ask("me");
+            m.Land(olderOk);
+            afterOlder = m.Cache; deferred = m.Deferred != null;
+            m.Frame();
+            m.Land(true);
+            m.Frame();
+            balance = m.Cache; sent = m.Sent;
+        }
+
+        /// <summary>The same read-back asked with no read on the wire.</summary>
+        private static void MeNoFlight(bool latch, out int balance, out int sent, out bool opened)
+        {
+            var m = new MeReadPath(latch);
+            m.CommitUnanswered(15);
+            m.Ask("me");
+            opened = m.DemandOpen;
+            m.Land(true);
+            m.Frame();
+            balance = m.Cache; sent = m.Sent;
+        }
+
+        /// <summary>The overlap, with a discard's answer admitted (+20, the
+        /// fence moved) while the older read flies: that read is dropped and
+        /// owed.</summary>
+        private static void MeFenced(out int balance, out int sent, out int drops)
+        {
+            var m = new MeReadPath(true);
+            m.Ask("me");
+            m.Serve();
+            m.CommitUnanswered(15);
+            m.Ask("me");
+            m.ConfirmedWrite(20);
+            m.Land(true);
+            m.Frame();
+            m.Land(true);
+            m.Frame();
+            balance = m.Cache; sent = m.Sent; drops = m.Drops;
+        }
+
+        /// <summary>An identity edge while the previous identity's read
+        /// flies: the demand asked before the edge (askedAfterEdge false), or
+        /// asked by the new identity after it.</summary>
+        private static void MeEdge(bool askedAfterEdge, out string deferredFor, out int sent)
+        {
+            var m = new MeReadPath(true);
+            m.Ask("old");
+            if (!askedAfterEdge) m.Ask("old");
+            m.Edge();
+            if (askedAfterEdge) m.Ask("new");
+            m.Land(true);
+            deferredFor = m.Deferred;
+            m.Frame();
+            m.Land(true);
+            m.Frame();
+            sent = m.Sent;
+        }
+
+        /// <summary>The overlap, with the tab sending a read of its own after
+        /// the older read landed and before the deferred re-read's
+        /// frame.</summary>
+        private static void MeDeferredMeetsRead(out int balance, out int sent)
+        {
+            var m = new MeReadPath(true);
+            m.Ask("me");
+            m.Serve();
+            m.CommitUnanswered(15);
+            m.Ask("me");
+            m.Land(true);
+            m.Ask("me");
+            m.Frame();
+            m.Land(true);
+            m.Frame();
+            balance = m.Cache; sent = m.Sent;
+        }
+
+        /// <summary>Every order of up to six events drawn from "a forced
+        /// ask", "the server serves the read on the wire", "a shard commits
+        /// with no admitted answer", "the read on the wire lands" and "the
+        /// next frame", then the path run until nothing is on the wire, owed
+        /// or scheduled: the cache ends on a snapshot the server served AFTER
+        /// the latest ask, the demand is closed, and no more reads went than
+        /// asks. False on the first order that breaks any of it.</summary>
+        private static bool MeDemandOnEveryOrder(bool latch)
+        {
+            for (int len = 1; len <= 6; len++)
+            {
+                int total = 1; for (int i = 0; i < len; i++) total *= 5;
+                for (int code = 0; code < total; code++)
+                {
+                    var m = new MeReadPath(latch);
+                    int c = code, asks = 0, lastAsk = -1;
+                    for (int i = 0; i < len; i++, c /= 5)
+                    {
+                        switch (c % 5)
+                        {
+                            case 0: m.Ask("me"); asks++; lastAsk = m.Clock; break;
+                            case 1: m.Serve(); break;
+                            case 2: m.CommitUnanswered(1); break;
+                            case 3: m.Land(true); break;
+                            default: m.Frame(); break;
+                        }
+                    }
+                    for (int k = 0; k < 8 && (m.InFlight || m.Deferred != null || m.Owed); k++) { m.Land(true); m.Frame(); }
+                    if (m.InFlight || m.Deferred != null || m.Owed || m.DemandOpen) return false;
+                    if (m.Sent > asks) return false;
+                    if (asks > 0 && m.CacheAt <= lastAsk) return false;
+                }
+            }
+            return true;
+        }
+
+        private static void MeDemandCases(SelfTestResult r)
+        {
+            int after, bal, sent;
+            bool deferred;
+            MeOverlap(true, true, out after, out deferred, out bal, out sent);
+            Check(r, "me overlap: a balance read-back asked while the 30 s read flies is sent once that read lands, and the committed balance is cached",
+                  bal == 115, bal.ToString());
+            Check(r, "me overlap: the older read never answers it: it lands its balance from before the commit, and a fresh read is scheduled",
+                  after == 100 && deferred, after + " " + deferred);
+            Check(r, "me overlap: two reads in all, the 30 s one and the demand's own", sent == 2, sent.ToString());
+            MeOverlap(true, false, out after, out deferred, out bal, out sent);
+            Check(r, "me overlap: the same when the older read fails", bal == 115 && sent == 2 && deferred, bal + " " + sent + " " + deferred);
+            MeOverlap(false, true, out after, out deferred, out bal, out sent);
+            Check(r, "control: without the latch (59fcf3f6's FetchPcMe) the read-back asked while the 30 s read flies is lost",
+                  !deferred && sent == 1, deferred + " " + sent);
+            Check(r, "control: and the balance from before the commit stays cached", bal == 100, bal.ToString());
+
+            int bal0, sent0;
+            bool opened, opened0;
+            MeNoFlight(true, out bal, out sent, out opened);
+            MeNoFlight(false, out bal0, out sent0, out opened0);
+            Check(r, "me demand: a read-back asked with no read on the wire is sent at once: one read, the committed balance, no demand",
+                  bal == 115 && sent == 1 && !opened, bal + " " + sent + " " + opened);
+            Check(r, "me demand: exactly as 59fcf3f6 sent it", bal == bal0 && sent == sent0 && opened == opened0, bal0 + " " + sent0 + " " + opened0);
+
+            int drops;
+            MeFenced(out bal, out sent, out drops);
+            Check(r, "me demand: when the fence drops the older read, its owed read answers the demand: one more read, not two",
+                  sent == 2 && drops == 1, sent + " " + drops);
+            Check(r, "me demand: and the newest balance is cached", bal == 135, bal.ToString());
+
+            string forWho;
+            MeEdge(false, out forWho, out sent);
+            Check(r, "me demand: an identity change releases a demand made before it: no read for the previous identity",
+                  forWho == null && sent == 1, (forWho ?? "(null)") + " " + sent);
+            MeEdge(true, out forWho, out sent);
+            Check(r, "me demand: a demand the new identity makes while the previous identity's read flies is sent for it once that read lands",
+                  forWho == "new" && sent == 2, (forWho ?? "(null)") + " " + sent);
+
+            MeDeferredMeetsRead(out bal, out sent);
+            Check(r, "me demand: a read sent after the older read landed answers the demand: the deferred re-read sends nothing more",
+                  sent == 2 && bal == 115, sent + " " + bal);
+
+            var d = new PcReadDemand();
+            int r1 = d.Dispatched(), r2 = d.Dispatched();
+            Check(r, "me demand: reads are numbered at dispatch", r1 == 1 && r2 == 2, r1 + " " + r2);
+            d.Demand(null, 1); d.Demand("", 1);
+            Check(r, "me demand: an ask with no identity is not a demand", !d.Open, "");
+            d.Demand("me", 1); d.Demand("me", 1);
+            Check(r, "me demand: asks while the same read flies are one demand, and the read on the wire never answers it",
+                  d.Landed(r2, 1) == "me" && !d.Open && d.Landed(r2, 1) == null, "");
+            d.Demand("me", 1);
+            int r3 = d.Dispatched();
+            Check(r, "me demand: a read dispatched after the demand answers it", d.Landed(r3, 1) == null && !d.Open, "");
+            d.Demand("me", 1);
+            Check(r, "me demand: a demand of another generation is dropped", d.Landed(r3, 2) == null && !d.Open, "");
+            d.Demand("me", 2); d.Clear();
+            Check(r, "me demand: an identity change releases it", !d.Open && d.Landed(r3, 2) == null, "");
+
+            Check(r, "me demand: on every order of up to six asks, serves, unanswered commits, landings and frames, the cache ends on a "
+                  + "snapshot served after the latest ask, the demand closed, and never more reads than asks", MeDemandOnEveryOrder(true), "");
+            Check(r, "control: without the latch some order ends on a snapshot served before the latest ask", !MeDemandOnEveryOrder(false), "");
+        }
+
+        // -- fix pass 5, finding 10: a dance selection's picture check -------
+
+        /// <summary>PortraitRender's one-shot picture check, reduced to what
+        /// finding 10 names: OnTabVisit arms it (Arm); Tick runs it once,
+        /// once /pc/me is cached; a dance in the cached /pc/me decides the
+        /// route (DanceVisit), and with none the base-portrait path starts
+        /// (Start("visit", true): the stored picture is taken as not current,
+        /// the case that uploads a base still). Never called by anything that
+        /// renders.</summary>
+        private sealed class PictureCheck
+        {
+            internal bool Pending;
+            internal int Runs, BaseStarts;
+            internal string RanOn;
+
+            internal void Arm() { Pending = true; }
+
+            internal void Tick(MeReadPath m)
+            {
+                if (!Pending || !m.HasCache) return;
+                Pending = false; Runs++; RanOn = m.CacheSku ?? "";
+                if (RanOn.Length == 0) BaseStarts++;
+            }
+        }
+
+        /// <summary>PlayerCardsUI.MaybeSendDance's /pc/me callback after a
+        /// selection succeeded: the caller's uiEpoch check, then the picture
+        /// check. armOnlyOnOk true is the fix (armed only by an answer that
+        /// was cached); false is cdac2efd's (armed by any answer, "in-flight"
+        /// included). Delivered counts every call; Heard the calls that pass
+        /// the epoch check, with the cached dance and the cached answer's
+        /// serve time at that moment.</summary>
+        private sealed class SelectionProbe
+        {
+            private readonly MeReadPath m;
+            private readonly PictureCheck check;
+            private readonly bool armOnlyOnOk;
+            private readonly int gen;
+            internal int Delivered, Heard, HeardCacheAt = -1, AskAt;
+            internal bool HeardOk;
+            internal string HeardSku;
+
+            internal SelectionProbe(MeReadPath m, PictureCheck check, bool armOnlyOnOk)
+            {
+                this.m = m; this.check = check; this.armOnlyOnOk = armOnlyOnOk; gen = m.Gen;
+            }
+
+            internal void On(bool ok, string resp)
+            {
+                Delivered++;
+                if (gen != m.Gen) return;                 // ep != uiEpoch: the identity changed meanwhile
+                Heard++; HeardOk = ok; HeardSku = m.CacheSku; HeardCacheAt = m.CacheAt;
+                if (check != null && (ok || !armOnlyOnOk)) check.Arm();
+            }
+
+            /// <summary>FetchPcMe(id, true, callback).</summary>
+            internal void Ask() { m.Ask("me", On); AskAt = m.Clock; }
+        }
+
+        private sealed class DanceRun
+        {
+            internal MeReadPath Path;
+            internal PictureCheck Check;
+            internal SelectionProbe Probe;
+            internal int RunsAtOlder, HeardAtOlder, SentAtPost, WaitingAtAsk, WaitingAfterEdge;
+            internal string SkuAtOlder;
+        }
+
+        /// <summary>The overlap round 5 named (finding 10). The tab's 30 s
+        /// read is dispatched and served before the selection (no dance). A
+        /// dance selection then commits on the server ("dance_a"), and
+        /// MaybeSendDance asks FetchPcMe(id, true, callback) while the 30 s
+        /// read still flies. The older read lands the pre-selection answer;
+        /// the next frame sends the demand's own read, which lands (postOk
+        /// false: it fails); then the next 30 s read is sent and lands. The
+        /// picture check ticks after every step, as the UI does. retain false
+        /// with armOnlyOnOk false is cdac2efd.</summary>
+        private static DanceRun DanceOverlap(bool retain, bool armOnlyOnOk, bool postOk)
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, retain), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            o.Probe = new SelectionProbe(m, c, armOnlyOnOk);
+            m.Ask("me"); c.Tick(m);                  // the tab's 30 s read
+            m.Serve(); c.Tick(m);                    // served before the selection: no dance
+            m.SelectDance("dance_a"); c.Tick(m);     // the selection commits; its answer writes only the item id
+            o.Probe.Ask(); c.Tick(m);                // MaybeSendDance's read, the 30 s read still on the wire
+            o.WaitingAtAsk = m.Waiting;
+            m.Land(true); c.Tick(m);                 // the older read lands the pre-selection answer
+            o.RunsAtOlder = c.Runs; o.SkuAtOlder = m.CacheSku; o.HeardAtOlder = o.Probe.Heard;
+            m.Frame(); c.Tick(m);                    // the demand's own read (RefetchPcMeNextFrame)
+            m.Land(postOk); c.Tick(m);               // the post-selection read lands
+            o.SentAtPost = m.Sent;
+            m.Frame(); c.Tick(m);
+            m.Ask("me"); c.Tick(m);                  // the next 30 s read
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>The selection with no /pc/me read on the wire: its read
+        /// is sent at once and carries the callback itself.</summary>
+        private static DanceRun DanceNoFlight(bool retain, bool armOnlyOnOk, bool ok)
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, retain), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            o.Probe = new SelectionProbe(m, c, armOnlyOnOk);
+            m.SelectDance("dance_a"); c.Tick(m);
+            o.Probe.Ask(); c.Tick(m);
+            o.WaitingAtAsk = m.Waiting;
+            m.Land(ok); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>An identity or consent edge while the previous identity's
+        /// 30 s read flies: the selection asked before the edge
+        /// (askedAfterEdge false), or the new identity's own selection asked
+        /// after it, that read still on the wire.</summary>
+        private static DanceRun DanceEdge(bool askedAfterEdge)
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, true), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            m.Ask("me"); c.Tick(m);
+            m.Serve(); c.Tick(m);
+            m.SelectDance("dance_a"); c.Tick(m);
+            if (!askedAfterEdge) { o.Probe = new SelectionProbe(m, c, true); o.Probe.Ask(); c.Tick(m); }
+            o.WaitingAtAsk = m.Waiting;
+            m.Edge(); c.Tick(m);                     // ReleasePcReadLatches
+            o.WaitingAfterEdge = m.Waiting;
+            if (askedAfterEdge)
+            {
+                m.SelectDance("dance_b"); c.Tick(m);
+                o.Probe = new SelectionProbe(m, c, true); o.Probe.Ask(); c.Tick(m);
+            }
+            m.Land(true); c.Tick(m);                 // the previous identity's read lands: stale
+            m.Frame(); c.Tick(m);
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            m.Ask("me"); c.Tick(m);                  // the next 30 s read
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>The overlap, with a shard's answer admitted (the fence
+        /// moved) while the demand's own read flies: that read is dropped and
+        /// owed, and the owed read is the first to land with its answer
+        /// taken.</summary>
+        private static DanceRun DanceFenced()
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, true), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            o.Probe = new SelectionProbe(m, c, true);
+            m.Ask("me"); m.Serve(); m.SelectDance("dance_a"); c.Tick(m);
+            o.Probe.Ask(); c.Tick(m);
+            m.Land(true); c.Tick(m);                 // the older read lands
+            m.Frame(); c.Tick(m);                    // the demand's own read is sent
+            m.ConfirmedWrite(20); c.Tick(m);         // a shard's answer is admitted while it flies
+            m.Land(true); c.Tick(m);                 // dropped by the fence: owed
+            o.HeardAtOlder = o.Probe.Heard;
+            m.Frame(); c.Tick(m);                    // the owed read is sent
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>The overlap, with the tab sending a read of its own after
+        /// the older read landed and before the deferred re-read's
+        /// frame.</summary>
+        private static DanceRun DanceDeferredMeetsRead()
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, true), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            o.Probe = new SelectionProbe(m, c, true);
+            m.Ask("me"); m.Serve(); m.SelectDance("dance_a"); c.Tick(m);
+            o.Probe.Ask(); c.Tick(m);
+            m.Land(true); c.Tick(m);                 // the older read lands
+            m.Ask("me"); c.Tick(m);                  // the tab's own read, after that landing
+            m.Frame(); c.Tick(m);                    // the deferred re-read: a read is on the wire, nothing sent
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>Every order of up to six events drawn from "a forced ask
+        /// with a callback", "the server serves the read on the wire", "a
+        /// dance selection commits", "the read on the wire lands", "the next
+        /// frame" and "a shard's answer is admitted (the fence moves)", then
+        /// the path run until nothing is on the wire, owed or scheduled: every
+        /// callback is heard exactly once, with an answer that was cached, and
+        /// the answer cached when it is heard was served after its ask; no
+        /// callback is left waiting. False on the first order that breaks any
+        /// of it.</summary>
+        private static bool DanceCallbacksOnEveryOrder(bool retain)
+        {
+            for (int len = 1; len <= 6; len++)
+            {
+                int total = 1; for (int i = 0; i < len; i++) total *= 6;
+                for (int code = 0; code < total; code++)
+                {
+                    var m = new MeReadPath(true, retain);
+                    var probes = new List<SelectionProbe>();
+                    int c = code, n = 0;
+                    for (int i = 0; i < len; i++, c /= 6)
+                    {
+                        switch (c % 6)
+                        {
+                            case 0: { var q = new SelectionProbe(m, null, true); probes.Add(q); q.Ask(); break; }
+                            case 1: m.Serve(); break;
+                            case 2: m.SelectDance("dance_" + (++n)); break;
+                            case 3: m.Land(true); break;
+                            case 4: m.Frame(); break;
+                            default: m.ConfirmedWrite(1); break;
+                        }
+                    }
+                    for (int k = 0; k < 8 && (m.InFlight || m.Deferred != null || m.Owed); k++) { m.Land(true); m.Frame(); }
+                    if (m.InFlight || m.Deferred != null || m.Owed || m.DemandOpen || m.Waiting != 0) return false;
+                    foreach (var p in probes)
+                        if (p.Delivered != 1 || p.Heard != 1 || !p.HeardOk || p.HeardCacheAt <= p.AskAt) return false;
+                }
+            }
+            return true;
+        }
+
+        private static string Said(DanceRun o)
+        {
+            return "heard=" + o.Probe.Heard + " delivered=" + o.Probe.Delivered + " ok=" + o.Probe.HeardOk
+                 + " sku=[" + (o.Probe.HeardSku ?? "(null)") + "] runs=" + o.Check.Runs + " ran_on=[" + (o.Check.RanOn ?? "(none)")
+                 + "] base=" + o.Check.BaseStarts + " sent=" + o.Path.Sent + " waiting=" + o.Path.Waiting;
+        }
+
+        private static void DanceSelectCases(SelfTestResult r)
+        {
+            var fix = DanceOverlap(true, true, true);
+            Check(r, "dance overlap: the selection's read, asked while the 30 s read flies, waits: the older read lands the pre-selection answer, unheard, and the picture check has not run",
+                  fix.WaitingAtAsk == 1 && fix.HeardAtOlder == 0 && fix.RunsAtOlder == 0 && fix.SkuAtOlder == "",
+                  fix.WaitingAtAsk + " " + fix.HeardAtOlder + " " + fix.RunsAtOlder + " [" + fix.SkuAtOlder + "]");
+            Check(r, "dance overlap: the callback is heard once, from the read sent after the selection, after its answer is cached",
+                  fix.Probe.Heard == 1 && fix.Probe.Delivered == 1 && fix.Probe.HeardOk && fix.Probe.HeardSku == "dance_a", Said(fix));
+            Check(r, "dance overlap: the picture check runs once, against the post-selection dance, and the base path never starts",
+                  fix.Check.Runs == 1 && fix.Check.RanOn == "dance_a" && fix.Check.BaseStarts == 0, Said(fix));
+            Check(r, "dance overlap: two reads, the 30 s one and the demand's own, then the next 30 s read never hears the callback again",
+                  fix.SentAtPost == 2 && fix.Path.Sent == 3 && fix.Probe.Delivered == 1 && fix.Path.Waiting == 0, fix.SentAtPost + " " + Said(fix));
+            var was = DanceOverlap(false, false, true);
+            Check(r, "control: cdac2efd's FetchPcMe answers the selection's read in-flight at once, so the check runs on the cache from before the selection and the base path starts",
+                  was.Probe.Heard == 1 && !was.Probe.HeardOk && was.RunsAtOlder == 1 && was.Check.RanOn == "" && was.Check.BaseStarts == 1, Said(was));
+
+            var failed = DanceOverlap(true, true, false);
+            Check(r, "dance overlap: when the post-selection read fails, the callback is heard once, failed, and arms no check: the base path never starts",
+                  failed.Probe.Heard == 1 && failed.Probe.Delivered == 1 && !failed.Probe.HeardOk && failed.Check.Runs == 0 && failed.Check.BaseStarts == 0,
+                  Said(failed));
+            var armsOnFail = DanceOverlap(true, false, false);
+            Check(r, "control: a callback that arms the check on a failed answer (cdac2efd's MaybeSendDance) runs it on the cache from before the selection",
+                  armsOnFail.Check.Runs == 1 && armsOnFail.Check.RanOn == "" && armsOnFail.Check.BaseStarts == 1, Said(armsOnFail));
+
+            var nf = DanceNoFlight(true, true, true);
+            var nf0 = DanceNoFlight(false, false, true);
+            Check(r, "dance no overlap: the selection's read is sent at once and heard once, and the check runs against the post-selection dance",
+                  nf.WaitingAtAsk == 0 && nf.Path.Sent == 1 && nf.Probe.Heard == 1 && nf.Probe.HeardOk && nf.Check.Runs == 1
+                  && nf.Check.RanOn == "dance_a" && nf.Check.BaseStarts == 0, Said(nf));
+            Check(r, "dance no overlap: exactly as cdac2efd: the same reads, the same callback and the same check",
+                  nf.Path.Sent == nf0.Path.Sent && nf.Probe.Heard == nf0.Probe.Heard && nf.Probe.HeardOk == nf0.Probe.HeardOk
+                  && nf.Check.Runs == nf0.Check.Runs && nf.Check.RanOn == nf0.Check.RanOn && nf.Check.BaseStarts == nf0.Check.BaseStarts, Said(nf0));
+            var nff = DanceNoFlight(true, true, false);
+            var nff0 = DanceNoFlight(false, false, false);
+            Check(r, "dance no overlap: a selection whose read fails arms no check, where cdac2efd ran it on the cache from before the selection",
+                  nff.Probe.Heard == 1 && nff.Check.Runs == 0 && nff0.Check.Runs == 1 && nff0.Check.BaseStarts == 1, Said(nff) + " | " + Said(nff0));
+
+            var edge = DanceEdge(false);
+            Check(r, "dance edge: an identity or consent edge drops the waiting callback: never heard, no check, nothing left waiting",
+                  edge.WaitingAtAsk == 1 && edge.WaitingAfterEdge == 0 && edge.Probe.Delivered == 0 && edge.Check.Runs == 0 && edge.Path.Waiting == 0,
+                  edge.WaitingAtAsk + " " + edge.WaitingAfterEdge + " " + Said(edge));
+            var edgeNew = DanceEdge(true);
+            Check(r, "dance edge: the new identity's selection, asked while the previous identity's read flies, is heard once from the read sent for it",
+                  edgeNew.Probe.Heard == 1 && edgeNew.Probe.Delivered == 1 && edgeNew.Probe.HeardSku == "dance_b" && edgeNew.Check.Runs == 1
+                  && edgeNew.Check.RanOn == "dance_b" && edgeNew.Check.BaseStarts == 0, Said(edgeNew));
+
+            var fenced = DanceFenced();
+            Check(r, "dance fenced: when the fence drops the post-selection read, the callback waits for the owed read and is heard once, after its answer",
+                  fenced.HeardAtOlder == 0 && fenced.Probe.Heard == 1 && fenced.Probe.HeardSku == "dance_a" && fenced.Check.Runs == 1
+                  && fenced.Check.RanOn == "dance_a" && fenced.Check.BaseStarts == 0 && fenced.Path.Sent == 3, fenced.HeardAtOlder + " " + Said(fenced));
+            var meets = DanceDeferredMeetsRead();
+            Check(r, "dance demand: a read sent after the older read landed, on the wire at the deferred frame, answers the callback: heard once, no third read",
+                  meets.Probe.Heard == 1 && meets.Probe.HeardSku == "dance_a" && meets.Path.Sent == 2 && meets.Check.RanOn == "dance_a"
+                  && meets.Check.BaseStarts == 0, Said(meets));
+
+            var d = new PcReadDemand();
+            int calls = 0;
+            Action<bool, string> cb = (ok, s) => calls++;
+            int r1 = d.Dispatched();
+            d.Demand("me", 1, cb);
+            Check(r, "waiting callback: a forced ask's callback is retained with its demand", d.Open && d.Waiting == 1, d.Waiting.ToString());
+            string again = d.Landed(r1, 1);
+            var none = d.Answered(r1, 1);
+            Check(r, "waiting callback: the read on the wire at the ask never answers it, and closing the demand keeps it",
+                  again == "me" && !d.Open && none == null && d.Waiting == 1, (again ?? "(null)") + " " + d.Waiting);
+            int r2 = d.Dispatched();
+            var due = d.Answered(r2, 1);
+            if (due != null) foreach (var f in due) f(true, "me");
+            var dueAgain = d.Answered(d.Dispatched(), 1);
+            Check(r, "waiting callback: the first read dispatched after the ask answers it, exactly once",
+                  due != null && due.Count == 1 && calls == 1 && d.Waiting == 0 && dueAgain == null, calls + " " + d.Waiting);
+            d.Demand("me", 1, cb);
+            var other = d.Answered(d.Dispatched(), 2);
+            Check(r, "waiting callback: a callback of another generation is dropped unheard", other == null && d.Waiting == 0, d.Waiting.ToString());
+            d.Demand("me", 2, cb); d.Demand("me", 2, cb);
+            d.Clear();
+            Check(r, "waiting callback: an identity or consent edge drops every waiting callback unheard",
+                  !d.Open && d.Waiting == 0 && d.Answered(d.Dispatched(), 2) == null, d.Waiting.ToString());
+            d.Demand("me", 2);
+            Check(r, "waiting callback: an ask without a callback waits for nothing", d.Open && d.Waiting == 0, d.Waiting.ToString());
+
+            Check(r, "dance demand: on every order of up to six asks with callbacks, serves, selections, landings, frames and fence moves, each callback "
+                  + "is heard exactly once, with a cached answer served after its ask, and none is left waiting", DanceCallbacksOnEveryOrder(true), "");
+            Check(r, "control: cdac2efd's FetchPcMe hears some callback at once, before any answer newer than its ask", !DanceCallbacksOnEveryOrder(false), "");
+        }
+
+        // -- fix pass 3, finding 5: a settings answer never writes the balance --
+
+        /// <summary>A settings write (announce on, against revision 5) is sent
+        /// while the cached balance is 100. The server commits it (revision 6)
+        /// and its answer, the full settings row, carries the balance the
+        /// server read at that commit: 100. A strip shard then commits (the
+        /// server: 115) and its answer lands first: current, so it installs
+        /// 115 and moves the answer fence. The settings answer lands LAST,
+        /// through ApiClient.PcSetSetting's cache write (PcApplySettings): the
+        /// settings and the revision, not the balance. applyBalance true is
+        /// the NEGATIVE CONTROL: PcApplySettings as 8fb4ea4b wrote it, which
+        /// also wrote the row's shards.</summary>
+        private static void SettingsLate(bool applyBalance, out int balance, out int revision, out bool announce, out int fenceWrites)
+        {
+            var fence = new PcCacheFence();
+            var flight = new PcShardFlight();
+            int cacheBal = 100, cacheRev = 5, srvBal = 100, srvRev = 5;
+            bool cacheAnnounce = false;
+            // the settings write commits; its answer is the row as of that commit
+            srvRev++;
+            int rowBal = srvBal, rowRev = srvRev;
+            bool rowAnnounce = true;
+            // a strip shard commits; its answer, current, lands first
+            int g = flight.Begin(1f, null, "s1");
+            srvBal += 15;
+            if (PcShardFlight.Admits(() => flight.IsCurrent(g))) { cacheBal = srvBal; fence.Wrote(); }
+            flight.Settle(g, null);
+            // the settings answer lands last
+            cacheAnnounce = rowAnnounce;
+            cacheRev = rowRev;
+            if (applyBalance) cacheBal = rowBal;
+            balance = cacheBal; revision = cacheRev; announce = cacheAnnounce; fenceWrites = fence.Writes;
+        }
+
+        private static void SettingsLateCases(SelfTestResult r)
+        {
+            int bal, rev, w;
+            bool ann;
+            SettingsLate(false, out bal, out rev, out ann, out w);
+            Check(r, "settings late: a settings answer landing after a newer shard balance keeps the newer balance", bal == 115, bal.ToString());
+            Check(r, "settings late: and applies the settings and the revision", ann && rev == 6, ann + " " + rev);
+            Check(r, "settings late: the shard's answer installed its balance and moved the fence first", w == 1, w.ToString());
+            SettingsLate(true, out bal, out rev, out ann, out w);
+            Check(r, "control: applying the row's shards puts the older balance back", bal == 100, bal.ToString());
+            Check(r, "control: with the same settings and revision applied", ann && rev == 6, ann + " " + rev);
+        }
+
+        // -- fix pass 3, finding 4: a retired single-discard answer writes nothing --
+
+        /// <summary>Single-discard run A sends its step; the server commits it
+        /// (100 -> 110) and the answer is delayed. The 25 s give-up retires A
+        /// (the serial bumped, the run ended) and its read-backs land (110,
+        /// admitted: no confirmed write since their dispatch). Run B's step
+        /// then succeeds (the server: 130) and its answer writes the balance
+        /// and moves the fence. A's older success (110) lands LAST, through
+        /// ApiClient.PcDiscard's cache write with the run predicate
+        /// DiscardNext builds (DiscardStepCurrent over the run's serial).
+        /// bStillOut: B's run has another step out when A lands. honourRun
+        /// false is the NEGATIVE CONTROL: PcDiscard as 8fb4ea4b wrote it,
+        /// which wrote every success's balance and moved the fence.</summary>
+        private static void DiscardLate(bool honourRun, bool bStillOut, out int balance, out int writesBefore, out int writesAfter)
+        {
+            var fence = new PcCacheFence();
+            int cacheBal = 100, srvBal = 100, runSerial = 0;
+            bool runOut;
+            int sA = ++runSerial; runOut = true;
+            srvBal += 10;
+            int answerA = srvBal;
+            Func<bool> currentA = () => DiscardStepCurrent(true, runOut, sA, runSerial);
+            runSerial++; runOut = false;
+            int stamp = fence.Stamp();
+            int snap = srvBal;
+            if (fence.Admits(stamp)) cacheBal = snap;
+            int sB = ++runSerial; runOut = true;
+            srvBal += 20;
+            Func<bool> currentB = () => DiscardStepCurrent(true, runOut, sB, runSerial);
+            if (PcShardFlight.Admits(currentB)) { cacheBal = srvBal; fence.Wrote(); }
+            if (!bStillOut) runOut = false;
+            writesBefore = fence.Writes;
+            if (honourRun ? PcShardFlight.Admits(currentA) : true) { cacheBal = answerA; fence.Wrote(); }
+            writesAfter = fence.Writes;
+            balance = cacheBal;
+        }
+
+        private static void DiscardLateCases(SelfTestResult r)
+        {
+            int bal, w0, w1;
+            DiscardLate(true, false, out bal, out w0, out w1);
+            Check(r, "discard late: a retired run's success landing after a newer run's keeps the newer run's balance", bal == 130, bal.ToString());
+            Check(r, "discard late: and leaves the answer fence where the newer run put it", w1 == w0, w0 + "->" + w1);
+            DiscardLate(true, true, out bal, out w0, out w1);
+            Check(r, "discard late: the same while the newer run still has a step out", bal == 130 && w1 == w0, bal + " " + w0 + "->" + w1);
+            DiscardLate(false, false, out bal, out w0, out w1);
+            Check(r, "control: without the run's predicate the late success writes the retired run's balance", bal == 110, bal.ToString());
+            Check(r, "control: and moves the fence", w1 == w0 + 1, w0 + "->" + w1);
+            Check(r, "discard step: the current run's step is current", DiscardStepCurrent(true, true, 3, 3), "");
+            Check(r, "discard step: a step of a run given up is not (the serial moved on)",
+                  !DiscardStepCurrent(true, true, 1, 3) && !DiscardStepCurrent(true, false, 1, 2), "");
+            Check(r, "discard step: a step sent under another identity is not", !DiscardStepCurrent(false, true, 3, 3), "");
+            Check(r, "discard step: a step of a run that has ended is not", !DiscardStepCurrent(true, false, 3, 3), "");
+        }
+
+        // -- fix pass 3, finding 2: a not_owned tombstone lifts when a later read holds the print --
+
+        private static readonly string[] TombFaces = { "A", "A", "B" };
+        private static readonly string[] TombIds = { "a1", "a2", "b1" };
+
+        /// <summary>One landing of the tombstone path: the collection read
+        /// `held` (each id's face is its first letter, upper-cased) walked
+        /// with the tombstones by PackDupes, then the button's answer.</summary>
+        private static string TombDupes(PcShardTombstones gone, string[] held, out bool offered)
+        {
+            var colFaces = new List<string>(); var colIds = new List<string>();
+            foreach (var id in held) { colIds.Add(id); colFaces.Add(id.Substring(0, 1).ToUpperInvariant()); }
+            bool ready;
+            var ids = PackDupes(TombFaces, TombIds, colFaces, colIds, gone, out ready);
+            offered = DupesOffered(ready, ids.Count, 40);
+            return Ids(ids);
+        }
+
+        /// <summary>The tombstone path the client runs, step by step, on a
+        /// pack of A (a1), A (a2), B (b1) the player owned whole when it was
+        /// pulled. Step 0: the cached collection read holds all three. a2 is
+        /// traded away and the strip's Discard on it is refused not_owned:
+        /// FailShard tombstones a2 (step 1, the cached read still holding it).
+        /// Step 2: the refusal's read-back, dispatched after it, lacks a2.
+        /// a2 is traded back; step 3: a read holds it again. Each read is
+        /// numbered at dispatch and reconciles the set when it lands, as
+        /// ApiClient.FetchPcCollection does. reconcile false is the NEGATIVE
+        /// CONTROL: 8fb4ea4b's tombstone, which nothing ever lifted.</summary>
+        private static void TombstonePath(bool reconcile, string[] dupes, bool[] offered, bool[] tomb)
+        {
+            var gone = new PcShardTombstones();
+            var whole = new[] { "a1", "a2", "b1" };
+            int r0 = gone.Dispatched();
+            if (reconcile) gone.Reconcile(whole, r0);
+            dupes[0] = TombDupes(gone, whole, out offered[0]); tomb[0] = gone.Contains("a2");
+            gone.Add("a2");
+            dupes[1] = TombDupes(gone, whole, out offered[1]); tomb[1] = gone.Contains("a2");
+            var absent = new[] { "a1", "b1" };
+            int r1 = gone.Dispatched();
+            if (reconcile) gone.Reconcile(absent, r1);
+            dupes[2] = TombDupes(gone, absent, out offered[2]); tomb[2] = gone.Contains("a2");
+            int r2 = gone.Dispatched();
+            if (reconcile) gone.Reconcile(whole, r2);
+            dupes[3] = TombDupes(gone, whole, out offered[3]); tomb[3] = gone.Contains("a2");
+        }
+
+        /// <summary>Every order of up to six events drawn from "a collection
+        /// read is dispatched", "a refusal names the print" and "the oldest
+        /// read on the wire lands holding the print": the print is tombstoned
+        /// exactly when a refusal named it and no read dispatched after the
+        /// LATEST refusal has landed since. The expectation counts refusals;
+        /// the class compares dispatch numbers.</summary>
+        private static bool TombstoneOnEveryOrder()
+        {
+            for (int len = 1; len <= 6; len++)
+            {
+                int total = 1; for (int i = 0; i < len; i++) total *= 3;
+                for (int code = 0; code < total; code++)
+                {
+                    var g = new PcShardTombstones();
+                    var wire = new Queue<KeyValuePair<int, int>>();   // (read number, refusals at its dispatch)
+                    int refusals = 0, c = code;
+                    bool expect = false;
+                    for (int i = 0; i < len; i++, c /= 3)
+                    {
+                        int ev = c % 3;
+                        if (ev == 0) wire.Enqueue(new KeyValuePair<int, int>(g.Dispatched(), refusals));
+                        else if (ev == 1) { g.Add("p"); refusals++; expect = true; }
+                        else if (wire.Count > 0)
+                        {
+                            var rd = wire.Dequeue();
+                            g.Reconcile(new[] { "p" }, rd.Key);
+                            if (refusals > 0 && rd.Value == refusals) expect = false;
+                        }
+                        if (g.Contains("p") != expect) return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        private static void TombstoneCases(SelfTestResult r)
+        {
+            var dupes = new string[4]; var offered = new bool[4]; var tomb = new bool[4];
+            TombstonePath(true, dupes, offered, tomb);
+            Check(r, "tombstone path: before the refusal the pack's duplicate a2 is offered",
+                  dupes[0] == "[a2]" && offered[0] && !tomb[0], dupes[0]);
+            Check(r, "tombstone path: a print the server named not_owned leaves both walks at once (the cached read still holds it)",
+                  tomb[1] && dupes[1] == "[]" && !offered[1], dupes[1]);
+            Check(r, "tombstone path: a refresh that lacks the print keeps it excluded",
+                  tomb[2] && dupes[2] == "[]", dupes[2]);
+            Check(r, "tombstone path: and the button state is unchanged by that refresh", offered[2] == offered[1], offered[2].ToString());
+            Check(r, "tombstone path: a refresh that holds the print again lifts its tombstone", !tomb[3], tomb[3].ToString());
+            Check(r, "tombstone path: the reacquired print is included", dupes[3] == "[a2]", dupes[3]);
+            Check(r, "tombstone path: and the button shows, the reacquired print being the pack's only duplicate", offered[3], offered[3].ToString());
+            Check(r, "tombstone path: the strip's Discard on the reacquired print is offered again",
+                  DiscardOffered(true, false, tomb[3], false), tomb[3].ToString());
+            var cd = new string[4]; var co = new bool[4]; var ct = new bool[4];
+            TombstonePath(false, cd, co, ct);
+            Check(r, "control: without the reconcile (8fb4ea4b's permanent tombstone) the reacquired print stays excluded",
+                  ct[3] && cd[3] == "[]" && cd[3] != dupes[3], cd[3]);
+            Check(r, "control: and the button stays hidden", !co[3] && co[3] != offered[3], co[3].ToString());
+
+            var g = new PcShardTombstones();
+            int stale = g.Dispatched();
+            g.Add("a2");
+            g.Reconcile(new[] { "a1", "a2", "b1" }, stale);
+            Check(r, "tombstone: a read dispatched before the refusal does not lift it, though it holds the print", g.Contains("a2"), "");
+            int fresh = g.Dispatched();
+            g.Reconcile(new[] { "a1", "a2", "b1" }, fresh);
+            Check(r, "tombstone: a read dispatched after the refusal that holds the print lifts it", !g.Contains("a2"), "");
+            g.Add("x"); g.Add("y");
+            int both = g.Dispatched();
+            g.Reconcile(new[] { "x" }, both);
+            Check(r, "tombstone: a read lifts only the prints it holds", !g.Contains("x") && g.Contains("y") && g.Count == 1, g.Count.ToString());
+            g.Add("x");
+            Check(r, "tombstone: a print named again after it was lifted is out again", g.Contains("x"), "");
+            g.Clear();
+            Check(r, "tombstone: an identity change clears every tombstone", g.Count == 0 && !g.Contains("y"), g.Count.ToString());
+            g.Add(null); g.Add("");
+            Check(r, "tombstone: no id is never a tombstone", g.Count == 0 && !g.Contains(null), g.Count.ToString());
+            Check(r, "tombstone: on every order of up to six dispatches, refusals and landings, a print is out exactly while no read "
+                  + "dispatched after the latest refusal has landed holding it", TombstoneOnEveryOrder(), "");
+            bool ready;
+            var none = PackDupes(TombFaces, TombIds, null, new List<string>(), new PcShardTombstones(), out ready);
+            Check(r, "pack dupes: a missing input is not ready and takes nothing", !ready && none.Count == 0, Ids(none));
+        }
+
+        // -- fix pass 2, finding 1: a read-back never undoes a newer shard ----
+
+        /// <summary>Request A (strip card a) is given up at 25 s, so its
+        /// collection and balance read-backs are dispatched, and the server
+        /// answers them from its state before B. Request B (strip card b,
+        /// +40) then succeeds and its answer writes the balance and removes b.
+        /// A's read-backs land LAST. honourFence false is the NEGATIVE
+        /// CONTROL: the read callbacks as a0a66027 wrote them, which replace
+        /// both caches unconditionally and must restore B's old balance and
+        /// its discarded card. rereads counts the reads sent again.</summary>
+        private static void RecoveryRead(bool honourFence, out int balance, out bool cardRestored, out int rereads)
+        {
+            var f = new PcShardFlight();
+            var fence = new PcCacheFence();
+            int minted = 0;
+            Func<string> mint = () => "nonce" + (++minted);
+            int cacheBal = 100, srvBal = 100;
+            var cache = new List<string> { "a", "b" };
+            var srv = new List<string> { "a", "b" };
+            f.KeyFor(ArmSet("a"), mint);
+            f.Begin(0f, null, "a");
+            bool quick;
+            f.GiveUp(26f, 25f, out quick);
+            // A's read-backs: stamped at dispatch, answered from the state before B.
+            int stampMe = fence.Stamp(), stampCol = fence.Stamp();
+            int snapBal = srvBal;
+            var snapCol = new List<string>(srv);
+            // B: the server commits, then answers; the answer writes the caches.
+            f.KeyFor(ArmSet("b"), mint);
+            int sB = f.Begin(30f, null, "b");
+            srvBal += 40; srv.Remove("b");
+            Func<bool> currentB = () => f.IsCurrent(sB);
+            if (PcShardFlight.Admits(currentB)) { cacheBal = srvBal; fence.Wrote(); }
+            if (f.Settle(sB, null)) { cache.Remove("b"); fence.Wrote(); }
+            // A's read-backs land last. A dropped read is owed and sent again
+            // once no shard is out (ApiClient.PcSendOwedReads), stamped then,
+            // and answered from the state after B.
+            if (f.InFlight) { balance = -1; cardRestored = true; rereads = -1; return; }
+            rereads = 0;
+            if (!honourFence || fence.Admits(stampMe)) cacheBal = snapBal;
+            else { rereads++; int again = fence.Stamp(); if (fence.Admits(again)) cacheBal = srvBal; }
+            if (!honourFence || fence.Admits(stampCol)) cache = snapCol;
+            else { rereads++; int again = fence.Stamp(); if (fence.Admits(again)) cache = new List<string>(srv); }
+            balance = cacheBal;
+            cardRestored = cache.Contains("b");
+        }
+
+        /// <summary>Every order of up to five events drawn from "a read is
+        /// dispatched", "a confirmed write" and "the read lands" (one read):
+        /// the read is admitted exactly when no write happened between its
+        /// dispatch and its landing.</summary>
+        private static bool FenceOnEveryOrder()
+        {
+            for (int len = 1; len <= 5; len++)
+            {
+                int total = 1; for (int i = 0; i < len; i++) total *= 3;
+                for (int code = 0; code < total; code++)
+                {
+                    var fence = new PcCacheFence();
+                    int c = code, stamp = -1;
+                    bool wroteSince = false;
+                    for (int i = 0; i < len; i++, c /= 3)
+                    {
+                        int ev = c % 3;
+                        if (ev == 0) { stamp = fence.Stamp(); wroteSince = false; }
+                        else if (ev == 1) { fence.Wrote(); wroteSince = true; }
+                        else if (stamp >= 0)
+                        {
+                            if (fence.Admits(stamp) != !wroteSince) return false;
+                            stamp = -1;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        private static void RecoveryCases(SelfTestResult r)
+        {
+            int bal, rr;
+            bool card;
+            RecoveryRead(true, out bal, out card, out rr);
+            Check(r, "recovery: a retired shard's balance read-back landing after a newer shard keeps the newer balance",
+                  bal == 140, bal.ToString());
+            Check(r, "recovery: a retired shard's collection read-back landing after a newer shard keeps the newer shard's card discarded",
+                  !card, card.ToString());
+            Check(r, "recovery: each dropped read-back is sent again once, stamped after the newer write", rr == 2, rr.ToString());
+            RecoveryRead(false, out bal, out card, out rr);
+            Check(r, "control: without the fence the late read-back restores the newer shard's old balance", bal == 100, bal.ToString());
+            Check(r, "control: without the fence the late read-back restores the newer shard's discarded card", card, card.ToString());
+
+            var fence = new PcCacheFence();
+            int s0 = fence.Stamp();
+            Check(r, "fence: a read with no confirmed write while it flew lands", fence.Admits(s0), "");
+            fence.Wrote();
+            Check(r, "fence: a read dispatched before a confirmed write is dropped", !fence.Admits(s0), "");
+            int s1 = fence.Stamp();
+            Check(r, "fence: a read dispatched after the write lands", fence.Admits(s1), "");
+            fence.Wrote(); fence.Wrote();
+            Check(r, "fence: two writes while it flew: still dropped", !fence.Admits(s1), "");
+            Check(r, "fence: on every order of dispatch, write and landing, a read lands exactly when no write happened in between",
+                  FenceOnEveryOrder(), "");
+        }
+
+        // -- fix pass 1, finding 3: the pack's duplicates, never a last copy --
+
+        private static List<string> Dupes(string[] faces, string[] ids, string counts, string[] live, out bool ready)
+        {
+            var map = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var part in counts.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var kv = part.Split('=');
+                map[kv[0]] = int.Parse(kv[1]);
+            }
+            return DuplicateShardIds(faces, ids, map, new HashSet<string>(live ?? ids, StringComparer.Ordinal), out ready);
+        }
+
+        private static string Ids(List<string> l) { return l == null ? "(null)" : "[" + string.Join(",", l.ToArray()) + "]"; }
+
+        private static void DupesCases(SelfTestResult r)
+        {
+            bool ready;
+            var faces = new[] { "A", "A", "A", "B", "C" };
+            var ids = new[] { "a1", "a2", "a3", "b1", "c1" };
+            var got = Dupes(faces, ids, "A=3,B=1,C=1", null, out ready);
+            Check(r, "dupes: a pack of A, A, A, B, C (C the last copy) yields exactly the two later A prints",
+                  ready && Ids(got) == "[a2,a3]", Ids(got));
+            Check(r, "dupes: never B, never C", !got.Contains("b1") && !got.Contains("c1"), Ids(got));
+            var all = AllLivePrints(faces, ids);
+            Check(r, "control: the all-prints set (Shard pack's) takes all five, B and C included",
+                  all.Count == 5 && all.Contains("b1") && all.Contains("c1") && Ids(all) != Ids(got), Ids(all));
+
+            got = Dupes(new[] { "A", "B", "C", "D", "E" }, new[] { "a", "b", "c", "d", "e" }, "A=1,B=1,C=1,D=1,E=1", null, out ready);
+            Check(r, "dupes: five faces, one live copy each: nothing", ready && got.Count == 0, Ids(got));
+            got = Dupes(new[] { "A", "A" }, new[] { "a1", "a2" }, "A=3", new[] { "a1", "a2", "a0" }, out ready);
+            Check(r, "dupes: a face the binder already holds has both pack copies taken (the binder's survives)",
+                  ready && Ids(got) == "[a1,a2]", Ids(got));
+            got = Dupes(new[] { "A", "A", "B" }, new[] { "a1", "a2", "b1" }, "A=1,B=1", new[] { "a1", "b1" }, out ready);
+            Check(r, "dupes: a pack print absent from the collection read is not the player's: ready, neither taken nor counted",
+                  ready && got.Count == 0, Ids(got));
+            got = Dupes(new[] { "A", "A", "B" }, new[] { "a1", "a2", "b1" }, "A=2,B=1", null, out ready);
+            Check(r, "dupes: a collection read holding every pack print: ready", ready && Ids(got) == "[a2]", Ids(got));
+            got = Dupes(new[] { "A|foil", "A|plain" }, new[] { "f", "p" }, "A|foil=1,A|plain=1", null, out ready);
+            Check(r, "dupes: a foil and a plain copy are different faces: nothing", ready && got.Count == 0, Ids(got));
+            got = Dupes(new[] { null, "A" }, new[] { "gone", "a1" }, "A=1", new[] { "a1" }, out ready);
+            Check(r, "dupes: a print not live (discarded or gone) is neither taken nor counted", ready && got.Count == 0, Ids(got));
+            got = Dupes(new[] { "A", "A" }, new[] { "a1", "a2" }, "A=2", null, out ready);
+            Check(r, "dupes: the first copy in display order survives", ready && Ids(got) == "[a2]", Ids(got));
+            got = Dupes(new string[0], new string[0], "", null, out ready);
+            Check(r, "dupes: an empty pack: ready, nothing", ready && got != null && got.Count == 0, Ids(got));
+            got = DuplicateShardIds(faces, ids, null, new HashSet<string>(ids), out ready);
+            Check(r, "dupes: a missing input is not ready and takes nothing", !ready && got.Count == 0, Ids(got));
+            Check(r, "dupes: on every pack of up to five A/B prints over every binder count, each face keeps a live copy",
+                  EveryFaceKeepsOne(), "");
+            OwnershipCases(r);
+        }
+
+        // -- fix pass 2, finding 2: the duplicates the player owns NOW --------
+
+        /// <summary>The readiness rule as fix pass 1 wrote it: not ready while
+        /// any live page print is absent from the collection read. NEGATIVE
+        /// CONTROL for the ownership cases: on a pack holding a print traded
+        /// away it must disagree with DuplicateShardIds. Never called by
+        /// anything that paints or sends.</summary>
+        private static bool ReadyAsFixPass1(IList<string> pageFaceKeys, IList<string> pagePrintIds, ICollection<string> livePrintIds)
+        {
+            for (int i = 0; i < pageFaceKeys.Count; i++)
+                if (pageFaceKeys[i] != null && (pagePrintIds[i] == null || !livePrintIds.Contains(pagePrintIds[i]))) return false;
+            return true;
+        }
+
+        private static void OwnershipCases(SelfTestResult r)
+        {
+            const int cap = 40;
+            bool ready;
+            // A pack of A, A, A, B; a2 traded away (the history still shows it
+            // live, the collection read omits it); a1 and a3 are still owned.
+            var faces = new[] { "A", "A", "A", "B" };
+            var ids = new[] { "a1", "a2", "a3", "b1" };
+            var live = new[] { "a1", "a3", "b1" };
+            var got = Dupes(faces, ids, "A=2,B=1", live, out ready);
+            Check(r, "ownership: a traded-away pack print with other owned duplicates: ready, the other duplicate taken",
+                  ready && Ids(got) == "[a3]", Ids(got));
+            Check(r, "ownership: the traded-away print is never in the set", !got.Contains("a2"), Ids(got));
+            Check(r, "ownership: and the button shows", DupesOffered(ready, got.Count, cap), "");
+            bool old = ReadyAsFixPass1(faces, ids, new HashSet<string>(live, StringComparer.Ordinal));
+            Check(r, "control: fix pass 1's readiness is not ready there, so its button stays hidden",
+                  !old && !DupesOffered(old, old ? got.Count : 0, cap), old.ToString());
+            // a2 traded away and back: the collection read holds it again
+            got = Dupes(faces, ids, "A=3,B=1", new[] { "a1", "a2", "a3", "b1" }, out ready);
+            Check(r, "ownership: a reacquired print is included", ready && Ids(got) == "[a2,a3]", Ids(got));
+            // a2 traded away and no other duplicate owned
+            got = Dupes(new[] { "A", "A", "B" }, new[] { "a1", "a2", "b1" }, "A=1,B=1", new[] { "a1", "b1" }, out ready);
+            Check(r, "ownership: no owned duplicates: nothing, and the button is hidden",
+                  ready && got.Count == 0 && !DupesOffered(ready, got.Count, cap), Ids(got));
+            // a collection read from before the pack: none of its prints, one older A
+            got = Dupes(new[] { "A", "A" }, new[] { "a1", "a2" }, "A=1", new[] { "a0" }, out ready);
+            Check(r, "ownership: a collection read from before the pack takes nothing (no pack print is counted)",
+                  ready && got.Count == 0, Ids(got));
+            Check(r, "offered: not ready hides it", !DupesOffered(false, 3, cap), "");
+            Check(r, "offered: over one batch hides it", !DupesOffered(true, cap + 1, cap) && DupesOffered(true, cap, cap), "");
+            Check(r, "ownership: on every pack of up to five A/B prints with any of them traded away, over every binder count, "
+                  + "no traded print is taken and each owned face keeps exactly one copy", EveryOwnedFaceKeepsOne(), "");
+        }
+
+        /// <summary>Exhaustive: every pack of one to five prints drawn from
+        /// faces A and B, every subset of them traded away (absent from the
+        /// collection read), and every binder holding of 0 or 1 copy of each
+        /// face outside the pack. Nothing traded is taken, and every face the
+        /// read holds keeps exactly one live copy.</summary>
+        private static bool EveryOwnedFaceKeepsOne()
+        {
+            for (int len = 1; len <= 5; len++)
+                for (int mask = 0; mask < (1 << len); mask++)
+                    for (int gone = 0; gone < (1 << len); gone++)
+                        for (int extraA = 0; extraA <= 1; extraA++)
+                            for (int extraB = 0; extraB <= 1; extraB++)
+                            {
+                                var faces = new List<string>(); var ids = new List<string>();
+                                var live = new HashSet<string>(StringComparer.Ordinal);
+                                var count = new Dictionary<string, int>(StringComparer.Ordinal) { { "A", extraA }, { "B", extraB } };
+                                if (extraA == 1) live.Add("xA");
+                                if (extraB == 1) live.Add("xB");
+                                for (int i = 0; i < len; i++)
+                                {
+                                    string f = ((mask >> i) & 1) == 1 ? "B" : "A";
+                                    faces.Add(f); ids.Add(f + i);
+                                    if (((gone >> i) & 1) == 0) { live.Add(f + i); count[f]++; }
+                                }
+                                bool ready;
+                                var took = DuplicateShardIds(faces, ids, count, live, out ready);
+                                if (!ready) return false;
+                                foreach (var t in took) if (!live.Contains(t)) return false;
+                                foreach (var f in new[] { "A", "B" })
+                                {
+                                    int taken = 0;
+                                    foreach (var t in took) if (t.StartsWith(f, StringComparison.Ordinal)) taken++;
+                                    if (count[f] > 0 && count[f] - taken != 1) return false;
+                                }
+                            }
+            return true;
+        }
+
+        /// <summary>Exhaustive over every pack of one to five prints drawn
+        /// from faces A and B and every binder holding of 0 or 1 extra copy
+        /// of each: what is taken never reaches a face's last live copy, and
+        /// every face with two or more live copies keeps exactly one.</summary>
+        private static bool EveryFaceKeepsOne()
+        {
+            for (int len = 1; len <= 5; len++)
+                for (int mask = 0; mask < (1 << len); mask++)
+                    for (int extraA = 0; extraA <= 1; extraA++)
+                        for (int extraB = 0; extraB <= 1; extraB++)
+                        {
+                            var faces = new List<string>(); var ids = new List<string>();
+                            var live = new HashSet<string>(StringComparer.Ordinal);
+                            var count = new Dictionary<string, int>(StringComparer.Ordinal) { { "A", extraA }, { "B", extraB } };
+                            for (int i = 0; i < len; i++)
+                            {
+                                string f = ((mask >> i) & 1) == 1 ? "B" : "A";
+                                faces.Add(f); ids.Add(f + i); live.Add(f + i); count[f]++;
+                            }
+                            bool ready;
+                            var took = DuplicateShardIds(faces, ids, count, live, out ready);
+                            if (!ready) return false;
+                            foreach (var f in new[] { "A", "B" })
+                            {
+                                int taken = 0;
+                                foreach (var t in took) if (t.StartsWith(f, StringComparison.Ordinal)) taken++;
+                                if (count[f] > 0 && count[f] - taken != 1) return false;
+                            }
+                        }
+            return true;
+        }
+
+        // -- fix pass 1, finding 2: a retired generation touches nothing ------
+
+        /// <summary>One shard given up at 25 s, a newer strip shard started,
+        /// then the OLD request's answer arriving late (a success carrying a
+        /// balance). honourSerial false is the NEGATIVE CONTROL: the callback
+        /// and the cache write as 6804a7e7 wrote them (no generation), which
+        /// must change the newer request's latch, nonce and cached balance.</summary>
+        private static void LateAnswer(bool honourSerial, out bool settled, out bool latchKept, out bool keyKept, out bool balanceKept)
+        {
+            var f = new PcShardFlight();
+            int minted = 0;
+            Func<string> mint = () => "nonce" + (++minted);
+            int balance = 100;
+            f.KeyFor(ArmSet("A"), mint);
+            int sA = f.Begin(0f, null, "A");
+            bool quick;
+            f.GiveUp(26f, 25f, out quick);
+            string kB = f.KeyFor(ArmSet("B"), mint);
+            int sB = f.Begin(30f, null, "B");
+            // A's late success: ApiClient's cache write, then the callback.
+            Func<bool> currentA = () => f.IsCurrent(sA);
+            if (honourSerial ? PcShardFlight.Admits(currentA) : true) balance = 250;
+            settled = honourSerial ? f.Settle(sA, null) : f.SettleIgnoringSerial(true, null);
+            latchKept = f.InFlight && f.QuickId == "B" && f.Serial == sB;
+            keyKept = f.QuickKey == kB && f.QuickKeyFor == ArmSet("B");
+            balanceKept = balance == 100;
+        }
+
+        private static void FlightCases(SelfTestResult r)
+        {
+            bool settled, latch, key, bal;
+            LateAnswer(true, out settled, out latch, out key, out bal);
+            Check(r, "late answer: a retired generation settles nothing", !settled, settled.ToString());
+            Check(r, "late answer: the newer request's latch is unchanged", latch, latch.ToString());
+            Check(r, "late answer: the newer request's nonce is unchanged", key, key.ToString());
+            Check(r, "late answer: the cached balance is unchanged", bal, bal.ToString());
+            LateAnswer(false, out settled, out latch, out key, out bal);
+            Check(r, "control: without the generation the late answer clears the newer latch", !latch, latch.ToString());
+            Check(r, "control: without the generation the late answer drops the newer nonce", !key, key.ToString());
+            Check(r, "control: without the generation the late answer overwrites the balance", !bal, bal.ToString());
+
+            var f = new PcShardFlight();
+            int minted = 0;
+            Func<string> mint = () => "n" + (++minted);
+            string k1 = f.KeyFor(ArmSet("A"), mint), k2 = f.KeyFor(ArmSet("A"), mint);
+            Check(r, "key: the same card keeps its nonce until an answer", k1 == k2 && minted == 1, k1 + "/" + k2);
+            int s = f.Begin(0f, "P", null);
+            bool quick;
+            Check(r, "give-up: not before its bound", !f.GiveUp(25f, 25f, out quick) && f.IsCurrent(s), "");
+            Check(r, "give-up: past its bound it releases the latch and retires the generation",
+                  f.GiveUp(25.5f, 25f, out quick) && !quick && !f.InFlight && !f.IsCurrent(s) && f.PackId == null, "");
+            int sel = f.Begin(30f, null, null);
+            Check(r, "late pack answer after a newer selection: nothing settles, the selection stays in flight",
+                  !f.Settle(s, "transport") && f.IsCurrent(sel) && f.PackId == null, "");
+            Check(r, "the current answer settles once", f.Settle(sel, null) && !f.InFlight, "");
+            Check(r, "the same answer delivered twice settles nothing the second time", !f.Settle(sel, null), "");
+
+            var q = new PcShardFlight();
+            string kq = q.KeyFor(ArmSet("C"), mint);
+            int sq = q.Begin(0f, null, "C");
+            Check(r, "a current strip refusal keeps the card's nonce (the retry is a replay)",
+                  q.Settle(sq, "transport") && q.QuickKey == kq, q.QuickKey);
+            sq = q.Begin(1f, null, "C");
+            Check(r, "a current strip success ends the card's nonce", q.Settle(sq, null) && q.QuickKey == null && q.QuickKeyFor == null, q.QuickKey);
+            q.KeyFor(ArmSet("C"), mint);
+            sq = q.Begin(2f, null, "C");
+            Check(r, "a current key_reused drops the card's nonce", q.Settle(sq, "key_reused") && q.QuickKey == null, q.QuickKey);
+            q.KeyFor(ArmSet("C"), mint);
+            sq = q.Begin(3f, null, "C");
+            q.Reset();
+            Check(r, "an identity reset retires the flight and its nonce",
+                  !q.IsCurrent(sq) && !q.Settle(sq, null) && !q.InFlight && q.QuickKey == null, "");
+            Check(r, "the cache write fails closed without a generation check", !PcShardFlight.Admits(null), "");
+
+            // finding 3: a Shard dupes is keyed by the flight's nonce too
+            var d = new PcShardFlight();
+            string kd = d.KeyFor("dupes|P|a2,a3", mint);
+            d.Begin(0f, null, null, "P");
+            bool dq;
+            Check(r, "a Shard dupes given up is read back and keeps its nonce",
+                  d.GiveUp(26f, 25f, out dq) && dq && d.QuickKey == kd && d.DupesOf == null, d.QuickKey);
+            int sd = d.Begin(30f, null, null, "P");
+            Check(r, "a Shard dupes success ends its nonce", d.Settle(sd, null) && d.QuickKey == null && d.DupesOf == null, d.QuickKey);
+        }
+
+        private static bool BinderUnchanged()
+        {
+            foreach (bool d in new[] { false, true })
+                foreach (bool g in new[] { false, true })
+                    foreach (bool s in new[] { false, true })
+                        if (DiscardOffered(false, d, g, s) != DiscardOffered(false, d, false, s)) return false;
+            return true;
+        }
+
+        private static void Check(SelfTestResult r, string name, bool ok, string got)
+        {
+            if (ok) r.Passed++; else r.Failed++;
+            r.Report.Append(ok ? "PASS" : "FAIL").Append(" | case=").Append(name)
+                    .Append(" | got=").Append(got ?? "(null)").Append('\n');
+        }
+    }
+
+    /// <summary>
+    /// Fix pass 1, finding 2: the batch shard's one in-flight request (a Shard
+    /// pack, a binder selection or a pull-strip card) and the strip card's
+    /// kept nonce, with ONE writer. Every request is stamped with a
+    /// generation (Begin); the 25 s give-up and an identity reset retire it.
+    /// An answer settles only when its generation is still the current one
+    /// (Settle), and the balance in its body is written into the cache only
+    /// then (Admits, ApiClient.PcDiscardBatch): a retired request's late
+    /// answer changes neither the cached balance or collection nor the latch
+    /// or nonce of a newer request. Free of Unity so the client rules harness
+    /// executes it (#391).
+    /// </summary>
+    internal sealed class PcShardFlight
+    {
+        internal bool InFlight { get; private set; }
+        internal float At { get; private set; }
+        internal string PackId { get; private set; }   // the pack a Shard pack in flight came from
+        internal string QuickId { get; private set; }  // the strip card a one-card shard is for
+        internal string DupesOf { get; private set; }  // the pack a Shard dupes in flight came from (finding 3)
+        internal int Serial { get; private set; }      // the current generation
+        // The flight's own nonce, kept until an answer: a strip card's, or a
+        // pack's duplicates set's (Shard dupes). One slot.
+        internal string QuickKey { get; private set; }
+        internal string QuickKeyFor { get; private set; }  // the set (ArmSet, or the dupes set) the nonce is for
+
+        /// <summary>Whether the request in flight is keyed by the flight's own
+        /// nonce (a strip card or a Shard dupes): its outcome is read back
+        /// after a give-up, and its nonce follows KeepKeyAfter.</summary>
+        internal bool Keyed { get { return QuickId != null || DupesOf != null; } }
+
+        /// <summary>A new request: a new generation, the latch taken.</summary>
+        internal int Begin(float now, string packId, string quickId, string dupesOf = null)
+        {
+            Serial++;
+            InFlight = true; At = now; PackId = packId; QuickId = quickId; DupesOf = dupesOf;
+            return Serial;
+        }
+
+        /// <summary>Whether an answer stamped `serial` is the current request's.</summary>
+        internal bool IsCurrent(int serial)
+        {
+            return InFlight && serial == Serial;
+        }
+
+        /// <summary>The cache write's test: true only when a generation check
+        /// is given and passes. Null (no check) fails closed.</summary>
+        internal static bool Admits(Func<bool> current)
+        {
+            return current != null && current();
+        }
+
+        /// <summary>The answer stamped `serial`: false, and NOTHING changed,
+        /// when that generation is retired; else the latch is released and a
+        /// keyed request's nonce (a strip card's or a Shard dupes') is kept or
+        /// dropped by PcQuickShardRules.KeepKeyAfter(code) (null code: a
+        /// success).</summary>
+        internal bool Settle(int serial, string code)
+        {
+            if (!IsCurrent(serial)) return false;
+            bool quick = Keyed;
+            InFlight = false; PackId = null; QuickId = null; DupesOf = null;
+            if (quick && !PcQuickShardRules.KeepKeyAfter(code)) { QuickKey = null; QuickKeyFor = null; }
+            return true;
+        }
+
+        /// <summary>The give-up: past `after` seconds with no answer the latch
+        /// is released and the generation retired, so a late answer settles
+        /// nothing. `quick` says whether it was keyed by the flight's nonce, a
+        /// strip card or a Shard dupes (whose outcome is read back; its nonce
+        /// is kept, the given_up rule).</summary>
+        internal bool GiveUp(float now, float after, out bool quick)
+        {
+            quick = false;
+            if (!InFlight || now - At <= after) return false;
+            quick = Keyed;
+            Serial++;
+            InFlight = false; PackId = null; QuickId = null; DupesOf = null;
+            return true;
+        }
+
+        /// <summary>The flight's nonce for `set` (a strip card's ArmSet, or a
+        /// Shard dupes' exact set): kept while it names the same set, minted
+        /// otherwise.</summary>
+        internal string KeyFor(string set, Func<string> mint)
+        {
+            if (QuickKeyFor != set || string.IsNullOrEmpty(QuickKey)) { QuickKey = mint(); QuickKeyFor = set; }
+            return QuickKey;
+        }
+
+        /// <summary>An identity change: whatever is in flight is retired and
+        /// the previous account's nonce dropped.</summary>
+        internal void Reset()
+        {
+            Serial++;
+            InFlight = false; At = 0f; PackId = null; QuickId = null; DupesOf = null; QuickKey = null; QuickKeyFor = null;
+        }
+
+        /// <summary>NEGATIVE CONTROL for the harness only: the callback as
+        /// 6804a7e7 wrote it, which settled every answer whatever its
+        /// generation. Never called by anything that sends.</summary>
+        internal bool SettleIgnoringSerial(bool quick, string code)
+        {
+            InFlight = false; PackId = null; QuickId = null; DupesOf = null;
+            if (quick && !PcQuickShardRules.KeepKeyAfter(code)) { QuickKey = null; QuickKeyFor = null; }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Fix pass 2, finding 1: the generation of the Player Cards caches'
+    /// confirmed writes. A /pc/me or /pc/collection read is stamped when it
+    /// is dispatched (Stamp). Every answer that writes either cache from a
+    /// server confirmation moves the generation (Wrote): a shard's or a
+    /// discard's balance and the prints it removed, and a trade accept's
+    /// drawn prints. A read lands in the cache only when no such write
+    /// happened while it was on the wire (Admits). Otherwise its snapshot may
+    /// predate that write, so ApiClient drops it and owes the read, sent again
+    /// (stamped then) once no shard and no discard is out. A read-back
+    /// launched by a retired shard (the 25 s
+    /// give-up's) therefore cannot put back a balance or a print that a newer
+    /// shard's answer confirmed. The fence orders reads against this
+    /// client's own confirmed writes only. Free of Unity so the client rules
+    /// harness executes it (#391).
+    /// </summary>
+    internal sealed class PcCacheFence
+    {
+        internal int Writes { get; private set; }
+
+        /// <summary>The generation a read carries from its dispatch.</summary>
+        internal int Stamp() { return Writes; }
+
+        /// <summary>A confirmed answer wrote a cache.</summary>
+        internal void Wrote() { Writes++; }
+
+        /// <summary>Whether a read stamped `stamp` may land: no confirmed
+        /// write happened since it was dispatched.</summary>
+        internal bool Admits(int stamp)
+        {
+            return stamp == Writes;
+        }
+    }
+
+    /// <summary>
+    /// Fix pass 3, finding 2: the prints a refused shard's not_owned named
+    /// (PlayerCardsUI.FailShard), kept out of the strip's Discard, the Shard
+    /// pack's set and both Shard dupes walks (PcQuickShardRules.PackDupes).
+    /// A tombstone is not permanent: every successful own-collection read
+    /// reconciles the set when it lands (ApiClient.FetchPcCollection), lifting
+    /// each tombstone whose print the read positively holds, so a print traded
+    /// away and back returns to both walks. Only a read DISPATCHED after the
+    /// refusal that wrote a tombstone can lift it: a read dispatched before
+    /// the refusal landed is not proven newer than that refusal, so it never
+    /// lifts one. Each read carries its dispatch number (Dispatched) to its
+    /// landing. An identity change clears the set (PlayerCardsUI). Free of
+    /// Unity so the client rules harness executes it (#391).
+    /// </summary>
+    internal sealed class PcShardTombstones
+    {
+        // print id -> the number of own-collection reads dispatched when a refusal named it
+        private readonly Dictionary<string, int> gone = new Dictionary<string, int>(StringComparer.Ordinal);
+        private int dispatched;
+
+        internal int Count { get { return gone.Count; } }
+
+        /// <summary>Whether `printId` is tombstoned.</summary>
+        internal bool Contains(string printId)
+        {
+            return printId != null && gone.ContainsKey(printId);
+        }
+
+        /// <summary>An own-collection read is dispatched: its number, carried
+        /// to its landing (Reconcile).</summary>
+        internal int Dispatched()
+        {
+            return ++dispatched;
+        }
+
+        /// <summary>A refused shard named `printId` not_owned: out until a read
+        /// dispatched after this holds it.</summary>
+        internal void Add(string printId)
+        {
+            if (!string.IsNullOrEmpty(printId)) gone[printId] = dispatched;
+        }
+
+        /// <summary>A successful own-collection read, number `read`, that
+        /// positively holds `heldPrintIds`: every tombstone it names that was
+        /// written before the read was dispatched is lifted. Returns how many
+        /// were.</summary>
+        internal int Reconcile(IEnumerable<string> heldPrintIds, int read)
+        {
+            if (heldPrintIds == null || gone.Count == 0) return 0;
+            int lifted = 0;
+            foreach (var id in heldPrintIds)
+            {
+                int at;
+                if (id != null && gone.TryGetValue(id, out at) && read > at) { gone.Remove(id); lifted++; }
+            }
+            return lifted;
+        }
+
+        /// <summary>An identity change: the previous account's tombstones go.</summary>
+        internal void Clear()
+        {
+            gone.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Fix pass 4, finding 7: a forced /pc/me read asked for while one is
+    /// already on the wire. ApiClient.FetchPcMe sends one read at a time, and
+    /// a forced ask made while one flew used to be answered "in-flight" and
+    /// forgotten. The read on the wire was dispatched before whatever made
+    /// the caller ask (a failed, refused or unanswered shard's balance
+    /// read-back among them), so its answer is not proven newer than that;
+    /// and when the shard committed with no answer this client admitted,
+    /// nothing moved the answer fence (PcCacheFence) to drop it. The ask is
+    /// remembered here (Demand), bound to the identity generation it was
+    /// made in, and closed when the read on the wire lands (Landed). Only a
+    /// read dispatched AFTER the demand answers it, so that older read never
+    /// does: Landed names the identity a fresh read is sent for. A demand of
+    /// another generation is dropped, and an identity or consent edge
+    /// releases it (Clear, ApiClient.ReleasePcReadLatches). Free of Unity so
+    /// the client rules harness executes it (#391).
+    ///
+    /// Fix pass 5, finding 10: a forced ask's completion callback is a caller
+    /// waiting for a read newer than its ask (the dance selection's picture
+    /// check, PlayerCardsUI.MaybeSendDance). It is retained here with the
+    /// demand (Demand) and is heard exactly once, from the first read
+    /// dispatched AFTER the ask that lands with its answer taken (Answered:
+    /// cached, or failed), never from the read that was on the wire when it
+    /// was asked, which is not proven newer than the ask. Closing the demand
+    /// at that older read's landing keeps it (Landed). A callback of another
+    /// generation is dropped unheard, and an identity or consent edge drops
+    /// every waiting callback unheard (Clear).
+    /// </summary>
+    internal sealed class PcReadDemand
+    {
+        private int dispatched;    // /pc/me reads dispatched so far
+        private bool open;
+        private int openAt;        // the reads dispatched when the open demand was made
+        private int openGen;       // the identity generation it was made in
+        private string openFor;    // the identity it was made for
+        // fix pass 5, finding 10: the forced asks' callbacks not heard yet
+        private readonly List<Waiter> waiting = new List<Waiter>();
+
+        /// <summary>A waiting callback: the reads dispatched when it was
+        /// asked (only a read numbered higher answers it) and the identity
+        /// generation it was asked in.</summary>
+        private sealed class Waiter
+        {
+            internal readonly Action<bool, string> Callback;
+            internal readonly int After;
+            internal readonly int Gen;
+
+            internal Waiter(Action<bool, string> callback, int after, int gen)
+            {
+                Callback = callback; After = after; Gen = gen;
+            }
+        }
+
+        /// <summary>Whether a demand is open.</summary>
+        internal bool Open { get { return open; } }
+
+        /// <summary>Fix pass 5, finding 10: the callbacks waiting for a read
+        /// newer than their ask.</summary>
+        internal int Waiting { get { return waiting.Count; } }
+
+        /// <summary>A /pc/me read is dispatched: its number, carried to its
+        /// landing (Landed).</summary>
+        internal int Dispatched()
+        {
+            return ++dispatched;
+        }
+
+        /// <summary>A forced read for `who` was asked for while a read was on
+        /// the wire, in identity generation `gen`. Asks made while the same
+        /// read flies are one demand. `callback`, when given, waits here
+        /// until a read dispatched after this ask answers it
+        /// (Answered).</summary>
+        internal void Demand(string who, int gen, Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(who)) return;
+            open = true; openAt = dispatched; openGen = gen; openFor = who;
+            if (callback != null) waiting.Add(new Waiter(callback, dispatched, gen));
+        }
+
+        /// <summary>The read numbered `read` landed, whatever its answer, with
+        /// the identity generation now `gen`. Closes the open demand and
+        /// returns the identity a fresh read is sent for, or null: null when
+        /// no demand is open, when the demand belongs to another generation,
+        /// and when this read was dispatched after the demand (it answers
+        /// it). A read dispatched at or before the demand never answers
+        /// it. The waiting callbacks stay (fix pass 5, finding 10): this
+        /// read answers none it was on the wire for.</summary>
+        internal string Landed(int read, int gen)
+        {
+            if (!open) return null;
+            string who = openFor;
+            bool again = openGen == gen && read <= openAt;
+            Close();
+            return again ? who : null;
+        }
+
+        /// <summary>Fix pass 5, finding 10: the read numbered `read` landed
+        /// with its answer taken (cached, or failed), with the identity
+        /// generation now `gen`: the waiting callbacks it answers, in ask
+        /// order, or null. A callback is answered only by a read dispatched
+        /// after its ask (read above After); the read that was on the wire
+        /// when it was asked never answers it. Each answered callback leaves
+        /// the list here, so it is heard exactly once. A callback of another
+        /// generation is dropped unheard.</summary>
+        internal List<Action<bool, string>> Answered(int read, int gen)
+        {
+            if (waiting.Count == 0) return null;
+            List<Action<bool, string>> due = null;
+            var keep = new List<Waiter>();
+            foreach (var w in waiting)
+            {
+                if (w.Gen != gen) continue;                        // another generation's ask: dropped unheard
+                if (read <= w.After) { keep.Add(w); continue; }    // the read on the wire at the ask never answers it
+                if (due == null) due = new List<Action<bool, string>>();
+                due.Add(w.Callback);                               // answered: heard once, so not kept
+            }
+            waiting.Clear(); waiting.AddRange(keep);
+            return due;
+        }
+
+        /// <summary>An identity or consent edge: the previous generation's
+        /// demand goes, and every waiting callback with it, unheard.</summary>
+        internal void Clear()
+        {
+            Close();
+            waiting.Clear();   // fix pass 5, finding 10: the waiting callbacks, never heard
+        }
+
+        /// <summary>Closes the open demand; the waiting callbacks
+        /// stay.</summary>
+        private void Close()
+        {
+            open = false; openAt = 0; openGen = 0; openFor = null;
+        }
+    }
+}

@@ -4079,7 +4079,7 @@ def test_the_admin_clear_restarts_the_steam_unit_and_the_render_guard_refuses_th
     # the missing-blob guard on every render path: the face route's renderer, the pre-render, the preview
     assert "raise _PcPortraitMissing()" in inspect.getsource(main._pc_render_face)
     assert "except _PcPortraitMissing:" in inspect.getsource(main._pc_prerender)
-    assert "raise _PcPortraitMissing()" in inspect.getsource(main.internal_pc_face_preview)
+    assert "raise _PcPortraitMissing()" in inspect.getsource(main._pc_preview_face)   # both preview routes draw here (row 24)
     assert MAIN_SRC.count("raise _PcPortraitMissing()") == 2
     ex = main._PcPortraitMissing()
     assert ex.status_code == 503 and ex.headers == {"Retry-After": "2"}

@@ -66,6 +66,15 @@ services:
       GLICKO2_DEFAULT_RATING: ${GLICKO2_DEFAULT_RATING}
       GLICKO2_DEFAULT_RD: ${GLICKO2_DEFAULT_RD}
       GLICKO2_DEFAULT_VOLATILITY: ${GLICKO2_DEFAULT_VOLATILITY}
+      # How many days of inactivity a leaderboard hides at. The api applies
+      # this window; the BOT prints the number in the board footer from its
+      # own read of the same key, so both services are enumerated here and
+      # both defaults are this one. Default REPEATED rather than `${VAR:-}`:
+      # enumerating a key makes it present, and os.environ.get falls back
+      # only for an ABSENT key, so the empty spelling would hand the process
+      # "" and int() would refuse it (#438). A test fails if any of the three
+      # copies drifts.
+      LEADERBOARD_ACTIVE_DAYS: ${LEADERBOARD_ACTIVE_DAYS:-90}
       # Steam Web API key for /auth/steam ticket verification (July 21).
       # Empty default so the container starts with .env unchanged — unset =
       # pipeline no-op mode (tokens issued unverified, nothing enforced).
@@ -174,6 +183,22 @@ services:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       API_BASE_URL: http://api:8000
       LEADERBOARD_CHANNEL: ${LEADERBOARD_CHANNEL}
+      # Which boards the leaderboard channel publishes, and in what
+      # order (v1.41.0 item 1). The default is REPEATED here on purpose.
+      # os.getenv falls back to its own default only when the key is
+      # ABSENT, and enumerating a key here makes it present -- so the
+      # usual `${VAR:-}` spelling would hand the bot an empty string,
+      # _enabled_boards() would yield nothing, and the channel would go
+      # quiet on the next deploy with .env untouched and no error in the
+      # logs (#438, and measured: 3 boards -> 0). Keep this list equal to
+      # the default in discord_bot.py; a test fails if they drift.
+      LEADERBOARD_BOARDS: ${LEADERBOARD_BOARDS:-1v1,2v2,ffa}
+      # The board footer prints "<n> inactive hidden (<this> days)". The api
+      # is what applies the window, from its own read of this same key, so
+      # the two services must receive the same value -- passing it to one of
+      # them would make the footer state a window nobody applied. Same
+      # default, repeated for the same reason as the line above.
+      LEADERBOARD_ACTIVE_DAYS: ${LEADERBOARD_ACTIVE_DAYS:-90}
       SERIES_LOG_CHANNEL: ${SERIES_LOG_CHANNEL}
       QUEUE_BEACON_CHANNEL: ${QUEUE_BEACON_CHANNEL}
       CHAT_CHANNEL: ${CHAT_CHANNEL:-1492022404829020230}

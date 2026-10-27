@@ -362,6 +362,28 @@ namespace CompetitiveRounds
             try { socket?.Abort(); } catch { }   // wakes the loop; it reconnects on backoff
         }
 
+        /// <summary>Undo ApiClient's Retarget when its secure-route check
+        /// answers again (board row 27). Clears the session override ONLY while
+        /// it is still the API's backup and chat never fell back on its own: the
+        /// REST check proves nothing about this socket's separate TLS stack
+        /// (#194), so a chat that failed wss by itself stays where it is. With
+        /// the override cleared the loop re-derives the configured base and its
+        /// own three-strike wss fall-back is armed again (it only counts while
+        /// no override is set). Only the main thread writes a non-null override
+        /// equal to the backup through Retarget; the socket thread writes one
+        /// only while the override is null, so this compare-and-clear races
+        /// nothing that could leave the wrong value behind.</summary>
+        public static void ReleaseApiFallback(string apiFallbackBaseHttp)
+        {
+            if (UsingWsFallback || string.IsNullOrWhiteSpace(apiFallbackBaseHttp)) return;
+            string cur = overrideBase;
+            if (cur == null) return;
+            if (!string.Equals(cur.TrimEnd('/'), apiFallbackBaseHttp.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)) return;
+            overrideBase = null;
+            Plugin.Log.LogInfo("[CHAT] secure route restored; leaving the backup for the configured endpoint");
+            try { socket?.Abort(); } catch { }   // wakes the loop; it reconnects on backoff
+        }
+
         private static string ResolveBaseHttp()
         {
             // Precedence: session override (TLS fallback) > configured value >

@@ -319,11 +319,18 @@ def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
     assert len(re.findall(r'(?:WHERE|AND) (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 5
     for fn in (main.pc_pool_summary, main.internal_pc_card, main._pc_preview_read):
         assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', inspect.getsource(fn))) == 1, fn.__name__
-    # The two preview routes decide membership through that one read and carry
-    # no membership clause of their own, so neither can drift from the other.
-    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+    # The preview routes decide membership through that one read and carry no
+    # membership clause of their own, so none can drift from the others: the
+    # two face previews (the bot's /card preview and the Settings full card,
+    # board row 24) through the drawing helper they share, which calls the
+    # read, and the motion preview GIF through the read itself.
+    for fn in (main.internal_pc_face_preview, main.pc_face_preview):
+        assert inspect.getsource(fn).count("await _pc_preview_face(db, ") == 1, fn.__name__
+    for fn in (main._pc_preview_face, main.internal_pc_motion_preview):
+        assert inspect.getsource(fn).count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
+    for fn in (main.internal_pc_face_preview, main.pc_face_preview, main._pc_preview_face,
+               main.internal_pc_motion_preview):
         route = inspect.getsource(fn)
-        assert route.count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
         assert "_PC_POOL_MEMBER_SQL" not in route and "_PC_POOL_STEAM_ID_SQL" not in route, fn.__name__
     # Card trading (migration 353) reads the word a sixth time: the trader word
     # opens with it, so a trade party is a pool member by the same fragment,
@@ -690,8 +697,8 @@ def _main_code():
     return "".join(lines)
 
 
-MUTATIONS = ("pc_open_pack", "pc_daily_claim", "pc_discard_print", "pc_set_setting")
-PRIVATE_READS = ("pc_pack_result", "pc_me")
+MUTATIONS = ("pc_open_pack", "pc_daily_claim", "pc_discard_print", "pc_discard_batch", "pc_set_setting")
+PRIVATE_READS = ("pc_pack_result", "pc_me", "pc_face_preview")
 
 
 def test_every_mutation_and_private_read_goes_through_the_verified_actor():
@@ -870,9 +877,11 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/pc/packs/open", ("POST",)), ("/api/v1/pc/packs/result", ("GET",)),
         ("/api/v1/pc/packs", ("GET",)),   # the pack history pager (Sept 12)
         ("/api/v1/pc/daily", ("POST",)), ("/api/v1/pc/prints/discard", ("POST",)),
+        ("/api/v1/pc/prints/discard-batch", ("POST",)),   # the batch shard (board row 25)
         ("/api/v1/pc/settings", ("POST",)), ("/api/v1/pc/me", ("GET",)),
         ("/api/v1/pc/collection", ("GET",)), ("/api/v1/pc/card", ("GET",)), ("/api/v1/pc/pool", ("GET",)),
         ("/api/v1/pc/portrait", ("POST",)),
+        ("/api/v1/pc/face/preview", ("GET",)),   # the Settings full-card preview (board row 24)
         ("/api/v1/pc/portrait/motion", ("POST",)),   # dance cards: the motion upload (S2.6)
         ("/api/v1/pc/dance", ("POST",)),              # dance cards: the selection (S2.10)
         # card trading (migration 353): the five player routes
@@ -1028,9 +1037,10 @@ def test_titles_and_rank_names_resolve_against_the_rounded_rating():
     # than its own expression
     assert inspect.getsource(main._pc_rank_name).count("_rank_name_for(_pc_board_rating(rating))") == 1
     assert inspect.getsource(main.internal_pc_card).count("_rank_name_for(_pc_board_rating(rating))") == 1
-    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+    for fn in (main.internal_pc_face_preview, main.pc_face_preview, main._pc_preview_face,
+               main.internal_pc_motion_preview):
         route = inspect.getsource(fn)
         assert "_pc_rank_name(" not in route and "_rank_name_for(" not in route, fn.__name__
-    preview = inspect.getsource(main._pc_preview_read)
+    preview = inspect.getsource(main._pc_preview_read)   # the read every preview draws from
     assert "rank_name = _pc_rank_name(rating)" in preview and "_rank_name_for(" not in preview
     assert 'subtitle = _pc_shop_title(member["title"], rank_name)' in preview and '"subtitle": subtitle' in preview

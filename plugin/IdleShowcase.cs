@@ -28,43 +28,32 @@ namespace CompetitiveRounds
     /// coroutine host (#16/#270c class).</summary>
     internal static class IdleShowcase
     {
-        // Aug 31 (Sid: "show more of / all of the compare tab"): every entry
-        // must BYTE-match NativeUI.COMPARE_METRICS (#152 — a mismatch is a
-        // silent no-op view). Deliberately excludes the per-player fetch-storm
-        // metrics (Achievements/Similar/Nemesis/Records — the 5323-5326
-        // design-review note: 12 candidates x N endpoints per view); Gold
-        // Sources and Build Types are single-fetch pie boards and safe.
-        private static readonly string[] CURATED_METRICS =
-        {
-            "Elo", "Hit / Block %", "Top Cards", "Peak Elo",
-            "Top Streaks", "5-0s Given / Taken", "Avg Game Length",
-            "Gold Sources", "Build Types",
-        };
-
-        // View script, data-driven (Aug 31 rewrite — the old parallel
-        // kind-constants + DWELL arrays drifted whenever a view was added).
-        // Kinds: 0 Home, 1 Compare (Arg = CURATED_METRICS index; index 0 also
-        // does selection setup), 2 leaderboard profile (select + scroll-to-row
-        // + detail sweep), 3 2v2 tab, 4 FFA tab.
-        private struct View { public int Kind; public int Arg; public float Dwell;
-            public View(int k, int a, float d) { Kind = k; Arg = a; Dwell = d; } }
-        private static readonly View[] SCRIPT =
-        {
-            new View(0, 0, 18f),          // Home
-            new View(1, 0, 26f),          // Compare: Elo (+ setup; axis = the configured RatingGraphAxis mode)
-            new View(1, 1, 20f),          // Hit / Block %
-            new View(1, 2, 20f),          // Top Cards
-            new View(1, 3, 15f),          // Peak Elo
-            new View(1, 4, 15f),          // Top Streaks
-            new View(1, 5, 15f),          // 5-0s Given / Taken
-            new View(1, 6, 15f),          // Avg Game Length
-            new View(1, 7, 17f),          // Gold Sources
-            new View(1, 8, 17f),          // Build Types
-            new View(2, 0, 30f),          // profile A: row-scroll + sweep
-            new View(2, 1, 30f),          // profile B
-            new View(3, 0, 22f),          // 2v2
-            new View(4, 0, 22f),          // FFA
-        };
+        // Board row 31 (Sid, 2026-09-28: show every Compare tab category, the
+        // other rules unchanged): the rotation is ShowcaseRules.Script over
+        // the Compare tab's own metric list - NativeUI.CompareMetricNames, a
+        // copy of COMPARE_METRICS in its order - so a metric added to the tab
+        // joins the walk with no second list to keep byte-matched (the #152
+        // hazard the curated list of 9 carried). One dwell per metric,
+        // [Broadcast] ShowcaseMetricSeconds (default 15 s); Home, the two
+        // leaderboard profiles and the 2v2 and FFA tabs keep their dwells, and
+        // the skip rule is unchanged (ShowcaseRules.Next). The script is
+        // rebuilt at every rotation start, so a changed dwell applies from the
+        // next rotation. Kinds and args: ShowcaseRules.View.
+        //
+        // Request cost (why the curated list once left the board metrics out):
+        // a board metric's data is fetched per candidate the first time it is
+        // shown in a session and then served from ApiClient's caches -
+        // FetchCompareBoard skips a key already cached or in flight and holds a
+        // failed key for 15 s; the compare achievements are cached per player;
+        // the nemesis boards once per selection; Records refetch a board after
+        // 5 minutes. So the walk adds at most one request per candidate (12)
+        // per board metric on its first showing in a session: the burst Gold
+        // Sources and Build Types already made in the curated walk.
+        private static string[] metrics = new string[0];
+        private static List<ShowcaseRules.View> script =
+            ShowcaseRules.Script(metrics, ShowcaseRules.DEFAULT_METRIC_SECONDS);
+        private static int metricsShown;        // Compare metrics shown this rotation
+        private static bool testRotation;       // [Broadcast] TestShowcase: one rotation, stream-live gate lifted
 
         private static bool opened;             // WE opened the current page
         private static bool suppressed;         // operator interfered this idle epoch
@@ -95,6 +84,19 @@ namespace CompetitiveRounds
             viewIdx = -1;
         }
 
+        /// <summary>[Broadcast] TestShowcase lever (board row 31's witness):
+        /// play one rotation with ONLY the stream-live gate lifted. The
+        /// director must still be idle with nothing to watch, the seat out of
+        /// any online room and the F5 page free, and the ownership contract is
+        /// unchanged. It ends when the rotation wraps, when the idle epoch
+        /// ends, or when the operator takes the page.</summary>
+        internal static void DevRunOneRotation()
+        {
+            testRotation = true;
+            suppressed = false;
+            Plugin.Log?.LogInfo("[SHOWCASE] test rotation requested: one rotation with the stream-live gate lifted");
+        }
+
         internal static void Tick(bool directorIdleNoTicket)
         {
             try
@@ -106,6 +108,7 @@ namespace CompetitiveRounds
                     // Leaving idle ends the epoch: teardown + lift suppression.
                     if (opened) Interrupt();
                     suppressed = false;
+                    if (testRotation) EndTestRotation("the director left idle");
                     return;
                 }
 
@@ -121,6 +124,7 @@ namespace CompetitiveRounds
                     opened = false;
                     viewIdx = -1;
                     suppressed = true;
+                    if (testRotation) EndTestRotation("the page was taken");
                     Plugin.Log?.LogInfo("[SHOWCASE] page taken/closed externally — standing down this idle epoch");
                     return;
                 }
@@ -138,7 +142,7 @@ namespace CompetitiveRounds
 
                 bool streamLive = false;
                 try { streamLive = BroadcastMode.StreamInfoLive; } catch { }
-                if (!streamLive) { if (opened) Interrupt(); return; }
+                if (!streamLive && !testRotation) { if (opened) Interrupt(); return; }
 
                 // Defensive: idle should mean menu, but never drive the F5
                 // page inside a live online room.
@@ -152,8 +156,11 @@ namespace CompetitiveRounds
                     if (!NativeUI.TryOpenForShowcase()) return;
                     opened = true;
                     profileRot = 0;
+                    BeginRotation();
+                    Plugin.Log?.LogInfo("[SHOWCASE] started: " + script.Count + " views, " + metrics.Length
+                        + " Compare metrics at " + ShowcaseRules.MetricDwell(MetricSecondsConfigured()).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)
+                        + " s each" + (testRotation ? " (test rotation)" : ""));
                     StartView(0);
-                    Plugin.Log?.LogInfo("[SHOWCASE] started");
                     return;
                 }
 
@@ -169,12 +176,61 @@ namespace CompetitiveRounds
                     readyWaitStart = -1f;
                     viewStartedAt = Time.realtimeSinceStartup;
                 }
-                float dwell = viewIdx >= 0 && viewIdx < SCRIPT.Length ? SCRIPT[viewIdx].Dwell : 20f;
+                float dwell = viewIdx >= 0 && viewIdx < script.Count ? script[viewIdx].Dwell : 20f;
                 TickView(dwell);
                 if (Time.realtimeSinceStartup - viewStartedAt < dwell) return;
-                StartView(NextView(viewIdx));
+                Advance();
             }
             catch { }
+        }
+
+        private static float MetricSecondsConfigured()
+        {
+            try
+            {
+                return Plugin.BroadcastShowcaseMetricSeconds != null
+                    ? Plugin.BroadcastShowcaseMetricSeconds.Value
+                    : ShowcaseRules.DEFAULT_METRIC_SECONDS;
+            }
+            catch { return ShowcaseRules.DEFAULT_METRIC_SECONDS; }
+        }
+
+        /// <summary>A rotation starts: the script is rebuilt from the Compare
+        /// tab's metric list and the configured dwell.</summary>
+        private static void BeginRotation()
+        {
+            metrics = NativeUI.CompareMetricNames;
+            script = ShowcaseRules.Script(metrics, MetricSecondsConfigured());
+            metricsShown = 0;
+        }
+
+        /// <summary>A dwell ended: step to the next view. Passing the end of
+        /// the rotation logs how many Compare metrics it showed, ends a
+        /// lever's test rotation (the page closes; the stream-live gate is
+        /// back), or begins the next rotation.</summary>
+        private static void Advance()
+        {
+            bool wrapped;
+            int next = ShowcaseRules.Next(script, viewIdx, candidates.Count, out wrapped);
+            if (wrapped)
+            {
+                Plugin.Log?.LogInfo("[SHOWCASE] rotation complete: " + metricsShown + "/" + metrics.Length + " Compare metrics shown");
+                if (testRotation)
+                {
+                    EndTestRotation("the rotation wrapped");
+                    Interrupt();
+                    return;
+                }
+                BeginRotation();
+                next = 0;   // Home: never skipped
+            }
+            StartView(next);
+        }
+
+        private static void EndTestRotation(string why)
+        {
+            testRotation = false;
+            Plugin.Log?.LogInfo("[SHOWCASE] test rotation finished: " + why);
         }
 
         /// <summary>Per-frame behavior INSIDE the current view. Today: the
@@ -185,7 +241,7 @@ namespace CompetitiveRounds
         /// (never a jump past the end).</summary>
         private static void TickView(float dwell)
         {
-            if (viewIdx < 0 || viewIdx >= SCRIPT.Length || SCRIPT[viewIdx].Kind != 2) return;
+            if (viewIdx < 0 || viewIdx >= script.Count || script[viewIdx].Kind != ShowcaseRules.KIND_PROFILE) return;
             if (!NativeUI.LbProfileLoaded) return;
             float el = Time.realtimeSinceStartup - viewStartedAt;
             if (el <= PROFILE_HOLD_SECONDS) { NativeUI.DevSetLbDetailScroll(0f); return; }
@@ -195,33 +251,20 @@ namespace CompetitiveRounds
 
         private static int NextView(int cur)
         {
-            int next = cur + 1;
-            if (next >= SCRIPT.Length || next < 0) next = 0;
-            // Skip whole view CLASSES that lack their data: Compare needs 2+
-            // candidates, profiles need 1+ (candidates refresh at view 1's
-            // setup; a cold start with nobody known degrades to Home/2v2/FFA).
-            int guard = 0;
-            while (guard++ < SCRIPT.Length)
-            {
-                int k = SCRIPT[next].Kind;
-                bool skip = (k == 1 && SCRIPT[next].Arg > 0 && candidates.Count < 2)
-                         || (k == 2 && candidates.Count < 1);
-                if (!skip) break;
-                next++; if (next >= SCRIPT.Length) next = 0;
-            }
-            return next;
+            bool wrapped;
+            return ShowcaseRules.Next(script, cur, candidates.Count, out wrapped);
         }
 
         private static bool ViewDataReady(int v)
         {
             try
             {
-                if (v < 0 || v >= SCRIPT.Length) return true;
-                switch (SCRIPT[v].Kind)
+                if (v < 0 || v >= script.Count) return true;
+                switch (script[v].Kind)
                 {
-                    case 0: return ApiClient.CachedOnlinePlayers != null;
-                    case 1: return SCRIPT[v].Arg > 0 || candidates.Count >= 2;
-                    case 2: return ApiClient.CachedLeaderboard != null && NativeUI.LbProfileLoaded;
+                    case ShowcaseRules.KIND_HOME: return ApiClient.CachedOnlinePlayers != null;
+                    case ShowcaseRules.KIND_COMPARE: return script[v].Arg > 0 || candidates.Count >= 2;
+                    case ShowcaseRules.KIND_PROFILE: return ApiClient.CachedLeaderboard != null && NativeUI.LbProfileLoaded;
                     default: return true;
                 }
             }
@@ -235,33 +278,42 @@ namespace CompetitiveRounds
             readyWaitStart = Time.realtimeSinceStartup;
             try
             {
-                if (v < 0 || v >= SCRIPT.Length) return;
-                switch (SCRIPT[v].Kind)
+                if (v < 0 || v >= script.Count) return;
+                var view = script[v];
+                switch (view.Kind)
                 {
-                    case 0:
+                    case ShowcaseRules.KIND_HOME:
                         NativeUI.DevOpenTab(13, -1f);   // Home (SwitchTab fetches presence)
                         break;
-                    case 1:
-                        if (SCRIPT[v].Arg == 0)
+                    case ShowcaseRules.KIND_COMPARE:
+                        if (view.Arg == 0)
                         {
                             GatherCandidates();
                             if (candidates.Count < 2) { StartView(NextView(v)); return; }
                             NativeUI.DevOpenTab(9, -1f);    // Compare
                             NativeUI.DevSetCompareSelection(candidates);
                         }
-                        NativeUI.DevSetCompareMetricByName(CURATED_METRICS[SCRIPT[v].Arg]);
+                        if (view.Arg < metrics.Length)
+                        {
+                            // Board row 31: one log line per metric shown.
+                            string name = metrics[view.Arg];
+                            bool set = NativeUI.DevSetCompareMetricByName(name);
+                            if (set) metricsShown++;
+                            Plugin.Log?.LogInfo(ShowcaseRules.MetricLine(view.Arg, metrics.Length, name)
+                                + (set ? "" : " (not on the Compare tab)"));
+                        }
                         break;
-                    case 2:
+                    case ShowcaseRules.KIND_PROFILE:
                         if (candidates.Count == 0) { StartView(NextView(v)); return; }
                         NativeUI.DevOpenTab(1, -1f);    // Leaderboard
                         NativeUI.DevSelectLeaderboardPlayer(candidates[profileRot % candidates.Count]);
                         profileRot++;
                         NativeUI.DevScrollLeaderboardToSelected();   // Aug 31: row into view
                         break;
-                    case 3:
+                    case ShowcaseRules.KIND_TEAM:
                         NativeUI.DevOpenTab(8, -1f);    // 2v2
                         break;
-                    case 4:
+                    case ShowcaseRules.KIND_FFA:
                         NativeUI.DevOpenTab(12, -1f);   // FFA
                         break;
                 }

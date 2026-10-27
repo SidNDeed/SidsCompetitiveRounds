@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.40.3";   // Sep 8-9: the ranked room's region. A client refreshed its Photon ping map only when older than 300 s while the server refuses any map stamped more than 180 s before the room is issued, and the one trigger that could refresh mid-queue required a Photon connection the main menu does not have -- so the maps that were supposed to decide the room were routinely too old to be used. A ranked-only session was worse off still: PUN builds its region list only from an OpGetRegions response, which a forced ranked connect skips, so those players had no list to ping at all and the measurement never ran once. The client now refreshes on a 60 s join threshold and a 90 s queue cadence that no longer asks Photon's connection state, and fetches its own region list from the NameServer when PUN has none. Also: a region left behind by the Sandbox's offline mode is no longer reported as the region you are on. Bug 351 (the thicker-menu-text toggle bricking chat) and bug 350 (a spectator's point orb opening already full) ride along, with match reports no longer failing on untyped interval parameters. Previous (1.40.2, Sep 8): one Session button per sitting; the Grow competitive clock 240 -> 120 FPS. Floors riding this release: DANCES_MIN_VERSION=1.39.7, MUSIC_PURCHASE_MIN_VERSION=1.40.0 -- both satisfied.
+        public const string ModVersion = "1.41.0";   // Sep 25: v1.41.0 BETA for testers - the v1.41.0 client lane merged with main (c2d14ad); no release, tag or upload until the testers have seen it. At 1.41.0 the server admits this client to non-default room rules (ROOM_RULES_MIN_VERSION); every other floor is met by 1.40.3 already. Previous (1.40.3, Sep 8-9): the ranked room's region. A client refreshed its Photon ping map only when older than 300 s while the server refuses any map stamped more than 180 s before the room is issued, and the one trigger that could refresh mid-queue required a Photon connection the main menu does not have -- so the maps that were supposed to decide the room were routinely too old to be used. A ranked-only session was worse off still: PUN builds its region list only from an OpGetRegions response, which a forced ranked connect skips, so those players had no list to ping at all and the measurement never ran once. The client now refreshes on a 60 s join threshold and a 90 s queue cadence that no longer asks Photon's connection state, and fetches its own region list from the NameServer when PUN has none. Also: a region left behind by the Sandbox's offline mode is no longer reported as the region you are on. Bug 351 (the thicker-menu-text toggle bricking chat) and bug 350 (a spectator's point orb opening already full) ride along, with match reports no longer failing on untyped interval parameters. Previous (1.40.2, Sep 8): one Session button per sitting; the Grow competitive clock 240 -> 120 FPS. Floors riding this release: DANCES_MIN_VERSION=1.39.7, MUSIC_PURCHASE_MIN_VERSION=1.40.0 -- both satisfied.
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -47,6 +47,7 @@ namespace CompetitiveRounds
         // anyone who unzipped the mod forge admin requests.
         internal static ConfigEntry<string> AdminHmacSecret;
         internal static ConfigEntry<bool> HttpsMigrationDone;
+        internal static ConfigEntry<float> SecureRetryMinutes;   // [API] board row 27: minutes between secure-route checks while the session runs on the backup
         internal static ConfigEntry<bool> RankedEnabled;
         internal static ConfigEntry<bool> RankedDisabledByConsent;
         internal static ConfigEntry<bool> ShowNotifications;
@@ -58,8 +59,13 @@ namespace CompetitiveRounds
         internal static ConfigEntry<int> BroadcastFpsCap;
         internal static ConfigEntry<bool> BroadcastWindowed1080;
         internal static ConfigEntry<bool> ShowRegionPing;
-        internal static ConfigEntry<bool> ShowInactiveOnBoards;   // [UI] item d: default off -- boards hide players inactive 90+ days
+        internal static ConfigEntry<bool> ShowRoomRulesIndicator;   // [UI] item 22: the standing room-rules strip, default on
+        internal static ConfigEntry<bool> ShowInactiveOnBoards;   // [UI] item d: default off -- boards hide players the server counts as inactive (its leaderboard_active_days)
         internal static ConfigEntry<bool> LagNoticesEnabled;   // [Network] LagNotices — Release B §4, default off
+        // [Data] AutoLogUpload — v1.41.0 item (a). Opt-IN, default off. Named
+        // ...Enabled rather than AutoLogUpload so the entry and the
+        // AutoLogUpload class that reads it cannot be mistaken for each other.
+        internal static ConfigEntry<bool> AutoLogUploadEnabled;
         // Streamed-playback measurement (MusicStreamProbe), both in [Music].
         // Opt-in, default off; the command names the track and the mode.
         internal static ConfigEntry<bool> MusicProbeEnabled;
@@ -74,8 +80,9 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ChatOverlayPinned;
         // Item 4: how long a chat line stays fully opaque in the overlay before
         // the (still hardcoded) 10s fade begins. Float so the value can be
-        // hand-edited in the cfg to anything; the in-game control cycles a
-        // fixed set (CHAT_TTL_CYCLE) because this codebase has no slider.
+        // hand-edited in the cfg to anything; the in-game control (item 13: a
+        // slider since the settings page reorganisation) is quantised to a
+        // fixed set of stops, CHAT_TTL_CYCLE, and writes only those.
         // 0 (and any value <= 0) is a MODE, not a duration — see
         // ChatOverlayHiddenDuringPlay.
         internal static ConfigEntry<float> ChatOverlaySeconds;
@@ -83,6 +90,12 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowBlockDebug;
         internal static ConfigEntry<bool> ShowPlayerColors;
         internal static ConfigEntry<bool> ShowInputOverlay;
+        // Item 19 (two default avatars): the setting (three keys) and the ONE
+        // remembered value, the pre-switch own selection (-1 = none).
+        internal static ConfigEntry<bool> AvatarAutoSwitch;
+        internal static ConfigEntry<int> AvatarModdedPreset;
+        internal static ConfigEntry<int> AvatarVanillaPreset;
+        internal static ConfigEntry<int> AvatarHomeSlot;
         // v1.32 items 7+8 — standalone accessibility/FPS toggles. Deliberately
         // NOT under the Performance master switch: these are user preferences
         // that should survive a perf-master flip (map note, settings tab).
@@ -145,6 +158,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> MusicShuffle;
         internal static ConfigEntry<bool> MusicLoop;
         internal static ConfigEntry<int> MusicVolume;        // engine-local %, on top of the game's own music slider
+        internal static ConfigEntry<bool> MusicVolumeMigrated; // one-shot marker for the 1.41.0 MusicVolume migration (MusicLevels.MigratedPercent)
         internal static ConfigEntry<bool> MenuMusicEnabled;  // legacy bool (§8) — superseded by MenuMusicMode, kept per #190
         internal static ConfigEntry<string> MenuMusicMode;   // "vanilla" / "custom" / "silent" (Sept 2 feedback)
         internal static ConfigEntry<bool> MenuMusicModeMigrated; // one-shot marker for the MenuMusicEnabled→MenuMusicMode migration
@@ -163,12 +177,30 @@ namespace CompetitiveRounds
         internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
         internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
+        internal static ConfigEntry<string> BroadcastTestPress;          // broadcast seat only -- "ObjectName[:nonce]" presses a named F5 overlay button once per new value (board row 27 witnesses)
+        internal static ConfigEntry<string> BroadcastTestSecureUrl;      // broadcast seat only -- an https address the secure-route check probes instead of the default one (board row 27 witnesses)
+        internal static ConfigEntry<string> BroadcastTestBackupUrl;      // broadcast seat only -- a plaintext address that replaces the backup for one launch: the local witness harness of board row 27 round 2
+        internal static ConfigEntry<string> BroadcastTestQueueReport;    // broadcast seat only -- each new value posts BepInEx/config/scr-portal-report.json as a match report through the real send and outbox path (board row 27 round 2 harness)
+        internal static ConfigEntry<string> BroadcastTestStaleToken;     // broadcast seat only -- each new value replaces the held session token with one the server never issued (board row 27 round 2 witness)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
+        internal static ConfigEntry<string> BroadcastTestReporterElectionSentinel; // broadcast seat only — any new value runs the 2v2 DC reporter-election self-test once
+        internal static ConfigEntry<string> BroadcastTestAutoLogConsentSentinel; // broadcast seat only — any new value runs the automatic-log consent-abort self-test once
+        internal static ConfigEntry<string> BroadcastTestChatRevokeSentinel; // broadcast seat only -- any new value runs the consent-revoke chat-discard self-test once
+        internal static ConfigEntry<string> BroadcastTestHeartbeatAbortSentinel; // broadcast seat only -- any new value runs the aborted-send heartbeat self-test once
+        internal static ConfigEntry<string> BroadcastTestPresetSlotSentinel; // broadcast seat only -- any new value runs the provisional preset-slot count self-test once
+        internal static ConfigEntry<string> BroadcastTestTeamGameNumberSentinel; // broadcast seat only -- any new value runs the 2v2 game-number self-test once
         internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
-        internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0-9 = playerFaces[n]
+        internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0..PortraitRender.PresetSlotCount()-1 = the saved face slot (#370 — NOT 0-9; playerFaces has ten entries but only eight are authorable). Anything outside that range resolves to -1, and is rewritten to -1 once the real slot count has been discovered — it is NOT clamped to the top slot (that silently re-rendered someone else's face onto the card).
+        internal static ConfigEntry<string> BinderSort;                  // Player Cards (item 20): the binder order, stored as the BinderSortRules.Mode member NAME (never the ordinal, which changes meaning when a mode is inserted). Written by the header button alone; an unrecognised name falls back to Name.
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
+        internal static ConfigEntry<string> BroadcastTestRoomRules;     // broadcast seat only, offline: latch a rules pair (ff=X;sc=Y) so the standing room-rules strip can be verified
+        internal static ConfigEntry<float> BroadcastShowcaseMetricSeconds; // broadcast seat only -- board row 31: the idle showcase's dwell per Compare category
+        internal static ConfigEntry<string> BroadcastTestShowcase;         // broadcast seat only -- any new value plays one showcase rotation with the stream-live gate lifted
+        internal static ConfigEntry<float> BroadcastSessionReportPageSeconds; // broadcast seat only -- board row 30g: the post-set session report's dwell per page
+        internal static ConfigEntry<string> BroadcastTestWatchedSet;       // broadcast seat only -- a NEW spectate game id replays that recorded set through the post-set report
+        internal static ConfigEntry<string> BroadcastTestSessionReport;    // broadcast seat only -- "<selector>:<key>[:<page>]" opens that set's F5 session report at a page; "close" closes it
         internal static BepInEx.Configuration.ConfigFile ConfigFileForLevers;
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
@@ -178,10 +210,13 @@ namespace CompetitiveRounds
         public static bool DataConsentAsked   => DataConsent != null && !string.IsNullOrEmpty(DataConsent.Value);
 
         // ── Item 4: chat-overlay message TTL ─────────────────────────────
-        // There is no slider infrastructure anywhere in this codebase, so the
-        // established pattern for a numeric setting is a CYCLING button
-        // (cursorShapeBtn / dateFmtBtn). Both the Settings tab and the M
-        // hotkey read the same ConfigEntry, so they cannot disagree.
+        // Item 13: the Settings row is a SLIDER over the stops below
+        // (UIFactory.CreateSlider), and it writes through
+        // SetChatOverlaySeconds, which quantises to the nearest stop, so the
+        // stored value is always one of them. The cycling button this
+        // paragraph used to describe is gone; CycleChatOverlaySeconds stays
+        // as the stepping wrapper over the same writer. Both the Settings tab
+        // and the M hotkey read the same ConfigEntry, so they cannot disagree.
         //
         // The cycle is deliberately bounded, but NOT for the reason a reader
         // might assume: the overlay renders at most the last 8 entries
@@ -206,16 +241,44 @@ namespace CompetitiveRounds
         internal static readonly float[] CHAT_TTL_CYCLE = { 0f, 5f, 10f, 25f, 45f, 90f };
 
         /// <summary>Advance the chat-overlay TTL to the next value in
-        /// CHAT_TTL_CYCLE. A stored value outside the cycle (hand-edited cfg)
-        /// lands on the first entry.</summary>
+        /// CHAT_TTL_CYCLE, through SetChatOverlaySeconds. A stored value
+        /// outside the cycle (hand-edited cfg) lands on the first entry, as it
+        /// always has.</summary>
         public static void CycleChatOverlaySeconds()
         {
             if (ChatOverlaySeconds == null) return;
             int idx = -1;
             for (int i = 0; i < CHAT_TTL_CYCLE.Length; i++)
                 if (Mathf.Approximately(CHAT_TTL_CYCLE[i], ChatOverlaySeconds.Value)) { idx = i; break; }
-            ChatOverlaySeconds.Value = CHAT_TTL_CYCLE[(idx + 1) % CHAT_TTL_CYCLE.Length];
+            SetChatOverlaySeconds(CHAT_TTL_CYCLE[(idx + 1) % CHAT_TTL_CYCLE.Length]);
+        }
+
+        /// <summary>Item 13: the value-taking writer (the settings slider, and
+        /// the per-tab reset). The value is quantised to the NEAREST stop of
+        /// CHAT_TTL_CYCLE, so nothing but a stop is ever stored: a hand-edited
+        /// 30 written back through here becomes 25, never 0 ("hidden in
+        /// game"), which is where the old cycler sent an out-of-set value.
+        /// Null entry (pre-Awake) writes nothing.</summary>
+        public static void SetChatOverlaySeconds(float s)
+        {
+            if (ChatOverlaySeconds == null) return;
+            int best = 0;
+            for (int i = 1; i < CHAT_TTL_CYCLE.Length; i++)
+                if (Mathf.Abs(CHAT_TTL_CYCLE[i] - s) < Mathf.Abs(CHAT_TTL_CYCLE[best] - s)) best = i;
+            ChatOverlaySeconds.Value = CHAT_TTL_CYCLE[best];
             Log.LogInfo($"[SETTINGS] Chat overlay TTL -> {ChatOverlaySeconds.Value}s");
+        }
+
+        /// <summary>Item 13: the index of the stop nearest the stored value
+        /// (the slider's handle position). A hand-edited out-of-set value shows
+        /// at its nearest stop; nothing is written until the handle moves.</summary>
+        public static int ChatOverlaySecondsIndex()
+        {
+            float v = ChatOverlaySeconds != null ? ChatOverlaySeconds.Value : 25f;
+            int best = 0;
+            for (int i = 1; i < CHAT_TTL_CYCLE.Length; i++)
+                if (Mathf.Abs(CHAT_TTL_CYCLE[i] - v) < Mathf.Abs(CHAT_TTL_CYCLE[best] - v)) best = i;
+            return best;
         }
 
         /// <summary>True when the player has set the TTL to 0, i.e. the in-game
@@ -259,7 +322,14 @@ namespace CompetitiveRounds
         /// is the actual overlay ON / PINNED / OFF control).</summary>
         public static string ChatOverlaySecondsLabel()
         {
-            float v = ChatOverlaySeconds != null ? ChatOverlaySeconds.Value : 25f;
+            return ChatOverlaySecondsLabel(ChatOverlaySeconds != null ? ChatOverlaySeconds.Value : 25f);
+        }
+
+        /// <summary>Item 13: the same token for a GIVEN value, so the settings
+        /// pane can render the recommended value (25s) without it being the
+        /// live one. The zero-argument form above is this over the live value.</summary>
+        public static string ChatOverlaySecondsLabel(float v)
+        {
             if (v <= 0f) return "0s";
             return Mathf.RoundToInt(v).ToString(System.Globalization.CultureInfo.InvariantCulture) + "s";
         }
@@ -420,6 +490,14 @@ namespace CompetitiveRounds
             // room-join edge (resumed-score reset + stash consume, bug 232/233;
             // NetworkReplicaDiagnostics room lifecycle, bug 235).
             go.AddComponent<Cr2v2DiagCallbacks>();
+            // v1.41.0 item 21: the damage-number driver - flushes and ages the
+            // labels every frame whether or not anything is drawn. Ungated,
+            // local, whole body guarded; it never touches gameplay.
+            go.AddComponent<DamageNumberDriver>();
+            // Letterbox ghost fix: the whole-window clearing camera, a child of
+            // this host so it lives exactly as long as the host does. Visual and
+            // local only, never gated (LetterboxClear.cs).
+            LetterboxClear.CreateClearCamera(go);
         }
 
         private void Awake()
@@ -448,6 +526,18 @@ namespace CompetitiveRounds
                     }
                     catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit-time log copy failed: {ex.Message}"); }
                 };
+                // Seat evidence: a game still live while the game closes is
+                // captured, then built and queued to its file now (no later
+                // frame comes) and sent at the next launch.
+                UnityEngine.Application.quitting += () =>
+                {
+                    try { PointEvidence.Drain(); } catch { }
+                    try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }
+                    try { SeatEvidence.FlushOnQuit(); } catch { }
+                    try { CardDrawEvidence.FlushOnQuit(); } catch { }
+                    try { CombatEvidence.FlushOnQuit(); } catch { }
+                    try { IdentityClockEvidence.FlushOnQuit(); } catch { }
+                };
             }
             catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
 
@@ -469,6 +559,16 @@ namespace CompetitiveRounds
                 "admins receive the value out-of-band and it must match the " +
                 "server's ADMIN_HMAC_SECRET. Admin menu actions are rejected " +
                 "without it."
+            );
+
+            // Board row 27: while the session runs on the plaintext backup (the
+            // secure check at boot failed), the secure route is checked again
+            // every this-many minutes, and on the Translate portal button. A
+            // NEW key, so no existing default changes (#190); clamped to
+            // 0.25..60 where it is read (ApiClient.SecureRetrySeconds).
+            SecureRetryMinutes = Config.Bind(
+                "API", "SecureRetryMinutes", 5f,
+                "Minutes between automatic checks of the secure connection while the game is running on the backup connection (0.25 to 60). The Translate portal button also checks it on demand."
             );
 
             // One-time HTTPS migration. Config.Bind writes its default to
@@ -664,14 +764,28 @@ namespace CompetitiveRounds
                 "Show Photon ping and region alongside FPS when in a room"
             );
 
+            // v1.41.0 item 22: the standing room-rules strip names every
+            // game-changing rule a room plays for the whole game. A NEW key with
+            // a TRUE default: Config.Bind writes a default once (#190), so every
+            // install, existing and fresh, shows the strip until the player
+            // turns it off here. Hides the strip only, never the game-start toast.
+            ShowRoomRulesIndicator = Config.Bind(
+                "UI", "ShowRoomRulesIndicator",
+                true,
+                "Show the small top-centre line naming the room's rules (friendly fire off, same cards) for the whole game. The game-start notice is not affected."
+            );
+
             // Sept 6 item d: a NEW key with a false default -- Config.Bind writes a
             // default once and never revisits it (#190), so this ships off for
             // every install. ApiClient appends include_inactive=true to the four
-            // board fetches while it is on.
+            // board fetches while it is on. The description states no day
+            // count: it is written into the .cfg at startup, before the server
+            // can have said what its window is, and the window is a server
+            // setting (leaderboard_active_days on /api/v1/mod-version).
             ShowInactiveOnBoards = Config.Bind(
                 "UI", "ShowInactiveOnBoards",
                 false,
-                "Show players inactive for 90+ days on the leaderboards"
+                "Show inactive players on the leaderboards (the server sets how many days without playing count as inactive)"
             );
 
             // Release B §4 (bug 332): opt-in lag notices. A NEW key with a
@@ -681,6 +795,17 @@ namespace CompetitiveRounds
                 "Network", "LagNotices",
                 false,
                 "Show short corner notices when this seat measures dropped frames, high ping to the relay, or late-arriving opponent updates. 1v1 fighter seats only; informational, nothing is sent."
+            );
+
+            // v1.41.0 item (a): opt-IN automatic log upload. A NEW key with a
+            // false default — Config.Bind writes a default once and never
+            // revisits it (#190) — so it ships OFF for every existing install
+            // as well as every fresh one, and a config that has never seen the
+            // key gets the false.
+            AutoLogUploadEnabled = Config.Bind(
+                "Data", "AutoLogUpload",
+                false,
+                "Off by default. When on, the mod sends the same log bundle the bug-report form sends (this session's BepInEx log, the previous session's, and Unity's) to the community server after you leave a room where a game was played. Local paths and this machine's Windows account name are removed before anything is sent. At most one upload every five minutes."
             );
 
             ShowIngameChat = Config.Bind(
@@ -725,7 +850,30 @@ namespace CompetitiveRounds
             ShowInputOverlay = Config.Bind(
                 "UI", "ShowInputOverlay",
                 false,
-                "Show a bottom-left WASD + Space + L/R-click input visualizer during matches. Keys glow red when pressed."
+                "Show a bottom-left visualizer of your movement, jump, shoot and block controls during matches. Keys glow red when pressed."
+            );
+
+            // Item 19: two default avatars chosen by the kind of room. New keys
+            // only; nothing above is renamed, retyped or moved.
+            AvatarAutoSwitch = Config.Bind(
+                "UI", "AvatarAutoSwitch",
+                true,
+                "Wear your vanilla avatar preset in games where somebody does not have the mod, and your modded preset where everyone does. Does nothing until the presets below are set."
+            );
+            AvatarModdedPreset = Config.Bind(
+                "UI", "AvatarModdedPreset",
+                -1,
+                "Character preset slot (0-based) worn where everyone has the mod. -1 = not set."
+            );
+            AvatarVanillaPreset = Config.Bind(
+                "UI", "AvatarVanillaPreset",
+                -1,
+                "Character preset slot (0-based) worn where somebody does not have the mod; only presets made from base-game items can be used. -1 = not set."
+            );
+            AvatarHomeSlot = Config.Bind(
+                "UI", "AvatarHomeSlot",
+                -1,
+                "Written by the mod: the preset you were wearing before a room switched it, given back when the room ends. -1 = none. Do not edit."
             );
 
             // LEGACY. Kept bound so the one-time migration below can read what the
@@ -998,9 +1146,38 @@ namespace CompetitiveRounds
                 "Loop the custom-music playlist when it reaches the end."
             );
             MusicVolume = Config.Bind(
-                "Music", "MusicVolume", 100,
-                "Custom-music volume percent (0-100, set with the Music tab's volume slider; any hand-edited value is used as-is, clamped). Applied on top of the game's own music slider, which keeps working."
+                "Music", "MusicVolume", MusicLevels.DEFAULT_PERCENT,
+                "Custom-music volume percent (0-100, set with the Music tab's volume slider; any hand-edited value is used as-is, clamped). "
+                + MusicLevels.DEFAULT_PERCENT + " plays the custom albums at the level of the game's own soundtrack; 100 is about 6 dB louder. "
+                + "Applied on top of the game's own music slider, which keeps working."
             );
+            // One-shot MusicVolume migration (1.41.0 item 23a), the
+            // MenuMusicModeMigrated pattern below: Config.Bind never revisits
+            // a written default (#190). 1.41.0 lowered the slider's whole
+            // range (MusicLevels.VOLUME_CEILING) and put the default below the
+            // top, and 100 was the default before, so a stored 100 is read as
+            // never chosen and becomes the new default, once. Gated on its own
+            // marker key, so a 100 chosen afterwards is kept; MigratedPercent
+            // returns every other stored value unchanged.
+            MusicVolumeMigrated = Config.Bind(
+                "Music", "MusicVolumeMigrated", false,
+                "Internal: set once the one-time 1.41.0 MusicVolume migration has run (a stored "
+                + MusicLevels.LEGACY_DEFAULT_PERCENT + ", the old default, became " + MusicLevels.DEFAULT_PERCENT
+                + "; no other value is changed). Clearing it runs the migration again on next launch."
+            );
+            try
+            {
+                if (!MusicVolumeMigrated.Value)
+                {
+                    int storedVolume = MusicVolume.Value;
+                    int migratedVolume = MusicLevels.MigratedPercent(storedVolume, false);
+                    if (migratedVolume != storedVolume) MusicVolume.Value = migratedVolume;
+                    MusicVolumeMigrated.Value = true;
+                    Log.LogInfo("[MUSIC] MusicVolume migration ran once: stored " + storedVolume + " -> " + migratedVolume
+                                + " (only a stored " + MusicLevels.LEGACY_DEFAULT_PERCENT + " moves)");
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[MUSIC] MusicVolume migration skipped: {ex.Message}"); }
             MenuMusicEnabled = Config.Bind(
                 "Music", "MenuMusicEnabled", false,
                 "Superseded by MenuMusicMode - value migrated once, no longer consulted except as a pre-migration fallback."
@@ -1072,23 +1249,87 @@ namespace CompetitiveRounds
             );
             BroadcastTestOpenTab = Config.Bind(
                 "Broadcast", "TestOpenTab", "",
-                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). Re-applied whenever the value changes; clear when done."
+                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). '4:cat<N>' selects a Shop category; after it, 'fixture[:line]', 'ladder:<line>', 'close' or 'live' drives the Titles section's ladder dropdown (fixture = BepInEx/config/scr-ladder-fixture.json). Re-applied whenever the value changes; clear when done."
             );
             BroadcastTestQuit = Config.Bind(
                 "Broadcast", "TestQuit", "",
                 "Broadcast seat only: set to any value that differs from the value at launch (e.g. quit-<timestamp>) to quit the game — Application.Quit, then a hard exit if the process is still alive 8 s later. Clear it afterwards; the value present at launch is the baseline and never fires."
             );
+            BroadcastTestPress = Config.Bind(
+                "Broadcast", "TestPress", "",
+                "Broadcast seat only: 'ObjectName[:nonce]' presses the named button on the open F5 overlay through the button's own click path (e.g. SPortal:1 for the Translate portal button, ScrMod:1 for the scrmod.com link). The value at launch is the baseline and never fires; each later different non-empty value presses once. Clear it when done."
+            );
+            BroadcastTestSecureUrl = Config.Bind(
+                "Broadcast", "TestSecureUrl", "",
+                "Broadcast seat only: an https address the secure-connection check probes instead of the default one, so a witness can make the secure route unreachable (a closed port or an unroutable host) without touching BaseUrl. Empty = the default address. Read at every check; clear it when done."
+            );
+            BroadcastTestBackupUrl = Config.Bind(
+                "Broadcast", "TestBackupUrl", "",
+                "Broadcast seat only, local witness harness: a plaintext http address that replaces the backup connection for this launch. While set, BaseUrl is the route's own address even when it is not the default, TestSecureUrl may also name a plaintext loopback address (http://127.0.0.1:port), and empty TestSecureUrl means BaseUrl. Point BaseUrl at a local api when using it. Read once at launch; clear it when done."
+            );
+            BroadcastTestQueueReport = Config.Bind(
+                "Broadcast", "TestQueueReport", "",
+                "Broadcast seat only, local witness harness: each new non-empty value (the value at launch never fires) posts the match report in BepInEx/config/scr-portal-report.json to the current api through the same send, failure and outbox path a finished 1v1 game uses. Only while TestBackupUrl is set. Clear it when done."
+            );
+            BroadcastTestStaleToken = Config.Bind(
+                "Broadcast", "TestStaleToken", "",
+                "Broadcast seat only: each new non-empty value (the value at launch never fires) replaces the held session token with a random one the server never issued, keeping its local expiry, so a witness can press the portal button with a token the server refuses. Clear it when done."
+            );
             BroadcastTestPlayerCards = Config.Bind(
                 "Broadcast", "TestPlayerCards", "",
                 "Broadcast seat only: set to any value that differs from the previous one to fill the Collection tab's reveal strip with five synthetic Player Cards (layout screenshots on a seat whose server has no Player Cards yet). No server call, nothing persisted."
             );
+            // Item 20. The EXISTING "Player Cards" section (with the space) —
+            // binding under a second, near-identical heading would give every
+            // player two Player Cards blocks in CompetitiveRounds.cfg. The
+            // value is the enum member name; applying it is deferred until a
+            // collection answer has been read (PlayerCardsUI.pendingBinderSort),
+            // and nothing but the header button ever writes it back.
+            BinderSort = Config.Bind(
+                "Player Cards", "BinderSort", "Name",
+                "How your binder is ordered: Name, Rarity, Edition, Date, Position (the rank printed on the card) or RatingPosition (where the player stands on the leaderboard today). Set by the Sort button on the binder page; an unrecognised value reads as Name."
+            );
+            PlayerCardsUI.RestoreBinderSort(BinderSort.Value);
             PortraitPreset = Config.Bind(
                 "Player Cards", "PortraitPreset", -1,
-                "Which character your card picture shows: -1 follows the character you have selected, 0-9 pins that saved preset slot (the button counts them from 1). Changing it re-renders the picture next time the Collection tab or Settings is open."
+                "Which character your card picture shows: -1 follows the character you have selected, or pin one of your saved character slots by its index counting from 0 (the button counts them from 1). Only slots the character creator lets you fill can be pinned; any other value falls back to following your selected character, and is reset to -1 once the game has told us how many slots there really are. Changing it re-renders the picture next time the Collection tab or Settings is open."
             );
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
-                "Broadcast seat only: set to any NEW value to run the cr_gstats W1-sentinel self-test once (design v6 section 1); the result is logged as [GSTATS-SENTINEL] PASS/FAIL. A value present at startup never runs."
+                "Broadcast seat only: set to any NEW value to run the cr_gstats self-tests once: the W1 sentinel (design v6 section 1) and the freeze-counting epoch check; the results are logged as [GSTATS-SENTINEL] and [FREEZE-EPOCH-SENTINEL] PASS/FAIL. A value present at startup never runs."
+            );
+            BroadcastTestReporterElectionSentinel = Config.Bind(
+                "Broadcast", "TestReporterElectionSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the 2v2 disconnect reporter-election self-test once (synthetic rooms only, nothing is sent); the result is logged as [REPORTER-ELECTION-SENTINEL] PASS/FAIL. A value present at startup never runs."
+            );
+            BroadcastTestHeartbeatAbortSentinel = Config.Bind(
+                "Broadcast", "TestHeartbeatAbortSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the aborted-send heartbeat self-test once (one"
+                + " request to a loopback discard address, aborted before it can be answered; the heartbeat fields"
+                + " are put back afterwards); the result is logged as [HEARTBEAT-ABORT-SENTINEL] PASS/FAIL. A value"
+                + " present at startup never runs."
+            );
+            BroadcastTestPresetSlotSentinel = Config.Bind(
+                "Broadcast", "TestPresetSlotSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the preset-slot count self-test once (it derives"
+                + " the count from the game's own portrait row and checks that a partial row's count is derived"
+                + " again rather than kept; the cached count is put back afterwards); the result is logged as"
+                + " [PRESET-SLOT-SENTINEL] PASS/FAIL. A value present at startup never runs."
+            );
+            BroadcastTestTeamGameNumberSentinel = Config.Bind(
+                "Broadcast", "TestTeamGameNumberSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the 2v2 game-number self-test once (synthetic"
+                + " series against a model of the server's filing rule, on trackers of its own: nothing is sent,"
+                + " and the seat's own tracker is never touched); the result is logged as"
+                + " [TEAM-GAME-NUMBER-SENTINEL] PASS/FAIL. A value present at startup never runs."
+            );
+            BroadcastTestChatRevokeSentinel = Config.Bind(
+                "Broadcast", "TestChatRevokeSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the consent-revoke chat self-test once (synthetic text in the open chat line and the held draft, put back afterwards; nothing is sent); the result is logged as [CHAT-REVOKE-SENTINEL] PASS/FAIL. A value present at startup never runs."
+            );
+            BroadcastTestAutoLogConsentSentinel = Config.Bind(
+                "Broadcast", "TestAutoLogConsentSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the automatic-log consent self-test once (synthetic bundles against a stub transport: nothing is sent, and the real setting and data consent are read but never written); the result is logged as [AUTO-LOG-CONSENT-SENTINEL] PASS/FAIL. A value present at startup never runs."
             );
             BroadcastTestMapSkinTourSeconds = Config.Bind(
                 "Broadcast", "TestMapSkinTourSeconds", 0,
@@ -1105,6 +1346,24 @@ namespace CompetitiveRounds
             BroadcastTestDance = Config.Bind(
                 "Broadcast", "TestDance", "",
                 "Broadcast seat only. 'wheel' pins the dance wheel open, 'preview:<sku>' toggles the shop puppet, 'play:<idx>' dev-installs a dance on the local sandbox body (offline only). Empty closes the wheel + puppet; an installed play simply expires on its own.");
+            BroadcastTestRoomRules = Config.Bind(
+                "Broadcast", "TestRoomRules", "",
+                "Broadcast seat only, outside any online room: a rules pair in the room grammar (ff=0;sc=1, ff=0;sc=0, ff=1;sc=1) latches those rules on this seat so the standing room-rules strip can be checked with nobody at the seat; logged as [ROOM-RULES] test lever lines. Applied once per distinct value; empty releases a latch this lever made. Refused inside a room.");
+            BroadcastShowcaseMetricSeconds = Config.Bind(
+                "Broadcast", "ShowcaseMetricSeconds", 15f,
+                "Broadcast seat only: how many seconds the idle showcase shows each Compare tab category; it walks every category in the tab's own order. 0 or less means the default (15); other values are held between 3 and 300. Applies from the next rotation.");
+            BroadcastTestShowcase = Config.Bind(
+                "Broadcast", "TestShowcase", "",
+                "Broadcast seat only: set to any NEW value to play one idle-showcase rotation even when the stream is not live; every other condition still applies (the director idle with nothing to watch, not in an online room, the F5 page free). Each Compare category shown logs a [SHOWCASE] metric line. A value present at startup never runs.");
+            BroadcastSessionReportPageSeconds = Config.Bind(
+                "Broadcast", "SessionReportPageSeconds", 12f,
+                "Broadcast seat only: after a watched set the broadcaster pages through the set's session report; this is how many seconds each page stays up. 0 or less means the default (12); other values are held between 3 and 300. Applies from the next page.");
+            BroadcastTestWatchedSet = Config.Bind(
+                "Broadcast", "TestWatchedSet", "",
+                "Broadcast seat only: set to a NEW spectate game id (a UUID) to replay that recorded set through the post-set report as if the director had just watched it (the server's report status, the settle, the fetches, the session report and its pages), even when the stream is not live. A value present at startup never runs.");
+            BroadcastTestSessionReport = Config.Bind(
+                "Broadcast", "TestSessionReport", "",
+                "Broadcast seat only: set to a NEW '<selector>:<key>' (selector sitting, series, match, session or lobby; key the UUID a history row carries) to open that set's session report on the open F5 page; add ':<page>' (1 is the first page) to show that page, and the same set with another page only turns the page. 'close' closes the report and leaves the F5 page open. A value set while the F5 page is closed waits for it (TestOpenTab opens it). A value present at startup never runs.");
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
             // ── Game version check ──
@@ -1117,6 +1376,11 @@ namespace CompetitiveRounds
                 return;
             }
             Log.LogInfo($"[COMPAT] Game version OK: {gameVer}");
+
+            // Item 17: the keybind registry - the mapping accessor is resolved and
+            // the sixteen Controls entries loaded BEFORE any patch can read them.
+            try { Keybinds.Init(Config); }
+            catch (Exception ex) { Log.LogError("[KEYBIND] init failed: " + ex.Message); }
 
             // Patch each [HarmonyPatch] class individually so one bad patch
             // (e.g. parameter-name mismatch with vanilla, missing target method)
@@ -1151,6 +1415,14 @@ namespace CompetitiveRounds
                     }
                 }
                 Log.LogInfo($"[HARMONY] Patches applied: {applied} ok, {failed} failed");
+                // Card draw evidence (B4): one line naming its six patches as attached.
+                try { CardDrawEvidence.BootLine(); } catch { }
+                // Combat evidence (B1-B5 and the addendum): one line naming every
+                // combat patch as attached, and the producers the census proves.
+                try { CombatEvidence.BootLine(); } catch { }
+                try { IdentityClockEvidence.BootLine(); } catch { }
+                // Item 21: one line naming both damage-number hook pairs as attached (#83).
+                try { DamageNumbers.BootLine(); } catch { }
             }
             catch (Exception ex)
             {
@@ -2383,6 +2655,143 @@ namespace CompetitiveRounds
             if (raw.Length == 0) return;
             try { GameStateWatcher.DevGstatsSentinelTest(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[GSTATS-SENTINEL] FAIL: lever threw {ex.Message}"); }
+            // Round 2 finding 3: the freeze-counting epoch rides the same payload.
+            GameStateWatcher.DevFreezeEpochSentinelTest();
+        }
+
+        // v1.41.0 beta round 2 finding 2: [Broadcast] TestReporterElectionSentinel,
+        // the same once-per-distinct-NEW-value grammar and identity gate as the
+        // TestGstatsSentinel lever above.
+        private static string _lastTestReporterElectionSentinel;
+        private void TickTestReporterElectionSentinel()
+        {
+            if (Plugin.BroadcastTestReporterElectionSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestReporterElectionSentinel.Value ?? "").Trim();
+            if (_lastTestReporterElectionSentinel == null) { _lastTestReporterElectionSentinel = raw; return; }
+            if (raw == _lastTestReporterElectionSentinel) return;
+            _lastTestReporterElectionSentinel = raw;
+            if (raw.Length == 0) return;
+            DevReporterElectionSentinelTest();
+        }
+
+        // v1.41.0 beta round 2 finding 4: [Broadcast] TestAutoLogConsentSentinel,
+        // the same grammar and identity gate as the two levers above.
+        private static string _lastTestAutoLogConsentSentinel;
+        private void TickTestAutoLogConsentSentinel()
+        {
+            if (Plugin.BroadcastTestAutoLogConsentSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestAutoLogConsentSentinel.Value ?? "").Trim();
+            if (_lastTestAutoLogConsentSentinel == null) { _lastTestAutoLogConsentSentinel = raw; return; }
+            if (raw == _lastTestAutoLogConsentSentinel) return;
+            _lastTestAutoLogConsentSentinel = raw;
+            if (raw.Length == 0) return;
+            AutoLogUpload.DevConsentSentinelTest();
+        }
+
+        // v1.41.0 beta round 3 finding 9: [Broadcast] TestChatRevokeSentinel,
+        // the same grammar and identity gate as the levers above.
+        private static string _lastTestChatRevokeSentinel;
+        private void TickTestChatRevokeSentinel()
+        {
+            if (Plugin.BroadcastTestChatRevokeSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestChatRevokeSentinel.Value ?? "").Trim();
+            if (_lastTestChatRevokeSentinel == null) { _lastTestChatRevokeSentinel = raw; return; }
+            if (raw == _lastTestChatRevokeSentinel) return;
+            _lastTestChatRevokeSentinel = raw;
+            if (raw.Length == 0) return;
+            CompetitiveUI.DevChatRevokeSentinelTest();
+        }
+
+        // v1.41.0 beta round 3 finding 20: [Broadcast] TestHeartbeatAbortSentinel,
+        // the same grammar and identity gate as the levers above.
+        private static string _lastTestHeartbeatAbortSentinel;
+        private void TickTestHeartbeatAbortSentinel()
+        {
+            if (Plugin.BroadcastTestHeartbeatAbortSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestHeartbeatAbortSentinel.Value ?? "").Trim();
+            if (_lastTestHeartbeatAbortSentinel == null) { _lastTestHeartbeatAbortSentinel = raw; return; }
+            if (raw == _lastTestHeartbeatAbortSentinel) return;
+            _lastTestHeartbeatAbortSentinel = raw;
+            if (raw.Length == 0) return;
+            ApiClient.DevHeartbeatAbortSentinelTest();
+        }
+
+        // v1.41.0 beta round 3 finding 10: [Broadcast] TestPresetSlotSentinel,
+        // the same grammar and identity gate as the levers above.
+        private static string _lastTestPresetSlotSentinel;
+        private void TickTestPresetSlotSentinel()
+        {
+            if (Plugin.BroadcastTestPresetSlotSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestPresetSlotSentinel.Value ?? "").Trim();
+            if (_lastTestPresetSlotSentinel == null) { _lastTestPresetSlotSentinel = raw; return; }
+            if (raw == _lastTestPresetSlotSentinel) return;
+            _lastTestPresetSlotSentinel = raw;
+            if (raw.Length == 0) return;
+            PortraitRender.DevPresetSlotSentinelTest();
+        }
+
+        // v1.41.0 beta round 4 finding 1: [Broadcast] TestTeamGameNumberSentinel,
+        // the same grammar and identity gate as the levers above.
+        private static string _lastTestTeamGameNumberSentinel;
+        private void TickTestTeamGameNumberSentinel()
+        {
+            if (Plugin.BroadcastTestTeamGameNumberSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestTeamGameNumberSentinel.Value ?? "").Trim();
+            if (_lastTestTeamGameNumberSentinel == null) { _lastTestTeamGameNumberSentinel = raw; return; }
+            if (raw == _lastTestTeamGameNumberSentinel) return;
+            _lastTestTeamGameNumberSentinel = raw;
+            if (raw.Length == 0) return;
+            DevTeamGameNumberSentinelTest();
+        }
+
+        /// <summary>The 2v2 game-number self-test (round 3 finding 1, client
+        /// half, round 4). Runs TeamGameNumber.RunSentinel: synthetic series
+        /// against a model of the server's filing rule, under the Tracker the
+        /// seat runs and three kept rules this round did not build, plus direct
+        /// checks of the tracker, the bounds and both canonicals. Round 5
+        /// (finding F25) adds the physical game's token: the reviewer's
+        /// scenario and its neighbours on two Trackers (a host and a peer)
+        /// against the server's token rule and the rule before it, direct
+        /// checks of taking, dropping and publishing a token, and the token's
+        /// canonicals and pin. Nothing is sent, no room property is written, and
+        /// TeamGameNumber.Live is never touched. Logs
+        /// [TEAM-GAME-NUMBER-SENTINEL] PASS/FAIL.</summary>
+        internal static void DevTeamGameNumberSentinelTest()
+        {
+            try
+            {
+                bool pass;
+                string line = TeamGameNumber.RunSentinel(out pass);
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"{TeamGameNumber.SentinelTag} FAIL: threw {ex.Message}");
+            }
+        }
+
+        /// <summary>The 2v2 DC reporter election's self-test (round 2 finding 2,
+        /// round 3 finding 2). Runs every survivor of synthetic four-seat rooms
+        /// through DcReporterElection.ShouldReport, the rule OnPlayerLeftRoom runs,
+        /// and checks that the failing states from both reviews (no survivor can
+        /// read the teams; a readable but wrong `t_id`; in each, the lowest id in
+        /// the room is the leaver's own teammate) leave a reporter the server
+        /// accepts, as does every state of a four-seat room in its sweep, and that
+        /// rooms whose teams are readable and true elect exactly two seats, exactly
+        /// one of which the server accepts (merge pass 1, follow-up 6).
+        /// Nothing is sent. Logs [REPORTER-ELECTION-SENTINEL] PASS/FAIL.</summary>
+        internal static void DevReporterElectionSentinelTest()
+        {
+            try
+            {
+                bool pass;
+                string line = DcReporterElection.RunSentinel(out pass);
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"{DcReporterElection.SentinelTag} FAIL: threw {ex.Message}");
+            }
         }
 
         // Sept 10: synthetic Player Card tiles (PlayerCardsUI.DevSeedTiles), same
@@ -2459,6 +2868,34 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestQuit lever failed: {ex.Message}"); }
         }
 
+        // TestPress lever state (board row 27 witnesses): the value at its
+        // first read is the baseline and never fires; each later different
+        // non-empty value presses once.
+        private static string _testPressLast;
+
+        /// <summary>Board row 27 and 33a witnesses: press a named button on the
+        /// open F5 overlay through the ClickHandler a real click runs (#420:
+        /// synthetic mouse input never reaches the overlay on this VM). The
+        /// TestQuit grammar, except that every new value fires once rather than
+        /// once per process. Broadcast identity only (the caller has already
+        /// checked), after the same 2 s cfg reload.</summary>
+        private void TickTestPress()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestPress == null) return;
+                string want = (Plugin.BroadcastTestPress.Value ?? "").Trim();
+                if (_testPressLast == null) { _testPressLast = want; return; }
+                if (string.Equals(want, _testPressLast, StringComparison.Ordinal)) return;
+                _testPressLast = want;
+                if (want.Length == 0) return;
+                int colon = want.IndexOf(':');
+                string name = colon >= 0 ? want.Substring(0, colon).Trim() : want;
+                Plugin.Log.LogInfo($"[UI] TestPress -> {name}: {NativeUI.DevPressButton(name)}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestPress lever failed: {ex.Message}"); }
+        }
+
         private static void QuitThenKill()
         {
             // r5 review M5: the hard-kill watchdog must not live on Unity's
@@ -2491,6 +2928,9 @@ namespace CompetitiveRounds
                 try { Plugin.ConfigFileForLevers?.Reload(); } catch { }
             }
             TickTestQuit();
+            TickTestPress();
+            ApiClient.TickTestQueueReport();
+            ApiClient.TickTestStaleToken();
             string raw = (Plugin.BroadcastTestOpenTab.Value ?? "").Trim();
             if (raw == _lastTestOpenTab) return;
             if (Time.realtimeSinceStartup < 6f) return;   // let the menu and the overlay's page build settle
@@ -2509,7 +2949,7 @@ namespace CompetitiveRounds
             // Screenshots of specific articles need this lever since
             // synthetic clicks can't reach the overlay (#420). Other tabs
             // keep the float scroll meaning.
-            string compareMetric = null; int shopCat = -1;
+            string compareMetric = null; int shopCat = -1; string ladderDirective = null;
             if (parts.Length > 1)
             {
                 if (idx == 15) infoKey = raw.Substring(raw.IndexOf(':') + 1).Trim();
@@ -2521,7 +2961,23 @@ namespace CompetitiveRounds
                 // Sept 1: "4:cat<N>" selects a Shop category tab (e.g. 4:cat10
                 // = Dances); a bare float keeps the scroll meaning.
                 else if (idx == 4 && parts[1].Trim().StartsWith("cat", StringComparison.OrdinalIgnoreCase))
+                {
                     int.TryParse(parts[1].Trim().Substring(3), out shopCat);
+                    // Sept 23 (item 12 follow-up): anything after "4:catN:" drives the
+                    // Titles section's ladder entries and their tier dropdown, e.g.
+                    // "4:cat4:fixture:cat" (TitleLaddersUI.DevDirective owns the grammar).
+                    if (parts.Length > 2) ladderDirective = string.Join(":", parts, 2, parts.Length - 2);
+                }
+                // Item 13: "5:<sub-tab>[:<key>]" opens a Settings sub-tab (and
+                // selects a row on it), "5:<sub-tab>:expand" also opens that
+                // tab's list, and "5:selftest" runs the settings self-test;
+                // NativeUI.DevSettingsDirective owns that grammar. A bare float
+                // keeps the scroll meaning.
+                else if (idx == 5 && !float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll))
+                {
+                    scroll = -1f;
+                    infoKey = raw.Substring(raw.IndexOf(':') + 1).Trim();
+                }
                 else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
             }
             // A "16:click:..." value (the retired preparation-click directive)
@@ -2532,6 +2988,7 @@ namespace CompetitiveRounds
             NativeUI.DevOpenTab(idx, scroll, infoKey);
             if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
             if (shopCat >= 0) NativeUI.DevSetShopCategory(shopCat);
+            if (!string.IsNullOrEmpty(ladderDirective)) TitleLaddersUI.DevDirective(ladderDirective);
         }
 
         // ── [Broadcast] TestQuickChatWheel: wheel layout screenshots ──
@@ -2555,6 +3012,31 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[QUICKCHAT] test send id {qid} -> {QuickChat.Send(qid)} refusal='{QuickChat.LastRefusal}'");
             }
             else CompetitiveUI.DevReleaseQuickChatWheel();
+        }
+
+        // [Broadcast] TestRoomRules (v1.41.0 item 22): latch a rules pair on the
+        // broadcast seat, OFFLINE only, so the standing room-rules strip paints
+        // with nobody at the seat. One application per distinct value; the value
+        // present at startup is applied too (unlike the sentinels, it runs no
+        // test, it only sets a state). Empty releases a latch this lever made
+        // and never one a room made (RoomRules.DevReleaseTest checks the source).
+        private static string _lastTestRoomRules;
+        private void TickTestRoomRules()
+        {
+            if (Plugin.BroadcastTestRoomRules == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestRoomRules.Value ?? "").Trim();
+            if (raw == _lastTestRoomRules) return;
+            _lastTestRoomRules = raw;
+            if (raw.Length == 0)
+            {
+                bool released = RoomRules.DevReleaseTest();
+                Plugin.Log.LogInfo("[ROOM-RULES] test lever: cleared (released=" + released + ")");
+                return;
+            }
+            bool ok = RoomRules.DevLatchForTest(raw);
+            Plugin.Log.LogInfo("[ROOM-RULES] test lever: '" + raw + "' "
+                + (ok ? "latched ff=" + (RoomRules.FriendlyFire ? 1 : 0) + " sc=" + (RoomRules.SameCards ? 1 : 0)
+                      : "refused (inside a room, or not the ff=X;sc=Y grammar)"));
         }
 
         // ── [Broadcast] TestDance: headless dance verification (Aug 31 item 5) ──
@@ -2604,6 +3086,69 @@ namespace CompetitiveRounds
                     if (ok) StartCoroutine(ProbeDancePose());
                 }
             }
+        }
+
+        // Board row 31: [Broadcast] TestShowcase - one idle-showcase rotation
+        // with only the stream-live gate lifted, for the in-game witness (each
+        // Compare metric shown logs a [SHOWCASE] metric line). The sentinel
+        // levers' grammar and identity gate: the value present at startup is
+        // the baseline and never runs; each distinct NEW value runs once.
+        private static string _lastTestShowcase;
+        private void TickTestShowcase()
+        {
+            if (Plugin.BroadcastTestShowcase == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestShowcase.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (_lastTestShowcase == null) { _lastTestShowcase = raw; return; }
+            if (raw == _lastTestShowcase) return;
+            _lastTestShowcase = raw;
+            if (raw.Length == 0) return;
+            IdleShowcase.DevRunOneRotation();
+        }
+
+        // Board row 30g: [Broadcast] TestWatchedSet - a recorded set replayed
+        // through the post-set report (PostSessionReport.DevWatchSet) for the
+        // in-game witness, a watched set not being available on demand. The
+        // sentinel levers' grammar and identity gate.
+        private static string _lastTestWatchedSet;
+        private void TickTestWatchedSet()
+        {
+            if (Plugin.BroadcastTestWatchedSet == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestWatchedSet.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (_lastTestWatchedSet == null) { _lastTestWatchedSet = raw; return; }
+            if (raw == _lastTestWatchedSet) return;
+            _lastTestWatchedSet = raw;
+            if (raw.Length == 0) return;
+            // Round 2 M4: the lever replays a recorded set as if the seat had
+            // watched it, so it runs only against a local test api; while the
+            // configured API is production (or any other non-local host) it
+            // refuses and says so.
+            string apiHost;
+            if (!SessionReportRules.DevLeverApiAllowed(ApiClient.BaseUrl, out apiHost))
+            {
+                try { Plugin.Log?.LogWarning("[REPORT] test watched set refused: the configured API (" + apiHost + ") is production or another non-local server; this lever runs only against a local test api (localhost / 127.0.0.1)"); } catch { }
+                return;
+            }
+            PostSessionReport.DevWatchSet(raw);
+        }
+
+        // Board row 30f: [Broadcast] TestSessionReport - the F5 session report
+        // opened on a set and turned to a page for the in-game witness: the
+        // history row's Session button is a click the witness cannot give the
+        // overlay (#420), and a named page ties each screenshot to its page.
+        // The levers' identity gate and new-value grammar; a value that arrives
+        // while the F5 page is closed waits for it instead of being spent.
+        private static string _lastTestSessionReport;
+        private void TickTestSessionReport()
+        {
+            if (Plugin.BroadcastTestSessionReport == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestSessionReport.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (_lastTestSessionReport == null) { _lastTestSessionReport = raw; return; }
+            if (raw == _lastTestSessionReport) return;
+            if (raw.Length > 0 && !NativeUI.IsOpen) return;   // wait for the F5 page
+            _lastTestSessionReport = raw;
+            if (raw.Length == 0) return;
+            NativeUI.ReleaseShowcaseOwnership();   // as TestOpenTab: the lever takes the page over from the showcase
+            SessionReportView.DevDirective(raw);
         }
 
         // ── [Broadcast] TestSilence: headless silence-indicator verification ──
@@ -2927,6 +3472,12 @@ namespace CompetitiveRounds
             // a disabled mod can only ever RESTORE.
             TickUnfocusedFpsCap();
             TickBroadcastWindowPin();
+            // Letterbox clear camera: per-frame scene check, depth re-adapted
+            // every 2 s. Above the modDisabled return like the fps tick: the
+            // camera is created with the host whatever the mod's state, and a
+            // stale depth would draw the clear OVER the game, so its upkeep must
+            // run whenever the camera exists.
+            LetterboxClear.Upkeep(gameObject);
 
             // Bug 389: the proximity-victim capability withdrawal runs here for
             // the same reason the fps tick does - ABOVE the modDisabled return.
@@ -2943,6 +3494,33 @@ namespace CompetitiveRounds
             // the NOT-capable value - it moves the room toward vanilla and can
             // apply nothing (#276/#430).
             try { ProximityVictimGate.RepublishCapability(); } catch { }
+
+            // [PEER-BUILD] evidence, also ABOVE the modDisabled return: stage
+            // this seat's cr_build statement once, pre-join, and print one line
+            // per remote seat per room join (again when its values change). No
+            // setting, lever or room-kind check is in front of it, because
+            // evidence a player can dispute ships in every client build. It
+            // reads the room and writes only this seat's own statement.
+            try { PeerBuild.StageBuildProp("tick"); PeerBuild.Tick(); } catch { }
+
+            // Seat evidence: a pending compat outcome is signed and persisted
+            // once the Steam id is known. Above the return because a finding
+            // is exactly the state that disables the mod; it only writes this
+            // seat's own queue file.
+            try { SeatEvidence.CompatTick(); } catch { }
+            // Evidence work the hooks deferred out of the game's methods: the
+            // point-end lines and push counts first (before GameStateWatcher's
+            // tick captures a record), then seat evidence's own clocks, the
+            // record builds and the queue, then the card draw builds, then the
+            // combat record builds. Above
+            // the return: previously queued evidence sends whatever the mod's
+            // state, under consent, a session, retry timing and no live
+            // combat. No setting in front of any of it.
+            try { PointEvidence.Drain(); } catch { }
+            try { SeatEvidence.Tick(); } catch { }
+            try { CardDrawEvidence.Tick(); } catch { }
+            try { CombatEvidence.Tick(); } catch { }
+            try { IdentityClockEvidence.Tick(); } catch { }
 
             if (Plugin.modDisabled) return;
 
@@ -2988,11 +3566,34 @@ namespace CompetitiveRounds
             // whose queue would otherwise stay put.
             try { ApiClient.OutboxTick(); } catch { }
 
-            // F5 input (no log spam — just toggle)
-            if (Input.GetKeyDown(KeyCode.F5))
+            // Board row 27: the secure-route re-check while the session runs on
+            // the plaintext backup. Self-throttled (once a second) and a no-op
+            // unless the boot check fell back to the backup.
+            try { ApiClient.SecureRouteTick(); } catch { }
+
+            // Item 17: the keybind capture's expiry and page check, and the
+            // in-game self-test's frame step, once a frame.
+            try { Keybinds.FrameTick(); } catch { }
+
+            // F5 input (no log spam — just toggle). Item 17 (question 1): the
+            // menu row is rebindable and F5 stays a permanent rescue read, so no
+            // binding can lock a player out of this menu. One toggle per frame
+            // whichever fired; a keybind capture owns the keyboard while armed.
+            bool menuF5 = false, menuRow = false;
+            try { menuF5 = Input.GetKeyDown(KeyCode.F5) && !Keybinds.CaptureOwnsInput; } catch { }
+            try { menuRow = Keybinds.Down(KeybindRules.MenuToggle); } catch { }
+            if (menuF5 || menuRow)
             {
                 CompetitiveUI.ToggleOverlay();
             }
+
+            // Item 19: the avatar-default rings on the character menu's portrait
+            // grid. Here, not in NativeUI.Tick, because this tick runs with the
+            // mod's overlay closed (the F5 read above can only open it from here).
+            try { AvatarDefaults.Tick(); } catch { }
+            // Item 19 fix pass 3 (H3): retries an owed card-pick popup face
+            // whose carrier is held, and stops owing it past the bound.
+            try { PopupCarriers.Tick(); } catch { }
 
             // Per-frame FPS sampling (active only while a match is being tracked).
             try { GameStateWatcher.TickFrame(); } catch { }
@@ -3028,6 +3629,9 @@ namespace CompetitiveRounds
             // [SC-SELFTEST] (room rules §6): the vanilla-mode Same Cards seams
             // against the live game, once per process, only with its cfg lever.
             try { VanillaCardSequence.EnsureSelfTest(); } catch { }
+            // [CARD-EV] census dump (B4): this seat's pool census, once per
+            // process, only with its cfg lever, never in a room.
+            try { CardDrawEvidence.EnsureCensusDump(); } catch { }
 
             // SCR Broadcast director + §2c identity fence (design §3a). Runs
             // from THIS persistent tick — never a coroutine host that
@@ -3051,10 +3655,20 @@ namespace CompetitiveRounds
             try { SpectatorTeardownProbe.Tick(); } catch { }
             try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
             try { TickTestGstatsSentinel(); } catch { }
+            try { TickTestReporterElectionSentinel(); } catch { }
+            try { TickTestAutoLogConsentSentinel(); } catch { }
+            try { TickTestChatRevokeSentinel(); } catch { }
+            try { TickTestHeartbeatAbortSentinel(); } catch { }
+            try { TickTestPresetSlotSentinel(); } catch { }
+            try { TickTestTeamGameNumberSentinel(); } catch { }
             try { TickTestPlayerCards(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
             try { TickTestDance(); } catch { }
+            try { TickTestRoomRules(); } catch { }
+            try { TickTestShowcase(); } catch { }
+            try { TickTestWatchedSet(); } catch { }
+            try { TickTestSessionReport(); } catch { }
 
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)
@@ -3093,6 +3707,22 @@ namespace CompetitiveRounds
             // patch covers the ordering the polling cannot).
             try { GrowNormalize.StageCapability("tick"); GrowNormalize.SyncRankedIntent("tick"); }
             catch { }
+            // Weapon-cooldown reset capability stage retry (#379): the same
+            // one-shot, compat-gated, idle-states-only staging the two above
+            // use, on the same always-on tick for the same reason.
+            try { WeaponCooldownReset.StageCapability("tick"); } catch { }
+            // Same one-shot pre-join stage for the saw-targeting capability
+            // (bug #380's gated half). Self-guarded, so this is free once staged.
+            try { SawTargetSync.StageCapability("tick"); } catch { }
+            // ...and for the 2v2 DC election generation (cr_dc2). A survivor that
+            // does not advertise it drops its room to the floor election, so the
+            // stage has to happen for every seat that can play 2v2, not only the
+            // ones that reach a vanilla-fix path.
+            try { DcReportSync.StageCapability("tick"); } catch { }
+            // Automatic post-match log upload (item a): keeps the room
+            // snapshot the room-exit callback needs, because OnLeftRoom runs
+            // after PhotonNetwork has already let go of the room.
+            try { AutoLogUpload.Tick(); } catch { }
             // Quick-chat sends through the vanilla chat RPC since Sept 1 and
             // needs no receive hook (event code 48 is retired, never shipped).
             // Dance emotes (Aug 31 item 5) ride event code 49; Tick runs the
@@ -3136,6 +3766,9 @@ namespace CompetitiveRounds
         {
             Plugin.Log.LogInfo("[PERSIST] Delayed initialization starting...");
 
+            // Seat evidence: hash this DLL and the game's off the main thread.
+            try { SeatEvidence.StartHashing(); } catch { }
+
             // ── Other mods check (Chainloader is complete by now) ──
             try
             {
@@ -3154,6 +3787,15 @@ namespace CompetitiveRounds
                         foreach (var m in otherMods)
                             Plugin.Log.LogError($"[COMPAT]   - {m}");
                         Plugin.Log.LogError("[COMPAT] Mod DISABLED to ensure competitive integrity.");
+                        try
+                        {
+                            var guids = new List<string>();
+                            foreach (var kvp in plugins) if (kvp.Key != Plugin.ModId) guids.Add(kvp.Key);
+                            SeatEvidence.NoteCompat("finding", guids);
+                            // Identity-clock evidence: this execution of the gate is one boot occurrence.
+                            try { IdentityClockEvidence.BootCheck("finding", guids); } catch { }
+                        }
+                        catch { }
                         Plugin.modDisabled = true;
                         Plugin.compatCheckComplete = true;
                         // Awake already staged the poison-authority capability, and
@@ -3182,6 +3824,12 @@ namespace CompetitiveRounds
                         // site; "[PROX-CAP] withdrew" is not a line a plain compat
                         // disable produces.
                         try { ProximityVictimGate.RepublishCapability(); } catch { }
+                        try { WeaponCooldownReset.RevokeCapability(); } catch { }
+                        try { SawTargetSync.RevokeCapability(); } catch { }
+                        // Same for the DC-election capability: a disabled mod runs no
+                        // election at all, and a peer counting us as a census seat
+                        // would hold a room-wide claim that is false on this seat.
+                        try { DcReportSync.RevokeCapability(); } catch { }
                         // r3 find 4: same shape for the base-game locale
                         // injector. It has been inert (activation is gated on
                         // the compat clear below), but Shutdown is idempotent
@@ -3193,10 +3841,15 @@ namespace CompetitiveRounds
                     }
                 }
                 Plugin.Log.LogInfo("[COMPAT] No other mods detected — OK");
+                try { SeatEvidence.NoteCompat("pass", null); } catch { }
+                try { IdentityClockEvidence.BootCheck("pass", null); } catch { }
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[COMPAT] Could not check other mods: {ex.Message}");
+                // A check that threw reports not_run, never pass.
+                try { SeatEvidence.NoteCompat("not_run", null); } catch { }
+                try { IdentityClockEvidence.BootCheck("not_run", null); } catch { }
             }
             Plugin.compatCheckComplete = true;
             // r3 find 4: releases the injector's activation gate. Everything
@@ -4052,6 +4705,10 @@ namespace CompetitiveRounds
         {
             // Roster changed: drop the same-frame fighter cache (r3).
             try { RoomActors.InvalidateFighterCache(); } catch { }
+            // Poison convergence v3 (A2b): any entry, spectators included.
+            try { PoisonSync.V3RoomEvent("player-entered", p); } catch { }
+            // Item 19 edge E3: the roster grew, so the room's facing may have moved.
+            AvatarDefaults.Evaluate("E3-entered");
 
             // Local classification cache. Best effort and LOCAL by design
             // (r9 deleted the announced-verdict property): the cross-client
@@ -4074,7 +4731,18 @@ namespace CompetitiveRounds
             // symmetrically — fair and fail-closed — until the master's
             // close removes it. Never gate this on IsUnauthorized: that
             // reads the LOCAL frozen roster, which seats legally disagree on.
-            try { if (!entrantIsSpectator) PoisonSync.NoteRosterChange("PlayerEntered"); } catch { }
+            //
+            // ...and for the same reason not on the line above either. The
+            // paragraph said REPLICATED while the gate read `entrantIsSpectator`,
+            // which is RoomActors.IsSpectator — a first-sight cache, i.e. the
+            // per-seat timing dependence this whole rule exists to remove, one
+            // layer up from the property it names (#302: the comment was a claim
+            // the code below it did not keep). The cache is still computed above,
+            // because the RecordRejected arm beside it is genuinely local; the
+            // POISON arm now reads the property.
+            bool entrantIsSpectatorReplicated = false;
+            try { entrantIsSpectatorReplicated = RoomActors.IsSpectatorReplicated(p); } catch { }
+            try { if (!entrantIsSpectatorReplicated) PoisonSync.NoteRosterChange("PlayerEntered"); } catch { }
 
             // Spectator entry: the master validates the claimed lease with the
             // server immediately (design §6.6) — invalid actors get kicked,
@@ -4156,11 +4824,64 @@ namespace CompetitiveRounds
                 if (p.CustomProperties != null)
                 {
                     if (p.CustomProperties.ContainsKey("p_id")) int.TryParse(p.CustomProperties["p_id"].ToString(), out slot);
-                    if (p.CustomProperties.ContainsKey("t_id")) int.TryParse(p.CustomProperties["t_id"].ToString(), out team);
+                    if (p.CustomProperties.ContainsKey(Player.VAR_TEAMID)) int.TryParse(p.CustomProperties[Player.VAR_TEAMID].ToString(), out team);
                 }
                 Plugin.Log.LogInfo($"[2v2-DIAG] PlayerEntered: nick='{p.NickName}' actor={p.ActorNumber} p_id={slot} t_id={team} {Diag2v2.DescribeRoom()}");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DIAG] PlayerEntered log error: {ex.Message}"); }
+        }
+
+        /// <summary>The 2v2 team a seat advertises (`t_id`), or -1 when it does not say
+        /// anything a 2v2 team can be. Same prop the leaver banner and DetermineLocalTeam
+        /// read, so every seat in the room answers this identically. -1 means UNKNOWN,
+        /// never "team 0".
+        ///
+        /// <para>A 2v2 `t_id` is 0 or 1 and nothing else. The prop is not 2v2's alone —
+        /// FFA writes the player's own SLOT into it ("every player own team"), so a seat
+        /// carrying a stale value from a previous FFA room can advertise 2, 3, 4. Taking
+        /// any non-negative integer at face value turned each of those into its own
+        /// one-member team, and a one-member team is always its own lowest id: every such
+        /// seat elected itself and the reporter count could reach every survivor in the
+        /// room instead of the two the election is designed to allow (r3 finding).
+        /// Anything outside {0,1} is UNKNOWN. A seat that meets an unknown team, its
+        /// own or the leaver's, reports the disconnect itself rather than trusting
+        /// the room-wide rule to find a seat the server accepts (round 2 finding 2;
+        /// DcReporterElection holds the rule and the parse).</para></summary>
+        private static int TeamIdOf(Photon.Realtime.Player pl)
+        {
+            try
+            {
+                if (pl == null || pl.CustomProperties == null) return -1;
+                object v;
+                if (!pl.CustomProperties.TryGetValue(Player.VAR_TEAMID, out v)) return -1;
+                return DcReporterElection.ParseTeamId(v);
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>The Steam id a seat advertises (`u_id`, `unity_id` is NOT
+        /// consulted here), or -1 when it advertises nothing a reporter election
+        /// can compare. Replicated, so every seat reads the same value for the
+        /// same actor — which is the whole reason the election uses it rather
+        /// than anything locally derived.
+        ///
+        /// <para>A `photon_`-prefixed value is Photon's own placeholder for an
+        /// actor with no Steam identity, never a Steam id, and it must not
+        /// order against real ones.</para></summary>
+        private static long SteamIdOf(Photon.Realtime.Player pl)
+        {
+            try
+            {
+                if (pl == null || pl.CustomProperties == null) return -1;
+                object v;
+                if (!pl.CustomProperties.TryGetValue("u_id", out v) || v == null) return -1;
+                string s = v.ToString();
+                if (string.IsNullOrEmpty(s) || s.StartsWith("photon_")) return -1;
+                long n;
+                if (!long.TryParse(s, out n) || n <= 0) return -1;
+                return n;
+            }
+            catch { return -1; }
         }
 
         public void OnPlayerLeftRoom(Photon.Realtime.Player p)
@@ -4168,6 +4889,19 @@ namespace CompetitiveRounds
             // Roster changed: same-frame reads must not see the cached view
             // (Codex r3 — two same-frame departures vs the DC reporter).
             try { RoomActors.InvalidateFighterCache(); } catch { }
+            // Poison convergence v3 (A2b): any departure, spectators included.
+            try { PoisonSync.V3RoomEvent("player-left", p); } catch { }
+            // Item 19 edge E11: a departure raises no property update, so this
+            // is the only edge on which the facing can return to Modded.
+            AvatarDefaults.Evaluate("E11-left");
+
+            // A 2v2 DC fallback watch, if one is armed, is watching for exactly
+            // this: the ELECTED seat leaving. Before any of the classification
+            // below, because the watch reads the property payload Photon still
+            // has on the departing actor, and because its answer ("it dispatched
+            // nothing", "it left with a request in flight") does not depend on
+            // whether this leaver is a fighter, a spectator or an impostor.
+            try { DcReportSync.NoteActorLeft(p); } catch { }
 
             // A SPECTATOR (or unauthorized impostor — r3 CRITICAL: a copied
             // u_id leaving must never read as the REAL fighter's DC) leaving
@@ -4196,10 +4930,14 @@ namespace CompetitiveRounds
             // 2, r9): cr_spec, the SCOPED u_id-absence rule and the
             // impostor-duplicate rule are computed from replicated data
             // identically on every seat; the local caches are not consulted.
+            // The cr_spec term said that and called IsSpectator, which IS a
+            // local cache — the same divergence as the entry gate above, and
+            // corrected the same way (#302, #432: the flag named one line, the
+            // defect is the operation).
             bool leaverIsSpectatorReplicated = false;
             try
             {
-                leaverIsSpectatorReplicated = RoomActors.IsSpectator(p)
+                leaverIsSpectatorReplicated = RoomActors.IsSpectatorReplicated(p)
                     || (RoomActors.ReplicatedIdentityGuaranteed()
                         && !RoomActors.HasReplicatedFighterIdentity(p))
                     || RoomActors.IsImpostorReplicated(p);
@@ -4221,10 +4959,31 @@ namespace CompetitiveRounds
             try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
             catch { }
 
-            // 2v2 DC reporting: when a player drops mid-series, the lowest-Steam-ID
-            // remaining client reports the DC to the server. Server awards the
-            // current match to the non-DC team (if total points >= 2) and starts
-            // the 5-min sticky-team requeue grace window.
+            // 2v2 DC reporting: when a player drops mid-series, the surviving seats
+            // the election below picks report the DC to the server: ONE elected
+            // survivor on the non-DC team wherever the census proves the rule
+            // room-wide, otherwise every seat DcReporterElection.ShouldReport names.
+            //
+            // THE DEPLOYED CONTRACT, restated from main.py's own
+            // team_series_report_dc rather than from memory (r2 LOW). Two
+            // outcomes: the whole SERIES completes to the non-DC team with full
+            // Glicko and gold (no XP) only when that team had ALREADY won at
+            // least one game AND the abandoned game holds >= 2 total points;
+            // otherwise the series flips to status='dc_incomplete' with
+            // invalidation_reason='dc_manual_pending' for manual resolution in
+            // the admin panel. There is no 5-minute grace window on this path —
+            // that is the legacy dc_paused flow, which only the state poll's
+            // expiry sweep still reads. What DOES exist is the bug-245 resume:
+            // if the same four re-queue within roughly thirty minutes the
+            // matcher re-locks them onto THIS series with its scores kept and
+            // clears the pending flag.
+            //
+            // This tree's server half (v1.41.0 beta round 2 finding 1; rounds 5
+            // to 8, findings F25 to F31) reads the two points from its own
+            // per-game record, never from the totals a report carries, and
+            // settles a lead-forfeit only for a report that carries the physical
+            // game's token, which ApiClient.ReportTeamSeriesDc reads as the
+            // report is built.
             //
             // STRICTLY 2v2: the widened IsActive() also fires this callback in
             // ovt_ rooms, where ActiveTeamSeriesId can be a STALE id from an
@@ -4274,29 +5033,384 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(dcSteamId) && !string.IsNullOrEmpty(p.UserId)) dcSteamId = p.UserId;
                 if (string.IsNullOrEmpty(dcSteamId) || dcSteamId.StartsWith("photon_")) return;
 
-                // Reporter election: lowest steam_id of those still in the room.
+                // Reporter election: exactly ONE PROMPT report wherever the rule can
+                // be proven ROOM-WIDE, delayed redundancy behind it, and this seat's
+                // honest point snapshot in every case.
+                //
+                // Bugs #384/#385 and the r2 HIGH above them. The server accepts a DC
+                // report only from a member of the non-DC team
+                // (team/series/{id}/report-dc: "reporter must be a member of the
+                // non-DC team"). The original election picked the lowest id in the
+                // ROOM — a different rule that agreed with the server's only by
+                // luck, so the series was never closed, every survivor kept a live
+                // 2v2 hold, and further 2v2 joins were refused until the lease TTL
+                // ran out. The first repair OR'd the old room-wide elector with a
+                // team-aware one to guarantee at least one report; that guarantee is
+                // kept, but the OR could elect TWO seats, and two reports are NOT
+                // equivalent:
+                //
+                //   `t1_points_total` / `t2_points_total` ride the query string,
+                //   OUTSIDE the DC signature, as ONE seat's snapshot of a game that
+                //   never produced a team_matches row. The deployed endpoint gates
+                //   its lead-forfeit branch on `total_points >= 2` and settles on the
+                //   FIRST accepted report (`WHERE status IN ('active','dc_paused')`).
+                //   So two HONEST survivors whose snapshots straddle two points
+                //   decide a rated series completion — ratings and gold — versus
+                //   `dc_incomplete`, by which request took the row lock first. No
+                //   dishonest client is required.
+                //
+                // Two arms, in this order:
+                //
+                //  (1) CENSUS, and only where the rule is ROOM-WIDE. A four-seat
+                //      census (three survivors plus the leaver); every seat
+                //      advertising a parseable and DISTINCT `u_id`; the four `t_id`
+                //      values forming an exact 2/2 split with the leaver's team
+                //      known; AND every survivor advertising `cr_dc2`, i.e. every
+                //      seat that could report is evaluating THIS rule
+                //      (RoomActors.DcReportSync). Then the lower `u_id` of the
+                //      non-DC team's two survivors is the reporter, it is the same
+                //      seat on every seat, and it posts at once. Its team-mate does
+                //      NOT post a second report and does NOT arm a timer: it arms a
+                //      watch on that seat's TERMINAL OUTCOME (DcReportSync.ArmFallback
+                //      — the `cr_dcr` property the prompt seat publishes, and ONLY
+                //      that) and posts nothing at all until one is known. It also
+                //      requires every fighter seat to advertise `cr_dc3`, the outcome
+                //      protocol's own key: a room running two outcome protocols is a
+                //      room where a `cr_dcr` value does not mean what this build reads
+                //      it as, and the watch is not armed there at all.
+                //
+                //      DEPARTURE IS NOT A TRIGGER — it STANDS THE WATCH DOWN. This
+                //      note used to name "that seat leaving the room having dispatched
+                //      nothing" as a second terminal signal, and the tree has not done
+                //      that since the round that wrote the rule: the elected seat's
+                //      departure is ITSELF a disconnect in this same series, the
+                //      election runs again for it in the very next statements of this
+                //      method, and a REAL-TOTALS report about it is composed in a
+                //      process this watch holds no property from. Firing on the
+                //      departure would put a zero-total post beside that report. The
+                //      watch stands down instead and posts nothing (RoomActors
+                //      DcReportSync.Evaluate, the `_watchGone` arm, checked BEFORE the
+                //      failure arm).
+                //
+                //      An earlier cut of this arm armed a DELAYED post at +45 s, sized
+                //      against the prompt seat's nominal retry budget; that is an
+                //      elapsed-time guess about another seat's transaction, Unity's
+                //      request timeout is not a hard ceiling under a stalled socket,
+                //      and a last attempt landing after the delayed post decides a
+                //      rated completion versus `dc_incomplete` by arrival order — the
+                //      very defect this arm exists to remove. When the watch does fire
+                //      it posts ZERO point totals, the one form the deployed endpoint
+                //      can only record as `dc_incomplete`, so a fallback can never BE
+                //      the report that rates a series.
+                //
+                //      THAT IS THE WHOLE CLAIM, AND IT IS NARROWER THAN THE ONE THIS
+                //      NOTE USED TO MAKE. "No ordering of the two can select the rated
+                //      completion" is FALSE and was withdrawn: a zero-total fallback
+                //      that takes the row lock FIRST writes `dc_incomplete`, and a
+                //      real-totals report behind it is answered `{"ignored": true}` —
+                //      a rated lead-forfeit lost. The client-side table removes every
+                //      schedule one seat can observe; a SECOND disconnect on a
+                //      different seat is not orderable from inside any one client.
+                //      NARROWING it is the SERVER lane's half, and narrowing is the
+                //      word: this client sends `is_fallback=true` on exactly its
+                //      fallback reports, and a server carrying the deferral rule
+                //      records the fallback without settling, so a later real-totals
+                //      report can still rate the series INSIDE A BOUND — one that is
+                //      stated once, in full, at the `is_fallback` site in
+                //      ApiClient.ReportTeamSeriesDc, and does not hold outside it.
+                //      Against a server that does not carry the rule the parameter is
+                //      ignored (#266) and the residual above stands unchanged — which
+                //      is why it is written here as a residual and not as a closure.
+                //      What neither covers is a refusal that would apply
+                //      to both seats (a room the series no longer names, a series
+                //      already gone): that is the endpoint's answer, not a delivery
+                //      failure, and the watch reads it as terminal and stands down.
+                //
+                //  (2) EVERYTHING ELSE — a seat without `u_id`, duplicate ids, a
+                //      `t_id` outside {0,1}, a census that is not 2/2, a roster
+                //      mid-change, or one peer on a build that does not advertise
+                //      `cr_dc2`. The FLOOR election runs: DcReporterElection's two
+                //      lowest ids plus its team claim (v1.41.0 beta round 3 finding
+                //      2), or, in a view it can check, the lowest id advertising the
+                //      team that stayed plus the seat advertising the leaver's team
+                //      (merge pass 1, follow-up 6); at least one report the server
+                //      accepts, always, because
+                //      zero reporters is the one outcome worse than the bug (#276).
+                //      A peer on an older build runs its own older rule, and the
+                //      two-seat bound holds only over the seats running this one.
+                //      Its residual is the straddle described above. This tree's
+                //      server half no longer reads the totals, so what can still
+                //      differ between two honest reports is whether each carries
+                //      the game's token (ApiClient.ReportTeamSeriesDc). An election is
+                //      a property of the ROOM, and no client-side rule can be
+                //      room-wide while a peer evaluates a different one — which is
+                //      why arm (1) asks the room first instead of assuming it.
+                //
+                // THE REPORT ALWAYS CARRIES THIS SEAT'S HONEST SNAPSHOT. An earlier
+                // cut of this election sent ZEROS from arm (2), on the reasoning that
+                // `total_points = 0` cannot reach the lead-forfeit branch and is
+                // therefore conservative. It is conservative for the SERVER and not
+                // for the abandoned team: it converts a forfeit they have already
+                // earned into `dc_incomplete`. Worse, it was reachable by the one
+                // party with a motive — the leaver's own surviving team-mate omitting
+                // `u_id`, or advertising a `t_id` outside {0,1}, fails the census on
+                // EVERY seat and zeroes the totals for the whole room. And it bought
+                // nothing against a liar, because every census input is
+                // self-advertised: a client willing to lie satisfies arm (1) and
+                // sends whatever totals it likes.
+                //
+                // WHAT A LYING CLIENT GAINS under THIS rule, enumerated (#283):
+                //   * Faking `t_id` to look non-DC: nothing. The server resolves team
+                //     membership from the series row, not from the report, and refuses
+                //     a DC-team member with a 400.
+                //   * Faking a low `u_id` to win arm (1): it must still be an actual
+                //     non-DC member for the server to accept it, and such a seat was
+                //     entitled to report anyway.
+                //   * Breaking the census on purpose (an inconsistent `t_id`, a
+                //     withheld `u_id`, a withheld `cr_dc2`): arm (2), the floor
+                //     election every seat falls back to. It no longer changes
+                //     WHAT is reported, only which seats report it — that is the
+                //     whole reason the zeros are gone.
+                //   * Going silent after winning arm (1): its team-mate's watch sees
+                //     ONE terminal outcome — a published `cr_dcr=no`, i.e. every
+                //     attempt answered and refused, or nothing ever dispatched — and
+                //     closes the series with a zero-total report. Leaving the room is
+                //     NOT that outcome and never was in the shipped rule: a departure
+                //     stands the watch DOWN, because it is a fresh disconnect that the
+                //     election closes with a real-totals report. Both seats are on the
+                //     non-DC team, so the only party who can reach that downgrade is
+                //     the abandoned team itself, and it downgrades its OWN forfeit;
+                //     the leaver's side has no lever on it (#283). A seat that
+                //     dispatches and then goes
+                //     silent WITHOUT a terminal answer is the one state where its
+                //     team-mate posts nothing at all, because a request may still be
+                //     in flight and a fallback beside it would decide the series by
+                //     arrival order again.
+                //   * Submitting inflated points while legitimately elected: unchanged
+                //     by this election and NOT closable from the client — the totals
+                //     are client-attested and ride outside the signature. The server
+                //     needed a per-game fact of its own (the server-contract note in
+                //     the r2 notes), and this tree's server half has it: it decides
+                //     from its own per-game record and only logs the totals (v1.41.0
+                //     beta round 2 finding 1).
                 string myId = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(myId)) return;
                 long myVal; if (!long.TryParse(myId, out myVal)) return;
-                bool iAmLowest = true;
-                foreach (var pp in RoomActors.ActiveFighters())   // census: reporter election over fighters only
-                {
-                    if (pp == null || pp.ActorNumber == p.ActorNumber) continue;  // skip the leaver
-                    if (pp.IsLocal) continue;
-                    string ppSid = null;
-                    if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("u_id"))
-                        ppSid = pp.CustomProperties["u_id"]?.ToString();
-                    if (string.IsNullOrEmpty(ppSid) || ppSid.StartsWith("photon_")) continue;
-                    if (long.TryParse(ppSid, out long ppVal) && ppVal < myVal) { iAmLowest = false; break; }
-                }
-                if (!iAmLowest) return;
 
-                // Pull current point totals from the in-game state. Per the DC rule,
-                // a match with combined points >= 2 awards the match to the non-DC team.
+                int dcTeam = TeamIdOf(p);
+                int myTeam = TeamIdOf(PhotonNetwork.LocalPlayer);
+
+                bool teamsKnown = dcTeam >= 0 && myTeam >= 0;
+
+                // CENSUS BASIS: the raw PlayerList filtered by the replicated
+                // spectator prop, read from the property on every call.
+                //
+                // NOT RoomActors.ActiveFighters(): that filter consults the frozen
+                // roster, which is LOCAL state — two seats freezing at different
+                // moments classify a prop-less actor differently, and an election two
+                // seats compute differently is exactly the duplicate this arm exists
+                // to rule out.
+                //
+                // NOT RoomActors.IsSpectator() either, which is the correction this
+                // round makes: that helper caches its answer by ActorNumber at FIRST
+                // SIGHT and never re-reads the property, so it too is per-seat state
+                // whose answer depends on when this seat happened to look. The role
+                // itself is immutable inside a room (staged pre-join, never cleared
+                // mid-room), so the uncached read is the one that actually delivers
+                // the "same bytes on every seat" this arm needs, and it self-heals
+                // for an actor whose payload was not readable yet instead of fixing
+                // the wrong answer in place for the rest of the room.
+                //
+                // Either misclassification costs the same thing and no more: the
+                // survivor count stops being 3, arm (1) is refused, and the room runs
+                // the floor election. Even the pair of them at once — one fighter read
+                // as a spectator while one spectator is read as a fighter, which keeps
+                // the count at 3 — lands in the same place, because a spectator clears
+                // `t_id` when it stages its role and an actor with no team fails the
+                // 2/2 split below.
+                //
+                // Photon has already removed the leaver from PlayerList by the time
+                // this callback runs, so `survivors` never contains `p`.
+                var survivors = new List<Photon.Realtime.Player>();
+                try
+                {
+                    var all = PhotonNetwork.PlayerList;
+                    if (all != null)
+                        for (int i = 0; i < all.Length; i++)
+                        {
+                            var a = all[i];
+                            if (a == null || a.ActorNumber == p.ActorNumber) continue;
+                            if (RoomActors.IsSpectatorReplicated(a)) continue;
+                            survivors.Add(a);
+                        }
+                }
+                catch { survivors.Clear(); }
+
+                // Arm (1)'s preconditions. Every one is read from a replicated
+                // property, and the last one asks whether the OTHER seats are even
+                // running this rule: without it, "exactly one reporter" would be a
+                // property of this process rather than of the room, and a peer on the
+                // previous build would post its own report beside ours anyway.
+                int missingCap = -1;
+                bool roomWide = DcReportSync.AllCapable(survivors, out missingCap);
+                bool unique = teamsKnown && survivors.Count == 3 && roomWide;
+                long lowestNonDc = long.MaxValue;
+                int nonDcCount = 0, dcTeamCount = 1;   // the leaver is on the DC team
+                var seenIds = new HashSet<long>();
+                bool sawSelf = false;
+                if (unique)
+                {
+                    long dcId = SteamIdOf(p);
+                    if (dcId < 0) unique = false; else seenIds.Add(dcId);
+                }
+                if (unique)
+                {
+                    for (int i = 0; i < survivors.Count; i++)
+                    {
+                        var s = survivors[i];
+                        long sid = SteamIdOf(s);
+                        int st = TeamIdOf(s);
+                        if (sid < 0 || st < 0 || !seenIds.Add(sid)) { unique = false; break; }
+                        if (s.IsLocal) { sawSelf = true; if (sid != myVal) { unique = false; break; } }
+                        if (st == dcTeam) dcTeamCount++;
+                        else { nonDcCount++; if (sid < lowestNonDc) lowestNonDc = sid; }
+                    }
+                }
+                // A 2v2 sitting is 2/2. Anything else means at least one seat is
+                // advertising a team it is not on, and the split is the cheapest
+                // replicated cross-check that catches it.
+                if (unique && (!sawSelf || dcTeamCount != 2 || nonDcCount != 2)) unique = false;
+
+                // The room is a fact of the OBSERVATION, not of the dispatch — read
+                // it HERE, before either arm can leave the room. A delayed or
+                // watch-driven post reading `PhotonNetwork.CurrentRoom` at send time
+                // would hand the server an empty hint, losing the bug-245 fence that
+                // stops a report about an abandoned room lead-forfeiting the sitting
+                // that resumed it.
+                string observedRoom = "";
+                try { observedRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
+
+                if (unique)
+                {
+                    if (myTeam == dcTeam) return;                 // the other team elects
+                    if (myVal == lowestNonDc)
+                        Plugin.Log.LogInfo("[2v2-DC] elected from the replicated census "
+                            + "(2/2 teams, four distinct ids, every survivor advertising "
+                            + DcReportSync.CapabilityProp + ") — the one prompt reporter");
+                    else
+                    {
+                        // The other non-DC survivor. NO TIMER, and no report now: it
+                        // watches the elected seat's transaction and acts only on a
+                        // terminal outcome of it. See DcReportSync's protocol note for
+                        // why an elapsed-time net was the wrong instrument and what
+                        // "terminal" means here.
+                        Photon.Realtime.Player elected = null;
+                        for (int i = 0; i < survivors.Count; i++)
+                            if (SteamIdOf(survivors[i]) == lowestNonDc) { elected = survivors[i]; break; }
+                        Plugin.Log.LogInfo("[2v2-DC] not the elected seat — watching actor "
+                            + (elected != null ? elected.ActorNumber.ToString() : "?")
+                            + " for a terminal outcome of its report (" + DcReportSync.OutcomeProp
+                            + "); this seat posts NOTHING until one is known");
+                        // `survivors` is the fighter seats still present — the same
+                        // census list arm (1) elected from. ArmFallback takes the
+                        // OUTCOME-protocol quorum over it and refuses, audibly, in a
+                        // room where any of them is running a different one.
+                        DcReportSync.ArmFallback(seriesId, elected, myId, dcSteamId,
+                                                 observedRoom, survivors);
+                        return;
+                    }
+                }
+                else
+                {
+                    if (teamsKnown && survivors.Count == 3 && !roomWide)
+                        Plugin.Log.LogInfo("[2v2-DC] census arm refused: "
+                            + (missingCap >= 0 ? $"actor {missingCap}" : "a survivor")
+                            + $" does not advertise {DcReportSync.CapabilityProp} — floor election "
+                            + "(that seat runs its own build's rule)");
+                    // FLOOR ELECTION: DcReporterElection.ShouldReport, the same code
+                    // its sentinel runs (v1.41.0 beta round 2 finding 2, round 3
+                    // finding 2). At least one report the server ACCEPTS, always:
+                    // the floor is the TWO lowest ids among the survivors, whatever
+                    // any `t_id` says, and of the three survivors the server refuses
+                    // exactly one, the leaver's teammate. The team claim can only ADD
+                    // a report, and a seat that cannot read the teams reports as
+                    // well. Duplicates are cheap: the first accepted report settles
+                    // the series and the rest no-op.
+                    //
+                    // It replaces the floor both lanes carried before they met. The
+                    // room-wide lowest id alone is refused whenever it is the
+                    // leaver's teammate. The 886bed8 lane's first cut of the L3
+                    // stand-down (a seat that looks like the leaver's teammate
+                    // defers while another survivor looks eligible) reaches ZERO
+                    // accepted reports when the leaver advertises the team that
+                    // stayed: with real teams {L,A} and {B,C}, A < B < C, and L
+                    // advertising B's team, A looks eligible and reports -- refused,
+                    // it is L's real teammate -- while B and C both read as the
+                    // leaver's team and stand down. Zero reporters is the one
+                    // outcome worse than the bug (#276).
+                    //
+                    // THE STAND-DOWN AS RULED (v1.41.0 merge pass 1, follow-up 6):
+                    // exactly one of the eligible seats reports, the lowest id, and
+                    // the stand-down belongs to an eligible seat that is not the
+                    // lowest eligible one. ShouldReport applies it only in a view it
+                    // can check (every survivor's `u_id` and `t_id` readable and the
+                    // advertised split 2/2), where the seat advertising the leaver's
+                    // team still reports; in the example above the view is not 2/2
+                    // (three seats advertise B's team) and the floor decides.
+                    //
+                    // Its census is the fighter view (RoomActors.ActiveFighters), as
+                    // it was where this rule was certified. That view is LOCAL state,
+                    // which is why arm (1) above may not use it; the floor needs no
+                    // agreement between seats, only that each seat's census is the
+                    // leave's other survivors, and once the roster is frozen the
+                    // fighter view keeps a spectator or a stranger out of it. The
+                    // bound, and what it does not cover, is stated once in
+                    // DcReporterElection.ShouldReport.
+                    var census = new List<DcReporterElection.Peer>();
+                    foreach (var pp in RoomActors.ActiveFighters())   // census: reporter election over fighters only
+                    {
+                        if (pp == null || pp.ActorNumber == p.ActorNumber) continue;  // skip the leaver
+                        if (pp.IsLocal) continue;
+                        string ppSid = null;
+                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("u_id"))
+                            ppSid = pp.CustomProperties["u_id"]?.ToString();
+                        census.Add(new DcReporterElection.Peer(ppSid, TeamIdOf(pp)));
+                    }
+                    bool onFloor, consistentView;
+                    if (!DcReporterElection.ShouldReport(myVal, myTeam, dcTeam, census,
+                            out onFloor, out _, out consistentView)) return;
+                    if (consistentView)
+                        Plugin.Log.LogInfo(myTeam == dcTeam
+                            ? "[2v2-DC] reporting from a consistent 2/2 view as the seat advertising the leaver's team "
+                              + "(the server refuses it if that team is true; the lower id of the other team reports as well)"
+                            : "[2v2-DC] reporting from a consistent 2/2 view as the lower id of the team that stayed");
+                    else if (!teamsKnown)
+                        Plugin.Log.LogInfo($"[2v2-DC] reporting with the teams unreadable (my t_id={myTeam}, "
+                            + $"leaver t_id={dcTeam}); the server accepts only the team that stayed");
+                    else if (!onFloor)
+                        Plugin.Log.LogInfo("[2v2-DC] reporting as the non-disconnected team's lowest id "
+                            + "(the two lowest ids in the room report as well)");
+                }
+
+                // Point totals: this seat's honest snapshot in BOTH arms. See the
+                // paragraph above for why the arm-(2) zeros are gone. They ride
+                // along for the server's log and the forfeit row's history: this
+                // tree's server decides whether the abandoned game saw real play
+                // from its own per-game record, never from these (v1.41.0 beta
+                // round 2 finding 1).
                 int t1Points = GameStateWatcher.LastP1Points;
                 int t2Points = GameStateWatcher.LastP2Points;
-                ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points);
-                Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} pts={t1Points}/{t2Points}");
+                // Every seat reaching this line is posting PROMPTLY: the census arm's
+                // elected reporter, or a floor-election seat. The watch arm returned
+                // above without posting, so there is no delay parameter left to get
+                // wrong.
+                // The physical game's token (v1.41.0 beta round 5, F25; round 6,
+                // F27 and F28) is read inside ApiClient.ReportTeamSeriesDc as the
+                // report is built, for a prompt report only, and logged there.
+                ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,
+                                             observedRoom, false);
+                Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} "
+                    + $"pts={t1Points}/{t2Points} census={unique} room={observedRoom} (prompt)");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
         }
@@ -4313,6 +5427,24 @@ namespace CompetitiveRounds
 
         public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps)
         {
+            // The elected 2v2 DC reporter announces where its report has got to
+            // through this callback (cr_dcr). FIRST statement: the very next
+            // block returns from the whole method on a null payload, and this
+            // one reads the actor, not the payload — a coalesced update that
+            // arrives with nothing we recognise still carries the actor's
+            // current properties.
+            try { DcReportSync.NoteActorProps(target); } catch { }
+            // Poison convergence v3 (A2b): a cr_pois3 change on any actor.
+            try { PoisonSync.V3PropsChanged(target, changedProps); } catch { }
+            // Item 19 fix pass 3 (H3): a remote picker's face carrier ARRIVED
+            // (the join snapshot never comes through here); the card-pick popup
+            // applies it only when it is that picker's value for this pick.
+            try { PopupCarriers.Arrived(target, changedProps); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] carrier arrival failed: {ex.Message}"); }
+            // Item 19 edge E4: a peer's cr_* properties (or this seat's own role)
+            // may have arrived, which can move the room's facing either way.
+            AvatarDefaults.Evaluate("E4-props");
+
             // r8 M4: identity and role are what the lag-notice window keys on,
             // and both of them change through this callback. A change that
             // lands and reverts between two frames leaves nothing behind in
@@ -4338,13 +5470,23 @@ namespace CompetitiveRounds
             }
             catch { }
         }
-        public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) { }
+        public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged)
+        {
+            // Item 19 edge E12: cr_ff (read by IsModIssuedRoom) is a ROOM
+            // property that can land after the join. It triggers a fresh
+            // evaluation and is logged; it never decides the face (fix pass 1,
+            // BR-H1: only the every-fighter census can answer Modded).
+            AvatarDefaults.Evaluate("E12-roomprops");
+        }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {
             // Bug #269: a handoff revokes our authority to speak for the room,
             // so any unconsumed map-scale publish ticket dies here — before
             // the spectator-transfer block below, which can return early.
             try { FfaMapScale.OnMasterClientSwitched(); } catch { }
+            // RJ-DRIFT change 3: a handoff invalidates N1's ticket (this
+            // seat's memory of its own confirmed cr_ffa_cyc write).
+            try { FfaMode.OnMasterClientSwitched(); } catch { }
             // V11 item 13: the switch's telemetry (EVT_MASTER), then the
             // authority fence. A fenced master hands the role on itself, so
             // the spectator hand-off below runs only when the fence did not.
@@ -4457,8 +5599,19 @@ namespace CompetitiveRounds
             // room. Idempotent.
             try { H2HSummary.Invalidate(); } catch { }
             try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
+            try { SawTargetSync.ResetForRoomChange(); } catch { }    // and so does its verdict line (see OnJoinedRoom)
+            // ...and the 2v2 DC fallback watch, which is a fact of ONE room and
+            // one series: a watch carried across a room edge would be waiting on an
+            // actor number that now names somebody else.
+            try { DcReportSync.ResetForRoomChange(); } catch { }
+            try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
+            // Item 19 edge E7: a disconnect may produce no OnLeftRoom. Never inside
+            // an InRoom test: the census reads InRoom itself, and an evaluation
+            // with no room is where a forced face is given back, even while the
+            // old GameManager still reports a game (fix pass 1, M3).
+            AvatarDefaults.Evaluate("E7-disconnect");
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
             // OnLeftRoom must still close the room/game telemetry — first
             // statement, before any early return below. Idempotent: with no
@@ -4492,6 +5645,21 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+            // v1.41.0 beta round 7, finding F29: every join, a rejoin of the
+            // same room included, breaks the physical-game ordinal and the
+            // game token this seat held (the poll can miss a leave+join inside
+            // one tick, so the reliable Photon edge does it). Only a host's
+            // publish grounds them again (TeamGameNumber, "Which physical
+            // game").
+            try
+            {
+                string tgnLine = TeamGameNumber.Live.NoteRoomJoined(PhotonNetwork.CurrentRoom?.Name ?? "");
+                if (tgnLine != null) Plugin.Log.LogInfo(tgnLine);
+            }
+            catch { }
+            // Item 19 edge E2: the join. The room's facing is derived from the
+            // room and its fighters' published properties, on every edge.
+            AvatarDefaults.Evaluate("E2-joined");
             // V11 I1: joined_room, for every join.
             try
             {
@@ -4512,6 +5680,15 @@ namespace CompetitiveRounds
             // Bug 235 diagnostics bind to the reliable Photon room edge so a
             // fast leave+rejoin cannot merge two sittings' counters/budgets.
             try { NetworkReplicaDiagnostics.OnRoomJoined(); } catch { }
+            // The saw-targeting verdict line is per ROOM, and until this call
+            // existed it was per PROCESS: SawTargetSync.ResetForRoomChange had no
+            // caller at all, so its de-duplication key survived every room and the
+            // second sitting of a session logged nothing. A bundle then cannot tell
+            // "the quorum was evaluated and applied in that room" from "the patch
+            // never attached", which is the one question the line is there to
+            // answer (#342 — a diagnostic that cannot speak proves nothing).
+            try { SawTargetSync.ResetForRoomChange(); } catch { }
+            try { DcReportSync.ResetForRoomChange(); } catch { }   // same room-scoped lifetime
             // Sept 6 item c: the reliable join edge mints the session id too (the
             // poll can miss a leave+join inside one tick); no game precedes either.
             try { GameStateWatcher.MintSessionUuid(); } catch { }
@@ -4775,11 +5952,27 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Poll /team/series/{id}/state every 2s for the first ~20s
-        /// after joining a cr_ff room. Server cancels the series after 15s if
-        /// fewer than 4 of 4 spawn-confirms have arrived. When we see status=
-        /// 'canceled' with reason 'assembly_timeout', show a notification and
-        /// leave the room — saves the remaining clients from sitting on the
-        /// ready screen until our 30s force-StartGame timeout.</summary>
+        /// after joining a cr_ff room. THE ONLY PERMITTED CALLER of the mutating
+        /// route (ApiClient.PollTeamSeriesStateAssemblyOnly) — everything else
+        /// reads series status through the read-only route.
+        ///
+        /// <para>The server cancels the series when the row has been issued for
+        /// more than 180 SECONDS (main.py `_ASSEMBLY_DEADLINE_SECONDS` on
+        /// production 0cc7f75) with fewer than 4 of 4 spawn-confirms and no
+        /// live-game evidence. This comment said 15 seconds for months; 15 s is
+        /// not a bound this loop or the server has ever had, and the number
+        /// mattered because it made the loop look like the thing that outlives
+        /// the deadline when in fact the opposite is true: 3 s + 22 s of loop
+        /// life is entirely inside 180 s, which is exactly why this caller
+        /// cannot reach the cancel arm. The loop's duration bounds only the
+        /// loop; it does not bound the ROW's age, which is measured from
+        /// `room_issued_at` on the server and can already be hours old on the
+        /// first read after a bug-245 resume relock.</para>
+        ///
+        /// <para>When we see status='canceled' with reason 'assembly_timeout',
+        /// show a notification and leave the room — saves the remaining clients
+        /// from sitting on the ready screen until our 30s force-StartGame
+        /// timeout.</para></summary>
         private static System.Collections.IEnumerator PollAssemblyStateLoop()
         {
             yield return new WaitForSeconds(3f);
@@ -4792,7 +5985,7 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(sid)) yield break;
 
                 bool gotResponse = false;
-                ApiClient.PollTeamSeriesState(sid, (status, reason, conf) =>
+                ApiClient.PollTeamSeriesStateAssemblyOnly(sid, (status, reason, conf) =>
                 {
                     gotResponse = true;
                     if (status == "canceled" && reason == "assembly_timeout")
@@ -5133,8 +6326,18 @@ namespace CompetitiveRounds
             // statement (same reason as OnDisconnected). Idempotent.
             try { H2HSummary.Invalidate(); } catch { }
             try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
+            try { SawTargetSync.ResetForRoomChange(); } catch { }    // and so does its verdict line (see OnJoinedRoom)
+            // ...and the 2v2 DC fallback watch, which is a fact of ONE room and
+            // one series: a watch carried across a room edge would be waiting on an
+            // actor number that now names somebody else.
+            try { DcReportSync.ResetForRoomChange(); } catch { }
+            try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
+            // Item 19 edge E6: never inside an InRoom test - the InRoom poll turns
+            // false during Leaving, before this callback. The census reads it,
+            // and a confirmed no-room outranks a still-live manager (fix pass 1, H9).
+            AvatarDefaults.Evaluate("E6-left");
             // A teardown window is bound to the room it was opened in. Without
             // this a seat that leaves between the round call-in and the call-in
             // of new players carries the open window across the room boundary
@@ -5184,6 +6387,12 @@ namespace CompetitiveRounds
             // The poll's Left-room branch keeps a lossy backup copy.
             try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
             try { VanillaFixSupport.ResetDiag(RoundSoundSweep.DiagKey); } catch { }
+            // #379: same per-sitting budgets, same reliable edge — and the
+            // gate's log dedup key goes with them, so the next room states its
+            // verdict instead of inheriting the previous room's line.
+            try { VanillaFixSupport.ResetDiag(WeaponCooldownReset.DiagKey); } catch { }
+            try { VanillaFixSupport.ResetDiag(WeaponCooldownReset.PhoenixDiagKey); } catch { }
+            try { WeaponCooldownReset.ResetForRoomChange(); } catch { }
             // A ghost loop at the MENU is the most audible variant of the
             // sound leak — sweep once on the reliable exit edge (Aug 22).
             try { RoundSoundSweep.Schedule("room-leave"); } catch { }
@@ -5210,6 +6419,14 @@ namespace CompetitiveRounds
             // caller, so the flush the r4 cap depends on never ran and a
             // filled cache stayed capped for the rest of the process.
             try { CardBarTeamColor.Reset(); } catch { }
+            // Automatic post-match log upload (item a). On the RELIABLE edge,
+            // not the room-state poll: the poll turns false during Leaving and
+            // cannot see a leave+rejoin that lands between two samples. It sits
+            // ABOVE the Diag2v2 early return below, which would otherwise skip
+            // it on every seat that has no pending 2v2 slot — i.e. almost all
+            // of them. Off unless the player opted in; it clears its own
+            // room-bound snapshot on every path, including the refusals.
+            try { AutoLogUpload.OnRoomLeft(); } catch { }
             // (A room-leave flush of the #308 birth tally was tried here and
             // REMOVED in review r3 find 3: it neither reset nor marked the tally,
             // so leaving room A and joining room B emitted the same numbers twice
@@ -5481,61 +6698,108 @@ namespace CompetitiveRounds
     }
 
     /// <summary>Publishes the local player's selected face to a Photon LocalPlayer
-    /// custom property `cr_face` so that in cr_ff rooms, every client can read any
-    /// other player's face without depending on RPC timing. Vanilla's
-    /// CardChoiceVisuals.Show fires `RPCA_SetFace` with `RpcTarget.All` only from
-    /// the picker's client — in 2v2 with 4 sequential pickers, the RPC for picker N
-    /// can arrive AFTER picker N+1's Show() has already torn down and re-rendered
-    /// the visualizer locally, so remote clients see "yesterday's picker" or no
-    /// face at all. Reading from custom props on each Show() call eliminates the
-    /// timing race entirely.</summary>
+    /// custom property `cr_face` so that every client can apply any other
+    /// player's face on the card-pick popup without depending on RPC timing.
+    /// Vanilla's CardChoiceVisuals.Show fires `RPCA_SetFace` with `RpcTarget.All`
+    /// only from the picker's client — in 2v2 with 4 sequential pickers, the RPC
+    /// for picker N can arrive AFTER picker N+1's Show() has already torn down and
+    /// re-rendered the visualizer locally, so remote clients see "yesterday's
+    /// picker" or no face at all. A property has its own race, the other way
+    /// round: a seat's copy of a remote carrier is the last update it received,
+    /// which can belong to an earlier pick. So the popup never reads that copy
+    /// (item 19 fix pass 3, H3): the picker BINDS the publish it makes at its
+    /// own popup to that popup's pick (fix pass 4: the game and rounds every
+    /// seat derives from the same events), and a remote seat applies a face or
+    /// a clear only when it is bound to the pick of the popup it shows
+    /// (PopupCarrierLedger, through PopupCarriers).</summary>
     internal static class FacePublisher
     {
         public const string PROP_FACE = "cr_face";
 
-        public static void PublishLocal()
+        /// <summary>The one publish-or-clear helper behind all four callers
+        /// (item 19 fix pass 1, H3). Every attempt ends in exactly one of three
+        /// outcomes, decided by AvatarRules.CarrierAction: the current valid
+        /// face is published; or the attempt reached a definitive "no valid
+        /// face" (no face list, a null face, an all-zero face) and the carrier
+        /// is CLEARED (once that write arrives, a remote seat's popup stops
+        /// owing this face and vanilla's RPC stays in charge); or nothing is written (a
+        /// spectator, no handler yet, no local player). A write reaches the
+        /// local cache only on the server's echo, so it is not observable in
+        /// the pass that made it: see the overload below (fix pass 2, H3).</summary>
+        public static FaceCarrierAction PublishLocal() => PublishLocal(out _);
+
+        /// <summary>The same attempt, also handing back the exact value it
+        /// published (null when it cleared or kept the carrier). Fix pass 2,
+        /// H3: PUN updates the local player's cached properties only on the
+        /// server's echo, so a caller that needs its own face in the same pass
+        /// uses this value and never rereads the cache. Fix pass 3, H3: forPick
+        /// is the card-pick popup's own publish (the local picker's Show). Fix
+        /// pass 4, H3: that one value is BOUND to the pick of the popup the
+        /// picker shows (PopupCarriers.PickNow): a face carries the pick as a
+        /// 13th field (PopupCarrierLedger.BoundFace), a clear is the tombstone
+        /// "clear|" + the pick (PopupCarrierLedger.BoundClear). A remote seat
+        /// applies either only to its popup of that same pick. When this seat
+        /// has no pick identity (no game start seen in this room) the publish
+        /// goes out unbound. Every other publish stays the 12 fields it always
+        /// was, and a clear outside a pick still removes the key.</summary>
+        public static FaceCarrierAction PublishLocal(out string published, bool forPick = false)
         {
+            published = null;
             try
             {
                 // Spectator: publishes NO cosmetic properties (design §3.5) —
-                // guarded here at the source so no call site can leak one.
-                if (RoomActors.LocalIsSpectator) return;
+                // guarded here at the source so no call site can leak one. No
+                // reader consults a spectator's carrier (the popup applies only
+                // the carrier of the picker it shows, and a spectator never
+                // picks), so Keep leaves nothing readable.
+                bool spectator = RoomActors.LocalIsSpectator;
                 var cch = CharacterCreatorHandler.instance;
-                if (cch == null)
+                bool listed = cch != null && cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0;
+                var face = listed ? cch.selectedPlayerFaces[0] : null;
+                var ids = face != null ? AvatarFaceIds.Of(face.eyeID, face.mouthID, face.detailID, face.detail2ID) : new AvatarFaceIds();
+                var action = new AvatarRules().CarrierAction(spectator, cch != null, PhotonNetwork.LocalPlayer != null, listed, ids);
+                if (action == FaceCarrierAction.Keep)
                 {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: CharacterCreatorHandler.instance is null (game state not ready)");
-                    return;
+                    if (spectator) return action;
+                    Plugin.Log.LogInfo(cch == null
+                        ? "[POPUP-DIAG] PublishLocal skipped: CharacterCreatorHandler.instance is null (game state not ready)"
+                        : "[POPUP-DIAG] PublishLocal skipped: LocalPlayer is null");
+                    return action;
                 }
-                if (cch.selectedPlayerFaces == null || cch.selectedPlayerFaces.Length == 0)
+                // Fix pass 4 (H3): the card-pick popup's own publish is bound to
+                // the pick that popup shows; null outside a pick, or when this
+                // seat has no pick identity (the publish then goes out unbound).
+                string pick = forPick ? PopupCarriers.PickNow() : null;
+                if (forPick && pick == null)
+                    Plugin.Log.LogInfo("[POPUP] card-pick publish unbound: this seat has seen no game start in this room, so no remote popup applies it");
+                if (action == FaceCarrierAction.Clear)
                 {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: selectedPlayerFaces empty");
-                    return;
-                }
-                var face = cch.selectedPlayerFaces[0];
-                if (face == null)
-                {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: face[0] is null");
-                    return;
-                }
-                if (PhotonNetwork.LocalPlayer == null)
-                {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: LocalPlayer is null");
-                    return;
-                }
-                // If the local face is fully default (all four item IDs zero), skip
-                // publishing. Accounts that never opened the character creator
-                // have an uninitialized face — publishing all-zeros causes
-                // CharacterCreatorItemEquipper.EquipFace to call Equip(null) on
-                // each slot, which destroys the visualizer's stock face entirely
-                // and renders a featureless body. User reported: "2 of 4 missing
-                // in card-pick phase" pointed at Sid3/Sid4 (alts that never
-                // customized their face). Without our publish, vanilla's
-                // RPCA_SetFace on the picker's client falls back to the local
-                // visualizer's saved face.
-                if (face.eyeID == 0 && face.mouthID == 0 && face.detailID == 0 && face.detail2ID == 0)
-                {
-                    Plugin.Log.LogInfo("[2v2] FacePublisher: skipping publish (face is all-zero defaults — let vanilla RPC handle it)");
-                    return;
+                    // No valid face to publish: selectedPlayerFaces empty, face[0]
+                    // null, or a fully default face (all four item IDs zero).
+                    // Accounts that never opened the character creator have an
+                    // uninitialized face — publishing all-zeros causes
+                    // CharacterCreatorItemEquipper.EquipFace to call Equip(null)
+                    // on each slot, which destroys the visualizer's stock face
+                    // entirely and renders a featureless body ("2 of 4 missing in
+                    // card-pick phase", alts that never customized their face).
+                    // Without a carrier, vanilla's RPCA_SetFace on the picker's
+                    // client falls back to the local visualizer's saved face. The
+                    // clear removes a carrier an earlier attempt published, which
+                    // returning here used to leave in place for the popup. Fix
+                    // pass 4 (H3): at a pick the clear is the tombstone bound to
+                    // the popup's pick, so a remote popup of that pick stops
+                    // owing a face at once; the key stays present until the next
+                    // publish (the facing census skips the carrier key by name,
+                    // AvatarRules.CarriesModSignature), and a reader that needs 12
+                    // fields (a 1.40.3 seat) refuses it and applies nothing.
+                    var clear = new ExitGames.Client.Photon.Hashtable();
+                    if (pick == null) clear[PROP_FACE] = null;
+                    else clear[PROP_FACE] = PopupCarrierLedger.BoundClear(pick);
+                    PhotonNetwork.LocalPlayer.SetCustomProperties(clear);
+                    Plugin.Log.LogInfo("[2v2] FacePublisher: cleared the face carrier ("
+                        + (!listed ? "selectedPlayerFaces empty" : face == null ? "face[0] is null" : "face is all-zero defaults")
+                        + (pick != null ? ", bound to " + pick : "") + " — let vanilla RPC handle it)");
+                    return action;
                 }
 
                 string serialized = string.Join("|", new[] {
@@ -5552,37 +6816,24 @@ namespace CompetitiveRounds
                     face.detail2Offset.x.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
                     face.detail2Offset.y.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
                 });
+                if (pick != null) serialized = PopupCarrierLedger.BoundFace(serialized, pick);
                 var props = new ExitGames.Client.Photon.Hashtable();
                 props[PROP_FACE] = serialized;
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
                 Plugin.Log.LogInfo($"[2v2] Published local face to Photon: {serialized}");
+                published = serialized;
+                return FaceCarrierAction.Publish;
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish failed: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish failed: {ex.Message}"); return FaceCarrierAction.Keep; }
         }
 
-        public static bool TryReadAndApply(int pickerActorNumber, GameObject visualizerRoot)
+        /// <summary>Equip a serialized face on the popup's visualizer. A null
+        /// or empty value applies nothing (vanilla's RPC stays in charge).</summary>
+        public static bool ApplySerialized(string s, int pickerActorNumber, GameObject visualizerRoot)
         {
             try
             {
-                Photon.Realtime.Player photonPlayer = null;
-                foreach (var pp in RoomActors.ActiveFighters())   // census: a picker is always a fighter
-                    if (pp != null && pp.ActorNumber == pickerActorNumber) { photonPlayer = pp; break; }
-                if (photonPlayer == null || photonPlayer.CustomProperties == null)
-                {
-                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: photonPlayer={(photonPlayer == null ? "null" : "found")} props={(photonPlayer?.CustomProperties == null ? "null" : "ok")}");
-                    return false;
-                }
-                if (!photonPlayer.CustomProperties.ContainsKey(PROP_FACE))
-                {
-                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: cr_face property not set on remote player (their client never published, or property not yet replicated)");
-                    return false;
-                }
-                string s = photonPlayer.CustomProperties[PROP_FACE]?.ToString() ?? "";
-                if (string.IsNullOrEmpty(s))
-                {
-                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: cr_face value is empty string");
-                    return false;
-                }
+                if (string.IsNullOrEmpty(s)) return false;
                 var parts = s.Split('|');
                 if (parts.Length < 12)
                 {
@@ -5600,7 +6851,7 @@ namespace CompetitiveRounds
                 float d2Ox = float.Parse(parts[10], ic), d2Oy = float.Parse(parts[11], ic);
                 // Skip all-zero faces (uninitialized accounts). Applying a
                 // default face wipes the visualizer's stock face. Caller will
-                // see TryReadAndApply return false and won't log "applied".
+                // see ApplySerialized return false and won't log "applied".
                 if (eyeID == 0 && mouthID == 0 && detailID == 0 && detail2ID == 0) return false;
                 var face = PlayerFace.CreateFace(
                     eyeID, new Vector2(eOx, eOy),
@@ -5615,18 +6866,141 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning($"[2v2] Face read+apply failed: {ex.Message}");
+                Plugin.Log.LogWarning($"[2v2] Face apply failed: {ex.Message}");
                 return false;
             }
         }
     }
 
-    /// <summary>Patch CardChoiceVisuals.Show Postfix to apply the picker's face from
-    /// Photon custom props after vanilla's RPC-broadcast attempt. In 2v2 the vanilla
-    /// RPC has timing races (only the picker's client fires it; remote clients can
-    /// see stale faces from the previous picker, or nothing if the RPC arrived
-    /// AFTER the next picker's Show tore down and re-instantiated the skin). Reading
-    /// from custom props each Show() guarantees the right face on every client.</summary>
+    /// <summary>Item 19 fix pass 3 (H3, the remote arm), bound in fix pass 4:
+    /// the Unity and Photon half of PopupCarrierLedger (AvatarDefaultRules.cs).
+    /// The card-pick popup (CardChoiceVisuals_Show_Competitive_Patch) applies
+    /// the picker's face from the cr_face carrier after vanilla's RPC-broadcast
+    /// attempt, which has timing races in 2v2 (only the picker's client fires
+    /// it; a remote seat can show the previous picker's face, or none, when the
+    /// RPC lands after the next picker's Show re-instantiated the skin). The
+    /// local picker applies the value it has just published (fix pass 2, H3).
+    /// A remote picker's face is the value that picker published BOUND to the
+    /// pick this popup shows (fix pass 4, H3: the pick identity PickNow, which
+    /// every seat derives from the same two events, the game start it saw in
+    /// the room and the rounds the master's RPCA_NextRound set): applied at
+    /// Show when it has arrived, and on arrival when it has not; a value bound
+    /// to another pick, or to none, is never applied. This class feeds the
+    /// ledger from the places that move it (the DoStartGame prefix, the Show
+    /// postfix, the property callback, the Hide postfix, the behaviour's tick),
+    /// applies what it hands back, and logs each decision as [POPUP]. Every
+    /// entry point runs on the main thread.</summary>
+    internal static class PopupCarriers
+    {
+        private static readonly PopupCarrierLedger Ledger = new PopupCarrierLedger(new AvatarRules());
+
+        private static object Room()
+        {
+            try { return PhotonNetwork.CurrentRoom; } catch { return null; }
+        }
+
+        private static double Now() => Time.realtimeSinceStartup;
+
+        private static void Say()
+        {
+            string n = Ledger.Note;
+            if (n != null) Plugin.Log.LogInfo("[POPUP] " + n);
+        }
+
+        /// <summary>The rounds completed in the current game on this seat
+        /// (GM_ArmsRace.p1Rounds + p2Rounds: zeroed for a game start by a new
+        /// GM or ResetMatch, and set on every seat by RPCA_NextRound before
+        /// that round's picks), or -1 when there is no game to read.</summary>
+        private static int Rounds()
+        {
+            try
+            {
+                var gm = GM_ArmsRace.instance;
+                return gm != null ? gm.p1Rounds + gm.p2Rounds : -1;
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>The identity of the pick a card-pick popup opening now
+        /// shows (fix pass 4, H3): "pick" + the games this seat saw start in
+        /// the room + "." + the rounds completed; null when this seat has none.
+        /// The picker binds its card-pick publish to it (FacePublisher.PublishLocal)
+        /// and a remote seat's popup of that pick derives the same value.</summary>
+        internal static string PickNow()
+        {
+            string pick = Ledger.PopupPick(Room(), Rounds());
+            Say();
+            return pick;
+        }
+
+        /// <summary>GM_ArmsRace.DoStartGame on a fighter seat (the first game
+        /// through StartGame, every same-room rematch through IDoRematch, #138).</summary>
+        internal static void GameStarted()
+        {
+            Ledger.GameStarted(Room());
+            Say();
+        }
+
+        /// <summary>The popup's remote arm (AvatarRules.PopupFace calls it for
+        /// a remote picker only): the value that picker published bound to the
+        /// pick this popup shows, or null while it has not arrived (the apply
+        /// is owed) or when nothing can be applied.</summary>
+        internal static string ForShow(int actor)
+        {
+            string pick = PickNow();
+            string v = Ledger.Show(Room(), actor, pick, Now());
+            Say();
+            return v;
+        }
+
+        /// <summary>The Show postfix applied a value ForShow handed it.</summary>
+        internal static void Applied(int actor, bool committed)
+        {
+            Ledger.Applied(actor, committed, Now());
+            Say();
+        }
+
+        /// <summary>The popup moved to the local picker, or was hidden.</summary>
+        internal static void Ended()
+        {
+            Ledger.EndSession(Room());
+            Say();
+        }
+
+        /// <summary>OnPlayerPropertiesUpdate: a carrier update from a remote
+        /// actor ARRIVED (a bound clear arrives as the tombstone, a removed key
+        /// as null). The join snapshot never comes through here, so it is never
+        /// taken for a pick's value. This is the one read of a carrier VALUE
+        /// (fix pass 4, H3): the ledger applies it only through the binding
+        /// check, AvatarRules.BoundToPopup.</summary>
+        internal static void Arrived(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changed)
+        {
+            if (target == null || target.IsLocal || changed == null || !changed.ContainsKey(FacePublisher.PROP_FACE)) return;
+            string v = Ledger.Arrived(Room(), target.ActorNumber, changed[FacePublisher.PROP_FACE] as string, PickNow(), Now());
+            Say();
+            if (v != null) ApplyNow(target.ActorNumber, v, "on arrival");
+        }
+
+        /// <summary>The behaviour's tick, every 15 frames: retries an owed
+        /// apply whose value is held, and drops one past the bound.</summary>
+        internal static void Tick()
+        {
+            if (Time.frameCount % 15 != 0) return;
+            string v = Ledger.Tick(Room(), Now());
+            Say();
+            if (v != null) ApplyNow(Ledger.Shown, v, "on retry");
+        }
+
+        private static void ApplyNow(int actor, string value, string when)
+        {
+            var vis = CardChoiceVisuals.instance;
+            bool ok = vis != null && FacePublisher.ApplySerialized(value, actor, vis.gameObject);
+            Ledger.Applied(actor, ok, Now());
+            Say();
+            if (ok) Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face (the value its picker published bound to this pick, {when}) (actor={actor})");
+        }
+    }
+
     /// <summary>Re-tint the card-pick visualizer body to match the picker's
     /// actual team. Vanilla CardChoiceVisuals spawns a skin clone that displays
     /// fine in 1v1, but in 2v2 our PlayerSkinBank patch can't reach the visualizer
@@ -5937,6 +7311,12 @@ namespace CompetitiveRounds
         static void Postfix(CardChoiceVisuals __instance, int pickerID)
         {
             LastShownPickerIndex = pickerID;
+            // Item 19 fix pass 3 (H3): set once this Show reached the carrier
+            // ledger as a REMOTE picker's popup; every other Show (the local
+            // picker, offline, or any early return or fault below) ends the
+            // ledger's popup session in the finally, so a carrier arriving
+            // later is never equipped onto a skin that is not its picker's.
+            bool remoteShown = false;
             try
             {
                 // Bug: "my skin wasn't Mustard during card pick" (casual room,
@@ -5964,14 +7344,34 @@ namespace CompetitiveRounds
                 // race between OnJoinedRoom and the first card-pick on a peer.
                 // A republish here gives the remote a fresh property right
                 // before they need it.
-                if (picker.IsLocal) FacePublisher.PublishLocal();
+                // Item 19 fix pass 2 (H3): the local cache takes that write only
+                // on the server's echo, so this pass uses the value it has just
+                // published (or nothing when the attempt cleared or kept the
+                // carrier) and never rereads the cache. Fix pass 3 (H3, the
+                // remote arm), bound in fix pass 4: that publish is bound to
+                // the pick this popup shows (PopupCarriers.PickNow), and a
+                // remote picker's face is the value it published bound to the
+                // pick THIS seat's popup shows, never this seat's cached copy
+                // and never a value bound to another pick or to none:
+                // PopupCarriers.ForShow hands it over when it has arrived, and
+                // otherwise owes the apply, which
+                // PopupCarriers.Arrived completes. AvatarRules.PopupFace decides
+                // which arm runs.
+                string freshFace = null;
+                var carrier = picker.IsLocal ? FacePublisher.PublishLocal(out freshFace, forPick: true) : FaceCarrierAction.Keep;
                 // Instinct achievement (v1.30): remember whose pick popup this is
                 // so the RPCA_SetCurrentSelected postfix only counts LOCAL scrolls.
                 CardPickSelectionTracker.CurrentPickerIsLocal = picker.IsLocal;
 
-                bool ok = FacePublisher.TryReadAndApply(pv.Owner.ActorNumber, __instance.gameObject);
+                int pickerActor = pv.Owner.ActorNumber;
+                string popupFace = new AvatarRules().PopupFace(picker.IsLocal, carrier, freshFace,
+                    () => { string v = PopupCarriers.ForShow(pickerActor); remoteShown = true; return v; });
+                bool ok = FacePublisher.ApplySerialized(popupFace, pickerActor, __instance.gameObject);
+                if (remoteShown && popupFace != null) PopupCarriers.Applied(pickerActor, ok);
                 if (ok)
-                    Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face from Photon (pickerID={pickerID}, actor={pv.Owner.ActorNumber})");
+                    Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face ({(picker.IsLocal ? "the value this pass published" : "the value its picker published bound to this pick")}) (pickerID={pickerID}, actor={pickerActor})");
+                else if (picker.IsLocal && carrier != FaceCarrierAction.Publish)
+                    Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: local picker carrier {carrier}, no face applied; vanilla's RPC in charge (pickerID={pickerID})");
 
                 // Diagnostic for "2 of 4 pickers don't show a character" bug.
                 // Log currentSkin state + transform so we can tell if the GO
@@ -6009,6 +7409,51 @@ namespace CompetitiveRounds
                 catch (Exception dex) { Plugin.Log.LogWarning($"[CARDPICK-DIAG] log error: {dex.Message}"); }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] CardChoiceVisuals.Show postfix error: {ex.Message}"); }
+            finally
+            {
+                if (!remoteShown)
+                {
+                    try { PopupCarriers.Ended(); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] carrier ledger end failed: {ex.Message}"); }
+                }
+            }
+        }
+    }
+
+    /// <summary>Item 19 fix pass 3 (H3): a hidden popup shows no picker, so the
+    /// carrier ledger's popup session ends here (what it held for that picker
+    /// belongs to the pick that just ended, see PopupCarrierLedger). A postfix,
+    /// so it runs also when InactiveVisualsHidePatch skips vanilla's Hide on an
+    /// inactive visualizer, which shows no picker either.</summary>
+    [HarmonyPatch(typeof(CardChoiceVisuals), "Hide")]
+    class CardChoiceVisuals_Hide_PopupCarrier_Patch
+    {
+        static void Postfix()
+        {
+            try { PopupCarriers.Ended(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] Hide postfix error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Item 19 fix pass 4 (H3): the game half of the pick identity.
+    /// GM_ArmsRace.DoStartGame runs on every fighter seat once per game (the
+    /// first game through StartGame, every same-room rematch through
+    /// IDoRematch, #138; never from RoundTransition), so the games each seat
+    /// counts in a room agree across the seats that saw them start. A void
+    /// prefix: it runs whatever a sibling prefix returns (#352) and changes
+    /// nothing the game reads. A spectator is not counted (its popups get no
+    /// identity, so no carrier is applied there and vanilla's face stands).</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "DoStartGame")]
+    internal static class GMArmsRace_DoStartGame_PopupCarrier_Patch
+    {
+        private static void Prefix()
+        {
+            try
+            {
+                if (PhotonNetwork.OfflineMode || RoomActors.LocalIsSpectator) return;
+                PopupCarriers.GameStarted();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[POPUP] carrier ledger game start failed: " + ex.Message); }
         }
     }
 
@@ -7887,9 +9332,15 @@ namespace CompetitiveRounds
                     {
                         var srcCD = damagingPlayer != null ? damagingPlayer.GetComponent<CharacterData>() : null;
                         var tgtCD = __instance != null ? __instance.GetComponentInParent<CharacterData>() : null;
-                        var teamField = typeof(CharacterData).GetField("teamID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        int srcTeam = (srcCD != null && teamField != null) ? (int)teamField.GetValue(srcCD) : -1;
-                        int tgtTeam = (tgtCD != null && teamField != null) ? (int)teamField.GetValue(tgtCD) : -1;
+                        // Player.TeamID via CharacterData.player -- CharacterData has
+                        // no teamID field of its own, so the reflection this replaced
+                        // resolved to null on every call and BOTH teams read -1, which
+                        // made same_team permanently false. A friendly-fire diagnostic
+                        // that cannot ever report friendly fire is worse than none
+                        // (#441). Decompile: CharacterData.player is a public Player
+                        // field; Player.TeamID is a public getter over m_teamID.
+                        int srcTeam = (srcCD != null && srcCD.player != null) ? srcCD.player.TeamID : -1;
+                        int tgtTeam = (tgtCD != null && tgtCD.player != null) ? tgtCD.player.TeamID : -1;
                         bool sameTeam = (srcTeam >= 0 && srcTeam == tgtTeam);
                         _ffDiagRemaining--;
                         Plugin.Log.LogInfo($"[FF-DIAG] dmg={damage.magnitude:F1} src_team={srcTeam} tgt_team={tgtTeam} same_team={sameTeam} weapon='{(damagingWeapon != null ? damagingWeapon.name : "(null)")}'");
@@ -9553,12 +11004,29 @@ namespace CompetitiveRounds
                                     // Green-hunt diagnostic: name every art part with its vanilla
                                     // + applied color so any hue that still looks wrong on screen
                                     // is attributable to a specific object from one log line.
+                                    //
+                                    // BOUNDED since report #359. The captured bundle holds 216
+                                    // [MAPCOLOR-ART] lines, but the bundle MIRRORS every write into
+                                    // two captured sections, so that is 108 emissions counted twice
+                                    // — the same double-count this batch corrected in the freeze
+                                    // counters, in the same report. The cap is not sized against 216;
+                                    // it is sized so one map's worth of parts is attributable and no
+                                    // more. The hunt it was built for is over, and a per-part,
+                                    // per-map-load line with no ceiling is a standing cost in every
+                                    // player's bundle. The budget is per PROCESS — nothing calls
+                                    // ResetDiag on this key — so it covers roughly one map's worth
+                                    // of parts after launch: enough to attribute a wrong hue, not
+                                    // enough to drown the report it is attached to. Reserve BEFORE
+                                    // building the message; the interpolation is the expensive half.
                                     try
                                     {
-                                        var psr0 = ps.GetComponent<ParticleSystemRenderer>();
-                                        var b = psr0 != null ? psr0.bounds.size : Vector3.zero;
-                                        Color applied = ps.main.startColor.color;
-                                        Plugin.Log.LogInfo($"[MAPCOLOR-ART] part='{ps.gameObject.name}' vanilla=#{(int)(vanilla.r*255):X2}{(int)(vanilla.g*255):X2}{(int)(vanilla.b*255):X2} applied=#{(int)(Mathf.Clamp01(applied.r)*255):X2}{(int)(Mathf.Clamp01(applied.g)*255):X2}{(int)(Mathf.Clamp01(applied.b)*255):X2} size={b.x:F0}x{b.y:F0}");
+                                        if (VanillaFixSupport.TryReserveDiag("mapcolor-art", 24))
+                                        {
+                                            var psr0 = ps.GetComponent<ParticleSystemRenderer>();
+                                            var b = psr0 != null ? psr0.bounds.size : Vector3.zero;
+                                            Color applied = ps.main.startColor.color;
+                                            VanillaFixSupport.WriteReservedDiag($"[MAPCOLOR-ART] part='{ps.gameObject.name}' vanilla=#{(int)(vanilla.r*255):X2}{(int)(vanilla.g*255):X2}{(int)(vanilla.b*255):X2} applied=#{(int)(Mathf.Clamp01(applied.r)*255):X2}{(int)(Mathf.Clamp01(applied.g)*255):X2}{(int)(Mathf.Clamp01(applied.b)*255):X2} size={b.x:F0}x{b.y:F0}");
+                                        }
                                     }
                                     catch { }
                                 }
@@ -9734,6 +11202,10 @@ namespace CompetitiveRounds
                 foreach (var cam in cams)
                 {
                     if (cam == null) continue;
+                    // The letterbox clear camera is an on-screen SolidColor
+                    // camera too, but it must stay opaque black: painting it
+                    // would colour the strips outside ROUNDS' viewport.
+                    if (LetterboxClear.IsOurs(cam)) continue;
                     if (!_loggedCams)
                         Plugin.Log.LogInfo($"[MAPCOLOR-CAMS] '{cam.gameObject.name}' depth={cam.depth} flags={cam.clearFlags} bg={cam.backgroundColor} rt={(cam.targetTexture != null)} mask={cam.cullingMask}");
                     // Only genuinely OFF-SCREEN cameras are off limits — the ones
@@ -10007,6 +11479,40 @@ namespace CompetitiveRounds
         // because scene reloads spawn fresh renderers.
         internal static class RenderPerfSettings
         {
+            /// <summary>Item 13: the named writers of the two map-render rows
+            /// (the settings page and its per-tab reset). Each writes its entry
+            /// by name and then runs the same live effect the row's handler used
+            /// to run inline: re-apply the renderers, re-queue the backdrop, and
+            /// re-tint a live custom skin, because which side carries the
+            /// inverse gain depends on whether SFSS lighting is on (Codex r5
+            /// #1). Deferred, so it never lands mid-transition.</summary>
+            internal static void SetLighting(bool on)
+            {
+                if (Plugin.MapLightingEnabled == null) return;
+                Plugin.MapLightingEnabled.Value = on;
+                ApplyLive();
+            }
+
+            internal static void SetShadows(bool on)
+            {
+                if (Plugin.MapShadowsEnabled == null) return;
+                Plugin.MapShadowsEnabled.Value = on;
+                ApplyLive();
+            }
+
+            private static void ApplyLive()
+            {
+                try
+                {
+                    Apply();
+                    ApplyBackdrop();
+                    var liveSku = MapColorState.CurrentSku;
+                    if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
+                        MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
+                }
+                catch { }
+            }
+
             private static readonly Dictionary<int, bool> _vanillaShadows = new Dictionary<int, bool>();
             private static readonly Dictionary<int, bool> _vanillaEnabled = new Dictionary<int, bool>();
             // Flat backdrop shown while lighting is disabled (matches the mod's UI
@@ -10213,6 +11719,20 @@ namespace CompetitiveRounds
                 catch { }
                 return false;
             }
+
+            /// <summary>Item 13: the value-taking writer the settings page and
+            /// its per-tab reset call. Writes the entry by name, then re-applies
+            /// every live profile, which is what the row's handler used to do
+            /// inline. It stays BELOW the private Set(PostProcessProfile, bool):
+            /// the item-13 keyset instrument resolves a call to a bare Set by
+            /// the first Set declared in this file, and that must remain the
+            /// overload that writes no ConfigEntry.</summary>
+            internal static void Set(bool on)
+            {
+                if (Plugin.ChromaticAberrationEnabled == null) return;
+                Plugin.ChromaticAberrationEnabled.Value = on;
+                try { Apply(); } catch { }
+            }
         }
 
         /// <summary>Bloom strength (Sid's "cosmetics are illuminated and the effect is quite
@@ -10265,10 +11785,24 @@ namespace CompetitiveRounds
                 }
             }
 
-            /// <summary>Cycles Full -> Reduced -> Off -> Full and applies immediately.</summary>
+            /// <summary>Cycles Full -> Reduced -> Off -> Full through Set.</summary>
             internal static void Cycle()
             {
-                string next = Level == "Full" ? "Reduced" : Level == "Reduced" ? "Off" : "Full";
+                Set(Level == "Full" ? "Reduced" : Level == "Reduced" ? "Off" : "Full");
+            }
+
+            /// <summary>Item 13: the value-taking writer (the settings page's
+            /// segmented row and its per-tab reset). The level is canonicalised
+            /// to Full / Reduced / Off the same way Level reads it, so a caller
+            /// cannot store a display word; null or unknown writes Full. Applies
+            /// immediately. Declared BEFORE the private Set(PostProcessProfile,
+            /// string, string) below, so it is the first Set of this class.</summary>
+            internal static void Set(string level)
+            {
+                string v = (level ?? "").Trim();
+                string next = string.Equals(v, "Off", StringComparison.OrdinalIgnoreCase) ? "Off"
+                    : string.Equals(v, "Reduced", StringComparison.OrdinalIgnoreCase) ? "Reduced"
+                    : "Full";
                 if (Plugin.BloomStrength != null) Plugin.BloomStrength.Value = next;
                 Apply();
             }
@@ -11094,7 +12628,9 @@ namespace CompetitiveRounds
                     // FLICKER as several skus applied in a burst. Gating on Shift keeps the
                     // chosen skin STABLE per round; the player deliberately cycles with Shift.
                     bool manualShift = false;
-                    try { manualShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift); } catch { }
+                    // Item 17: the bound MapSkinCycle control (question 8: its default
+                    // is Left Shift alone - the transpiled ArtHandler read is the same row).
+                    try { manualShift = Keybinds.Held(KeybindRules.MapSkinCycle); } catch { }
                     manualShiftNow = manualShift;   // consumed by the defer decision below
                     if (manualShift)
                         _cycleIndex = (_cycleIndex + 1) % equipped.Count;

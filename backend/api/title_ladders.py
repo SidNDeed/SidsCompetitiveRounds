@@ -41,7 +41,10 @@ HOW PRODUCTION REACHES THIS MODULE. In three places, and no others:
      is not hooked. ``backend/tests/test_title_ladders.py`` asserts the set
      per mode, each call's reference expression, and that main.py holds
      exactly those three calls.
-  2. THE ROUTER. main.py includes the ``router`` defined below exactly once.
+  2. THE ROUTER. main.py includes the ``router`` defined below exactly once, so
+     ``GET /api/v1/players/{steam_id}/title-ladders`` is served. Its 404 for
+     an unknown account carries ``NO_ACCOUNT_MARKER`` so the client can tell
+     that 404 from an unmounted route and say so.
   3. THE CARVE-OUT. ``main`` reads ``NOT_AUTO_OWNED_SKUS`` to take the earned
      rungs and the two retired titles out of the shop-owner exemption, on the
      ``/shop/items`` listing and on the set-active ownership check.
@@ -61,6 +64,13 @@ from read_gate import ReadGateRoute
 
 # Verified reads: the GET route here carries the read gate (read_gate.py).
 router = APIRouter(tags=["Titles"], route_class=ReadGateRoute)
+
+# The read route's own 404 carries this in its detail so the client can tell
+# "this account has no ladder yet" from "this server has no such route". Both
+# are 404 with a JSON body, and the only other difference is wording. Never put
+# it in anything a player reads: the whole value of a probe is that nothing
+# else has a reason to touch it (#306).
+NO_ACCOUNT_MARKER = "ladder_no_account"
 
 
 # -- The hidden pool ---------------------------------------------------
@@ -698,8 +708,9 @@ async def record_completed_games(db: AsyncSession, player_ids, *, mode: str,
     claimed and consumed one after the other, in the order the server
     recorded them.
     """
-    # Late import: `main` imports THIS module at its own module level, so a
-    # module-level `from main import ...` here would be an import cycle.
+    # Late import: `main` imports THIS module at its own module level (to
+    # mount `router` and to read NOT_AUTO_OWNED_SKUS), so a module-level
+    # `from main import ...` here would be an import cycle.
     from main import _grant_title_item
 
     # The two Apex statements are defined HERE, not at module level: every
@@ -942,6 +953,15 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
     `unit`.
 
     Unknown steam_id is a 404 rather than an empty board.
+
+    That 404 carries ``NO_ACCOUNT_MARKER`` because the client has to tell it
+    apart from the 404 a server WITHOUT this route answers, and the two are
+    otherwise the same status with the same JSON shape. Telling them apart by
+    the wording beside them -- "Player not found" versus FastAPI's stock "Not
+    Found" -- is the check that keeps passing after a rewording, so the marker
+    exists for no other purpose and appears in no player-facing text. The
+    client's half is ``ApiClient.TitleLadderFailure``; until a server carrying
+    this marker is deployed it presumes rather than proves, and says so.
     """
     # One snapshot per request: every read below sees the first SELECT's
     # snapshot, and READ ONLY makes any write here an error. Must stay first.
@@ -952,7 +972,9 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
         select(Player).where(Player.steam_id == steam_id)
     )).scalar_one_or_none()
     if player is None:
-        raise HTTPException(status_code=404, detail="Player not found")
+        raise HTTPException(status_code=404,
+                            detail={"error": NO_ACCOUNT_MARKER,
+                                    "message": "Player not found"})
 
     owned_skus = {
         s for (s,) in (await db.execute(

@@ -1,0 +1,4 @@
+# Build output and generated mutants. run_tests.py regenerates all of it.
+bin/
+obj/
+work/

@@ -1,0 +1,184 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    EXECUTES the client rule files that are deliberately free of Unity, Photon
+    and BepInEx, under a plain compiler. Same arrangement as
+    tools/h2h-harness, and for the same reason: a rule whose only gate is a
+    source-shape test is asserted ABOUT, never run (#391).
+
+      LogScrub.cs       what a log bundle stops carrying before it leaves the
+                        process. Its SelfTest is two-way: every case is
+                        measured with the scrub and without it, and a case
+                        passes only when the unscrubbed measurement is
+                        non-zero.
+
+      TopStripBand.cs   the top-centre column's band allocator: which y each
+                        surface gets when several paint at once. It takes the
+                        frame number as a PARAMETER precisely so it can be
+                        driven from here instead of asserted about.
+
+      FfaReportRules.cs who submits an FFA game's report, what key it is filed
+                        under, and whether a refusal is final. The key must be
+                        identical on every seat in the room and must still
+                        carry the suffix the server parses out of it.
+
+      RosterCensusRules.cs  which seats a per-game roster WIDENING may take in
+                        and which rejection latches the resulting roster
+                        releases. Both were unrunnable while they lived inside
+                        RoomActors against live Photon state, and the r2 HIGH
+                        they close — a widening census that had already
+                        excluded the actor it was deciding about — is exactly
+                        the kind of circularity a source-shape test cannot see.
+
+      BinderSortRules.cs    the binder's order: which sorts the header button
+                        offers, which of them the config may restore before
+                        the collection answer has landed, and the comparison
+                        itself. The "% 5" cycler it replaced was correct for
+                        exactly as long as there were five sorts, and a
+                        comparator is the shape a source test can only ever
+                        describe — so both are driven from here.
+
+      TitleLadderRules.cs   the animal title ladders in the Shop's Titles
+                        section: which ladders render (each exactly once),
+                        which listing rows they replace, which tier is held,
+                        and the Buy / Upgrade / Maxed button with every
+                        disabled reason. Its cases live in the harness-only
+                        TitleLadderRulesSelfTest.cs (the other half of the
+                        partial class), so the shipped DLL carries no ladder
+                        fixture.
+
+      SettingsModel.cs      the settings page's split and reset-scope rules
+                        (item 13): where a painted row string is cut into its
+                        label and its value, and exactly which rows each
+                        sub-tab's reset writes. The generated descriptor table
+                        it reads (SettingsDescriptors.g.cs) comes with it, and
+                        I18nHarnessStub.cs, the one stand-in both this suite
+                        and the secure-route suite compile against, stands
+                        in for the plugin's I18n, which needs Unity. The
+                        cases live in the harness-only
+                        SettingsModelSelfTest.cs.
+      PcTradeRules.cs   card trading's client half: the canonical item list
+                        and its SHA-256 digest (checked against fixed vectors
+                        the server's own player_cards.trade_items and
+                        trade_digest produced), the signed terms, what a
+                        summary read means for the Trades view, the three
+                        lists, the refetch and busy-retry rules, new-proposal
+                        detection and the In a trade set. A digest that is
+                        off by one byte makes every proposal answer bad_terms
+                        with no other symptom, so it is RUN, not described.
+
+      RoomRulesStrip.cs     which line the standing room-rules strip paints
+                        (v1.41.0 item 22): friendly fire when it is off,
+                        the same-cards state when the room has the rule,
+                        both in one line, and nothing when the player's
+                        cfg key hides it. The negative control is the
+                        same-cards-only chooser the strip had before.
+
+      MusicLevels.cs        the custom-music level math (v1.41.0 item 23):
+                        the slider's ceiling (100 maps to at most half of
+                        the old output, one factor for every stored value)
+                        and the two fade-in envelopes, driven frame by
+                        frame at 60 and at 10 fps. The negative controls
+                        are the pre-1.41 slider law and the short envelope.
+
+      SecureRouteRules.cs   board row 27: the secure-route checks behind the
+                        Translate portal button and the timer that retries
+                        while the session runs on the plaintext backup - the
+                        probe verdicts, the flip, the marks, the claim. Its
+                        cases live in the harness-only SecureRouteRulesSelfTest.cs
+                        with a fake transport and a fake clock.
+                        SecureRouteText.cs (every sentence a player reads on
+                        those paths) and I18nCatalogues.cs (the four shipped
+                        catalogues) compile against I18nHarnessStub.cs, a
+                        harness-only stand-in for plugin/I18n.cs, which reads
+                        Unity; so the sentences checked are the shipped ones,
+                        looked up in the shipped catalogues.
+
+      NameGlyphs.cs         the one name sanitiser of the list panels (report 3,
+                        2026-09-30): a code point the font chain cannot
+                        render and a cut surrogate pair become '?', controls
+                        a space, tag characters '[' ']'. Driven with a fixed
+                        font-chain answer; U+13171 and a supplementary-plane
+                        emoji are cases, the raw name is the negative control.
+
+      SessionReportRules.cs  the session report's envelope parser (board row
+                        30a) and, as the report's later items land, the
+                        numbers its pages derive. Its cases live in the
+                        harness-only SessionReportRulesSelfTest.cs and parse
+                        envelopes the server's own route produced, one per
+                        kind (captured by test_session_report_pg.py's dump
+                        hook), so the client parser is executed against the
+                        server's actual output.
+
+      ShowcaseRules.cs  the broadcast idle showcase's rotation (board row 31):
+                        every Compare metric in the tab's own order with one
+                        dwell each, the other views' places and dwells, the
+                        skip rule, and the one log line per metric shown.
+
+      FfaNumberingRules.cs  the FFA game-number rules (RJ-DRIFT): which number
+                        a seat keys a report, a pick phase and a live-points
+                        send with, and when it has none. Its SelfTest runs the
+                        unit cases and the SittingModel walks, which drive
+                        FfaReportRules' GameKeySnapshot and ElectReporter
+                        through relaunches, late joins, spectators, drops and
+                        master handoffs. numbering_controls.py mutates the
+                        rule functions one at a time against copies of these
+                        files and checks each control's FAIL set.
+
+    net10.0 because that is the runtime installed on the build seat, matching
+    the h2h harness; RollForward keeps the next SDK rotation from turning this
+    into a green-looking nothing.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>client-rules-harness</AssemblyName>
+    <RootNamespace>CompetitiveRounds.Harness</RootNamespace>
+    <!-- Only the files named below. A default glob would drag in the whole
+         plugin tree, which does not compile without Unity. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Main.cs" />
+    <Compile Include="../../plugin/LogScrub.cs" />
+    <Compile Include="../../plugin/TopStripBand.cs" />
+    <Compile Include="../../plugin/FfaReportRules.cs" />
+    <Compile Include="../../plugin/KeybindRules.cs" />
+    <Compile Include="../../plugin/RosterCensusRules.cs" />
+    <Compile Include="../../plugin/BinderSortRules.cs" />
+    <Compile Include="../../plugin/PcQuickShardRules.cs" />
+    <Compile Include="../../plugin/TitleLadderRules.cs" />
+    <Compile Include="TitleLadderRulesSelfTest.cs" />
+    <Compile Include="../../plugin/SettingsModel.cs" />
+    <Compile Include="../../plugin/SettingsDescriptors.g.cs" />
+    <Compile Include="SettingsModelSelfTest.cs" />
+    <Compile Include="../../plugin/PcTradeRules.cs" />
+    <Compile Include="../../plugin/RoomRulesStrip.cs" />
+    <Compile Include="../../plugin/MusicLevels.cs" />
+    <Compile Include="../../plugin/SecureRouteRules.cs" />
+    <Compile Include="../../plugin/SecureRouteText.cs" />
+    <Compile Include="../../plugin/I18nCatalogues.cs" />
+    <Compile Include="SecureRouteRulesSelfTest.cs" />
+    <Compile Include="I18nHarnessStub.cs" />
+    <Compile Include="../../plugin/NameGlyphs.cs" />
+    <Compile Include="../../plugin/SessionReportRules.cs" />
+    <Compile Include="SessionReportRulesSelfTest.cs" />
+    <Compile Include="../../plugin/ShowcaseRules.cs" />
+    <Compile Include="../../plugin/FfaNumberingRules.cs" />
+    <Compile Include="../../plugin/DamageNumberRules.cs" />
+    <Compile Include="../../plugin/AvatarDefaultRules.cs" />
+    <Compile Include="AvatarDefaultRulesSelfTest.cs" />
+    <Compile Include="KeybindFix2Controls.cs" />
+    <Compile Include="KeybindFix3Controls.cs" />
+    <Compile Include="KeybindFix4Controls.cs" />
+    <Compile Include="../../plugin/ReadGateRules.cs" />
+    <Compile Include="ReadGateRulesSelfTest.cs" />
+  </ItemGroup>
+
+</Project>

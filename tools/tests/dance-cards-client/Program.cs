@@ -109,6 +109,8 @@ namespace DanceCardsClientTests
             Add("matte_arith", MatteArith);
             Add("grade_after_matte", GradeAfterMatte);
             Add("edge_band", EdgeBand);
+            Add("edge_first_pixel", EdgeFirstPixel);
+            Add("fit_drawn", FitDrawn);
             Add("luma_pillow", LumaPillow);
             Add("flash_pillow", FlashPillow);
             Add("flash_bounds", FlashBounds);
@@ -121,11 +123,16 @@ namespace DanceCardsClientTests
             Add("t48_decide_truth_table", DecideTruthTable);
             Add("motion_current_terms", MotionCurrentTerms);
             Add("still_current_rows", StillCurrentRows);
+            Add("t58_no_base_still_while_dance_selected", T58NoBaseStill);
+            Add("t58_base_still_without_selection", T58BaseStillWithoutSelection);
+            Add("t58_wait_only_when_transient", T58WaitOnlyWhenTransient);
             Add("remember_key_stable", RememberKeyStable);
             Add("frame_emit_for_server", FrameEmitForServer);
             Add("rig_undo_retry_restores_same_pass", () => RigUndo(RigFault.FirstAttempt));
             Add("rig_undo_kept_owed_until_restored", () => RigUndo(RigFault.EveryAttempt));
             Add("rig_undo_clean", () => RigUndo(RigFault.None));
+            Add("rig_baseline_write_supersedes_owed", () => RigBaseline(true));
+            Add("rig_baseline_write_clean", () => RigBaseline(false));
             // -- PlayerCardMotionCore -------------------------------------------
             Add("read_parse", ReadParse);
             Add("atlas_shape", AtlasShapeCase);
@@ -417,6 +424,89 @@ namespace DanceCardsClientTests
                 px[(c[1] * e + c[0]) * 4 + 3] = 1;
                 Check(DanceMotionCore.EdgeClear(px, e, e, DanceMotionCore.EDGE_MARGIN) == (c[2] == 1), "pixel (" + c[0] + "," + c[1] + ")");
             }
+        }
+
+        /// <summary>Bug 405: the band pixel a refused capture logs is the first
+        /// one the check met (buffer order), with its alpha, and the row it
+        /// names is the PNG's row from the top in both readback orders -- the
+        /// decoded PNG carries that alpha at that place.</summary>
+        private static void EdgeFirstPixel()
+        {
+            const int e = 590;
+            int x, y, a;
+            var px = new byte[e * e * 4];
+            Check(!DanceMotionCore.FirstEdgePixel(px, e, e, 2, out x, out y, out a) && x == -1 && y == -1 && a == -1, "a clear band named a pixel");
+            px[(300 * e + 588) * 4 + 3] = 77;   // right strip, row 300
+            px[(400 * e + 1) * 4 + 3] = 9;      // left strip, row 400
+            Check(DanceMotionCore.FirstEdgePixel(px, e, e, 2, out x, out y, out a) && x == 588 && y == 300 && a == 77, "strip: (" + x + "," + y + ") " + a);
+            px[(1 * e + 500) * 4 + 3] = 5;      // top band, row 1
+            Check(DanceMotionCore.FirstEdgePixel(px, e, e, 2, out x, out y, out a) && x == 500 && y == 1 && a == 5, "top band: (" + x + "," + y + ") " + a);
+            px[(300 * e + 0) * 4 + 3] = 3;      // left strip, row 300, before the right one on that row
+            px[(1 * e + 500) * 4 + 3] = 0;
+            Check(DanceMotionCore.FirstEdgePixel(px, e, e, 2, out x, out y, out a) && x == 0 && y == 300 && a == 3, "left before right: (" + x + "," + y + ") " + a);
+            Check(!DanceMotionCore.EdgeClear(px, e, e, 2), "the verdict disagrees with the pixel");
+            foreach (bool bu in new[] { true, false })
+            {
+                var black = new byte[e * e * 4]; var white = new byte[e * e * 4];
+                for (int p = 0; p < black.Length; p += 4) { black[p + 3] = 255; white[p] = white[p + 1] = white[p + 2] = white[p + 3] = 255; }
+                int q = (1 * e + 7) * 4;                                   // buffer row 1, column 7: opaque
+                black[q] = white[q] = 10; black[q + 1] = white[q + 1] = 20; black[q + 2] = white[q + 2] = 30;
+                var f = DanceMotionCore.ProcessPair(black, white, e, GradeMap, bu, new byte[black.Length], true);
+                int want = bu ? e - 2 : 1;
+                Check(!f.EdgeClear && f.EdgeX == 7 && f.EdgeY == want && f.EdgeA == 255,
+                      "bottomUp=" + bu + ": (" + f.EdgeX + "," + f.EdgeY + ") alpha " + f.EdgeA + ", want (7," + want + ") 255");
+                var back = ScrPng.DecodeRgba8(f.Png, e, e);                 // rows bottom-up
+                Check(back != null && back[((e - 1 - f.EdgeY) * e + f.EdgeX) * 4 + 3] == 255, "bottomUp=" + bu + ": the PNG has no pixel where the log says");
+                var s = new List<DanceMotionCore.FrameOut> { f };
+                f.Covered = 300; f.Pixels = 1000;                           // coverage inside the bounds, so the band is what refuses
+                string why = DanceMotionCore.SelfCheck(s, 1, 100) ?? "";
+                Check(why.Contains("(7," + want + ") alpha 255"), "the refusal does not name the pixel: " + why);
+            }
+        }
+
+        private static bool Holds(float cx, float cy, float s, float ocx, float ocy, float os)
+        {
+            const float eps = 1e-4f;
+            return ocx - os / 2 >= cx - s / 2 - eps && ocx + os / 2 <= cx + s / 2 + eps
+                && ocy - os / 2 >= cy - s / 2 - eps && ocy + os / 2 <= cy + s / 2 + eps;
+        }
+
+        /// <summary>Bug 405: the capture square holds the solid square and every
+        /// drawn box clear of the band, growing at most growMax; what it cannot
+        /// hold is reported not kept; the solid square is never cut.</summary>
+        private static void FitDrawn()
+        {
+            const int e = 590, clear = 4;
+            float frac = (float)clear / e;
+            var keep = new bool[4];
+            float cx, cy, s;
+            // everything inside: the solid square unchanged
+            var inside = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-0.5f, -0.5f, 0.5f, 0.5f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, inside, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Solid
+                  && cx == 0f && cy == 0f && s == 4f && keep[0], "inside: (" + cx + "," + cy + ") " + s);
+            // a box in the band of the solid square (y 1.99): it grows a little and keeps it
+            var band = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-0.3f, 1.5f, 0.3f, 1.999f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, band, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Grown
+                  && keep[0] && s > 4f && s <= 5f && Holds(cx, cy, s, 0f, 0f, 4f) && DanceMotionCore.BoxClear(band[0], cx, cy, s, frac),
+                  "band: (" + cx + "," + cy + ") " + s);
+            // a box over the top: it grows to hold it, within the cap
+            var over = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-0.3f, 1.5f, 0.3f, 2.3f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, over, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Grown
+                  && keep[0] && s <= 5f && Holds(cx, cy, s, 0f, 0f, 4f) && DanceMotionCore.BoxClear(over[0], cx, cy, s, frac),
+                  "over: (" + cx + "," + cy + ") " + s);
+            // one box over the left edge
+            var left = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-2.2f, -0.2f, -1.6f, 0.2f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, left, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Grown
+                  && keep[0] && Holds(cx, cy, s, 0f, 0f, 4f) && DanceMotionCore.BoxClear(left[0], cx, cy, s, frac), "left: (" + cx + "," + cy + ") " + s);
+            // a box far above: capped at growMax, that box not kept, a near one kept, the solid square whole
+            var far = new List<DanceMotionCore.Box> { new DanceMotionCore.Box(-0.3f, 6f, 0.3f, 6.6f), new DanceMotionCore.Box(-0.2f, -0.2f, 0.2f, 0.2f) };
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, far, clear, e, 1.25f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Capped
+                  && Math.Abs(s - 5f) < 1e-5f && !keep[0] && keep[1] && Holds(cx, cy, s, 0f, 0f, 4f) && cy > 0f,
+                  "far: (" + cx + "," + cy + ") " + s + " keep " + keep[0] + "," + keep[1]);
+            // growMax 1: never grown, never moved; the box is not kept
+            Check(DanceMotionCore.FitDrawn(0f, 0f, 4f, over, clear, e, 1f, keep, out cx, out cy, out s) == DanceMotionCore.FitMode.Capped
+                  && s == 4f && cx == 0f && cy == 0f && !keep[0], "cap 1: (" + cx + "," + cy + ") " + s);
+            Throws(() => DanceMotionCore.FitDrawn(0f, 0f, 0f, inside, clear, e, 1.25f, keep, out cx, out cy, out s), "a zero solid side");
         }
 
         private static void LumaPillow()
@@ -1029,6 +1119,68 @@ namespace DanceCardsClientTests
             Check(!DanceMotionCore.StillCurrent("", BASE, BASE, null), "no stored still: replaced");
         }
 
+        /// <summary>Report 1 (2026-09-30), the still-only path's pure half. The
+        /// replay is the production state the triage read: a motion bound to
+        /// the dance still, then the character's inputs moved while this seat
+        /// could not capture (a hold, or the ownership read timed out). Decide
+        /// says Fallback with the stored still behind -- exactly where the
+        /// still-only path used to send a base still over the bound motion.
+        /// With a dance selected no row of the decision may route to a base
+        /// still, transient or not.</summary>
+        private static void T58NoBaseStill()
+        {
+            string bound = H1 + ":" + H2 + ":1";
+            string base2 = BASE.Replace("face=a", "face=b");       // the inputs moved (the triage: face 32:..:33 -> 28:..:9)
+            string dance2 = base2 + "|dance=dance_floss|ar=1";
+            var need = DanceMotionCore.Decide(true, "dance_floss", true, bound, H2, DANCE, dance2, 1, false, false);
+            Check(need == DanceMotionCore.Need.Fallback, "replay: Fallback expected, got " + need);
+            Check(!DanceMotionCore.StillCurrent(H2, DANCE, base2, dance2), "replay: the stored dance still should be behind");
+            Check(DanceMotionCore.DanceSelected(true, "dance_floss"), "replay: a selection named by the server is selected");
+            foreach (bool transient in new[] { false, true })
+            {
+                var r = DanceMotionCore.StillOnlyRoute(true, "dance_floss", transient);
+                Check(r != DanceMotionCore.StillOnly.Base, "replay transient=" + transient + ": routed to a base still");
+            }
+            // Every None and Fallback row of the truth table that carries a selection.
+            var rows = new[]
+            {
+                DanceMotionCore.Decide(true, "dance_floss", false, bound, H2, DANCE, DANCE, 1, true, false),   // not owned here: None
+                DanceMotionCore.Decide(true, "dance_floss", true, bound, H2, DANCE, null, 1, true, false),     // no dance descriptor: Fallback
+                DanceMotionCore.Decide(true, "dance_floss", true, "", H2, BASE, DANCE, 1, false, false),       // cannot dance here: Fallback
+                DanceMotionCore.Decide(true, "dance_floss", true, "", H2, BASE, DANCE, 1, true, true),         // remembered: Fallback
+            };
+            foreach (var n in rows)
+            {
+                Check(n == DanceMotionCore.Need.None || n == DanceMotionCore.Need.Fallback, "row decided " + n);
+                foreach (bool transient in new[] { false, true })
+                    Check(DanceMotionCore.StillOnlyRoute(true, "dance_floss", transient) != DanceMotionCore.StillOnly.Base,
+                          "row " + n + " transient=" + transient + ": routed to a base still");
+            }
+        }
+
+        /// <summary>T58's negative control: with no selection (an older server,
+        /// an empty or absent sku) the still-only path sends the base still as
+        /// it always did, transient or not.</summary>
+        private static void T58BaseStillWithoutSelection()
+        {
+            foreach (bool transient in new[] { false, true })
+            {
+                Check(DanceMotionCore.StillOnlyRoute(false, "dance_floss", transient) == DanceMotionCore.StillOnly.Base, "older server");
+                Check(DanceMotionCore.StillOnlyRoute(true, "", transient) == DanceMotionCore.StillOnly.Base, "empty selection");
+                Check(DanceMotionCore.StillOnlyRoute(true, null, transient) == DanceMotionCore.StillOnly.Base, "absent selection");
+            }
+            Check(!DanceMotionCore.DanceSelected(false, "dance_floss") && !DanceMotionCore.DanceSelected(true, "")
+                  && !DanceMotionCore.DanceSelected(true, null), "no selection is not selected");
+        }
+
+        /// <summary>T58's Wait/Nothing split: only a reason that ends by itself
+        /// keeps the check armed.</summary>
+        private static void T58WaitOnlyWhenTransient()
+        {
+            Check(DanceMotionCore.StillOnlyRoute(true, "dance_floss", true) == DanceMotionCore.StillOnly.Wait, "transient: Wait");
+            Check(DanceMotionCore.StillOnlyRoute(true, "dance_floss", false) == DanceMotionCore.StillOnly.Nothing, "settled: Nothing");
+        }
+
         private static void RememberKeyStable()
         {
             string a = DanceMotionCore.RememberKey("7656", DANCE), b = DanceMotionCore.RememberKey("7656", DANCE);
@@ -1174,6 +1326,74 @@ namespace DanceCardsClientTests
                 + "; follow-up undid " + again + "; rig entries owed after it " + (owed.ContainsKey("r0") ? 1 : 0)
                 + ", at baseline " + (pos["r0"] == 0 && pos["r1"] == 0 && pos["r2"] == 0 && pos["r3"] == 0)
                 + ", outside kept " + owed.ContainsKey("x9") + ", failures " + failures.Count);
+        }
+
+        /// <summary>RR-LAND-1 (the Codex dance-cards LAND LOW): the capture's
+        /// Rest and T45 run the rig undo and THEN write the arm baselines; a
+        /// later restore of the same targets (the arm Prefix, Tick's restore)
+        /// follows. Four rig entries, each a VALUE at baseline 10 displaced by
+        /// its delta: r0 and r2 have every undo attempt throw while the
+        /// injection lasts (so they are still owed after the undo pass), r1
+        /// and r3 undo cleanly. The baselines are then written through the
+        /// product's DanceMotionCore.WriteBaseline, r2's write throwing before
+        /// it changes the value; then the injection lifts and the later
+        /// restore runs. Required: after the baseline write r0 is at baseline
+        /// and no longer owed (the write superseded its delta); r2, whose write
+        /// threw, is still displaced and still owed; after the later restore
+        /// every entry is at baseline and none is owed -- never baseline minus
+        /// a delta. The clean arm (no injection) is the negative control: no
+        /// entry is owed at the write, so it passes with or without the
+        /// forget.</summary>
+        private static void RigBaseline(bool fault)
+        {
+            const int B = 10;
+            string[] order = { "r0", "r1", "r2", "r3" };
+            int[] deltas = { 3, 5, 7, 11 };
+            var owed = new Dictionary<string, int>();
+            var pos = new Dictionary<string, int>();
+            for (int i = 0; i < order.Length; i++) { owed[order[i]] = deltas[i]; pos[order[i]] = B + deltas[i]; }
+            bool inject = fault;
+            var failures = new List<string>();
+            Func<int> restore = () => DanceMotionCore.UndoEach(new List<string>(owed.Keys),
+                k => false, null,
+                k =>
+                {
+                    if (inject && (k == "r0" || k == "r2")) throw new InvalidOperationException("injected undo failure on " + k);
+                    pos[k] -= owed[k];
+                },
+                k => { owed.Remove(k); },
+                (k, e) => failures.Add(k + ":" + e.GetType().Name));
+            // Rest: the undo pass, then the baseline write of every target
+            int undone = restore();
+            Check(undone == (fault ? 2 : 4), "the undo pass undid " + undone);
+            int writeThrew = 0;
+            foreach (var k in order)
+            {
+                try
+                {
+                    DanceMotionCore.WriteBaseline(k,
+                        t =>
+                        {
+                            if (inject && t == "r2") throw new InvalidOperationException("injected write failure on " + t);
+                            pos[t] = B;
+                        },
+                        t => { owed.Remove(t); });
+                }
+                catch (InvalidOperationException) { writeThrew++; }
+            }
+            Check(writeThrew == (fault ? 1 : 0), "baseline writes that threw: " + writeThrew);
+            Check(pos["r0"] == B && !owed.ContainsKey("r0"), "after the baseline write r0 is at " + pos["r0"] + ", owed " + owed.ContainsKey("r0"));
+            if (fault)
+                Check(pos["r2"] == B + 7 && owed.ContainsKey("r2"), "r2, whose write threw, is at " + pos["r2"] + ", owed " + owed.ContainsKey("r2"));
+            // the later restore of the same targets, the injection lifted
+            inject = false;
+            int again = restore();
+            Check(again == (fault ? 1 : 0), "the later restore undid " + again);
+            foreach (var k in order)
+                Check(pos[k] == B && !owed.ContainsKey(k), "after the later restore " + k + " is at " + pos[k] + " (baseline " + B + "), owed " + owed.ContainsKey(k));
+            Console.WriteLine("  rig baseline (" + (fault ? "owed at the write" : "clean") + "): undo pass " + undone + ", writes threw " + writeThrew
+                + ", later restore " + again + ", at baseline " + (pos["r0"] == B && pos["r1"] == B && pos["r2"] == B && pos["r3"] == B)
+                + ", owed " + owed.Count + ", undo failures " + failures.Count);
         }
     }
 }

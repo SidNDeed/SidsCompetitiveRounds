@@ -265,6 +265,8 @@ namespace CompetitiveRounds
                 // rounds are never eaten.
                 if (SpectatorSync.RoundObservationLatched) return false;
                 SpectatorSync.LatchRoundObservation();
+                // evidence only (merge pass 6, G1-L1): one more round this observer took
+                unchecked { PointEvidence.ObservedRounds++; }
             }
             catch { }
             try
@@ -680,8 +682,11 @@ namespace CompetitiveRounds
     /// DoDisconnect, no DC win, no leaver bookkeeping.
     ///
     /// Runs on PLAYER clients (not gated on Suppress) — it is the one
-    /// player-side patch in this file, and it is inert whenever the
-    /// departing actor is not a spectator, which is every room today.</summary>
+    /// player-side patch in this file. It no-ops whenever the departing actor
+    /// is not a spectator; the trailing "which is every room today" was stale
+    /// and is removed (corrected 2026-09-18, Codex b4yssbnuh). Spectator
+    /// sessions are live, so real spectator departures DO exercise this
+    /// suppression path.</summary>
     [HarmonyPatch(typeof(NetworkConnectionHandler), "OnPlayerLeftRoom")]
     internal static class Spectator_LeaveIsInvisible_Patch
     {
@@ -808,8 +813,13 @@ namespace CompetitiveRounds
     /// never Object.Destroy a Photon-owned object), and the master closes
     /// the offending connection.
     ///
-    /// Inert today: no actor carries the role property and no roster is
-    /// frozen, so the guard never fires.</summary>
+    /// CORRECTED 2026-09-17: this note used to say "inert today: no actor
+    /// carries the role property and no roster is frozen, so the guard never
+    /// fires." BOTH halves are now false. cr_spec is staged pre-join at
+    /// SpectatorSession.cs:419, and FreezeFighterRoster is called from
+    /// GameStateWatcher.cs:1572, :5006 and :6398. This guard is live: it can
+    /// refuse a registration in ordinary play, and its refusal cost has to be
+    /// weighed as a real one.</summary>
     [HarmonyPatch(typeof(PlayerManager), "RegisterPlayer")]
     internal static class Spectator_RegistrationFirewall_Patch
     {

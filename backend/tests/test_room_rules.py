@@ -113,6 +113,28 @@ def test_version_floor_fails_closed():
         assert main._mod_version_at_least(ok, FLOOR) is True, ok
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "bug #365/#366: ROOM_RULES_MIN_VERSION is 1.41.0 while LATEST_MOD_VERSION is 1.40.3, "
+    "so no client that exists can satisfy the floor and _rules_for_queue_match forces sc=0 "
+    "on every ranked-queue room whatever both players have set. Fixing it is a release "
+    "coupling (client ModVersion and this floor set to the same string in one commit, API "
+    "deployed before the client per #337), so the marker stays until that ship. strict=True "
+    "on purpose: the moment the floor becomes reachable this test XPASSes and FAILS the "
+    "suite, which is what forces this marker to be removed rather than left to rot."))
+def test_the_version_floor_is_reachable_by_a_client_that_exists():
+    """The floor is a forward pin, and a forward pin that is never brought back
+    down silently disables the feature it gates for ever.
+
+    Every other assertion in this file uses FLOOR as its own 'new enough'
+    version, so the whole suite is self-referential about that value and passes
+    for ANY floor, including one no build can reach (#342/#431 — a check that
+    cannot fail). This is the one assertion that is not: it compares the floor
+    against the newest version the server will admit."""
+    assert main._parse_version(main.ROOM_RULES_MIN_VERSION) <= main._parse_version(main.LATEST_MOD_VERSION), (
+        f"room-rules floor {main.ROOM_RULES_MIN_VERSION} is above the newest client "
+        f"{main.LATEST_MOD_VERSION} — Same Cards can never turn on in a queue match")
+
+
 def test_admission_refuses_only_nondefault_rooms_to_old_requests():
     nondefault = {"ff": False, "sc": False}
     # default rules: never refused, whatever the header (or its absence)
@@ -157,8 +179,12 @@ def test_history_record_distinguishes_unknown_from_default():
 
 
 def test_ffa_settings_block_reports_unknown_rather_than_a_plausible_default():
+    # settings_frozen None: a game recorded before migration 360, so the block
+    # comes from the lobby columns (test_ffa_settings_frozen.py covers the
+    # frozen block and the fall back between the two).
     full = {"score_target": 7, "card_cap": 5, "initial_picks": 1, "card_candidates": 5,
-            "same_card_rule": True, "sudden_death": False, "settings_known": True}
+            "same_card_rule": True, "sudden_death": False, "settings_known": True,
+            "settings_frozen": None}
     assert main._ffa_settings_block(full) == {
         "score_target": 7, "card_cap": 5, "initial_picks": 1, "card_candidates": 5,
         "same_card_rule": True, "sudden_death": False}
@@ -391,8 +417,12 @@ def test_a1_issuance_relock_and_grant_shapes():
     for fn, needle in (("_report_load_1v1", '"rules": _rules_history(r["rules"])'),
                        ("_report_load_team", '"rules": _rules_history(r["rules"])'),
                        ("_report_load_ovt", '"rules": _rules_history(r["rules"], r["solo_extra_pick"])'),
-                       ("_report_load_ffa", '"settings": _ffa_settings_block(r)')):
+                       ("_report_ffa_games", '"settings": _ffa_settings_block(r)')):
         assert _src(fn).count(needle) == 1, fn
+    # Both FFA selectors (match= and the lobby= of board row 30a) build their
+    # games through that one builder, so each carries the settings record.
+    for fn in ("_report_load_ffa", "_report_load_ffa_lobby"):
+        assert _src(fn).count("await _report_ffa_games(db, ") == 1, fn
     assert _src("_report_game_json").count('for _k in ("rules", "settings"):') == 1
     for sql, join in ((main._REPORT_1V1_SQL, "LEFT JOIN ranked_series rs ON rs.id = m.series_id"),
                       (main._REPORT_TEAM_SQL, "LEFT JOIN team_series ts ON ts.id = tm.series_id"),

@@ -1,0 +1,1899 @@
+# FROZEN SERVER-LANE EXTRACT -- the September 16 2v2 disconnect displacement.
+#
+# THIS FILE IS DATA, NOT SOURCE.  It is a verbatim slice of the round-6 client
+# review pin's immutable REVIEW-INPUT/server-lane/main.py, carried inside this
+# lane so the cross-lane equality can be proven against the frozen
+# representation the contract names and against nothing else -- no environment
+# variable, no sibling worktree, nothing a reader of the bundle cannot re-derive.
+#
+# IT IS NEVER IMPORTED OR EXECUTED.  The harness reads it as text: the status
+# route's own return dict, the report-dc handler's three non-parking exits, its
+# is_fallback park, and the one DC HMAC canonical.
+#
+# IF THE LANES MERGE this file stops being the binding: the resolver prefers a
+# real tree that carries the route -- the merged repository itself -- and falls
+# back here only when no such tree is present.  It is a review artifact with a
+# shelf life, not a second copy of the server to maintain.
+#
+# source          : the round-6 client review pin, REVIEW-INPUT/server-lane/main.py
+# source-lines    : 38671-40546 of 56062
+# source-sha256   : f025a8b4e21d33768737c740443253f2441ca18094cad1514b33f4b5e67dc1ad
+# sha256-of-body  : 397e4fc4200365415fc8e5ec3128f3fdf54e38b111deb415bc403a1c211313a6
+# occurrences     : @app.get("/api/v1/team/series/{series_ x1; if is_fallback: x1; :dc".encode() x1; "reason": "dc_room_mismatch" x1; "reason": "dc_after_resume" x1
+#
+# The body begins at the status route's decorator on the next line.  Everything
+# above this point is provenance and is NOT covered by sha256-of-body.
+@app.get("/api/v1/team/series/{series_id}/status", tags=["Team Matches"])
+async def team_series_status_readonly(
+    series_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Read a 2v2 series' status. This route never writes.
+
+    WHY IT IS A ROUTE AND NOT A FLAG. The team tab's DC-grace banner wants to
+    know what a series' status is; the endpoint it used to ask,
+    GET .../state below, is a lifecycle operation that cancels an overdue
+    assembly and reconciles that series' bets. Round 4 gave that endpoint a
+    `lifecycle=false` parameter and had the client check the echoed flag. The
+    guarantee was then a property of an ARGUMENT, and an unknown argument is
+    the one thing a box that predates it answers 200 while ignoring (bug #266,
+    learning #422) -- so on a partly-updated deployment the first "read" the
+    banner issued could still cancel a played series and refund its stakes,
+    before any echo told the client to stop. The edge routes GETs to whichever
+    box it chooses and can route two requests from one seat to two boxes, so no
+    earlier answer -- an advertisement on /api/v1/mod-version included -- can
+    speak for the box that answers THIS one.
+
+    A separate path cannot be ignored. A box that does not carry this route
+    has no handler for it, no catch-all route and no exception handler that
+    would dress the miss up as success, so it answers 404 and the client
+    latches its banner off for that series. The capability is proven per
+    RESPONSE, by "readonly": true in the body the answering box produced, and
+    it proves nothing about any other request.
+
+    WHAT "NEVER WRITES" MEANS HERE, precisely, because a guarantee in a
+    comment is a claim about the whole state space (#351, #302): this function
+    issues one SELECT, plus whatever SELECT the service-subject assertion
+    needs; it opens no savepoint, calls no commit, and reaches no helper that
+    writes. test_sept16_dc_fallback_orderings.py records every statement this
+    route puts on the connection and requires each to be a SELECT, with the
+    mutating state GET under the same recorder as the positive control that
+    the recorder can see a write at all (#391).
+
+    WHAT THIS ROUTE CARRIES FOR THE BANNER, and what that costs. The response
+    carries the DEFERRAL STATE -- dc_deferred, dc_deferred_seconds_remaining
+    and dc_deferred_bound_seconds -- and the team tab's DC-grace banner derives
+    its shown/hidden state and its countdown from exactly those three fields.
+    The predicate the banner used before required status == 'dc_paused' and a
+    positive remaining time; no statement in this api writes that status and
+    dc_grace_until is only ever written NULL, so that predicate could not be
+    satisfied by any series this server produces. It is deleted on the client
+    rather than patched (#310, #389), and these fields are what replaces it.
+
+    THIS ROUTE NOW REQUIRES MIGRATION 326. The SELECT below reads
+    dc_fallback_at directly -- no savepoint, no fallback branch -- so on a box
+    where 326 has not been applied the statement raises UndefinedColumn and
+    this route answers 500. That is the reason the deploy order is the
+    migration FIRST and then the api on both boxes, and it is a deliberate
+    choice rather than an oversight: a branch that answered 200 with the
+    deferral fields missing would put the "is this box updated" question back
+    inside the body, which is the shape bug #266 turns on. The colour columns
+    beside them arrived in migration 206 and are read the same way (#235).
+
+    WHAT A REFUSAL COSTS, stated from the client's own use of this call rather
+    than from the name of the banner: the answer to this read is what the team
+    tab refreshes its cached series status, its series score and its frozen
+    team-colour stamp from, so a refused answer latches this series dark and
+    leaves ALL of that as stale as it leaves the banner. Pricing the refusal at
+    "the banner" alone understates it. What it does NOT cost is any outcome:
+    the assembly poll is a different call to a different route, nothing here
+    writes, and a dark banner changes no row. A 500 in the state GET would cost
+    the assembly; a 500 here costs a tab that stops updating."""
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+    r = (await db.execute(
+        text("""
+            SELECT status, invalidation_reason, spawn_confirmations,
+                   created_at, room_issued_at, dc_grace_until,
+                   dc_team_remaining, dc_player_id,
+                   t1_series_wins, t2_series_wins,
+                   t1_color_name, t1_color_hex, t2_color_name, t2_color_hex,
+                   t1a_id, t1b_id, t2a_id, t2b_id,
+                   -- THE DEFERRAL STATE, derived here in the one SELECT.
+                   -- dc_deferred repeats the sweep's own predicate against
+                   -- this row, so "the banner is up" and "the sweep could
+                   -- still act on this marker" are one condition read once
+                   -- rather than two that can disagree (#342). It is false on
+                   -- a settled row that still carries an inert marker.
+                   (dc_fallback_at IS NOT NULL
+                    AND status IN ('active', 'dc_paused')) AS dc_deferred,
+                   -- The DEADLINE, expressed as the seconds left on it: the
+                   -- marker plus the one bound constant, minus
+                   -- clock_timestamp(). The same clock that stamped
+                   -- dc_fallback_at and the same clock the sweep measures the
+                   -- bound on, so no api-to-database skew enters it and there
+                   -- is no second clock to reconcile (#426, #427).
+                   -- make_interval(secs => :bound) rather than arithmetic on
+                   -- the parameter: that spelling is the one whose binding
+                   -- this file already exercises against the driver, in the
+                   -- sweep's two statements (#275).
+                   CASE WHEN dc_fallback_at IS NULL THEN 0
+                        ELSE GREATEST(0, EXTRACT(EPOCH FROM (
+                                 (dc_fallback_at + make_interval(secs => :bound))
+                                 - clock_timestamp())))
+                   END AS dc_deferred_seconds_remaining
+              FROM team_series
+             WHERE id = :sid
+        """),
+        {"sid": sid_uuid, "bound": float(_DC_FALLBACK_DEFER_SECONDS)},
+    )).mappings().first()
+    if r is None:
+        raise HTTPException(404, "Series not found")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[r["t1a_id"], r["t1b_id"],
+                                 r["t2a_id"], r["t2b_id"]])
+    _anchor = r["room_issued_at"] or r["created_at"]
+    _age = (datetime.now(timezone.utc) - _anchor).total_seconds()
+    _grace = 0
+    if r["dc_grace_until"] is not None:
+        _grace = max(0, int((r["dc_grace_until"]
+                             - datetime.now(timezone.utc)).total_seconds()))
+    # Both values come out of the row above and nothing else is consulted. The
+    # floor to 0 when not deferred is not cosmetic: the SQL already returns 0
+    # for a NULL marker, and this second floor covers the row that DOES carry a
+    # marker with time left on it but is no longer in a status the sweep admits
+    # -- a completed series -- where a remaining count would be a countdown to
+    # nothing.
+    _deferred = bool(r["dc_deferred"])
+    _defer_left = (int(r["dc_deferred_seconds_remaining"] or 0)
+                   if _deferred else 0)
+    return {
+        # The whole capability, stated by the box that answered. A client that
+        # does not see this key treats the answer as no answer.
+        "readonly": True,
+        "status": r["status"],
+        "reason": r["invalidation_reason"],
+        "confirmations": int(r["spawn_confirmations"] or 0),
+        "expected": 4,
+        # age_seconds and deadline_seconds are REPORTED, never acted on here:
+        # a reader can see that an assembly is overdue, and only the assembly
+        # poll's own call to the state endpoint below may do anything about it.
+        "age_seconds": int(_age),
+        "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+        "dc_grace_seconds_remaining": _grace,
+        "dc_team_remaining": r["dc_team_remaining"],
+        "dc_player_id": str(r["dc_player_id"]) if r["dc_player_id"] else None,
+        # THE DEFERRAL STATE, and the ONLY input the team tab's DC-grace
+        # banner has. Three fields, all three present on every 200 and none of
+        # them ever null: the client parses these bodies by hand (Unity's
+        # JsonUtility silently fails on nested arrays, so the codebase splits
+        # strings everywhere instead), and a null where an int is expected is
+        # the shape that reads as a silent 0 on one path and throws on another.
+        #
+        # WHAT EACH ONE IS A CLAIM ABOUT, and nothing wider:
+        #   dc_deferred                   -- this row, as read a few lines
+        #                                    above, carries a marker the sweep
+        #                                    could still act on. It is not a
+        #                                    claim that the sweep will act, or
+        #                                    that a report is still in flight.
+        #   dc_deferred_seconds_remaining -- seconds left on THAT marker's
+        #                                    bound at the moment of the read,
+        #                                    floored at 0. 0 with dc_deferred
+        #                                    true is a real state: the bound
+        #                                    has passed and no tick has
+        #                                    settled the row yet.
+        #   dc_deferred_bound_seconds     -- the one constant, emitted so no
+        #                                    client carries its own copy of the
+        #                                    number.
+        "dc_deferred": _deferred,
+        "dc_deferred_seconds_remaining": _defer_left,
+        "dc_deferred_bound_seconds": _DC_FALLBACK_DEFER_SECONDS,
+        "t1_series_wins": int(r["t1_series_wins"] or 0),
+        "t2_series_wins": int(r["t2_series_wins"] or 0),
+        "t1_color_name": r["t1_color_name"] or "",
+        "t1_color_hex": r["t1_color_hex"] or "",
+        "t2_color_name": r["t2_color_name"] or "",
+        "t2_color_hex": r["t2_color_hex"] or "",
+        "color_decided": any(
+            r[c] is not None for c in ("t1_color_name", "t1_color_hex",
+                                       "t2_color_name", "t2_color_hex")),
+    }
+
+
+@app.get("/api/v1/team/series/{series_id}/state", tags=["Team Matches"])
+async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
+    """Per-series assembly + lifecycle state. Polled by clients after
+    ready_join. If the room has been issued for longer than the assembly
+    deadline (_ASSEMBLY_DEADLINE_SECONDS from room_issued_at) with fewer
+    than 4 spawn-confirms and no live-game evidence, transitions to
+    status='canceled' with reason 'assembly_timeout' so all 4 clients can
+    bail back to menu.
+
+    THIS GET WRITES. Despite the shape, it is a lifecycle operation: two arms
+    below change status and commit, and the assembly arm also reconciles the
+    series' bets. Its four conditions -- 'active', fewer than four
+    spawn-confirms, age past the deadline measured from room_issued_at, and no
+    positive live-game evidence -- are all ordinary on a played 2v2 whose
+    spawn-confirm POST was lost, so a caller that merely wants to READ the
+    status can cancel a played series and refund its stakes.
+
+    A CALLER THAT ONLY WANTS TO READ MUST NOT CALL THIS AT ALL. It calls
+    GET /api/v1/team/series/{series_id}/status, the route directly above,
+    which has no mutating arm of any kind. Round 4 tried to give this endpoint
+    a `lifecycle=false` parameter instead; that made the read-only guarantee a
+    property of an ARGUMENT, and an argument is exactly what a box that
+    predates it ignores while answering 200 (bug #266, learning #422) -- so a
+    request the caller believed was a read could still cancel a played series
+    on any box that had not been updated yet. A separate route cannot be
+    ignored: a box that lacks it has no handler on the path and answers 404.
+    The parameter, its response echo and the capability advertisement on
+    /api/v1/mod-version are all deleted.
+
+    The assembly poll (PollAssemblyStateLoop) is the only caller that wants
+    this endpoint: it is the one thing that frees four clients from a failed
+    assembly, and it runs only while a seat is waiting to spawn."""
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+
+    row = await db.execute(
+        text("""
+            SELECT id, status, created_at, spawn_confirmations,
+                   invalidation_reason, completed_at,
+                   dc_grace_until, dc_team_remaining, dc_player_id,
+                   t1_series_wins, t2_series_wins, room_issued_at,
+                   t1a_id, t1b_id, t2a_id, t2b_id
+              FROM team_series
+             WHERE id = :sid
+        """),
+        {"sid": sid_uuid},
+    )
+    r = row.first()
+    if r is None:
+        raise HTTPException(404, "Series not found")
+    await _assert_no_service_subject(db, affected_player_ids=list(r[12:16]))
+
+    s_status = r[1]
+    s_created = r[2]
+    s_confirms = int(r[3] or 0)
+    s_reason = r[4]
+    s_dc_grace_until = r[6]
+    s_dc_team = r[7]
+    s_dc_player = r[8]
+
+    # July 30 lifecycle audit item 4: the deadline used to measure from
+    # created_at — MATCH time — so it also had to absorb ready-up (up to
+    # 120s), Photon connect, map load and spawn-confirm delivery, and a state
+    # poll right after room issue could cancel a healthy assembly off the
+    # exhausted earlier clock. Measure from room_issued_at (migration 170;
+    # COALESCE covers pre-migration rows with the old conservative anchor).
+    s_room_issued = r[11] or s_created
+    age_seconds = (datetime.now(timezone.utc) - s_room_issued).total_seconds()
+
+    # Auto-cancel if the assembly deadline has passed and we still don't have 4.
+    # The in_match veto covers the "game is live but a spawn-confirm POST was
+    # lost" hole: a live game stuck at 3/4 confirmations must not be cancelled
+    # by this poll-driven timer.
+    if (
+        s_status == "active"
+        and s_confirms < 4
+        and age_seconds > _ASSEMBLY_DEADLINE_SECONDS
+        and not _group_game_positively_live(str(sid_uuid))
+    ):
+        await db.execute(
+            text("""
+                UPDATE team_series
+                   SET status = 'canceled',
+                       invalidated_at = NOW(),
+                       invalidation_reason = 'assembly_timeout'
+                 WHERE id = :sid AND status = 'active'
+            """),
+            {"sid": sid_uuid},
+        )
+        await _reconcile_team_series_bets(db, sid_uuid, "assembly_timeout")
+        await db.commit()
+        return {
+            "status": "canceled",
+            "reason": "assembly_timeout",
+            "confirmations": s_confirms,
+            "expected": 4,
+            "age_seconds": int(age_seconds),
+            "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+        }
+
+    # 5-min sticky-team requeue grace window: if the deadline has passed and
+    # the series is still flagged dc_paused, resolve it. The non-DC team takes
+    # the series win by forfeit (their 2 members were ready to keep going).
+    dc_grace_seconds_remaining = 0
+    if s_dc_grace_until is not None:
+        dc_grace_seconds_remaining = max(0, int((s_dc_grace_until - datetime.now(timezone.utc)).total_seconds()))
+        if dc_grace_seconds_remaining == 0 and s_status == "dc_paused":
+            # Manual-control policy: a lapsed grace window no longer auto-forfeits to
+            # the remaining team (a long 2v2 restart must not hand someone the series).
+            # Flip to dc_incomplete so it surfaces in the admin panel for a manual call.
+            # (New DCs no longer enter dc_paused at all; this only catches legacy rows.)
+            await db.execute(
+                text("""UPDATE team_series SET status='dc_incomplete',
+                           invalidation_reason='dc_manual_pending'
+                         WHERE id=:sid AND status='dc_paused'"""),
+                {"sid": sid_uuid},
+            )
+            await db.commit()
+            return {
+                "status": "dc_incomplete",
+                "reason": "awaiting_admin_resolution",
+                "winner_team": None,
+                "confirmations": s_confirms,
+                "expected": 4,
+                "age_seconds": int(age_seconds),
+                "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+                "dc_grace_seconds_remaining": 0,
+            }
+
+    # Aug 8 (Sid): the frozen body-colour team identity rides the state poll —
+    # every client hits this after ready_join, so it is the one fetch that
+    # reaches all four seats before game 1. Savepointed separate read (#235):
+    # pre-migration-206 the columns are absent and the response simply omits
+    # nothing (empty strings = vanilla).
+    _tc = ("", "", "", "")
+    _tc_decided = False
+    try:
+        async with db.begin_nested():
+            _tcr = (await db.execute(text(
+                "SELECT t1_color_name, t1_color_hex, t2_color_name, t2_color_hex"
+                "  FROM team_series WHERE id = :sid"), {"sid": sid_uuid})).first()
+            if _tcr is not None:
+                _tc = tuple((v or "") for v in _tcr)
+                # Codex r2 f9: NOT NULL = the server decided ('' = frozen
+                # vanilla); NULL = pre-feature row, client may fall back.
+                _tc_decided = any(v is not None for v in _tcr)
+    except Exception:
+        pass
+    return {
+        "status": s_status,
+        "reason": s_reason,
+        "confirmations": s_confirms,
+        "expected": 4,
+        "age_seconds": int(age_seconds),
+        "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+        "dc_grace_seconds_remaining": dc_grace_seconds_remaining,
+        "dc_team_remaining": s_dc_team,
+        "dc_player_id": str(s_dc_player) if s_dc_player else None,
+        "t1_series_wins": int(r[9] or 0),
+        "t2_series_wins": int(r[10] or 0),
+        "t1_color_name": _tc[0], "t1_color_hex": _tc[1],
+        "t2_color_name": _tc[2], "t2_color_hex": _tc[3],
+        "color_decided": _tc_decided,
+    }
+
+
+_DC_GRACE_SECONDS = 300  # 5-minute sticky-team requeue window
+
+
+async def _complete_team_series_with_ratings(
+    db: AsyncSession,
+    series_uuid: UUID,
+    winner_team: int,
+    reason: str,
+    dc_pid=None,
+):
+    """Fully complete a 2v2 series — Glicko-2 + series gold + per-slot accumulators +
+    completed_series counter — for the DC / forfeit / admin-resolution paths.
+
+    Deliberately awards NO XP: match XP is a per-GAME payout granted inline by
+    submit_team_match for each game actually played (and those games already
+    paid out before the DC). A forfeit ends the series without another game, so
+    there is no game to pay XP for. (The docstring used to claim xp — audit
+    found the body never awarded it; the claim was wrong, not the body.)
+
+    Before v1.28 the DC paths (report-dc, grace-expiry) marked a series 'completed'
+    but applied NO ratings/gold, so a DC-decided win never moved Elo or paid out —
+    making leaving strictly better than losing on the board. This factors the SAME
+    completion math used by submit_team_match's inline block (rating period = this
+    series, each player's two opponents = the other team) so every completion path
+    produces identical economy + rating effects.
+
+    Idempotent guard: callers must only invoke this for a series transitioning OUT of
+    a non-completed status in the SAME transaction; the UPDATE ... WHERE status<>'completed'
+    in the caller is the lock. This helper assumes the row is already (or about to be)
+    marked completed and just applies the side effects. Safe to call once per series.
+
+    winner_team: 1 or 2. reason: stored in invalidation_reason. dc_pid: optional.
+    Returns dict of {str(pid): new_rating} for logging.
+    """
+    # FOR UPDATE row-locks the series so concurrent completion attempts serialize.
+    # The SECOND caller (e.g. a duo rage-quitting fires OnPlayerLeftRoom twice → two
+    # report-dc POSTs, or a DC report racing a normal match-end submit) sees the row
+    # already 'completed' and no-ops — without this guard both would apply a full
+    # rating period + gold payout + bet settle, double-crediting everyone. This is
+    # the single guard that closes the double-credit / double-settle / admin-re-pay
+    # races (2v2 audit finding #1).
+    srow = (await db.execute(
+        text("""SELECT status, t1a_id, t1b_id, t2a_id, t2b_id
+                  FROM team_series WHERE id = :sid FOR UPDATE"""),
+        {"sid": series_uuid},
+    )).mappings().first()
+    if srow is None:
+        return {}
+    if srow["status"] == "completed":
+        # Already finished by a concurrent caller — do nothing.
+        return {}
+    t1a_id, t1b_id, t2a_id, t2b_id = srow["t1a_id"], srow["t1b_id"], srow["t2a_id"], srow["t2b_id"]
+    gids = [t1a_id, t1b_id, t2a_id, t2b_id]
+    await _assert_no_service_subject(
+        db, affected_player_ids=[g for g in gids if g is not None])
+    if any(g is None for g in gids):
+        # Defensive: a series with an unfilled slot can't have ratings applied.
+        # Still free the queue rows — the normal path's DELETE at the bottom is
+        # skipped by this early return, and completed-series rows that linger in
+        # team_queue block their players from re-queueing until the janitor.
+        await db.execute(
+            text("""UPDATE team_series SET status='completed', winner_team=:wt,
+                       completed_at=NOW(), invalidation_reason=:rsn WHERE id=:sid"""),
+            {"wt": winner_team, "rsn": reason, "sid": series_uuid},
+        )
+        # Player Cards: no inline roll on this branch (a slot may be unfilled);
+        # the row stays valid with winner_team set, so the reconciler grants
+        # the populated winners from it within PC_RECONCILE_EVERY_S (c3 C).
+        await _lock_queue_rows_ordered(db, "team_queue", [g for g in gids if g is not None])
+        await db.execute(text("DELETE FROM team_queue WHERE series_id = :sid"), {"sid": series_uuid})
+        return {}
+    # Mark completed (winner + reason) up front.
+    await db.execute(
+        text("""UPDATE team_series SET status='completed', winner_team=:wt,
+                   completed_at=NOW(), invalidation_reason=:rsn, dc_player_id=COALESCE(:dpid, dc_player_id)
+                 WHERE id=:sid"""),
+        {"wt": winner_team, "rsn": reason, "sid": series_uuid, "dpid": dc_pid},
+    )
+
+    # Canonical players-row lock pass BEFORE any glicko access (adversarial
+    # review of the submit_team_match lock-order fix): the players row is the
+    # only reliable cross-series gate — every member has one from queue join,
+    # while glicko_ratings_2v2 rows don't exist until a player's first
+    # completion, so for first-series players the glicko pass below matches
+    # zero rows and locks nothing. Without this pass, this helper's first
+    # players tuple locks came from _grant_rating_achievements' gold UPDATEs
+    # in SLOT order — an ABBA edge against submit_team_match's sorted pass
+    # when the shared players have no glicko rows — and two first-completion
+    # transactions could race duplicate-PK glicko INSERTs. FOR NO KEY UPDATE:
+    # the mode every later non-key players UPDATE takes anyway, and unlike
+    # FOR UPDATE it does not conflict with the FOR KEY SHARE RI locks a
+    # caller may already hold from INSERTing a team_matches row naming these
+    # players (report-dc's synthetic forfeit row).
+    for _pid in sorted(gids, key=str):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": _pid},
+        )
+
+    # ── Glicko-2 (mirrors submit_team_match:7232-7306) ──
+    # Canonical-order lock pass first (learning #197 / review find): two
+    # completions can share players across DIFFERENT series (dc_incomplete
+    # husk resolved while the same four play a new series), and each series'
+    # slot order differs — an ANY(...) FOR UPDATE locks in planner order, an
+    # ABBA edge. One indexed lock per row, ascending str(pid), same rule as
+    # _lock_queue_rows_ordered. (Cross-series serialization itself is
+    # guaranteed by the players pass above; this keeps glicko row access
+    # ordered among completers whose rows already exist.)
+    for _pid in sorted(gids, key=str):
+        await db.execute(
+            text("SELECT 1 FROM glicko_ratings_2v2 WHERE player_id = :pid FOR UPDATE"),
+            {"pid": _pid},
+        )
+    gres = await db.execute(
+        text("SELECT player_id, rating, rating_deviation, volatility, peak_rating, completed_series "
+             "FROM glicko_ratings_2v2 WHERE player_id = ANY(:ids)"),
+        {"ids": gids},
+    )
+    existing = {r["player_id"]: dict(r) for r in gres.mappings().all()}
+    for pid in gids:
+        if pid not in existing:
+            existing[pid] = {
+                "player_id": pid, "rating": GLICKO2_DEFAULT_RATING,
+                "rating_deviation": GLICKO2_DEFAULT_RD, "volatility": GLICKO2_DEFAULT_VOLATILITY,
+                "peak_rating": GLICKO2_DEFAULT_RATING, "completed_series": 0, "_new": True,
+            }
+    team1_won = (winner_team == 1)
+    inputs = {pid: existing[pid] for pid in gids}
+
+    def update_player(p, opps_pre, won: bool):
+        opps = [(o["rating"], o["rating_deviation"], 1.0 if won else 0.0) for o in opps_pre]
+        return calculate_new_rating(p["rating"], p["rating_deviation"], p["volatility"], opps, GLICKO2_TAU)
+
+    results = {}
+    for pid in (t1a_id, t1b_id):
+        results[pid] = update_player(inputs[pid], [inputs[t2a_id], inputs[t2b_id]], team1_won)
+    for pid in (t2a_id, t2b_id):
+        results[pid] = update_player(inputs[pid], [inputs[t1a_id], inputs[t1b_id]], not team1_won)
+
+    new_ratings = {}
+    for pid, (new_r, new_rd, new_vol) in results.items():
+        if inputs[pid].get("_new"):
+            db.add(GlickoRating2v2(
+                player_id=pid, rating=new_r, rating_deviation=new_rd, volatility=new_vol,
+                peak_rating=max(GLICKO2_DEFAULT_RATING, new_r), games_in_period=0,
+                completed_series=1, last_calculated=datetime.now(timezone.utc),
+            ))
+        else:
+            await db.execute(
+                text("""UPDATE glicko_ratings_2v2
+                       SET rating=:r, rating_deviation=:rd, volatility=:v,
+                           peak_rating=GREATEST(COALESCE(peak_rating,:r), :r),
+                           completed_series = completed_series + 1,
+                           last_calculated=NOW(), updated_at=NOW()
+                       WHERE player_id=:pid"""),
+                {"r": new_r, "rd": new_rd, "v": new_vol, "pid": pid},
+            )
+        new_ratings[str(pid)] = round(new_r, 1)
+        await _grant_rating_achievements(db, pid, new_r)
+
+    # Per-slot rating deltas (joined by player_id, same as the inline path).
+    delta_by_pid = {pid: round(results[pid][0] - inputs[pid]["rating"], 1) for pid in gids}
+    await db.execute(
+        text("""UPDATE team_series SET
+                   t1a_rating_change=:t1a_d, t1b_rating_change=:t1b_d,
+                   t2a_rating_change=:t2a_d, t2b_rating_change=:t2b_d
+                 WHERE id=:sid"""),
+        {"sid": series_uuid, "t1a_d": delta_by_pid[t1a_id], "t1b_d": delta_by_pid[t1b_id],
+         "t2a_d": delta_by_pid[t2a_id], "t2b_d": delta_by_pid[t2b_id]},
+    )
+
+    # ── Series-completion gold (+50 win / +25 loss) + per-slot accumulator ──
+    # July 20 item 6: scaled by the opposing team's tier, same formula as the
+    # inline submit path (learning #77 family: DC-decided series must pay
+    # identically). `inputs` holds the pre-update rating snapshot.
+    _t1_avg_rating = (inputs[t1a_id]["rating"] + inputs[t1b_id]["rating"]) / 2.0
+    _t2_avg_rating = (inputs[t2a_id]["rating"] + inputs[t2b_id]["rating"]) / 2.0
+    bonus_by_pid = {}
+    # sorted(key=str): players-row tuple locks in canonical order — slot order
+    # differs per series and two completions can share players (review find).
+    for pid in sorted(gids, key=str):
+        player_team = 1 if pid in (t1a_id, t1b_id) else 2
+        won_series = (player_team == winner_team)
+        _s_mult, _ = _tier_mult_for(_t2_avg_rating if player_team == 1 else _t1_avg_rating)
+        bonus = int((TEAM_SERIES_WIN_GOLD if won_series else TEAM_SERIES_LOSS_GOLD) * _s_mult)
+        await db.execute(
+            text("UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:g, "
+                 "team_gold_earned=COALESCE(team_gold_earned,0)+:g WHERE id=:pid"),
+            {"g": bonus, "pid": pid},
+        )
+        db.add(GoldTransaction(
+            player_id=pid, amount=bonus,
+            reason=("team_series_win" if won_series else "team_series_loss"),
+            reference_id=str(series_uuid),
+        ))
+        bonus_by_pid[pid] = bonus
+    await db.execute(
+        text("UPDATE team_series SET "
+             "t1a_gold_earned=COALESCE(t1a_gold_earned,0)+:t1a_g, "
+             "t1b_gold_earned=COALESCE(t1b_gold_earned,0)+:t1b_g, "
+             "t2a_gold_earned=COALESCE(t2a_gold_earned,0)+:t2a_g, "
+             "t2b_gold_earned=COALESCE(t2b_gold_earned,0)+:t2b_g WHERE id=:sid"),
+        {"sid": series_uuid, "t1a_g": bonus_by_pid[t1a_id], "t1b_g": bonus_by_pid[t1b_id],
+         "t2a_g": bonus_by_pid[t2a_id], "t2b_g": bonus_by_pid[t2b_id]},
+    )
+
+    # Settle any open 2v2 bets on this series (mirror submit_team_match).
+    # SAVEPOINT (learning #187 family): a bare try/except around writes inside
+    # an open Postgres transaction does NOT contain the failure — a failed
+    # statement aborts the WHOLE transaction and the later commit dies anyway.
+    # begin_nested() rolls back only this block on error, so the series
+    # completion above still commits. The flush() runs the pending ORM adds
+    # inside the savepoint (an unflushed add would survive the rollback).
+    try:
+        async with db.begin_nested():
+            unsettled = (await db.execute(text("""
+                SELECT id, player_id, amount, odds_multiplier, bet_on_team
+                  FROM team_bets WHERE team_series_id = :sid AND settled_at IS NULL
+                 ORDER BY player_id::text, id
+            """), {"sid": series_uuid})).mappings().all()
+            winner_a_id, winner_b_id = ((t1a_id, t1b_id) if winner_team == 1
+                                        else (t2a_id, t2b_id))
+            for b in unsettled:
+                won = (b["bet_on_team"] == winner_team)
+                gross = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
+                payout, fighter_tax = (_bet_fighter_tax(
+                    b["amount"], b["odds_multiplier"], gross
+                ) if won else (0, 0))
+                # Claim-gated (Codex Jul-29 find 1): the SELECT above is a
+                # snapshot — a janitor reconcile can settle/refund this bet
+                # between it and here, and an unconditional UPDATE would
+                # overwrite that terminal state and pay a second time.
+                claimed = (await db.execute(text(
+                    "UPDATE team_bets SET settled_at=NOW(), payout=:p, settlement_kind=:k,"
+                    " fighter_tax=NULLIF(:tax, 0)"
+                    " WHERE id=:id AND settled_at IS NULL RETURNING id"),
+                    {"p": payout, "k": "won" if won else "lost",
+                     "tax": fighter_tax, "id": b["id"]})).scalar()
+                if claimed is None:
+                    continue
+                if payout > 0:
+                    await db.execute(text("UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:p WHERE id=:pid"),
+                                     {"p": payout, "pid": b["player_id"]})
+                    db.add(GoldTransaction(player_id=b["player_id"], amount=payout,
+                                           reason="team_bet_payout", reference_id=str(series_uuid)))
+                    await _credit_team_bet_fighter_tax(
+                        db, winner_a_id, winner_b_id, fighter_tax, str(series_uuid))
+            await db.flush()
+    except Exception as bex:
+        print(f"[TEAM-DC-COMPLETE] bet settle error for {series_uuid}: {bex}")
+    # Player Cards (WP-D): a forfeit / admin completion rolls the same
+    # earned-pack odds as a played one — one roll, no score line.
+    try:
+        async with db.begin_nested():
+            await _pc_grant_earned_packs(
+                db, mode="team", series_id=series_uuid,
+                winner_ids=([t1a_id, t1b_id] if winner_team == 1 else [t2a_id, t2b_id]),
+                label=f"team-{reason}")
+    except Exception as pcex:
+        print(f"[PC-EARNED] team grant failed for {series_uuid} ({reason}): {pcex}")
+
+    # Free the queue rows.
+    await _lock_queue_rows_ordered(db, "team_queue", gids)
+    await db.execute(text("DELETE FROM team_queue WHERE series_id = :sid"), {"sid": series_uuid})
+    return new_ratings
+
+
+# Statuses on which _reconcile_team_series_bets may REFUND. Deliberately NOT
+# "anything but completed": dc_incomplete / dc_paused are awaiting an admin
+# decision — refunding there would strand a valid winning bet forever, because
+# the eventual completion only selects unsettled rows (Codex Jul-29 find 2).
+_TEAM_BET_REFUND_STATUSES = ("cancelled", "canceled")
+
+
+async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str,
+                                      allow_refund_statuses: tuple = _TEAM_BET_REFUND_STATUSES):
+    """Terminal bet resolution for a 2v2 series that is being cancelled/voided
+    (or is discovered already closed with unsettled bets — the janitor sweep).
+    A completed, non-invalidated series with a recorded winner SETTLES its
+    unsettled bets against that result (#241 — the settle savepoint can roll
+    back while the completion commits, leaving chargeable-but-unpaid winners);
+    a series in an allowed terminal-cancel status refunds the stake; ANY other
+    status (active, dc_incomplete, dc_paused, ...) is skipped — its lifecycle
+    isn't decided yet. The stalled-active janitor arm opts 'active' into the
+    refund set explicitly (the husk policy, mirroring the 1v1 stalled prune).
+
+    The series row is locked FOR NO KEY UPDATE first (#202: the weakest mode
+    that conflicts with everything we must serialize against): it conflicts
+    with the FOR UPDATE every completion path holds AND with the plain status
+    UPDATEs (report-dc's flip to dc_incomplete takes NO KEY UPDATE, which
+    KEY SHARE would have sailed past — Codex round-2 find 2), while staying
+    compatible with the FK KEY SHARE that team_bets/team_matches INSERTs take.
+    So an in-flight completion or DC transition commits before we classify,
+    and we then settle/skip against the real state instead of refunding it.
+    Accepted residual (round-2 find 1 / round-3 find 1): a series writer that
+    has not yet taken its series lock when the stalled sweep claims a refund
+    can still finish afterwards — report-dc between its synthetic-match
+    INSERT (FK KEY SHARE only) and the completion helper's FOR UPDATE, or the
+    non-forfeit DC path whose dc_incomplete flip was read-then-write. Both
+    need a game-less HOUR plus a ~ms interleaving, and the outcome is always
+    the documented refund-sticky policy (#107): stakes returned, never a
+    double-pay (every write is claimed), with the skip/settle decision made
+    against whatever state committed first.
+    Claim-first per bet (settled_at gate inside the UPDATE) so a concurrent
+    settle can never double-pay; gold direction mirrors the live paths (win:
+    bettor gold_earned += net payout and fighters receive the tax; refund:
+    gold_spent -= stake). Bounded per pass (leftovers picked up by the
+    janitor's next tick). Savepoint-contained, never raises."""
+    try:
+        async with db.begin_nested():
+            srow = (await db.execute(text(
+                "SELECT status, winner_team, invalidated_at,"
+                " t1a_id, t1b_id, t2a_id, t2b_id FROM team_series"
+                " WHERE id = :sid FOR NO KEY UPDATE"
+            ), {"sid": series_uuid})).mappings().first()
+            if srow is None:
+                return
+            settle_against = (srow["winner_team"]
+                              if (srow["status"] == "completed"
+                                  and srow["winner_team"] in (1, 2)
+                                  and srow["invalidated_at"] is None)
+                              else None)
+            if settle_against is None and srow["status"] not in allow_refund_statuses:
+                print(f"[TEAM-BETS] reconcile skipped for {series_uuid} ({reason}): "
+                      f"status '{srow['status']}' is not terminal here")
+                return
+            winner_ids = ((srow["t1a_id"], srow["t1b_id"])
+                          if settle_against == 1 else
+                          (srow["t2a_id"], srow["t2b_id"])
+                          if settle_against == 2 else ())
+            # Every team lifecycle writer takes series -> canonically ordered
+            # players. Tax credits must keep that order even if slot A/B flips.
+            for winner_id in sorted(winner_ids, key=str):
+                await db.execute(text(
+                    "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
+                ), {"pid": winner_id})
+            unsettled = (await db.execute(text(
+                "SELECT id, player_id, amount, odds_multiplier, bet_on_team"
+                "  FROM team_bets WHERE team_series_id = :sid AND settled_at IS NULL"
+                " ORDER BY player_id::text, id LIMIT 200"
+            ), {"sid": series_uuid})).mappings().all()
+            await _assert_no_service_subject(
+                db, affected_player_ids=[b["player_id"] for b in unsettled] + list(winner_ids))
+            settled = refunded = 0
+            for b in unsettled:
+                if settle_against is not None:
+                    won = b["bet_on_team"] == settle_against
+                    gross = int(round(b["amount"] * float(b["odds_multiplier"]))) if won else 0
+                    pay, fighter_tax = (_bet_fighter_tax(
+                        b["amount"], b["odds_multiplier"], gross
+                    ) if won else (0, 0))
+                    kind = "won" if won else "lost"
+                else:
+                    pay = b["amount"]   # payout == stake marks a refund (#107/#244)
+                    fighter_tax = 0
+                    kind = "refunded"
+                if settle_against is not None:
+                    claimed = (await db.execute(text(
+                        "UPDATE team_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k,"
+                        " fighter_tax = NULLIF(:tax, 0)"
+                        " WHERE id = :bid AND settled_at IS NULL RETURNING id"
+                    ), {"p": pay, "k": kind, "tax": fighter_tax,
+                        "bid": b["id"]})).scalar()
+                else:
+                    # Refunds return principal and never enter the tax path.
+                    claimed = (await db.execute(text(
+                        "UPDATE team_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k"
+                        " WHERE id = :bid AND settled_at IS NULL RETURNING id"
+                    ), {"p": pay, "k": kind, "bid": b["id"]})).scalar()
+                if claimed is None:
+                    continue
+                if settle_against is not None:
+                    settled += 1
+                    if pay > 0:
+                        await db.execute(text(
+                            "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = :pid"
+                        ), {"p": pay, "pid": b["player_id"]})
+                        db.add(GoldTransaction(player_id=b["player_id"], amount=pay,
+                                               reason="team_bet_payout", reference_id=str(series_uuid)))
+                        await _credit_team_bet_fighter_tax(
+                            db, winner_ids[0], winner_ids[1], fighter_tax,
+                            str(series_uuid))
+                else:
+                    refunded += 1
+                    await db.execute(text(
+                        "UPDATE players SET gold_spent = GREATEST(0, COALESCE(gold_spent,0) - :amt) WHERE id = :pid"
+                    ), {"amt": b["amount"], "pid": b["player_id"]})
+                    db.add(GoldTransaction(player_id=b["player_id"], amount=b["amount"],
+                                           reason="team_bet_refund", reference_id=str(series_uuid)))
+            # Flush INSIDE the savepoint — an unflushed ORM add would survive
+            # the rollback and write a ledger row without its gold move (#187).
+            await db.flush()
+            if settled or refunded:
+                print(f"[TEAM-BETS] reconciled series {series_uuid} ({reason}): "
+                      f"{settled} settled, {refunded} refunded")
+    except Exception as ex:
+        print(f"[TEAM-BETS] reconcile failed for {series_uuid} ({reason}) — janitor retries: {ex}")
+
+
+@app.post("/api/v1/admin/team/series/{series_id}/resolve", tags=["Admin"])
+async def admin_resolve_team_series(
+    series_id: str,
+    action: str = Query(..., description="'complete' (award winner_team) or 'void' (cancel, no result)"),
+    winner_team: int | None = Query(None, description="1 or 2; required when action=complete"),
+    x_internal_key: str = Header(None, alias="X-Internal-Key"),
+    admin_steam_id: str = Query(None),
+    hmac_signature: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: force-resolve a stuck / incomplete 2v2 series.
+
+    Callable two ways: (1) API_SECRET_KEY via the X-Internal-Key header (server-side
+    scripts), or (2) admin-HMAC (admin_steam_id + hmac_signature) so the mod's in-game
+    admin panel can resolve a series. Canonical for (2):
+    admin:{steam}:resolve_team_series:{series_id}:{action}:{winner_team or 0}.
+
+    action='complete' applies the SAME Glicko/gold/xp as a normal completion via
+    _complete_team_series_with_ratings (awards a DC/forfeit after the fact).
+    action='void' cancels the series with no winner and no rating/economy effect.
+    Operates on any series not already completed/cancelled."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    internal_ok = bool(expected) and x_internal_key == expected
+    admin_ok = False
+    if not internal_ok and admin_steam_id:
+        _tgt = f"{series_id}:{action}:{winner_team if winner_team is not None else 0}"
+        admin_ok = (await _is_admin(db, admin_steam_id)) and _verify_admin_hmac(
+            admin_steam_id, "resolve_team_series", _tgt, hmac_signature)
+    if not (internal_ok or admin_ok):
+        raise HTTPException(403, "Not authorized")
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+    srow = (await db.execute(
+        text("SELECT status, t1a_id, t1b_id, t2a_id, t2b_id "
+             "FROM team_series WHERE id=:sid FOR UPDATE"), {"sid": sid_uuid},
+    )).mappings().first()
+    if srow is None:
+        raise HTTPException(404, "Series not found")
+    # Guard against re-resolution: a completed OR already-voided series must not be
+    # re-paid (void→complete would otherwise double-credit). The helper has its own
+    # status guard too, but bail early for a clean response.
+    if srow["status"] in ("completed", "cancelled", "canceled"):
+        return {"status": "noop", "reason": f"already {srow['status']}"}
+    # ACCEPTED RESIDUAL (bug 245 review r1 finding 12): an admin who loaded a
+    # dc_incomplete series can fire this action AFTER the four resumed it to
+    # 'active' — the signed target carries no expected-status, so the stale
+    # decision resolves a live sitting. Deliberate: this endpoint's purpose
+    # includes force-resolving ACTIVE series, admin actions are human+rare,
+    # and admin_reverse tools recover the outcome. Binding the observed
+    # status into the HMAC would need a coordinated client change.
+    await _assert_no_service_subject(
+        db,
+        affected_player_ids=[srow["t1a_id"], srow["t1b_id"],
+                             srow["t2a_id"], srow["t2b_id"]],
+    )
+    if admin_steam_id and admin_ok:
+        db.add(AdminAction(admin_steam_id=admin_steam_id, action="resolve_team_series",
+                           target_series_id=sid_uuid,
+                           details={"action": action, "winner_team": winner_team}))
+
+    if action == "void":
+        await db.execute(
+            text("""UPDATE team_series SET status='cancelled', completed_at=NOW(),
+                       invalidation_reason='admin_void' WHERE id=:sid"""),
+            {"sid": sid_uuid},
+        )
+        # Soft-invalidate any match rows so they don't pollute match-W/L stats.
+        await db.execute(
+            text("""UPDATE team_matches SET invalidated_at=NOW(),
+                       invalidation_reason='admin_void' WHERE series_id=:sid AND invalidated_at IS NULL"""),
+            {"sid": sid_uuid},
+        )
+        void_queue_ids = list((await db.execute(text(
+            "SELECT player_id FROM team_queue WHERE series_id = :sid"
+        ), {"sid": sid_uuid})).scalars().all())
+        await _lock_queue_rows_ordered(db, "team_queue", void_queue_ids)
+        await db.execute(text("DELETE FROM team_queue WHERE series_id=:sid"), {"sid": sid_uuid})
+        await _reconcile_team_series_bets(db, sid_uuid, "admin_void")
+        await db.commit()
+        return {"status": "voided", "series_id": series_id}
+
+    if action == "complete":
+        if winner_team not in (1, 2):
+            raise HTTPException(400, "winner_team must be 1 or 2 for action=complete")
+        new_ratings = await _complete_team_series_with_ratings(
+            db, sid_uuid, winner_team, "admin_resolved",
+        )
+        await db.commit()
+        return {"status": "completed", "winner_team": winner_team, "new_ratings": new_ratings}
+
+    raise HTTPException(400, "action must be 'complete' or 'void'")
+
+
+@app.get("/api/v1/admin/recent-series", tags=["Admin"])
+async def admin_recent_series(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    limit: int = Query(30, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Unified recent 1v1 + 2v2 series for the mod admin panel. Each entry carries a
+    per-ladder series #, players + card picks, series score, status, and who DC'd (2v2).
+    incomplete=true → resolvable (Award/Void); completed → reversible. Admin-HMAC gated
+    (canonical admin:{steam}:list_recent_series:)."""
+    if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, "list_recent_series", "", hmac_signature):
+        raise HTTPException(403, "Bad admin signature")
+
+    # ── 2v2 ──
+    team_rows = (await db.execute(text("""
+        WITH numbered AS (SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) AS num FROM team_series)
+        SELECT s.id, n.num, s.status, s.created_at, s.completed_at,
+               s.t1_series_wins, s.t2_series_wins, s.winner_team,
+               s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id, s.dc_player_id,
+               p1a.display_name AS t1a_name, p1a.steam_id AS t1a_sid,
+               p1b.display_name AS t1b_name, p1b.steam_id AS t1b_sid,
+               p2a.display_name AS t2a_name, p2a.steam_id AS t2a_sid,
+               p2b.display_name AS t2b_name, p2b.steam_id AS t2b_sid,
+               dcp.display_name AS dc_name, dcp.steam_id AS dc_sid
+          FROM team_series s
+          JOIN numbered n ON n.id = s.id
+          JOIN players p1a ON p1a.id = s.t1a_id
+          JOIN players p1b ON p1b.id = s.t1b_id
+          JOIN players p2a ON p2a.id = s.t2a_id
+          JOIN players p2b ON p2b.id = s.t2b_id
+          LEFT JOIN players dcp ON dcp.id = s.dc_player_id
+         ORDER BY s.created_at DESC LIMIT :lim
+    """), {"lim": limit})).mappings().all()
+
+    team_ids = [r["id"] for r in team_rows]
+    team_cards = {}
+    if team_ids:
+        for cr in (await db.execute(text("""
+            SELECT tm.series_id, tmc.player_id, tm.id AS match_id, tmc.card_name
+              FROM team_matches tm JOIN team_match_cards tmc ON tmc.match_id = tm.id
+             WHERE tm.series_id = ANY(:sids)
+             ORDER BY tm.ended_at, tmc.pick_order
+        """), {"sids": team_ids})).mappings().all():
+            team_cards.setdefault((cr["series_id"], cr["player_id"]), []).append((cr["match_id"], cr["card_name"]))
+
+    def _games_join(entries):
+        # Two-level flat encoding (bug #68): '||' separates GAMES, '|' separates
+        # cards within a game. Stays a flat scalar so JsonUtility parses it
+        # (learning #25 — no nested arrays); the admin tab splits on '||' to
+        # render one line per game instead of the whole series mashed together.
+        games, last_mid = [], object()
+        for mid, name in entries:
+            if mid != last_mid:
+                games.append([])
+                last_mid = mid
+            games[-1].append(name)
+        return "||".join("|".join(g) for g in games)
+
+    def _tc(r, pre):  # per-game card names for a 2v2 slot
+        return _games_join(team_cards.get((r["id"], r[f"{pre}_id"]), []))
+
+    # Flat scalar fields only (cards pipe-joined) so the client parses the whole
+    # payload with JsonUtility — nested arrays silently fail there (learning #25).
+    two = []
+    for r in team_rows:
+        two.append({
+            "ladder": "2v2", "series_number": int(r["num"]), "series_id": str(r["id"]),
+            "status": r["status"], "num_players": 4,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else "",
+            "score": f"{r['t1_series_wins'] or 0}-{r['t2_series_wins'] or 0}",
+            "winner_team": r["winner_team"] or 0,
+            "incomplete": r["status"] in ("active", "dc_paused", "dc_incomplete"),
+            "dc_name": r["dc_name"] or "", "dc_steam": r["dc_sid"] or "",
+            "p1_name": r["t1a_name"], "p1_steam": r["t1a_sid"], "p1_team": 1, "p1_cards": _tc(r, "t1a"),
+            "p2_name": r["t1b_name"], "p2_steam": r["t1b_sid"], "p2_team": 1, "p2_cards": _tc(r, "t1b"),
+            "p3_name": r["t2a_name"], "p3_steam": r["t2a_sid"], "p3_team": 2, "p3_cards": _tc(r, "t2a"),
+            "p4_name": r["t2b_name"], "p4_steam": r["t2b_sid"], "p4_team": 2, "p4_cards": _tc(r, "t2b"),
+        })
+
+    # ── 1v1 ──
+    solo_rows = (await db.execute(text("""
+        WITH numbered AS (SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) AS num FROM ranked_series)
+        SELECT s.id, n.num, s.status, s.created_at, s.completed_at,
+               s.p1_series_wins, s.p2_series_wins, s.winner_id,
+               s.player1_id, s.player2_id, s.invalidated_at,
+               p1.display_name AS p1_name, p1.steam_id AS p1_sid,
+               p2.display_name AS p2_name, p2.steam_id AS p2_sid
+          FROM ranked_series s
+          JOIN numbered n ON n.id = s.id
+          JOIN players p1 ON p1.id = s.player1_id
+          JOIN players p2 ON p2.id = s.player2_id
+         ORDER BY s.created_at DESC LIMIT :lim
+    """), {"lim": limit})).mappings().all()
+
+    solo_ids = [r["id"] for r in solo_rows]
+    solo_cards = {}
+    if solo_ids:
+        for cr in (await db.execute(text("""
+            SELECT m.series_id, mc.player_id, m.id AS match_id, mc.card_name
+              FROM matches m JOIN match_cards mc ON mc.match_id = m.id
+             WHERE m.series_id = ANY(:sids)
+             ORDER BY m.created_at, mc.pick_order
+        """), {"sids": solo_ids})).mappings().all():
+            solo_cards.setdefault((cr["series_id"], cr["player_id"]), []).append((cr["match_id"], cr["card_name"]))
+
+    one = []
+    for r in solo_rows:
+        winner = 1 if r["winner_id"] == r["player1_id"] else (2 if r["winner_id"] == r["player2_id"] else 0)
+        status = "cancelled" if r["invalidated_at"] is not None else r["status"]
+        one.append({
+            "ladder": "1v1", "series_number": int(r["num"]), "series_id": str(r["id"]),
+            "status": status, "num_players": 2,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else "",
+            "score": f"{r['p1_series_wins'] or 0}-{r['p2_series_wins'] or 0}",
+            "winner_team": winner,
+            "incomplete": status not in ("completed", "cancelled"),
+            "dc_name": "", "dc_steam": "",
+            "p1_name": r["p1_name"], "p1_steam": r["p1_sid"], "p1_team": 1,
+            "p1_cards": _games_join(solo_cards.get((r["id"], r["player1_id"]), [])),
+            "p2_name": r["p2_name"], "p2_steam": r["p2_sid"], "p2_team": 2,
+            "p2_cards": _games_join(solo_cards.get((r["id"], r["player2_id"]), [])),
+            "p3_name": "", "p3_steam": "", "p3_team": 0, "p3_cards": "",
+            "p4_name": "", "p4_steam": "", "p4_team": 0, "p4_cards": "",
+        })
+
+    combined = two + one
+    combined.sort(key=lambda x: x["created_at"] or "", reverse=True)
+    return {"series": combined[:limit]}
+
+
+class _AdminReverseTeamSeriesReq(BaseModel):
+    admin_steam_id: str
+    series_id: str
+    reason: str = "admin_reverse"
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/admin/team/reverse-series", tags=["Admin"])
+async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSession = Depends(get_db)):
+    """Reverse a COMPLETED 2v2 series: undo each slot's Glicko rating change, decrement
+    completed_series, reverse the series-completion gold (+ bet payouts/tax), invalidate its
+    matches, and cancel the series. Rating-only reversal (RD/volatility not restored),
+    matching the 1v1 admin/reverse-series. Admin-HMAC gated."""
+    await _require_admin(db, req.admin_steam_id, "reverse_team_series", req.series_id, req.hmac_signature)
+    try:
+        sid = UUID(req.series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+    s = (await db.execute(text("""
+        SELECT status, t1a_id, t1b_id, t2a_id, t2b_id,
+               t1a_rating_change, t1b_rating_change, t2a_rating_change, t2b_rating_change
+          FROM team_series WHERE id = :sid FOR UPDATE
+    """), {"sid": sid})).mappings().first()
+    if s is None:
+        raise HTTPException(404, "Series not found")
+    if s["status"] != "completed":
+        return {"status": "noop", "reason": f"series is '{s['status']}', not completed"}
+
+    slots = [(s["t1a_id"], s["t1a_rating_change"]), (s["t1b_id"], s["t1b_rating_change"]),
+             (s["t2a_id"], s["t2a_rating_change"]), (s["t2b_id"], s["t2b_rating_change"])]
+    await _assert_no_service_subject(
+        db, affected_player_ids=[pid for pid, _ in slots if pid is not None])
+    reverse_txns = (await db.execute(text("""
+        SELECT player_id, amount, reason FROM gold_transactions
+         WHERE reference_id = :ref
+           AND reason IN ('team_series_win', 'team_series_loss', 'team_bet_payout',
+                          'team_bet_tax')
+         ORDER BY player_id::text, id
+    """), {"ref": str(sid)})).mappings().all()
+    await _assert_no_service_subject(
+        db, affected_player_ids=[tx["player_id"] for tx in reverse_txns])
+    # Lock protocol (same as _complete_team_series_with_ratings: series row
+    # first — held above — then players sorted str(pid) FOR NO KEY UPDATE,
+    # then glicko in the same sorted order). This endpoint previously took
+    # glicko tuple locks in SLOT order with no players pass at all — a
+    # glicko-before-players inversion that could ABBA against a concurrent
+    # completion sharing players (dc_incomplete husk scenario).
+    for _pid in sorted((pid for pid, _ in slots if pid is not None), key=str):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": _pid},
+        )
+    for pid, rc in sorted((sl for sl in slots if sl[0] is not None), key=lambda sl: str(sl[0])):
+        await db.execute(text("""
+            UPDATE glicko_ratings_2v2
+               SET rating = rating - :rc,
+                   completed_series = GREATEST(0, completed_series - 1),
+                   updated_at = NOW(), last_calculated = NOW()
+             WHERE player_id = :pid
+        """), {"rc": float(rc or 0), "pid": pid})
+
+    # Reverse series-completion gold (win/loss bonus + bet payouts/tax). Win/loss bonus also
+    # bumped team_gold_earned; bet payouts/tax only gold_earned. Bettor rows sit
+    # outside the four held member locks (same accepted class as live bet
+    # settlement); ORDER BY player_id::text matches the settle path's order so
+    # the two can't invert against each other.
+    for tx in reverse_txns:
+        await db.execute(text(
+            "UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - :amt) WHERE id = :pid"
+        ), {"amt": tx["amount"], "pid": tx["player_id"]})
+        if tx["reason"] in ("team_series_win", "team_series_loss"):
+            await db.execute(text(
+                "UPDATE players SET team_gold_earned = GREATEST(0, COALESCE(team_gold_earned,0) - :amt) WHERE id = :pid"
+            ), {"amt": tx["amount"], "pid": tx["player_id"]})
+        db.add(GoldTransaction(player_id=tx["player_id"], amount=-tx["amount"],
+                               reason="team_series_reversal", reference_id=str(sid)))
+
+    await db.execute(text("""
+        UPDATE team_matches SET invalidated_at = NOW(), invalidation_reason = 'admin_reverse'
+         WHERE series_id = :sid AND invalidated_at IS NULL
+    """), {"sid": sid})
+    await db.execute(text("""
+        UPDATE team_series SET status = 'cancelled', winner_team = NULL,
+               invalidated_at = NOW(), invalidation_reason = :rsn
+         WHERE id = :sid
+    """), {"sid": sid, "rsn": (req.reason or "admin_reverse")[:64]})
+    # Player Cards (WP-D): the series' unopened earned packs go with the result.
+    try:
+        async with db.begin_nested():   # a failed void must not abort the reversal (#235)
+            await _pc_void_earned_packs(db, mode="team", series_id=sid, label="admin-reverse")
+    except Exception as pcex:
+        print(f"[PC-EARNED] void failed for team {sid}: {pcex}")
+    # Unsettled bets on the now-voided result are refunded (settled bets are
+    # deliberately untouched — winnings clawback is a separate policy call).
+    await _reconcile_team_series_bets(db, sid, "admin_reverse")
+    db.add(AdminAction(admin_steam_id=req.admin_steam_id, action="reverse_team_series",
+                       target_series_id=sid, details={"reason": req.reason}))
+    await db.commit()
+    return {"status": "reversed", "series_id": req.series_id}
+
+
+@app.post("/api/v1/admin/team/rebuild-glicko", tags=["Admin"])
+async def admin_rebuild_team_glicko(
+    x_internal_key: str = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: rebuild ALL 2v2 Glicko ratings + completed_series counters from the
+    completed-series history. API_SECRET_KEY gated. Idempotent / re-runnable.
+
+    Fixes the historical invisibility bug: prior recovery migrations (077-080)
+    inserted completed team_series + credited gold/xp but never created the
+    glicko_ratings_2v2 rows or bumped completed_series, so recovered players had
+    NULL/zero 2v2 ratings and were filtered off the 2v2 leaderboard
+    (WHERE completed_series >= 1). This replays every completed, non-invalidated
+    series in chronological order through the same Glicko-2 math, writing fresh
+    ratings + an accurate completed_series count for every participant.
+
+    Does NOT touch gold/xp (those were already credited by the live path /
+    recovery migrations — replaying them would double-pay). Ratings-only rebuild."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(403, "Internal endpoint")
+
+    async def _read_completed_series():
+        return (await db.execute(text("""
+            SELECT id, t1a_id, t1b_id, t2a_id, t2b_id, winner_team, completed_at
+              FROM team_series
+             WHERE status='completed' AND winner_team IN (1,2)
+               AND t1a_id IS NOT NULL AND t1b_id IS NOT NULL
+               AND t2a_id IS NOT NULL AND t2b_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM players p
+                    WHERE p.steam_id = ANY(CAST(:service_ids AS text[]))
+                      AND p.id IN (t1a_id, t1b_id, t2a_id, t2b_id))
+             ORDER BY completed_at ASC NULLS LAST
+        """), {"service_ids": list(SPECTATE_BROADCAST_STEAM_IDS)})).mappings().all()
+
+    series_rows = await _read_completed_series()
+
+    # In-memory rating state per player; seed defaults on first appearance.
+    # sids_by_pid: the exact SET of series ids replayed for each player —
+    # the recheck below compares sets, not counts, because a count can alias
+    # (a reversal cancelling one series while a new one completes leaves the
+    # count equal with the membership changed). len(set) is also the correct
+    # completed_series value even for a degenerate row carrying the same
+    # player in two slots (which a raw count would tally twice, making the
+    # recheck permanently mismatch and the player unfixable).
+    state: dict = {}
+    sids_by_pid: dict = {}
+
+    def seed(pid):
+        if pid not in state:
+            state[pid] = {"rating": GLICKO2_DEFAULT_RATING, "rating_deviation": GLICKO2_DEFAULT_RD,
+                          "volatility": GLICKO2_DEFAULT_VOLATILITY, "peak": GLICKO2_DEFAULT_RATING}
+            sids_by_pid[pid] = set()
+
+    for s in series_rows:
+        t1 = [s["t1a_id"], s["t1b_id"]]
+        t2 = [s["t2a_id"], s["t2b_id"]]
+        for pid in t1 + t2:
+            seed(pid)
+            sids_by_pid[pid].add(s["id"])
+        team1_won = (s["winner_team"] == 1)
+        snap = {pid: dict(state[pid]) for pid in t1 + t2}
+
+        def calc(pid, opp_pids, won):
+            opps = [(snap[o]["rating"], snap[o]["rating_deviation"], 1.0 if won else 0.0) for o in opp_pids]
+            return calculate_new_rating(snap[pid]["rating"], snap[pid]["rating_deviation"],
+                                        snap[pid]["volatility"], opps, GLICKO2_TAU)
+        for pid in t1:
+            nr, nrd, nv = calc(pid, t2, team1_won)
+            state[pid] = {"rating": nr, "rating_deviation": nrd, "volatility": nv,
+                          "peak": max(state[pid]["peak"], nr)}
+        for pid in t2:
+            nr, nrd, nv = calc(pid, t1, not team1_won)
+            state[pid] = {"rating": nr, "rating_deviation": nrd, "volatility": nv,
+                          "peak": max(state[pid]["peak"], nr)}
+
+    # Universe = replayed participants UNION everyone who ALREADY has a 2v2
+    # rating row (Codex cold review). If a player's only completed series was
+    # reversed they vanish from `state` entirely, and their existing row would
+    # keep a stale rating/RD/peak and a nonzero completed_series forever —
+    # visible on the 2v2 leaderboard, which filters `completed_series >= 1`.
+    # Seeding them gives defaults and zero series, so this really is a replay
+    # of history rather than a replay of whoever currently appears in one.
+    for _pid in (await db.execute(text("""
+        SELECT g.player_id FROM glicko_ratings_2v2 g
+        JOIN players p ON p.id = g.player_id
+        WHERE NOT (p.steam_id = ANY(CAST(:service_ids AS text[])))
+    """), {"service_ids": list(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all():
+        seed(_pid)
+
+    # Persist via one SHORT transaction per player: lock that player's row
+    # (canonical FOR NO KEY UPDATE), re-verify the history generation, upsert,
+    # commit. Why not one big sorted lock pass over every participant
+    # (adversarial review find): bettor gold UPDATEs in the live paths are
+    # outside every writer's sorted lock set, and a pass this wide is
+    # near-guaranteed to hold some bettor's row while waiting on a row a live
+    # report holds, whose bet settle then wants the bettor — an ABBA no
+    # ordering discipline covers. A mini-transaction holds at most one players
+    # row (+ that player's glicko row, which any live writer only takes AFTER
+    # holding the same players row), so no hold-and-wait chain can form.
+    #
+    # The guard is GLOBAL, not per-player (Codex cold review): Glicko is a
+    # chain, so a reversal in an OPPONENT's history changes the correct result
+    # for this player even though this player's own series set is untouched —
+    # a per-player check passes and writes a silently stale rating. Any change
+    # to the completed-series set therefore invalidates the whole replay: stop,
+    # report every not-yet-written player as contended, and let the admin
+    # re-run (idempotent). One extra indexed read per player on a small table
+    # is a fine price for not writing wrong ratings.
+    #
+    # KNOWN TRADE, accepted: committing per player means readers can observe a
+    # MIXED generation mid-run (`place_team_bet` stores durable odds from the
+    # 2v2 ratings it reads). The alternative — one transaction — is the wide
+    # lock pass that deadlocks live match reports. Run this when nobody is
+    # playing; it is an admin repair tool, not a live-safe operation.
+    _snapshot_sids = {r["id"] for r in series_rows}
+    _ordered = sorted(state.items(), key=lambda kv: str(kv[0]))
+    written = 0
+    contended: list = []
+    for _idx, (pid, st) in enumerate(_ordered):
+        await _assert_no_service_subject(db, affected_player_ids=[pid])
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": pid},
+        )
+        live_sids = set((await db.execute(text("""
+            SELECT id FROM team_series
+             WHERE status='completed' AND winner_team IN (1,2)
+               AND t1a_id IS NOT NULL AND t1b_id IS NOT NULL
+               AND t2a_id IS NOT NULL AND t2b_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM players p
+                    WHERE p.steam_id = ANY(CAST(:service_ids AS text[]))
+                      AND p.id IN (t1a_id, t1b_id, t2a_id, t2b_id))
+        """), {"service_ids": list(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all())
+        if live_sids != _snapshot_sids:
+            contended = [str(p) for p, _ in _ordered[_idx:]]
+            await db.commit()
+            print(f"[REBUILD-2V2] completed-series history changed under the rebuild after "
+                  f"{written} player(s); STOPPING with {len(contended)} unwritten. The replay is "
+                  f"stale for everyone downstream of the change — re-run when play has settled.")
+            break
+        await db.execute(text("""
+            INSERT INTO glicko_ratings_2v2
+                (player_id, rating, rating_deviation, volatility, peak_rating,
+                 games_in_period, completed_series, last_calculated, updated_at)
+            VALUES (:pid, :r, :rd, :v, :peak, 0, :cs, NOW(), NOW())
+            ON CONFLICT (player_id) DO UPDATE SET
+                rating=:r, rating_deviation=:rd, volatility=:v,
+                peak_rating=:peak, completed_series=:cs,
+                last_calculated=NOW(), updated_at=NOW()
+        """), {"pid": pid, "r": st["rating"], "rd": st["rating_deviation"],
+               "v": st["volatility"], "peak": st["peak"], "cs": len(sids_by_pid[pid])})
+        await db.commit()
+        written += 1
+    return {"status": ("rebuilt" if not contended else "incomplete_rerun_needed"),
+            "series_replayed": len(series_rows),
+            "players_written": written, "players_contended": contended}
+
+
+def _verify_team_dc_hmac(steam_id: str, series_id: str, dc_player_steam_id: str, signature: str) -> bool:
+    """HMAC for team-DC reports: sha256(secret, "{reporter}:{series}:{dc_player}:dc")."""
+    if not MATCH_HMAC_SECRET:
+        return True
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"{steam_id}:{series_id}:{dc_player_steam_id}:dc".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature or "")
+
+
+_TEAM_RESUME_WINDOW_MINUTES = 30
+
+
+def _team_quartet_key(pids) -> str:
+    """Canonical identity of a four-player group for advisory locking —
+    sorted str(uuid) join, the same canonical ordering every other lock pass
+    uses (#197). Value-keyed because the rows being serialized (a same-four
+    team_series) may not exist yet (#207)."""
+    return ",".join(sorted(str(p) for p in pids))
+
+
+async def _team_quartet_lock(db: AsyncSession, pids) -> None:
+    """Serialize every same-four series CREATION/RESUME funnel (r1 finding
+    4): the queue matcher and the signed continuation endpoint could both
+    read "no live same-four series" and insert disjoint rows. Both funnels
+    take this xact-scoped advisory lock BEFORE their live recheck.
+    Ordering note: the queue poll holds team_queue tuples when it takes
+    this; the continuation holds per-steam advisory locks. Neither ever
+    acquires the other's first resource, and two polls over one quartet
+    cannot both hold the same queue rows, so no cycle exists."""
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"
+    ), {"k": _team_quartet_key(pids)})
+
+
+def _team_series_resumable(row, now=None) -> bool:
+    """ONE resume-eligibility predicate for every path (r1 finding 8 — the
+    dedupe backstop bypassing the sticky path's age/reason/grace rules is
+    how a two-hour-old husk got reactivated with a stale score). `row` must
+    carry status, dc_grace_until, invalidation_reason, created_at,
+    room_issued_at, last_game_at (newest valid team_matches.ended_at, may
+    be None), games, t1/t2_series_wins."""
+    now = now or datetime.now(timezone.utc)
+    if (row["games"] or 0) <= 0 and \
+            (row["t1_series_wins"] or 0) <= 0 and (row["t2_series_wins"] or 0) <= 0:
+        return False   # zero-game rows are superseded, never resumed
+    window = timedelta(minutes=_TEAM_RESUME_WINDOW_MINUTES)
+    fresh = False
+    for ts_col in ("created_at", "room_issued_at", "last_game_at"):
+        v = row.get(ts_col) if hasattr(row, "get") else row[ts_col]
+        if v is not None and (now - v) < window:
+            fresh = True
+            break
+    st = row["status"]
+    if st == "active":
+        return fresh
+    if st == "dc_paused":
+        return row["dc_grace_until"] is not None and row["dc_grace_until"] > now
+    if st == "dc_incomplete":
+        return row["invalidation_reason"] == "dc_manual_pending" and fresh
+    return False
+
+
+async def _team_lock_family_pick(db: AsyncSession, four_pids,
+                                 req_t1=None, req_t2=None,
+                                 caller_steam: str = ""):
+    """Core of the same-four family resolution (r1 finding 5; r2 HIGH 2/3
+    made it a SHARED primitive — the queue matcher, the hosted-lobby Start
+    and the continuation endpoint are all same-four creation funnels and
+    each must resolve the WHOLE family, never a newest-row probe).
+
+    CONTRACT: the caller already holds _team_quartet_lock for these four.
+    Enumerates every live same-four row, locks each (SKIP LOCKED),
+    supersedes zero-game husks (cancel + bet reconcile), and picks the
+    authoritative resumable row per _team_series_resumable.
+
+    Returns ('picked', row) with the authoritative row LOCKED; ('fresh',
+    None) when nothing is resumable and an insert may proceed; ('defer',
+    None) when a family row is visible but locked elsewhere (admin resolve,
+    DC report, janitor) — never mint a duplicate while the authoritative
+    row is in motion.
+
+    Partition intent (r1 finding 11): when req_t1/req_t2 are given, a
+    played series whose stored split differs from the REQUESTED split (side
+    swap tolerated) is not resumable — a deliberate re-split starts a fresh
+    series; the old row is left for the janitor/admin rather than cancelled
+    (it has real results and bets). Zero-game husks are superseded
+    regardless of partition."""
+    fam = (await db.execute(text("""
+        SELECT ts.id FROM team_series ts
+         WHERE ts.status IN ('active', 'dc_paused', 'dc_incomplete')
+           AND ts.t1a_id = ANY(:ids) AND ts.t1b_id = ANY(:ids)
+           AND ts.t2a_id = ANY(:ids) AND ts.t2b_id = ANY(:ids)
+         ORDER BY ts.created_at DESC
+    """), {"ids": list(four_pids)})).scalars().all()
+    if not fam:
+        return ("fresh", None)
+    locked_rows = []
+    for fid in fam:
+        r = (await db.execute(text("""
+            SELECT ts.id, ts.status, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id,
+                   ts.t1_series_wins, ts.t2_series_wins, ts.dc_grace_until,
+                   ts.invalidation_reason, ts.created_at, ts.room_issued_at,
+                   ts.rules,
+                   (SELECT COUNT(*) FROM team_matches tm
+                     WHERE tm.series_id = ts.id
+                       AND tm.invalidated_at IS NULL) AS games,
+                   (SELECT MAX(tm.ended_at) FROM team_matches tm
+                     WHERE tm.series_id = ts.id
+                       AND tm.invalidated_at IS NULL) AS last_game_at
+              FROM team_series ts
+             WHERE ts.id = :sid
+               AND ts.status IN ('active', 'dc_paused', 'dc_incomplete')
+             FOR UPDATE OF ts SKIP LOCKED
+        """), {"sid": fid})).mappings().first()
+        if r is None:
+            # Visible a moment ago, now locked elsewhere or terminal. If it
+            # merely went terminal, the next poll's family read won't see it;
+            # deferring costs one 3s cycle either way.
+            return ("defer", None)
+        locked_rows.append(r)
+    candidates = []
+    for r in locked_rows:
+        if not _team_series_resumable(r):
+            continue
+        if req_t1 is not None and req_t2 is not None:
+            stored_t1 = {r["t1a_id"], r["t1b_id"]}
+            stored_t2 = {r["t2a_id"], r["t2b_id"]}
+            if not ((stored_t1 == set(req_t1) and stored_t2 == set(req_t2))
+                    or (stored_t1 == set(req_t2) and stored_t2 == set(req_t1))):
+                continue
+        candidates.append(r)
+    authoritative = None
+    if candidates:
+        candidates.sort(key=lambda r: (
+            (r["games"] or 0) + (r["t1_series_wins"] or 0) + (r["t2_series_wins"] or 0),
+            r["created_at"]), reverse=True)
+        authoritative = candidates[0]
+    for r in locked_rows:
+        if authoritative is not None and r["id"] == authoritative["id"]:
+            continue
+        if (r["games"] or 0) > 0 or (r["t1_series_wins"] or 0) > 0 \
+                or (r["t2_series_wins"] or 0) > 0:
+            # Played but not authoritative/eligible: leave it — it carries
+            # real results and possibly bets (#242: never move money from a
+            # dedupe pass). The janitor sweeps and the 2h listing arms age
+            # it out of every live surface.
+            continue
+        await db.execute(text("""
+            UPDATE team_series
+               SET status = 'cancelled', completed_at = NOW(),
+                   invalidation_reason = 'superseded_requeue'
+             WHERE id = :sid
+        """), {"sid": r["id"]})
+        await _reconcile_team_series_bets(db, r["id"], "superseded_requeue")
+        print(f"[TEAM-QUEUE-LOCK] superseded zero-game husk {r['id']} "
+              f"(family resolve, caller={caller_steam})")
+    if authoritative is None:
+        return ("fresh", None)
+    return ("picked", authoritative)
+
+
+async def _team_resolve_live_family(db: AsyncSession, four_pids, caller_pid,
+                                    caller_steam: str, my_qtype: str,
+                                    req_t1=None, req_t2=None):
+    """Queue-matcher wrapper over _team_lock_family_pick: takes the quartet
+    lock, resolves the family, and re-locks the four QUEUE rows onto the
+    authoritative series. Returns ('relocked', TeamQueuePollResponse) /
+    ('fresh', None) / ('defer', None)."""
+    await _team_quartet_lock(db, four_pids)
+    outcome, authoritative = await _team_lock_family_pick(
+        db, four_pids, req_t1, req_t2, caller_steam)
+    if outcome != "picked":
+        return (outcome, None)
+    await _assert_no_service_subject(db, affected_player_ids=list(four_pids))
+    resp = await _team_relock_existing_series(
+        db, authoritative, list(four_pids), caller_pid, caller_steam,
+        "family_resolve")
+    return ("relocked", resp)
+
+
+async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
+                                       caller_pid, caller_steam: str,
+                                       reason: str):
+    """Bug 245: re-lock four queued players onto an EXISTING live series
+    instead of minting a duplicate. Shared by the sticky DC-resume path and
+    the same-four dedupe backstop in the 2v2 queue matcher.
+
+    Contract: the CALLER holds FOR UPDATE (obtained via SKIP LOCKED) on the
+    series row `srow` and has verified all four members are present + fresh
+    in team_queue (searching, or already bound to THIS series), eligible per
+    _team_series_resumable, and not service subjects. Team assignment keeps
+    the series' ORIGINAL partition — scores only make sense under it, and
+    the balancer-time slot order stays canonical for HMAC matching.
+
+    Review r1 findings, each load-bearing:
+      * live_t1/t2_points are PRESERVED (finding 1): they are the bet
+        cutoff's monotonic latch — resetting them reopened a betting window
+        that game 1's progress had already closed. The next game's live
+        POSTs overwrite them.
+      * photon_room_id / room_issued_at are CLEARED (finding 3): the old
+        room is dead, and a deferred DC report naming it must not match the
+        resumed series (report-dc ignores a room-carrying report against a
+        room-less row). Re-issuance stores the new room before play.
+      * spawn_confirmations / spawn_confirmed_by RESET (finding 6): stale
+        4/4 evidence from the dead room disabled the 180s assembly cancel
+        and the stale-series janitor for the new room.
+    The dc_manual_pending flag clears because play resumed — nothing is
+    pending an admin call any more."""
+    t1a, t1b = srow["t1a_id"], srow["t1b_id"]
+    # Room rules (migration 306, a1 H5): a relock is the SAME series, so the
+    # rows carry the series' own record again (rules are constant across the
+    # games of one series); a series born before the record (NULL) stays
+    # NULL — its rows then play the defaults and its history stays unknown.
+    _relock_rules = (_rules_json(srow["rules"]) if srow["rules"] is not None else None)
+    for pid in member_pids:
+        t = 1 if pid in (t1a, t1b) else 2
+        await db.execute(
+            text("""
+                UPDATE team_queue
+                   SET status = 'matched',
+                       series_id = :sid,
+                       team_assigned = :t,
+                       matched_at = NOW(),
+                       rules = CAST(:rules AS JSONB)
+                 WHERE player_id = :pid
+            """),
+            {"sid": srow["id"], "t": t, "pid": pid, "rules": _relock_rules},
+        )
+    await _lease_acquire_many(db, list(member_pids), "team", srow["id"],
+                              LEASE_TTL_ASSEMBLY)
+    # Flip the series back to active and clear DC fields so the next match
+    # plays through normally. Status guard is belt-and-suspenders — the
+    # caller's row lock already pins it.
+    await db.execute(
+        text("""
+            UPDATE team_series
+               SET status = 'active',
+                   dc_grace_until = NULL,
+                   dc_team_remaining = NULL,
+                   dc_player_id = NULL,
+                   photon_room_id = NULL,
+                   room_issued_at = NULL,
+                   spawn_confirmations = 0,
+                   spawn_confirmed_by = '[]'::jsonb,
+                   invalidation_reason = CASE
+                       WHEN invalidation_reason = 'dc_manual_pending' THEN NULL
+                       ELSE invalidation_reason END
+             WHERE id = :sid
+               AND status IN ('active', 'dc_paused', 'dc_incomplete')
+        """),
+        {"sid": srow["id"]},
+    )
+    # r2 HIGH 1: stamp the relock so report-dc can fence ROOMLESS (old
+    # client) reports arriving in the post-resume window — the room fence
+    # alone cannot see them. Savepointed (#235): pre-migration-235 the
+    # stamp is skipped and the fence simply stays inactive.
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "UPDATE team_series SET relocked_at = clock_timestamp() WHERE id = :sid"
+            ), {"sid": srow["id"]})
+    except Exception:
+        pass
+    # Clear the deferred-fallback marker with the other DC fields above. This
+    # funnel is one of the two that revive a series; the shared helper is the
+    # whole reason the other one cannot be forgotten again.
+    await _team_clear_dc_fallback_marker(db, srow["id"])
+    await db.commit()
+    print(f"[TEAM-QUEUE-LOCK] relock onto existing series={srow['id']} "
+          f"caller={caller_steam} reason={reason}")
+    # The poll responder reads the queue rows again on its next pass —
+    # return matched here so the caller sees the resume and surfaces the
+    # ready-up button.
+    my_team = 1 if caller_pid in (t1a, t1b) else 2
+    return TeamQueuePollResponse(
+        status="matched",
+        series_id=str(srow["id"]),
+        team_assigned=my_team,
+        teammates=[],   # filled by next poll tick from the queue rows
+        opponents=[],
+        match_age_seconds=0,
+    )
+
+
+@app.post("/api/v1/team/series/{series_id}/report-dc", tags=["Team Matches"])
+async def team_series_report_dc(
+    series_id: str,
+    reporter_steam_id: str = Query(...),
+    dc_player_steam_id: str = Query(...),
+    t1_points_total: int = Query(0, ge=0),
+    t2_points_total: int = Query(0, ge=0),
+    photon_room_id: str = Query(None),
+    is_fallback: bool = Query(False),
+    hmac_sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mid-series disconnect report. Three outcomes now. (0) DEFERRED — when
+    is_fallback is set, the report records a marker and settles nothing at
+    all; see the branch below for why, and team_dc_fallback_sweep_loop for
+    what eventually closes such a series. The two settling outcomes are
+    unchanged and are what every report without that flag still gets:
+    (1) lead-forfeit — if the non-DC team was already up a game AND the
+    abandoned game had >=2 total points, the whole series completes to them
+    with full ratings/economy; (2) otherwise the series flips to
+    status='dc_incomplete' (invalidation_reason='dc_manual_pending') for
+    manual admin resolution — UNLESS the same four re-queue within ~30
+    minutes, in which case the matcher's sticky resume / same-four dedupe
+    re-locks them onto THIS series (original partition, scores kept) and
+    clears the pending flag (bug 245). The old dc_paused-with-grace flow is
+    legacy; only the state-poll's expiry sweep still reads it."""
+    if not _verify_team_dc_hmac(reporter_steam_id, series_id, dc_player_steam_id, hmac_sig):
+        raise HTTPException(403, "Invalid DC report signature")
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+
+    # Resolve players.
+    pid_row = await db.execute(select(Player.id).where(Player.steam_id == dc_player_steam_id))
+    dc_pid = pid_row.scalar_one_or_none()
+    if dc_pid is None:
+        raise HTTPException(404, "DC'd player unknown")
+
+    # Locked read (r1 finding 3): the room validation below and every write
+    # in this endpoint must act on pinned state — an UNLOCKED read could
+    # validate the old room, lose the race to a concurrent resume's room
+    # rewrite, and still flip the resumed sitting. FOR NO KEY UPDATE (#202):
+    # the synthetic-forfeit team_matches INSERT below takes FK KEY SHARE on
+    # this row, and later writes are non-key UPDATEs; it still serializes
+    # against the family resolver's FOR UPDATE and the admin endpoint.
+    s_row = await db.execute(
+        text("""
+            SELECT id, status, t1a_id, t1b_id, t2a_id, t2b_id,
+                   t1_series_wins, t2_series_wins, photon_room_id
+              FROM team_series WHERE id = :sid
+               FOR NO KEY UPDATE
+        """),
+        {"sid": sid_uuid},
+    )
+    s = s_row.mappings().first()
+    if s is None:
+        raise HTTPException(404, "Series not found")
+    if s["status"] not in ("active", "dc_paused"):
+        # THE SETTLED-ROW EXIT. A report that arrives after anything terminal
+        # has been written -- by another report, by an admin, or by the
+        # deferred-fallback sweep -- is ignored here and is not rated. That is
+        # the second half of the bound stated in the deferral branch below.
+        #
+        # This call itself settles nothing: whatever wrote the terminal status
+        # wrote it before this report arrived, which is what "ignored": True
+        # says. "deferred": False rides this exit because every 200 this
+        # endpoint returns carries the field -- without it on the exits that
+        # do not park a report, a client could not tell this build from one
+        # that predates the flag and dropped the parameter (bug #266, learning
+        # #422). The field is DEFINED once, in the deferral branch below, and
+        # means here exactly what it says there and nothing more.
+        return {"status": s["status"], "ignored": True, "deferred": False}
+    # Bug 245 companion: a DEFERRED DC report (clients can hold one through an
+    # assembly phase and fire it minutes later) must not decide a series the
+    # four have since RESUMED. Two arms, both against the LOCKED row:
+    #  * stored room non-empty and mismatched -> the report names a room this
+    #    series does not own (its dead predecessor) -> ignore.
+    #  * report CARRIES a room while the stored room is EMPTY -> the resume
+    #    cleared the dead room and the new one is not issued yet (r1 finding
+    #    3's gap): any room-carrying report in that window is by definition
+    #    about the abandoned sitting -> ignore. A modern client always plays
+    #    in an issued room, which is stored before play begins.
+    # Unsigned hint: an empty/absent room (old clients) keeps today's
+    # behavior, and a forged "current" room buys nothing beyond omitting the
+    # param. Suffix tolerance mirrors the report-room grammar.
+    _claimed_room = (photon_room_id or "").strip()
+    _stored_room = (s["photon_room_id"] or "").strip()
+    if _claimed_room and (
+            (_stored_room
+             and _claimed_room != _stored_room
+             and not _claimed_room.startswith(_stored_room + "_"))
+            or not _stored_room):
+        return {"status": s["status"], "ignored": True,
+                "reason": "dc_room_mismatch", "deferred": False}
+    # r2 HIGH 1: an OLD client's report carries no room at all, so the fence
+    # above cannot see a delayed pre-resume report. Discriminator: the
+    # relock stamp. A ROOMLESS report inside the post-relock window is by
+    # construction about the abandoned sitting (a live report about the
+    # resumed play names the re-issued room). Residual, documented: an
+    # old-client LEGIT repeat-DC within 10 minutes of a resume is also
+    # ignored and falls to the admin/janitor path — the safe direction, and
+    # shrinking as clients update. Savepointed (#235) for pre-migration-235.
+    # clock_timestamp() on BOTH the stamps and this read (r3 HIGH 1, #277):
+    # NOW() freezes at transaction start, and this endpoint's row lock — or
+    # the relock's own lock waits — would otherwise silently shorten the
+    # promised window by however long the transaction waited.
+    if not _claimed_room:
+        _recent_relock = False
+        try:
+            async with db.begin_nested():
+                _recent_relock = bool((await db.execute(text(
+                    "SELECT 1 FROM team_series WHERE id = :sid"
+                    "  AND relocked_at IS NOT NULL"
+                    "  AND relocked_at > clock_timestamp() - INTERVAL '10 minutes'"
+                ), {"sid": sid_uuid})).scalar())
+        except Exception:
+            _recent_relock = False
+        if _recent_relock:
+            return {"status": s["status"], "ignored": True,
+                    "reason": "dc_after_resume", "deferred": False}
+    await _assert_no_service_subject(
+        db,
+        affected_player_ids=[s["t1a_id"], s["t1b_id"], s["t2a_id"], s["t2b_id"]],
+    )
+
+    # Determine which team the DC'd player was on.
+    dc_team = 1 if dc_pid in (s["t1a_id"], s["t1b_id"]) else 2 if dc_pid in (s["t2a_id"], s["t2b_id"]) else None
+    if dc_team is None:
+        raise HTTPException(400, "DC'd player isn't part of this series")
+    other_team = 2 if dc_team == 1 else 1
+
+    # F6 hardening: the reporter must be a member of THIS series and on the team
+    # that did NOT disconnect. The DC HMAC proves "a mod produced this", not that
+    # the reporter was in the match (shared-secret limitation), so bind to series
+    # membership server-side — stops attributing a DC to an arbitrary player.
+    rep_pid = (await db.execute(
+        select(Player.id).where(Player.steam_id == reporter_steam_id)
+    )).scalar_one_or_none()
+    rep_team = 1 if rep_pid in (s["t1a_id"], s["t1b_id"]) else 2 if rep_pid in (s["t2a_id"], s["t2b_id"]) else None
+    if rep_team is None or rep_team == dc_team:
+        raise HTTPException(400, "reporter must be a member of the non-DC team")
+
+    # ── Deferred fallback: the report that decides nothing ─────────────────
+    # is_fallback marks a report filed by a survivor that is NOT the elected
+    # reporter. ONE condition produces it in the client THIS release carries
+    # -- no released build publishes cr_dcr at all, so there is no older
+    # client whose conditions also have to be counted: the elected
+    # seat published a terminal refusal (cr_dcr=no), which tells the survivors
+    # that no real-totals report is coming. When the elected seat's attempts
+    # go UNANSWERED instead, it publishes cr_dcr=unk and the survivors WITHHOLD
+    # — no fallback is filed, no marker is written and the series stays
+    # 'active'. The disposition of such a series is the rowless-husk arm of
+    # team_queue_cleanup_loop: quiet for 60 minutes, no team_queue rows, no
+    # positive in-game evidence, and it is cancelled with
+    # invalidation_reason='rowless_husk' and its bets reconciled. That is a
+    # cancel, not a rating — no seat gains from an unanswered report.
+    #
+    # WHY IT DEFERS. A fallback and the elected seat's real-totals report can
+    # be in flight at the same moment and are not orderable from inside either
+    # client. When both settle on arrival, whichever takes this row's lock
+    # first decides the series: a fallback landing first writes
+    # 'dc_incomplete', and the settled-row exit above then discards the
+    # real-totals report along with the rated lead-forfeit it would have
+    # applied — the same four players get a rated series or a pending admin
+    # row depending on request order alone. Deferring removes the ordering
+    # from the outcome instead of guessing at it.
+    #
+    # THE BOUND, and it is a bound rather than a guarantee. Both lanes carry
+    # this sentence verbatim (client ApiClient.cs and the header of migration
+    # 326):
+    #
+    #   A real-totals report wins while the deferred marker is younger than
+    #   420 seconds, and after that only until a sweep tick finds no live-game
+    #   evidence for the series and settles the row; once a row is settled, a
+    #   later report is refused at the settled-row exit and is not rated.
+    #
+    # The round-4 comment here said "at ANY later moment", which is the one
+    # thing that is not true: the sweep exists precisely to close a row that
+    # nothing else ever settles, and a report that arrives after it has done
+    # so takes the settled-row exit above (#351 — the guarantee a comment
+    # asserts is a claim about the whole state space).
+    #
+    # THE INPUT IS UNSIGNED, and deliberately. The DC canonical is frozen at
+    # reporter:series:dc_player:dc, so a new signed field would fail every
+    # current client's signature; is_fallback rides outside it, the same
+    # precedent as photon_room_id above. It can only move this handler toward
+    # the conservative outcome — setting it buys a report that decides
+    # nothing, omitting it buys exactly today's position (#283). Default False
+    # keeps every client that predates the flag on today's path.
+    #
+    # WHERE THIS BRANCH SITS, AND WHY THERE. After the row lock and after
+    # every validation the settling path performs — the room fence, the
+    # post-relock fence, the service-subject assertion, the DC-team resolution
+    # and the reporter-membership bind — and BEFORE the lead-forfeit block, so
+    # no rating, gold or team_matches write is REACHABLE with is_fallback set.
+    # That is structural. It does not rest on a fallback happening to carry
+    # zero points, which is a property of today's client and not a check this
+    # endpoint could fail on (#342).
+    #
+    # clock_timestamp(), not NOW(): NOW() freezes at transaction start, and
+    # this handler's own FOR NO KEY UPDATE wait would backdate the marker by
+    # the whole wait — a wait approaching the bound would hand the sweep a
+    # marker already expired on arrival and let it settle the series while a
+    # real-totals report was still in flight (#277). COALESCE keeps the FIRST
+    # filing, so neither a retrying client nor a second survivor can push the
+    # bound forward by re-posting.
+    if is_fallback:
+        await db.execute(
+            text("""
+                UPDATE team_series
+                   SET dc_fallback_at = COALESCE(dc_fallback_at, clock_timestamp()),
+                       dc_fallback_player_id = COALESCE(dc_fallback_player_id, :dpid)
+                 WHERE id = :sid AND status IN ('active', 'dc_paused')
+            """),
+            {"sid": sid_uuid, "dpid": dc_pid},
+        )
+        await db.commit()
+        print(f"[TEAM-DC] fallback DEFERRED series={sid_uuid} dc_player={dc_pid} "
+              f"reporter={reporter_steam_id} bound={_DC_FALLBACK_DEFER_SECONDS}s")
+        # "deferred" is a status this endpoint has never returned before, which
+        # is how a client tells a deployed server from one that predates the
+        # flag and dropped it (bug #266, learning #422): a box at 0cc7f75
+        # answers with one of ITS statuses — a settlement, or one of the same
+        # three ignoring exits it already had — and never with this one, and
+        # nothing on that box will revisit the report afterwards. It is a 2xx
+        # either way, so the client's answered/unanswered split reads it as
+        # answered and the seat stops retrying. A caller that needs the
+        # deferral must read this field; having sent the parameter proves
+        # nothing about what answered.
+        #
+        # The FIELD, not the status, is the discriminator, and it rides every
+        # 200 this endpoint returns. THE DEFINITION, and the only one in this
+        # file: "deferred" says only whether THIS call parked the report: true
+        # when it did, false on the five exits that do not park one -- two of
+        # which settle the series while the other three, the settled-row exit
+        # and the two room fences, decide nothing and say so with "ignored":
+        # true -- and absent only from a box that predates the flag. False is
+        # therefore not a claim that this call settled anything: a caller that
+        # needs the disposition reads "ignored" and "status" out of the same
+        # body, and a caller that reads no "deferred" key at all knows it
+        # reached a box that predates the flag.
+        return {
+            "status": "deferred",
+            "deferred": True,
+            "series_status": s["status"],
+            "reason": "dc_fallback_deferred",
+            "defer_seconds": _DC_FALLBACK_DEFER_SECONDS,
+        }
+
+    # F6 FOLLOW-UP (tracked in docs/SECURITY_ACTION_ITEMS.md): t1/t2_points_total
+    # are still client-supplied + outside the DC HMAC, so a member could misreport
+    # the abandoned game's score to flip the >=2-points game-award branch. Lower
+    # impact (one 2v2 game; the lead-forfeit rule below ignores points entirely)
+    # and needs a coordinated client-canonical change — folding points into the
+    # DC signature is the next pass.
+    total_points = (t1_points_total or 0) + (t2_points_total or 0)
+
+    # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────
+    # If the NON-DC (remaining) team has ALREADY won at least one game of this
+    # series AND the abandoned game had at least 2 total points, a DC by the
+    # other team forfeits the WHOLE series to them. This is the rule Sid asked
+    # for: you can't leave a 2v2 to dodge a loss once the other team is up a
+    # game. BOTH conditions are required — the branch below tests them
+    # together — and the points half is what keeps a break/restart out of it;
+    # the round-4 comment here said "regardless of the abandoned game's point
+    # total", which is the opposite of the code two lines down.
+    #
+    # It applies full Glicko and series gold via the shared helper so the
+    # forfeit win actually moves the board (the old dc_decided/dc_forfeit paths
+    # completed the series with NO ratings — leaving was strictly safer than
+    # losing). NO XP: match XP is a per-GAME payout granted inline by
+    # submit_team_match for games actually played, and
+    # _complete_team_series_with_ratings deliberately awards none — see its
+    # own docstring, which records that an earlier version of this claim was
+    # wrong in the same direction.
+    other_team_existing_wins = (s["t1_series_wins"] or 0) if other_team == 1 else (s["t2_series_wins"] or 0)
+    # "Clear case" (Sid's rule): auto-forfeit ONLY when the non-DC team was already
+    # up a game AND real play happened in the abandoned game (>=2 points). A break/
+    # restart DC (little or no play) or an even series is NOT auto-decided — it drops
+    # to dc_incomplete below for manual resolution in the mod admin panel, so a 2v2
+    # that breaks and needs a restart never auto-penalizes anyone.
+    if (other_team_existing_wins or 0) >= 1 and total_points >= 2:
+        # Record a synthetic forfeit game for history parity.
+        await db.execute(
+            text("""INSERT INTO team_matches
+                       (series_id, t1a_id, t1b_id, t2a_id, t2b_id,
+                        t1_rounds_won, t2_rounds_won, t1_points_total, t2_points_total,
+                        winner_team, dc_player_id, dc_at, ended_at, photon_room_id)
+                   VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 0, 0, :t1p, :t2p,
+                           :wt, :dpid, NOW(), NOW(), 'dc_leadforfeit')"""),
+            {"sid": sid_uuid, "t1a": s["t1a_id"], "t1b": s["t1b_id"],
+             "t2a": s["t2a_id"], "t2b": s["t2b_id"], "t1p": t1_points_total or 0,
+             "t2p": t2_points_total or 0, "wt": other_team, "dpid": dc_pid},
+        )
+        new_ratings = await _complete_team_series_with_ratings(
+            db, sid_uuid, other_team, "dc_leadforfeit", dc_pid=dc_pid,
+        )
+        await db.commit()
+        return {"status": "completed", "winner_team": other_team,
+                "reason": "dc_leadforfeit", "new_ratings": new_ratings,
+                "deferred": False}
+
+    # Not a clear-cut forfeit (non-DC team wasn't already up a game, or too little
+    # was played to count). Per the 2v2 manual-control policy — a game can break and
+    # need a restart, and we never auto-penalize for that — record who left and mark
+    # the series INCOMPLETE for an admin to award/void from the mod's admin panel.
+    # No auto-forfeit, no rating/economy effect. Games reported before the DC stand;
+    # the admin decides the series outcome from the recent-series log.
+    await db.execute(
+        text("""
+            UPDATE team_series
+               SET status = 'dc_incomplete',
+                   dc_player_id = :dpid,
+                   dc_team_remaining = :ot,
+                   invalidation_reason = 'dc_manual_pending'
+             WHERE id = :sid AND status IN ('active', 'dc_paused')
+        """),
+        {"sid": sid_uuid, "dpid": dc_pid, "ot": other_team},
+    )
+    await db.commit()
+    return {
+        "status": "dc_incomplete",
+        "dc_team_remaining": other_team,
+        "reason": "awaiting_admin_resolution",
+        "deferred": False,
+    }
+
+
+# ── 2v2 series continuation (recording-gap fix) ─────────────────────────────
+# When four players keep playing in the same cr_ff room past the first BO3 (which
+# locks at first-to-2), the client had no active series to report to and later games
+# were dropped entirely. The reporter (lowest Steam ID) calls this at game start to
+# open a fresh 'active' series for the SAME four + room, so games 4+ of a sitting
+# record as ranked. Anti-abuse: the four must have a real recent series together
+# (the sitting's series 1) and the caller must be the lowest Steam ID. HMAC over the
+# shared mod secret (canonical below).
+class _TeamContinuationReq(BaseModel):
+    reporter_steam_id: str
+    room_id: str
+    region: str | None = None
+    t1a_steam: str
+    t1b_steam: str
+    t2a_steam: str
+    t2b_steam: str
+    hmac_signature: str | None = None
+
+
+_CONTINUATION_WINDOW_MINUTES = 60  # prior series must have completed this recently

@@ -14,7 +14,10 @@ namespace CompetitiveRounds
 {
     public static class ApiClient
     {
-        private static string baseUrl = "";
+        // volatile: written on the main thread (Initialize, the boot verdict and
+        // the secure-route flip, board row 27) and also read from the chat
+        // socket's thread (FetchRecentChat on a reconnect).
+        private static volatile string baseUrl = "";
         private static float lastFetchTime = 0f;
         private static float fetchCooldown = 5f; // Min seconds between refreshes
 
@@ -35,8 +38,33 @@ namespace CompetitiveRounds
         // Version check
         public static string LatestModVersion { get; private set; } = null;
         public static string MinModVersion { get; private set; } = null;
-        // Set when the server returns 426 to any request — UI hides everything and prompts update.
+        // Set when the server answers with the GLOBAL mod-version floor — UI hides
+        // everything and prompts update. NOT every 426: several narrow refusals use
+        // that status too, and HandleVersionGate deliberately lets those through to
+        // their own callers rather than locking the menu (r3/r4 findings).
         public static bool ForceUpdateRequired { get; private set; } = false;
+        // The inactivity window every board filters on, as the SERVER states it
+        // (/api/v1/mod-version -> leaderboard_active_days). 0 means "the server
+        // has not told us", which is what an older server and a failed version
+        // check both look like; every surface that prints a day count prints no
+        // count at all in that case rather than falling back to a number of its
+        // own. LEADERBOARD_ACTIVE_DAYS is configurable server-side, so a
+        // client-side 90 was wrong on any other setting and a second constant
+        // here would only move that defect rather than remove it.
+        public static int LeaderboardActiveDays { get; private set; } = 0;
+
+        // THERE IS NO ADVERTISED SERIES-STATUS CAPABILITY, and re-adding one is the
+        // defect this round removed. The previous round read a capability boolean
+        // off /api/v1/mod-version and spent it as permission to send a per-series
+        // request. Those are two requests and two routing decisions: the edge can
+        // answer /mod-version from one box and the series read from another, and a
+        // rollback moves a box under a flag already held. A capability read from
+        // one response is not a property of the box that answers the next one.
+        // What replaces it is in PollTeamSeriesStatusReadOnly: it polls a route the
+        // server lane adds as a pure read, which a box that predates it does not
+        // serve at all, and the answer it trusts has to say `readonly` in its own
+        // body — the answering box proves itself, per response, or the banner goes
+        // dark for that series.
 
         // Recent ranked series (for leaderboard sidebar)
         public static List<RecentSeriesEntry> CachedRecentSeries { get; private set; }
@@ -102,7 +130,8 @@ namespace CompetitiveRounds
             // Bug 342: seen within 3 minutes and not appear-offline. Server-decided
             // (SQL over players.last_seen), so an older server simply omits it -> false.
             public bool is_online;
-            // Item d: not seen for 90 days (server-decided). Only ever true in a
+            // Item d: not seen for LEADERBOARD_ACTIVE_DAYS days (server-decided; the
+            // window itself arrives as leaderboard_active_days). Only ever true in a
             // board fetched with include_inactive=true; absent -> false.
             public bool inactive;
         }
@@ -593,9 +622,9 @@ namespace CompetitiveRounds
             // main.py VERBATIM — the F5 Achievements tab iterates THIS dict, so a
             // key missing here is invisible in-game even though the server grants
             // it (unlock toasts already fall back to the server-sent name).
-            {"ffa_shutout_3",            new[]{"Clean House",          "Win a ranked FFA 5-0 with 3 or more players (nobody else takes a point)"}},
-            {"ffa_shutout_4",            new[]{"Party Crasher",        "Win a ranked FFA 5-0 with 4 or more players (nobody else takes a point)"}},
-            {"ffa_shutout_5",            new[]{"Hostile Takeover",     "Win a ranked FFA 5-0 with 5 or more players (nobody else takes a point)"}},
+            {"ffa_shutout_3",            new[]{"Clean House",          "Win a ranked FFA 5-0 with 3 or more players who finished the game (nobody else takes a point)"}},
+            {"ffa_shutout_4",            new[]{"Party Crasher",        "Win a ranked FFA 5-0 with 4 or more players who finished the game (nobody else takes a point)"}},
+            {"ffa_shutout_5",            new[]{"Hostile Takeover",     "Win a ranked FFA 5-0 with 5 or more players who finished the game (nobody else takes a point)"}},
             {"ffa_kills_50",             new[]{"Rampage",              "Get over 50 kills in a single ranked FFA"}},
             {"ffa_kills_100",            new[]{"Bodycount",            "Get over 100 kills in a single ranked FFA"}},
             {"ffa_half_point_heartbreak",  new[]{"Heartbreak",           "Lose a ranked FFA holding 10 or more half points that never became a point"}},
@@ -653,8 +682,17 @@ namespace CompetitiveRounds
             // `if (Success)` with no else, so LatestModVersion stays null, the
             // F5 Update button stays hidden, and the auto-updater never fires.
             // Probe first and fall back for the session if TLS can't connect.
-            if (string.Equals(baseUrl, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
-                Plugin.Instance.StartCoroutine(ProbeEndpointThenStart());
+            // Board row 27: the fall-back is no longer for the WHOLE session --
+            // the portal button and a timer re-check the secure route and the
+            // first usable answer returns the session to it (StartBootProbe).
+            // Only the compiled default gets a route: an explicit override is a
+            // deliberate choice and nothing re-checks or replaces it.
+            UsingLegacyFallback = false;
+            _route = null;
+            _routeHarnessBackup = RouteHarnessBackup();
+            if (_routeHarnessBackup != null
+                || string.Equals(baseUrl, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+                StartBootProbe();
             else
                 CheckModVersion();
             // Start the tournament heartbeat loop. This runs forever and fires
@@ -667,6 +705,10 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(TournamentHeartbeatLoop());
             // v1.29: always-on presence ping (mod-clients-online counter).
             Plugin.Instance.StartCoroutine(PresenceLoop());
+            // Verified reads (requirement 35): the read gate's stage, re-read
+            // from the OPEN /mod-version every 5 minutes and once after any
+            // gate refusal. DoCheckModVersion feeds the boot answer.
+            Plugin.Instance.StartCoroutine(ReadGateModePoll());
             // Sept 6 (in-game mail): unread/revision status poll — 60 s cadence
             // anchored 30 s off the presence ping (design B-6), plugin-level so
             // it keeps running with the F5 page closed (#50).
@@ -709,7 +751,21 @@ namespace CompetitiveRounds
         // matches has UNIQUE (photon_room_id, player1_id, player2_id), team_matches
         // has the 5-column equivalent, and room ids are per-game suffixed — a
         // replay of a report that actually landed just errors out and is dropped.
-        private class PendingReport { public string url; public string json; public int attempts; public float nextAt; }
+        private class PendingReport
+        {
+            public string url; public string json; public int attempts; public float nextAt;
+            /// <summary>In memory only (never persisted): the entry is held
+            /// back because no session is held for a transport that carries one
+            /// (SecureRouteRules.OutboxSendGate). Only so the wait is logged
+            /// once when it begins and once when it ends, not on every lap.</summary>
+            public bool waitingForSession;
+            /// <summary>In memory only: the time the last restore promised this
+            /// entry a look by (OutboxRouteRestored), negative when none stands.
+            /// A give-back never moves the entry later than it
+            /// (SecureRouteRules.OutboxGiveBackDue); a send that begins after
+            /// the promise has kept it.</summary>
+            public float restoreDueAt = -1f;
+        }
         private static readonly List<PendingReport> _pendingReports = new List<PendingReport>();
         /// <summary>WHICH host is driving the supervisor, not merely that one
         /// was started. The flag this replaces was cleared only by the
@@ -760,16 +816,84 @@ namespace CompetitiveRounds
         private static bool _outboxLoaded;
 
         /// <summary>Whether this exact report is already queued. Identity is
-        /// the url and the body, which is what RemovePendingReport already
-        /// matches on, so the two agree about what "the same report" means.</summary>
+        /// the body and the address it resolves to (SameQueuedReport), which is
+        /// what RemovePendingReport also matches on, so the two agree about
+        /// what "the same report" means.</summary>
         private static bool OutboxAlreadyQueued(string url, string json)
         {
             for (int i = 0; i < _pendingReports.Count; i++)
             {
                 var p = _pendingReports[i];
-                if (p.url == url && p.json == json) return true;
+                if (SameQueuedReport(p.url, p.json, url, json)) return true;
             }
             return false;
+        }
+
+        /// <summary>Where a queued report is sent NOW (Codex round 1 HIGH 1).
+        /// A report keeps the address it was queued with, and that address
+        /// named the base of the moment; when the base is one of this session's
+        /// route (the secure address, the backup, a witness lever's), the report
+        /// follows the route to the base in use at the send. So a report queued
+        /// on the backup goes to the secure base, with the session token, from
+        /// the first retry after a restore, and a report queued on the secure
+        /// base in an earlier launch goes where this launch's route goes. No
+        /// route (an explicit BaseUrl override) changes nothing. Resolved once
+        /// per send: a request already in flight keeps its URL.</summary>
+        private static string OutboxSendUrl(string storedUrl)
+        {
+            var route = _route;
+            if (route == null || string.IsNullOrEmpty(storedUrl)) return storedUrl;
+            string[] bases = route.Bases(SecureProbeBase());
+            if (_routeHarnessBackup == null)
+            {
+                // The compiled pair too, for a report queued in an earlier
+                // launch whose route answered differently. Never in the witness
+                // harness: a real report on disk must not be sent to it.
+                var all = new string[bases.Length + 2];
+                bases.CopyTo(all, 0);
+                all[bases.Length] = Plugin.DefaultApiUrl;
+                all[bases.Length + 1] = Plugin.LegacyApiUrl;
+                bases = all;
+            }
+            return SecureRouteRules.OutboxTarget(storedUrl, baseUrl, bases);
+        }
+
+        /// <summary>The route has just returned to the secure base: every
+        /// queued report falls due within OUTBOX_RESTORE_DELAY, so a report that
+        /// waited on the backup (at the capped interval) is looked at promptly.
+        /// Falling due is not being sent: the pass sends a report to the secure
+        /// base only with a fresh session (SecureRouteRules.OutboxSendGate), and
+        /// until SteamAuth lands one the entry waits without spending an attempt
+        /// (Codex round 2 HIGH 1: a restore followed by minutes without a
+        /// session used to send it tokenless and spend its budget). Nothing is
+        /// sent from here: the supervisor's next pass decides, resolving each
+        /// address as always.</summary>
+        private static void OutboxRouteRestored()
+        {
+            if (_pendingReports.Count == 0) return;
+            float soon = Time.realtimeSinceStartup + OUTBOX_RESTORE_DELAY;
+            int pulled = 0;
+            foreach (var p in _pendingReports)
+            {
+                p.restoreDueAt = soon;
+                if (p.nextAt > soon) { p.nextAt = soon; pulled++; }
+            }
+            Plugin.Log.LogInfo($"[OUTBOX] secure route restored: {_pendingReports.Count} queued report(s) due within "
+                               + $"{OUTBOX_RESTORE_DELAY:0} s ({pulled} brought forward)");
+            EnsureOutboxLoop();
+        }
+
+        private const float OUTBOX_RESTORE_DELAY = 20f;
+
+        /// <summary>One report, whichever of the route's bases it was queued
+        /// under: the same body bound for the same place once resolved. Without
+        /// the resolution a report queued on the backup and queued again on the
+        /// secure base after a restore would be two entries and two sends.</summary>
+        private static bool SameQueuedReport(string urlA, string jsonA, string urlB, string jsonB)
+        {
+            if (jsonA != jsonB) return false;
+            if (urlA == urlB) return true;
+            return string.Equals(OutboxSendUrl(urlA), OutboxSendUrl(urlB), StringComparison.Ordinal);
         }
         /// <summary>DERIVED from the window the server will still accept a
         /// report in, not chosen. At the capped backoff below this ladder has
@@ -963,7 +1087,7 @@ namespace CompetitiveRounds
                 // was the one call that could not restart the driver.
                 EnsureOutboxLoop();
                 foreach (var pending in _pendingReports)
-                    if (pending.url == url && pending.json == json)
+                    if (SameQueuedReport(pending.url, pending.json, url, json))
                         return;
                 float initialDelay = OutboxInitialDelay(url);
                 _pendingReports.Add(new PendingReport
@@ -984,6 +1108,86 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] enqueue failed: {ex.Message}"); }
         }
 
+        /// <summary>Where a terminally refused report is parked: beside the
+        /// outbox, under a DIFFERENT name, because the two files mean opposite
+        /// things. The outbox is "send this again"; this is "this will never
+        /// be sent again, and here it is". Nothing reads this file back into
+        /// the send path — LoadOutbox opens OutboxPath alone.</summary>
+        private static string RefusedReportsPath
+        {
+            get { return Path.Combine(BepInEx.Paths.ConfigPath, "CompetitiveRounds.refused-reports.jsonl"); }
+        }
+
+        /// <summary>The most recent terminal refusals to keep. A parked report
+        /// is diagnostic, not a queue, so it is bounded by COUNT: the file is
+        /// rewritten with the newest entries rather than grown without limit.
+        /// The one exception is a file that cannot be READ — see the park,
+        /// which appends there rather than destroying entries it cannot
+        /// see.</summary>
+        private const int REFUSED_REPORTS_KEPT = 20;
+
+        /// <summary>Keep a local copy of a report the server refused
+        /// terminally (409/403). It is never re-sent and never re-keyed — see
+        /// the FFA terminal branch for why re-keying is the dangerous half —
+        /// so this is not a retry queue and must not become one.
+        ///
+        /// WHY IT EXISTS. A terminal refusal is the end of the road for that
+        /// game's rating, XP, gold and wager settlement on this client, and
+        /// what the SERVER did with the body is a property of that backend:
+        /// the FFA endpoint refuses with 403 on a signature that does not
+        /// verify, on a player set that is not exactly the lobby's roster, on
+        /// a player count or slot that disagrees with the row, and on a
+        /// rejected game tail — and only some of those paths capture anything.
+        /// Before this, the entire client-side record of such a game was one
+        /// log line without the body, so a game that existed nowhere on the
+        /// server existed nowhere here either. Now the seat that filed it
+        /// still has it.
+        ///
+        /// Failure direction: this is best-effort and swallows its own errors.
+        /// A disk that will not take the copy must not also cost the log line
+        /// or the caller's remaining work.</summary>
+        internal static void ParkRefusedReport(string url, string json, string response)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(json)) return;
+                // One line per refusal: when, which route, what the server
+                // said, and the body as it was sent — the body last, because
+                // it is the only field with no length bound.
+                string line = "{\"at\":\"" + DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture)
+                         + "\",\"url\":\"" + Escape(url)
+                         + "\",\"refusal\":\"" + Escape(Trunc(response, 300))
+                         + "\",\"body\":" + json + "}";
+
+                var kept = new List<string>();
+                bool readable = true;
+                try
+                {
+                    if (File.Exists(RefusedReportsPath))
+                        kept.AddRange(File.ReadAllLines(RefusedReportsPath));
+                }
+                catch { readable = false; }
+                if (!readable)
+                {
+                    // Which direction does the unhandled case fail? Rewriting
+                    // a file we could not READ would destroy entries we cannot
+                    // even see, to enforce a bound that is only diagnostic.
+                    // Appending keeps both: the older refusals stay, this one
+                    // lands, and the cap is applied at the next readable write.
+                    File.AppendAllText(RefusedReportsPath, line + Environment.NewLine);
+                    Plugin.Log.LogInfo("[REFUSED] parked a terminally refused report (appended; "
+                                       + "the existing file could not be read to apply the cap)");
+                    return;
+                }
+                kept.Add(line);
+                while (kept.Count > REFUSED_REPORTS_KEPT) kept.RemoveAt(0);
+                File.WriteAllLines(RefusedReportsPath, kept.ToArray());
+                Plugin.Log.LogInfo($"[REFUSED] parked a terminally refused report "
+                                   + $"({kept.Count} kept in CompetitiveRounds.refused-reports.jsonl)");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[REFUSED] could not park the report: {ex.Message}"); }
+        }
+
         /// <summary>Macro evidence, and only it: the one queued url whose 409
         /// is a race with the elected reporter's match insert rather than a
         /// settled refusal.</summary>
@@ -991,6 +1195,37 @@ namespace CompetitiveRounds
         {
             return !string.IsNullOrEmpty(url)
                 && url.EndsWith("/api/v1/matches/macro-evidence", StringComparison.Ordinal);
+        }
+
+        /// <summary>A SETTLED refusal: the server understood the report and
+        /// the state it names has already moved on. Re-sending the identical
+        /// body cannot change that answer, so it is terminal for the sender —
+        /// the same rule OutboxPass has always applied to a 409, stated here
+        /// so the FIRST attempt can apply it too instead of queueing a report
+        /// whose only future is to be dropped on its first retry.
+        ///
+        /// Matched on the STATUS CODE, deliberately, and not on the phrase the
+        /// server sends with it: that phrase is product-facing text that gets
+        /// reworded (the FFA report endpoint alone refuses with three
+        /// different ones), and a check keyed on wording passes silently
+        /// forever once the wording moves (#306).</summary>
+        /// One definition, in FfaReportRules, so the status-code test in the
+        /// POST loop and the response-text test here cannot drift apart.
+        internal static bool IsSettledConflictResponse(string resp)
+        {
+            return FfaReportRules.IsSettledRefusal(resp);
+        }
+
+        /// <summary>A refusal this sender must not retry and must not re-key:
+        /// 409 (already recorded) or 403 (refused and captured because the
+        /// key's game tail is not the one the lobby expects). 503 is NOT one —
+        /// the server declining to decide is the one refusal the retry loop's
+        /// premise still fits.
+        ///
+        /// Same one definition, same reason.</summary>
+        internal static bool IsTerminalRefusalResponse(string resp)
+        {
+            return FfaReportRules.IsTerminalRefusal(resp);
         }
 
         /// <summary>The disconnect report, whichever series it names. The
@@ -1033,7 +1268,7 @@ namespace CompetitiveRounds
             for (int i = _pendingReports.Count - 1; i >= 0; i--)
             {
                 var pending = _pendingReports[i];
-                if (pending.url != url || pending.json != json) continue;
+                if (!SameQueuedReport(pending.url, pending.json, url, json)) continue;
                 _pendingReports.RemoveAt(i);
                 removed = true;
             }
@@ -1238,7 +1473,7 @@ namespace CompetitiveRounds
             {
                 bool seen = false;
                 foreach (var n in merged.entries)
-                    if (n.url == e.url && n.json == e.json) { seen = true; break; }
+                    if (SameQueuedReport(n.url, n.json, e.url, e.json)) { seen = true; break; }
                 if (!seen) merged.entries.Add(e);
             }
             return merged;
@@ -1524,17 +1759,85 @@ namespace CompetitiveRounds
             foreach (var p in due)
             {
                 if (!_pendingReports.Contains(p)) continue;
+                // Codex round 1 HIGH 1: the address is resolved for THIS send
+                // and kept in a local, so a flip during the request changes
+                // nothing about it; the entry is rewritten (and persisted) only
+                // when the route has moved since it was queued.
+                string target = OutboxSendUrl(p.url);
+                if (!string.Equals(target, p.url, StringComparison.Ordinal))
+                {
+                    Plugin.Log.LogInfo($"[OUTBOX] queued report follows the route: {SecureRouteRules.HostPort(p.url)} -> "
+                                       + $"{SecureRouteRules.HostPort(target)}");
+                    p.url = target;
+                    PersistOutbox();
+                }
+                // Codex round 2 HIGH 1: over a transport that carries the
+                // session token, a report goes out only WITH a fresh session.
+                // Without one it waits here: no send, no attempt spent, the
+                // entry kept, looked at again after the poll interval.
+                if (SecureRouteRules.OutboxSendGate(CredentialedTransportAllowed(target), SteamAuth.HasFreshToken)
+                    == SecureRouteRules.OutboxGate.WaitForSession)
+                {
+                    p.nextAt = Time.realtimeSinceStartup + (float)SecureRouteRules.OutboxSessionPollSeconds;
+                    if (!p.waitingForSession)
+                    {
+                        p.waitingForSession = true;
+                        Plugin.Log.LogInfo($"[OUTBOX] queued report waits for a session before it goes to {SecureRouteRules.HostPort(target)}: "
+                                           + $"sent only with the token, no attempt spent while it waits ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
+                    }
+                    continue;
+                }
+                if (p.waitingForSession)
+                {
+                    p.waitingForSession = false;
+                    Plugin.Log.LogInfo($"[OUTBOX] session held; sending the queued report to {SecureRouteRules.HostPort(target)} with it");
+                }
+                p.restoreDueAt = -1f;   // this send keeps any restore's promise
                 p.attempts++;
                 // Linear-ish backoff, capped at 4x the base interval. Measured
-                // from now rather than from the top of the pass — an earlier
+                // from now rather than from the top of the pass - an earlier
                 // entry's attempt can have taken most of a minute.
                 p.nextAt = Time.realtimeSinceStartup
                            + OUTBOX_RETRY_SECONDS
                              * Math.Min(OUTBOX_RETRY_MAX_MULTIPLIER, (float)p.attempts);
-                bool done = false, ok = false; string resp = null;
-                yield return PostRequest(p.url, p.json, (s, r) => { done = true; ok = s; resp = r; });
+                // Whether THIS request carried the token, read from the header
+                // PostRequestRaw actually stamped (not from the address: a
+                // session dropped between the gate and the stamp leaves an
+                // https request without one).
+                bool done = false, ok = false, carried = false; string resp = null;
+                // redactErrorText: a failure's text can reach the log below,
+                // so its body is scrubbed whole before the 300 cut.
+                yield return PostRequest(target, p.json, (s, r) => { done = true; ok = s; resp = r; },
+                                         stamped => carried = stamped, redactErrorText: true);
                 while (!done) yield return null;
-                if (ok)
+                // Codex round 3 HIGH 1: what the request CARRIED decides
+                // removal as well as spend, and it is asked before the status.
+                // A request without the token (the plaintext backup, or a
+                // session dropped between the gate and the stamp) settles
+                // nothing, whatever it was answered: a 2xx there can come from
+                // a server that does not enforce or from anything answering in
+                // its place, and removing the entry on it lost the report. The
+                // attempt is given back and the entry stays queued until one
+                // send that carries the token settles it.
+                var answer = SecureRouteRules.OutboxAnswerFor(ok, carried);
+                if (answer == SecureRouteRules.OutboxAnswer.GiveBack)
+                {
+                    p.attempts--;
+                    // The earlier of the capped interval and a restore's
+                    // promise made while this request was in flight
+                    // (Codex round 2 LOW 1): never later than the promise.
+                    p.nextAt = (float)SecureRouteRules.OutboxGiveBackDue(
+                        Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * OUTBOX_RETRY_MAX_MULTIPLIER, p.restoreDueAt);
+                    if (ok)
+                        Plugin.Log.LogInfo("[OUTBOX] a retry without the session token was answered 2xx; not taken as delivered, "
+                                           + $"the report stays queued for a send with the token ({p.attempts} of {OUTBOX_MAX_ATTEMPTS} spent)");
+                    else
+                        // The failure text is a remote answer: flattened,
+                        // scrubbed whole, then bounded (Codex round 3 LOW 5).
+                        Plugin.Log.LogInfo(SecureRouteRules.OutboxTokenlessFailureLine(resp, p.attempts, OUTBOX_MAX_ATTEMPTS));
+                    continue;
+                }
+                if (answer == SecureRouteRules.OutboxAnswer.Settle)
                 {
                     Plugin.Log.LogInfo($"[OUTBOX] queued report delivered on retry {p.attempts}");
                     if (!IsSilentOutboxUrl(p.url))
@@ -1639,6 +1942,10 @@ namespace CompetitiveRounds
                     // retires one is the server, which turns the same refusal
                     // into a 403 once the sitting has been idle past its live
                     // window.
+                    //
+                    // Only a request that carried the session token reaches
+                    // this branch (SecureRouteRules.OutboxAnswerFor): a
+                    // tokenless one was given back above.
                     bool retryableTransient =
                         resp != null
                         && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")
@@ -1780,48 +2087,358 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>Probe the TLS endpoint before committing to it for the session.
-        /// Falls back to the legacy plaintext endpoint ONLY on a transport-level
-        /// failure — never on an HTTP status, because any 4xx/5xx proves the port
-        /// and the TLS handshake both worked and the problem is elsewhere.
-        /// Deliberately does NOT write to config: this must re-evaluate every launch.
-        /// DELETE THIS along with Plugin.LegacyApiUrl in the same release that drops
-        /// the plaintext port-forward, or a broken TLS path is forgiven forever.</summary>
-        private static IEnumerator ProbeEndpointThenStart()
+        // Secure route (board row 27). The boot check used to be the only one: a
+        // session whose two boot attempts failed stayed on the plaintext backup
+        // until the game restarted, and a LAN desktop fails them by construction
+        // (the router's hairpin hangs the second connection, #223). The same
+        // probe now also runs from the portal button and from a timer while on
+        // the backup. SecureRouteRules decides; this file does the I/O and owns
+        // the base-url field, which it copies from the route after a verdict.
+        // Deliberately never writes to config: the boot check re-evaluates every
+        // launch. DELETE the backup half along with Plugin.LegacyApiUrl in the
+        // same release that drops the plaintext port-forward, or a broken TLS
+        // path is forgiven forever.
+
+        /// <summary>This session's route; null when BaseUrl is an explicit
+        /// override, for which no check, backup or timer ever runs.</summary>
+        private static SecureRouteRules.Route _route;
+        private static float _secureRouteTickRt = -999f;
+        private static bool _loggedBadTestSecureUrl;
+        /// <summary>The local witness harness's backup address, or null (every
+        /// player, and this seat whenever the lever is empty). Set once per
+        /// Initialize from [Broadcast] TestBackupUrl.</summary>
+        private static string _routeHarnessBackup;
+
+        /// <summary>The local witness harness (Codex round 1 HIGH 1's control):
+        /// on the broadcast identity only, [Broadcast] TestBackupUrl names a
+        /// plaintext address that replaces the backup for this launch, the
+        /// configured BaseUrl is the route's own address even when it is not
+        /// the compiled default, and a check may probe a plaintext loopback
+        /// address (the harness has no certificate a client trusts). The
+        /// harness runs every request against a local api; a player's route is
+        /// untouched, since the lever is read only on the broadcast identity
+        /// and is empty by default.</summary>
+        private static string RouteHarnessBackup()
         {
-            const int attempts = 2;
-            bool reachable = false;
-            for (int i = 0; i < attempts && !reachable; i++)
+            try
             {
-                using (var probe = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version"))
+                if (Plugin.BroadcastTestBackupUrl == null) return null;
+                string lever = SecureRouteRules.TrimBase(Plugin.BroadcastTestBackupUrl.Value);
+                if (lever.Length == 0) return null;
+                if (!BroadcastMode.IsBroadcastIdentityAtBoot()) return null;
+                Uri parsed;
+                if (!lever.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || !Uri.TryCreate(lever, UriKind.Absolute, out parsed) || !string.IsNullOrEmpty(parsed.UserInfo))
                 {
-                    probe.timeout = 8;
-                    StampVersionHeader(probe);
-                    yield return probe.SendWebRequest();
-                    // "Reachable" must mean USABLE, not merely "something answered".
-                    // An earlier version accepted anything that wasn't a
-                    // ConnectionError, on the reasoning that an HTTP status proves
-                    // the port and TLS handshake worked. True — but useless to the
-                    // player: nginx up with the api container down returns 502, and
-                    // a captive portal or TLS-intercepting middlebox returns an
-                    // HTML 200. Both would pin the client to an endpoint it cannot
-                    // actually use, and because every recovery channel rides this
-                    // same baseUrl there would be no way back. Require a parseable
-                    // mod-version payload instead.
-                    string body = probe.result == UnityWebRequest.Result.Success
-                        ? (probe.downloadHandler?.text ?? "") : "";
-                    if (!string.IsNullOrEmpty(ExtractJsonString(body, "version")))
-                        reachable = true;
-                    else
-                        Plugin.Log.LogWarning(
-                            $"[API] TLS endpoint probe {i + 1}/{attempts} unusable: " +
-                            $"result={probe.result} code={probe.responseCode} err={probe.error}");
+                    Plugin.Log.LogWarning($"[SCR] TestBackupUrl ignored: not a plaintext http address ({lever})");
+                    return null;
+                }
+                Plugin.Log.LogWarning($"[SCR] witness harness: the backup is {lever} and the route's address is {baseUrl} for this launch");
+                return lever;
+            }
+            catch { return null; }
+        }
+
+        private static string _testQueueReportLast;
+
+        /// <summary>The harness's report (Codex round 1 HIGH 1's control): each
+        /// new value of [Broadcast] TestQueueReport posts the body in
+        /// BepInEx/config/scr-portal-report.json to the current base exactly as
+        /// ReportMatch posts a finished 1v1 game (PostMatchReportWithRetry, then
+        /// EnqueueFailedReport on failure or on a 2xx that did not carry the
+        /// session token), so the outbox that carries it is
+        /// the real one. ReportMatch itself is fenced off the broadcast
+        /// identity, which is why the body comes from a file. Called from the
+        /// broadcast lever tick; does nothing unless the harness is armed.</summary>
+        internal static void TickTestQueueReport()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestQueueReport == null) return;
+                string want = (Plugin.BroadcastTestQueueReport.Value ?? "").Trim();
+                if (_testQueueReportLast == null) { _testQueueReportLast = want; return; }
+                if (string.Equals(want, _testQueueReportLast, StringComparison.Ordinal)) return;
+                _testQueueReportLast = want;
+                if (want.Length == 0) return;
+                if (_routeHarnessBackup == null || Plugin.Instance == null)
+                {
+                    Plugin.Log.LogWarning("[SCR] TestQueueReport ignored: the witness harness is not armed (TestBackupUrl)");
+                    return;
+                }
+                string path = Path.Combine(BepInEx.Paths.ConfigPath, "scr-portal-report.json");
+                string json = File.ReadAllText(path).Trim();
+                string url = $"{baseUrl}/api/v1/matches";
+                Plugin.Log.LogInfo($"[SCR] TestQueueReport ({want}): posting the harness report to {url} ({json.Length} bytes)");
+                Plugin.Instance.StartCoroutine(PostMatchReportWithRetry(url, json, (success, response) =>
+                {
+                    if (success)
+                    {
+                        Plugin.Log.LogInfo($"[SCR] TestQueueReport: reported at once: {Trunc(response, 160)}");
+                        return;
+                    }
+                    Plugin.Log.LogWarning($"[SCR] TestQueueReport: the send failed ({Trunc(response ?? "", 160)}); queued as a game's report is");
+                    EnqueueFailedReport($"{baseUrl}/api/v1/matches", json);   // as ReportMatch's failure branch
+                    SeedWitnessAttempts(want, json);
+                }));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] TestQueueReport failed: {ex.Message}"); }
+        }
+
+        /// <summary>Witness only (Codex round 2 HIGH 1's control S8/S9): a
+        /// TestQueueReport value ending "@N" sets the attempts the queued entry
+        /// has already spent to N, so the one attempt that would delete it is
+        /// the next counted one. Reached only from TickTestQueueReport, which
+        /// does nothing unless the broadcast-only witness harness is armed.</summary>
+        private static void SeedWitnessAttempts(string want, string json)
+        {
+            int at = want.LastIndexOf('@');
+            int seed;
+            if (at < 0 || !int.TryParse(want.Substring(at + 1), out seed) || seed < 0 || seed >= OUTBOX_MAX_ATTEMPTS) return;
+            foreach (var p in _pendingReports)
+            {
+                if (p.json != json) continue;
+                p.attempts = seed;
+                Plugin.Log.LogWarning($"[SCR] TestQueueReport: the queued entry's spent attempts set to {seed} of {OUTBOX_MAX_ATTEMPTS} (witness only)");
+                return;
+            }
+        }
+
+        private static string _testStaleTokenLast;
+
+        /// <summary>Witness lever (Codex round 1 LOW 1's control): each new
+        /// value of [Broadcast] TestStaleToken replaces the held session token
+        /// with a random one the server never issued. Called from the broadcast
+        /// lever tick.</summary>
+        internal static void TickTestStaleToken()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestStaleToken == null) return;
+                string want = (Plugin.BroadcastTestStaleToken.Value ?? "").Trim();
+                if (_testStaleTokenLast == null) { _testStaleTokenLast = want; return; }
+                if (string.Equals(want, _testStaleTokenLast, StringComparison.Ordinal)) return;
+                _testStaleTokenLast = want;
+                if (want.Length == 0) return;
+                var bytes = new byte[32];
+                using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes);
+                string fake = Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+                bool done = SteamAuth.ReplaceTokenForWitness(fake);
+                Plugin.Log.LogWarning(done
+                    ? $"[SCR] TestStaleToken ({want}): the held session token was replaced by one the server never issued"
+                    : $"[SCR] TestStaleToken ({want}): no session held; nothing replaced");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] TestStaleToken failed: {ex.Message}"); }
+        }
+
+        /// <summary>The address a check probes: the compiled secure default, or,
+        /// on the broadcast identity only, [Broadcast] TestSecureUrl when it
+        /// names an https address (the witness lever for the backup path). The
+        /// session only ever moves to an address a check has just shown usable.
+        /// The boot check asks too: it starts in Initialize, which DoInitialize
+        /// calls before GameStateWatcher.Initialize resolves the local id, so the
+        /// identity is asked in its boot-safe form, and only when the lever is set.</summary>
+        private static string SecureProbeBase()
+        {
+            // The harness's own address stands in for the compiled default,
+            // so an emptied lever never sends a harness check to the real one.
+            bool harness = _routeHarnessBackup != null && _route != null;
+            string def = harness ? _route.Bases(null)[0] : SecureRouteRules.TrimBase(Plugin.DefaultApiUrl);
+            try
+            {
+                if (Plugin.BroadcastTestSecureUrl == null) return def;
+                string lever = SecureRouteRules.TrimBase(Plugin.BroadcastTestSecureUrl.Value);
+                if (lever.Length == 0) return def;
+                if (!BroadcastMode.IsBroadcastIdentityAtBoot()) return def;
+                if (SecureRouteRules.IsSecure(lever)) return lever;
+                if (harness && SecureRouteRules.IsLoopbackPlaintext(lever)) return lever;
+                if (!_loggedBadTestSecureUrl)
+                {
+                    _loggedBadTestSecureUrl = true;
+                    Plugin.Log.LogWarning($"[SCR] TestSecureUrl ignored: not an https address ({lever})");
                 }
             }
+            catch { }
+            return def;
+        }
+
+        private static double SecureRetrySeconds()
+        {
+            double minutes = SecureRouteRules.DefaultRetryMinutes;
+            try { if (Plugin.SecureRetryMinutes != null) minutes = Plugin.SecureRetryMinutes.Value; } catch { }
+            return SecureRouteRules.RetrySecondsFromMinutes(minutes);
+        }
+
+        private static int SecureProbeOwner()
+        {
+            var host = Plugin.Instance;
+            return host != null ? host.GetInstanceID() : 0;
+        }
+
+        private static double RealtimeNow() => Time.realtimeSinceStartup;
+
+        /// <summary>The ONE probe behind the boot check, the portal button and
+        /// the timer: GET mod-version with an 8 s timeout, stamped like every
+        /// request. "Reachable" must mean USABLE, not merely "something
+        /// answered". An earlier version accepted anything that wasn't a
+        /// ConnectionError, on the reasoning that an HTTP status proves the
+        /// port and TLS handshake worked. True, but useless to the player:
+        /// nginx up with the api container down returns 502, and a captive
+        /// portal or TLS-intercepting middlebox returns an HTML 200. Both would
+        /// pin the client to an endpoint it cannot actually use, and because
+        /// every recovery channel rides this same baseUrl there would be no way
+        /// back. So the reading records whether a parseable mod-version payload
+        /// came back, and SecureRouteRules.Classify calls anything else
+        /// unusable.</summary>
+        private static IEnumerator ProbeSecureRoute(string url, int timeoutSeconds, Action<SecureRouteRules.Reading> done)
+        {
+            var reading = new SecureRouteRules.Reading
+            {
+                Result = SecureRouteRules.Transport.NotStarted, ResultName = "NotStarted",
+            };
+            float started = Time.realtimeSinceStartup;
+            using (var probe = UnityWebRequest.Get(url))
+            {
+                probe.timeout = timeoutSeconds;
+                StampVersionHeader(probe);
+                yield return probe.SendWebRequest();
+                try
+                {
+                    reading.ResultName = probe.result.ToString();
+                    reading.HttpCode = probe.responseCode;
+                    reading.Error = probe.error;
+                    switch (probe.result)
+                    {
+                        case UnityWebRequest.Result.Success: reading.Result = SecureRouteRules.Transport.Success; break;
+                        case UnityWebRequest.Result.ProtocolError: reading.Result = SecureRouteRules.Transport.HttpError; break;
+                        case UnityWebRequest.Result.ConnectionError: reading.Result = SecureRouteRules.Transport.ConnectionError; break;
+                        default: reading.Result = SecureRouteRules.Transport.DataError; break;
+                    }
+                    string body = probe.result == UnityWebRequest.Result.Success
+                        ? (probe.downloadHandler?.text ?? "") : "";
+                    // A strict parse of the whole body (Codex round 1 MEDIUM 1):
+                    // the substring reader accepted a body cut off inside the
+                    // version string and refused one with a space after the
+                    // colon, and a usable verdict ends the backup for good.
+                    reading.VersionParsed = SecureRouteRules.IsModVersionBody(body);
+                }
+                catch (Exception ex) { reading.Error = "probe read failed: " + ex.Message; }
+            }
+            reading.ElapsedSeconds = Time.realtimeSinceStartup - started;
+            try { done(reading); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] secure route verdict failed: {ex.Message}"); }
+        }
+
+        /// <summary>The route's transport: one ProbeSecureRoute coroutine per
+        /// attempt, on the current host.</summary>
+        private sealed class SecureProbeTransport : SecureRouteRules.ITransport
+        {
+            internal static readonly SecureProbeTransport Shared = new SecureProbeTransport();
+
+            public void Get(string url, int timeoutSeconds, Action<SecureRouteRules.Reading> done)
+            {
+                Coroutine running = null;
+                try
+                {
+                    var host = Plugin.Instance;
+                    if (host != null) running = host.StartCoroutine(ProbeSecureRoute(url, timeoutSeconds, done));
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] secure route probe could not start: {ex.Message}"); }
+                // An inactive host returns null instead of throwing (see
+                // EnsureOutboxLoop), so the verdict is "not started", now.
+                if (running == null)
+                    done(new SecureRouteRules.Reading
+                    {
+                        Result = SecureRouteRules.Transport.NotStarted, ResultName = "NotStarted",
+                        Error = "the probe could not start (no active host)",
+                    });
+            }
+        }
+
+        /// <summary>The boot check: two attempts against the secure address,
+        /// then OnBootProbeConcluded, then the version check (as before).</summary>
+        private static void StartBootProbe()
+        {
+            var route = _routeHarnessBackup != null
+                ? new SecureRouteRules.Route(baseUrl, _routeHarnessBackup, acceptLoopbackPlaintext: true)
+                : new SecureRouteRules.Route(Plugin.DefaultApiUrl, Plugin.LegacyApiUrl);
+            _route = route;
+            int gen = route.Begin(SecureRouteRules.Trigger.Boot, SecureProbeBase(), RealtimeNow(),
+                                  SecureProbeOwner(), SecureRetrySeconds());
+            if (gen == 0) { CheckModVersion(); return; }
+            RunSecureCheck(route, gen);
+        }
+
+        private static void RunSecureCheck(SecureRouteRules.Route route, int generation)
+        {
+            route.Run(generation, SecureProbeTransport.Shared, RealtimeNow, SecureRetrySeconds,
+                      LogSecureAttempt, c => OnSecureRunConcluded(route, c));
+        }
+
+        /// <summary>From the persistent behaviour's Update, beside OutboxTick:
+        /// the timer's check while on the backup. Asked on a tick rather than
+        /// armed once, so a destroyed host cannot silence it (#508); the route
+        /// itself refuses to run beside a live check or off the backup.</summary>
+        internal static void SecureRouteTick()
+        {
+            var route = _route;
+            if (route == null || !route.OnFallback) return;
+            float now = Time.realtimeSinceStartup;
+            if (now - _secureRouteTickRt < 1f) return;
+            _secureRouteTickRt = now;
+            int owner = SecureProbeOwner();
+            if (owner == 0 || !route.AutoDue(now, owner)) return;
+            int gen = route.Begin(SecureRouteRules.Trigger.Timer, SecureProbeBase(), now, owner, SecureRetrySeconds());
+            if (gen != 0) RunSecureCheck(route, gen);
+        }
+
+        /// <summary>One log line per attempt. The boot run keeps the survey's
+        /// own line, unchanged, so a player's log still shows which route it
+        /// took and why (item d, #224); button and timer checks name their
+        /// outcome whatever it was.</summary>
+        private static void LogSecureAttempt(SecureRouteRules.Attempt a)
+        {
+            try
+            {
+                if (a.Trigger == SecureRouteRules.Trigger.Boot)
+                {
+                    if (a.Outcome != SecureRouteRules.Outcome.Usable)
+                        Plugin.Log.LogWarning(
+                            $"[API] TLS endpoint probe {a.Number}/{a.Of} unusable: " +
+                            $"result={a.Reading.ResultName} code={a.Reading.HttpCode} err={a.Reading.Error}");
+                    return;
+                }
+                string trigger = a.Trigger == SecureRouteRules.Trigger.Button ? "portal button" : "timer";
+                string outcome = SecureRouteRules.Describe(a.Outcome, a.Reading.HttpCode, SecureRouteRules.ProbeTimeoutSeconds);
+                string took = a.Reading.ElapsedSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+                string detail = a.Outcome == SecureRouteRules.Outcome.Usable ? ""
+                    : $" (result={a.Reading.ResultName} code={a.Reading.HttpCode} err={a.Reading.Error})";
+                Plugin.Log.LogInfo($"[SCR] secure route check {a.AttemptsSinceFallback} ({trigger}): {outcome} at "
+                                   + $"{SecureRouteRules.HostPort(a.Base)} in {took} s{detail}"
+                                   + (a.Current ? "" : " [superseded, ignored]"));
+            }
+            catch { }
+        }
+
+        private static void OnSecureRunConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
+        {
+            // A verdict from a superseded run, or from a route a later
+            // Initialize replaced (a respawn re-runs it), changes nothing.
+            if (c == null || c.Stale || !ReferenceEquals(route, _route)) return;
+            if (c.Trigger == SecureRouteRules.Trigger.Boot) { OnBootProbeConcluded(route, c); return; }
+            if (c.Flipped) OnSecureRouteRestored(route, c);
+            FinishPortalPress(c);
+        }
+
+        /// <summary>The boot run's verdict. On failure the session moves to the
+        /// plaintext backup (the survey's lines below are unchanged) and the
+        /// timer starts counting; either way the version check runs next.</summary>
+        private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
+        {
+            bool reachable = c.Usable;
 
             if (!reachable)
             {
-                baseUrl = Plugin.LegacyApiUrl.TrimEnd('/');
+                baseUrl = route.CurrentBase;
                 UsingLegacyFallback = true;
                 Plugin.Log.LogWarning(
                     $"[API] {Plugin.DefaultApiUrl} unreachable — falling back to {baseUrl} for this session. " +
@@ -1830,8 +2447,102 @@ namespace CompetitiveRounds
                 // already looping on the dead TLS host has to be pointed at the
                 // fallback explicitly — otherwise chat stays dark all session.
                 try { ChatClient.Retarget(baseUrl); } catch (Exception ex) { Plugin.Log.LogWarning($"[API] chat retarget failed: {ex.Message}"); }
+                string every = (SecureRetrySeconds() / 60.0).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                Plugin.Log.LogInfo($"[SCR] secure route {c.HostPort} failed at boot "
+                                   + $"({SecureRouteRules.Describe(c.Outcome, c.HttpCode, c.TimeoutSeconds)}); the backup "
+                                   + $"carries this session until a check answers: every {every} min, and on the portal button");
             }
+            else
+            {
+                baseUrl = route.CurrentBase;
+                // A respawn re-runs Initialize, and chat's session override is
+                // static: it can still name the backup from an earlier boot in
+                // this process. Released only if it is still the API's (no-op
+                // otherwise).
+                try { ChatClient.ReleaseApiFallback(Plugin.LegacyApiUrl); } catch { }
+            }
+            FinishPortalPress(c);
             CheckModVersion();
+        }
+
+        /// <summary>A check begun on the backup answered: the session returns to
+        /// the address that answered, for good (the route stops its timer).
+        ///
+        /// One field write, on the main thread. A request object built before
+        /// it keeps the backup URL it was built with and completes there: the
+        /// same api answers both ports, and it already carries the backup's
+        /// rules (StampVersionHeader withheld the bearer and
+        /// SensitiveTransportBlocked vetted the route, both against its own
+        /// URL). Every request built after it uses the secure base, bearer
+        /// included. The report outbox resolves each queued report's address
+        /// when it sends it (OutboxSendUrl), so a report queued on the backup
+        /// goes to the restored base, with the token, from its next retry on;
+        /// a retry already in flight keeps the URL it was sent with.</summary>
+        private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)
+        {
+            baseUrl = route.CurrentBase;
+            UsingLegacyFallback = false;
+            int n = c.AttemptsSinceFallback;
+            Plugin.Log.LogInfo($"[SCR] secure route restored after {n} attempt{(n == 1 ? "" : "s")} ({baseUrl})");
+            // Chat was pointed at the backup by the boot verdict. The REST check
+            // says nothing about chat's own TLS stack (#194), so chat is not
+            // forced onto wss: its override is released and its own three-strike
+            // wss fall-back decides from here.
+            try { ChatClient.ReleaseApiFallback(Plugin.LegacyApiUrl); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SCR] chat release failed: {ex.Message}"); }
+            try { OutboxRouteRestored(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] route-restore pass failed: {ex.Message}"); }
+        }
+
+        /// <summary>The answer to a portal press that was waiting on a check.</summary>
+        private static void FinishPortalPress(SecureRouteRules.Conclusion c)
+        {
+            if (c.OpenPortal)
+            {
+                if (c.Flipped)
+                    CompetitiveUI.ShowNotification(SecureRouteText.RestoredOpeningPortal(), new Color(0.4f, 1f, 0.5f), 5f);
+                var host = Plugin.Instance;
+                if (host != null) host.StartCoroutine(OpenPortalWhenSessionReady());
+            }
+            else if (c.ReportFailure)
+            {
+                Plugin.Log.LogInfo($"[SCR] portal not opened: the secure route {c.HostPort} "
+                                   + $"{SecureRouteRules.Describe(c.Outcome, c.HttpCode, c.TimeoutSeconds)}; the session stays on the backup");
+                CompetitiveUI.ShowNotification(SecureRouteText.Failure(c.Outcome, c.HostPort, c.TimeoutSeconds, c.HttpCode),
+                                               Color.yellow, 9f);
+            }
+        }
+
+        /// <summary>After a restore there may be no session yet: no ticket is
+        /// requested while the session is on the backup (SteamAuth.MaybeRefresh),
+        /// and the portal mint accepts a verified session only. SteamAuth
+        /// requests one on its own loop once the route returns; this waits for
+        /// it, bounded, then mints either way (a refusal then shows the
+        /// existing sign-in message). Used by the press that restores the
+        /// route and by every press after a restore.</summary>
+        private static IEnumerator OpenPortalWhenSessionReady()
+        {
+            // A USABLE session, not a nonempty token (Codex round 1 LOW 1): a
+            // token that expired while the session sat on the backup is still
+            // nonempty, and minting with it only earns a refusal. The mint
+            // itself then covers a token the server has dropped (a fresh-looking
+            // one it no longer knows): MintPortalSessionAndOpen re-mints once.
+            float started = Time.realtimeSinceStartup;
+            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady(), SteamAuth.Latch))
+            {
+                try { SteamAuth.MaybeRefresh(); } catch { }
+                yield return new WaitForSecondsRealtime(0.5f);
+            }
+            MintPortalSessionAndOpen(true);
+        }
+
+        /// <summary>A known local identity and a fresh session: what the portal
+        /// mint needs before it is worth sending.</summary>
+        private static bool PortalSessionReady()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return false;
+            return SteamAuth.HasFreshToken;
         }
 
         /// <summary>Bug 392 item A step 2: whether the server has said it
@@ -1863,9 +2574,14 @@ namespace CompetitiveRounds
         private static IEnumerator DoCheckModVersion()
         {
             var req = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version");
+            // Verified reads (merged hold 3): the server carries read_gate and
+            // read_gate_open only for a request whose X-Mod-Version is 1.41.0 or
+            // later, so the boot read is stamped like every other API call.
+            StampVersionHeader(req);
             yield return req.SendWebRequest();
             if (req.result == UnityWebRequest.Result.Success)
             {
+                ReadGateAdvert(req.downloadHandler.text, "version-check");
                 string ver = ExtractJsonString(req.downloadHandler.text, "version");
                 string minVer = ExtractJsonString(req.downloadHandler.text, "min_version");
                 // Re-read on EVERY successful response, not only the first: an
@@ -1896,6 +2612,21 @@ namespace CompetitiveRounds
                 ServerAcceptsInvoluntaryFfaCause = involuntaryCause;
                 ServerJoinRegionGuard = ExtractJsonInt(req.downloadHandler.text, "join_region_guard") == 1;
                 Plugin.Log.LogInfo("[VERSION] join_region_guard -> " + (ServerJoinRegionGuard ? "1" : "0"));
+                // Absent on a server older than the one that started advertising
+                // it: ExtractJsonInt answers 0, which is the same "not told"
+                // state the printing surfaces already handle. Only a positive
+                // value is taken, so a malformed answer cannot turn a label that
+                // states the window into one that states "0d". A CHANGED value
+                // marks the UI dirty: this answer arrives asynchronously, often
+                // after the F5 panel has drawn its labels without a count (or
+                // with the previous one), and an open surface repaints only
+                // when it is dirty (NativeUI's update loop).
+                int lbDays = ExtractJsonInt(req.downloadHandler.text, "leaderboard_active_days");
+                if (lbDays > 0 && lbDays != LeaderboardActiveDays)
+                {
+                    LeaderboardActiveDays = lbDays;
+                    NativeUI.MarkDirty();
+                }
                 if (!string.IsNullOrEmpty(ver))
                 {
                     LatestModVersion = ver;
@@ -1924,6 +2655,19 @@ namespace CompetitiveRounds
                         Plugin.Log.LogWarning($"[VERSION] Mod is BELOW server minimum (v{Plugin.ModVersion} < v{minVer}) — update required");
                     }
                 }
+                // NOTHING IS READ OUT OF THIS ANSWER BUT THE TWO VERSION NUMBERS.
+                // That sentence came with the 886bed8 client half and is about
+                // series status. One other field of this answer IS read, above:
+                // the involuntary-cause capability (bug 392), which gates what
+                // this client sends when it leaves an FFA room, and whose own
+                // paragraph states what reading it once at startup does not
+                // cover.
+                // The previous round parsed a series-status capability flag here
+                // and let it decide whether a later, separately routed request was
+                // safe to send. Both halves of that are gone — the parse and the
+                // field — because no answer from this route describes the box that
+                // will answer the next one. The per-series read proves itself in
+                // its own response body instead.
                 // Auto-fire update on launch if behind. The Update method is no-op
                 // when running the Thunderstore build (it surfaces a notification only).
                 // NOT on the broadcast seat: that binary is installed by the build
@@ -2247,6 +2991,102 @@ namespace CompetitiveRounds
             catch { return ""; }
         }
 
+        // ── Seat evidence (contract V2) ──────────────────────────
+        // Its own canonical strings ("seat-evidence:v2:...", "compat-outcome:v1:...")
+        // signed under the match-report key. The 7-field match canonical above is
+        // not touched, not reused and not extended.
+
+        internal static string SeatEvidenceSig(string canonical) { return ComputeHmacHex(canonical); }
+
+        /// <summary>The compat sender on a seat the other-plug-in check
+        /// disabled (Initialize never runs there): sets the base the one compat
+        /// send and its Steam ticket exchange use, and starts nothing else (no
+        /// probe, loop, outbox or fetch). An already initialised base is kept.</summary>
+        internal static void SeatEvidenceCompatBase(string url)
+        {
+            if (!string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(url)) return;
+            baseUrl = url.TrimEnd('/');
+        }
+
+        /// <summary>The api is configured and this seat holds a session token
+        /// (the seat-evidence routes answer 401 without one).</summary>
+        internal static bool SeatEvidenceReady
+        {
+            get { return !string.IsNullOrEmpty(baseUrl) && !string.IsNullOrEmpty(SteamAuth.SessionToken) && Plugin.Instance != null; }
+        }
+
+        /// <summary>One POST of frozen bytes on the evidence routes' own bare
+        /// path (SeatEvidencePostRaw). False: nothing was started (no base, no
+        /// host, no data consent). beforeSend runs after every local gate
+        /// passed and the request is completely built, immediately before
+        /// SendWebRequest; false from it means the request is not sent. callback(left, ok, text, carriedToken):
+        /// left says whether the request went out at all; text is the body, or
+        /// "HTTP code: body" plus a Retry-After line on a refusal;
+        /// carriedToken says whether the session token went out.</summary>
+        internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Func<string> clockHeader, Action<bool, bool, string, bool> callback)
+        {
+            if (string.IsNullOrEmpty(baseUrl) || Plugin.Instance == null || !Plugin.DataConsentGranted) return false;
+            Plugin.Instance.StartCoroutine(SeatEvidencePostRaw(baseUrl + path, body, beforeSend, clockHeader, callback));
+            return true;
+        }
+
+        /// <summary>The evidence routes' POST (F10): it carries the contract
+        /// body and exactly the contract's application headers, Content-Type,
+        /// X-Mod-Version and X-Session-Token, and nothing else (the shared
+        /// StampVersionHeader also stamps the locale, so it is not used here;
+        /// every other route keeps the shared path). The session token is
+        /// required: on a transport that may not carry it the request is not
+        /// sent. The same consent, sensitive-transport, version-gate and
+        /// session-refusal handling as the shared path.</summary>
+        private static IEnumerator SeatEvidencePostRaw(string url, string body, Func<bool> beforeSend, Func<string> clockHeader, Action<bool, bool, string, bool> callback)
+        {
+            Action<bool, bool, string, bool> answer = (left, ok, text, carried) => { try { callback(left, ok, text, carried); } catch { } };
+            if (ConsentBlocksRequest(url)) { answer(false, false, "no-consent", false); yield break; }
+            bool refused = false;
+            if (SensitiveTransportBlocked(url, body, (ok0, text0) => refused = true) || refused)
+            {
+                answer(false, false, "insecure-transport", false); yield break;
+            }
+            string token = SteamAuth.SessionToken;
+            if (string.IsNullOrEmpty(token) || !CredentialedTransportAllowed(url))
+            {
+                answer(false, false, "no-session", false); yield break;
+            }
+            byte[] raw = Encoding.UTF8.GetBytes(body ?? "");
+            using (var request = new UnityWebRequest(url, "POST"))
+            {
+                if (raw.Length > 0) request.uploadHandler = new UploadHandlerRaw(raw);
+                request.downloadHandler = new DownloadHandlerBuffer();
+                request.SetRequestHeader("Content-Type", "application/json");
+                request.SetRequestHeader("X-Mod-Version", Plugin.ModVersion ?? "0.0.0");
+                request.SetRequestHeader("X-Session-Token", token);
+                // Identity-clock route only (clockHeader is null on every other
+                // route): X-Seat-Clock read now, as this send is built (each
+                // retry carries its own reading; the signed record bytes are
+                // unchanged). Outside the signature.
+                if (clockHeader != null)
+                {
+                    string ch = null;
+                    try { ch = clockHeader(); } catch { ch = null; }
+                    if (!string.IsNullOrEmpty(ch)) { try { request.SetRequestHeader("X-Seat-Clock", ch); } catch { } }
+                }
+                request.timeout = 20;
+                // F6: the request is completely built before beforeSend persists
+                // the spent transmission; between a true from it and
+                // SendWebRequest only the contained attempt mark runs.
+                bool go = false;
+                try { go = beforeSend == null || beforeSend(); } catch { go = false; }
+                if (!go) { answer(false, false, "not-sent", false); yield break; }
+                try { MarkApiAttempt(); } catch { }
+                yield return request.SendWebRequest();
+                if (HandleVersionGate(request)) { answer(true, false, "outdated", true); yield break; }
+                HandleSessionReject(request, token);
+                bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
+                answer(true, success, success ? request.downloadHandler.text : FormatRequestError(request), true);
+            }
+        }
+
         // Security A2: admin canonicals sign with the SEPARATE admin secret
         // from the local BepInEx config (never compiled into the DLL). Empty
         // secret -> empty signature -> clean server-side 403; the one-time log
@@ -2358,6 +3198,15 @@ namespace CompetitiveRounds
         }
 
         public static List<ActiveSeriesEntry> CachedActiveSeries { get; private set; }
+        /// <summary>The last /series/active read: whether it answered and parsed
+        /// completely, and when (realtimeSinceStartup). A failed or partial read
+        /// is not a "no series" answer (report L13: the broadcast status
+        /// lease's series_status reads these).</summary>
+        internal static bool ActiveSeriesReadOk { get; private set; }
+        internal static float ActiveSeriesReadAt { get; private set; } = -1f;
+        /// <summary>Moves on every completed /series/active read, failed ones
+        /// included: a status cached before it is stale at once.</summary>
+        internal static long ActiveSeriesReadGen { get; private set; }
         public static List<MyBetEntry> CachedMyBets { get; private set; } = new List<MyBetEntry>();
 
         public static void FetchActiveSeries()
@@ -2366,8 +3215,9 @@ namespace CompetitiveRounds
                 $"{baseUrl}/api/v1/series/active",
                 (ok, resp) =>
                 {
-                    if (!ok) return;
+                    if (!ok) { ActiveSeriesReadOk = false; ActiveSeriesReadGen++; return; }
                     var list = new List<ActiveSeriesEntry>();
+                    bool parsed = false;
                     try
                     {
                         var parts = resp.Split(new[] { "\"series_id\":" }, StringSplitOptions.None);
@@ -2398,8 +3248,13 @@ namespace CompetitiveRounds
                             e.phase           = ExtractJsonString(chunk, "phase");
                             if (!string.IsNullOrEmpty(e.series_id)) list.Add(e);
                         }
+                        // complete only when the body IS {"series": [objects]} (parsed
+                        // structurally) and every object in it gave one entry
+                        int shape = IdentityClockCore.SeriesBodyShape(resp);
+                        parsed = shape >= 0 && shape == list.Count;
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[BET] active-series parse: {ex.Message}"); }
+                    try { ActiveSeriesReadOk = parsed; ActiveSeriesReadAt = UnityEngine.Time.realtimeSinceStartup; ActiveSeriesReadGen++; } catch { }
                     CachedActiveSeries = list;
                     NativeUI.MarkDirty();
                 }
@@ -2667,15 +3522,25 @@ namespace CompetitiveRounds
             // it, one missed game report left every later live-points write
             // refused and the betting window open for the rest of the sitting.
             public Func<string, string> rewriteOnRefusal; public bool rewrote;
+            // v1.41.0 beta round 4, finding 1: a 2v2 post that names its game
+            // carries the same post WITHOUT the pair here. A server that does
+            // not know the pair checks the legacy signature and refuses the
+            // named one ("HTTP 403" + "Invalid signature"); the post is then
+            // resent once in the legacy form, and onFallbackOk runs when that
+            // one is accepted (the series' later posts then go without the
+            // pair; see PostTeamLivePoints).
+            public string fallbackUrl; public bool fellBack; public Action onFallbackOk;
         }
         private static readonly Dictionary<string, LivePointRetry> livePointRetries =
             new Dictionary<string, LivePointRetry>();
         private const int LIVE_POINT_MAX_ATTEMPTS = 4;
 
         private static void SendLivePoints(string key, string url, string tag,
-                                           Func<string, string> rewriteOnRefusal = null)
+                                           Func<string, string> rewriteOnRefusal = null,
+                                           string fallbackUrl = null, Action onFallbackOk = null)
         {
-            var entry = new LivePointRetry { url = url, attempts = 0, tag = tag, rewriteOnRefusal = rewriteOnRefusal };
+            var entry = new LivePointRetry { url = url, attempts = 0, tag = tag, rewriteOnRefusal = rewriteOnRefusal,
+                                             fallbackUrl = fallbackUrl, onFallbackOk = onFallbackOk };
             livePointRetries[key] = entry;   // newest score wins outright
             SendLivePointsOnce(key, entry);
         }
@@ -2691,7 +3556,24 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     livePointRetries.Remove(key);
-                    Plugin.Log.LogInfo($"[LIVE-POINTS] {entry.tag} ok");
+                    Plugin.Log.LogInfo($"[LIVE-POINTS] {entry.tag} ok{(entry.fellBack ? " (without the pair)" : "")}");
+                    if (entry.fellBack && entry.onFallbackOk != null)
+                    {
+                        try { entry.onFallbackOk(); } catch { }
+                    }
+                    return;
+                }
+                // Round 4, finding 1: the named form refused on its signature
+                // alone is the server not knowing the pair. Resend once
+                // without it; any other refusal takes the paths below.
+                if (entry.fallbackUrl != null && !entry.fellBack && resp != null
+                    && (resp.IndexOf("HTTP 403", StringComparison.Ordinal) >= 0
+                        || resp.IndexOf("HTTP/1.1 403", StringComparison.Ordinal) >= 0)
+                    && resp.IndexOf("Invalid signature", StringComparison.Ordinal) >= 0)
+                {
+                    entry.fellBack = true; entry.url = entry.fallbackUrl; entry.attempts = 0;
+                    Plugin.Log.LogWarning($"[LIVE-POINTS] {entry.tag} refused with the pair (403) -- resending once without it");
+                    SendLivePointsOnce(key, entry);
                     return;
                 }
                 // A 409 is the server saying the write does not apply (series
@@ -2742,16 +3624,64 @@ namespace CompetitiveRounds
         /// (Sid, Aug 9: the cutoff is 2 points, never a clock). t1/t2 are in
         /// team_series' own slot order. Delivery is retried like the 1v1
         /// channel (bounded, newest-value-wins); a persistently lost report
-        /// costs cutoff precision until the 20s refresh, never gameplay.</summary>
-        public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points)
+        /// costs cutoff precision until the 20s refresh, never gameplay.
+        ///
+        /// v1.41.0 beta round 4, finding 1: gameNumber and photonRoomId are
+        /// the game this pair is the running score of, frozen at its game's
+        /// start (TeamGameNumber.Live.For), and the room it is played in.
+        /// With both, the post carries game_number and photon_room_id and
+        /// signs 'team-live-points-game:{series}:{reporter}:{t1}:{t2}:{game}:{room}',
+        /// the canonical update_team_live_points checks for them; the server
+        /// then files it only under exactly that game of that sitting. It goes
+        /// WITHOUT the pair, signing the legacy canonical, when there is no
+        /// number (0: see TeamGameNumber for when), when the number or the
+        /// room is outside what the server accepts (TeamGameNumber.Sendable),
+        /// or when this series' server has already refused the pair once
+        /// (a server that does not know it: the 403 fallback in
+        /// SendLivePointsOnce).
+        ///
+        /// v1.41.0 beta round 5, finding F25: gameToken is the physical
+        /// game's token (TeamGameNumber.Live.TokenFor). A post WITH the pair
+        /// also carries it, as game_token plus token_sig over
+        /// 'team-live-points-token:{series}:{reporter}:{t1}:{t2}:{game}:{room}:{token}'
+        /// (TeamGameNumber.TokenCanonical), signed apart from the pair's own
+        /// sig, which is unchanged. A server that does not know the token
+        /// ignores the two parameters; one that cannot verify it files the
+        /// post without it. A post without the pair never carries it.
+        ///
+        /// Round 6, finding F27: the token is 'nonce:ordinal:epoch'
+        /// (TeamGameNumber.MakeToken), all three parts signed. The server
+        /// takes a post whose token names a game other than the one it is
+        /// filed under as proof that the record holds another physical
+        /// game.</summary>
+        public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points,
+                                              int gameNumber = 0, string photonRoomId = null, string gameToken = null)
         {
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId)) return;
-            string sig = ComputeHmacHex($"team-live-points:{seriesId}:{reporterSteamId}:{t1Points}:{t2Points}");
-            string url = $"{baseUrl}/api/v1/team/series/{Escape(seriesId)}/live-points" +
-                         $"?t1_points={t1Points}&t2_points={t2Points}" +
-                         $"&reporter_steam_id={Escape(reporterSteamId)}&sig={sig}";
-            SendLivePoints("2v2:" + seriesId, url,
-                $"2v2 series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {t1Points}-{t2Points}");
+            string query = $"{baseUrl}/api/v1/team/series/{Escape(seriesId)}/live-points" +
+                           $"?t1_points={t1Points}&t2_points={t2Points}" +
+                           $"&reporter_steam_id={Escape(reporterSteamId)}";
+            string legacyUrl = query + "&sig=" + ComputeHmacHex(
+                TeamGameNumber.LegacyCanonical(seriesId, reporterSteamId, t1Points, t2Points));
+            string tag = $"2v2 series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {t1Points}-{t2Points}";
+            if (!TeamGameNumber.Sendable(gameNumber, photonRoomId)
+                || TeamGameNumber.Live.AttestationRefused(seriesId))
+            {
+                SendLivePoints("2v2:" + seriesId, legacyUrl, tag);
+                return;
+            }
+            string namedUrl = query + TeamGameNumber.QueryPair(gameNumber, UnityWebRequest.EscapeURL(photonRoomId))
+                              + "&sig=" + ComputeHmacHex(TeamGameNumber.AttestedCanonical(
+                                  seriesId, reporterSteamId, t1Points, t2Points, gameNumber, photonRoomId));
+            if (TeamGameNumber.TokenValid(gameToken))
+            {
+                namedUrl += TeamGameNumber.QueryToken(gameToken, ComputeHmacHex(TeamGameNumber.TokenCanonical(
+                    seriesId, reporterSteamId, t1Points, t2Points, gameNumber, photonRoomId, gameToken)));
+                tag += " token " + TeamGameNumber.Describe(gameToken);
+            }
+            SendLivePoints("2v2:" + seriesId, namedUrl, tag + " game " + gameNumber,
+                fallbackUrl: legacyUrl,
+                onFallbackOk: () => TeamGameNumber.Live.NoteAttestationRefused(seriesId));
         }
 
         /// <summary>Points scored ACROSS THE FIELD in the FFA game in progress
@@ -3001,9 +3931,17 @@ namespace CompetitiveRounds
             // the old one's name and cosmetics.
             CachedPlayerStats = null;
             CachedPcMe = null; CachedPcCollection = null;
+            ClearPcTradeCaches();
+            ReleasePcReadLatches();
             PcMeError = null; PcCollectionError = null;
             PcMeFetchedAt = -1f; PcMeDispatchedAt = -1f; PcCollectionFetchedAt = -1f;
             pcMeAttemptAt = -100f; pcCollAttemptAt = -100f;
+            // Title ladders (item 12): the board names which rungs the account
+            // OWNS and which one it wears. Same ordering — epoch first, so an
+            // answer already on the wire is dropped, then the clears.
+            _ladderEpoch++;
+            CachedTitleLadders = null; TitleLaddersError = null;
+            TitleLaddersFetchedAt = -1f; ladderAttemptAt = -100f;
             NativeUI.MarkDirty();
         }
 
@@ -3725,7 +4663,13 @@ namespace CompetitiveRounds
             public string print_id, card_id, subject_player_id, subject_name, edition_id, minted_at, rarity, top_card, title, rank_name, source;
             public string face_rev;   // v22 §2.2: the server's face revision; null on an api without the renderer
             public string face_locale = "en";   // the locale the answer keyed face_rev under (set by the parsers)
-            public bool subject_deleted, foil, signed, discarded;
+            public bool subject_deleted, foil, signed, discarded, traded;
+            // Card trading: `traded` is the own-binder answer's permanent flag
+            // (pc_prints.acquired_by_trade, F1), absent -> false on an api
+            // without trading. `gone` is set only inside a trade's give/get
+            // list, where a print a data deletion removed is named by its id
+            // alone ({"print_id": ..., "gone": true}).
+            public bool gone;
             public int pool_rank, board_rank, series_wins, series_losses, slot;
             public int discard_shards = -1;   // what the discard paid; -1 = not discarded, or an answer without the field
             // v22 7: copies of this exact card the opener held BEFORE this slot,
@@ -3734,11 +4678,29 @@ namespace CompetitiveRounds
             // rather than announcing every card new.
             public int dup_at_pull = -1;
             public float rating, peak_rating;
+            // ── item 20: the SUBJECT as of the collection read ──────────────
+            // Everything above is the MINT-TIME snapshot frozen onto the card
+            // face. These four are where that player stands TODAY, and they
+            // ride only the /pc/collection answer (a pack open and /pc/card
+            // carry none). Absence is unranked, not an error: an api that
+            // predates the server half leaves all four at their defaults, the
+            // collection's own subject_standings reads false, and the binder
+            // keeps the five sorts it has always had.
+            public int subject_board_rank;    // 0 = not on the card's board today
+            public float subject_rating;      // only meaningful while subject_rated
+            public bool subject_rated;        // a rating row exists and the subject has not deleted their data
+            public bool subject_inactive;     // the leaderboard's own activity window says so
         }
         public class PcUnopened { public string pack_id, source, mode, kind, reference_id, created_at; }
         public class PcMe
         {
             public bool collection_public, announce, daily_claimed;
+            public bool trades_open;       // card trading consent (Settings); meaningful only while has_trades_open
+            // The settings answer CARRIED trades_open. An api without the
+            // trading schema never sends the key (F3), and its absence is not
+            // "off": the Settings row is hidden, never shown as a switch the
+            // server would refuse.
+            public bool has_trades_open;
             public bool paid_cap_exempt;   // the server skips the daily paid-pack cap for this account (testing exemption)
             public int revision, shards, price_gold, price_shards, paid_packs_per_day, prints_per_pack, paid_today, prints, pool_member_count;
             public string daily_pack_id, next_reset_utc, pool_taken_at;
@@ -3771,6 +4733,12 @@ namespace CompetitiveRounds
             public string locale = "en";   // the locale the server keyed the faces under (v22 §2.2)
             public bool is_public;
             public int count;
+            // item 20: this answer computed the subjects' standings, so the
+            // four subject_* fields on each print mean something. FALSE on an
+            // api that predates them, and false is the whole feature-presence
+            // question -- a per-print 0 only ever means "this subject has no
+            // position", never "this api never said".
+            public bool subject_standings;
             public List<PcPrint> prints = new List<PcPrint>();
         }
 
@@ -3783,11 +4751,69 @@ namespace CompetitiveRounds
         private static bool pcMeInFlight, pcCollInFlight;
         private static float pcMeAttemptAt = -100f, pcCollAttemptAt = -100f;   // the throttle keys on the last ATTEMPT, so a failing fetch is not re-fired by every repaint
         private static int _pcCacheEpoch;   // advanced on every identity edge (c4): a landing from an older epoch never touches the cache
+        /// <summary>Item 18 fix pass 2, finding 1: the generation of the two
+        /// caches' confirmed writes (PcCacheFence). FetchPcMe and
+        /// FetchPcCollection stamp it at dispatch and land only if it has not
+        /// moved; the writers that apply a server confirmation (a shard's or a
+        /// discard's balance and removed prints, a trade accept's drawn
+        /// prints) move it.</summary>
+        internal static readonly PcCacheFence PcAnswerFence = new PcCacheFence();
+        /// <summary>Item 18 fix pass 3, finding 2: the prints a refused
+        /// shard's not_owned named (PcShardTombstones; PlayerCardsUI reads
+        /// and writes it as shardGone). It lives here because the reads that
+        /// lift a tombstone land here: FetchPcCollection numbers each read at
+        /// dispatch and, when a read lands, lifts every tombstone written
+        /// before that dispatch whose print the read holds, so a print traded
+        /// away and back returns to the pull tab's walks.</summary>
+        internal static readonly PcShardTombstones PcShardGone = new PcShardTombstones();
+        /// <summary>Item 18 fix pass 4, finding 7: a forced /pc/me read asked
+        /// for while one is already on the wire (PcReadDemand). FetchPcMe
+        /// remembers it, bound to the identity generation it was asked in,
+        /// and once the read on the wire lands a fresh read is sent: that
+        /// older answer never answers it. ReleasePcReadLatches releases it at
+        /// an identity or consent edge. Fix pass 5, finding 10: a forced
+        /// ask's callback waits here too, and is heard once, from the first
+        /// read dispatched after the ask that lands with its answer taken
+        /// (PcReadDemand.Answered); the edge drops it unheard.</summary>
+        internal static readonly PcReadDemand PcMeDemand = new PcReadDemand();
+        // A read the fence dropped is owed (with the callers that waited on
+        // it) until PcSendOwedReads sends it again; an identity edge clears it.
+        private static bool pcMeReadOwed, pcCollReadOwed;
+        private static Action<bool, string> pcMeOwedCallback, pcCollOwedCallback;
+        internal static bool PcReadsOwed { get { return pcMeReadOwed || pcCollReadOwed; } }
+
+        /// <summary>Fix pass 2, finding 1: sends each read the fence dropped,
+        /// once, stamped now. PlayerCardsUI's tick calls it only while no
+        /// shard and no discard is out, so the read it sends is not itself
+        /// dropped by an answer of the same run, and one dropped read costs
+        /// at most one more request.</summary>
+        internal static void PcSendOwedReads(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            if (pcMeReadOwed && !pcMeInFlight)
+            {
+                pcMeReadOwed = false;
+                var cb = pcMeOwedCallback; pcMeOwedCallback = null;
+                FetchPcMe(steamId, true, cb);
+            }
+            if (pcCollReadOwed && !pcCollInFlight)
+            {
+                pcCollReadOwed = false;
+                var cb = pcCollOwedCallback; pcCollOwedCallback = null;
+                pcCollAttemptAt = -100f;
+                FetchPcCollection(steamId, true, cb);
+            }
+        }
 
         /// <summary>The identity/consent generation. It is bumped by
-        /// OnLocalIdentityChanged and by the consent revoke, BEFORE either
-        /// clears anything, so any answer dispatched under the previous account
-        /// or the previous consent state can be recognised and dropped. The
+        /// OnLocalIdentityChanged and by the consent revoke, before either clears
+        /// THE CACHES THIS EPOCH FENCES, so any answer dispatched under the
+        /// previous account or the previous consent state can be recognised and
+        /// dropped. Note the narrower claim: other state goes first in both paths
+        /// (the shop caches on one, a dozen caches and the music stores on the
+        /// other), and `Plugin.DataConsentGranted` flips later still, so a reader
+        /// who needs "nothing has been cleared yet" does not get it here (r4
+        /// finding). The
         /// Player Cards reads have always fenced on it; it is the same edge for
         /// every other read, which is why it is named here rather than left as
         /// a Player Cards detail.</summary>
@@ -3807,21 +4833,76 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
             if (!force && Time.realtimeSinceStartup - pcMeAttemptAt < 10f) { callback?.Invoke(CachedPcMe != null, null); return; }
-            if (pcMeInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            if (pcMeInFlight)
+            {
+                // Fix pass 4, finding 7: a forced read is DEMAND (a failed,
+                // refused or unanswered shard's balance read-back among
+                // them), and the read already on the wire (the tab's 30 s
+                // read, for one) was dispatched before whatever made the
+                // caller ask, so its answer is not proven newer than that.
+                // When a shard committed with no answer this client
+                // admitted, nothing moved the answer fence, so that older
+                // read lands, and the balance it installs may be the one
+                // from before the commit. The demand is remembered
+                // (PcMeDemand, bound to this generation), and a fresh read
+                // is sent once the older one lands.
+                //
+                // Fix pass 5, finding 10: a forced ask's callback is a caller
+                // waiting for a read newer than its ask (the dance
+                // selection's picture check, PlayerCardsUI.MaybeSendDance),
+                // so it is no longer answered "in-flight" here. It waits
+                // with the demand (PcMeDemand) and is heard once, from the
+                // first read dispatched after this ask that lands with its
+                // answer taken, never from the older read, which is not
+                // proven newer than the ask; an identity or consent edge
+                // drops it unheard.
+                if (force) { PcMeDemand.Demand(steamId, _pcCacheEpoch, callback); return; }
+                callback?.Invoke(false, "in-flight");
+                return;
+            }
             pcMeInFlight = true; pcMeAttemptAt = Time.realtimeSinceStartup;
             float dispatched = pcMeAttemptAt;
             string url = PcUrl("me", steamId, $"pcread:{steamId}:me:-", null);
             int epoch = _pcCacheEpoch;
+            int fence = PcAnswerFence.Stamp();
+            int read = PcMeDemand.Dispatched();   // fix pass 4, finding 7: which demand this read can answer
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 pcMeInFlight = false;
+                // Fix pass 4, finding 7: whatever this answer is, a demand
+                // made while it was on the wire is closed here. This read was
+                // dispatched before that demand, so it never answers it; a
+                // fresh read is sent the next frame (PcMeReadAgain) unless
+                // the fence drops this answer, whose owed read is dispatched
+                // later and answers it. A demand of another generation is
+                // dropped.
+                string again = PcMeDemand.Landed(read, _pcCacheEpoch);
                 if (epoch != _pcCacheEpoch)
                 {
                     // dispatched for a previous identity: never repaint the cache (c4)
                     Plugin.Log.LogInfo("[PC] me answer dropped: identity changed");
+                    PcMeReadAgain(again);   // a demand the current identity made while this one flew
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
                     return;
                 }
+                if (ok && !PcAnswerFence.Admits(fence))
+                {
+                    // Fix pass 2, finding 1: a confirmed write (a shard's or a
+                    // discard's balance) landed while this read was on the
+                    // wire, so its balance may predate it. Dropped; the read
+                    // is OWED and sent again by PcSendOwedReads once no shard
+                    // or discard is out (never mid-run: a re-read per discard
+                    // answer is the request shape C2 removed). The caller
+                    // hears that read. That read, dispatched later, also
+                    // answers a demand made while this one flew (fix pass 4,
+                    // finding 7), so no second read is sent for it, and the
+                    // callbacks left waiting are heard from it, not from this
+                    // answer, which is not taken (fix pass 5, finding 10).
+                    Plugin.Log.LogInfo("[PC] me answer dropped: a confirmed write landed while it was in flight; read owed");
+                    pcMeReadOwed = true; if (callback != null) pcMeOwedCallback += callback;
+                    return;
+                }
+                PcMeReadAgain(again);   // fix pass 4, finding 7: this answer lands, then the demand's own read goes
                 if (ok)
                 {
                     var me = ParsePcMe(resp);
@@ -3831,6 +4912,17 @@ namespace CompetitiveRounds
                 else { PcMeError = resp; Plugin.Log.LogInfo($"[PC] me fetch failed: {PcShort(resp)}"); }
                 try { NativeUI.MarkDirty(); } catch { }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] me callback threw: {cex.Message}"); }
+                // Fix pass 5, finding 10: then each callback a forced ask left
+                // waiting while an older read flew, this read being the first
+                // dispatched after that ask to land with its answer taken:
+                // heard once, with this answer, after it is cached (or has
+                // failed). Never on the stale-identity or fence-drop paths
+                // above, which take no answer: there the read sent next
+                // answers it.
+                var waited = PcMeDemand.Answered(read, _pcCacheEpoch);
+                if (waited != null)
+                    foreach (var w in waited)
+                        try { w(ok, resp); } catch (Exception wex) { Plugin.Log.LogWarning($"[PC] me waiting callback threw: {wex.Message}"); }
             }, detailedErrors: true, sessionAware: true));
         }
 
@@ -3855,6 +4947,8 @@ namespace CompetitiveRounds
             pcCollInFlight = true; pcCollAttemptAt = Time.realtimeSinceStartup;
             string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:-", null);
             int epoch = _pcCacheEpoch;
+            int fence = PcAnswerFence.Stamp();
+            int read = PcShardGone.Dispatched();   // fix pass 3, finding 2: which tombstones this read may lift
             // The prints carry a face_locale and the faces are cached by it, so
             // the answer describes the language it was ASKED in. Committing one
             // asked in the previous language leaves every face keyed to a locale
@@ -3863,14 +4957,18 @@ namespace CompetitiveRounds
             string who = steamId;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
-                pcCollInFlight = false;
-                bool again = pcCollForceAgain; pcCollForceAgain = false;
+                // An answer dispatched before an identity or consent edge touches
+                // nothing: the edge released this read's latch and its remembered
+                // demand (ReleasePcReadLatches), which now belong to the new
+                // generation's reads (TC-M2 sweep).
                 if (epoch != _pcCacheEpoch)
                 {
                     Plugin.Log.LogInfo("[PC] collection answer dropped: identity changed");
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
                     return;
                 }
+                pcCollInFlight = false;
+                bool again = pcCollForceAgain; pcCollForceAgain = false;
                 if (locale != I18n.Locale)
                 {
                     Plugin.Log.LogInfo("[PC] collection answer dropped: language changed while it was in flight");
@@ -3880,17 +4978,42 @@ namespace CompetitiveRounds
                     FetchPcCollection(who, true, callback);
                     return;
                 }
+                if (ok && !PcAnswerFence.Admits(fence))
+                {
+                    // Fix pass 2, finding 1: a confirmed write (prints a shard,
+                    // a discard or a trade accept removed or drew) landed while
+                    // this read was on the wire, so its prints may predate it.
+                    // Dropped; the read is OWED (PcSendOwedReads, as /pc/me's),
+                    // and that read also answers any demand remembered
+                    // meanwhile. The caller hears that read.
+                    Plugin.Log.LogInfo("[PC] collection answer dropped: a confirmed write landed while it was in flight; read owed");
+                    pcCollReadOwed = true; if (callback != null) pcCollOwedCallback += callback;
+                    return;
+                }
                 if (again)
                 {
                     // something demanded a fresh read while this one was on the
-                    // wire: let this answer land, then go again
+                    // wire: let this answer land, then go again, bound to this
+                    // answer's generation (the epoch check above proved the
+                    // dispatch epoch is still the current one; TC-M2)
                     pcCollAttemptAt = -100f;
-                    try { Plugin.Instance.StartCoroutine(RefetchCollectionNextFrame(who)); } catch { }
+                    try { Plugin.Instance.StartCoroutine(RefetchCollectionNextFrame(who, epoch)); } catch { }
                 }
                 if (ok)
                 {
                     var col = ParsePcCollection(resp);
-                    if (col != null) { CachedPcCollection = col; PcCollectionFetchedAt = Time.realtimeSinceStartup; PcCollectionError = null; }
+                    if (col != null)
+                    {
+                        CachedPcCollection = col; PcCollectionFetchedAt = Time.realtimeSinceStartup; PcCollectionError = null;
+                        // Fix pass 3, finding 2: this landed read is the current
+                        // ownership, so every not_owned tombstone written before
+                        // it was dispatched whose print it holds live is lifted:
+                        // a print traded away and back is the player's again.
+                        var held = new List<string>();
+                        if (col.prints != null)
+                            foreach (var p in col.prints) if (p != null && p.print_id != null && !p.discarded && !p.gone) held.Add(p.print_id);
+                        PcShardGone.Reconcile(held, read);
+                    }
                     else { PcCollectionError = "parse"; ok = false; }
                 }
                 else { PcCollectionError = resp; Plugin.Log.LogInfo($"[PC] collection fetch failed: {PcShort(resp)}"); }
@@ -3901,10 +5024,50 @@ namespace CompetitiveRounds
 
         private static bool pcCollForceAgain;
 
-        private static IEnumerator RefetchCollectionNextFrame(string steamId)
+        /// <summary>The next-frame binder re-read, bound to the Player Cards
+        /// generation that scheduled it (TC-M2, as RefetchTradesNextFrame):
+        /// an identity or consent edge before the frame comes round drops it.</summary>
+        private static IEnumerator RefetchCollectionNextFrame(string steamId, int genAtSchedule)
         {
             yield return null;                       // let this answer commit first
+            if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))
+            {
+                Plugin.Log.LogInfo("[PC] collection deferred re-read dropped: identity changed gen_at_schedule=" + genAtSchedule + " gen_now=" + _pcCacheEpoch);
+                yield break;
+            }
             FetchPcCollection(steamId, true);
+        }
+
+        /// <summary>Fix pass 4, finding 7: the fresh /pc/me read that a
+        /// demand made while a read was on the wire asks for, once that read
+        /// has landed (PcMeDemand.Landed named the identity), sent the next
+        /// frame. Null: nothing was demanded.</summary>
+        private static void PcMeReadAgain(string steamId)
+        {
+            if (steamId == null) return;
+            try { Plugin.Instance.StartCoroutine(RefetchPcMeNextFrame(steamId, _pcCacheEpoch)); } catch { }
+        }
+
+        /// <summary>Fix pass 4, finding 7: the next-frame /pc/me re-read,
+        /// bound to the Player Cards generation that scheduled it (TC-M2, as
+        /// RefetchCollectionNextFrame): an identity or consent edge before
+        /// the frame comes round drops it. A read on the wire by then was
+        /// sent after the older answer landed, so after the demand: it
+        /// answers the demand, and no second read is sent.</summary>
+        private static IEnumerator RefetchPcMeNextFrame(string steamId, int genAtSchedule)
+        {
+            yield return null;                       // let the older answer commit first
+            if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))
+            {
+                Plugin.Log.LogInfo("[PC] me deferred re-read dropped: identity changed gen_at_schedule=" + genAtSchedule + " gen_now=" + _pcCacheEpoch);
+                yield break;
+            }
+            if (pcMeInFlight)
+            {
+                Plugin.Log.LogInfo("[PC] me deferred re-read not sent: a read sent after the demand is on the wire");
+                yield break;
+            }
+            FetchPcMe(steamId, true);
         }
 
         /// <summary>Buy and open a pack. The caller persists its intent (nonce,
@@ -3959,26 +5122,130 @@ namespace CompetitiveRounds
             }));
         }
 
-        public static void PcDiscard(string steamId, string printId, Action<bool, string> callback)
+        /// <summary>One print discarded: a step of the binder's per-copy run
+        /// (PlayerCardsUI.DiscardNext), one request per copy. The balance in
+        /// the answer is written into the cache before the callback runs, and
+        /// moves PcAnswerFence, only while `current` says the step is still
+        /// the caller's current run (item 18 fix pass 3, finding 4:
+        /// PcQuickShardRules.DiscardStepCurrent, PcDiscardBatch's
+        /// PcShardFlight.Admits(current) rule). A run given up whose answer
+        /// arrives late therefore changes neither the cached balance nor the
+        /// fence. A null `current` writes none (Admits fails closed).</summary>
+        public static void PcDiscard(string steamId, string printId, Func<bool> current, Action<bool, string> callback)
         {
             string url = PcUrl("prints/discard", steamId, $"pcdiscard:{steamId}:{printId}", $"print_id={printId}");
             int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[PC] discard {printId} ok={ok} resp={PcShort(resp)}");
-                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))
                 {
                     string sh = PcTopLevel(resp, "shards");
-                    if (sh != null) CachedPcMe.shards = PcInt(sh);
+                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }
                 }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] discard callback threw: {cex.Message}"); }
             }));
         }
 
+        /// <summary>The most prints one batch shard may name: the server's
+        /// PC_DISCARD_BATCH_CAP (player_cards.py), pinned equal by
+        /// test_pc_shard_client. A request past it is refused whole (422
+        /// too_many), so the client never builds one.</summary>
+        public const int PC_DISCARD_BATCH_CAP = 40;
+
+        /// <summary>The batch shard (board row 25): up to PC_DISCARD_BATCH_CAP of
+        /// the caller's prints discarded in ONE server transaction, all or none.
+        /// Signed over pcdiscardn:{steam}:{key}:{the ids as the body lists them};
+        /// the key is the pack id for a pack shard and a nonce for a binder
+        /// selection. The same key with the same prints is answered the stored
+        /// total and credits nothing, so a caller keeps its key until an answer
+        /// arrives and a retry can never pay twice. The key and the ids are
+        /// written into the JSON body as they are, so both must be plain tokens
+        /// ([A-Za-z0-9-], at most 64): anything else is refused here, unsent.
+        /// The balance in the answer is written into the cache before the
+        /// callback runs, as the single discard does -- and only while
+        /// `current` says the request is still the caller's current one
+        /// (item 18 fix pass 1, F2: PcShardFlight's generation), so a request
+        /// given up whose answer arrives late writes no balance. A null
+        /// `current` writes none (PcShardFlight.Admits fails closed). A
+        /// balance it does write moves PcAnswerFence (fix pass 2, finding 1),
+        /// so a read already on the wire cannot put the older balance back.</summary>
+        public static void PcDiscardBatch(string steamId, string key, IList<string> printIds, Func<bool> current, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null || !PcPlainToken(key) || printIds == null || printIds.Count == 0
+                || printIds.Count > PC_DISCARD_BATCH_CAP)
+            { callback?.Invoke(false, "not ready"); return; }
+            var body = new StringBuilder();
+            body.Append("{\"key\":\"").Append(key).Append("\",\"print_ids\":[");
+            for (int i = 0; i < printIds.Count; i++)
+            {
+                if (!PcPlainToken(printIds[i])) { callback?.Invoke(false, "not ready"); return; }
+                if (i > 0) body.Append(',');
+                body.Append('"').Append(printIds[i]).Append('"');
+            }
+            body.Append("]}");
+            string joined = string.Join(",", printIds);
+            string url = PcUrl("prints/discard-batch", steamId, $"pcdiscardn:{steamId}:{key}:{joined}", null);
+            int epoch = _pcCacheEpoch;
+            int count = printIds.Count;
+            Plugin.Instance.StartCoroutine(PostRequest(url, body.ToString(), (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] discard-batch key={key} prints={count} ok={ok} resp={PcShort(resp)}");
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))
+                {
+                    string sh = PcTopLevel(resp, "shards");
+                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }
+                }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] discard-batch callback threw: {cex.Message}"); }
+            }));
+        }
+
+        private static bool PcPlainToken(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length > 64) return false;
+            foreach (char c in s)
+                if (!(c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return false;
+            return true;
+        }
+
+        /// <summary>(print id, shards it paid) for every print a batch shard
+        /// answer lists under "results" -- the depth-aware readers, never a
+        /// JsonUtility parse of the nested array. Empty for anything else.</summary>
+        internal static List<KeyValuePair<string, int>> PcBatchResults(string resp)
+        {
+            var list = new List<KeyValuePair<string, int>>();
+            string arr = PcTopLevel(resp, "results");
+            if (string.IsNullOrEmpty(arr) || arr == "null") return list;
+            foreach (var o in SliceTopLevelObjects(arr))
+            {
+                string id = PcStr(PcTopLevel(o, "print_id"));
+                if (!string.IsNullOrEmpty(id)) list.Add(new KeyValuePair<string, int>(id, PcInt(PcTopLevel(o, "shards_gained"))));
+            }
+            return list;
+        }
+
+        /// <summary>The Settings tab's full card (board row 24): the caller's
+        /// OWN card as the pool sees it now -- frame, rarity, name, rank title,
+        /// rating, record and picture -- one 750x1050 PNG drawn by the server
+        /// with the renderer the bot's /card preview uses. Signed over
+        /// pcread:{steam}:face:preview; (ok, bytes, HTTP status): 404 while the
+        /// caller has no card in the pool yet, 503 while the server cannot draw
+        /// one. The caller checks the header for the CARD size before decoding.</summary>
+        public static void PcFacePreview(string steamId, Action<bool, byte[], long> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, null, 0); return; }
+            FetchBytes(PcUrl("face/preview", steamId, $"pcread:{steamId}:face:preview", null), PC_FACE_MAX_BYTES, callback);
+        }
+
         /// <summary>Compare-and-set one setting: the revision the caller read
         /// must still be current (409 stale_revision otherwise). The answer is
-        /// the full settings row and is written into the cache before the
-        /// callback runs.</summary>
+        /// the full settings row; its settings and its revision are written
+        /// into the cache before the callback runs, its shard balance is not
+        /// (fix pass 3, finding 5). That balance is the one the server read
+        /// when this write committed: a shard confirmed while the answer was
+        /// on the wire installs a newer balance, which this answer landing
+        /// later would put back. The cached balance comes from the /pc/me
+        /// answer and the discard answers only (PcApplySettings).</summary>
         public static void PcSetSetting(string steamId, string nonce, int revision, string key, int value, Action<bool, string> callback)
         {
             string url = PcUrl("settings", steamId, $"pcset:{steamId}:{nonce}:{revision}:{key}:{value}",
@@ -3990,6 +5257,439 @@ namespace CompetitiveRounds
                 if (ok && epoch == _pcCacheEpoch && CachedPcMe != null) PcApplySettings(CachedPcMe, resp);
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] settings callback threw: {cex.Message}"); }
             }));
+        }
+
+        // -- Card trading (v1.41.0, design V8 3.4-3.7 and 6.5) ------------------
+        // Cards for cards between two players; the server is the only
+        // authority. Every route takes QUERY parameters. A trade refusal is
+        // {"detail": {"error", "permanent", "state", "retry_after"}}; the
+        // guards in front of the trade code answer in other shapes (a 401, a
+        // plain-string detail such as "Invalid signature" or
+        // "service_account_forbidden", the read replica's top-level error),
+        // and PcTradeErrorCode reads those as PcErrorCode does
+        // ("session_required", "read_replica", "http" for a plain string),
+        // except that it names service_account_forbidden. Only the code is
+        // read: busy is retried once after two seconds (V8 1.4), whatever
+        // retry_after says. The canonical item list, its digest and the
+        // signed terms are built by PcTradeRules (executed by
+        // tools/client-rules-harness against the server's own vectors). Every
+        // answer is fenced on the Player Cards epoch it was dispatched under:
+        // an identity or consent edge between dispatch and landing drops it.
+
+        /// <summary>One trade from the viewer's side (V8 3.7): `give` is what
+        /// the viewer gives, `get` what the viewer receives. `state` is the
+        /// stored status, or "expired" for a lapsed proposal the janitor has
+        /// not swept yet.</summary>
+        public class PcTrade
+        {
+            public string trade_id, role, state, counterparty_steam_id, counterparty_name, digest;
+            public string created_at, expires_at, closed_at, executed_at, reason;
+            public float? counterparty_rating;   // null on the wire: no rating row
+            public bool possible;
+            public List<PcPrint> give = new List<PcPrint>();
+            public List<PcPrint> get = new List<PcPrint>();
+        }
+        /// <summary>view=summary (V8 3.7). Named ...Answer because C# forbids a
+        /// nested type and a method of one name in one class, and the method
+        /// is PcTradeSummary (design 6.5).</summary>
+        public class PcTradeSummaryAnswer
+        {
+            public bool enabled, tradesOpen;
+            public int revision;
+            public string serverNow;
+            public List<string> receivedOpen = new List<string>();   // TRADE ids, never print ids
+            public List<string> sentOpen = new List<string>();       // TRADE ids, never print ids
+        }
+        /// <summary>The PC_TRADE values the client displays (it hardcodes none), plus today's two counts.</summary>
+        public class PcTradeBounds
+        {
+            public int prints_per_side_max, ttl_hours, open_sent_max, open_received_max, proposals_per_day,
+                       executed_per_day, executed_per_pair_day, decline_cooldown_hours, reversal_window_minutes,
+                       reversal_cooldown_hours, min_ranked_series, min_mod_age_days, traded_discard_shards,
+                       recent_days, executed_today, proposals_today;
+        }
+        /// <summary>view=full: the summary's fields plus the bounds, the locale
+        /// the faces were keyed under, the open offers (full prints, with
+        /// faces) and the recent trades (slim prints, at most 20).</summary>
+        public class PcTradeFull : PcTradeSummaryAnswer
+        {
+            public PcTradeBounds bounds = new PcTradeBounds();
+            public string locale = "en";
+            public List<PcTrade> offers = new List<PcTrade>();
+            public List<PcTrade> recent = new List<PcTrade>();
+        }
+
+        public static PcTradeSummaryAnswer CachedPcTradeSummary { get; private set; }
+        public static PcTradeFull CachedPcTrades { get; private set; }
+        public static string PcTradeSummaryError { get; private set; }
+        public static string PcTradesError { get; private set; }
+        public static float PcTradeSummaryFetchedAt = -1f, PcTradesFetchedAt = -1f;
+        private static bool pcTradeSummaryInFlight, pcTradesInFlight, pcTradesForceAgain, pcCollOfInFlight;
+        private static float pcTradeSummaryAttemptAt = -100f, pcTradesAttemptAt = -100f;
+        // TC-L1: the ordering fence over the two slots. Every trades read takes
+        // a dispatch number when it is SENT, and a slot never takes an answer
+        // sent before the one it holds (PcTradeRules.TradeCacheFence). TC-L5:
+        // every answer lands through it once, failures included, so a stale
+        // 404 or 503 is kept out like a stale success and never classified. A
+        // full success the fence keeps out is asked again once; the re-ask's
+        // own answer is never re-asked, so the fence cannot start a chain of
+        // reads.
+        private static readonly PcTradeRules.TradeCacheFence pcTradeFence = new PcTradeRules.TradeCacheFence();
+        private static bool pcTradesStaleReask;
+
+        /// <summary>What a trades read's callback hears in place of its answer
+        /// when the fence kept that answer out (TC-L5): a newer answer is
+        /// already held, so this one is neither shown nor classified.
+        /// PlayerCardsUI.TradeReadLanded ignores it, as it ignores
+        /// stale-identity.</summary>
+        internal const string PcStaleOrder = "stale-order";
+
+        /// <summary>Called at both Player Cards cache-clearing edges (identity
+        /// change, consent revoke), after the epoch has advanced.</summary>
+        private static void ClearPcTradeCaches()
+        {
+            CachedPcTradeSummary = null; CachedPcTrades = null;
+            PcTradeSummaryError = null; PcTradesError = null;
+            PcTradeSummaryFetchedAt = -1f; PcTradesFetchedAt = -1f;
+            pcTradeSummaryAttemptAt = -100f; pcTradesAttemptAt = -100f;
+            pcTradesForceAgain = false;
+            pcTradeFence.Clear(); pcTradesStaleReask = false;
+        }
+
+        /// <summary>Called at both Player Cards cache-clearing edges, right
+        /// after ClearPcTradeCaches (TC-M2 sweep). A read latch or a remembered
+        /// forced demand belongs to the generation that set it. An answer sent
+        /// before the edge is dropped by its epoch check without touching
+        /// either, so the edge releases them here: the new generation's first
+        /// reads are not refused as in-flight behind an answer that is never
+        /// taken, and a demand made after the edge is not consumed by one. The
+        /// trades read's own remembered demand is released by
+        /// ClearPcTradeCaches.</summary>
+        private static void ReleasePcReadLatches()
+        {
+            pcTradeSummaryInFlight = false; pcTradesInFlight = false;
+            pcCollInFlight = false; pcCollForceAgain = false;
+            pcCollOfInFlight = false;
+            // fix pass 2, finding 1: a read owed to the previous identity is not sent
+            pcMeReadOwed = false; pcCollReadOwed = false; pcMeOwedCallback = null; pcCollOwedCallback = null;
+            // fix pass 4, finding 7: nor a balance read the previous identity
+            // demanded; fix pass 5, finding 10: and the callbacks its forced
+            // asks left waiting are dropped unheard
+            PcMeDemand.Clear();
+        }
+
+        /// <summary>GET /pc/trades?view=summary, HMAC over
+        /// pcread:{steam}:trades:summary, strict session. Throttled to one read
+        /// per 10 s unless forced.</summary>
+        public static void PcTradeSummary(string steamId, bool force, Action<bool, string> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
+            if (!force && Time.realtimeSinceStartup - pcTradeSummaryAttemptAt < 10f) { callback?.Invoke(CachedPcTradeSummary != null, null); return; }
+            if (pcTradeSummaryInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            pcTradeSummaryInFlight = true; pcTradeSummaryAttemptAt = Time.realtimeSinceStartup;
+            int order = pcTradeFence.Dispatch();
+            string url = PcUrl("trades", steamId, PcTradeRules.CanonRead(steamId, "trades", "summary"), "view=summary");
+            int epoch = _pcCacheEpoch;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                // a pre-edge answer leaves the latch alone: the edge released it (TC-M2 sweep)
+                if (epoch != _pcCacheEpoch)
+                {
+                    Plugin.Log.LogInfo("[PC] trade summary answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
+                pcTradeSummaryInFlight = false;
+                PcTradeSummaryAnswer s = null;
+                if (ok) { s = ParsePcTradeSummary(resp); if (s == null) { ok = false; resp = "parse"; } }
+                // ONE landing per answer, success or failure (TC-L5): an answer
+                // older than the one the slot holds is kept out whatever it says -
+                // no cache write, no error string, and the callback hears
+                // PcStaleOrder, so a stale 404 or 503 is never classified
+                bool keptOut = !pcTradeFence.LandSummary(order, ok, ok ? 200 : PcHttpCode(resp), ok ? null : PcTradeErrorCode(resp));
+                if (keptOut)
+                    Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale answer kept out kind=summary outcome=" + (ok ? "ok" : "fail") + " sent=" + order + " held=" + pcTradeFence.Summary);
+                else if (ok) { CachedPcTradeSummary = s; PcTradeSummaryFetchedAt = Time.realtimeSinceStartup; PcTradeSummaryError = null; }
+                else { PcTradeSummaryError = resp; Plugin.Log.LogInfo($"[PC] trade summary failed: {PcShort(resp)}"); }
+                try { NativeUI.MarkDirty(); } catch { }
+                try { callback?.Invoke(!keptOut && ok, keptOut ? PcStaleOrder : resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trade summary callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        /// <summary>GET /pc/trades?view=full, HMAC over pcread:{steam}:trades:full
+        /// (the signed view and the queried view are one string: a mismatch is
+        /// refused). Throttled to one read per 10 s unless forced; a forced
+        /// read while one is on the wire is remembered and re-issued when that
+        /// one lands (the collection's rule: a forced read is demand).</summary>
+        public static void PcTrades(string steamId, bool force, Action<bool, string> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
+            if (!force && Time.realtimeSinceStartup - pcTradesAttemptAt < 10f) { callback?.Invoke(CachedPcTrades != null, null); return; }
+            if (pcTradesInFlight)
+            {
+                if (force) pcTradesForceAgain = true;
+                callback?.Invoke(false, "in-flight");
+                return;
+            }
+            pcTradesInFlight = true; pcTradesAttemptAt = Time.realtimeSinceStartup;
+            int order = pcTradeFence.Dispatch();
+            bool reask = pcTradesStaleReask; pcTradesStaleReask = false;
+            string url = PcUrl("trades", steamId, PcTradeRules.CanonRead(steamId, "trades", "full"), "view=full");
+            int epoch = _pcCacheEpoch;
+            // The offers' prints carry faces keyed by the locale the read was
+            // ASKED in; an answer from before a language switch is re-asked.
+            string locale = I18n.Locale;
+            string who = steamId;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                // a pre-edge answer leaves the latch and the remembered demand
+                // alone: the edge released both (TC-M2 sweep)
+                if (epoch != _pcCacheEpoch)
+                {
+                    Plugin.Log.LogInfo("[PC] trades answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
+                pcTradesInFlight = false;
+                bool again = pcTradesForceAgain; pcTradesForceAgain = false;
+                if (locale != I18n.Locale)
+                {
+                    Plugin.Log.LogInfo("[PC] trades answer dropped: language changed while it was in flight");
+                    pcTradesAttemptAt = -100f;
+                    PcTrades(who, true, callback);
+                    return;
+                }
+                PcTradeFull f = null;
+                if (ok) { f = ParsePcTradeFull(resp); if (f == null) { ok = false; resp = "parse"; } }
+                // ONE landing per answer, success or failure (TC-L5): a full answer
+                // writes both slots, so it must be no older than either; one kept
+                // out writes nothing, whatever it says, and the callback hears
+                // PcStaleOrder
+                bool keptOut = !pcTradeFence.LandFull(order, ok, ok ? 200 : PcHttpCode(resp), ok ? null : PcTradeErrorCode(resp));
+                if (keptOut)
+                {
+                    // a newer answer is already held: taking this one would put the cache back
+                    Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale answer kept out kind=full outcome=" + (ok ? "ok" : "fail") + " sent=" + order + " held=" + pcTradeFence.Summary + (reask ? " reask=1" : ""));
+                }
+                else if (ok)
+                {
+                    CachedPcTrades = f; PcTradesFetchedAt = Time.realtimeSinceStartup; PcTradesError = null;
+                    // the full read carries every summary field: the summary cache follows it
+                    CachedPcTradeSummary = f; PcTradeSummaryFetchedAt = PcTradesFetchedAt; PcTradeSummaryError = null;
+                }
+                else { PcTradesError = resp; Plugin.Log.LogInfo($"[PC] trades read failed: {PcShort(resp)}"); }
+                // A forced read that came in while this one was out, or ONE re-ask
+                // after a SUCCESS the fence kept out (the full slot is then older
+                // than the summary): re-issued next frame, once this answer has
+                // committed. A failure kept out is not asked again: the answer
+                // that kept it out is newer.
+                bool reaskNow = keptOut && ok && !reask;
+                if (again || reaskNow)
+                {
+                    pcTradesAttemptAt = -100f;
+                    pcTradesStaleReask = reaskNow;
+                    // bound to this answer's generation: the epoch check above proved
+                    // the dispatch epoch is still the current one (TC-M2)
+                    try { Plugin.Instance.StartCoroutine(RefetchTradesNextFrame(who, epoch)); } catch { }
+                }
+                try { NativeUI.MarkDirty(); } catch { }
+                try { callback?.Invoke(!keptOut && ok, keptOut ? PcStaleOrder : resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trades callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        /// <summary>The next-frame re-ask, bound to the Player Cards generation
+        /// that scheduled it (TC-M2, PcTradeRules.GenerationCurrent): an
+        /// identity or consent edge before the frame comes round drops it, so
+        /// no read goes out for the previous identity and nothing it would
+        /// answer is written.</summary>
+        private static IEnumerator RefetchTradesNextFrame(string steamId, int genAtSchedule)
+        {
+            yield return null;                       // let this answer commit first
+            if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))
+            {
+                Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] stale-generation dropped kind=trades gen_at_schedule=" + genAtSchedule + " gen_now=" + _pcCacheEpoch);
+                yield break;
+            }
+            PcTrades(steamId, true, null);
+        }
+
+        /// <summary>POST /pc/trades/propose (V8 3.4): `steamId` gives `give`
+        /// (own print ids) to `toSteamId` for `get` (their print ids). The
+        /// digest is the canonical item list's (PcTradeRules, C6); the nonce is
+        /// the caller's and must be re-sent unchanged by a retry after a lost
+        /// answer, which then answers the stored row. A side that is not all
+        /// UUIDs never leaves the client ("bad_terms_local").</summary>
+        public static void PcTradePropose(string steamId, string nonce, string toSteamId, List<string> give, List<string> get, Action<bool, string> callback)
+        {
+            var g = PcTradeRules.CanonicalIds(give);
+            var t = PcTradeRules.CanonicalIds(get);
+            string digest = (g != null && t != null) ? PcTradeRules.Digest(steamId, g, toSteamId, t) : null;
+            if (string.IsNullOrEmpty(steamId) || string.IsNullOrEmpty(toSteamId) || string.IsNullOrEmpty(nonce)
+                || g == null || t == null || g.Count == 0 || t.Count == 0 || digest == null)
+            { callback?.Invoke(false, "bad_terms_local"); return; }
+            string url = PcUrl("trades/propose", steamId, PcTradeRules.CanonTrade(steamId, nonce, "propose", toSteamId, digest),
+                $"nonce={nonce}&to={toSteamId}&give={string.Join(",", g.ToArray())}&get={string.Join(",", t.ToArray())}&digest={digest}");
+            int epoch = _pcCacheEpoch;
+            Plugin.Log.LogInfo($"[PC] trade propose give={g.Count} get={t.Count} digest={digest.Substring(0, 12)} nonce={nonce.Substring(0, Math.Min(8, nonce.Length))}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] trade propose answer ok={ok} resp={PcShort(resp)}");
+                if (epoch != _pcCacheEpoch) { try { callback?.Invoke(false, "stale-identity"); } catch { } return; }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trade propose callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>POST /pc/trades/{accept|decline|cancel} (V8 3.5, 3.6): one
+        /// method, three callers. `tradeId` is sent exactly as the server gave
+        /// it (the server accepts only its own canonical spelling) and
+        /// `digest` is the trade's own, from the read.</summary>
+        public static void PcTradeAct(string action, string steamId, string nonce, string tradeId, string digest, Action<bool, string> callback)
+        {
+            if ((action != "accept" && action != "decline" && action != "cancel")
+                || string.IsNullOrEmpty(steamId) || string.IsNullOrEmpty(nonce)
+                || string.IsNullOrEmpty(tradeId) || string.IsNullOrEmpty(digest))
+            { callback?.Invoke(false, "bad_terms_local"); return; }
+            string url = PcUrl("trades/" + action, steamId, PcTradeRules.CanonTrade(steamId, nonce, action, tradeId, digest),
+                $"nonce={nonce}&trade_id={tradeId}&digest={digest}");
+            int epoch = _pcCacheEpoch;
+            Plugin.Log.LogInfo($"[PC] trade {action} {tradeId.Substring(0, Math.Min(8, tradeId.Length))} nonce={nonce.Substring(0, Math.Min(8, nonce.Length))}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] trade {action} answer ok={ok} resp={PcShort(resp)}");
+                if (epoch != _pcCacheEpoch) { try { callback?.Invoke(false, "stale-identity"); } catch { } return; }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] trade {action} callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>Another player's binder for a proposal's "You get" side
+        /// (V8 6.2): GET /pc/collection with subject=, HMAC over
+        /// pcread:{steam}:collection:{subject}. One-shot: no cache and no
+        /// throttle beyond one request in flight; the caller parses the answer
+        /// with ParsePcCollection. A private binder answers 403 private.</summary>
+        public static void FetchPcCollectionOf(string steamId, string subjectSteamId, Action<bool, string> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown" || string.IsNullOrEmpty(subjectSteamId))
+            { callback?.Invoke(false, "no-id"); return; }
+            if (pcCollOfInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            pcCollOfInFlight = true;
+            string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:{subjectSteamId}", $"subject={subjectSteamId}");
+            int epoch = _pcCacheEpoch;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                // a pre-edge answer leaves the latch alone: the edge released it (TC-M2 sweep)
+                if (epoch != _pcCacheEpoch)
+                {
+                    Plugin.Log.LogInfo("[PC] collection-of answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
+                pcCollOfInFlight = false;
+                Plugin.Log.LogInfo($"[PC] collection-of ok={ok} resp={PcShort(ok ? "(binder)" : resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] collection-of callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        /// <summary>The machine-readable reason of a failed trade call:
+        /// PcErrorCode, plus the one plain-string detail the trade routes
+        /// answer with (403 "service_account_forbidden", from the service
+        /// account guard), which PcErrorCode reads as "http".</summary>
+        public static string PcTradeErrorCode(string resp)
+        {
+            string code = PcErrorCode(resp);
+            if (code != "http" || string.IsNullOrEmpty(resp)) return code;
+            int b = resp.IndexOf('{');
+            if (b < 0) return code;
+            string detail = PcStr(PcTopLevel(resp.Substring(b), "detail"));
+            return detail == "service_account_forbidden" ? detail : code;
+        }
+
+        internal static PcTrade ParsePcTrade(string obj, string faceLocale = "en")
+        {
+            if (string.IsNullOrEmpty(obj)) return null;
+            string id = PcStr(PcTopLevel(obj, "trade_id"));
+            if (string.IsNullOrEmpty(id)) return null;
+            string rating = PcTopLevel(obj, "counterparty_rating");
+            return new PcTrade
+            {
+                trade_id = id,
+                role = PcStr(PcTopLevel(obj, "role")),
+                state = PcStr(PcTopLevel(obj, "state")),
+                counterparty_steam_id = PcStr(PcTopLevel(obj, "counterparty_steam_id")),
+                counterparty_name = PcStr(PcTopLevel(obj, "counterparty_name")),
+                counterparty_rating = (rating == null || rating == "null") ? (float?)null : PcFloat(rating),
+                give = ParsePcPrints(PcTopLevel(obj, "give"), faceLocale),
+                get = ParsePcPrints(PcTopLevel(obj, "get"), faceLocale),
+                digest = PcStr(PcTopLevel(obj, "digest")),
+                created_at = PcStr(PcTopLevel(obj, "created_at")),
+                expires_at = PcStr(PcTopLevel(obj, "expires_at")),
+                closed_at = PcStr(PcTopLevel(obj, "closed_at")),
+                executed_at = PcStr(PcTopLevel(obj, "executed_at")),
+                reason = PcStr(PcTopLevel(obj, "reason")),
+                possible = PcBool(PcTopLevel(obj, "possible")),
+            };
+        }
+
+        internal static List<PcTrade> ParsePcTrades(string arrayRaw, string faceLocale = "en")
+        {
+            var list = new List<PcTrade>();
+            if (string.IsNullOrEmpty(arrayRaw) || arrayRaw == "null") return list;
+            foreach (var o in SliceTopLevelObjects(arrayRaw))
+            {
+                var t = ParsePcTrade(o, faceLocale);
+                if (t != null) list.Add(t);
+            }
+            return list;
+        }
+
+        private static void FillPcTradeSummary(PcTradeSummaryAnswer s, string json)
+        {
+            s.enabled = PcBool(PcTopLevel(json, "enabled"));
+            s.tradesOpen = PcBool(PcTopLevel(json, "trades_open"));
+            s.revision = PcInt(PcTopLevel(json, "revision"));
+            s.serverNow = PcStr(PcTopLevel(json, "server_now"));
+            s.receivedOpen = new List<string>(PcStrArray(PcTopLevel(json, "received_open")));
+            s.sentOpen = new List<string>(PcStrArray(PcTopLevel(json, "sent_open")));
+        }
+
+        /// <summary>A summary answer, or null when the body is not one (no
+        /// top-level `enabled`).</summary>
+        internal static PcTradeSummaryAnswer ParsePcTradeSummary(string json)
+        {
+            if (string.IsNullOrEmpty(json) || PcTopLevel(json, "enabled") == null) return null;
+            var s = new PcTradeSummaryAnswer();
+            FillPcTradeSummary(s, json);
+            return s;
+        }
+
+        internal static PcTradeFull ParsePcTradeFull(string json)
+        {
+            if (string.IsNullOrEmpty(json) || PcTopLevel(json, "enabled") == null) return null;
+            var f = new PcTradeFull();
+            FillPcTradeSummary(f, json);
+            string b = PcTopLevel(json, "bounds") ?? "";
+            f.bounds = new PcTradeBounds
+            {
+                prints_per_side_max = PcInt(PcTopLevel(b, "prints_per_side_max")),
+                ttl_hours = PcInt(PcTopLevel(b, "ttl_hours")),
+                open_sent_max = PcInt(PcTopLevel(b, "open_sent_max")),
+                open_received_max = PcInt(PcTopLevel(b, "open_received_max")),
+                proposals_per_day = PcInt(PcTopLevel(b, "proposals_per_day")),
+                executed_per_day = PcInt(PcTopLevel(b, "executed_per_day")),
+                executed_per_pair_day = PcInt(PcTopLevel(b, "executed_per_pair_day")),
+                decline_cooldown_hours = PcInt(PcTopLevel(b, "decline_cooldown_hours")),
+                reversal_window_minutes = PcInt(PcTopLevel(b, "reversal_window_minutes")),
+                reversal_cooldown_hours = PcInt(PcTopLevel(b, "reversal_cooldown_hours")),
+                min_ranked_series = PcInt(PcTopLevel(b, "min_ranked_series")),
+                min_mod_age_days = PcInt(PcTopLevel(b, "min_mod_age_days")),
+                traded_discard_shards = PcInt(PcTopLevel(b, "traded_discard_shards")),
+                recent_days = PcInt(PcTopLevel(b, "recent_days")),
+                executed_today = PcInt(PcTopLevel(b, "executed_today")),
+                proposals_today = PcInt(PcTopLevel(b, "proposals_today")),
+            };
+            f.locale = PcStr(PcTopLevel(json, "locale")) ?? "en";
+            f.offers = ParsePcTrades(PcTopLevel(json, "offers"), f.locale);
+            f.recent = ParsePcTrades(PcTopLevel(json, "recent"), f.locale);
+            return f;
         }
 
         // ── Player Cards faces + the portrait writer (design v22 §2.2 / §3.2) ──
@@ -4100,16 +5800,30 @@ namespace CompetitiveRounds
         private static IEnumerator GetMotionAtlas(string url, int cap, Action<bool, byte[], long, string> callback)
         {
             if (ConsentBlocksRequest(url)) { callback(false, null, 0, "no-consent"); yield break; }
+            // Verified reads (requirements 33-34): the same hold and the same
+            // refusal retries as GetRequest.
+            var rgAttempts = new ReadGateRules.Attempts();
+            while (true)
+            {
+            string rgFail = null;
+            yield return ReadGateHold(url, w => rgFail = w);
+            if (rgFail != null) { callback(false, null, 0, rgFail); yield break; }
             NoteAttempt();
+            ReadGateRules.Verdict rgv;
             using (var request = UnityWebRequest.Get(url))
             {
                 var handler = new CappedDownload(cap);
                 request.downloadHandler = handler;
                 StampVersionHeader(request);
+                string _rgTok = SteamAuth.SessionToken;
                 request.timeout = 30;
                 yield return request.SendWebRequest();
 
                 if (HandleVersionGate(request)) { callback(false, null, 426, "outdated"); yield break; }
+                rgv = ReadGateVerdict(request, ReadGateBody(request, handler), rgAttempts, _rgTok);
+                if (rgv.Next != ReadGateRules.Next.Deliver) NoteResult(false, request.responseCode);
+                else
+                {
                 bool success = request.result == UnityWebRequest.Result.Success;
                 NoteResult(success, request.responseCode);
                 byte[] data = null;
@@ -4137,7 +5851,26 @@ namespace CompetitiveRounds
                     err = request.responseCode > 0 ? $"HTTP {request.responseCode}: {(string.IsNullOrEmpty(body) ? request.error : body)}" : request.error;
                 }
                 callback(success, data, request.responseCode, err);
+                yield break;
+                }
             }
+            if (rgv.Next == ReadGateRules.Next.DelayRetry)
+                yield return new WaitForSecondsRealtime((float)rgv.Delay);
+            }
+        }
+
+        /// <summary>A refusal body out of a capped byte download, for the
+        /// read-gate verdict: only a 401 or 503 is read, and only its first
+        /// 512 bytes.</summary>
+        private static string ReadGateBody(UnityWebRequest request, CappedDownload handler)
+        {
+            if (request.responseCode != 401 && request.responseCode != 503) return null;
+            try
+            {
+                var b = handler.Taken();
+                return b == null ? null : Encoding.UTF8.GetString(b, 0, Math.Min(b.Length, 512));
+            }
+            catch { return null; }
         }
 
         /// <summary>`retry_after` of a refusal, top-level or inside the detail
@@ -4254,16 +5987,30 @@ namespace CompetitiveRounds
         private static IEnumerator GetBytes(string url, int cap, Action<bool, byte[], long> callback)
         {
             if (ConsentBlocksRequest(url)) { callback(false, null, 0); yield break; }
+            // Verified reads (requirements 33-34): the same hold and the same
+            // refusal retries as GetRequest.
+            var rgAttempts = new ReadGateRules.Attempts();
+            while (true)
+            {
+            string rgFail = null;
+            yield return ReadGateHold(url, w => rgFail = w);
+            if (rgFail != null) { callback(false, null, 0); yield break; }
             NoteAttempt();
+            ReadGateRules.Verdict rgv;
             using (var request = UnityWebRequest.Get(url))
             {
                 var handler = new CappedDownload(cap);
                 request.downloadHandler = handler;
                 StampVersionHeader(request);
+                string _rgTok = SteamAuth.SessionToken;
                 request.timeout = 20;
                 yield return request.SendWebRequest();
 
                 if (HandleVersionGate(request)) { callback(false, null, 426); yield break; }
+                rgv = ReadGateVerdict(request, ReadGateBody(request, handler), rgAttempts, _rgTok);
+                if (rgv.Next != ReadGateRules.Next.Deliver) NoteResult(false, request.responseCode);
+                else
+                {
                 bool success = request.result == UnityWebRequest.Result.Success;
                 NoteResult(success, request.responseCode);
                 byte[] data = null;
@@ -4288,6 +6035,11 @@ namespace CompetitiveRounds
                     catch { success = false; data = null; }
                 }
                 callback(success, data, request.responseCode);
+                yield break;
+                }
+            }
+            if (rgv.Next == ReadGateRules.Next.DelayRetry)
+                yield return new WaitForSecondsRealtime((float)rgv.Delay);
             }
         }
 
@@ -4369,7 +6121,14 @@ namespace CompetitiveRounds
             {
                 int k = j + 1;
                 while (k < n) { if (json[k] == '\\') { k += 2; continue; } if (json[k] == '"') break; k++; }
-                return json.Substring(j, Math.Min(n, k + 1) - j);
+                // An UNTERMINATED string token means a truncated body, not a value.
+                // Returning the fragment let a cut-off `{"error":"outdated` read back
+                // as the global version floor and gate the whole UI — precisely the
+                // direction HandleVersionGate documents it must never take, and the
+                // gate is sticky once set (r5 finding). Null here is what every caller
+                // of this parser wants from a body it cannot fully read.
+                if (k >= n) return null;
+                return json.Substring(j, k + 1 - j);
             }
             if (c == '{' || c == '[')
             {
@@ -4439,14 +6198,9 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(raw) || raw == "null") return fallback;
             return PcInt(raw);
         }
-        /// <summary>A 64-bit id (a shop item's `BigInteger` key), 0 when absent
-        /// or unreadable.</summary>
-        internal static long PcLong(string raw)
-        {
-            if (string.IsNullOrEmpty(raw) || raw == "null") return 0L;
-            long v;
-            return long.TryParse(PcStr(raw), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out v) ? v : 0L;
-        }
+        // PcLong (a 64-bit shop item id, 0 when absent or unreadable) is defined
+        // once, beside the title-ladder parsers: both sides of merge pass 3 added
+        // the same function, and the dance keys read that one.
         internal static float PcFloat(string raw)
         {
             if (string.IsNullOrEmpty(raw) || raw == "null") return 0f;
@@ -4483,9 +6237,19 @@ namespace CompetitiveRounds
                 source = PcStr(PcTopLevel(obj, "source")),
                 slot = PcInt(PcTopLevel(obj, "slot")),
                 discarded = PcBool(PcTopLevel(obj, "discarded")),
+                traded = PcBool(PcTopLevel(obj, "traded")),
+                gone = PcBool(PcTopLevel(obj, "gone")),
                 discard_shards = PcIntOr(PcTopLevel(obj, "discard_shards"), -1),
                 face_rev = PcStr(PcTopLevel(obj, "face_rev")),
                 dup_at_pull = PcIntOr(PcTopLevel(obj, "dup_at_pull"), -1),
+                // item 20. PcTopLevel matches the WHOLE quoted key at depth 1,
+                // so "subject_rating" and the frozen "rating" above cannot read
+                // each other. PcHas is the present-and-not-null test: a subject
+                // with no rating row must not be read as a subject rated 0.
+                subject_board_rank = PcInt(PcTopLevel(obj, "subject_board_rank")),
+                subject_rating = PcFloat(PcTopLevel(obj, "subject_rating")),
+                subject_rated = PcHas(obj, "subject_rating"),
+                subject_inactive = PcBool(PcTopLevel(obj, "subject_inactive")),
             };
             return string.IsNullOrEmpty(p.print_id) ? null : p;
         }
@@ -4502,13 +6266,23 @@ namespace CompetitiveRounds
             return list;
         }
 
+        /// <summary>The settings and the revision of a settings object, never
+        /// the shard balance (fix pass 3, finding 5). Two callers: ParsePcMe,
+        /// whose settings object carries no balance and which reads the
+        /// answer's top-level shards itself, and PcSetSetting, whose answer
+        /// row carries the balance as of its own commit, older than any shard
+        /// confirmed while that answer was on the wire. The cached balance is
+        /// written by three answers only: /pc/me (ParsePcMe, installed by
+        /// FetchPcMe through the answer fence) and the two discard answers
+        /// (PcDiscard, PcDiscardBatch, each current and each moving the
+        /// fence).</summary>
         private static void PcApplySettings(PcMe me, string settingsObj)
         {
             if (me == null || string.IsNullOrEmpty(settingsObj)) return;
             if (PcHas(settingsObj, "collection_public")) me.collection_public = PcBool(PcTopLevel(settingsObj, "collection_public"));
             if (PcHas(settingsObj, "announce")) me.announce = PcBool(PcTopLevel(settingsObj, "announce"));
             if (PcHas(settingsObj, "revision")) me.revision = PcInt(PcTopLevel(settingsObj, "revision"));
-            if (PcHas(settingsObj, "shards")) me.shards = PcInt(PcTopLevel(settingsObj, "shards"));
+            if (PcHas(settingsObj, "trades_open")) { me.trades_open = PcBool(PcTopLevel(settingsObj, "trades_open")); me.has_trades_open = true; }
         }
 
         internal static PcMe ParsePcMe(string json)
@@ -4663,9 +6437,347 @@ namespace CompetitiveRounds
                 locale = PcStr(PcTopLevel(json, "locale")) ?? "en",
                 is_public = PcBool(PcTopLevel(json, "public")),
                 count = PcInt(PcTopLevel(json, "count")),
+                // item 20: absent -> false -> the binder does not offer the
+                // rating-position sort. The unhandled case fails toward the
+                // five sorts that have always worked (#276).
+                subject_standings = PcBool(PcTopLevel(json, "subject_standings")),
                 prints = ParsePcPrints(prints, PcStr(PcTopLevel(json, "locale")) ?? "en"),
             };
             return c;
+        }
+
+        // ── Title ladders (v1.41.0 item 12; five tiers, board row 29) ──────
+        //
+        // GET /api/v1/players/{steam_id}/title-ladders answers
+        //   {steam_id, active_line, ladders:[{line, name, games, tier,
+        //     max_tier, next_tier, next_threshold, next_names, games_to_next,
+        //     rungs:[{tier, sku, item_id, name, description, rarity,
+        //             preview_color, threshold, price, owned, active,
+        //             reached}],
+        //     group, kind, unit, modes, condition, streak}]}
+        //
+        // The keys after `rungs` (and a rung's `reached`) were APPENDED by the
+        // five-tier server build. A server before it omits them: `unit` reads
+        // null and every caller falls back to the old "series" wording, which
+        // is what that server counted.
+        //
+        // Depth-aware reads are not a style choice here. `name`, `tier`, `sku`
+        // and `threshold` ALL recur inside `rungs[]`, and
+        // `ExtractJson*(json, key)` answers with the first occurrence anywhere
+        // in the text — an order the server never promised (#608). A line's
+        // display name and its first rung's name are different strings and the
+        // flat helper cannot tell them apart. `JsonUtility` drops the nested
+        // arrays outright (#25). Every read below is `PcTopLevel` against the
+        // object that OWNS the key, so depth decides, never position.
+
+        /// <summary>One rung of one line. `item_id` is the `shop_items` row id
+        /// the equip call needs; 0 means the server named no row and the rung
+        /// is not equippable from here.</summary>
+        internal class TitleLadderRung
+        {
+            public int tier;
+            public string sku, name, description, rarity, preview_color;
+            public long item_id;
+            public int threshold, price;
+            public bool owned, active;
+            /// <summary>The count has reached this tier (appended key; false
+            /// from a server before the five-tier build).</summary>
+            public bool reached;
+        }
+
+        /// <summary>One animal line. `has_next` is false at the top of the
+        /// line, where the server sends JSON null for next_tier /
+        /// next_threshold / games_to_next — a 0 read out of that null would
+        /// render as "0 more to go", the opposite of what it means.</summary>
+        internal class TitleLadderLine
+        {
+            public string line, name;
+            public int games, tier, max_tier;
+            public bool has_next;
+            public int next_tier, next_threshold, games_to_next;
+            public string[] next_names = new string[0];
+            public List<TitleLadderRung> rungs = new List<TitleLadderRung>();
+            /// <summary>Appended by the five-tier server build, null before it:
+            /// `group` (animal, card, playstyle, shop, numeral), `kind`, `unit`
+            /// (games, wins, losses, gold, streak: what `games` counts),
+            /// `modes` (any or 1v1) and `condition` (the English rule the
+            /// dropdown shows through I18n.Tr).</summary>
+            public string group, kind, unit, modes, condition;
+            /// <summary>The current run of ranked 1v1 wins (Apex only);
+            /// `has_streak` is false where the server sent null or nothing.</summary>
+            public bool has_streak;
+            public int streak;
+
+            /// <summary>Does the player hold any rung of this line? A line with
+            /// none is NOT STARTED — it can show no progress at all, because
+            /// progress only accrues while a rung of the line is equipped.</summary>
+            internal bool AnyOwned
+            {
+                get { for (int i = 0; i < rungs.Count; i++) if (rungs[i].owned) return true; return false; }
+            }
+        }
+
+        internal class TitleLadders
+        {
+            public string steam_id, active_line;
+            public List<TitleLadderLine> lines = new List<TitleLadderLine>();
+        }
+
+        /// <summary>A raw token → `long`. `shop_items.id` is a bigint and is
+        /// carried as `long` everywhere else in this file (ShopItemData.id,
+        /// every SetActive* signature); reading it through `PcInt` would
+        /// silently TRUNCATE a row id past 2^31 into a different, valid-looking
+        /// id, and the equip call would then name someone else's row.</summary>
+        internal static long PcLong(string raw)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return 0L;
+            long v;
+            return long.TryParse(PcStr(raw), System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out v) ? v : 0L;
+        }
+
+        /// <summary>The strings of a RAW json array token (`["a","b"]`), in
+        /// order. A non-array token, or one holding no strings, answers
+        /// empty — never null, so no caller needs a second check.</summary>
+        internal static string[] PcStrArray(string rawArray)
+        {
+            var outp = new List<string>();
+            if (string.IsNullOrEmpty(rawArray) || rawArray == "null") return outp.ToArray();
+            int n = rawArray.Length;
+            for (int i = 0; i < n; i++)
+            {
+                if (rawArray[i] != '"') continue;
+                int k = i + 1;
+                while (k < n) { if (rawArray[k] == '\\') { k += 2; continue; } if (rawArray[k] == '"') break; k++; }
+                if (k >= n) break;                       // truncated body: keep what parsed
+                outp.Add(PcStr(rawArray.Substring(i, k + 1 - i)) ?? "");
+                i = k;
+            }
+            return outp.ToArray();
+        }
+
+        /// <summary>One rung object → a rung. A rung whose `sku` is missing is
+        /// DROPPED rather than rendered as a blank chip: the sku is what the
+        /// equip path and the Shop deep-link are keyed on, so a rung without
+        /// one cannot be acted on and must not claim a slot.</summary>
+        internal static TitleLadderRung ParseTitleLadderRung(string obj)
+        {
+            if (string.IsNullOrEmpty(obj)) return null;
+            string sku = PcStr(PcTopLevel(obj, "sku"));
+            if (string.IsNullOrEmpty(sku)) return null;
+            return new TitleLadderRung
+            {
+                tier = PcInt(PcTopLevel(obj, "tier")),
+                sku = sku,
+                name = PcStr(PcTopLevel(obj, "name")),
+                description = PcStr(PcTopLevel(obj, "description")),
+                rarity = PcStr(PcTopLevel(obj, "rarity")),
+                preview_color = PcStr(PcTopLevel(obj, "preview_color")),
+                item_id = PcLong(PcTopLevel(obj, "item_id")),
+                threshold = PcInt(PcTopLevel(obj, "threshold")),
+                price = PcInt(PcTopLevel(obj, "price")),
+                owned = PcBool(PcTopLevel(obj, "owned")),
+                active = PcBool(PcTopLevel(obj, "active")),
+                reached = PcBool(PcTopLevel(obj, "reached")),
+            };
+        }
+
+        /// <summary>The whole answer, or null when the body carries no
+        /// `ladders` array at all — which is what an error page, a truncated
+        /// body and another route's 200 all look like. Null is the caller's
+        /// signal to render UNAVAILABLE rather than a board of zeroes.</summary>
+        internal static TitleLadders ParseTitleLadders(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string arr = PcTopLevel(json, "ladders");
+            if (string.IsNullOrEmpty(arr) || arr == "null") return null;
+            var d = new TitleLadders
+            {
+                steam_id = PcStr(PcTopLevel(json, "steam_id")),
+                active_line = PcStr(PcTopLevel(json, "active_line")),
+            };
+            foreach (var obj in SliceTopLevelObjects(arr))
+            {
+                string line = PcStr(PcTopLevel(obj, "line"));
+                if (string.IsNullOrEmpty(line)) continue;
+                var ln = new TitleLadderLine
+                {
+                    line = line,
+                    name = PcStr(PcTopLevel(obj, "name")) ?? line,
+                    games = PcInt(PcTopLevel(obj, "games")),
+                    tier = PcInt(PcTopLevel(obj, "tier")),
+                    max_tier = PcInt(PcTopLevel(obj, "max_tier")),
+                    next_names = PcStrArray(PcTopLevel(obj, "next_names")),
+                    group = PcStr(PcTopLevel(obj, "group")),
+                    kind = PcStr(PcTopLevel(obj, "kind")),
+                    unit = PcStr(PcTopLevel(obj, "unit")),
+                    modes = PcStr(PcTopLevel(obj, "modes")),
+                    condition = PcStr(PcTopLevel(obj, "condition")),
+                };
+                // Presence, as for next_tier below: a null streak is "this
+                // ladder keeps no run", not a run of 0.
+                string sk = PcTopLevel(obj, "streak");
+                ln.has_streak = !string.IsNullOrEmpty(sk) && sk != "null";
+                if (ln.has_streak) ln.streak = PcInt(sk);
+                // Presence, not value: at the top of a line the server sends
+                // null for all three, and PcInt reads a null as 0.
+                string nt = PcTopLevel(obj, "next_tier");
+                ln.has_next = !string.IsNullOrEmpty(nt) && nt != "null";
+                if (ln.has_next)
+                {
+                    ln.next_tier = PcInt(nt);
+                    ln.next_threshold = PcInt(PcTopLevel(obj, "next_threshold"));
+                    ln.games_to_next = PcInt(PcTopLevel(obj, "games_to_next"));
+                }
+                string rungs = PcTopLevel(obj, "rungs");
+                if (!string.IsNullOrEmpty(rungs) && rungs != "null")
+                    foreach (var ro in SliceTopLevelObjects(rungs))
+                    {
+                        var r = ParseTitleLadderRung(ro);
+                        if (r != null) ln.rungs.Add(r);
+                    }
+                d.lines.Add(ln);
+            }
+            return d;
+        }
+
+        // internal, not public: the type it exposes is internal, and a public
+        // property of an internal type does not compile (CS0053).
+        internal static TitleLadders CachedTitleLadders { get; private set; }
+        /// <summary>Why the last attempt produced no board. Set from
+        /// TitleLadderFailure, which is where the reasoning lives:
+        ///
+        ///   "route"     — a 404 with no body of the route's own. The server
+        ///                 does not serve the ladder route.
+        ///   "empty"     — a 404 the ROUTE answered, PROVED by the route's own
+        ///                 marker: the ladder table has no row for this
+        ///                 account. CORRECTED (Codex client r2 LOW): that is
+        ///                 not the same as "has not bought an entry rung". The
+        ///                 route 404s when the general Player row is absent —
+        ///                 an account the backend has never seen at all — and
+        ///                 a player who has a Player row but no ladder
+        ///                 progress gets a 200 with an empty board instead.
+        ///                 The two render differently and the difference is
+        ///                 the point.
+        ///   "parse"     — a 200 whose body carried no ladders.
+        ///   "transport" — no answer at all.
+        ///   anything else is the transport's own text.
+        ///
+        /// Null while a board is in hand. This list said only route/parse/
+        /// transport for as long as every 404 was read as route absence, so
+        /// the docstring agreed with the defect rather than with the route.
+        /// </summary>
+        public static string TitleLaddersError { get; private set; }
+        public static float TitleLaddersFetchedAt = -1f;
+        private static float ladderAttemptAt = -100f;
+        private static bool ladderInFlight;
+        private static int _ladderEpoch;
+
+        /// <summary>Fetch the ladder board for one account. Pure read, no HMAC
+        /// — the route is a public read like /achievements/{id}. `force`
+        /// bypasses the 20 s floor (an equip has to be seen immediately).</summary>
+        public static void FetchTitleLadders(string steamId, bool force = false)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            if (ladderInFlight) return;
+            if (!force && Time.realtimeSinceStartup - ladderAttemptAt < 20f) return;
+            ladderInFlight = true; ladderAttemptAt = Time.realtimeSinceStartup;
+            int epoch = _ladderEpoch;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/{Escape(steamId)}/title-ladders",
+                (success, response) =>
+                {
+                    ladderInFlight = false;
+                    // The account this answer describes is no longer the one on
+                    // screen: committing it would show one player's owned rungs
+                    // under another player's name.
+                    if (epoch != _ladderEpoch)
+                    {
+                        Plugin.Log.LogInfo("[LADDER] answer dropped: identity changed");
+                        return;
+                    }
+                    if (success)
+                    {
+                        var d = ParseTitleLadders(response);
+                        if (d != null)
+                        {
+                            CachedTitleLadders = d;
+                            TitleLaddersError = null;
+                            TitleLaddersFetchedAt = Time.realtimeSinceStartup;
+                            Plugin.Log.LogInfo($"[LADDER] fetched {d.lines.Count} lines (active={d.active_line ?? "none"})");
+                        }
+                        else
+                        {
+                            TitleLaddersError = "parse";
+                            Plugin.Log.LogWarning($"[LADDER] 200 with no ladders array: {PcShort(response)}");
+                        }
+                    }
+                    else
+                    {
+                        TitleLaddersError = TitleLadderFailure(response);
+                        Plugin.Log.LogInfo($"[LADDER] fetch failed ({TitleLaddersError}): {PcShort(response)}");
+                    }
+                    try { NativeUI.MarkDirty(); } catch { }
+                }, detailedErrors: true));
+        }
+
+        /// <summary>The marker the ladder route puts in its OWN 404 body so
+        /// this client can tell "you have no ladder yet" from "this server has
+        /// no such route". It exists for no other purpose and appears in no
+        /// player-facing text, which is the only kind of probe that survives a
+        /// rewording of the message beside it (#306).</summary>
+        internal const string LadderNoAccountMarker = "ladder_no_account";
+
+        /// <summary>Classify a failed title-ladder fetch.
+        ///
+        /// THE DEFECT: every 404 was read as "this server does not serve the
+        /// ladder route yet", and the route answers 404 for an UNKNOWN ACCOUNT
+        /// too. A player whose account the ladder table has never seen — which
+        /// is every player until they buy an entry rung — was told the service
+        /// was unavailable.
+        ///
+        /// TWO outcomes, and the discrimination is the MARKER and nothing
+        /// else:
+        ///
+        ///   "empty"  — the 404 body carries LadderNoAccountMarker. That
+        ///              marker is a field the ladder route alone returns and
+        ///              exists for no other purpose, so its presence PROVES
+        ///              the request reached the route and the route said "no
+        ///              row for this account".
+        ///   "route"  — every other 404. No body, a bare status, an HTML error
+        ///              page, or a JSON body without the marker.
+        ///
+        /// WHAT THIS REPLACED, and why the replacement is not a UX
+        /// regression (Codex client r2 MEDIUM, this method). A JSON-bodied
+        /// 404 without the marker used to be PRESUMED "empty", on the reading
+        /// that the route always answers JSON. FastAPI's own unrouted answer
+        /// is `{"detail":"Not Found"}` — also JSON, also brace-bearing — so
+        /// the presumption classified "this server has no ladder route" as
+        /// "your ladder is empty, go buy a title", and a brace anywhere in an
+        /// HTML error page did the same. A classification that cannot fail on
+        /// the case it exists for is not a classification (#342); the probe
+        /// has to be something the route alone emits (#306).
+        ///
+        /// Both directions are now correct rather than one being traded for
+        /// the other: on a server WITHOUT the route the answer really is "this
+        /// server does not serve ladders", and on a server WITH it a new
+        /// account gets the marker and reads "no ladder yet". The only
+        /// combination that could mislead — a deployed route that stopped
+        /// emitting its own marker — is a server defect this client cannot
+        /// paper over, and it fails toward "unavailable", which is the
+        /// conservative direction for a tab whose other reading invites a
+        /// purchase.
+        ///
+        /// Anything that is not a 404 keeps its own response text, and a
+        /// response with no status at all is "transport".</summary>
+        internal static string TitleLadderFailure(string response)
+        {
+            if (string.IsNullOrEmpty(response)) return "transport";
+            if (response.IndexOf("HTTP 404", StringComparison.Ordinal) < 0)
+                return response;
+            return response.IndexOf(LadderNoAccountMarker, StringComparison.Ordinal) >= 0
+                ? "empty"
+                : "route";
         }
 
         /// <summary>The machine-readable reason of a failed Player Cards call:
@@ -4877,30 +6989,125 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Portal handoff (§2.5): mint a short-TTL portal session and
-        /// open the browser with the token in the URL FRAGMENT. Refused on a
-        /// plaintext base URL — the token is a real credential.</summary>
+        /// open the browser with the token in the URL FRAGMENT. Never over a
+        /// plaintext base URL: the token is a real credential. On the backup
+        /// connection the press first checks the secure route (board row 27)
+        /// and opens the portal in the same press when it answers; while a
+        /// check is already running the press waits for that one. After a
+        /// restore the press waits for the first secure session.</summary>
         public static void OpenTranslatePortal()
         {
+            // The identity is asked only before a mint (Codex round 1 LOW 2):
+            // the secure check and the plaintext refusal need none, and asking
+            // first made a press during the startup identity race do nothing
+            // at all, with no toast. SecureRouteRules.PortalPressAction orders it.
+            if (Plugin.Instance == null) return;
+            var route = _route;
+            SecureRouteRules.Press? press = null;
+            int gen = 0;
+            if (route != null)
+                press = route.PressPortal(SecureProbeBase(), RealtimeNow(), SecureProbeOwner(), SecureRetrySeconds(), out gen);
             string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
-            if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            var action = SecureRouteRules.PortalPressAction(
+                press, baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase),
+                route != null && route.Restored, !string.IsNullOrEmpty(sid) && sid != "unknown");
+            switch (action)
             {
-                CompetitiveUI.ShowNotification("Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one.", Color.yellow, 6f);
+                case SecureRouteRules.PressAction.ShowChecking:
+                    CompetitiveUI.ShowNotification(SecureRouteText.Checking(), Color.white, 9f);
+                    Plugin.Log.LogInfo(press == SecureRouteRules.Press.Checking
+                        ? "[SCR] portal button: on the backup connection, checking the secure route before opening"
+                        : "[SCR] portal button: a secure route check is already running; the press waits for it");
+                    if (press == SecureRouteRules.Press.Checking) RunSecureCheck(route, gen);
+                    return;
+                case SecureRouteRules.PressAction.RefusePlaintext:
+                    // No check can help: an explicit plaintext BaseUrl (no
+                    // route), so the gate names the address instead of
+                    // promising one. One log line says why nothing opened
+                    // (Codex round 2 LOW 3), with the base reduced to
+                    // scheme://host:port so no credential reaches the log.
+                    CompetitiveUI.ShowNotification(SecureRouteText.PlaintextOverride(baseUrl), Color.yellow, 8f);
+                    Plugin.Log.LogInfo(SecureRouteRules.PlaintextRefusalLine(baseUrl));
+                    return;
+                case SecureRouteRules.PressAction.WaitThenMint:
+                    // Back from the backup (the first secure session may not
+                    // have landed yet: SteamAuth requests one on its own loop
+                    // once the route returns), or the startup identity race:
+                    // wait for both, bounded, then mint.
+                    Plugin.Instance.StartCoroutine(OpenPortalWhenSessionReady());
+                    return;
+                default:
+                    MintPortalSessionAndOpen(true);
+                    return;
+            }
+        }
+
+        /// <summary>The mint and the browser hand-off, behind the same gate. The
+        /// base is read once, so the token is minted and opened on one host.
+        /// `remintOnRefusal`: when the server refuses the session the request
+        /// carried (PostRequest has already dropped that token), sign in again
+        /// and mint once more, so one press opens exactly one portal tab
+        /// (Codex round 1 LOW 1). The second mint passes false: a second
+        /// refusal is reported, never looped.</summary>
+        private static void MintPortalSessionAndOpen(bool remintOnRefusal)
+        {
+            if (Plugin.Instance == null) return;
+            string sid = MatchTracker.LocalSteamId;
+            // Every press that ends without a portal says why in the log (board
+            // row 27 round 2: witness S5's press r5 showed only a 5 s toast and
+            // left no line, so its cause could not be read afterwards).
+            if (string.IsNullOrEmpty(sid) || sid == "unknown")
+            {
+                Plugin.Log.LogWarning("[I18N] portal not opened: the local Steam identity is not known yet");
+                CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
+                return;
+            }
+            string portalBase = baseUrl;
+            if (!portalBase.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                Plugin.Log.LogWarning($"[I18N] portal not opened: the base moved off https before the mint ({portalBase})");
                 return;
             }
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/i18n/portal-session",
+                $"{portalBase}/api/v1/i18n/portal-session",
                 $"{{\"steam_id\":\"{Escape(sid)}\"}}",
                 (success, response) =>
                 {
                     string token = success ? ExtractJsonString(response, "token") : null;
-                    if (string.IsNullOrEmpty(token))
+                    var act = SecureRouteRules.PortalMintAction(success, token, response, remintOnRefusal);
+                    if (act == SecureRouteRules.MintAction.RemintOnce && Plugin.Instance != null)
                     {
+                        Plugin.Log.LogInfo("[I18N] portal mint refused the session; signing in again and minting once more");
+                        Plugin.Instance.StartCoroutine(RemintThenOpenPortal());
+                        return;
+                    }
+                    if (act != SecureRouteRules.MintAction.Open)
+                    {
+                        // The failure's own answer, never a token: one line,
+                        // scrubbed of credentials, then bounded (Codex round 2
+                        // LOW 4; SecureRouteRules.PortalMintFailureLine).
+                        Plugin.Log.LogWarning(SecureRouteRules.PortalMintFailureLine(portalBase, success, response, !remintOnRefusal));
                         CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
                         return;
                     }
-                    Application.OpenURL($"{baseUrl}/translate#token={token}");
-                }));
+                    Plugin.Log.LogInfo($"[I18N] portal opened over {portalBase}");
+                    Application.OpenURL($"{portalBase}/translate#token={token}");
+                },
+                redactErrorText: true));   // the failure text is logged: scrubbed whole before it is cut
+        }
+
+        /// <summary>After the portal mint refused the session: wait (bounded)
+        /// for the session SteamAuth mints to replace the dropped one, then mint
+        /// once more without a further retry.</summary>
+        private static IEnumerator RemintThenOpenPortal()
+        {
+            float started = Time.realtimeSinceStartup;
+            while (SecureRouteRules.KeepWaitingForSession(started, Time.realtimeSinceStartup, PortalSessionReady(), SteamAuth.Latch))
+            {
+                try { SteamAuth.MaybeRefresh(); } catch { }
+                yield return new WaitForSecondsRealtime(0.5f);
+            }
+            MintPortalSessionAndOpen(false);
         }
 
         // R2-5: chat scrollback request generation. A refetch (reconnect,
@@ -7356,13 +9563,20 @@ namespace CompetitiveRounds
             // Persist before the first network yield so a quit, crash, or long
             // outage cannot erase the immutable evidence body.
             EnqueueFailedReport(url, body);
+            // The queued copy is taken out only for a 2xx to a request that
+            // carried the session token (SecureRouteRules.OutboxAnswerFor,
+            // Codex round 3 HIGH 1); a tokenless 2xx leaves it for the outbox.
+            bool carried = false;
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 url, body,
                 (ok, resp) =>
                 {
                     if (ok)
                     {
-                        RemovePendingReport(url, body);
+                        if (SecureRouteRules.OutboxAnswerFor(true, carried) == SecureRouteRules.OutboxAnswer.Settle)
+                            RemovePendingReport(url, body);
+                        else
+                            Plugin.Log.LogInfo("[INPUT] macro evidence answered without the session token; kept queued for a send with it");
                     }
                     else
                     {
@@ -7370,7 +9584,8 @@ namespace CompetitiveRounds
                             $"[INPUT] exact macro evidence was not attached: {Trunc120(resp)}");
                     }
                 },
-                maxRetries: 6, retryDelay: 2f));
+                maxRetries: 6, retryDelay: 2f,
+                onTokenStamped: stamped => carried = stamped));
         }
 
         public static void ReportMatch(
@@ -7433,7 +9648,18 @@ namespace CompetitiveRounds
             int localRecvGapCount = 0, int localRecvGapMaxMs = 0,
             int oppHbGapCount = 0,
             int oppFreezeCount = 0, int oppFreezeFocusedCount = 0,
+            // Round 2 finding 3: false => the peer did not declare our freeze
+            // counting definition (PeerFreezeStats), so both counters go as null.
+            // Defaults to false: a caller that never asked gets "absent", not a
+            // number counted under a definition nobody checked.
+            bool oppFreezeStatsKnown = false,
             int oppRecvGapCount = 0,
+            // Counting-semantic epochs for the freeze columns either side of
+            // this row (GameStateWatcher.FREEZE_COUNT_EPOCH). 0 = the producer
+            // never tagged its output, i.e. pre-epoch, which is UNKNOWN and not
+            // comparable with a tagged value. Additive: a server that does not
+            // declare these ignores them.
+            int localFreezeEpoch = 0, int oppFreezeEpoch = 0,
             // July 22 item 3 — latency timelines (own 3s samples; opp via
             // gstats field 12) + opp average for the history "Ping:" tag.
             string localPingTimeline = null, string oppPingTimeline = null,
@@ -7556,8 +9782,11 @@ namespace CompetitiveRounds
             sb.Append($"\"local_recv_gap_count\":{localRecvGapCount},");
             sb.Append($"\"local_recv_gap_max_ms\":{localRecvGapMaxMs},");
             sb.Append($"\"opp_hb_gap_count\":{oppHbGapCount},");
-            sb.Append($"\"opp_freeze_count\":{oppFreezeCount},");
-            sb.Append($"\"opp_freeze_focused_count\":{oppFreezeFocusedCount},");
+            // Round 2 finding 3: null when the peer's freeze definition is not
+            // ours (the schema's own "absent"; ge=0 would 422 a negative).
+            sb.Append(PeerFreezeStats.ReportFields(oppFreezeStatsKnown, oppFreezeCount, oppFreezeFocusedCount));
+            sb.Append($"\"local_freeze_epoch\":{localFreezeEpoch},");
+            sb.Append($"\"opp_freeze_epoch\":{oppFreezeEpoch},");
             sb.Append($"\"opp_recv_gap_count\":{oppRecvGapCount},");
             sb.Append($"\"local_ping_timeline\":\"{Escape(ClampTimeline(localPingTimeline))}\",");
             sb.Append($"\"opp_ping_timeline\":\"{Escape(ClampTimeline(oppPingTimeline))}\",");
@@ -7610,7 +9839,7 @@ namespace CompetitiveRounds
                 preflightRetiredThrough = preflightGeneration;
             ClearActiveSeries();
 
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry(
                 $"{baseUrl}/api/v1/matches",
                 json,
                 (success, response) =>
@@ -7823,8 +10052,8 @@ namespace CompetitiveRounds
 
         // ── Data fetching ─────────────────────────────────────
 
-        // Item d (Sept 6): the server hides players not seen for 90 days
-        // (LEADERBOARD_ACTIVE_DAYS) from every board unless the fetch says
+        // Item d (Sept 6): the server hides players not seen for
+        // LEADERBOARD_ACTIVE_DAYS days from every board unless the fetch says
         // include_inactive=true, and then flags each such row `inactive`. ONE
         // helper for all four board fetches, driven by the Settings toggle.
         private static string InactiveQuery()
@@ -12419,67 +14648,54 @@ namespace CompetitiveRounds
         /// FindMatchingBracket is only safe when string values can't contain
         /// brackets; these arrays are mostly USER-CONTROLLED display names
         /// ("[TAG] Bob", ">:[") — learning #61 family.</summary>
+        // Sept 28 (board row 30a): the implementation moved to the Unity-free
+        // SessionReportRules so tools/client-rules-harness EXECUTES it; the one
+        // behaviour change is a null string, which answers -1 instead of throwing.
         internal static int FindMatchingBracketStringAware(string s, int openPos)
-        {
-            if (openPos < 0 || openPos >= s.Length) return -1;
-            int depth = 0; bool inStr = false;
-            for (int i = openPos; i < s.Length; i++)
-            {
-                char c = s[i];
-                if (inStr)
-                {
-                    if (c == '\\') i++;
-                    else if (c == '"') inStr = false;
-                    continue;
-                }
-                if (c == '"') { inStr = true; continue; }
-                if (c == '[') depth++;
-                else if (c == ']') { depth--; if (depth == 0) return i; }
-            }
-            return -1;
-        }
+            => SessionReportRules.MatchBracket(s, openPos);
 
         // Curly twin of the above (learning #156: any slice over a region that
         // can carry user-authored strings must be string-aware).
         // internal since Sept 6 item a: ProfileCard slices the H2H response's
         // nested `profile` / `modes` members with it (design v2 A-4).
         internal static int FindMatchingBraceStringAware(string s, int openPos)
-        {
-            if (openPos < 0 || openPos >= s.Length) return -1;
-            int depth = 0; bool inStr = false;
-            for (int i = openPos; i < s.Length; i++)
-            {
-                char c = s[i];
-                if (inStr)
-                {
-                    if (c == '\\') i++;
-                    else if (c == '"') inStr = false;
-                    continue;
-                }
-                if (c == '"') { inStr = true; continue; }
-                if (c == '{') depth++;
-                else if (c == '}') { depth--; if (depth == 0) return i; }
-            }
-            return -1;
-        }
+            => SessionReportRules.MatchBrace(s, openPos);
 
         /// <summary>Sept 6 batch (Group 4 item c): GET /api/v1/report — the session
-        /// report envelope for ONE set. `selector` is series / match / session and
-        /// `key` the UUID the history row carries. Strict Steam session endpoint
+        /// report envelope for ONE set. `selector` is series / match / session /
+        /// sitting / lobby and `key` the UUID the history row carries (Sept 28,
+        /// board row 30a: `sitting` resolves its anchor's mode server-side and
+        /// `lobby` is an FFA game's lobby sitting). Strict Steam session endpoint
         /// (no token -> the same early-out the other strict callers use, so the
         /// view can say why); participant-only server side (a non-participant
         /// gets the same 404 as a missing set). Read-only. Parsing lives in
-        /// SessionReportModel.Parse — the raw text is handed to the callback.</summary>
+        /// SessionReportRules.Parse — the raw text is handed to the callback.</summary>
         public static void FetchSessionReport(string selector, string key, Action<bool, string> callback)
+            => FetchSessionReport(selector, key, null, callback);
+
+        /// <summary>Board row 30g: `viewer` (a 17-digit Steam id) asks for the set
+        /// as that player is served it. The server answers it only for the
+        /// broadcast account (strict session plus its allowlist) and refuses
+        /// every other caller with 403 "broadcast_only"; null or empty is the
+        /// caller's own report, the request the F5 view makes.</summary>
+        public static void FetchSessionReport(string selector, string key, string viewer, Action<bool, string> callback)
         {
             if (callback == null) return;
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { callback(false, "no-identity"); return; }
             if (string.IsNullOrEmpty(SteamAuth.SessionToken)) { callback(false, "session_required"); return; }   // strict-session endpoint
-            if (selector != "series" && selector != "match" && selector != "session" && selector != "sitting") { callback(false, "bad-selector"); return; }   // Sept 8 item 5: ?sitting=<match uuid>
+            if (selector != "series" && selector != "match" && selector != "session" && selector != "sitting"
+                && selector != "lobby") { callback(false, "bad-selector"); return; }   // Sept 8 item 5: ?sitting=<match uuid>; Sept 28 (row 30a): ?lobby=<ffa match uuid>
             Guid parsed;
             if (!Guid.TryParse(key ?? "", out parsed)) { callback(false, "bad-key"); return; }
+            bool named = !string.IsNullOrEmpty(viewer);
+            if (named)
+            {
+                if (viewer.Length != 17) { callback(false, "bad-viewer"); return; }
+                foreach (char ch in viewer) if (ch < '0' || ch > '9') { callback(false, "bad-viewer"); return; }
+            }
             string url = $"{baseUrl}/api/v1/report?steam_id={Uri.EscapeDataString(sid)}&{selector}={parsed.ToString("D")}";
+            if (named) url += "&viewer=" + viewer;
             Plugin.Instance.StartCoroutine(GetRequest(url, callback, detailedErrors: true, sessionAware: true));
         }
 
@@ -13494,6 +15710,12 @@ namespace CompetitiveRounds
             get => activeTeamSeriesId;
             set
             {
+                // THE REPAINT RULE (#432): this setter is one of the three writers of
+                // the banner's inputs, so it takes the key before it writes and asks
+                // RequestBannerRepaintIfChanged for the repaint after — the same rule
+                // the refusal branch and the shared parse hold, applied to the
+                // operation rather than to whichever exit someone remembered.
+                string bannerBefore = BannerRenderKey();
                 if (!string.Equals(value, activeTeamSeriesId, StringComparison.Ordinal))
                 {
                     SeriesTeam1ColorName = ""; SeriesTeam1ColorHex = "";
@@ -13506,15 +15728,26 @@ namespace CompetitiveRounds
                     // LastSeriesStateForId == current id) could terminate on
                     // the PREVIOUS series' answer.
                     LastSeriesStateForId = null;
+                    LastSeriesStateRoom = null;
                     LastSeriesStateStatus = null;
                     LastSeriesStateReason = null;
                     LastSeriesStateConfirmations = 0;
-                    LastSeriesDcGraceSeconds = 0;
-                    LastSeriesDcTeamRemaining = 0;
                     LastSeriesT1Wins = 0;
                     LastSeriesT2Wins = 0;
+                    // The banner's three inputs are part of that scope: an id
+                    // change must not leave the previous series' deferral state
+                    // standing under the new series' banner.
+                    LastSeriesDcDeferred = false;
+                    LastSeriesDcDeferredSecondsRemaining = 0;
+                    LastSeriesDcDeferredBoundSeconds = 0;
+                    // And the PRESENCE bit beside them, which the witness and the
+                    // render key both read: leaving it set says the previous
+                    // series' answer carried the deferral state, about a series
+                    // whose numbers have just been cleared (#342).
+                    LastSeriesDcDeferredFieldsPresent = false;
                 }
                 activeTeamSeriesId = value;
+                RequestBannerRepaintIfChanged(bannerBefore);
             }
         }
         public static bool IsTeamQueuePolling { get; private set; } = false;
@@ -13907,7 +16140,7 @@ namespace CompetitiveRounds
                     {
                         var prejoin = new ExitGames.Client.Photon.Hashtable();
                         prejoin["p_id"] = slot;
-                        prejoin["t_id"] = slot / 2;
+                        prejoin[Player.VAR_TEAMID] = slot / 2;
                         // Bug 389: this build re-resolves the victim of a proximity
                         // effect on every call instead of keeping the first one. It
                         // changes who takes damage in a shared simulation, so it runs
@@ -14105,37 +16338,266 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Tracks the most recent series-state poll response so the
-        /// dispatcher coroutine can react. Set by PollTeamSeriesState.</summary>
+        /// dispatcher coroutine can react. Set by the shared response parse
+        /// (ApplySeriesStateResponse), whichever of the two routes fetched it.</summary>
         public static string LastSeriesStateStatus = null;
         public static string LastSeriesStateReason = null;
         public static int LastSeriesStateConfirmations = 0;
-        public static int LastSeriesDcGraceSeconds = 0;
-        public static int LastSeriesDcTeamRemaining = 0;
-        public static int LastSeriesT1Wins = 0;
-        public static int LastSeriesT2Wins = 0;
+        // THE BANNER'S INPUTS ARE WRITABLE ONLY HERE (per the round-7 review).
+        // Every one of them is read from other sources — NativeUI renders them,
+        // Plugin.cs gates on the cached id — and none of them is written from
+        // any source but this one. Declared as public fields they were writable
+        // by every spelling C# has, which is why the repaint census had to
+        // recognise compound assignment, increment, null-coalescing assignment,
+        // ref/out arguments and API-mediated writers such as Interlocked before
+        // it could claim to see every writer. A private setter removes that
+        // surface instead of watching it: a property cannot be passed by
+        // reference at all, so the ref/out and Interlocked forms stop compiling
+        // rather than stop being visible, and any new writer outside this class
+        // is a compile error rather than a census miss. The census stays wide —
+        // this narrows what it has to find, it does not replace it.
+        public static int LastSeriesT1Wins { get; private set; } = 0;
+        public static int LastSeriesT2Wins { get; private set; } = 0;
+        /// <summary>THE DC-GRACE BANNER'S WHOLE INPUT, and the names are the
+        /// cross-lane contract's own: `dc_deferred`,
+        /// `dc_deferred_seconds_remaining` and `dc_deferred_bound_seconds`, which
+        /// the read-only status route carries on every 200. A name that exists on
+        /// one lane and not the other is the defect this mirroring exists to make
+        /// greppable (#341, #444).
+        ///
+        /// <para>The two statics that used to sit here — the dc_grace seconds and
+        /// the dc-team remaining — are GONE with the predicate that read them. That
+        /// predicate required status=='dc_paused' with a positive remaining time;
+        /// nothing writes that status (the flow that did was retired in v1.30.0,
+        /// dc_grace_until is only ever written NULL) and nothing read the second
+        /// field at all, so the pair were a cache nothing could render. Deleted
+        /// rather than left for the next reader to believe (#310, #389).</para></summary>
+        public static bool LastSeriesDcDeferred { get; private set; } = false;
+        public static int LastSeriesDcDeferredSecondsRemaining { get; private set; } = 0;
+        public static int LastSeriesDcDeferredBoundSeconds { get; private set; } = 0;
+        /// <summary>Whether the answer that last wrote the three fields above
+        /// CARRIED them. Absent and false are different facts and only one of them
+        /// is about the row (#342, #604): the lifecycle state read carries none of
+        /// the three and a status answer can be missing them, and both land in the
+        /// same else-branch below, which zeroes the cache. The banner is off either
+        /// way — that is the direction an unknown costs least in (#276) — but its
+        /// witness must not spell "nothing answered this" as "the route said
+        /// false". This flag is what lets that line say which one it holds.</summary>
+        public static bool LastSeriesDcDeferredFieldsPresent { get; private set; } = false;
         // Codex r2 f8: WHICH series the LastSeriesState* fields describe. Set
-        // ONLY in PollTeamSeriesState's success callback (to the id that
-        // response was for) and reset by the ActiveTeamSeriesId setter, so a
-        // consumer can require ForId == current before trusting the cache.
-        public static string LastSeriesStateForId = null;
-        // Throttled background poll of the team-series state — 2s while we
-        // have an active or paused series, off otherwise.
-        private static float teamSeriesStateTimer = 0f;
+        // ONLY in ApplySeriesStateResponse (to the id that response was for)
+        // and reset by the ActiveTeamSeriesId setter, so a consumer can require
+        // ForId == current before trusting the cache.
+        public static string LastSeriesStateForId { get; private set; } = null;
+        // Round 4, finding 1: the Photon room the LAST answer was both asked
+        // and received in, "" when the two differ. RefreshTeamGameRecord reads
+        // the cached confirmations only when this is the current room, so a
+        // count from an earlier sitting never stands in for this one's. Written
+        // beside the shared parse by ObserveSeriesStateAnswer, whichever of the
+        // two routes fetched the answer.
+        public static string LastSeriesStateRoom = null;
+        // The next UNSCALED WALL-CLOCK time the team-series status read may be
+        // dispatched at — not an accumulator of frame time. Why it is a deadline
+        // and not a sum is in UpdateTeamSeriesStatePoll's own gate.
+        private static float teamSeriesStateNextAt = 0f;
         private const float TEAM_SERIES_STATE_INTERVAL = 2f;
+        // ONE REMEMBERED SERIES ID, NOT A SET, so the cardinality this thins the
+        // refusal line to is ONE LINE PER CHANGE OF SERIES and not one line per
+        // series: a tab moving A -> B -> A emits A's line again. That is enough to
+        // stop the line repeating at the tab's frame rate, which is what it is for,
+        // and it is not evidence of how many series were refused. It speaks at all
+        // rather than falling through in silence — an unpolled banner and a banner
+        // whose poll was refused are different facts (#342).
+        private static string _statusPollRefusedForSeries = null;
+        // THE LATCH, and it is per SERIES because that is the scope the evidence
+        // has. One entry per series id whose status read came back as something
+        // other than a 2xx carrying `readonly` — the box that answered has no such
+        // route, or did not answer it as a read. It is written in exactly one place
+        // (the response callback in PollTeamSeriesStatusReadOnly, which is the only
+        // code that has ever seen such an answer) and read in two (the tick below,
+        // so the refusal can SPEAK and name the series, and the poller itself, so
+        // the rule belongs to the operation and not to one caller's discipline —
+        // #432). A session holds one id per series it polled and was refused on.
+        private static readonly HashSet<string> _statusPollDarkSeries = new HashSet<string>();
+        // THE CAUSE, for the subset of the latch above whose dark answer reached
+        // no box at all: HTTP 0 is a refusal before the wire (consent, sensitive
+        // transport), a transport failure, or the 20 s timeout. Kept as a second
+        // set rather than folded into the latch so the latch stays one structure
+        // with one writer. The refusal line below reads it because "a box answered
+        // and it was not a read" and "nothing answered" are different facts, and a
+        // triage grep must never read the first off a cell that was the second
+        // (#342, #430).
+        private static readonly HashSet<string> _statusPollDarkNoAnswer = new HashSet<string>();
+        // The other half of the same rule, and the same cardinality: ONE REMEMBERED
+        // SERIES ID, so this is one line per CHANGE of series for the answer that DID
+        // prove itself, and A -> B -> A emits A's line twice. Both directions speak,
+        // because "the banner is dark" and "the banner is live" are different facts
+        // and a bundle has to be able to tell them apart (#342, #438).
+        private static string _statusPollProvenForSeries = null;
+
+        /// <summary>True while this session has been refused a status read for
+        /// that series. The RENDER reads it: a latch means no box answered this
+        /// series' read as a read, so there is no deferral state to draw and the
+        /// last one must not be left on screen. Exposed as a method rather than
+        /// handing the set out, so the latch keeps its one writer (#432).</summary>
+        public static bool SeriesStatusLatchedDark(string seriesId)
+        {
+            return !string.IsNullOrEmpty(seriesId) && _statusPollDarkSeries.Contains(seriesId);
+        }
+
+        /// <summary>Whether a JSON body carries a key AT ALL, which is a different
+        /// question from what its value is. `ExtractJsonBool` answers false for an
+        /// absent key and for a false one alike (#604), so any branch whose meaning
+        /// depends on the difference measures presence first, with this.
+        ///
+        /// <para>A textual probe, like every other reader of these payloads in this
+        /// file: Unity's <c>JsonUtility</c> silently fails on nested arrays, which
+        /// is why the codebase splits strings by hand everywhere. It looks for the
+        /// QUOTED key, so a value carrying the bare word does not answer for it. It
+        /// is a presence probe on a body whose shape is known and not a parser: a
+        /// string VALUE that contained the quoted token would answer for it, which
+        /// is true of every other reader here and is why none of them is used on a
+        /// body this client did not ask for.</para></summary>
+        private static bool HasJsonKey(string json, string key)
+        {
+            return !string.IsNullOrEmpty(json)
+                   && json.IndexOf("\"" + key + "\"", StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>Whether a body carries the WHOLE deferral state — all three
+        /// fields of the cross-lane contract. One helper, because the parse and the
+        /// witness line below both ask this question, and a duplicated predicate is
+        /// how one copy gets fixed and the other keeps the defect (#330).</summary>
+        private static bool HasDeferralFields(string resp)
+        {
+            return HasJsonKey(resp, "dc_deferred")
+                   && HasJsonKey(resp, "dc_deferred_seconds_remaining")
+                   && HasJsonKey(resp, "dc_deferred_bound_seconds");
+        }
+
+        // The third suppressor, and the third of the same shape: ONE REMEMBERED
+        // SERIES ID, so one line per CHANGE of series for the answer that proved
+        // itself as a read but did not carry the deferral state, and A -> B -> A
+        // emits A's line twice. A banner that is off because a field was missing and
+        // a banner that is off because the series is not deferred are different
+        // facts, and a bundle has to be able to tell them apart (#342).
+        private static string _statusPollNoDeferralForSeries = null;
+
+        /// <summary>The team tab's DC-grace banner refresh.
+        ///
+        /// <para>THIS PATH COMPOSES ONE URL AND HAS NO SECOND BRANCH. It dispatches
+        /// <see cref="PollTeamSeriesStatusReadOnly"/> and nothing else, on every
+        /// answer and in every server state; that method builds
+        /// <c>GET /team/series/{id}/status</c>, which the server lane adds as a
+        /// handler that issues one SELECT and no write, and which a box that
+        /// predates it has no handler for at all. It has no fallback — not on a
+        /// 404, not on a 5xx, not on a body it cannot read. The claim this makes
+        /// about the client is total; the claim it makes about a server is only
+        /// that those are the two shapes a box can be in, and the server lane's
+        /// notes carry the production-pin evidence for the second.
+        /// The previous round routed this banner at the LIFECYCLE
+        /// endpoint in a mode a separate advertisement said was safe, which is a
+        /// claim about one box spent on a request another box can answer; that
+        /// design and its advertisement are deleted rather than repaired.</para>
+        ///
+        /// <para>WHY THE ROUTE MATTERS AND NOT THE MODE.
+        /// <c>GET /team/series/{id}/state</c> is a lifecycle WRITE — see the block
+        /// above SendTeamSpawnConfirm for the full arm. It sets
+        /// <c>status='canceled'</c> with <c>invalidation_reason='assembly_timeout'</c>,
+        /// reconciles the series' bets and COMMITS, whenever the row reads
+        /// <c>status='active'</c> with fewer than four spawn-confirms, more than 180 s
+        /// past <c>room_issued_at</c>, and no positive live-game evidence in the api
+        /// process. Each of those three is reachable by a healthy PLAYED 2v2: a lost
+        /// spawn-confirm POST leaves a live game at 3/4 indefinitely; the bug-245
+        /// resume relock writes <c>spawn_confirmations=0</c> and
+        /// <c>room_issued_at=NULL</c>, after which the endpoint's COALESCE falls back
+        /// to <c>created_at</c> and the age is already hours on the first read; and
+        /// the live-game veto reads an in-process map that every api restart empties.
+        /// This method runs from the MENU, against whatever series id is cached, for
+        /// as long as the team tab is open — precisely a caller outside the assembly
+        /// window that write exists for. A query parameter cannot keep this method
+        /// away from that arm, because a box that does not know the parameter drops
+        /// it and runs the arm anyway (#266); a different PATH can, because a box
+        /// that does not have the path runs no handler at all.</para>
+        ///
+        /// <para>THE PREDICATE, stated as the code applies it: the banner polls the
+        /// status route until an answer says this box does not serve it as a read,
+        /// and then polls NOTHING AT ALL for that series and says so once. It never
+        /// degrades to the lifecycle route, and it never decides from a previous
+        /// answer that the next box is safe.</para>
+        ///
+        /// <para>AND IT DOES NOT TRY TO DECIDE "IS THIS SERIES PLAYED YET" FROM HERE.
+        /// The three terms that actually select the cancel arm are the row's confirm
+        /// count, its age from <c>room_issued_at</c>, and the api process's live-game
+        /// map. A client can see none of them, so any local test — wins seen, a game
+        /// entered, a cached status of <c>dc_paused</c> — is a guess about a different
+        /// quantity, and a guess that is WRONG exactly in the resume case the relock
+        /// creates (#342: a check that cannot fail on the state it is meant to catch
+        /// is worse than no check). The unhandled case fails toward touching nothing
+        /// (#276).</para>
+        ///
+        /// <para>WHAT THE REFUSAL COSTS, MEASURED RATHER THAN ASSUMED (#286, #405),
+        /// AND THE PRICE CHANGED THIS ROUND. Rounds 2 to 4 priced it at "one
+        /// countdown in one banner" while the banner could not render at all: it
+        /// sat behind status=='dc_paused' with seconds remaining, and nothing
+        /// writes that status -- the flow that did was retired in v1.30.0
+        /// (2026-07-12), dc_grace_until is only ever written NULL, and the primary
+        /// holds no team_series row in that status. Round 5 measured that and
+        /// priced the refusal at the colour stamp alone. Both readings are now
+        /// history: the dead predicate is DELETED and the banner derives from the
+        /// deferral fields this route carries, so a refusal costs THREE stated
+        /// things for that series and no more -- the 2 s refresh of the frozen
+        /// team-COLOUR stamp, the status cache the assembly loop reads, and the
+        /// DC-deferral banner, which goes dark rather than stale. It costs nothing
+        /// on any other series and nothing server-side: this route writes nothing,
+        /// and not reading it writes nothing either (#430 -- a guard is judged by
+        /// what its refusal costs).</para></summary>
         public static void UpdateTeamSeriesStatePoll(bool force)
         {
             string sid = ActiveTeamSeriesId;
             if (string.IsNullOrEmpty(sid)) return;
-            teamSeriesStateTimer += Time.deltaTime;
-            if (!force && teamSeriesStateTimer < TEAM_SERIES_STATE_INTERVAL) return;
-            teamSeriesStateTimer = 0f;
-            PollTeamSeriesState(sid, (status, reason, conf) =>
+            if (_statusPollDarkSeries.Contains(sid))
             {
-                // PollTeamSeriesState already populates LastSeriesStateStatus etc.
-                // We just need to extract the DC fields, which it doesn't currently
-                // parse — the response JSON has them, but the in-helper parse uses
-                // a fixed callback signature. Refresh in a separate parse below.
-            });
+                if (_statusPollRefusedForSeries != sid)
+                {
+                    _statusPollRefusedForSeries = sid;
+                    Plugin.Log.LogInfo("[2v2] DC-grace banner NOT polling series " + sid
+                        + (_statusPollDarkNoAnswer.Contains(sid)
+                            ? " — the status read for it never reached a box: a refusal before the "
+                              + "wire, a transport failure, or the 20 s timeout, recorded as HTTP 0 when "
+                              + "that read returned. This line says nothing about any box's routes"
+                            : " — a box answering for this seat did not answer that read AS a read: "
+                              + "it serves no such route, or it has no such series, which the read below "
+                              + "recorded when that answer arrived")
+                        + ". The banner stays dark for this series, and "
+                        + "there is no second route to fall back to: the only other per-series route "
+                        + "performs a lifecycle write that can cancel a played series and reconcile "
+                        + "its bets");
+                }
+                return;
+            }
+            // WALL-CLOCK CADENCE, AND THE CALLER IS A PER-FRAME TICKER (#62).
+            // This gate used to add Time.deltaTime, and its only caller sat inside
+            // RefreshTeamTab — a repaint path that runs when something flips the
+            // dirty bit, not every frame. The interval was therefore measured in
+            // REPAINTS: the wall-clock cadence moved with the frame rate and with
+            // however much unrelated traffic happened to be repainting the tab, so
+            // a survivor inside a deferral window could wait tens of seconds for the
+            // first read and watch the handed-over seconds jump by as much. The
+            // caller is now NativeUI.MaybeRefreshTeamTab, which runs every frame
+            // while tab 8 is open, and the gate below is an unscaled wall-clock
+            // deadline — so the read is dispatched every TEAM_SERIES_STATE_INTERVAL
+            // of the survivor's own clock, at any frame rate, and while the game
+            // clock is stopped. `force` still bypasses it for a caller that needs a
+            // read now.
+            if (!force && Time.unscaledTime < teamSeriesStateNextAt) return;
+            teamSeriesStateNextAt = Time.unscaledTime + TEAM_SERIES_STATE_INTERVAL;
+            // The parse fills LastSeriesDcDeferred /
+            // LastSeriesDcDeferredSecondsRemaining /
+            // LastSeriesDcDeferredBoundSeconds — which, with the series wins, is
+            // everything the banner reads — plus LastSeriesStateStatus for the
+            // assembly loop. No callback.
+            PollTeamSeriesStatusReadOnly(sid, null);
         }
 
         /// <summary>POST /team/series/continuation. Called by the reporter (lowest Steam
@@ -14188,17 +16650,176 @@ namespace CompetitiveRounds
         }
 
         /// <summary>POST /team/series/{id}/report-dc. Called from
-        /// Cr2v2DiagCallbacks.OnPlayerLeftRoom when the lowest-Steam-ID remaining
-        /// client detects a mid-series DC. Server applies the 2v2 DC rule (any
-        /// match abandoned with >=2 total points → non-DC team wins) and starts
-        /// the 5-min sticky-team requeue grace window.</summary>
+        /// Cr2v2DiagCallbacks.OnPlayerLeftRoom by an elected survivor: the ONE
+        /// seat on the non-DC team that the census elects wherever it proves the
+        /// rule room-wide, otherwise every seat DcReporterElection names.
+        ///
+        /// <para>THE DEPLOYED RULE, read off main.py's team_series_report_dc rather
+        /// than remembered (r2 LOW). The whole SERIES completes to the non-DC team
+        /// — with Glicko and gold, no XP — only when BOTH halves hold: that team
+        /// had already won at least one game of the series, AND the abandoned game
+        /// carries >= 2 total points. The previous wording here said "any match
+        /// abandoned with >=2 total points", which drops the existing-win half and
+        /// describes a rule the endpoint has never had.</para>
+        ///
+        /// <para>Otherwise the series flips to status='dc_incomplete' with
+        /// invalidation_reason='dc_manual_pending' for the admin panel. There is no
+        /// 5-minute grace window on this path: that belongs to the legacy dc_paused
+        /// flow, which only the state poll's expiry sweep still reads. The window
+        /// that does exist is bug 245's resume — the same four re-queueing within
+        /// roughly thirty minutes are re-locked onto THIS series with its scores
+        /// kept and the pending flag cleared.</para>
+        ///
+        /// <para>THIS TREE'S SERVER HALF (v1.41.0 beta round 2, finding 1) reads the
+        /// abandoned game's two points from its own per-game record, never from
+        /// this report: the point totals sent here are logged and kept on the
+        /// forfeit row, and decide nothing. Where the paragraphs below lean on the
+        /// totals gating the lead-forfeit, they describe the 0cc7f75 rule they were
+        /// read from; on this tree's server what gives a report the power to settle
+        /// a lead-forfeit is its game token (THE GAME TOKEN, next).</para>
+        ///
+        /// <para>THE GAME TOKEN (v1.41.0 beta round 5, finding F25; round 6,
+        /// findings F27 and F28). A PROMPT report reads the token of the physical
+        /// game this seat is in (GameStateWatcher.TeamTokenForReport) HERE, as the
+        /// report is built, and logs what it read; a game over or a game start this
+        /// seat has not seen yet withholds it. With one, the report carries
+        /// game_token plus token_sig over
+        /// 'team-dc-token:{reporter}:{series}:{dc_player}:{token}'
+        /// (TeamGameNumber.DcTokenCanonical); hmac_sig and its canonical are
+        /// unchanged. The server reads the abandoned game's crossing only from
+        /// posts that carried this token, and only when its ordinal is the game
+        /// being settled (the ordinal and epoch are signed with it); without one it
+        /// settles no lead-forfeit. A FALLBACK report never carries a token: on
+        /// this tree's server that absence, and not its zero totals, is what keeps
+        /// a fallback from ever being the report that rates a series, beside the
+        /// deferral that a server reading is_fallback applies.</para>
+        ///
+        /// <para>The point totals below ride the query string OUTSIDE the DC
+        /// signature and gate half of the forfeit condition. The election in
+        /// Plugin.OnPlayerLeftRoom decides WHO sends and WHEN; this method only
+        /// carries what that seat observed.</para>
+        ///
+        /// <para>DELIVERY. A single un-retried request used to be the whole
+        /// mechanism, on a path whose failure leaves the series open and every
+        /// survivor holding a 2v2 lease until its TTL expires — and the disruption
+        /// that produced the disconnect is exactly the one that drops it. It now
+        /// goes through PostRequestWithRetry, and a second seat may send a
+        /// <paramref name="fallback"/> report behind it. Both are safe against the
+        /// DEPLOYED endpoint, which is not merely tolerant of a repeat but
+        /// explicitly ignores one: it re-reads the row under FOR NO KEY UPDATE
+        /// (backend/api/main.py at 0cc7f75, read rather than remembered — the
+        /// previous wording here said FOR UPDATE, which is the mode the COMPLETION
+        /// helper beneath it takes, not this one) and returns `{"ignored": true}`
+        /// unless the status is still active/dc_paused; the completion helper then
+        /// no-ops on an already-completed series. A duplicate therefore cannot
+        /// double-apply ratings or gold.</para>
+        ///
+        /// <para>THE FALLBACK FORM. <paramref name="fallback"/> is not a statement
+        /// about WHO is sending; it is the shape of what is sent. A fallback report
+        /// carries ZERO point totals, forced here rather than trusted from the
+        /// caller, because `total_points >= 2` is half of the endpoint's
+        /// lead-forfeit condition: a zero-total report cannot take that branch, so
+        /// the only write it can reach is the one recording
+        /// `status='dc_incomplete'`. WHO may send one, and on what terminal signal,
+        /// is DcReportSync's rule, not this method's.</para>
+        ///
+        /// <para>WHAT THE ZERO FORM DOES AND DOES NOT BUY, stated exactly, because
+        /// the previous wording here overclaimed it. It buys this: a fallback can
+        /// never BE the report that rates a series — under every ordering, the only
+        /// row state it can reach is `dc_incomplete`. It does NOT buy immunity from
+        /// arrival order in general: a fallback that reaches the lock FIRST writes
+        /// `dc_incomplete`, and a real-totals report arriving behind it is answered
+        /// `{"ignored": true}`, so a rated lead-forfeit can still be LOST to a
+        /// fallback that ran beside it. That is why the form is only half the rule
+        /// and DcReportSync's terminal-signal table is the other half: the form
+        /// bounds the damage, the signal table is what keeps the two apart. The one
+        /// case the client half cannot close — a SECOND disconnect in the same
+        /// series, whose own prompt report is a different seat's transaction the
+        /// watch never armed on — is named in DcReportSync's note and closed by the
+        /// server-lane rule recorded with this round, not by this comment.</para>
+        ///
+        /// <para>OUTCOME PUBLICATION. A prompt report announces its own progress on
+        /// the `cr_dcr` player property — `send` before the request exists, then
+        /// `ok` on any server answer, `no` when every attempt was refused or nothing
+        /// ever left this process, and `unk` when an attempt went unanswered and a
+        /// handler may still be running — because the seat behind it decides what to
+        /// do from that and from nothing else. Every exit of this method that
+        /// abandons a prompt report announces `no` on the way out, so "said nothing
+        /// at all" stops being a state the watcher has to guess about. A fallback
+        /// publishes nothing: nobody is watching it, and a second writer on that
+        /// property would make the value ambiguous.</para>
+        ///
+        /// <para><paramref name="observedRoom"/> is the room the disconnect was
+        /// SEEN in, passed in rather than read here: a fallback send happens after
+        /// its watch settles and can be outside the room by then, and this method
+        /// reading `PhotonNetwork.CurrentRoom` at that point would send an empty
+        /// hint — which the endpoint treats as an old client and lets through the
+        /// bug-245 resume fence. Null keeps the old read-it-here behaviour for any
+        /// caller that has no observation to name.</para></summary>
         public static void ReportTeamSeriesDc(
             string seriesId, string reporterSteamId, string dcPlayerSteamId,
-            int t1PointsTotal, int t2PointsTotal)
+            int t1PointsTotal, int t2PointsTotal,
+            string observedRoom = null, bool fallback = false)
         {
-            // §2c identity fence: the broadcast service account never reports.
-            if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc")) return;
-            if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcPlayerSteamId)) return;
+            // THE ZERO FORM IS ENFORCED HERE AND NOWHERE ELSE, in either lane.
+            // Against a server that predates the deferral, a fallback carrying real
+            // totals could select the rated completion — the one property the watch
+            // behind it is built on. Against a server that carries the deferral, the
+            // same report would be DEFERRED rather than settled, losing a rated
+            // lead-forfeit it had earned. Neither server checks the totals: the
+            // deferral branch reads is_fallback alone, and that lane's own note says
+            // so — the placement before the lead-forfeit block is structural and does
+            // not rest on a fallback happening to carry zero points, which is a
+            // property of this client and not a predicate that endpoint could fail
+            // on (#342). So this line is the whole guarantee. It is not redundant
+            // with any server-side check and must not be deleted as one.
+            //
+            // It also SPEAKS when it has to act (#438). Normalising in silence would
+            // leave a caller that passes real totals with fallback:true looking
+            // exactly like one that passed zeros, and that caller is the defect this
+            // line exists to absorb.
+            if (fallback)
+            {
+                if (t1PointsTotal != 0 || t2PointsTotal != 0)
+                    Plugin.Log.LogWarning("[2v2-DC] a fallback report was composed with non-zero "
+                        + "point totals (t1=" + t1PointsTotal + " t2=" + t2PointsTotal + ") — forcing "
+                        + "the zero form. A fallback states only that the series looks abandoned; the "
+                        + "caller that supplied these totals is reporting a game it did not watch");
+                t1PointsTotal = 0;
+                t2PointsTotal = 0;
+            }
+            // EVERY EXIT OF THE PROMPT PATH ANNOUNCES ITSELF. The seat behind this
+            // one decides from `cr_dcr` and from nothing else, so a prompt report
+            // that returns here in silence leaves that seat waiting on a
+            // transaction that will never exist — a state the protocol note used to
+            // leave unenumerated. Both refusals below are LOCAL declines: nothing
+            // was composed, nothing was sent, no handler exists anywhere, which is
+            // exactly the `no` case (#430 — the value names what the server did, and
+            // "we never tried" belongs with "the server refused", not with "we do
+            // not know"). The series tag is the announcement's whole meaning, so a
+            // missing series id is the one exit that cannot speak.
+            if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc"))
+            {
+                if (!fallback && !string.IsNullOrEmpty(seriesId))
+                {
+                    Plugin.Log.LogInfo("[2v2-DC] prompt report declined by the identity fence — "
+                        + "publishing " + DcReportSync.OutcomeProp + "=" + DcReportSync.OutcomeFailed
+                        + " so the watching seat is not left waiting on a report that will never be sent");
+                    try { DcReportSync.PublishOutcome(seriesId, DcReportSync.OutcomeFailed); } catch { }
+                }
+                return;
+            }
+            if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcPlayerSteamId))
+            {
+                if (!fallback && !string.IsNullOrEmpty(seriesId))
+                {
+                    Plugin.Log.LogWarning("[2v2-DC] prompt report abandoned — a required field was empty; "
+                        + "publishing " + DcReportSync.OutcomeProp + "=" + DcReportSync.OutcomeFailed
+                        + " so the watching seat is not left waiting");
+                    try { DcReportSync.PublishOutcome(seriesId, DcReportSync.OutcomeFailed); } catch { }
+                }
+                return;
+            }
             string sig = ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:dc");
             // Bug 245 companion: name the room this DC was OBSERVED in (raw,
             // unsuffixed). The server ignores a report whose room no longer
@@ -14207,21 +16828,408 @@ namespace CompetitiveRounds
             // must not lead-forfeit the resumed sitting mid-play. Unsigned
             // hint by design (the DC canonical is frozen); empty when the
             // room is already gone, which keeps legacy behavior.
-            string dcRoom = "";
-            try { dcRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
+            string dcRoom = observedRoom;
+            if (dcRoom == null)
+            {
+                dcRoom = "";
+                try { dcRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
+            }
+            // is_fallback: TRUE on exactly the reports this client composes as a
+            // fallback, and absent otherwise. Unsigned, like photon_room_id, which
+            // already rides outside the frozen DC canonical — extending the canonical
+            // is a coordinated change that would fail every current client's
+            // signature.
+            //
+            // WHAT IT ASKS THE SERVER FOR. A server carrying the fallback-deferral
+            // rule does not settle on a zero-total fallback: it records that a
+            // survivor believes the series is abandoned and answers
+            // {"deferred": true}, leaving the row open for a real-totals prompt
+            // report to reach its normal branches, including the rated
+            // lead-forfeit. THE BOUND ON THAT, in the cross-lane contract's words
+            // and carried character for character on both lanes and in the
+            // migration:
+            //
+            //   A real-totals report wins while the deferred marker is younger than
+            //   420 seconds, and after that only until a sweep tick finds no
+            //   live-game evidence for the series and settles the row; once a row is
+            //   settled, a later report is refused at the settled-row exit and is
+            //   not rated.
+            //
+            // So this is not "the client is safe afterwards": it is a window, and
+            // what happens past it is a stated loss rather than an unstated one. The
+            // ordering the client cannot close — two disconnects on different seats
+            // are not orderable from inside one client — is closed inside that
+            // window and not outside it, and setting the flag is the client's whole
+            // part in it.
+            //
+            // AGAINST AN OLDER SERVER (#266). An unknown query parameter is IGNORED
+            // and the request is answered 200. WHAT THAT 200 PROVES, and it is less
+            // than the previous wording claimed: only that the box which answered
+            // predates the field. It is not proof that the report settled — a box of
+            // that generation still has the exits that write NOTHING and answer
+            // {"ignored": true}, so "settled" and "discarded without a write" are not
+            // distinguishable from a missing key, and the disposition, if the body
+            // carries one, is in `status` and `ignored`. What IS true of that
+            // generation either way is that nothing there parks a report, so the flag
+            // buys nothing and costs nothing against it and the displacement residual
+            // stands unchanged. Nothing here reads the 200 as proof the parameter was
+            // understood — that is what the `deferred` field below is for.
+            //
+            // DIRECTION (#283). Setting it moves the server away from settling and
+            // toward deferral, and the deferral branch sits before the lead-forfeit
+            // block and reaches no rating, gold or team_matches write — so a set flag
+            // cannot produce a WRONG rated result; omitting it is today's position.
+            //
+            // IT IS NOT FREE, and the earlier wording here claimed a server-side
+            // check that does not exist. The server's branch reads is_fallback and
+            // nothing else; that lane's own note states the placement is structural
+            // and does not rest on a fallback carrying zero points, "which is a
+            // property of today's client and not a check this endpoint could fail on"
+            // (#342). A real-totals prompt report sent with this flag is therefore
+            // DEFERRED rather than settled, and the rated lead-forfeit it would have
+            // applied is lost to the sweep instead. The flag and the zero form are
+            // kept consistent in exactly ONE place across both lanes — the
+            // normalisation at the top of this method — and nothing downstream
+            // re-checks it. Both halves of this contract were written in one round,
+            // so neither may be asserted from the other (#341/#635), and a claim that
+            // cannot be traced to code is a finding (#302).
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/report-dc" +
                          $"?reporter_steam_id={UnityWebRequest.EscapeURL(reporterSteamId)}" +
                          $"&dc_player_steam_id={UnityWebRequest.EscapeURL(dcPlayerSteamId)}" +
                          $"&t1_points_total={t1PointsTotal}" +
                          $"&t2_points_total={t2PointsTotal}" +
                          $"&photon_room_id={UnityWebRequest.EscapeURL(dcRoom)}" +
+                         (fallback ? "&is_fallback=true" : "") +
                          $"&hmac_sig={UnityWebRequest.EscapeURL(sig)}";
-            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            // v1.41.0 beta round 5, finding F25 (round 6, findings F27 and F28):
+            // the token of the physical game this seat is in, read HERE, as the
+            // report is built, and for a PROMPT report only ("" = none: the server
+            // then settles no lead-forfeit and the series goes to an admin). A game
+            // over or a game start this seat has not seen yet withholds it, and the
+            // reason is logged. A fallback carries none (THE GAME TOKEN, in the
+            // summary). A throw here costs the token and never the report: every
+            // exit of the prompt path must announce itself, and a report without a
+            // token is the conservative one.
+            string gameToken = "";
+            if (!fallback)
+            {
+                string tokenWhy = "";
+                try { gameToken = GameStateWatcher.TeamTokenForReport(seriesId, out tokenWhy) ?? ""; }
+                catch (Exception ex) { gameToken = ""; tokenWhy = "the token read threw " + ex.GetType().Name; }
+                Plugin.Log.LogInfo($"[2v2-DC] series={seriesId} "
+                    + (gameToken.Length > 0 ? $"game token {TeamGameNumber.Describe(gameToken)}"
+                                            : $"no game token ({tokenWhy ?? ""}; no automatic lead-forfeit)"));
+            }
+            if (TeamGameNumber.TokenValid(gameToken))
+                url += TeamGameNumber.QueryToken(gameToken, ComputeHmacHex(TeamGameNumber.DcTokenCanonical(
+                    reporterSteamId, seriesId, dcPlayerSteamId, gameToken)));
+            // The URL is complete BEFORE the request exists. Every field in it is a
+            // fact of the disconnect — the reporter, the leaver, the points as they
+            // stood, the room it happened in — and none of them may be re-read from
+            // a client state that has moved on by the time the request goes out.
+            //
+            // `send` is published BEFORE the coroutine starts, so the announcement
+            // that a request exists cannot be overtaken by the request itself. A
+            // seat that then vanishes has told the room "a report may be in flight",
+            // which is the state in which the seat behind it posts nothing.
+            if (!fallback)
+            {
+                try { DcReportSync.PublishOutcome(seriesId, DcReportSync.OutcomeSent); }
+                catch { }
+            }
+            Plugin.Instance.StartCoroutine(SendTeamSeriesDcReport(url, seriesId, fallback));
+        }
+
+        /// <summary>Dispatch half of <see cref="ReportTeamSeriesDc"/>: the retried
+        /// POST, and — for a PROMPT report — the terminal announcement the seat
+        /// behind it is waiting on. There is no wait here any more: the delayed
+        /// send this method used to open with was an elapsed-time guess about
+        /// another seat's transaction, and the seat that used to schedule it now
+        /// watches for a terminal outcome instead.
+        ///
+        /// <para>NOT UNDER THE CARRIED RULE, by decision (merge pass 3 of the
+        /// v1.41.0 beta lane, board row 27's merge semantic 5). The match
+        /// reporters settle a 2xx only when the answering request carried
+        /// X-Session-Token (PostMatchReportWithRetry) because their four routes
+        /// read the Steam session (_check_steam_session) and each report has a
+        /// queued copy to fall back on.
+        /// Neither holds here: the report-dc route is authenticated by its
+        /// HMAC and never reads the session (team_series_report_dc in
+        /// backend/api/main.py takes no request), so a 2xx records the same
+        /// whether or not the token went out; and this report has no queued
+        /// copy, so a 2xx refused as "not carried" would have nowhere to go
+        /// and would publish OutcomeFailed, which tells the seat behind to
+        /// post its fallback beside a report that landed. A 2xx here is
+        /// therefore answered as it is, onTokenStamped is not passed, and
+        /// test_portal_reprobe_client.py pins both halves of that premise.</para></summary>
+        private static IEnumerator SendTeamSeriesDcReport(string url, string seriesId, bool fallback)
+        {
+            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetryAnswered(url, "", (ok, resp, answered) =>
             {
                 if (ok) Plugin.Log.LogInfo($"[2v2-DC] report accepted: {resp}");
-                else Plugin.Log.LogWarning($"[2v2-DC] report failed: {resp}");
+                else Plugin.Log.LogWarning($"[2v2-DC] report failed after every retry: {resp}"
+                    + $" (every attempt answered={answered})");
+                if (fallback)
+                {
+                    // WHICH BOX ANSWERED, said positively rather than assumed, and
+                    // now in THREE values rather than two. A 200 alone cannot tell a
+                    // box that deferred this fallback from one that predates the
+                    // field and dropped the is_fallback parameter (#266 — an unknown
+                    // query parameter is dropped silently and the answer is a healthy
+                    // 200), and it cannot say what that older box DID with the report
+                    // either: a 200 with no `deferred` key carries no disposition, so
+                    // a settle and a no-write refusal read the same from here. The
+                    // cross-lane contract closes the first question by making
+                    // `deferred` PRESENT on every 200 that endpoint returns, so
+                    // presence is tracked separately from value (#604):
+                    //
+                    //   present and true   THIS CALL parked this report
+                    //   present and false  this call parked NOTHING. It is not a
+                    //                      claim that this call settled anything:
+                    //                      of the five exits that answer false,
+                    //                      two settle the series (the
+                    //                      lead-forfeit completion and the
+                    //                      dc_incomplete settle) and the other
+                    //                      three (the settled-row exit and the
+                    //                      two room fences) write nothing and
+                    //                      say so with "ignored": true in the
+                    //                      same body
+                    //   absent from a 200  the box that answered PREDATES the
+                    //                      field. That is the whole of what the
+                    //                      absence proves. What that box did with
+                    //                      the report is not carried in a missing
+                    //                      key — it is read out of "ignored" and
+                    //                      "status" in the same body, or not at all
+                    //
+                    // THE DEFINITION IS THE CONTRACT'S, character for character, and
+                    // the server tree carries this same sentence at the one place
+                    // that file defines the field. One contract, two trees, grepped
+                    // for the same literal rather than described twice on each side
+                    // (#341, #444) — a rule described twice is a rule that drifts:
+                    //
+                    //   "deferred" says only whether THIS call parked the report:
+                    //   true when it did, false on the five exits that do not park
+                    //   one -- two of which settle the series while the other three,
+                    //   the settled-row exit and the two room fences, decide nothing
+                    //   and say so with "ignored": true -- and absent only from a
+                    //   box that predates the flag.
+                    //
+                    // AND THE TWO SENTENCES THIS LANE MAY STATE, AND MAY NOT
+                    // EXCEED, also the contract's own words (one at each of the
+                    // two sites the round-5 lens found overclaiming):
+                    //
+                    //   A FALSE "deferred" proves only that this call parked
+                    //   nothing. It is never proof of settlement: three of the
+                    //   five exits that answer false decide nothing and say so
+                    //   with "ignored": true.
+                    //
+                    // and a NON-200 proves nothing about any box, which is why the
+                    // read below is taken only on `ok`. Each line says exactly that
+                    // much and no more: the previous round's version read absence as
+                    // "this server does not carry the rule", which was an inference
+                    // about a box from a field the rule's own validation exits did
+                    // not emit either (#342).
+                    //
+                    // WHAT THE DEFERRED LINE DOES NOT PROMISE. A deferral is not a
+                    // disposition, and the sweep is not the only thing that can close
+                    // the row it left open — the round-7 correction, because the
+                    // previous wording named one writer where the tree has several.
+                    // A marked row is settled by the sweep, on a tick that finds no
+                    // live-game evidence for the series; and it is settled by a LATER
+                    // REAL-TOTALS REPORT that reaches the lead-forfeit completion or
+                    // the dc_incomplete settle while the bound still holds, which is
+                    // the whole point of leaving it open. So a series whose evidence
+                    // keeps being refreshed, or whose row is skipped by every tick,
+                    // stays open until a report closes it or a tick does, and nothing
+                    // in this process observes any of that. The line below therefore
+                    // reports the deferral it was told about and states the window; it
+                    // does not claim the row will close, or by which writer.
+                    //
+                    // AND A DEFERRAL CAN END WITHOUT BEING SETTLED -- the round-13
+                    // addition, owed to this lane by the server lane's round-9 review
+                    // (OI-4). Besides the sweep and a later real-totals report, three
+                    // more paths end a deferral: the server's revival and resume
+                    // funnels and its room-issue clear, each of which clears the
+                    // row's deferred marker. A deferral that ends that way ends
+                    // without this report settling anything, so "the deferral ended"
+                    // is not "the series settled" either, and nothing in this process
+                    // observes which path ended it.
+                    if (ok)
+                    {
+                        bool present = !string.IsNullOrEmpty(resp)
+                                       && resp.IndexOf("\"deferred\"", StringComparison.Ordinal) >= 0;
+                        bool deferred = false;
+                        if (present)
+                        {
+                            try { deferred = ExtractJsonBool(resp, "deferred"); } catch { deferred = false; }
+                        }
+                        if (present && deferred)
+                            Plugin.Log.LogInfo("[2v2-DC] fallback DEFERRED by the server — the row is "
+                                + "left open so a real-totals report can still take its normal branches. "
+                                + "A real-totals report wins while the deferred marker is younger than "
+                                + "420 seconds, and after that only until a sweep tick finds no live-game "
+                                + "evidence for the series and settles the row; once a row is settled, a "
+                                + "later report is refused at the settled-row exit and is not rated. What "
+                                + "stays open: nothing here observes the sweep, so this line is the "
+                                + "deferral and not the disposition");
+                        else if (present)
+                        {
+                            // deferred=false DOES NOT MEAN THIS REPORT SETTLED ANYTHING.
+                            // On a box carrying the rule the deferral branch precedes
+                            // every settling write, so a report with is_fallback set
+                            // reaches no settling exit at all: the exits it can reach
+                            // answer {"ignored": true}, write nothing, and echo the
+                            // status the row ALREADY held -- which may be `completed`
+                            // and rated, from the other seat's prompt report. The
+                            // previous wording claimed a write that did not happen and
+                            // a dc_incomplete bound the row need not be under, which
+                            // would point an investigation at this path instead of at
+                            // whatever actually wrote the row (#342, #351).
+                            bool ignored = false;
+                            if (resp.IndexOf("\"ignored\"", StringComparison.Ordinal) >= 0)
+                            {
+                                try { ignored = ExtractJsonBool(resp, "ignored"); } catch { ignored = false; }
+                            }
+                            if (ignored)
+                                Plugin.Log.LogInfo("[2v2-DC] fallback NOT PARKED AND NOT APPLIED "
+                                    + "(deferred=false with ignored=true) — this box carries the rule "
+                                    + "and refused the report WITHOUT WRITING: the row was already out of "
+                                    + "(active, dc_paused), or a room/resume fence rejected it. The status "
+                                    + "in this answer is the one the row already held, written by something "
+                                    + "else; this report changed nothing and bounds nothing");
+                            else
+                                Plugin.Log.LogInfo("[2v2-DC] fallback answered deferred=false with no "
+                                    + "ignored flag — this box carries the rule and took an exit this "
+                                    + "client does not model. The status in the answer is what the row "
+                                    + "reads now; nothing here claims this report produced it");
+                        }
+                        else
+                        {
+                            // AN ABSENT FIELD IS A FACT ABOUT THE BOX, NOT ABOUT THE ROW,
+                            // and the contract's own sentence for this site is:
+                            //
+                            //   An ABSENT "deferred" proves only that the box that
+                            //   answered predates the field. It says nothing about
+                            //   whether that box settled, ignored or fenced this
+                            //   report; the disposition, if the body carries one, is
+                            //   in "status" and "ignored".
+                            //
+                            // The previous wording read it as a
+                            // SETTLEMENT and even named the status it assumed had been
+                            // written. A box that predates the field still has the three
+                            // exits that write NOTHING and answer {"ignored": true} — the
+                            // settled-row exit and the two room fences — so "no deferred
+                            // key" covers a settle and a refusal alike, and an
+                            // investigation sent here by that line would be hunting a
+                            // write that may never have happened (#342, #351).
+                            //
+                            // What IS in the body is read rather than inferred: the same
+                            // "ignored" key, which that generation of the endpoint already
+                            // emitted, and the status it echoes. Neither is a deferral,
+                            // and this line claims neither.
+                            bool oldIgnored = false;
+                            if (!string.IsNullOrEmpty(resp)
+                                && resp.IndexOf("\"ignored\"", StringComparison.Ordinal) >= 0)
+                            {
+                                try { oldIgnored = ExtractJsonBool(resp, "ignored"); } catch { oldIgnored = false; }
+                            }
+                            Plugin.Log.LogInfo(
+                                "[2v2-DC] fallback answered by a box that PREDATES the deferral "
+                                + "field (a 200 carrying no deferred key). "
+                                + "That is all the absence proves, and it is not a disposition: "
+                                + "a settle and a no-write refusal are not distinguishable from "
+                                + "a missing key. "
+                                + (oldIgnored
+                                    ? "This body does carry ignored=true, so that box wrote nothing and "
+                                      + "echoed the status the row already held"
+                                    : "This body carries no ignored flag, so that box took a settling "
+                                      + "exit or one this client does not model; which of them is not "
+                                      + "readable from here")
+                                + ". That the answering box predates the field is the whole of "
+                                + "what this absence proves; it says nothing about whether that "
+                                + "box settled, ignored or fenced this report");
+                        }
+                    }
+                    return;
+                }
+                // THREE outcomes, not two, because failure is two different facts.
+                //
+                //  ok        ANY server answer, including `{"ignored": true}`: the
+                //            series is already settled, or the room fence refused
+                //            this report — and a fallback carrying the same observed
+                //            room would be refused identically.
+                //  no        every attempt FAILED and every one of them was
+                //            answered, or nothing ever left this process. Nothing
+                //            landed and nothing is still running: the other seat is
+                //            the only thing that can close the series.
+                //  unk       at least one attempt was sent and got no answer. Our
+                //            `request.timeout` abandoned the connection; the handler
+                //            on the other end did not stop, and it can still commit.
+                //            NOT terminal — announcing `no` here is what let a
+                //            fallback be posted beside a transaction that was still
+                //            running, and arrival order then chose between the rated
+                //            completion and dc_incomplete.
+                try
+                {
+                    DcReportSync.PublishOutcome(
+                        seriesId,
+                        ok ? DcReportSync.OutcomeAnswered
+                           : answered ? DcReportSync.OutcomeFailed
+                                      : DcReportSync.OutcomeUnknown);
+                }
+                catch { }
             }));
         }
+
+        // GET /team/series/{id}/state IS A WRITE. There is no read-only probe of a
+        // series' status on the deployed server, and the previous round added one
+        // on the assumption that a GET could not change anything. It can: the
+        // endpoint's FIRST arm (backend/api/main.py at 0cc7f75) UPDATEs
+        // status='canceled', invalidation_reason='assembly_timeout', runs
+        // _reconcile_team_series_bets and COMMITS, whenever the row reads
+        // status='active' with fewer than four spawn-confirms, more than
+        // _ASSEMBLY_DEADLINE_SECONDS (180) past room_issued_at, and no positive
+        // live-game evidence.
+        //
+        // None of those three is the rare state the arm was written for:
+        //  * fewer than four confirms is a NORMAL state of a healthy live series —
+        //    the server's own comments say so twice, naming a lost spawn-confirm
+        //    POST leaving a live game at 3/4 "forever"; and the bug-245 resume
+        //    relock writes spawn_confirmations=0 AND room_issued_at=NULL, after
+        //    which the endpoint's COALESCE falls back to created_at and the age is
+        //    already hours on the first read;
+        //  * the live-game veto reads an IN-PROCESS dict that every api restart
+        //    empties, which its own comment describes as "for minutes after every
+        //    deploy EVERY group looks idle".
+        //
+        // THE PREVIOUS ROUND SAID "the one shipped caller" HERE AND WAS WRONG. It
+        // named Plugin.PollAssemblyStateLoop, which genuinely cannot reach the arm —
+        // it starts 3s after a cr_ff join, runs ~22s and exits the moment the seat is
+        // out of the room, so its whole life is inside the 180s deadline. But the
+        // team tab had a SECOND caller, UpdateTeamSeriesStatePoll, running from the
+        // menu against whatever series id was cached for as long as the tab was open;
+        // it was not found because the round's own check counted this URL literal,
+        // which is one occurrence whether it has one caller or five. A flag names a
+        // LINE, the defect is a CLASS (#432): the operation to sweep is "a caller of
+        // a GET that writes", and the check that closes it counts CALLERS.
+        //
+        // Both of those callers would have voided a partly-played series as never
+        // assembled: not dc_incomplete, so never in the admin panel, bets settled on
+        // the wrong reason, and a real report afterwards answered with
+        // {"ignored": true}. The tab's caller is gone — the banner goes through
+        // PollTeamSeriesStatusReadOnly, which builds a DIFFERENT PATH
+        // (.../status) and never this one. That is the whole of the separation now:
+        // the round that tried to keep this route and make it safe in a mode did it
+        // with a query parameter, and a box that does not know a query parameter
+        // drops it and writes anyway (#266). This route has exactly one caller, in
+        // its default and only mode, which writes; the method's name says so.
+        // NOTHING REPLACES IT, because nothing needed it. The question it was asked
+        // ("is this series still open?") is answered by the report endpoint itself,
+        // atomically, under the FOR NO KEY UPDATE reread it already takes: a status
+        // outside (active, dc_paused) returns {"ignored": true} and writes nothing.
+        // A separate read before the post was strictly worse even without the
+        // cancel — two round trips deciding on state that can change between them.
+        // Do not reintroduce a client-side status probe against this endpoint.
 
         /// <summary>POST /team/series/{id}/spawn-confirm. Called from the auto-spawn
         /// coroutine when CreatePlayer override successfully creates the local
@@ -14240,54 +17248,590 @@ namespace CompetitiveRounds
             }));
         }
 
-        /// <summary>GET /team/series/{id}/state. Polled during the first 20s
-        /// after ready_join to detect server-side assembly cancel.</summary>
-        public static void PollTeamSeriesState(string seriesId, Action<string, string, int> onResponse)
+        /// <summary>v1.41.0 beta round 4, finding 1: after a 2v2 game over,
+        /// read the series' recorded games again, so the next game's start
+        /// (GameStateWatcher.OnMatchStarted -> TeamGameNumber.Live.OnGameStart)
+        /// names its game from a count that includes the game just played.
+        /// Every seat runs it, at +2, +5, +9, +14 and +20 s, and stops as soon
+        /// as a read shows the finished game recorded, when the active series
+        /// changes, or when a newer game over starts its own. A read that comes
+        /// too late only costs the next game its number (TeamGameNumber: a
+        /// stale count names a LOWER game, never a higher one).
+        ///
+        /// The reads go through PollTeamSeriesStatusReadOnly, the read-only
+        /// status route: the lifecycle route has exactly one permitted caller
+        /// (PollTeamSeriesStateAssemblyOnly's own note). A status read that is
+        /// latched dark for the series sends nothing, so the refresh ends there,
+        /// and one that finds another read of the series in flight sends nothing
+        /// either, the answer in flight feeding the same cache.
+        ///
+        /// The gate below was written when these reads went through the
+        /// lifecycle route, whose cancel arm they were never to reach:
+        /// team_series_state cancels an assembly that has fewer than four
+        /// confirmations once its deadline has passed. The status route has no
+        /// such arm. The gate is kept as the refresh's stop condition: the reads
+        /// continue only while the last read of THIS series, asked and answered
+        /// in THIS room, showed it active with all four seats confirmed.</summary>
+        public static void RefreshTeamGameRecord(string seriesId)
+        {
+            if (string.IsNullOrEmpty(seriesId) || Plugin.Instance == null) return;
+            int gen = ++teamGameRefreshGen;
+            Plugin.Instance.StartCoroutine(TeamGameRecordRefresh(seriesId, gen));
+        }
+
+        private static int teamGameRefreshGen;
+        private static readonly float[] TeamGameRefreshWaits = { 2f, 3f, 4f, 5f, 6f };
+
+        private static System.Collections.IEnumerator TeamGameRecordRefresh(string seriesId, int gen)
+        {
+            int polled = 0;
+            foreach (float wait in TeamGameRefreshWaits)
+            {
+                yield return new WaitForSeconds(wait);
+                if (gen != teamGameRefreshGen) yield break;
+                if (!string.Equals(ActiveTeamSeriesId, seriesId, StringComparison.Ordinal)) yield break;
+                if (TeamGameNumber.Live.ReadShowsGameRecorded(seriesId)) yield break;
+                if (SeriesStatusLatchedDark(seriesId))
+                {
+                    Plugin.Log.LogInfo($"[2V2-GAME] series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} "
+                        + $"no further after-game read ({polled} asked): the read-only status route is "
+                        + "latched dark for this series");
+                    yield break;
+                }
+                string roomNow = "";
+                try { roomNow = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+                if (!string.Equals(LastSeriesStateForId, seriesId, StringComparison.Ordinal)
+                    || roomNow.Length == 0
+                    || !string.Equals(LastSeriesStateRoom, roomNow, StringComparison.Ordinal)
+                    || LastSeriesStateStatus != "active" || LastSeriesStateConfirmations < 4)
+                {
+                    Plugin.Log.LogInfo($"[2V2-GAME] series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} "
+                        + $"no further after-game read ({polled} asked): the last read of this series in this room "
+                        + "is not active with four confirmations");
+                    yield break;
+                }
+                polled++;
+                PollTeamSeriesStatusReadOnly(seriesId, null);
+            }
+        }
+
+        /// <summary>What an answer from EITHER series route teaches beside the
+        /// banner parse. Both routes' callbacks call it right after
+        /// ApplySeriesStateResponse: the lifecycle read in
+        /// PollTeamSeriesStateAssemblyOnly, and the read-only status read once
+        /// GATE 2 has affirmed it. It stays out of the shared parse because none
+        /// of it is a banner input: every key that parse reads is one the status
+        /// route is bound to emit, and the keys here are read only where present.
+        ///
+        /// <para>Round 4, finding 1: the room the answer was both asked and
+        /// received in (LastSeriesStateRoom, "" when the two differ).</para>
+        ///
+        /// <para>Round 4, finding 1: the series' recorded games, for
+        /// TeamGameNumber. Only an answer that carries both win counts is a read
+        /// of the games (the canceled and dc_incomplete answers carry neither,
+        /// and a missing field parses as 0); both routes carry the two counts.
+        /// Round 8, finding F31: a read names no physical game. Since round 11
+        /// (route a: no physical game 1 is issued) no read of either route is
+        /// a read of the sitting, so `relocked` and `two_points_on_record` are
+        /// not read here.</para></summary>
+        private static void ObserveSeriesStateAnswer(string seriesId, string resp, string roomAsked)
+        {
+            string roomNow = "";
+            try { roomNow = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+            LastSeriesStateRoom = string.Equals(roomAsked, roomNow, StringComparison.Ordinal) ? roomNow : "";
+            try
+            {
+                string tgnLine = TeamGameNumber.Live.ObserveRead(seriesId,
+                    resp.IndexOf("\"t1_series_wins\":", StringComparison.Ordinal) >= 0
+                    && resp.IndexOf("\"t2_series_wins\":", StringComparison.Ordinal) >= 0,
+                    LastSeriesT1Wins, LastSeriesT2Wins);
+                if (tgnLine != null) Plugin.Log.LogInfo(tgnLine);
+            }
+            catch { }
+        }
+
+        /// <summary>GET /team/series/{id}/state — the LIFECYCLE route, which has one
+        /// behaviour and it mutates. Its first arm cancels the series and reconciles
+        /// its bets; the name carries that so a call site cannot be written without
+        /// reading it.
+        ///
+        /// <para>EXACTLY ONE CALLER IS PERMITTED: Plugin.PollAssemblyStateLoop, which
+        /// is the assembly window the cancel arm was written for — it starts 3 s
+        /// after a cr_ff join, lives ~22 s, and exits the moment this seat is out of
+        /// the room or has no pending 2v2 slot, so its whole life is inside the
+        /// server's 180 s deadline and it cannot reach the arm. It is also the one
+        /// caller that MUST keep the lifecycle behaviour: it is the only thing that
+        /// frees four clients from an assembly that failed. Every other consumer of
+        /// series status uses PollTeamSeriesStatusReadOnly, which builds the separate
+        /// .../status path and never this one. Two callers of this route have been
+        /// removed on this branch — the DC fallback path's pre-check, then the team
+        /// tab's banner. Do not add a third.</para></summary>
+        public static void PollTeamSeriesStateAssemblyOnly(string seriesId, Action<string, string, int> onResponse)
         {
             if (string.IsNullOrEmpty(seriesId)) return;
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";
+            string roomAsked = "";
+            try { roomAsked = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 if (!ok || string.IsNullOrEmpty(resp)) return;
-                string status = ExtractJsonString(resp, "status") ?? "";
-                string reason = ExtractJsonString(resp, "reason") ?? "";
-                int conf = ExtractJsonInt(resp, "confirmations");
-                LastSeriesStateStatus = status;
-                LastSeriesStateReason = reason;
-                LastSeriesStateConfirmations = conf;
-                LastSeriesDcGraceSeconds = ExtractJsonInt(resp, "dc_grace_seconds_remaining");
-                LastSeriesDcTeamRemaining = ExtractJsonInt(resp, "dc_team_remaining");
-                LastSeriesT1Wins = ExtractJsonInt(resp, "t1_series_wins");
-                LastSeriesT2Wins = ExtractJsonInt(resp, "t2_series_wins");
-                // Codex r2 f8: stamp WHICH series this answer described — the
-                // ONLY writer of this field. A late callback for a previous
-                // series overwrites the cache above, but ForId then names that
-                // previous series, so the assembly loop's ForId==current check
-                // rejects it.
-                LastSeriesStateForId = seriesId;
-                // Aug 8 (Sid): the frozen team-colour stamp rides this poll
-                // (empty = vanilla / pre-migration). Publish only while the
-                // response still describes the ACTIVE series — a late callback
-                // for a previous series must not repaint the new one's stamp.
-                if (seriesId == ActiveTeamSeriesId)
-                {
-                    SeriesTeam1ColorName = ExtractJsonString(resp, "t1_color_name") ?? "";
-                    SeriesTeam1ColorHex = ExtractJsonString(resp, "t1_color_hex") ?? "";
-                    SeriesTeam2ColorName = ExtractJsonString(resp, "t2_color_name") ?? "";
-                    SeriesTeam2ColorHex = ExtractJsonString(resp, "t2_color_hex") ?? "";
-                    // Codex r2 f8-adjacent/f6: carry the decided bool with the
-                    // colours, and re-publish the room stamp from the poll —
-                    // idempotent (PublishSeriesStamp skips identical values
-                    // and no-ops on undecided-and-empty), and this is the one
-                    // fetch every fighter seat runs, so it reaches rooms the
-                    // continuation response (reporter-only) cannot.
-                    SeriesColorDecided = ExtractJsonBool(resp, "color_decided");
-                    TeamColorIdentity.PublishSeriesStamp(seriesId,
-                        SeriesTeam1ColorName, SeriesTeam1ColorHex,
-                        SeriesTeam2ColorName, SeriesTeam2ColorHex, SeriesColorDecided);
-                }
-                onResponse?.Invoke(status, reason, conf);
+                ApplySeriesStateResponse(seriesId, resp, onResponse);
+                ObserveSeriesStateAnswer(seriesId, resp, roomAsked);
             }));
+        }
+
+        /// <summary>A DIFFERENT ROUTE: <c>GET /team/series/{id}/status</c>, which the
+        /// server lane adds this round as a pure read — no cancel arm, no bet
+        /// reconciliation, no UPDATE of any kind — returning the status fields the
+        /// state endpoint returns plus <c>readonly: true</c>.
+        ///
+        /// <para>WHY A ROUTE AND NOT A MODE. The previous round asked the mutating
+        /// state endpoint to behave as a read when sent a query flag, and protected
+        /// the first such request with a capability flag read earlier from
+        /// /mod-version. Both are unsound for the same reason: a query parameter is
+        /// DROPPED by a box that does not know it, which answers 200 and runs the
+        /// mutating arms (#266), and the flag that permitted the request was a
+        /// statement about whichever box answered /mod-version, not about the box
+        /// answering this one. Two requests are two routing decisions — the edge
+        /// routes reads to the standby and keeps the primary as a fallback upstream,
+        /// and a rollback moves a box under a flag already held. A path is not
+        /// droppable: a box without this route runs no handler for it, and what
+        /// comes back is a refusal rather than a write. The server lane's notes
+        /// carry the production-pin evidence for what such a box answers.</para>
+        ///
+        /// <para>GATE 1, before anything is sent: this series must not already be
+        /// latched dark (<c>_statusPollDarkSeries</c>). Checked here as well as at
+        /// the call site, so the rule belongs to the operation rather than to one
+        /// caller's discipline (#432).</para>
+        ///
+        /// <para>GATE 2, ON THE ANSWER, AND IT IS THE WHOLE CAPABILITY CHECK. The
+        /// answer is trusted only if the request SUCCEEDED and the body carries
+        /// <c>readonly</c> — presence tracked separately from value, because a bool
+        /// extractor answers false for "absent" and for "false" alike and absent is
+        /// the dangerous one (#604) — and that value is true. EVERY OTHER ANSWER —
+        /// a 404, whether from a box that predates the route or from one that does
+        /// not have this series, a 426 from the version gate, a 503, a 5xx, a
+        /// timeout, a body that does not say it or cannot be parsed — latches THIS
+        /// SERIES dark, logs one line naming the HTTP status and the series id, and
+        /// parses NOTHING out of the answer. The two 404s are not told apart, and
+        /// they do not need to be: neither has a status to show, and the banner's
+        /// disposition for both is the same one. There is no fallback:
+        /// this method composes one URL, and no branch of it reaches the lifecycle
+        /// route. The capability is proven per RESPONSE, by the box that answered,
+        /// and never inferred from a previous answer or an advertisement.</para>
+        ///
+        /// <para>THE UNANSWERED CASE LATCHES TOO, and that is deliberate rather than
+        /// incidental. A timeout tells us nothing about which box serves what, so
+        /// the argument for retrying it is real; the argument against is that "keep
+        /// asking until something answers" is how a poll ends up spending a previous
+        /// box's answer on the next box, which is the defect this round removed. The
+        /// latch is therefore on the ANSWER this request got, whatever it was, and
+        /// the status in the line says which case it was: 0 is no answer at all — a
+        /// refusal before the wire, a transport failure, or the 20 s timeout. What
+        /// it costs is one series' 2 s refresh of the team-colour stamp and of the
+        /// status cache -- and, since the banner now derives from the three deferral
+        /// fields this very route carries, the DC-grace banner for that series as
+        /// well: the branch below clears the cached deferral state and asks for the
+        /// repaint that takes an already-rendered banner off the screen, so a refusal
+        /// DOES darken a live countdown rather than being unable to reach one. That
+        /// is the round-7 correction of a sentence written when the banner still hung
+        /// off a predicate no box satisfied (#351: the comment stated a rule the tree
+        /// had stopped keeping) -- for that series (#430);
+        /// what it buys is that the rule has no cell in which it keeps trying. The one
+        /// outcome that does NOT latch is a dispatch that never became a request
+        /// (the catch below): nothing was asked of any box, so there is no answer to
+        /// judge.</para>
+        ///
+        /// <para>GATE 3, THE IN-FLIGHT BOUND. The caller is the team tab's
+        /// per-frame ticker (NativeUI.MaybeRefreshTeamTab); it calls this poll on
+        /// every frame the tab is open and the poll's own unscaled wall-clock
+        /// deadline lets a read through every TEAM_SERIES_STATE_INTERVAL (2 s). The
+        /// latch lives in a response callback and a request may be outstanding for
+        /// up to the transport's own 20 s timeout — so without a rule the number of
+        /// reads reaching the wire before the first answer is round-trip latency
+        /// over that interval, about ten. THAT ARITHMETIC IS THE WALL CLOCK'S, and
+        /// it is stated here only because the cadence is now wall time: while the
+        /// gate accumulated frame time inside a repaint path the real count was
+        /// smaller, for a reason that moved with the frame rate, and a bound that
+        /// holds by accident is not a bound (#342). It is bounded rather than assumed: at most one read of this
+        /// route is outstanding at a time. The flag is cleared in the callback,
+        /// which GetRequest invokes on EVERY exit — consent refusal, transport
+        /// refusal, version gate, success and failure alike — and again if the
+        /// dispatch itself throws. A flag that somehow stuck would leave this route
+        /// polling nothing, which is the same cost the latch imposes and the same
+        /// direction the rest of this method fails in (#276). The bound now costs
+        /// less than it did: the reads it limits are reads.</para></summary>
+        private static bool _statusReadInFlight;
+
+        public static void PollTeamSeriesStatusReadOnly(string seriesId, Action<string, string, int> onResponse)
+        {
+            if (string.IsNullOrEmpty(seriesId)) return;
+            if (_statusPollDarkSeries.Contains(seriesId)) return;   // GATE 1
+            if (_statusReadInFlight) return;                        // GATE 3
+            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";
+            _statusReadInFlight = true;
+            // The code THIS request was answered with, captured per dispatch rather
+            // than in a field: GetRequest reports it immediately before it invokes
+            // the callback below, and a field would be shared with every other
+            // request in flight. 0 is "no answer reached this process".
+            long answeredWith = 0;
+            // Round 4, finding 1: the room this read is sent from, so its answer
+            // can record whether it was received in the same one
+            // (ObserveSeriesStateAnswer; RefreshTeamGameRecord reads it).
+            string roomAsked = "";
+            try { roomAsked = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+            // THE REPAINT RULE, TAKEN ONCE FOR THE WHOLE DISPATCH (#432). The
+            // callback below takes its own key, because it runs later and the state
+            // it compares is the state as of the ANSWER; this one covers the
+            // dispatch path itself, which writes none of the banner's inputs and
+            // therefore asks for nothing. It is here so that the rule is a property
+            // of every path out of this method rather than of the two that happen to
+            // write today: a path that gains a write later gains the request with it.
+            string dispatchBannerBefore = BannerRenderKey();
+            try
+            {
+                Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+                {
+                    _statusReadInFlight = false;
+                    // The banner's inputs as of this ANSWER. GetRequest invokes this
+                    // callback on EVERY exit — success, a non-2xx, a transport
+                    // refusal and the 20 s timeout alike — so this one capture covers
+                    // the refusal path and the timeout path, which are the same path
+                    // here and are distinguished only by the code in `answeredWith`.
+                    string bannerBefore = BannerRenderKey();
+                    // GATE 2 — the answering box proves the read, in this answer.
+                    bool present = !string.IsNullOrEmpty(resp)
+                                   && resp.IndexOf("\"readonly\"", StringComparison.Ordinal) >= 0;
+                    bool affirmed = false;
+                    if (ok && present)
+                    {
+                        try { affirmed = ExtractJsonBool(resp, "readonly"); } catch { affirmed = false; }
+                    }
+                    if (!affirmed)
+                    {
+                        _statusPollDarkSeries.Add(seriesId);
+                        if (answeredWith <= 0) _statusPollDarkNoAnswer.Add(seriesId);
+                        // DARK HAS TO MEAN DARK, AND THAT IS THREE FACTS, NOT TWO.
+                        // Latching stops the POLL; on its own it does not change what
+                        // the banner renders FROM; and changing what it renders from
+                        // does not repaint it (#342). WHAT THE BANNER READS IS THE
+                        // THREE NUMBERS, THE PRESENCE BIT AND THIS LATCH -- not the
+                        // three numbers alone, which is what this comment said while
+                        // the render predicate beside it read `!latchedDark` and the
+                        // witness read the presence bit. The key below is built from
+                        // every one of them, and a census asserts that. The numbers'
+                        // only other writer is the
+                        // ActiveTeamSeriesId setter, which fires on an id CHANGE --
+                        // so without the clear the last good answer stays on screen,
+                        // frozen, counting down from a number nothing will ever
+                        // refresh, for as long as the tab is open.
+                        //
+                        // THE THIRD FACT IS THE ROUND-7 CORRECTION. The clear alone
+                        // left the round-6 claim below true of the STATE and false of
+                        // the SCREEN: this tab re-renders on a dirty flip (#62), so a
+                        // cleared cache is drawn only when something flips that bit,
+                        // and during an outage nothing may. The request is made at
+                        // the end of this branch, by the same rule the id setter and
+                        // the shared parse hold, so "the last one is not kept" is a
+                        // statement about what is rendered and not only about what is
+                        // stored.
+                        //
+                        // THE CLEAR IS CONFINED TO THE SERIES THE CACHE DESCRIBES,
+                        // and to nothing else. The round-5 guard carried a second
+                        // arm -- `|| seriesId == ActiveTeamSeriesId` -- under a
+                        // comment that said "only while the cache describes THIS
+                        // series", which that arm is precisely the case that breaks:
+                        // a late answer for series B leaves the cache describing B,
+                        // and a failed read of the active series A then satisfied the
+                        // second arm and blanked B's numbers. The comment stated the
+                        // rule the code broke (#351). The case the second arm was
+                        // reaching for -- a cache describing ANOTHER series while A's
+                        // banner is on screen -- is closed at the RENDER instead,
+                        // where it belongs: the banner draws only while the cache's
+                        // own ForId names the series it is about, so a cache
+                        // describing B never paints A's banner and there is nothing
+                        // for a cross-series clear to fix (#331: the root, not a
+                        // second bandaid at the writer).
+                        if (LastSeriesStateForId == seriesId)
+                        {
+                            LastSeriesDcDeferred = false;
+                            LastSeriesDcDeferredSecondsRemaining = 0;
+                            LastSeriesDcDeferredBoundSeconds = 0;
+                            // AND THE PRESENCE BIT, WITH THEM. Cleared numbers beside
+                            // a standing presence bit is a state no answer produces:
+                            // it reads as "the last answer for this series carried
+                            // dc_deferred=false", a denial about the series, when what
+                            // happened is that no answer arrived or none proved itself.
+                            // The id setter clears the bit with the numbers for exactly
+                            // this reason; so does this branch, or the two writers of
+                            // one cache disagree about what the cache means (#342).
+                            LastSeriesDcDeferredFieldsPresent = false;
+                        }
+                        Plugin.Log.LogWarning("[2v2] series status read for series " + seriesId
+                            + " was not answered as a read: HTTP " + answeredWith
+                            + (answeredWith > 0
+                                ? (ok
+                                    ? " carried no readonly=true in its body"
+                                    : " — this box did not answer it as a read: it serves no such "
+                                      + "route, or it has no such series")
+                                : " (no answer reached this process — a refusal before the wire, a "
+                                  + "transport failure, or the 20 s timeout)")
+                            + ". Latching the DC-grace banner dark for this series: the read is proved "
+                            + "by the box that answers it, in that answer, and this one did not. There "
+                            + "is no second route to try, and nothing is parsed out of this answer");
+                        // THE REPAINT RULE ON THE REFUSAL PATH. The branch above may
+                        // have changed the banner's inputs; this asks for the redraw
+                        // that takes an already-rendered banner off the screen. It is
+                        // the same call the id setter and the shared parse make, on
+                        // the same before/after key, which is what makes the rule the
+                        // OPERATION's rather than one exit's (#432, #330).
+                        RequestBannerRepaintIfChanged(bannerBefore);
+                        return;
+                    }
+                    // AND THE POSITIVE ONE. A feature that works in silence and a
+                    // feature that never ran look identical in a bundle, so
+                    // acceptance has to be a signal the feature EMITS (#438) — this
+                    // is the only line that says a box answered this read AS a read.
+                    //
+                    // WHAT THIS LINE PROVES, EXACTLY, and it is less than its
+                    // previous wording claimed on three counts:
+                    //  * it is about the ANSWER, not about the UI. It says a box
+                    //    served this read as a read. It says nothing about what the
+                    //    banner renders: the render has its own gates (the cache
+                    //    must describe this series, and the answer must carry the
+                    //    deferral fields), and the banner emits its own line for
+                    //    that. "The banner is live" was a claim about a different
+                    //    subsystem made from this one's evidence (#342).
+                    //  * it is PER RESPONSE. The next answer for the same series can
+                    //    come from another box through the edge, and a refusal then
+                    //    emits the negative line for a series that already emitted
+                    //    this one. Neither line retracts the other; each is true of
+                    //    the answer it was taken from.
+                    //  * the marker below is ONE remembered series, not a set, so it
+                    //    is not series-exclusive either: a tab moving A -> B -> A
+                    //    emits this line twice for A. It thins a per-tick line to a
+                    //    per-change one and is not evidence of how many series were
+                    //    proved.
+                    if (_statusPollProvenForSeries != seriesId)
+                    {
+                        _statusPollProvenForSeries = seriesId;
+                        Plugin.Log.LogInfo("[2v2] series status read PROVEN for series " + seriesId
+                            + " — HTTP " + answeredWith + " carrying readonly=true, so the box that "
+                            + "answered THIS read serves it as a read. It proves nothing about the "
+                            + "box that answers the next one, which is why the check is taken on "
+                            + "every answer, and nothing about what the banner renders — the banner "
+                            + "reports itself. This line can repeat for a series the tab returns to, "
+                            + "and a later answer for this same series can still be refused");
+                    }
+                    // AND THE OTHER ITEM-7 LINE: what a missing field does. This
+                    // answer proved itself as a read, so nothing is latched; but a
+                    // body without the complete deferral state is read as NOT
+                    // deferred, and the banner is then off for a reason that has
+                    // nothing to do with the series. Said out loud, once per series,
+                    // so that reason is readable instead of inferred.
+                    if (!HasDeferralFields(resp) && _statusPollNoDeferralForSeries != seriesId)
+                    {
+                        _statusPollNoDeferralForSeries = seriesId;
+                        Plugin.Log.LogWarning("[2v2] series status read for series " + seriesId
+                            + " answered readonly=true but carried no complete deferral state "
+                            + "(dc_deferred, dc_deferred_seconds_remaining and "
+                            + "dc_deferred_bound_seconds ride every 200 of that route). "
+                            + "Absence is never read as presence, so this is read as NOT "
+                            + "deferred and the banner stays off. This line is about the ANSWER: it says "
+                            + "nothing about whether that series carries a marker");
+                    }
+                    ApplySeriesStateResponse(seriesId, resp, onResponse);
+                    ObserveSeriesStateAnswer(seriesId, resp, roomAsked);
+                }, detailedErrors: true, onResponseCode: code => answeredWith = code));
+            }
+            catch (Exception ex)
+            {
+                // The dispatch itself failed, so no callback will ever run and
+                // nothing would clear the flag: release it here or this route
+                // stops polling for the session on one transient failure. It does
+                // NOT latch — nothing was asked of any box.
+                _statusReadInFlight = false;
+                Plugin.Log.LogWarning("[2v2] series status read could not be dispatched: " + ex.Message);
+                // THE REPAINT RULE ON THE DISPATCH-THROW PATH, and it is inert on
+                // purpose. Nothing above this line writes a banner input, so the key
+                // is unchanged and no repaint is requested. The call is here because
+                // the rule is "every path out of this method holds it", and a rule
+                // with an exempt path is a rule nobody can check (#432).
+                RequestBannerRepaintIfChanged(dispatchBannerBefore);
+            }
+        }
+
+        /// <summary>Everything the DC banner renders from, in one string, so an
+        /// answer that changed it can ask for the repaint that draws it. It is not
+        /// a claim about what is on screen — the banner reports itself — only about
+        /// the inputs.
+        ///
+        /// <para>THE SERIES ID IS ONE OF THOSE INPUTS. The render predicate reads
+        /// ActiveTeamSeriesId beside the cache, so a key built from the cache alone
+        /// would call an id change "no change" in the one case where the banner has
+        /// to stop drawing. The key is the WHOLE input set or it is a key to
+        /// something else (#342).</para>
+        ///
+        /// <para>AND SO IS THE DARK LATCH. The render predicate is
+        /// <c>cacheIsThisSeries &amp;&amp; !latchedDark &amp;&amp; dc_deferred</c>;
+        /// the latch is one of its three terms and therefore one of this key's
+        /// terms. The first cut of this key left it out because it is the one input
+        /// that is a SET and not a field: the census that enumerates the writers
+        /// greps assignments, and a set is written by <c>Add</c>. That made the two
+        /// halves of the refusal branch come apart — the latch add is
+        /// unconditional, the clear beneath it is confined to the cached series, so
+        /// a refusal for a series the cache does not describe changed what the
+        /// banner reads while no keyed field moved and the repaint was never asked
+        /// for. The key asks the set the ONE question the render asks it: is the
+        /// ACTIVE series latched. Membership for any other series is not an input
+        /// here, because the banner never reads it (#330: the question is asked
+        /// within the span that asks it, not file-wide).</para></summary>
+        private static string BannerRenderKey()
+        {
+            return (activeTeamSeriesId ?? "-")
+                   + "|" + (LastSeriesStateForId ?? "-")
+                   + "|" + (LastSeriesDcDeferred ? "1" : "0")
+                   + "|" + LastSeriesDcDeferredSecondsRemaining
+                   + "|" + LastSeriesDcDeferredBoundSeconds
+                   + "|" + (LastSeriesDcDeferredFieldsPresent ? "p" : "-")
+                   + "|" + (SeriesStatusLatchedDark(activeTeamSeriesId) ? "d" : "-")
+                   + "|" + LastSeriesT1Wins + "|" + LastSeriesT2Wins;
+        }
+
+        /// <summary>THE REPAINT RULE, AND IT BELONGS TO THE OPERATION RATHER THAN TO
+        /// ONE EXIT (#432). Every path that can change what the banner renders from
+        /// takes this key BEFORE it writes and calls this AFTER, so the repaint is
+        /// requested by the RULE and not by whichever branch someone remembered.
+        ///
+        /// <para>WHY IT IS A RULE AND NOT A LINE. Round 6 put the request at the end
+        /// of the affirmative parse only. The refusal branch cleared the same three
+        /// fields and returned without it, so after the banner had rendered a later
+        /// 404, 500 or unanswered read changed the state the banner reads while the
+        /// visible object stayed active until something unrelated marked the tab
+        /// dirty — during an outage, for as long as the tab stayed open. A flag names
+        /// a LINE; the defect was the CLASS (#330, #279). The writers of those inputs
+        /// are the three this file has — the id setter, the refusal branch and the
+        /// shared parse — and each of them now holds this rule, as does the
+        /// dispatch-throw path, which writes none of them and therefore asks for
+        /// nothing: a path that is inert under the rule is still under it, which is
+        /// what makes the rule checkable rather than a habit.</para>
+        ///
+        /// <para>AN ANSWER THAT CHANGES NOTHING ASKS FOR NOTHING. The tab re-renders
+        /// on a dirty flip (#62), so requesting a repaint on every answer would make
+        /// a 2 s poll a 2 s redraw of the whole tab. The comparison is what keeps the
+        /// request proportional to the change.</para></summary>
+        private static void RequestBannerRepaintIfChanged(string keyBefore)
+        {
+            if (BannerRenderKey() != keyBefore) NativeUI.MarkDirty();
+        }
+
+        /// <summary>The shared response parse for the two routes above. Extracted so
+        /// the read-only route cannot drift into a second, subtly different reader of
+        /// the same payload — the two halves of one contract written apart is how a
+        /// field ends up on one side only (#635).</summary>
+        private static void ApplySeriesStateResponse(string seriesId, string resp,
+                                                     Action<string, string, int> onResponse)
+        {
+            // The banner's inputs BEFORE this answer, so the repaint below is asked
+            // for on a change and not on every answer (#62: the tab redraws on a
+            // dirty flip, so an answer nothing flips for is an answer nobody sees).
+            string bannerBefore = BannerRenderKey();
+            string status = ExtractJsonString(resp, "status") ?? "";
+            string reason = ExtractJsonString(resp, "reason") ?? "";
+            int conf = ExtractJsonInt(resp, "confirmations");
+            LastSeriesStateStatus = status;
+            LastSeriesStateReason = reason;
+            LastSeriesStateConfirmations = conf;
+            // THE DEFERRAL STATE, WHICH IS THE BANNER'S WHOLE INPUT. The three
+            // keys are the contract's, spelled here exactly as the route emits
+            // them, and all three ride every 200 that route returns.
+            //
+            // ABSENCE IS NEVER READ AS PRESENCE. A bool extractor answers false
+            // for "absent" and for "false" alike (#604), so presence is measured
+            // before value and a body missing ANY of the three is taken as NOT
+            // deferred — the banner then stays off, which is the direction an
+            // unknown costs least in (#276, #430). No production box is in that
+            // state (a box either predates the route and 404s, which latches, or
+            // carries the route with all three fields), and the branch exists so
+            // that a box which somehow is fails to OFF rather than to a guess.
+            //
+            // THE STATE GET GOES THROUGH HERE TOO, and it carries none of the
+            // three, so its answer zeroes them AND records that they were ABSENT
+            // rather than false. That is the same fail-to-OFF, and what it costs is
+            // now said rather than assumed: that route has ONE caller,
+            // Plugin.PollAssemblyStateLoop, which runs in-room for about twenty
+            // seconds after a join while this banner is a MENU element, and the
+            // tab's own read — dispatched by its per-frame ticker on an unscaled
+            // 2 s deadline — restores the state when it answers. Until it does the
+            // banner is off, and its witness says the ANSWER carried no deferral
+            // state, which is a different sentence from "this series holds no
+            // marker": a body without the keys measured nothing about the row
+            // (#342). The alternative is a second reader of one payload, which is
+            // how a field ends up handled on one side only (#635).
+            if (HasDeferralFields(resp))
+            {
+                bool deferredNow = false;
+                try { deferredNow = ExtractJsonBool(resp, "dc_deferred"); } catch { deferredNow = false; }
+                LastSeriesDcDeferred = deferredNow;
+                // Floored here as well as on the route: the route promises a
+                // non-negative int, and a countdown that could render a negative
+                // is a claim about the whole state space rather than about the
+                // answer in hand (#351).
+                LastSeriesDcDeferredSecondsRemaining =
+                    Math.Max(0, ExtractJsonInt(resp, "dc_deferred_seconds_remaining"));
+                LastSeriesDcDeferredBoundSeconds =
+                    Math.Max(0, ExtractJsonInt(resp, "dc_deferred_bound_seconds"));
+                LastSeriesDcDeferredFieldsPresent = true;
+            }
+            else
+            {
+                LastSeriesDcDeferred = false;
+                LastSeriesDcDeferredSecondsRemaining = 0;
+                LastSeriesDcDeferredBoundSeconds = 0;
+                LastSeriesDcDeferredFieldsPresent = false;
+            }
+            LastSeriesT1Wins = ExtractJsonInt(resp, "t1_series_wins");
+            LastSeriesT2Wins = ExtractJsonInt(resp, "t2_series_wins");
+            // Codex r2 f8: stamp WHICH series this answer described — the
+            // ONLY writer of this field. A late callback for a previous
+            // series overwrites the cache above, but ForId then names that
+            // previous series, so the assembly loop's ForId==current check
+            // rejects it.
+            LastSeriesStateForId = seriesId;
+            // Aug 8 (Sid): the frozen team-colour stamp rides this poll
+            // (empty = vanilla / pre-migration). Publish only while the
+            // response still describes the ACTIVE series — a late callback
+            // for a previous series must not repaint the new one's stamp.
+            if (seriesId == ActiveTeamSeriesId)
+            {
+                SeriesTeam1ColorName = ExtractJsonString(resp, "t1_color_name") ?? "";
+                SeriesTeam1ColorHex = ExtractJsonString(resp, "t1_color_hex") ?? "";
+                SeriesTeam2ColorName = ExtractJsonString(resp, "t2_color_name") ?? "";
+                SeriesTeam2ColorHex = ExtractJsonString(resp, "t2_color_hex") ?? "";
+                // Codex r2 f8-adjacent/f6: carry the decided bool with the
+                // colours, and re-publish the room stamp from the poll —
+                // idempotent (PublishSeriesStamp skips identical values
+                // and no-ops on undecided-and-empty), and this is the one
+                // fetch every fighter seat runs, so it reaches rooms the
+                // continuation response (reporter-only) cannot.
+                SeriesColorDecided = ExtractJsonBool(resp, "color_decided");
+                TeamColorIdentity.PublishSeriesStamp(seriesId,
+                    SeriesTeam1ColorName, SeriesTeam1ColorHex,
+                    SeriesTeam2ColorName, SeriesTeam2ColorHex, SeriesColorDecided);
+            }
+            // THE REPAINT, WHICH IS THE OTHER HALF OF THE BANNER'S CADENCE (#62).
+            // The team tab re-renders only when something flips the dirty bit, so a
+            // wall-clock poll alone would still draw at whatever rate the tab's
+            // other fetches happened to repaint it. An answer that CHANGES what the
+            // banner reads asks for that repaint here — the shape every other fetch
+            // on this tab already uses (#62: the ticker polls, the answer marks
+            // dirty). An answer that changes nothing asks for nothing.
+            //
+            // IT IS THE SHARED CALL AND NOT A LOCAL COMPARISON, because round 6's
+            // local one WAS the whole of the rule and the refusal branch sat outside
+            // it. One helper, three writers, one before/after key (#432).
+            RequestBannerRepaintIfChanged(bannerBefore);
+            onResponse?.Invoke(status, reason, conf);
         }
 
         /// <summary>Submit a 2v2 match. Reporter is the lowest Steam ID across
@@ -14423,7 +17967,7 @@ namespace CompetitiveRounds
 
             string json = sb.ToString();
             Plugin.Log.LogInfo($"Reporting 2v2 match (series={seriesId}, winner=T{winnerTeam}, {t1Rounds}-{t2Rounds})...");
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry(
                 $"{baseUrl}/api/v1/team/matches", json,
                 (success, response) =>
                 {
@@ -15386,7 +18930,7 @@ namespace CompetitiveRounds
                         {
                             var prejoin = new ExitGames.Client.Photon.Hashtable();
                             prejoin["p_id"] = slot;
-                            prejoin["t_id"] = slot == 0 ? 0 : 1;
+                            prejoin[Player.VAR_TEAMID] = slot == 0 ? 0 : 1;
                             // Bug 389: this build re-resolves the victim of a proximity
                             // effect on every call instead of keeping the first one. It
                             // changes who takes damage in a shared simulation, so it runs
@@ -15669,7 +19213,7 @@ namespace CompetitiveRounds
             sb.Append("}");
             string json = sb.ToString();
             Plugin.Log.LogInfo($"[1v2-REPORT] submitting series={seriesId} winner=side{winnerSide} {soloRounds}-{duoRounds}");
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/ovt/matches", json, (ok, resp) =>
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry($"{baseUrl}/api/v1/ovt/matches", json, (ok, resp) =>
             {
                 if (ok)
                 {
@@ -17408,7 +20952,7 @@ namespace CompetitiveRounds
                 {
                     var prejoin = new ExitGames.Client.Photon.Hashtable();
                     prejoin["p_id"] = FfaMySlot;
-                    prejoin["t_id"] = FfaMySlot;   // FFA: every player own team
+                    prejoin[Player.VAR_TEAMID] = FfaMySlot;   // FFA: every player own team
                     prejoin["u_id"] = sid;
                     // Capability advert (rope-scale fix): the map-object
                     // rescale keys off the MASTER's copy of this prop —
@@ -17437,6 +20981,12 @@ namespace CompetitiveRounds
                         FfaAssembly.PrejoinAtJoin = true;
                     else if (PhotonNetwork.LocalPlayer != null)
                         PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
+                    // RJ-DRIFT change 11 (N9): record the join target
+                    // and its key together; the pre-join fence stages
+                    // the advert for exactly this target. A re-form's
+                    // target is recorded here too: the key is a function
+                    // of the target alone (StagedAdvertKey).
+                    FfaMode.RecordAdvertTarget(room);
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join SetCustomProperties: {ex.Message}"); }
                 try { NametagStyler.PublishToPhoton(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join nametag publish: {ex.Message}"); }
@@ -20465,7 +24015,7 @@ namespace CompetitiveRounds
             sb.Append("}");
             string json = sb.ToString();
             Plugin.Log.LogInfo($"[FFA-REPORT] submitting lobby={lobbyId} n={players.Count} winner={winnerSteam}");
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/ffa/matches", json, (ok, resp) =>
+            Plugin.Instance.StartCoroutine(PostMatchReportWithRetry($"{baseUrl}/api/v1/ffa/matches", json, (ok, resp) =>
             {
                 if (ok)
                 {
@@ -20478,12 +24028,67 @@ namespace CompetitiveRounds
                             myPlace == 1 ? I18n.TrF("FFA VICTORY! +{0}xp", xp) : I18n.TrF("FFA: placed #{0} (+{1}xp)", myPlace, xp),
                             myPlace == 1 ? Color.green : new Color(0.6f, 0.8f, 1f), 6f);
                 }
+                else if (IsTerminalRefusalResponse(resp))
+                {
+                    // TERMINAL AT ATTEMPT 1, and deliberately not queued.
+                    //
+                    // WHAT THIS CLIENT GUARANTEES, which is the only half it
+                    // can: a report refused with 409 or 403 is never re-sent
+                    // and never RE-KEYED. The second is the load-bearing one —
+                    // a second key is a second GAME to the server, so a client
+                    // that "tried a different number" would convert one
+                    // refusal into a second settlement of rating, XP, gold and
+                    // wagers. 503 is not in this branch; that one is the
+                    // server declining to decide and the retry loop keeps it.
+                    //
+                    // WHAT THE SERVER DOES, stated as the required behaviour
+                    // rather than as something this line can promise (an
+                    // earlier revision asserted score-vector comparison and
+                    // quarantine as facts about the deployed backend, and
+                    // neither was true of the build this client shipped
+                    // against — Codex client r2 LOW, this comment): the FFA
+                    // endpoint must settle a report only when its key's game
+                    // tail equals the lobby's games_played + 1 under the lobby
+                    // lock, echo 200 for an exact resubmission, and refuse
+                    // every other tail terminally. Whether a given backend
+                    // does that is a property of that backend, not of this
+                    // branch. This client's behaviour is identical either way,
+                    // which is why it is safe to ship on both.
+                    //
+                    // A 403 here is NOT necessarily that tail check: the same
+                    // code answers an unverifiable signature and a body whose
+                    // player set, count or slot ordering disagrees with the
+                    // lobby row. This branch treats them alike on purpose —
+                    // every one of them is a refusal on state an identical
+                    // resend finds unchanged — but nothing here may claim
+                    // WHICH check spoke, or that it kept a copy.
+                    //
+                    // Queueing would put a report in the outbox whose only
+                    // future is to be dropped on its first retry, 30 s later,
+                    // after one more request. Logged, once, because a refusal
+                    // is worth seeing in a seat's log next to the game it
+                    // belongs to.
+                    //
+                    // AND PARKED, because "not queued" was being read as "the
+                    // server kept it" (r3 lens MEDIUM). The endpoint's 403 has
+                    // several causes — an unverifiable signature, a player set
+                    // that is not exactly the lobby's frozen roster, a player
+                    // count or slot that disagrees with the row, a rejected
+                    // game tail — and capture is a property of some of those
+                    // paths, not of the code. Whether the far side kept this
+                    // body is therefore not knowable here, and the one thing
+                    // this branch CAN guarantee is that the seat which filed
+                    // it still has it. Parking is not a retry: nothing reads
+                    // that file into the send path.
+                    Plugin.Log.LogWarning($"[FFA] report refused and not retried or re-keyed: {Trunc(resp, 160)}");
+                    ParkRefusedReport($"{baseUrl}/api/v1/ffa/matches", json, resp);
+                }
                 else
                 {
                     Plugin.Log.LogWarning($"[FFA] report failed: {resp}");
                     EnqueueFailedReport($"{baseUrl}/api/v1/ffa/matches", json);
                 }
-            }, maxRetries: 3, retryDelay: 2f));
+            }, maxRetries: 3, retryDelay: 2f, stopOnTerminalRefusal: true));
         }
 
         // ── Player Blocks (permanent, from leaderboard) ──────────
@@ -20716,6 +24321,11 @@ namespace CompetitiveRounds
             // OutboxPass, so a report that can never land is dropped rather
             // than retried twenty times.
             if (durable) EnqueueFailedReport(url, DC_REPORT_BODY);
+            // Whether this request carried the session token, read from the
+            // header actually stamped on it: the queued copy is taken out only
+            // for a 2xx to a request that did (SecureRouteRules.OutboxAnswerFor,
+            // Codex round 3 HIGH 1); a tokenless 2xx leaves it for the outbox.
+            bool carried = false;
             Plugin.Instance.StartCoroutine(PostRequest(
                 url,
                 DC_REPORT_BODY,
@@ -20723,14 +24333,18 @@ namespace CompetitiveRounds
                 {
                     if (success)
                     {
-                        if (durable) RemovePendingReport(url, DC_REPORT_BODY);
+                        if (durable && SecureRouteRules.OutboxAnswerFor(true, carried) == SecureRouteRules.OutboxAnswer.Settle)
+                            RemovePendingReport(url, DC_REPORT_BODY);
+                        else if (durable)
+                            Plugin.Log.LogInfo("[DC] disconnect report answered without the session token; kept queued for a send with it");
                         Plugin.Log.LogInfo($"[DC] Reported disconnect by {disconnectedSteamId}: {response}");
                     }
                     else if (durable)
                         Plugin.Log.LogWarning($"[DC] Disconnect report failed, queued for retry: {response}");
                     else
                         Plugin.Log.LogWarning($"[DC] Failed to report disconnect (no series id — not queued): {response}");
-                }
+                },
+                stamped => carried = stamped
             ));
         }
 
@@ -20927,9 +24541,21 @@ namespace CompetitiveRounds
             try
             {
                 if (req.responseCode != 401) return;
+                // A 401 speaks only for a token the request carried, and
+                // StampVersionHeader withholds the token on plaintext-to-public
+                // transport by this same rule on this same URL. A request to
+                // the backup never showed the server a session, so its 401 says
+                // nothing about ours: clearing on it dropped a good session, and
+                // after a secure-route restore (board row 27) a request still
+                // bound for the backup would drop the new one.
+                if (!CredentialedTransportAllowed(req.url)) return;
                 string body = null;
                 try { body = req.downloadHandler?.text; } catch { }
-                if (body == null || !body.Contains("session_required")) return;
+                // Both refusal wordings (Codex round 1 LOW 1): the enforced
+                // writes say session_required, the portal mint says
+                // "steam session required", and missing the second left a
+                // dropped token in place for the next press to fail on too.
+                if (!SecureRouteRules.IsSessionRefusal(body)) return;
                 SteamAuth.InvalidateSessionIf(sentToken);
                 Plugin.Log.LogWarning("[STEAM-AUTH] server rejected session (401) — re-minting on next heartbeat");
             }
@@ -21007,47 +24633,89 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>July 21 item 4: exchange a Steam web-API auth ticket for a
-        /// server session token. Called from SteamAuth's ticket callback.</summary>
-        public static void PostSteamAuth(string ticketHex)
+        /// <summary>Whether the api would exchange a Steam ticket now: the
+        /// transport rule the bearer rides on (F1), asked of the current base.
+        /// SteamAuth asks it before requesting a ticket and PostSteamAuth before
+        /// exchanging one: one rule, asked at both ends.</summary>
+        internal static bool TicketExchangeAllowed() => CredentialedTransportAllowed(baseUrl);
+
+        /// <summary>The refusal notice, once per session: a log line and a
+        /// toast. "Until it is back", not "this session": on the backup
+        /// connection a secure-route check can restore signed-in features
+        /// mid-session (board row 27).</summary>
+        internal static void NoteTicketExchangeRefused()
         {
-            string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            if (_insecureAuthNotified) return;
+            _insecureAuthNotified = true;
+            Plugin.Log.LogWarning($"[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint {baseUrl} - signed-in features are off until the secure route is back");
+            try
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Secure connection unavailable - signed-in features are off until it is back."), new Color(1f, 0.6f, 0.2f), 8f);
+            }
+            catch { }
+        }
+
+        /// <summary>July 21 item 4: exchange a Steam web-API auth ticket for a
+        /// server session token. Called from SteamAuth's ticket callback.
+        /// `onEnded` is called exactly once, on every path, with how the
+        /// exchange ended (board row 27 round 2): SteamAuth cancels the ticket
+        /// there and only then may request the next one.</summary>
+        public static void PostSteamAuth(string ticketHex, Action<string> onEnded)
+        {
+            bool ended = false;
+            Action<string> end = outcome =>
+            {
+                if (ended) return;
+                ended = true;
+                try { onEnded?.Invoke(outcome); } catch (Exception ex) { Plugin.Log.LogWarning($"[STEAM-AUTH] ticket end hook threw: {ex.Message}"); }
+            };
+            string sid = SteamAuth.Identity();
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { end("not sent: no identity"); return; }
             // F1 (Codex r3): never exchange a Steam ticket over plaintext to a
             // PUBLIC host — the returned 24h bearer would be capturable in
-            // transit. SteamAuth keeps minting tickets on a 4s backoff while
-            // no session lands, so the log + toast are once-per-session.
-            if (!CredentialedTransportAllowed(baseUrl))
+            // transit. SteamAuth asks TicketExchangeAllowed before it requests
+            // a ticket, so this refusal is reached only by a ticket requested
+            // on a secure base whose callback lands after the session moved to
+            // the backup.
+            if (!TicketExchangeAllowed())
             {
-                if (!_insecureAuthNotified)
-                {
-                    _insecureAuthNotified = true;
-                    Plugin.Log.LogWarning($"[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint {baseUrl} — signed-in features disabled this session");
-                    try
-                    {
-                        CompetitiveUI.ShowNotification(I18n.Tr("Secure connection unavailable - signed-in features are disabled this session."), new Color(1f, 0.6f, 0.2f), 8f);
-                    }
-                    catch { }
-                }
+                NoteTicketExchangeRefused();
+                end("not sent: plaintext base");
                 return;
             }
             string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"ticket_hex\":\"{Escape(ticketHex)}\",\"mod_version\":\"{Escape(Plugin.ModVersion ?? "0.0.0")}\"}}";
-            Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/auth/steam",
-                json,
-                (success, response) =>
-                {
-                    if (!success)
+            try
+            {
+                Plugin.Instance.StartCoroutine(PostRequest(
+                    $"{baseUrl}/api/v1/auth/steam",
+                    json,
+                    (success, response) =>
                     {
-                        Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange failed: {response}");
-                        return;
-                    }
-                    string token = ExtractJsonString(response, "session_token");
-                    int expiresIn = ExtractJsonInt(response, "expires_in");
-                    if (!string.IsNullOrEmpty(token)) SteamAuth.SetSession(token, expiresIn > 0 ? expiresIn : 86400);
-                    else Plugin.Log.LogWarning("[STEAM-AUTH] session response had no token");
-                }
-            ));
+                        try
+                        {
+                            if (!success)
+                            {
+                                Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange failed: {response}");
+                                return;
+                            }
+                            string token = ExtractJsonString(response, "session_token");
+                            int expiresIn = ExtractJsonInt(response, "expires_in");
+                            if (!string.IsNullOrEmpty(token)) SteamAuth.SetSession(token, expiresIn > 0 ? expiresIn : 86400);
+                            else Plugin.Log.LogWarning("[STEAM-AUTH] session response had no token");
+                        }
+                        finally
+                        {
+                            end(success ? "answered" : "failed");
+                        }
+                    },
+                    timeoutSeconds: SecureRouteRules.SteamAuthExchangeTimeoutSeconds
+                ));
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange not started: {ex.Message}");
+                end("not started");
+            }
         }
 
         // Paths that MUST work before consent is granted (version probe so we can auto-update
@@ -21137,10 +24805,17 @@ namespace CompetitiveRounds
                 // data may since have been deleted.
                 _pcCacheEpoch++;
                 CachedPcMe = null; CachedPcCollection = null;
+                ClearPcTradeCaches();
+                ReleasePcReadLatches();
                 try { PlayerCardFaces.Clear(); } catch { }
                 try { PlayerCardMotion.Clear(); } catch { }
                 try { PlayerCardsUI.OnIdentityChanged(); } catch { }
                 try { PortraitRender.OnIdentityChanged(); } catch { }
+                // The held chat draft is the player's own words under the consent
+                // they just withdrew. Dropped HERE rather than only in the chat
+                // loop's own guard, which a throwing draw path can keep from ever
+                // running (r4 finding).
+                try { CompetitiveUI.DropChatDraftOnRevoke(); } catch { }
                 ChatClient.Disconnect();
                 // Flip ranked off — if the user is in queue, server rejects further polls (410)
                 // and the queue entry expires via the cleanup cron. No more match reports will
@@ -21160,16 +24835,46 @@ namespace CompetitiveRounds
 
         // Detect server-side version-gate rejection. UnityWebRequest treats 4xx as
         // ProtocolError, so we look at responseCode rather than result.
+        /// <summary>True when this response is the GLOBAL mod-version floor, which
+        /// gates the whole UI until the player updates.
+        ///
+        /// <para>Keyed on the version middleware's own payload — <c>"error":
+        /// "outdated"</c> — and not on the 426 status, because 426 is also how the
+        /// server says several much narrower things: the spectator protocol floor for
+        /// one room (a friendly-fire-off room raises its own), the music-purchase
+        /// minimum, and the admin flag-review client. Status alone turned every one of
+        /// those into "your mod is below the required version" and hid the entire menu
+        /// from a client that was perfectly current for playing — one WATCH click on
+        /// the wrong room was enough (r3 finding, widened: the report named the
+        /// spectate case, the conflation covers four).</para>
+        ///
+        /// <para>Failure direction: an unreadable or unexpected body does NOT gate.
+        /// The middleware answers EVERY request, so a real global floor re-presents
+        /// itself on the next call and gates then; the opposite default locks a
+        /// working client out of the mod on one malformed reply.</para></summary>
         private static bool HandleVersionGate(UnityWebRequest req)
         {
-            if (req.responseCode == 426)
+            if (req.responseCode != 426) return false;
+            string body = null;
+            try { body = req.downloadHandler != null ? req.downloadHandler.text : null; } catch { }
+            // The middleware's payload is {"error": "outdated", "required": ...}.
+            // Read the `error` FIELD, not the token: a narrow refusal whose own
+            // detail happened to be the word "outdated" — {"detail":"outdated"} —
+            // would otherwise still lock the whole menu, which is the exact
+            // conflation this function was rewritten to end (r4 finding).
+            string err = null;
+            try { err = PcTopLevel(body, "error"); } catch { }
+            if (err != null) err = err.Trim().Trim('"');
+            if (!string.Equals(err, "outdated", StringComparison.Ordinal))
             {
-                if (!ForceUpdateRequired)
-                    Plugin.Log.LogWarning("[VERSION] Server returned 426 — mod is below required version, gating UI");
-                ForceUpdateRequired = true;
-                return true;
+                Plugin.Log.LogInfo("[VERSION] 426 that is not the global version floor — "
+                    + "letting the caller report its own reason");
+                return false;
             }
-            return false;
+            if (!ForceUpdateRequired)
+                Plugin.Log.LogWarning("[VERSION] Server returned the global version floor — gating UI");
+            ForceUpdateRequired = true;
+            return true;
         }
 
         // Heartbeat — track the most recent ATTEMPT and the most recent SUCCESS, separately.
@@ -21178,11 +24883,118 @@ namespace CompetitiveRounds
         public static float LastApiSuccessAt = -999f;
         public static float LastApiAttemptAt = -999f;
         public static bool LastResponseWasMaintenance = false;
-        private static void NoteAttempt() { LastApiAttemptAt = Time.unscaledTime; }
+        private static int _apiAttemptSerial;
+        private static void NoteAttempt() { LastApiAttemptAt = Time.unscaledTime; _apiAttemptSerial++; }
         private static void NoteResult(bool success, long httpCode)
         {
             if (success) { LastApiSuccessAt = Time.unscaledTime; LastResponseWasMaintenance = false; }
             else if (httpCode == 503) { LastResponseWasMaintenance = true; }
+        }
+
+        // A request this client aborts itself (PostRequestRaw's abortIf: the
+        // automatic log upload when the player withdraws consent or turns the
+        // setting off) was never a question put to the server, so it must not
+        // be counted as one (v1.41.0 beta round 3, finding 20). What counted
+        // it was NoteAttempt: ApiLooksDown weighs the attempt mark against the
+        // last success, so an aborted send inside a quiet spell read as an
+        // outage. The abort's NoteResult(false, 0) never wrote anything --
+        // NoteResult records a success or a 503 and nothing else. So a send
+        // keeps the mark it replaced, and an abort puts that mark back, but
+        // only while no later attempt has been made: a later request is its
+        // own question to the server and keeps its own mark.
+        private struct ApiAttemptMark { public int Serial; public float Before; }
+        private static ApiAttemptMark MarkApiAttempt()
+        {
+            var mark = new ApiAttemptMark { Before = LastApiAttemptAt };
+            NoteAttempt();
+            mark.Serial = _apiAttemptSerial;
+            return mark;
+        }
+        private static void WithdrawApiAttempt(ApiAttemptMark mark)
+        {
+            if (mark.Serial == _apiAttemptSerial) LastApiAttemptAt = mark.Before;
+        }
+
+        /// <summary>Round 3 finding 20's in-game check, run by the [Broadcast]
+        /// TestHeartbeatAbortSentinel lever. Drives the REAL PostRequestRaw
+        /// abort branch at a loopback discard address with an abortIf that is
+        /// true at its first poll, so the send and its abort both complete
+        /// inside one MoveNext and nothing reaches any server, then checks
+        /// that the heartbeat reads as it did before the send. Every field it
+        /// touches is put back.</summary>
+        internal static string RunHeartbeatAbortSentinel(out bool pass)
+        {
+            const string tag = "[HEARTBEAT-ABORT-SENTINEL]";
+            float savedAttempt = LastApiAttemptAt, savedSuccess = LastApiSuccessAt;
+            int savedSerial = _apiAttemptSerial;
+            bool savedLatch = _nextRequestCarriesAdminCredential;
+            var failures = new List<string>();
+            int checks = 0;
+            try
+            {
+                float now = Time.unscaledTime;
+                // A quiet spell: the last success a minute ago, no attempt since.
+                LastApiSuccessAt = now - 60f;
+                LastApiAttemptAt = -999f;
+
+                // Control: in this state an unanswered attempt DOES read as down.
+                var control = MarkApiAttempt();
+                checks++;
+                if (!ApiLooksDown) failures.Add("control: an unanswered attempt did not read as down");
+                WithdrawApiAttempt(control);
+
+                // The real abort branch.
+                string answer = null;
+                IEnumerator send = PostRequestRaw("http://127.0.0.1:9/heartbeat-abort-sentinel",
+                                                  Encoding.UTF8.GetBytes("{}"),
+                                                  (ok, reply) => { answer = reply; },
+                                                  null, () => true);
+                for (int step = 0; step < 4 && send.MoveNext(); step++) { }
+                checks++;
+                if (answer != RequestCancelledMarker)
+                    failures.Add("the abort branch did not run (answer: " + (answer ?? "none") + ")");
+                checks++;
+                if (ApiLooksDown) failures.Add("an aborted send left the heartbeat reading down");
+                checks++;
+                if (LastApiAttemptAt != -999f) failures.Add("an aborted send left its attempt mark");
+
+                // A later genuine attempt keeps its own mark.
+                var earlier = MarkApiAttempt();
+                NoteAttempt();
+                WithdrawApiAttempt(earlier);
+                checks++;
+                if (!ApiLooksDown) failures.Add("withdrawing an earlier send erased a later attempt's mark");
+            }
+            catch (Exception ex)
+            {
+                failures.Add("threw " + ex.GetType().Name + ": " + ex.Message);
+            }
+            finally
+            {
+                LastApiAttemptAt = savedAttempt;
+                LastApiSuccessAt = savedSuccess;
+                _apiAttemptSerial = savedSerial;
+                _nextRequestCarriesAdminCredential = savedLatch;
+            }
+            pass = failures.Count == 0;
+            return pass
+                ? tag + " PASS: " + checks + " checks (an aborted send leaves the heartbeat as it"
+                  + " found it; an unanswered attempt still reads down, and a later one keeps its mark)"
+                : tag + " FAIL: " + string.Join("; ", failures.ToArray());
+        }
+
+        internal static void DevHeartbeatAbortSentinelTest()
+        {
+            try
+            {
+                bool pass;
+                string line = RunHeartbeatAbortSentinel(out pass);
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[HEARTBEAT-ABORT-SENTINEL] FAIL: threw " + ex.Message);
+            }
         }
         /// <summary>True when we've recently TRIED to talk to the API and the most recent attempt
         /// hasn't succeeded — distinct from "haven't tried in a while".</summary>
@@ -21300,49 +25112,271 @@ namespace CompetitiveRounds
         /// <param name="extraHeader2Name">Sept 10 WP-B: a second optional pair
         /// (the multiplayer polls' X-Region-Pings-Gen beside X-Region-Pings),
         /// stamped under the same rule as the first.</param>
+        /// <param name="onResponseCode">Sept 16 r5: an optional sink for the HTTP
+        /// status THIS request was answered with, invoked on every exit immediately
+        /// BEFORE <paramref name="callback"/>, so a caller reading it from inside
+        /// the callback always sees this request's own code. 0 means no answer
+        /// reached this process — a consent refusal, the insecure-transport refusal,
+        /// or a transport failure that never produced a status — which is a
+        /// different fact from any code a box returned (#342), and the one caller
+        /// that reads it treats the two differently. Default null: the ~100 other
+        /// callers are unchanged, and a null sink is never invoked.</param>
         private static IEnumerator GetRequest(string url, Action<bool, string> callback,
             bool detailedErrors = false, bool sessionAware = false,
             string extraHeaderName = null, string extraHeaderValue = null,
-            string extraHeader2Name = null, string extraHeader2Value = null)
+            string extraHeader2Name = null, string extraHeader2Value = null,
+            Action<long> onResponseCode = null)
         {
-            if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
-            if (SensitiveTransportBlocked(url, null, callback)) yield break;
-            NoteAttempt();
-            using (var request = UnityWebRequest.Get(url))
+            // Both pre-wire refusals report 0 before the callback they hand back.
+            // SensitiveTransportBlocked invokes the callback itself, so it is given
+            // a wrapper rather than the raw one — otherwise the code would arrive
+            // after the body it describes.
+            if (ConsentBlocksRequest(url))
             {
-                StampVersionHeader(request);
-                if (!string.IsNullOrEmpty(extraHeaderName) && extraHeaderValue != null)
-                    request.SetRequestHeader(extraHeaderName, extraHeaderValue);
-                if (!string.IsNullOrEmpty(extraHeader2Name) && extraHeader2Value != null)
-                    request.SetRequestHeader(extraHeader2Name, extraHeader2Value);
-                // Capture the token this request rides out with (same pattern
-                // as PostRequest): the compare inside HandleSessionReject
-                // guards the race where a slow 401 lands after a newer
-                // session was already minted.
-                string _sentTok = sessionAware ? SteamAuth.SessionToken : null;
-                request.timeout = 20;
-                yield return request.SendWebRequest();
+                if (onResponseCode != null) onResponseCode(0);
+                callback(false, "no-consent"); yield break;
+            }
+            if (SensitiveTransportBlocked(url, null, (ok0, body0) =>
+                {
+                    if (onResponseCode != null) onResponseCode(0);
+                    callback(ok0, body0);
+                })) yield break;
+            // Verified reads (requirements 33-34): the hold before each send,
+            // and the gate's refusals retried here; every other answer leaves
+            // through the unchanged path below. In `off` and `log` the hold
+            // sends at once and no answer is a gate refusal, so one pass.
+            var rgAttempts = new ReadGateRules.Attempts();
+            while (true)
+            {
+                string rgFail = null;
+                yield return ReadGateHold(url, w => rgFail = w);
+                if (rgFail != null)
+                {
+                    if (onResponseCode != null) onResponseCode(0);
+                    callback(false, rgFail); yield break;
+                }
+                NoteAttempt();
+                ReadGateRules.Verdict rgv;
+                using (var request = UnityWebRequest.Get(url))
+                {
+                    StampVersionHeader(request);
+                    if (!string.IsNullOrEmpty(extraHeaderName) && extraHeaderValue != null)
+                        request.SetRequestHeader(extraHeaderName, extraHeaderValue);
+                    if (!string.IsNullOrEmpty(extraHeader2Name) && extraHeader2Value != null)
+                        request.SetRequestHeader(extraHeader2Name, extraHeader2Value);
+                    // Capture the token this request rides out with (same pattern
+                    // as PostRequest): the compare inside HandleSessionReject
+                    // guards the race where a slow 401 lands after a newer
+                    // session was already minted.
+                    string _sentTok = sessionAware ? SteamAuth.SessionToken : null;
+                    string _rgTok = SteamAuth.SessionToken;
+                    request.timeout = 20;
+                    yield return request.SendWebRequest();
 
-                if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
-                if (sessionAware) HandleSessionReject(request, _sentTok);
-                bool success = request.result == UnityWebRequest.Result.Success;
-                NoteResult(success, request.responseCode);
-                callback(success, success
-                    ? request.downloadHandler.text
-                    : (detailedErrors ? FormatRequestError(request) : request.error));
+                    if (HandleVersionGate(request))
+                    {
+                        // The box DID answer this one, with the gate's own status.
+                        if (onResponseCode != null) onResponseCode(request.responseCode);
+                        callback(false, "outdated"); yield break;
+                    }
+                    string rgBody = null;
+                    try { rgBody = request.downloadHandler?.text; } catch { }
+                    rgv = ReadGateVerdict(request, rgBody, rgAttempts, _rgTok);
+                    if (rgv.Next == ReadGateRules.Next.Deliver)
+                    {
+                        if (sessionAware) HandleSessionReject(request, _sentTok);
+                        bool success = request.result == UnityWebRequest.Result.Success;
+                        NoteResult(success, request.responseCode);
+                        if (onResponseCode != null) onResponseCode(request.responseCode);
+                        callback(success, success
+                            ? request.downloadHandler.text
+                            : (detailedErrors ? FormatRequestError(request) : request.error));
+                        yield break;
+                    }
+                    NoteResult(false, request.responseCode);
+                }
+                if (rgv.Next == ReadGateRules.Next.DelayRetry)
+                    yield return new WaitForSecondsRealtime((float)rgv.Delay);
             }
         }
 
-        private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback, int timeout = 20)
+        // -- Verified reads: the client half (requirements 32-35) -------------
+        //
+        // Every decision is ReadGateRules' (executed by the client-rules
+        // harness, suite `readgate`); these helpers only act on it.
+
+        /// <summary>The hold a GET passes before it is sent: returns at once
+        /// when the rules say send, polls every 0.5 s while they say wait, and
+        /// hands `failed` the local failure word when they say fail. A gated
+        /// GET is never sent without the session under `enforce`.</summary>
+        private static IEnumerator ReadGateHold(string url, Action<string> failed)
+        {
+            var rules = ReadGateRules.Current;
+            float t0 = Time.realtimeSinceStartup;
+            bool waited = false;
+            while (true)
+            {
+                double w = Time.realtimeSinceStartup - t0;
+                var h = rules.ShouldHold(url, CredentialedTransportAllowed(url), SteamAuth.HasFreshToken, w);
+                if (h == ReadGateRules.Hold.Send)
+                {
+                    if (waited) Plugin.Log.LogInfo($"[READ-GATE] held {(int)(w * 1000)} ms");
+                    yield break;
+                }
+                if (h == ReadGateRules.Hold.FailSecureRoute)
+                {
+                    NoteReadGateFallback();
+                    failed(ReadGateRules.FailSecureRouteWord);
+                    yield break;
+                }
+                if (h == ReadGateRules.Hold.FailPending)
+                {
+                    Plugin.Log.LogWarning($"[READ-GATE] held {(int)(w * 1000)} ms without a session; not sent ({ReadGateRules.FailPendingWord})");
+                    failed(ReadGateRules.FailPendingWord);
+                    yield break;
+                }
+                waited = true;
+                yield return new WaitForSecondsRealtime((float)ReadGateRules.HoldPollSeconds);
+            }
+        }
+
+        /// <summary>The rules' verdict on one answer, with the session reject
+        /// and the log line its retry calls for. Never a toast.</summary>
+        private static ReadGateRules.Verdict ReadGateVerdict(UnityWebRequest req, string body,
+            ReadGateRules.Attempts attempts, string sentToken)
+        {
+            long code = req.responseCode;
+            if (code != 401 && code != 503)
+                return new ReadGateRules.Verdict { Next = ReadGateRules.Next.Deliver, Refusal = "" };
+            string cc = null;
+            try { cc = req.GetResponseHeader("Cache-Control"); } catch { }
+            var v = ReadGateRules.Current.OnRefusal(code, body, cc, attempts);
+            if (v.PassToSessionReject) HandleSessionReject(req, sentToken);
+            if (v.Next == ReadGateRules.Next.ResessionRetry)
+                Plugin.Log.LogInfo($"[READ-GATE] retried after refusal ({v.Refusal})");
+            else if (v.Next == ReadGateRules.Next.DelayRetry && v.ReplicationRetry > 0)
+                Plugin.Log.LogInfo($"[READ-GATE] replication pending, retry {v.ReplicationRetry}");
+            else if (v.Next == ReadGateRules.Next.DelayRetry)
+                Plugin.Log.LogInfo($"[READ-GATE] gate unavailable, retry once after {v.Delay:0} s");
+            else if (v.Refusal.Length > 0)
+                Plugin.Log.LogWarning($"[READ-GATE] refused again ({v.Refusal}); reported as a failure");
+            return v;
+        }
+
+        /// <summary>One /mod-version answer's read-gate fields into the rules,
+        /// and the `[READ-GATE] mode=` line the self-verify reads.</summary>
+        private static void ReadGateAdvert(string body, string source)
+        {
+            try
+            {
+                var rules = ReadGateRules.Current;
+                string word = rules.OnModeAdvert(ExtractJsonString(body, "read_gate"), body);
+                Plugin.Log.LogInfo($"[READ-GATE] mode={word} enforce_latched={rules.EnforceLatched} open_list={(rules.HasOpenList ? "yes" : "none")} source={source}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[READ-GATE] advert unreadable: {ex.Message}"); }
+        }
+
+        /// <summary>The mode poll (requirement 35): reads only the read-gate
+        /// fields of the OPEN /mod-version, every 5 minutes and once after any
+        /// gate refusal, on whichever route the session is on. It never runs
+        /// DoCheckModVersion's update decision.</summary>
+        private static IEnumerator ReadGateModePoll()
+        {
+            float next = Time.realtimeSinceStartup + (float)ReadGateRules.ModePollSeconds;
+            while (true)
+            {
+                yield return new WaitForSecondsRealtime(1f);
+                bool asked = ReadGateRules.Current.TakePollRequest();
+                if (!asked && Time.realtimeSinceStartup < next) continue;
+                next = Time.realtimeSinceStartup + (float)ReadGateRules.ModePollSeconds;
+                using (var req = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version"))
+                {
+                    req.timeout = 20;
+                    // The same stamp as the boot read: without X-Mod-Version
+                    // the answer carries no mode and no OPEN list, so a latch
+                    // could never be released by a log or off advert.
+                    StampVersionHeader(req);
+                    yield return req.SendWebRequest();
+                    if (req.result == UnityWebRequest.Result.Success)
+                        ReadGateAdvert(req.downloadHandler.text, asked ? "after-refusal" : "poll");
+                    else
+                        Plugin.Log.LogInfo($"[READ-GATE] mode poll failed ({req.responseCode}); stage kept");
+                }
+            }
+        }
+
+        /// <summary>The one notice per session for a gated read the backup
+        /// connection cannot carry (design 7.2).</summary>
+        private static void NoteReadGateFallback()
+        {
+            if (!ReadGateRules.Current.TakeFallbackNotice()) return;
+            Plugin.Log.LogWarning($"[READ-GATE] gated reads need the secure route; not sent on the backup connection ({ReadGateRules.FailSecureRouteWord})");
+            try
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Stats and profiles need the secure connection. Retrying every 5 minutes."), new Color(1f, 0.85f, 0.2f), 8f);
+            }
+            catch { }
+        }
+
+        /// <summary>The string form. Delegates so there is ONE POST body: the
+        /// consent gate, the sensitive-transport gate, the version header, the
+        /// session handling and the error formatting cannot differ between a
+        /// caller that hands over text and one that hands over bytes.</summary>
+        /// <param name="onTokenStamped">Told once, before the request goes
+        /// out, whether StampVersionHeader attached X-Session-Token to it (the
+        /// header itself is read back): the outbox's spend rule asks what the
+        /// request carried, not what its address could have carried.</param>
+        /// <param name="timeoutSeconds">The request's timeout. The session
+        /// exchange passes SecureRouteRules.SteamAuthExchangeTimeoutSeconds,
+        /// which the portal's readiness wait is derived from.</param>
+        /// <param name="redactErrorText">The caller logs the failure text: its
+        /// whole body is scrubbed of credentials before it is cut
+        /// (FormatRequestError; Codex round 3 LOW 3).</param>
+        private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback,
+                                               Action<bool> onTokenStamped = null, int timeoutSeconds = 20,
+                                               bool redactErrorText = false)
+        {
+            return PostRequestRaw(url,
+                                  string.IsNullOrEmpty(json) ? null : Encoding.UTF8.GetBytes(json),
+                                  callback, json, null, onTokenStamped, timeoutSeconds, redactErrorText);
+        }
+
+        /// <summary>The response text a request aborted by
+        /// <c>abortIf</c> reports. A sentinel, not a status: it is not
+        /// "HTTP &lt;code&gt;:"-shaped, so ExtractHttpStatus reads 0 and no caller
+        /// can mistake it for a server refusal.</summary>
+        internal const string RequestCancelledMarker = "cancelled-locally";
+
+        /// <param name="sensitiveProbe">The body as TEXT for
+        /// SensitiveTransportBlocked's two body-level token checks
+        /// (`"admin_steam_id":` / `"password":`). Null means "this caller has
+        /// no text form", which GetRequest has always passed; the URL-level
+        /// and admin-credential halves of that gate still run. The automatic
+        /// log upload passes null and is sound doing so: its body carries
+        /// neither key, and every value inside it — the log text included — is
+        /// JSON-escaped, so neither raw token sequence can appear.</param>
+        /// <param name="abortIf">Polled once a frame while the request is in
+        /// flight; the first true calls <c>request.Abort()</c> and reports
+        /// <see cref="RequestCancelledMarker"/>. Null is "run to completion",
+        /// which every caller but the automatic log upload passes. It stops
+        /// this client SENDING the rest of a body — it cannot recall bytes the
+        /// server has already read, which is why the consent caption promises
+        /// the first and not the second.</param>
+        private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,
+                                                  Action<bool, string> callback,
+                                                  string sensitiveProbe = null,
+                                                  Func<bool> abortIf = null,
+                                                  Action<bool> onTokenStamped = null,
+                                                  int timeoutSeconds = 20,
+                                                  bool redactErrorText = false)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
-            if (SensitiveTransportBlocked(url, json, callback)) yield break;
-            NoteAttempt();
+            if (SensitiveTransportBlocked(url, sensitiveProbe, callback)) yield break;
+            var attemptMark = MarkApiAttempt();
             using (var request = new UnityWebRequest(url, "POST"))
             {
-                if (!string.IsNullOrEmpty(json))
+                if (bodyRaw != null && bodyRaw.Length > 0)
                 {
-                    byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
                     request.uploadHandler = new UploadHandlerRaw(bodyRaw);
                 }
                 request.downloadHandler = new DownloadHandlerBuffer();
@@ -21350,10 +25384,50 @@ namespace CompetitiveRounds
                 StampVersionHeader(request);
                 string _sentTok = SteamAuth.SessionToken;
                 // V11: the assembly's POSTs are single-try with a 4 s timeout
-                // (AsmPost); every other caller keeps the 20 s default.
-                request.timeout = timeout;
+                // (AsmPost). The session exchange passes
+                // SecureRouteRules.SteamAuthExchangeTimeoutSeconds; every other
+                // caller takes the 20 s default.
+                request.timeout = timeoutSeconds;
+                if (onTokenStamped != null)
+                {
+                    bool stamped = false;
+                    try { stamped = !string.IsNullOrEmpty(request.GetRequestHeader("X-Session-Token")); } catch { }
+                    try { onTokenStamped(stamped); } catch { }
+                }
 
-                yield return request.SendWebRequest();
+                if (abortIf == null)
+                {
+                    yield return request.SendWebRequest();
+                }
+                else
+                {
+                    // A CANCELLABLE send. `yield return op` is one suspension
+                    // with no frame in between, so a caller whose permission
+                    // to send can be WITHDRAWN mid-transfer (the automatic log
+                    // upload, when the player turns the setting off) has
+                    // nowhere to interrupt it. Polling the operation gives one
+                    // check per frame, and Abort() ends the transfer rather
+                    // than letting it finish and discarding the answer.
+                    var op = request.SendWebRequest();
+                    bool aborted = false;
+                    while (!op.isDone)
+                    {
+                        bool stop = false;
+                        try { stop = abortIf(); } catch { }
+                        if (stop) { aborted = true; break; }
+                        yield return null;
+                    }
+                    if (aborted)
+                    {
+                        try { request.Abort(); } catch { }
+                        // Neutral to the heartbeat (finding 20): take back
+                        // this send's attempt mark rather than report a
+                        // result the server never gave.
+                        WithdrawApiAttempt(attemptMark);
+                        callback(false, RequestCancelledMarker);
+                        yield break;
+                    }
+                }
 
                 if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
                 HandleSessionReject(request, _sentTok);
@@ -21363,11 +25437,14 @@ namespace CompetitiveRounds
                     success,
                     success
                         ? request.downloadHandler.text
-                        : FormatRequestError(request));
+                        : FormatRequestError(request, redactErrorText));
             }
         }
 
-        private static string FormatRequestError(UnityWebRequest request)
+        /// <param name="redact">The caller logs this text: the whole response
+        /// body is scrubbed of credentials BEFORE it is cut (Codex round 3
+        /// LOW 3; SecureRouteRules.RequestErrorText).</param>
+        private static string FormatRequestError(UnityWebRequest request, bool redact = false)
         {
             if (request == null) return "request failed";
             // Carry the RESPONSE BODY, not just Unity's status text (lobby
@@ -21378,10 +25455,6 @@ namespace CompetitiveRounds
             // pattern-matches it for permanence.
             string body = "";
             try { body = request.downloadHandler?.text ?? ""; } catch { }
-            if (body.Length > 300) body = body.Substring(0, 300);
-            string line = request.responseCode > 0
-                ? $"HTTP {request.responseCode}: {(string.IsNullOrEmpty(body) ? request.error : body)}"
-                : request.error;
             // Sept 6 item b (review r1 M14): a 429 says WHEN to retry in its
             // Retry-After header, and for the daily window that header is the
             // only honest figure — carry it as a trailing line so a caller can
@@ -21391,8 +25464,9 @@ namespace CompetitiveRounds
             // extractors) sees exactly what it saw before.
             string retryAfter = null;
             try { retryAfter = request.GetResponseHeader("Retry-After"); } catch { }
-            if (!string.IsNullOrEmpty(retryAfter) && !string.IsNullOrEmpty(line)) line += "\nRetry-After: " + retryAfter.Trim();
-            return line;
+            // The text itself (the body cut to 300, after the scrub when
+            // `redact`) is built by one rule the harness executes.
+            return SecureRouteRules.RequestErrorText(request.responseCode, body, request.error, retryAfter, redact);
         }
 
         // ── Sept 6 (Sid, in-game mail): request + slicer aliases for MailClient.cs ──
@@ -21411,7 +25485,7 @@ namespace CompetitiveRounds
         public static void AsmPost(string url, string json, Action<bool, string> callback, int timeout = 20)
         {
             if (Plugin.Instance == null) { try { callback?.Invoke(false, "no plugin"); } catch { } return; }
-            Plugin.Instance.StartCoroutine(PostRequest(url, json, callback ?? ((ok, r) => { }), timeout));
+            Plugin.Instance.StartCoroutine(PostRequest(url, json, callback ?? ((ok, r) => { }), timeoutSeconds: timeout));
         }
         public static int FindMatchingBracketStringAwarePublic(string s, int openPos) => FindMatchingBracketStringAware(s, openPos);
         public static int FindMatchingBraceStringAwarePublic(string s, int openPos) => FindMatchingBraceStringAware(s, openPos);
@@ -21464,11 +25538,82 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>POST with automatic retry on failure (DNS hiccups, timeouts).</summary>
-        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f)
+        /// <summary>POST with automatic retry on failure (DNS hiccups, timeouts).
+        ///
+        /// <paramref name="stopOnTerminalRefusal"/> ends the loop on a refusal
+        /// the server has already decided, instead of re-sending. The loop's
+        /// premise is that the failure was the TRANSPORT's — a hiccup two
+        /// seconds apart is a different roll of the dice — and such a refusal
+        /// breaks that premise: the server read the body, understood it, and
+        /// refused on state that the next attempt will find in the same place.
+        /// WHICH codes those are is FfaReportRules.IsTerminalRefusal's to say
+        /// (409 already recorded, 403 refused-and-captured), and 503 is
+        /// deliberately outside it — the server declining to decide is the one
+        /// refusal the loop's premise still fits. Off by default, so every
+        /// existing caller retries exactly as it did; the match-report callers
+        /// opt in, because for them each extra attempt is another settlement
+        /// request for a game the server has already decided about.
+        ///
+        /// <para>There is ONE retry loop, PostRequestWithRetryAnswered's; this
+        /// method is its two-argument face. The refusal rule is built here, from
+        /// the shared FfaReportRules predicate, only for a caller that opted in,
+        /// and the loop asks it of every failed attempt.</para></summary>
+        /// <param name="onTokenStamped">Told before each attempt goes out
+        /// whether StampVersionHeader attached X-Session-Token to it (the
+        /// header itself is read back), so the last call before `callback`
+        /// describes the request that answered. Passed through unchanged to
+        /// the one loop, which tells it (merge pass 3: the parameter is the
+        /// loop's, so a caller of either face gets the same report).</param>
+        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnTerminalRefusal = false,
+                                                        Action<bool> onTokenStamped = null)
         {
-            if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
-            if (SensitiveTransportBlocked(url, json, callback)) yield break;
+            Func<UnityWebRequest, bool> stopOn = null;
+            if (stopOnTerminalRefusal)
+                stopOn = request => FfaReportRules.IsTerminalRefusal(request.responseCode);
+            return PostRequestWithRetryAnswered(
+                url, json, (ok, resp, answered) => callback(ok, resp), maxRetries, retryDelay, stopOn, onTokenStamped);
+        }
+
+        /// <summary>The retried POST, with ONE extra fact for the callers that need
+        /// it: whether every attempt it made was ANSWERED.
+        ///
+        /// <para><c>request.timeout</c> is a CLIENT-side deadline. It abandons our
+        /// end of the connection; it does not reach the server, and it does not
+        /// cancel the handler, which goes on running and can commit long after we
+        /// have given up. So <c>ok == false</c> is two different facts wearing one
+        /// boolean (#430): "the server answered and refused", after which nothing of
+        /// ours is still running anywhere — and "we never heard back", after which a
+        /// transaction we cannot see may still be in flight and may still write. A
+        /// caller that ANNOUNCES its own failure to another seat has to tell those
+        /// apart, because the second one is not a terminal outcome of anything.</para>
+        ///
+        /// <para><paramref name="callback"/>'s third argument is false as soon as ONE
+        /// attempt is sent and receives no HTTP status (<c>responseCode</c> 0 —
+        /// timeout, DNS, reset). It stays true when nothing left this process at all
+        /// (a local decline), which is equally definite in the direction the callers
+        /// care about. It is accumulated ACROSS attempts on purpose: attempt 1 timing
+        /// out and attempt 3 receiving a 400 leaves attempt 1's handler running, so
+        /// the last attempt's status alone answers the wrong question.</para>
+        ///
+        /// <para><paramref name="stopOn"/>, when given, is asked of every failed
+        /// attempt, and a true answer ends the loop at once instead of re-sending:
+        /// PostRequestWithRetry builds it from FfaReportRules.IsTerminalRefusal for
+        /// a caller that opts in (see its summary for why a decided refusal breaks
+        /// the loop's premise). Null, the default, retries every failure.</para>
+        ///
+        /// <para><paramref name="onTokenStamped"/>, when given, is told before
+        /// each attempt goes out whether StampVersionHeader attached
+        /// X-Session-Token to it (the header read back from the request), so
+        /// the last call before <paramref name="callback"/> describes the
+        /// request that answered. PostMatchReportWithRetry feeds it to
+        /// SecureRouteRules.ReportSendCarried; null, the default, is told
+        /// nothing.</para></summary>
+        private static IEnumerator PostRequestWithRetryAnswered(string url, string json, Action<bool, string, bool> callback, int maxRetries = 3, float retryDelay = 2f, Func<UnityWebRequest, bool> stopOn = null,
+                                                                Action<bool> onTokenStamped = null)
+        {
+            bool allAnswered = true;
+            if (ConsentBlocksRequest(url)) { callback(false, "no-consent", true); yield break; }
+            if (SensitiveTransportBlocked(url, json, (ok, resp) => callback(ok, resp, true))) yield break;
             for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
                 NoteAttempt();
@@ -21484,30 +25629,78 @@ namespace CompetitiveRounds
                     StampVersionHeader(request);
                     string _sentTok = SteamAuth.SessionToken;
                     request.timeout = 10;
+                    if (onTokenStamped != null)
+                    {
+                        bool stamped = false;
+                        try { stamped = !string.IsNullOrEmpty(request.GetRequestHeader("X-Session-Token")); } catch { }
+                        try { onTokenStamped(stamped); } catch { }
+                    }
 
                     yield return request.SendWebRequest();
 
-                    if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
+                    // A version gate IS an answer: a response arrived and was read.
+                    if (HandleVersionGate(request)) { callback(false, "outdated", allAnswered); yield break; }
                     HandleSessionReject(request, _sentTok);
 
                     bool success = request.result == UnityWebRequest.Result.Success;
                     NoteResult(success, request.responseCode);
                     if (success)
                     {
-                        callback(true, request.downloadHandler.text);
+                        callback(true, request.downloadHandler.text, allAnswered);
                         yield break;
                     }
 
-                    Plugin.Log.LogWarning($"[HTTP] POST attempt {attempt}/{maxRetries} failed: {request.error}");
+                    // MEASURED, not inferred from the error text: UnityWebRequest
+                    // reports 0 here exactly when no HTTP status was received.
+                    if (request.responseCode <= 0) allAnswered = false;
+
+                    Plugin.Log.LogWarning($"[HTTP] POST attempt {attempt}/{maxRetries} failed: {request.error}"
+                        + $" (status={request.responseCode})");
+
+                    if (stopOn != null && stopOn(request))
+                    {
+                        Plugin.Log.LogWarning($"[HTTP] {request.responseCode} is a decided refusal — not retrying");
+                        callback(false, FormatRequestError(request), allAnswered);
+                        yield break;
+                    }
 
                     if (attempt < maxRetries)
                         // Network recovery must keep moving while ROUNDS pauses
                         // or slows game time on result/menu screens.
                         yield return new WaitForSecondsRealtime(retryDelay);
                     else
-                        callback(false, FormatRequestError(request));
+                        callback(false, FormatRequestError(request), allAnswered);
                 }
             }
+        }
+
+        /// <summary>PostRequestWithRetry for a match report (Codex round 4
+        /// HIGH 1): the settlement rule the outbox applies to a queued report,
+        /// applied to the first send. `callback(true, ...)` is given only for a
+        /// 2xx to a request that carried the session token
+        /// (SecureRouteRules.ReportSendCarried, fed by onTokenStamped before
+        /// every attempt). A 2xx from any attempt that did not carry it reaches
+        /// the caller as a failure with SecureRouteRules.TokenlessReportAnswer,
+        /// so the caller's failure arm queues the same body under the same key,
+        /// exactly as it queues every failure, and the player sees the queued
+        /// outcome. The loop stops at that answer: another attempt would go out
+        /// the same way. Every caller that settles a match report uses this,
+        /// never PostRequestWithRetry directly.</summary>
+        private static IEnumerator PostMatchReportWithRetry(string url, string json, Action<bool, string> callback,
+                                                            int maxRetries = 3, float retryDelay = 2f,
+                                                            bool stopOnTerminalRefusal = false)
+        {
+            var carried = new SecureRouteRules.ReportSendCarried();
+            return PostRequestWithRetry(url, json, (ok, resp) =>
+            {
+                if (ok && !carried.Settles(ok))
+                {
+                    Plugin.Log.LogWarning("[OUTBOX] a match report was answered 2xx without the session token; not taken as recorded, it is queued for a send with the token");
+                    callback(false, SecureRouteRules.TokenlessReportAnswer);
+                    return;
+                }
+                callback(ok, resp);
+            }, maxRetries, retryDelay, stopOnTerminalRefusal, carried.Stamped);
         }
 
         // ── Discord Linking ──────────────────────────────────────
@@ -22008,28 +26201,228 @@ namespace CompetitiveRounds
             ));
         }
 
-        // Reads the tail of a log file (BepInEx LogOutput.log or Unity output_log.txt)
-        // with sane caps so we don't blow out memory on a multi-MB log.
+        /// <summary>Reads the tail of a log file (BepInEx LogOutput.log or
+        /// Unity output_log.txt).
+        ///
+        /// THE INPUT IS BOUNDED BEFORE THE READ, not after it. The previous
+        /// shape called ReadToEnd and trimmed afterwards, so a 40 MB log cost
+        /// 40 MB of allocation and 40 MB of decoding to keep 1.5 MB (Codex r1
+        /// HIGH, AutoLogUpload.cs:184 — the room-exit bundle is built from
+        /// three of these). The stream is SEEKED to the last
+        /// <paramref name="maxChars"/> BYTES and nothing before that offset is
+        /// ever touched.
+        ///
+        /// THE STATED CAP IS IN BYTES AND THE CHARACTER CAP RIDES ON IT: one
+        /// byte can only ever produce one character or fewer in UTF-8, so a
+        /// `maxChars`-byte window yields at most `maxChars` characters and
+        /// usually exactly that many (these logs are overwhelmingly ASCII). A
+        /// multi-byte-heavy log therefore returns LESS than the character cap,
+        /// never more, which is the conservative direction for a bundle whose
+        /// whole point is an upper bound.
+        ///
+        /// A mid-file seek can land inside a UTF-8 sequence, so the first
+        /// continuation bytes (10xxxxxx) after the offset are skipped — at
+        /// most three, since that is the longest tail a sequence has. Without
+        /// that, the first character of the window decodes as U+FFFD.</summary>
         public static string ReadLogTail(string path, int maxChars = BUG_REPORT_LOG_CAP_CHARS)
         {
             try
             {
                 if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return "";
+                if (maxChars <= 0) return "";
                 // FileShare.ReadWrite — BepInEx + Unity keep these handles open.
                 using (var fs = new System.IO.FileStream(path, System.IO.FileMode.Open,
                                                         System.IO.FileAccess.Read,
                                                         System.IO.FileShare.ReadWrite))
-                using (var sr = new System.IO.StreamReader(fs))
                 {
-                    string all = sr.ReadToEnd();
-                    if (all.Length <= maxChars) return all;
-                    return all.Substring(all.Length - maxChars);
+                    long len = 0;
+                    try { len = fs.Length; } catch { }
+                    bool seeked = false;
+                    if (len > maxChars && fs.CanSeek)
+                    {
+                        fs.Position = len - maxChars;
+                        seeked = true;
+                        // Step past a partial UTF-8 sequence. Bounded at 3:
+                        // a sequence carries at most three continuation bytes.
+                        for (int i = 0; i < 3; i++)
+                        {
+                            int b = fs.ReadByte();
+                            if (b < 0) break;
+                            if ((b & 0xC0) != 0x80) { fs.Position = fs.Position - 1; break; }
+                        }
+                    }
+                    // BOM detection only makes sense at offset 0; a mid-file
+                    // window has no preamble to read.
+                    using (var sr = new System.IO.StreamReader(
+                               fs, new UTF8Encoding(false),
+                               detectEncodingFromByteOrderMarks: !seeked))
+                    {
+                        string all = sr.ReadToEnd();
+                        // Belt and braces: the byte window already bounds this,
+                        // and a decoder that somehow produced more characters
+                        // than bytes would still not get past the caller's cap.
+                        if (all.Length <= maxChars) return all;
+                        return all.Substring(all.Length - maxChars);
+                    }
                 }
             }
             catch (Exception ex)
             {
                 return $"[log read error: {ex.Message}]";
             }
+        }
+
+        // ── Automatic post-match log upload ──────────────────────────────────
+        //
+        // POST /api/v1/logs/auto. Same transport and same body shape as
+        // SubmitBugReport, three deliberate differences:
+        //
+        //  * ONE ATTEMPT. PostRequest, never PostRequestWithRetry. The server
+        //    answers 429 at its own 12-per-24h bucket and 409-class refusals on
+        //    state a second attempt would find in exactly the same place, so a
+        //    retry loop could only ever turn a refusal into two refusals. The
+        //    single attempt is what makes "a refusal is terminal" a property of
+        //    the code rather than a promise in a comment.
+        //  * STRICT SESSION. The route creates a disk artifact attributed to a
+        //    Steam id and refuses a claim it cannot prove, so the call is not
+        //    made at all without a token — an anonymous attempt can only spend
+        //    a request to be told 401.
+        //  * A 404 IS AN ANSWER, not a failure. The client may ship before the
+        //    server half; a route that is not there means the feature is off at
+        //    this backend. AutoLogUpload latches that and stops for the
+        //    session, so an un-deployed server costs one request per launch.
+        //
+        // The caller passes the log text ALREADY SCRUBBED (CompetitiveUI
+        // .ComposeLogBundle is the only producer of that text — the bug form
+        // and the automatic upload differ in where they RUN it, not in what it
+        // builds — and it scrubs); nothing here re-scrubs, because two scrub
+        // sites is how one of them rots.
+        public static void SubmitAutoLog(string steamId, string displayName, string mode,
+                                         string roomName, string opponentSteamId, string seriesId,
+                                         string logText, Action<bool, long, string> done)
+        {
+            if (Plugin.Instance == null) { done?.Invoke(false, 0, "not ready"); return; }
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown")
+            {
+                done?.Invoke(false, 0, "steam_id missing");
+                return;
+            }
+            if (string.IsNullOrEmpty(SteamAuth.SessionToken))
+            {
+                done?.Invoke(false, 0, "session_required");   // strict-session endpoint
+                return;
+            }
+            if (string.IsNullOrEmpty(logText))
+            {
+                done?.Invoke(false, 0, "log empty");
+                return;
+            }
+            string body = BuildAutoLogBody(steamId, displayName, Plugin.ModVersion,
+                                           SafeApplicationVersion(), mode, roomName,
+                                           opponentSteamId, seriesId, logText);
+            SubmitAutoLogBody(Encoding.UTF8.GetBytes(body), done);
+        }
+
+        /// <summary>Application.version, read HERE because it is a Unity API
+        /// and BuildAutoLogBody is deliberately callable off the main
+        /// thread.</summary>
+        internal static string SafeApplicationVersion()
+        {
+            try { return UnityEngine.Application.version ?? ""; }
+            catch { return ""; }
+        }
+
+        /// <summary>THREAD-SAFE by contract, and that is the whole reason it is
+        /// its own member (Codex r1 HIGH, AutoLogUpload.cs:184): building this
+        /// body means JSON-escaping up to 3.5 M characters, and on the game
+        /// thread at room exit that is a visible freeze. It touches no Unity
+        /// API, no Photon state, no logger and no mutable static — every value
+        /// it needs is a parameter, captured by the caller while it was still
+        /// on the main thread.
+        ///
+        /// Nothing here re-scrubs: CompetitiveUI's bundle composer is the only
+        /// producer of <paramref name="logText"/> and it scrubs, because two
+        /// scrub sites is how one of them rots.</summary>
+        internal static string BuildAutoLogBody(string steamId, string displayName,
+                                                string modVersion, string gameVersion,
+                                                string mode, string roomName,
+                                                string opponentSteamId, string seriesId,
+                                                string logText)
+        {
+            if (logText != null && logText.Length > BUG_REPORT_LOG_CAP_CHARS)
+                logText = logText.Substring(logText.Length - BUG_REPORT_LOG_CAP_CHARS); // tail-most window
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{");
+            sb.Append($"\"steam_id\":\"{JsonEscapeFull(steamId)}\"");
+            sb.Append($",\"display_name\":\"{JsonEscapeFull(displayName ?? "")}\"");
+            sb.Append($",\"mod_version\":\"{JsonEscapeFull(modVersion ?? "")}\"");
+            sb.Append($",\"game_version\":\"{JsonEscapeFull(gameVersion ?? "")}\"");
+            sb.Append($",\"mode\":\"{JsonEscapeFull(mode ?? "")}\"");
+            sb.Append($",\"room_name\":\"{JsonEscapeFull(roomName ?? "")}\"");
+            if (!string.IsNullOrEmpty(opponentSteamId))
+                sb.Append($",\"opponent_steam_id\":\"{JsonEscapeFull(opponentSteamId)}\"");
+            if (!string.IsNullOrEmpty(seriesId))
+                sb.Append($",\"series_id\":\"{JsonEscapeFull(seriesId)}\"");
+            sb.Append($",\"log_text\":\"{JsonEscapeFull(logText ?? "")}\"");
+            sb.Append("}");
+            return sb.ToString();
+        }
+
+        /// <summary>Post an ALREADY-ENCODED automatic-log body. MAIN THREAD
+        /// ONLY (it starts a coroutine), but the only work it does that scales
+        /// with the log is handing the finished byte[] to the upload handler —
+        /// no read, no scan, no escape, no encode.
+        ///
+        /// <paramref name="abortIf"/> is polled once a frame until the request
+        /// finishes, and a true answer ABORTS the transfer rather than letting
+        /// it complete. The caller passes its own "is this still allowed"
+        /// predicate: the consent says nothing is sent while the setting is
+        /// off, and a request already on the wire when the player turns it off
+        /// is the one case where that sentence used to be untrue (Codex client
+        /// r2 MEDIUM).</summary>
+        internal static void SubmitAutoLogBody(byte[] body, Action<bool, long, string> done,
+                                               Func<bool> abortIf = null)
+        {
+            if (Plugin.Instance == null) { done?.Invoke(false, 0, "not ready"); return; }
+            if (body == null || body.Length == 0) { done?.Invoke(false, 0, "log empty"); return; }
+            if (string.IsNullOrEmpty(SteamAuth.SessionToken))
+            {
+                done?.Invoke(false, 0, "session_required");   // strict-session endpoint
+                return;
+            }
+            Plugin.Instance.StartCoroutine(PostRequestRaw(
+                $"{baseUrl}/api/v1/logs/auto", body,
+                (ok, response) =>
+                {
+                    // FormatRequestError's "HTTP <code>: <body>" prefix is the
+                    // contract the status is read back out of — the same one
+                    // the report outbox pattern-matches for permanence.
+                    long code = ok ? 200 : ExtractHttpStatus(response);
+                    done?.Invoke(ok, code, response);
+                },
+                abortIf: abortIf
+            ));
+        }
+
+        /// <summary>Reads the numeric status out of FormatRequestError's
+        /// "HTTP &lt;code&gt;: ..." prefix; 0 when the failure had no response at
+        /// all (a transport timeout), which is a different thing from a server
+        /// refusal and must not be confused with one.</summary>
+        private static long ExtractHttpStatus(string err)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(err) || !err.StartsWith("HTTP ", StringComparison.Ordinal)) return 0;
+                int colon = err.IndexOf(':', 5);
+                if (colon <= 5) return 0;
+                long code;
+                if (long.TryParse(err.Substring(5, colon - 5).Trim(),
+                                  System.Globalization.NumberStyles.Integer,
+                                  System.Globalization.CultureInfo.InvariantCulture, out code))
+                    return code;
+            }
+            catch { }
+            return 0;
         }
 
 
@@ -23225,6 +27618,139 @@ namespace CompetitiveRounds
             public string disabled_reason = "";
         }
 
+        /// <summary>A spectate refusal reason as a full SENTENCE, for a notification
+        /// that owns a whole line (bug #375). <see cref="SpectateReasonShort"/> is the
+        /// same answer sized for a list cell; both are renderings of the one table in
+        /// <see cref="SpectateReason"/>, which is where the reason is actually decided.
+        ///
+        /// <para>The server computes a reason for every game it lists and ships it as
+        /// <c>disabled_reason</c>, and it sends the same vocabulary back when a grant is
+        /// refused. Both consumers go through that table so the listing and the grant can
+        /// never disagree about what a reason means — previously the grant path had this
+        /// mapping inline and the LISTING had no mapping at all, which is why a game that
+        /// could not be watched simply vanished from the panel with nothing said.</para>
+        ///
+        /// <para>Accepts either a bare reason token or a raw response body containing
+        /// one, so the grant path can hand it the server's reply unchanged.</para></summary>
+        internal static string SpectateReasonText(string reason)
+        {
+            return SpectateReason(reason, full: true);
+        }
+
+        /// <summary>The same answers, sized for a list CELL rather than a toast.
+        ///
+        /// <para>The sentences above are right for a notification, which owns a whole
+        /// line; the live-games lists render the reason in a ~190px no-wrap cell where
+        /// they are clipped mid-word and every one of them loses the clause that makes
+        /// it an answer — "…has spectating disabled" and "…not accepting spectators
+        /// right now" both survive only as far as their shared, useless prefix (r2
+        /// finding). Bounding the STRING to the cell is the codebase's own remedy for a
+        /// fixed-width one-line cell; bounding the cell to the string is not available
+        /// here, because these are translated and the longest locale is not knowable
+        /// from this side. Every label below is short enough that it still fits with
+        /// roughly twice the width to spare, which is the margin translation needs.</para></summary>
+        internal static string SpectateReasonShort(string reason)
+        {
+            return SpectateReason(reason, full: false);
+        }
+
+        /// <summary>THE reason table. One ordered chain, two renderings.
+        ///
+        /// <para>The short and full forms used to be two separate chains, which is two
+        /// places to decide which reason a string matched — and two chains drift: one
+        /// gains a key, the other does not, and the list and the toast then explain the
+        /// same refusal differently or one of them stops explaining it at all (r3
+        /// finding). Here a key can only be added to both at once.</para>
+        ///
+        /// <para>THREE READINGS, IN PRECEDENCE ORDER (r2 LOW). The caller may hand
+        /// over a bare token (the listing's <c>disabled_reason</c>), or a whole
+        /// formatted error line ("HTTP 409: {"detail":"mode_not_ready"}"), which is
+        /// what the grant path's failure text actually looks like. Those are read in
+        /// the order of how much they PROVE:
+        ///   1. the whole string IS a known key — the listing's own field;
+        ///   2. the body's <c>detail</c> field is a known key — the one place the
+        ///      server states its answer, and the only reading that is positional
+        ///      rather than incidental;
+        ///   3. only then the ordered <c>Contains</c> chain below.
+        /// Reading (3) alone is what made the answer depend on code order: a body
+        /// carrying two mapped keys — an error line that quotes a room state while
+        /// refusing for another cause — returned whichever check happened to sit
+        /// higher, and nothing enforced that no key is a substring of another. The
+        /// chain is kept because it is the only thing that can read a malformed body
+        /// or a future server that stops sending <c>detail</c>, and its ordering
+        /// caveat below still applies TO IT.</para></summary>
+        private static string SpectateReason(string reason, bool full)
+        {
+            string r = reason ?? "";
+            string exact = SpectateReasonExact(r.Trim(), full);
+            if (exact != null) return exact;
+            string detail = null;
+            try { detail = ExtractJsonString(r, "detail"); } catch { }
+            if (!string.IsNullOrEmpty(detail))
+            {
+                exact = SpectateReasonExact(detail.Trim(), full);
+                if (exact != null) return exact;
+            }
+            if (r.Contains("spectator_full"))
+                return I18n.Tr(full ? "All spectator seats are taken." : "Seats full");
+            if (r.Contains("spectating_disabled"))
+                return I18n.Tr(full ? "A player in this game has spectating disabled." : "Player opted out");
+            if (r.Contains("game_not_live"))
+                return I18n.Tr(full ? "That game is no longer live." : "Game ended");
+            if (r.Contains("already_in_game"))
+                return I18n.Tr(full ? "Leave your current game first." : "You're in a game");
+            // Order is fixed, but nothing ENFORCES that a future key is not a
+            // substring of a later one — no longest-match rule, no exact-field parse.
+            // Today no key contains another, which is a property of this list and not
+            // a guarantee of the mechanism (r4 finding). Adding a key that is a
+            // substring of one below it would shadow that one silently, so put a new
+            // key ABOVE anything it could be contained by.
+            if (r.Contains("room_not_ready"))
+                return I18n.Tr(full ? "That game is not ready to watch yet." : "Not ready yet");
+            if (r.Contains("mode_not_ready"))
+                return I18n.Tr(full ? "That mode is not accepting spectators right now." : "Mode closed");
+            if (r.Contains("spectator_upgrade_required"))
+                return I18n.Tr(full ? "Update the mod to watch this game." : "Update required");
+            // The grant refuses an unauthenticated caller with 401 session_required.
+            // It was missing, so the one refusal that clears itself — the session
+            // renews on its own — read as a permanent "could not spectate" and the
+            // player stopped trying (r3 finding).
+            if (r.Contains("session_required"))
+                return I18n.Tr(full ? "Steam session expired — try again in a moment." : "Session expired");
+            return I18n.Tr(full ? "Could not spectate this game." : "Unavailable");
+        }
+
+        /// <summary>The same table, matched WHOLE. Null when the candidate is not
+        /// one of the eight keys — which is the point: an exact match cannot be
+        /// shadowed by a longer key, cannot depend on the order of the chain, and
+        /// cannot be produced by a key appearing incidentally inside a sentence.
+        /// Every string here is the byte-for-byte server key; adding one to the
+        /// chain above without adding it here silently demotes it to the ordered
+        /// reading.</summary>
+        private static string SpectateReasonExact(string key, bool full)
+        {
+            switch (key)
+            {
+                case "spectator_full":
+                    return I18n.Tr(full ? "All spectator seats are taken." : "Seats full");
+                case "spectating_disabled":
+                    return I18n.Tr(full ? "A player in this game has spectating disabled." : "Player opted out");
+                case "game_not_live":
+                    return I18n.Tr(full ? "That game is no longer live." : "Game ended");
+                case "already_in_game":
+                    return I18n.Tr(full ? "Leave your current game first." : "You're in a game");
+                case "room_not_ready":
+                    return I18n.Tr(full ? "That game is not ready to watch yet." : "Not ready yet");
+                case "mode_not_ready":
+                    return I18n.Tr(full ? "That mode is not accepting spectators right now." : "Mode closed");
+                case "spectator_upgrade_required":
+                    return I18n.Tr(full ? "Update the mod to watch this game." : "Update required");
+                case "session_required":
+                    return I18n.Tr(full ? "Steam session expired — try again in a moment." : "Session expired");
+            }
+            return null;
+        }
+
         public static List<SpectateGameInfo> CachedSpectateGames = new List<SpectateGameInfo>();
         private static float lastSpectateGamesFetch = -999f;
         private static string spectateLeaseId = "";
@@ -23255,13 +27781,80 @@ namespace CompetitiveRounds
                 + $"\"phase\":\"{Escape(phase)}\","
                 + $"\"roster\":\"{Escape(rosterCsv ?? "")}\""
                 + "}";
+            string attestedMode = mode ?? "", attestedRoster = rosterCsv ?? "", attestedRoom = roomName ?? "";
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/spectate/participant-attest", json,
                 (ok, resp) =>
                 {
                     if (!ok && !resp.Contains("HTTP 4"))
                         Plugin.Log.LogInfo($"[SPECTATE] attest failed (transport): {resp}");
+                    try { NoteSpectateAttestAnswer(ok, resp, attestedRoom, attestedMode, attestedRoster); } catch { }
                 }));
+        }
+
+        // Session report round 6 MEDIUM 1: the server's answer to this seat's
+        // last participant attest - the room row's game id and the source the
+        // server derived for it - kept with the room, mode and roster that
+        // attest sent. A master's spectator validation carries the game id
+        // and source only while its snapshot shows that same room, mode and
+        // roster (SpectateAttestAnswerFor); the server grants a watch only
+        // when all four are still the live row's. Round 7 MEDIUM 1: the
+        // answer also carries the row's generation (an integer that only
+        // increases and advances on every change of the row's game id, mode,
+        // source or roster), kept and sent beside them; the server grants a
+        // watch only when it too is still the live row's.
+        private static string spectateAttestAnswerRoom = "", spectateAttestAnswerMode = "",
+            spectateAttestAnswerRoster = "", spectateAttestAnswerGameId = "", spectateAttestAnswerSourceRef = "",
+            spectateAttestAnswerGeneration = "";
+
+        internal static void NoteSpectateAttestAnswer(bool ok, string resp, string room, string mode, string roster)
+        {
+            resp = resp ?? "";
+            string generation = ExtractJsonIdToken(resp, "generation");
+            // Any other answer (a refusal, a transport failure, a server
+            // from before this answer named the row, or one without a
+            // generation of 1 to 18 digits) leaves no answer to send: the
+            // next validation goes out without a tuple.
+            if (!ok || ExtractJsonString(resp, "status") != "ok"
+                || !resp.Contains("\"game_id\":\"") || !resp.Contains("\"source_ref\":\"")
+                || !SpectateGenerationToken(generation))
+            {
+                if (string.Equals(spectateAttestAnswerRoom, room, StringComparison.Ordinal))
+                    spectateAttestAnswerRoom = spectateAttestAnswerGameId = spectateAttestAnswerSourceRef =
+                        spectateAttestAnswerGeneration = "";
+                return;
+            }
+            spectateAttestAnswerRoom = room ?? "";
+            spectateAttestAnswerMode = mode ?? "";
+            spectateAttestAnswerRoster = roster ?? "";
+            spectateAttestAnswerGameId = ExtractJsonString(resp, "game_id");
+            spectateAttestAnswerSourceRef = ExtractJsonString(resp, "source_ref");
+            spectateAttestAnswerGeneration = generation;
+        }
+
+        // A generation the validation may send as a bare JSON number: 1 to 18
+        // ASCII digits, not starting with 0 (the server's sequence starts at 1).
+        internal static bool SpectateGenerationToken(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length > 18 || s[0] == '0') return false;
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] < '0' || s[i] > '9') return false;
+            return true;
+        }
+
+        internal static bool SpectateAttestAnswerFor(string room, string mode, string roster,
+                                                     out string gameId, out string sourceRef, out string generation)
+        {
+            gameId = sourceRef = generation = "";
+            if (spectateAttestAnswerGameId.Length == 0) return false;
+            if (!SpectateGenerationToken(spectateAttestAnswerGeneration)) return false;
+            if (!string.Equals(spectateAttestAnswerRoom, room ?? "", StringComparison.Ordinal)) return false;
+            if (!string.Equals(spectateAttestAnswerMode, mode ?? "", StringComparison.Ordinal)) return false;
+            if (!string.Equals(spectateAttestAnswerRoster, roster ?? "", StringComparison.Ordinal)) return false;
+            gameId = spectateAttestAnswerGameId;
+            sourceRef = spectateAttestAnswerSourceRef;
+            generation = spectateAttestAnswerGeneration;
+            return true;
         }
 
         /// <summary>Tell the server this fighter has left the room, so the
@@ -23475,11 +28068,40 @@ namespace CompetitiveRounds
             return RequestSpectateGrantCore(gameId, broadcastTicket: true);
         }
 
+        /// <summary>EVERY refusal below this line says something (#375, r2 MEDIUM).
+        /// A locally declined WATCH used to be a bare `return 0;` on two arms —
+        /// unresolved identity and a grant already on the wire — so the player
+        /// clicked and nothing at all happened, which reads as a broken button
+        /// rather than as a refusal. A guard is judged by what its refusal COSTS
+        /// (#430), and an unexplained one costs the player the ability to tell
+        /// "not yet" from "never". Toasts are suppressed for broadcast-ticket
+        /// dispatches, which nobody clicked; the log line is unconditional so a
+        /// bundle carries the reason either way.</summary>
         private static int RequestSpectateGrantCore(string gameId, bool broadcastTicket)
         {
             string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return 0;
-            if (spectateGrantInFlight) return 0;
+            if (Plugin.Instance == null)
+            {
+                // No UI host to toast to; this is the only arm that cannot speak.
+                Plugin.Log.LogWarning("[SPECTATE] WATCH declined before dispatch: no plugin host");
+                return 0;
+            }
+            if (string.IsNullOrEmpty(sid) || sid == "unknown")
+            {
+                Plugin.Log.LogInfo("[SPECTATE] WATCH declined before dispatch: local identity unresolved");
+                if (!broadcastTicket)
+                    CompetitiveUI.ShowNotification(I18n.Tr("Sign-in still pending - try again in a moment."),
+                                                   Color.yellow, 4f);
+                return 0;
+            }
+            if (spectateGrantInFlight)
+            {
+                Plugin.Log.LogInfo("[SPECTATE] WATCH declined before dispatch: a grant is already in flight");
+                if (!broadcastTicket)
+                    CompetitiveUI.ShowNotification(I18n.Tr("Still finishing your last spectate request - try again in a moment."),
+                                                   Color.yellow, 4f);
+                return 0;
+            }
             // r2 find 4: NO grant is admitted while a broadcast-issued grant
             // request is still unresolved on the wire — even a public WATCH
             // on this seat. A newer grant reaching the server before the
@@ -23487,6 +28109,17 @@ namespace CompetitiveRounds
             // straggler. Only ever armed on the broadcast seat.
             if (BroadcastGrantTransportUnsettled)
             {
+                // The LOG line is unconditional; the TOAST is not. Every other
+                // refusal before the dispatch speaks in the log whoever asked,
+                // and this one did not: with broadcastTicket=true the toast guard
+                // is false, the method returns zero, and the bundle from the one
+                // seat where this guard can arm at all shows nothing. "A grant was
+                // declined" and "no grant was ever requested" then read identically
+                // (#430 — a guard is judged by what its refusal costs, and an
+                // unexplained refusal costs the ability to tell those apart).
+                Plugin.Log.LogInfo("[SPECTATE] WATCH declined before dispatch: a broadcast-issued "
+                    + "grant request is still unresolved on the wire"
+                    + (broadcastTicket ? " (broadcast ticket — no toast)" : ""));
                 // Deliberately NOT I18n.Tr: this toast is reachable only on
                 // the broadcast seat (the guard arms nowhere else), and
                 // bot-seat-only strings must not enter the translation
@@ -23558,11 +28191,7 @@ namespace CompetitiveRounds
                     }
                     if (!ok)
                     {
-                        string why = I18n.Tr("Could not spectate this game.");
-                        if (resp.Contains("spectator_full")) why = I18n.Tr("All spectator seats are taken.");
-                        else if (resp.Contains("spectating_disabled")) why = I18n.Tr("A player in this game has spectating disabled.");
-                        else if (resp.Contains("game_not_live")) why = I18n.Tr("That game is no longer live.");
-                        else if (resp.Contains("already_in_game")) why = I18n.Tr("Leave your current game first.");
+                        string why = SpectateReasonText(resp);
                         Plugin.Log.LogInfo($"[SPECTATE] grant refused: {resp}");
                         CompetitiveUI.ShowNotification(why, Color.yellow, 5f);
                         return;
@@ -23990,8 +28619,34 @@ namespace CompetitiveRounds
         /// each claimed spectator actor holds a live lease for THIS room.
         /// Invalid actors are kicked; valid names are published as a room
         /// property for the roster display (names only — no credentials).
-        /// Called on spectator entry and from the periodic attest ticker.</summary>
-        public static void SpectateValidateActors()
+        /// Called on spectator entry and from the periodic attest ticker.
+        /// Session report round 5 MEDIUM 1: the request also carries the
+        /// participant tuple this master reads with the spectator snapshot
+        /// (observed_mode, observed_roster, derived as the attest derives
+        /// them); the server records a watch only when that tuple is still
+        /// the live room row's, and otherwise answers status "retry", on
+        /// which the master takes a fresh snapshot and sends again, at most
+        /// SPECTATE_VALIDATE_RETRY_MAX times. Round 6 MEDIUM 1: the tuple
+        /// also carries the room row's game id and source, from the server's
+        /// answer to this seat's last attest of the same room, mode and
+        /// roster; without one the request carries no tuple.</summary>
+        public static void SpectateValidateActors() { SpectateValidateActors(0); }
+
+        internal const int SPECTATE_VALIDATE_RETRY_MAX = 3;
+        internal const float SPECTATE_VALIDATE_RETRY_DELAY_S = 2f;
+
+        private static IEnumerator SpectateValidateRetryAfter(int attempt, string room)
+        {
+            yield return new WaitForSecondsRealtime(SPECTATE_VALIDATE_RETRY_DELAY_S);
+            try
+            {
+                if (string.Equals(Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "", room, StringComparison.Ordinal))
+                    SpectateValidateActors(attempt);
+            }
+            catch { }
+        }
+
+        private static void SpectateValidateActors(int attempt)
         {
             try
             {
@@ -24004,11 +28659,40 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(SteamAuth.SessionToken)) return;
 
                 string roomAtSend = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
+                // The participant tuple of THIS snapshot (round 5 MEDIUM 1):
+                // the mode the room's prefix names (a room with none is a
+                // code room, spectatable only as a 1v1) and the fighters'
+                // ids in the attest's canonical order. With no fighter id to
+                // report, the old request shape goes out: the seats are still
+                // validated, and no watch is recorded.
+                string seenMode = GameStateWatcher.SpectateModeOfRoomPrefix(roomAtSend);
+                if (seenMode.Length == 0) seenMode = "1v1";
+                string seenRoster = string.Join(",",
+                    GameStateWatcher.SpectateFighterIds(RoomActors.ActiveFighters()).ToArray());
+                // Round 6 MEDIUM 1: the room row's game id and source are the
+                // server's answer to this seat's last attest of this same
+                // room, mode and roster. Without such an answer (none yet,
+                // or the snapshot's roster is not the one last attested) the
+                // old request shape goes out and an attest is asked for now,
+                // so the next validation carries the whole tuple.
+                // Round 7 MEDIUM 1: with them, the row's generation from that
+                // same answer (digits only, SpectateGenerationToken), so the
+                // server can tell a row that moved and came back.
+                string seenGameId = "", seenSource = "", seenGeneration = "";
+                bool sendTuple = seenRoster.Length > 0 && SpectateAttestAnswerFor(
+                    roomAtSend, seenMode, seenRoster, out seenGameId, out seenSource, out seenGeneration);
+                if (!sendTuple && seenRoster.Length > 0) GameStateWatcher.RequestSpectateAttestSoon();
                 var sb = new StringBuilder();
                 sb.Append('{')
                   .Append($"\"steam_id\":\"{Escape(sid)}\",")
-                  .Append($"\"room_name\":\"{Escape(roomAtSend)}\",")
-                  .Append("\"spectators\":[");
+                  .Append($"\"room_name\":\"{Escape(roomAtSend)}\",");
+                if (sendTuple)
+                    sb.Append($"\"observed_game_id\":\"{Escape(seenGameId)}\",")
+                      .Append($"\"observed_generation\":{seenGeneration},")
+                      .Append($"\"observed_mode\":\"{Escape(seenMode)}\",")
+                      .Append($"\"observed_source_ref\":\"{Escape(seenSource)}\",")
+                      .Append($"\"observed_roster\":\"{Escape(seenRoster)}\",");
+                sb.Append("\"spectators\":[");
                 bool first = true;
                 for (int i = 0; i < specs.Length; i++)
                 {
@@ -24035,6 +28719,26 @@ namespace CompetitiveRounds
                         {
                             if (!string.Equals(Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "", roomAtSend, StringComparison.Ordinal))
                                 return;
+                        }
+                        catch { return; }
+                        // Round 5 MEDIUM 1: the room's participants changed
+                        // between this snapshot and the server's read. Nothing
+                        // was validated and nothing is rejected - no kick, no
+                        // roster publish (its results are empty) - and a
+                        // fresh snapshot goes out after a short delay, a
+                        // bounded number of times; the periodic tick after
+                        // that is the next attempt.
+                        try
+                        {
+                            if (ExtractJsonString(resp, "status") == "retry")
+                            {
+                                // the row moved on (round 6: its source or game
+                                // too): a fresh attest answer for the retry
+                                GameStateWatcher.RequestSpectateAttestSoon();
+                                if (attempt < SPECTATE_VALIDATE_RETRY_MAX)
+                                    Plugin.Instance.StartCoroutine(SpectateValidateRetryAfter(attempt + 1, roomAtSend));
+                                return;
+                            }
                         }
                         catch { return; }
                         try

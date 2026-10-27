@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Seat evidence replay harness: compiles the REAL plugin/SeatEvidence.cs
+       and plugin/SeatEvidenceCore.cs, as they ship, against Stubs.cs (working
+       stand-ins for Unity, Photon, ROUNDS and the plug-in members they touch)
+       and drives scripted replays through the Unity-side classification.
+       Mutants are built from COPIES of SeatEvidence.cs (SeatEvidenceSource
+       override); the tracked file is never modified.
+       With IcRealEvidence=true the REAL plugin/IdentityClockEvidence.cs (or a
+       mutant COPY, IdentityEvidenceSource) is compiled too, in place of the
+       stub class, for the production quit flush case. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>ReplayTests</AssemblyName>
+    <RootNamespace>SeatEvidenceReplay</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0169;CS0649;CS0414;CS0162</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(SeatEvidenceSource)' == ''">
+    <SeatEvidenceSource>$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidence.cs</SeatEvidenceSource>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IdentityEvidenceSource)' == ''">
+    <IdentityEvidenceSource>$(MSBuildThisFileDirectory)..\..\..\plugin\IdentityClockEvidence.cs</IdentityEvidenceSource>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IcRealEvidence)' == 'true'">
+    <DefineConstants>$(DefineConstants);IC_REAL_EVIDENCE</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs" />
+    <Compile Include="$(SeatEvidenceSource)" />
+    <!-- the identity-clock quit flush loop (FlushCaptures), run by the
+         identity_closing_next_boot case against the real SpoolClosing -->
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\IdentityClockCore.cs" />
+    <Compile Include="$(IdentityEvidenceSource)" Condition="'$(IcRealEvidence)' == 'true'" />
+    <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)StubsIc.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>

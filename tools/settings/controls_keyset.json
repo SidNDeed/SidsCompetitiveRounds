@@ -1,0 +1,61 @@
+{
+ "home": "SubControls",
+ "rows": [
+  "SKbMenuToggle",
+  "SKbScoreboard",
+  "SKbQuickChat",
+  "SKbDanceWheel",
+  "SKbChatOpen",
+  "SKbChatChannel",
+  "SKbChatOverlayMode",
+  "SKbMapSkinCycle",
+  "SKbAvatarSwap",
+  "SKbMoveUp",
+  "SKbMoveDown",
+  "SKbMoveLeft",
+  "SKbMoveRight",
+  "SKbJump",
+  "SKbFire",
+  "SKbBlock"
+ ],
+ "raw_controls": [],
+ "keys": [
+  "SKbAvatarSwap",
+  "SKbBlock",
+  "SKbChatChannel",
+  "SKbChatOpen",
+  "SKbChatOverlayMode",
+  "SKbDanceWheel",
+  "SKbFire",
+  "SKbJump",
+  "SKbMapSkinCycle",
+  "SKbMenuToggle",
+  "SKbMoveDown",
+  "SKbMoveLeft",
+  "SKbMoveRight",
+  "SKbMoveUp",
+  "SKbQuickChat",
+  "SKbScoreboard"
+ ],
+ "parts": {
+  "row": [
+   "_q",
+   "_l",
+   "_c"
+  ],
+  "cell": [
+   "_b",
+   "_x",
+   "_r"
+  ]
+ },
+ "headings": [
+  "SKbHeadMod",
+  "SKbHeadGame"
+ ],
+ "chrome": [
+  "SKbResetAll (under SetDetFoot)",
+  "SKbResetAllC (under SetDetFoot)",
+  "SKbResetAllX (under SetDetFoot)"
+ ]
+}

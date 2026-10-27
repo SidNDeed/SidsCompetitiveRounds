@@ -418,10 +418,11 @@ def test_the_route_takes_its_field_name_from_the_pinned_constant(monkeypatch):
 
 def test_the_transitional_alias_is_gone_from_the_wire():
     """The first spelling was carried as a SECOND key while the lanes were
-    apart. The removal condition written at the constant was that the lanes be
-    merged and the client literal be read off the merged tree; this branch is
-    that merge and the test above is that read, so the route advertises one
-    name for one boolean.
+    apart. The removal condition written at the constant had two parts: both
+    lanes on one branch, and the client literal taken from the client source
+    rather than transcribed. This branch carries both lanes and the test above
+    takes the literal that way, so the route advertises one name for one
+    boolean.
 
     An absence assertion passes trivially against a route that returned
     nothing, so the canonical key is asserted PRESENT in the same payload as

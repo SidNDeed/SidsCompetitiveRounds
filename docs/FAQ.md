@@ -1,8 +1,10 @@
 # Sid's Competitive Rounds — FAQ
 
 Canonical copy of the #scr-faq sheet. Posted to Discord channel `1159243585309384805`
-via `pending_channel_posts` (migration 110). Keep this file and the migration in sync —
-to re-post an edited section, insert a fresh row via a new migration.
+via `pending_channel_posts` (migration 110). Since migration 338 a correction EDITS the
+posted message in place instead of appending a new one: change a section here, then carry
+the same text in a migration that bumps that row's `revision`.
+`backend/tests/test_faq_surfaces.py` fails when this file and the migration disagree.
 
 Each `## Message N` section below is one Discord message (must stay under 2000 chars).
 
@@ -60,9 +62,9 @@ Everything else records as **casual** (still tracked, no rating change). The mod
 - **1v1 ranked queue:** F5 → Ranked tab → Search Ranked. When a match is found, both players have 90 seconds to click Ready — then the mod auto-connects you into a private room. Don't press Escape while it's loading; that cancels the connection (the mod recovers, but it costs time).
 - **2v2:** F5 → 2v2 tab. Two queues: **Search Random** (auto-balanced teams by rating) and **Find Custom Lobby** (you pick your team — grab 3 friends). 2v2 has its own rating and leaderboard.
 - **1v2:** F5 → 1v2 tab. One solo against a duo — separate Solo and Duo leaderboards, and the solo can take an extra starting pick if the lobby enables it.
-- **FFA:** F5 → FFA tab. 3-10 players, everyone for themselves — last one standing scores, first to 5 points wins, everyone picks cards at the same time. Own rating and leaderboard.
+- **FFA:** F5 → FFA tab. 3-10 players, everyone for themselves — last one standing scores, first to **5** points wins by default (the host can set that target anywhere from 3 to 10), everyone picks cards at the same time. Own rating and leaderboard.
 - Queue searches cap at **30 minutes** in every mode — you'll get an in-game notice if you hit it; just rejoin if you're still around.
-- **Tournaments:** F5 → Tournaments. A sync (same-time) tournament runs weekly — sign up, vote a time, the bracket auto-connects your matches. An async tournament runs every ~6 weeks with a week per round; coordinate with your opponent on Discord.
+- **Tournaments:** F5 → Tournaments. A sync (same-time) tournament runs weekly — sign up, vote a time, the bracket auto-connects your matches. An async tournament follows the bracket, not a calendar: the next one opens **2 days after the previous one finishes**, and if that one was cancelled (or never recorded a finish) only **24 hours** after it was created, so a bracket that failed to fill doesn't cost everyone a wait. Each round has a **7-day** deadline; coordinate with your opponent on Discord.
 - **Playing a friend directly?** Private-room games between two modded, ranked-enabled players count as ranked automatically.
 
 ## Message 5 — Gold, shop, bets, achievements
@@ -71,8 +73,8 @@ Everything else records as **casual** (still tracked, no rating change). The mod
 
 - You earn **gold + XP** from every recorded match; ranked pays roughly double, winning pays more.
 - **Shop (F5):** titles, trails, map color skins, nametag styles, body colors, cursors, effects — and community-made **character cosmetics** (faces, accessories), equipped in ROUNDS' own character editor (F8 or main-menu Characters).
-- **Achievements (F5):** one-time challenges paying 100g each; some unlock exclusive titles.
-- **Betting:** you can bet gold on other players' live ranked series — in-game from the Leaderboard tab's live panel, or from Discord via the live-bet buttons the bot posts. Bets lock once game 1 reaches 2 points. If a series never finishes, stakes are refunded automatically (~1 hour).
+- **Achievements (F5):** one-time challenges paying **100g** by default — the hardest pay 300g, 500g or 1000g; some unlock exclusive titles.
+- **Betting:** you can bet gold on other players' live ranked series — in-game from the Leaderboard tab's live panel, or from Discord via the live-bet buttons the bot posts. Bets lock once game 1 reaches 2 points. If a series never finishes, stakes are refunded automatically: after 30 minutes when no game was ever reported, after 60 minutes when it stalls mid-series. Tournament series sit outside both clocks — a tournament bet settles on the bracket instead, and a forfeited or bye'd match refunds its stakes.
 - **Link your Discord** with `/link` in the Discord server — connects your accounts for bet buttons, bug-report DMs, and server-booster gold perks.
 - In-game chat: press **T** during a game. It bridges both ways with the #in-game-chat channel.
 
@@ -82,7 +84,7 @@ Everything else records as **casual** (still tracked, no rating change). The mod
 
 - **"Mod disabled: other mods detected"** — remove every other BepInEx plugin. Vanilla ROUNDS + this mod only.
 - **F5 does nothing / menu button gone** — restart ROUNDS. If it keeps happening, file a bug report.
-- **Queue found a match but nothing happened** — usually the other player didn't ready in time; you're re-queued automatically. If you get stuck alone in a room, the mod returns you to the menu after ~60s, penalty-free.
+- **Queue found a match but nothing happened** — usually the other player didn't ready in time; you're re-queued automatically. If you get stuck alone in a room the mod warns you, then returns you to the menu on its own — 60s in 1v1, 90s in 2v2 and 1v2, 2 min in FFA, 6 min in a tournament room (the server gives your tournament opponent a longer grace). No penalty either way.
 - **Leaderboard/stats look frozen** — the server may be restarting; check #announcements, give it a minute.
 - **Game froze or crashed?** Relaunch and rejoin your opponent — the series resumes.
 

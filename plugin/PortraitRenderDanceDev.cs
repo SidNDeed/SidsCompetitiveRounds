@@ -23,6 +23,8 @@ namespace CompetitiveRounds
     ///                     [,faultframe=K][,teardownmutant]             T45's job teardown arm, L1's order (teardownmutant: the mutant arm)
     ///                     [,multi=K][,jobs=N]                          S2F3 evidence: K same-state repeats of each frame's black pass compared; N job workers
     ///                     [,msaa4]                                     S2F3: T36's mutant arm, the frames and the still through the old 4x MSAA targets
+    ///                     [,effect=SKU|none][,color=SKU:HEX|none]      bug 405: this effect / colour on the rig (local only, nothing selected or sent)
+    ///                     [,fit=solid][,fitgrow=F]                     bug 405: fit=solid is the mutant arm (the solid-only fit); the growth cap
     ///   TestPlayerCards = portrait:dance,t38[,mutant]                  T38's TryGetPose harness
     ///   TestPlayerCards = portrait:dance,decide[,sku=S][,nomemory][,recolor][,stored=dance|base|none]   T48's decision probe
     ///
@@ -76,6 +78,10 @@ namespace CompetitiveRounds
                 else if (p.StartsWith("multi=") && int.TryParse(p.Substring(6), out iv)) opt.multi = Mathf.Clamp(iv, 0, 16);
                 else if (p.StartsWith("jobs=") && int.TryParse(p.Substring(5), out iv)) opt.jobs = Mathf.Max(0, iv);
                 else if (p == "msaa4") opt.msaa4 = true;
+                else if (p == "fit=solid") opt.fitSolid = true;
+                else if (p.StartsWith("fitgrow=") && float.TryParse(p.Substring(8), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out fv)) opt.fitGrow = Mathf.Clamp(fv, 1f, 4f);
+                else if (p.StartsWith("effect=")) opt.effect = p.Substring(7) == "none" ? "" : p.Substring(7);
+                else if (p.StartsWith("color=")) opt.color = p.Substring(6) == "none" ? "" : p.Substring(6);
                 else Plugin.Log.LogInfo("[DANCE] lever: unknown option '" + p + "'");
             }
             if (sub == "t38") { DanceDevT38(mutant); return; }
@@ -96,6 +102,7 @@ namespace CompetitiveRounds
                 {
                     local = true, tag = template.tag, holdFrames = template.holdFrames, fps = template.fps, fixedDt = template.fixedDt,
                     tclock = template.tclock, matteq = template.matteq, multi = template.multi, jobs = template.jobs, msaa4 = template.msaa4,
+                    fitSolid = template.fitSolid, fitGrow = template.fitGrow, effect = template.effect, color = template.color,
                 };
                 float waitUntil = Time.realtimeSinceStartup + 30f;
                 while ((Rendering || UploadInFlight) && Time.realtimeSinceStartup < waitUntil) yield return null;

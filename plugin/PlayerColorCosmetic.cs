@@ -29,6 +29,17 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class PlayerColorCosmetic
     {
+        /// <summary>Item 13: the named writer of the settings row and its
+        /// per-tab reset, carrying both live refreshes the row's handler used
+        /// to run inline (the body colours here and the effect tint).</summary>
+        internal static void SetShowPlayerColors(bool on)
+        {
+            if (Plugin.ShowPlayerColors == null) return;
+            Plugin.ShowPlayerColors.Value = on;
+            try { OnShowPlayerColorsToggled(); } catch { }
+            try { PlayerEffectCosmetic.OnShowPlayerColorsToggled(); } catch { }
+        }
+
         private const string PROP_SKU   = "cr_pcolor_sku";
         private const string PROP_COLOR = "cr_pcolor_color";
 

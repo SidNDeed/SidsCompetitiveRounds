@@ -115,9 +115,10 @@ MARK_BAKED = "SCR_GRADE_TABLE=BAKED"
 # what may change. 3: the particle pin reaches sub-emitters and steps in fixed
 # increments with prewarm off and path-only seeds; the table and the length are
 # RECIPE 2's. The length was picked in game under RECIPE 2's simulation, so it
-# is re-checked in game with `sweep` before a RECIPE 3 build that uploads is
-# published; once RECIPE 3 pictures are stored, a different length is RECIPE 4.
-LEDGER = {2: (0xfad306d7, 5.5), 3: (0xfad306d7, 5.5)}
+# is re-checked in game with `sweep` before a build that uploads is published.
+# 4: the frame is centred on the rig transform rather than on the solid union
+# (ComputeBounds); the table and the length are still RECIPE 2's.
+LEDGER = {2: (0xfad306d7, 5.5), 3: (0xfad306d7, 5.5), 4: (0xfad306d7, 5.5)}
 
 
 # ── the digest, as PortraitGrade.GradeDigest computes it ────────────────────
@@ -2725,7 +2726,8 @@ FREE_ARM = [
     "if ((h.rig.transform.position.x > rx) == (a.transform.position.x > rx)) { g.gunSide++; continue; }",
     "Vector3 rest = a.transform.parent.TransformPoint(a.startPos);",
     None,   # armMoved: read before the writes below
-    "a.target.position = rest;",
+    # the baseline write forgets the dance delta it supersedes (RR-LAND-1)
+    "DanceEmotes.WriteArmBaseline(a.target, rest);",
     "a.velolcity = Vector3.zero;",
     "if (a.sinceRaise < 0.3f) a.sinceRaise = 0.3f;",
     "g.free++;",
@@ -2802,9 +2804,13 @@ def test_the_gun_pin_predicate_keeps_every_term_of_the_rig_contract():
     # negative controls: a movement term dropped (MW), the rest written before it is compared
     dropped = _mut(arms, " || a.sinceRaise < 0.3f) g.armMoved = true;", ") g.armMoved = true;")
     assert any("armMoved asks" in x for x in free_arm_problems(dropped))
-    written = _mut(_mut(arms, "                    a.target.position = rest;\n", ""),
-                   "                    if ((a.target.position - rest)", "                    a.target.position = rest;\n                    if ((a.target.position - rest)")
+    baseline = "                    DanceEmotes.WriteArmBaseline(a.target, rest);"
+    written = _mut(_mut(arms, baseline + "   // forgets a dance delta still owed on it (RR-LAND-1)\n", ""),
+                   "                    if ((a.target.position - rest)", baseline + "\n                    if ((a.target.position - rest)")
     assert any("the free arm" in x for x in free_arm_problems(written))
+    # negative control (RR-LAND-1): a bare position write, which leaves an owed dance delta remembered
+    bare = _mut(arms, "DanceEmotes.WriteArmBaseline(a.target, rest);", "a.target.position = rest;")
+    assert any("the free arm" in x for x in free_arm_problems(bare))
     # The springs, whole. A mirror spring's side is its own Update's test (the
     # root 0.1 left of the holder is the left side), and its rest pose is what
     # that Update settles to on that side: position, rotation, no velocity. A

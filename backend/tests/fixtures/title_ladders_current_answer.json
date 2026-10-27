@@ -1,0 +1,750 @@
+{
+ "steam_id": "STEAM-ID-PLACEHOLDER",
+ "active_line": null,
+ "ladders": [
+  {
+   "line": "rat",
+   "name": "Rat",
+   "games": 0,
+   "tier": 1,
+   "max_tier": 5,
+   "next_tier": 2,
+   "next_threshold": 10,
+   "next_names": [
+    "Rat Leader"
+   ],
+   "games_to_next": 10,
+   "rungs": [
+    {
+     "tier": 1,
+     "sku": "title_ladder_rat_1",
+     "item_id": 360,
+     "name": "Rat",
+     "description": "Small, quick, everywhere.",
+     "rarity": "rare",
+     "preview_color": "#9AA0A6",
+     "threshold": 0,
+     "price": 1000,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 2,
+     "sku": "title_ladder_rat_2",
+     "item_id": 361,
+     "name": "Rat Leader",
+     "description": "The other rats listen.",
+     "rarity": "rare",
+     "preview_color": "#B6BDC6",
+     "threshold": 10,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 3,
+     "sku": "title_ladder_rat_3",
+     "item_id": 362,
+     "name": "Rat Lord",
+     "description": "A lordship of gutters.",
+     "rarity": "epic",
+     "preview_color": "#A88CE0",
+     "threshold": 30,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 4,
+     "sku": "title_ladder_rat_4_king",
+     "item_id": 363,
+     "name": "Rat King",
+     "description": "Crowned in the tunnels.",
+     "rarity": "epic",
+     "preview_color": "#E0B33A",
+     "threshold": 75,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 4,
+     "sku": "title_ladder_rat_4_queen",
+     "item_id": 364,
+     "name": "Rat Queen",
+     "description": "Crowned in the tunnels.",
+     "rarity": "epic",
+     "preview_color": "#E0B33A",
+     "threshold": 75,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 5,
+     "sku": "title_ladder_rat_5",
+     "item_id": 365,
+     "name": "Rat God",
+     "description": "Worshipped. Still a rat.",
+     "rarity": "legendary",
+     "preview_color": "#FFE066",
+     "threshold": 150,
+     "price": 0,
+     "owned": false,
+     "active": false
+    }
+   ]
+  },
+  {
+   "line": "cat",
+   "name": "Cat",
+   "games": 0,
+   "tier": 1,
+   "max_tier": 6,
+   "next_tier": 2,
+   "next_threshold": 10,
+   "next_names": [
+    "Cat"
+   ],
+   "games_to_next": 10,
+   "rungs": [
+    {
+     "tier": 1,
+     "sku": "title_ladder_cat_1",
+     "item_id": 366,
+     "name": "Kitten",
+     "description": "Mostly paws.",
+     "rarity": "rare",
+     "preview_color": "#F2C1A0",
+     "threshold": 0,
+     "price": 1000,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 2,
+     "sku": "title_ladder_cat_2",
+     "item_id": 367,
+     "name": "Cat",
+     "description": "Sovereign of the sofa.",
+     "rarity": "rare",
+     "preview_color": "#E8A87C",
+     "threshold": 10,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 3,
+     "sku": "title_ladder_cat_3",
+     "item_id": 368,
+     "name": "Big Cat",
+     "description": "No longer a lap animal.",
+     "rarity": "epic",
+     "preview_color": "#C97B4A",
+     "threshold": 30,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 4,
+     "sku": "title_ladder_cat_4",
+     "item_id": 369,
+     "name": "Alpha Cat",
+     "description": "The fight ends when you say.",
+     "rarity": "epic",
+     "preview_color": "#B25E2E",
+     "threshold": 75,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 5,
+     "sku": "title_ladder_cat_5",
+     "item_id": 370,
+     "name": "President Meow",
+     "description": "Elected unopposed.",
+     "rarity": "legendary",
+     "preview_color": "#E5A83B",
+     "threshold": 150,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 6,
+     "sku": "title_ladder_cat_6",
+     "item_id": 371,
+     "name": "Cat Deity",
+     "description": "Nine lives, one throne.",
+     "rarity": "legendary",
+     "preview_color": "#FFD966",
+     "threshold": 300,
+     "price": 0,
+     "owned": false,
+     "active": false
+    }
+   ]
+  },
+  {
+   "line": "dog",
+   "name": "Dog",
+   "games": 0,
+   "tier": 1,
+   "max_tier": 6,
+   "next_tier": 2,
+   "next_threshold": 10,
+   "next_names": [
+    "Dog"
+   ],
+   "games_to_next": 10,
+   "rungs": [
+    {
+     "tier": 1,
+     "sku": "title_ladder_dog_1",
+     "item_id": 372,
+     "name": "Pup",
+     "description": "Enthusiasm exceeds skill.",
+     "rarity": "rare",
+     "preview_color": "#C7A87B",
+     "threshold": 0,
+     "price": 1000,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 2,
+     "sku": "title_ladder_dog_2",
+     "item_id": 373,
+     "name": "Dog",
+     "description": "Reliable. Loud.",
+     "rarity": "rare",
+     "preview_color": "#B08D5A",
+     "threshold": 10,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 3,
+     "sku": "title_ladder_dog_3",
+     "item_id": 374,
+     "name": "Good Dog",
+     "description": "Told so, repeatedly.",
+     "rarity": "epic",
+     "preview_color": "#98703C",
+     "threshold": 30,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 4,
+     "sku": "title_ladder_dog_4",
+     "item_id": 375,
+     "name": "Top Dog",
+     "description": "Head of the pack.",
+     "rarity": "epic",
+     "preview_color": "#D4913A",
+     "threshold": 75,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 5,
+     "sku": "title_ladder_dog_5",
+     "item_id": 376,
+     "name": "Big Dog",
+     "description": "The pack is now a problem.",
+     "rarity": "legendary",
+     "preview_color": "#E9AE45",
+     "threshold": 150,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 6,
+     "sku": "title_ladder_dog_6",
+     "item_id": 377,
+     "name": "Dog God",
+     "description": "Very good. Divine, even.",
+     "rarity": "legendary",
+     "preview_color": "#FFDE8A",
+     "threshold": 300,
+     "price": 0,
+     "owned": false,
+     "active": false
+    }
+   ]
+  },
+  {
+   "line": "turtle",
+   "name": "Turtle",
+   "games": 0,
+   "tier": 1,
+   "max_tier": 6,
+   "next_tier": 2,
+   "next_threshold": 10,
+   "next_names": [
+    "Turtle"
+   ],
+   "games_to_next": 10,
+   "rungs": [
+    {
+     "tier": 1,
+     "sku": "title_ladder_turtle_1",
+     "item_id": 378,
+     "name": "Hatchling",
+     "description": "Freshly out of the shell.",
+     "rarity": "rare",
+     "preview_color": "#8FBF9F",
+     "threshold": 0,
+     "price": 1000,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 2,
+     "sku": "title_ladder_turtle_2",
+     "item_id": 379,
+     "name": "Turtle",
+     "description": "Slow is a strategy.",
+     "rarity": "rare",
+     "preview_color": "#6FA882",
+     "threshold": 10,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 3,
+     "sku": "title_ladder_turtle_3",
+     "item_id": 380,
+     "name": "Snapper",
+     "description": "The bite lands first.",
+     "rarity": "epic",
+     "preview_color": "#4E8C66",
+     "threshold": 30,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 4,
+     "sku": "title_ladder_turtle_4",
+     "item_id": 381,
+     "name": "Elder Turtle",
+     "description": "Outlasted everyone.",
+     "rarity": "epic",
+     "preview_color": "#3F7A57",
+     "threshold": 75,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 5,
+     "sku": "title_ladder_turtle_5",
+     "item_id": 382,
+     "name": "Turtle Sage",
+     "description": "Patience as a weapon.",
+     "rarity": "legendary",
+     "preview_color": "#6BC49A",
+     "threshold": 150,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 6,
+     "sku": "title_ladder_turtle_6",
+     "item_id": 383,
+     "name": "World Turtle",
+     "description": "Everything rests on you.",
+     "rarity": "legendary",
+     "preview_color": "#9BF0C4",
+     "threshold": 300,
+     "price": 0,
+     "owned": false,
+     "active": false
+    }
+   ]
+  },
+  {
+   "line": "rabbit",
+   "name": "Rabbit",
+   "games": 0,
+   "tier": 1,
+   "max_tier": 6,
+   "next_tier": 2,
+   "next_threshold": 10,
+   "next_names": [
+    "Rabbit"
+   ],
+   "games_to_next": 10,
+   "rungs": [
+    {
+     "tier": 1,
+     "sku": "title_ladder_rabbit_1",
+     "item_id": 384,
+     "name": "Bunny",
+     "description": "Twitchy and fast.",
+     "rarity": "rare",
+     "preview_color": "#F3C6D6",
+     "threshold": 0,
+     "price": 1000,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 2,
+     "sku": "title_ladder_rabbit_2",
+     "item_id": 385,
+     "name": "Rabbit",
+     "description": "Gone before the shot.",
+     "rarity": "rare",
+     "preview_color": "#E3A0BC",
+     "threshold": 10,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 3,
+     "sku": "title_ladder_rabbit_3",
+     "item_id": 386,
+     "name": "Jackrabbit",
+     "description": "Nothing catches you.",
+     "rarity": "epic",
+     "preview_color": "#CE7A9E",
+     "threshold": 30,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 4,
+     "sku": "title_ladder_rabbit_4",
+     "item_id": 387,
+     "name": "Hare Apparent",
+     "description": "Next in line.",
+     "rarity": "epic",
+     "preview_color": "#B85C86",
+     "threshold": 75,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 5,
+     "sku": "title_ladder_rabbit_5",
+     "item_id": 388,
+     "name": "Moon Rabbit",
+     "description": "Pounding something on the moon.",
+     "rarity": "legendary",
+     "preview_color": "#C79BF0",
+     "threshold": 150,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 6,
+     "sku": "title_ladder_rabbit_6",
+     "item_id": 389,
+     "name": "Rabbit God",
+     "description": "A god of small quick things.",
+     "rarity": "legendary",
+     "preview_color": "#EBD1FF",
+     "threshold": 300,
+     "price": 0,
+     "owned": false,
+     "active": false
+    }
+   ]
+  },
+  {
+   "line": "bear",
+   "name": "Bear",
+   "games": 0,
+   "tier": 1,
+   "max_tier": 6,
+   "next_tier": 2,
+   "next_threshold": 10,
+   "next_names": [
+    "Bear"
+   ],
+   "games_to_next": 10,
+   "rungs": [
+    {
+     "tier": 1,
+     "sku": "title_ladder_bear_1",
+     "item_id": 390,
+     "name": "Cub",
+     "description": "Cute until it is not.",
+     "rarity": "rare",
+     "preview_color": "#C59A6B",
+     "threshold": 0,
+     "price": 1000,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 2,
+     "sku": "title_ladder_bear_2",
+     "item_id": 391,
+     "name": "Bear",
+     "description": "Simply large.",
+     "rarity": "rare",
+     "preview_color": "#A87A4E",
+     "threshold": 10,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 3,
+     "sku": "title_ladder_bear_3",
+     "item_id": 392,
+     "name": "Grizzly",
+     "description": "The argument is over.",
+     "rarity": "epic",
+     "preview_color": "#8A5C35",
+     "threshold": 30,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 4,
+     "sku": "title_ladder_bear_4",
+     "item_id": 393,
+     "name": "Bear Boss",
+     "description": "Runs the woods.",
+     "rarity": "epic",
+     "preview_color": "#6F4526",
+     "threshold": 75,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 5,
+     "sku": "title_ladder_bear_5",
+     "item_id": 394,
+     "name": "Ursa Major",
+     "description": "Written into the sky.",
+     "rarity": "legendary",
+     "preview_color": "#D9A85C",
+     "threshold": 150,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 6,
+     "sku": "title_ladder_bear_6",
+     "item_id": 395,
+     "name": "Bear God",
+     "description": "The woods run themselves now.",
+     "rarity": "legendary",
+     "preview_color": "#FFDDA1",
+     "threshold": 300,
+     "price": 0,
+     "owned": false,
+     "active": false
+    }
+   ]
+  },
+  {
+   "line": "eagle",
+   "name": "Eagle",
+   "games": 0,
+   "tier": 1,
+   "max_tier": 6,
+   "next_tier": 2,
+   "next_threshold": 10,
+   "next_names": [
+    "Eagle"
+   ],
+   "games_to_next": 10,
+   "rungs": [
+    {
+     "tier": 1,
+     "sku": "title_ladder_eagle_1",
+     "item_id": 396,
+     "name": "Eaglet",
+     "description": "Not yet airborne.",
+     "rarity": "rare",
+     "preview_color": "#D9CBA3",
+     "threshold": 0,
+     "price": 1000,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 2,
+     "sku": "title_ladder_eagle_2",
+     "item_id": 397,
+     "name": "Eagle",
+     "description": "The sky is a map.",
+     "rarity": "rare",
+     "preview_color": "#BFA96B",
+     "threshold": 10,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 3,
+     "sku": "title_ladder_eagle_3",
+     "item_id": 398,
+     "name": "Golden Eagle",
+     "description": "Gilded and patient.",
+     "rarity": "epic",
+     "preview_color": "#D4AF37",
+     "threshold": 30,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 4,
+     "sku": "title_ladder_eagle_4",
+     "item_id": 399,
+     "name": "Sky Lord",
+     "description": "Owns the airspace.",
+     "rarity": "epic",
+     "preview_color": "#9FC6E8",
+     "threshold": 75,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 5,
+     "sku": "title_ladder_eagle_5",
+     "item_id": 400,
+     "name": "Thunderbird",
+     "description": "Arrives with the storm.",
+     "rarity": "legendary",
+     "preview_color": "#7FA9FF",
+     "threshold": 150,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 6,
+     "sku": "title_ladder_eagle_6",
+     "item_id": 401,
+     "name": "Eagle God",
+     "description": "The storm arrives with you.",
+     "rarity": "legendary",
+     "preview_color": "#CFE4FF",
+     "threshold": 300,
+     "price": 0,
+     "owned": false,
+     "active": false
+    }
+   ]
+  },
+  {
+   "line": "shark",
+   "name": "Shark",
+   "games": 0,
+   "tier": 1,
+   "max_tier": 6,
+   "next_tier": 2,
+   "next_threshold": 10,
+   "next_names": [
+    "Shark"
+   ],
+   "games_to_next": 10,
+   "rungs": [
+    {
+     "tier": 1,
+     "sku": "title_ladder_shark_1",
+     "item_id": 402,
+     "name": "Shark Pup",
+     "description": "Teeth already.",
+     "rarity": "rare",
+     "preview_color": "#A9C6D6",
+     "threshold": 0,
+     "price": 1000,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 2,
+     "sku": "title_ladder_shark_2",
+     "item_id": 403,
+     "name": "Shark",
+     "description": "Never stops moving.",
+     "rarity": "rare",
+     "preview_color": "#7FA8BF",
+     "threshold": 10,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 3,
+     "sku": "title_ladder_shark_3",
+     "item_id": 404,
+     "name": "Great White",
+     "description": "The water empties.",
+     "rarity": "epic",
+     "preview_color": "#5B88A3",
+     "threshold": 30,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 4,
+     "sku": "title_ladder_shark_4",
+     "item_id": 405,
+     "name": "Apex Shark",
+     "description": "Top of every chain here.",
+     "rarity": "epic",
+     "preview_color": "#416B87",
+     "threshold": 75,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 5,
+     "sku": "title_ladder_shark_5",
+     "item_id": 406,
+     "name": "Megalodon",
+     "description": "Too big for the ocean.",
+     "rarity": "legendary",
+     "preview_color": "#2F5570",
+     "threshold": 150,
+     "price": 0,
+     "owned": false,
+     "active": false
+    },
+    {
+     "tier": 6,
+     "sku": "title_ladder_shark_6",
+     "item_id": 407,
+     "name": "Shark God",
+     "description": "The ocean is the pet.",
+     "rarity": "legendary",
+     "preview_color": "#8FD8FF",
+     "threshold": 300,
+     "price": 0,
+     "owned": false,
+     "active": false
+    }
+   ]
+  }
+ ]
+}

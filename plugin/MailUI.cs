@@ -59,7 +59,7 @@ namespace CompetitiveRounds
         private static object txtComposeTitle, txtReplyTo, txtReplySubject, txtSubjectCount, txtBodyCount, txtComposeStatus;
         private static GameObject toRow, ccRow, toChips, ccChips, subjectAnchor, subjectLabel, bodyAnchor, btnAddTo, btnAddCc, btnSend;
         // settings
-        private static GameObject btnMailFrom, btnBlocked, blockedList;
+        private static GameObject btnMailFrom, btnMailRelay, btnBlocked, blockedList;
 
         // ── list state ──────────────────────────────────────────────────────
         private static readonly List<MailClient.Summary> inboxItems = new List<MailClient.Summary>();
@@ -123,6 +123,7 @@ namespace CompetitiveRounds
         private static bool blocksExpanded, blocksLoading;
         private static int blocksVersion, blocksPainted = -1;
         private static string mailFromPending;              // optimistic value while a PUT is in flight
+        private static bool? mailRelayPending;              // item 5: same, for the Discord relay switch
 
         private static GUIStyle styleField, styleArea, styleHint, styleHintTop, styleModalLabel, styleModalTitle, styleReasonOn, styleReasonOff;
         private static float lastDrawWarnAt = -999f;
@@ -587,23 +588,34 @@ namespace CompetitiveRounds
 
         // ── Settings row (hooked from NativeUI.BuildSettingsTab / RefreshSettings) ──
 
-        /// <summary>The Data &amp; Privacy row: "Who can mail me" (cycles
-        /// everyone → people I have played → nobody, PUT /mail/settings) and the
-        /// blocked-sender list with Unblock, so both mail preferences sit together.</summary>
+        /// <summary>The Chat &amp; mail rows (item 13): "Who can mail me" (a
+        /// dropdown over MailClient.MAIL_FROM_VALUES, PUT /mail/settings), the
+        /// Discord relay switch, and the blocked-sender disclosure with its
+        /// Unblock list, so every mail preference sits together. Each is a
+        /// typed settings row; the two captions are the rows' help text.</summary>
         public static void BuildSettingsRow(Transform parent)
         {
-            var group = new GameObject("SMail_grp");
-            group.transform.SetParent(parent, false);
-            group.AddComponent<RectTransform>();
-            UIFactory.AddVLG(group, spacing: 3);
-            UIFactory.AddLE(group, flexH: 0);
-            // Sept 8 item 4: SettingsButton pins the 340 px width behind a flex spacer;
-            // a bare Btn inside this VLG was stretched to the full panel width.
-            btnMailFrom = NativeUI.SettingsButton(group.transform, "SMailFrom", "", C_WHITE, C_BTN, new Vector2(340, 28), CycleMailFrom);
-            UIFactory.CreateText("SMailFrom_d", group.transform, "Who may send you in-game mail. Blocked senders never reach you.", 13f, C_DIM, sizeDelta: new Vector2(700, 18));
-            btnBlocked = NativeUI.SettingsButton(group.transform, "SMailBlocked", "", C_WHITE, C_BTN, new Vector2(340, 28), ToggleBlockedList);
+            btnMailFrom = NativeUI.SettingsDropdown(parent, "SMailFrom",
+                I18n.Tr("Who may send you in-game mail. Blocked senders never reach you."),
+                () => MailClient.MAIL_FROM_VALUES, () => mailFromPending ?? MailClient.MailFrom,
+                id => { SetMailFrom(id); });
+            btnMailRelay = NativeUI.SettingsSwitch(parent, "SMailRelay",
+                I18n.Tr("Also DM new mail to your linked Discord. You can reply from there."),
+                () => mailRelayPending ?? MailClient.DiscordRelay, ToggleMailRelay,
+                // Round-2 R4: before a status poll has landed, or with no
+                // linked Discord, the stored flag is not something the row can
+                // act on, so the switch paints neutral beside the label's
+                // "checking..." / "link Discord first"; a click still reaches
+                // SetMailRelay, which answers with the same explanation.
+                known: () => MailClient.StatusEverSeen && MailClient.DiscordLinked);
+            // Ask for the relay state now rather than waiting out the poll
+            // interval: this row is the only place it is shown, and an empty
+            // answer here reads as a wrong one.
+            if (!MailClient.StatusEverSeen) MailClient.PollNow();
+            btnBlocked = NativeUI.SettingsDisclosure(parent, "SMailBlocked", null,
+                () => blocksExpanded, ToggleBlockedList);
             blockedList = new GameObject("SMailBlockedList");
-            blockedList.transform.SetParent(group.transform, false);
+            blockedList.transform.SetParent(parent, false);
             blockedList.AddComponent<RectTransform>();
             UIFactory.AddVLG(blockedList, spacing: 2, padL: 12);
             UIFactory.AddLE(blockedList, flexH: 0);
@@ -611,10 +623,11 @@ namespace CompetitiveRounds
             blocksPainted = -1;
         }
 
-        public static void RefreshSettingsRow()
+        /// <summary>Item 13: the mail-from row's paint, as a function of the
+        /// value, so the settings pane can render the recommended value
+        /// (everyone) through the same literals the live row paints.</summary>
+        internal static void PaintMailFrom(object t, string v)
         {
-            if (btnMailFrom == null) return;
-            string v = mailFromPending ?? MailClient.MailFrom;
             string label;
             switch (v)
             {
@@ -622,7 +635,36 @@ namespace CompetitiveRounds
                 case "nobody": label = I18n.Tr("Who can mail me: <color=#FF9966>Nobody</color>"); break;
                 default: label = I18n.Tr("Who can mail me: <color=#88FF88>Everyone</color>"); break;
             }
-            UIFactory.SetTextRaw(UIFactory.GetButtonText(btnMailFrom), label);
+            UIFactory.SetTextRaw(t, label);
+        }
+
+        /// <summary>Item 13: the relay row's paint as a function of its three
+        /// inputs. Without a linked Discord the switch has nothing to act on,
+        /// so it says so instead of offering a toggle that would do nothing
+        /// visible -- the flag itself stays whatever it is, and starts
+        /// working the moment the account is linked. Three states, not two.
+        /// Until a status poll has landed we do not KNOW whether this account
+        /// has a linked Discord, and rendering "link Discord first" at that
+        /// point is an instruction that is wrong for anyone who already has.</summary>
+        internal static void PaintMailRelay(object t, bool seen, bool linked, bool on)
+        {
+            string rl = !seen
+                ? I18n.Tr("Discord relay: <color=#AAAAAA>checking...</color>")
+                : !linked
+                ? I18n.Tr("Discord relay: <color=#AAAAAA>link Discord first</color>")
+                : (on
+                    ? I18n.Tr("Discord relay: <color=#88FF88>On</color>")
+                    : I18n.Tr("Discord relay: <color=#FF9966>Off</color>"));
+            UIFactory.SetTextRaw(t, rl);
+        }
+
+        public static void RefreshSettingsRow()
+        {
+            if (btnMailFrom == null) return;
+            PaintMailFrom(UIFactory.GetButtonText(btnMailFrom), mailFromPending ?? MailClient.MailFrom);
+            if (btnMailRelay != null)
+                PaintMailRelay(UIFactory.GetButtonText(btnMailRelay), MailClient.StatusEverSeen,
+                    MailClient.DiscordLinked, mailRelayPending ?? MailClient.DiscordRelay);
             if (btnBlocked != null)
             {
                 string bl = blocks != null
@@ -657,13 +699,67 @@ namespace CompetitiveRounds
             if (mailFromPending != null) return;              // a PUT is in flight
             string cur = MailClient.MailFrom;
             int idx = Array.IndexOf(MailClient.MAIL_FROM_VALUES, cur);
-            string next = MailClient.MAIL_FROM_VALUES[(idx + 1) % MailClient.MAIL_FROM_VALUES.Length];
+            SetMailFrom(MailClient.MAIL_FROM_VALUES[(idx + 1) % MailClient.MAIL_FROM_VALUES.Length]);
+        }
+
+        /// <summary>Item 13: the value-taking writer of the mail-from row. One
+        /// PUT at a time: a choice while a PUT is in flight is dropped, so the
+        /// value that persists is the one the row shows. A value outside
+        /// MAIL_FROM_VALUES is refused before anything is sent (the property's
+        /// own setter would coerce it to everyone).</summary>
+        internal static void SetMailFrom(string next)
+        {
+            if (mailFromPending != null) return;              // a PUT is in flight
+            if (Array.IndexOf(MailClient.MAIL_FROM_VALUES, next) < 0) return;
+            if (next == MailClient.MailFrom) return;          // already stored: no PUT
             mailFromPending = next;
             NativeUI.MarkDirty();
             MailClient.PutSettings(next, (ok, r) =>
             {
                 mailFromPending = null;
                 if (ok) MailClient.MailFrom = next;
+                else CompetitiveUI.ShowNotification(MailClient.ErrorDetail(r), Color.yellow, 5f);
+                NativeUI.MarkDirty();
+            });
+        }
+
+        /// <summary>Item 5. Mirrors CycleMailFrom: optimistic while the PUT is
+        /// in flight, and the cached value only moves once the server has
+        /// accepted it.</summary>
+        private static void ToggleMailRelay()
+        {
+            if (mailRelayPending != null) return;             // a PUT is in flight
+            SetMailRelay(!MailClient.DiscordRelay);
+        }
+
+        /// <summary>Item 13: the value-taking writer of the relay switch. The
+        /// same refusals as before, in the same order: a PUT in flight, an
+        /// unknown link state (poll now, say so), no linked Discord (say how).</summary>
+        internal static void SetMailRelay(bool next)
+        {
+            if (mailRelayPending != null) return;             // a PUT is in flight
+            if (!MailClient.StatusEverSeen)
+            {
+                MailClient.PollNow();
+                CompetitiveUI.ShowNotification(
+                    I18n.Tr("Still checking your Discord link - try again in a moment."),
+                    Color.yellow, 3f);
+                return;
+            }
+            if (!MailClient.DiscordLinked)
+            {
+                CompetitiveUI.ShowNotification(
+                    I18n.Tr("Link your Discord first: Home tab -> Get Link Code, then !link YOUR_CODE in Discord."),
+                    Color.yellow, 5f);
+                return;
+            }
+            if (next == MailClient.DiscordRelay) return;       // already stored: no PUT
+            mailRelayPending = next;
+            NativeUI.MarkDirty();
+            MailClient.PutRelay(next, (ok, r) =>
+            {
+                mailRelayPending = null;
+                if (ok) MailClient.DiscordRelay = next;
                 else CompetitiveUI.ShowNotification(MailClient.ErrorDetail(r), Color.yellow, 5f);
                 NativeUI.MarkDirty();
             });
@@ -823,6 +919,11 @@ namespace CompetitiveRounds
             sb.Append(I18n.Tr("To:")).Append(' ').Append(San(AddresseeNames(m.to, 8))).Append('\n');
             if (m.cc.Count > 0) sb.Append(I18n.Tr("Cc:")).Append(' ').Append(San(AddresseeNames(m.cc, 8))).Append('\n');
             sb.Append("<color=#777777>").Append(FmtTime(m.createdAt)).Append("</color>");
+            // Item 5: where this message was written. Only shown for the one
+            // case that is not the default, so an ordinary mail's meta line
+            // is unchanged.
+            if (m.via == "discord")
+                sb.Append(" <color=#7A83E8>").Append(I18n.Tr("via Discord")).Append("</color>");
             if (txtReaderMeta != null) UIFactory.SetTextRaw(txtReaderMeta, sb.ToString());
             string subj = San(OneLine(m.subject));
             if (m.IsBroadcast) subj = "<color=#FFD94D>[" + I18n.Tr("Announcement") + "]</color> " + subj;

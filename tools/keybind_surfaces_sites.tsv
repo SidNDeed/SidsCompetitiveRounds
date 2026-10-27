@@ -1,0 +1,26 @@
+# tools/keybind_surfaces.py producer sites: file	method	producer	count	feeds (template ids, - for none)	note
+BroadcastHud.cs	DrawActionRow	KeybindSemanticCap	5	-	semantic caps drawn as labels (K)
+CompetitiveUI.cs	DrawChatInput	KeybindRowFace	1	c6877414da55b264	inside I18n.TrF
+CompetitiveUI.cs	DrawDanceWheel	KeybindRowFace	2	1ee7469705bf8cf5,2f993c703c59434d	inside I18n.TrF
+CompetitiveUI.cs	DrawInputOverlay	KeybindOverlayCap	7	-	caps drawn as labels (K)
+CompetitiveUI.cs	DrawMatchFoundStuckOverlay	KeybindRowFace	1	2cc48659a9b9a51f	inside I18n.TrF
+CompetitiveUI.cs	DrawQuickChat	KeybindRowFace	1	0545b092d2bb9b65	inside I18n.TrF
+CompetitiveUI.cs	OverlaySmall	KeybindOverlayCap	1	-	cap drawn as a label (K)
+InfoLibrary.cs	(file scope)	KeybindRowFace	13	32548b3ebc8e9936,5aaebe531cb9cf09,84ad76a669a0da13,9932f848f9a995ff,d8b40f6f6315ebcf	inside I18n.TrF
+InfoViz.cs	BuildKeyboard	Cap	12	1e395c4e58f63399,2939ef85f045ee7c,383be83bbc34d04d,3f4742e68725ca40,4b712bd125fc9151,69a358031d6d4c5f,741476a9c960d40f,a6bf4f2389295dfd,acf6ba0a98909fa0,affafc49cfe48945,c19aa76eb50f3ad7	inside I18n.TrF
+InfoViz.cs	BuildKeyboard	Fill	54	-	board cap colours (KeybindRules.BoardCapRole, T1 case 24)
+InfoViz.cs	BuildKeyboard	MoveCaps	1	3f4742e68725ca40	inside I18n.TrF
+NativeUI.Keybinds.cs	KbDescHpPrecision	KeybindRowFace	1	58eca18787c3b157	inside I18n.TrF
+NativeUI.Keybinds.cs	KbDescInGameChat	KeybindRowFace	2	bf5674bc86b15488	inside I18n.TrF
+NativeUI.Keybinds.cs	KbDescInputOverlay	KbMoveAndJumpFaces	1	3e99e33e70274435	inside I18n.TrF
+NativeUI.Keybinds.cs	KbShopItemDesc	KeybindRowFace	1	4afe4a47409ae12a,d7ef3176e44d0bd9	TrF over the legacy wheel suffix rewrite
+NativeUI.Keybinds.cs	KbShopTabDesc	KeybindRowFace	1	703e3963264dc8f1,e2fccafb2075f6e0	TrF(d, ...) over SHOP_TAB_DESCS
+NativeUI.Keybinds.cs	KeybindChangedToast	KeybindRowFace	1	1fe5b3e9abf3ace9	joined into the toast's {0}
+NativeUI.Keybinds.cs	KeybindJoinPrompt	KeybindRowFace	1	6925d2481c0e8eef	inside I18n.TrF
+NativeUI.Keybinds.cs	KeybindPaintRow	KeybindRowFace	1	-	the row's face on its _b button (K)
+NativeUI.Keybinds.cs	KeybindReadyPrompt	KeybindRowFace	1	86df78d70f5dd74c	inside I18n.TrF
+NativeUI.Keybinds.cs	KeybindRenderPane	KeybindRowFace	1	02e09889c563a0ef	inside I18n.TrF
+NativeUI.cs	BuildHomeTab	KeybindRowFace	1	4bf1b342b634b8cc	inside I18n.TrF
+NativeUI.cs	LangChatNoteText	KeybindRowFace	1	3cd7ffe9c90f5595	inside I18n.TrF
+NativeUI.cs	RefreshChatLog	KeybindRowFace	3	148886cba3727dba,be2aacc29e7b8ad4	inside I18n.TrF
+TabStatsOverlay.cs	EnsureLocaleStrings	KeybindRowFace	1	941068397def1de6	inside I18n.TrF

@@ -5842,9 +5842,9 @@ def test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice():
 # was never driven at all.
 #
 # So the columns are added, once, on top of the fixture the rest of this file
-# uses. They are the ones 154/156/167/177/206/216/233/324/327 declare, at the
-# types those migrations declare, because a test table that narrows a column is
-# exercising a different write. Cards, offers, achievements, earned packs and
+# uses. They are the ones 154/156/167/177/206/216/233/324/327/360 declare, at
+# the types those migrations declare, because a test table that narrows a
+# column is exercising a different write. Cards, offers, achievements, earned packs and
 # wagers are NOT built here and do not need to be: every one of them is inside
 # the endpoint's own savepointed try/except, so a missing table degrades to the
 # same "not this game" the production guard gives and the report still settles.
@@ -5870,7 +5870,8 @@ ALTER TABLE ffa_matches
     ADD COLUMN IF NOT EXISTS timeline TEXT,
     ADD COLUMN IF NOT EXISTS battles_total INTEGER,
     ADD COLUMN IF NOT EXISTS paid_battles REAL,
-    ADD COLUMN IF NOT EXISTS elapsed_seconds INTEGER;
+    ADD COLUMN IF NOT EXISTS elapsed_seconds INTEGER,
+    ADD COLUMN IF NOT EXISTS settings_frozen JSONB;
 
 ALTER TABLE ffa_match_players
     ADD COLUMN IF NOT EXISTS slot SMALLINT,

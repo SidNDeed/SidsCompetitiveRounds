@@ -233,21 +233,120 @@ namespace CompetitiveRounds
         /// above 0 (the server's motion_edge check).</summary>
         internal static bool EdgeClear(byte[] rgba, int w, int h, int margin)
         {
+            int x, y, a;
+            return !FirstEdgePixel(rgba, w, h, margin, out x, out y, out a);
+        }
+
+        /// <summary>The first pixel within `margin` of any edge whose alpha is
+        /// above 0, in buffer row order (row by row, left to right; on a row
+        /// inside the band, the left strip's pixel before the right strip's):
+        /// its column, its buffer row and its alpha. False, with -1s, when the
+        /// band is clear. EdgeClear is its negation, so the log's pixel and the
+        /// check's verdict cannot disagree (bug 405).</summary>
+        internal static bool FirstEdgePixel(byte[] rgba, int w, int h, int margin, out int px, out int py, out int alpha)
+        {
+            px = -1; py = -1; alpha = -1;
             for (int y = 0; y < h; y++)
             {
                 bool band = y < margin || y >= h - margin;
                 int row = y * w * 4;
                 if (band)
                 {
-                    for (int x = 0; x < w; x++) if (rgba[row + x * 4 + 3] != 0) return false;
+                    for (int x = 0; x < w; x++)
+                        if (rgba[row + x * 4 + 3] != 0) { px = x; py = y; alpha = rgba[row + x * 4 + 3]; return true; }
                 }
                 else
                 {
                     for (int x = 0; x < margin; x++)
-                        if (rgba[row + x * 4 + 3] != 0 || rgba[row + (w - 1 - x) * 4 + 3] != 0) return false;
+                    {
+                        if (rgba[row + x * 4 + 3] != 0) { px = x; py = y; alpha = rgba[row + x * 4 + 3]; return true; }
+                        int r = w - 1 - x;
+                        if (rgba[row + r * 4 + 3] != 0) { px = r; py = y; alpha = rgba[row + r * 4 + 3]; return true; }
+                    }
                 }
             }
-            return true;
+            return false;
+        }
+
+        // -- the frame fit (bug 405) ---------------------------------------------
+
+        /// <summary>A drawn extent in world units on the capture plane (x right,
+        /// y up), e.g. one particle's box united over every pose.</summary>
+        internal struct Box
+        {
+            internal float MinX, MinY, MaxX, MaxY;
+            internal Box(float minX, float minY, float maxX, float maxY) { MinX = minX; MinY = minY; MaxX = maxX; MaxY = maxY; }
+        }
+
+        /// <summary>How FitDrawn framed the capture: Solid -- the solid square
+        /// already holds everything drawn, unchanged; Grown -- the square grew
+        /// (at most growMax times the solid side) to hold everything drawn;
+        /// Capped -- the square grew to growMax and the drawn boxes it still
+        /// cannot hold are not kept.</summary>
+        internal enum FitMode { Solid, Grown, Capped }
+
+        /// <summary>True when `b` lies inside the square (centre cx,cy, side
+        /// `side`) with `frac` of the side kept clear along every edge.</summary>
+        internal static bool BoxClear(Box b, float cx, float cy, float side, float frac)
+        {
+            float half = side * 0.5f, inset = side * frac;
+            return b.MinX >= cx - half + inset && b.MaxX <= cx + half - inset
+                && b.MinY >= cy - half + inset && b.MaxY <= cy + half - inset;
+        }
+
+        /// <summary>The capture square for a solid square (cx, cy, side) and
+        /// the boxes of everything else that is drawn into the frames (bug
+        /// 405: a worn effect's particles reached the edge band, which the
+        /// server refuses). The frame is `edge` pixels and `clearPx` pixels
+        /// along every edge must stay clear of every drawn box.
+        ///
+        /// Every box already clear in the solid square: the solid square,
+        /// unchanged (Solid). Else the smallest square that holds the solid
+        /// square and every box with the clear band, centred on their union,
+        /// when its side is at most growMax x side (Grown). Else a square of
+        /// growMax x side that still holds the whole solid square, centred as
+        /// near the union's centre as that allows (Capped). `keep[i]` says
+        /// whether box i is clear in the square returned; a box that is not
+        /// is what the caller keeps out of the capture. Never a square smaller
+        /// than the solid one, and never one that cuts the solid square.</summary>
+        internal static FitMode FitDrawn(float cx, float cy, float side, IList<Box> drawn, int clearPx, int edge, float growMax,
+                                         bool[] keep, out float fitCx, out float fitCy, out float fitSide)
+        {
+            if (drawn == null || keep == null || keep.Length < drawn.Count || edge <= 0 || clearPx < 0 || 2 * clearPx >= edge || side <= 0f)
+                throw new ArgumentException("fit inputs");
+            float frac = (float)clearPx / edge;
+            fitCx = cx; fitCy = cy; fitSide = side;
+            bool all = true;
+            for (int i = 0; i < drawn.Count; i++) { keep[i] = BoxClear(drawn[i], cx, cy, side, frac); all &= keep[i]; }
+            if (all) return FitMode.Solid;
+            float minX = cx - side * 0.5f, maxX = cx + side * 0.5f, minY = cy - side * 0.5f, maxY = cy + side * 0.5f;
+            for (int i = 0; i < drawn.Count; i++)
+            {
+                var b = drawn[i];
+                if (b.MinX < minX) minX = b.MinX;
+                if (b.MaxX > maxX) maxX = b.MaxX;
+                if (b.MinY < minY) minY = b.MinY;
+                if (b.MaxY > maxY) maxY = b.MaxY;
+            }
+            // a hair over the exact side, so a box on the clear line is not
+            // lost to float rounding
+            float need = Math.Max(maxX - minX, maxY - minY) / (1f - 2f * frac) * 1.0001f;
+            float ux = (minX + maxX) * 0.5f, uy = (minY + maxY) * 0.5f;
+            float cap = side * Math.Max(1f, growMax);
+            FitMode mode;
+            if (need <= cap) { fitCx = ux; fitCy = uy; fitSide = need; mode = FitMode.Grown; }
+            else
+            {
+                fitSide = cap;
+                // the whole solid square stays inside: its centre may move by
+                // at most (cap - side) / 2 on each axis
+                float slack = (cap - side) * 0.5f;
+                fitCx = Math.Min(Math.Max(ux, cx - slack), cx + slack);
+                fitCy = Math.Min(Math.Max(uy, cy - slack), cy + slack);
+                mode = FitMode.Capped;
+            }
+            for (int i = 0; i < drawn.Count; i++) keep[i] = BoxClear(drawn[i], fitCx, fitCy, fitSide, frac);
+            return mode;
         }
 
         /// <summary>The 8-bit Rec. 709 luma of the frame composited over the
@@ -341,7 +440,8 @@ namespace CompetitiveRounds
             internal byte[] Png;
             internal int Covered, Lit, Partial, Pixels;
             internal bool EdgeClear;
-            internal byte[] Luma;            // frames only: the flash check's input
+            internal int EdgeX = -1, EdgeY = -1, EdgeA = -1;   // the first band pixel (column, PNG row from the top, alpha) when not clear
+            internal byte[] Luma;           // frames only: the flash check's input
             internal byte[] Preview;         // the still only: reduce(4), for the Settings preview
             internal double Coverage { get { return Pixels > 0 ? (double)Covered / Pixels : 0.0; } }
             internal double LitFraction { get { return Pixels > 0 ? (double)Lit / Pixels : 0.0; } }
@@ -358,7 +458,9 @@ namespace CompetitiveRounds
             var f = new FrameOut { Pixels = edge * edge };
             Matte(black, white, work, out f.Lit, out f.Partial, out f.Covered);
             Grade(work, grade);
-            f.EdgeClear = EdgeClear(work, edge, edge, EDGE_MARGIN);
+            int ex, ey, ea;
+            f.EdgeClear = !FirstEdgePixel(work, edge, edge, EDGE_MARGIN, out ex, out ey, out ea);
+            if (!f.EdgeClear) { f.EdgeX = ex; f.EdgeY = bottomUp ? edge - 1 - ey : ey; f.EdgeA = ea; }
             f.Png = ScrPng.EncodeRgba(work, edge, edge, bottomUp);
             if (frame) { f.Luma = new byte[edge * edge]; LumaOverBg(work, f.Luma); }
             else f.Preview = Reduce4(work, edge);
@@ -380,7 +482,7 @@ namespace CompetitiveRounds
                 var f = frames[k];
                 if (f == null || f.Png == null) return "frame " + k + " missing";
                 if (f.Coverage < COVERAGE_MIN || f.Coverage > COVERAGE_MAX) return "frame " + k + " coverage " + f.Coverage.ToString("F4", CultureInfo.InvariantCulture);
-                if (!f.EdgeClear) return "frame " + k + " touches the edge band";
+                if (!f.EdgeClear) return "frame " + k + " touches the edge band at (" + f.EdgeX + "," + f.EdgeY + ") alpha " + f.EdgeA;
                 if (f.Png.Length > FRAME_MAX_BYTES) return "frame " + k + " is " + f.Png.Length + " bytes";
                 if (k > 0)
                 {
@@ -508,9 +610,41 @@ namespace CompetitiveRounds
         /// would build now -- nothing to do. Needed: the dance job (the still
         /// and the motion from one camera). Fallback: a motion is needed but
         /// the job cannot run on this seat now (no AsyncGPUReadback, no baked
-        /// grade table, a hold) or its key is remembered -- the still-only path
-        /// keeps the still current, with no suffix.</summary>
+        /// grade table, a hold) or its key is remembered. None and Fallback do
+        /// NOT license a base still while a dance is selected: StillOnlyRoute
+        /// decides what the still-only path may send (report 1, 2026-09-30).</summary>
         internal enum Need { None, Current, Needed, Fallback }
+
+        /// <summary>The server names a dance selection (S2.9 names one only
+        /// while the player holds it). While this is true the only still that
+        /// may go up is the dance job's own, under the dance descriptor: a base
+        /// still is stored over the dance still, the motion's binding to the
+        /// still no longer holds (pc_motion.servable) and every print reads "no
+        /// motion" until a new capture (report 1, 2026-09-30: a base still sent
+        /// 56 s after a bound motion). The server accepts an absent suffix
+        /// whatever the selection (S2.8), so the refusal is the client's.</summary>
+        internal static bool DanceSelected(bool supported, string selectedSku)
+        {
+            return supported && !string.IsNullOrEmpty(selectedSku);
+        }
+
+        /// <summary>What the still-only path may send when the picture check
+        /// or a refresh did not start the dance job and the picture is not
+        /// current (Need None, or a Fallback whose still is behind). Base: the
+        /// base still, as before this release -- no dance is selected. Wait:
+        /// nothing now, the check stays armed -- a dance is selected and the
+        /// reason the job cannot run ends by itself (a HoldOff hold, the
+        /// ownership read not answered yet). Nothing: nothing, the check is
+        /// settled until the next visit -- a dance is selected and the job
+        /// cannot run in this process (a remembered key, a session stop, a
+        /// seat that cannot capture, a dance this client does not list).</summary>
+        internal enum StillOnly { Base, Wait, Nothing }
+
+        internal static StillOnly StillOnlyRoute(bool supported, string selectedSku, bool transient)
+        {
+            if (!DanceSelected(supported, selectedSku)) return StillOnly.Base;
+            return transient ? StillOnly.Wait : StillOnly.Nothing;
+        }
 
         internal static Need Decide(bool supported, string selectedSku, bool ownedHere, string pcMotion,
                                     string portraitHash, string portraitDescriptor, string danceDescriptor,
@@ -541,10 +675,10 @@ namespace CompetitiveRounds
         /// still under the base descriptor, or -- on the fallback, where a
         /// dance is selected -- under the same inputs with that dance's suffix:
         /// a dancer still whose motion is missing or was refused is the same
-        /// pixels, and replacing it would only spend a pacing slot. With no
-        /// selection `danceDescriptor` is null, so a suffixed still is replaced
-        /// by a base one (the server accepts an absent suffix whatever the
-        /// selection, S2.8).</summary>
+        /// pixels. With no selection `danceDescriptor` is null, so a suffixed
+        /// still is replaced by a base one (the server accepts an absent suffix
+        /// whatever the selection, S2.8). A still that is not current while a
+        /// dance IS selected is never replaced by a base one (StillOnlyRoute).</summary>
         internal static bool StillCurrent(string portraitHash, string portraitDescriptor, string baseDescriptor, string danceDescriptor)
         {
             if (string.IsNullOrEmpty(portraitHash) || baseDescriptor == null) return false;
@@ -617,6 +751,22 @@ namespace CompetitiveRounds
         /// before leaving it owed for the next pass (the first try and one
         /// retry).</summary>
         internal const int UndoAttempts = 2;
+
+        /// <summary>RR-LAND-1: an authoritative baseline write supersedes the
+        /// delta remembered for the same key. `write` sets the baseline (one
+        /// assignment that lands or throws before changing the transform, the
+        /// same assumption UndoEach makes of an undo); once it has returned,
+        /// `forget` drops the remembered delta, so no later restore of that
+        /// key (the arm Prefix, Tick's restore, a teardown) subtracts it from
+        /// the baseline just written. A write that throws forgets nothing: the
+        /// transform is unchanged, its delta is still owed, and the exception
+        /// reaches the caller exactly as the bare assignment's did. The capture
+        /// writes every arm-target baseline through it (DanceEmotes.WriteArmBaseline).</summary>
+        internal static void WriteBaseline<K>(K k, Action<K> write, Action<K> forget)
+        {
+            write(k);
+            forget(k);
+        }
 
         private static void Failed<K>(Action<K, Exception> failed, K k, Exception e)
         {

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Card draw evidence (B4) replay harness: compiles the REAL
+       plugin/CardDrawEvidence.cs (the hook side, the drain, the seal, the
+       freeze, the census, the build) with the REAL CardDrawEvidenceCore.cs and
+       SeatEvidenceCore.cs, against Stubs.cs (working stand-ins for Unity,
+       Photon, ROUNDS and the plug-in members it touches; the queue side of
+       SeatEvidence is a recorder). Mutants are built from COPIES of
+       CardDrawEvidence.cs (CardSource override); the tracked file is never
+       modified. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>CardReplayTests</AssemblyName>
+    <RootNamespace>CardDrawReplay</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0169;CS0649;CS0414;CS0162</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(CardSource)' == ''">
+    <CardSource>$(MSBuildThisFileDirectory)..\..\..\plugin\CardDrawEvidence.cs</CardSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\CardDrawEvidenceCore.cs" />
+    <Compile Include="$(CardSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>

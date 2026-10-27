@@ -159,8 +159,10 @@ def pair(control, site, old, new, note, checks, target=None):
 # The description and the repro steps share one validator: one plant.
 LOG_RULE = "            v = _schema_logred.redact_credentials(v)    # the rule, over the log as sent\n"
 TEXT_RULE = "            v = _schema_logred.redact_credentials(v)    # the rule, over the text as sent\n"
-LOG_CUT = ("            if len(v) > 12_000_000:\n"
-           "                v = v[-12_000_000:]                     # then the tail is kept\n")
+# The log clamp reads the named ceiling since the v1.41.0 beta met this lane (merge
+# pass 3): the same 12_000_000, as BUG_REPORT_LOG_MAX_CHARS.
+LOG_CUT = ("            if len(v) > BUG_REPORT_LOG_MAX_CHARS:\n"
+           "                v = v[-BUG_REPORT_LOG_MAX_CHARS:]       # then the tail is kept\n")
 TEXT_CUT = ("            if len(v) > 8000:\n"
             "                v = v[:8000]                            # then the head is kept\n")
 pair("R1-log", "the log is received without the rule",

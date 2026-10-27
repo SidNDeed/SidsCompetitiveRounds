@@ -40,7 +40,7 @@ namespace CompetitiveRounds
     /// read is measuring a prediction, and every round of narrowing that prediction
     /// produced another case of it). One call covers every mode: this mod prefixes
     /// GetOtherPlayer itself while the free-for-all engine is driving the room
-    /// (FfaMode.cs:3752-3764) and otherwise it falls through to stock
+    /// (FfaMode.cs:3979-3991) and otherwise it falls through to stock
     /// GetClosestPlayerInTeam, mis-indexed liveness gate and all - and the ring
     /// reaches its own player through that same patched method
     /// (PlayerInRangeTrigger.cs:59-61). There is no branch here to disagree with it.
@@ -281,7 +281,7 @@ namespace CompetitiveRounds
         /// So both channels are handled the same way - the flags are untouched and
         /// the next tick tries again - and the success line is printed only where
         /// the room was actually told. The same polarity the room half of this API
-        /// is already read with at GameStateWatcher.cs:4843 (#276/#430).
+        /// is already read with at GameStateWatcher.cs:4927 (#276/#430).
         ///
         /// The refusal is stated through the BOUNDED sink, not Plugin.Log: the
         /// retry is per tick by design and a line per tick would bury it. Its
@@ -365,7 +365,14 @@ namespace CompetitiveRounds
                 // may still be simulating. Treat it as a seat that does not
                 // advertise.
                 if (p == null) return false;
-                if (RoomActors.IsSpectator(p)) continue;
+                // A CONFIRMED spectator, read from the replicated property on
+                // every call (RoomActors.IsSpectatorReplicated), the basis the
+                // 886bed8 client half's #432 sweep gave every cross-seat roster
+                // filter. IsSpectator's first-sight cache is per-seat state: a
+                // spectator whose properties were not yet readable when this
+                // seat first looked would stay counted here and fail this census
+                // on this seat alone, while seats that looked later repair.
+                if (RoomActors.IsSpectatorReplicated(p)) continue;
 
                 var props = p.CustomProperties;
                 object v;
@@ -390,7 +397,8 @@ namespace CompetitiveRounds
         /// THE DENOMINATOR IS EVERY ACTOR THAT CAN SIMULATE THE EFFECT, which is
         /// NOT RoomActors.ActiveFighters(). That helper is the rating-bearing
         /// roster, and it is deliberately fail-CLOSED: once FreezeFighterRoster has
-        /// run - and it does run, from GameStateWatcher.cs:1562, :5107 and :6507 -
+        /// run - and it does run, from GameStateWatcher.cs:1570 and :5191 and
+        /// through the per-game FFA refreeze at :6620 -
         /// it drops any actor that is off the frozen steam-id roster, whose u_id
         /// cannot be read, or that was ever cached as rejected. Dropping an actor
         /// from a ROSTER is the safe direction. Dropping it from a CAPABILITY
@@ -508,7 +516,7 @@ namespace CompetitiveRounds
         /// with the same argument. Everything that decides WHO - the candidate
         /// team, the roster order, the liveness gate and its mis-index, the
         /// comparison and its float behaviour, and the free-for-all substitution
-        /// this mod itself installs on that method (FfaMode.cs:3752-3764) - happens
+        /// this mod itself installs on that method (FfaMode.cs:3979-3991) - happens
         /// inside vanilla IL. There is nothing here to keep equivalent to it.
         ///
         /// A throw is caught and answered with vanilla-unchanged. Letting it
@@ -637,6 +645,32 @@ namespace CompetitiveRounds
                 ProximityVictim.SignalText(site, outcome, why),
                 ProximityVictim.MaxOutcomeSignals);
         }
+
+        /// <summary>Bugs 437-439 - the positive signal, called ONLY on the
+        /// accepting branch, before the write, so `previous` is what the
+        /// effect's own field held (vanilla's cached victim, or the previous
+        /// activation's answer). Reads two ids and decides nothing; a throw is
+        /// swallowed so a log line can never change the activation.
+        ///
+        /// This runs on EVERY accepted activation (a Lifestealer ring can fire
+        /// its effect most frames), so the slot is reserved first and the line
+        /// is built only when the slot was free: a spent budget costs the key
+        /// and one dictionary probe, never the text.</summary>
+        internal static void NoteActive(string site, Player previous, Player fresh)
+        {
+            try
+            {
+                int prevId = previous == null ? -1 : previous.PlayerID;
+                int freshId = fresh == null ? -1 : fresh.PlayerID;
+                bool redirected = ProximityVictim.IsRedirect(prevId, freshId);
+                if (VanillaFixSupport.TryReserveDiag(
+                        ProximityVictim.ActiveSignalKey(site, redirected),
+                        ProximityVictim.MaxOutcomeSignals))
+                    VanillaFixSupport.WriteReservedDiag(
+                        ProximityVictim.ActiveSignalText(site, redirected, prevId, freshId));
+            }
+            catch { }
+        }
     }
 
     /// <summary>The reported defect. DealDamageToPlayer.cs:24,33-40.</summary>
@@ -657,6 +691,8 @@ namespace CompetitiveRounds
             // few microseconds earlier. The write stays on the accepting branch, and
             // the return comes from the seam, so both prefixes on a shared method
             // answer Harmony through one tested function (#432).
+            if (action == ProximityPrefixAction.WriteVictimAndRun)
+                ProximityVictimResolver.NoteActive("DealDamageToPlayer", __instance.target, fresh);
             if (action == ProximityPrefixAction.WriteVictimAndRun) __instance.target = fresh;
             return ProximityVictim.PrefixReturn(action);
         }
@@ -719,6 +755,8 @@ namespace CompetitiveRounds
                 "StunPlayer", __instance,
                 __instance != null && __instance.targetPlayer == StunPlayer.TargetPlayer.OtherPlayer,
                 out fresh);
+            if (action == ProximityPrefixAction.WriteVictimAndRun)
+                ProximityVictimResolver.NoteActive("StunPlayer", __instance.target, fresh);
             if (action == ProximityPrefixAction.WriteVictimAndRun) __instance.target = fresh;
             return ProximityVictim.PrefixReturn(action);
         }
@@ -766,6 +804,8 @@ namespace CompetitiveRounds
             Player fresh;
             ProximityPrefixAction action = ProximityVictimResolver.DecidePrefix(
                 "TeleportToOpponent", __instance, true, out fresh);
+            if (action == ProximityPrefixAction.WriteVictimAndRun)
+                ProximityVictimResolver.NoteActive("TeleportToOpponent", __instance.target, fresh);
             if (action == ProximityPrefixAction.WriteVictimAndRun) __instance.target = fresh;
             return ProximityVictim.PrefixReturn(action);
         }

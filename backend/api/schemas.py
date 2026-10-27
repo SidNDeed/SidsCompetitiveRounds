@@ -148,6 +148,39 @@ class MatchReport(BaseModel):
     local_freeze_count: int | None = Field(None, ge=0, le=30000)
     local_freeze_focused_count: int | None = Field(None, ge=0, le=30000)
     local_freeze_total_sec: float | None = Field(None, ge=0, le=86400)
+    # SERVER-CONTRACT NOTE ONLY — no field is declared here by this client pass,
+    # and nothing below changes behaviour. Since the Sept 16 client batch the
+    # reporter also sends two integers on this body:
+    #     local_freeze_epoch, opp_freeze_epoch
+    # They are the COUNTING SEMANTIC of the three local_freeze_* / two
+    # opp_freeze_* columns above, not a version: 1 = the pre-batch definition,
+    # which credited one stall TWICE (Math.Max(unscaledDeltaTime, wallGap), both
+    # sampled per tick) and is therefore inflated ~2x; 2 = the monotonic
+    # single-trip definition; ABSENT or 0 = a client older than the tag, which is
+    # UNKNOWN and must not be laundered into either era. The peer's value rides
+    # cr_gstats field 24 and reaches opp_freeze_epoch the same way opp_freeze_*
+    # already does. reporter_mod_version cannot substitute: a locally built DLL
+    # reports the last shipped version (learning #301).
+    # Pydantic v2 ignores undeclared fields, so the additions are inert on the
+    # deployed server and an older server keeps working. The pin that statement
+    # is checked against is PRODUCTION 0cc7f75 — the revision running on both
+    # backend boxes — and not the cc92498 tail this comment used to name: that
+    # tail is retired and was never deployed, so a contract validated against it
+    # is validated against a model production does not run (#302 — a claim has
+    # to be traceable to the thing it describes). On 0cc7f75 no model in this
+    # file sets extra="forbid", and the reporting endpoints in main.py neither
+    # store nor classify these two fields.
+    #
+    # THE CLIENT'S GUARANTEE STOPS AT THE WIRE. What the Sept 16 client batch
+    # delivers is that every row a CURRENT client reports carries a counting
+    # semantic on the body, and that a peer's value reaches the reporter tagged
+    # or not at all. It does NOT deliver a partitioned history: nothing on
+    # 0cc7f75 persists either field, so stored rows have no partition key and
+    # the advisory freeze classifier and the admin evidence view still compare
+    # across the two eras. That is a server pass — declare both fields, store
+    # them beside the counters they describe, treat pre-batch rows as epoch 1,
+    # and make both consumers refuse a comparison whose epochs differ — and it
+    # is OUT OF SCOPE for the client batch that added them.
     local_ping_avg: int | None = Field(None, ge=0, le=30000)
     local_ping_max: int | None = Field(None, ge=0, le=30000)
     local_recv_gap_count: int | None = Field(None, ge=0, le=30000)
@@ -1056,6 +1089,17 @@ class HealthResponse(BaseModel):
     # without a default, so building the answer without it raises instead
     # of silently leaving the key out. Absent on any build before it.
     janitor_selftest_build: int
+    # session_report: whether GET /api/v1/report is bound on this app AND the
+    # database this box is connected to has every table and column the route's
+    # statements name (main._session_report_probe: 1 yes, 0 no; the degraded
+    # arm answers the last probe). The statements are the report's own
+    # constants, named and held complete by tests (#342). The release train's
+    # build discriminator for board rows 30a/30d/30g, which add no route; read
+    # by nothing else (#306).
+    # Declared without a default, so building the answer without it raises
+    # instead of silently leaving the key out. Absent on any build before
+    # those rows, which is how the train reads the old build.
+    session_report: int
     # connect_failure: how many of the connect-failure design's eight I2
     # writers (the lock, the poll, connect, assembly, the leave, the verdict,
     # the report and the release) are wired to their seat-row write in this
@@ -2180,6 +2224,25 @@ class SpectateValidateBody(BaseModel):
     steam_id: str = Field(min_length=1, max_length=32)
     room_name: str = Field(min_length=1, max_length=64)
     spectators: list[SpectateValidateEntry] = Field(default_factory=list, max_length=8)
+    # Session report round 5 MEDIUM 1: the participant tuple the master read
+    # from its own room when it took this spectator inventory - the room's
+    # mode and its fighters' steam ids, sorted and comma-joined exactly as
+    # its attest sends them. Round 6 MEDIUM 1: beside them, the room row's
+    # game id and server-derived source, as the server answered the master's
+    # last participant attest of that same mode and roster. The route grants
+    # a watch only when all of them are the live room row's under the room
+    # lock, and records these values (main._SPECTATE_GRANT_OBSERVED_TUPLE).
+    # Round 7 MEDIUM 1: and the room row's generation from that same attest
+    # answer (migration 364: it only increases, and advances on every change
+    # of any other value here). All five absent is the request shape of every
+    # released client (1.40.3 and earlier): it is answered as before, and
+    # writes no grant. Some without the others is refused (422), including
+    # round 6's four without the generation.
+    observed_game_id: str | None = Field(default=None, max_length=64)
+    observed_generation: int | None = Field(default=None, ge=1, le=9223372036854775807)
+    observed_mode: str | None = Field(default=None, min_length=3, max_length=8)
+    observed_source_ref: str | None = Field(default=None, max_length=64)
+    observed_roster: str | None = Field(default=None, max_length=400)
 
 
 class AllowSpectatorsBody(BaseModel):

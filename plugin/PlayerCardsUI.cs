@@ -3,6 +3,13 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
+// The binder orders used to be a private enum here. Item 20 moved the member
+// set, the cycler and the comparator into BinderSortRules so a plain compiler
+// (tools/client-rules-harness) can RUN them; the alias keeps every switch site
+// in this file reading as it always has, and keeps ONE definition of the set
+// the cycle length is derived from.
+using Sort = CompetitiveRounds.BinderSortRules.Mode;
+
 namespace CompetitiveRounds
 {
     /// <summary>Player Cards (Sept 10 batch, WP-E): the Collection tab (Open
@@ -36,8 +43,11 @@ namespace CompetitiveRounds
         private static readonly Color C_SIGN = new Color(1f, 0.95f, 0.75f);
         private static readonly Color C_OK = new Color(0.55f, 1f, 0.55f);
         private static readonly Color C_WARN = new Color(1f, 0.85f, 0.3f);
+        private static readonly Color C_SELECT = new Color(0.35f, 0.92f, 1f, 1f);   // a binder tile picked for Shard selected (no rarity band uses cyan)
 
-        private enum View { Open, Binder, Info }
+        // Trades (v1.41.0) is appended AFTER Info, so Open/Binder/Info keep
+        // 0/1/2 and the index casts at the view buttons stay what they were.
+        private enum View { Open, Binder, Info, Trades }
         private static View view = View.Open;
         private const int TILES_PER_ROW = 5, BINDER_ROWS = 2;   // 5 x 236 px fits the 1240-wide binder column
         private const int REVEAL_TILES = 5;                     // one pack = five prints
@@ -63,13 +73,24 @@ namespace CompetitiveRounds
             public object txtName, txtTitle, txtL1, txtL2, txtL3, txtL4, txtMark, txtSign, btnDiscardTxt, btnDupesTxt, faceMark;
             public ApiClient.PcPrint print;   // the row's CURRENT binding — callbacks read this, never a captured print (#265)
             public int dupes;
+            // item 18: true for the pull strip's five tiles, whose Discard
+            // button shards that one card (PcQuickShardRules); false for the
+            // binder's, which keep their own Discard. Set once in CreateTile.
+            public bool quickSurface;
+            // card trading (v1.41.0): the In a trade / Traded badge over the
+            // tile, a click that replaces the card view (the compose pickers),
+            // and the mini form the trade lists draw
+            public GameObject badgeGO;
+            public object badge;
+            public Action<Tile> click;
+            public bool mini;
         }
         private class PackRow { public GameObject root, btnOpen; public object txt; public ApiClient.PcUnopened pack; }
 
         // tab
         private static GameObject tabRoot, openRoot, binderRoot, infoRoot;
-        private static readonly GameObject[] viewBtns = new GameObject[3];
-        private static readonly object[] viewTxts = new object[3];
+        private static readonly GameObject[] viewBtns = new GameObject[4];
+        private static readonly object[] viewTxts = new object[4];
         private static object txtBalance, txtStatus;
         // open packs
         private static object txtDaily, txtPaid, txtPool, txtLastHdr, txtPacksHdr;
@@ -84,29 +105,135 @@ namespace CompetitiveRounds
         /// <summary>Binder orders (2026-09-13): the header button cycles them.
         /// Position is the leaderboard position printed on the card
         /// (board_rank); a card of a player who was off the board that day
-        /// sorts last under it.</summary>
-        private enum Sort { Name, Rarity, Edition, Date, Position }
+        /// sorts last under it. Rating position (item 20) asks the different
+        /// question — where that player stands on the same board TODAY — and
+        /// is offered only while the collection answer carries standings.
+        ///
+        /// The members themselves are BinderSortRules.Mode (aliased to `Sort`
+        /// at the top of this file): Unity-free, so the cycler and the
+        /// comparator are EXECUTED by tools/client-rules-harness rather than
+        /// described by a source test.</summary>
         private static Sort binderSort = Sort.Name;
+        /// <summary>A sort read out of the config file that has not been
+        /// applied yet.
+        ///
+        /// The binder's FIRST paint of a session always happens before the
+        /// collection fetch has answered — OnTabEntered only STARTS the fetch
+        /// and RefreshBinder then paints the col == null branch — so resolving
+        /// a stored "RatingPosition" there would coerce it to Name on every
+        /// launch. It is held instead, and BinderSortRules.Resolve decides on
+        /// each paint whether to apply it, drop it for this session, or keep
+        /// waiting. None of the three writes the config back: the config is
+        /// written by CycleSort, an explicit click, and by nothing else.</summary>
+        private static Sort? pendingBinderSort;
         private static Tile[] binderTiles;
         private static GameObject[] binderRows;
         private static int binderPage;
         private static string armedPrintId; private static bool armedDupes; private static float armedAt;
         private static bool discardInFlight; private static readonly List<string> discardQueue = new List<string>();
+        // The run latch's give-up (the settings card latch's rule, carried
+        // item ii): discardSentAt is when the run's CURRENT step began - a
+        // request sent, or the end of a server-asked pause - and a run whose
+        // step has had no answer 25 s later is ended by RetireStuckLatches.
+        // discardSerial names the run; every answer and every resumed pause
+        // checks it before touching run state, so a late answer to a run that
+        // was given up (or a pause of one) cannot drive a newer run.
+        private static float discardSentAt; private static int discardSerial;
         private static int discardDone, discardShards;
-        private static bool discardRetried;   // the one wait-and-retry a rate-limited copy gets (Sept 14 batch, C2)
+        // The copies that have already had their ONE wait-and-retry, keyed
+        // by print id.
+        //
+        // This was a run-wide bool that DiscardAfter cleared on every
+        // resumption, which made it mean "one retry IN FLIGHT" while the
+        // comment beside it said "one retry per copy". The difference is not
+        // academic: with the default 3 s pause, one stubborn copy could be
+        // re-asked six times over on its own and spend the entire run budget,
+        // so the copies queued behind it never got the retry the rule
+        // promised them. Per copy, the latch is set once and never cleared
+        // until the run ends.
+        private static readonly HashSet<string> discardRetriedIds = new HashSet<string>();
+        private static float discardWaited;   // seconds THIS run has already spent waiting a refusal out
+        // Ceiling on the waiting a single discard run may do, ACROSS copies.
+        // The per-copy latch bounds how often ONE copy may be re-asked; this
+        // bounds the RUN, so a long queue of individually-once-retried copies
+        // cannot leave the binder saying "discarding..." indefinitely with the
+        // button dead and nothing said. Past the budget the run finishes, and
+        // it reports the exhausted budget as its own reason rather than as a
+        // plain refusal - those are different events to the player.
+        private const float DiscardWaitBudget = 20f;
         // info
         private static object txtInfo;
         // state
         private static bool openInFlight, claimInFlight, recoverInFlight;
         private static float openAt, claimAt, recoverAt, tickAt, meRefreshAt;
+        // recoverAt is the RETRY throttle; recoverSentAt is when the request in
+        // flight was sent (its 25 s give-up), recoverSerial the request.
+        private static float recoverSentAt; private static int recoverSerial;
         private static int unparseableStrikes;   // consecutive 2xx answers the client could not read (c6)
         private static ApiClient.PcPackAnswer lastPack;
         private static string lastMsg; private static Color lastMsgColor; private static float lastMsgAt;
         // settings rows
         private static GameObject btnPublic, btnAnnounce, btnPreset, presetPreview, presetPreviewRow;
         private static object btnPublicTxt, btnAnnounceTxt, btnPresetTxt, txtPicNote;
+        // the Card trading row (v1.41.0, V8 2.1/6.1): the settings page's row,
+        // its label, and the object that gets hidden (the row itself)
+        private static GameObject btnTrades, tradesRowGroup;
+        private static object btnTradesTxt;
+        private static string tradesRowSig;   // the last settings-row state logged
         private static int previewShown = -1;   // PortraitRender.PreviewSerial the preview sprite was made from
         private static Sprite previewSprite;
+        // Board row 24: the Settings preview is the WHOLE card as other players
+        // see it -- the server's own drawing (ApiClient.PcFacePreview), owned
+        // here and never the face cache's. While a new look is on its way the
+        // slot shows the live picture above with a pending note instead.
+        private const float SETTINGS_CARD_W = 240f, SETTINGS_CARD_H = 336f;   // the 750x1050 card at 0.32, its 5:7 kept
+        private const float SETTINGS_CAP_W = 420f;                            // the line beside it; 240 + 12 + 420 fits the 700 column
+        private const int SC_NONE = 0, SC_CARD = 1, SC_NOT_IN_POOL = 2, SC_UNAVAILABLE = 3;
+        private static object txtSettingsCardCap;
+        private static Texture2D settingsCardTex;
+        private static Sprite settingsCardSprite, settingsCardBound;
+        private static string settingsCardKey;           // identity epoch | stored portrait hash | locale the card was drawn for
+        private static bool settingsCardInFlight;
+        // When the fetch in flight was sent, and its serial: a fetch with no
+        // answer 25 s on (past the 20 s transport timeout) is given up and
+        // its latch released, and an answer whose serial is not the latest
+        // commits nothing (asks-b round 2, L4).
+        private static float settingsCardSentAt;
+        private static int settingsCardSerial;
+        private static float settingsCardRetryAt, settingsCardAt = -1000f;
+        private static int settingsCardState = SC_NONE;
+        // Board row 25: the batch shard (a whole pack from its result, or a
+        // binder selection), one server transaction per click.
+        private static GameObject btnShardPack, btnSelect, btnShardSel;
+        private static object btnShardPackTxt, btnSelectTxt, btnShardSelTxt, txtBinderHint, txtBinderSelHint;
+        // Item 18 fix pass 1 (F3): the pull tab's Shard dupes -- the shown
+        // pack's duplicates only (PcQuickShardRules.DuplicateShardIds).
+        private static GameObject btnShardDupes;
+        private static object btnShardDupesTxt;
+        private static bool selecting;                                        // the binder's Select mode
+        private static readonly List<string> selectedIds = new List<string>();  // in the order they were clicked
+        private static string armedShard; private static float armedShardAt;   // the exact request the first click armed
+        // Item 18 fix pass 1 (F2): the one batch shard in flight -- its latch,
+        // its generation, the pack or strip card it is for -- and a strip
+        // card's nonce (kept until an answer, PcQuickShardRules.KeepKeyAfter,
+        // so the same card asked again after a lost answer is a replay) have
+        // ONE writer, PcShardFlight: a retired generation's late answer
+        // changes nothing (SendShard).
+        private static readonly PcShardFlight shardFlight = new PcShardFlight();
+        private static bool shardInFlight => shardFlight.InFlight;
+        private static string shardPackId => shardFlight.PackId;    // the pack a Shard pack in flight came from (null: a selection)
+        private static string shardQuickId => shardFlight.QuickId;  // the strip card a one-card shard is for
+        private static string shardKey, shardKeyFor;   // a selection's nonce and the exact request it was made for (#172)
+        // Prints the server named as no longer this account's (a refused
+        // shard's not_owned), kept out of the strip's Discard, the next Shard
+        // pack and both Shard dupes walks until an own-collection read
+        // dispatched after that refusal holds them again (item 18 fix pass 3,
+        // finding 2: ApiClient.FetchPcCollection reconciles the set, which
+        // ApiClient owns for that reason); and packs whose key an earlier
+        // batch already used with other cards, whose button stays down
+        // (single discards and the binder selection still reach them).
+        private static PcShardTombstones shardGone => ApiClient.PcShardGone;
+        private static readonly HashSet<string> packShardBurned = new HashSet<string>(StringComparer.Ordinal);
         private static bool setInFlight; private static float setAt;
         // the dance row (dance cards S5.8): the choice lives on the server; a
         // click only moves the pending choice, sent after a short pause
@@ -218,6 +345,55 @@ namespace CompetitiveRounds
                 case "outdated": return I18n.Tr("Update the mod first");
                 case "transport": return I18n.Tr("No answer from the server - try again in a moment");
                 case "rate_limited": return I18n.Tr("Too many requests at once - wait a few seconds and try again");
+                // Distinct from the line above ON PURPOSE. "Too many requests"
+                // describes a refusal the player can retry straight away; this
+                // one means we already waited, for as long as a run may, and
+                // the queue did not drain. Folding them together told a player
+                // who had been waiting twenty seconds to wait a few seconds.
+                case "rate_limit_waited": return I18n.Tr("The server kept asking us to pause - we waited as long as we can; the rest are still in your binder");
+                // card trading (v1.41.0): one line per refusal code the trade
+                // routes answer as built (V8 2.7, 3.4-3.7, 3.13)
+                case "trading_off": return I18n.Tr("Trading is paused");
+                case "trading_unavailable": return I18n.Tr("Trading is not available yet");
+                case "bad_request": return I18n.Tr("The server could not read that trade request - update the mod or try again");
+                case "self_trade": return I18n.Tr("You cannot trade with yourself");
+                case "bad_terms": return I18n.Tr("That trade has changed - check it again before answering");
+                case "bad_terms_local": return I18n.Tr("Those cards cannot be sent in a trade - choose them again");
+                case "already_processed": return I18n.Tr("That trade was already answered");
+                case "counterparty_unavailable": return I18n.Tr("That player cannot trade");
+                case "counterparty_not_eligible": return I18n.Tr("That player cannot trade yet");
+                case "not_eligible":
+                    {
+                        var tb = ApiClient.CachedPcTrades;
+                        return tb != null && tb.bounds.min_mod_age_days > 0
+                            ? I18n.TrF("You cannot trade yet - trading needs {0} days with the mod and {1} completed ranked series", tb.bounds.min_mod_age_days, tb.bounds.min_ranked_series)
+                            : I18n.Tr("You cannot trade yet");
+                    }
+                case "private": return I18n.Tr("That player's binder is private - they can still propose a trade to you");
+                case "busy": return I18n.Tr("The server is busy with that trade - try again in a moment");
+                case "trading_closed": return I18n.Tr("Your card trading is off - turn it on in Settings");
+                case "counterparty_closed": return I18n.Tr("That player has card trading turned off");
+                case "print_gone": return I18n.Tr("A card in that trade is no longer there");
+                case "subject_unavailable": return I18n.Tr("A card in that trade shows a player who can no longer be traded");
+                case "print_offered_elsewhere": return I18n.Tr("One of your cards is already offered in another trade");
+                case "recently_traded": return I18n.Tr("A card in that trade changed hands moments ago - try again later");
+                case "cap_open_sent": return I18n.Tr("You have too many proposals waiting - cancel one first");
+                case "cap_open_received": return I18n.Tr("That player has too many proposals waiting - try again later");
+                case "cap_proposals_day": return I18n.Tr("You have sent all the proposals allowed today - try again after midnight UTC");
+                case "cooldown_declined": return I18n.Tr("That player declined your last proposal - wait before proposing to them again");
+                case "cooldown_reversal": return I18n.Tr("A trade between you was reversed - wait before trading again");
+                case "pair_busy": return I18n.Tr("You already have an open trade with that player");
+                case "not_found": return I18n.Tr("That trade no longer exists");
+                case "wrong_party": return I18n.Tr("That trade is not yours to answer");
+                case "expired": return I18n.Tr("That trade has expired");
+                case "declined": return I18n.Tr("That trade was declined");
+                case "cancelled": return I18n.Tr("That trade was cancelled");
+                case "void": return I18n.Tr("That trade is no longer possible");
+                case "reversed": return I18n.Tr("That trade was reversed by an admin");
+                case "cap_executed_day": return I18n.Tr("You have made all the trades allowed today - try again after midnight UTC");
+                case "cap_executed_pair_day": return I18n.Tr("You two have made all the trades allowed today - try again after midnight UTC");
+                case "transfer_conflict": return I18n.Tr("The cards changed while the trade ran - nothing moved, check your binder");
+                case "service_account_forbidden": return I18n.Tr("This account cannot trade cards");
                 default: return I18n.Tr("The server refused that - try again in a moment");
             }
         }
@@ -343,8 +519,30 @@ namespace CompetitiveRounds
             if (previewSprite != null) { try { UnityEngine.Object.Destroy(previewSprite); } catch { } previewSprite = null; }
             previewShown = -1;
             if (presetPreview != null) { try { PlayerCardFaces.SetFace(presetPreview, null); } catch { } }
-            discardQueue.Clear(); armedPrintId = null; priceChangedAt = -1f;
+            // Board row 24: the previous account's full card is not this one's.
+            // A fetch still in flight is dropped by its epoch check.
+            SettingsCardDrop();
+            settingsCardInFlight = false; settingsCardRetryAt = 0f; settingsCardAt = -1000f;
+            // Board row 25: a selection names the previous account's prints,
+            // and an answer still in flight is dropped by its epoch check.
+            selecting = false; selectedIds.Clear();
+            armedShard = null; armedShardAt = 0f;
+            shardFlight.Reset(); shardKey = null; shardKeyFor = null;
+            shardGone.Clear(); packShardBurned.Clear();
+            // FinishDiscard is not on this path, so the run state it clears
+            // is cleared here too. A per-copy retry latch left populated
+            // would be carried into the NEXT account's run, where those
+            // print ids are not even its own; and discardInFlight left true
+            // WEDGES the surface outright - the binder goes on saying
+            // "discarding..." and the button stays dead for an account that
+            // never started a run. The epoch check drops the answer that would
+            // have cleared it; only RetireStuckLatches' 25 s give-up would,
+            // and that is 25 s of a dead surface.
+            discardInFlight = false;
+            discardQueue.Clear(); discardRetriedIds.Clear(); discardWaited = 0f;
+            armedPrintId = null; priceChangedAt = -1f;
             recoverAt = 0f; meRefreshAt = 0f; unparseableStrikes = 0;
+            ResetTrades();
             try { NativeUI.MarkDirty(); } catch { }
         }
 
@@ -365,6 +563,7 @@ namespace CompetitiveRounds
             try { HideCardPopup(); } catch { }
             try { PlayerCardMotion.Stop(); } catch { }   // every overlay stops (S5.7)
             pendingVisit = true; settingsVisited = false;
+            tradesEdge.OverlayClosed();   // the Trades view survives a close: the reopen is an entry (TC-L2)
         }
 
         /// <summary>The card view is a full-screen uGUI surface: it owns input
@@ -401,6 +600,7 @@ namespace CompetitiveRounds
             // return inside one throttle window never ran an off-Settings tick,
             // so the visit check stayed disarmed for the second entry.
             if (!onSettings) settingsVisited = false;   // leaving Settings re-arms its one check for the next entry (r6 L12)
+            tradesEdge.Frame(onTab && view == View.Trades);   // and a frame off the Trades view re-arms its entry read (TC-L2)
             if (danceChoice >= 0) { try { MaybeSendDance(); } catch (Exception ex) { danceChoice = -1; danceInFlight = false; Plugin.Log.LogWarning($"[PC] dance selection threw: {ex.Message}"); } }
             if (onTab || cardPopupTile != null) { try { PlaceTopCards(); } catch { } }   // every frame: the overlays follow the layout and the snapshots (C3)
             // Dance cards playback (design S5.7): every call, before the throttle
@@ -410,8 +610,19 @@ namespace CompetitiveRounds
             if (Time.unscaledTime < tickAt) return;
             tickAt = Time.unscaledTime + 2f;
             var id = LocalId();
+            // Above every early return: a latch stuck while the tab is shut
+            // (or on Settings) is retired all the same.
+            RetireStuckLatches(id);
             if (id == null) return;
+            // Fix pass 2, finding 1: a read the answer fence dropped is sent
+            // again only while no shard and no discard is out, so one more
+            // answer of the same run cannot drop it again.
+            if (ApiClient.PcReadsOwed && !shardInFlight && !discardInFlight) ApiClient.PcSendOwedReads(id);
             if (HasIntent()) MaybeRecover(false);
+            // Card trading (V8 6.4): ABOVE the early return below, so the
+            // 120 s summary runs whichever tab is current while the overlay
+            // is up, as MaybeRecover does.
+            TickTrades(id, onTab);
             if (onTab && pendingVisit) { pendingVisit = false; OnTabEntered(); }
             if (!onTab && !onSettings) return;
             try { PlayerCardFaces.Tick(); } catch { }
@@ -427,12 +638,33 @@ namespace CompetitiveRounds
                 // rendered while the stored picture was current. The check now
                 // draws the preview in that case (PortraitRender.Tick).
                 if (!settingsVisited) { settingsVisited = true; try { PortraitRender.OnTabVisit(); } catch { } }
+                // Board row 24: the full card the slot shows, asked for here
+                // (Settings has no fetch chain of its own).
+                try { SettingsCardTick(id); } catch (Exception ex) { Plugin.Log.LogWarning($"[PC] settings card tick threw: {ex.Message}"); }
                 return;
             }
             if (Time.unscaledTime >= meRefreshAt) { meRefreshAt = Time.unscaledTime + 30f; ApiClient.FetchPcMe(id, true); }
             // the binder after an identity edge (c5): an empty cache without an error is refetched (throttled by ApiClient)
             if (view == View.Binder && ApiClient.CachedPcCollection == null && ApiClient.PcCollectionError == null) ApiClient.FetchPcCollection(id);
             if (armedPrintId != null && Now - armedAt > 6f) { armedPrintId = null; NativeUI.MarkDirty(); }
+            if (armedShard != null && Now - armedShardAt > 6f) { armedShard = null; NativeUI.MarkDirty(); }
+            // Past the 20 s transport timeout, the other latches' rule: an answer
+            // that never came back does not leave both shard buttons dead.
+            // The give-up retires the request's generation (F2): an answer that
+            // does arrive later settles nothing and writes no balance.
+            bool quick;
+            if (shardFlight.GiveUp(Now, 25f, out quick))
+            {
+                // Item 18: a strip shard given up has an unknown outcome, so
+                // the collection and the balance are read back (its key is
+                // kept: the same card asked again is a replay).
+                if (quick)
+                {
+                    Plugin.Log.LogWarning("[PC] quick shard: no answer 25 s after the request; given up, read back");
+                    if (PcQuickShardRules.ReadBackAfter("given_up")) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
+                }
+                NativeUI.MarkDirty();
+            }
             if (lastMsg != null && Now - lastMsgAt > 15f) { lastMsg = null; NativeUI.MarkDirty(); }
             if (openInFlight && Now - openAt > 25f) { openInFlight = false; NativeUI.MarkDirty(); }
             if (claimInFlight && Now - claimAt > 25f) { claimInFlight = false; NativeUI.MarkDirty(); }
@@ -453,6 +685,7 @@ namespace CompetitiveRounds
         {
             HookHistorySignals();
             view = View.Open; binderPage = 0; armedPrintId = null;
+            EndCompose(); tradesLabelPainted = null;
             tabRoot = new GameObject("PcRoot");
             tabRoot.transform.SetParent(parent, false);
             tabRoot.AddComponent<RectTransform>();
@@ -475,7 +708,7 @@ namespace CompetitiveRounds
             bar.AddComponent<RectTransform>();
             UIFactory.AddHLG(bar, spacing: 6, forceExpandH: true);
             UIFactory.AddLE(bar, prefH: 30, minH: 30, flexH: 0);
-            // Three literal sites (c4): a label must sit AT a harvested
+            // Four literal sites (c4): a label must sit AT a harvested
             // CreateButton call for the key catalogue to carry it.
             ViewButton(0, UIFactory.CreateButton("PcView0", bar.transform, "Open Packs", 14f, C_LABEL, C_BTN,
                 () => { view = (View)0; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(0, 26)));
@@ -483,11 +716,16 @@ namespace CompetitiveRounds
                 () => { view = (View)1; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(0, 26)));
             ViewButton(2, UIFactory.CreateButton("PcView2", bar.transform, "Get packs", 14f, C_LABEL, C_BTN,
                 () => { view = (View)2; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(0, 26)));
+            ViewButton(3, UIFactory.CreateButton("PcView3", bar.transform, "Trades", 14f, C_LABEL, C_BTN,
+                () => { view = (View)3; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(0, 26)));
+            // hidden until a first view=summary read says the server trades (V8 6.9)
+            if (viewBtns[3] != null) viewBtns[3].SetActive(PcTradeRules.TabShown(tradeDiscovery));
             txtStatus = UIFactory.CreateText("PcStatus", tabRoot.transform, "", 14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(1000, 22));
 
             BuildOpenView(tabRoot.transform);
             BuildBinderView(tabRoot.transform);
             BuildInfoView(tabRoot.transform);
+            BuildTradesView(tabRoot.transform);
         }
 
         private static void BuildOpenView(Transform parent)
@@ -563,6 +801,22 @@ namespace CompetitiveRounds
             UIFactory.SetOverflowMode(txtLastHdr, 2); UIFactory.SetWordWrap(txtLastHdr, false);
             var hdrGO = (txtLastHdr as Component)?.gameObject;
             if (hdrGO != null) UIFactory.AddLE(hdrGO, flexW: 1);
+            // Board row 25: shard every card of the pack on show that is still
+            // yours, in one server transaction (two clicks: the first names the
+            // total and any card that is your only copy). CreateButton routes
+            // the click through ClickGuard.
+            btnShardPack = UIFactory.CreateButton("PcShardPack", hdrRow.transform, "", 12f, C_WHITE, C_DANGER, OnShardPackClick, sizeDelta: new Vector2(170, 22));
+            btnShardPackTxt = UIFactory.GetButtonText(btnShardPack);
+            if (btnShardPackTxt != null) { UIFactory.SetOverflowMode(btnShardPackTxt, 2); UIFactory.SetWordWrap(btnShardPackTxt, false); }
+            btnShardPack.SetActive(false);
+            // Item 18 fix pass 1 (F3): shard only the pack on show's
+            // duplicates, one live copy of every exact face kept, through the
+            // same batch route (two clicks; CreateButton routes the click
+            // through ClickGuard). Up only when the pack holds a duplicate.
+            btnShardDupes = UIFactory.CreateButton("PcShardDupes", hdrRow.transform, "", 12f, C_WHITE, C_DANGER, OnShardDupesClick, sizeDelta: new Vector2(150, 22));
+            btnShardDupesTxt = UIFactory.GetButtonText(btnShardDupes);
+            if (btnShardDupesTxt != null) { UIFactory.SetOverflowMode(btnShardDupesTxt, 2); UIFactory.SetWordWrap(btnShardDupesTxt, false); }
+            btnShardDupes.SetActive(false);
             btnHistOlder = UIFactory.CreateButton("PcHistOlder", hdrRow.transform, "< Older", 12f, C_WHITE, C_BTN, () => PageHistory(+1), sizeDelta: new Vector2(76, 22));
             txtHistPos = UIFactory.CreateText("PcHistPos", hdrRow.transform, "", 13f, C_LABEL, UIFactory.AlignMidCenter, sizeDelta: new Vector2(120, 22));
             btnHistNewer = UIFactory.CreateButton("PcHistNewer", hdrRow.transform, "Newer >", 12f, C_WHITE, C_BTN, () => PageHistory(-1), sizeDelta: new Vector2(76, 22));
@@ -574,7 +828,9 @@ namespace CompetitiveRounds
             UIFactory.AddHLG(lastStrip, spacing: 8, forceExpandH: false);
             UIFactory.AddLE(lastStrip, prefH: TILE_H, minH: TILE_H, flexH: 0);
             revealTiles = new Tile[REVEAL_TILES];
-            for (int i = 0; i < REVEAL_TILES; i++) revealTiles[i] = CreateTile(lastStrip.transform, "PcRv" + i, false);
+            // Item 18: the strip's tiles carry the binder's action row, and its
+            // Discard shards that one card (OnQuickShardClick).
+            for (int i = 0; i < REVEAL_TILES; i++) revealTiles[i] = CreateTile(lastStrip.transform, "PcRv" + i, true, true);
         }
 
         private static void BuildBinderView(Transform parent)
@@ -612,7 +868,24 @@ namespace CompetitiveRounds
             }
             // Click-to-view (2026-09-13): the tiles have no View button; the
             // picture and the text block open the card, and this line says so.
-            UIFactory.CreateText("PcBHint", binderRoot.transform, "Click a card to view it", 12f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(600, 18));
+            txtBinderHint = UIFactory.CreateText("PcBHint", binderRoot.transform, "Click a card to view it", 12f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(600, 18));
+            // Board row 25: a row below it carries Select (a click then picks a
+            // card instead of opening it; the line above gives way to this
+            // row's own line saying so) and Shard selected, which shards the
+            // picked cards in one server transaction (two clicks, as Shard pack).
+            var foot = new GameObject("PcBFoot"); foot.transform.SetParent(binderRoot.transform, false); foot.AddComponent<RectTransform>();
+            UIFactory.AddHLG(foot, spacing: 10, forceExpandH: false); UIFactory.AddLE(foot, prefH: 24, minH: 24, flexH: 0);
+            UIFactory.SetHLGChildAlignMiddle(foot);
+            txtBinderSelHint = UIFactory.CreateText("PcBSelHint", foot.transform, "", 12f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 18));
+            var hintGO = (txtBinderSelHint as Component)?.gameObject;
+            if (hintGO != null) UIFactory.AddLE(hintGO, flexW: 1);
+            btnSelect = UIFactory.CreateButton("PcBSelect", foot.transform, "Select", 12f, C_WHITE, C_BTN, OnSelectClick, sizeDelta: new Vector2(140, 22));
+            btnSelectTxt = UIFactory.GetButtonText(btnSelect);
+            btnShardSel = UIFactory.CreateButton("PcBShardSel", foot.transform, "", 12f, C_WHITE, C_DANGER, OnShardSelectedClick, sizeDelta: new Vector2(200, 22));
+            btnShardSelTxt = UIFactory.GetButtonText(btnShardSel);
+            foreach (var o in new[] { btnSelectTxt, btnShardSelTxt })
+                if (o != null) { UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false); }
+            btnShardSel.SetActive(false);
         }
 
         private static void BuildInfoView(Transform parent)
@@ -632,9 +905,10 @@ namespace CompetitiveRounds
             UIFactory.SetTextAutoHeight(txtInfo, 40f);   // scroll content: auto height, no baked floor (#449)
         }
 
-        private static Tile CreateTile(Transform parent, string name, bool withActions)
+        private static Tile CreateTile(Transform parent, string name, bool withActions, bool quickSurface = false)
         {
             var t = new Tile();
+            t.quickSurface = quickSurface;
             t.root = UIFactory.CreatePanel(name, parent, FrameColor("common", false));
             UIFactory.AddVLG(t.root, spacing: 0, padL: 3, padR: 3, padT: 3, padB: 3);
             UIFactory.AddLE(t.root, prefW: TILE_W, minW: TILE_W, prefH: TILE_H, minH: TILE_H, flexW: 0, flexH: 0);
@@ -710,7 +984,10 @@ namespace CompetitiveRounds
                 // minH as well as prefH: a row with no minimum is the first
                 // thing a layout over budget shrinks to nothing (#449's rule).
                 UIFactory.AddLE(t.actions, prefH: 22, minH: 22, flexH: 0);
-                t.btnDiscard = UIFactory.CreateButton(name + "_d", t.actions.transform, "Discard", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, false), sizeDelta: new Vector2(76, 20));
+                // The strip's Discard shards the one card through the batch
+                // shard's route (item 18); the binder's keeps its own path.
+                t.btnDiscard = UIFactory.CreateButton(name + "_d", t.actions.transform, "Discard", 11f, C_WHITE, C_DANGER,
+                    quickSurface ? (UnityEngine.Events.UnityAction)(() => OnQuickShardClick(tile)) : () => OnDiscardClick(tile, false), sizeDelta: new Vector2(76, 20));
                 t.btnDiscardTxt = UIFactory.GetButtonText(t.btnDiscard);
                 t.btnDupes = UIFactory.CreateButton(name + "_dd", t.actions.transform, "", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, true), sizeDelta: new Vector2(84, 20));
                 t.btnDupesTxt = UIFactory.GetButtonText(t.btnDupes);
@@ -718,6 +995,9 @@ namespace CompetitiveRounds
                 // text lines opted out above and the buttons had not (c4/c5).
                 foreach (var o in new[] { t.btnDiscardTxt, t.btnDupesTxt })
                     if (o != null) { UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false); }
+                // the binder's In a trade / Traded badge (V8 6.1), created last so it draws on
+                // top, just above the 22 px action row (root pad 3 + inner pad 4 below that row)
+                AddBadge(t, name + "_bd", TILE_W - 24f, 13f, 3f + 4f + 22f + 4f);
             }
             t.root.SetActive(false);
             return t;
@@ -801,6 +1081,7 @@ namespace CompetitiveRounds
                     UIFactory.SetOverflowMode(mk, 2); UIFactory.SetWordWrap(mk, true);
                 }
                 cardPopupTile = popupTile;
+                MaybeAddOfferButton(p, h);   // card trading (V8 6.1): Offer in a trade
                 int seq = ++cardPopupSeq, ep = uiEpoch, gen = PlayerCardFaces.Generation;
                 var hit = PlayerCardFaces.Cached(p.print_id, p.face_rev, p.face_locale, "card");
                 if (hit != null) { PopupFaceLanded(img, p, hit, popupTile); return; }
@@ -828,7 +1109,14 @@ namespace CompetitiveRounds
         private static void OnTileClick(Tile t)
         {
             if (t == null || t.print == null || Time.frameCount == cardPopupFrame) return;
+            if (t.print.gone) return;   // a print a data deletion removed (card trading): nothing to open or pick
             if (!ClickGuard.Claim(t.root)) return;
+            // a compose picker's tile selects instead of opening the card (card trading)
+            if (t.click != null) { t.click(t); return; }
+            // Board row 25: in Select mode a binder tile (the one with an action
+            // row) is picked or dropped instead of opened. The reveal strip's
+            // tiles still open their card.
+            if (selecting && view == View.Binder && t.actions != null) { ToggleSelected(t.print); return; }
             ShowCard(t);
         }
 
@@ -913,6 +1201,7 @@ namespace CompetitiveRounds
             if (p.signed) lines.Add("~ " + name + " ~");
             try { NativeUI.ShowInfoPopupRaw(name, string.Join("\n\n", lines.ToArray())); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PC] card view failed: {ex.Message}"); }
+            MaybeAddTextOfferButton(p);   // card trading (V8 6.1): the text view offers the card too
         }
 
         private static void FillTile(Tile t, ApiClient.PcPrint p, int dupes)
@@ -939,16 +1228,41 @@ namespace CompetitiveRounds
             // words sit over the picture when the face is still cached, and the
             // picture is dimmed so the stamp reads on any band colour.
             string mark = p.discarded ? DiscardedLine(p) : MarkLine(p);
+            // Board row 25: a binder tile picked for Shard selected wears a cyan
+            // frame and a "Selected" stamp (the DISCARDED stamp's slot: the
+            // binder holds no discarded print), and its mark line says so too
+            // for a tile showing its text block.
+            bool picked = selecting && t.actions != null && !t.quickSurface && !p.discarded && selectedIds.Contains(p.print_id);
+            if (picked) { UIFactory.SetImageColor(t.root, C_SELECT); mark = I18n.Tr("Selected") + " | " + mark; }
             UIFactory.SetTextRaw(t.txtMark, mark);
-            if (t.faceMark != null) UIFactory.SetTextRaw(t.faceMark, p.discarded ? "<b>" + DiscardedLine(p) + "</b>" : "");
-            if (t.faceMarkGO != null) t.faceMarkGO.SetActive(p.discarded);
-            UIFactory.SetImageColor(t.face, p.discarded ? new Color(0.42f, 0.42f, 0.48f, 1f) : Color.white);
+            if (t.faceMark != null) UIFactory.SetTextRaw(t.faceMark, p.discarded ? "<b>" + DiscardedLine(p) + "</b>" : (picked ? "<b>" + I18n.Tr("Selected") + "</b>" : ""));
+            if (t.faceMarkGO != null) t.faceMarkGO.SetActive(p.discarded || picked);
+            UIFactory.SetImageColor(t.face, p.discarded || picked ? new Color(0.42f, 0.42f, 0.48f, 1f) : Color.white);
             UIFactory.SetTextRaw(t.txtSign, p.signed ? "<i>~ " + name + " ~</i>" : "");
             if (t.actions != null)
             {
+                bool gone = p.print_id != null && shardGone.Contains(p.print_id);
+                // Select mode picks binder cards; the binder's per-card buttons
+                // wait until it ends. The strip's rule is its own (item 18).
+                t.btnDiscard.SetActive(PcQuickShardRules.DiscardOffered(t.quickSurface, p.discarded, gone, selecting));
+                if (t.quickSurface)
+                {
+                    // Item 18: armed by the batch shard's arming (one card's
+                    // set), "sharding..." while this card's request is out,
+                    // and dimmed while any shard or discard is out (a click
+                    // then is refused at the entry).
+                    bool busyThis = shardInFlight && shardQuickId == p.print_id;
+                    bool armedQ = armedShard != null && armedShard == PcQuickShardRules.ArmSet(p.print_id) && Now - armedShardAt <= 6f;
+                    if (busyThis) UIFactory.SetTextRaw(t.btnDiscardTxt, I18n.Tr("sharding..."));
+                    else UIFactory.SetText(t.btnDiscardTxt, armedQ ? "Sure? Discard" : "Discard");
+                    UIFactory.SetImageColor(t.btnDiscard, SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
+                    t.btnDupes.SetActive(false);
+                    PaintTileBadge(t, p);
+                    return;
+                }
                 bool armedThis = armedPrintId == p.print_id && !armedDupes;
                 UIFactory.SetText(t.btnDiscardTxt, armedThis ? "Sure? Discard" : "Discard");
-                bool showDupes = dupes > 1;
+                bool showDupes = dupes > 1 && !selecting;
                 t.btnDupes.SetActive(showDupes);
                 if (showDupes)
                 {
@@ -956,6 +1270,7 @@ namespace CompetitiveRounds
                     UIFactory.SetTextRaw(t.btnDupesTxt, armedD ? I18n.Tr("Sure? Discard dupes") : I18n.TrF("Dupes ({0})", dupes - 1));
                 }
             }
+            PaintTileBadge(t, p);   // display only: Discard stays live on a print in a trade (V8 1.2)
         }
 
         /// <summary>The face of this print at tile size, if the server has one:
@@ -1009,59 +1324,68 @@ namespace CompetitiveRounds
         // game (Discord, the bot) the badge stands as drawn: name, framed
         // empty area.
         //
-        // The art area is [94,646,172,750] -- 78x104. Its HEIGHT is the badge
-        // frame's full clear run: BadgeFrame.png's rails own y 642-645 and
-        // y 751-754, so 646..750 is every row the art can use, and the card's
-        // top and bottom edges meet the box.
+        // The box is [100,651,167,745] -- 67x94 -- and the backing plate is
+        // the same rect. Two constraints place it, and both hold at once:
         //
-        // The WIDTH is 78 and not 72 because of what fills the height. The
-        // vanilla card body (Canvas/Front/Background, the rect the four
-        // corner marks sit on) measures 351.9 x 479.9, aspect 0.7333, and
-        // preserveAspect fits by whichever axis runs out first. At 72x104
-        // the box is aspect 0.6923 -- NARROWER than the card -- so the fit
-        // is width-limited and the card draws 98.2 px tall, 5.8 px short of
-        // the box, which is corner marks that do not reach the rails
-        // (observation 1, 2026-09-21). At 78x104 the box is 0.75, wider than
-        // the card, so the fit is HEIGHT-limited: the card draws the full
-        // 104 px and the corner marks land on 646 and 750. The 1.7 px that
-        // 78 has over the exact-match 76.26 is deliberate slack, so a small
-        // error in the measured card aspect cannot flip the fit back to
-        // width-limited and reopen the gap; it costs under a pixel either
-        // side. Measured from the asset: the frame's inner clear area is
-        // x 62..174, so 94..172 is inside it, and the badge name's own ink
-        // ends at x=89, so the art clears the name by five pixels.
+        // 1. It starts 4 px right of the NAME COLUMN, not of one name's ink.
+        //    The layout's badge_name rect is [64,654,96,742], and a long card
+        //    name fills that column to x=96, so the art starts at x=100
+        //    (backend/tests/test_client_top_card_overlay.py pins it).
+        // 2. It keeps at least 2 px from every pixel of BadgeFrame.png, the
+        //    rounded corners included. The frame's opening is transparent
+        //    over x 62-174 and rows 646-750; the rails occupy x 175-178, rows
+        //    642-645 and rows 751-754, and the opening's inner corners are
+        //    rounded (~12 px radius: on the right, the rail's inner edge is at
+        //    x=163 on row 646 and x=172 on row 652, mirrored at the bottom as
+        //    x=163 on row 750 and x=170 on row 746). Both overlays are opaque
+        //    rectangles -- the plate in C_BADGE_DARK, and the capture
+        //    composited over its backing colour at alpha 255 -- so any overlap
+        //    paints over the frame. The pre-inset rects (the backing at
+        //    [92,646] 80x104, the art box at [94,646] 78x104) did exactly that
+        //    on the right-hand corners: 44 frame pixels under the backing and
+        //    34 under the drawn card, counted by pixel centre over the frame's
+        //    alpha. Here the nearest frame pixel is 2.00 px from the box, at
+        //    the top-right corner; the straight rails are 5 px above, 8 px to
+        //    the right and 6 px below.
+        //
+        // The size follows from those two. 94 px is the least height that
+        // still claims 90% of the clear area's 104 px, which the same test
+        // requires, and 67 px is the widest box of that height starting at
+        // x=100 that keeps 2 px from both right-hand corners: a 68 px box
+        // comes within 1.41 px of one wherever it sits vertically.
+        //
+        // The fit is therefore WIDTH-limited. The vanilla card body
+        // (Canvas/Front/Background, the rect the four corner marks sit on)
+        // measures 351.9 x 479.9, aspect 0.7333; the box is 67/94 = 0.7128,
+        // narrower than the card, so preserveAspect draws the card 67 px wide
+        // and 91.37 px tall, from y=652.31 to y=743.69, and the plate shows
+        // 1.31 px above and below it in the badge's own dark. The ~1.9 px the
+        // box is short of a height-limited width is slack, so a small error
+        // in the measured card aspect cannot flip the fit. Rail contact
+        // without covering the frame needs a per-pixel trim of the capture's
+        // corners -- the pre-composite alpha kept per card and a thumbnail
+        // texture of its own, since the thumbnail shares the full sprite's
+        // texture -- and that is a follow-up, not this.
         //
         // preserveAspect (CreatePanelCentred) does the scaling, and what it
         // scales is CardSnapshot's THUMBNAIL: the capture cropped to the
         // card's corner band, not the whole 380x600 render. That crop is
-        // what makes the corner marks meet this box -- the full render
+        // what lines the corner marks up with this box -- the full render
         // carries the camera's 8% wobble pad and the letterbox the fixed RT
         // aspect adds, and fitting THAT lands the card's own edge ~9-10 px
-        // inside the box (observation 1, 2026-09-21). The band is still
-        // taller than it is wide, so the fit stays HEIGHT-limited: the band
-        // fills 104 px vertically, takes whatever width its aspect gives,
-        // centred, with the framed backing showing either side. A band
-        // wider than the box would fit to width instead, which is the same
-        // rule and still never overlaps the name.
+        // inside the box (observation 1, 2026-09-21).
         //
         // Before 9a these were 60x77 and 50x73, inset and offset up-left
         // inside the old silhouette; the art did not reach the box edges.
         //
-        // The BACKING starts eight pixels further left than the art, at
-        // x=92 rather than x=100. That strip is what a pre-9a server face
-        // draws its badge_mark in ([92,654,144,722]), and a client carrying
-        // these constants against such a face shows its left sliver as a
-        // white bar beside the card (observation 2, 2026-09-21). The real
-        // close for that is deploying the 9a renderer; this covers the strip
-        // meanwhile and is harmless once it is deployed. It does not reach
-        // the name: the 9a face draws the card name in the x 64..96 column,
-        // and the name's own INK ends at x=89 measured over nine card names
-        // at the fitter's 19 px (ai-collab probe, 2026-09-21) -- three
-        // pixels of clearance. A larger badge-name font would eat that, so
-        // the clearance belongs to the measurement, not to the rect's edge.
+        // A pre-9a server face draws its badge_mark in [92,654,144,722]. The
+        // earlier rects started the plate at x=92 so that it covered the
+        // mark's left sliver (observation 2, 2026-09-21); from x=100 the
+        // plate leaves the mark's x 92-100 strip visible on such a face. The
+        // name column, which every 9a face draws, takes precedence.
         // Fractions of the face, top-left origin.
-        private const float TC_BACK_X = 92f / 750f, TC_BACK_Y = 646f / 1050f, TC_BACK_W = 80f / 750f, TC_BACK_H = 104f / 1050f;
-        private const float TC_ART_X = 94f / 750f, TC_ART_Y = 646f / 1050f, TC_ART_W = 78f / 750f, TC_ART_H = 104f / 1050f;
+        private const float TC_BACK_X = 100f / 750f, TC_BACK_Y = 651f / 1050f, TC_BACK_W = 67f / 750f, TC_BACK_H = 94f / 1050f;
+        private const float TC_ART_X = 100f / 750f, TC_ART_Y = 651f / 1050f, TC_ART_W = 67f / 750f, TC_ART_H = 94f / 1050f;
         private static readonly Color C_BADGE_DARK = new Color(0.08f, 0.08f, 0.10f, 1f);
         private static readonly Color C_FACE_DIM = new Color(0.42f, 0.42f, 0.48f, 1f);
 
@@ -1118,9 +1442,10 @@ namespace CompetitiveRounds
             string card = (p != null && t.face.activeSelf) ? p.top_card : null;
             Sprite spr = null;
             // The THUMBNAIL, not the full snapshot: cropped to the card's
-            // corner band so the corner marks reach this box's top and
-            // bottom edges and the card's own name plate stays out of a
-            // 104 px picture. The full sprite is unchanged for every other
+            // corner band so the card's own edge -- the rect its corner
+            // marks sit on -- is what preserveAspect fits into this box, and
+            // the card's own name plate stays out of a ~91 px picture. The
+            // full sprite is unchanged for every other
             // consumer (CardImageLoader, TabStatsOverlay, the card preview).
             bool show = !string.IsNullOrEmpty(card) && CardSnapshot.TryGetThumbSprite(card, out spr) && spr != null;
             if (!show)
@@ -1176,7 +1501,21 @@ namespace CompetitiveRounds
         private static readonly List<PlayerCardMotion.Slot> motionTiles = new List<PlayerCardMotion.Slot>();
         private static readonly List<PlayerCardMotion.Slot> motionPool = new List<PlayerCardMotion.Slot>();
         private static readonly PlayerCardMotion.Slot motionPopup = new PlayerCardMotion.Slot();
-        private static readonly string[] MotionViews = { "open", "binder", "info" };
+        // The playback's view names, one per View value and indexed by it,
+        // derived from the enum itself so a view added later has its entry
+        // (bug 405: a hand-written list of three threw on every Trades frame).
+        private static readonly string[] MotionViews = MotionViewNames();
+
+        private static string[] MotionViewNames()
+        {
+            var values = (View[])Enum.GetValues(typeof(View));
+            int top = 0;
+            foreach (var v in values) top = Math.Max(top, (int)v);
+            var names = new string[top + 1];
+            for (int i = 0; i < names.Length; i++) names[i] = "view" + i;   // a gap in the values still has an entry
+            foreach (var v in values) if ((int)v >= 0) names[(int)v] = v.ToString().ToLowerInvariant();
+            return names;
+        }
         private static string motionKey, motionKeyPack;
         private static int motionKeyView = -1, motionKeyPage = int.MinValue;
 
@@ -1199,7 +1538,7 @@ namespace CompetitiveRounds
                     if (lastStrip != null && lastStrip.activeInHierarchy) MotionAdd(revealTiles, ref used);
                     key = MotionPageKey(0, historyIndex, shown != null ? shown.pack_id : null);
                 }
-                else key = MotionPageKey(2, 0, null);
+                else key = MotionPageKey((int)view, 0, null);
             }
             PlayerCardMotion.Slot pop = null;
             if (popup)
@@ -1311,7 +1650,13 @@ namespace CompetitiveRounds
             var id = LocalId();
             var me = ApiClient.CachedPcMe;
             var st = ApiClient.CachedPlayerStats;
-            for (int i = 0; i < 3; i++)
+            // The Trades view exists only while the server trades (V8 6.9): a
+            // 404 or no answer yet hides it, and a view left on it falls back.
+            bool tradesShown = PcTradeRules.TabShown(tradeDiscovery);
+            if (!tradesShown && view == View.Trades) { view = View.Open; EndCompose(); }
+            if (viewBtns[3] != null && viewBtns[3].activeSelf != tradesShown) viewBtns[3].SetActive(tradesShown);
+            PaintTradesLabel();
+            for (int i = 0; i < viewBtns.Length; i++)
             {
                 if (viewBtns[i] != null) UIFactory.SetImageColor(viewBtns[i], (int)view == i ? C_BTNACT : C_BTN);
                 if (viewTxts[i] != null) UIFactory.SetColor(viewTxts[i], (int)view == i ? C_WHITE : C_LABEL);
@@ -1319,6 +1664,7 @@ namespace CompetitiveRounds
             if (openRoot != null) openRoot.SetActive(view == View.Open);
             if (binderRoot != null) binderRoot.SetActive(view == View.Binder);
             if (infoRoot != null) infoRoot.SetActive(view == View.Info);
+            if (tradesRoot != null) tradesRoot.SetActive(view == View.Trades);
 
             string bal = st != null ? I18n.TrF("{0} gold", st.gold_earned - st.gold_spent) : "";   // the Shop's balance rule
             if (me != null) bal += (bal.Length > 0 ? "  -  " : "") + I18n.TrF("{0} shards", me.shards);
@@ -1350,6 +1696,7 @@ namespace CompetitiveRounds
             }
             if (view == View.Open) RefreshOpen(me);
             else if (view == View.Binder) RefreshBinder(me);
+            else if (view == View.Trades) RefreshTrades(id);
             else RefreshInfo(me);
         }
 
@@ -1425,13 +1772,58 @@ namespace CompetitiveRounds
                 UIFactory.SetImageColor(btnHistNewer, historyIndex > 0 ? C_BTN : C_PANEL);
                 for (int i = 0; i < revealTiles.Length; i++)
                     FillTile(revealTiles[i], i < shown.prints.Count ? shown.prints[i] : null, 0);
+                RefreshShardPackButton(shown);
             }
             else if (historyInFlight)
             {
                 UIFactory.SetTextRaw(txtLastHdr, I18n.Tr("Loading your packs..."));
                 UIFactory.SetTextRaw(txtHistPos, "");
                 for (int i = 0; i < revealTiles.Length; i++) FillTile(revealTiles[i], null, 0);
+                RefreshShardPackButton(null);
             }
+            else RefreshShardPackButton(null);
+        }
+
+        /// <summary>Board row 25: the Shard pack button on the pack on show --
+        /// up while the pack still holds a card of yours this client has not
+        /// seen discarded, labelled with the total those cards pay (the second
+        /// click's label once armed), "sharding..." while a batch is out.</summary>
+        private static void RefreshShardPackButton(ApiClient.PcPackAnswer shown)
+        {
+            RefreshShardDupesButton(shown);
+            if (btnShardPack == null) return;
+            var ids = PackShardIds(shown);
+            bool up = ids.Count > 0 && ids.Count <= ApiClient.PC_DISCARD_BATCH_CAP
+                      && !packShardBurned.Contains(shown.pack_id);
+            bool busy = shardInFlight && shown != null && shardPackId == shown.pack_id;
+            btnShardPack.SetActive(up || busy);
+            if (!up && !busy) return;
+            int total = ShardTotal(shown.prints, ids);
+            bool armed = armedShard != null && armedShard == PackShardSet(shown.pack_id, ids) && Now - armedShardAt <= 6f;
+            UIFactory.SetTextRaw(btnShardPackTxt, busy ? I18n.Tr("sharding...")
+                : armed ? I18n.TrF("Sure? +{0} shards", total) : I18n.TrF("Shard pack (+{0})", total));
+            UIFactory.SetImageColor(btnShardPack, SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
+        }
+
+        /// <summary>Item 18 fix pass 1 (F3): the Shard dupes button on the pack
+        /// on show -- up while the pack holds a duplicate the player owns now
+        /// (PackDupeIds; PcQuickShardRules.DupesOffered, fix pass 2), labelled with
+        /// the total those copies pay (the second click's label once armed),
+        /// "sharding..." while its batch is out.</summary>
+        private static void RefreshShardDupesButton(ApiClient.PcPackAnswer shown)
+        {
+            if (btnShardDupes == null) return;
+            bool ready;
+            var ids = PackDupeIds(shown, ApiClient.CachedPcCollection, out ready);
+            bool up = PcQuickShardRules.DupesOffered(ready, ids.Count, ApiClient.PC_DISCARD_BATCH_CAP);
+            bool busy = shardInFlight && shown != null && shardFlight.DupesOf == shown.pack_id;
+            btnShardDupes.SetActive(up || busy);
+            if (!up && !busy) return;
+            int total = ShardTotal(shown.prints, ids);
+            bool armed = armedShard != null && armedShard == DupesShardSet(shown.pack_id, ids) && Now - armedShardAt <= 6f;
+            UIFactory.SetTextRaw(btnShardDupesTxt, busy ? I18n.Tr("sharding...")
+                : armed ? I18n.TrF("Sure? +{0} shards", total) : I18n.TrF("Shard dupes (+{0})", total));
+            UIFactory.SetImageColor(btnShardDupes, SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
         }
 
         // ── pack history (the strip's pager) ──────────────────────────────
@@ -1446,6 +1838,10 @@ namespace CompetitiveRounds
         private static readonly List<ApiClient.PcPackAnswer> packHistory = new List<ApiClient.PcPackAnswer>();
         private static string historyNextBefore;
         private static bool historyLoaded, historyInFlight, historyExhausted;
+        // historyGen names a HISTORY (bumped by HistoryReset); historySerial
+        // names a page REQUEST (bumped by its 25 s give-up as well), so a
+        // late page cannot land after the request was given up.
+        private static float historySentAt; private static int historySerial;
         private static int historyIndex, historyTotal;
         // The chain's count is its FIRST page's total, kept for the chain's
         // life: a later page's total can count a pack opened on another
@@ -1700,11 +2096,17 @@ namespace CompetitiveRounds
             string before = historyLoaded ? historyNextBefore : null;
             if (historyLoaded && string.IsNullOrEmpty(before)) { historyExhausted = true; return; }
             historyInFlight = true;
-            int ep = uiEpoch, gen = historyGen;
+            historySentAt = Now;
+            int ep = uiEpoch, gen = historyGen, serial = ++historySerial;
             NativeUI.MarkDirty();
             ApiClient.FetchPcPacks(id, before, (ok, resp, h) =>
             {
                 if (ep != uiEpoch || gen != historyGen) return;   // reset since: its flags went with it
+                if (serial != historySerial)
+                {
+                    Plugin.Log.LogInfo($"[PC] pack history: answer to serial {serial} dropped (given up)");
+                    return;
+                }
                 historyInFlight = false;
                 if (!ok || h == null)
                 {
@@ -1823,9 +2225,33 @@ namespace CompetitiveRounds
         private static readonly List<ApiClient.PcPrint> sorted = new List<ApiClient.PcPrint>();
         private static readonly Dictionary<string, int> faceCounts = new Dictionary<string, int>();
 
+        /// <summary>What this session knows about the subjects' standings.
+        /// Three values, because "no answer has been read yet" and "an answer
+        /// was read and carried none" must not decide the same way (#430) —
+        /// the cycler may treat them alike, the restore may not.</summary>
+        private static BinderSortRules.Standings CurrentStandings()
+        {
+            var col = ApiClient.CachedPcCollection;
+            if (col == null) return BinderSortRules.Standings.Unknown;
+            return col.subject_standings
+                ? BinderSortRules.Standings.Present
+                : BinderSortRules.Standings.Absent;
+        }
+
+        /// <summary>The header button. The next mode comes from
+        /// BinderSortRules, which derives the cycle length from the enum — the
+        /// "% 5" that stood here was right for exactly as long as there were
+        /// five sorts — and steps over a mode the current answer cannot serve.
+        ///
+        /// This is the ONLY writer of the stored sort: an explicit click. No
+        /// paint path, no fallback and no availability test writes it, so a
+        /// session that cannot offer the rating sort costs the player that
+        /// session's ordering and never the preference itself.</summary>
         private static void CycleSort()
         {
-            binderSort = (Sort)(((int)binderSort + 1) % 5);
+            binderSort = BinderSortRules.Next(binderSort, CurrentStandings());
+            pendingBinderSort = null;   // an explicit choice supersedes a restore still waiting
+            if (Plugin.BinderSort != null) Plugin.BinderSort.Value = BinderSortRules.NameOf(binderSort);
             binderPage = 0;
             try { PlayerCardMotion.Rebase(); } catch { }   // a reorder, never a visit (S5.3)
             NativeUI.MarkDirty();
@@ -1839,57 +2265,94 @@ namespace CompetitiveRounds
                 case Sort.Edition: return I18n.Tr("Edition");
                 case Sort.Date: return I18n.Tr("Date obtained");
                 case Sort.Position: return I18n.Tr("Position");
+                case Sort.RatingPosition: return I18n.Tr("Rating position");
                 default: return I18n.Tr("Name");
             }
         }
 
-        private static int EditionNo(ApiClient.PcPrint p) { int e; return int.TryParse(p.edition_id ?? "", out e) ? e : int.MaxValue; }
-        private static int BoardKey(ApiClient.PcPrint p) { return p.board_rank > 0 ? p.board_rank : int.MaxValue; }
+        /// <summary>Plugin.Awake hands over the stored sort once. Parsing is
+        /// BinderSortRules' job (a member NAME, never an ordinal; an
+        /// unrecognised one falls back to Name) and applying it is deferred —
+        /// see pendingBinderSort.</summary>
+        internal static void RestoreBinderSort(string stored)
+        {
+            pendingBinderSort = BinderSortRules.Parse(stored, Sort.Name);
+        }
 
-        /// <summary>The binder order: the chosen key first, then the name order
-        /// as the tiebreaker under every mode (and the whole order under Name),
+        private static int EditionNo(ApiClient.PcPrint p) { int e; return int.TryParse(p.edition_id ?? "", out e) ? e : int.MaxValue; }
+
+        /// <summary>One print reduced to the keys the order reads. Everything
+        /// locale- or Unity-dependent is resolved HERE — SafeName goes through
+        /// I18n, RarityOrder is already a number — so BinderSortRules stays
+        /// free of both and can be run under a plain compiler.</summary>
+        private static BinderSortRules.Subject SortKey(ApiClient.PcPrint p)
+        {
+            return new BinderSortRules.Subject
+            {
+                PrintId = p.print_id,
+                CardId = p.card_id,
+                EditionId = p.edition_id,
+                MintedAt = p.minted_at,
+                Name = SafeName(p),
+                RarityOrder = RarityOrder(p.rarity),
+                Foil = p.foil,
+                Signed = p.signed,
+                EditionNo = EditionNo(p),
+                PoolRank = p.pool_rank,
+                MintBoardRank = p.board_rank,       // the number on the card face
+                SubjectId = p.subject_player_id,
+                Rank = p.subject_board_rank,        // where that player stands today
+                Inactive = p.subject_inactive,
+                Rated = p.subject_rated,
+                Rating = p.subject_rating,
+            };
+        }
+
+        /// <summary>The binder order. The rule itself is BinderSortRules.Compare,
+        /// which the harness runs: the chosen key first, then the name order as
+        /// the tiebreaker under every mode (and the whole order under Name),
         /// down to the print id so the order is total.</summary>
         private static int CompareForBinder(ApiClient.PcPrint a, ApiClient.PcPrint b)
         {
-            int c;
-            switch (binderSort)
-            {
-                case Sort.Rarity:
-                    c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity)); if (c != 0) return c;
-                    c = (b.foil ? 1 : 0).CompareTo(a.foil ? 1 : 0); if (c != 0) return c;
-                    c = (b.signed ? 1 : 0).CompareTo(a.signed ? 1 : 0); if (c != 0) return c;
-                    break;
-                case Sort.Edition:
-                    c = EditionNo(a).CompareTo(EditionNo(b)); if (c != 0) return c;
-                    c = string.CompareOrdinal(a.edition_id ?? "", b.edition_id ?? ""); if (c != 0) return c;
-                    c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity)); if (c != 0) return c;
-                    break;
-                case Sort.Date:
-                    c = string.CompareOrdinal(b.minted_at ?? "", a.minted_at ?? ""); if (c != 0) return c;   // newest first
-                    break;
-                case Sort.Position:
-                    c = BoardKey(a).CompareTo(BoardKey(b)); if (c != 0) return c;
-                    c = a.pool_rank.CompareTo(b.pool_rank); if (c != 0) return c;
-                    break;
-            }
-            c = string.Compare(SafeName(a), SafeName(b), StringComparison.OrdinalIgnoreCase); if (c != 0) return c;
-            c = string.CompareOrdinal(a.card_id ?? "", b.card_id ?? ""); if (c != 0) return c;
-            c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity)); if (c != 0) return c;
-            c = (b.foil ? 1 : 0).CompareTo(a.foil ? 1 : 0); if (c != 0) return c;
-            c = (b.signed ? 1 : 0).CompareTo(a.signed ? 1 : 0); if (c != 0) return c;
-            c = string.CompareOrdinal(a.minted_at ?? "", b.minted_at ?? "");
-            return c != 0 ? c : string.CompareOrdinal(a.print_id, b.print_id);
+            return BinderSortRules.Compare(SortKey(a), SortKey(b), binderSort);
         }
 
         private static void RefreshBinder(ApiClient.PcMe me)
         {
             var col = ApiClient.CachedPcCollection;
+            // The deferred restore (item 20), BEFORE the sort, off the same
+            // `col` this paint reads. Unknown keeps it waiting; only an answer
+            // that was actually read decides, and neither outcome touches the
+            // stored value.
+            if (pendingBinderSort.HasValue)
+            {
+                switch (BinderSortRules.Resolve(pendingBinderSort.Value, CurrentStandings()))
+                {
+                    case BinderSortRules.Restore.Apply:
+                        binderSort = pendingBinderSort.Value;
+                        pendingBinderSort = null;
+                        binderPage = 0;
+                        break;
+                    case BinderSortRules.Restore.DropForSession:
+                        pendingBinderSort = null;
+                        break;
+                    // Keep: the fetch has not answered yet; try again next paint.
+                }
+            }
             sorted.Clear(); faceCounts.Clear();
             if (col != null)
             {
                 sorted.AddRange(col.prints);
                 sorted.Sort(CompareForBinder);
                 foreach (var p in sorted) { string k = FaceKey(p); int n; faceCounts.TryGetValue(k, out n); faceCounts[k] = n + 1; }
+                // Board row 25: a picked card that left the collection (a
+                // refetch, a discard, another device) is no longer picked.
+                if (selectedIds.Count > 0)
+                {
+                    var held = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var p in col.prints) if (p != null && p.print_id != null) held.Add(p.print_id);
+                    selectedIds.RemoveAll(x => !held.Contains(x));
+                }
             }
             int total = sorted.Count;
             int pages = Math.Max(1, (total + PAGE - 1) / PAGE);
@@ -1900,7 +2363,9 @@ namespace CompetitiveRounds
             else if (total == 0) hdr = I18n.Tr("No cards yet - open a pack");
             else hdr = I18n.TrF("{0} cards", total);
             if (discardInFlight) hdr += "  -  " + I18n.Tr("discarding...");
+            else if (shardInFlight) hdr += "  -  " + I18n.Tr("sharding...");
             UIFactory.SetTextRaw(txtBinderHdr, hdr);
+            RefreshSelectRow(col);
             UIFactory.SetTextRaw(txtBinderPage, I18n.TrF("Page {0} of {1}", binderPage + 1, pages));
             if (btnSortTxt != null) UIFactory.SetTextRaw(btnSortTxt, I18n.Tr("Sort:") + " " + SortLabel(binderSort));
             if (btnPrev != null) btnPrev.SetActive(pages > 1);
@@ -1916,6 +2381,7 @@ namespace CompetitiveRounds
             }
             for (int r = 0; r < BINDER_ROWS; r++)
                 if (binderRows[r] != null) binderRows[r].SetActive(start + r * TILES_PER_ROW < total);
+            LogBadges(sorted);
         }
 
         private static void RefreshInfo(ApiClient.PcMe me)
@@ -1932,7 +2398,10 @@ namespace CompetitiveRounds
                     ? I18n.TrF("- Buy one for {0} gold or {1} shards. No daily limit on this account.", gold, shards)
                     : I18n.TrF("- Buy one for {0} gold or {1} shards, up to {2} paid packs a day.", gold, shards, cap)) + "\n\n"
                 + I18n.TrF("Each pack holds {0} cards. A card's rarity is its player's rank in the card pool on the day of the pull: Legendary = #1-2, Epic #3-10, Rare #11-20, Uncommon #21-40, Common #41 and below. Odds per card: Common 60%, Uncommon 25%, Rare 11%, Epic 3.5%, Legendary 0.5%. Every card also rolls Foil (1 in 200) and Signed (1 in 2000) on its own.", per) + "\n\n"
-                + I18n.Tr("Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discards are one card at a time; the Dupes button discards every other copy of that exact card.") + "\n\n"
+                + I18n.Tr("Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discard takes one card and the Dupes button every other copy of that exact card; Shard pack (on a pack you opened) and Select (in the binder) shard up to 40 cards in one go.") + "\n"
+                // its own literal, right after the discard sentence (V8 6.7, F13; the
+                // batch shard lane reworded that sentence, this one is unchanged)
+                + I18n.Tr("Cards received in a trade may give fewer shards when discarded.") + "\n\n"
                 + I18n.Tr("A card freezes its player's title, rating, record and rank as the leaderboard had them on the day it was pulled; the name and the picture stay live (a renamed player shows their new name). Every player who has run the mod from a Steam account and is not banned can be pulled; a public binder and pull announcements are your Settings, and deleting your data removes every card of you from every binder.");
             UIFactory.SetTextRaw(txtInfo, body);
         }
@@ -2193,21 +2662,77 @@ namespace CompetitiveRounds
             if (!force && Time.unscaledTime < recoverAt) return;
             recoverAt = Time.unscaledTime + 15f;
             recoverInFlight = true;
-            Plugin.Log.LogInfo($"[PC] recovering {kind} intent (age {age:F0}s)");
-            int ep = uiEpoch;
+            recoverSentAt = Now;
+            int ep = uiEpoch, serial = ++recoverSerial;
+            Plugin.Log.LogInfo($"[PC] recovering {kind} intent (age {age:F0}s, serial {serial})");
             ApiClient.PcPackResult(id, kind == "buy" ? reference : null, kind == "pack" ? reference : null,
-                (ok, resp) => { if (ep != uiEpoch) return; recoverInFlight = false; HandleAnswer(ok, resp, true); });
+                (ok, resp) =>
+                {
+                    if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                    if (serial != recoverSerial)
+                    {
+                        // The intent is still on disk, so nothing is lost: the
+                        // next recovery asks the same idempotent question again.
+                        Plugin.Log.LogInfo($"[PC] recovery: answer to serial {serial} dropped (given up)");
+                        return;
+                    }
+                    recoverInFlight = false;
+                    HandleAnswer(ok, resp, true);
+                });
+        }
+
+        /// <summary>The 25 s give-up for the three latches that had none
+        /// (carried item ii, the settings card latch's rule from asks-b round
+        /// 2): past ApiClient's 20 s transport timeout an answer that has not
+        /// come is not coming - a request whose coroutine was stopped (the
+        /// persistent host respawned, Plugin.cs OnDestroy) never runs its
+        /// callback, and the latch would otherwise hold for the session. Each
+        /// give-up bumps that latch's serial, so an answer that does arrive
+        /// later commits nothing. Runs on every 2 s tick, above the tick's
+        /// early returns.</summary>
+        private static void RetireStuckLatches(string id)
+        {
+            if (historyInFlight && Now - historySentAt > 25f)
+            {
+                historyInFlight = false;
+                historySerial++;
+                historyFailedAt = Now;   // EnsureHistory's own 30 s retry, as after a failed page
+                Plugin.Log.LogWarning("[PC] pack history: no answer 25 s after the request; given up");
+                NativeUI.MarkDirty();
+            }
+            if (recoverInFlight && Now - recoverSentAt > 25f)
+            {
+                recoverInFlight = false;
+                recoverSerial++;
+                Plugin.Log.LogWarning("[PC] recovery: no answer 25 s after the request; given up, the intent is kept");
+                NativeUI.MarkDirty();
+            }
+            if (discardInFlight && Now - discardSentAt > 25f)
+            {
+                discardSerial++;
+                Plugin.Log.LogWarning($"[PC] discard: no answer 25 s into the run's step ({discardDone} done); run given up");
+                // Whether the unanswered discard applied is unknown, so the
+                // binder and the balance are re-read ("transport" alone skips
+                // that refetch - it is the code for an answer that FAILED).
+                FinishDiscard(id, "transport");
+                if (id != null) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
+            }
         }
 
         private static void OnDiscardClick(Tile t, bool dupes)
         {
             var p = t?.print; var id = LocalId();
-            if (p == null || id == null || discardInFlight) return;
+            if (p == null || id == null || discardInFlight || shardInFlight) return;
             if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
             if (armedPrintId != p.print_id || armedDupes != dupes || Now - armedAt > 6f)
             {
                 armedPrintId = p.print_id; armedDupes = dupes; armedAt = Now;
-                Say(dupes ? I18n.Tr("Click Dupes again to discard every other copy of that card") : I18n.Tr("Click Discard again to discard that card for shards"));
+                string ask = dupes ? I18n.Tr("Click Dupes again to discard every other copy of that card") : I18n.Tr("Click Discard again to discard that card for shards");
+                // Board row 25 (b): the last copy of a card is the player's
+                // call, so the first click says so and the second still
+                // discards it. Dupes always keeps the copy it was clicked on.
+                if (!dupes && t.dupes <= 1) ask += " - " + I18n.TrF("this is your only copy of {0}", SafeName(p));
+                Say(ask);
                 return;
             }
             armedPrintId = null;
@@ -2222,19 +2747,30 @@ namespace CompetitiveRounds
                         if (o.print_id != p.print_id && FaceKey(o) == key) discardQueue.Add(o.print_id);
             }
             if (discardQueue.Count == 0) return;
-            discardDone = 0; discardShards = 0; discardInFlight = true;
+            discardDone = 0; discardShards = 0; discardWaited = 0f; discardRetriedIds.Clear(); discardInFlight = true;
+            int serial = ++discardSerial;
             NativeUI.MarkDirty();
-            DiscardNext(id);
+            DiscardNext(id, serial);
         }
 
-        private static void DiscardNext(string id)
+        private static void DiscardNext(string id, int serial)
         {
             if (discardQueue.Count == 0) { FinishDiscard(id, null); return; }
             string pid = discardQueue[0]; discardQueue.RemoveAt(0);
             int ep = uiEpoch;
-            ApiClient.PcDiscard(id, pid, (ok, resp) =>
+            discardSentAt = Now;
+            // Item 18 fix pass 3, finding 4: ApiClient writes the answer's
+            // balance, and moves the answer fence, only while this step is
+            // still the current run's -- the test this callback makes below,
+            // made before that write as well.
+            ApiClient.PcDiscard(id, pid, () => PcQuickShardRules.DiscardStepCurrent(ep == uiEpoch, discardInFlight, serial, discardSerial), (ok, resp) =>
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                if (serial != discardSerial)
+                {
+                    Plugin.Log.LogInfo($"[PC] discard: answer for run {serial} dropped (given up)");
+                    return;
+                }
                 if (ok)
                 {
                     discardDone++;
@@ -2242,40 +2778,74 @@ namespace CompetitiveRounds
                     discardShards += gained;
                     var col = ApiClient.CachedPcCollection;
                     if (col != null) col.prints.RemoveAll(x => x.print_id == pid);
+                    ApiClient.PcAnswerFence.Wrote();   // fix pass 2, finding 1: a confirmed removal
                     HistoryMarkDiscarded(pid, gained);
-                    DiscardNext(id);
+                    DiscardNext(id, serial);
                     return;
                 }
                 string code = ApiClient.PcErrorCode(resp);
-                // A dupes discard is one request per copy, and the api's
-                // sensitive-path limit is 20 in 10 s (Sept 14 batch, C2): a
-                // rate-limited answer is waited out and the same copy asked
-                // again, once per copy; not a refusal, and not a chain of
-                // refetches on top of the limit.
-                if (code == "rate_limited" && !discardRetried)
+                float wait = ApiClient.PcRetryAfter(resp, 3);
+                // A dupes discard is one request per copy, and the card routes
+                // carry a request budget of their own that one request per copy
+                // stays inside: a rate-limited answer is waited out and the same
+                // copy asked again, once per copy; not a refusal, and not a
+                // chain of refetches on top of the limit. The waiting a run may
+                // do is capped by DiscardWaitBudget - past it the run ends and
+                // says so instead of retrying without a ceiling.
+                if (code == "rate_limited" && !discardRetriedIds.Contains(pid))
                 {
-                    discardRetried = true;
-                    discardQueue.Insert(0, pid);
-                    float wait = ApiClient.PcRetryAfter(resp, 3);
-                    Say(I18n.TrF("Slowing down - the server asked for a {0} s pause", (int)wait), C_WARN);
-                    Plugin.Instance.StartCoroutine(DiscardAfter(id, wait, ep));
+                    if (discardWaited + wait <= DiscardWaitBudget)
+                    {
+                        discardRetriedIds.Add(pid);
+                        discardWaited += wait;
+                        discardQueue.Insert(0, pid);
+                        Say(I18n.TrF("Slowing down - the server asked for a {0} s pause", (int)wait), C_WARN);
+                        // The step's give-up counts from the END of the pause:
+                        // the pause is ours, not an unanswered request. A
+                        // pause whose coroutine never resumes (the host
+                        // respawned) is still given up 25 s after it ends.
+                        discardSentAt = Now + wait;
+                        Plugin.Instance.StartCoroutine(DiscardAfter(id, wait, ep, serial));
+                        return;
+                    }
+                    // This copy still had its retry; the RUN has no waiting
+                    // time left. Reported as its own reason - a player who has
+                    // just watched us wait out two pauses is not being told
+                    // the same thing as one whose first request was refused.
+                    FinishDiscard(id, "rate_limit_waited");
                     return;
                 }
                 FinishDiscard(id, code);
             });
         }
 
-        private static IEnumerator DiscardAfter(string id, float seconds, int ep)
+        private static IEnumerator DiscardAfter(string id, float seconds, int ep, int serial)
         {
             yield return new WaitForSecondsRealtime(seconds);
-            if (ep != uiEpoch || !discardInFlight) yield break;
-            discardRetried = false;
-            DiscardNext(id);
+            // serial: a pause of a run that was given up must not resume a
+            // NEWER run (discardInFlight alone is true again for that one).
+            if (ep != uiEpoch || !discardInFlight || serial != discardSerial) yield break;
+            // DELIBERATELY does not clear the per-copy latch. Resuming IS the
+            // retry; clearing it here was what turned "one retry per copy"
+            // into "one retry in flight" and let a single copy loop until the
+            // run budget ran out.
+            //
+            // CORRECTED (Codex client r2 LOW): "cleared only by FinishDiscard"
+            // was not the whole list, and the omissions are exactly the two a
+            // reader needs in order to decide whether a stale latch can
+            // survive. THREE sites clear it, and every one of them ends a RUN:
+            // FinishDiscard (the run finished or gave up), the new-run
+            // initialisation in the discard entry point (a fresh run starts
+            // with no copy already retried), and the identity change (another
+            // account's run must not inherit this one's retries). What no site
+            // does is clear it MID-RUN — that is the property this comment is
+            // actually here for.
+            DiscardNext(id, serial);
         }
 
         private static void FinishDiscard(string id, string errorCode)
         {
-            discardInFlight = false; discardQueue.Clear(); discardRetried = false;
+            discardInFlight = false; discardQueue.Clear(); discardRetriedIds.Clear(); discardWaited = 0f;
             // One line for both halves: what was discarded stays reported when
             // the next discard fails (c4).
             if (discardDone > 0 && errorCode != null)
@@ -2288,11 +2858,539 @@ namespace CompetitiveRounds
             // the two refetches after every discard were what the rate limit
             // saw first). A refusal other than the limit itself re-reads both,
             // since the local copy may be what was wrong (not_owned).
-            if (id != null && errorCode != null && errorCode != "rate_limited" && errorCode != "transport")
+            // rate_limit_waited is excluded for the same reason rate_limited
+            // is: two refetches on top of a limit that is already refusing us
+            // are exactly what C2 removed. A budget we exhausted is the one
+            // moment we most need to stop asking.
+            if (id != null && errorCode != null && errorCode != "rate_limited"
+                && errorCode != "rate_limit_waited" && errorCode != "transport")
             {
                 ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true);
             }
             NativeUI.MarkDirty();
+        }
+
+
+        // -- Board row 25: the batch shard ---------------------------------------
+        // One server transaction per click (ApiClient.PcDiscardBatch): up to
+        // PC_DISCARD_BATCH_CAP prints, all discarded or none, the credit one
+        // delta, keyed by the pack id (Shard pack) or by a nonce kept for the
+        // exact selection until an answer arrives (Shard selected), so a retry
+        // after a lost answer is answered the stored total and never pays
+        // twice. Two clicks, as Discard: the first names the total and every
+        // card the batch would take the last copy of (the player's call, not a
+        // server block), the second sends. The Dupes button keeps its own
+        // one-request-per-copy loop on the single route.
+
+        /// <summary>The shards a discard pays by rarity: PC_ECONOMY["shards"] in
+        /// backend/api/player_cards.py, pinned equal by test_pc_shard_client.
+        /// Only the confirmation's total reads it; what is credited is the
+        /// server's own figure, which the toast reports.</summary>
+        private static int ShardValue(string rarity)
+        {
+            switch (rarity)
+            {
+                case "legendary": return 600;
+                case "epic": return 150;
+                case "rare": return 40;
+                case "uncommon": return 15;
+                default: return 5;
+            }
+        }
+
+        /// <summary>The batch shard met card trading in the v1.41.0 beta (merge
+        /// pass 2): a print ever received by trade (pc_prints.acquired_by_trade,
+        /// the own binder's permanent `traded` flag) is paid
+        /// PC_TRADE["traded_discard_shards"] whatever its rarity, not its
+        /// rarity's value. The client hardcodes no trade value, so such a print
+        /// is counted at the bound the last full trades read carried, and at 0
+        /// while no read has; the question then says such cards may give fewer
+        /// shards (TradedNote). The flag is read from the print or, for a pack
+        /// answer's print, which does not carry it, from the collection by id.
+        /// Every other print is counted at its rarity (ShardValue).</summary>
+        private static int ShardValueOf(ApiClient.PcPrint p, HashSet<string> tradedIds)
+        {
+            if (p == null) return 0;
+            if (p.traded || (p.print_id != null && tradedIds.Contains(p.print_id)))
+            {
+                var full = ApiClient.CachedPcTrades;
+                return full != null && full.bounds != null ? Math.Max(0, full.bounds.traded_discard_shards) : 0;
+            }
+            return ShardValue(p.rarity);
+        }
+
+        /// <summary>The print ids the cached own collection marks as received by trade.</summary>
+        private static HashSet<string> TradedIds()
+        {
+            var s = new HashSet<string>(StringComparer.Ordinal);
+            var col = ApiClient.CachedPcCollection;
+            if (col != null)
+                foreach (var p in col.prints)
+                    if (p != null && p.traded && p.print_id != null) s.Add(p.print_id);
+            return s;
+        }
+
+        private static int ShardTotal(List<ApiClient.PcPrint> prints, List<string> ids)
+        {
+            int traded;
+            return ShardTotal(prints, ids, out traded);
+        }
+
+        /// <summary>The confirmation's total over the batch, and how many of its
+        /// prints were received by trade (ShardValueOf).</summary>
+        private static int ShardTotal(List<ApiClient.PcPrint> prints, List<string> ids, out int traded)
+        {
+            int total = 0;
+            traded = 0;
+            if (prints == null || ids == null) return 0;
+            var want = new HashSet<string>(ids, StringComparer.Ordinal);
+            var tradedIds = TradedIds();
+            foreach (var p in prints)
+                if (p != null && p.print_id != null && want.Remove(p.print_id))
+                {
+                    if (p.traded || tradedIds.Contains(p.print_id)) traded++;
+                    total += ShardValueOf(p, tradedIds);
+                }
+            return total;
+        }
+
+        /// <summary>The question's line for a batch holding a print received by
+        /// trade: the Info page's own sentence, so the two never disagree.</summary>
+        private static string TradedNote(int traded)
+        {
+            return traded > 0 ? " - " + I18n.Tr("Cards received in a trade may give fewer shards when discarded.") : "";
+        }
+
+        private static ApiClient.PcPackAnswer ShownPack()
+        {
+            if (packHistory.Count == 0) return null;
+            return packHistory[Math.Min(Math.Max(historyIndex, 0), packHistory.Count - 1)];
+        }
+
+        /// <summary>The server's key rule ([A-Za-z0-9-], 8 to 64 characters),
+        /// which also covers the JSON body ApiClient writes ids into verbatim.</summary>
+        private static bool ShardToken(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length < 8 || s.Length > 64) return false;
+            foreach (char c in s)
+                if (!(c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return false;
+            return true;
+        }
+
+        /// <summary>What a Shard pack sends: every print of the pack this client
+        /// has not seen discarded and the server has not named as gone, sorted
+        /// (the request is armed and keyed by the exact set). Empty for a pack
+        /// without a usable id.</summary>
+        private static List<string> PackShardIds(ApiClient.PcPackAnswer pack)
+        {
+            var ids = new List<string>();
+            if (pack == null || pack.prints == null || !ShardToken(pack.pack_id)) return ids;
+            foreach (var p in pack.prints)
+                if (p != null && !p.discarded && ShardToken(p.print_id) && !shardGone.Contains(p.print_id) && !ids.Contains(p.print_id))
+                    ids.Add(p.print_id);
+            ids.Sort(StringComparer.Ordinal);
+            return ids;
+        }
+
+        private static string PackShardSet(string packId, List<string> ids) { return "pack|" + packId + "|" + string.Join(",", ids.ToArray()); }
+        private static string SelShardSet(List<string> ids) { return "sel|" + string.Join(",", ids.ToArray()); }
+
+        /// <summary>The first click arms the exact request and answers false; a
+        /// second click on the same request inside six seconds answers true.</summary>
+        private static bool ShardConfirmed(string set)
+        {
+            if (armedShard == set && Now - armedShardAt <= 6f) { armedShard = null; return true; }
+            armedShard = set; armedShardAt = Now;
+            NativeUI.MarkDirty();
+            return false;
+        }
+
+        /// <summary>" - this is your only copy of X, Y" for every card the batch
+        /// would take the last copy of, counted by the exact card (FaceKey, the
+        /// Dupes rule) over the collection AND the batch's own prints, so a pack
+        /// opened after the collection was read still counts its own copies.
+        /// The names are the subjects' as drawn, never translated (#602).</summary>
+        private static string OnlyCopyNote(List<ApiClient.PcPrint> batch, ApiClient.PcCollection col)
+        {
+            var copies = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            System.Action<ApiClient.PcPrint> count = p =>
+            {
+                if (p == null || p.print_id == null || p.discarded) return;
+                string k = FaceKey(p);
+                HashSet<string> s;
+                if (!copies.TryGetValue(k, out s)) { s = new HashSet<string>(StringComparer.Ordinal); copies[k] = s; }
+                s.Add(p.print_id);
+            };
+            if (col != null) foreach (var p in col.prints) count(p);
+            foreach (var p in batch) count(p);
+            var taking = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var p in batch) { string k = FaceKey(p); int n; taking.TryGetValue(k, out n); taking[k] = n + 1; }
+            var names = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var p in batch)
+            {
+                string k = FaceKey(p);
+                HashSet<string> s;
+                if (seen.Add(k) && copies.TryGetValue(k, out s) && taking[k] >= s.Count) names.Add(SafeName(p));
+            }
+            if (names.Count == 0) return "";
+            string list = names.Count <= 3 ? string.Join(", ", names.ToArray())
+                : string.Join(", ", names.GetRange(0, 3).ToArray()) + ", +" + (names.Count - 3);
+            return " - " + I18n.TrF("this is your only copy of {0}", list);
+        }
+
+        private static void OnShardPackClick()
+        {
+            var id = LocalId();
+            if (id == null || shardInFlight || discardInFlight) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            var shown = ShownPack();
+            var ids = PackShardIds(shown);
+            if (ids.Count == 0 || packShardBurned.Contains(shown.pack_id)) return;
+            if (ids.Count > ApiClient.PC_DISCARD_BATCH_CAP) { Say(I18n.TrF("You can shard up to {0} cards at once", ApiClient.PC_DISCARD_BATCH_CAP), C_WARN); return; }
+            var col = ApiClient.CachedPcCollection;
+            if (col == null) { ApiClient.FetchPcCollection(id, true); Say(I18n.Tr("Loading your binder - try again in a moment"), C_WARN); return; }
+            var batch = new List<ApiClient.PcPrint>();
+            var want = new HashSet<string>(ids, StringComparer.Ordinal);
+            foreach (var p in shown.prints) if (p != null && p.print_id != null && want.Remove(p.print_id)) batch.Add(p);
+            int traded;
+            int total = ShardTotal(batch, ids, out traded);
+            if (!ShardConfirmed(PackShardSet(shown.pack_id, ids)))
+            {
+                Say(I18n.TrF("Click Shard pack again to shard {0} cards for {1} shards", ids.Count, total) + OnlyCopyNote(batch, col) + TradedNote(traded), C_WARN);
+                return;
+            }
+            SendShard(id, shown.pack_id, ids, shown.pack_id);
+        }
+
+        /// <summary>Item 18 fix pass 1 (F3): what a Shard dupes sends -- the
+        /// pack on show's DUPLICATES only, sorted: PcQuickShardRules.
+        /// DuplicateShardIds over the pack's live prints (in display order,
+        /// by exact face) and the collection's live copies, so one live copy
+        /// of every exact face is kept and a unique or last copy is never in
+        /// the set. A print discarded or named gone by the server is not
+        /// live. The collection read is the current ownership (fix pass 2,
+        /// finding 2): a pack print it does not hold (traded away since the
+        /// pull) is neither taken nor counted, and one traded back counts
+        /// again. A print the server named not_owned (shardGone) is out of
+        /// both walks until a collection read dispatched after that refusal
+        /// holds it again (fix pass 3, finding 2): the walks themselves run in
+        /// PcQuickShardRules.PackDupes, which the client rules harness
+        /// executes with the tombstones. `ready` is false (and the set empty)
+        /// only while no collection read is loaded.</summary>
+        private static List<string> PackDupeIds(ApiClient.PcPackAnswer pack, ApiClient.PcCollection col, out bool ready)
+        {
+            ready = false;
+            var none = new List<string>();
+            if (pack == null || pack.prints == null || !ShardToken(pack.pack_id) || col == null || col.prints == null) return none;
+            var faces = new List<string>(); var pids = new List<string>();
+            foreach (var p in pack.prints)
+            {
+                bool live = p != null && !p.discarded && ShardToken(p.print_id);
+                faces.Add(live ? FaceKey(p) : null); pids.Add(p?.print_id);
+            }
+            var colFaces = new List<string>(); var colIds = new List<string>();
+            foreach (var c in col.prints)
+            {
+                bool own = c != null && c.print_id != null && !c.discarded;
+                colFaces.Add(own ? FaceKey(c) : null); colIds.Add(own ? c.print_id : null);
+            }
+            return PcQuickShardRules.PackDupes(faces, pids, colFaces, colIds, shardGone, out ready);
+        }
+
+        private static string DupesShardSet(string packId, List<string> ids) { return "dupes|" + packId + "|" + string.Join(",", ids.ToArray()); }
+
+        /// <summary>Item 18 fix pass 1 (F3): the pull tab's Shard dupes. Two
+        /// clicks inside six seconds, as every shard control: the first names
+        /// how many duplicates and what they pay; the second sends ONE batch
+        /// request with exactly that set, keyed by a nonce kept for that set
+        /// until an answer (PcShardFlight.KeyFor), so asking again after a
+        /// lost answer is a replay. The Shard pack beside it is unchanged
+        /// (board row 25: every live print of the pack, with the last-copy
+        /// note).</summary>
+        private static void OnShardDupesClick()
+        {
+            var id = LocalId();
+            if (id == null || shardInFlight || discardInFlight) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            var shown = ShownPack();
+            if (shown == null || !ShardToken(shown.pack_id)) return;
+            var col = ApiClient.CachedPcCollection;
+            bool ready;
+            var ids = PackDupeIds(shown, col, out ready);
+            if (!ready) { ApiClient.FetchPcCollection(id, true); Say(I18n.Tr("Loading your binder - try again in a moment"), C_WARN); return; }
+            if (ids.Count == 0) return;
+            if (ids.Count > ApiClient.PC_DISCARD_BATCH_CAP) { Say(I18n.TrF("You can shard up to {0} cards at once", ApiClient.PC_DISCARD_BATCH_CAP), C_WARN); return; }
+            var batch = new List<ApiClient.PcPrint>();
+            var want = new HashSet<string>(ids, StringComparer.Ordinal);
+            foreach (var p in shown.prints) if (p != null && p.print_id != null && want.Remove(p.print_id)) batch.Add(p);
+            int traded;
+            int total = ShardTotal(batch, ids, out traded);
+            string set = DupesShardSet(shown.pack_id, ids);
+            if (!ShardConfirmed(set))
+            {
+                Say(I18n.TrF("Click Shard dupes again to shard {0} duplicates for {1} shards", ids.Count, total) + TradedNote(traded), C_WARN);
+                return;
+            }
+            string key = shardFlight.KeyFor(set, () => NewNonce());
+            SendShard(id, key, ids, null, null, shown.pack_id);
+        }
+
+        private static void OnSelectClick()
+        {
+            if (shardInFlight) return;
+            selecting = !selecting;
+            armedShard = null;
+            if (!selecting) selectedIds.Clear();
+            Plugin.Log.LogInfo("[PC] binder select " + (selecting ? "on" : "off"));
+            NativeUI.MarkDirty();
+        }
+
+        private static void ToggleSelected(ApiClient.PcPrint p)
+        {
+            if (p == null || p.discarded || !ShardToken(p.print_id) || shardInFlight) return;
+            if (!selectedIds.Remove(p.print_id))
+            {
+                if (selectedIds.Count >= ApiClient.PC_DISCARD_BATCH_CAP)
+                {
+                    Say(I18n.TrF("You can shard up to {0} cards at once", ApiClient.PC_DISCARD_BATCH_CAP), C_WARN);
+                    return;
+                }
+                selectedIds.Add(p.print_id);
+            }
+            armedShard = null;   // another set: the next Shard selected asks again
+            NativeUI.MarkDirty();
+        }
+
+        private static void OnShardSelectedClick()
+        {
+            var id = LocalId();
+            if (id == null || shardInFlight || discardInFlight) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            var col = ApiClient.CachedPcCollection;
+            if (col == null) { ApiClient.FetchPcCollection(id, true); Say(I18n.Tr("Loading your binder - try again in a moment"), C_WARN); return; }
+            var byId = new Dictionary<string, ApiClient.PcPrint>(StringComparer.Ordinal);
+            foreach (var p in col.prints) if (p != null && p.print_id != null) byId[p.print_id] = p;
+            selectedIds.RemoveAll(x => !byId.ContainsKey(x));
+            if (selectedIds.Count == 0) { Say(I18n.Tr("Select cards first - click the cards you want to shard"), C_WARN); return; }
+            if (selectedIds.Count > ApiClient.PC_DISCARD_BATCH_CAP) { Say(I18n.TrF("You can shard up to {0} cards at once", ApiClient.PC_DISCARD_BATCH_CAP), C_WARN); return; }
+            var ids = new List<string>(selectedIds);
+            ids.Sort(StringComparer.Ordinal);
+            var batch = new List<ApiClient.PcPrint>();
+            foreach (var x in ids) batch.Add(byId[x]);
+            int traded;
+            int total = ShardTotal(batch, ids, out traded);
+            string set = SelShardSet(ids);
+            if (!ShardConfirmed(set))
+            {
+                Say(I18n.TrF("Click Shard selected again to shard {0} cards for {1} shards", ids.Count, total) + OnlyCopyNote(batch, col) + TradedNote(traded), C_WARN);
+                return;
+            }
+            // The nonce belongs to this exact selection until an answer arrives:
+            // the same cards asked again after a lost answer are the same key,
+            // which the server answers from its stored row (#172).
+            if (shardKeyFor != set || string.IsNullOrEmpty(shardKey)) { shardKey = NewNonce(); shardKeyFor = set; }
+            SendShard(id, shardKey, ids, null);
+        }
+
+        /// <summary>Item 18: the pull strip's Discard. Two clicks inside six
+        /// seconds, as every shard control: the first names what the card
+        /// pays and, when it is the player's last copy of that card, says so
+        /// (the player's call, never a block); the second sends ONE request,
+        /// the batch shard's route with this one print, keyed by a nonce kept
+        /// for this card until an answer arrives. Nothing on screen changes
+        /// until the server answers: the stamp and the balance come from the
+        /// answer (FinishShard and ApiClient.PcDiscardBatch).</summary>
+        private static void OnQuickShardClick(Tile t)
+        {
+            var p = t?.print; var id = LocalId();
+            if (p == null || id == null || p.discarded || shardInFlight || discardInFlight) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            if (!ShardToken(p.print_id) || shardGone.Contains(p.print_id)) return;
+            // The last-copy count reads the collection: a positive signal, not
+            // a guess from the pack alone (the Shard pack's own rule).
+            var col = ApiClient.CachedPcCollection;
+            if (col == null) { ApiClient.FetchPcCollection(id, true); Say(I18n.Tr("Loading your binder - try again in a moment"), C_WARN); return; }
+            var one = new List<ApiClient.PcPrint> { p };
+            var ids = new List<string> { p.print_id };
+            string set = PcQuickShardRules.ArmSet(p.print_id);
+            if (!ShardConfirmed(set))
+            {
+                int traded;
+                int value = ShardTotal(one, ids, out traded);
+                Say(I18n.Tr("Click Discard again to discard that card for shards") + " (+" + value + ")"
+                    + OnlyCopyNote(one, col) + TradedNote(traded), C_WARN);
+                return;
+            }
+            string key = shardFlight.KeyFor(set, () => NewNonce());
+            SendShard(id, key, ids, null, p.print_id);
+        }
+
+        private static void RefreshSelectRow(ApiClient.PcCollection col)
+        {
+            if (btnSelect == null) return;
+            btnSelect.SetActive(selecting || (col != null && col.prints.Count > 0));
+            UIFactory.SetTextRaw(btnSelectTxt, selecting ? I18n.Tr("Stop selecting") : I18n.Tr("Select"));
+            // The view line (its text set once, where it was built) gives way to
+            // the select line while Select is on.
+            var viewHint = (txtBinderHint as Component)?.gameObject;
+            if (viewHint != null) viewHint.SetActive(!selecting);
+            UIFactory.SetTextRaw(txtBinderSelHint, selecting ? I18n.Tr("Click cards to select them for shards") : "");
+            if (btnShardSel == null) return;
+            btnShardSel.SetActive(selecting);
+            if (!selecting) return;
+            var ids = new List<string>(selectedIds);
+            ids.Sort(StringComparer.Ordinal);
+            int total = col != null ? ShardTotal(col.prints, ids) : 0;
+            bool armed = armedShard != null && ids.Count > 0 && armedShard == SelShardSet(ids) && Now - armedShardAt <= 6f;
+            UIFactory.SetTextRaw(btnShardSelTxt, shardInFlight && shardPackId == null ? I18n.Tr("sharding...")
+                : armed ? I18n.TrF("Sure? +{0} shards", total) : I18n.TrF("Shard selected ({0})", ids.Count));
+            UIFactory.SetImageColor(btnShardSel, ids.Count > 0 && SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
+        }
+
+        /// <summary>quickPrintId: the pull-strip card a one-card shard is for
+        /// (item 18), null for a pack or a selection; dupesOf: the pack a
+        /// Shard dupes is for (fix pass 1, F3). Both are keyed by the flight's
+        /// own nonce and answered by FinishShard / FailShard's strip rules
+        /// (their `quick` flag).</summary>
+        private static void SendShard(string id, string key, List<string> ids, string packId, string quickPrintId = null, string dupesOf = null)
+        {
+            // F2: the request's generation. Its answer is checked against it
+            // twice: by ApiClient before the balance is written into the
+            // cache, and here before anything else is touched.
+            int serial = shardFlight.Begin(Now, packId, quickPrintId, dupesOf);
+            // A strip card and a Shard dupes are keyed by the flight's nonce,
+            // so their answers follow the strip's rules (F3).
+            bool keyed = quickPrintId != null || dupesOf != null;
+            NativeUI.MarkDirty();
+            int ep = uiEpoch;
+            Plugin.Log.LogInfo($"[PC] shard {(quickPrintId != null ? "quick" : dupesOf != null ? "dupes" : packId != null ? "pack" : "selection")}: {ids.Count} card(s)");
+            ApiClient.PcDiscardBatch(id, key, ids, () => ep == uiEpoch && shardFlight.IsCurrent(serial), (ok, resp) =>
+            {
+                if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                string code = ok ? null : resp == "not ready" ? "not_ready" : ApiClient.PcErrorCode(resp);
+                if (!shardFlight.Settle(serial, code))
+                {
+                    Plugin.Log.LogInfo($"[PC] shard: answer for request {serial} dropped (given up)");
+                    return;
+                }
+                if (ok) FinishShard(id, resp, ids, packId, keyed);
+                else FailShard(id, resp, packId, keyed);
+                NativeUI.MarkDirty();
+            });
+        }
+
+        /// <summary>A batch the server did: every print it lists leaves the
+        /// collection and is stamped in the pack history with what it paid, and
+        /// the toast names the total the server credited (the balance in the
+        /// answer was written into the cache by ApiClient). An answer that does
+        /// not list exactly what was sent reads both back.</summary>
+        private static void FinishShard(string id, string resp, List<string> sent, string packId, bool quick = false)
+        {
+            var results = ApiClient.PcBatchResults(resp);
+            int total = ApiClient.PcInt(ApiClient.PcTopLevel(resp, "shards_gained"));
+            int n = ApiClient.PcInt(ApiClient.PcTopLevel(resp, "prints"));
+            var col = ApiClient.CachedPcCollection;
+            var done = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var r in results)
+            {
+                done.Add(r.Key);
+                if (col != null) col.prints.RemoveAll(x => x.print_id == r.Key);
+                HistoryMarkDiscarded(r.Key, r.Value);
+            }
+            // Fix pass 2, finding 1: the prints this answer removed are a
+            // confirmed write, so a collection read already on the wire (a
+            // retired shard's read-back included) cannot put them back.
+            if (results.Count > 0) ApiClient.PcAnswerFence.Wrote();
+            selectedIds.RemoveAll(x => done.Contains(x));
+            // a strip card's nonce was ended by PcShardFlight.Settle (a success)
+            if (!quick) { if (packId == null) { shardKey = null; shardKeyFor = null; } }
+            if (results.Count != sent.Count) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
+            if (n <= 0) n = results.Count;
+            string msg = I18n.TrF("Sharded {0} cards for {1} shards", n, total);
+            Plugin.Log.LogInfo($"[PC] shard done: {n} card(s), +{total} shards{(ApiClient.PcBool(ApiClient.PcTopLevel(resp, "replayed")) ? " (replayed)" : "")}");
+            Say(msg, C_OK);
+            try { CompetitiveUI.ShowNotification(msg, C_OK, 4f); } catch { }
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex ShardUuid =
+            new System.Text.RegularExpressions.Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+
+        /// <summary>The print ids a not_owned refusal names (its print_ids list).</summary>
+        private static List<string> NamedPrintIds(string resp)
+        {
+            var list = new List<string>();
+            int at = string.IsNullOrEmpty(resp) ? -1 : resp.IndexOf("\"print_ids\"", StringComparison.Ordinal);
+            if (at < 0) return list;
+            foreach (System.Text.RegularExpressions.Match m in ShardUuid.Matches(resp.Substring(at))) list.Add(m.Value.ToLowerInvariant());
+            return list;
+        }
+
+        /// <summary>A batch the server refused: nothing was discarded and
+        /// nothing credited (all or none). A lost answer or a rate limit keeps
+        /// the key, so asking again is a replay; a refusal that says the local
+        /// copy is wrong reads the collection and the balance again.</summary>
+        private static void FailShard(string id, string resp, string packId, bool quick = false)
+        {
+            string code = ApiClient.PcErrorCode(resp);
+            bool reread = false;
+            if (quick)
+            {
+                // Item 18: a strip card's refusal. Nothing on screen changed
+                // before the answer, so the card and the balance are still as
+                // they were; PcQuickShardRules says whether they are read
+                // back (every code but the rate limit and an unsent request:
+                // a lost answer included, whose outcome is unknown) and
+                // whether the card's key is kept for a replay.
+                // ApiClient refused to build the request (its "not ready"),
+                // which PcErrorCode would read as transport: nothing was sent.
+                // The card's nonce was kept or dropped by PcShardFlight.Settle
+                // (PcQuickShardRules.KeepKeyAfter) before this ran.
+                if (resp == "not ready") code = "not_ready";
+                if (code == "not_owned") foreach (var g in NamedPrintIds(resp)) { shardGone.Add(g); selectedIds.Remove(g); }
+                string say;
+                if (code == "not_owned") say = I18n.Tr("One of those cards is no longer in your collection - nothing was sharded; your binder has been refreshed");
+                else if (code == "key_reused") say = I18n.Tr("That shard was already done with other cards - your binder has been refreshed");
+                else if (code == "shard_batch_unavailable" || (code == "http" && ApiClient.PcHttpCode(resp) == 404))
+                    say = I18n.Tr("Shard pack is not available on this server yet - discard one card at a time for now");
+                else say = ReasonText(code);
+                Say(say, C_WARN);
+                Plugin.Log.LogInfo($"[PC] quick shard refused: {code}");
+                if (PcQuickShardRules.ReadBackAfter(code) && id != null) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
+                return;
+            }
+            switch (code)
+            {
+                case "not_owned":
+                    foreach (var g in NamedPrintIds(resp)) { shardGone.Add(g); selectedIds.Remove(g); }
+                    Say(I18n.Tr("One of those cards is no longer in your collection - nothing was sharded; your binder has been refreshed"), C_WARN);
+                    reread = true;
+                    break;
+                case "key_reused":
+                    if (packId != null) packShardBurned.Add(packId);
+                    else { shardKey = null; shardKeyFor = null; }
+                    Say(I18n.Tr("That shard was already done with other cards - your binder has been refreshed"), C_WARN);
+                    reread = true;
+                    break;
+                case "too_many":
+                    Say(I18n.TrF("You can shard up to {0} cards at once", ApiClient.PC_DISCARD_BATCH_CAP), C_WARN);
+                    break;
+                case "shard_batch_unavailable":
+                    Say(I18n.Tr("Shard pack is not available on this server yet - discard one card at a time for now"), C_WARN);
+                    break;
+                default:
+                    // An api without the route answers FastAPI's plain 404.
+                    if (code == "http" && ApiClient.PcHttpCode(resp) == 404)
+                    {
+                        Say(I18n.Tr("Shard pack is not available on this server yet - discard one card at a time for now"), C_WARN);
+                        break;
+                    }
+                    Say(ReasonText(code), C_WARN);
+                    reread = code != "transport" && code != "rate_limited" && code != "session_required";
+                    break;
+            }
+            Plugin.Log.LogInfo($"[PC] shard refused: {code}");
+            if (reread && id != null) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
         }
 
 
@@ -2342,8 +3440,17 @@ namespace CompetitiveRounds
                 // a synthetic 375x525 face in the cache for every print — the
                 // exact sprite size a fetched face has, so the action row is
                 // verified under the same layout pressure the live binder has.
-                var col = new ApiClient.PcCollection { owner_steam_id = "dev", owner_name = "Sid", is_public = true };
+                var col = new ApiClient.PcCollection { owner_steam_id = "dev", owner_name = "Sid", is_public = true, subject_standings = true };
                 string[] rar2 = { "legendary", "epic", "rare", "uncommon", "common", "common", "rare", "uncommon", "common", "common" };
+                // Item 20's witness set, per SUBJECT: the front group, both
+                // sides of the 100/101 boundary, a rank-5 subject who has gone
+                // quiet (highest rating of the ten, and still at the back), and
+                // two unrated subjects behind every rated one. subject_rank 0
+                // is "off the board today".
+                int[] subjRank = { 1, 2, 100, 101, 5, 0, 0, 0, 0 };
+                bool[] subjQuiet = { false, false, false, false, true, false, false, false, false };
+                bool[] subjRated = { true, true, true, true, true, true, true, false, false };
+                float[] subjRating = { 1900f, 1860f, 1500f, 1820f, 2400f, 1700f, 1300f, 0f, 0f };
                 for (int i = 0; i < 10; i++)
                 {
                     int subj = i == 9 ? 8 : i;   // the last two are the same card
@@ -2354,6 +3461,8 @@ namespace CompetitiveRounds
                         pool_rank = i + 1, rating = 1900 - i * 40, peak_rating = 1950 - i * 40, board_rank = i < 5 ? i + 1 : 0,
                         series_wins = 40 - i * 3, series_losses = 10 + i, top_card = tops[i % tops.Length], title = i == 1 ? "Champion" : "", rank_name = "Advanced I",
                         source = "bought", slot = i % 5, dup_at_pull = -1,
+                        subject_board_rank = subjRank[subj], subject_inactive = subjQuiet[subj],
+                        subject_rated = subjRated[subj], subject_rating = subjRating[subj],
                         face_rev = (mode == "binder-faces" || cardMode) ? "dev" : null,
                     });
                 }
@@ -2366,9 +3475,9 @@ namespace CompetitiveRounds
                 // "card" also opens the full-size card view on the first
                 // print, and "card:N" on print N — the prints carry different
                 // top cards, so N is how a second card's art gets measured.
-                // The Top card overlay is ~104/1050 of the face, so
-                // on a binder tile it is ~35 px tall and on this popup it is
-                // ~100 px: the popup is the only surface on this seat where
+                // The Top card overlay is ~94/1050 of the face, so
+                // on a binder tile it is ~33 px tall and on this popup it is
+                // ~93 px: the popup is the only surface on this seat where
                 // the corner marks can be measured against the box edges to
                 // the pixel. Needs a face at the "card" size too — without
                 // one ShowCard asks the server, which answers 403 for this
@@ -2404,13 +3513,40 @@ namespace CompetitiveRounds
 
         /// <summary>Broadcast-seat lever `act:<what>` (identity-gated by the
         /// caller): presses the REAL buttons against the live api, because a
-        /// synthetic click never reaches the overlay (#420). "daily" is the
-        /// daily button (claim, or open the claimed pack), "open" the first
-        /// waiting pack, "card:N" the Nth binder tile's card view, and
-        /// "view:open|binder|info" the view switch, with nothing seeded.</summary>
+        /// synthetic click never reaches the overlay (#420). The full list of
+        /// what it takes, each with nothing seeded:
+        ///   "daily"         the daily button (claim, or open the claimed pack);
+        ///   "open"          the first waiting pack;
+        ///   "card:N"        the Nth binder tile's card view;
+        ///   "view:open|binder|info|trades"  the view switch (any other value
+        ///                   selects the Open view);
+        ///   "setting:collection_public|announce|trades_open"  that server
+        ///                   row's toggle (ToggleSetting); any other key is
+        ///                   logged and ignored;
+        ///   "shardpack"     the Shard pack button on the pack on show (board
+        ///                   row 25: the first press arms and names the total,
+        ///                   a second press inside six seconds sends);
+        ///   "killhost"      the persistent host destroyed and respawned (board
+        ///                   row 24, round 2);
+        ///   "trade:..."     the card-trading verbs, handed to DevTrade (listed
+        ///                   there).
+        /// A "/n" suffix is dropped before matching, so a repeated press can
+        /// carry a distinct value. Anything else is logged as unknown.</summary>
         internal static void DevAct(string what)
         {
             what = what ?? "";
+            // The lever fires once per distinct value, so a repeated press (the
+            // second click that confirms an armed Accept) carries a "/n" suffix.
+            int slash = what.IndexOf('/');
+            if (slash >= 0) what = what.Substring(0, slash);
+            if (what.StartsWith("trade:")) { DevTrade(what.Substring(6)); return; }
+            if (what.StartsWith("setting:"))
+            {
+                string key = what.Substring(8);
+                if (key == "collection_public" || key == "announce" || key == "trades_open") { Plugin.Log.LogInfo("[PC] act: setting " + key); ToggleSetting(key); }
+                else Plugin.Log.LogInfo("[PC] act: setting - unknown key");
+                return;
+            }
             if (what == "daily") { ClaimDaily(); Plugin.Log.LogInfo("[PC] act: daily"); return; }
             if (what == "open")
             {
@@ -2429,15 +3565,1316 @@ namespace CompetitiveRounds
                 ShowCard(binderTiles[n]);
                 return;
             }
+            if (what == "shardpack") { Plugin.Log.LogInfo("[PC] act: shardpack"); OnShardPackClick(); return; }
+            if (what == "killhost")
+            {
+                // Board row 24, round 2 (L4): destroy the persistent host the
+                // way a scene teardown does, so the coroutines it runs (a
+                // Settings card fetch among them) stop without their callbacks
+                // and its OnDestroy respawns it.
+                Plugin.Log.LogInfo("[PC] act: killhost (settings card in flight: " + settingsCardInFlight + ", serial " + settingsCardSerial + ")");
+                var host = Plugin.Instance;
+                if (host != null) UnityEngine.Object.Destroy(host.gameObject);
+                return;
+            }
             if (what.StartsWith("view:"))
             {
                 string v = what.Substring(5);
-                view = v == "binder" ? View.Binder : (v == "info" ? View.Info : View.Open);
+                view = v == "binder" ? View.Binder : (v == "info" ? View.Info : (v == "trades" ? View.Trades : View.Open));
                 Plugin.Log.LogInfo("[PC] act: view " + view);
                 NativeUI.MarkDirty();
                 return;
             }
             Plugin.Log.LogInfo("[PC] act: unknown '" + what + "'");
+        }
+
+        /// <summary>The trade half of the act lever (card trading witness):
+        /// poll, new, pick:STEAM, offer:STEAM (the open card view's print, then
+        /// that player), give:N / get:N (the Nth card on the picker page), send,
+        /// back, accept:N / decline:N (the Nth Incoming row), cancel:N (the Nth
+        /// Sent row). Each presses the same handler the real control does.</summary>
+        private static void DevTrade(string w)
+        {
+            var id = LocalId();
+            string[] a = w.Split(':');
+            string verb = a[0];
+            int n = -1;
+            if (a.Length > 1 && verb != "pick" && verb != "offer" && !int.TryParse(a[1], out n)) n = -1;   // pick/offer carry a Steam id, not an index
+            switch (verb)
+            {
+                case "poll": tradeSummaryAt = 0f; if (id != null) ReadTrades(id, true); break;
+                case "new": StartTradeSearch(null); break;
+                case "pick": if (a.Length > 1) StartCompose(a[1], null, null); break;
+                case "offer":
+                    {
+                        // the Offer button showing on a card view (face or text), then that player
+                        if (offerBtnGO == null || offerBtnPid == null || a.Length < 2) { Plugin.Log.LogInfo("[PC] act: trade offer - no Offer button showing"); return; }
+                        string pid = offerBtnPid;
+                        try { offerBtnHide?.Invoke(); } catch { }
+                        StartCompose(a[1], null, pid);
+                        break;
+                    }
+                case "give": DevToggle(givePickTiles, n, true); break;
+                case "get": DevToggle(getPickTiles, n, false); break;
+                case "send": SendProposal(); break;
+                case "back": OnComposeBack(); break;
+                case "accept": if (n >= 0 && n < inRows.Count && inRows[n].trade != null) OnAcceptClick(inRows[n]); break;
+                case "decline": if (n >= 0 && n < inRows.Count && inRows[n].trade != null) OnCloseClick(inRows[n], "decline"); break;
+                case "cancel": if (n >= 0 && n < sentRows.Count && sentRows[n].trade != null) OnCloseClick(sentRows[n], "cancel"); break;
+                default: Plugin.Log.LogInfo("[PC] act: trade - unknown verb"); return;
+            }
+            Plugin.Log.LogInfo("[PC] act: trade " + verb + (n >= 0 ? " " + n : ""));
+            NativeUI.MarkDirty();
+        }
+
+        private static void DevToggle(Tile[] tiles, int n, bool mine)
+        {
+            if (tiles == null || n < 0 || n >= tiles.Length || tiles[n] == null || tiles[n].print == null)
+            { Plugin.Log.LogInfo("[PC] act: trade - no such picker card"); return; }
+            ToggleComposeCard(tiles[n], mine);
+        }
+
+        // -- Card trading (v1.41.0, design V8 section 6) ----------------------
+        // The Trades view (the fourth view), the proposal flow, the inbox, the
+        // card view's Offer in a trade, the binder badges, the polling and the
+        // discovery gate. The server is the only authority (6.6): every list,
+        // badge and count here is drawn from its answers and gates no write -
+        // a click reaches the server, whose refusal is shown and then re-read.
+        // Sentinel lines ([PC-TRADE-SENTINEL]) carry counts and codes only,
+        // never a Steam id, a trade id or a name.
+
+        private const float MINI_W = 90f, MINI_H = 126f;   // a mini face: 5:7, like the tile
+        private const int SIDE_TILES = 3;                  // faces drawn per side of a row; more read "+n"
+        private const int PICK_PAGE = 10;                  // faces per compose picker page
+        private const float NOTIFY_WAIT_S = 30f;           // a new-proposal toast waits this long for its name
+        private static readonly Color C_PICKED = new Color(0.30f, 0.90f, 1.00f, 1f);
+
+        private class TradeRow
+        {
+            public GameObject root, btnA, btnB;
+            public object txtWho, txtWhen, txtNote, btnATxt, txtGiveMore, txtGetMore;
+            public Tile[] give, get;
+            public ApiClient.PcTrade trade;   // the row's CURRENT binding - handlers read this, never a captured trade (#265)
+        }
+
+        private static GameObject tradesRoot, tradeListsBox, composeBox, btnNewTrade, inBox, sentBox, recentBox;
+        private static object txtTradesHdr, txtInHdr, txtSentHdr, txtRecentHdr;
+        private static readonly List<TradeRow> inRows = new List<TradeRow>(), sentRows = new List<TradeRow>();
+        private static readonly List<object> recentTxts = new List<object>();
+        private static bool tradesBuilt;
+        private static PcTradeRules.Discovery tradeDiscovery = PcTradeRules.Discovery.Unknown;
+        private static float tradeSummaryAt, tradesFullAt;
+        private static float processedSummaryAt = -1f, processedFullAt = -1f;
+        private static List<string> lastReceivedOpen;   // null until the session's first summary: that one announces nothing
+        private static readonly List<string> pendingNotify = new List<string>();
+        private static float pendingNotifyAt;
+        private static HashSet<string> offeredIds = new HashSet<string>(StringComparer.Ordinal);
+        private static string armedTradeId; private static float armedTradeAt;
+        private static bool tradeActInFlight; private static float tradeActAt;
+        private static readonly Dictionary<string, string> actNonces = new Dictionary<string, string>();
+        private static bool tradeSelfChecked;
+        // the Trades view's entry edge (C12, TC-L2): every entry forces the full read
+        private static readonly PcTradeRules.TradesEntryEdge tradesEdge = new PcTradeRules.TradesEntryEdge();
+        private static GameObject offerBtnGO; private static string offerBtnPid; private static Action offerBtnHide;   // the card view's Offer button
+        private static string tradePanelSig, tradeBadgeSig, tradesLabelPainted, collectionLabelPainted;
+        private static object collectionLabelObj;
+        // compose (V8 6.2)
+        private static bool composing, composeTheirsLoading;
+        private static int composeSeq, giveCardPage, getCardPage;
+        private static string composeTo, composeToName, composeNonce, composeNonceKey, composeTheirsError;
+        private static ApiClient.PcCollection composeTheirs;
+        private static readonly List<string> composeGive = new List<string>(), composeGet = new List<string>();
+        private static readonly List<ApiClient.PcPrint> theirPickList = new List<ApiClient.PcPrint>(), ownPickList = new List<ApiClient.PcPrint>();
+        private static object txtComposeHdr, txtComposeWarn, txtComposeExpiry, txtGetPickHdr, txtGivePickHdr,
+                              txtTheirNote, txtOwnNote, txtGetPage, txtGivePage, composeGiveMore, composeGetMore;
+        private static GameObject btnSendProposal;
+        private static Tile[] giveSelTiles, getSelTiles, getPickTiles, givePickTiles;
+
+        /// <summary>An identity edge (or a consent revoke) drops every trade
+        /// state this client holds: the lists were the previous account's.</summary>
+        private static void ResetTrades()
+        {
+            tradeDiscovery = PcTradeRules.Discovery.Unknown;
+            tradeSummaryAt = 0f; tradesFullAt = 0f;
+            processedSummaryAt = -1f; processedFullAt = -1f;
+            lastReceivedOpen = null; pendingNotify.Clear();
+            offeredIds = new HashSet<string>(StringComparer.Ordinal);
+            armedTradeId = null; tradeActInFlight = false; actNonces.Clear();
+            tradesEdge.Reset();
+            offerBtnGO = null; offerBtnPid = null; offerBtnHide = null;
+            tradePanelSig = null; tradeBadgeSig = null; tradesLabelPainted = null; collectionLabelPainted = null;
+            EndCompose();
+        }
+
+        // -- polling (V8 6.4) and discovery (6.9) ------------------------------
+
+        /// <summary>Called from MaybeTick every two seconds while the overlay is
+        /// up, BEFORE its early return for other tabs.</summary>
+        private static void TickTrades(string id, bool onTab)
+        {
+            if (!tradeSelfChecked)
+            {
+                // the startup banner: the digest rule run on the server's own vectors
+                tradeSelfChecked = true;
+                string got = ""; bool pass = false;
+                try { pass = PcTradeRules.DigestSelfCheck(out got); } catch (Exception ex) { got = ex.GetType().Name; }
+                Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] digest self-check " + (pass ? "PASS" : "FAIL") + " got=" + got);
+            }
+            ProcessTradeAnswers();
+            // entering = the Trades view became visible (the tab AND the view):
+            // that read is forced, and owed until it is issued. The edge is
+            // re-armed by a frame off the view (MaybeTick) and by the overlay
+            // closing (OnOverlayClosed); the five-second gap stays behind them
+            // as a secondary guard (TC-L2).
+            bool onTrades = onTab && view == View.Trades;
+            float sinceTick = Now - tradesEdge.LastTickAt;
+            bool owed = tradesEdge.Tick(onTrades, Now);
+            if (armedTradeId != null && Now - armedTradeAt > PcTradeRules.ArmWindowSeconds) { armedTradeId = null; NativeUI.MarkDirty(); }
+            if (tradeActInFlight && Now - tradeActAt > 25f) { tradeActInFlight = false; NativeUI.MarkDirty(); }
+            if (pendingNotify.Count > 0 && Now - pendingNotifyAt > NOTIFY_WAIT_S) NotifyNew(null);
+            if (!SessionReady) return;
+            if (Now >= tradeSummaryAt)
+            {
+                tradeSummaryAt = Now + PcTradeRules.NextSummaryDelay(tradeDiscovery);
+                int ep = uiEpoch;
+                ApiClient.PcTradeSummary(id, false, (ok, resp) => { if (ep == uiEpoch) TradeReadLanded("summary", ok, resp); });
+            }
+            if (PcTradeRules.FullReadDue(onTrades, PcTradeRules.ReadsAllowed(tradeDiscovery), owed, Now, tradesFullAt))
+            {
+                if (owed) Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] trades entered forced_read=1 since_tick_ms=" + Mathf.RoundToInt(sinceTick * 1000f));
+                ReadTrades(id, owed);
+                tradesEdge.ReadIssued();
+            }
+        }
+
+        private static void ReadTrades(string id, bool force)
+        {
+            if (id == null) return;
+            tradesFullAt = Now + PcTradeRules.FullPollSeconds;
+            int ep = uiEpoch;
+            ApiClient.PcTrades(id, force, (ok, resp) => { if (ep == uiEpoch) TradeReadLanded("full", ok, resp); });
+        }
+
+        /// <summary>A failed read classifies the discovery state (404 absent,
+        /// 503 trading_unavailable unavailable, anything else keeps it); a read
+        /// that landed is acted on by ProcessTradeAnswers. An answer the trades
+        /// fence kept out (ApiClient.PcStaleOrder) is ignored like a stale
+        /// identity: a newer answer is already held (TC-L5).</summary>
+        private static void TradeReadLanded(string kind, bool ok, string resp)
+        {
+            if (!ok && (resp == null || resp == "in-flight" || resp == "no-id" || resp == "stale-identity" || resp == ApiClient.PcStaleOrder)) return;
+            if (!ok)
+            {
+                string code = ApiClient.PcTradeErrorCode(resp);
+                int http = ApiClient.PcHttpCode(resp);
+                var before = tradeDiscovery;
+                tradeDiscovery = PcTradeRules.Classify(tradeDiscovery, false, false, http, code);
+                Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] " + kind + " ok=0 http=" + http + " code=" + (code ?? "-") + " discovery=" + tradeDiscovery);
+                if (tradeDiscovery != before)
+                {
+                    tradeSummaryAt = Now + PcTradeRules.NextSummaryDelay(tradeDiscovery);
+                    NativeUI.MarkDirty();
+                }
+                if (kind == "full" && pendingNotify.Count > 0) NotifyNew(null);   // the read failed: no name (F14)
+                return;
+            }
+            ProcessTradeAnswers();
+        }
+
+        /// <summary>Acts once on each answer that landed (the cache stamps say
+        /// which). The summary sets the discovery state and finds new incoming
+        /// ids against the last summary; the full read (which carries every
+        /// summary field too) names them and rebuilds the set of prints held
+        /// by the player's own open offers.</summary>
+        private static void ProcessTradeAnswers()
+        {
+            var s = ApiClient.CachedPcTradeSummary;
+            if (s != null && ApiClient.PcTradeSummaryFetchedAt != processedSummaryAt)
+            {
+                processedSummaryAt = ApiClient.PcTradeSummaryFetchedAt;
+                tradeDiscovery = PcTradeRules.Classify(tradeDiscovery, true, s.enabled, 200, null);
+                var fresh = PcTradeRules.NewIds(lastReceivedOpen, s.receivedOpen);
+                lastReceivedOpen = new List<string>(s.receivedOpen);
+                if (fresh.Count > 0)
+                {
+                    if (pendingNotify.Count == 0) pendingNotifyAt = Now;
+                    foreach (var f in fresh) if (!pendingNotify.Contains(f)) pendingNotify.Add(f);
+                }
+                bool fromFull = ApiClient.CachedPcTrades != null && ApiClient.PcTradesFetchedAt == ApiClient.PcTradeSummaryFetchedAt;
+                Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] summary ok=1 enabled=" + (s.enabled ? 1 : 0) + " trades_open=" + (s.tradesOpen ? 1 : 0)
+                    + " received=" + s.receivedOpen.Count + " sent=" + s.sentOpen.Count + " new=" + fresh.Count
+                    + " discovery=" + tradeDiscovery + " tab=" + (PcTradeRules.TabShown(tradeDiscovery) ? 1 : 0) + " from_full=" + (fromFull ? 1 : 0));
+                // a new proposal forces one full read for its name; a sent set the
+                // cached full read does not match forces one for the badges
+                if (!fromFull && PcTradeRules.ReadsAllowed(tradeDiscovery) && (fresh.Count > 0 || !SentOpenMatches(s)))
+                    ReadTrades(LocalId(), true);
+                NativeUI.MarkDirty();
+            }
+            var full = ApiClient.CachedPcTrades;
+            if (full != null && ApiClient.PcTradesFetchedAt != processedFullAt)
+            {
+                processedFullAt = ApiClient.PcTradesFetchedAt;
+                var refs = new List<PcTradeRules.TradeRef>();
+                foreach (var t in full.offers) refs.Add(new PcTradeRules.TradeRef(t.role, t.state, PrintIdsOf(t.give)));
+                offeredIds = PcTradeRules.OfferedPrintIds(refs);
+                Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] full ok=1 offers=" + full.offers.Count + " recent=" + full.recent.Count
+                    + " offered_prints=" + offeredIds.Count + " side_max=" + full.bounds.prints_per_side_max + " ttl_h=" + full.bounds.ttl_hours
+                    + " today=" + full.bounds.executed_today + "/" + full.bounds.executed_per_day);
+                if (pendingNotify.Count > 0) NotifyNew(full);
+                NativeUI.MarkDirty();
+            }
+        }
+
+        private static List<string> PrintIdsOf(List<ApiClient.PcPrint> prints)
+        {
+            var outp = new List<string>();
+            if (prints != null) foreach (var p in prints) if (p != null && !string.IsNullOrEmpty(p.print_id)) outp.Add(p.print_id);
+            return outp;
+        }
+
+        /// <summary>The summary's sent_open (TRADE ids) against the cached full
+        /// read's own sent proposals: a difference means the badges and the
+        /// card view's offered set are stale.</summary>
+        private static bool SentOpenMatches(ApiClient.PcTradeSummaryAnswer s)
+        {
+            var full = ApiClient.CachedPcTrades;
+            var have = new HashSet<string>(StringComparer.Ordinal);
+            if (full != null)
+                foreach (var t in full.offers)
+                    if (t.role == "sent" && t.state == "proposed" && !string.IsNullOrEmpty(t.trade_id)) have.Add(t.trade_id);
+            if (have.Count != s.sentOpen.Count) return false;
+            foreach (var tid in s.sentOpen) if (!have.Contains(tid)) return false;
+            return true;
+        }
+
+        /// <summary>One toast for the new proposals (V8 6.4). It names the
+        /// proposer from the full read's server-derived counterparty_name when
+        /// every new proposal is from one player; otherwise, or when the read
+        /// failed or never came, the separate unnamed line - never an empty
+        /// {0} (F14). New ids the read no longer lists as open are dropped.</summary>
+        private static void NotifyNew(ApiClient.PcTradeFull full)
+        {
+            var ids = new List<string>(pendingNotify);
+            pendingNotify.Clear();
+            string name = null; bool oneName = true; int found = 0;
+            if (full != null)
+            {
+                foreach (var tid in ids)
+                {
+                    var t = full.offers.Find(x => x.trade_id == tid);
+                    if (t == null) continue;
+                    found++;
+                    string n = TradeName(t);
+                    if (n.Length == 0) oneName = false;
+                    else if (name == null) name = n;
+                    else if (name != n) oneName = false;
+                }
+                if (found == 0) { Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] notify new=0 dropped=" + ids.Count); return; }
+            }
+            bool named = full != null && name != null && oneName;
+            string msg = named ? I18n.TrF("New trade proposal from {0}", name) : I18n.Tr("New trade proposal");
+            try { CompetitiveUI.ShowNotification(msg, C_GOLD, 5f); } catch { }
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] notify new=" + (full != null ? found : ids.Count) + " named=" + (named ? 1 : 0));
+            NativeUI.MarkDirty();
+        }
+
+        private static string TradeName(ApiClient.PcTrade t)
+        {
+            string n = t != null ? (t.counterparty_name ?? "") : "";
+            return n.Length > 24 ? n.Substring(0, 24) : n;
+        }
+
+        private static string TradeState()
+        {
+            switch (tradeDiscovery)
+            {
+                case PcTradeRules.Discovery.Enabled: return "";
+                case PcTradeRules.Discovery.Paused: return I18n.Tr("Trading is paused");
+                case PcTradeRules.Discovery.Unknown: return I18n.Tr("Loading...");
+                default: return I18n.Tr("Trading is not available yet");
+            }
+        }
+
+        /// <summary>The summary says the player's OWN Card trading switch is
+        /// off: a proposal would be refused (trading_closed), so none is
+        /// offered. Display only - the server decides.</summary>
+        private static bool OwnTradingClosed()
+        {
+            var s = ApiClient.CachedPcTradeSummary;
+            return s != null && !s.tradesOpen;
+        }
+
+        /// <summary>Open incoming proposals: the Trades button's and the
+        /// Collection sub-tab's count ("raises the tab badge", V8 6.4).</summary>
+        private static int IncomingOpenCount()
+        {
+            var s = ApiClient.CachedPcTradeSummary;
+            return s != null && PcTradeRules.ReadsAllowed(tradeDiscovery) ? s.receivedOpen.Count : 0;
+        }
+
+        private static void PaintTradesLabel()
+        {
+            if (viewTxts[3] == null) return;
+            int n = IncomingOpenCount();
+            string label = n > 0 ? I18n.Tr("Trades") + " (" + n + ")" : I18n.Tr("Trades");
+            if (label == tradesLabelPainted) return;
+            tradesLabelPainted = label;
+            UIFactory.SetTextRaw(viewTxts[3], label);
+        }
+
+        /// <summary>NativeUI's sub-tab bar calls this on each repaint with the
+        /// Collection sub-tab's label: "Collection (n)" while n proposals wait.</summary>
+        internal static void PaintCollectionTabLabel(object txt)
+        {
+            if (txt == null) return;
+            int n = IncomingOpenCount();
+            string label = n > 0 ? I18n.Tr("Collection") + " (" + n + ")" : I18n.Tr("Collection");
+            if (txt == collectionLabelObj && label == collectionLabelPainted) return;
+            collectionLabelObj = txt; collectionLabelPainted = label;
+            UIFactory.SetTextRaw(txt, label);
+        }
+
+        private static void OnTradesOpenToggled(string id)
+        {
+            tradeSummaryAt = 0f;
+            if (PcTradeRules.ReadsAllowed(tradeDiscovery)) ReadTrades(id, true);
+        }
+
+        // -- the view (V8 6.1, 6.3) --------------------------------------------
+
+        /// <summary>The fourth view's root and header. The lists and the compose
+        /// screen are built on its first paint (EnsureTradesBuilt): a player who
+        /// never opens Trades never pays for them.</summary>
+        private static void BuildTradesView(Transform parent)
+        {
+            tradesBuilt = false;
+            inRows.Clear(); sentRows.Clear(); recentTxts.Clear();
+            giveSelTiles = null; getSelTiles = null; getPickTiles = null; givePickTiles = null;
+            tradePanelSig = null;
+            tradesRoot = new GameObject("PcTrades");
+            tradesRoot.transform.SetParent(parent, false);
+            tradesRoot.AddComponent<RectTransform>();
+            UIFactory.AddVLG(tradesRoot, spacing: 6);
+            UIFactory.AddLE(tradesRoot, flexH: 1);
+            var hdr = new GameObject("PcTHdr"); hdr.transform.SetParent(tradesRoot.transform, false); hdr.AddComponent<RectTransform>();
+            UIFactory.AddHLG(hdr, spacing: 10, forceExpandH: true); UIFactory.AddLE(hdr, prefH: 28, flexH: 0);
+            txtTradesHdr = UIFactory.CreateText("PcTHdrTxt", hdr.transform, "", 15f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(760, 26));
+            UIFactory.SetOverflowMode(txtTradesHdr, 2); UIFactory.SetWordWrap(txtTradesHdr, false);
+            var sp = new GameObject("PcTSp"); sp.transform.SetParent(hdr.transform, false); sp.AddComponent<RectTransform>(); UIFactory.AddLE(sp, flexW: 1);
+            btnNewTrade = UIFactory.CreateButton("PcTNew", hdr.transform, "New trade", 14f, C_WHITE, C_BUY, () => StartTradeSearch(null), sizeDelta: new Vector2(180, 26));
+            btnNewTrade.SetActive(false);
+            tradesRoot.SetActive(false);
+        }
+
+        private static void EnsureTradesBuilt()
+        {
+            if (tradesBuilt || tradesRoot == null) return;
+            tradesBuilt = true;
+            // The three lists: ONE scroll with three headed sections (C4's
+            // choice), so a long Incoming never hides Sent behind a second bar.
+            var sv = UIFactory.CreateScrollView("PcTSV", tradesRoot.transform, spacing: 6);
+            UIFactory.AddLE(sv.scrollGO, flexH: 1);
+            tradeListsBox = sv.scrollGO;
+            var c = sv.content.transform;
+            inBox = ListSection(c, "PcTIn", out txtInHdr);
+            sentBox = ListSection(c, "PcTSent", out txtSentHdr);
+            recentBox = ListSection(c, "PcTRec", out txtRecentHdr);
+            BuildCompose();
+        }
+
+        private static GameObject ListSection(Transform parent, string name, out object hdr)
+        {
+            var box = UIFactory.CreatePanel(name, parent, C_PANEL);
+            UIFactory.AddVLG(box, spacing: 4, padL: 10, padR: 10, padT: 6, padB: 6);
+            UIFactory.AddLE(box, flexH: 0);
+            hdr = UIFactory.CreateText(name + "H", box.transform, "", 16f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 24));
+            return box;
+        }
+
+        private static GameObject Column(Transform parent, string name, float w)
+        {
+            var go = new GameObject(name); go.transform.SetParent(parent, false); go.AddComponent<RectTransform>();
+            UIFactory.AddVLG(go, spacing: 4);
+            UIFactory.AddLE(go, prefW: w, minW: w, flexW: 0);
+            return go;
+        }
+
+        /// <summary>A labelled strip of mini faces: "You give" / "You get".</summary>
+        private static Tile[] SideStrip(Transform parent, string name, string label, out object more, int count, Action<Tile> click, bool withBadge)
+        {
+            var col = Column(parent, name, count * (MINI_W + 4f) + 34f);
+            UIFactory.CreateText(name + "_h", col.transform, label, 13f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(240, 18));
+            var strip = new GameObject(name + "_s"); strip.transform.SetParent(col.transform, false); strip.AddComponent<RectTransform>();
+            UIFactory.AddHLG(strip, spacing: 4, forceExpandH: false);
+            UIFactory.AddLE(strip, prefH: MINI_H, minH: MINI_H, flexH: 0);
+            var tiles = new Tile[count];
+            for (int i = 0; i < count; i++) tiles[i] = CreateMiniTile(strip.transform, name + i, click, withBadge);
+            more = UIFactory.CreateText(name + "_m", strip.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(30, 20));
+            return tiles;
+        }
+
+        /// <summary>A small card: the server face through the existing face
+        /// cache (PlayerCardFaces, the "tile" size scaled down), or the name and
+        /// the rarity line when no face could be had. A click opens the card
+        /// view, or runs `click` (the compose pickers).</summary>
+        private static Tile CreateMiniTile(Transform parent, string name, Action<Tile> click, bool withBadge)
+        {
+            var t = new Tile { mini = true, click = click };
+            t.root = UIFactory.CreatePanel(name, parent, FrameColor("common", false));
+            UIFactory.AddVLG(t.root, spacing: 0, padL: 2, padR: 2, padT: 2, padB: 2);
+            UIFactory.AddLE(t.root, prefW: MINI_W, minW: MINI_W, prefH: MINI_H, minH: MINI_H, flexW: 0, flexH: 0);
+            t.face = UIFactory.CreatePanel(name + "_f", t.root.transform, C_CARD);
+            UIFactory.AddLE(t.face, prefW: 0, prefH: 0, flexH: 1, flexW: 1);
+            PlayerCardFaces.SetFace(t.face, null);
+            t.face.SetActive(false);
+            t.textBlock = UIFactory.CreatePanel(name + "_tb", t.root.transform, C_CARD);
+            UIFactory.AddVLG(t.textBlock, spacing: 2, padL: 4, padR: 4, padT: 4, padB: 4);
+            UIFactory.AddLE(t.textBlock, prefW: 0, prefH: 0, flexH: 1, flexW: 1);
+            t.txtName = UIFactory.CreateText(name + "_n", t.textBlock.transform, "", 12f, C_WHITE, UIFactory.AlignTopLeft, sizeDelta: new Vector2(MINI_W - 12f, 48));
+            t.txtMark = UIFactory.CreateText(name + "_m", t.textBlock.transform, "", 12f, C_GOLD, UIFactory.AlignTopLeft, sizeDelta: new Vector2(MINI_W - 12f, 48));
+            foreach (var o in new[] { t.txtName, t.txtMark }) { UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, true); }
+            var tile = t;
+            foreach (var go in new[] { t.face, t.textBlock })
+            {
+                var ch = go.AddComponent<ClickHandler>();
+                ch.onClick = () => OnTileClick(tile);
+            }
+            if (withBadge) AddBadge(t, name + "_bd", MINI_W - 6f, 12f, 4f);
+            t.root.SetActive(false);
+            return t;
+        }
+
+        /// <summary>The badge strip along the bottom of a tile, `bottom` above its
+        /// lower edge (on a binder tile, just above the action row), clear of the
+        /// name at the top: out of the tile's layout (ignoreLayout) and
+        /// click-through, hidden until painted.</summary>
+        private static void AddBadge(Tile t, string name, float w, float fontSize, float bottom)
+        {
+            var go = UIFactory.CreatePanel(name, t.root.transform, new Color(0f, 0f, 0f, 0.80f));
+            try
+            {
+                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+                if (UIFactory.tLE != null)
+                {
+                    var le = go.AddComponent(UIFactory.tLE);
+                    UIFactory.tLE.GetProperty("ignoreLayout", bf)?.SetValue(le, true);
+                }
+                var img = UIFactory.tImage != null ? go.GetComponent(UIFactory.tImage) : null;
+                if (img != null) UIFactory.tImage.GetProperty("raycastTarget", bf)?.SetValue(img, false);
+            }
+            catch { }
+            var rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = new Vector2(0.5f, 0f); rt.anchorMax = new Vector2(0.5f, 0f); rt.pivot = new Vector2(0.5f, 0f);
+            rt.anchoredPosition = new Vector2(0f, bottom); rt.sizeDelta = new Vector2(w, fontSize + 8f);
+            t.badge = UIFactory.CreateText(name + "_t", go.transform, "", fontSize, C_WARN, UIFactory.AlignMidCenter, sizeDelta: Vector2.zero);
+            var tc = t.badge as Component;
+            var trt = tc != null ? tc.GetComponent<RectTransform>() : null;
+            if (trt != null) { trt.anchorMin = Vector2.zero; trt.anchorMax = Vector2.one; trt.offsetMin = Vector2.zero; trt.offsetMax = Vector2.zero; }
+            UIFactory.SetOverflowMode(t.badge, 2); UIFactory.SetWordWrap(t.badge, false);
+            t.badgeGO = go;
+            go.SetActive(false);
+        }
+
+        private static bool IsOffered(string printId)
+        {
+            string c = PcTradeRules.CanonicalId(printId);
+            return c != null && offeredIds.Contains(c);
+        }
+
+        /// <summary>V8 6.1 badges: In a trade (held by one of the player's own
+        /// open offers, from the cached full read - no request per tile) and
+        /// Traded (the print's own server flag, permanent). Display only.</summary>
+        private static void PaintTileBadge(Tile t, ApiClient.PcPrint p)
+        {
+            if (t == null || t.badgeGO == null) return;
+            string b = "";
+            if (p != null && !p.discarded && !p.gone)
+            {
+                bool held = IsOffered(p.print_id);
+                if (held && p.traded && !t.mini) b = I18n.Tr("In a trade") + " | " + I18n.Tr("Traded");
+                else if (held) b = I18n.Tr("In a trade");
+                else if (p.traded) b = I18n.Tr("Traded");
+            }
+            bool on = b.Length > 0;
+            if (t.badgeGO.activeSelf != on) t.badgeGO.SetActive(on);
+            if (on) UIFactory.SetTextRaw(t.badge, b);
+        }
+
+        private static void LogBadges(List<ApiClient.PcPrint> prints)
+        {
+            int held = 0, traded = 0;
+            foreach (var p in prints)
+            {
+                if (p == null || p.discarded) continue;
+                if (IsOffered(p.print_id)) held++;
+                if (p.traded) traded++;
+            }
+            string sig = held + "/" + traded;
+            if (sig == tradeBadgeSig) return;
+            tradeBadgeSig = sig;
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] badges held=" + held + " traded=" + traded);
+        }
+
+        private static void FillMiniTile(Tile t, ApiClient.PcPrint p, bool picked)
+        {
+            if (t == null || t.root == null) return;
+            t.print = p; t.dupes = 0;
+            t.bindSeq++;
+            if (p == null) { ShowTileText(t); t.root.SetActive(false); return; }
+            if (!t.root.activeSelf) t.root.SetActive(true);
+            UIFactory.SetImageColor(t.root, picked ? C_PICKED : (p.gone ? C_DIM : FrameColor(p.rarity, p.foil)));
+            UIFactory.SetTextRaw(t.txtName, p.gone ? I18n.Tr("[deleted]") : SafeName(p));
+            UIFactory.SetTextRaw(t.txtMark, p.gone ? "" : MarkLine(p));
+            if (p.gone) ShowTileText(t); else BindFace(t, p);
+            PaintTileBadge(t, p);
+        }
+
+        private static void FillSide(Tile[] tiles, object more, List<ApiClient.PcPrint> prints)
+        {
+            int n = prints != null ? prints.Count : 0;
+            for (int i = 0; i < tiles.Length; i++) FillMiniTile(tiles[i], i < n ? prints[i] : null, false);
+            UIFactory.SetTextRaw(more, n > tiles.Length ? "+" + (n - tiles.Length) : "");
+        }
+
+        private static TradeRow CreateTradeRow(Transform parent, string name, bool incoming)
+        {
+            var r = new TradeRow();
+            r.root = UIFactory.CreatePanel(name, parent, C_CARD);
+            UIFactory.AddHLG(r.root, spacing: 10, padL: 8, padR: 8, padT: 6, padB: 6, forceExpandH: false);
+            UIFactory.AddLE(r.root, prefH: MINI_H + 36f, minH: MINI_H + 36f, flexH: 0);
+            var info = Column(r.root.transform, name + "_i", 250f);
+            r.txtWho = UIFactory.CreateText(name + "_w", info.transform, "", 15f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(250, 22));
+            r.txtWhen = UIFactory.CreateText(name + "_e", info.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(250, 20));
+            r.txtNote = UIFactory.CreateText(name + "_o", info.transform, "", 12f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(250, 20));
+            foreach (var o in new[] { r.txtWho, r.txtWhen, r.txtNote }) { UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false); }
+            r.give = SideStrip(r.root.transform, name + "_g", I18n.Tr("You give"), out r.txtGiveMore, SIDE_TILES, null, false);
+            r.get = SideStrip(r.root.transform, name + "_t", I18n.Tr("You get"), out r.txtGetMore, SIDE_TILES, null, false);
+            var sp = new GameObject(name + "_sp"); sp.transform.SetParent(r.root.transform, false); sp.AddComponent<RectTransform>(); UIFactory.AddLE(sp, flexW: 1);
+            var act = Column(r.root.transform, name + "_a", 170f);
+            var row = r;
+            if (incoming)
+            {
+                r.btnA = UIFactory.CreateButton(name + "_ok", act.transform, "Accept", 13f, C_WHITE, C_BUY, () => OnAcceptClick(row), sizeDelta: new Vector2(170, 28));
+                r.btnB = UIFactory.CreateButton(name + "_no", act.transform, "Decline", 13f, C_WHITE, C_DANGER, () => OnCloseClick(row, "decline"), sizeDelta: new Vector2(170, 28));
+            }
+            else
+                r.btnA = UIFactory.CreateButton(name + "_cx", act.transform, "Cancel", 13f, C_WHITE, C_DANGER, () => OnCloseClick(row, "cancel"), sizeDelta: new Vector2(170, 28));
+            r.btnATxt = UIFactory.GetButtonText(r.btnA);
+            r.root.SetActive(false);
+            return r;
+        }
+
+        private static void RefreshTrades(string id)
+        {
+            if (tradesRoot == null) return;
+            EnsureTradesBuilt();
+            var sum = ApiClient.CachedPcTradeSummary;
+            var full = ApiClient.CachedPcTrades;
+            bool reads = PcTradeRules.ReadsAllowed(tradeDiscovery), propose = PcTradeRules.ProposeAllowed(tradeDiscovery);
+            if (composing && !propose) EndCompose();   // paused (or gone) under an open compose: propose is not offered
+            string hdr; Color hc = C_WHITE;
+            if (tradeDiscovery == PcTradeRules.Discovery.Unknown) hdr = I18n.Tr("Loading...");
+            else if (!propose) { hdr = TradeState(); hc = C_WARN; }
+            else if (sum != null && !sum.tradesOpen) { hdr = ReasonText("trading_closed"); hc = C_WARN; }
+            else if (full != null) hdr = I18n.TrF("Trades today: {0}/{1}", full.bounds.executed_today, full.bounds.executed_per_day);
+            else if (ApiClient.PcTradesError != null) { hdr = ReasonText(ApiClient.PcTradeErrorCode(ApiClient.PcTradesError)); hc = C_WARN; }
+            else hdr = I18n.Tr("Loading...");
+            UIFactory.SetTextRaw(txtTradesHdr, hdr);
+            UIFactory.SetColor(txtTradesHdr, hc);
+            bool showNew = propose && !composing && !OwnTradingClosed();
+            if (btnNewTrade != null && btnNewTrade.activeSelf != showNew) btnNewTrade.SetActive(showNew);
+            bool showLists = reads && !composing;
+            if (tradeListsBox != null && tradeListsBox.activeSelf != showLists) tradeListsBox.SetActive(showLists);
+            if (composeBox != null && composeBox.activeSelf != composing) composeBox.SetActive(composing);
+            int inc = 0, snt = 0;
+            if (composing) RefreshCompose();
+            else if (reads) RefreshTradeLists(full, out inc, out snt);
+            string sig = (composing ? "compose" : (reads ? "lists" : "blocked")) + " discovery=" + tradeDiscovery
+                + " in=" + inc + " sent=" + snt + " recent=" + (full != null ? full.recent.Count : 0) + " new_trade=" + (showNew ? 1 : 0)
+                + (composing ? " give=" + composeGive.Count + " get=" + composeGet.Count + " theirs=" + (composeTheirs != null ? composeTheirs.prints.Count : -1) + " err=" + (composeTheirsError ?? "-") : "");
+            if (sig != tradePanelSig) { tradePanelSig = sig; Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] panel " + sig); }
+        }
+
+        private static void RefreshTradeLists(ApiClient.PcTradeFull full, out int incCount, out int sentCount)
+        {
+            var inc = new List<ApiClient.PcTrade>(); var snt = new List<ApiClient.PcTrade>(); var rec = new List<ApiClient.PcTrade>();
+            if (full != null)
+            {
+                foreach (var t in full.offers)
+                {
+                    var b = PcTradeRules.BucketOf(t.role, t.state);
+                    if (b == PcTradeRules.Bucket.Incoming) inc.Add(t);
+                    else if (b == PcTradeRules.Bucket.Sent) snt.Add(t);
+                    else rec.Add(t);
+                }
+                rec.AddRange(full.recent);
+            }
+            incCount = inc.Count; sentCount = snt.Count;
+            UIFactory.SetTextRaw(txtInHdr, I18n.Tr("Incoming") + " (" + inc.Count + ")");
+            UIFactory.SetTextRaw(txtSentHdr, I18n.Tr("Sent") + " (" + snt.Count + ")");
+            UIFactory.SetTextRaw(txtRecentHdr, I18n.Tr("Recent") + " (" + rec.Count + ")");
+            PaintRows(inRows, inBox, "PcTI", inc, true, full);
+            PaintRows(sentRows, sentBox, "PcTS", snt, false, full);
+            while (recentTxts.Count < rec.Count)
+            {
+                var o = UIFactory.CreateText("PcTR" + recentTxts.Count, recentBox.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(1100, 20));
+                UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false);
+                recentTxts.Add(o);
+            }
+            for (int i = 0; i < recentTxts.Count; i++)
+            {
+                var go = (recentTxts[i] as Component) != null ? ((Component)recentTxts[i]).gameObject : null;
+                bool on = i < rec.Count;
+                if (go != null && go.activeSelf != on) go.SetActive(on);
+                if (on) UIFactory.SetTextRaw(recentTxts[i], RecentLine(rec[i]));
+            }
+        }
+
+        /// <summary>Rows are created as the lists need them (lazily, and never
+        /// more than the longest list seen), so no bound is hardcoded here.</summary>
+        private static void PaintRows(List<TradeRow> rows, GameObject box, string prefix, List<ApiClient.PcTrade> list, bool incoming, ApiClient.PcTradeFull full)
+        {
+            while (rows.Count < list.Count) rows.Add(CreateTradeRow(box.transform, prefix + rows.Count, incoming));
+            for (int i = 0; i < rows.Count; i++)
+            {
+                if (i < list.Count) FillTradeRow(rows[i], list[i], incoming, full);
+                else { rows[i].trade = null; if (rows[i].root.activeSelf) rows[i].root.SetActive(false); }
+            }
+        }
+
+        private static void FillTradeRow(TradeRow r, ApiClient.PcTrade t, bool incoming, ApiClient.PcTradeFull full)
+        {
+            r.trade = t;
+            if (!r.root.activeSelf) r.root.SetActive(true);
+            string name = TradeName(t);
+            if (name.Length == 0) name = I18n.Tr("Unnamed player");
+            string who = incoming ? I18n.TrF("From {0}", name) : I18n.TrF("To {0}", name);
+            if (t.counterparty_rating.HasValue) who += "  (" + Mathf.RoundToInt(t.counterparty_rating.Value) + ")";
+            UIFactory.SetTextRaw(r.txtWho, who);
+            if (!t.possible)
+            {
+                UIFactory.SetTextRaw(r.txtWhen, I18n.Tr("No longer possible"));
+                UIFactory.SetColor(r.txtWhen, C_WARN);
+            }
+            else
+            {
+                // the server's clock, never this PC's (V8 1.6)
+                double left = PcTradeRules.SecondsLeft(t.expires_at, full != null ? full.serverNow : null, Now - ApiClient.PcTradesFetchedAt);
+                UIFactory.SetTextRaw(r.txtWhen, I18n.TrF("Expires in {0}", PcTradeRules.TimeLeftText(left)));
+                UIFactory.SetColor(r.txtWhen, C_LABEL);
+            }
+            UIFactory.SetTextRaw(r.txtNote, incoming ? "" : I18n.Tr("Waiting for their answer"));
+            FillSide(r.give, r.txtGiveMore, t.give);
+            FillSide(r.get, r.txtGetMore, t.get);
+            if (incoming)
+            {
+                // A row that is no longer possible, or trading paused: no Accept (V8 1.4, 6.9)
+                bool canAccept = t.possible && PcTradeRules.ProposeAllowed(tradeDiscovery);
+                if (r.btnA.activeSelf != canAccept) r.btnA.SetActive(canAccept);
+                bool armed = PcTradeRules.ConfirmsArmed(armedTradeId, armedTradeAt, t.trade_id, Now);
+                UIFactory.SetText(r.btnATxt, armed ? "Confirm accept" : "Accept");
+            }
+            UIFactory.SetImageColor(r.btnA, tradeActInFlight ? C_BTN : (incoming ? C_BUY : C_DANGER));
+        }
+
+        private static string RecentLine(ApiClient.PcTrade t)
+        {
+            string outcome;
+            switch (t.state)
+            {
+                case "executed": outcome = I18n.Tr("Trade completed"); break;
+                case "declined": outcome = I18n.Tr("Trade declined"); break;
+                case "cancelled": outcome = I18n.Tr("Trade cancelled"); break;
+                case "expired": outcome = I18n.Tr("Trade expired"); break;
+                case "reversed": outcome = ReasonText("reversed"); break;
+                default: outcome = I18n.Tr("No longer possible"); break;   // void, and any state this build does not know
+            }
+            string name = TradeName(t);
+            if (name.Length == 0) name = I18n.Tr("Unnamed player");
+            string line = outcome + "  -  " + (t.role == "sent" ? I18n.TrF("To {0}", name) : I18n.TrF("From {0}", name))
+                + "  -  " + DateOnly(!string.IsNullOrEmpty(t.closed_at) ? t.closed_at : t.expires_at);
+            if (!string.IsNullOrEmpty(t.reason)) line += "  -  " + ReasonText(t.reason);
+            line += "  -  " + I18n.Tr("You give") + ": " + CardList(t.give) + "  |  " + I18n.Tr("You get") + ": " + CardList(t.get);
+            return line;
+        }
+
+        private static string CardList(List<ApiClient.PcPrint> prints)
+        {
+            var parts = new List<string>();
+            if (prints != null)
+                foreach (var p in prints)
+                    parts.Add(p == null || p.gone ? I18n.Tr("[deleted]") : SafeName(p) + " (" + RarityLabel(p.rarity) + ")");
+            return string.Join(", ", parts.ToArray());
+        }
+
+        // -- the inbox's actions (V8 1.4-1.5, 6.3, 6.6) ------------------------
+
+        /// <summary>Accept is armed by the first click and confirmed by a second
+        /// inside six seconds, Discard's rule, on its OWN armed pair: the
+        /// binder's armedPrintId would collide with it.</summary>
+        private static void OnAcceptClick(TradeRow r)
+        {
+            var t = r != null ? r.trade : null; var id = LocalId();
+            if (t == null || id == null) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            if (tradeActInFlight) return;
+            if (!PcTradeRules.ProposeAllowed(tradeDiscovery)) { Say(TradeState(), C_WARN); return; }
+            if (!PcTradeRules.ConfirmsArmed(armedTradeId, armedTradeAt, t.trade_id, Now))
+            {
+                armedTradeId = t.trade_id; armedTradeAt = Now;
+                NativeUI.MarkDirty();
+                return;
+            }
+            armedTradeId = null;
+            TradeAct("accept", id, t, false);
+        }
+
+        private static void OnCloseClick(TradeRow r, string action)
+        {
+            var t = r != null ? r.trade : null; var id = LocalId();
+            if (t == null || id == null) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            if (tradeActInFlight) return;
+            TradeAct(action, id, t, false);
+        }
+
+        /// <summary>One nonce per (action, trade) for the life of the attempt: a
+        /// retry after a lost answer re-sends it and gets the stored row.</summary>
+        private static string ActNonce(string action, string tradeId)
+        {
+            string k = action + "|" + tradeId, n;
+            if (!actNonces.TryGetValue(k, out n)) { n = NewNonce(); actNonces[k] = n; }
+            return n;
+        }
+
+        /// <summary>No answer, or a refusal that turned the request away before
+        /// it was read: the attempt keeps its nonce.</summary>
+        private static bool KeepsNonce(string code)
+        {
+            return code == "transport" || code == "rate_limited" || code == "busy";
+        }
+
+        private static void TradeAct(string action, string id, ApiClient.PcTrade t, bool isRetry)
+        {
+            string tid = t.trade_id, dg = t.digest, nonce = ActNonce(action, tid);
+            tradeActInFlight = true; tradeActAt = Now;
+            NativeUI.MarkDirty();
+            int ep = uiEpoch;
+            ApiClient.PcTradeAct(action, id, nonce, tid, dg, (ok, resp) =>
+            {
+                if (ep != uiEpoch) return;
+                tradeActInFlight = false;
+                string code = ok ? null : ApiClient.PcTradeErrorCode(resp);
+                Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] " + action + " ok=" + (ok ? 1 : 0) + " code=" + (code ?? "-") + (isRetry ? " retry=1" : ""));
+                if (!ok && PcTradeRules.RetryBusy(code, isRetry))
+                {
+                    // V8 1.4: busy is retried once, after two seconds, before it is shown
+                    tradeActInFlight = true; tradeActAt = Now;
+                    Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] busy-retry action=" + action);
+                    RetryLater(ep, PcTradeRules.NoComposeFence, null, () => TradeAct(action, id, t, true), null);
+                    return;
+                }
+                if (ok || !KeepsNonce(code)) actNonces.Remove(action + "|" + tid);
+                if (ok)
+                {
+                    if (action == "accept") { DrawReceived(resp); Say(I18n.Tr("Trade completed"), C_OK); }
+                    else if (action == "decline") Say(I18n.Tr("Trade declined"), C_OK);
+                    else Say(I18n.Tr("Trade cancelled"), C_OK);
+                    AfterTradeAction(id);
+                }
+                else
+                {
+                    Say(ReasonText(code), C_WARN);
+                    if (PcTradeRules.RefetchAfterRefusal(code)) AfterTradeAction(id);
+                }
+                NativeUI.MarkDirty();
+            });
+        }
+
+        /// <summary>After every action, and after every refusal
+        /// PcTradeRules.RefetchAfterRefusal names (all but busy, retried
+        /// instead, and transport, no answer; a rate limit included): the
+        /// trade list AND the binder are re-read from the server, since this
+        /// client's copy may be what was wrong (V8 6.4, 6.6).</summary>
+        private static void AfterTradeAction(string id)
+        {
+            if (id == null) return;
+            ReadTrades(id, true);
+            ApiClient.FetchPcCollection(id, true);
+        }
+
+        /// <summary>Runs a retry after BusyRetrySeconds (the busy retry, V8 1.4,
+        /// and the binder read's in-flight retry) behind the fence
+        /// PcTradeRules.RetryCheck decides, consulted BEFORE the retry runs
+        /// (TC-M1): an identity edge drops it silently (ResetTrades already
+        /// released the attempt), and a compose that ended, was replaced or no
+        /// longer holds the armed terms drops it through `dropped`, which
+        /// releases what the attempt still holds. `seq` is
+        /// PcTradeRules.NoComposeFence for a retry that belongs to no compose,
+        /// and `terms` is null for one that carries none.</summary>
+        private static void RetryLater(int ep, int seq, string terms, Action a, Action dropped)
+        {
+            try { Plugin.Instance.StartCoroutine(RetryCo(ep, seq, terms, a, dropped)); }
+            catch (Exception ex) { tradeActInFlight = false; Plugin.Log.LogWarning("[PC] trade retry not scheduled: " + ex.Message); }
+        }
+
+        private static IEnumerator RetryCo(int ep, int seq, string terms, Action a, Action dropped)
+        {
+            yield return new WaitForSecondsRealtime(PcTradeRules.BusyRetrySeconds);
+            string termsNow = terms == null ? null : PcTradeRules.TermsKey(composeTo, composeGive, composeGet);
+            var verdict = PcTradeRules.RetryCheck(ep, uiEpoch, seq, composeSeq, terms, termsNow);
+            if (verdict == PcTradeRules.RetryVerdict.IdentityChanged) yield break;
+            if (verdict == PcTradeRules.RetryVerdict.ComposeChanged)
+            {
+                try { if (dropped != null) dropped(); }
+                catch (Exception ex) { tradeActInFlight = false; Plugin.Log.LogWarning("[PC] trade retry drop threw: " + ex.Message); }
+                yield break;
+            }
+            try { a(); }
+            catch (Exception ex) { tradeActInFlight = false; Plugin.Log.LogWarning("[PC] trade retry threw: " + ex.Message); }
+        }
+
+        /// <summary>An executed accept draws the answer's received prints into
+        /// the binder at once (and drops the given ones); the forced binder read
+        /// that follows (AfterTradeAction) replaces the cache with the server's
+        /// word (V8 6.6).</summary>
+        private static void DrawReceived(string resp)
+        {
+            var col = ApiClient.CachedPcCollection;
+            var ans = ApiClient.ParsePcTrade(resp, col != null ? col.locale : "en");
+            if (col == null || ans == null) return;
+            var gave = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var p in ans.give) if (p != null && !string.IsNullOrEmpty(p.print_id)) gave.Add(p.print_id);
+            col.prints.RemoveAll(p => p != null && gave.Contains(p.print_id));
+            int drawn = 0;
+            foreach (var p in ans.get)
+                if (p != null && !p.gone && !string.IsNullOrEmpty(p.print_id) && !col.prints.Exists(x => x.print_id == p.print_id)) { col.prints.Add(p); drawn++; }
+            // Fix pass 2, finding 1 (the sibling writer): the accept's prints
+            // are a confirmed write, so a collection read already on the wire
+            // cannot undo them before AfterTradeAction's forced read lands.
+            ApiClient.PcAnswerFence.Wrote();
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] accept drew received=" + drawn + " gave=" + gave.Count);
+        }
+
+        // -- the card view's entry (V8 6.1) ------------------------------------
+
+        /// <summary>Offer in a trade, beside the card: an own, live print, while
+        /// trading is on, and not already held by one of the player's open
+        /// offers (from the cached full read's own sent proposals - sent_open
+        /// carries TRADE ids, never print ids).</summary>
+        private static void MaybeAddOfferButton(ApiClient.PcPrint p, float h)
+        {
+            if (cardPopupGO == null || !OfferAllowed(p)) return;
+            float fw = h * PlayerCardFaces.CARD_W / PlayerCardFaces.CARD_H;
+            AddOfferButton(cardPopupGO.transform, p.print_id, fw / 2f + 24f, HideCardPopup, "face");
+        }
+
+        private static bool OfferAllowed(ApiClient.PcPrint p)
+        {
+            if (p == null || p.discarded || !PcTradeRules.ProposeAllowed(tradeDiscovery) || OwnTradingClosed()) return false;
+            var own = ApiClient.CachedPcCollection;
+            if (own == null || !own.prints.Exists(x => x.print_id == p.print_id && !x.discarded)) return false;
+            return !IsOffered(p.print_id);
+        }
+
+        /// <summary>The text card view (a print with no face to show) is
+        /// NativeUI's info popup: Offer in a trade sits to the right of its box,
+        /// as it does beside a face, parented to that popup so closing the popup
+        /// removes it. The newest popup is the last child of that name: one
+        /// closed this frame may not be destroyed yet.</summary>
+        private static void MaybeAddTextOfferButton(ApiClient.PcPrint p)
+        {
+            if (!OfferAllowed(p)) return;
+            Transform pop = null;
+            try
+            {
+                var overlay = NativeUI.OverlayRoot;
+                for (int i = overlay != null ? overlay.childCount - 1 : -1; i >= 0 && pop == null; i--)
+                {
+                    var c = overlay.GetChild(i);
+                    if (c != null && c.name == "CR_InfoPopup") pop = c;
+                }
+            }
+            catch { }
+            if (pop == null) return;
+            float bw = 960f;
+            var box = pop.Find("Box") as RectTransform;
+            if (box != null && box.sizeDelta.x > 0f) bw = box.sizeDelta.x;
+            AddOfferButton(pop, p.print_id, bw / 2f + 24f, NativeUI.HideInfoPopup, "text");
+        }
+
+        private static void AddOfferButton(Transform parent, string pid, float x, Action hide, string kind)
+        {
+            var btn = UIFactory.CreateButton("Offer", parent, "Offer in a trade", 16f, C_WHITE, C_BUY,
+                () => { hide(); StartTradeSearch(pid); NativeUI.MarkDirty(); }, sizeDelta: new Vector2(260, 40));
+            var rt = btn.GetComponent<RectTransform>();
+            rt.anchorMin = new Vector2(0.5f, 0.5f); rt.anchorMax = new Vector2(0.5f, 0.5f); rt.pivot = new Vector2(0f, 0.5f);
+            rt.anchoredPosition = new Vector2(x, 0f);
+            // the popup's own control, like its backdrop: it must work while the popup holds the input
+            var ch = btn.GetComponent<ClickHandler>();
+            if (ch != null) ch.bypassModalBlock = true;
+            offerBtnGO = btn; offerBtnPid = pid; offerBtnHide = hide;
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] offer-button shown=1 view=" + kind);
+        }
+
+        // -- the proposal flow (V8 6.2) ----------------------------------------
+
+        /// <summary>New trade: the existing general player search (C5 - called
+        /// into, not rebuilt), then the compose screen. `preselect` is one of
+        /// the player's own prints, from the card view.</summary>
+        private static void StartTradeSearch(string preselect)
+        {
+            if (tradeActInFlight) { FrozenInput("search"); return; }
+            if (!PcTradeRules.ProposeAllowed(tradeDiscovery)) { Say(TradeState(), C_WARN); return; }
+            if (OwnTradingClosed()) { Say(ReasonText("trading_closed"), C_WARN); return; }
+            int ep = uiEpoch;
+            try
+            {
+                CompetitiveUI.OpenPlayerSearch(I18n.Tr("Search for a player by name"), (sid, name) =>
+                {
+                    if (ep != uiEpoch) return;
+                    StartCompose(sid, name, preselect);
+                });
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[PC] trade search failed: " + ex.Message); }
+        }
+
+        private static void StartCompose(string toSteamId, string name, string preselect)
+        {
+            var id = LocalId();
+            if (id == null || string.IsNullOrEmpty(toSteamId)) return;
+            if (tradeActInFlight) { FrozenInput("new"); return; }
+            if (toSteamId == id) { Say(ReasonText("self_trade"), C_WARN); return; }
+            if (!PcTradeRules.ProposeAllowed(tradeDiscovery)) { Say(TradeState(), C_WARN); return; }
+            EndCompose();
+            composing = true; view = View.Trades;
+            composeTo = toSteamId;
+            composeToName = string.IsNullOrEmpty(name) ? null : name;
+            if (!string.IsNullOrEmpty(preselect)) composeGive.Add(preselect);
+            if (ApiClient.CachedPcTrades == null) ReadTrades(id, true);   // the bounds: the side cap and the expiry
+            if (ApiClient.CachedPcCollection == null) ApiClient.FetchPcCollection(id);
+            FetchTheirBinder(id, composeSeq);
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] compose start preselected=" + composeGive.Count);
+            NativeUI.MarkDirty();
+        }
+
+        /// <summary>The compose is frozen while an attempt is pending (TC-M1):
+        /// from Send's own commit through its answer, or through the busy
+        /// retry's answer, Back, the pickers and a new compose are ignored -
+        /// the `if (tradeActInFlight)` rule OnAcceptClick and OnCloseClick
+        /// already follow. The refused input is logged for the witness.</summary>
+        private static void FrozenInput(string input)
+        {
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] compose frozen input=" + input);
+        }
+
+        /// <summary>The compose's Back button, and the lever's "back".</summary>
+        private static void OnComposeBack()
+        {
+            if (tradeActInFlight) { FrozenInput("back"); return; }
+            EndCompose();
+            NativeUI.MarkDirty();
+        }
+
+        private static void EndCompose()
+        {
+            composing = false; composeSeq++;
+            composeTo = null; composeToName = null;
+            composeTheirs = null; composeTheirsError = null; composeTheirsLoading = false;
+            composeGive.Clear(); composeGet.Clear();
+            composeNonce = null; composeNonceKey = null;
+            giveCardPage = 0; getCardPage = 0;
+        }
+
+        /// <summary>Their binder through /pc/collection?subject= (a private one
+        /// answers 403 private). One request in flight at a time: a compose
+        /// started while the last one's is still out asks again shortly.</summary>
+        private static void FetchTheirBinder(string id, int seq)
+        {
+            if (!composing || id == null || seq != composeSeq) return;
+            composeTheirsLoading = true;
+            int ep = uiEpoch; string to = composeTo;
+            ApiClient.FetchPcCollectionOf(id, to, (ok, resp) =>
+            {
+                if (ep != uiEpoch || seq != composeSeq) return;
+                if (!ok && resp == "in-flight") { RetryLater(ep, seq, null, () => FetchTheirBinder(id, seq), null); return; }
+                composeTheirsLoading = false;
+                string code = ok ? null : ApiClient.PcTradeErrorCode(resp);
+                if (ok)
+                {
+                    var col = ApiClient.ParsePcCollection(resp);
+                    if (col == null) composeTheirsError = "parse";
+                    else
+                    {
+                        composeTheirs = col; composeTheirsError = null;
+                        if (!string.IsNullOrEmpty(col.owner_name)) composeToName = col.owner_name;   // the server's render name
+                    }
+                }
+                else composeTheirsError = code;
+                Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] collection-of ok=" + (composeTheirs != null ? 1 : 0) + " code=" + (composeTheirsError ?? "-")
+                    + " prints=" + (composeTheirs != null ? composeTheirs.prints.Count : 0));
+                NativeUI.MarkDirty();
+            });
+        }
+
+        private static int SideMax()
+        {
+            var f = ApiClient.CachedPcTrades;
+            return f != null ? f.bounds.prints_per_side_max : 0;
+        }
+
+        /// <summary>A picker click (or a chosen card's click, to drop it). The
+        /// cap is the server's prints_per_side_max; unknown until the full read
+        /// has answered, and then nothing is chosen.</summary>
+        private static void ToggleComposeCard(Tile t, bool mine)
+        {
+            var p = t != null ? t.print : null;
+            if (p == null || !composing || string.IsNullOrEmpty(p.print_id)) return;
+            if (tradeActInFlight) { FrozenInput("pick"); return; }
+            var side = mine ? composeGive : composeGet;
+            if (side.Contains(p.print_id)) side.Remove(p.print_id);
+            else
+            {
+                int max = SideMax();
+                if (!PcTradeRules.CanAddToSide(side.Count, max))
+                {
+                    if (max <= 0) Say(I18n.Tr("Loading..."));
+                    else if (mine) Say(I18n.TrF("Choose up to {0} of your cards", max), C_WARN);
+                    else Say(I18n.TrF("Choose up to {0} of their cards", max), C_WARN);
+                    return;
+                }
+                side.Add(p.print_id);
+            }
+            NativeUI.MarkDirty();
+        }
+
+        private static void PageCompose(bool mine, int delta)
+        {
+            if (mine) giveCardPage += delta; else getCardPage += delta;
+            NativeUI.MarkDirty();
+        }
+
+        private static void BuildCompose()
+        {
+            composeBox = new GameObject("PcTCompose");
+            composeBox.transform.SetParent(tradesRoot.transform, false);
+            composeBox.AddComponent<RectTransform>();
+            UIFactory.AddVLG(composeBox, spacing: 6);
+            UIFactory.AddLE(composeBox, flexH: 1);
+            var hdr = new GameObject("PcTCHdr"); hdr.transform.SetParent(composeBox.transform, false); hdr.AddComponent<RectTransform>();
+            UIFactory.AddHLG(hdr, spacing: 10, forceExpandH: true); UIFactory.AddLE(hdr, prefH: 28, flexH: 0);
+            txtComposeHdr = UIFactory.CreateText("PcTCHdrT", hdr.transform, "", 16f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 26));
+            var sp = new GameObject("PcTCSp"); sp.transform.SetParent(hdr.transform, false); sp.AddComponent<RectTransform>(); UIFactory.AddLE(sp, flexW: 1);
+            UIFactory.CreateButton("PcTCBack", hdr.transform, "Back", 14f, C_WHITE, C_BTN, OnComposeBack, sizeDelta: new Vector2(120, 26));
+            var sv = UIFactory.CreateScrollView("PcTCSV", composeBox.transform, spacing: 6);
+            UIFactory.AddLE(sv.scrollGO, flexH: 1);
+            var c = sv.content.transform;
+            // the review panel: both sides as faces, the only-copy warning, the expiry, Send
+            var rev = UIFactory.CreatePanel("PcTCRev", c, C_PANEL);
+            UIFactory.AddHLG(rev, spacing: 14, padL: 10, padR: 10, padT: 6, padB: 6, forceExpandH: false);
+            UIFactory.AddLE(rev, prefH: MINI_H + 36f, minH: MINI_H + 36f, flexH: 0);
+            giveSelTiles = SideStrip(rev.transform, "PcTCGv", I18n.Tr("You give"), out composeGiveMore, SIDE_TILES, t => ToggleComposeCard(t, true), false);
+            getSelTiles = SideStrip(rev.transform, "PcTCGt", I18n.Tr("You get"), out composeGetMore, SIDE_TILES, t => ToggleComposeCard(t, false), false);
+            var info = Column(rev.transform, "PcTCInfo", 420f);
+            txtComposeWarn = UIFactory.CreateText("PcTCWarn", info.transform, "", 13f, C_WARN, UIFactory.AlignMidLeft, sizeDelta: new Vector2(420, 20));
+            txtComposeExpiry = UIFactory.CreateText("PcTCExp", info.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(420, 20));
+            btnSendProposal = UIFactory.CreateButton("PcTCSend", info.transform, "Send proposal", 14f, C_WHITE, C_BUY, SendProposal, sizeDelta: new Vector2(240, 30));
+            // their cards first (what is asked for), then the player's own
+            getPickTiles = PickerSection(c, "PcTCTh", out txtGetPickHdr, out txtGetPage, out txtTheirNote,
+                () => PageCompose(false, -1), () => PageCompose(false, +1), t => ToggleComposeCard(t, false));
+            givePickTiles = PickerSection(c, "PcTCMy", out txtGivePickHdr, out txtGivePage, out txtOwnNote,
+                () => PageCompose(true, -1), () => PageCompose(true, +1), t => ToggleComposeCard(t, true));
+            composeBox.SetActive(false);
+        }
+
+        private static Tile[] PickerSection(Transform parent, string name, out object hdr, out object page, out object note,
+            UnityEngine.Events.UnityAction prev, UnityEngine.Events.UnityAction next, Action<Tile> click)
+        {
+            var box = UIFactory.CreatePanel(name, parent, C_PANEL);
+            UIFactory.AddVLG(box, spacing: 4, padL: 10, padR: 10, padT: 6, padB: 6);
+            UIFactory.AddLE(box, flexH: 0);
+            var hr = new GameObject(name + "_hr"); hr.transform.SetParent(box.transform, false); hr.AddComponent<RectTransform>();
+            UIFactory.AddHLG(hr, spacing: 8, forceExpandH: true); UIFactory.AddLE(hr, prefH: 26, flexH: 0);
+            hdr = UIFactory.CreateText(name + "_h", hr.transform, "", 14f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 24));
+            var sp = new GameObject(name + "_sp"); sp.transform.SetParent(hr.transform, false); sp.AddComponent<RectTransform>(); UIFactory.AddLE(sp, flexW: 1);
+            UIFactory.CreateButton(name + "_p", hr.transform, "<", 14f, C_WHITE, C_BTN, prev, sizeDelta: new Vector2(40, 24));
+            page = UIFactory.CreateText(name + "_pg", hr.transform, "", 13f, C_LABEL, UIFactory.AlignMidCenter, sizeDelta: new Vector2(140, 24));
+            UIFactory.CreateButton(name + "_n", hr.transform, ">", 14f, C_WHITE, C_BTN, next, sizeDelta: new Vector2(40, 24));
+            note = UIFactory.CreateText(name + "_no", box.transform, "", 13f, C_WARN, UIFactory.AlignMidLeft, sizeDelta: new Vector2(1000, 20));
+            UIFactory.SetWordWrap(note, true); UIFactory.SetTextAutoHeight(note, 20f);
+            var strip = new GameObject(name + "_s"); strip.transform.SetParent(box.transform, false); strip.AddComponent<RectTransform>();
+            UIFactory.AddHLG(strip, spacing: 4, forceExpandH: false);
+            UIFactory.AddLE(strip, prefH: MINI_H, minH: MINI_H, flexH: 0);
+            var tiles = new Tile[PICK_PAGE];
+            for (int i = 0; i < PICK_PAGE; i++) tiles[i] = CreateMiniTile(strip.transform, name + i, click, true);
+            return tiles;
+        }
+
+        private static int ComparePick(ApiClient.PcPrint a, ApiClient.PcPrint b)
+        {
+            int c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity));
+            if (c != 0) return c;
+            c = string.Compare(SafeName(a), SafeName(b), StringComparison.OrdinalIgnoreCase);
+            if (c != 0) return c;
+            return string.CompareOrdinal(a.print_id ?? "", b.print_id ?? "");
+        }
+
+        /// <summary>A chosen card that is gone from the binder it came from (a
+        /// refetch after a refusal, a discard elsewhere) is dropped.</summary>
+        private static void PruneCompose()
+        {
+            var own = ApiClient.CachedPcCollection;
+            if (own != null) composeGive.RemoveAll(pid => !own.prints.Exists(p => p.print_id == pid && !p.discarded));
+            if (composeTheirs != null) composeGet.RemoveAll(pid => !composeTheirs.prints.Exists(p => p.print_id == pid && !p.discarded));
+        }
+
+        private static void RefreshCompose()
+        {
+            PruneCompose();
+            var own = ApiClient.CachedPcCollection;
+            var full = ApiClient.CachedPcTrades;
+            int max = SideMax();
+            string name = !string.IsNullOrEmpty(composeToName) ? composeToName : I18n.Tr("Unnamed player");
+            if (name.Length > 24) name = name.Substring(0, 24);
+            UIFactory.SetTextRaw(txtComposeHdr, I18n.TrF("To {0}", name));
+            theirPickList.Clear();
+            if (composeTheirs != null) foreach (var p in composeTheirs.prints) if (p != null && !p.discarded) theirPickList.Add(p);
+            theirPickList.Sort(ComparePick);
+            ownPickList.Clear();
+            if (own != null) foreach (var p in own.prints) if (p != null && !p.discarded) ownPickList.Add(p);
+            ownPickList.Sort(ComparePick);
+            string theirNote;
+            if (composeTheirsError == "private") theirNote = I18n.TrF("{0}'s binder is private - they can still propose a trade to you", name);
+            else if (composeTheirsError != null) theirNote = ReasonText(composeTheirsError);
+            else if (composeTheirs == null || composeTheirsLoading) theirNote = I18n.Tr("Loading...");
+            else theirNote = "";
+            UIFactory.SetTextRaw(txtTheirNote, theirNote);
+            UIFactory.SetTextRaw(txtOwnNote, own == null ? (ApiClient.PcCollectionError != null ? ReasonText(ApiClient.PcErrorCode(ApiClient.PcCollectionError)) : I18n.Tr("Loading...")) : "");
+            UIFactory.SetTextRaw(txtGetPickHdr, max > 0 ? I18n.TrF("Choose up to {0} of their cards", max) : I18n.Tr("Loading..."));
+            UIFactory.SetTextRaw(txtGivePickHdr, max > 0 ? I18n.TrF("Choose up to {0} of your cards", max) : I18n.Tr("Loading..."));
+            PaintPicker(getPickTiles, theirPickList, ref getCardPage, txtGetPage, composeGet);
+            PaintPicker(givePickTiles, ownPickList, ref giveCardPage, txtGivePage, composeGive);
+            FillChosen(giveSelTiles, composeGiveMore, composeGive, own != null ? own.prints : null);
+            FillChosen(getSelTiles, composeGetMore, composeGet, composeTheirs != null ? composeTheirs.prints : null);
+            UIFactory.SetTextRaw(txtComposeWarn, OnlyCopyGiven(own) ? I18n.Tr("This is your only copy of this card") : "");
+            UIFactory.SetTextRaw(txtComposeExpiry, full != null && full.bounds.ttl_hours > 0
+                ? I18n.TrF("Expires in {0}", PcTradeRules.TimeLeftText(full.bounds.ttl_hours * 3600.0)) : "");
+            bool canSend = composeGive.Count > 0 && composeGet.Count > 0 && PcTradeRules.ProposeAllowed(tradeDiscovery) && !tradeActInFlight;
+            UIFactory.SetImageColor(btnSendProposal, canSend ? C_BUY : C_BTN);
+        }
+
+        private static void PaintPicker(Tile[] tiles, List<ApiClient.PcPrint> list, ref int page, object pageTxt, List<string> chosen)
+        {
+            if (tiles == null) return;
+            int pages = Math.Max(1, (list.Count + PICK_PAGE - 1) / PICK_PAGE);
+            if (page >= pages) page = pages - 1;
+            if (page < 0) page = 0;
+            UIFactory.SetTextRaw(pageTxt, I18n.TrF("Page {0} of {1}", page + 1, pages));
+            for (int i = 0; i < tiles.Length; i++)
+            {
+                int idx = page * PICK_PAGE + i;
+                var p = idx < list.Count ? list[idx] : null;
+                FillMiniTile(tiles[i], p, p != null && chosen.Contains(p.print_id));
+            }
+        }
+
+        private static void FillChosen(Tile[] tiles, object more, List<string> ids, List<ApiClient.PcPrint> pool)
+        {
+            if (tiles == null) return;
+            for (int i = 0; i < tiles.Length; i++)
+            {
+                ApiClient.PcPrint p = null;
+                if (i < ids.Count && pool != null) { string want = ids[i]; p = pool.Find(x => x.print_id == want); }
+                FillMiniTile(tiles[i], p, false);
+            }
+            UIFactory.SetTextRaw(more, ids.Count > tiles.Length ? "+" + (ids.Count - tiles.Length) : "");
+        }
+
+        /// <summary>The only-copy warning (V8 6.2), advisory: a chosen card with
+        /// no other live, unchosen copy of the same card in the cached binder.</summary>
+        private static bool OnlyCopyGiven(ApiClient.PcCollection own)
+        {
+            if (own == null) return false;
+            foreach (var pid in composeGive)
+            {
+                var p = own.prints.Find(x => x.print_id == pid);
+                if (p == null) continue;
+                bool other = own.prints.Exists(x => x.print_id != pid && x.card_id == p.card_id && !x.discarded && !composeGive.Contains(x.print_id));
+                if (!other) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Send (V8 6.2): the digest and the signed terms are built by
+        /// ApiClient.PcTradePropose from PcTradeRules. The nonce is bound to the
+        /// terms: the same terms re-sent after a lost answer re-send the same
+        /// nonce and get the stored row; changed terms start a new attempt.</summary>
+        private static void SendProposal()
+        {
+            var id = LocalId();
+            if (id == null || !composing) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            if (!PcTradeRules.ProposeAllowed(tradeDiscovery)) { Say(TradeState(), C_WARN); return; }
+            if (tradeActInFlight || composeGive.Count == 0 || composeGet.Count == 0) return;
+            var give = new List<string>(composeGive); give.Sort(StringComparer.Ordinal);
+            var get = new List<string>(composeGet); get.Sort(StringComparer.Ordinal);
+            string key = PcTradeRules.TermsKey(composeTo, give, get);
+            if (composeNonce == null || composeNonceKey != key) { composeNonce = NewNonce(); composeNonceKey = key; }
+            ProposeNow(id, composeTo, give, get, composeNonce, composeSeq, false);
+        }
+
+        private static void ProposeNow(string id, string to, List<string> give, List<string> get, string nonce, int seq, bool isRetry)
+        {
+            tradeActInFlight = true; tradeActAt = Now;
+            NativeUI.MarkDirty();
+            int ep = uiEpoch;
+            ApiClient.PcTradePropose(id, nonce, to, give, get, (ok, resp) =>
+            {
+                if (ep != uiEpoch) return;
+                tradeActInFlight = false;
+                string code = ok ? null : ApiClient.PcTradeErrorCode(resp);
+                Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] propose ok=" + (ok ? 1 : 0) + " code=" + (code ?? "-") + (isRetry ? " retry=1" : "")
+                    + " give=" + give.Count + " get=" + get.Count);
+                if (!ok && PcTradeRules.RetryBusy(code, isRetry))
+                {
+                    tradeActInFlight = true; tradeActAt = Now;
+                    Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] busy-retry action=propose");
+                    RetryLater(ep, seq, PcTradeRules.TermsKey(to, give, get),
+                               () => ProposeNow(id, to, give, get, nonce, seq, true), ProposeRetryDropped);
+                    return;
+                }
+                if (ok)
+                {
+                    // committed: the new proposal is in Sent after the forced read
+                    if (seq == composeSeq) EndCompose();
+                    view = View.Trades;
+                    AfterTradeAction(id);
+                }
+                else
+                {
+                    if (!KeepsNonce(code) && seq == composeSeq) { composeNonce = null; composeNonceKey = null; }
+                    Say(ReasonText(code), C_WARN);
+                    if (PcTradeRules.RefetchAfterRefusal(code))
+                    {
+                        AfterTradeAction(id);
+                        if (composing && seq == composeSeq) FetchTheirBinder(id, seq);
+                    }
+                }
+                NativeUI.MarkDirty();
+            });
+        }
+
+        /// <summary>A busy proposal's retry, dropped by the fence (TC-M1): the
+        /// first answer stands. Busy turned the request away before it was
+        /// read (the reason the attempt keeps its nonce), so nothing is
+        /// pending any more: the freeze is released and the busy reason is
+        /// shown, as it would have been had the retry been refused too.</summary>
+        private static void ProposeRetryDropped()
+        {
+            tradeActInFlight = false;
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] busy-retry dropped action=propose reason=compose-changed");
+            Say(ReasonText("busy"), C_WARN);
+            NativeUI.MarkDirty();
         }
 
 
@@ -2449,85 +4886,212 @@ namespace CompetitiveRounds
         // every unbanned player who has run the mod from a Steam account -- not
         // every registered player, which is what this comment said until the
         // 2026-09-16 coherence pass. ──
+        /// <summary>Round-2 R4: the two Player Cards switches are neutral until
+        /// /pc/me answers; their labels say "..." until then.</summary>
+        private static bool PcMeKnown() { return ApiClient.CachedPcMe != null; }
+
         internal static void BuildSettingsRows(Transform parent)
         {
             UIFactory.CreateText("SPcHdr", parent, "Player Cards", 15f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
-            var info = UIFactory.CreateText("SPcInfo", parent,
+            btnPublic = NativeUI.SettingsSwitch(parent, "SPcPub",
+                I18n.Tr("Lets others see which cards you hold, in the mod and in Discord."),
+                () => ApiClient.CachedPcMe != null && ApiClient.CachedPcMe.collection_public,
+                () => ToggleSetting("collection_public"),
+                PcMeKnown);
+            btnPublicTxt = UIFactory.GetButtonText(btnPublic);
+            btnAnnounce = NativeUI.SettingsSwitch(parent, "SPcAnn",
+                I18n.Tr("Rare pulls may be posted to the Discord gambler chat with your name."),
+                () => ApiClient.CachedPcMe != null && ApiClient.CachedPcMe.announce,
+                () => ToggleSetting("announce"),
+                PcMeKnown);
+            btnAnnounceTxt = UIFactory.GetButtonText(btnAnnounce);
+            // Card trading (v1.41.0, V8 2.1/6.1): after the announcements row.
+            // Shown only while /pc/me's settings carry trades_open (F3), which
+            // PaintTradesRow decides on every settings repaint; hidden until then.
+            // Its value is known only while the key is present: an answer without
+            // it (a server before the trading schema) is not OFF.
+            btnTrades = NativeUI.SettingsSwitch(parent, "SPcTrd",
+                I18n.Tr("Other players can send you card-for-card trade proposals. Nothing moves until you accept. Turning this off ends your open proposals."),
+                () => ApiClient.CachedPcMe != null && ApiClient.CachedPcMe.has_trades_open && ApiClient.CachedPcMe.trades_open,
+                () => ToggleSetting("trades_open"),
+                () => ApiClient.CachedPcMe != null && ApiClient.CachedPcMe.has_trades_open);
+            btnTradesTxt = UIFactory.GetButtonText(btnTrades);
+            tradesRowGroup = btnTrades;   // the settings page's row itself is what gets hidden
+            tradesRowSig = null;
+            TradesRowVisible(false);
+            btnPreset = NativeUI.SettingsDropdown(parent, "SPcPre",
+                I18n.Tr("Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show."),
+                PresetOptionIds, () => PortraitRender.CurrentPreset().ToString(System.Globalization.CultureInfo.InvariantCulture),
+                id => { SetPreset(ParsePresetId(id)); });
+            btnPresetTxt = UIFactory.GetButtonText(btnPreset);
+            // Dance cards (design S5.8): the dance the card performs, after the
+            // preset row. Shown only while /pc/me carries the dance keys (a
+            // server with dance cards), which RefreshDanceRow decides on every
+            // settings repaint; hidden until then. A pick is a pending choice
+            // (SetDance) that MaybeSendDance sends; nothing is stored here.
+            btnDance = NativeUI.SettingsDropdown(parent, "SPcDnc",
+                I18n.Tr("The dance your card performs: it plays once each time your card is shown in a binder or a pack, drawn from your own character on this PC. Pick one you own; None keeps your card still."),
+                DanceOptionIds, DanceCurrentId, id => { SetDance(ParseDanceId(id)); });
+            btnDanceTxt = UIFactory.GetButtonText(btnDance);
+            btnDance.SetActive(false);   // the settings page's row itself; shown once /pc/me says the server has dance cards
+        }
+
+        /// <summary>Item 13: the Player Cards texts that are not rows -- the
+        /// block's explainer, the preset preview and the renderer's note --
+        /// built into the settings pane (NativeUI's SetDetail), where they
+        /// show beside the rows they explain. <paramref name="infoParent"/>
+        /// takes the explainer, <paramref name="previewParent"/> the preview
+        /// row and the note (the pane's SDetPrev slot).</summary>
+        internal static GameObject BuildSettingsPaneExtras(Transform infoParent, Transform previewParent)
+        {
+            var info = UIFactory.CreateText("SPcInfo", infoParent,
                 "Other players can pull, collect and trade a card of you showing your name, rank title, rating and ranked record - the same things the leaderboard shows. Its picture is your Steam profile picture until this PC has sent your in-game character - the same body, face, colour and effect you play with, drawn here and sent once. Deleting your data (below) removes every card of you from every binder.",
                 13f, C_DIM, sizeDelta: new Vector2(700, 36));
             // wrap + auto height, the Info body's shape: CreateText defaults to a
             // single Truncate line, and this caption is longer than the column
             UIFactory.SetWordWrap(info, true); UIFactory.SetTextAutoHeight(info, 36f);
-            btnPublic = SettingsRow(parent, "SPcPub", () => ToggleSetting("collection_public"),
-                "Lets others see which cards you hold, in the mod and in Discord.", 18f);
-            btnPublicTxt = UIFactory.GetButtonText(btnPublic);
-            btnAnnounce = SettingsRow(parent, "SPcAnn", () => ToggleSetting("announce"),
-                "Rare pulls may be posted to the Discord gambler chat with your name.", 18f);
-            btnAnnounceTxt = UIFactory.GetButtonText(btnAnnounce);
-            btnPreset = SettingsRow(parent, "SPcPre", CyclePreset,
-                "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show.", 18f);
-            btnPresetTxt = UIFactory.GetButtonText(btnPreset);
-            btnDance = SettingsRow(parent, "SPcDnc", CycleDance,
-                "The dance your card performs: it plays once each time your card is shown in a binder or a pack, drawn from your own character on this PC. Pick one you own; None keeps your card still.", 18f);
-            btnDanceTxt = UIFactory.GetButtonText(btnDance);
-            if (btnDance.transform.parent != null) btnDance.transform.parent.gameObject.SetActive(false);   // shown once /pc/me says the server has dance cards
-            // The preview in its own left-aligned row: dropped straight into
-            // the settings column it was stretched to the column's width and
-            // its picture centred in that ("too far to the right", Sid,
+            UIFactory.SetMinH(((Component)info).gameObject, 0f);
+            // The preview in its own left-aligned row, so its picture is not
+            // centred in a stretched cell ("too far to the right", Sid,
             // 2026-09-13). It shows as soon as a render exists, which the
-            // Settings tab now asks for itself (MaybeTick -> OnTabVisit).
+            // Settings tab asks for itself (MaybeTick -> OnTabVisit).
+            //
+            // Board row 24: the row is the WHOLE card as other players see it
+            // -- frame, band, name, title, numbers and picture, drawn by the
+            // server (SettingsCardTick) -- in a card-shaped slot, with a line
+            // beside it saying which picture is showing and why. The picture
+            // fills the slot's own rect (CreatePanel stretches a child and the
+            // slot has no layout group), so the card lands edge to edge and the
+            // square live picture letterboxes on the slot's dark ground.
             presetPreviewRow = new GameObject("SPcPrevRow");
-            presetPreviewRow.transform.SetParent(parent, false);
+            presetPreviewRow.transform.SetParent(previewParent, false);
             presetPreviewRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(presetPreviewRow, spacing: 8, forceExpandW: false, forceExpandH: false);
-            UIFactory.AddLE(presetPreviewRow, prefH: 118, minH: 118, flexH: 0);
-            presetPreview = UIFactory.CreatePanel("SPcPrev", presetPreviewRow.transform, C_CARD);
-            UIFactory.AddLE(presetPreview, prefW: 118, minW: 118, prefH: 118, minH: 118, flexW: 0, flexH: 0);
+            UIFactory.AddHLG(presetPreviewRow, spacing: 12, forceExpandW: false, forceExpandH: false);
+            UIFactory.SetHLGChildAlignMiddle(presetPreviewRow);
+            UIFactory.AddLE(presetPreviewRow, prefH: SETTINGS_CARD_H, minH: SETTINGS_CARD_H, flexH: 0);
+            var slot = UIFactory.CreatePanel("SPcCard", presetPreviewRow.transform, C_CARD);
+            UIFactory.AddLE(slot, prefW: SETTINGS_CARD_W, minW: SETTINGS_CARD_W, prefH: SETTINGS_CARD_H, minH: SETTINGS_CARD_H, flexW: 0, flexH: 0);
+            presetPreview = UIFactory.CreatePanel("SPcPrev", slot.transform, C_CARD);
             PlayerCardFaces.SetFace(presetPreview, null);
+            settingsCardBound = null;
+            txtSettingsCardCap = UIFactory.CreateText("SPcCardCap", presetPreviewRow.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(SETTINGS_CAP_W, 60));
+            UIFactory.SetWordWrap(txtSettingsCardCap, true);
+            var capGO = (txtSettingsCardCap as Component)?.gameObject;
+            if (capGO != null) UIFactory.AddLE(capGO, prefW: SETTINGS_CAP_W, minW: SETTINGS_CAP_W, flexW: 0);
             presetPreviewRow.SetActive(false);
             // The renderer's last word (rendered / uploading / picture current /
             // why it refused), the diagnostic the picture row used to carry.
-            txtPicNote = UIFactory.CreateText("SPcPicN", parent, "", 12f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 16));
+            txtPicNote = UIFactory.CreateText("SPcPicN", previewParent, "", 12f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 16));
+            return ((Component)info).gameObject;
         }
 
-        private static string PresetLabel()
+        /// <summary>The preset slots a player can pick: Follow (-1) and every
+        /// AUTHORABLE slot (bug #370: PresetSlotCount, not the array length).</summary>
+        private static string[] PresetOptionIds()
         {
-            int v = PortraitRender.CurrentPreset();
-            // v is the slot INDEX; players count slots from one.
+            int slots = PortraitRender.PresetSlotCount();
+            var ids = new string[slots + 1];
+            for (int i = -1; i < slots; i++)
+                ids[i + 1] = i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return ids;
+        }
+
+        private static int ParsePresetId(string id)
+        {
+            int v;
+            return int.TryParse(id, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out v) ? v : -1;
+        }
+
+        private static string PresetLabel() => PresetLabel(PortraitRender.CurrentPreset());
+
+        /// <summary>Item 13: the label of a GIVEN slot index, so the settings
+        /// pane can render the recommended value (Follow, -1) without it being
+        /// the live one. v is the slot INDEX; players count slots from one.</summary>
+        internal static string PresetLabel(int v)
+        {
             return v < 0 ? I18n.Tr("Follow my character") : I18n.TrF("Preset {0}", v + 1);
         }
 
-        /// <summary>Follow → 1 → … → 10 → Follow. Local only (the picture itself is
-        /// what reaches the server), debounced by the renderer.</summary>
+        /// <summary>Follow → 1 → … → the last AUTHORABLE slot → Follow. Local only (the
+        /// picture itself is what reaches the server), debounced by the renderer.
+        ///
+        /// <para>The upper bound is <see cref="PortraitRender.PresetSlotCount"/>, not
+        /// <c>playerFaces.Length</c> (bug #370): the array holds ten entries but the
+        /// character creator only lets you fill the first eight, and the two that cannot
+        /// be filled used to be offered here and rendered an empty face.</para></summary>
         private static void CyclePreset()
         {
             try
             {
                 var cfg = Plugin.PortraitPreset;
                 if (cfg == null) return;
-                // -1 → 0 → … → 9 → -1
-                cfg.Value = ((Mathf.Clamp(cfg.Value, -1, 9) + 2) % 11) - 1;
-                PortraitRender.RequestRefresh("preset");
-                NativeUI.MarkDirty();
+                // -1 → 0 → … → slots-1 → -1, over slots+1 states.
+                int slots = PortraitRender.PresetSlotCount();
+                SetPreset(((Mathf.Clamp(cfg.Value, -1, slots - 1) + 2) % (slots + 1)) - 1);
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PC] preset cycle threw: {ex.Message}"); }
         }
 
-        private static GameObject SettingsRow(Transform parent, string name, UnityEngine.Events.UnityAction onClick, string desc, float descH)
+        /// <summary>Item 13: the value-taking writer of the preset row (the
+        /// settings page's dropdown). The slot is clamped to Follow (-1)
+        /// through the last AUTHORABLE slot (bug #370), so an out-of-range id
+        /// cannot select an unfillable slot. Local only; the renderer is asked
+        /// for a new picture, debounced on its side.</summary>
+        internal static void SetPreset(int v)
         {
-            // One setting = one [button + caption below] group (Bug 87), the
-            // same shape as NativeUI's SettingsToggle.
-            var group = new GameObject(name + "_grp");
-            group.transform.SetParent(parent, false);
-            group.AddComponent<RectTransform>();
-            UIFactory.AddVLG(group, spacing: 1);
-            UIFactory.AddLE(group, flexH: 0);
-            var btn = NativeUI.SettingsButton(group.transform, name, "", C_WHITE, C_BTN, new Vector2(340, 28), onClick);
-            var d = UIFactory.CreateText(name + "_d", group.transform, desc, 13f, C_DIM, sizeDelta: new Vector2(700, descH));
-            // wrap + auto height (2026-09-13): a caption longer than the column, or
-            // a translation of one, folds instead of running off the edge
-            UIFactory.SetWordWrap(d, true); UIFactory.SetTextAutoHeight(d, descH);
-            return btn;
+            try
+            {
+                var cfg = Plugin.PortraitPreset;
+                if (cfg == null) return;
+                int slots = PortraitRender.PresetSlotCount();
+                int next = Mathf.Clamp(v, -1, slots - 1);
+                if (next == cfg.Value) return;                 // already stored: no refresh request
+                cfg.Value = next;
+                PortraitRender.RequestRefresh("preset");
+                NativeUI.MarkDirty();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PC] preset set threw: {ex.Message}"); }
+        }
+
+        /// <summary>Item 13: the server rows' paint as a function of the value
+        /// (null = /pc/me has not answered yet), so the settings pane can render
+        /// the recommended value through the same literals. There are THREE
+        /// server rows, each with its own painter: collection_public
+        /// (PaintCollectionPublic), announce (PaintAnnounce) and trades_open
+        /// (PaintTrades, the card-trading row SPcTrd that merge pass 1 added).</summary>
+        internal static void PaintCollectionPublic(object t, bool? on)
+        {
+            UIFactory.SetText(t, on == null
+                ? "My collection is public: <color=#888>...</color>"
+                : on.Value
+                    ? "My collection is public: <color=#88FF88>ON</color>"
+                    : "My collection is public: <color=#FF9966>OFF</color>");
+        }
+
+        internal static void PaintAnnounce(object t, bool? on)
+        {
+            UIFactory.SetText(t, on == null
+                ? "Announce my pulls: <color=#888>...</color>"
+                : on.Value
+                    ? "Announce my pulls: <color=#88FF88>ON</color>"
+                    : "Announce my pulls: <color=#FF9966>OFF</color>");
+        }
+
+        /// <summary>The Card trading row's paint as a function of the value
+        /// (null = /pc/me has not answered, or answered without trades_open),
+        /// the same literals the row showed before the settings page moved.</summary>
+        internal static void PaintTrades(object t, bool? on)
+        {
+            UIFactory.SetText(t, on == null
+                ? "Card trading: <color=#888>...</color>"
+                : on.Value
+                    ? "Card trading: <color=#88FF88>ON</color>"
+                    : "Card trading: <color=#FF9966>OFF</color>");
+        }
+
+        internal static void PaintPreset(object t, int v)
+        {
+            UIFactory.SetTextRaw(t, I18n.Tr("Character preset") + ": <color=#CCCCCC>" + PresetLabel(v) + "</color>");
         }
 
         internal static void RefreshSettingsRows()
@@ -2536,22 +5100,34 @@ namespace CompetitiveRounds
             var id = LocalId();
             var me = ApiClient.CachedPcMe;
             if (me == null && id != null) ApiClient.FetchPcMe(id);   // throttled inside (10 s)
-            if (me == null)
-            {
-                UIFactory.SetText(btnPublicTxt, "My collection is public: <color=#888>...</color>");
-                UIFactory.SetText(btnAnnounceTxt, "Announce my pulls: <color=#888>...</color>");
-            }
-            else
-            {
-                UIFactory.SetText(btnPublicTxt, me.collection_public
-                    ? "My collection is public: <color=#88FF88>ON</color>"
-                    : "My collection is public: <color=#FF9966>OFF</color>");
-                UIFactory.SetText(btnAnnounceTxt, me.announce
-                    ? "Announce my pulls: <color=#88FF88>ON</color>"
-                    : "Announce my pulls: <color=#FF9966>OFF</color>");
-            }
+            PaintCollectionPublic(btnPublicTxt, me == null ? (bool?)null : me.collection_public);
+            PaintAnnounce(btnAnnounceTxt, me == null ? (bool?)null : me.announce);
+            PaintTrades(btnTradesTxt, me == null || !me.has_trades_open ? (bool?)null : me.trades_open);
+            PaintTradesRow(me);
             RefreshDanceRow(me);
             RefreshPictureRows();
+        }
+
+        /// <summary>The Card trading row is shown only while /pc/me's settings
+        /// carry trades_open (V8 6.1, F3). Three states, never two: /pc/me not
+        /// answered yet (hidden, waiting), answered WITH the key (shown, ON or
+        /// OFF), answered WITHOUT it - a server before the trading schema
+        /// (hidden). Absent is never read as OFF: that would offer a switch the
+        /// server refuses.</summary>
+        private static void PaintTradesRow(ApiClient.PcMe me)
+        {
+            string state = me == null ? "unknown" : (me.has_trades_open ? "present" : "absent");
+            TradesRowVisible(state == "present");
+            string value = state == "present" ? (me.trades_open ? "on" : "off") : "-";
+            string sig = state + "|" + value;
+            if (sig == tradesRowSig) return;
+            tradesRowSig = sig;
+            Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] settings-row state=" + state + " value=" + value);
+        }
+
+        private static void TradesRowVisible(bool on)
+        {
+            if (tradesRowGroup != null && tradesRowGroup.activeSelf != on) tradesRowGroup.SetActive(on);
         }
 
         // -- the dance row (dance cards design S5.8) -----------------------------------
@@ -2584,39 +5160,82 @@ namespace CompetitiveRounds
 
         /// <summary>Shown only when /pc/me carries the dance keys (a server with
         /// dance cards); the label is the pending choice while one is waiting,
-        /// else the server's selection.</summary>
+        /// else the server's selection. Painted on EVERY settings pass, shown or
+        /// not (item 13's T2b paints each key once per pass), as the trading
+        /// row is; hidden, it shows the unknown word. The settings page's row
+        /// is itself what is hidden (SettingsDropdown returns the row).</summary>
         private static void RefreshDanceRow(ApiClient.PcMe me)
         {
             if (btnDance == null || btnDanceTxt == null) return;
             bool show = me != null && me.dance_supported;
-            var grp = btnDance.transform.parent != null ? btnDance.transform.parent.gameObject : btnDance;
-            if (grp.activeSelf != show) grp.SetActive(show);
-            if (!show) return;
+            if (btnDance.activeSelf != show) btnDance.SetActive(show);
+            if (!show) { PaintDance(btnDanceTxt, "..."); return; }
             long item = danceChoice >= 0 ? danceChoice : me.pc_dance_item;
-            string label = DanceItemLabel(item, me) + (danceChoice >= 0 || danceInFlight ? " ..." : "");
-            UIFactory.SetTextRaw(btnDanceTxt, I18n.TrF("Dance on my card: {0}", "<color=#CCCCCC>" + label + "</color>"));
+            PaintDance(btnDanceTxt, DanceItemLabel(item, me) + (danceChoice >= 0 || danceInFlight ? " ..." : ""));
         }
 
-        /// <summary>None -> each owned dance -> None. Only the pending choice
-        /// moves here; MaybeSendDance sends it after a 1.5 s pause, so a run of
-        /// clicks costs one selection. Nothing is written to the config: the
-        /// selection is the server's (S2.10).</summary>
-        private static void CycleDance()
+        /// <summary>The dance row's paint as a function of the label (item 13:
+        /// the settings page renders an option's word and the recommended
+        /// None through it).</summary>
+        internal static void PaintDance(object t, string label)
+        {
+            UIFactory.SetTextRaw(t, I18n.TrF("Dance on my card: {0}", "<color=#CCCCCC>" + label + "</color>"));
+        }
+
+        /// <summary>Item 13: the label of a GIVEN option id (a shop item id,
+        /// "0" for None), so the page can name each option and the
+        /// recommended value without it being the live one.</summary>
+        internal static string DanceOptionLabel(string id)
+        {
+            return DanceItemLabel(ParseDanceId(id), ApiClient.CachedPcMe);
+        }
+
+        private static long ParseDanceId(string id)
+        {
+            long v;
+            return long.TryParse(id, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out v) && v > 0 ? v : 0;
+        }
+
+        /// <summary>The dropdown's options: None, then each owned dance this
+        /// client can capture, in the wheel's order. Null (the dropdown does
+        /// not open) until the selection can be sent: no /pc/me with the dance
+        /// keys, no session, or the shop list not read yet, which it asks for.</summary>
+        private static string[] DanceOptionIds()
         {
             var id = LocalId(); var me = ApiClient.CachedPcMe;
-            if (id == null || me == null || !me.dance_supported) return;
-            if (!SessionReady) { try { CompetitiveUI.ShowNotification(ReasonText("session_required"), C_WARN, 3f); } catch { } return; }
+            if (id == null || me == null || !me.dance_supported) return null;
+            if (!SessionReady) { try { CompetitiveUI.ShowNotification(ReasonText("session_required"), C_WARN, 3f); } catch { } return null; }
             var owned = OwnedDanceItems();
             if (owned == null)
             {
                 try { ApiClient.FetchShopItems(id); } catch { }
                 try { CompetitiveUI.ShowNotification(I18n.Tr("Loading your dances..."), C_LABEL, 2f); } catch { }
-                return;
+                return null;
             }
-            long cur = danceChoice >= 0 ? danceChoice : me.pc_dance_item;
-            int at = -1;
-            for (int i = 0; i < owned.Count; i++) if (owned[i].id == cur) at = i;
-            danceChoice = at + 1 < owned.Count ? owned[at + 1].id : 0;
+            var ids = new string[owned.Count + 1];
+            ids[0] = "0";
+            for (int i = 0; i < owned.Count; i++) ids[i + 1] = owned[i].id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return ids;
+        }
+
+        private static string DanceCurrentId()
+        {
+            var me = ApiClient.CachedPcMe;
+            long cur = danceChoice >= 0 ? danceChoice : (me != null ? me.pc_dance_item : 0);
+            return (cur > 0 ? cur : 0).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Item 13: the dance row's writer (the settings page's
+        /// dropdown). Only the pending choice moves here; MaybeSendDance sends
+        /// it after a 1.5 s pause, so a run of picks costs one selection.
+        /// Nothing is written to the config: the selection is the server's
+        /// (S2.10). 0 is None.</summary>
+        internal static void SetDance(long item)
+        {
+            var id = LocalId(); var me = ApiClient.CachedPcMe;
+            if (id == null || me == null || !me.dance_supported) return;
+            if (!SessionReady) { try { CompetitiveUI.ShowNotification(ReasonText("session_required"), C_WARN, 3f); } catch { } return; }
+            danceChoice = item > 0 ? item : 0;
             danceChoiceAt = Time.unscaledTime;
             NativeUI.MarkDirty();
         }
@@ -2650,7 +5269,16 @@ namespace CompetitiveRounds
                 ApiClient.FetchPcMe(id, true, (ok2, r2) =>
                 {
                     if (ep != uiEpoch) return;
-                    try { PortraitRender.OnTabVisit(); } catch { }   // the picture check (S5.8): a dance picture, or the still without one
+                    // Item 18 fix pass 5, finding 10: this callback is heard
+                    // at most once, and with ok2 only once the answer of a
+                    // /pc/me read sent for or after this ask is cached, never
+                    // that of a read already on the wire when it was asked
+                    // (FetchPcMe keeps it waiting while an older read flies,
+                    // PcReadDemand). So the picture check is armed only here,
+                    // against the post-selection answer. A failed or refused
+                    // answer cached nothing, so it arms no check against the
+                    // answer from before the selection; the next visit checks.
+                    if (ok2) { try { PortraitRender.OnTabVisit(); } catch { } }   // the picture check (S5.8): a dance picture, or the still without one
                     NativeUI.MarkDirty();
                 });
                 NativeUI.MarkDirty();
@@ -2663,37 +5291,237 @@ namespace CompetitiveRounds
         private static void RefreshPictureRows()
         {
             if (btnPresetTxt == null) return;
-            UIFactory.SetTextRaw(btnPresetTxt, I18n.Tr("Character preset") + ": <color=#CCCCCC>" + PresetLabel() + "</color>");
+            PaintPreset(btnPresetTxt, PortraitRender.CurrentPreset());
             string note = PortraitRender.LastResult;
             UIFactory.SetTextRaw(txtPicNote, string.IsNullOrEmpty(note) ? "" : "(" + note + ")");
             if (presetPreviewRow == null || presetPreview == null) return;
-            bool show = PortraitRender.PreviewTex != null;
-            presetPreviewRow.SetActive(show);
-            if (show && previewShown != PortraitRender.PreviewSerial)
+            // The live picture's Sprite follows the renderer's serial, as it
+            // always has; a Sprite that is on the slot is taken off BEFORE it
+            // is destroyed, so the Image never holds a dead one.
+            if (previewShown != PortraitRender.PreviewSerial)
             {
                 previewShown = PortraitRender.PreviewSerial;
                 var old = previewSprite;
                 previewSprite = PlayerCardFaces.SpriteOf(PortraitRender.PreviewTex);
-                PlayerCardFaces.SetFace(presetPreview, previewSprite);
-                if (old != null) { try { UnityEngine.Object.Destroy(old); } catch { } }
+                if (old != null)
+                {
+                    if (settingsCardBound == old) { PlayerCardFaces.SetFace(presetPreview, null); settingsCardBound = null; }
+                    try { UnityEngine.Object.Destroy(old); } catch { }
+                }
             }
+            Sprite show; string cap;
+            SettingsCardView(out show, out cap);
+            presetPreviewRow.SetActive(show != null || cap != null);
+            if (show != settingsCardBound) { PlayerCardFaces.SetFace(presetPreview, show); settingsCardBound = show; }
+            UIFactory.SetTextRaw(txtSettingsCardCap, cap ?? "");
         }
 
+        // -- Board row 24: the Settings full card ------------------------------
+        // The slot shows the card the server draws for this player -- the same
+        // drawing the Discord /card preview shows, from the portrait the server
+        // HOLDS -- because that is what other players see. The one time it is
+        // not the truth to show is while a new look is on its way (a preset
+        // change still settling, a render that will upload, the upload itself):
+        // the server's card is then the OLD picture, so the slot shows the live
+        // picture with a pending line, and the upload's answer (which writes the
+        // new portrait hash into /pc/me) changes the key below, which fetches
+        // the new card.
+
+        /// <summary>What a fetched card is good for: the identity epoch, the
+        /// portrait the server holds, and the language its labels are drawn in.
+        /// A change to any of them asks the server again.</summary>
+        private static string SettingsCardWant(ApiClient.PcMe me)
+        {
+            return uiEpoch + "|" + (me != null ? me.portrait_hash ?? "" : "") + "|" + (string.IsNullOrEmpty(I18n.Locale) ? "en" : I18n.Locale);
+        }
+
+        /// <summary>From MaybeTick while Settings is the current tab (every two
+        /// seconds). Asks for the card when the one held is for another key or
+        /// five minutes old (the numbers on it move with the daily snapshot and
+        /// every ranked result), never before a refusal's retry time, and never
+        /// while a new look is on its way (the server would draw the picture it
+        /// still holds; the upload's answer changes the key anyway). One fetch
+        /// at a time; an answer from before an identity edge commits nothing.
+        /// A fetch with no answer 25 s after it was sent is given up (the
+        /// other latches' rule, past the 20 s transport timeout): when the
+        /// persistent host that ran its coroutine is destroyed and respawned
+        /// (Plugin.cs OnDestroy), the coroutine stops and its callback never
+        /// runs, so the latch would otherwise hold for the rest of the
+        /// session. An answer that does arrive after it was given up commits
+        /// nothing: its serial is no longer the latest.</summary>
+        private static void SettingsCardTick(string id)
+        {
+            var me = ApiClient.CachedPcMe;
+            if (settingsCardInFlight && Now - settingsCardSentAt > 25f)
+            {
+                settingsCardInFlight = false;
+                settingsCardSerial++;
+                Plugin.Log.LogWarning("[PC] settings card: no answer 25 s after the request; given up, asking again");
+            }
+            if (id == null || me == null || !SessionReady || settingsCardInFlight || presetPreview == null) return;
+            if (PortraitRender.LookPending) return;
+            string want = SettingsCardWant(me);
+            bool stale = want != settingsCardKey || Now - settingsCardAt > 300f;
+            if (!stale || Now < settingsCardRetryAt) return;
+            settingsCardInFlight = true;
+            settingsCardSentAt = Now;
+            int ep = uiEpoch, serial = ++settingsCardSerial;
+            Plugin.Log.LogInfo($"[PC] settings card: requested (serial {serial})");
+            ApiClient.PcFacePreview(id, (ok, data, code) =>
+            {
+                if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                if (serial != settingsCardSerial)
+                {
+                    Plugin.Log.LogInfo($"[PC] settings card: answer to serial {serial} dropped (given up)");
+                    return;
+                }
+                settingsCardInFlight = false;
+                Texture2D tex = ok ? PlayerCardFaces.DecodeOwned(data, "card", true) : null;
+                if (tex != null)
+                {
+                    var spr = PlayerCardFaces.SpriteOf(tex);
+                    if (spr == null) { try { UnityEngine.Object.Destroy(tex); } catch { } }
+                    else
+                    {
+                        SettingsCardDrop();
+                        settingsCardTex = tex; settingsCardSprite = spr;
+                        settingsCardKey = want; settingsCardState = SC_CARD; settingsCardRetryAt = 0f;
+                        settingsCardAt = Now;
+                        Plugin.Log.LogInfo($"[PC] settings card: {tex.width}x{tex.height} ({want})");
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                }
+                if (ok || code != 404)
+                {
+                    // Not drawn, or drawn but not the card size. settingsCardAt
+                    // stays the time of the last card DRAWN, so a failed refresh
+                    // of a held card leaves it stale and the next try comes at
+                    // the retry time, thirty seconds out (asks-b round 2, L3).
+                    // A card already held stays up, captioned as not loaded
+                    // (SettingsCardView) until a fetch succeeds.
+                    settingsCardState = SC_UNAVAILABLE;
+                    settingsCardRetryAt = Now + 30f;
+                    Plugin.Log.LogWarning($"[PC] settings card: not drawn (HTTP {code}); retry in 30 s");
+                }
+                else
+                {
+                    // No row in the pool snapshot in force: there is no card of
+                    // this player to show until the next snapshot takes them.
+                    SettingsCardDrop();
+                    settingsCardKey = want; settingsCardState = SC_NOT_IN_POOL;
+                    settingsCardAt = Now;
+                    settingsCardRetryAt = Now + 300f;
+                    Plugin.Log.LogInfo("[PC] settings card: not in the pool yet");
+                }
+                NativeUI.MarkDirty();
+            });
+        }
+
+        /// <summary>The held card, off the slot first and then destroyed.</summary>
+        private static void SettingsCardDrop()
+        {
+            if (settingsCardSprite != null && settingsCardBound == settingsCardSprite)
+            {
+                if (presetPreview != null) { try { PlayerCardFaces.SetFace(presetPreview, null); } catch { } }
+                settingsCardBound = null;
+            }
+            if (settingsCardSprite != null) { try { UnityEngine.Object.Destroy(settingsCardSprite); } catch { } settingsCardSprite = null; }
+            if (settingsCardTex != null) { try { UnityEngine.Object.Destroy(settingsCardTex); } catch { } settingsCardTex = null; }
+            settingsCardKey = null; settingsCardState = SC_NONE;
+        }
+
+        /// <summary>What the slot shows and the line beside it.
+        ///
+        /// A new look on its way: the live picture (the held card until a
+        /// render exists), with the pending line. Otherwise the server's card
+        /// whenever the one held is for the current key -- with a line saying
+        /// it could not be loaded when its last refresh failed, or that other
+        /// players still see it when the picture on screen differs from
+        /// the one the server holds (a render that was not sent; the note below
+        /// the row says why). No card for this key: not in the pool, a refused
+        /// fetch, or one still on its way, each with its own line, over the
+        /// live picture when there is one.</summary>
+        private static void SettingsCardView(out Sprite show, out string cap)
+        {
+            var me = ApiClient.CachedPcMe;
+            Sprite live = previewSprite;
+            Sprite held = settingsCardSprite;
+            if (me == null && ApiClient.PcMeError != null && held == null) { show = live; cap = live != null ? "" : null; return; }
+            if (!SessionReady && held == null) { show = live; cap = ReasonText("session_required"); return; }
+            if (PortraitRender.LookPending)
+            {
+                show = live ?? held;
+                cap = I18n.Tr("Saving your new picture - your card updates here once it has been sent.");
+                return;
+            }
+            if (held != null && me != null && settingsCardKey == SettingsCardWant(me))
+            {
+                show = held;
+                if (settingsCardState == SC_UNAVAILABLE)
+                {
+                    // Its last refresh failed (asks-b round 2, L3): the card
+                    // on show is the last one drawn, not known to be current,
+                    // and the tick asks again at the retry time.
+                    cap = I18n.Tr("Your card could not be loaded right now - it is tried again shortly.");
+                    return;
+                }
+                string ld = PortraitRender.PreviewDescriptor;
+                bool unsent = live != null && ld != null && ld != (me.portrait_descriptor ?? "");
+                cap = unsent
+                    ? I18n.Tr("Other players still see this card: your new picture was not sent (the note below says why).")
+                    : I18n.Tr("Your card as other players see it.");
+                return;
+            }
+            if (settingsCardState == SC_NOT_IN_POOL)
+            {
+                show = live;
+                cap = I18n.Tr("You are not in the card pool yet, so there is no card to show - this is your picture.");
+                return;
+            }
+            show = live ?? held;
+            cap = settingsCardState == SC_UNAVAILABLE && !settingsCardInFlight
+                ? I18n.Tr("Your card could not be loaded right now - it is tried again shortly.")
+                : I18n.Tr("Loading your card...");
+        }
+
+        // Three keys, three branches (V8 6.1, M20): a third key must never read
+        // or write the second one's value, which the old two-way form did for
+        // every key that was not collection_public.
         private static bool SettingValue(ApiClient.PcMe me, string key)
         {
-            return key == "collection_public" ? me.collection_public : me.announce;
+            if (key == "collection_public") return me.collection_public;
+            if (key == "announce") return me.announce;
+            return me.trades_open;
         }
         private static void ApplySetting(ApiClient.PcMe me, string key, bool v)
         {
             if (me == null) return;
-            if (key == "collection_public") me.collection_public = v; else me.announce = v;
+            if (key == "collection_public") me.collection_public = v;
+            else if (key == "announce") me.announce = v;
+            else me.trades_open = v;
         }
 
         private static void ToggleSetting(string key)
         {
+            var me = ApiClient.CachedPcMe;
+            if (me == null) { var lid = LocalId(); if (lid != null) ApiClient.FetchPcMe(lid, true); return; }
+            SetSetting(key, !SettingValue(me, key));
+        }
+
+        /// <summary>Item 13: the value-taking writer of the three server rows
+        /// (the settings page's switches): collection_public, announce and
+        /// trades_open, the three branches of SettingValue and ApplySetting;
+        /// only trades_open re-reads the open proposals after a successful
+        /// write (OnTradesOpenToggled). A value equal to the cached one
+        /// sends nothing. Everything else is the toggle's contract unchanged:
+        /// single flight, optimistic, rolled back on failure.</summary>
+        internal static void SetSetting(string key, bool value)
+        {
             var id = LocalId(); var me = ApiClient.CachedPcMe;
             if (id == null) return;
             if (me == null) { ApiClient.FetchPcMe(id, true); return; }
+            if (SettingValue(me, key) == value) { NativeUI.MarkDirty(); return; }
             if (!SessionReady) { try { CompetitiveUI.ShowNotification(ReasonText("session_required"), C_WARN, 3f); } catch { } return; }
             // Single-flight with a 25 s latch (past the 20 s transport timeout,
             // the same rule as the same-cards preference): the value that
@@ -2702,7 +5530,7 @@ namespace CompetitiveRounds
             if (setInFlight && Now - setAt < 25f) return;
             setInFlight = true; setAt = Now;
             bool before = SettingValue(me, key);
-            bool after = !before;
+            bool after = value;
             int revision = me.revision;
             ApplySetting(me, key, after);
             NativeUI.MarkDirty();
@@ -2712,6 +5540,8 @@ namespace CompetitiveRounds
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
                 setInFlight = false;
+                // switching trading off ends the open proposals (V8 2.1): re-read them
+                if (ok && key == "trades_open") OnTradesOpenToggled(id);
                 if (!ok)
                 {
                     var cur = ApiClient.CachedPcMe;

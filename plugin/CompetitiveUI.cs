@@ -64,6 +64,18 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>Item 19: is the toast slot showing exactly this text right
+        /// now (translated the way ShowNotification translates it, timer
+        /// live)? A read of the two statics above; writes nothing. The timer
+        /// half is load-bearing: notifText is never cleared when a toast
+        /// expires, so a text-only test would suppress a message forever.</summary>
+        internal static bool IsShowing(string raw)
+        {
+            string t = raw;
+            try { t = I18n.Tr(raw); } catch { }
+            return notifTimer > 0f && notifText == t;
+        }
+
         public static void QueueNotification(string text, Color color, float duration = 5f)
         {
             if (!Plugin.ShowNotifications.Value) return;
@@ -253,6 +265,17 @@ namespace CompetitiveRounds
                 chatMutePublishTickAt = Time.unscaledTime;
                 PublishChatMuteState();
             }
+            // Item 17: the ChatChannel tap is read from the PHYSICAL key stream
+            // once a frame (KeybindRules.TapDetector over every KeyCode member,
+            // the typed text and, fix pass 3 M1, the key-down messages the game
+            // thread took from its queue since the previous frame, drained from
+            // an event accumulator), not from IMGUI events: a key pressed with
+            // it - also in the same frame as a click - or a modifier use
+            // disarms the tap, and so does a keyboard press no KeyCode names,
+            // also one that went down and up between two frames, whenever that
+            // event source is live.
+            try { if (Keybinds.ChatChannelTapped(chatInputOpen)) CycleChatSendChannel(); }
+            catch (Exception e) { VanillaFixSupport.DiagLimited("KeybindChatTap", "[KEYBIND] chat tap: " + e.Message, 3); }
             NativeUI.Tick();
         }
 
@@ -323,8 +346,25 @@ namespace CompetitiveRounds
             // click that dismissed it ALSO reached the armed Discard on the
             // tile beneath, in the same click (#141/#200).
             || PlayerCardsUI.CardPopupOpen
+            // (The title ladders' tier popup was a term here until the
+            // five-tier build replaced it with a dropdown inside the Shop's
+            // own list: no backdrop, nothing to own input for.)
             || !Plugin.DataConsentAsked;
         private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
+
+        /// <summary>Item 13: the raw-keystroke gate, named ONCE. It is what
+        /// ClickHandler.ModalBlockInput is written from, and it is the first
+        /// thing the settings page's keyboard poll reads, live, so a modal
+        /// that opens this frame already owns the keys (ModalBlockInput is
+        /// written from OnGUI and is one frame stale in Update).</summary>
+        internal static bool KeyboardInputOwnedByModal => AnyModalOwnsInput || quickChatOpen || danceWheelOpen;
+
+        /// <summary>Item 13: the T-chat box is a typing surface but not a
+        /// modal (it can be open over the F5 page, and it must not block
+        /// clicks), so it is not in the gate above; the settings keyboard poll
+        /// reads this beside it so a space typed into chat never presses a
+        /// settings row.</summary>
+        internal static bool ChatTypingOwnsKeyboard => chatInputOpen;
 
         // Sept 8 item 1: IMGUI is painted after the mod's uGUI canvases, so a page's
         // IMGUI (the search boxes, the hover graphs, the session report, the shop
@@ -375,6 +415,7 @@ namespace CompetitiveRounds
             DrawFPS();
             DrawH2HBanner();          // Release B §1: "vs NAME · last played · H2H" (10 s)
             DrawLagNotices();   // Release B §4: opt-in network notices under the corner label
+            DamageNumbers.Draw();     // v1.41.0 item 21: damage/heal numbers, under the board and every modal
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             if (!PageImguiHidden)   // Sept 8 item 1: page IMGUI never paints over a popup
             {
@@ -417,7 +458,18 @@ namespace CompetitiveRounds
                 DrawCardHoverTooltip();
                 DrawScoreHoverGraph();
                 DrawFpsHoverGraph();
-                SessionReportView.Draw();   // Sept 6 item c: above the F5 hover popups, below the search overlays
+                // Sept 6 item c: above the F5 hover popups. The search fields below
+                // are painted AFTER it (IMGUI stacks by call order), so since board
+                // row 30b each of them - and the picker's field, the admin player
+                // search and the ranked callout further down - stands down while the
+                // report is open: no paint, no input, focus flag false
+                // (SessionReportRules.PageElementMayDraw). The rest drawn after it
+                // is a modal, a toast or an alert strip meant to sit on top; that
+                // census is ON_TOP in test_session_report_overlay_guard.py. The FFA
+                // and 1v2 tabs' row hover tooltips paint from their own behaviours'
+                // OnGUI, outside this order, and ask the same rule; that test also
+                // classifies every behaviour with an OnGUI.
+                SessionReportView.Draw();
                 DrawCompareSearch();
                 DrawLeaderboardSearch();
                 DrawCardStatsSearch();   // Aug 31 — Card Stats card search
@@ -445,6 +497,7 @@ namespace CompetitiveRounds
             DrawFlagEvidence();
             DrawLeaverBanner();
             DrawTournamentBanner();
+            DrawRoomRulesBanner();    // Sept 15: persistent same-cards strip, docked under the top-centre stack
             // Block clicks to the F5 page behind any open IMGUI modal (lopi #14:
             // clicks on the bug-report form were also hitting F5 buttons underneath).
             // TWO independent input paths must be blocked: the uGUI EventSystem
@@ -461,13 +514,15 @@ namespace CompetitiveRounds
             // underneath, on EITHER input path.
             if (!PageImguiHidden) DrawRankedHintCallout();   // Sept 8 item 1: the callout is IMGUI too
             bool anyModal = BackdroplessModalOpen || quickChatOpen || danceWheelOpen;
-            NativeUI.SetClickBlocker(anyModal);
+            NativeUI.SetClickBlocker(anyModal || Keybinds.CaptureOwnsInput);   // item 17 property 7
             // The raw-poll half additionally covers the modals that DO raise
             // their own uGUI backdrop (info popup, picker, language prompt,
             // consent) — a backdrop stops EventSystem clicks but not a
             // ClickHandler polling Input.GetMouseButtonDown itself (#141/#200).
             // Adding them to anyModal instead would double-blocker them.
-            ClickHandler.ModalBlockInput = AnyModalOwnsInput || quickChatOpen || danceWheelOpen;
+            // Item 17: a keybind capture owns clicks on BOTH paths, but never joins
+            // KeyboardInputOwnedByModal - the capture poll reads that gate first.
+            ClickHandler.ModalBlockInput = KeyboardInputOwnedByModal || Keybinds.CaptureOwnsInput;
             // Sept 7 item 1 (contract 7 / 1-1a): a backdropless modal is topmost
             // by definition, so while one is up every popup's bypass handlers
             // are inert as well. Single writer, beside ModalBlockInput's.
@@ -483,14 +538,16 @@ namespace CompetitiveRounds
         /// label-only). IMGUI so it has ZERO layout footprint; anchor rect
         /// read LIVE per draw (#143); display-only, raycast-free by nature.
         /// Geometry and font scale with the uGUI canvas's width-match factor
-        /// (r2 nit: fixed pixels read ~half-size on ultrawide).</summary>
+        /// (r2 nit: fixed pixels read ~half-size on ultrawide). It stands down
+        /// while the session report is open (board row 30b): drawn after the
+        /// report, it painted over it.</summary>
         private static GUIStyle rankedHintStyle;
         private static void DrawRankedHintCallout()
         {
             try
             {
                 if (Event.current == null || Event.current.type != EventType.Repaint) return;
-                if (!NativeUI.IsOpen || !NativeUI.RankedHintActive) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.RankedHintActive, SessionReportView.Active)) return;
                 var anchor = NativeUI.GetRankedHintAnchorRect();
                 if (anchor.width < 1f) return;
                 float k = Mathf.Clamp(Screen.width / 1920f, 1f, 2f);
@@ -627,7 +684,16 @@ namespace CompetitiveRounds
         private static Vector2 ffaPickBannerMeasured;
         private static string ffaPickBannerMeasuredText;
         private static int ffaPickBannerMeasuredFont = -1;
+        // Band-ABSOLUTE bottom of the pick banner's drawn (or empty) slot; the
+        // settings and match-point banners chain off it. Written by
+        // DrawFfaPickBanner every Repaint, never by the layout refresh — the
+        // refresh runs before the band origin is known.
         private static float ffaPickBannerYMax;
+        // The band DrawFfaScoreStrip opens for the three banners: its origin,
+        // and the lowest edge any of them painted (still the origin when none
+        // did, which is how the band consumes nothing).
+        private static float ffaBannerBandTop;
+        private static float ffaBannerBandBottom;
 
         // Bug #132: 5s "FFA starting" countdown between the host's Start and
         // the room join. Realtime clock — the countdown must tick at menu
@@ -693,9 +759,20 @@ namespace CompetitiveRounds
                 EnsureFfaHudResources();
                 RefreshFfaHudLayout();
                 if (inMatch) DrawFfaScoreRows();
+                // The three banners below are ONE claimant of the top-centre
+                // column: they chain downward off each other through
+                // ffaPickBannerYMax, so the band is opened once here and closed
+                // with the lowest edge any of them actually painted. Before
+                // this they took no part in the column at all and the leaver
+                // and tournament bars painted straight across them.
+                // (The per-player score rows above are top-LEFT, not in this
+                // column, and deliberately claim nothing.)
+                ffaBannerBandTop = OpenTopStrip();
+                ffaBannerBandBottom = ffaBannerBandTop;
                 DrawFfaPickBanner(now);
                 DrawFfaSettingsBanner(now);
                 DrawFfaMatchPointBanner(now);
+                CloseTopStrip(ffaBannerBandBottom);
             }
             catch { }
         }
@@ -899,11 +976,13 @@ namespace CompetitiveRounds
             }
 
             float bannerW = 260f * ffaHudScale;
+            // The y here is the banner stack's INSET inside its band, not a
+            // screen coordinate: DrawFfaPickBanner adds the band origin. Not a
+            // place to set ffaPickBannerYMax — this runs before the band is
+            // opened, so anything it wrote would be band-relative and the two
+            // banners chaining off it would paint into the column above.
             ffaPickBannerRect = new Rect((width - bannerW) * 0.5f, 6f * ffaHudScale,
                 bannerW, 28f * ffaHudScale);
-            // Default until a banner draws taller this frame — consumers below
-            // the banner stack off the REAL drawn edge, not the layout slot.
-            ffaPickBannerYMax = ffaPickBannerRect.yMax;
             ffaHudNameStyle.fontSize = Mathf.Max(1, Mathf.RoundToInt(12f * ffaHudScale));
             ffaPickBannerStyle.fontSize = Mathf.Max(1, Mathf.RoundToInt(14f * ffaHudScale));
         }
@@ -1053,6 +1132,7 @@ namespace CompetitiveRounds
                 ffaCfgBannerSize = ffaCfgBannerStyle.CalcSize(new GUIContent(ffaCfgBannerText));
             float w = ffaCfgBannerSize.x + 34f, h = ffaCfgBannerSize.y + 14f;
             var rect = new Rect((Screen.width - w) * 0.5f, ffaPickBannerYMax + 8f, w, h);
+            if (rect.yMax > ffaBannerBandBottom) ffaBannerBandBottom = rect.yMax;
             float fade = Mathf.Clamp01(ffaCfgBannerUntil - now);   // last second fades out
             Color previous = GUI.color;
             GUI.color = new Color(0.10f, 0.13f, 0.20f, 0.90f * fade);
@@ -1202,6 +1282,7 @@ namespace CompetitiveRounds
             if (!string.IsNullOrEmpty(ffaCfgBannerText) && now <= ffaCfgBannerUntil)
                 y += ffaCfgBannerSize.y + 20f;
             var rect = new Rect((Screen.width - w) * 0.5f, y, w, h);
+            if (rect.yMax > ffaBannerBandBottom) ffaBannerBandBottom = rect.yMax;
             float pulse = 0.80f + 0.20f * Mathf.Sin(now * 5f);
             Color previous = GUI.color;
             GUI.color = new Color(0.36f, 0.26f, 0.03f, 0.92f * pulse);
@@ -1215,7 +1296,11 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(ffaPickBannerText))
             {
-                ffaPickBannerYMax = ffaPickBannerRect.yMax;
+                // Empty slot: the two banners below still chain off it (their
+                // own layout is unchanged), but nothing painted, so the band's
+                // bottom is NOT advanced here. Only a banner that actually
+                // paints moves ffaBannerBandBottom.
+                ffaPickBannerYMax = ffaBannerBandTop + ffaPickBannerRect.yMax;
                 return;
             }
             Color background;
@@ -1253,8 +1338,10 @@ namespace CompetitiveRounds
             float bw = Mathf.Min(Mathf.Max(ffaPickBannerRect.width, ffaPickBannerMeasured.x + 26f),
                 Screen.width - 20f);
             float bh = Mathf.Max(ffaPickBannerRect.height, ffaPickBannerMeasured.y + 8f);
-            var bannerRect = new Rect((Screen.width - bw) * 0.5f, ffaPickBannerRect.y, bw, bh);
+            var bannerRect = new Rect((Screen.width - bw) * 0.5f,
+                ffaBannerBandTop + ffaPickBannerRect.y, bw, bh);
             ffaPickBannerYMax = bannerRect.yMax;
+            if (bannerRect.yMax > ffaBannerBandBottom) ffaBannerBandBottom = bannerRect.yMax;
 
             Color previous = GUI.color;
             GUI.color = background;
@@ -1324,7 +1411,11 @@ namespace CompetitiveRounds
             float pulse = 0.78f + 0.14f * Mathf.Sin(Time.unscaledTime * 5f);
             float fade = Mathf.Clamp01(_leaverUntil - Time.unscaledTime);
             bg.a = 0.92f * pulse * fade;
-            GUI.DrawTexture(new Rect(0, 0, Screen.width, barH), Texture2D.whiteTexture,
+            // Full-width bar, but it no longer assumes y=0: the match status
+            // lines and the FFA banners claim the column above it, and this bar
+            // used to paint straight over both.
+            float barY = ClaimTopStrip(barH);
+            GUI.DrawTexture(new Rect(0, barY, Screen.width, barH), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, bg, 0, 0);
             if (_leaverStyle == null)
                 _leaverStyle = new GUIStyle(GUI.skin.label)
@@ -1334,7 +1425,7 @@ namespace CompetitiveRounds
                 };
             var prev = GUI.color;
             GUI.color = new Color(1f, 1f, 1f, Mathf.Clamp01(fade * 1.5f));
-            GUI.Label(new Rect(0, 0, Screen.width, barH), _leaverText, _leaverStyle);
+            GUI.Label(new Rect(0, barY, Screen.width, barH), _leaverText, _leaverStyle);
             GUI.color = prev;
         }
 
@@ -1460,6 +1551,9 @@ namespace CompetitiveRounds
                 }
 
                 if (text == null) return;
+                // Claimed AFTER the last early return, so a frame on which this
+                // banner decides not to paint leaves no hole in the column.
+                float barY = ClaimTopStrip(barH);
                 if (tourneyBannerStyle == null)
                     tourneyBannerStyle = new GUIStyle(GUI.skin.label)
                     { fontSize = 17, alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, richText = false };
@@ -1467,13 +1561,338 @@ namespace CompetitiveRounds
                 // Pulse the big banners' alpha slightly so they read as live.
                 float pulse = barH > 30f ? 0.85f + 0.15f * Mathf.PingPong(Time.unscaledTime * 1.6f, 1f) : 1f;
                 var prev = GUI.color;
-                GUI.color = new Color(bg.r, bg.g, bg.b, bg.a * pulse);
-                GUI.DrawTexture(new Rect(0, 0, Screen.width, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
-                GUI.color = Color.white;
-                GUI.Label(new Rect(0, 0, Screen.width, barH), text, tourneyBannerStyle);
-                GUI.color = prev;
+                // Same shape, same reason as DrawRoomRulesBanner (review item
+                // 3): this body is wrapped in catch { } too, so the restore has
+                // to run from a finally or a throw mid-bar leaks the banner tint
+                // into every surface drawn later in the pass.
+                try
+                {
+                    GUI.color = new Color(bg.r, bg.g, bg.b, bg.a * pulse);
+                    GUI.DrawTexture(new Rect(0, barY, Screen.width, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
+                    GUI.color = Color.white;
+                    GUI.Label(new Rect(0, barY, Screen.width, barH), text, tourneyBannerStyle);
+                }
+                finally { GUI.color = prev; }
             }
             catch { }
+        }
+
+        // -- Room rules: the standing strip (Sept 15; friendly fire: item 22) --------
+        // The game-start toast (RoomRules.OnGameStart) is an ARRIVAL cue: one
+        // 6 s bottom-centre notification per latched room, behind its own
+        // `announced` latch. It cannot serve a seat that joins after it fired,
+        // and once it fades nothing on screen says the rule is still live. This
+        // strip is the standing statement of the same fact: it re-reads the
+        // rule every Repaint — no event, no timer — so a late joiner, a
+        // reconnect and a mid-series spectator all see it from the frame their
+        // own join latches the rules. Both are kept, and they sit at opposite
+        // edges (toast bottom-centre, strip top-centre), so neither covers the
+        // other.
+        //
+        // ONE PREDICATE, BOTH MODES — AND IT IS StripState(), NOT RuleOn()
+        // (Codex client r2 LOW, this paragraph). What stood here said the
+        // strip reads RuleOn() and that "label and deal cannot disagree by
+        // construction". Both halves stopped being true in the round the
+        // painter moved: RuleOn() is the CONFIGURATION and stays true through
+        // every fallback LatchForGame takes, so a strip drawn from it promises
+        // shared hands for a whole game in which this seat rolls privately.
+        //
+        // The painter reads FfaCardSequence.StripState(), derived from the two
+        // fields the DEALER reads (_latchedGame, _active): Off / Pending /
+        // Active / FellBack, with a different sentence for the last two. That
+        // is a guarantee about EVERY exit from LatchForGame, which is why the
+        // exception catch in it had to start latching too — one exit that left
+        // the fields alone was enough to bring the contradiction back.
+        //
+        // RuleOn() is still the mode-choosing predicate underneath
+        // StripState() — it picks the flag belonging to the room's own mode
+        // (RoomRules.SameCards for the vanilla pick modes, FfaMode.SameCardRule
+        // for an FFA lobby) — and a second copy of that choice here would be
+        // free to drift the way RoomRules.SameCards already had: it is the
+        // VANILLA half only, so an FFA room running its lobby's same-card rule
+        // showed nothing.
+        //
+        // The rule dies with the room, and that is also this strip's off
+        // switch. Outside any room FfaMode.EngineActive() is false, so RuleOn
+        // answers on the vanilla flag — which RoomRules.ResetLatched clears on
+        // the left-room and disconnect edges — and nothing paints, whatever an
+        // FFA lobby left behind in its own field. A mismatching room latches
+        // the DEFAULTS before leaving, so the strip never shows on the way out
+        // either. Exactly one of the two flags is ever READ, because RuleOn
+        // chooses by mode: whichever side answers, the strip says the one
+        // sentence and says it once.
+        //
+        // FRIENDLY FIRE, since v1.41.0 item 22 (Sid: while any game-changing
+        // room rule is active, a standing indicator names it for the whole
+        // game; a toast is not enough). The strip used to name only the rule
+        // that changes what you are handed and left friendly fire OFF to the
+        // six-second toast. It now reads RoomRules.FriendlyFireOff (the LATCHED
+        // rule, Latched && !FriendlyFire, so the defaults and every FFA lobby
+        // read false) beside StripState(), and RoomRulesStrip.Choose turns the
+        // pair into one sentence: friendly fire alone, same cards alone (or
+        // its fell-back line), or both in one line. The game-start toast is
+        // unchanged and still fires once per latched room.
+        //
+        // [UI] ShowRoomRulesIndicator (default true) hides the strip and
+        // nothing else: the toast and the rules themselves are untouched, and
+        // a hidden strip logs one "suppressed" line per change, so that it was
+        // hidden is still a readable fact.
+        //
+        // Why this strip and not a standing copy of the toast: the toast's slot
+        // (DrawNotification, bottom-centre) is where the 6 s and 9 s toasts
+        // paint, so a standing line there would collide with every toast for a
+        // whole game. This strip is the standing statement at the opposite
+        // edge, and one pill for every rule rather than two indicators.
+        //
+        // RECT: a centred pill, 22px tall, docked under whatever else painted in
+        // the top-centre strip in THIS Repaint — the in-match banner/series/H2H
+        // lines (DrawMatchStatus, y 8..84 worst case) and the full-width leaver
+        // and tournament bars — via the reservation below; y=2 when the strip is
+        // otherwise empty, which is the between-games and card-pick case the
+        // late joiner actually arrives into. Clear of the top-LEFT column (FPS
+        // label, the H2H line at x 6..906 y 22..42, the opt-in lag notices at
+        // x 6..646 y 24..88) at ordinary widths; on a narrow window it can reach
+        // their right end, and since both are drawn EARLIER in DrawUI this paints
+        // over them — the precedence those two already take from every later
+        // overlay.
+        //
+        // Sept 15 review item 4 - WHY THIS ONE IS GATED AND THE OTHER TWO ARE
+        // NOT. DrawLeaverBanner and DrawTournamentBanner paint over popups too,
+        // and that is correct for them: they are seconds long and
+        // match-critical. This strip lasts as long as the room, so the same
+        // behaviour means floating over the F5 page, the shop, Player Cards and
+        // the bug-report form for a whole sitting. It is a standing reminder,
+        // not an alert; the rule is still there when the popup closes.
+        //
+        // The flag is NOT PageImguiHidden, which is the gate the page-level
+        // IMGUI block uses: that one means "a uGUI popup covers the F5 PAGE",
+        // so it is FALSE for the backdrop-less IMGUI modals (bug report, log
+        // viewer, confirms, admin prompt, session report - they live in
+        // BackdroplessModalOpen) and FALSE for a plainly open F5 menu, which
+        // are most of what this strip was painting over. AnyModalOwnsInput is
+        // the superset: it contains every term of PageImguiHidden (via
+        // OtherModalOwnsInput) plus those modals. NativeUI.IsOpen adds the menu
+        // itself, and it is live at OnGUI time - SpectatorHud.DrawBlackout
+        // already chooses the bar over the cover by reading it there.
+        // Deliberately absent: quickChatOpen / danceWheelOpen (held wheels, not
+        // pages, and excluded from AnyModalOwnsInput by design).
+        //
+        // PAINT ONLY. The reservation writers upstream are untouched, so the
+        // stack arithmetic keeps running while this is hidden and the strip
+        // comes back at the right y on the frame the popup closes.
+        private static bool RoomStripHidden => AnyModalOwnsInput || NativeUI.IsOpen;
+
+        private static GUIStyle roomRuleStyle;
+        private static string roomRuleText;
+        private static float roomRuleWidth;
+        // Edge latch for the log line below: set on the first Repaint that
+        // actually PAINTS the strip, cleared when the rule goes off, so a
+        // room's worth of Repaints emits ONE line and the next room emits
+        // another. Not a "once ever" flag — a seat that leaves and rejoins
+        // should log again, because that is a second arrival.
+        // Holds the LINE it logged, not a bool: the strip's claim changes when
+        // the dealer falls back mid-room, and one line per room would have hid
+        // exactly the transition worth reading.
+        private static RoomRulesStrip.Line roomRuleLogged = RoomRulesStrip.Line.None;
+        // The same edge latch for the [UI] ShowRoomRulesIndicator=false branch:
+        // one "suppressed" line per line the key hid, not one per frame.
+        private static RoomRulesStrip.Line roomRuleSuppressed = RoomRulesStrip.Line.None;
+
+        private static void DrawRoomRulesBanner()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            // Whole body guarded: DrawUI has no outer try/catch (#255).
+            try
+            {
+                // The DEALER'S LATCHED STATE, not the configuration. RuleOn()
+                // stays true after LatchForGame takes any of its fallbacks
+                // (capability adverts, seed prop, card pool, pool hash), so a
+                // strip drawn from it promised "same cards for everyone" for a
+                // whole game in which this seat rolled privately. StripState()
+                // reads the two fields the dealer itself reads.
+                FfaCardSequence.RuleDisplayState state;
+                try { state = FfaCardSequence.StripState(); }
+                catch { state = FfaCardSequence.RuleDisplayState.Off; }
+                bool fellBack = state == FfaCardSequence.RuleDisplayState.FellBack;
+                // Pending renders the configured rule (a room lobby should show
+                // its own rule) -- only a LATCHED fallback changes the claim.
+                RoomRulesStrip.SameCards sameCards = fellBack
+                    ? RoomRulesStrip.SameCards.FellBack
+                    : state == FfaCardSequence.RuleDisplayState.Off
+                        ? RoomRulesStrip.SameCards.Off
+                        : RoomRulesStrip.SameCards.On;
+                // Item 22: the latched friendly-fire rule, named beside it.
+                bool ffOff;
+                try { ffOff = RoomRules.FriendlyFireOff; }
+                catch { ffOff = false; }
+                RoomRulesStrip.Line line = RoomRulesStrip.Choose(ffOff, sameCards);
+                if (line == RoomRulesStrip.Line.None)
+                {
+                    roomRuleLogged = RoomRulesStrip.Line.None;
+                    roomRuleSuppressed = RoomRulesStrip.Line.None;
+                    return;
+                }
+                // The player's key (default true). A missing entry (a config
+                // that failed to bind) shows the strip: hiding is the opt-out.
+                bool enabled;
+                try { enabled = Plugin.ShowRoomRulesIndicator == null || Plugin.ShowRoomRulesIndicator.Value; }
+                catch { enabled = true; }
+                if (!RoomRulesStrip.Paints(enabled, line))
+                {
+                    if (roomRuleSuppressed != line)
+                    {
+                        roomRuleSuppressed = line;
+                        // Shown again later is a new arrival and logs again.
+                        roomRuleLogged = RoomRulesStrip.Line.None;
+                        Plugin.Log.LogInfo("[ROOM-RULES] indicator suppressed by [UI] ShowRoomRulesIndicator=false: "
+                            + line + " (same cards " + state + ")");
+                    }
+                    return;
+                }
+                roomRuleSuppressed = RoomRulesStrip.Line.None;
+                // Item 4: yields to anything the player opened. See RoomStripHidden.
+                if (RoomStripHidden) return;
+                if (roomRuleLogged != line)
+                {
+                    roomRuleLogged = line;
+                    // Written on the first PAINTING Repaint of each line, never
+                    // per frame (#162): it claims the strip was shown, so it is
+                    // emitted past the hidden gate rather than at the rule edge.
+                    // The only place this tag is written (#306).
+                    Plugin.Log.LogInfo("[ROOM-RULES] indicator shown: " + line
+                        + " (same cards " + state + ")");
+                }
+                if (roomRuleStyle == null)
+                {
+                    roomRuleStyle = new GUIStyle(GUI.skin.label)
+                    {
+                        fontSize = 13, fontStyle = FontStyle.Bold, richText = false,
+                        alignment = TextAnchor.MiddleCenter, clipping = TextClipping.Overflow,
+                    };
+                }
+                // Colour is per-state and set every frame, not once at style
+                // creation: the style is cached across states, so a colour
+                // written only inside the "if (style == null)" block would stay
+                // whatever the FIRST state of the session painted.
+                bool amber = RoomRulesStrip.IsFallback(line);
+                roomRuleStyle.normal.textColor = amber
+                    ? new Color(1f, 0.86f, 0.55f, 1f)          // amber: a downgrade
+                    : new Color(0.78f, 0.92f, 1f, 1f);          // cyan, as the toast
+                // One catalogue string per line; the three friendly-fire lines
+                // reuse the toast's own keys where the toast says the same
+                // thing, and the fell-back combination is the one new key.
+                string text;
+                switch (line)
+                {
+                    case RoomRulesStrip.Line.SameCards:
+                        text = I18n.Tr("Room rule: same cards for everyone"); break;
+                    case RoomRulesStrip.Line.SameCardsOff:
+                        text = I18n.Tr("Room rule: same cards is off this game"); break;
+                    case RoomRulesStrip.Line.FriendlyFireOff:
+                        text = I18n.Tr("Room rules: friendly fire OFF"); break;
+                    case RoomRulesStrip.Line.FriendlyFireOffSameCards:
+                        text = I18n.Tr("Room rules: friendly fire OFF, same cards for everyone"); break;
+                    default:
+                        text = I18n.Tr("Room rules: friendly fire OFF, same cards is off this game"); break;
+                }
+                // CalcSize on CHANGE only — never per Repaint (#162). The text
+                // moves when the locale or the state does, and the reference
+                // compare below costs one ordinal string compare per frame.
+                if (!string.Equals(text, roomRuleText, StringComparison.Ordinal))
+                {
+                    roomRuleText = text;
+                    roomRuleWidth = roomRuleStyle.CalcSize(new GUIContent(text)).x + 26f;
+                }
+                const float barH = 22f;
+                float w = Mathf.Min(roomRuleWidth, Screen.width - 8f);
+                float x = (Screen.width - w) / 2f;
+                // Last claimant in DrawUI's order, so this band starts below
+                // everything else painting in the top-centre column.
+                float y = ClaimTopStrip(barH);
+                var prev = GUI.color;
+                // try/finally, not a trailing restore (Sept 15 review item 3):
+                // this whole body sits inside catch { }, so a throw out of
+                // DrawTexture or Label would swallow the restore and leave
+                // GUI.color navy-tinted for every surface drawn after this one
+                // in the same IMGUI pass.
+                try
+                {
+                    GUI.color = amber
+                        ? new Color(0.30f, 0.22f, 0.06f, 0.78f)
+                        : new Color(0.10f, 0.22f, 0.40f, 0.72f);
+                    GUI.DrawTexture(new Rect(x, y, w, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
+                    GUI.color = Color.white;
+                    GUI.Label(new Rect(x, y, w, barH), text, roomRuleStyle);
+                }
+                finally { GUI.color = prev; }
+            }
+            catch { }
+        }
+
+        // ── Top-centre strip: a band ALLOCATOR, not a maximum ──────────────
+        // Every surface painting in the top-centre column CLAIMS a band of its
+        // own height and is told the y to paint at; the next claim starts below
+        // it. The previous shape stored only the MAX bottom edge, which laid
+        // out exactly one surface (the room-rules strip, which read the max and
+        // docked under it) and left every other pair overlapping: the leaver
+        // bar and the tournament bar are both full-width at y=0, the match
+        // status lines start at y=8 under both of them, the spectator live bar
+        // sits at y=4, and the FFA pick/configuration/match-point banners start
+        // near y=6 and did not take part at all.
+        //
+        // CLAIM ORDER IS DrawUI'S CALL ORDER, and that is the whole contract —
+        // there is no priority table to keep in sync with it. In DrawUI:
+        //   SpectatorHud.Draw()  →  DrawFfaScoreStrip()  →  DrawMatchStatus()
+        //   →  DrawLeaverBanner()  →  DrawTournamentBanner()
+        //   →  DrawRoomRulesBanner()
+        // so a seat's own mode HUD keeps the top of the column and the
+        // transient alert bars stack beneath it. test_same_cards_indicator.py
+        // pins that order against a reordering edit.
+        //
+        // Claims are made on Repaint ONLY (every claimant is repaint-gated) and
+        // the running total is stamped with the frame it belongs to, so a
+        // surface that stops drawing simply stops claiming and the ones below
+        // it move up — never one frame stale, and a Layout pass in the same
+        // frame cannot double-count.
+        //
+        // KNOWN AND ACCEPTED (Sept 15 review item 5): when a leaver or
+        // tournament banner ends, or a match stops being tracked, that
+        // claimant simply stops claiming and the strip snaps up - one frame
+        // after the surface above it disappeared. Cosmetic, one frame, no state
+        // damage; the alternative is a decay timer holding a band for a surface
+        // that is already gone. Deliberate. Please do not file it as a bug.
+        // The arithmetic itself lives in TopStripBand, which is free of Unity
+        // so tools/client-rules-harness can EXECUTE it: the ordering and the
+        // never-climbs-back guarantee are proven by running, not by a test
+        // reading this file (#391). Everything below is the Unity edge —
+        // supplying the frame number and nothing else.
+        private static TopStripBand topStrip;
+
+        /// <summary>Claim a band of <paramref name="height"/> at the bottom of
+        /// the top-centre column and return the y to paint at. internal, not
+        /// private: SpectatorHud.DrawLiveBar is a claimant and is its own
+        /// class.</summary>
+        internal static float ClaimTopStrip(float height)
+        {
+            return topStrip.Claim(Time.frameCount, height);
+        }
+
+        /// <summary>Open a band for a claimant that lays ITSELF out downward
+        /// and only knows its bottom edge once it has painted (DrawMatchStatus'
+        /// optional banner/series/H2H lines; the FFA banner chain). Returns the
+        /// y to start at; the claimant must call CloseTopStrip with the lowest
+        /// edge it actually painted.</summary>
+        internal static float OpenTopStrip()
+        {
+            return topStrip.Open(Time.frameCount);
+        }
+
+        /// <summary>Close the band OpenTopStrip returned, stating the lowest y
+        /// the claimant painted. A bottom at or above the band's own origin
+        /// means it painted nothing and consumes no space.</summary>
+        internal static void CloseTopStrip(float bottomY)
+        {
+            topStrip.Close(Time.frameCount, bottomY);
         }
 
         // Bottom-center toast naming the map skin you just Shift-cycled to, so you can
@@ -1647,7 +2066,7 @@ namespace CompetitiveRounds
             compareSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 9) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 9, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetCompareSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -1704,7 +2123,7 @@ namespace CompetitiveRounds
             pickerSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || !NativeUI.PickerOpen) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.PickerOpen, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetPickerSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (pickerSearchStyle == null)
@@ -1736,7 +2155,7 @@ namespace CompetitiveRounds
             lbSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 1) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 1, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetLbSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -1771,7 +2190,7 @@ namespace CompetitiveRounds
             cardStatsSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 2) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 2, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetCardStatsSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -1808,7 +2227,7 @@ namespace CompetitiveRounds
             infoSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 15) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 15, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetInfoSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -1848,7 +2267,7 @@ namespace CompetitiveRounds
             histSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 0) return;
+                if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, NativeUI.CurrentTab == 0, SessionReportView.Active)) return;
                 Rect r = NativeUI.GetHistorySearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -3304,7 +3723,7 @@ namespace CompetitiveRounds
                       I18n.Tr("<color=#FFD080>Match-found screen might be stuck</color>"),
                       stuckTitleStyle);
             GUI.Label(new Rect(x + 14, y + 32, w - 28, 50),
-                      I18n.TrF("<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try space again, or use the escape hatch below.</color>", secs),
+                      I18n.TrF("<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try {1} again, or use the escape hatch below.</color>", secs, NativeUI.KeybindRowFace(KeybindRules.Jump)),
                       stuckTextStyle);
 
             if (GUI.Button(new Rect(x + 14, y + h - 38, 220, 28), I18n.Tr("Force exit room"), stuckButtonStyle))
@@ -3735,13 +4154,18 @@ namespace CompetitiveRounds
                 };
             }
 
-            bool w = Input.GetKey(KeyCode.W);
-            bool a = Input.GetKey(KeyCode.A);
-            bool s = Input.GetKey(KeyCode.S);
-            bool d = Input.GetKey(KeyCode.D);
-            bool space = Input.GetKey(KeyCode.Space);
-            bool lmb = Input.GetMouseButton(0);
-            bool rmb = Input.GetMouseButton(1);
+            // Item 17: the BOUND sources, read through the one total accessor
+            // (an unreadable source reads as not pressed, never as a throw).
+            bool w = Keybinds.ReadBoundSource(KeybindRules.MoveUp, Keybinds.Mode.Held) == Read.Down;
+            bool a = Keybinds.ReadBoundSource(KeybindRules.MoveLeft, Keybinds.Mode.Held) == Read.Down;
+            bool s = Keybinds.ReadBoundSource(KeybindRules.MoveDown, Keybinds.Mode.Held) == Read.Down;
+            bool d = Keybinds.ReadBoundSource(KeybindRules.MoveRight, Keybinds.Mode.Held) == Read.Down;
+            bool space = Keybinds.ReadBoundSource(KeybindRules.Jump, Keybinds.Mode.Held) == Read.Down;
+            bool lmb = Keybinds.ReadBoundSource(KeybindRules.Fire, Keybinds.Mode.Held) == Read.Down;
+            bool rmb = Keybinds.ReadBoundSource(KeybindRules.Block, Keybinds.Mode.Held) == Read.Down;
+            // A spectating seat's keyboard is not the watched player's: semantic caps.
+            bool specSeat = false;
+            try { specSeat = RoomActors.LocalIsSpectator; } catch { }
 
             // Geometry: bottom-left, two stacked rows for keyboard, mouse row below.
             float keyW = 38, keyH = 38, gap = 4;
@@ -3751,25 +4175,32 @@ namespace CompetitiveRounds
             // Mouse row (LMB + RMB, wider keys labeled).
             float mouseRowY = bottomY - keyH;
             float mKeyW = keyW * 1.6f;
-            DrawKeyBox(new Rect(originX, mouseRowY, mKeyW, keyH), "LMB", lmb, true);
-            DrawKeyBox(new Rect(originX + mKeyW + gap, mouseRowY, mKeyW, keyH), "RMB", rmb, true);
+            DrawKeyBox(new Rect(originX, mouseRowY, mKeyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.Fire, specSeat), lmb, true);
+            DrawKeyBox(new Rect(originX + mKeyW + gap, mouseRowY, mKeyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.Block, specSeat), rmb, true);
             float mouseRowW = (mKeyW * 2) + gap;
             // Spacer
             float wasdBottomY = mouseRowY - 10 - keyH;
             // Bottom WASD row: A S D
             float asdX = originX + keyW + gap;  // align under W
-            DrawKeyBox(new Rect(originX,                 wasdBottomY, keyW, keyH), "A", a, false);
-            DrawKeyBox(new Rect(originX + keyW + gap,    wasdBottomY, keyW, keyH), "S", s, false);
-            DrawKeyBox(new Rect(originX + (keyW+gap)*2,  wasdBottomY, keyW, keyH), "D", d, false);
+            DrawKeyBox(new Rect(originX,                 wasdBottomY, keyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.MoveLeft, specSeat), a, OverlaySmall(KeybindRules.MoveLeft, specSeat));
+            DrawKeyBox(new Rect(originX + keyW + gap,    wasdBottomY, keyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.MoveDown, specSeat), s, OverlaySmall(KeybindRules.MoveDown, specSeat));
+            DrawKeyBox(new Rect(originX + (keyW+gap)*2,  wasdBottomY, keyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.MoveRight, specSeat), d, OverlaySmall(KeybindRules.MoveRight, specSeat));
             // W row on top
             float wRowY = wasdBottomY - keyH - gap;
-            DrawKeyBox(new Rect(originX + keyW + gap,    wRowY, keyW, keyH), "W", w, false);
+            DrawKeyBox(new Rect(originX + keyW + gap,    wRowY, keyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.MoveUp, specSeat), w, OverlaySmall(KeybindRules.MoveUp, specSeat));
             // Space bar (wide) under the WASD cluster, between WASD and mouse.
             float spaceY = mouseRowY - 6 - keyH;
             float spaceW = (keyW + gap) * 3 - gap;
             // But this collides with WASD layout — instead place SPACE to the
             // right of WASD on the same row as the bottom WASD line.
-            DrawKeyBox(new Rect(originX + (keyW+gap)*3 + 8, wasdBottomY, spaceW, keyH), "SPACE", space, true);
+            DrawKeyBox(new Rect(originX + (keyW+gap)*3 + 8, wasdBottomY, spaceW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.Jump, specSeat), space, true);
+        }
+
+        /// <summary>Item 17: a cap longer than one character takes the small
+        /// face in a 38 px movement key.</summary>
+        private static bool OverlaySmall(int row, bool spectator)
+        {
+            return NativeUI.KeybindOverlayCap(row, spectator).Length > 1;
         }
 
         private static void DrawKeyBox(Rect r, string label, bool pressed, bool small)
@@ -3943,12 +4374,28 @@ namespace CompetitiveRounds
                 case ChatOverlayMode.Pinned: next = ChatOverlayMode.Muted;  break;
                 default:                     next = ChatOverlayMode.Normal; break;
             }
+            SetChatOverlayMode(next);
+        }
+
+        /// <summary>Item 13: the value-taking writer behind the M hotkey's
+        /// cycle, the settings page's segmented row and its per-tab reset.
+        /// Persists both entries, republishes the room marker IN THIS CALL
+        /// STACK (the 2 s reconciler in Tick is a safety net, never the
+        /// publisher), repaints, and announces the state entered. The state
+        /// already stored returns before anything is written, published or
+        /// announced (the M cycle never asks for it; a segmented click on the
+        /// lit option and a reset of a tab already at Normal do). A value
+        /// outside the three members is refused, and so is a pair with either
+        /// entry unbound: a half-written pair paints a state nobody chose.</summary>
+        internal static void SetChatOverlayMode(ChatOverlayMode next)
+        {
+            if (next != ChatOverlayMode.Normal && next != ChatOverlayMode.Pinned && next != ChatOverlayMode.Muted) return;
+            if (Plugin.ShowIngameChat == null || Plugin.ChatOverlayPinned == null) return;
+            if (next == CurrentChatOverlayMode()) return;
             try
             {
-                if (Plugin.ShowIngameChat != null)
-                    Plugin.ShowIngameChat.Value = next != ChatOverlayMode.Muted;
-                if (Plugin.ChatOverlayPinned != null)
-                    Plugin.ChatOverlayPinned.Value = next == ChatOverlayMode.Pinned;
+                Plugin.ShowIngameChat.Value = next != ChatOverlayMode.Muted;
+                Plugin.ChatOverlayPinned.Value = next == ChatOverlayMode.Pinned;
             }
             catch { }
             try { PublishChatMuteState(); } catch { }
@@ -4270,6 +4717,10 @@ namespace CompetitiveRounds
         /// is nulled with the flag, so a cancelled prompt cannot fire later.</summary>
         public static void CancelPrompts()
         {
+            // Item 13: the artist picker (the settings page's dropdowns) is a
+            // prompt of this set too, and its callback is nulled with its flag.
+            Keybinds.CancelCapture("prompts cancelled");   // item 17: first, like ConsumePromptEscape
+            artistPickerOpen = false; artistPickerOnPick = null;
             confirmOpen = false; confirmOnYes = null;
             playerSearchOpen = false; playerSearchOnPick = null;
         }
@@ -4278,6 +4729,14 @@ namespace CompetitiveRounds
         /// Runs in Update, before the IMGUI draw would see the same press.</summary>
         public static bool ConsumePromptEscape()
         {
+            // Item 13: FIRST, because the picker is backdrop-less IMGUI and so
+            // topmost by definition. Tick runs before OnGUI, so the picker's
+            // own Escape branch never sees a press consumed here; without this
+            // clause the page closed under an open dropdown.
+            // Item 17: an armed keybind capture is topmost of all - Escape cancels it
+            // and the page stays (without this the page closed under the capture).
+            if (Keybinds.KeybindCaptureActive) { Keybinds.CancelCapture("escape"); return true; }
+            if (artistPickerOpen) { artistPickerOpen = false; artistPickerOnPick = null; return true; }
             if (confirmOpen) { confirmOpen = false; confirmOnYes = null; return true; }
             if (playerSearchOpen) { playerSearchOpen = false; playerSearchOnPick = null; return true; }
             return false;
@@ -4345,6 +4804,7 @@ namespace CompetitiveRounds
         private static Action<string> artistPickerOnPick = null;
         private static string artistPickerAction = "Assign";
         private static bool artistPickerShowClear = true;
+        private static bool artistPickerShowIds = true;
         private static Vector2 artistPickerScroll = Vector2.zero;
         private static GUIStyle pickerRowStyle;
 
@@ -4354,9 +4814,13 @@ namespace CompetitiveRounds
         /// <param name="selectedId">Pre-selects the current value, so pressing
         /// the action button without clicking a row keeps what you already had
         /// instead of silently choosing the first row.</param>
+        /// <param name="showIds">Item 13: false hides the grey id beside each
+        /// row (the settings page's dropdowns, whose ids are storage values such
+        /// as MDY, not something a player picks by).</param>
         public static void OpenArtistPicker(string title, string[] names, string[] ids, Action<string> onPick,
                                             string actionLabel = "Assign", bool showClear = true,
-                                            string itemNoun = "artist", string selectedId = null)
+                                            string itemNoun = "artist", string selectedId = null,
+                                            bool showIds = true)
         {
             if (names == null || ids == null || names.Length == 0 || names.Length != ids.Length) return;
             artistPickerTitle = title ?? "Pick an artist";
@@ -4370,6 +4834,7 @@ namespace CompetitiveRounds
             artistPickerOnPick = onPick;
             artistPickerAction = string.IsNullOrEmpty(actionLabel) ? "Assign" : actionLabel;
             artistPickerShowClear = showClear;
+            artistPickerShowIds = showIds;
             artistPickerScroll = Vector2.zero;
             artistPickerOpen = true;
         }
@@ -4407,7 +4872,9 @@ namespace CompetitiveRounds
                 if (sel)
                     GUI.DrawTexture(new Rect(0, i * rowH, w - 45, rowH - 2), Texture2D.whiteTexture,
                         ScaleMode.StretchToFill, true, 0, new Color(0.25f, 0.45f, 0.25f, 0.85f), 0, 0);
-                string line = $"{(sel ? "> " : "")}{artistPickerNames[i]}   <color=#888><size=11>{artistPickerIds[i]}</size></color>";
+                string line = artistPickerShowIds
+                    ? $"{(sel ? "> " : "")}{artistPickerNames[i]}   <color=#888><size=11>{artistPickerIds[i]}</size></color>"
+                    : $"{(sel ? "> " : "")}{artistPickerNames[i]}";
                 if (GUI.Button(new Rect(0, i * rowH, w - 45, rowH - 2), line, pickerRowStyle))
                     artistPickerIdx = i;
             }
@@ -4463,6 +4930,9 @@ namespace CompetitiveRounds
         {
             if (!playerSearchOpen) return;
             if (!NativeUI.IsOpen) { playerSearchOpen = false; playerSearchOnPick = null; return; }
+            // Board row 30b: under an open session report the search modal stands
+            // down (it stays open and comes back when the report closes).
+            if (!SessionReportRules.PageElementMayDraw(NativeUI.IsOpen, playerSearchOpen, SessionReportView.Active)) return;
             var ev = Event.current;
             bool cancel = false;
             if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape) { cancel = true; ev.Use(); }
@@ -5950,10 +6420,21 @@ namespace CompetitiveRounds
         // BepInEx logs (which are usually the triage signal) when Unity's log
         // happened to be large.
         //
-        // Budget split (~3.4M total, under ApiClient.BUG_REPORT_LOG_CAP_CHARS=3.5M):
+        // Budget split:
         //   BepInEx current     1.5M  — most important for live diagnosis
         //   BepInEx prev        1.0M  — crash-on-prior-launch context
         //   Unity Player.log    1.0M  — engine-side hint when needed
+        // That is 3.5M of LOG TEXT, which is exactly
+        // ApiClient.BUG_REPORT_LOG_CAP_CHARS and not under it — and the
+        // section headers and the audio self-check are on top. The comment
+        // here used to claim "~3.4M total, under 3.5M", which was arithmetic
+        // nobody had done (Codex r1 LOW, CompetitiveUI.cs:6141). Both senders
+        // therefore TAIL-TRIM to the cap, and the trim is deliberate rather
+        // than an accident the numbers were supposed to avoid: the audio
+        // self-check rides at the END for that reason, and what a full bundle
+        // gives up is the oldest lines of the previous session's log. If the
+        // per-section budgets are ever meant to fit whole, they have to come
+        // down — not the comment.
         // Tail-most slice of each (most recent N chars) is taken. Each section
         // emits a clearly delimited header so a triage reader can split the
         // concatenation back into pieces.
@@ -5961,30 +6442,117 @@ namespace CompetitiveRounds
         private const int BUNDLE_CAP_BEP_PREV    = 1_000_000;
         private const int BUNDLE_CAP_UNITY       = 1_000_000;
 
-        private static string BuildLogBundle()
+        /// <summary>Replacement count from the most recent BuildLogBundle()
+        /// scrub. Read by the BUG FORM's own logging. The automatic upload does
+        /// NOT read it — it takes the count ComposeLogBundle hands back, so two
+        /// bundles in flight cannot report each other's figure.</summary>
+        internal static int LastScrubReplacements { get; private set; }
+
+        /// <summary>Everything a log bundle needs that can only be read on the
+        /// GAME THREAD, captured as plain values. The three log paths walk the
+        /// assembly location and Application.persistentDataPath; the audio
+        /// self-check reads AudioListener, PlayerPrefs and the vanilla mixer.
+        /// None of that is legal off the main thread, and all of it is O(1) —
+        /// which is what lets the expensive half run somewhere else.</summary>
+        internal sealed class LogBundleInputs
         {
-            string bep     = ApiClient.ReadLogTail(BepInExLogPath(),         maxChars: BUNDLE_CAP_BEP_CURRENT);
-            string bepPrev = ApiClient.ReadLogTail(BepInExLogPreviousPath(), maxChars: BUNDLE_CAP_BEP_PREV);
-            string uni     = ApiClient.ReadLogTail(UnityLogPath(),           maxChars: BUNDLE_CAP_UNITY);
-            var sb = new System.Text.StringBuilder();
-            if (!string.IsNullOrEmpty(bepPrev))
-            {
-                sb.AppendLine($"===== BepInEx LogOutput-prev.log [{BepInExLogPreviousPath()}]  ({bepPrev.Length:N0} chars, cap {BUNDLE_CAP_BEP_PREV:N0}) =====");
-                sb.AppendLine(bepPrev);
-                sb.AppendLine();
-            }
-            sb.AppendLine($"===== BepInEx LogOutput.log [{BepInExLogPath() ?? "(path unknown)"}]  ({(bep?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_BEP_CURRENT:N0}) =====");
-            sb.AppendLine(string.IsNullOrEmpty(bep) ? "(not found)" : bep);
-            sb.AppendLine();
-            sb.AppendLine($"===== Unity Player.log [{UnityLogPath() ?? "(path unknown)"}]  ({(uni?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_UNITY:N0}) =====");
-            sb.AppendLine(string.IsNullOrEmpty(uni) ? "(not found)" : uni);
+            internal string BepPath;
+            internal string BepPrevPath;
+            internal string UniPath;
+            internal string AudioSnapshot;
+        }
+
+        /// <summary>MAIN THREAD. A fixed, small amount of work: three path
+        /// computations and one audio snapshot. Nothing here scales with the
+        /// size of a log.</summary>
+        internal static LogBundleInputs CaptureLogBundleInputs()
+        {
+            var i = new LogBundleInputs();
+            try { i.BepPath = BepInExLogPath(); } catch { }
+            try { i.BepPrevPath = BepInExLogPreviousPath(); } catch { }
+            try { i.UniPath = UnityLogPath(); } catch { }
             // Bug 337: the audio self-check rides at the END of the bundle.
             // SubmitBugReport keeps the tail-most window of the text, so a
             // block at the head could be trimmed away with the oldest log.
+            try { i.AudioSnapshot = AudioSelfCheck.Snapshot(); }
+            catch (Exception ex) { i.AudioSnapshot = "(audio self-check unavailable: " + ex.GetType().Name + ")"; }
+            return i;
+        }
+
+        /// <summary>THREAD-SAFE by contract — this is the expensive half, and
+        /// the automatic post-match upload runs it on a worker thread (Codex r1
+        /// HIGH, AutoLogUpload.cs:184: reading, scrubbing and escaping up to
+        /// 3.5 M characters at room exit was a visible freeze on the game
+        /// thread). It touches NO Unity API, NO Photon state, NO logger and NO
+        /// mutable static: every input arrives in <paramref name="inputs"/> and
+        /// every output leaves through a parameter or the return value. Keep it
+        /// that way — a single Plugin.Log call or Application.* read here puts
+        /// the freeze back, silently, on a worker thread where it may instead
+        /// throw.
+        ///
+        /// <paramref name="scrubbed"/> is -1 when the scrub could not complete;
+        /// the returned text is then the withheld-content sentence, never the
+        /// unscrubbed bundle. <paramref name="diagnostic"/> is the line the
+        /// CALLER logs once it is back on the main thread.</summary>
+        internal static string ComposeLogBundle(LogBundleInputs inputs, out int scrubbed, out string diagnostic)
+        {
+            if (inputs == null) inputs = new LogBundleInputs();
+            string bep     = ApiClient.ReadLogTail(inputs.BepPath,     maxChars: BUNDLE_CAP_BEP_CURRENT);
+            string bepPrev = ApiClient.ReadLogTail(inputs.BepPrevPath, maxChars: BUNDLE_CAP_BEP_PREV);
+            string uni     = ApiClient.ReadLogTail(inputs.UniPath,     maxChars: BUNDLE_CAP_UNITY);
+            var sb = new System.Text.StringBuilder();
+            if (!string.IsNullOrEmpty(bepPrev))
+            {
+                sb.AppendLine($"===== BepInEx LogOutput-prev.log [{inputs.BepPrevPath}]  ({bepPrev.Length:N0} chars, cap {BUNDLE_CAP_BEP_PREV:N0}) =====");
+                sb.AppendLine(bepPrev);
+                sb.AppendLine();
+            }
+            sb.AppendLine($"===== BepInEx LogOutput.log [{inputs.BepPath ?? "(path unknown)"}]  ({(bep?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_BEP_CURRENT:N0}) =====");
+            sb.AppendLine(string.IsNullOrEmpty(bep) ? "(not found)" : bep);
+            sb.AppendLine();
+            sb.AppendLine($"===== Unity Player.log [{inputs.UniPath ?? "(path unknown)"}]  ({(uni?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_UNITY:N0}) =====");
+            sb.AppendLine(string.IsNullOrEmpty(uni) ? "(not found)" : uni);
             sb.AppendLine();
             sb.AppendLine("===== audio self-check (at submit) =====");
-            sb.AppendLine(AudioSelfCheck.Snapshot());
-            return sb.ToString();
+            sb.AppendLine(inputs.AudioSnapshot ?? "(audio self-check not captured)");
+
+            // THE scrub site. It is here, and not at either sender, because
+            // both senders ship this exact text: a scrub at one call site
+            // would leave the other one unscrubbed the first time somebody
+            // added a third sender. The section headers above embed the log
+            // FILE PATHS, and Unity's log lives under the user profile, so the
+            // scrub has to run after they are appended.
+            //
+            // A null return is the scrub reporting that it could not do its
+            // job. The text is withheld in that case: a bug report or an
+            // upload that arrives as one honest sentence is a far better
+            // outcome than one that arrives carrying a machine's account name.
+            string cleaned = LogScrub.Scrub(sb.ToString(), out scrubbed);
+            if (cleaned == null)
+            {
+                scrubbed = -1;
+                diagnostic = "[LOG-SCRUB] scrub failed — log bundle withheld rather than sent unscrubbed";
+                return "[log bundle withheld: the local-path scrub failed on this machine]";
+            }
+            diagnostic = $"[LOG-SCRUB] bundle {cleaned.Length:N0} chars, {scrubbed} local-identity replacement(s)";
+            return cleaned;
+        }
+
+        /// <summary>The BUG FORM's producer: capture + compose in one go, on
+        /// the thread that called it. The form is a menu click with a modal
+        /// already on screen and a spinner the player is watching, so a pause
+        /// there is the expected cost of pressing Send; the ROOM-EXIT producer
+        /// is the one that may not pause, and it schedules the same two halves
+        /// itself. Internal, not private, because AutoLogUpload used to call
+        /// this and the shape is still the single producer of the TEXT.</summary>
+        internal static string BuildLogBundle()
+        {
+            int scrubbed; string diagnostic;
+            string cleaned = ComposeLogBundle(CaptureLogBundleInputs(), out scrubbed, out diagnostic);
+            LastScrubReplacements = scrubbed;
+            if (scrubbed < 0) Plugin.Log.LogError(diagnostic);
+            else Plugin.Log.LogInfo(diagnostic);
+            return cleaned;
         }
 
         // Walks from the plugin assembly's location back to <ROUNDS>/BepInEx/.
@@ -6421,12 +6989,56 @@ namespace CompetitiveRounds
         // text unconditionally — so opening the "Change view" / "Typing
         // channel" pickers, which register as ArtistPromptOpen modals and trip
         // the modal guard below, silently ate whatever the player had typed.
-        // The distinction is INTENT, not call site: Esc and a successful send
-        // end the message, so they discard; a close FORCED on us (a modal
-        // taking the keyboard, vanilla's Enter box, the liveness watchdog)
-        // stashes it and the next open resumes.
+        // The distinction is INTENT, not call site: a successful send ends the
+        // message, so it discards; a close FORCED on us (a modal taking the
+        // keyboard, vanilla's Enter box, the liveness watchdog) stashes it and
+        // the next open resumes. #382 moved ESCAPE from the first group to the
+        // second: a player pressing Esc to look something up had not finished
+        // their message either, and it is the consent-revoked path — not Esc —
+        // that still has to hard-discard.
         private static string chatDraftStash;
         private static float chatDraftStashAt = -999f;
+        /// <summary>Which typing channel the stashed draft was written for.
+        /// A draft belongs to an audience, so the resume is keyed on this and
+        /// not just on the TTL. Null means "stashed before a channel was
+        /// resolvable", which only matches another null.</summary>
+        private static string chatDraftStashChannel;
+        /// <summary>Which ACCOUNT wrote the stashed draft, captured when it is
+        /// stashed. Null means "stashed before an identity was resolvable", and
+        /// only matches another null.
+        ///
+        /// <para>DropChatOnAccountChange is still the primary guarantee and this
+        /// does not replace it. It is the arm for the case that hook cannot cover:
+        /// the hook fires on a RESOLVED transition, and a transition that is never
+        /// observed — a resolution failure, a restart inside the TTL, an ordering
+        /// the transition detector does not see — leaves a stash whose channel
+        /// still matches, which is the whole test the reader used to apply. Storing
+        /// what the reader needs where the reader is means one missed hook is not
+        /// also a missed guarantee (r2 LOW).</para></summary>
+        private static string chatDraftStashIdentity;
+        // NO IDENTITY FENCE LIVES HERE ANY MORE (r5 method change). Two generation
+        // counters used to guard this — one stamped on the stash, one on the open
+        // editor — each compared against ApiClient.IdentityEpoch at the moment the
+        // text was about to be used. Three findings landed inside that scheme in a
+        // single round: the close path stamped the NEW epoch onto A's text; the
+        // `/report` and `/mute` commands dispatch BEFORE the submit comparison, so
+        // a line composed as A filed a report under B; and an ordinary FIRST
+        // resolution of the local id (unknown -> A, nobody's account changed)
+        // advanced the epoch and discarded a legitimate draft.
+        //
+        // A comparison made where the text is USED has to be repeated at every such
+        // place and is only ever as good as the worst one — and one of them was
+        // three statements too late. The guarantee is now enforced where the text
+        // STOPS BELONGING TO ITS AUTHOR: an account change destroys the stash and
+        // the live box together (DropChatOnAccountChange below), so no later reader
+        // has to ask, and no future caller can forget to. A first resolution is not
+        // an account change and deliberately does not fire it —
+        // GameStateWatcher.NoteIdentityTransition already separates the two
+        // structurally, which is what makes this both cheaper and correct where the
+        // counter was not.
+        /// <summary>Window during which the box says a draft came back (#382).</summary>
+        private static float chatResumeNoticeUntil = -999f;
+        private static GUIStyle chatResumeStyle;
         // Ceiling on a resumed draft. The stash only ever bridges an
         // involuntary interruption — a picker round-trip, a yield to vanilla
         // chat — which is a seconds-scale detour, so 3 minutes is generous for
@@ -6437,14 +7049,210 @@ namespace CompetitiveRounds
         // that makes Time.time crawl (#221).
         private const float CHAT_DRAFT_STASH_TTL = 180f;
 
-        /// <summary>Returns a stashed draft to resume (one-shot — the stash is
-        /// consumed either way), or "" when there is none or it has expired.</summary>
+        /// <summary>Destroy everything the player composed under the consent
+        /// they just withdrew: the held stash AND whatever is sitting in the open
+        /// box, the same pair DropChatOnAccountChange below destroys. Called from
+        /// the consent-revoke path itself so the hard-discard does not depend on
+        /// the chat loop running a frame later -- a revoke arriving while the draw
+        /// path is throwing would otherwise never reach the guard that drops it.
+        /// That guard is also what empties the open line, so a revoke it never
+        /// reached used to leave the typed line in the box (v1.41.0 beta round 3
+        /// finding 9, and an r2 MEDIUM on the 886bed8 client half: the guarantee
+        /// is "nothing composed under the old consent survives it", and half of
+        /// "composed" lives in the live field). RunChatRevokeSentinel below checks
+        /// all three.
+        ///
+        /// <para>The shared teardown is reached through CloseChatInput rather than
+        /// repeated here, so a future field added to one is not missing from the
+        /// other. By the time it is called the stash is gone and the live text is
+        /// empty, so none of its branches can re-stash anything. The resume-caret
+        /// window needs no line of its own: it is armed only while the box is open,
+        /// and CloseChatInput disarms it. So this method's own assignments are
+        /// exactly DropChatOnAccountChange's, which is what keeps the two pinned
+        /// equal; closing a box that is open is CloseChatInput's job.</para></summary>
+        internal static void DropChatDraftOnRevoke()
+        {
+            bool hadText = !string.IsNullOrEmpty(chatDraftStash)
+                        || !string.IsNullOrEmpty(chatInputText);
+            DropStash();
+            chatInputText = "";
+            chatResumeNoticeUntil = -999f;
+            if (chatInputOpen) CloseChatInput(discardDraft: true);
+            if (hadText)
+                Plugin.Log.LogInfo("[CHAT] data consent revoked — the held draft and the open line were discarded");
+        }
+
+        /// <summary>The resolved account CHANGED — not merely resolved for the
+        /// first time. Everything the previous account composed is destroyed
+        /// outright: the stash AND whatever is sitting in the open box. That is
+        /// what makes "a line written as A can never leave as B" true without a
+        /// single reader checking for it.
+        ///
+        /// <para>Called from GameStateWatcher.NoteIdentityTransition's
+        /// account-change branch, which is the only place that can tell a switch
+        /// apart from a first resolution. Fencing this on the identity epoch
+        /// instead could not: the same counter advances for both.</para></summary>
+        internal static void DropChatOnAccountChange()
+        {
+            bool hadText = !string.IsNullOrEmpty(chatDraftStash)
+                        || !string.IsNullOrEmpty(chatInputText);
+            DropStash();
+            chatInputText = "";
+            chatResumeNoticeUntil = -999f;
+            if (hadText)
+            {
+                Plugin.Log.LogInfo("[CHAT] account changed — the held draft and the open line were discarded");
+                try { ShowNotification(I18n.Tr("Account changed — message not sent."),
+                                       Color.yellow, 4f); } catch { }
+            }
+        }
+
+        /// <summary>Forget the stash and everything that described it, in one place
+        /// so a future field cannot be added and then left behind by one of the
+        /// several paths that drop it. The TIMESTAMP is part of "everything that
+        /// described it" — leaving it set meant a dropped stash still carried the
+        /// age of the text that no longer existed (r5 finding).</summary>
+        private static void DropStash()
+        {
+            chatDraftStash = null;
+            chatDraftStashChannel = null;
+            chatDraftStashIdentity = null;
+            chatDraftStashAt = -999f;
+        }
+
+        /// <summary>Round 3 finding 9's self-test. Seeds the open line, the held
+        /// stash and the resume notice with synthetic values, calls
+        /// DropChatDraftOnRevoke -- the method the consent-revoke path calls --
+        /// and checks that each of them reads empty afterwards, for an open line
+        /// alone, a stash alone, and both. The five fields are put back as they
+        /// were whatever happens, so a real draft outlives the test; the [CHAT]
+        /// discard lines it causes are its own. Nothing is sent.</summary>
+        internal static string RunChatRevokeSentinel(out bool pass)
+        {
+            const string tag = "[CHAT-REVOKE-SENTINEL]";
+            string keepText = chatInputText, keepStash = chatDraftStash, keepChannel = chatDraftStashChannel;
+            float keepAt = chatDraftStashAt, keepNotice = chatResumeNoticeUntil;
+            var failures = new List<string>();
+            int checks = 0;
+            try
+            {
+                foreach (string state in new[] { "open line only", "stash only", "open line and stash" })
+                {
+                    bool line = state != "stash only", stash = state != "open line only";
+                    chatInputText = line ? "sentinel: a line typed before the revoke" : "";
+                    chatDraftStash = stash ? "sentinel: a draft held before the revoke" : null;
+                    chatDraftStashChannel = stash ? "sentinel" : null;
+                    chatDraftStashAt = stash ? Time.unscaledTime : -999f;
+                    chatResumeNoticeUntil = Time.unscaledTime + 60f;
+                    DropChatDraftOnRevoke();
+                    checks++;
+                    if (!string.IsNullOrEmpty(chatInputText)) failures.Add(state + ": the open line survived");
+                    checks++;
+                    if (chatDraftStash != null || chatDraftStashChannel != null || chatDraftStashAt >= 0f)
+                        failures.Add(state + ": the stash survived");
+                    checks++;
+                    if (chatResumeNoticeUntil > Time.unscaledTime) failures.Add(state + ": the resume notice survived");
+                }
+            }
+            finally
+            {
+                chatInputText = keepText; chatDraftStash = keepStash; chatDraftStashChannel = keepChannel;
+                chatDraftStashAt = keepAt; chatResumeNoticeUntil = keepNotice;
+            }
+            pass = failures.Count == 0;
+            return pass
+                ? tag + " PASS: " + checks + " checks (the open line, the stash and the resume notice all empty after a revoke, in each of 3 states)"
+                : tag + " FAIL: " + string.Join("; ", failures.ToArray());
+        }
+
+        /// <summary>[Broadcast] TestChatRevokeSentinel's entry: runs the
+        /// sentinel once and logs its line.</summary>
+        internal static void DevChatRevokeSentinelTest()
+        {
+            try
+            {
+                bool pass;
+                string line = RunChatRevokeSentinel(out pass);
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[CHAT-REVOKE-SENTINEL] FAIL: threw " + ex.Message);
+            }
+        }
+
+        /// <summary>Returns a stashed draft to resume, or "" when there is none, it
+        /// has expired, or it belongs to a different channel.
+        ///
+        /// <para>Consumed on resume and on expiry — but NOT when the typing channel
+        /// has moved since it was stashed. A draft is written for an audience, and
+        /// resuming it into whatever channel happens to be selected now puts the
+        /// player one Enter away from sending it to the wrong room (r2 finding).
+        /// Holding it instead means switching back inside the TTL still gets it
+        /// back, and switching away simply lets it age out.</para></summary>
         private static string TakeStashedDraft()
         {
             string d = chatDraftStash;
-            chatDraftStash = null;
-            if (string.IsNullOrEmpty(d)) return "";
-            if (Time.unscaledTime - chatDraftStashAt > CHAT_DRAFT_STASH_TTL) return "";
+            if (string.IsNullOrEmpty(d)) { DropStash(); return ""; }
+            if (Time.unscaledTime - chatDraftStashAt > CHAT_DRAFT_STASH_TTL) { DropStash(); return ""; }
+            // DIFFERENT ACCOUNT -> destroy it. Unlike the channel case below this is
+            // never "hold it, they might come back": the identity edge means the
+            // person who wrote the line is gone, and handing their text to whoever
+            // signed in next is the one outcome this whole mechanism must not have.
+            //
+            // This paragraph described a rule that WAS NOT HERE (r2 LOW): the check
+            // below it was the channel comparison, and nothing in this function read
+            // an identity at all, because the guarantee had been moved wholesale to
+            // DropChatOnAccountChange. That hook is still the primary mechanism; this
+            // is the arm for a transition it never observes. A resolvable identity
+            // that differs from the one the text was written under destroys the
+            // stash, and so does a resolvable identity over a stash that names NO
+            // writer — null matches only null, which is what the field's own doc
+            // has always claimed. An UNRESOLVED identity NOW is the case that is
+            // not evidence of a change and is deliberately not treated as one —
+            // that is the first-resolution shape the hook already refuses to fire
+            // on. The two are not symmetric on purpose: an unknown reader leaves
+            // the question open, an unknown WRITER answers it against resuming.
+            string writer = chatDraftStashIdentity;
+            string reader = null;
+            try { reader = MatchTracker.LocalSteamId; } catch { }
+            bool readerResolved = !string.IsNullOrEmpty(reader) && reader != "unknown";
+            if (readerResolved
+                && !string.IsNullOrEmpty(writer)
+                && !string.Equals(writer, reader, StringComparison.Ordinal))
+            {
+                Plugin.Log.LogInfo("[CHAT] a held draft belonged to a different account — discarded unread");
+                DropStash();
+                return "";
+            }
+            // A NULL writer only matches a null reader — the rule the field's own
+            // doc states, and which the reader did not apply: a stash written
+            // before identity resolution was handed to whatever account resolved
+            // afterwards, as long as the channel and the TTL still matched.
+            // "Stashed before an identity was resolvable" is not evidence that the
+            // line was THIS account's; it is the absence of evidence either way,
+            // and a draft is not worth resuming into an account that cannot be
+            // shown to have written it. The reverse case is deliberately NOT
+            // symmetric: an unresolved READER over a known writer keeps the stash,
+            // because that is the first-resolution shape DropChatOnAccountChange
+            // also refuses to treat as a change.
+            //
+            // What the refusal costs (#430): a draft typed in the seconds before
+            // the local id resolves is dropped instead of resumed. That window is
+            // bounded by sign-in, and the alternative is the one outcome this
+            // mechanism exists to prevent.
+            if (readerResolved && string.IsNullOrEmpty(writer))
+            {
+                Plugin.Log.LogInfo("[CHAT] a held draft was written before any account was resolved — "
+                    + "discarded unread rather than resumed under the account that has resolved since");
+                DropStash();
+                return "";
+            }
+            string now = null;
+            try { now = ChatClient.SendChannel; } catch { }
+            if (!string.Equals(chatDraftStashChannel ?? "", now ?? "", StringComparison.Ordinal))
+                return "";                      // different audience: keep it, do not resume it here
+            DropStash();
             return d;
         }
 
@@ -6456,35 +7264,71 @@ namespace CompetitiveRounds
         /// it is.</summary>
         private static void CloseChatInput(bool discardDraft)
         {
-            if (discardDraft) chatDraftStash = null;
+            if (discardDraft)
+            {
+                // Discard the draft for THIS channel — not a stash being held back
+                // because the typing channel moved. That one is a different message
+                // for a different room; the player abandoning an empty box here has
+                // not abandoned it, and deleting it was undoing the hold-back the
+                // line above exists for (r3 finding). Only a POSITIVELY different
+                // channel earns the reprieve: if the current channel cannot be read
+                // we cannot tell them apart, and losing a draft beats resuming one
+                // into a room it was not written for.
+                string now = null;
+                try { now = ChatClient.SendChannel; } catch { }
+                bool belongsElsewhere = chatDraftStashChannel != null && now != null
+                    && !string.Equals(chatDraftStashChannel, now, StringComparison.Ordinal);
+                if (!belongsElsewhere) DropStash();
+            }
             // Only overwrite the stash when there is something to stash. The
             // modal and consent guards call this EVERY frame the modal is up,
             // and by the second call chatInputText is already "" — an
             // unconditional write there would erase the draft one frame after
             // saving it, which is the original bug with extra steps.
+            // Never stash without consent. The revoke path drops the stash, but it
+            // is not the only order events can arrive in: the epoch bump and the
+            // DataConsentGranted flip are separated by a dozen statements, and a
+            // watchdog close landing in that window wrote a NEW stash carrying the
+            // post-revoke epoch — one the fence would then happily accept (r4
+            // finding). A close during a revoke keeps nothing.
+            else if (!Plugin.DataConsentGranted) DropStash();
             else if (!string.IsNullOrEmpty(chatInputText) && chatInputText.Trim().Length > 0)
             {
                 chatDraftStash = chatInputText;
                 chatDraftStashAt = Time.unscaledTime;
+                chatDraftStashChannel = null;
+                chatDraftStashIdentity = null;
+                try { chatDraftStashChannel = ChatClient.SendChannel; } catch { }
+                try
+                {
+                    string who = MatchTracker.LocalSteamId;
+                    if (!string.IsNullOrEmpty(who) && who != "unknown") chatDraftStashIdentity = who;
+                }
+                catch { }
             }
             chatInputOpen = false;
             chatJustOpened = false;
             chatInputText = "";
-            // Item 13: never carry a half-observed shift hold into the next
-            // time the box opens — a KeyUp we never saw would otherwise leave
-            // the tap armed and switch channels on the next release.
-            chatAltHeld = false;
-            chatAltTapClean = false;
+            // Item 13: never carry a half-observed hold into the next time the
+            // box opens (item 17: the physical detector's state).
+            Keybinds.ResetChatTap();
             // Disarm the resume-caret window with the box — it is re-armed by
-            // the next open that actually resumes something.
+            // the next open that actually resumes something. Same for the
+            // "draft restored" notice: its deadline outlives the box by up to
+            // four seconds, so a submit-then-reopen inside that window would
+            // otherwise announce a restore over an empty field (r2 finding).
             chatCaretToEndUntil = -999f;
+            chatResumeNoticeUntil = -999f;
             SetGameplayInputLock(false);
         }
 
         // ── Chat input (IMGUI overlay) ───────────────────────────
         // Lives over the native F5 menu so we don't need TMP_InputField reflection
         // just for a one-line send box. Press T with the menu open to focus; Enter
-        // sends, Escape cancels.
+        // sends. Escape CLOSES WITHOUT SENDING AND KEEPS THE DRAFT (bug #382) --
+        // it used to discard, and this line went on saying "cancels" after the
+        // behaviour changed, one screen above the comment that calls that wording
+        // false (r4 finding).
         private static bool chatInputOpen = false;
         /// <summary>True while the in-game chat IMGUI text field has focus. Used to
         /// suppress raw-key input tracking (Immovable Object achievement) so typing
@@ -6538,12 +7382,25 @@ namespace CompetitiveRounds
             // idx == -1 (a stale/unknown value) lands on "global".
             ChatClient.SendChannel = ChatSendCycle[(idx + 1) % ChatSendCycle.Length];
             chatHeaderCache = null;
+            // The stash is resumed on OPEN, and the channel it is waiting for can
+            // be selected without ever closing the box — so a draft held back for
+            // "es" was unreachable by the only action that would recover it, and
+            // the next Enter then deleted it as this channel's own abandoned
+            // draft (r4 finding). Retry here, and only into an EMPTY field: the
+            // player cycling channels mid-message is composing, and their text is
+            // not something to overwrite.
+            if (chatInputOpen && chatInputText.Length == 0)
+            {
+                string resumed = TakeStashedDraft();
+                if (resumed.Length > 0)
+                {
+                    chatInputText = resumed;
+                    chatCaretToEndUntil = Time.unscaledTime + 1f;
+                    chatResumeNoticeUntil = Time.unscaledTime + 4f;
+                }
+            }
         }
 
-        // Shift-tap state for the channel cycle (see the KeyUp handler in
-        // DrawChatInput for why a tap, not a press, is the trigger).
-        private static bool chatAltHeld, chatAltTapClean;
-        private static float chatAltDownAt;
         // F4 companion, armed only when a stashed draft is resumed. Runtime
         // IMGUI's TextEditor.DetectFocusChange calls OnFocus() -> SelectAll()
         // on a single-line field the frame after keyboard focus lands, which is
@@ -6568,6 +7425,7 @@ namespace CompetitiveRounds
         // the memo correct by construction rather than by enumeration.
         private static string chatHeaderCache, chatHeaderChan, chatHeaderLocale;
         private static int chatHeaderGen = -1;
+        private static int chatHeaderKb = -1;
         private static GUIStyle chatHeaderStyle;
 
         private static void DrawChatInput()
@@ -6585,7 +7443,13 @@ namespace CompetitiveRounds
             // Discard: consent has been revoked, so chat is gone entirely —
             // there is no "next open" to resume into, and holding the player's
             // typed text after they opted out is the wrong default (F4).
-            if (!Plugin.DataConsentGranted) { CloseChatInput(discardDraft: true); return; }
+            // DropStash FIRST and unconditionally: consent revocation is the one
+            // discard that must not be negotiable. CloseChatInput's discard now
+            // spares a stash belonging to another typing channel (r3), and that
+            // reprieve has no business surviving an opt-out — the epoch fence in
+            // TakeStashedDraft would also catch it, but a rule this categorical
+            // should not rest on a second mechanism being correct.
+            if (!Plugin.DataConsentGranted) { DropStash(); CloseChatInput(discardDraft: true); return; }
             // Don't hijack T or M while a modal owns the screen. Two distinct
             // reasons, one guard: a modal with a text field needs 't'/'m' as
             // typed characters (lopi: typing "t" in Compare search opened chat),
@@ -6660,7 +7524,7 @@ namespace CompetitiveRounds
                 // owns focus; we additionally inspect it for any InputField-typed component so
                 // we don't false-positive on plain buttons.
                 if (IsAnotherTextInputActive()) return;
-                if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.T)
+                if (Keybinds.Matches(KeybindRules.ChatOpen, ev))   // item 17: the bound key
                 {
                     // Lockdown (design v3 S7): don't open a box whose submit
                     // would be refused — the system line IS the feedback, and
@@ -6674,13 +7538,19 @@ namespace CompetitiveRounds
                     chatInputOpen = true;
                     chatJustOpened = true;
                     // F4: resume a draft an incidental close stashed (one-shot,
-                    // TTL-bounded). "" when there is nothing to resume, which
-                    // is the old behaviour.
+                    // TTL-bounded, and only into the channel it was written
+                    // for). "" when there is nothing to resume, which is the
+                    // old behaviour.
                     chatInputText = TakeStashedDraft();
                     if (chatInputText.Length > 0)
+                    {
                         chatCaretToEndUntil = Time.unscaledTime + 1f;
-                    chatAltHeld = false;
-                    chatAltTapClean = false;
+                        // Longer than the caret window on purpose: that one is
+                        // disarmed the moment the editor is found, and this one
+                        // has to stay up long enough to be read (bug #382).
+                        chatResumeNoticeUntil = Time.unscaledTime + 4f;
+                    }
+                    Keybinds.ResetChatTap();
                     // Belt-and-suspenders re-derive. Since F10 the memo's key
                     // covers every input that can change the line (channel,
                     // locale, catalogue generation), so this is no longer the
@@ -6704,7 +7574,7 @@ namespace CompetitiveRounds
                 // was a hand-copied SUBSET, so M did fire behind a confirm
                 // dialog (Aug 12 UI review). No gameplay-input lock is taken:
                 // this is a one-shot toggle, not a typing surface.
-                else if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.M)
+                else if (Keybinds.Matches(KeybindRules.ChatOverlayMode, ev))   // item 17
                 {
                     CycleChatOverlayMode();
                     ev.Use();
@@ -6742,35 +7612,10 @@ namespace CompetitiveRounds
             bool submit = false, cancel = false;
             if (ev != null && ev.type == EventType.KeyDown)
             {
-                if (ev.keyCode == KeyCode.LeftAlt || ev.keyCode == KeyCode.RightAlt)
-                {
-                    // Aug 6 item 11: the channel cycle moved from Shift to Alt
-                    // (Shift kept firing while players typed capitals). Arm a
-                    // tap on the FIRST alt-down of a hold (key repeat must not
-                    // re-arm a hold that already typed something).
-                    // Deliberately not ev.Use()'d: a bare alt KeyDown carries
-                    // no character, and TextField reads the modifier off the
-                    // keys that follow, not off this event.
-                    if (!chatAltHeld)
-                    {
-                        chatAltHeld = true;
-                        chatAltTapClean = true;
-                        chatAltDownAt = Time.unscaledTime;
-                    }
-                }
-                else if (ev.keyCode != KeyCode.None || ev.character != '\0')
-                {
-                    // ANY other real KeyDown during the hold means alt was a
-                    // MODIFIER (Alt+Tab, AltGr-typed characters on intl
-                    // layouts), not a tap. Unity fires TWO KeyDown events per
-                    // physical key (one with keyCode, one with ev.character —
-                    // see the chatJustOpened note above) and either one
-                    // disarms. Padding events with neither are skipped, or the
-                    // alt's own key-down pair could disarm the tap it just
-                    // armed.
-                    chatAltTapClean = false;
-                }
-
+                // Item 17: the channel tap is no longer read here. IMGUI's
+                // events are per OnGUI pass and lose key identity on the
+                // character half of each pair; CompetitiveUI.Tick reads the
+                // bound ChatChannel key physically, once a frame.
                 if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter)
                 {
                     submit = true; ev.Use();
@@ -6786,36 +7631,6 @@ namespace CompetitiveRounds
                     // yank the caret out of the box mid-message.
                     ev.Use();
                 }
-            }
-            else if (ev != null && ev.type == EventType.KeyUp
-                     && (ev.keyCode == KeyCode.LeftAlt || ev.keyCode == KeyCode.RightAlt))
-            {
-                // Item 13 (Shift->Alt per Aug 6 item 11): a TAP of alt rotates
-                // the SEND channel through the whole allowed set
-                // (global -> es -> ru -> global), ungated by locale — the old
-                // Tab cycle only existed when the player HAD a locale channel,
-                // so English clients had no cycle at all.
-                //
-                // The discriminator is the whole trick: acting on the RELEASE,
-                // and only when nothing was typed between the press and the
-                // release (chatAltTapClean, cleared above by any other
-                // KeyDown) and the hold was shorter than 0.6s, means an alt
-                // used as a modifier (Alt+Tab, AltGr) can never trigger it —
-                // the other key's own KeyDown always lands inside the hold.
-                bool tap = chatAltHeld && chatAltTapClean
-                           && Time.unscaledTime - chatAltDownAt < 0.6f;
-                chatAltHeld = false;
-                chatAltTapClean = false;
-                if (tap) { CycleChatSendChannel(); ev.Use(); }
-            }
-
-            // Alt+Tab safety: if focus left while alt was held, the KeyUp
-            // never arrives — clear the armed state so the first alt tap
-            // after returning doesn't act on a stale hold.
-            if (!Application.isFocused && (chatAltHeld || chatAltTapClean))
-            {
-                chatAltHeld = false;
-                chatAltTapClean = false;
             }
 
             // ── Position (item 13) ────────────────────────────────────────
@@ -6867,13 +7682,17 @@ namespace CompetitiveRounds
             string hdrChan = ChatClient.SendChannel;
             string hdrLoc = I18n.Locale;
             int hdrGen = I18n.CatalogueGeneration;   // F10 — see the memo's note
+            int hdrKb = Keybinds.Revision;   // item 17: the line names the bound channel key
             if (chatHeaderCache == null || hdrChan != chatHeaderChan
-                || hdrLoc != chatHeaderLocale || hdrGen != chatHeaderGen)
+                || hdrLoc != chatHeaderLocale || hdrGen != chatHeaderGen || hdrKb != chatHeaderKb)
             {
-                chatHeaderChan = hdrChan; chatHeaderLocale = hdrLoc; chatHeaderGen = hdrGen;
+                chatHeaderChan = hdrChan; chatHeaderLocale = hdrLoc; chatHeaderGen = hdrGen; chatHeaderKb = hdrKb;
+                // "Esc to cancel" became a false statement when Esc started
+                // keeping the draft (bug #382) — the line has to say what the
+                // key now does, so this key changes with the behaviour.
                 chatHeaderCache = I18n.TrF(
-                    "Chat [{0}]  —  Enter to send, Esc to cancel, Alt switches channel",
-                    ChannelDisplayLabel(hdrChan));
+                    "Chat [{0}]  —  Enter to send, Esc keeps your draft, {1} switches channel",
+                    ChannelDisplayLabel(hdrChan), NativeUI.KeybindRowFace(KeybindRules.ChatChannel));
             }
             // Overflow clipping + no wrap on the header: it is a TRANSLATED
             // line in an 18px box (2px tighter than before), and OS-fallback
@@ -6886,6 +7705,31 @@ namespace CompetitiveRounds
                 chatHeaderStyle = new GUIStyle(GUI.skin.label)
                 { wordWrap = false, clipping = TextClipping.Overflow };
             GUI.Label(new Rect(x, headerY, w, ChatInHeaderH), chatHeaderCache, chatHeaderStyle);
+
+            // Bug #382, second half: a resumed draft used to come back in
+            // SILENCE. Entering a game already stashed correctly, but the box
+            // vanished and the text only reappeared if the player happened to
+            // press T again inside the TTL — which from their seat is
+            // indistinguishable from having been deleted. Say it out loud.
+            // Drawn separately rather than folded into chatHeaderCache on
+            // purpose: it is transient, and the header memo's key is supposed
+            // to cover everything that can change that line.
+            // Time AND a field that still holds the restored text. The deadline alone
+            // described a moment, not a state: select-all-delete inside the window
+            // left "draft restored" sitting over an empty box, saying the opposite of
+            // what the player had just done (r3 finding).
+            if (Time.unscaledTime < chatResumeNoticeUntil && chatInputText.Length > 0)
+            {
+                if (chatResumeStyle == null)
+                    chatResumeStyle = new GUIStyle(GUI.skin.label)
+                    {
+                        wordWrap = false,
+                        clipping = TextClipping.Overflow,
+                        alignment = TextAnchor.MiddleRight,
+                    };
+                GUI.Label(new Rect(x, headerY, w, ChatInHeaderH),
+                          I18n.Tr("draft restored"), chatResumeStyle);
+            }
 
             GUI.SetNextControlName("CRChat");
             chatInputText = GUI.TextField(new Rect(x, y, w, h), chatInputText ?? "", 480, chatStyle);
@@ -6948,6 +7792,11 @@ namespace CompetitiveRounds
                         // discarded with the close below, same as a normal send.
                         NativeUI.NotifyChatLockedAttempt();
                     }
+                    // No identity comparison here, deliberately. An account change
+                    // has already destroyed this text before it could reach any of
+                    // these branches — see DropChatOnAccountChange. A check placed
+                    // at this point sat BELOW the /mute and /report dispatches
+                    // above it and never covered them (r5 finding).
                     else
                     {
                         ChatClient.Send(GameStateWatcher.LocalSteamId,
@@ -6961,9 +7810,27 @@ namespace CompetitiveRounds
             }
             else if (cancel)
             {
-                // Esc IS the discard gesture — it must also drop any older
-                // stash, or a resumed-then-cancelled draft would come back.
-                CloseChatInput(discardDraft: true);
+                // Bug #382 — Esc KEEPS the draft. It used to be treated as the
+                // discard gesture, on the reasoning that Esc ends the message.
+                // The field refuted the premise: in ROUNDS Esc is the MENU
+                // gesture, so a player leaving a match presses it while the box
+                // is open and our overlay swallows it — and this was the one
+                // close path that destroyed the draft AND the stash, i.e. the
+                // exact path "leaving a game deletes what you were typing"
+                // travels. It is no different in kind from the modal and
+                // watchdog closes that already stash; the only thing that ever
+                // made it different was that assumption about intent (LEARNING
+                // #351 — the guarantee a comment asserts is written from the one
+                // state its author had in mind; NOT bug report #351, which is a
+                // separate, unclaimed report about chat rendering breaking after a
+                // menu-thickness change. The two share a number and nothing else,
+                // and this hunk addresses bug report #382 alone).
+                //
+                // A deliberate discard is still one keystroke away: Esc, then
+                // do not press T again — the stash ages out on its own TTL and
+                // nothing was sent. What is no longer possible is losing a long
+                // message to a keypress aimed at the game menu.
+                CloseChatInput(discardDraft: false);
             }
         }
 
@@ -7139,7 +8006,7 @@ namespace CompetitiveRounds
             var ev = Event.current;
             if (!danceWheelOpen)
             {
-                if (ev == null || ev.type != EventType.KeyDown || ev.keyCode != KeyCode.E) return;
+                if (!Keybinds.Matches(KeybindRules.DanceWheel, ev)) return;   // item 17: the bound key
                 if (IsAnotherTextInputActive()) return;
                 bool spec = false;
                 try { spec = RoomActors.LocalIsSpectator; } catch { }
@@ -7175,7 +8042,7 @@ namespace CompetitiveRounds
                         if (!string.IsNullOrEmpty(sid) && sid != "unknown") ApiClient.FetchShopItems(sid);
                     }
                     catch { }
-                    ShowNotification(I18n.Tr("Loading your dances - try E again in a second."),
+                    ShowNotification(I18n.TrF("Loading your dances - try {0} again in a second.", NativeUI.KeybindRowFace(KeybindRules.DanceWheel)),
                                      new Color(0.75f, 0.85f, 1f), 2.5f);
                     ev.Use();
                     return;
@@ -7206,7 +8073,7 @@ namespace CompetitiveRounds
             if (dwIds == null || dwIds.Length == 0 || !DanceEmotes.WindowOpen()) { DwClose(); return; }
             if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
             { DwClose(); ev.Use(); return; }
-            if (dwClickMode && ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.E)
+            if (dwClickMode && Keybinds.Matches(KeybindRules.DanceWheel, ev))
             { DwClose(); ev.Use(); return; }
 
             QcEnsureStyles();
@@ -7228,7 +8095,7 @@ namespace CompetitiveRounds
                 if (dwHighlight >= n) dwHighlight = 0;
             }
 
-            bool held = Input.GetKey(KeyCode.E);
+            bool held = Keybinds.Held(KeybindRules.DanceWheel);
             bool clicked = ev != null && ev.type == EventType.MouseDown && ev.button == 0;
             if (clicked) ev.Use();
             if (clicked)
@@ -7249,7 +8116,7 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(cx - 120f, cy - 22f, 240f, 20f),
                 $"<color=#FFC8F0><b>{I18n.Tr("Dances")}</b></color>", qcHintStyle);
             GUI.Label(new Rect(cx - 120f, cy + 2f, 240f, 20f),
-                $"<color=#8899AA>{I18n.Tr("point + release E to dance")}</color>", qcHintStyle);
+                $"<color=#8899AA>{I18n.TrF("point + release {0} to dance", NativeUI.KeybindRowFace(KeybindRules.DanceWheel))}</color>", qcHintStyle);
             if (dwHighlight >= 0)
             {
                 Vector2 dirN = d.normalized;
@@ -7433,8 +8300,8 @@ namespace CompetitiveRounds
                 // tease them with a wheel either.
                 bool spec = false;
                 try { spec = RoomActors.LocalIsSpectator; } catch { }
-                if (inRoom && !spec && ev != null && ev.type == EventType.KeyDown
-                    && ev.keyCode == KeyCode.Q && !IsAnotherTextInputActive())
+                if (inRoom && !spec && Keybinds.Matches(KeybindRules.QuickChat, ev)   // item 17: the bound key
+                    && !IsAnotherTextInputActive())
                 {
                     quickChatOpen = true;
                     qcStage = 0; qcHighlight = -1; qcClickMode = false;
@@ -7450,7 +8317,7 @@ namespace CompetitiveRounds
             // Q pressed again while in a click-mode wheel = dismiss (the main
             // hold gesture closes on RELEASE below; a fresh KeyDown can only
             // mean the More wheel or a tap-opened wheel).
-            if ((qcStage == 1 || qcClickMode) && ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Q)
+            if ((qcStage == 1 || qcClickMode) && Keybinds.Matches(KeybindRules.QuickChat, ev))
             { QcClose(); ev.Use(); return; }
 
             QcEnsureStyles();
@@ -7488,7 +8355,7 @@ namespace CompetitiveRounds
             // confirm (tap Q again / Esc dismisses). The 0.25s grace ignores
             // the release that belongs to the opening tap itself. More wheel:
             // click only (the hold ended when it opened).
-            bool held = Input.GetKey(KeyCode.Q);
+            bool held = Keybinds.Held(KeybindRules.QuickChat);
             bool clicked = ev != null && ev.type == EventType.MouseDown && ev.button == 0;
             if (clicked) ev.Use();
             if (clicked)
@@ -7518,7 +8385,7 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(cx - Rx * 1.45f, cy - Ry * 1.45f, Rx * 2.9f, Ry * 2.9f),
                 qcDiscTex, ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.55f), 0, 0);
             string hint = qcStage == 0
-                ? I18n.Tr("point + release Q to send")
+                ? I18n.TrF("point + release {0} to send", NativeUI.KeybindRowFace(KeybindRules.QuickChat))
                 : I18n.Tr("click a phrase - Esc closes");
             GUI.Label(new Rect(cx - 120f, cy - 22f, 240f, 20f),
                 $"<color=#AECBFF><b>{I18n.Tr("Quick chat")}</b></color>", qcHintStyle);
@@ -7679,8 +8546,8 @@ namespace CompetitiveRounds
                 "  • Each match you play: rounds won, points, duration, cards picked, cards offered, opponent\n" +
                 "  • Your Glicko-2 rating history\n\n" +
                 "What you can do later:\n" +
-                "  • Revoke consent anytime (F5 → Settings → Revoke). Reporting stops.\n" +
-                "  • Delete your data (F5 → Settings → Delete my data). Steam ID, display name, and Discord link " +
+                "  • Revoke consent anytime with the Data & Privacy switch (F5 → Settings → Privacy & account). Reporting stops.\n" +
+                "  • Delete your data with the Delete My Data button (F5 → Settings → Privacy & account). Steam ID, display name, and Discord link " +
                 "are scrubbed. Matches stay so other players' ratings and histories aren't disturbed. " +
                 "Deletion is IRREVERSIBLE — you cannot re-register this Steam ID later.\n\n" +
                 "Choose Allow to use the leaderboard. Choose Decline to run the mod fully offline.");
@@ -7712,15 +8579,13 @@ namespace CompetitiveRounds
             string declineLabel = I18n.Tr("Decline (offline mode)");
             if (GUI.Button(new Rect(x + 50, y + h - 56, 260, 38), allowLabel))
             {
-                Plugin.DataConsent.Value = "granted";
+                ConsentSetting.Set(true);   // round-2 L1: the consent row's one writer
                 Plugin.Log.LogInfo("[CONSENT] User granted data reporting");
-                ApiClient.OnConsentChanged();
             }
             if (GUI.Button(new Rect(x + w - 310, y + h - 56, 260, 38), declineLabel))
             {
-                Plugin.DataConsent.Value = "denied";
+                ConsentSetting.Set(false);   // round-2 L1: the consent row's one writer
                 Plugin.Log.LogInfo("[CONSENT] User declined data reporting");
-                ApiClient.OnConsentChanged();
             }
 
             // Eat mouse / keyboard so the click doesn't pass through to the menu underneath
@@ -8432,8 +9297,8 @@ namespace CompetitiveRounds
                 {
                     int myTeam = -1;
                     var mp = Photon.Pun.PhotonNetwork.LocalPlayer?.CustomProperties;
-                    if (mp != null && mp.ContainsKey("t_id"))
-                        int.TryParse(mp["t_id"]?.ToString(), out myTeam);
+                    if (mp != null && mp.ContainsKey(Player.VAR_TEAMID))
+                        int.TryParse(mp[Player.VAR_TEAMID]?.ToString(), out myTeam);
                     foreach (var pp in RoomActors.ActiveFighters())   // census: a spectator is neither mate nor foe
                     {
                         if (pp == null || pp.IsLocal) continue;
@@ -8441,8 +9306,8 @@ namespace CompetitiveRounds
                         if (string.IsNullOrEmpty(nm)) nm = "?";
                         if (nm.Length > 14) nm = nm.Substring(0, 14);
                         int t = -1;
-                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("t_id"))
-                            int.TryParse(pp.CustomProperties["t_id"]?.ToString(), out t);
+                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(Player.VAR_TEAMID))
+                            int.TryParse(pp.CustomProperties[Player.VAR_TEAMID]?.ToString(), out t);
                         // Missing t_id => treat as opponent (same convention the
                         // leaver banner uses); self-corrects on the next refresh.
                         if (t >= 0 && myTeam >= 0 && t == myTeam) mates.Add(nm); else foes.Add(nm);
@@ -8559,6 +9424,29 @@ namespace CompetitiveRounds
             if (Time.unscaledTime >= matchStatusCacheUntil || matchStatusCachedRanked != isRanked)
                 RefreshMatchStatusCache(isRanked);
             var oc = GUI.contentColor;
+            // This block lays ITSELF out downward over a variable number of
+            // lines, so it opens a band rather than claiming a fixed height:
+            // bandTop is the y its first line starts from, and CloseTopStrip
+            // below states the lowest edge it actually reached. Opened after
+            // every early return above, so a frame on which nothing paints
+            // leaves no hole in the column.
+            float bandTop = OpenTopStrip();
+            // Bottom edge of everything this block paints, accumulated as a
+            // RUNNING MAX over the lines and declared at the end so whatever
+            // claims next (today: the leaver bar, the tournament bar and the
+            // room-rules strip, all later in DrawUI) starts under it instead of
+            // over it. Tracked PER LINE rather than re-derived from the
+            // conditions, so a later edit to these lines carries it along.
+            //
+            // Max, not plain assignment (Sept 15 review item 2): every path
+            // below is monotone TODAY, so last-write-wins returns the same
+            // number - but the first HUD row inserted above the H2H row would
+            // then report a bottom edge SMALLER than the rows above it, and the
+            // surfaces below would climb back onto the series line with a
+            // screenshot as the first signal. The guarantee belongs here, in
+            // this function, not in what the next editor happens to know.
+            // 0 = this block painted nothing.
+            float stackBottom = 0f;
 
             // Top banner: "RANKED - Recording" only on ranked; 1v2 gets its own
             // honest label (unranked beta). Casual gets no banner — the score
@@ -8568,7 +9456,7 @@ namespace CompetitiveRounds
             float scoreY;
             if (showBanner)
             {
-                float bannerY = 8f;
+                float bannerY = bandTop + 8f;
                 // Bug 231 (Sid: "make it gold and have it above the RANKED -
                 // Recording message"): tournament matches get a GOLD line
                 // ABOVE the ranked banner. The label comes from the
@@ -8584,15 +9472,17 @@ namespace CompetitiveRounds
                         string.IsNullOrEmpty(tLabel) ? I18n.Tr("TOURNAMENT MATCH") : tLabel,
                         statusStyle);
                     bannerY += 18f;
+                    stackBottom = Mathf.Max(stackBottom, bannerY);
                 }
                 GUI.contentColor = ovt ? new Color(0.55f, 0.8f, 1f) : Color.green;
                 GUI.Label(new Rect((Screen.width - 220) / 2f, bannerY, 220, 18),
                     ovt ? I18n.Tr("1v2 - UNRATED") : I18n.Tr("RANKED - Recording"), statusStyle);
+                stackBottom = Mathf.Max(stackBottom, bannerY + 18f);
                 scoreY = bannerY + 20f;   // 28 when no tournament line — unchanged layout
             }
             else
             {
-                scoreY = 8;
+                scoreY = bandTop + 8f;
             }
 
             // Two HUD lines under the RANKED banner — both pulled from
@@ -8610,6 +9500,7 @@ namespace CompetitiveRounds
                 GUI.contentColor = new Color(1f, 0.85f, 0.3f);
                 GUI.Label(new Rect((Screen.width - 380) / 2f, scoreY, 380, 22),
                     matchStatusSeries, scoreStyle);
+                stackBottom = Mathf.Max(stackBottom, scoreY + 22f);
                 nextLineY = scoreY + 18;
             }
 
@@ -8620,7 +9511,13 @@ namespace CompetitiveRounds
                 GUI.contentColor = matchStatusH2HTint;
                 GUI.Label(new Rect((Screen.width - hw) / 2f, nextLineY, hw, 20),
                     matchStatusH2H, scoreStyle);
+                stackBottom = Mathf.Max(stackBottom, nextLineY + 20f);
             }
+            // Closes the band opened above. A stackBottom still at 0, or at or
+            // above bandTop, means no line painted and the band consumes
+            // nothing — the casual-match path (no banner, no series line, no
+            // H2H) reaches here exactly that way.
+            CloseTopStrip(stackBottom);
             GUI.contentColor = oc;
         }
 

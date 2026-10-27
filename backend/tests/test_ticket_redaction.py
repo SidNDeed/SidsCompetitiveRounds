@@ -923,6 +923,11 @@ class Env:
                 await conn.run_sync(models.Base.metadata.create_all,
                                     tables=[models.ShopItem.__table__, models.Player.__table__,
                                             models.AdminUser.__table__])
+                # models.Player.mail_discord_relay (the v1.41.0 beta's migration 330)
+                # leaves its default to SQL (FetchedValue), which create_all does not
+                # render: the column gets migration 330's DEFAULT here, as it has in
+                # production.
+                await conn.execute(text("ALTER TABLE public.players ALTER COLUMN mail_discord_relay SET DEFAULT true"))
                 for stmt in [s for s in BUG_DDL.split(";") if s.strip()]:
                     await conn.execute(text(stmt))
                 await conn.execute(text("INSERT INTO public.admin_users (steam_id, granted_at) VALUES (:s, now())"),

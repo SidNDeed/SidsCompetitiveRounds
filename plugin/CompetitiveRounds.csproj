@@ -222,15 +222,19 @@
     <MusicPreviewsToCopy Include="music\*_preview.ogg" />
     <MusicPreviewsToCopy Include="music\*.png" />
     <MusicFullToCopy Include="music\*.ogg" Exclude="music\*_preview.ogg" />
-    <!-- Existence-conditioned, unlike the three above, because this Include is a
-         LITERAL path rather than a wildcard: a wildcard yields no items on a
-         checkout without the music tree, while a literal Include yields one
-         whether or not the file exists. The Copy that consumes it then fails
-         MSB3030 and the whole build reports FAILED - on any seat whose checkout
-         has no music/ directory, which includes every clone of this repo, and
-         after the assembly has already been written and installed. A red exit
-         code on an otherwise-clean Release build is the state in which a real
-         compile error gets waved through. -->
+    <!-- Exists() is REQUIRED here, unlike the three siblings above. Those are
+         wildcards, so MSBuild globs them and they come back genuinely empty
+         when music\ is absent. This one is a LITERAL path, and MSBuild adds a
+         literal Include to the item whether or not the file is there - so the
+         item is never empty, the Condition on the Copy that consumes it
+         (="'@(MusicManifestToCopy)' != ''") can never be false, and the copy
+         hard-fails MSB3030 in any tree without music assets. The guard was
+         written to tolerate their absence and could not do it. The whole build
+         then reports FAILED - on any seat whose checkout has no music/
+         directory, which includes every clone of this repo, and after the
+         assembly has already been written and installed. A red exit code on an
+         otherwise-clean Release build is the state in which a real compile
+         error gets waved through. -->
     <MusicManifestToCopy Include="music\manifest.json" Condition="Exists('music\manifest.json')" />
   </ItemGroup>
 
@@ -260,6 +264,7 @@
     <!-- Sept 7: header utility-strip icons (mail with unread badge, music); drawn by tools/make_icons.py -->
     <EmbeddedResource Include="assets\ic_mail.png" />
     <EmbeddedResource Include="assets\ic_music.png" />
+    <EmbeddedResource Include="assets\ic_bug.png" />
     <EmbeddedResource Include="assets\mus_ic_star_on.png" />
     <EmbeddedResource Include="assets\mus_ic_star_off.png" />
     <EmbeddedResource Include="assets\mus_ic_stop.png" />

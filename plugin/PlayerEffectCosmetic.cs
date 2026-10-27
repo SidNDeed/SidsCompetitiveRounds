@@ -27,6 +27,17 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class PlayerEffectCosmetic
     {
+        /// <summary>Item 13: the named writer of the settings row and its
+        /// per-tab reset, carrying both live refreshes the row's handler used
+        /// to run inline (player effects here and the map-skin shimmer).</summary>
+        internal static void SetAnimatedCosmetics(bool on)
+        {
+            if (Plugin.AnimatedCosmetics == null) return;
+            Plugin.AnimatedCosmetics.Value = on;
+            try { OnAnimatedCosmeticsToggled(); } catch { }
+            try { MapSkinEffects.OnAnimatedCosmeticsToggled(); } catch { }
+        }
+
         private const string PROP_SKU = "cr_effect_sku";
 
         // actorNumber → the spawned aura GameObject (destroyed on cleanup).

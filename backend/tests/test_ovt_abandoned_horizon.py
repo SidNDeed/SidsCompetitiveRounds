@@ -1770,7 +1770,12 @@ PIN_RE = re.compile(r'PIN main\.py:(\d+) "([^"]+)"')
 # removed cannot pass unnoticed. A SUPERSET by construction — every SQL
 # statement in main.py naming `ovt_series` and the word `status` — which is
 # what makes it derived from the tree rather than authored from the notes.
-OVT_SERIES_STATUS_STATEMENTS = 31
+# 32 on the v1.41.0 beta merge (main cd8d846 into the beta): main's 31 plus
+# the beta's FOR SHARE re-read of a live continuation's row (SELECT status,
+# photon_room_id FROM ovt_series ... FOR SHARE). It re-reads only the row
+# the live arm has just selected, by id, and keeps it only in the live arm's
+# statuses, so it opens no path to a row the live arm would not take.
+OVT_SERIES_STATUS_STATEMENTS = 32
 
 
 def test_every_bug391_source_citation_resolves_to_what_it_names():
@@ -2494,7 +2499,11 @@ def test_every_slot_pair_comparison_in_the_report_and_void_paths_is_accounted_fo
     from collections import Counter
     census = {
         "submit_ovt_match": {"set": 1, "ordered": 1, "scalar": 1,
-                             "containment": 2, "in-list": 1},
+                             "containment": 2},
+        # The tier-rating read moved out of the handler into its own helper
+        # (a read that fails must refuse, not substitute): the in-list it
+        # carries is counted where it now lives.
+        "_ovt_tier_ratings": {"in-list": 1},
         "_ovt_canonical_duo": {"scalar": 1},
         "_ovt_award_seats": {"membership": 2},
         "_ovt_horizon_candidates": {},

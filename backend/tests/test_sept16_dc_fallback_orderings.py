@@ -39,6 +39,18 @@ record and with team 1's post alone, and asserts the hotfix's outcome
 there, so the orderings below end rated because of the record and not in
 spite of it.
 
+THE GAME TOKEN (the v1.41.0 beta). Under the beta's rule a crossing counts
+only from the posts that carried the physical game's token the DC
+report names, counted from the series' physical game 1 on record
+(main._team_game_token_seats, _team_game_first_game_refusal; migrations 354
+and 359). Nothing in the API writes that origin, so in production every
+leave goes to an admin; the beta's own lab writes one (LAB_FIRST in
+test_team_series_report_dc.py) to exercise the readers of an origin, and
+this fixture does the same: the series carries LAB_FIRST, every seeded post
+carries game 1's token of the game in progress, and both reports name it
+(_LAB_TOKENS). The orderings are then about what they were written for --
+which report reaches the row first -- on a game the record proves played.
+
 WHAT IS STUBBED, AND WHAT IS NOT. _complete_team_series_with_ratings is
 replaced by a recorder that performs the one write the real helper's callers
 depend on (status='completed') and counts its invocations. Standing up Glicko,
@@ -78,9 +90,30 @@ SQL_DIR = pathlib.Path(__file__).resolve().parents[1] / "sql"
 MIGRATION = SQL_DIR / "356_team_series_dc_fallback_at.sql"
 # The lead-forfeit hotfix's per-game record: main's own migrations, executed
 # verbatim before 356 (the module docstring, THE PER-GAME RECORD).
+# 354 and 359 are the v1.41.0 beta's: on the merged tree the per-game record
+# keeps the physical game's token (354) and the series its first game's nonce
+# (359), and _record_team_game_points and the report read both.
 PERGAME_MIGRATIONS = (SQL_DIR / "348_team_series_games.sql",
                       SQL_DIR / "351_team_series_games_identity.sql",
-                      SQL_DIR / "352_team_series_games_attested_seats.sql")
+                      SQL_DIR / "352_team_series_games_attested_seats.sql",
+                      SQL_DIR / "354_team_series_games_game_token.sql",
+                      SQL_DIR / "359_team_series_first_game_nonce.sql")
+# The physical game 1 this fixture writes on every series (the beta's lab
+# origin, test_team_series_report_dc.LAB_FIRST), and the wire token of each
+# series' game in progress, which both reports name.
+LAB_FIRST = "5eed1ab00f1e2d3c"
+_LAB_TOKENS = {}
+
+
+def _lab_token(game):
+    """(wire, (nonce, ordinal, epoch)) of game `game` ((ordinal, room), as
+    main._team_game_identity names it), counted from LAB_FIRST with the
+    game's own number as its epoch."""
+    ordinal = int(game[0])
+    nonce = main._team_game_chain_nonce(LAB_FIRST, ordinal, ordinal)
+    return "%s:%d:%d" % (nonce, ordinal, ordinal), (nonce, ordinal, ordinal)
+
+
 # The sitting room every seeded series stores; its per-game record is filed
 # in it. The reports below name no room, so neither room fence refuses them.
 SITTING_ROOM = "sct-ordering0001"
@@ -342,10 +375,14 @@ async def _fresh_series(t2_wins: int = 1, played=(0, 2)):
     # The game in progress, named by the helper the report's own read uses
     # (the stored wins and room), and each played seat's attested post of it.
     game = main._team_game_identity(0, t2_wins, SITTING_ROOM)
+    wire, token = _lab_token(game)
+    _LAB_TOKENS[str(ids["sid"])] = wire
     async with Session() as s:
+        await s.execute(text("UPDATE team_series SET first_game_nonce = :n WHERE id = :sid"),
+                        {"n": LAB_FIRST, "sid": ids["sid"]})
         for seat in played:
             assert await main._record_team_game_points(
-                s, ids["sid"], 1, 1, game, seat, attested=game), (game, seat)
+                s, ids["sid"], 1, 1, game, seat, attested=game, token=token), (game, seat)
         await s.commit()
     return engine, Session, ids
 
@@ -356,7 +393,8 @@ async def _fallback(Session, sid):
         return await main.team_series_report_dc(
             series_id=str(sid), reporter_steam_id=SID_T2A,
             dc_player_steam_id=SID_T1A, t1_points_total=0, t2_points_total=0,
-            photon_room_id=None, is_fallback=True, hmac_sig="", db=s)
+            photon_room_id=None, is_fallback=True, hmac_sig="",
+            game_token=_LAB_TOKENS.get(str(sid)), token_sig="", db=s)
 
 
 async def _real_totals(Session, sid):
@@ -365,7 +403,8 @@ async def _real_totals(Session, sid):
         return await main.team_series_report_dc(
             series_id=str(sid), reporter_steam_id=SID_T2A,
             dc_player_steam_id=SID_T1A, t1_points_total=3, t2_points_total=4,
-            photon_room_id=None, is_fallback=False, hmac_sig="", db=s)
+            photon_room_id=None, is_fallback=False, hmac_sig="",
+            game_token=_LAB_TOKENS.get(str(sid)), token_sig="", db=s)
 
 
 async def _row(Session, sid):
@@ -983,8 +1022,15 @@ class _RecordStatements:
         from sqlalchemy import event
         event.remove(self._engine, "before_cursor_execute", self._fn)
 
+    # Savepoint control writes nothing. On the v1.41.0 beta merge the hourly
+    # service-account refresh (main._service_player_uuids, which the route's
+    # service-subject assertion calls) runs inside db.begin_nested(), so a
+    # read-only route issues SAVEPOINT / RELEASE SAVEPOINT around its SELECT.
+    _SAVEPOINT_CONTROL = ("SAVEPOINT ", "RELEASE SAVEPOINT ", "ROLLBACK TO SAVEPOINT ")
+
     def non_selects(self):
-        return [s for s in self.seen if not s.upper().startswith("SELECT")]
+        return [s for s in self.seen if not s.upper().startswith("SELECT")
+                and not s.upper().startswith(self._SAVEPOINT_CONTROL)]
 
 
 def test_the_read_only_status_route_issues_only_selects():

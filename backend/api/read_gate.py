@@ -193,6 +193,9 @@ WRITE_ON_GET: dict[str, str] = {
                                  "sender colours",
     "/api/v1/tournaments/players/{steam_id}/penalty": "the handler recomputes the penalty row "
                                                       "and commits",
+    "/api/v1/pc/face/preview": "session-reached: the caller's own card is drawn by the bot's "
+                               "/card helper, whose Steam prime writes the avatar cache and "
+                               "releases portrait blobs (the class of /api/v1/pc/packs/result)",
 }
 
 # Routes test_write_on_get_inventory flags that are NOT write-on-get, each
@@ -260,6 +263,18 @@ WRITE_REVIEWED: dict[str, tuple[frozenset, str]] = {
                    "_pc_steam_write"}), _R_INTERNAL),
     "/api/v1/internal/stream-posts/pending": (frozenset({"internal_stream_posts_pending"}),
                                               _R_INTERNAL),
+    "/api/v1/internal/channel-posts/pending": (
+        frozenset({"pending_channel_posts"}),
+        _R_INTERNAL + "; a designed claim: the poll claims each row it hands out "
+        "(claimed_at, claimed_token) and records handed_revision and "
+        "handed_fingerprint, so a row is rendered by the holder of its claim only "
+        "(ecd12d05)"),
+    "/api/v1/internal/pending-dms": (
+        frozenset({"_PENDING_DM_RETIRE_SQL", "internal_pending_dms"}),
+        _R_INTERNAL + "; a designed claim: each poll first marks undeliverable the "
+        "rows past the hand-out cap or the age bound, then picks, locks and claims "
+        "one batch in one statement, and the claim prevents a double hand-out "
+        "(5c0f605a)"),
 }
 _R_PORTAL = ("the portal token's first-use address binding (_portal_auth), written only for "
              "a presented portal token; PORTAL: the gate refuses nothing")

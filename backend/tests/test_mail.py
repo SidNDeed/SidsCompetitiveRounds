@@ -18,6 +18,8 @@ import asyncio
 import hashlib
 import hmac
 import inspect
+import textwrap
+import ast
 import json
 import math
 import os
@@ -74,8 +76,12 @@ class _Scalars:
 
 
 class _Res:
-    def __init__(self, rows=()):
+    def __init__(self, rows=(), rowcount=0):
         self._rows = list(rows)
+        # Item 5's relay fan-out reads res.rowcount. Without it the access
+        # raises, queue_mail_relay swallows it, and every send test quietly
+        # exercises the fail-soft branch while looking green.
+        self.rowcount = rowcount
 
     def mappings(self):
         return self
@@ -127,6 +133,7 @@ class FakeDb:
         self.bulk_grants = {}
         self.messages = {}
         self.recipients = {}
+        self.pending_dms = []               # item 5: the Discord relay queue
         self.blocks = set()
         self.played = set()
         self.cases = {}
@@ -147,11 +154,15 @@ class FakeDb:
 
     # seeding -------------------------------------------------------------
     def add_player(self, sid, name=None, mod_seen=True, mail_from="everyone", deleted=False,
-                   discord_id=None):
+                   discord_id=None, mail_discord_relay=True):
         pid = uuid.uuid4()
+        # mail_discord_relay defaults True here because migration 330 gives
+        # the COLUMN that default, for every row and not only linked ones
+        # (item 5). A fake that defaulted it False would make the relay look
+        # off by default and hide a regression in the real default.
         self.players[pid] = {"id": pid, "steam_id": sid, "display_name": name or f"P{sid[-1]}",
                              "mod_seen_at": (NOW - timedelta(days=1)) if mod_seen is True else mod_seen,
-                             "mail_from": mail_from,
+                             "mail_from": mail_from, "mail_discord_relay": mail_discord_relay,
                              "deleted_at": NOW if deleted else None, "discord_id": discord_id}
         return pid
 
@@ -168,13 +179,14 @@ class FakeDb:
 
     def seed_message(self, sender_id, recipients, subject="Hello", body="body text", created_at=None,
                      kind="direct", key=None, read=False, deleted_by_sender_at=None, thread_id=None,
-                     in_reply_to=None):
+                     in_reply_to=None, via="game"):
         mid = uuid.uuid4()
         self.messages[mid] = {"id": mid, "sender_id": sender_id, "kind": kind,
                               "thread_id": thread_id or mid, "in_reply_to": in_reply_to,
                               "subject": subject, "body": body, "idempotency_key": key or uuid.uuid4(),
                               "created_at": created_at or NOW,
-                              "deleted_by_sender_at": deleted_by_sender_at}
+                              "deleted_by_sender_at": deleted_by_sender_at,
+                              "via": via}      # item 5 / migration 330
         for rid, rkind, delivery in recipients:
             self.recipients[(mid, rid)] = {"kind": rkind, "delivery": delivery,
                                            "read_at": NOW if read else None, "deleted_at": None}
@@ -279,7 +291,10 @@ class FakeDb:
             p = self.player_by_sid(params["sid"])
             if p is None or p["deleted_at"] is not None:
                 return _Res([])
-            return _Res([{k: p[k] for k in ("id", "steam_id", "display_name", "mod_seen_at", "mail_from")}])
+            keys = ["id", "steam_id", "display_name", "mod_seen_at", "mail_from"]
+            if "mail_discord_relay" in sql:      # _mail_caller's longer form
+                keys += ["mail_discord_relay", "discord_id"]
+            return _Res([{k: p[k] for k in keys}])
         if "SELECT id, steam_id FROM players" in sql and "= ANY(" in sql:
             return _Res([{"id": p["id"], "steam_id": p["steam_id"]} for p in self.players.values()
                          if p["steam_id"] in set(params["sids"]) and p["deleted_at"] is None])
@@ -296,6 +311,40 @@ class FakeDb:
         if "UPDATE players SET mail_from" in sql:
             self.players[params["me"]]["mail_from"] = params["v"]
             return _Res()
+        if "INSERT INTO pending_dms (steam_id, content, mail_id, relay_code, sender_steam_id)" in sql:
+            # Item 5's relay fan-out. Mirrors the statement's own predicate
+            # -- delivered envelopes, linked Discord, relay on -- so a send
+            # test exercises the real path and the queue is observable.
+            #
+            # `relay_code` is carried here because the row cannot exist
+            # without it (ck_pending_dms_relay_code), and because it is the
+            # whole of the redesign: the thread identity is written in the
+            # mail's own transaction, before any Discord message exists.
+            n = 0
+            for (mid_k, rid), r in self.recipients.items():
+                if str(mid_k) != str(params["mid"]) or r["delivery"] != "delivered":
+                    continue
+                p = self.players.get(rid)
+                if p and p["discord_id"] is not None and p["mail_discord_relay"]:
+                    self.pending_dms.append({"steam_id": p["steam_id"],
+                                             "content": params["content"],
+                                             "mail_id": params["mid"],
+                                             "relay_code": params["code"],
+                                             "sender_steam_id": params.get("sender") or None,
+                                             "cancelled_at": None})
+                    n += 1
+            return _Res(rowcount=n)
+        # The relay-off gate (round 3 finding 19): FOR UPDATE on the
+        # player's own row, the first lock on the OFF edge of both toggles.
+        # Emulated as the read it also is and recorded as a lock; the lock
+        # itself is exercised on PostgreSQL in test_mail_discord_relay.
+        if "FROM players WHERE id = :me FOR UPDATE" in sql:
+            p = self.players.get(params["me"])
+            self.locks.append(("relay-off-gate", params["me"]))
+            return _Res([(p["steam_id"],)] if p else [])
+        if "UPDATE players SET mail_discord_relay" in sql:
+            self.players[params["me"]]["mail_discord_relay"] = params["r"]
+            return _Res()
         # the deletion ledger (review r3)
         if "FROM deleted_steam_ids" in sql:
             if "= ANY(" in sql:
@@ -308,7 +357,17 @@ class FakeDb:
         if "pg_advisory_xact_lock(hashtext('ban-rate:'" in sql:
             self.locks.append(("ban-rate", params["adm"]))
             return _Res([(1,)])
-        if "pg_advisory_xact_lock(hashtext(:sid))" in sql:
+        # The identity lock in EITHER spelling. This used to pin the exact
+        # literal `hashtext(:sid)`, so when _mail_lock_identities moved onto
+        # the shared _identity_lock_many -- which spells its bind
+        # `CAST(:sid AS text)` (#275) -- the fake silently stopped
+        # recognising it, on_identity_lock stopped firing, and 84 tests
+        # failed for that one reason. Match the SHAPE (an advisory lock on
+        # a :sid bind), not one rendering of it. The two literal-keyed
+        # classes above have already returned, and the quoted-key guard
+        # keeps a future one from being miscounted as an identity.
+        if ("pg_advisory_xact_lock(hashtext(" in sql
+                and chr(39) not in sql and "sid" in params):
             self.locks.append(("identity", params["sid"]))
             if self.on_identity_lock is not None:
                 self.on_identity_lock(params["sid"])        # "a deletion committed while we waited for this lock"
@@ -437,7 +496,11 @@ class FakeDb:
                                   "in_reply_to": params.get("irt"), "subject": params["subj"],
                                   "body": params["body"], "idempotency_key": params["key"],
                                   "created_at": self.message_created_at, "deleted_by_sender_at": None,
-                                  "recipient_count": None}
+                                  "recipient_count": None,
+                                  # Item 5: the send core binds it; the
+                                  # broadcast insert does not, and takes the
+                                  # column default exactly as the table does.
+                                  "via": params.get("via", "game")}
             return _Res()
         if "UPDATE mail_messages SET recipient_count" in sql:
             self.messages[params["mid"]]["recipient_count"] = int(params["n"])
@@ -741,6 +804,64 @@ class FakeDb:
         # ...and first WAITS for any Discord line in flight naming the player (r7 H2): none here
         if "MAX(l.until) - clock_timestamp()" in sql:
             return _Res()
+        # A1 r2: the identity barrier bounds its lock WAIT (self-review
+        # finding 2). Recognised rather than merely tolerated: SET LOCAL
+        # governs only the statements that FOLLOW it, so a timeout issued
+        # after the first identity lock is decoration — and the mail
+        # lattice's tests are exactly the ones that assert lock order.
+        if sql.startswith("SET LOCAL lock_timeout"):
+            # The POSITION claim (the SET precedes the locks it governs)
+            # is asserted where it is true and checkable: inside
+            # _identity_lock_many's own statement sequence, in
+            # test_a1_identity_formation.py. It cannot be asserted here,
+            # because this fake is one object across many simulated
+            # requests while SET LOCAL is per TRANSACTION -- an identity
+            # lock from an earlier send is not "already taken" for this one.
+            # Three forms reach here: the arming, which must carry the
+            # constant; the re-arming before each later identity lock (merge
+            # pass 5, R2-C-L1: the barrier spends ONE budget, so each later
+            # lock waits only what is left of it, never more than the
+            # constant); and the disarming that follows the barrier.
+            rearm = re.match(r"SET LOCAL lock_timeout = '(\d+)ms'$", sql.strip())
+            assert (sql.rstrip().endswith("DEFAULT")
+                    or str(main.FORMATION_LOCK_TIMEOUT_MS) in sql
+                    or (rearm is not None
+                        and 1 <= int(rearm.group(1)) <= main.FORMATION_LOCK_TIMEOUT_MS)), sql
+            return _Res([])
+        # Deleting a mail WITHDRAWS the relay DM that has not gone out
+        # yet. Undelivered only -- a DM already sent is out, and its row has
+        # to survive because the thread code printed in that DM resolves
+        # through it. Cancelled rather than deleted for exactly that reason,
+        # which is why this arm marks the row instead of dropping it: an arm
+        # that deleted would let a test pass while the player's reply to an
+        # already-sent mail stopped resolving.
+        if sql.startswith("UPDATE pending_dms SET cancelled_at = NOW()") \
+                and "WHERE mail_id = :mid" in sql:
+            hit = 0
+            for row in self.pending_dms:
+                if str(row.get("mail_id")) == str(params["mid"]) \
+                        and row.get("steam_id") == params["sid"] \
+                        and row.get("cancelled_at") is None:
+                    row["cancelled_at"] = NOW
+                    hit += 1
+            return _Res(rowcount=hit)
+        # ...and turning the relay OFF withdraws the whole backlog. Same
+        # statement shape, different predicate and a different caller: the
+        # bot's `/mail relay off` and the client's mail-settings PUT both
+        # run mail_discord.RELAY_OFF_CANCEL_SQL, which is defined once so
+        # the two cannot drift into meaning different things (#329/#341).
+        # Keyed on relay_code, as the statement is (round 2 finding 6): a
+        # tombstone -- mail purged, mail_id NULL -- is still a relay row.
+        if sql.startswith("UPDATE pending_dms SET cancelled_at = NOW()") \
+                and "WHERE steam_id = :sid" in sql:
+            hit = 0
+            for row in self.pending_dms:
+                if row.get("steam_id") == params["sid"] \
+                        and row.get("relay_code") is not None \
+                        and row.get("cancelled_at") is None:
+                    row["cancelled_at"] = NOW
+                    hit += 1
+            return _Res(rowcount=hit)
         raise AssertionError(f"unexpected statement: {sql[:120]}")
 
 
@@ -921,10 +1042,15 @@ def test_advisory_lock_is_taken_first_and_pinned_in_the_send_span():
     lock_i = next(i for i, s in enumerate(db.statements) if "hashtext('mail:'" in s)
     idem_i = next(i for i, s in enumerate(db.statements) if "idempotency_key = :key" in s)
     ins_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_messages" in s)
-    ident_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+    ident_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in s)
     assert ident_i < lock_i < idem_i < ins_i                          # identity lattice -> sender lock -> replay -> write
     assert db.locks == [("identity", A_SID), ("mail", ids[A_SID])]
-    for fn in (main.mail_send, main.mail_reply):
+    # _mail_reply_core, not mail_reply: item 5 extracted the reply body so
+    # the Discord reply route runs the identical gates, and the lock block
+    # moved with it verbatim. This is the only check on the REPLY path's
+    # ordering -- the behavioural half above exercises mail_send -- so it
+    # follows the code rather than being dropped.
+    for fn in (main.mail_send, main._mail_reply_core):
         src = inspect.getsource(fn)
         assert src.index("_mail_lock_identities(") < src.index("_mail_lock_sender(") \
             < src.index("_mail_prior_send(") < src.index("_mail_sender_gates(")
@@ -1344,7 +1470,8 @@ def test_read_delete_detail_and_status_revision_monotonic():
     db.message_created_at = NOW
     m2 = _send(db, [B_SID], cc=[C_SID], subject="two")["id"]
     st = _status(db, "tokB")
-    assert st == {"unread": 2, "revision": "2", "mail_from": "everyone"}
+    assert st == {"unread": 2, "revision": "2", "mail_from": "everyone",
+                  "discord_relay": True, "discord_linked": False}
     read = _run(main.mail_read(m1, _req("tokB"), db))
     assert read["read_at"] == NOW.isoformat() and _status(db, "tokB")["unread"] == 1
     detail = _run(main.mail_detail(m2, _req("tokB"), db))
@@ -1388,11 +1515,229 @@ def test_block_list_is_owner_only():
 
 def test_settings_route_owns_mail_from():
     db, ids = _world()
-    assert _run(main.mail_settings_get(_req("tokA"), db)) == {"mail_from": "everyone"}
+    assert _run(main.mail_settings_get(_req("tokA"), db)) == {
+        "mail_from": "everyone", "discord_relay": True, "discord_linked": False}
     assert _run(main.mail_settings_put(main._MailSettingsReq(mail_from="Played"), _req("tokA"), db)) == {"mail_from": "played"}
     assert db.players[ids[A_SID]]["mail_from"] == "played"
     assert _raises(main.mail_settings_put(main._MailSettingsReq(mail_from="friends"), _req("tokA"), db)).detail == "mail_from_invalid"
     assert db.players[ids[A_SID]]["mail_from"] == "played"
+
+
+def test_the_relay_flag_is_left_alone_by_a_client_that_does_not_send_it():
+    """Item 5. A 1.40.3 client PUTs {mail_from} and knows nothing about the
+    relay. If an absent field meant False, every settings save from an old
+    client would silently turn the relay off for a player who never asked
+    -- so absent must mean "leave it alone", and it is asserted here rather
+    than trusted to the Optional default."""
+    db, ids = _world()
+    assert db.players[ids[A_SID]]["mail_discord_relay"] is True
+    _run(main.mail_settings_put(main._MailSettingsReq(mail_from="played"), _req("tokA"), db))
+    assert db.players[ids[A_SID]]["mail_discord_relay"] is True, \
+        "an old client's save must not reset a preference it cannot see"
+    out = _run(main.mail_settings_put(
+        main._MailSettingsReq(mail_from="played", discord_relay=False), _req("tokA"), db))
+    # Both fields were SENT, so both are echoed. `withdrawn` rides along
+    # as a report of what turning the relay off did to the queue.
+    assert out["mail_from"] == "played" and out["discord_relay"] is False
+    assert out["withdrawn"] == 0, "nothing was queued, so nothing was withdrawn"
+    assert db.players[ids[A_SID]]["mail_discord_relay"] is False
+    # ...and the GET reports what was stored, not the column default.
+    got = _run(main.mail_settings_get(_req("tokA"), db))
+    assert got["discord_relay"] is False and got["discord_linked"] is False
+
+
+def test_the_mail_policy_is_left_alone_by_a_put_that_only_moves_the_relay():
+    """THE SYMMETRIC CASE, and the one the first round got wrong.
+
+    The test above asserts an old client cannot clobber the relay. It passed
+    while the opposite direction was fully broken: `_MailSettingsReq` still
+    carried a second `mail_from: str = "everyone"` below the Optional one,
+    Pydantic takes the later declaration, and so a PUT meaning "just turn
+    the relay off" quietly reset a player's "who may mail me" to everyone.
+    One direction asserted is not the rule asserted -- the rule is that an
+    ABSENT field never writes, whichever field is absent."""
+    db, ids = _world()
+    _run(main.mail_settings_put(main._MailSettingsReq(mail_from="nobody"), _req("tokA"), db))
+    assert db.players[ids[A_SID]]["mail_from"] == "nobody"
+
+    req = main._MailSettingsReq(discord_relay=False)
+    assert req.mail_from is None, "an unset mail_from must not materialise a value"
+    out = _run(main.mail_settings_put(req, _req("tokA"), db))
+    # The RULE, not the whole dict: an absent field must not be echoed as
+    # written. `withdrawn` is not an echo of an unsent field -- it reports
+    # what turning the relay off did to the queue -- so pinning the dict
+    # whole would fail here for a reason this test is not about.
+    assert "mail_from" not in out, "a field nobody sent must not be echoed as written"
+    assert out["discord_relay"] is False
+    assert out["withdrawn"] == 0, "nothing was queued, so nothing was withdrawn"
+    assert db.players[ids[A_SID]]["mail_from"] == "nobody", \
+        "toggling the relay must not rewrite who may mail this player"
+    assert db.players[ids[A_SID]]["mail_discord_relay"] is False
+
+    # ...and a PUT that carries neither field is a caller bug, not a no-op.
+    assert _raises(main.mail_settings_put(
+        main._MailSettingsReq(), _req("tokA"), db)).detail == "mail_from_or_relay_required"
+
+
+def test_turning_the_relay_off_withdraws_what_is_still_queued():
+    """The preference used to be consulted only by the fan-out that CREATES
+    rows, so it governed nothing that already existed: a player who turned
+    the relay off while the bot was down still received the whole backlog
+    when it came back.
+
+    Undelivered only, and CANCELLED rather than deleted -- a DM already sent
+    is out, and its row is what makes the thread code printed in that DM
+    resolve. Deleting it would turn "that mail is gone" into a reply that
+    names nothing at all.
+
+    This is also the negative control for the three `withdrawn == 0`
+    assertions elsewhere in this file: a statement matching no rows would
+    satisfy all of them."""
+    db, ids = _world()
+    mid = "11111111-2222-3333-4444-555555555555"
+    db.pending_dms.extend([
+        # this player's, still queued -- the one that must go
+        {"steam_id": A_SID, "content": "queued relay", "mail_id": mid,
+         "relay_code": "SCR-AAAAAAAAAAAA", "cancelled_at": None},
+        # this player's, already DMed: it is out, and its row is the route
+        # a reply to that DM still resolves through
+        {"steam_id": A_SID, "content": "sent relay", "mail_id": mid,
+         "relay_code": "SCR-BBBBBBBBBBBB", "cancelled_at": None,
+         "delivered_at": NOW},
+        # an operational DM -- nothing to do with any mail, and not the
+        # relay preference's business
+        {"steam_id": A_SID, "content": "your bug report was answered",
+         "mail_id": None, "relay_code": None, "cancelled_at": None},
+        # someone else's queued relay
+        {"steam_id": B_SID, "content": "other player relay", "mail_id": mid,
+         "relay_code": "SCR-CCCCCCCCCCCC", "cancelled_at": None},
+    ])
+    out = _run(main.mail_settings_put(
+        main._MailSettingsReq(discord_relay=False), _req("tokA"), db))
+    assert out["discord_relay"] is False
+    cancelled = [r["content"] for r in db.pending_dms if r["cancelled_at"]]
+    assert out["withdrawn"] >= 1, (
+        "the backlog was not withdrawn: %s" % out)
+    assert "queued relay" in cancelled, cancelled
+    assert "your bug report was answered" not in cancelled, (
+        "an operational DM was withdrawn by a MAIL relay preference")
+    assert "other player relay" not in cancelled, (
+        "the withdrawal reached another player's queue")
+    # ...and turning it back ON withdraws nothing, because the statement runs
+    # on the OFF edge only.
+    before = len(cancelled)
+    out2 = _run(main.mail_settings_put(
+        main._MailSettingsReq(discord_relay=True), _req("tokA"), db))
+    assert "withdrawn" not in out2 or out2["withdrawn"] == 0, out2
+    assert len([r for r in db.pending_dms if r["cancelled_at"]]) == before
+
+
+def test_both_relay_toggles_run_the_same_withdrawal_statement():
+    """`/mail relay off` in Discord and the in-game settings PUT are two
+    routes onto one decision. Written out twice they would drift into meaning
+    different things by the same name, which is a cost this project has
+    already paid (#329/#341) -- so there is one statement and both import it.
+
+    MUTATION: paste a second copy of the UPDATE into main.py. Must fail."""
+    import mail_discord as _md
+    assert isinstance(_md.RELAY_OFF_CANCEL_SQL, str)
+    src_ = inspect.getsource(main.mail_settings_put)
+    assert "mail_discord.RELAY_OFF_CANCEL_SQL" in src_, (
+        "the client toggle does not use the shared statement")
+    assert "UPDATE pending_dms SET cancelled_at" not in src_, (
+        "the client toggle has grown its own copy of the withdrawal")
+    # The statement withdraws UNDELIVERED mail rows for one player, and says
+    # so in its predicate rather than relying on the caller. A mail row is
+    # one with a relay_code: a tombstone has lost its mail_id and is still
+    # one (round 2 finding 6).
+    flat = " ".join(_md.RELAY_OFF_CANCEL_SQL.split())
+    for clause in ("steam_id = :sid", "relay_code IS NOT NULL",
+                   "delivered_at IS NULL", "cancelled_at IS NULL"):
+        assert clause in flat, (clause, flat)
+    assert "mail_id" not in flat, (
+        "the withdrawal keys on mail_id again, which a tombstone lacks: " + flat)
+    assert "DELETE" not in flat.upper(), flat
+
+
+def test_turning_the_relay_off_takes_its_row_lock_before_any_write(monkeypatch):
+    """Round 3 finding 19. The OFF edge of BOTH relay toggles takes
+    mail_discord's gate -- FOR UPDATE on the player's own players row --
+    before the preference write and before the withdrawal sweep. FOR UPDATE
+    is the one mode that waits for a send holding the envelope fan-out's
+    FOR KEY SHARE, and the wait only helps if the sweep comes after it.
+    test_mail_discord_relay runs the race itself on PostgreSQL through both
+    routes; this pins the order, the mode, and that the ON edge and a
+    mail_from-only PUT take no gate.
+
+    MUTATION: move either route's gate below its UPDATE, or weaken FOR
+    UPDATE to FOR NO KEY UPDATE. Must fail."""
+    import mail_discord as _md
+    for const in (_md.RELAY_OFF_GATE_BY_ID_SQL, _md.RELAY_OFF_GATE_BY_DISCORD_SQL):
+        flat = " ".join(const.split())
+        assert flat.startswith("SELECT ") and flat.endswith(" FOR UPDATE"), flat
+        assert "NO KEY" not in flat and "SHARE" not in flat, flat
+    # The lock the gate waits on. Weakening or dropping it undoes the gate
+    # without touching it, so it is pinned from here as well.
+    assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL
+
+    def _after_gate(statements, gate):
+        at = [i for i, s in enumerate(statements) if s == gate]
+        assert len(at) == 1, ("the OFF edge ran its gate %d times" % len(at), statements)
+        before = statements[:at[0]]
+        assert not any(_is_write(s) or " FOR " in s for s in before), (
+            "a write or a row lock came before the relay-off gate", before)
+        after = statements[at[0] + 1:]
+        assert _md.RELAY_OFF_CANCEL_SQL in after, after
+        return after
+
+    # the in-game settings PUT, with a mail_from write in the same request
+    db, ids = _world()
+    out = _run(main.mail_settings_put(main._MailSettingsReq(
+        mail_from="played", discord_relay=False), _req("tokA"), db))
+    assert out["discord_relay"] is False and out["mail_from"] == "played", out
+    after = _after_gate(db.statements, _md.RELAY_OFF_GATE_BY_ID_SQL)
+    assert any(s.startswith("UPDATE players SET mail_from") for s in after), after
+    assert any(s.startswith("UPDATE players SET mail_discord_relay") for s in after), after
+    assert ("relay-off-gate", ids[A_SID]) in db.locks, db.locks
+    for req in (main._MailSettingsReq(discord_relay=True),
+                main._MailSettingsReq(mail_from="everyone")):
+        db, ids = _world()
+        _run(main.mail_settings_put(req, _req("tokA"), db))
+        assert _md.RELAY_OFF_GATE_BY_ID_SQL not in db.statements, (req, db.statements)
+
+    # the bot's `/mail relay off`
+    class _Rec:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, clause, params=None):
+            self.statements.append(str(clause))
+            return SimpleNamespace(rowcount=0, first=lambda: ("1",))
+
+        async def commit(self):
+            self.statements.append("COMMIT")
+
+    monkeypatch.setenv("API_SECRET_KEY", "the-key")
+    for enabled in (False, True):
+        rec = _Rec()
+        _run(_md.mail_relay_pref(_md._RelayPrefReq(discord_id="d-1", enabled=enabled),
+                                 x_internal_key="the-key", db=rec))
+        if enabled:
+            assert _md.RELAY_OFF_GATE_BY_DISCORD_SQL not in rec.statements, rec.statements
+            continue
+        after = _after_gate(rec.statements, _md.RELAY_OFF_GATE_BY_DISCORD_SQL)
+        assert any(s.startswith("UPDATE players SET mail_discord_relay") for s in after), after
+
+
+def test_neither_settings_field_carries_a_default_that_could_write():
+    """The defect above was a DUPLICATE DECLARATION, which reads as perfectly
+    normal code and which a behavioural test only catches for the field it
+    happens to exercise. Pin the model itself: a non-None default on either
+    field means an absent field writes, for every caller at once."""
+    for name in ("mail_from", "discord_relay"):
+        f = main._MailSettingsReq.model_fields[name]
+        assert f.default is None and not f.is_required(), \
+            "%s defaults to %r -- an absent field would write it" % (name, f.default)
 
 
 # ── delete-account (B-8) and retention ────────────────────────────────────
@@ -1406,13 +1751,42 @@ def test_delete_account_handles_every_new_table_by_name():
                     ("DELETE FROM mail_censor_hits WHERE sender_id = :pid", 1),
                     ("UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :sid", 1),     # M11
                     ("UPDATE mail_bulk_grants SET granted_by = :tomb WHERE granted_by = :sid", 1),       # M11
-                    ("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid", 1)):                         # migration 300
+                    ("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid", 1),                          # migration 300
+                    # item 5 / migration 330: a relay DM row is a COPY of the
+                    # mail held outside the envelope tables, and nothing reaches
+                    # it by cascade -- this endpoint anonymises rather than
+                    # deletes, and a purged mail leaves the row as a tombstone.
+                    # Both directions -- addressed to, and sent by.
+                    ("text(_ERASE_RELAY_DMS_TO_SQL)", 1),
+                    ("text(_ERASE_RELAY_DMS_FROM_SQL)", 1)):
         assert src.count(stmt) == n, stmt
+    # ...and the WHOLE of each, predicate included; only the bind NAMES are
+    # left free. The sent-by one was once matched on its prefix, and the
+    # prefix does not contain the clause that decides whose rows go:
+    # `sender_id <> :pid` kept every DM this player sent and deleted
+    # everyone else's, and read as correct. Round 2 finding 8 moved both off
+    # a mail_id-only key, which a purged mail's tombstone no longer has.
+    # Which local each bind takes is proven by running them, in
+    # test_mail_discord_relay's erasure test, bound as this handler binds.
+    def _shape(sql):
+        return re.sub(r"(?<!:):[A-Za-z_]\w*", ":?", " ".join(sql.split()))
+    assert _shape(main._ERASE_RELAY_DMS_TO_SQL) == (
+        "DELETE FROM pending_dms WHERE relay_code IS NOT NULL AND steam_id = :?"), (
+        main._ERASE_RELAY_DMS_TO_SQL)
+    assert _shape(main._ERASE_RELAY_DMS_FROM_SQL) == (
+        "DELETE FROM pending_dms WHERE sender_steam_id = :?"
+        " OR mail_id IN (SELECT id FROM mail_messages WHERE sender_id = :?)"), (
+        main._ERASE_RELAY_DMS_FROM_SQL)
     # H3: the second envelope sweep and the revision row go AFTER the anonymising rewrite has been flushed
     rewrite = src.index('player.steam_id = f"deleted_')
     flush = src.index("await db.flush()", rewrite)
     assert rewrite < flush < src.rindex("DELETE FROM mail_recipients WHERE recipient_id = :pid") \
         < src.index("DELETE FROM mail_inbox_rev") < src.index("await db.commit()", flush)
+    # The relay queue goes after the flush too, and for the same reason: a
+    # send racing the deletion either committed before the rewrite (its rows
+    # are caught here) or blocks and then finds deleted_at set.
+    for const in ("_ERASE_RELAY_DMS_TO_SQL", "_ERASE_RELAY_DMS_FROM_SQL"):
+        assert flush < src.index(const) < src.index("await db.commit()", flush), const
     assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL and "FOR KEY SHARE OF p" in main._MAIL_BROADCAST_FANOUT_SQL
     # sent messages and the moderation evidence are retained (the recipients' and the moderators' property)
     assert "DELETE FROM mail_messages" not in src and "DELETE FROM moderation_cases" not in src
@@ -1645,7 +2019,7 @@ def test_every_mutation_joins_the_identity_lattice(route, victim, refusal):
     with _admin_secret():
         _run(_lattice_coro(db, route, orig, case_id))
     sid = actor if victim == "actor" else target
-    lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+    lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in s)
     reread_i = next(i for i, s in enumerate(db.statements) if "FROM players WHERE id = :pid FOR NO KEY UPDATE" in s)
     write_i = next(i for i, s in enumerate(db.statements) if _is_write(s))
     assert lock_i < reread_i < write_i and ("identity", sid) in db.locks and db.commits >= 1
@@ -1683,7 +2057,8 @@ def test_status_revision_advances_in_commit_order_not_created_at():
     db, ids = _world()
     db.message_created_at = NOW
     first = _send(db, [B_SID], subject="newer timestamp, committed first")
-    assert _status(db, "tokB") == {"unread": 1, "revision": "1", "mail_from": "everyone"}
+    assert _status(db, "tokB") == {"unread": 1, "revision": "1", "mail_from": "everyone",
+                                   "discord_relay": True, "discord_linked": False}
     fan_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_recipients" in s)
     bump_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_inbox_rev" in s)
     assert fan_i < bump_i < db.commit_marks[0]                       # the bump is INSIDE the sending transaction: after its fan-out, before its commit (review r2 pin)
@@ -1927,12 +2302,18 @@ def test_client_parser_reads_the_keys_the_server_emits():
         return out
     server_keys = keys(payloads, set())
     required = {"messages", "next_cursor", "id", "thread_id", "kind", "sender", "steam_id", "name", "title_color",
-                "subject", "created_at", "read_at", "addressees", "in_reply_to", "body", "to", "cc",
-                "unread", "revision", "mail_from", "blocks"}
+                "subject", "created_at", "read_at", "addressees", "in_reply_to", "body", "to", "cc", "via",
+                "unread", "revision", "mail_from", "blocks",
+                "discord_relay", "discord_linked"}
     assert required <= client_keys, sorted(required - client_keys)  # the client still reads each of them
     assert required <= server_keys, sorted(required - server_keys)  # and the server still emits each
     assert set(payloads["sent"]["messages"][-1]["addressees"][0]) == {"steam_id", "name", "kind"}
-    assert set(payloads["status"]) == {"unread", "revision", "mail_from"}
+    # Item 5 added two keys here. They are in `required` above as well, so
+    # this pins BOTH halves: the server emits them and the C# parser binds
+    # them. (`required <= client_keys` is a subset check -- on its own it
+    # would never have noticed the server growing a key nothing reads.)
+    assert set(payloads["status"]) == {"unread", "revision", "mail_from",
+                                       "discord_relay", "discord_linked"}
 
 
 def test_report_reason_bound_matches_the_client():
@@ -2033,7 +2414,7 @@ def test_a_scrub_under_the_lock_is_written_as_the_tombstone(route, victim):
     with _admin_secret():
         res = _run(_lattice_coro(db, route, orig, case_id))
     assert res["status"] == "ok" and "v" in tomb and db.commits == 1
-    lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+    lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in s)
     reread_i = next(i for i, s in enumerate(db.statements) if "FROM players WHERE id = :pid FOR NO KEY UPDATE" in s)
     write_i = next(i for i, s in enumerate(db.statements) if _is_write(s))
     assert any("players" in s for s in db.statements[:lock_i])       # the route's first read of the identity precedes the lock ...
@@ -2132,7 +2513,7 @@ def test_a_deleted_admin_is_refused_while_a_never_created_one_acts():
                      main.admin_mail_broadcast(_bcast_req(), db)):
             exc = _raises(coro)
             assert (exc.status_code, exc.detail) == (403, "account_deleted")
-        lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+        lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in s)
         ledger_i = next(i for i, s in enumerate(db.statements) if "FROM deleted_steam_ids" in s)
         assert lock_i < ledger_i                                          # read under the lock, after it
         assert not db.admin_actions and A_SID not in db.bulk_grants

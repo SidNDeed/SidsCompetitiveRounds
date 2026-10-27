@@ -26,9 +26,21 @@ SRC = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 TEXT = open(SRC, encoding="utf-8").read()
 TREE = ast.parse(TEXT)
 
+# Item 11 added module-level names that poll_channel_posts reads: three helpers
+# it CALLS and the render cap both of its render paths are bounded by. They
+# have to be lifted with it. Leaving one out does not skip it — the loop's
+# broad `except Exception` swallows the NameError and logs "send failed", which
+# looks like a transport hiccup and silently costs every ack.
+# test_every_name_the_channel_post_loop_reads_is_defined_for_it holds this
+# list to the code, so a name the loop starts reading fails by name instead of
+# as a lost ack.
 WANT_FUNC = {"_modcase_uuid_ok", "_modcase_parse", "_modcase_custom_id", "_modcase_parse_custom_id",
-             "_modcase_view", "_modcase_render", "_modcase_click", "poll_channel_posts", "on_interaction"}
-WANT_ASSIGN = {"MODCASE_MARKER", "_MODCASE_BUTTONS", "_channel_post_sent", "_TDLC_ANSWERS"}
+             "_modcase_view", "_modcase_render", "_modcase_click", "poll_channel_posts", "on_interaction",
+             "_escape_md",   # _modcase_render escapes the names it prints (round 4, finding 23)
+             "_channel_post_ack_params", "_adopt_channel_post_message",
+             "_release_channel_post_claim"}
+WANT_ASSIGN = {"MODCASE_MARKER", "_MODCASE_BUTTONS", "_channel_post_sent", "_TDLC_ANSWERS",
+               "_CHANNEL_POST_MAX_RENDERS"}
 
 
 def _run(coro):
@@ -117,7 +129,11 @@ class _Api:
 
     async def get(self, path, timeout=8.0):
         self.calls.append(("GET", path, None))
-        assert path == "/internal/channel-posts/pending", path
+        # revisions=true since migration 338 (item 11): the bot declaring that
+        # it can edit a corrected message in place. These posts carry no
+        # posted_revision, which is the "never delivered" case, so every
+        # assertion below is still about the original fire-once path.
+        assert path == "/internal/channel-posts/pending?revisions=true", path
         return {"posts": list(self.posts)}
 
     async def post(self, path, params=None, timeout=None):
@@ -216,7 +232,7 @@ def _bot_ns(api, bot, session=_NO_SESSION_GIVEN, out=None):
         session = _Session(200, {})
     out = out if out is not None else []
     ns = {"discord": FAKE_DISCORD, "aiohttp": FAKE_AIOHTTP, "bot": bot, "api_get": api.get, "api_post": api.post,
-          "http_session": session, "API_SECRET_KEY": "internal-key", "API_BASE_URL": "http://api:8000",
+          "http_session": session, "API_SECRET_KEY": "internal-key", "API_BASE_URL": "http://api:8000", "re": re,
           "print": lambda *a, **k: out.append(" ".join(str(x) for x in a))}
     exec(compile(ast.Module(body=_lift(), type_ignores=[]), SRC, "exec"), ns)
     return ns
@@ -287,6 +303,65 @@ def test_lifted_functions_are_the_wired_ones():
     assert re.search(r"poll_channel_posts\.start\(\)", TEXT)
 
 
+def _names_read_but_not_bound(fn):
+    """The names a function's BODY loads that nothing inside it binds: its
+    globals and builtins. Decorators are not read, because the lift strips
+    them. Bound means a parameter, an assignment or loop target, an except
+    alias, an import, or a nested def or class, anywhere in it."""
+    bound, loads = set(), set()
+    for top in [fn.args] + fn.body:
+        for sub in ast.walk(top):
+            if isinstance(sub, ast.Name):
+                (loads if isinstance(sub.ctx, ast.Load) else bound).add(sub.id)
+            elif isinstance(sub, ast.arg):
+                bound.add(sub.arg)
+            elif isinstance(sub, ast.ExceptHandler) and sub.name:
+                bound.add(sub.name)
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                bound.update((a.asname or a.name).split(".")[0] for a in sub.names)
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(sub.name)
+    return loads - bound
+
+
+def test_every_name_the_channel_post_loop_reads_is_defined_for_it():
+    """A name the outbox loop reads that its test namespace does not define
+    is a NameError at run time, and inside poll_channel_posts that NameError
+    is swallowed by the broad except and printed as "send failed": the
+    symptom is a tick that stops part-way and reads as a transport failure,
+    several tests away from the cause. Round 5 of item 11 moved the render
+    cap to module level and the lift list above did not follow it, which
+    turned four of the tests below red on exactly that symptom. So the names
+    are read rather than waited for: the loop, and every lifted helper it
+    reaches, may load only names defined in the namespace _bot_ns builds, or
+    builtins. (on_interaction's other routes reach handlers this file neither
+    lifts nor drives; they are not behind this loop's except, and are not
+    walked.)"""
+    import builtins
+    available = set(_bot_ns(_Api([]), _Bot({}))) | set(dir(builtins))
+    funcs = {n.name: n for n in TREE.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in WANT_FUNC}
+    assert set(funcs) == WANT_FUNC, "a wanted function is not in discord_bot.py"
+    reach, todo = set(), ["poll_channel_posts"]
+    while todo:
+        name = todo.pop()
+        if name not in reach:
+            reach.add(name)
+            todo.extend(n for n in _names_read_but_not_bound(funcs[name]) if n in funcs)
+    # The walk has to follow calls, or it checks the loop alone and passes.
+    assert {"_channel_post_ack_params", "_adopt_channel_post_message",
+            "_release_channel_post_claim", "_modcase_parse"} <= reach, (
+        "the walk did not follow the loop's calls: it reached only %s" % sorted(reach))
+    missing = {name: sorted(_names_read_but_not_bound(funcs[name]) - available)
+               for name in sorted(reach)}
+    missing = {k: v for k, v in missing.items() if v}
+    assert not missing, (
+        "the outbox loop reads names its test namespace does not define, so "
+        "the path that reaches them raises NameError inside the loop's broad "
+        "except and is logged as a send failure: %s. Lift them (WANT_FUNC / "
+        "WANT_ASSIGN) or supply them in _bot_ns." % missing)
+
+
 def test_tick_posts_with_buttons_then_stamps_then_acks_in_order():
     case_id = str(uuid.uuid4())
     api = _Api([_case_post(case_id, 1), _plain_post(2)])
@@ -298,10 +373,15 @@ def test_tick_posts_with_buttons_then_stamps_then_acks_in_order():
     assert [b.kw["custom_id"] for b in view.children] == [f"modcase:{k}:{case_id}" for k, *_ in ns["_MODCASE_BUTTONS"]]
     assert view.timeout is None and "view" not in ch.sent[1].kw       # a plain post carries no buttons
     assert ch.sent[0].kw["allowed_mentions"].kw == {"users": True, "everyone": False, "roles": False}
+    # Item 11: the ack now carries the Discord message id, so a later
+    # correction of this row edits that message instead of queueing a new one
+    # under it. `revision` is absent because these fixtures answer the
+    # pre-338 payload, and the endpoint reads an absent revision as "whatever
+    # is current" — the fire-once ack this test has always asserted.
     assert [c for c in api.calls if c[0] == "POST"] == [
         ("POST", f"/internal/moderation-cases/{case_id}/notified", None),    # M1: the stamp precedes the ack
-        ("POST", "/internal/channel-posts/ack", {"post_id": 1}),
-        ("POST", "/internal/channel-posts/ack", {"post_id": 2})]
+        ("POST", "/internal/channel-posts/ack", {"post_id": 1, "message_id": str(ch.sent[0].id)}),
+        ("POST", "/internal/channel-posts/ack", {"post_id": 2, "message_id": str(ch.sent[1].id)})]
     assert ns["_channel_post_sent"] == {} and api.posts == []
 
 

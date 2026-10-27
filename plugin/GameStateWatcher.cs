@@ -90,6 +90,18 @@ namespace CompetitiveRounds
         private static int liveCumP2 = 0;
         private static int liveSentRankedP1 = 0, liveSentRankedP2 = 0;
         private static int liveSentTeamP1 = 0, liveSentTeamP2 = 0;
+        // v1.41.0 beta round 5, finding F25: the physical game's token the last
+        // 2v2 post carried ("" = none), so the token's arrival is itself a
+        // reason to post; whether this seat still owes the game's publish (set
+        // at every cr_ff game start, retried each poll tick only while it waits
+        // for the host role inside the first round); and the last reason logged
+        // for not publishing. Round 6, finding F28: the readings of the score
+        // that end a game's token (round 5's high-water rounds, now seeded at
+        // the game start and on the points too) are the tracker's
+        // (TeamGameNumber.Live.ObserveScore).
+        private static string liveSentTeamToken = "";
+        private static bool teamTokenOwed;
+        private static string teamTokenLastWhy = "";
         private static int p1Points = 0;
         private static int p2Points = 0;
         private static int p1Rounds = 0;
@@ -237,6 +249,104 @@ namespace CompetitiveRounds
         private static int localFreezeCount = 0;
         private static int localFreezeFocusedCount = 0;   // resumed WITH focus = window-drag signature
         private static float localFreezeTotalSec = 0f;
+        // Counters trip at 0.5s; the per-event LOG trips at 0.2s; and since r2 a
+        // bounded AGGREGATE covers the 50-199 ms band, which is the class report
+        // #359 is actually about. That report's own bundle holds 94.9% of 32,917
+        // frames under 17 ms and only EIGHT frames at or above 200 ms, while 1,666
+        // sit in the 17-100 ms band and the worst in-combat class was 50-199 ms,
+        // 125 times. A 0.2s trip therefore could not observe the reported stutter
+        // at all: it is a threshold the evidence sits below (#342 — a check that
+        // cannot fail is worse than no check).
+        //
+        // VOLUME, stated as a cap rather than a hope. That report was already 27%
+        // diagnostic noise by line count, so the band cannot be logged per event:
+        //   * at most FREEZE_BAND_EXEMPLAR_CAP (10) individual band lines, so a
+        //     bundle carries examples with their dt and focus state;
+        //   * then aggregates only — one [FREEZE-BAND] summary per 60 s of
+        //     tracking, at most FREEZE_BAND_SUMMARY_CAP (12) per match, and only
+        //     when the band actually moved since the last one.
+        // Worst case is 22 added lines per match, against the 60 the >0.2s log may
+        // already spend.
+        //
+        // PER MATCH IS THE UNIT, and until this round it was not: `_freezeLogged`
+        // was initialised once and never reset, so FREEZE_LOG_CAP was a
+        // PER-PROCESS budget. A player's first match of a session could spend all
+        // 60 lines and every later match in that session reported no freeze line
+        // at all — the bundle from the match someone actually complained about
+        // then reads exactly like a match with no stalls in it. The reset below
+        // sits beside the counters' own reset, so all three caps (event lines,
+        // band exemplars, band summaries) are spent and refilled per match, which
+        // is the unit every sentence above already claimed.
+        private const float FREEZE_COUNT_SEC = 0.5f;
+        private const float FREEZE_LOG_SEC = 0.2f;
+        private const float FREEZE_BAND_SEC = 0.05f;
+        private const int FREEZE_LOG_CAP = 60;
+        private const int FREEZE_BAND_EXEMPLAR_CAP = 10;
+        private const int FREEZE_BAND_SUMMARY_CAP = 12;
+        private const float FREEZE_BAND_SUMMARY_SEC = 60f;
+        private static int _freezeLogged = 0;
+        private static int _bandCount = 0, _bandMaxMs = 0, _bandLogged = 0;
+        private static int _bandSummaries = 0, _bandSummarisedCount = 0;
+        private static float _bandTotalSec = 0f, _bandSummaryAt = -999f;
+
+        /// <summary>THE COUNTING-SEMANTIC EPOCH for local_freeze_count /
+        /// local_freeze_focused_count / local_freeze_total_sec.
+        ///
+        /// <para>Every build before this one tripped the freeze detector from
+        /// <c>Math.Max(dt, wallGap)</c> with both sources sampled every tick, so one
+        /// stall was counted TWICE — on the resume tick by the stopwatch and on the
+        /// next tick by unscaledDeltaTime. Every figure those builds reported is
+        /// inflated about 2x. The numbers are not wrong in a way a reader can see:
+        /// they are the same three columns, in the same range, and a mixed-era
+        /// comparison looks like a real difference between two players.</para>
+        ///
+        /// <para>A build label cannot separate the eras — a locally built DLL
+        /// reports the last shipped version (#301) — so the producer tags its own
+        /// output, exactly as BULLET_STATS_EPOCH does for the bullet counters.
+        /// 1 = the doubled definition; 2 = the monotonic single-trip definition.
+        /// 0 = the field was never sent, i.e. a client older than the tag, which is
+        /// UNKNOWN and must not be laundered into either era.</para>
+        ///
+        /// <para>SERVER SIDE IS OUT OF SCOPE for this client pass. The wire contract
+        /// this half establishes: `local_freeze_epoch` and `opp_freeze_epoch`,
+        /// integers, on the match-report body, plus cr_gstats field 24 carrying the
+        /// peer's value. Both are additive; the deployed schema ignores fields it
+        /// does not declare, so an old server keeps working and a new one can
+        /// partition the series.</para></summary>
+        internal const int FREEZE_COUNT_EPOCH = 2;
+
+        /// <summary>The epoch the PEER's freeze counters were produced under, via
+        /// cr_gstats field 24. 0 = the peer never sent it.</summary>
+        public static int OppFreezeEpoch { get; private set; }
+
+        /// <summary>True only when the peer's freeze counters were produced by our
+        /// own counting definition. Anything else — a silent old client, a garbled
+        /// field, an era we do not understand — is UNKNOWN.</summary>
+        public static bool OppFreezeCountersUsable => OppFreezeEpoch == FREEZE_COUNT_EPOCH;
+
+        /// <summary>One bounded aggregate line for the 50-199 ms band. `final` is
+        /// the match-end flush, which ignores the interval but still respects the
+        /// cap and still refuses to print a summary of nothing.</summary>
+        private static void FlushFreezeBandSummary(bool final)
+        {
+            try
+            {
+                if (_bandCount <= _bandSummarisedCount) return;          // nothing new to say
+                if (_bandSummaries >= FREEZE_BAND_SUMMARY_CAP) return;
+                float now = Time.unscaledTime;
+                if (!final && now - _bandSummaryAt < FREEZE_BAND_SUMMARY_SEC) return;
+                _bandSummaryAt = now;
+                _bandSummaries++;
+                int since = _bandCount - _bandSummarisedCount;
+                _bandSummarisedCount = _bandCount;
+                Plugin.Log.LogInfo($"[FREEZE-BAND] {(int)(FREEZE_BAND_SEC * 1000)}-"
+                    + $"{(int)(FREEZE_LOG_SEC * 1000) - 1}ms gaps: +{since} since the last summary, "
+                    + $"{_bandCount} this match, worst={_bandMaxMs}ms, total={_bandTotalSec:F2}s"
+                    + (_bandSummaries == FREEZE_BAND_SUMMARY_CAP
+                        ? " (summary cap reached — counting continues)" : ""));
+            }
+            catch { }
+        }
         private static readonly List<int> pingSamples = new List<int>();        // 3s cadence, aggregates reported
         private static int localRecvGapCount = 0;
         private static int localRecvGapMaxMs = 0;
@@ -323,6 +433,11 @@ namespace CompetitiveRounds
         private static string sharedGameToken = "";
         private static string previousGameToken = "";
         private static int matchStartServerTimestamp;
+        // Seat evidence B5: the master's numeric T0 from cr_game_token, held by
+        // BOTH seats once the shared token is adopted (the master keeps the
+        // value it published; the non-master adopts the published one).
+        private static int sharedGameT0;
+        private static bool sharedGameT0Set;
 
         // Game over
         private static bool gameOverReported = false;
@@ -1333,8 +1448,11 @@ namespace CompetitiveRounds
             if (pollTimer < 0.1f) return;
             pollTimer = 0f;
 
-            PollRoomState();
-            PollMatchState();
+            // Item 17 (METHOD CHANGE 1b, belt): each half contained, so a throw in
+            // one costs only that half's non-paying duties. No paying achievement
+            // predicate is reachable only through here (TickAchievementInput).
+            try { PollRoomState(); } catch (Exception e) { SafeAchLog("PollRoomState threw: " + e.Message); }
+            try { PollMatchState(); } catch (Exception e) { SafeAchLog("PollMatchState threw: " + e.Message); }
             if (isTracking) TryRefreshSharedGameToken();
             PollRoomlessGameScene();
             TickSpectateAttest();
@@ -1435,6 +1553,47 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The spectate mode a room's name prefix names ("" for a
+        /// name with none: a code room, which attests as 1v1 only while
+        /// RankedCodeRoom1v1InProgress). Shared by the attest ticker and the
+        /// master's spectator validation (session report round 5 MEDIUM 1),
+        /// so the tuple a validation reports observing is derived exactly as
+        /// the attest that wrote the room row derived it.</summary>
+        internal static string SpectateModeOfRoomPrefix(string room)
+        {
+            room = room ?? "";
+            return room.StartsWith("ranked_", StringComparison.Ordinal) ? "1v1"
+                : room.StartsWith("sct-", StringComparison.Ordinal) ? "1v1"
+                : room.StartsWith("team_", StringComparison.Ordinal) ? "2v2"
+                : room.StartsWith("ovt_", StringComparison.Ordinal) ? "1v2"
+                : room.StartsWith("ffa_", StringComparison.Ordinal) ? "ffa"
+                : "";
+        }
+
+        /// <summary>The fighters' steam ids in the canonical roster order:
+        /// sorted ordinal, so every fighter produces the identical byte
+        /// sequence (design section 6.3). Shared by the attest ticker and the
+        /// master's spectator validation (session report round 5 MEDIUM 1).</summary>
+        internal static List<string> SpectateFighterIds(Photon.Realtime.Player[] fighters)
+        {
+            var sids = new List<string>(fighters != null ? fighters.Length : 0);
+            if (fighters == null) return sids;
+            foreach (var f in fighters)
+            {
+                var s = RoomActors.SteamIdOf(f);
+                if (!string.IsNullOrEmpty(s)) sids.Add(s);
+            }
+            sids.Sort(StringComparer.Ordinal);
+            return sids;
+        }
+
+        /// <summary>Session report round 6 MEDIUM 1: the master's validation
+        /// had no attest answer for the tuple it observes (or the server
+        /// answered retry), so the next attest tick sends at once instead of
+        /// waiting out the 60 s throttle; it still sends only a complete
+        /// roster, and the answer is what the next validation carries.</summary>
+        internal static void RequestSpectateAttestSoon() { spectateAttestEdgePending = true; }
+
         private static void TickSpectateAttest()
         {
             try
@@ -1452,13 +1611,7 @@ namespace CompetitiveRounds
                 // room fallback trust). Seat reservation needs no bump here:
                 // the QueueJoiner creates every sct- room with
                 // fighterTarget + SEAT_CAP MaxPlayers like the queue rooms.
-                string mode =
-                    room.StartsWith("ranked_", StringComparison.Ordinal) ? "1v1"
-                    : room.StartsWith("sct-", StringComparison.Ordinal) ? "1v1"
-                    : room.StartsWith("team_", StringComparison.Ordinal) ? "2v2"
-                    : room.StartsWith("ovt_", StringComparison.Ordinal) ? "1v2"
-                    : room.StartsWith("ffa_", StringComparison.Ordinal) ? "ffa"
-                    : "";
+                string mode = SpectateModeOfRoomPrefix(room);
                 bool codeRoom = false;
                 if (mode.Length == 0)
                 {
@@ -1544,15 +1697,7 @@ namespace CompetitiveRounds
                 }
                 else target = 2;
 
-                var sids = new List<string>(fighters.Length);
-                foreach (var f in fighters)
-                {
-                    var s = RoomActors.SteamIdOf(f);
-                    if (!string.IsNullOrEmpty(s)) sids.Add(s);
-                }
-                // Canonical roster string: sorted ordinal — every fighter must
-                // produce the identical byte sequence (design §6.3).
-                sids.Sort(StringComparer.Ordinal);
+                var sids = SpectateFighterIds(fighters);
                 if (sids.Count != target) return;   // roster incomplete — nothing to attest yet
 
                 // Roster-freeze catch-up: code rooms never pass the
@@ -1837,6 +1982,9 @@ namespace CompetitiveRounds
         private static bool _lastBattleForPoisonEdge;
         public static void TickFrame()
         {
+            // Item 17 (D3): the three paying input predicates, FIRST - nothing in
+            // the tick runs ahead of them, and a throw inside marks all three acted.
+            try { TickAchievementInput(); } catch { MarkInputPredicatesActed("achievement tick threw"); }
             // [NET] telemetry BEFORE the spectator early-return — the
             // spectator seat needs the ping/fps/dispatch line most (bug 217:
             // the whole latency question was unanswerable from a bundle).
@@ -1890,25 +2038,74 @@ namespace CompetitiveRounds
             if (!isTracking) { _lastTickStopwatchMs = -1; return; }
             float dt = Time.unscaledDeltaTime;
             // July 21 item 2 — freeze detection BEFORE the dt>1 skip (that skip
-            // used to discard exactly the evidence). unscaledDeltaTime carries
-            // the gap on the resume frame; the independent Stopwatch cross-checks
-            // any engine smoothing. Focused resume = window-drag signature.
+            // used to discard exactly the evidence). Focused resume = window-drag
+            // signature.
+            //
+            // THE MONOTONIC STOPWATCH IS THE SOLE TRIP SOURCE (report #359). The old
+            // condition was `gap = Math.Max(dt, wallGap)` with BOTH sources sampled
+            // every tick — and Math.Max is an OR, not the "cross-check" the previous
+            // wording here claimed. One stall therefore tripped TWICE: on the resume
+            // tick the Stopwatch carries the gap while unscaledDeltaTime has not caught
+            // up, then on the NEXT tick unscaledDeltaTime carries it while the wall is
+            // already normal. #359's bundle holds the twin verbatim —
+            //   gap=1.40 dt=0.01 wall=1.40 n=1
+            //   gap=1.40 dt=1.40 wall=0.01 n=2
+            // These counters ship to the server as local_freeze_count /
+            // local_freeze_focused_count / local_freeze_total_sec, so EVERY freeze
+            // figure this seat has ever reported was inflated about 2x, and anything
+            // concluded from that series needs re-checking before it is trusted.
+            // A PEER's copy of the first two rides cr_gstats fields 9-10, and a
+            // client from before this fix still sends the inflated count there. So
+            // the payload declares this definition as field 24 (PeerFreezeStats.
+            // Epoch), and a match report carries a peer's freeze counters only when
+            // the peer declared it; otherwise they go as absent (round 2 finding 3).
+            // dt remains in the log line as an observation; it trips nothing.
             long nowMs = _tickStopwatch.ElapsedMilliseconds;
             if (_lastTickStopwatchMs >= 0)
             {
                 float wallGap = (nowMs - _lastTickStopwatchMs) / 1000f;
-                float gap = Math.Max(dt, wallGap);
-                if (gap > 0.5f && !inPickPhase)
+                if (wallGap > FREEZE_BAND_SEC && !inPickPhase)
                 {
-                    localFreezeCount++;
-                    localFreezeTotalSec += gap;
                     bool focused = false;
                     try { focused = Application.isFocused; } catch { }
-                    if (focused) localFreezeFocusedCount++;
-                    Plugin.Log.LogInfo($"[FREEZE-DIAG] gap={gap:F2}s dt={dt:F2} wall={wallGap:F2} focused={focused} n={localFreezeCount}");
+                    bool counted = wallGap > FREEZE_COUNT_SEC;
+                    if (counted)
+                    {
+                        localFreezeCount++;
+                        localFreezeTotalSec += wallGap;
+                        if (focused) localFreezeFocusedCount++;
+                    }
+                    if (wallGap > FREEZE_LOG_SEC)
+                    {
+                        if (_freezeLogged < FREEZE_LOG_CAP)
+                        {
+                            _freezeLogged++;
+                            Plugin.Log.LogInfo($"[FREEZE-DIAG] gap={wallGap:F2}s dt={dt:F2} focused={focused} counted={counted} n={localFreezeCount}"
+                                + (_freezeLogged == FREEZE_LOG_CAP ? " (log cap reached — counting continues)" : ""));
+                        }
+                    }
+                    else
+                    {
+                        // #359's band. The three local_freeze_* counters deliberately
+                        // do NOT move here — their 0.5s definition is what the epoch
+                        // above pins, and widening it would produce a third era of
+                        // numbers wearing the same column names.
+                        _bandCount++;
+                        _bandTotalSec += wallGap;
+                        int bandMs = (int)(wallGap * 1000f);
+                        if (bandMs > _bandMaxMs) _bandMaxMs = bandMs;
+                        if (_bandLogged < FREEZE_BAND_EXEMPLAR_CAP)
+                        {
+                            _bandLogged++;
+                            Plugin.Log.LogInfo($"[FREEZE-BAND] gap={wallGap:F3}s dt={dt:F3} focused={focused} n={_bandCount}"
+                                + (_bandLogged == FREEZE_BAND_EXEMPLAR_CAP
+                                    ? " (examples done — summaries only from here)" : ""));
+                        }
+                    }
                 }
             }
             _lastTickStopwatchMs = nowMs;
+            FlushFreezeBandSummary(false);
             if (dt <= 0f || dt > 1f) return; // skip pause / first-frame outliers (freeze recorded above)
             fpsFrameCount++;
             fpsTimeAccum += dt;
@@ -2064,28 +2261,24 @@ namespace CompetitiveRounds
 
             LocalActiveSecondsThisMatch += dt;
 
+            // Item 17: advisory counters read the BOUND sources only, and count a
+            // Down and nothing else - an unreadable source never adds to the #50
+            // macro bucket. Exactly seven reads, one per game row; the arrows are
+            // gone (on the defaults they move nobody). The achievement half of
+            // the old Fire block lives in TickAchievementInput, never here.
             int keyDowns = 0;
             int clickDowns = 0;
-            if (Input.GetKeyDown(KeyCode.W)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.A)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.S)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.D)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.Space)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.UpArrow)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.DownArrow)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.LeftArrow)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.RightArrow)) keyDowns++;
-            if (Input.GetMouseButtonDown(0))
+            if (Keybinds.ReadBoundSource(KeybindRules.MoveUp, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.MoveDown, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.MoveLeft, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.MoveRight, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.Jump, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.Fire, Keybinds.Mode.Edge) == Read.Down)
             {
                 clickDowns++;
                 LocalShotsThisMatch++;
-                if (!achFiredShot)
-                {
-                    achFiredShot = true;
-                    Plugin.Log.LogInfo("[ACH] Player fired a shot");
-                }
             }
-            if (Input.GetMouseButtonDown(1))
+            if (Keybinds.ReadBoundSource(KeybindRules.Block, Keybinds.Mode.Edge) == Read.Down)
             {
                 clickDowns++;
                 LocalBlocksThisMatch++;
@@ -2181,6 +2374,22 @@ namespace CompetitiveRounds
         /// garbled field, a future era we do not understand - is UNKNOWN, and
         /// unknown must render and report as absent rather than as zero.</summary>
         public static bool OppBulletStatsUsable => OppBulletStatsEpoch == BULLET_STATS_EPOCH;
+
+        // Round 2 finding 3: the same statement for the FREEZE counters (fields
+        // 9-10), declared as field 24. PeerFreezeStats holds the definition, the
+        // parse and the report fields; this is the per-peer state the receiver
+        // fills from the same payload as the counters. 0 = the peer never said.
+        //
+        // Field 24 has one number per definition and two constants naming it:
+        // FREEZE_COUNT_EPOCH is what the payload builder writes and the report
+        // carries as local_freeze_epoch, PeerFreezeStats.Epoch is what a peer's
+        // counters are accepted under. OppFreezeEpoch and OppFreezeStatsEpoch
+        // are both read from the same field of the same payload and reset at the
+        // same edges. The constants are equal by construction, and this line
+        // stops compiling (a division by the constant zero) the moment they part.
+        private const int FreezeEpochsAgree = 1 / (FREEZE_COUNT_EPOCH == PeerFreezeStats.Epoch ? 1 : 0);
+        public static int OppFreezeStatsEpoch { get; private set; }
+        public static bool OppFreezeStatsUsable => PeerFreezeStats.Usable(OppFreezeStatsEpoch);
         public static int OppStatMacroSuspectSeconds { get; private set; }
         public static int OppStatMacroPeakKeysPerSecond { get; private set; }
         public static int OppStatMacroPeakClicksPerSecond { get; private set; }
@@ -2276,6 +2485,37 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo($"[GSTATS-SENTINEL] {(pass ? "PASS" : "FAIL")}: {sentinels.Count} sentinels x 2 runs (success + injected exception){detail}");
         }
 
+        /// <summary>Round 2 finding 3 -- the freeze-counting epoch's self-test, run
+        /// by the same TestGstatsSentinel lever. PeerFreezeStats.RunSentinel sends
+        /// synthetic old- and new-format payloads (4 and 4 freezes each) through
+        /// the receiver's parse, the usability gate and the report's two fields:
+        /// the old format must come out absent, the new one as a trusted 4 and 4.
+        /// This adds the one check only the game can make, that the REAL payload
+        /// builder declares the epoch at field 24. BuildGstatsPayload is called
+        /// directly with advanceSequence:false, as DevGstatsSentinelTest does, so
+        /// nothing is broadcast. Logs [FREEZE-EPOCH-SENTINEL] PASS/FAIL.</summary>
+        internal static void DevFreezeEpochSentinelTest()
+        {
+            try
+            {
+                int seqBefore = gstatsSeq;
+                string[] built = BuildGstatsPayload(0, advanceSequence: false).Split('|');
+                bool seqMoved = gstatsSeq != seqBefore;
+                bool pass;
+                string line = PeerFreezeStats.RunSentinel(out pass, built);
+                if (seqMoved)
+                {
+                    pass = false;
+                    line = PeerFreezeStats.SentinelTag + " FAIL: the payload builder advanced the sequence; " + line;
+                }
+                if (pass) Plugin.Log.LogInfo(line); else Plugin.Log.LogWarning(line);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"{PeerFreezeStats.SentinelTag} FAIL: threw {ex.Message}");
+            }
+        }
+
         private static string BuildGstatsPayload(int recentFps, bool advanceSequence)
         {
             if (advanceSequence) gstatsSeq++;
@@ -2297,7 +2537,21 @@ namespace CompetitiveRounds
                 // Field 23 - #308 part 6 bullet-stats epoch. Every consumer of
                 // this payload gates on parts.Length >= N, so appending is
                 // backward-compatible: an old peer simply never sees it.
-                $"|{BULLET_STATS_EPOCH}";
+                $"|{BULLET_STATS_EPOCH}" +
+                // Field 24 — the counting-semantic epoch for fields 9/10
+                // (local_freeze_count / local_freeze_focused_count). Same
+                // append-only contract: every consumer gates on parts.Length,
+                // so an old peer simply never sees it and reads as UNKNOWN.
+                // ONE field, declared by two lanes (the 886bed8 client half and
+                // v1.41.0 beta round 2 finding 3), so ONE value: the receiver
+                // reads it into OppFreezeEpoch, which the match report carries
+                // as opp_freeze_epoch, AND through PeerFreezeStats into
+                // OppFreezeStatsEpoch, which decides whether the peer's two
+                // counters ride that report at all. PeerFreezeStats.Epoch
+                // therefore names this same definition, and the
+                // [FREEZE-EPOCH-SENTINEL]'s builder check fails if the two
+                // numbers ever part.
+                $"|{FREEZE_COUNT_EPOCH}";
         }
 
         private static void BroadcastGstatsImmediate()
@@ -2476,9 +2730,25 @@ namespace CompetitiveRounds
                                         if (parts.Length >= 4)
                                             oppBlockTimeline.Add(parts[2] + ":" + parts[3]);
                                     }
-                                    oppFreezeCount = int.Parse(parts[8]);
-                                    oppFreezeFocusedCount = int.Parse(parts[9]);
+                                    // The counters and the definition they were
+                                    // counted under come from this ONE payload
+                                    // (round 2 finding 3). A garbled count throws
+                                    // before any of the three is assigned, so the
+                                    // previous payload's triple stands together.
+                                    int _fzCount, _fzFocused, _fzEpoch;
+                                    PeerFreezeStats.TryRead(parts, out _fzCount, out _fzFocused, out _fzEpoch);
+                                    oppFreezeCount = _fzCount;
+                                    oppFreezeFocusedCount = _fzFocused;
+                                    OppFreezeStatsEpoch = _fzEpoch;
                                     oppRecvGapCount = int.Parse(parts[10]);
+                                    // Field 24: which counting definition produced the
+                                    // two freeze numbers just read. Absent = 0 = UNKNOWN,
+                                    // never "the same as ours".
+                                    int _oppFreezeEra = 0;
+                                    if (parts.Length >= 24)
+                                        int.TryParse(parts[23], System.Globalization.NumberStyles.Integer,
+                                                     System.Globalization.CultureInfo.InvariantCulture, out _oppFreezeEra);
+                                    OppFreezeEpoch = _oppFreezeEra;
                                 }
                                 else if (parts.Length >= 6 && parts[0] == "0" && parts[1] == "0")
                                 {
@@ -3550,6 +3820,18 @@ namespace CompetitiveRounds
                     // on its own it labelled team_ and ovt_ exits "RANKED" too.
                     string matchType = RoomModeLabels.ModeLabel(photonRoomId, matchIsRanked);
 
+                    // Seat evidence: how this seat saw the game end. The other
+                    // seat's departure, when noted, was noted first and is kept.
+                    try
+                    {
+                        string seEnd = opponentDCReported ? "other_left" : "left";
+                        string seCause;
+                        if (!opponentDCReported && TransportExit.TryGetFreshInvoluntary(TransportExit.NowSeconds(), out seCause))
+                            seEnd = "lost";
+                        SeatEvidence.NoteEnd(seEnd);
+                    }
+                    catch { }
+
                     // If this client is the leaver while the opponent already
                     // has a reportable DC-win lead, preserve its exact local
                     // macro sample before ResetMatchState clears the counters.
@@ -3635,6 +3917,12 @@ namespace CompetitiveRounds
                             Plugin.Log.LogInfo(
                                 $"[POLL] exit followed an involuntary disconnect cause={dcCause} toast={(toasted ? "shown" : "declined")}");
                     }
+
+                    // Seat evidence: a game that got no game over here (the
+                    // DC-win branches above went through OnGameOver, which
+                    // dispatched) still yields this seat's record of what it
+                    // collected up to the exit.
+                    if (!gameOverReported) SeatEvidenceCut(localRounds, oppRounds);
                 }
 
                 Plugin.Log.LogInfo("[POLL] Left room");
@@ -3733,6 +4021,9 @@ namespace CompetitiveRounds
                 // Disarm catches its own failure; no-op when never armed.
                 try { EscMenuLeaveGuard.Disarm(); } catch { }
                 try { EscLeaveRow.OnRoomLeft(); } catch { }
+                // Round 4, finding 1: a frozen 2v2 game number belongs to the
+                // room it was frozen in; the next room names its own games.
+                try { TeamGameNumber.Live.Clear(); } catch { }
                 // Consume LeavingForRanked on EVERY observed room exit (lobby
                 // impl round 6): the flag's meaning is "the NEXT room exit is
                 // our deliberate leave-for-ranked". The tracking-gated scoring
@@ -4075,12 +4366,14 @@ namespace CompetitiveRounds
                     if (playerCount >= 2 && opponentDCReported)
                     {
                         opponentDCReported = false;
+                        try { SeatEvidence.ClearEnd(); } catch { }
                         Plugin.Log.LogInfo("[POLL] Opponent returned to the room — cleared stale DC latch");
                     }
 
                     if (opponentWasPresent && playerCount <= 1 && !opponentDCReported)
                     {
                         opponentDCReported = true;
+                        try { SeatEvidence.NoteEnd("other_left"); } catch { }
                         // The 1v1 DC-win report is finalised from the
                         // room-LEAVE handler below, where the players are
                         // already gone — this is the last frame that still
@@ -4255,8 +4548,8 @@ namespace CompetitiveRounds
                 {
                     var myProps = PhotonNetwork.LocalPlayer?.CustomProperties;
                     if (p.CustomProperties != null && myProps != null
-                        && p.CustomProperties.ContainsKey("t_id") && myProps.ContainsKey("t_id"))
-                        isTeammate = p.CustomProperties["t_id"]?.ToString() == myProps["t_id"]?.ToString();
+                        && p.CustomProperties.ContainsKey(Player.VAR_TEAMID) && myProps.ContainsKey(Player.VAR_TEAMID))
+                        isTeammate = p.CustomProperties[Player.VAR_TEAMID]?.ToString() == myProps[Player.VAR_TEAMID]?.ToString();
                 }
                 catch { }
 
@@ -4292,8 +4585,8 @@ namespace CompetitiveRounds
                             if (p.CustomProperties != null && p.CustomProperties.ContainsKey("u_id"))
                                 luSid = p.CustomProperties["u_id"]?.ToString();
                             int luTeam = -1;
-                            if (p.CustomProperties != null && p.CustomProperties.ContainsKey("t_id"))
-                                int.TryParse(p.CustomProperties["t_id"]?.ToString(), out luTeam);
+                            if (p.CustomProperties != null && p.CustomProperties.ContainsKey(Player.VAR_TEAMID))
+                                int.TryParse(p.CustomProperties[Player.VAR_TEAMID]?.ToString(), out luTeam);
                             // V11 item 13 (the leaver ledger): an actor this
                             // client does not keep never overwrites a leave.
                             if (!string.IsNullOrEmpty(luSid) && luTeam >= 0)
@@ -4516,6 +4809,14 @@ namespace CompetitiveRounds
                 try { PlayerCardsUI.OnIdentityChanged(); } catch { }
                 try { MusicEntitlements.OnIdentityChanged(); } catch { }
                 try { MusicRatings.OnIdentityChanged(); } catch { }
+                // Text the PREVIOUS account composed — the held draft and whatever
+                // is still in the open box — is destroyed here, at the transition,
+                // rather than being compared against a generation counter wherever
+                // it later gets used (r5). This branch is the only place in the
+                // client that can tell an account SWITCH from a first resolution,
+                // and the first-resolution branch below deliberately does not do
+                // this: resolving unknown -> A changes nobody's authorship.
+                try { CompetitiveUI.DropChatOnAccountChange(); } catch { }
                 _identityRefetchPending = true;
             }
             else if (!prevResolved && newResolved)
@@ -4605,9 +4906,9 @@ namespace CompetitiveRounds
             try
             {
                 var localProps = PhotonNetwork.LocalPlayer?.CustomProperties;
-                if (localProps != null && localProps.ContainsKey("t_id"))
+                if (localProps != null && localProps.ContainsKey(Player.VAR_TEAMID))
                 {
-                    localTeamId = System.Convert.ToInt32(localProps["t_id"]);
+                    localTeamId = System.Convert.ToInt32(localProps[Player.VAR_TEAMID]);
                     Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from Photon t_id)");
                     CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
                     return;
@@ -4626,27 +4927,73 @@ namespace CompetitiveRounds
                     var pv = playerObj.GetComponent<PhotonView>();
                     if (pv != null && pv.IsMine)
                     {
-                        var charData = playerObj.GetComponent<CharacterData>();
-                        if (charData != null)
+                        // Player.TeamID -- NOT CharacterData.teamID. CharacterData
+                        // carries no such field, so the reflection below returned
+                        // null and this branch has never once fired on any seat:
+                        // every client has silently been taking the index fallback.
+                        // That is the same mistake that took the whole 2v2 report
+                        // path down in v1.25.11 (see the comment above the report
+                        // builder, which fixed it there by reading Player.TeamID);
+                        // this site was missed by that sweep.
+                        //
+                        // Index is NOT a safe stand-in for the team id. It happens
+                        // to agree in 1v1, where the list holds two entries in team
+                        // order, and it is exactly the assumption the rejoin work
+                        // makes load-bearing at four new points -- a readmitted
+                        // player's position in pm.players is not their team.
+                        // Reaching here is itself a fact about assignment, not
+                        // an accident of ordering. Vanilla (decompiled Player.cs
+                        // :177) sets m_teamID and THEN publishes the key -- but
+                        // only when it is online:
+                        //
+                        //   public void AssignTeamID(int ID) {
+                        //       m_teamID = ID;
+                        //       if (!PhotonNetwork.OfflineMode) {
+                        //           customProperties[VAR_TEAMID] = m_teamID;
+                        //           ...SetCustomProperties(customProperties); } }
+                        //
+                        // and Player.VAR_TEAMID is "t_id" -- the same key the arm
+                        // at the top of this method reads, and the same one our
+                        // pre-join writes seed ahead of vanilla. So the cases
+                        // split cleanly, with no inference required:
+                        //
+                        //  * ONLINE -- an assigned seat ALWAYS carries t_id, so
+                        //    the arm above has already returned. Getting here
+                        //    means this seat is not assigned, m_teamID is still
+                        //    its default, and reading TeamID would report team 0
+                        //    authoritatively for a player who has no team yet.
+                        //  * OFFLINE -- nothing ever publishes t_id, so that arm
+                        //    can never fire and TeamID is the ONLY valid source.
+                        //
+                        // This replaced a `TeamID >= 0` guard that could never be
+                        // false: m_teamID is a plain private int with no
+                        // [SerializeField] and no initializer, and Player's .ctor
+                        // never stores to it (18 IL bytes, one stfld, not this
+                        // field), so its pre-assignment value is 0 -- and 0 is a
+                        // real team. A check that cannot fail is worse than no
+                        // check (#342/#431/#441).
+                        if (PhotonNetwork.OfflineMode)
                         {
-                            var field = typeof(CharacterData).GetField("teamID",
-                                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                            if (field != null)
-                            {
-                                localTeamId = (int)field.GetValue(charData);
-                                Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from CharacterData)");
-                                CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
-                                return;
-                            }
+                            localTeamId = playerObj.TeamID;
+                            Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from Player.TeamID)");
+                            CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
+                            return;
                         }
 
+                        // Online and past the t_id arm: this seat has not been
+                        // assigned, so there is no team to read. Index is a
+                        // guess and says so -- but it at least differs per
+                        // seat, where TeamID would hand every unassigned
+                        // player team 0.
                         for (int i = 0; i < pm.players.Count; i++)
                         {
                             var ipv = pm.players[i]?.GetComponent<PhotonView>();
                             if (ipv != null && ipv.IsMine)
                             {
                                 localTeamId = i;
-                                Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from index)");
+                                Plugin.Log.LogWarning($"[POLL] Local team: {localTeamId} (from index -- "
+                                    + "Player.TeamID was unassigned; this is a GUESS, correct only while "
+                                    + "list position happens to equal team)");
                                 CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
                                 return;
                             }
@@ -4711,6 +5058,13 @@ namespace CompetitiveRounds
             bool gameActive = (curP1Rounds > 0 || curP2Rounds > 0 ||
                                curP1Points > 0 || curP2Points > 0);
 
+            // v1.41.0 beta round 5, finding F25: read the room's game token,
+            // publish it when this seat owes it, and drop it when the score
+            // falls inside a game (TeamGameNumber, "The physical game's token").
+            // Round 6, finding F28: the score it reads there ends the game's
+            // token BEFORE OnMatchStarted or OnGameOver below can run.
+            TickTeamToken();
+
             if (gameActive && !wasGameInProgress && !isTracking)
             {
                 OnMatchStarted();
@@ -4771,6 +5125,9 @@ namespace CompetitiveRounds
                     // these later-spawned sprites.
                     try { PlayerColorCosmetic.OnRoundStart(); } catch { }
                     try { PlayerEffectCosmetic.OnRoundStart(); } catch { }
+                    // Item 17 (question 5): one local toast naming any control
+                    // rebound since the last round start.
+                    try { Keybinds.OnRoundStart(); } catch { }
 
                     // Achievement: track comeback (0-4 deficit)
                     int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
@@ -4788,7 +5145,7 @@ namespace CompetitiveRounds
                 PollCardPicks();
 
                 // Achievement: poll health and death state on local player
-                PollAchievementState();
+                try { PollAchievementState(); } catch (Exception e) { SafeAchLog("PollAchievementState threw: " + e.Message); }
 
                 // Bug 324 / review r1 find 3: live-points CATCH-UP. Eligibility
                 // (ActiveRankedSeriesId adoption, a late matchIsRanked=true
@@ -4880,6 +5237,8 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.CurrentRoom.SetCustomProperties(props))
                     return;
                 sharedGameToken = token;
+                sharedGameT0 = matchStartServerTimestamp;
+                sharedGameT0Set = true;
             }
             catch { }
         }
@@ -4893,6 +5252,8 @@ namespace CompetitiveRounds
                 previousGameToken = sharedGameToken;
             sharedGameToken = "";
             matchStartServerTimestamp = 0;
+            sharedGameT0 = 0;
+            sharedGameT0Set = false;
             if (!oneVOneMatchAtStart) return;
             // Record the common Photon clock even if this client has not yet
             // observed both capability properties. The master may already see
@@ -4930,6 +5291,10 @@ namespace CompetitiveRounds
                         // one Unity main thread can enter the match >10s later
                         // even though Photon delivered the correct room token.
                         sharedGameToken = parts[0];
+                        // B5: adopt the master's T0 with its token (the
+                        // number used to be parsed and discarded).
+                        sharedGameT0 = publishedAt;
+                        sharedGameT0Set = true;
                         return;
                     }
                 }
@@ -5107,12 +5472,198 @@ namespace CompetitiveRounds
                 inCrFfRoom = !PhotonNetwork.OfflineMode && rp != null && rp.ContainsKey("cr_ff");
             }
             catch { }
-            if (inCrFfRoom && !string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId)
-                && (force || sp1 != liveSentTeamP1 || sp2 != liveSentTeamP2))
+            if (!inCrFfRoom || string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId)) return;
+            // Round 4, finding 1: the game frozen at this game's start and the
+            // room it is played in (0 = the post goes without them). Round 5,
+            // finding F25: the physical game's token (TeamGameNumber.Live.
+            // TokenFor; "" = the post goes without one). A token that arrives
+            // after the pair was sent is itself a reason to post again, so a
+            // pair first sent without it carries it on the next tick rather
+            // than at the 20 s refresh. Round 6, findings F27 and F28, and
+            // round 7, finding F29: the token is checked as the post is built,
+            // against the physical game this seat holds (grounded on a host's
+            // publish, never on a count) and its reading of the score now;
+            // round 7, finding F30: only while the game's lifecycle hooks are
+            // attached (TeamGameLifecycle.HooksLive), which end the token at the
+            // game's own game over and next start whatever the polls saw.
+            string teamRoom = TeamGameRoom();
+            string teamToken = TeamGameNumber.Live.TokenFor(ApiClient.ActiveTeamSeriesId, teamRoom, ReadTeamToken(),
+                                                            ReadLiveScore(), TeamGameLifecycle.HooksLive);
+            bool tokenNews = teamToken != liveSentTeamToken && (sp1 > 0 || sp2 > 0);
+            if (force || tokenNews || sp1 != liveSentTeamP1 || sp2 != liveSentTeamP2)
             {
                 liveSentTeamP1 = sp1; liveSentTeamP2 = sp2;
-                ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId, sp1, sp2);
+                liveSentTeamToken = teamToken;
+                int teamGame = TeamGameNumber.Live.For(ApiClient.ActiveTeamSeriesId, teamRoom);
+                ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId, sp1, sp2,
+                                             teamGame, teamRoom, teamToken);
             }
+        }
+
+        /// <summary>Round 4, finding 1: the room a 2v2 post names. The
+        /// existing photonRoomId (set when this room was joined), and only
+        /// while it is still the room Photon says this seat is in; "" (no
+        /// room, so no number) otherwise.</summary>
+        private static string TeamGameRoom()
+        {
+            string live = "";
+            try { live = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+            return string.Equals(photonRoomId, live, StringComparison.Ordinal) ? live : "";
+        }
+
+        /// <summary>Round 5, finding F25: the room's game token as this seat
+        /// reads it now, "" when the room holds none or the value is not a
+        /// token (TeamGameNumber.TokenValid).</summary>
+        internal static string ReadTeamToken()
+        {
+            try
+            {
+                var props = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (props == null || !props.ContainsKey(TeamGameNumber.TokenRoomKey)) return "";
+                string v = props[TeamGameNumber.TokenRoomKey]?.ToString() ?? "";
+                return TeamGameNumber.TokenValid(v) ? v : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>Round 5, finding F25: the token a 2v2 DC report names,
+        /// "" when this seat holds none for the game in progress
+        /// (TeamGameNumber.Live.TokenFor; `why` says why not, for the log).
+        /// The server then withholds the lead-forfeit and the series goes to
+        /// an admin. Round 6, findings F27 and F28: it is checked here, as the
+        /// report is built, against the room's value, the physical game this
+        /// seat holds (round 7, F29) and its reading of the score now, and
+        /// (round 7, F30) only while the game's lifecycle hooks are attached:
+        /// the game's own game over and next start have already ended the
+        /// token on this seat when they ran, even when they have not reached
+        /// the watcher (OnPlayerLeftRoom can run before the next poll
+        /// tick).</summary>
+        internal static string TeamTokenForReport(string seriesId, out string why)
+        {
+            why = "";
+            try
+            {
+                return TeamGameNumber.Live.TokenFor(seriesId, TeamGameRoom(), ReadTeamToken(), ReadLiveScore(),
+                                                    TeamGameLifecycle.HooksLive, out why);
+            }
+            catch (Exception ex)
+            {
+                why = "the token could not be read: " + ex.Message;
+                return "";
+            }
+        }
+
+        /// <summary>Round 6, finding F28: the scoreboard as this seat reads it
+        /// now (TeamGameNumber.Score): both sides' rounds and points and the
+        /// rounds a game is won at (the game's own field when it reads above
+        /// 0, else the value OnGameOver uses). Unread when the fields are not
+        /// resolved, when no room is joined, or when the room's messages are
+        /// held (PhotonNetwork.IsMessageQueueRunning false: the scoreboard then
+        /// shows the room as of an unknown time). An unread score carries no
+        /// token. Round 7, finding F30: no time is read with it.</summary>
+        private static TeamGameNumber.Score ReadLiveScore()
+        {
+            try
+            {
+                if (!fieldsResolved || !PhotonNetwork.InRoom || !PhotonNetwork.IsMessageQueueRunning)
+                    return default(TeamGameNumber.Score);
+                var gm = GM_ArmsRace.instance;
+                if (gm == null) return default(TeamGameNumber.Score);
+                int toWin = f_roundsToWinGame != null ? GetFieldInt(gm, f_roundsToWinGame) : 0;
+                if (toWin <= 0) toWin = roundsToWin;
+                return TeamGameNumber.Score.Of(GetFieldInt(gm, f_p1Rounds), GetFieldInt(gm, f_p2Rounds),
+                                               GetFieldInt(gm, f_p1Points), GetFieldInt(gm, f_p2Points), toWin);
+            }
+            catch { return default(TeamGameNumber.Score); }
+        }
+
+        /// <summary>Round 5, finding F25, and round 6, findings F27 and F28,
+        /// once per poll tick in a cr_ff room: the score as this seat reads it
+        /// (TeamGameNumber.Tracker.ObserveScore ends the game's token at once
+        /// on the game over and on a score that cannot follow the last reading
+        /// inside one game -- round 5's missed-boundary guard, now seeded at
+        /// the game start and on the points too; round 7, finding F30: no time
+        /// is read, and the game's own game over and next start end it first,
+        /// TeamGameLifecycle), then the room's game token (a changed value or a
+        /// later game's ends it too), then the host's publish when this seat
+        /// owes the game's token.</summary>
+        private static void TickTeamToken()
+        {
+            try
+            {
+                var props = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (PhotonNetwork.OfflineMode || props == null || !props.ContainsKey("cr_ff")) return;
+                TeamGameNumber.Score s = ReadLiveScore();
+                string line = TeamGameNumber.Live.ObserveScore(s);
+                if (line != null) Plugin.Log.LogInfo(line);
+                line = TeamGameNumber.Live.ObserveRoomToken(TeamGameRoom(), ReadTeamToken());
+                if (line != null) Plugin.Log.LogInfo(line);
+                if (teamTokenOwed && s.Read) TryPublishTeamToken(s.R1 == 0 && s.R2 == 0);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"{TeamGameNumber.LogTag} game token tick error: {ex.Message}"); }
+        }
+
+        /// <summary>Round 5, finding F25: the host's publish of the game's
+        /// token, one per game, only inside the game's first round (the rounds
+        /// 0-0). Armed only when SetCustomProperties reports the send (#428);
+        /// the host's own posts then wait for the room to show the value, like
+        /// every other seat's. Every reason not to publish is logged once per
+        /// game. Two are retried on the next tick while the first round
+        /// lasts: "not the host" (a host handoff inside the first round) and a
+        /// send SetCustomProperties refused; every other one ends this seat's
+        /// part. Round 7, finding F29: the token names the physical game's
+        /// ordinal this seat holds (grounded on a publish it took, never on a
+        /// count) and an epoch above every one this seat has read in the room
+        /// or published (TeamGameNumber.Tracker.TokenToPublish). Since round
+        /// 11 (finding M1) no server names a series' physical game 1, so no
+        /// seat is grounded and this publishes nothing.</summary>
+        private static void TryPublishTeamToken(bool firstRound)
+        {
+            bool host = false;
+            try { host = PhotonNetwork.IsMasterClient; } catch { }
+            string room = TeamGameRoom();
+            string current = ReadTeamToken();
+            string why;
+            string token = TeamGameNumber.Live.TokenToPublish(host, firstRound, current, out why);
+            if (token.Length == 0)
+            {
+                if (why != TeamGameNumber.WhyNotHost) teamTokenOwed = false;
+                if (why != teamTokenLastWhy)
+                {
+                    teamTokenLastWhy = why;
+                    Plugin.Log.LogInfo($"{TeamGameNumber.LogTag} no game token published by this seat: {why}");
+                }
+                return;
+            }
+            bool sent = false;
+            string failed = "the room is not the one this game is played in";
+            try
+            {
+                var r = PhotonNetwork.CurrentRoom;
+                if (r != null && room.Length > 0 && string.Equals(r.Name, room, StringComparison.Ordinal))
+                {
+                    var props = new Hashtable();
+                    props[TeamGameNumber.TokenRoomKey] = token;
+                    sent = r.SetCustomProperties(props);
+                    failed = "SetCustomProperties refused the send";
+                }
+            }
+            catch (Exception ex) { failed = "SetCustomProperties threw " + ex.Message; }
+            if (!sent)
+            {
+                // Not armed: the next tick tries again while the first round lasts.
+                string why2 = "publish not sent (" + failed + "); retrying";
+                if (why2 != teamTokenLastWhy)
+                {
+                    teamTokenLastWhy = why2;
+                    Plugin.Log.LogInfo($"{TeamGameNumber.LogTag} game token {why2}");
+                }
+                return;
+            }
+            TeamGameNumber.Live.ArmPublished(token);
+            teamTokenOwed = false;
+            Plugin.Log.LogInfo($"{TeamGameNumber.LogTag} game token {TeamGameNumber.Describe(token)} published"
+                               + " as the room's host; this seat's posts carry it once the room shows it");
         }
 
         private static void OnMatchStarted()
@@ -5120,6 +5671,7 @@ namespace CompetitiveRounds
             // Spectator: never tracks a match (defense in depth — the GM
             // lifecycle that fires this is suppressed on a spectator).
             if (RoomActors.LocalIsSpectator) return;
+            try { Keybinds.OnRoundStart(); } catch { }   // item 17: the first round start of a match
             // Roster census (bug 391 §4.1), BEFORE OnGameStarted: that call
             // resets the per-actor view window, so a census taken after it
             // would read every batch counter as zero.
@@ -5159,6 +5711,41 @@ namespace CompetitiveRounds
             liveCumP1 = 0; liveCumP2 = 0;
             liveSentRankedP1 = 0; liveSentRankedP2 = 0;
             liveSentTeamP1 = 0; liveSentTeamP2 = 0;
+            // v1.41.0 beta round 4, finding 1: the game this game's 2v2 posts
+            // name, frozen HERE, at the event that resets the pair they carry
+            // (update_team_live_points: a client must take game_number from the
+            // event that resets its pair). TeamGameNumber says how it is chosen
+            // and when a post goes without it. Only a cr_ff room feeds the team
+            // channel (MaybeSendLivePoints), so only a cr_ff room freezes one.
+            try
+            {
+                var tgnProps = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (!PhotonNetwork.OfflineMode && tgnProps != null && tgnProps.ContainsKey("cr_ff"))
+                {
+                    string tgnLine;
+                    TeamGameNumber.Live.OnGameStart(ApiClient.ActiveTeamSeriesId, TeamGameRoom(), ReadLiveScore(),
+                                                    out tgnLine);
+                    Plugin.Log.LogInfo(tgnLine);
+                    // Round 5, finding F25: the game's token. What the room
+                    // holds now is read at once (a value published for this
+                    // game before this seat's start is taken: a late start
+                    // still takes its game's token, #182); the host's publish
+                    // goes on the next poll tick (TickTeamToken), with the
+                    // score it reads there. Round 6, finding F28: the score
+                    // read here seeds the readings that end the game's token.
+                    string tokLine = TeamGameNumber.Live.ObserveRoomToken(TeamGameRoom(), ReadTeamToken());
+                    if (tokLine != null) Plugin.Log.LogInfo(tokLine);
+                    teamTokenOwed = true;
+                    teamTokenLastWhy = "";
+                }
+                else
+                {
+                    TeamGameNumber.Live.Clear();
+                    teamTokenOwed = false;
+                }
+            }
+            catch { }
+            liveSentTeamToken = "";
             // Match-scoped DC latch — must reset per GAME, not only on room leave
             // (learning #27). Rematches reuse the room, so a latch set during
             // game 1 would otherwise still be true in game 2 and let a LEAVER
@@ -5253,6 +5840,13 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+
+            // Seat evidence (contract V2): open this game's window. Contained.
+            try { SeatEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
+            // Combat evidence (B1-B3, B5): the same window, its own collectors. Contained.
+            try { CombatEvidence.BeginGame(oneVOneMatchAtStart); } catch { }
+            // Identity-clock evidence: its window, moment 1. Contained.
+            try { IdentityClockEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
 
             // Spawn the cosmetic trail for this match (if the player owns one).
             TrailCosmetic.OnMatchStart();
@@ -5445,6 +6039,20 @@ namespace CompetitiveRounds
             if (RoomActors.LocalIsSpectator) return;   // spectator: no result paths
             if (!isTracking || gameOverReported) return;
             gameOverReported = true;
+            // v1.41.0 beta round 6, finding F28: this game's token, and the
+            // value the room holds now, are stale for every later game. FIRST,
+            // before anything below can throw, and in its own try.
+            try
+            {
+                var tokProps = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (!PhotonNetwork.OfflineMode && tokProps != null && tokProps.ContainsKey("cr_ff"))
+                {
+                    teamTokenOwed = false;
+                    string tokLine = TeamGameNumber.Live.OnTokenGameOver(TeamGameRoom(), ReadTeamToken());
+                    if (tokLine != null) Plugin.Log.LogInfo(tokLine);
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"{TeamGameNumber.LogTag} game token game-over error: {ex.Message}"); }
             sessionMatchCount++;
             // Roster census (bug 391 §4.1) — the last reading of the roster
             // this game, taken before the diagnostics windows are closed.
@@ -5469,6 +6077,20 @@ namespace CompetitiveRounds
             // correctness never depends on waiting while match state can reset.
             BroadcastGstatsImmediate();
             try { PhotonNetwork.SendAllOutgoingCommands(); } catch { }
+            // v1.41.0 beta round 4, finding 1: every seat of a cr_ff room reads
+            // the series' recorded games again after this game, so the next
+            // game's start names its game from a count that includes this one.
+            try
+            {
+                var goProps = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (!PhotonNetwork.OfflineMode && goProps != null && goProps.ContainsKey("cr_ff"))
+                {
+                    ApiClient.RefreshTeamGameRecord(ApiClient.ActiveTeamSeriesId);
+                    // The game's token was made stale at the top of OnGameOver
+                    // (round 6, finding F28).
+                }
+            }
+            catch { }
             PollOpponentFps();
 
             if (!opponentSteamIdResolved)
@@ -5546,8 +6168,8 @@ namespace CompetitiveRounds
                     int ppTeam = -1;
                     try
                     {
-                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("t_id"))
-                            ppTeam = System.Convert.ToInt32(pp.CustomProperties["t_id"]);
+                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(Player.VAR_TEAMID))
+                            ppTeam = System.Convert.ToInt32(pp.CustomProperties[Player.VAR_TEAMID]);
                     }
                     catch { }
                     bool isTeammate = ppTeam >= 0 && localTeamId >= 0 && ppTeam == localTeamId;
@@ -6038,7 +6660,12 @@ namespace CompetitiveRounds
                 try
                 {
                     string rn = PhotonNetwork.CurrentRoom?.Name ?? "(no room)";
-                    bool isTour = rn.StartsWith("sct-");
+                    // `sct-` is the SYNC tournament prefix only. ASYNC tournaments run
+                    // in player-hosted code rooms and never carry it, so this field read
+                    // False straight through a real Grand Final (report #358) — the one
+                    // mis-route the block comment above names as the reason this line
+                    // exists. Read the resolved context that routing itself uses.
+                    bool isTour = GameStateWatcher.IsTournamentMatch;
                     bool isRk = rn.StartsWith("ranked_");
                     Plugin.Log.LogInfo($"[REPORT-ROUTE] 1v1 path: room={rn} isRanked={matchIsRanked} tournament={isTour} ranked_queue={isRk} reporter={localSteamId} opponent={opponentSteamId}");
                 }
@@ -6144,6 +6771,8 @@ namespace CompetitiveRounds
                     localFreezeCount: localFreezeCount,
                     localFreezeFocusedCount: localFreezeFocusedCount,
                     localFreezeTotalSec: localFreezeTotalSec,
+                    localFreezeEpoch: FREEZE_COUNT_EPOCH,
+                    oppFreezeEpoch: OppFreezeEpoch,
                     localPingAvg: pingSamples.Count > 0 ? (int)Math.Round(pingSamples.Average()) : 0,
                     localPingMax: pingSamples.Count > 0 ? pingSamples.Max() : 0,
                     // July 22 item 3: latency timelines for the history hover chart.
@@ -6155,6 +6784,9 @@ namespace CompetitiveRounds
                     oppHbGapCount: oppHbGapCount,
                     oppFreezeCount: oppFreezeCount,
                     oppFreezeFocusedCount: oppFreezeFocusedCount,
+                    // Round 2 finding 3: a peer that did not declare our freeze
+                    // definition has its two counters sent as null (absent).
+                    oppFreezeStatsKnown: OppFreezeStatsUsable,
                     oppRecvGapCount: oppRecvGapCount,
                     // July 22 item 1: cumulative Hit%/Block% pair timelines +
                     // per-point timestamps for the new hover graphs.
@@ -6205,6 +6837,26 @@ namespace CompetitiveRounds
                 );
             }
 
+            // Seat evidence (contract V2): built AFTER the match report above is
+            // queued, ranked 1v1 only, both seats, and contained like the other
+            // telemetry: it can never delay or drop the report.
+            if (!isOfflineMatch)
+            {
+                try
+                {
+                    SeatEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId,
+                        localTeamId == 0 ? p1Rounds : p2Rounds, localTeamId == 0 ? p2Rounds : p1Rounds,
+                        matchIsRanked && oneVOneMatchAtStart);
+                }
+                catch { }
+                // Card draw evidence (B4): after the seat record, same gate.
+                try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
+                // Combat evidence: after the card record, same gate, O(1) capture.
+                try { CombatEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
+                // Identity-clock evidence: after the seat record, same gate.
+                try { IdentityClockEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
+            }
+
             // Evaluate achievements before clearing match state
             EvaluateAchievements(localWon);
 
@@ -6243,8 +6895,8 @@ namespace CompetitiveRounds
                     string sid = ResolvePhotonSteamId(pp);
                     if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) return;
                     int team = -1;
-                    if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("t_id"))
-                    { try { team = Convert.ToInt32(pp.CustomProperties["t_id"]); } catch { } }
+                    if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(Player.VAR_TEAMID))
+                    { try { team = Convert.ToInt32(pp.CustomProperties[Player.VAR_TEAMID]); } catch { } }
                     if (team != 0 && team != 1) return;
                     sids[i] = sid; teams[i] = team;
                 }
@@ -6475,9 +7127,15 @@ namespace CompetitiveRounds
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
+            FlushFreezeBandSummary(true);
+            _freezeLogged = 0;   // the >0.2s cap is per MATCH, like the two below it
+            _bandCount = 0; _bandMaxMs = 0; _bandLogged = 0; _bandTotalSec = 0f;
+            _bandSummaries = 0; _bandSummarisedCount = 0; _bandSummaryAt = -999f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
             oppHbGapCount = 0; _oppHbGapOpen = false;
             oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
+            OppFreezeStatsEpoch = 0;   // round 2 finding 3: unknown until a peer says otherwise
+            OppFreezeEpoch = 0;
             _lastTickStopwatchMs = -1;
             _hitsRemaining = 0;
             _activationSuccessCredited = true;
@@ -6534,20 +7192,54 @@ namespace CompetitiveRounds
             try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
             try { NetworkSeatTelemetry.OnMatchStarted(); } catch { }   // lag-332 W1 (bundle-only in FFA)
             try { RoomRules.OnGameStart(); } catch { }                 // room rules: per-game counters (FFA plays the defaults)
-            // Roster freeze — same rule as OnMatchStarted (r1 find 1). Re-run
-            // per game: FFA leavers shrink the roster between games.
+            // Game N's frozen report number must never key game N+1. The key
+            // is composed synchronously at game over, so nothing legitimate
+            // reads the snapshot after this point.
+            try { FfaMode.ClearReportGameNumber(); } catch { }
+            // Roster freeze (r1 find 1), re-run per game because an FFA room
+            // plays several. NOT the same rule as OnMatchStarted any more, and
+            // the difference is the fix below — that path freezes once for a
+            // room and may keep replacing.
+            //
+            // RJ-2: the re-run UNIONS once a roster exists, where it used to
+            // REPLACE. "Who is present at this instant" is a fair snapshot of
+            // a room at match assembly and a poor one at a game boundary: a
+            // seat that is loading, alt-tabbed or part-way through a rejoin
+            // between games fell off the roster it was already on, and from
+            // there IsUnauthorized reads true (fail-closed), the seat is
+            // rejected and closed, and every client drops it from
+            // ActiveFighters(). The union never narrows, so crossing a
+            // boundary cannot cost a fighter its place.
+            //
+            // THE CENSUS IS NOT BUILT HERE ANY MORE (Codex client r2 HIGH,
+            // this line). It used to be assembled from ActiveFighters(), which
+            // applies IsUnauthorized — and IsUnauthorized tests the rejection
+            // latch BEFORE membership. A latched seat was therefore removed
+            // from the census before its Steam ID could reach the union, the
+            // roster could never widen to cover it, and the release predicate
+            // could never fire: the latch was hiding the only evidence that
+            // would have released it. From the other side, once the roster is
+            // frozen ActiveFighters() is a SUBSET of it, so the widening could
+            // not add anyone under any input at all. Both halves of the rule —
+            // which seats the raw census admits, and which latches the
+            // resulting roster releases — now live in RoomActors over
+            // RosterCensusRules, where the client-rules harness RUNS them.
             try
             {
                 // V11 K47: in a gated room the lock roster, no fighter view.
                 var lockIds = GatedFreezeIds();
-                var ids = lockIds ?? new List<string>();
-                if (lockIds == null)
-                    foreach (var f in RoomActors.ActiveFighters())
-                    {
-                        var s = RoomActors.SteamIdOf(f);
-                        if (!string.IsNullOrEmpty(s)) ids.Add(s);
-                    }
-                if (ids.Count >= 2) RoomActors.FreezeFighterRoster(ids);
+                if (lockIds != null)
+                {
+                    if (lockIds.Count >= 2) RoomActors.FreezeFighterRoster(lockIds);
+                    Plugin.Log.LogInfo($"[FFA] roster after game {FfaMode.GameNumber} freeze: "
+                                       + $"{RoomActors.FrozenRosterSize} (gated room: the lock roster, {lockIds.Count})");
+                }
+                else
+                {
+                    var census = RoomActors.RefreezeFighterRosterForGameFromRoom();
+                    Plugin.Log.LogInfo($"[FFA] roster after game {FfaMode.GameNumber} freeze: "
+                                       + $"{RoomActors.FrozenRosterSize} (census {census.Count})");
+                }
             }
             catch { }
             try
@@ -6573,9 +7265,32 @@ namespace CompetitiveRounds
                 {
                     var clearProps = new Hashtable();
                     clearProps[CARD_PROP_KEY] = "";
+                    // RJ-3 witness, published in the SAME op as the card clear
+                    // so the two cannot disagree: this hook is the only site
+                    // that clears this seat's per-game tallies, so the seat
+                    // that carries game N is exactly the seat that holds game
+                    // N's scores. The lane design's reporter election read it
+                    // at game over; this build elects by presence and does not
+                    // (the RJ-3 note in TryReportFfaMatch). The game numbering
+                    // reads it: the ending master's witness is the master game
+                    // of the carry and of the follow test (FfaMode.MasterGameNow).
+                    // RJ-DRIFT N4 (change 7): the value is this seat's ROOM
+                    // game, or -1 when it holds none; never the counter. This
+                    // is the witness's only in-room writer.
+                    int witness = FfaNumberingRules.WitnessToPublish(FfaMode.RoomGame);
+                    clearProps[FfaMode.PropGameWitness] = witness;
                     PhotonNetwork.LocalPlayer?.SetCustomProperties(clearProps);
+                    Plugin.Log.LogInfo($"[FFA] witness published {FfaMode.PropGameWitness}={witness}");
                 }
-                catch { }
+                catch (Exception wex)
+                {
+                    // Not fatal and not silent. This build's report election
+                    // does not read the witness (TryReportFfaMatch), so a
+                    // failed publish changes no reporter; the line stays for
+                    // the lane design's diagnostics and for the game numbering,
+                    // which reads the witness (FfaMode.MasterGameNow).
+                    Plugin.Log.LogWarning($"[FFA] witness publish failed: {wex.Message}");
+                }
 
                 ResetPerMatchCombatCounters();
                 if (string.IsNullOrEmpty(localSteamId) || localSteamId == "unknown")
@@ -6662,7 +7377,9 @@ namespace CompetitiveRounds
                     // someone who quit in game 2 kept collecting a result for
                     // games 3..N they were never in — part of what Sid saw as
                     // "names I did not lose to".
-                    if (kvL.Value.leftGameNumber != FfaMode.GameNumber) continue;
+                    // RJ-DRIFT N10 (change 17): stamp and "now" are both the
+                    // local game sequence.
+                    if (!FfaNumberingRules.LeftInGame(kvL.Value.leftGameNumber, FfaMode.LocalGameSeq)) continue;
                     string nm3 = AddName(kvL.Value.displayName ?? "");
                     if (nm3 != null) roster.Add(new KeyValuePair<string, int>(nm3, kvL.Value.slot));
                 }
@@ -6727,6 +7444,23 @@ namespace CompetitiveRounds
             gameOverReported = true;
             isTracking = false;    // the next game re-arms via OnFfaMatchStarted
             sessionMatchCount++;
+            // FIRST, before the election, before the census, before anything
+            // that can await: freeze the game number this report will be filed
+            // under. cr_ffa_cyc is mutable and the host rolls it into the next
+            // game as soon as the next pick cycle opens, so an elector reading
+            // it LATER keyed a different game than its peers did — two keys,
+            // one physical game, two settlements (Codex client r2 HIGH,
+            // FfaReportRules.cs:91). -1 here means this seat cannot file at
+            // all; it does not mean "use the local counter".
+            int frozenGame = -1;
+            try { frozenGame = FfaMode.FreezeReportGameNumber(); } catch { }
+            Plugin.Log.LogInfo($"[FFA-REPORT] game number frozen at game over: "
+                               + (frozenGame >= 0 ? frozenGame.ToString() : "none (this seat cannot file)"));
+            // RJ-DRIFT N2 (change 5): the next game's number, decided here from
+            // the snapshot just frozen (never from a later read of the
+            // property), bound to this Room object; FOLLOWED is cleared.
+            try { Plugin.Log.LogInfo(FfaMode.TakeCarry()); }
+            catch (Exception cex) { Plugin.Log.LogWarning($"[FFA-NUM] carry: {cex.Message}"); }
             // Roster census (bug 391 §4.1) — same ordering rule as OnGameOver.
             try { RosterCensusEmitter.OnGameBoundary(); } catch { }
             try { NetworkReplicaDiagnostics.OnGameEnded(); } catch { }
@@ -6784,18 +7518,44 @@ namespace CompetitiveRounds
             // OnGameOver path, so its session bookkeeping lives here.
             try { RecordFfaSession(myPlace, localWon, myTeam); } catch (Exception ex)
             { Plugin.Log.LogWarning($"[SESSION] ffa record failed: {ex.Message}"); }
+            // The placement is FORMATTED FROM A KEY, not interpolated
+            // before the lookup. ShowNotification calls I18n.Tr on what it is
+            // given, so an already-composed "FFA over - you placed #3" is not
+            // a catalogue key and never matches one: every non-winning FFA
+            // player read English while the victory line beside it, passed
+            // whole, was translated.
             CompetitiveUI.ShowNotification(localWon
-                ? "FFA VICTORY!"
-                : $"FFA over - you placed #{myPlace}", localWon ? Color.green : new Color(0.7f, 0.85f, 1f), 6f);
+                ? I18n.Tr("FFA VICTORY!")
+                : I18n.TrF("FFA over - you placed #{0}", myPlace),
+                localWon ? Color.green : new Color(0.7f, 0.85f, 1f), 6f);
             AccumulateSessionTime();
             SaveSessionState();
 
             int duration = (int)(DateTime.UtcNow - matchStartTime).TotalSeconds;
             if (duration <= 0 || duration > 86400)
                 duration = (int)Math.Max(1f, Time.realtimeSinceStartup - FfaMode.MatchStartRealtime);
-            // Per-game report room id: same shape the other modes use — the
-            // per-game suffix is the server-side replay-dedup key.
-            string reportRoomId = $"{photonRoomId}_{matchStartTime:HHmmss}_r{FfaMode.GameNumber}";
+            // Per-game report room id: the server-side replay-dedup key, and
+            // therefore a value every seat in the room has to compute
+            // IDENTICALLY. The rule and the reasoning live in
+            // FfaReportRules.ReportRoomId. What stood here mixed this seat's
+            // local clock (matchStartTime, DateTime.UtcNow at its own
+            // match-start hook) with this seat's local game counter, so the two
+            // reporters the election can deliberately produce filed under two
+            // different keys, nothing collided, and one game settled twice.
+            string reportRoomId = FfaReportRules.ReportRoomId(photonRoomId, frozenGame);
+            if (!FfaReportRules.CanFile(reportRoomId))
+            {
+                // FAIL CLOSED. No published number was readable at the
+                // game-over edge, so there is no number every seat would
+                // agree on — and the local counter is exactly the per-seat
+                // value the shared key exists to escape, so substituting it
+                // would manufacture the disagreement. One lost result costs a
+                // game; a minted number costs a second settlement of rating,
+                // XP, gold and wagers on a game that already paid out.
+                Plugin.Log.LogWarning("[FFA-REPORT] no published game number was frozen at game over — "
+                    + "this seat is not eligible to file this game");
+                return;
+            }
             try
             {
                 if (!TryReportFfaMatch(reportRoomId, duration, winnerTeam))
@@ -6852,6 +7612,28 @@ namespace CompetitiveRounds
 
             var entries = new List<ApiClient.FfaReportPlayer>();
             var presentSteams = new List<string>();
+            // RJ-3: present fighters that also WITNESSED this game's start
+            // (FfaMode.PropGameWitness) were the lane design's electorate.
+            // THIS BUILD DOES NOT READ THEM (V1410-BETA deviation, D-C R1).
+            // The election below is by presence, lowest present Steam ID
+            // first, the rule v1.40.3 applies; main's V11 item 12 skips a seat
+            // whose cr_late or cr_lag bars it (properties a 1.40.3 seat never
+            // carries), and FfaReportRules.ElectReporter keeps it total when no
+            // present id parses. A beta room mixes this client
+            // with 1.40.3 seats, and only this client publishes the witness:
+            // a witness election there makes a lone tester the only witness,
+            // so it always elects itself, while the 1.40.3 seats elect the
+            // lowest present seat, and two seats file one game whenever those
+            // differ. By presence every seat applies one rule to the same
+            // fighters. The frozen key is unchanged: a seat that froze no game
+            // number does not file (FfaReportRules.CanFile in OnFfaGameOver),
+            // so an elected tester without one files nothing, which loses the
+            // result rather than settling a game twice. What this gives back:
+            // the case RJ-3 closed is open again here, exactly as on v1.40.3
+            // and main. A seat that relaunched into the room mid-sitting is
+            // present with the per-game tables OnFfaMatchStarted cleared, and
+            // when it holds the lowest Steam ID it is elected and files the
+            // game's scoreboard from them.
             var presentActorBySteam = new Dictionary<string, int>(StringComparer.Ordinal);
             string winnerSteam = null;
 
@@ -6980,14 +7762,16 @@ namespace CompetitiveRounds
                     // game (server skips rating/XP). A leaver DURING this
                     // game is absent=false and still gets rated — leaving
                     // at 0 score must not dodge the loss.
-                    absent = kv.Value.leftGameNumber != FfaMode.GameNumber,
+                    // RJ-DRIFT N10 (change 17): the stamp against the local
+                    // game sequence.
+                    absent = !FfaNumberingRules.LeftInGame(kv.Value.leftGameNumber, FfaMode.LocalGameSeq),
                     // Field point total when they left — drives the server's
                     // early-leave grace (under 2 = nothing was decided yet, so
                     // no rating for them this game). Only meaningful for a
                     // leave from THIS game: a carried ghost's figure belongs to
                     // a game that already ended, so send -1 and let the server
                     // read it as "not reported".
-                    gamePointsAtLeave = (kv.Value.leftGameNumber == FfaMode.GameNumber
+                    gamePointsAtLeave = (FfaNumberingRules.LeftInGame(kv.Value.leftGameNumber, FfaMode.LocalGameSeq)
                                          ? kv.Value.gamePointsAtLeave : -1),
                     cards = FfaMode.PickHistoryFor(kv.Value.slot),
                     telemetry = null,
@@ -7047,12 +7831,25 @@ namespace CompetitiveRounds
             }
 
             // Reporter election: lowest Steam ID among PRESENT players (all FFA
-            // players carry the mod — the queue is the only entry path).
+            // players carry the mod - the queue is the only entry path).
             // V11 item 12: the election skips a present player whose cr_late
             // names this lobby (every game of the sitting) or whose cr_lag names
             // this lobby and this game, lowest Steam id first as before; the
             // fallback to itself is disabled for a seat carrying either, read
             // from the local record (#428), never from its own property.
+            //
+            // WHAT TWO ELECTORS FILE, if seats ever disagree about who is
+            // present: both keys are FfaReportRules.ReportRoomId over the game
+            // number each seat FROZE at the game-over edge - not a live read
+            // of cr_ffa_cyc, which the host rolls into the next game, and not
+            // a local counter, which drift adoption moves per seat - so two
+            // electors of one physical game present the same string, and a
+            // seat that froze no number files nothing at all. The server's
+            // required behaviour is to settle only the tail equal to the
+            // lobby's games_played+1 under the lobby lock, echo an exact
+            // resubmission and refuse every other tail terminally; this
+            // client's half is one key per physical game, a 409 or 403 treated
+            // as terminal at attempt 1, and no re-keying of a refused report.
             var cands = new List<KeyValuePair<long, string>>();
             foreach (var sid in presentSteams)
                 if (long.TryParse(sid, out long v)) cands.Add(new KeyValuePair<long, string>(v, sid));
@@ -7065,6 +7862,18 @@ namespace CompetitiveRounds
                 a => FfaLateEntry.LaggedInGame(a, reportGame), a => FfaLateEntry.LateInSitting(a));
             string lowest = null;
             if (elected >= 0) sidOfActor.TryGetValue(elected, out lowest);
+            else if (cands.Count == 0)
+            {
+                // TOTAL (#430): no present id parses, so numeric order names
+                // nobody and every seat would fall back to electing itself.
+                // FfaReportRules.ElectReporter's ordinal pass over the same
+                // replicated set names one seat on every client instead; a seat
+                // item 12 bars is not elected by it either.
+                string ord = FfaReportRules.ElectReporter(presentSteams, null, out bool _);
+                if (ord != null && presentActorBySteam.TryGetValue(ord, out int oa)
+                    && !FfaLateEntry.LateInSitting(oa) && !FfaLateEntry.LaggedInGame(oa, reportGame))
+                    lowest = ord;
+            }
             int ownActor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
             bool selfBarred = FfaLateEntry.LateInSitting(ownActor) || FfaLateEntry.LaggedInGame(ownActor, reportGame);
             if (lowest == null && !selfBarred) lowest = localSteamId;
@@ -7452,50 +8261,154 @@ namespace CompetitiveRounds
                     break;
                 }
             }
-            catch { }
+            catch (Exception e) { SafeAchLog("health/death sample threw: " + e.Message); }
 
             // Sync our exposed flag — true ONLY when we're truly in combat (not pick / dead / menu).
+            // Item 17: no achievement predicate reads it any more (ReadCombatGate
+            // derives its own); its consumers are the advisory counters and chat.
             LocalAliveInCombatNow = localAliveInCombat && !inPickPhase;
 
-            // Input tracking — discrete key/click COUNTS moved to TickInputSampling
-            // (per-frame; the *Down APIs are frame-edge triggers and missed ~97% of
-            // events at this 10 Hz cadence — bug #50). Only HELD-state achievement
-            // edges remain here: GetKey/GetMouseButton read held state, which a
-            // 10 Hz sample sees reliably.
-            if (localAliveInCombat && !inPickPhase)
+        }
+
+        // ── Item 17 (D3): the paying input predicates ─────────────
+        // Pacifist (achFiredShot), Immovable Object (achMoved) and Grounded
+        // (achJumped) pay gold when their flag is still FALSE at a win. So the
+        // failure direction that matters is a flag left false while the player
+        // acted: every read here is TOTAL (Keybinds.ReadBoundSource answers
+        // Unreadable, never throws), every union folds Down OR Unreadable as
+        // acted, the combat gate suppresses only on a POSITIVE not-in-combat,
+        // and a throw anywhere marks the predicate acted. A wrong "acted"
+        // forfeits one achievement for one match; a wrong "not acted" pays.
+
+        private enum Gate { InCombat, NotInCombat, Unknown }
+
+        /// <summary>Fire: the bound row, legacy LMB (the default and every
+        /// player's habit) and this seat's own PlayerAction.</summary>
+        private static readonly Keybinds.Src[] FireUnion =
+        {
+            Keybinds.Src.Row(KeybindRules.Fire), Keybinds.Src.LegacyMouse(0), Keybinds.ActionFire,
+        };
+
+        /// <summary>Move: the four movement rows and Jump, the legacy keys the
+        /// pin read (W A S D Space and the arrows), and the action term.</summary>
+        private static readonly Keybinds.Src[] MoveUnion =
+        {
+            Keybinds.Src.Row(KeybindRules.MoveUp), Keybinds.Src.Row(KeybindRules.MoveDown),
+            Keybinds.Src.Row(KeybindRules.MoveLeft), Keybinds.Src.Row(KeybindRules.MoveRight),
+            Keybinds.Src.Row(KeybindRules.Jump),
+            Keybinds.Src.Legacy(KeyCode.W), Keybinds.Src.Legacy(KeyCode.A), Keybinds.Src.Legacy(KeyCode.S),
+            Keybinds.Src.Legacy(KeyCode.D), Keybinds.Src.Legacy(KeyCode.Space),
+            Keybinds.Src.Legacy(KeyCode.UpArrow), Keybinds.Src.Legacy(KeyCode.DownArrow),
+            Keybinds.Src.Legacy(KeyCode.LeftArrow), Keybinds.Src.Legacy(KeyCode.RightArrow),
+            Keybinds.ActionMove,
+        };
+
+        /// <summary>Jump: the Jump and MoveUp rows (both jump in ROUNDS), the
+        /// legacy Space, W and Up, and the action term.</summary>
+        private static readonly Keybinds.Src[] JumpUnion =
+        {
+            Keybinds.Src.Row(KeybindRules.Jump), Keybinds.Src.Row(KeybindRules.MoveUp),
+            Keybinds.Src.Legacy(KeyCode.Space), Keybinds.Src.Legacy(KeyCode.W), Keybinds.Src.Legacy(KeyCode.UpArrow),
+            Keybinds.ActionJump,
+        };
+
+        /// <summary>Acted = Down OR Unreadable, over every term, no branch
+        /// that can skip one. ReadBoundSource cannot throw.</summary>
+        private static bool UnionActed(Keybinds.Mode mode, Keybinds.Src[] union)
+        {
+            bool acted = false;
+            for (int i = 0; i < union.Length; i++)
+                if (Keybinds.ReadBoundSource(union[i], mode) != Read.Up) acted = true;
+            return acted;
+        }
+
+        /// <summary>The gate, derived here every frame from values this
+        /// method reads itself. Only NotInCombat suppresses.</summary>
+        private static Gate ReadCombatGate()
+        {
+            try
             {
-                // Skip while the chat overlay / F5 menu has focus — typing "wasd"
-                // in a Discord-bridged message previously false-flagged Immovable
-                // Object. Hoisted above the shot check for bug #128: the T chat is
-                // now openable DURING combat, so a click that lands while the box
-                // has focus fires no gun (GameManager.lockInput) and must not
-                // count as "fired a shot" either — that would silently break a
-                // Pacifist run for anyone who chats mid-round.
-                bool typingInChat = false;
-                try { typingInChat = CompetitiveUI.AnyChatTyping || NativeUI.IsOpen; } catch { }
-                if (!typingInChat && !achFiredShot && Input.GetMouseButton(0))
-                {
-                    achFiredShot = true;
-                    Plugin.Log.LogInfo("[ACH] Player fired a shot");
-                }
-                if (!typingInChat && !achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
-                    Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
-                    Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||
-                    Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.LeftArrow) ||
-                    Input.GetKey(KeyCode.RightArrow)))
+                if (!isTracking) return Gate.NotInCombat;
+                if (inPickPhase) return Gate.NotInCombat;
+                var data = Keybinds.LocalCharacter();
+                if (data == null) return Gate.Unknown;
+                return (!data.dead && data.health > 0f) ? Gate.InCombat : Gate.NotInCombat;
+            }
+            catch { return Gate.Unknown; }
+        }
+
+        /// <summary>The first statement of TickFrame. Held at frame rate: a
+        /// press cannot be shorter than the frame that samples it. Fire first,
+        /// in its own try (D3); each union's catch drives its own predicate.</summary>
+        private static void TickAchievementInput()
+        {
+            if (!isTracking) return;
+            if (ReadCombatGate() == Gate.NotInCombat) return;
+            bool typingInChat = false;                    // unknown => NOT typing => the flag SETS
+            try { typingInChat = CompetitiveUI.AnyChatTyping || NativeUI.IsOpen; }
+            catch { SafeAchLog("chat state unreadable - read as not typing"); }
+            if (typingInChat) return;
+            // Fire first, in its own try (D3): no advisory read sits ahead of it.
+            try { if (!achFiredShot && UnionActed(Keybinds.Mode.Held, FireUnion)) NoteShotFired(false); }
+            catch { NoteShotFired(true); SafeAchLog("input predicate threw: fire - marked acted"); }
+            try
+            {
+                if (!achMoved && UnionActed(Keybinds.Mode.Held, MoveUnion))
                 {
                     achMoved = true;
-                    Plugin.Log.LogInfo("[ACH] Player moved");
-                }
-                // Grounded (v1.30): jump keys only — W/Space/Up all jump in ROUNDS.
-                if (!typingInChat && !achJumped && (Input.GetKey(KeyCode.Space)
-                    || Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow)))
-                {
-                    achJumped = true;
-                    Plugin.Log.LogInfo("[ACH] Player jumped");
+                    SafeAchLog("Player moved");
                 }
             }
+            catch { achMoved = true; SafeAchLog("input predicate threw: move - marked acted"); }
+            try
+            {
+                if (!achJumped && UnionActed(Keybinds.Mode.Held, JumpUnion))
+                {
+                    achJumped = true;
+                    SafeAchLog("Player jumped");
+                }
+            }
+            catch { achJumped = true; SafeAchLog("input predicate threw: jump - marked acted"); }
         }
+
+        /// <summary>The ONLY writer of achFiredShot, and total: the flag read
+        /// first, the typingInChat re-derivation inside its own try defaulting
+        /// to false, the log through SafeAchLog. forced is read in one place,
+        /// the typing guard: a catch passes true because on that path the input
+        /// was never read, so the typing suppression cannot apply to it.</summary>
+        private static void NoteShotFired(bool forced)
+        {
+            if (achFiredShot) return;
+            bool typingInChat = false;
+            try { typingInChat = CompetitiveUI.AnyChatTyping || NativeUI.IsOpen; }
+            catch { SafeAchLog("chat state unreadable at the shot - read as not typing"); }
+            if (typingInChat && !forced) return;
+            achFiredShot = true;
+            SafeAchLog("Player fired a shot");
+        }
+
+        /// <summary>A throw reached the tick's wrapper: all three input
+        /// predicates are marked acted rather than left false (the conservative
+        /// direction: the achievement is not paid). Total, like the two
+        /// routines it calls.</summary>
+        private static void MarkInputPredicatesActed(string reason)
+        {
+            NoteShotFired(true);
+            achMoved = true;
+            achJumped = true;
+            SafeAchLog("input predicates unevaluated, marked acted: " + reason);
+        }
+
+        /// <summary>Failed achievement-log writes (the one thing SafeAchLog's
+        /// own catch can do without calling anything).</summary>
+        private static int achLogFailures;
+
+        /// <summary>A log line that cannot throw.</summary>
+        private static void SafeAchLog(string message)
+        {
+            try { Plugin.Log.LogInfo("[ACH] " + message); } catch { achLogFailures++; }
+        }
+
 
         private static void EvaluateAchievements(bool localWon)
         {
@@ -8184,6 +9097,8 @@ namespace CompetitiveRounds
             sharedGameToken = "";
             previousGameToken = "";
             matchStartServerTimestamp = 0;
+            sharedGameT0 = 0;
+            sharedGameT0Set = false;
             wasGameInProgress = false;
             pcolorRoomApplied = false;
             // Room over — drop the Tab-board card baselines (bug #64); the Player
@@ -8268,9 +9183,15 @@ namespace CompetitiveRounds
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
+            FlushFreezeBandSummary(true);
+            _freezeLogged = 0;   // the >0.2s cap is per MATCH, like the two below it
+            _bandCount = 0; _bandMaxMs = 0; _bandLogged = 0; _bandTotalSec = 0f;
+            _bandSummaries = 0; _bandSummarisedCount = 0; _bandSummaryAt = -999f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
             oppHbGapCount = 0; _oppHbGapOpen = false;
             oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
+            OppFreezeStatsEpoch = 0;   // round 2 finding 3: unknown until a peer says otherwise
+            OppFreezeEpoch = 0;
             _lastTickStopwatchMs = -1;
             _hitsRemaining = 0;
             _activationSuccessCredited = true;
@@ -8330,6 +9251,53 @@ namespace CompetitiveRounds
         }
         public static bool LeavingForRanked { get; set; } = false;
         public static string LocalSteamId => localSteamId;
+
+        /// <summary>Seat evidence: this game's T0. With the shared token adopted
+        /// it is the master's published value (fromToken); otherwise this seat's
+        /// own start stamp. Raw int32 Photon server time.</summary>
+        internal static int SeatEvidenceT0(out bool fromToken)
+        {
+            fromToken = sharedGameT0Set && !string.IsNullOrEmpty(sharedGameToken);
+            return fromToken ? sharedGameT0 : matchStartServerTimestamp;
+        }
+
+        /// <summary>Seat evidence for a game that got no game over on this seat
+        /// (a leave, a drop, or the game closing): the record of what this seat
+        /// collected up to the end, with the end kind it noted. Its score and
+        /// attach key follow the report the game gets (SeatEvidenceCore.CutScore:
+        /// only the round TOTAL enters the key). Contained: it never changes the
+        /// exit's own handling.</summary>
+        private static void SeatEvidenceCut(int localRounds, int oppRounds)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(photonRoomId)
+                    && photonRoomId.IndexOf("offline", StringComparison.OrdinalIgnoreCase) >= 0) return;
+                int[] s = SeatEvidenceCore.CutScore(localRounds, oppRounds, opponentDCReported);
+                SeatEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), s[0], s[1],
+                    matchIsRanked && oneVOneMatchAtStart);
+                // Card draw evidence (B4): the same game cut short, same attach key.
+                try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
+                try { CombatEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
+                // Identity-clock evidence: the same game cut short, same attach key.
+                try { IdentityClockEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
+            }
+            catch { }
+        }
+
+        /// <summary>Application.quitting: a game still live while the game
+        /// closes is queued to the seat-evidence file now (end "closing") and
+        /// sent at the next launch.</summary>
+        internal static void SeatEvidenceOnQuit()
+        {
+            try
+            {
+                if (!isTracking || gameOverReported) return;
+                SeatEvidence.NoteEnd("closing");
+                SeatEvidenceCut(localTeamId == 0 ? p1Rounds : p2Rounds, localTeamId == 0 ? p2Rounds : p1Rounds);
+            }
+            catch { }
+        }
         public static string LocalDisplayName => localDisplayName;
         public static string OpponentDisplayName => opponentDisplayName;
         public static string OpponentSteamId => opponentSteamId;
@@ -8437,7 +9405,8 @@ namespace CompetitiveRounds
     /// Seats come from PhotonNetwork.PlayerList minus spectators, NOT from
     /// RoomActors.ActiveFighters(). ActiveFighters applies IsUnauthorized once
     /// the roster is frozen — and the roster IS frozen on this branch, at the
-    /// three FreezeFighterRoster call sites in this file — so a latched actor
+    /// two FreezeFighterRoster call sites in this file and at the per-game FFA
+    /// refreeze (RoomActors.RefreezeFighterRosterForGameFromRoom) — so a latched actor
     /// would be removed from the census before it could be counted, and a seat
     /// that has gone missing from the reporting client's view is exactly the
     /// row this instrument exists to show. The FFA lane learned the same thing

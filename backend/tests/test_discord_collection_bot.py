@@ -2226,8 +2226,11 @@ def ready_rig(env):
         return None
     for name in task_fns:
         extra[name] = noop
-    rig = make_rig(H.asgi_handler(env), funcs={"on_ready", "poll_pending_dms", "_ack_pending_dms", "api_get"},
-                   assigns={"_pdm_seen_ids"}, extra=extra)
+    # On the v1.41.0 beta merge the poller is the beta's: its per-row recheck
+    # (_dm_still_live, the pending-DM cancellation route) and its two ledgers
+    # (_pdm_seen, _pdm_unacked) in place of main's _pdm_seen_ids.
+    rig = make_rig(H.asgi_handler(env), funcs={"on_ready", "poll_pending_dms", "_ack_pending_dms", "_dm_still_live", "api_get"},
+                   assigns={"_pdm_seen", "_pdm_unacked"}, extra=extra)
     session = rig.ns["http_session"]
     rig.ns["aiohttp"].ClientSession = lambda *a, **k: session
     rig.ns["discord"].NotFound = type("NotFound", (Exception,), {})

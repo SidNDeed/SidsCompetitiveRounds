@@ -93,6 +93,11 @@ LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL", "0"))
 # mirror of that server setting for footer/label text -- the filtering itself
 # is server-side, so a mismatch here can only mislabel, never mis-filter.
 LB_ACTIVE_DAYS = int(os.getenv("LEADERBOARD_ACTIVE_DAYS", "90"))
+# v1.41.0 item 1: which boards #scr-leaderboard carries, in channel order
+# (the last one sits at the bottom). Keys are BOARDS entries; an unknown key
+# is logged by _enabled_boards rather than dropped. Default excludes 1v2 and
+# the Records mini-boards (Sid, 2026-09-18).
+LEADERBOARD_BOARDS_RAW = os.getenv("LEADERBOARD_BOARDS", "1v1,2v2,ffa")
 SERIES_LOG_CHANNEL_ID = int(os.getenv("SERIES_LOG_CHANNEL", "0"))
 QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
 CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
@@ -192,7 +197,7 @@ TROPHY_X2_SUFFIX = " (x2)"
 # concrete match IS in hand, render m["deadline_at"] instead of this number.
 ASYNC_DEADLINE_DAYS = 7
 
-# July 28 rank reorganization (Stan's proposal): base-tier floors move to
+# July 28 rank reorganization: base-tier floors move to
 # Intermediate 1500 / Advanced 1675 / Master 1980 (GM stays 2330), sub-tiers
 # widen toward the bottom, and tier I is spelled out on every rank. Must stay
 # in lockstep with main.py's RANK_TIERS (which strips the range suffix).
@@ -328,9 +333,8 @@ async def _handle_ticket_dm(message):
     """A user DMed the bot (not a command). Parse '#N <text>' / 'ticket N <text>'
     and post it as a comment on bug report N. The API verifies the DMer actually
     owns ticket N (their linked Discord must match the report's reporter)."""
-    import re
     content = (message.content or "").strip()
-    m = re.match(r'^(?:ticket\s*)?#?\s*(\d+)\s*[:.\-]?\s+(.+)$', content, re.IGNORECASE | re.DOTALL)
+    m = _TICKET_DM_RE.match(content)
     if not m:
         await message.channel.send(
             "💬 To add to one of your bug reports, DM me like:\n"
@@ -374,6 +378,379 @@ async def _handle_ticket_dm(message):
     except Exception as ex:
         print(f"[TICKET-DM] post error: {ex}")
         await message.channel.send("⚠️ Couldn't reach the report system — try again shortly.")
+
+async def _mail_reply_post(payload):
+    """POST the bot-only reply route. Returns (status, json_or_none)."""
+    if http_session is None or not API_SECRET_KEY:
+        return 0, None
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/mail/reply-from-discord",
+            json=payload, headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as r:
+            try:
+                return r.status, await r.json()
+            except Exception:
+                return r.status, None
+    except Exception as ex:
+        print(f"[MAIL-DM] post error: {ex}")
+        return 0, None
+
+
+def _is_registered_command(content):
+    """True when this DM text invokes a command the bot actually has.
+
+    The Reply branch sits above the "!" guard so a mail reply reading
+    "!important" is mail text and not a failed command. That is right for
+    text which only LOOKS like a command and wrong for one that IS one: a
+    player who replies to a relay DM with `!link ABC123` means the command,
+    and mailing that line to whoever sent the mail both loses the command
+    and sends an answer nobody asked for. The bot's own command table is
+    the discriminator -- no list to keep in step."""
+    s = content or ""
+    # NO lstrip and NO lowercasing: this has to agree with the parser that
+    # will actually run, and discord.py leaves `strip_after_prefix` and
+    # `case_insensitive` at their False defaults. Being more generous here
+    # than the parser is the worst of both -- "  !link x" was withheld
+    # from mail as a command and then never dispatched as one, so the
+    # message did nothing at all.
+    prefix = getattr(bot, "command_prefix", "!")
+    if not isinstance(prefix, str) or not s.startswith(prefix):
+        return False
+    parts = s[len(prefix):].split(None, 1)
+    word = parts[0] if parts else ""
+    if not word:
+        return False
+    try:
+        return bot.get_command(word) is not None
+    except Exception:
+        # Fail CLOSED. Treating an unanswerable question as "not a
+        # command" mails whatever the player typed to another player, and
+        # `!link <code>` is exactly the text that must never go there.
+        return True
+
+
+def _mail_sent_line(info):
+    """The confirmation. `known` is false when the server could not read
+    the thread back -- saying "to them - (no subject)" there states two
+    facts it does not have, about a reply that did send."""
+    if not (info or {}).get("known"):
+        return "\u2709\ufe0f Sent your reply."
+    who = (info.get("sender_name") or "").strip() or "them"
+    subj = (info.get("subject") or "").strip() or "(no subject)"
+    return "\u2709\ufe0f Sent your reply to **%s** — *%s*" % (_escape_md(who), subj)
+
+
+# ── Item 5: the thread marker ──────────────────────────────────────────────
+#
+# DUPLICATED VERBATIM from backend/api/mail_discord.py. The bot is a separate
+# container and imports nothing from the api, so these literals have to exist
+# twice; `test_the_bot_and_the_api_agree_on_the_marker` compares them across
+# the two files, because two copies of one contract silently drifting apart
+# is a failure this project has already paid for (#329/#341).
+RELAY_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+RELAY_CODE_LEN = 12
+_CODE_BODY = "[0-9A-HJKMNP-TV-Z]{%d}" % RELAY_CODE_LEN
+# The ONE definition of "this message names a thread". Anchored to a whole
+# line: `_mail_discord_safe` escapes a line-leading `-#` and collapses
+# intra-line whitespace, so no player-authored field can render as this line.
+RELAY_CODE_RE = re.compile(r"(?m)^-# \u21a9 (SCR-" + _CODE_BODY + r")[ \t]*$")
+# "one of ours, and MENTIONS threads without naming one" -- the listing below
+# prints several codes and must never be read as pointing at any of them.
+RELAY_CODE_ANY_RE = re.compile(r"SCR-" + _CODE_BODY)
+# A code the player TYPED, in leading position only. A code sitting anywhere
+# in the body of a message that carries a Discord Reply is text, not a
+# target: the pointer they used outranks anything quoted inside their words.
+# IGNORECASE is load-bearing, not tidiness: `normalize_relay_code` accepts a
+# code in any case and repairs I/L/O by eye, and this is the gate in front of
+# it. Without the flag the gate was strictly narrower than the thing it
+# guards, so a lowercase code -- what you get pasting from most phone
+# keyboards -- was never even offered to the normalizer.
+_RELAY_CODE_LEAD_RE = re.compile(
+    r"^\s*(SCR[- ]?[0-9A-Za-z]{12})\b[\s:,.\-]*(.*)$", re.DOTALL | re.IGNORECASE)
+
+
+def relay_code_line(code):
+    return "\n-# \u21a9 %s" % code
+
+
+def normalize_relay_code(s):
+    """A code the PLAYER typed -> the stored form, or "" if it is not one.
+
+    Crockford decoding: case-insensitive, and I/L read as 1 while O reads as
+    0, because those are the substitutions a person makes copying a code by
+    eye. U is not in the alphabet and is deliberately NOT remapped -- it is
+    simply not a code."""
+    t = re.sub(r"[^0-9A-Z]", "", (s or "").strip().upper())
+    if not t.startswith("SCR"):
+        return ""
+    t = t[3:].replace("I", "1").replace("L", "1").replace("O", "0")
+    if len(t) != RELAY_CODE_LEN or any(c not in RELAY_CODE_ALPHABET for c in t):
+        return ""
+    return "SCR-" + t
+
+
+# ── The pick-a-thread listing ──────────────────────────────────────────────
+#
+# What a tap still has to know: the words the player already typed, the id
+# that makes the send idempotent, and who is allowed to tap. None of it can
+# live in the custom_id -- Discord caps that at 100 characters and a player's
+# message does not belong in a component id -- so it is held here, keyed by
+# the listing's own message id, and evicted oldest-first.
+#
+# This state is deliberately PROCESS-LOCAL, which is the opposite of the maps
+# this change deletes. The difference is what its loss costs (#430): losing a
+# map made the bot guess a thread, and losing this makes it print a sentence
+# telling the player what to type. The codes are in the listing TEXT as well,
+# so a restart leaves a durable route in the message itself.
+_mailpick: dict = {}
+_MAILPICK_MAX = 500
+
+
+async def _relay_threads(discord_id):
+    """The threads a reply could be naming, newest first. None on failure --
+    which is NOT the same as an empty list, and the callers keep them apart."""
+    if http_session is None or not API_SECRET_KEY:
+        return None
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/mail/relay-threads",
+            json={"discord_id": str(discord_id)},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as r:
+            if r.status == 404:
+                body = await r.json() if r.content_type == "application/json" else {}
+                if (body or {}).get("detail") == "not_linked":
+                    # A fact, not a failure, and the two callers want
+                    # opposite things from it: the DM chain falls through to
+                    # the ticket path, `/mail reply` says how to link.
+                    return "not_linked"
+                # The ROUTE is missing: this bot is newer than the api it is
+                # talking to. Named, because "no threads" and "the deploy is
+                # half-done" must not read the same in a log.
+                print("[MAIL-DM] relay-threads 404 — api predates this bot")
+                return None
+            if r.status != 200:
+                return None
+            return ((await r.json()) or {}).get("threads") or []
+    except Exception as ex:
+        print(f"[MAIL-DM] relay-threads error: {ex}")
+        return None
+
+
+def _mailpick_view(threads, disabled=False):
+    """One button per thread. `timeout=None` and no live callbacks: routing
+    is by custom_id through on_interaction, the same shape as the tournament
+    buttons at :10915, so nothing here depends on a newer component API."""
+    view = discord.ui.View(timeout=None)
+    for t in threads[:5]:
+        label = "%s \u2014 %s" % ((t.get("sender_name") or "?").strip(),
+                                  (t.get("subject") or "(no subject)").strip())
+        view.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.secondary, label=label[:80],
+            custom_id="scrmail:%s" % t.get("relay_code"), disabled=disabled))
+    return view
+
+
+async def _ask_which_mail(message_or_ctx, body, *, discord_id, channel,
+                          source_message_id, unreadable=False, bad_code=False):
+    """Refuse, and make the refusal cost one tap.
+
+    Returns "HANDLED" or "ASK" when the player was answered, and "NOT_MAIL"
+    when they have no relay threads at all -- so the ticket chain still gets
+    every message it gets today from a player who has never had mail."""
+    threads = await _relay_threads(discord_id)
+    if threads == "not_linked":
+        return "NOT_LINKED"
+    if not threads:
+        if unreadable:
+            await channel.send(
+                "\u26a0\ufe0f I couldn\u2019t read the message you replied to "
+                "\u2014 reply in game (F5 \u2192 Mail).")
+            return "HANDLED"
+        # Not ours to answer. `threads is None` (the api was unreachable)
+        # lands here too, and deliberately: with no list to offer there is
+        # nothing this path can do that the ticket path cannot.
+        return "NOT_MAIL"
+    lead = ("\u274c That thread code doesn\u2019t match any mail sent to you."
+            if bad_code else
+            "\u26a0\ufe0f I couldn\u2019t read the message you replied to."
+            if unreadable else
+            "\u2753 I couldn\u2019t tell which mail that answers.")
+    lines = [lead, "Tap the one you meant \u2014 or use Discord\u2019s **Reply** on its DM."]
+    for t in threads[:5]:
+        lines.append("**%s** \u2014 *%s* \u00b7 `%s`"
+                     % (_escape_md((t.get("sender_name") or "?").strip()),
+                        (t.get("subject") or "(no subject)").strip(),
+                        t.get("relay_code")))
+    lines.append("-# Or send `SCR-XXXXXXXXXXXX your message` at any time.")
+    sent = await channel.send("\n".join(lines), view=_mailpick_view(threads))
+    if sent is not None:
+        while len(_mailpick) >= _MAILPICK_MAX:
+            _mailpick.pop(next(iter(_mailpick)), None)
+        _mailpick[str(sent.id)] = {
+            "body": body, "author_id": int(discord_id),
+            "source_message_id": source_message_id,
+            "codes": {t.get("relay_code") for t in threads[:5]},
+            "threads": threads[:5]}
+    return "ASK"
+
+
+async def _post_mail_reply(channel, discord_id, code, body, source_message_id):
+    """POST one reply that NAMES its thread. Returns a dispatch verdict."""
+    status, data = await _mail_reply_post({
+        "discord_id": str(discord_id), "relay_code": code, "body": body,
+        # Idempotency across the retry boundary (#172): Discord may redeliver
+        # a message, and a reply can commit while its confirmation fails.
+        # Both are a repeat of the SAME message and must not become two.
+        "source_message_id": source_message_id})
+    if status == 200:
+        info = (data or {}).get("replied_to") or {}
+        out = _mail_sent_line(info)
+        # The confirmation carries the marker too, so replying to IT stays on
+        # the same thread -- exactly one marker line, so it resolves.
+        if info.get("relay_code"):
+            out += relay_code_line(info["relay_code"])
+        await channel.send(out)
+        return "HANDLED"
+    detail = (data or {}).get("detail") or "unknown"
+    if status == 404 and detail == "not_linked":
+        # Unchanged: the ticket path still gets its chance at this message.
+        return "NOT_MAIL"
+    if status == 404 and detail in ("unknown_code", "target_required"):
+        return await _ask_which_mail(
+            None, body, discord_id=discord_id, channel=channel,
+            source_message_id=source_message_id, bad_code=True)
+    if status == 0:
+        await channel.send("\u26a0\ufe0f Mail is temporarily unreachable \u2014 try again shortly.")
+        return "HANDLED"
+    if detail == "not_found":
+        # Specifically NOT the blocks/length/rate line: nothing the player
+        # did was refused, the mail they are answering no longer exists.
+        await channel.send(
+            "\u274c That mail isn\u2019t there any more \u2014 it was deleted, so "
+            "there is nothing to reply to.")
+        return "HANDLED"
+    # Everything else is a real refusal from the SAME rules the in-game reply
+    # obeys (blocked, rate-limited, too long, censor). Surface the reason.
+    await channel.send(
+        f"\u274c Couldn\u2019t send that reply: `{detail}`. The same rules apply as "
+        f"in-game (blocks, length, and a short rate limit).")
+    return "HANDLED"
+
+
+async def _handle_mail_dm(message):
+    """Turn a DM into a reply on the mail it answers.
+
+    Returns exactly one of "HANDLED", "ASK", "NOT_MAIL". Three values and not
+    a boolean on purpose: one boolean used to mean both "not our DM" and "we
+    could not look", and those two need opposite outcomes (#430).
+
+    The actor is never sent as a steam id -- the bot forwards the Discord id
+    and the server resolves the player from players.discord_id (#545)."""
+    ref = getattr(message, "reference", None)
+    ref_id = getattr(ref, "message_id", None) if ref is not None else None
+    # NOT stripped before posting. The core judges prohibited control
+    # characters BEFORE any trim, so a body ending in LF, U+0085 or U+2028 is
+    # refused in game; stripping here would make the Discord path quietly
+    # more permissive than the one it must match. The strip only decides
+    # whether there is anything worth posting at all.
+    body = message.content or ""
+    if not body.strip():
+        return "NOT_MAIL"
+    did = str(message.author.id)
+    src = str(getattr(message, "id", "") or "")
+    if ref_id:
+        r = getattr(ref, "resolved", None)
+        if r is None or isinstance(r, discord.DeletedReferencedMessage):
+            try:
+                r = await message.channel.fetch_message(int(ref_id))
+            except Exception as ex:
+                # UNKNOWN, not "not ours". The router could not establish
+                # which thread was named, so it asks -- it does not guess and
+                # it does not silently re-route the player's words.
+                print(f"[MAIL-DM] could not read referenced message {ref_id}: {ex}")
+                return await _ask_which_mail(
+                    message, body, discord_id=did, channel=message.channel,
+                    source_message_id=src, unreadable=True)
+        me = getattr(bot, "user", None)
+        if r is None or me is None or getattr(getattr(r, "author", None), "id", None) != me.id:
+            return "NOT_MAIL"
+        found = RELAY_CODE_RE.findall(r.content or "")
+        if len(found) == 1:
+            return await _post_mail_reply(message.channel, did, found[0], body, src)
+        if len(found) > 1:
+            # Unreachable for our own messages -- a relay DM and a
+            # confirmation each carry exactly one marker line. Asking is what
+            # KEEPS it unreachable: picking one of two would answer a thread
+            # the player did not point at, silently, with their words.
+            return await _ask_which_mail(
+                message, body, discord_id=did, channel=message.channel,
+                source_message_id=src)
+        if RELAY_CODE_ANY_RE.search(r.content or ""):
+            # They replied to the listing itself rather than tapping it.
+            return await _ask_which_mail(
+                message, body, discord_id=did, channel=message.channel,
+                source_message_id=src)
+        return "NOT_MAIL"
+    lead = _RELAY_CODE_LEAD_RE.match(body)
+    if lead:
+        code = normalize_relay_code(lead.group(1))
+        if code:
+            return await _post_mail_reply(message.channel, did, code,
+                                          lead.group(2), src)
+    # A plain DM with no reference and no code. This is the one behavioural
+    # loss in the change: it used to reach the most recent mail by guessing,
+    # and now reaches a list the player picks from. It returns "NOT_MAIL" for
+    # a player with no relay threads, so the ticket chain is untouched for
+    # everyone who has never received relayed mail.
+    return await _ask_which_mail(message, body, discord_id=did,
+                                 channel=message.channel, source_message_id=src)
+
+
+async def _mailpick_click(interaction, custom_id):
+    """A tap on the listing. All of the refusals are ephemeral: the listing
+    is in the player's own DMs, but a stale tap should not read as a send."""
+    code = (custom_id or "").split(":", 1)[1] if ":" in (custom_id or "") else ""
+    key = str(getattr(getattr(interaction, "message", None), "id", "") or "")
+    st = _mailpick.get(key)
+    if st is None:
+        # The process restarted, or the listing aged out. A sentence, not a
+        # dead button -- and the code is still printed in the message above.
+        await interaction.response.send_message(
+            "\u23f3 That list has expired \u2014 send `%s your message` and I\u2019ll "
+            "put it on that thread." % (code or "SCR-XXXXXXXXXXXX"), ephemeral=True)
+        return
+    if interaction.user.id != st["author_id"]:
+        await interaction.response.send_message("That isn\u2019t your reply.", ephemeral=True)
+        return
+    if code not in st["codes"]:
+        await interaction.response.send_message("\u26a0\ufe0f Unrecognized button.", ephemeral=True)
+        return
+    # Defer first: the internal POST is allowed 8s and the interaction window
+    # is 3 (the same correction as `/mail reply`, :4996).
+    try:
+        await interaction.response.defer()
+    except Exception:
+        pass
+    # Consume BEFORE the post. A double tap must collapse onto one in-game
+    # reply; `source_message_id` already makes the server idempotent (#172),
+    # and this keeps the second tap from spending a request to find that out.
+    _mailpick.pop(key, None)
+    verdict = await _post_mail_reply(interaction.channel, st["author_id"], code,
+                                     st["body"], st["source_message_id"])
+    if verdict != "HANDLED":
+        # The post refused in a way that re-listed the threads; the buttons
+        # on THIS message are spent either way.
+        pass
+    try:
+        await interaction.message.edit(
+            view=_mailpick_view(st["threads"], disabled=True))
+    except Exception:
+        pass
+
 
 def get_rank_name(rating):
     for threshold, name in RANK_ROLES:
@@ -563,6 +940,15 @@ async def backfill_discord_usernames():
 # rephrasings). Cooldowns keep it from spamming: one answer per topic per
 # channel per 3 min, one answer per user per 20s.
 import re as _faq_re
+
+# The ONE definition of "this DM is a bug-report follow-up" (#N <text> /
+# ticket N <text>). _handle_ticket_dm parses with it, and on_message's
+# item-5 precedence chain tests with it before letting the mail relay claim
+# a plain DM -- so a message the ticket handler would have accepted can
+# never be swallowed by the relay, and the two can never drift apart.
+_TICKET_DM_RE = _faq_re.compile(
+    r'^(?:ticket\s*)?#?\s*(\d+)\s*[:.\-]?\s+(.+)$',
+    _faq_re.IGNORECASE | _faq_re.DOTALL)
 import time as _faq_time
 import difflib as _faq_difflib
 import os as _faq_os   # block-local like the others: the harness execs ONLY
@@ -740,7 +1126,12 @@ def _faq_plainify(text: str, cap: int = 420) -> str:
     #47), and channel mentions are meaningless in-game."""
     t = _faq_re.sub(r"<#\d+>", "the Discord server", text)
     t = _faq_re.sub(r"<@!?\d+>", "them", t)
-    t = t.replace("**", "").replace("__", "").replace("`", "")
+    t = t.replace("**", "").replace("__", "")
+    # A player's name arrives escaped for Discord (_escape_md; round 4,
+    # finding 23), and in-game chat shows text as typed: drop the markup
+    # backticks, not an escaped one, then every escape.
+    t = _faq_re.sub(r"(?<!\\)`", "", t)
+    t = _faq_re.sub(r"\\([^0-9A-Za-z\s])", r"\1", t)
     for bad, good in (("—", "-"), ("–", "-"), ("×", "x"), ("•", "-"),
                       ("→", "->"), ("’", "'"), ("“", '"'), ("”", '"'),
                       ("·", "-"), ("✅", ""), ("❌", "")):
@@ -790,16 +1181,21 @@ _FAQ_ACHIEVEMENTS_TEXT = (
 async def _faq_top_player(message):
     """Dynamic: read the live leaderboard and name the top player(s)."""
     data = await api_get("/leaderboard?limit=3&min_matches=1")
-    entries = (data or {}).get("entries") or []
-    if not entries:
+    entries = (data or {}).get("entries")
+    if entries is None:
         return "Couldn't reach the leaderboard right now — try `/lb` in a minute."
+    if not entries:
+        # An empty board is an answer, not a failed read (round 4, finding
+        # 24): nobody meets the board's active or minimum-match filter.
+        return ("Nobody is on the ranked leaderboard right now. `/lb all` also lists "
+                "the players who have not played for a while.")
     top = entries[0]
-    line = (f"Right now the top-rated player is **{top['display_name']}** at "
+    line = (f"Right now the top-rated player is **{_escape_md(top['display_name'])}** at "
             f"**{top['rating']}** ({top['wins']}W/{top['losses']}L).")
     if len(entries) >= 3:
-        line += (f"\nPodium: 🥇 {entries[0]['display_name']} ({entries[0]['rating']}) · "
-                 f"🥈 {entries[1]['display_name']} ({entries[1]['rating']}) · "
-                 f"🥉 {entries[2]['display_name']} ({entries[2]['rating']})")
+        line += (f"\nPodium: 🥇 {_escape_md(entries[0]['display_name'])} ({entries[0]['rating']}) · "
+                 f"🥈 {_escape_md(entries[1]['display_name'])} ({entries[1]['rating']}) · "
+                 f"🥉 {_escape_md(entries[2]['display_name'])} ({entries[2]['rating']})")
     line += "\nFull board: `/lb`, the #scr-leaderboard channel, or F5 → Leaderboard in-game."
     return line
 
@@ -910,20 +1306,20 @@ async def _faq_elo_delta(message):
     if state_a == "error" or state_b == "error":
         return "Couldn't reach the player database right now — try again in a minute."
     if state_a == "unlinked":
-        return f"❌ {user_a.display_name} isn't linked yet — they need `/link` first."
+        return f"❌ {_escape_md(user_a.display_name)} isn't linked yet — they need `/link` first."
     if state_b == "unlinked":
-        return f"❌ {user_b.display_name} isn't linked yet — they need `/link` first."
+        return f"❌ {_escape_md(user_b.display_name)} isn't linked yet — they need `/link` first."
     prev = await api_get(f"/players/{link_a['steam_id']}/rating-preview"
                          f"?opponent_steam_id={link_b['steam_id']}")
     if not prev:
         return "Couldn't compute that right now — try again in a minute."
     pa, pb = prev["player"], prev["opponent"]
     prob = prev.get("win_probability", 0.5)
-    return (f"**{pa['display_name']}** ({pa['rating']:.0f}) vs **{pb['display_name']}** ({pb['rating']:.0f}) — "
-            f"if {pa['display_name']} wins the ranked series: **+{pa['win_delta']:.1f}**, "
+    return (f"**{_escape_md(pa['display_name'])}** ({pa['rating']:.0f}) vs **{_escape_md(pb['display_name'])}** ({pb['rating']:.0f}) — "
+            f"if {_escape_md(pa['display_name'])} wins the ranked series: **+{pa['win_delta']:.1f}**, "
             f"if they lose: **{pa['loss_delta']:.1f}**.\n"
-            f"{pb['display_name']}'s side: win **+{pb['win_delta']:.1f}** / loss **{pb['loss_delta']:.1f}**. "
-            f"Win probability for {pa['display_name']}: **{prob * 100:.0f}%**.\n"
+            f"{_escape_md(pb['display_name'])}'s side: win **+{pb['win_delta']:.1f}** / loss **{pb['loss_delta']:.1f}**. "
+            f"Win probability for {_escape_md(pa['display_name'])}: **{prob * 100:.0f}%**.\n"
             f"*(Glicko-2 — ratings move per completed BO3 series, and swings shrink "
             f"as your rating settles.)*\n"
             f"Also `/elo 2v2` and `/elo ffa` preview team and FFA games."
@@ -1098,7 +1494,10 @@ FAQ_ENTRIES = [
                    "• Bets **lock** once game 1 reaches 2 points or any game is decided.\n"
                    "• Gross payout = stake × odds. A winning heavy-favorite bet (stored odds ≤ 1.5×) can redirect part "
                    "of its profit—not the stake—to the fighter/team you backed. If a series never finishes, "
-                   "stakes **auto-refund** (~1 hour).\n"
+                   "stakes **auto-refund** — there are two windows: after 30 minutes when no game was ever "
+                   "reported, after 60 minutes when it stalls mid-series. **Tournament series sit outside both "
+                   "clocks**: a tournament bet settles on the bracket instead, and a forfeited or bye'd match "
+                   "refunds its stakes.\n"
                    "• Want a ping when betting opens? Grab the **Gambler** role — react 🎲 on the signup message "
                    "in the bets channel."),
     },
@@ -1281,7 +1680,8 @@ FAQ_ENTRIES = [
                    "start time you can make; it locks once **8+ players agree on one time** and at that time you "
                    "just **have ROUNDS open** — the mod auto-connects every bracket match, with a short "
                    "skippable breather between your matches.\n"
-                   "• **Async** (rolling: a new one opens 2 days after the previous one ends): one round per week, 7-day deadline per match — nothing to be "
+                   "• **Async** (rolling: a new one opens 2 days after the previous one finishes, and if that one was "
+                   "cancelled (or never recorded a finish) only **24 hours** after it was created): one round per week, 7-day deadline per match — nothing to be "
                    "online for. You agree a time with your opponent on Discord (`/dm-opponent`), then play a "
                    "normal private lobby together and it records automatically; no room code from the bracket, "
                    "no Ready Up.\n"
@@ -1308,7 +1708,7 @@ FAQ_ENTRIES = [
                    "team's tier) on top of match XP.\n"
                    "• **Play up in ranked** — gold and XP scale by your opponent's tier (up to ×3 vs a "
                    "Grand Master), win or lose; series wins pay 10-30g and even series losses pay 5-15g.\n"
-                   "• **Earn achievements** — 100g each, the Sid/Stan Slayer trophies pay 1000g.\n"
+                   "• **Earn achievements** — 100g by default; the harder ones pay 300g, 500g or 1000g.\n"
                    "• **Win tournaments** — trophy payouts.\n"
                    "• **Make and sell cosmetics** — artists earn a 30% royalty on every sale "
                    "(ask me *how do I become an artist*).\n"
@@ -1350,14 +1750,36 @@ FAQ_ENTRIES = [
             r"my \b(art|drawing|design)\b.{0,25}\b(game|mod|shop)\b",
         ],
         "examples": ["how do i make cosmetics", "how do i become an artist"],
+        # Every NUMBER here is pinned by backend/tests/fixtures/faq_claims.json
+        # to the constant that enforces it, so a knob that moves without this
+        # text fails a test rather than quietly making the answer wrong —
+        # 512 included: the claim reads ValidateCosmeticPngBytes' own
+        # `w != 512 || h != 512` refusal, so changing that check to any other
+        # square reds test_every_claim_has_an_anchor. (Round two anchored the
+        # sizes and left 512 unanchored while this comment said otherwise.)
+        # The 512x512 / transparency / size
+        # checks are NativeUI.ValidateCosmeticPngBytes (1,200,000 bytes per PNG)
+        # and ValidateAndNameGifCosmetic (2,200,000 bytes for a GIF); the
+        # server's own upload ceiling is COSMETIC_MAX_B64 = 1,600,000 base64
+        # characters, so for a PNG the in-game number is the one a submission
+        # meets first. The GIF branch and the __fN frame walk are
+        # ValidateAndNameCosmetic, and the frame cap is enforced twice —
+        # COSMETIC_MAX_FRAMES on the server and the client's own scan bound —
+        # which the fixture cross-checks rather than trusting either copy. The
+        # contact line is unchanged from its parent; routing artist
+        # applications is a community decision, not a code fact. The previous
+        # answer said animation was not supported yet and routed it to a side
+        # channel — it had been supported since Aug 7.
         "answer": ("**DM Sid** with some art you'd like to upload — that's the whole application.\n"
-                   "Format: **512×512 PNG** with real transparency, drawn for a character slot (eyes, mouth, or "
-                   "detail/accessory).\n"
-                   "The in-game uploader currently submits **one static PNG** and lets you preview its true size "
-                   "against the player body before review. It does **not** bundle animation frames yet.\n"
-                   "For an animated submission, upload frame 1 for review and send the remaining frames plus the "
-                   "intended FPS to Sid separately. Shipped files use `myitem.png`, then `myitem__f2.png`, "
-                   "`myitem__f3.png`, …\n"
+                   "Format: **512×512 PNG** with real transparency, **up to 1.2 MB** per file, drawn for a "
+                   "character slot (eyes, mouth, or detail/accessory). The upload endpoint's own ceiling is "
+                   "**1,600,000 base64 characters**, so the in-game check is the one you meet first.\n"
+                   "**Animated work goes through the in-game uploader too.** Either drop a **GIF** (**up to "
+                   "2.2 MB**), or name your frames `myitem.png`, `myitem__f2.png`, `myitem__f3.png`, … and "
+                   "pick the base file — up to **16 frames**. Every PNG frame gets the same size and "
+                   "transparency check.\n"
+                   "Either way you position the art on a live on-body preview — slot, scale and offset — at "
+                   "true size before it goes to review.\n"
                    "Approved artists get the in-game **Artist tab** (F5): upload cosmetics, set price and stock "
                    "after the art ships, gift copies, and earn a **30% royalty** on every sale."),
     },
@@ -1580,7 +2002,9 @@ FAQ_ENTRIES = [
                    "• In 2v2, leaving can immediately forfeit the series when the other team was already up a "
                    "game and the abandoned game had meaningful play. Other 2v2 DCs are marked incomplete for "
                    "an admin to award or void; they do not silently become a loss.\n"
-                   "• If a series never finishes, any bets on it auto-refund (~1 hour).\n"
+                   "• If a series never finishes, any bets on it auto-refund: 30 minutes when no game was "
+                   "ever reported, 60 minutes when it stalls mid-series. Tournament series sit outside both "
+                   "clocks — those bets settle on the bracket.\n"
                    "• Game crashed mid-match? Relaunch and rejoin your opponent — the series picks back up."),
     },
     {
@@ -1780,7 +2204,7 @@ FAQ_ENTRIES = [
     {
         # Sits immediately ABOVE how_ffa so a rating-specific FFA question gets
         # the rating answer, not the 12-line generic FFA wall ("right topic,
-        # wrong answer" — Snail's placement question). Still below
+        # wrong answer", as a player's placement question found). Still below
         # bug_report/tournaments like the rest of the broad FFA cluster.
         "key": "ffa_rating",
         "title": "FFA rating & placement",
@@ -2770,6 +3194,13 @@ async def on_message(message: discord.Message):
     # §2.6: ANY mapped bridge channel relays, tagged with its language code
     # (the old single-channel check generalized — global keeps its id).
     _relay_lang = CHAT_LANG_BY_CHAN.get(getattr(message.channel, "id", 0)) if message.channel else None
+    if _relay_lang and _is_registered_command(message.content):
+        # A command is an instruction to the bot, not chat. Relaying one
+        # into the game shows players a line they cannot act on, and for
+        # the two commands that carry a secret -- `!mail reply <private
+        # text>` and `!link <code>` -- it publishes it to everyone in the
+        # game and everyone in the channel. Dispatch still happens below.
+        _relay_lang = None
     if _relay_lang:
         content = _discord_chat_plain_content(message)
         display = getattr(message.author, "global_name", None) or message.author.name
@@ -2817,10 +3248,57 @@ async def on_message(message: discord.Message):
                         return
             except Exception as e:
                 print(f"[CHAT] Failed to relay Discord -> API: {e}")
+    # Item 5, ABOVE the "!" guard on purpose. A Discord Reply aimed at a
+    # relayed mail DM is the one unambiguous signal in this whole chain --
+    # the player pointed at the message -- and its BODY is mail text, which
+    # may perfectly well start with "!". Left inside the guard below, a
+    # reply reading "!important" went to command dispatch and was lost.
+    # Text that only looks like a command ("!important") is mail; text that
+    # IS one is left for dispatch, because a player replying `!link ABC123`
+    # means the command and not a mail carrying their link code.
+    if isinstance(message.channel, discord.DMChannel) and message.content \
+            and getattr(getattr(message, "reference", None), "message_id", None) \
+            and not _is_registered_command(message.content):
+        try:
+            if await _handle_mail_dm(message) in ("HANDLED", "ASK"):
+                return
+        except Exception as ex:
+            print(f"[MAIL-DM] reply handler error: {ex}")
     # A plain (non-command) DM to the bot is treated as a follow-up on one of
     # the sender's own bug reports (e.g. "#12 still happens after relaunch").
+    # `_is_registered_command`, NOT `startswith("!")`. The bare prefix test
+    # was a second, cruder answer to the question the helper above already
+    # answers properly, and it disagreed with it: a DM reading "!important"
+    # is not a command, was withheld from this whole chain anyway, and then
+    # dispatched as nothing -- so it did nothing at all. Same predicate on
+    # both gates, one definition of "this is a command" (#432).
     if isinstance(message.channel, discord.DMChannel) and message.content \
-            and not message.content.startswith("!"):
+            and not _is_registered_command(message.content):
+        # Item 5 precedence, and the order is the whole design:
+        #   1. a Discord Reply aimed at a relayed mail DM -> mail reply
+        #      (handled ABOVE this block, so that a reply whose body starts
+        #      with "!" is mail text and not a failed command)
+        #   2. '#N <text>'                                -> ticket comment
+        #   3. a leading thread code                      -> mail reply
+        #   4. otherwise                                  -> ticket usage text
+        # 1 is first because it is the only unambiguous signal. 2 outranks 3
+        # so that no ticket comment that works today can be swallowed by the
+        # relay -- and the two can never both match anyway: a code starts
+        # with "S" and _TICKET_DM_RE requires a digit after an optional "#".
+        # Step 3 no longer claims a bare DM for the most recent mail; it
+        # offers the list and the player picks. That is the ONE behavioural
+        # loss in this change, and it is the whole point of it.
+        if _TICKET_DM_RE.match((message.content or "").strip()):
+            try:
+                await _handle_ticket_dm(message)
+            except Exception as ex:
+                print(f"[TICKET-DM] handler error: {ex}")
+            return
+        try:
+            if await _handle_mail_dm(message) in ("HANDLED", "ASK"):
+                return
+        except Exception as ex:
+            print(f"[MAIL-DM] handler error: {ex}")
         try:
             await _handle_ticket_dm(message)
         except Exception as ex:
@@ -3355,7 +3833,7 @@ async def chat_ws_listener():
 # Twitch: the VM overlay keeps its own native IRC read, so bridged twitch
 # copies are dropped there by source. YouTube: this bridge is the ONLY reader
 # anywhere — the VM overlay renders the bridged copies it receives over the
-# SCR websocket.
+# SCR websocket (the streaming design's chat addendum).
 STREAM_BRIDGE_TWITCH_CHANNEL = os.getenv("STREAM_BRIDGE_TWITCH_CHANNEL", "sidscompetitiverounds").lower().lstrip("#")
 # The prefix (`:login!login@login.tmi...`) carries the sender's LOGIN — the
 # stable lowercase handle, captured for mute identity (design S1). The tags
@@ -3527,7 +4005,7 @@ async def youtube_chat_bridge():
     (video id via poll_stream_posts). Polls the OFFICIAL YouTube Data API —
     the previous chat_downloader reader was deleted, not bypassed (#310):
     0.2.8 (its latest release, 2023) is parse-broken against current YouTube
-    page variants.
+    page variants, reproduced when the streaming chat addendum was designed.
     Missing creds degrade to a one-time log; Twitch is unaffected. Replays
     after a re-attach are harmless — the server's native-id guard drops them.
 
@@ -4718,11 +5196,135 @@ async def cmd_link(ctx, code: str = None):
     if not result: await ctx.send("❌ API unreachable."); return
     if "error" in result:
         await ctx.send("❌ Invalid or expired code." if result.get("status") == 404 else f"❌ {result['error']}"); return
-    await ctx.send(f"✅ Linked! **{ctx.author.display_name}** → Steam **{result.get('display_name')}** (`{result.get('steam_id')}`)")
+    await ctx.send(f"✅ Linked! **{_escape_md(ctx.author.display_name)}** → Steam **{_escape_md(result.get('display_name'))}** (`{result.get('steam_id')}`)")
     data = await api_get(f"/players/by-discord/{ctx.author.id}")
     if data and "rating" in data:
         rank = await update_member_role(ctx.author, data["rating"])
         await ctx.send(f"{rank_emoji(rank)} Rank: **{rank}** ({data['rating']:.0f})")
+
+@bot.hybrid_group(name="mail", description="In-game mail: Discord relay settings")
+async def cmd_mail(ctx):
+    """Group body. discord.py invokes this when no subcommand was given."""
+    if ctx.invoked_subcommand is None:
+        await ctx.send(
+            "**In-game mail**\n"
+            "\u2022 `/mail relay on` / `/mail relay off` \u2014 whether new in-game "
+            "mail is also DMed to you here.\n"
+            "\u2022 To answer a mail, hit Discord\u2019s **Reply** on its DM and type "
+            "your message.\n"
+            "\u2022 `/mail reply <text>` \u2014 for when you are not in that DM "
+            "thread: start with the `SCR-` code printed under the mail, or leave "
+            "it off and pick from a list.\n"
+            "Your mail always arrives in game at F5 \u2192 Mail, whatever this is set to.")
+
+
+@cmd_mail.command(name="relay",
+                  description="Turn Discord DMs for new in-game mail on or off")
+@app_commands.describe(state="on or off")
+async def cmd_mail_relay(ctx, state: str):
+    want = (state or "").strip().lower()
+    if want not in ("on", "off"):
+        await ctx.send("Use `/mail relay on` or `/mail relay off`.")
+        return
+    if http_session is None or not API_SECRET_KEY:
+        await ctx.send("\u26a0\ufe0f Mail settings are temporarily unreachable \u2014 try again shortly.")
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/mail/relay-pref",
+            json={"discord_id": str(ctx.author.id), "enabled": want == "on"},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as r:
+            if r.status == 404:
+                await ctx.send(
+                    "\u274c Your Discord isn\u2019t linked to a ROUNDS account yet \u2014 "
+                    "in game press F5 \u2192 Home tab \u2192 **Get Link Code**, then "
+                    "`!link YOUR_CODE` here.")
+                return
+            if r.status != 200:
+                print(f"[MAIL-RELAY] pref {r.status}: {(await r.text())[:120]}")
+                await ctx.send("\u26a0\ufe0f Couldn\u2019t change that right now \u2014 try again in a moment.")
+                return
+    except Exception as ex:
+        print(f"[MAIL-RELAY] pref error: {ex}")
+        await ctx.send("\u26a0\ufe0f Couldn\u2019t reach mail settings \u2014 try again shortly.")
+        return
+    await ctx.send(
+        "\u2705 Mail relay **on** \u2014 new in-game mail will be DMed to you here."
+        if want == "on" else
+        "\u2705 Mail relay **off** \u2014 no more DMs for new in-game mail. "
+        "Your mail still arrives in game at F5 \u2192 Mail.")
+
+
+@cmd_mail.command(name="reply",
+                  description="Reply to a mail that was DMed to you")
+@app_commands.describe(
+    text="Your reply \u2014 start with the thread code, or leave it off to pick from a list")
+async def cmd_mail_reply(ctx, *, text: str):
+    """PLAN.md item 5. Discord's Reply on the DM is exact and is the way the
+    marker line teaches; this exists for the player who is not in that DM
+    thread -- on mobile, or after clearing the conversation.
+
+    It names a thread the same two ways every other path does: the code the
+    player leads with, or the one they tap. It does NOT fall back to the most
+    recent mail. That fallback read arrival time as identity (#174) and was
+    wrong exactly when it mattered -- a second mail landing between the DM
+    and the reply silently redirected the answer to the wrong person."""
+    # DM ONLY. The body of this command is private mail. Typed as
+    # `!mail reply ...` in a bridged channel it is relayed into in-game
+    # chat before dispatch (the relay above now skips commands, but the
+    # channel itself still saw it), and answering in a guild would have
+    # the bot name the sender and subject to everyone reading.
+    if getattr(ctx, "guild", None) is not None:
+        await ctx.send(
+            "\U0001f512 Send that to me in a **direct message** \u2014 a mail "
+            "reply is private, and anything typed here is not.",
+            ephemeral=True)
+        return
+    body = text or ""
+    if not body.strip():
+        await ctx.send("Use `/mail reply <your message>`.")
+        return
+    # Before the request, not after: a slash interaction hard-fails at 3s
+    # and this call is allowed 8, so a slow api turned a reply that DID
+    # send into "the application did not respond" -- and the retry that
+    # invites carries a new interaction id, so it is a new key and a
+    # second mail.
+    await _maybe_defer(ctx)
+    # The invocation is the idempotency source here, exactly as the message
+    # id is for a DM reply: a retried interaction must not become a second
+    # mail. A slash invocation has no real message, so the interaction id
+    # stands in -- and a tap on the listing below reuses this SAME id, so
+    # picking a thread cannot become a second send either (#172).
+    src_id = str(getattr(getattr(ctx, "message", None), "id", None)
+                 or getattr(getattr(ctx, "interaction", None), "id", None) or "")
+    # A leading thread code names the thread; without one there is nothing
+    # left to name it with, and the player picks from a list. The recency
+    # lookup that used to stand in here named a thread by WHEN it arrived,
+    # which is not what identifies it (#174).
+    lead = _RELAY_CODE_LEAD_RE.match(body)
+    code = normalize_relay_code(lead.group(1)) if lead else ""
+    if code:
+        verdict = await _post_mail_reply(ctx, str(ctx.author.id), code,
+                                         lead.group(2), src_id)
+    else:
+        verdict = await _ask_which_mail(None, body, discord_id=str(ctx.author.id),
+                                        channel=ctx, source_message_id=src_id)
+    if verdict == "NOT_LINKED":
+        await ctx.send(
+            "\u274c Your Discord isn\u2019t linked to a ROUNDS account yet \u2014 "
+            "in game press F5 \u2192 Home tab \u2192 **Get Link Code**, then "
+            "`!link YOUR_CODE` here.")
+    elif verdict == "NOT_MAIL":
+        # Reached only with no threads to offer. In a DM this falls through
+        # to the ticket chain; here the player asked for mail by name, so
+        # silence would be the wrong answer.
+        await ctx.send(
+            "\u274c No mail has been relayed to you yet, so there is nothing to "
+            "reply to. Mail you receive in game is DMed here when the relay is "
+            "on (`/mail relay on`).")
+
 
 @bot.hybrid_command(name="rank", description="Ranked stats: rating, tier, streaks, leaderboard position")
 @app_commands.describe(member="Player to look up (defaults to yourself)")
@@ -4733,14 +5335,14 @@ async def cmd_rank(ctx, member: discord.Member = None):
     target = member or ctx.author
     link = await api_get(f"/players/by-discord/{target.id}")
     if not link:
-        await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {target.display_name} not linked."); return
+        await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {_escape_md(target.display_name)} not linked."); return
     steam_id = link["steam_id"]
     await _maybe_defer(ctx)
     s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
     rank = get_rank_name(s["rating"])
     peak = s.get("peak_rating", s["rating"])
-    embed = discord.Embed(title=f"{rank_emoji(rank)}  {s['display_name']}  —  {rank}", color=discord.Color.gold())
+    embed = discord.Embed(title=f"{rank_emoji(rank)}  {_escape_md(s['display_name'])}  —  {rank}", color=discord.Color.gold())
     embed.set_thumbnail(url=target.display_avatar.url)
 
     # Elo block
@@ -4779,8 +5381,12 @@ async def cmd_rank(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 async def get_lb_position(steam_id):
+    # "?" only when a read fails. An empty list is an answer (round 4,
+    # finding 24): nobody meets the active or minimum-match filter, and the
+    # lookup goes on to the full list below as it does for any player not on
+    # this one.
     data = await api_get("/leaderboard?limit=200&min_matches=1")
-    if not data or not data.get("entries"): return "?"
+    if not data or data.get("entries") is None: return "?"
     for e in data["entries"]:
         if e["steam_id"] == steam_id: return str(e["rank"])
     # Item d: the default board hides players not seen for LB_ACTIVE_DAYS days.
@@ -4789,7 +5395,8 @@ async def get_lb_position(steam_id):
     # a player absent from BOTH lists. The api's limit cap (500) is used here
     # because the unfiltered list is the longer one.
     data = await api_get("/leaderboard?limit=500&min_matches=1&include_inactive=true")
-    for e in (data or {}).get("entries") or []:
+    if not data or data.get("entries") is None: return "?"   # unknown, not "Unranked"
+    for e in data["entries"]:
         if e["steam_id"] == steam_id:
             if e.get("inactive"):
                 return f"{e['rank']} (inactive {LB_ACTIVE_DAYS}d+)"
@@ -4872,12 +5479,12 @@ async def cmd_stats(ctx, member: discord.Member = None):
     target = member or ctx.author
     link = await api_get(f"/players/by-discord/{target.id}")
     if not link:
-        await ctx.send("❌ Not linked." if target == ctx.author else f"❌ {target.display_name} not linked."); return
+        await ctx.send("❌ Not linked." if target == ctx.author else f"❌ {_escape_md(target.display_name)} not linked."); return
     steam_id = link["steam_id"]
     await _maybe_defer(ctx)
     s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
-    embed = discord.Embed(title=f"📋  {s['display_name']}  —  Overall Stats", color=discord.Color.blue())
+    embed = discord.Embed(title=f"📋  {_escape_md(s['display_name'])}  —  Overall Stats", color=discord.Color.blue())
     embed.set_thumbnail(url=target.display_avatar.url)
 
     # Overall record — every mode combined.
@@ -4932,6 +5539,67 @@ async def cmd_stats(ctx, member: discord.Member = None):
     embed.set_footer(text=f"Steam: {s['steam_id']}")
     await ctx.send(embed=embed)
 
+def _escape_md(text) -> str:
+    """A player's name made literal in Discord Markdown. First written for
+    the **bold** of every leaderboard row: _lb_line here and the mode
+    boards' _lb_line_2v2, _lb_line_ffa and _lb_line_ovt (v1.41.0 beta round 3
+    finding 16). Since round 4 (finding 23) the other replies, DMs, posts and
+    embeds that print a player's Steam or Discord name use it as well, as
+    the census in tests/test_discord_name_markdown.py finds them; the few
+    that already used discord.utils.escape_markdown keep it.
+    Backslash-escapes * _ ~ | and the backtick (bold, italics
+    and underline, strikethrough, spoiler, inline code), the backslash
+    itself (a trailing one would escape the row's own closing **), and
+    [ ] < > (a masked link, or a mention, emoji or timestamp tag). Discord
+    shows a backslash before any of these as the character alone.
+
+    TRUNCATE FIRST, then escape -- never the other way round. Cutting an
+    escaped name can strand a lone backslash at its end, and that escapes
+    the row's closing ** instead.
+
+    A row is one line whatever the name holds (round 4, finding 16's newline
+    half): every line break becomes a single space before anything is
+    escaped -- CR, LF, a CRLF pair (one break, one space), and the other
+    characters str.splitlines() breaks a line on (VT, FF, FS, GS, RS, NEL,
+    and the Unicode line and paragraph separators). A name like
+    "Alice\\n# 2 Fake" no longer starts a line of its own, so it can
+    neither fake an extra row nor open a heading, a list or a quote."""
+    one_line = re.sub(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]", " ", str(text))
+    escaped = re.sub(r"([\\*_~|`\[\]<>])", r"\\\1", one_line)
+    # A name can open a line: a reply that starts with it, an embed field's
+    # name. There a leading # opens a heading, a leading - or + a list item or
+    # subtext, and 1. or 1) a numbered list (round 4, finding 23). A backslash
+    # keeps the marker text; Discord shows the marker alone.
+    escaped = re.sub(r"^(\s*)([#+-])", r"\1\\\2", escaped)
+    return re.sub(r"^(\s*\d+)([.)])", r"\1\\\2", escaped)
+
+
+_LB_NAME_BREAKS = re.compile(r"[\r\n  ]+")
+
+
+def _lb_name(raw, width=24) -> str:
+    """One board row's display name: truncated, flattened to a single line,
+    then markdown-escaped.
+
+    The name is player-authored and lands inside a bold span in an embed
+    description. `escape_markdown` neutralises the characters it covers
+    (`* _ ~ | \\` and backticks), which is what stops a name closing a bold
+    run early and re-formatting the rest of the row; it does NOT touch line
+    breaks, and a break inside a row splits that row in two, where the second
+    half can be written to read like another player's rank. Both are
+    formatting defects only — every send this bot makes carries
+    `allowed_mentions.none()` (the client default at :288), so nothing here
+    can ping.
+
+    Truncate first, escape second: escaping inserts backslashes, so escaping
+    first would spend the width budget on them and could cut an escape pair
+    in half. The caller passes `e["display_name"]` rather than the whole
+    entry, so the row's own indexed read — and the test that watches which
+    fields a renderer touches — stays where it is."""
+    flat = _LB_NAME_BREAKS.sub(" ", str(raw if raw is not None else "?"))
+    return discord.utils.escape_markdown(flat[:width])
+
+
 def _lb_line(e, rank=None):
     """One short leaderboard row. Kept terse — a 50-row page must fit inside
     Discord's 6000-chars-across-all-embeds message budget.
@@ -4947,7 +5615,7 @@ def _lb_line(e, rank=None):
     if rank is None:
         rank = e["rank"]
     emoji = rank_emoji(get_rank_name(e["rating"]))
-    name = str(e["display_name"])[:24]
+    name = _escape_md(str(e["display_name"])[:24])
     return f"`#{rank:>3}` {emoji} **{name}** — {e['rating']} ({e['wins']}W/{e['losses']}L)"
 
 
@@ -5008,7 +5676,12 @@ async def cmd_leaderboard(ctx, page: str = "1", scope: str = ""):
     offset = (page - 1) * per_page
     data = await api_get(f"/leaderboard?limit={per_page}&offset={offset}&min_matches=1"
                          + ("&include_inactive=true" if include_inactive else ""))
-    if not data or not data.get("entries"): await ctx.send("❌ No data."); return
+    # A failed read says so; an empty page is an answer (round 4, finding 24)
+    # -- nobody meets the active or minimum-match filter, or the page is past
+    # the last one -- and renders as an empty board.
+    if not data or data.get("entries") is None:
+        await ctx.send("❌ Couldn't reach the leaderboard right now -- try again in a minute.")
+        return
     # Rank is derived from offset + position, NOT from entry["rank"] — the
     # server double-adds offset to an already-absolute ROW_NUMBER (see
     # _lb_line docstring), which made /lb 2 start at #201 instead of #101.
@@ -5018,7 +5691,10 @@ async def cmd_leaderboard(ctx, page: str = "1", scope: str = ""):
     total_pages = max(1, (total + per_page - 1) // per_page)
     # 50 rows can still exceed one embed's 4096-char description in the worst
     # case — split across up to 3 embeds in ONE message.
-    descs = _split_lb_descriptions(lines)
+    if not lines and page > total_pages:
+        descs = [f"(no players on page {page}; the last page is {total_pages})"]
+    else:
+        descs = _split_lb_descriptions(lines)
     embeds = []
     for ci, desc in enumerate(descs):
         em = discord.Embed(
@@ -5503,7 +6179,7 @@ class ComparePaginator(discord.ui.View):
         self._update_buttons()
 
     def build_embed(self) -> discord.Embed:
-        embed = discord.Embed(title=f"⚔️ {self.name_a} vs {self.name_b}", color=0xE67E22)
+        embed = discord.Embed(title=f"⚔️ {_escape_md(self.name_a)} vs {_escape_md(self.name_b)}", color=0xE67E22)
         embed.add_field(name="📊  Overall head-to-head", value=self.rec_val[:1024], inline=False)
         if self.cards_val:
             embed.add_field(name="🃏  Most-picked cards vs each other",
@@ -5519,8 +6195,8 @@ class ComparePaginator(discord.ui.View):
             score = f"{m.get('player_rounds_won', 0)}-{m.get('opponent_rounds_won', 0)}"
             tag = "Ranked" if m.get("is_ranked") else "Casual"
             fname = f"{_match_date_str(m)} — {wl} {score} · {tag}"
-            fval = (f"{self.name_a[:14]}: {_cards_str(m.get('cards_picked'))} | "
-                    f"{self.name_b[:14]}: {_cards_str(m.get('opponent_cards_picked'))}")[:1024]
+            fval = (f"{_escape_md(self.name_a[:14])}: {_cards_str(m.get('cards_picked'))} | "
+                    f"{_escape_md(self.name_b[:14])}: {_cards_str(m.get('opponent_cards_picked'))}")[:1024]
             if len(fname) + len(fval) > budget:
                 break
             budget -= len(fname) + len(fval)
@@ -5596,11 +6272,11 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
     await _maybe_defer(ctx)
     link_a = await api_get(f"/players/by-discord/{player1.id}")
     if not link_a:
-        await ctx.send(f"❌ {player1.display_name} not linked. They need `/link` first.")
+        await ctx.send(f"❌ {_escape_md(player1.display_name)} not linked. They need `/link` first.")
         return
     link_b = await api_get(f"/players/by-discord/{player2.id}")
     if not link_b:
-        await ctx.send(f"❌ {player2.display_name} not linked. They need `/link` first.")
+        await ctx.send(f"❌ {_escape_md(player2.display_name)} not linked. They need `/link` first.")
         return
     steam_a, steam_b = link_a["steam_id"], link_b["steam_id"]
     name_a = link_a.get("display_name") or player1.display_name
@@ -5626,10 +6302,10 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
              if isinstance(m, dict) and m.get("opponent_steam_id") == steam_b]
 
     if tw + tl == 0 and sw + sl == 0 and not games:
-        await ctx.send(f"**{name_a}** and **{name_b}** haven't played each other yet.")
+        await ctx.send(f"**{_escape_md(name_a)}** and **{_escape_md(name_b)}** haven't played each other yet.")
         return
 
-    rec_val = (f"**{tw}W – {tl}L** for {name_a}\n"
+    rec_val = (f"**{tw}W – {tl}L** for {_escape_md(name_a)}\n"
                f"Ranked: **{rw}–{rl}**  ·  Casual: **{cw}–{cl}**\n"
                f"Completed series (BO3): **{sw}–{sl}**")
 
@@ -5640,8 +6316,8 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
     if h2h_cards and (h2h_cards.get("player_cards") or h2h_cards.get("opponent_cards")):
         def _fmt_top(cl):
             return ", ".join(f"{c['card_name']} ×{c['picks']}" for c in (cl or [])[:6]) or "—"
-        cards_val = (f"**{name_a[:14]}:** {_fmt_top(h2h_cards.get('player_cards'))}\n"
-                     f"**{name_b[:14]}:** {_fmt_top(h2h_cards.get('opponent_cards'))}")
+        cards_val = (f"**{_escape_md(name_a[:14])}:** {_fmt_top(h2h_cards.get('player_cards'))}\n"
+                     f"**{_escape_md(name_b[:14])}:** {_fmt_top(h2h_cards.get('opponent_cards'))}")
 
     if games:
         view = ComparePaginator(name_a, name_b, rec_val, cards_val, games)
@@ -5649,13 +6325,13 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
         view.message = msg
     else:
         # H2H counters exist but the games predate A's 2000-row history window.
-        embed = discord.Embed(title=f"⚔️ {name_a} vs {name_b}", color=0xE67E22)
+        embed = discord.Embed(title=f"⚔️ {_escape_md(name_a)} vs {_escape_md(name_b)}", color=0xE67E22)
         embed.add_field(name="📊  Overall head-to-head", value=rec_val[:1024], inline=False)
         if cards_val:
             embed.add_field(name="🃏  Most-picked cards vs each other",
                             value=cards_val[:1024], inline=False)
         embed.add_field(name="Recent games",
-                        value=f"No games between them in {name_a}'s recent history window.",
+                        value=f"No games between them in {_escape_md(name_a)}'s recent history window.",
                         inline=False)
         embed.set_footer(text="Record is lifetime")
         await ctx.send(embed=embed)
@@ -5701,7 +6377,7 @@ async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
             continue
         resolved.append((m, link["steam_id"], link.get("display_name") or m.display_name))
     if not_linked:
-        await ctx.send("❌ Not linked: " + ", ".join(not_linked) + ". They need `/link` first.")
+        await ctx.send("❌ Not linked: " + ", ".join(_escape_md(n) for n in not_linked) + ". They need `/link` first.")
         return
 
     # ── elo: the rating-history overlay line chart (moved from old /compare) ──
@@ -5735,7 +6411,7 @@ async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
                     val += " · (fewer than two rating updates — not plotted)"
             else:
                 val = "(no data)"
-            embed.add_field(name=str(p["name"])[:256], value=val, inline=True)
+            embed.add_field(name=_escape_md(str(p["name"])[:256]), value=val, inline=True)
         embed.set_image(url="attachment://graph.png")
         embed.set_footer(text=(f"x axis: {x_label} • newest {RATING_HISTORY_FETCH} rating updates per player")[:2048])
         await ctx.send(embed=embed, file=file)
@@ -5958,7 +6634,7 @@ async def _elo_2v2(ctx, you, teammate, opp1, opp2):
         lines.append(f"**{label}** — team rating **{_elo_num(team.get('rating'), signed=False)}**, "
                      f"win chance ~**{prob * 100:.0f}%**")
         for p in team.get("players") or []:
-            lines.append(f"• **{p.get('display_name')}** ({_elo_num(p.get('rating'), signed=False)}) — "
+            lines.append(f"• **{_escape_md(p.get('display_name'))}** ({_elo_num(p.get('rating'), signed=False)}) — "
                          f"win **{_elo_num(p.get('win_delta'))}** / loss **{_elo_num(p.get('loss_delta'))}**")
         lines.append("")
     lines.append("*(Glicko-2 per completed 2v2 series, each player rated against both opponents. "
@@ -5994,7 +6670,7 @@ async def _elo_ffa(ctx, members, me, score_target=None):
     lines = [f"Field of **{len(players)}** — average rating "
              f"**{_elo_num(prev.get('field_average_rating'), signed=False)}** · first to **{prev.get('score_target')}**", ""]
     for p in players:
-        lines.append(f"**{p.get('display_name')}** ({_elo_num(p.get('rating'), signed=False)}) — "
+        lines.append(f"**{_escape_md(p.get('display_name'))}** ({_elo_num(p.get('rating'), signed=False)}) — "
                      f"1st **{_elo_num(p.get('first_delta'))}** · last **{_elo_num(p.get('last_delta'))}**")
         row = p.get("place_deltas") or []
         if row:
@@ -6291,7 +6967,7 @@ def _render_game_detail_png_locked(game):
                        None, 3.0, None, "time (M:SS)"))
     damage_taken_series = []
     blocks_series = []
-    # Bug 181 (Stan): v2 block pairs are activated:successful — the honest
+    # Bug 181: v2 block pairs are activated:successful — the honest
     # block-rate pairing. Legacy rows keep the damage-taken labels; the
     # format is per-row, so one mixed game labels by majority.
     _blk_v2_votes = 0
@@ -6695,14 +7371,14 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     target = member or ctx.author
     link = await api_get(f"/players/by-discord/{target.id}")
     if not link:
-        await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {target.display_name} not linked."); return
+        await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {_escape_md(target.display_name)} not linked."); return
     steam_id = link["steam_id"]
     await _maybe_defer(ctx)
     s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
     hist = await api_get(f"/players/{steam_id}/matches?limit=50")
     rank = s.get("rank_name") or get_rank_name(s["rating"])
-    embed = discord.Embed(title=f"{rank_emoji(rank)}  {s['display_name']}  —  My Stats", color=0x9B59B6)
+    embed = discord.Embed(title=f"{rank_emoji(rank)}  {_escape_md(s['display_name'])}  —  My Stats", color=0x9B59B6)
     # v1.34.1: surface the Discord @display name (opt-out honored — the API
     # nulls discord_display_name when show_discord is off). No real mention.
     _dname = s.get("discord_display_name")
@@ -6803,7 +7479,7 @@ async def cmd_cards(ctx, member: discord.Member = None,
     if member is not None:
         link = await api_get(f"/players/by-discord/{member.id}")
         if not link:
-            await ctx.send(f"❌ {member.display_name} not linked.")
+            await ctx.send(f"❌ {_escape_md(member.display_name)} not linked.")
             return
         q += f"&steam_id={link['steam_id']}"
         scope = member.display_name
@@ -6824,7 +7500,7 @@ async def cmd_cards(ctx, member: discord.Member = None,
             ln += f" · {float(c.get('pass_rate') or 0) * 100:.0f}% passed"
         lines.append(ln)
     embed = discord.Embed(
-        title=f"🃏 Card Stats — {scope} ({filter})",
+        title=f"🃏 Card Stats — {_escape_md(scope)} ({filter})",
         description="\n".join(lines)[:4000],
         color=discord.Color.teal(),
     )
@@ -7141,7 +7817,7 @@ async def log_ffa_match_result(guild, m):
     for p in sorted(players, key=lambda q: q.get("placement", 99)):
         rc = p.get("rating_change")
         rc_s = "" if rc is None else (f" (+{rc:.1f})" if rc > 0 else f" ({rc:.1f})")
-        # Bug 178 (Stan): absolute before→after, like the 1v1/2v2 posts.
+        # Bug 178: absolute before→after, like the 1v1/2v2 posts.
         # Match-time stamps from the row, so later games can't rewrite them.
         rb, ra = p.get("rating_before"), p.get("rating_after")
         ba_s = f" {rb:.0f}→{ra:.0f}" if (rb is not None and ra is not None) else ""
@@ -7175,7 +7851,7 @@ async def log_ffa_match_result(guild, m):
     _settings_line = _ffa_settings_summary(m.get("settings"))
     if _settings_line:
         embed.add_field(name="Settings", value=_settings_line, inline=False)
-    # Bug 179 (Stan): carry the /game code so nobody has to open the game.
+    # Bug 179: carry the /game code so nobody has to open the game.
     _code = str(m.get("match_id") or "").replace("-", "")[:12].upper()
     _foot = f"{dur // 60}m{dur % 60:02d}s" if dur else ""
     if _code:
@@ -7260,7 +7936,7 @@ async def poll_bug_reports():
                 description=desc or "(no description)",
                 color=sev_color,
             )
-            embed.add_field(name="Reporter", value=f"`{who}` (mod v{mod})", inline=False)
+            embed.add_field(name="Reporter", value=f"{_escape_md(who)} (mod v{mod})", inline=False)
             embed.set_footer(text=f"Triage in-game (F5 -> Admin -> Bug Reports) or quote as #{bug_num}.")
             try:
                 msg = await channel.send(embed=embed)
@@ -7399,26 +8075,26 @@ async def poll_bug_report_events():
                 }.get(new_s, 0x6688AA)
                 embed = discord.Embed(
                     title=f"Bug report #{bug_num} — status change",
-                    description=(f"**{actor}** moved your report from "
+                    description=(f"**{_escape_md(actor)}** moved your report from "
                                  f"**{old_s}** → **{new_s}**."),
                     color=status_color,
                 )
                 if snippet:
                     embed.add_field(name="Your report", value=snippet, inline=False)
                 if e.get("comment"):
-                    embed.add_field(name="Note from " + actor, value=e["comment"][:1024], inline=False)
+                    embed.add_field(name="Note from " + _escape_md(actor), value=e["comment"][:1024], inline=False)
             elif etype == "comment":
                 comment_text = (e.get("comment") or "").strip()
                 if not comment_text:
                     continue  # nothing to relay
                 embed = discord.Embed(
                     title=f"Bug report #{bug_num} — new comment",
-                    description=f"**{actor}** commented on your report.",
+                    description=f"**{_escape_md(actor)}** commented on your report.",
                     color=0x6688CC,
                 )
                 if snippet:
                     embed.add_field(name="Your report", value=snippet, inline=False)
-                embed.add_field(name=f"{actor} says", value=comment_text[:1024], inline=False)
+                embed.add_field(name=f"{_escape_md(actor)} says", value=comment_text[:1024], inline=False)
             else:
                 # Unknown event type — nothing to send; ack so it doesn't loop.
                 seen_bug_events.add(eid)
@@ -7465,11 +8141,11 @@ async def _post_bug_event_to_thread(e):
     actor = e.get("actor_name") or "Someone"
     if e.get("event_type") == "status_change":
         new_s = (e.get("new_status") or "?").upper()
-        text_out = f"**{actor}** → **{new_s}**"
+        text_out = f"**{_escape_md(actor)}** → **{new_s}**"
         if e.get("comment"):
             text_out += f"\n{e['comment'][:1500]}"
     else:
-        text_out = f"**{actor}:** {(e.get('comment') or '')[:1800]}"
+        text_out = f"**{_escape_md(actor)}:** {(e.get('comment') or '')[:1800]}"
     try:
         if getattr(thread, "archived", False):
             await thread.edit(archived=False)
@@ -7535,7 +8211,7 @@ async def log_team_series_result(guild, s):
         rc = p.get("rating_change", 0) or 0
         # 1 decimal — sub-1.0 changes were rounding to "0" (same as bug #18, 1v1 side).
         rc_s = f"+{rc:.1f}" if rc > 0 else f"{rc:.1f}"
-        return f"**{p['name']}** {p['rating']:.0f} ({rc_s})"
+        return f"**{_escape_md(p['name'])}** {p['rating']:.0f} ({rc_s})"
 
     # Tournament marker (contract item 2). 2v2 tournaments don't exist today,
     # so this renders only if the feed ever carries the flag — free future-proofing.
@@ -7544,8 +8220,8 @@ async def log_team_series_result(guild, s):
         title=("🏆 Tournament 2v2 Series Complete" if t_flag else "⚔️ 2v2 Series Complete"),
         color=discord.Color.gold())
     _desc = (
-        f"👑 **{winners[0]['name']} + {winners[1]['name']}** "
-        f"def. **{losers[0]['name']} + {losers[1]['name']}** "
+        f"👑 **{_escape_md(winners[0]['name'])} + {_escape_md(winners[1]['name'])}** "
+        f"def. **{_escape_md(losers[0]['name'])} + {_escape_md(losers[1]['name'])}** "
         f"`{score}`"
     )
     if t_flag and t_label:
@@ -7562,7 +8238,7 @@ async def log_team_series_result(guild, s):
     _rules_line = _rules_summary(s.get("rules"))
     if _rules_line:
         embed.add_field(name="Rules", value=_rules_line, inline=False)
-    # Bug 179 (Stan): per-game /game codes in the footer.
+    # Bug 179: per-game /game codes in the footer.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]
     if _codes:
         embed.set_footer(text=" · ".join(f"/game {c}" for c in _codes))
@@ -7619,11 +8295,11 @@ async def post_bet_outcomes(s):
     for b in bets:
         if b.get("won"):
             profit = (b.get("payout") or 0) - b["amount"]
-            lines.append(f"🟢 **{b['bettor_name']}** bet {b['amount']:,}g on **{b['bet_on_name']}** → won **+{profit:,}g** (x{b.get('odds_multiplier', 1.0)})")
+            lines.append(f"🟢 **{_escape_md(b['bettor_name'])}** bet {b['amount']:,}g on **{_escape_md(b['bet_on_name'])}** → won **+{profit:,}g** (x{b.get('odds_multiplier', 1.0)})")
         else:
-            lines.append(f"🔴 **{b['bettor_name']}** bet {b['amount']:,}g on **{b['bet_on_name']}** → lost")
+            lines.append(f"🔴 **{_escape_md(b['bettor_name'])}** bet {b['amount']:,}g on **{_escape_md(b['bet_on_name'])}** → lost")
     em = discord.Embed(
-        title=f"💰 Bets settled: {s['winner_name']} wins {score} vs {s['p2_name'] if p1_won else s['p1_name']}",
+        title=f"💰 Bets settled: {_escape_md(s['winner_name'])} wins {score} vs {_escape_md(s['p2_name'] if p1_won else s['p1_name'])}",
         description="\n".join(lines[:15]),
         color=0x33AA55,
     )
@@ -7649,7 +8325,7 @@ async def log_series_result(guild, s):
     embed = discord.Embed(
         title=("🏆 Tournament Series Complete" if t_flag else "⚔️ Ranked Series Complete"),
         color=(discord.Color.gold() if t_flag else discord.Color.green()))
-    _desc = f"**{s['winner_name']}** wins {score}!"
+    _desc = f"**{_escape_md(s['winner_name'])}** wins {score}!"
     if t_flag and t_label:
         _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
     embed.description = _desc
@@ -7660,16 +8336,16 @@ async def log_series_result(guild, s):
     rc2 = s["p2_rating_change"]; rc2s = f"+{rc2:.1f}" if rc2 > 0 else f"{rc2:.1f}"
     r1, r2 = get_rank_name(s["p1_rating"]), get_rank_name(s["p2_rating"])
     s1, s2 = streak_str(s.get("p1_streak",0)), streak_str(s.get("p2_streak",0))
-    embed.add_field(name=f"{rank_emoji(r1)} {s['p1_name']}" + (" 👑" if p1_won else ""),
+    embed.add_field(name=f"{rank_emoji(r1)} {_escape_md(s['p1_name'])}" + (" 👑" if p1_won else ""),
                     value=f"**{s['p1_rating']:.0f}** ({rc1s}) — {r1}\n{s1}", inline=True)
-    embed.add_field(name=f"{rank_emoji(r2)} {s['p2_name']}" + (" 👑" if not p1_won else ""),
+    embed.add_field(name=f"{rank_emoji(r2)} {_escape_md(s['p2_name'])}" + (" 👑" if not p1_won else ""),
                     value=f"**{s['p2_rating']:.0f}** ({rc2s}) — {r2}\n{s2}", inline=True)
     # Room rules batch: only the non-defaults, so a vanilla series posts as
     # it always has.
     _rules_line = _rules_summary(s.get("rules"))
     if _rules_line:
         embed.add_field(name="Rules", value=_rules_line, inline=False)
-    # Bug 179 (Stan): the per-game /game codes, so nobody has to open the
+    # Bug 179: the per-game /game codes, so nobody has to open the
     # game to inspect a result. Server sends them oldest-first.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]
     if _codes:
@@ -7838,12 +8514,22 @@ async def setup_rank_roles(ctx):
 async def publish_lb_loop():
     """Dedicated leaderboard-channel refresh (item 8). Was piggybacked on the
     end of the 30-min role sync — any role-sync failure or slowness starved
-    it. Fully guarded so one bad tick can never stop the loop."""
-    for guild in bot.guilds:
-        try:
-            await publish_lb(guild)
-        except Exception as e:
-            print(f"Leaderboard publish error: {e}")
+    it. Fully guarded so one bad tick can never stop the loop (#129).
+    Publishes the whole BOARDS set now, not just the 1v1 board (v1.41.0
+    item 1); a single board's failure is contained inside publish_boards, and
+    this guard stays as the backstop for everything above it (channel
+    resolution, the rescan).
+
+    ONE publish per tick. This used to loop over bot.guilds and publish per
+    guild, which was harmless only while the bot was in exactly one: the
+    channel id is global, so every extra guild repeated the same tick against
+    the same channel -- six backend GETs and seven Discord calls per repeat,
+    more while a duplicate sweep runs -- and the repeats raced each other
+    through the same _lb_message_ids entry."""
+    try:
+        await publish_boards()
+    except Exception as e:
+        print(f"Leaderboard publish error: {e}")
 
 @publish_lb_loop.before_loop
 async def before_publish_lb(): await bot.wait_until_ready()
@@ -7963,19 +8649,21 @@ LB_PAGE_SIZE = 50
 LB_TOTAL_FETCH = 500
 
 
-def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: int,
-                     hidden_inactive: int = 0) -> list:
-    """Render one page of the auto-posted leaderboard as a LIST of embeds
-    (a worst-case 50-row page can exceed a single embed's 4096-char
-    description; up to 3 embeds travel in one message). Pure function so the
-    paginator view + initial post share the rendering."""
+def _build_board_embeds(board: dict, entries: list, total_players: int, page: int,
+                        total_pages: int, hidden_inactive: int = 0) -> list:
+    """Render one page of an auto-posted board as a LIST of embeds (a
+    worst-case 50-row page can exceed a single embed's 4096-char description;
+    up to 3 embeds travel in one message). Pure function so the paginator view
+    + initial post share the rendering. `board` is one BOARDS entry: the row
+    renderer, the title, the colour and the population noun come from it and
+    nothing else here is 1v1-specific."""
     start = page * LB_PAGE_SIZE
     end = min(start + LB_PAGE_SIZE, len(entries))
     # Rank from list position (entries are one offset-0 fetch, so position
     # IS the rank) — entry["rank"] is double-offset on offset pages server-side
     # (see _lb_line docstring); deriving locally keeps this correct even if
     # the fetch ever grows an offset.
-    lines = [_lb_line(e, rank=start + i + 1) for i, e in enumerate(entries[start:end])]
+    lines = [board["line"](e, start + i + 1) for i, e in enumerate(entries[start:end])]
     # Live relative timestamp INSIDE the embed body ("Updated 3 minutes ago",
     # ticking client-side). The embed's footer timestamp was the only recency
     # signal before, and a silently-edited days-old message reads as a dead
@@ -7987,17 +8675,17 @@ def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: 
     embeds = []
     for ci, desc in enumerate(descs):
         em = discord.Embed(
-            # Title on the FIRST embed only — publish_lb's duplicate rescan
-            # identifies the board by this title on embeds[0].
-            title="🏆 Ranked Leaderboard" if ci == 0 else None,
+            # Title on the FIRST embed only — the restart rescan identifies
+            # WHICH board a message is by this exact string on embeds[0].
+            title=board["title"] if ci == 0 else None,
             description=desc,
-            color=discord.Color.gold(),
+            color=board["color"](),
             timestamp=datetime.utcnow() if ci == len(descs) - 1 else None,
         )
         if ci == len(descs) - 1:
             # Item d: the board hides players not seen for LB_ACTIVE_DAYS days;
-            # publish_lb passes how many, and 0 (or a failed count) shows nothing.
-            em.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} ranked players"
+            # _render_board passes how many, and 0 (or a skipped probe) shows nothing.
+            em.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} {board['noun']}"
                           + (f" • {hidden_inactive} inactive hidden ({LB_ACTIVE_DAYS} days)"
                              if hidden_inactive > 0 else "")
                           + " • Auto-updated")
@@ -8006,17 +8694,51 @@ def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: 
 
 
 class LeaderboardPaginator(discord.ui.View):
-    """Prev/Next buttons for the auto-posted leaderboard. Caches the entries list
-    so page flips don't re-hit the API. Long timeout (24h) — refreshed on every
-    publish_lb tick (sync_roles_periodic loop, every 30 min) so users always have
-    a working set of buttons within an hour of clicking."""
-    def __init__(self, entries: list, total_players: int, hidden_inactive: int = 0):
+    """Prev/Next buttons for ONE board. Caches that board's entries list so
+    page flips don't re-hit the API.
+
+    The timeout is 24h and a fresh View is attached on every tick that
+    RENDERS this board — every 10 minutes while its endpoint answers. It is
+    NOT true that the buttons therefore always work, which is what an earlier
+    version of this docstring claimed: a board whose endpoint has failed for
+    24 hours straight keeps its last message on the channel with an EXPIRED
+    view, and its buttons then do nothing until some tick renders it again.
+    That state announces itself first — publish_boards prints an outcome line
+    per board per tick, so 144 consecutive unrendered lines precede the first
+    dead button."""
+    def __init__(self, board: dict, entries: list, total_players: int, hidden_inactive: int = 0):
         super().__init__(timeout=86400)
+        self.board = board
         self.entries = entries
         self.total_players = total_players
         self.hidden_inactive = hidden_inactive   # item d footer suffix, kept across page flips
         self.total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
         self.page = 0
+        # Board-scoped custom_ids. discord.py keys its view store by
+        # (message_id, custom_id) and every board is its own message, so this
+        # is NOT what keeps one board's buttons off another's message. Nor
+        # does anything in this file log them: an earlier version of this
+        # comment said the scope made a stray interaction attributable "in
+        # the logs", and there is no such log line — what carries the board
+        # key is the id in the interaction Discord itself reports. What the
+        # scope does buy is two things. It is the board's IDENTITY on the
+        # channel: _reconcile_board_messages reads the key back out of a
+        # message's components to adopt or retire it, so a renamed display
+        # title cannot orphan the message (the title is only the fallback,
+        # for a message posted before this marker existed). That reading
+        # takes the format exactly as written here, four colon-separated
+        # parts, so change both together. And it keeps the ids distinct if
+        # these views are ever made persistent (a persistent view is stored
+        # under message_id None, where a shared id across boards WOULD
+        # collide). The random token is per-view and deliberately prevents
+        # persistent re-registration across a restart; these views time out
+        # instead, and Discord keeps the components -- and so the key -- on
+        # the message when they do.
+        token = os.urandom(4).hex()
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                slot = "prev" if (child.label or "").startswith("◀") else "next"
+                child.custom_id = f"scrlb:{board['key']}:{slot}:{token}"
 
     def _update_buttons(self):
         # Disable Prev on first page, Next on last page. Children list order = button order.
@@ -8032,8 +8754,8 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = max(0, self.page - 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages,
-                                    self.hidden_inactive),
+            embeds=_build_board_embeds(self.board, self.entries, self.total_players, self.page,
+                                       self.total_pages, self.hidden_inactive),
             view=self,
         )
 
@@ -8042,121 +8764,844 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = min(self.total_pages - 1, self.page + 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages,
-                                    self.hidden_inactive),
+            embeds=_build_board_embeds(self.board, self.entries, self.total_players, self.page,
+                                       self.total_pages, self.hidden_inactive),
             view=self,
         )
 
 
-# Remembered per-channel leaderboard message id — direct edits instead of a
-# history scan. If the message got deleted we fall back to a (wider) scan and
-# finally post a fresh one. The old 5-message scan silently posted duplicates
-# (or found nothing to edit) once a few chat messages buried the board (item 8).
+# ── Board catalogue (v1.41.0 item 1) ──────────────────────────────
+# #scr-leaderboard carried the 1v1 board only; every other board the API
+# already serves was invisible there. One entry here is one message in the
+# channel, published in this order — the LAST entry sits at the channel
+# bottom. Each board keeps its own message id, its own paginator and its own
+# row renderer, because the 2v2/FFA/1v2 rows are not 1v1 rows: the fields each
+# renderer reads were taken from that endpoint's response model in schemas.py,
+# not from the 1v1 shape.
+#
+# #153 — "matches the visible leaderboard" means matching what CALLERS PASS,
+# not the signature's defaults — applies to these paths UNEVENLY, and the
+# difference is worth knowing before copying a line:
+#   1v1  /leaderboard defaults min_matches=5 (main.py:8163) and every real
+#        caller passes 1 (ApiClient.cs:7656, the old bot board). This is
+#        #153's own case: a board on the default would show a different
+#        population from the one players already see, so the 1 is REQUIRED.
+#   2v2  /team/leaderboard and /ffa/leaderboard already default their minimum
+#   FFA  to 1 (main.py:52512, main.py:49200) and the F5 client passes only limit and
+#        sort_by (ApiClient.cs:14821, ApiClient.cs:18947), so it takes those defaults. The
+#        explicit min_series=1 / min_games=1 here therefore change nothing
+#        today; they are written down so the board names the population it
+#        shows, and so a later edit to either default cannot move this board
+#        away from the client's view in silence. A test pins each value to
+#        the endpoint's own current default for exactly that.
+#   1v2  /ovt/leaderboard has NO minimum parameter (main.py:43171) — there is
+#        nothing to pass, and `role` is the only filter it takes.
+# (An earlier version of this comment cited #153 for "render what the endpoint
+# returns", which is a different rule and not one #153 states; a later one said
+# every path carries an explicit minimum, which the 1v2 row above refutes.)
+#
+#   key    — LEADERBOARD_BOARDS token, log prefix, and the board's IDENTITY on
+#            the channel: the paginator stamps it into every button's
+#            custom_id, and the reconcile read adopts and retires a message
+#            by it. Never rename a key; it is what the message is.
+#   title  — embed title. NOT the identity: renaming it edits the existing
+#            message into the new title on the next tick (adopted by its
+#            key), or retires it by its key if the board is off. It is the
+#            FALLBACK identity only, matched exactly, for a board message
+#            posted before the key marker existed.
+#   retired_titles — optional: titles this board was published under before
+#            the current one. A rename adds the old title here, so a message
+#            from before the marker that still carries it is adopted or
+#            retired too. Titles and retired titles are distinct across the
+#            whole catalogue (a test pins that).
+#   path   — the GET this board renders
+#   probe  — 1-row fetch whose total_players gives the population INCLUDING
+#            inactives, for the "N inactive hidden" footer. None where the
+#            endpoint's total_players is the PAGE size rather than the
+#            population — main.py says exactly that of /ovt/leaderboard in its
+#            own KNOWN NIT comment, so the difference would measure nothing.
+#   line   — row renderer (entry, rank) -> str
+#   noun   — what total_players counts, for the footer
+#   color  — embed colour, called per embed (discord.Color factories)
+#
+# /api/v1/records is deliberately NOT a board here: it answers parallel arrays
+# for ONE named stat board at a time (RecordsBoardResponse in schemas.py), not
+# entries/total_players, and which of its stats this channel should carry has
+# not been decided. `LEADERBOARD_BOARDS=records` therefore logs an unknown-key
+# line rather than looking like a setting that works.
+
+
+def _board_medal(rank: int) -> str:
+    """Podium glyph for the mode boards. The 1v1 tier emoji (_lb_line) is
+    deliberately not reused: the tiers and the Discord rank roles are both
+    derived from the 1v1 rating (update_member_role), so a tier glyph beside a
+    2v2 or FFA rating would name a tier nothing grants. Mode podiums do exist
+    server-side (bootstrap_mode_podium_titles in main.py), so top-3 is the one
+    distinction these rows can honestly draw."""
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "▫️")
+
+
+def _lb_line_2v2(e, rank=None):
+    """One 2v2 row: rating + completed-series W/L. Fields per
+    Team2v2LeaderboardEntry — series_wins/series_losses, NOT the 1v1
+    wins/losses keys. Indexed, not .get(): a changed row shape must fail this
+    board's render (contained per board in publish_boards) rather than publish
+    a column of zeros."""
+    if rank is None:
+        rank = e["rank"]
+    name = _escape_md(str(e["display_name"])[:24])
+    return (f"`#{rank:>3}` {_board_medal(rank)} **{name}** — {e['rating']} "
+            f"({e['series_wins']}W/{e['series_losses']}L)")
+
+
+def _lb_line_ffa(e, rank=None):
+    """One FFA row. Fields per FfaLeaderboardEntry, where `wins` is 1st places
+    (not series wins) and avg_placement is averaged over recorded games — the
+    two numbers an FFA player is read on besides the rating."""
+    if rank is None:
+        rank = e["rank"]
+    name = _escape_md(str(e["display_name"])[:24])
+    return (f"`#{rank:>3}` {_board_medal(rank)} **{name}** — {e['rating']} "
+            f"({e['games_played']}g, {e['wins']}× 1st, avg {float(e['avg_placement']):.1f})")
+
+
+def _lb_line_ovt(e, rank=None):
+    """One 1v2 row. Ovt1v2LeaderboardEntry carries no rating — the endpoint
+    answers is_ranked=false — so the row is W/L over games played.
+
+    win_rate here is ALREADY A PERCENT, not a 0-1 fraction, and 1v2 is the
+    only board where that is true. The producer is
+    `round(100.0 * wins / games, 1)` in the /ovt/leaderboard handler; the
+    other three all divide without scaling (1v1 and 2v2 as
+    `ROUND(wins::numeric / total, 4)` in SQL, FFA as `round(wins / games, 3)`).
+    So this renderer must NOT multiply by 100.
+
+    It is also the only row renderer in this file that shows a win rate at
+    all: the 1v1 row shows `rating (WW/LL)`, 2v2 shows `rating (series
+    W/L)`, FFA shows `rating (games, firsts, avg placement)`. So there is
+    no sibling here to copy the unit from, which is how the stray 100* got
+    written in the first place — it was generalised from the client, where
+    three of the four tables carry a win-rate column.
+
+    Do not "fix" the divergence in main.py. The shipped client already
+    matches it: RefreshFfaTab writes `{e.win_rate*100f:F0}%`
+    (NativeUI.cs:4672) and RefreshTeamTab writes the same (NativeUI.cs:27204), while
+    the 1v2 board writes `{e.win_rate:F0}%` unscaled (NativeUI.cs:5980). The 1v1 table
+    carries no win-rate column at all — it renders `{e.wins}-{e.losses}`, so
+    there is nothing there to normalise and nothing there to copy from.
+
+    Both directions of a "normalisation" are wrong, and they are wrong in
+    opposite ways. Making /ovt/leaderboard return a FRACTION like the other
+    three leaves the two renderers that do not scale — this row and
+    NativeUI.cs:5980 — printing a live 58.8% player as "1%". Making the
+    three fraction endpoints return a PERCENT leaves the two renderers that
+    DO scale — NativeUI.cs:4672 and NativeUI.cs:27204 — printing that same player as
+    "5880%". The unit belongs to the endpoint, and every consumer is
+    written against its own endpoint's unit.
+
+    test_win_rate_unit_is_per_endpoint pins the renderer half and the
+    handlers' spelling; the two value tests beside it take the NUMBER each
+    handler computes for one fixed input and assert its scale, which is what
+    a `100 *` wrapped around any of those four expressions fails."""
+    if rank is None:
+        rank = e["rank"]
+    name = _escape_md(str(e["display_name"])[:24])
+    return (f"`#{rank:>3}` {_board_medal(rank)} **{name}** — "
+            f"{e['wins']}W/{e['losses']}L "
+            f"({e['games_played']} games, {round(float(e['win_rate']))}%)")
+
+
+BOARDS = [
+    {"key": "1v1", "title": "🏆 Ranked Leaderboard",
+     "path": f"/leaderboard?limit={LB_TOTAL_FETCH}&min_matches=1",
+     "probe": "/leaderboard?limit=1&min_matches=1&include_inactive=true",
+     "line": _lb_line, "noun": "ranked players", "color": lambda: discord.Color.gold()},
+    {"key": "2v2", "title": "👥 2v2 Ranked Leaderboard",
+     "path": f"/team/leaderboard?limit={LB_TOTAL_FETCH}&min_series=1",
+     "probe": "/team/leaderboard?limit=1&min_series=1&include_inactive=true",
+     "line": _lb_line_2v2, "noun": "rated 2v2 players", "color": lambda: discord.Color.blurple()},
+    {"key": "ffa", "title": "🎯 FFA Ranked Leaderboard",
+     "path": f"/ffa/leaderboard?limit={LB_TOTAL_FETCH}&min_games=1",
+     "probe": "/ffa/leaderboard?limit=1&min_games=1&include_inactive=true",
+     "line": _lb_line_ffa, "noun": "rated FFA players", "color": lambda: discord.Color.orange()},
+    # Off by default (Sid, 2026-09-18): 1v2 is unranked, and its total_players
+    # is the page size, so its footer says "listed" and carries no inactive
+    # suffix — see `probe` above.
+    {"key": "1v2", "title": "⚔️ 1v2 Leaderboard",
+     "path": f"/ovt/leaderboard?limit={LB_TOTAL_FETCH}&role=combined",
+     "probe": None,
+     "line": _lb_line_ovt, "noun": "1v2 players listed", "color": lambda: discord.Color.teal()},
+]
+
+_lb_unknown_board_keys: set = set()
+
+
+def _enabled_boards() -> list:
+    """The boards this deployment publishes, in LEADERBOARD_BOARDS order
+    (default 1v1,2v2,ffa — 1v2 and the Records mini-boards stay off, Sid
+    2026-09-18). An unknown token IS dropped — it names no board, so there is
+    nothing to publish for it — and it is named once in the log as it goes,
+    because a key that silently publishes nothing looks exactly like a
+    setting that works. That name is load-bearing a second time: the
+    retirement sweep refuses to delete anything while any token failed to
+    resolve, so a typo costs a board its publish and never its message."""
+    by_key = {b["key"]: b for b in BOARDS}
+    out, unknown = [], []
+    for tok in (LEADERBOARD_BOARDS_RAW or "").split(","):
+        tok = tok.strip().lower()
+        if not tok:
+            continue
+        if tok in by_key:
+            if by_key[tok] not in out:
+                out.append(by_key[tok])
+        elif tok not in _lb_unknown_board_keys:
+            _lb_unknown_board_keys.add(tok)
+            unknown.append(tok)
+    if unknown:
+        print(f"[LB] LEADERBOARD_BOARDS names no such board: {', '.join(unknown)} "
+              f"(known: {', '.join(by_key)})")
+    return out
+
+
+# Remembered board message ids per channel: {channel id: {board key: message id}}.
+#
+# This map is NOT the record of what is on the channel. THE CHANNEL IS. Every
+# tick re-reads the channel and re-derives this map from what it finds
+# (_reconcile_board_messages below), so no id here is ever acted on as though
+# it still described a message. What the map buys is the EDIT path:
+# fetch_message reaches a held id at any depth, so the ordinary tick edits one
+# message per board instead of re-posting the set.
+#
+# It replaced a 5-message history scan that silently posted duplicates once a
+# few chat messages buried the board (item 8).
 _lb_message_ids: dict = {}
 
-async def publish_lb(guild):
+# How many messages ONE reconcile read will take before it stops trying to see
+# the whole channel. This is not a scan depth: the read stops as soon as the
+# channel ENDS, so a board channel holding a handful of messages costs one
+# history request and never approaches this number (a longer channel costs
+# one request per 100 messages on every tick, at most
+# LB_RECONCILE_CEILING // 100 + 1 -- _reconcile_board_messages has the
+# count). It is reached only by a
+# channel holding more than this many messages, and reaching it means the read
+# did not establish what lies behind it -- on such a tick the publisher
+# deletes nothing and posts nothing fresh, and says so per board.
+#
+# What that bound costs: a board whose message is buried under more than this
+# many messages AND whose id this process has lost (a restart) is neither
+# edited nor replaced, and every tick prints why. Raising this number is the
+# lever. The direction was chosen because a second full set left permanently
+# on the channel is the failure item 8 exists to prevent and nothing reports
+# it, while an absent board announces itself on every tick.
+LB_RECONCILE_CEILING = 2000
+
+
+# Named apart from _delete_board_message, the tournament board's helper, which
+# returns None or the failure rather than a bool and logs nothing itself.
+async def _delete_lb_message(ch, msg, what: str) -> bool:
+    """Delete one board message of ours. True when it is gone -- including
+    when it was already gone, which is not a failure.
+
+    A refusal is logged and LEFT. Nothing remembers this id: the channel is
+    the record, and the next tick's reconcile reads it again and finds this
+    message exactly as this one found it. That is also what makes leaving it
+    safe -- the decision to delete is re-derived from a fresh read every tick
+    and never replayed from memory, so this id cannot come back as a delete
+    after the channel has made it a board again."""
+    try:
+        await msg.delete()
+        return True
+    except discord.NotFound:
+        return True
+    except Exception as e:
+        print(f"[LB] couldn't delete {what} mid={msg.id} ({e}) -- "
+              f"the next tick reads the channel again and finds it")
+        return False
+
+
+async def _render_board(board: dict):
+    """Fetch one board and render it. Returns (embeds, view), or None when the
+    endpoint did not answer.
+
+    AN EMPTY BOARD IS NOT AN OUTAGE. api_get returns None for every transport
+    failure and every non-200 -- it catches and logs at :311 and cannot
+    propagate -- so None is the outage signal, and a 200 carrying
+    `entries: []` is a mode nobody has played yet. It renders as "(no
+    players)" and keeps its place in the set. Treating empty as an outage did
+    three things, none of them wanted: it kept the PREVIOUS tick's players on
+    the channel for as long as the mode stayed empty, it counted the board as
+    unrendered so the whole set could not re-anchor, and on a first deploy it
+    meant an enabled board never appeared at all.
+
+    A payload with no `entries` key is a shape this renderer cannot read, and
+    is reported as that rather than published as an empty board. A row shape
+    it cannot render RAISES -- publish_boards contains that per board, so one
+    board's bad tick can neither skip the others nor kill the loop (#129)."""
+    data = await api_get(board["path"])
+    if data is None:
+        return None                       # api_get logged the status or the error
+    entries = data.get("entries")
+    if entries is None:
+        print(f"[LB] {board['key']}: answer carried no entries list -- board left as it is")
+        return None
+    total_players = data.get("total_players", 0)
+    # Item d: the fetch above is the DEFAULT board, so inactive players are
+    # already hidden. One extra 1-row fetch with everyone included yields the
+    # population; the footer says how many are hidden. A failed fetch or a
+    # non-positive difference just omits the suffix — never blocks the post.
+    hidden_inactive = 0
+    if board["probe"]:
+        try:
+            _all = await api_get(board["probe"])
+            if _all:
+                hidden_inactive = int(_all.get("total_players", 0) or 0) - int(total_players or 0)
+        except Exception as e:
+            # NOT the network path, and this clause must not be read as
+            # covering it: api_get swallows every transport failure and every
+            # non-200 and returns None (:311), which `if _all` already handles
+            # by leaving the suffix off. What reaches here is a 200 whose
+            # total_players is not a number, or a non-dict answer -- int()
+            # and .get() are what raise. Either way the suffix is dropped and
+            # the board is still published.
+            print(f"[LB] {board['key']}: inactive count unreadable ({e}) -- footer suffix skipped")
+    total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
+    embeds = _build_board_embeds(board, entries, total_players, 0, total_pages, hidden_inactive)
+    view = LeaderboardPaginator(board, entries, total_players, hidden_inactive)
+    view._update_buttons()
+    return embeds, view
+
+
+async def _delete_board_message(ch, msg=None, mid=None):
+    """Delete one board message of ours, given the message or its id, and
+    say whether it is PROVEN gone (v1.41.0 beta round 4, findings 21 and
+    22). Returns None when it is: the delete went through, or Discord
+    answered 404 (discord.NotFound) because it was already deleted.
+    Otherwise it returns the failure -- a 5xx, a rate limit, a lost
+    permission -- and the message may still be live, so the caller keeps
+    treating it as live: nothing replaces it, and a leftover stays owed."""
+    try:
+        if msg is None:
+            msg = await ch.fetch_message(mid)
+        await msg.delete()
+        return None
+    except discord.NotFound:
+        return None
+    except Exception as e:
+        return e
+
+
+async def _own_embed_messages(ch):
+    """Every message of this bot's in `ch` that carries an embed, newest
+    first, read from the channel's WHOLE history (v1.41.0 beta round 4,
+    findings 12, 13 and 15: absolute convergence). limit=None: discord.py
+    pages it, 100 messages per request, back to the channel's first message.
+    The sweeps used to read the newest 50 messages only, so a board buried
+    deeper -- under chat, or left by an earlier process -- was never adopted,
+    retired or swept, however often the sweep was retried. The walk costs one
+    request per 100 messages of the channel, and it runs only while a sweep
+    is owed: at the start of every process, and after a failure.
+
+    Returns (messages, error). error is None when the walk reached the
+    channel's first message; otherwise it is the failure, and messages are
+    the newest ones read before it. Only a COMPLETE walk shows that a board
+    is not in the channel. A partial one still names the newest copy of every
+    board it did reach, because history is newest-first."""
+    found = []
+    try:
+        async for msg in ch.history(limit=None):
+            if msg.author == bot.user and msg.embeds:
+                found.append(msg)
+    except Exception as e:
+        return found, e
+    return found, None
+
+
+async def _reconcile_board_messages(ch, boards: list, ids: dict) -> tuple:
+    """Read the channel FRESH and CLASSIFY what is on it. Returns
+    (read_complete, anchored, dupes, retired). It DELETES NOTHING.
+
+    THE CHANNEL IS THE ONLY RECORD. Every decision this tick makes about a
+    message is made from messages this read just saw, never from an id held
+    in memory, so a message id can only mean one thing at a time. Within one
+    read a message of ours that IS an enabled board (IDENTITY, below) is
+    either the NEWEST one -- that board's keeper, which is what `ids` is set
+    to -- or an older COPY, listed newest-first under its board key in
+    `dupes`. A message that is a board this deployment no longer publishes
+    is listed in `retired` as (message, key). The queue that used to hold a
+    second reading of an id, and the cap that used to evict from it, are
+    gone.
+
+    IDENTITY. Which board a message is comes from the BOARD KEY its buttons
+    carry: LeaderboardPaginator stamps it into every custom_id
+    ("scrlb:<key>:<slot>:<token>"), every board message is posted and edited
+    with that view, and Discord keeps a message's components when its view
+    times out. A display title is NOT the identity, because a title can be
+    renamed and the message under it is still that board: after a rename
+    and a restart the old message is adopted by its key and edited into the
+    new title, or retired by its key if the board is off -- never left
+    beside a fresh post. The TITLE is the fallback, for a message posted
+    before the marker existed (the single-board publisher's 1v1): its
+    current title, or any title in its BOARDS entry's `retired_titles`. A
+    marker naming a key no BOARDS entry has is not this build's board, and
+    the message is left exactly as it is.
+
+    WHY THIS FUNCTION DELETES NOTHING. A read shows what was on the channel
+    when it was read, and nothing more. The keeper it picks can be removed
+    -- by a moderator, or by a second process on the same token -- after the
+    read yields it and before anything acts on it, and an older copy deleted
+    on the strength of that read is then the board's last message. So every
+    delete belongs to the caller and follows its PROOF on the same tick: an
+    older copy goes only after an edit of a newer copy of that board has
+    landed, or after that board's replacement has been sent; a board that did
+    not render this tick (an outage, the no-render return) keeps every copy
+    it has. A retired board has no replacement by definition, so its
+    messages need no such proof and go on any complete read.
+
+    HOW FAR THE READ GOES. It reads newest-first until the CHANNEL ENDS, not
+    to a fixed depth, so in any channel of at most LB_RECONCILE_CEILING
+    messages there is nothing behind it and a previous set cannot be left
+    undiscovered -- which is the whole failure the old fixed 200-message scan
+    could not close, because a set buried deeper than the scan was re-posted
+    fresh and the old one orphaned.
+
+    WHAT THE READ COSTS. The read is ONE iterator, `ch.history(...)`, and it
+    is NOT one request: discord.py fetches history in REST requests of at
+    most 100 messages and asks again until a request comes back short. A
+    channel of N messages therefore costs
+
+        min(N, LB_RECONCILE_CEILING) // 100 + 1
+
+    history requests, on every tick: one while the channel holds fewer than
+    100 messages (the normal state of a board channel), two from 100, three
+    from 200, and at most LB_RECONCILE_CEILING // 100 + 1 = 21, which a
+    channel reaches at LB_RECONCILE_CEILING messages and never exceeds,
+    because the read stops one message past the ceiling.
+
+    WHICH DIRECTION THE UNHANDLED CASE FAILS. A read that raises, a read that
+    dies part-way, and a read that reaches the ceiling are all treated the
+    same: the channel picture is INCOMPLETE, so the caller deletes nothing
+    and posts nothing fresh on this tick. It still ADOPTS what it saw, which is
+    sound at any depth -- history is newest-first, so the first message that
+    is a given board is that board's newest message in the channel whether or
+    not the read went on to finish. And it does not drop a remembered id it
+    did not see, because it has not shown that message is gone. Only a
+    COMPLETE read may do that, and only a complete read may delete.
+
+    WHAT CAN BE DELETED, AND WHAT IS NEVER DELETED. Only messages whose
+    author is this BOT ACCOUNT, which carry an embed, and which are a board
+    by the identity above. A message posted by any other account is skipped
+    before anything else is asked about it, on every path. Of ours, two
+    kinds can go: an older COPY of an enabled board, once the same tick has
+    proven a newer copy of that board live (its edit landed) or sent its
+    replacement, and a RETIRED board's message (a board in BOARDS this
+    deployment no longer publishes, which is a deliberate removal).
+
+    WHAT THAT GUARANTEES, AND WHAT IT CANNOT. This process never deletes a
+    copy of a board on the strength of a read alone: at the moment of every
+    such delete, a newer copy of that board accepted an edit on this tick or
+    its replacement was sent on this tick. What no publisher can make atomic
+    is the gap between that proof and the delete. Another actor that removes
+    the proven copy inside it leaves the board absent until the next
+    complete read, which posts the board fresh -- at most one tick, ten
+    minutes. A board whose render failed is never left absent by this
+    process, because on that tick it deletes no copy of it at all.
+
+    Retirement runs when the enabled set is EMPTY too. `LEADERBOARD_BOARDS`
+    set to nothing means this deployment publishes no boards, and leaving the
+    last set of messages up said the opposite -- permanently stale, and
+    indistinguishable to a reader from boards that stopped updating. It is
+    still REFUSED while any token in LEADERBOARD_BOARDS failed to resolve: a
+    typo drops a real board from the enabled set, and the cost of acting on
+    that is a deleted message while the cost of refusing is a board that
+    keeps publishing while the log names the key (#430).
+
+    "Ours" is an IDENTITY check, not a provenance one: a set left by an
+    earlier run, or by a second process on the same token, is adopted and
+    swept exactly like one this process posted. That is the intent -- those
+    ARE the duplicates -- and it is why `anchored` is derived from the same
+    read rather than from a second one.
+
+    ANCHORED comes out of this read as well, so the tick pays no extra
+    history request for it: it is whether the channel's last len(boards)
+    messages, leaving out every older copy and retired message this read
+    classified (the messages a tick deletes once their proof is in), are
+    exactly this set in BOARDS order, oldest to newest. An EDIT never moves a
+    Discord message and never changes its posted date, so a board edited
+    every 10 minutes but buried under chat reads as dead -- sitting at the
+    bottom is part of publishing it, not polish. An incomplete read answers
+    True, i.e. "do not repost":
+    the direction to fail in is editing in place, never moving a set whose
+    position was not established.
+    """
+    enabled = {b["key"] for b in boards}
+    # A catalogue board this deployment does not publish is RETIRED -- unless
+    # a LEADERBOARD_BOARDS token failed to resolve, and then nothing is (#430).
+    retiring = ({b["key"] for b in BOARDS} - enabled) if not _lb_unknown_board_keys else set()
+    # The fallback identity: every title a board has been published under.
+    # Current titles go in first, so a retired title can never take a title
+    # that another board carries now.
+    by_title: dict = {}
+    for b in BOARDS:
+        by_title.setdefault(b["title"], b["key"])
+    for b in BOARDS:
+        for t in b.get("retired_titles", ()):
+            by_title.setdefault(t, b["key"])
+
+    def board_key(msg):
+        """The board a message of ours IS: the key its buttons carry, else
+        (a message from before the marker) the key its title names, else
+        None. A marker is never second-guessed by the title under it."""
+        todo, i = list(getattr(msg, "components", None) or ()), 0
+        while i < len(todo):                  # action rows, then their children
+            c = todo[i]
+            i += 1
+            cid = getattr(c, "custom_id", None)
+            if isinstance(cid, str) and cid.startswith("scrlb:"):
+                parts = cid.split(":")
+                if len(parts) == 4 and parts[1]:
+                    return parts[1]
+            todo.extend(getattr(c, "children", None) or ())
+        return by_title.get(msg.embeds[0].title or "")
+
+    keepers: dict = {}
+    dupes: dict = {}
+    retired: list = []
+    order: list = []
+    complete, seen = True, 0
+    try:
+        async for msg in ch.history(limit=LB_RECONCILE_CEILING + 1):
+            seen += 1
+            if seen > LB_RECONCILE_CEILING:
+                complete = False
+                print(f"[LB] the channel holds more than {LB_RECONCILE_CEILING} messages -- "
+                      f"this tick deletes nothing and posts nothing fresh")
+                break
+            order.append(msg.id)
+            if msg.author != bot.user or not msg.embeds:
+                continue                      # never ours: not touched, not counted
+            key = board_key(msg)
+            if key in enabled:
+                if key in keepers:
+                    dupes.setdefault(key, []).append(msg)    # an older copy, newest-first
+                else:
+                    keepers[key] = msg        # newest-first: the first one wins
+            elif key in retiring:
+                retired.append((msg, key))
+            # Anything else -- no board, a board this build does not know, or
+            # a retirement refused -- is left exactly as it is.
+    except Exception as e:
+        complete = False
+        print(f"[LB] channel read failed ({e}) -- this tick deletes nothing "
+              f"and posts nothing fresh")
+
+    for key, msg in keepers.items():
+        ids[key] = msg.id
+    if complete:
+        # The read covered the whole channel, so a board it did not see has no
+        # message there and a remembered id for it is an id for something that
+        # is gone. Under an incomplete read the id is KEPT -- fetch_message
+        # reaches a message at any depth, and dropping it would turn "deeper
+        # than the read" into a fresh duplicate.
+        for b in boards:
+            if b["key"] not in keepers:
+                ids.pop(b["key"], None)
+
+    if not complete:
+        held = sum(len(v) for v in dupes.values()) + len(retired)
+        if held:
+            print(f"[LB] {held} stale board message(s) left as they are: the channel "
+                  f"read did not reach the end of the channel")
+        # The older copies stay listed: the caller may still ADOPT one by an
+        # edit when the newer copy has gone, which removes nothing. It deletes
+        # none of them on this read, and retires nothing.
+        return False, True, dupes, []
+
+    want = [ids.get(b["key"]) for b in boards]
+    if not boards or any(mid is None for mid in want):
+        return True, False, dupes, retired
+    leaving = {m.id for copies in dupes.values() for m in copies} | {m.id for m, _k in retired}
+    tail = [mid for mid in order if mid not in leaving][:len(want)]
+    tail.reverse()                            # history is newest-first; channel order is oldest-first
+    return True, tail == want, dupes, retired
+
+
+async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict, dupes: dict):
+    """Move the whole board set to the channel bottom in BOARDS order, one
+    board at a time, POSTING EACH REPLACEMENT BEFORE DELETING THE MESSAGE IT
+    REPLACES. Sends append at the bottom in order while the deletes remove
+    from above, so the channel ends in the same state a delete-all-then-repost
+    reaches -- and this process never takes a board's last message off the
+    channel: every delete here follows that board's sent replacement. The
+    older copies the read found for a board (`dupes`) go in the same step and
+    under the same rule, after that board's replacement is on the channel.
+
+    The delete-first shape this replaces was sound only for as long as every
+    send that followed it succeeded. The caller renders the whole set up front
+    and still refuses to repost unless EVERY board rendered, so the
+    replacement CONTENT was always in hand; what no amount of pre-rendering
+    can hold is a SUCCESSFUL SEND. A 5xx, a timeout, a lost Manage-Messages,
+    or the task being cancelled between the two loops left the channel holding
+    part of the set or none of it until a later tick -- ten minutes of empty
+    leaderboard channel, which is precisely the appearance of deadness that
+    bottom-anchoring exists to prevent (#140).
+
+    Both failure directions are non-destructive. A failed send leaves the old
+    message and every older copy in place: stale and out of order, but
+    present, and the next tick re-anchors. A failed delete leaves a duplicate
+    above the new set, and the next tick's reconcile finds it by READING THE
+    CHANNEL -- it is an older message of an enabled board (its key, or for
+    a message from before the marker its title), which is exactly what that
+    read classifies as an older copy, deleted on
+    that tick once a newer copy is proven live -- and it needs nothing
+    remembered here to be found. Neither direction can empty the channel.
+    The deletes on this path are of messages whose board's REPLACEMENT HAS
+    ALREADY BEEN SENT, a few lines above, and the whole path still runs at
+    most once per tick.
+    """
+    print(f"[LB] board set is not at the channel bottom -- reposting {len(boards)} boards in order")
+    removed = 0
+    for b in boards:
+        r = rendered.get(b["key"])
+        if r is None:
+            # The caller gates on every board having rendered, so this is
+            # unreachable today. It is here because the alternative to
+            # skipping one board is a KeyError that costs the whole guild's
+            # tick -- the caller catches it, so the loop survives (#129), but
+            # every board after this one in BOARDS order would be skipped too.
+            print(f"[LB] {b['key']}: no render in hand -- left as it is, not reposted")
+            continue
+        embeds, view = r
+        old = ids.get(b["key"])
+        try:
+            sent = await ch.send(embeds=embeds, view=view)
+        except Exception as e:
+            print(f"[LB] {b['key']}: repost failed ({e}) -- old message kept, re-anchoring next tick")
+            continue
+        ids[b["key"]] = sent.id
+        print(f"[LB] {b['key']}: reposted at bottom as mid={sent.id}")
+        # The replacement is on the channel now, so the older copies this
+        # tick's read found for this board may go too.
+        for m in dupes.get(b["key"], ()):
+            if await _delete_lb_message(ch, m, f"duplicate {b['key']} board"):
+                removed += 1
+        if old is None:
+            continue
+        try:
+            msg = await ch.fetch_message(old)
+        except discord.NotFound:
+            continue                      # already gone; nothing left to remove
+        except Exception as e:
+            print(f"[LB] {b['key']}: old message mid={old} not reachable ({e}) -- "
+                  f"the next tick reads the channel again and finds it")
+            continue
+        await _delete_lb_message(ch, msg, f"replaced {b['key']} board")
+    if removed:
+        print(f"[LB] deleted {removed} duplicate stale board message(s)")
+
+
+async def publish_boards():
+    """Publish every enabled board into the leaderboard channel, one message
+    each, in BOARDS order.
+
+    One outcome line per board per tick, because the order of diagnosis on
+    this channel is #140's: PROVE THE WRITES LAND (outcome logging), THEN ask
+    what the viewer actually sees. #140 got there the hard way — the per-tick
+    logs proved every edit was landing while the report was "posts aren't
+    updating", and the answer turned out to be burial, not failure. Without a
+    line per board per tick neither half of that question can be answered
+    from the logs. (An earlier version of this sentence cited learning #83,
+    which is about a Harmony patch that never ATTACHED, found by grepping the
+    startup log for `Failed to patch`. That rule is about proving a
+    diagnostic collects at all; it is not about a publish loop's per-tick
+    outcomes.)
+
+    ONE channel, resolved ONCE per tick. LEADERBOARD_CHANNEL_ID names a
+    single channel and bot.get_channel resolves it out of the connection's
+    cache across every guild. The previous shape took a guild and was called
+    once per guild, and `guild.get_channel` returning None for a guild that
+    does not own the channel fell through to `bot.fetch_channel`, which
+    answers for ANY guild -- so every additional guild the bot joined
+    re-rendered and re-edited the same three boards, at six backend GETs and
+    seven Discord calls a time.
+
+    WHAT ONE TICK COSTS. Three boards, steady state, nothing stale on the
+    channel, and fewer than 100 messages on it: SIX backend GETs (three
+    board fetches and three one-row inactive probes) and SEVEN Discord
+    requests -- the reconcile read, which on a channel that short is ONE
+    history request, then one fetch_message and one edit per board. The
+    read is one `history()` iterator but not one request: a channel of N
+    messages costs min(N, LB_RECONCILE_CEILING) // 100 + 1 history requests,
+    so every further 100 messages on the channel adds a request to EVERY
+    tick, up to LB_RECONCILE_CEILING // 100 + 1 = 21. The four-board
+    configuration is seven backend GETs (1v2 has no probe) and nine Discord
+    requests on the short channel. A channel-cache miss adds one
+    fetch_channel. A tick that has to re-anchor makes no edits: it trades
+    the three fetch_message/edit pairs for three sends, three fetch_message
+    and three deletes, ten requests with the one history request. A cold
+    start ADOPTS a set already on the channel from that same read, deleting
+    nothing, and then costs the steady seven, or the re-anchor's ten when
+    that set is buried -- each plus the read's further requests on a longer
+    channel. Every older copy or retired message the read finds adds one
+    delete once it may go, of a message the read already holds; a keeper
+    found gone costs its fetch_message, and each older copy tried in its
+    place another fetch_message and the edit. There is no separate tail
+    read and no per-id retry sweep: both came out of the reconcile read,
+    which is the one place the channel is read from.
+
+    ORDER. Render first (that touches only the API), then RECONCILE THE
+    CHANNEL, and only then act on it. Nothing decides a deletion before the
+    channel has been read on this tick, and no copy of a board is deleted
+    before a newer copy of that board is proven live on this tick (its edit
+    landed) or its replacement has been sent on this tick."""
     if LEADERBOARD_CHANNEL_ID <= 0: return
-    ch = guild.get_channel(LEADERBOARD_CHANNEL_ID)
+    ch = bot.get_channel(LEADERBOARD_CHANNEL_ID)
     if not ch:
         try: ch = await bot.fetch_channel(LEADERBOARD_CHANNEL_ID)
         except Exception as e:
             print(f"[LB] channel {LEADERBOARD_CHANNEL_ID} unreachable: {e}")
             return
     if not ch: return
-    data = await api_get(f"/leaderboard?limit={LB_TOTAL_FETCH}&min_matches=1")
-    if not data or not data.get("entries"):
-        # api_get already logged the status on non-200; this covers empty payloads.
-        print("[LB] no leaderboard data this tick — skipping")
-        return
-    entries = data["entries"]
-    total_players = data.get("total_players", 0)
-    # Item d: the fetch above is the DEFAULT board, so inactive players are
-    # already hidden. One extra 1-row fetch with everyone included yields the
-    # population; the footer says how many are hidden. A failed fetch or a
-    # non-positive difference just omits the suffix -- never blocks the post.
-    hidden_inactive = 0
-    try:
-        _all = await api_get("/leaderboard?limit=1&min_matches=1&include_inactive=true")
-        if _all:
-            hidden_inactive = int(_all.get("total_players", 0) or 0) - int(total_players or 0)
-    except Exception as e:
-        print(f"[LB] inactive count fetch failed ({e}) — footer suffix skipped")
-    total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
-    embeds = _build_lb_embeds(entries, total_players, 0, total_pages, hidden_inactive)
-    view = LeaderboardPaginator(entries, total_players, hidden_inactive)
-    view._update_buttons()
-    # Fast path: edit the message we already know about. Logged on success too —
-    # a silently-successful loop is indistinguishable from a dead one in the logs
-    # (learning #83), and "is the board actually being edited?" is exactly the
-    # question this bug keeps asking. 6 lines/hour.
-    #
-    # Bottom-anchor: an EDIT never moves a Discord message and never changes its
-    # "posted" date, so a days-old board being edited every 10 minutes still
-    # reads as dead ("posts aren't posting/updating") to anyone scrolled to the
-    # channel bottom. If anything was posted after our board, delete it and
-    # repost at the bottom — in a dedicated board channel this triggers rarely
-    # (restarts, someone chatting), at most once per tick, and pings no one.
-    mid = _lb_message_ids.get(ch.id)
-    if mid:
+    boards = _enabled_boards()
+    # Render everything BEFORE touching the channel: the repost path deletes
+    # messages, and it may only do that while holding a replacement for each.
+    # With no enabled board this loop does nothing and the reconcile below
+    # still runs -- that is the whole disable path, and returning before it
+    # left every old board message on the channel for good.
+    rendered = {}
+    for b in boards:
         try:
-            msg = await ch.fetch_message(mid)
-            if getattr(ch, "last_message_id", None) not in (None, mid):
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                sent = await ch.send(embeds=embeds, view=view)
-                _lb_message_ids[ch.id] = sent.id
-                print(f"[LB] board was buried (last_message_id={ch.last_message_id}) — reposted at bottom as mid={sent.id}")
-                return
-            await msg.edit(embeds=embeds, view=view)
-            print(f"[LB] edited board mid={mid}")
-            return
-        except Exception as e:
-            print(f"[LB] fast-path edit of mid={mid} failed ({e}) — rescanning")
-            _lb_message_ids.pop(ch.id, None)  # deleted/unreachable — rediscover
-    # Rescan: adopt the NEWEST board message and DELETE any older duplicates.
-    # Restart-era re-anchors and the pre-v1.30 5-message scan left duplicate
-    # boards behind in some channels; whichever one a viewer (or a pin) is
-    # looking at may not be the one we edit — a permanently "stale" board that
-    # no log line ever explained. Sweeping duplicates makes the visible board
-    # unambiguous, and every outcome now logs.
-    keeper = None
-    dupes = 0
-    async for msg in ch.history(limit=50):
-        if msg.author == bot.user and msg.embeds and "Ranked Leaderboard" in (msg.embeds[0].title or ""):
-            if keeper is None:
-                keeper = msg
+            r = await _render_board(b)
+            if r is None:
+                print(f"[LB] {b['key']}: no data this tick — board left as it is")
             else:
-                try:
-                    await msg.delete()
-                    dupes += 1
-                except Exception as e:
-                    print(f"[LB] couldn't delete duplicate board mid={msg.id}: {e}")
-    if dupes:
-        print(f"[LB] deleted {dupes} duplicate stale board message(s)")
-    if keeper is not None:
-        if getattr(ch, "last_message_id", None) not in (None, keeper.id):
-            # Same bottom-anchor rule as the fast path.
-            try:
-                await keeper.delete()
-            except Exception:
-                pass
-            sent = await ch.send(embeds=embeds, view=view)
-            _lb_message_ids[ch.id] = sent.id
-            print(f"[LB] re-anchored board was buried — reposted at bottom as mid={sent.id}")
-            return
-        _lb_message_ids[ch.id] = keeper.id
-        try:
-            await keeper.edit(embeds=embeds, view=view)
-            print(f"[LB] re-anchored to board mid={keeper.id} and edited")
+                rendered[b["key"]] = r
         except Exception as e:
-            # Leave the id cached; the next tick retries via the fast path.
-            print(f"[LB] re-anchor edit of mid={keeper.id} failed: {e}")
+            print(f"[LB] {b['key']}: render failed ({e}) — board left as it is")
+    ids = _lb_message_ids.setdefault(ch.id, {})
+    # The channel, read fresh, is what every decision below is made from. It
+    # is read on the ticks that publish nothing too -- an outage tick, and the
+    # empty-configuration tick -- so the id map follows the channel and a
+    # retired board's message goes while nothing renders. What such a tick
+    # never does is delete a COPY of a board: that waits for a tick on which
+    # the board renders and a newer copy of it is proven live.
+    complete, anchored, dupes, retired = await _reconcile_board_messages(ch, boards, ids)
+    if complete and retired:
+        gone = 0
+        for msg, key in retired:
+            if await _delete_lb_message(ch, msg, f"retired {key} board"):
+                gone += 1
+        if gone:
+            print(f"[LB] retired {gone} board message(s) for boards this deployment "
+                  f"no longer publishes")
+    if not boards:
+        print("[LB] LEADERBOARD_BOARDS names no board — this deployment publishes none")
         return
-    sent = await ch.send(embeds=embeds, view=view)
-    _lb_message_ids[ch.id] = sent.id
-    print(f"[LB] posted fresh leaderboard message in {ch.id}")
+    for key, older in dupes.items():
+        if key not in rendered:
+            print(f"[LB] {key}: {len(older)} older copy/copies left as they are — this board "
+                  f"did not render, so nothing proves a newer copy live this tick")
+    if not rendered:
+        print("[LB] no board rendered this tick — nothing published")
+        return
+    # `anchored` was measured on the SAME read that adopted these ids, leaving
+    # out the copies this tick will remove once their proof is in, so it
+    # answers the question about the set we are actually publishing. The old
+    # shape measured position first and adopted second, which is why it had
+    # to ask twice: with two processes on one token it could adopt the other
+    # process's set and then repost a set that was already exactly where it
+    # belonged, churning message ids and buttons every ten minutes with a
+    # delete/send gap on every pass.
+    if not anchored:
+        if len(rendered) == len(boards) and complete:
+            await _repost_board_set(ch, boards, rendered, ids, dupes)
+            return
+        if not complete:
+            print("[LB] set is buried but the channel could not be read — editing what we "
+                  "already hold, re-anchoring on a tick whose read succeeds")
+        else:
+            print("[LB] set is buried but a board did not render — editing in place, "
+                  "re-anchoring on a tick where every board renders")
+    removed = 0
+    for b in boards:
+        key = b["key"]
+        r = rendered.get(key)
+        if r is None:
+            continue                      # its outcome line was printed above
+        embeds, view = r
+        # Every copy of this board the tick knows of, NEWEST FIRST: the id the
+        # read adopted (after an incomplete read, possibly one this process
+        # still remembers), then each older copy the read saw. The first copy
+        # that takes the edit IS the board, proven live on this tick; only the
+        # copies older than that one may be deleted, and only after it.
+        older = dupes.get(key, [])
+        mid = ids.get(key)
+        copies = ([mid] if mid is not None else []) + [m.id for m in older if m.id != mid]
+        live, held = None, False
+        for n, cmid in enumerate(copies):
+            try:
+                msg = await ch.fetch_message(cmid)
+                await msg.edit(embeds=embeds, view=view)
+            except discord.NotFound:
+                # The message is GONE -- a moderator or another process took
+                # it between this tick's channel read and this edit. That is
+                # the one failure that says anything about whether a
+                # replacement is needed, and an older copy the read saw is
+                # the first candidate for it: adopting it removes nothing.
+                print(f"[LB] {key}: board mid={cmid} is gone — "
+                      + ("trying its next older copy" if n + 1 < len(copies)
+                         else "posting a fresh message"))
+                if ids.get(key) == cmid:
+                    ids.pop(key, None)
+                continue
+            except Exception as e:
+                # A 429, a 5xx, a dropped connection, a lost permission: none
+                # of these says the message is gone, and posting a fresh one
+                # on them is what left [old, new] on the channel permanently.
+                # The new message alone satisfies the tail check, so no later
+                # tick rescans and nothing ever sweeps the old one -- on a
+                # one-board deployment that is terminal, and on a three-board
+                # one it survives only because the ORDER happens to break and
+                # force a re-anchor. Keep the id and retry -- and keep every
+                # older copy too, because nothing has proven this one live.
+                print(f"[LB] {key}: edit of mid={cmid} failed ({e}) — keeping mid={cmid}, retrying next tick")
+                ids[key] = cmid
+                held = True
+                break
+            live = cmid
+            break
+        if live is not None:
+            ids[key] = live
+            print(f"[LB] {key}: edited board mid={live}"
+                  + ("" if live == copies[0] else " (an older copy, adopted: every newer copy is gone)"))
+            if complete:
+                doomed = set(copies[copies.index(live) + 1:])
+                for m in older:
+                    if m.id in doomed and await _delete_lb_message(ch, m, f"duplicate {key} board"):
+                        removed += 1
+            continue
+        if held:
+            continue
+        # ONE rule for every fresh post, whichever way this board arrived
+        # here: no id at all, or every copy of it turned out to be gone. A
+        # fresh post may only follow a COMPLETE channel read. An incomplete
+        # read has not shown that this board has no message further back, and
+        # posting on it is how a restart during a Discord blip -- or a
+        # channel past LB_RECONCILE_CEILING -- puts a second full set on the
+        # channel, perfectly anchored, which no later tick has any reason to
+        # rescan.
+        if not complete:
+            print(f"[LB] {key}: no message id and the channel read was incomplete — "
+                  f"not posting, retrying next tick")
+            continue
+        try:
+            sent = await ch.send(embeds=embeds, view=view)
+            ids[key] = sent.id
+            print(f"[LB] {key}: posted fresh board message mid={sent.id}")
+        except Exception as e:
+            print(f"[LB] {key}: post failed ({e})")
+    if removed:
+        print(f"[LB] deleted {removed} duplicate stale board message(s)")
+
 
 # ── Anti-cheat flag relay ────────────────────────────────────────
 # IDs whose Discord send succeeded but durable API acknowledgement failed.
@@ -8309,8 +9754,8 @@ def _modcase_render(status, body, spec, actor_name):
         detail = detail.get("error") or ""
     detail = str(detail or "")[:180]
     if status == 200 and body.get("status") == "ok":
-        return (f"\N{WHITE HEAVY CHECK MARK} **{spec['label']}** applied by {actor_name} "
-                f"to **{body.get('subject_name') or '?'}** (`{body.get('subject_steam_id') or '?'}`)"
+        return (f"\N{WHITE HEAVY CHECK MARK} **{spec['label']}** applied by {_escape_md(actor_name)} "
+                f"to **{_escape_md(body.get('subject_name') or '?')}** (`{body.get('subject_steam_id') or '?'}`)"
                 f" — case `{spec['case_id'][:8]}` {body.get('resolution') or ''}".rstrip())
     if status == 200 and body.get("status") == "already_resolved":
         return (f"\N{INFORMATION SOURCE} This case was already **{body.get('case_status')}**"
@@ -10392,6 +11837,14 @@ async def poll_pc_events():
         _pc_face_tries.clear()        # bounded the same way; a clear only grants more tries
 
 
+# How many times ONE tick may put text on Discord for ONE row: the send or
+# first edit, plus one correction that landed while it was doing so. Module
+# level and used by both render paths, because the cap is one rule: a copy of
+# it — a literal, or an `if` that admits exactly one more render — can be
+# lifted while the other holds, and nothing goes red to say the two disagree.
+_CHANNEL_POST_MAX_RENDERS = 2
+
+
 @tasks.loop(seconds=30)
 async def poll_channel_posts():
     """Generic announce queue (v1.30): the API's pending_channel_posts table
@@ -10405,12 +11858,108 @@ async def poll_channel_posts():
     notified stamp — is retried by the outbox itself on the next tick, while
     the sent-memory above keeps that retry from posting twice. A row whose
     ack did not answer "acked" stays pending and is re-driven, never treated
-    as done."""
+    as done.
+
+    Migration 338 added a SECOND case: a row whose content was corrected. It
+    is EDITED in place, never re-sent — a correction posted as a new message
+    sits below the wrong text, which is what 134's Part C had to do and why
+    #scr-faq has a duplicate RANKED section. `revisions=true` is this build
+    declaring it can do that; an older api ignores the parameter and simply
+    answers with never-posted rows, so nothing about the old behaviour
+    depends on the new one.
+
+    THE SEND/EDIT DECISION IS posted_at. Not posted_revision: a row delivered
+    by a pre-338 bot after 338 had been applied can carry posted_at with a
+    NULL posted_revision, because that bot's ack cannot name a revision and
+    the api refuses to invent one it cannot prove. Treating NULL as "never
+    delivered" would post a second copy of every such row — the exact
+    duplicate this item exists to remove. This loop refuses to send anything
+    that already carries a posted_at, whatever its revision columns say.
+
+    A row with no stored id is adopted from adopt_fingerprint — the exact
+    text that was sent — and only when exactly one of the bot's own messages
+    in that channel carries it. When nothing matches, or more than one does,
+    the row is skipped and the old text stays up; this path must never fall
+    through to a send, because the only failure it could produce that way is
+    the duplicate it exists to prevent (#276: pick which direction the
+    unhandled case fails).
+
+    AMBIGUITY IS DECIDED BY THE SERVER, AND THIS LOOP ONLY OBEYS IT. Two rows
+    in one channel whose recorded text is byte-identical are indistinguishable
+    from outside, so neither may bind: whichever ran first would otherwise take
+    a message on an exactly-one match that is only exactly-one because it was
+    evaluated one row at a time. REFUSING LEAVES THE CHANNEL EXACTLY AS IT
+    IS — one surviving message or two, whichever it happens to hold — where
+    binding one edits a message as likely to belong to the other row. (Round
+    three said "both old messages" here, which describes the two-message case
+    as though it were the only one; the one-message case is the harder half
+    and the one a per-row scan cannot tell apart.) The
+    api computes that over the WHOLE channel and returns `ambiguous` per row —
+    this loop computed it over one response, which made the answer depend on
+    where the 20-row LIMIT fell and on what a concurrent poller had taken, and
+    made two unrelated channels carrying the same text block each other.
+
+    THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING. The hand-out returns a
+    `claim_token`; every ack this loop makes presents it. An ack from a caller
+    that does not hold the claim records no revision and comes back
+    "not_claimant" — never "acked" — so a tick that lost its lease learns that
+    instead of believing it finished. A "stale" answer KEEPS the claim, which
+    is what lets this loop render forward under the same token while no other
+    poller can be handed the row.
+
+    A REFUSED ACK STILL RECORDS THE MESSAGE. The one thing this loop knows and
+    the api cannot is whether a message went out, and the sent-memory that
+    holds it here is in-process: a restart drops it. So the api keeps the
+    DELIVERY half of a refused ack — posted_at, and an id for a row that has
+    none — and refuses only the revision, the fingerprint and the claim. That
+    is what stops a tick whose lease expired inside ch.send from becoming a
+    second copy of the announcement after the next bot restart (#105). The
+    answer is still a failure here, and this loop still stops: the row belongs
+    to whoever holds the claim, and it will be handed out again as a
+    correction rather than as a send.
+
+    RELEASING: this loop hands a row back when it DECIDES not to render it
+    (nothing to adopt, the message is gone, the render cap on either path) — a
+    decision made while the api is demonstrably answering.
+    ANYTHING THAT IS NOT A DECISION KEEPS THE CLAIM: an ack or a bind the api
+    did not answer, a send or an edit that raised, a tick that died. None of
+    those can say what reached Discord, so the row stays held until the 120 s
+    lease expires rather than being offered to a second poller that knows even
+    less (#276).
+
+    EVERY ONE OF THOSE HAND-BACKS PRESENTS THIS TICK'S TOKEN, and the api
+    decides against the row as it stands: a hand-back whose lease has lapsed,
+    or whose row a second poller now holds, releases nothing and is answered
+    "not_claimant". So this loop cannot free a claim that is no longer its own,
+    whichever of the release sites it reaches — that is a property of the ack
+    statement, not of the care taken at each call here.
+
+    BOTH RENDER PATHS SHARE ONE CAP, _CHANNEL_POST_MAX_RENDERS. The correction
+    path loops under it; the send path counts the send itself as the first
+    render and edits forward under the same number.
+
+    ORDER WITHIN A CORRECTION: adopt, then make the id durable (bind_only),
+    then edit, then ack the revision THAT WAS RENDERED. The edit is what
+    invalidates the fingerprint, so it must not be the step that a crash can
+    leave unrecorded — after the bind, the row can be found by its id; before
+    it, by its fingerprint; there is no window in which it can be found by
+    neither. The ack names the revision of the text that was actually put on
+    Discord, and the api will not record any other; if the row moved on while
+    this tick was rendering, the ack comes back "stale" with the newer text
+    and the loop edits forward and acks again rather than leaving the channel
+    on the old revision for another tick."""
     if http_session is None or not API_SECRET_KEY:
         return
-    data = await api_get("/internal/channel-posts/pending")
+    data = await api_get("/internal/channel-posts/pending?revisions=true")
     if not data or not data.get("posts"):
         return
+    # Ids already spoken for this tick: a message another row in THIS batch
+    # already owns is not a candidate for adoption. Six FAQ rows arrive
+    # together, so this is where two of them could otherwise select one
+    # message. This is a within-tick detail, not the ownership rule — the
+    # ownership rule is the api's `ambiguous` flag, computed over the whole
+    # channel, and it is the only thing that decides whether a row may bind.
+    claimed = {str(q["message_id"]) for q in data["posts"] if q.get("message_id")}
     for p in data["posts"]:
         try:
             ch = bot.get_channel(int(p["channel_id"]))
@@ -10427,6 +11976,157 @@ async def poll_channel_posts():
             # Mute/Ban/Dismiss buttons (custom_id = case id only, B-2), stamp
             # notified_at, THEN ack. Any other post is unchanged.
             case_id, content = _modcase_parse(p["content"])
+            revision = p.get("revision")
+            # The claim this row was handed to US under. Absent against a
+            # pre-338 api, where every ack degrades to the fire-once shape.
+            token = p.get("claim_token")
+            # DELIVERY IS posted_at, NOT posted_revision. A row an OLD bot
+            # delivered while 338 was already applied can carry posted_at with
+            # posted_revision still NULL — indistinguishable from a never-posted
+            # row by the revision columns alone, and re-sending it is the
+            # duplicate this whole item exists to prevent. A pre-338 api omits
+            # the key, and .get() then reads None, which is the same answer it
+            # gave before the column existed — that build only ever returns
+            # rows with posted_at NULL, so every row it hands over is genuinely
+            # a first post.
+            first_post = p.get("posted_at") is None
+
+            if not first_post:
+                # ── Correction: edit the live message, or do nothing ──
+                # Memory before the stored id, for the stream loop's reason
+                # (round-2 f2): the in-process id is only ever set by our own
+                # send or adopt, so after an ack failure it is the fresher of
+                # the two.
+                mid = _channel_post_sent.get(p["id"]) or p.get("message_id")
+                if mid is True:          # legacy marker from a send that
+                    mid = None           # could not report its id
+                if not mid:
+                    mid = await _adopt_channel_post_message(ch, p, claimed)
+                if not mid:
+                    print(f"[CHANNEL-POST] no message id for {p['id']} in {p['channel_id']} — "
+                          f"correction skipped, existing text left in place")
+                    # A DECISION, not a failure: nothing here will render, and
+                    # the api just answered the poll, so hand the claim back
+                    # rather than making the next tick wait out a lease for a
+                    # row this one already finished thinking about.
+                    await _release_channel_post_claim(p["id"], token)
+                    continue   # an edit has no position, so skipping it cannot
+                               # disorder the queue — and returning here would
+                               # stall every later announcement behind it
+                claimed.add(str(mid))
+                if not p.get("message_id"):
+                    # PERSIST THE ID BEFORE THE EDIT. The edit is what destroys
+                    # the fingerprint's subject: after it, the live message no
+                    # longer reads as the text 338 recorded, so a restart that
+                    # happened between "edited" and "acked" could never find
+                    # this message again and the row would stay pending
+                    # forever. Binding first is ordered the other way round —
+                    # if the bind commits and nothing else does, the next tick
+                    # re-reads the row with a durable id; if the bind does not
+                    # commit, the fingerprint is still true because no edit has
+                    # happened yet. bind_only leaves posted_revision alone, so
+                    # the row stays pending either way and the correction is
+                    # re-driven rather than marked delivered.
+                    bound = await api_post(
+                        "/internal/channel-posts/ack",
+                        params=_channel_post_ack_params(p["id"], None, mid,
+                                                        bind_only=True,
+                                                        claim_token=token))
+                    if not bound or bound.get("status") != "acked":
+                        # Including "not_claimant": the lease expired under
+                        # this tick and somebody else may already be rendering
+                        # the row. Nothing to hand back — the claim is not
+                        # ours — and nothing to edit.
+                        print(f"[CHANNEL-POST] could not persist message id {mid} for {p['id']}: "
+                              f"{bound} — correction deferred, existing text left in place")
+                        continue
+                try:
+                    msg = await ch.fetch_message(int(mid))
+                except discord.NotFound:
+                    # Somebody deleted the message. Re-sending would put the
+                    # sheet back in a channel it was removed from; leave it.
+                    print(f"[CHANNEL-POST] message {mid} for post {p['id']} is gone — correction skipped")
+                    await _release_channel_post_claim(p["id"], token)
+                    continue
+                except discord.Forbidden:
+                    print(f"[CHANNEL-POST] cannot read history in {p['channel_id']} (forbidden) — "
+                          f"post {p['id']} left pending")
+                    await _release_channel_post_claim(p["id"], token)
+                    continue
+                ack = None
+                # The ack names the revision that was RENDERED and the api
+                # records that one and no other, so a correction landing while
+                # this tick was editing comes back as "stale" carrying the
+                # newer text: edit forward and ack that instead of leaving the
+                # channel a revision behind until the next tick. A stale answer
+                # KEEPS this tick's claim, which is why the loop below is
+                # allowed to go round again — no other poller can be handed the
+                # row while this one is still inside it.
+                #
+                # _CHANNEL_POST_MAX_RENDERS is the ONLY thing bounding that,
+                # deliberately in one place — a second copy of the cap would
+                # let one of them be lifted while the other held, and the test
+                # could not tell. Without it this is an unbounded chase after a
+                # writer the loop does not control (#361), starving every row
+                # behind it; with it, a third correction inside one tick
+                # simply waits. The SEND path below renders under the same
+                # constant: it used to bound its own corrective edit by having
+                # exactly one `if`, which was the second copy this comment
+                # forbids, spelled as control flow instead of as a number.
+                renders = 0
+                # The revision of the text that LAST went on Discord, kept
+                # separately from `revision` because a stale answer moves
+                # `revision` forward to a text this tick has not rendered yet.
+                # Naming that newer number anywhere would record a revision
+                # nobody displayed, which is the whole defect this bus exists
+                # to avoid.
+                rendered = None
+                while renders < _CHANNEL_POST_MAX_RENDERS:
+                    renders += 1
+                    rendered = revision
+                    await msg.edit(content=content[:2000],
+                                   allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+                    _channel_post_sent[p["id"]] = msg.id
+                    print(f"[CHANNEL-POST] edited {p['id']} (rev {rendered}) in {p['channel_id']}")
+                    ack = await api_post("/internal/channel-posts/ack",
+                                         params=_channel_post_ack_params(
+                                             p["id"], rendered, msg.id,
+                                             claim_token=token))
+                    if not ack or ack.get("status") != "stale":
+                        break
+                    if not ack.get("content") or not ack.get("revision"):
+                        break   # a stale answer that carries no newer text is
+                                # not actionable; the next tick re-reads the row
+                    revision = ack.get("revision")
+                    _, content = _modcase_parse(ack["content"])
+                if ack and ack.get("status") == "stale":
+                    print(f"[CHANNEL-POST] {p['id']} is still behind after this tick's renders — "
+                          f"left pending, the id is stored and the next tick edits it")
+                    # THE CAP IS A DECISION TO STOP, so it hands the claim back
+                    # explicitly, naming the revision that WAS RENDERED — never
+                    # the newer one the stale answer carried. Without this the
+                    # row would sit under a claim nobody is using for the rest
+                    # of the lease. Nothing is re-sent by the hand-off: the row
+                    # carries posted_at and its message id, so the next poll
+                    # takes the correction path, not the send path.
+                    await _release_channel_post_claim(p["id"], token, rendered)
+                    continue
+                if not ack or ack.get("status") != "acked":
+                    # "not_claimant" arrives here too, and it is NOT success:
+                    # no revision was recorded, so the row stays pending for
+                    # whoever does hold the claim. The delivery half the api
+                    # keeps from a refused ack changes nothing on this path —
+                    # a correction row already carries posted_at and its id.
+                    print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, edit remembered")
+                    return
+                _channel_post_sent.pop(p["id"], None)
+                continue
+
+            # None when this tick did not do the sending (a retry after a
+            # failed ack). The stale arm below needs the message OBJECT, and a
+            # name that only exists on some paths would raise inside the broad
+            # except and be printed as a transport failure.
+            msg = None
             if p["id"] not in _channel_post_sent:
                 send_kw = {"allowed_mentions": discord.AllowedMentions(users=True, everyone=False, roles=False)}
                 if case_id:
@@ -10443,8 +12143,66 @@ async def poll_channel_posts():
                 if not stamped or stamped.get("status") != "ok":
                     print(f"[MODCASE] notified stamp failed for {case_id}: {stamped} — will retry")
                     return
-            ack = await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
+            # The id rides along so the NEXT correction can edit this message
+            # rather than adopting it. `revision` is None against a pre-338
+            # api, which records the delivery without a rendered revision — the
+            # old fire-once ack, unchanged.
+            remembered = _channel_post_sent.get(p["id"])
+            ack = await api_post("/internal/channel-posts/ack",
+                                 params=_channel_post_ack_params(
+                                     p["id"], revision,
+                                     remembered if isinstance(remembered, int) else None,
+                                     claim_token=token))
+            # THE SEND IS THIS TICK'S FIRST RENDER, so the corrective edits
+            # below run under the SAME cap the correction path uses, counted
+            # from one. This used to be a single `if`, which bounded the send
+            # path at two renders by the shape of the code rather than by the
+            # constant — a second copy of the cap, and the kind that cannot be
+            # read off beside the first (#432: the flag named one line, the
+            # defect is the class). Raising or lowering the constant now moves
+            # both paths together, and neither can be lifted alone.
+            renders = 1
+            while (renders < _CHANNEL_POST_MAX_RENDERS
+                   and ack and ack.get("status") == "stale"
+                   and msg is not None and isinstance(remembered, int)):
+                # The row was corrected between this send and its ack. The api
+                # recorded the revision that WAS sent — so nothing reads as
+                # delivered that is not — and handed back the newer text. The
+                # claim is still ours (a stale answer releases nothing), so the
+                # message exists, its id is known, and this tick corrects it; a
+                # failure here just leaves a pending row with posted_at set,
+                # which the correction path picks up next tick without sending.
+                _, newer = _modcase_parse(ack.get("content") or "")
+                if not newer or not ack.get("revision"):
+                    break   # a stale answer that carries no newer text is not
+                            # actionable; the next tick re-reads the row
+                newer_rev = ack["revision"]
+                renders += 1
+                await msg.edit(content=newer[:2000],
+                               allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+                print(f"[CHANNEL-POST] {p['id']} was corrected mid-send — edited to rev {newer_rev}")
+                ack = await api_post("/internal/channel-posts/ack",
+                                     params=_channel_post_ack_params(
+                                         p["id"], newer_rev, remembered,
+                                         claim_token=token))
+            if ack and ack.get("status") == "stale":
+                print(f"[CHANNEL-POST] {p['id']} delivered but still behind — correction next tick")
+                # Same decision as the correction path's cap: this tick has
+                # stopped rendering, so the claim goes back rather than sitting
+                # idle for the rest of the lease. The row is delivered and
+                # carries its id, so the next poll edits — it cannot re-send.
+                # A PURE hand-back: the delivery ack above already recorded the
+                # revision that went out, and naming one here could only repeat
+                # it or name one nobody rendered.
+                await _release_channel_post_claim(p["id"], token)
+                continue
             if not ack or ack.get("status") != "acked":
+                # "not_claimant" lands here as a failure, which is what it is
+                # for the RENDER: no revision was recorded and this tick may
+                # not edit. The SEND is not lost with it — the api records
+                # posted_at and the reported id from a refused ack too, which
+                # is what makes a lost lease cost a retry instead of a second
+                # message after the next restart clears the memory below.
                 print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, send remembered")
                 return
             _channel_post_sent.pop(p["id"], None)
@@ -10454,6 +12212,159 @@ async def poll_channel_posts():
         except Exception as e:
             print(f"[CHANNEL-POST] send failed for {p['id']}: {e} — will retry")
             return  # keep strict ordering; retry from this post next tick
+
+
+def _channel_post_ack_params(post_id, revision, message_id, bind_only=False,
+                             claim_token=None, release=False):
+    """Query params for the channel-post ack, with the optional halves
+    dropped rather than sent as None — aiohttp refuses a None param value,
+    and the endpoint treats an absent field as "leave it alone". Against a
+    pre-338 api `revision` and `claim_token` both arrive None here and the ack
+    degrades to exactly the call this loop used to make.
+
+    An omitted `revision` is not a shorthand for "whatever is current": the
+    endpoint will not advance a row past a revision nobody claims to have
+    rendered, so a caller that cannot name one gets its delivery recorded at
+    what the hand-out gave it, and nothing else.
+
+    claim_token is the row's claim, handed over by the poll that took it. The
+    endpoint requires it of anything that names a revision or binds an id and
+    refuses the call by name without it, so dropping it here is not a degraded
+    ack — it is a refused one.
+
+    bind_only asks the endpoint for the id write ALONE — no posted_at, no
+    posted_revision — which is how a correction makes its message id durable
+    without claiming to have rendered anything yet. release asks it to drop the
+    claim: with a revision, "record this and let go" at the render cap; without
+    one, a pure hand-back that writes nothing at all."""
+    params = {"post_id": post_id}
+    if revision is not None:
+        params["revision"] = int(revision)
+    if message_id is not None:
+        params["message_id"] = str(message_id)
+    if bind_only:
+        params["bind_only"] = "true"
+    if release:
+        params["release"] = "true"
+    if claim_token is not None:
+        params["claim_token"] = str(claim_token)
+    return params
+
+
+async def _release_channel_post_claim(post_id, claim_token, revision=None):
+    """Hand a row's claim back because this tick DECIDED to stop rendering it.
+
+    The claim is exclusive by design: while it is held, no other poller is
+    handed the row. That is what makes forward re-rendering safe, and it is
+    also why a tick that walks away — nothing to adopt, the message is gone,
+    the render cap reached — must say so rather than let the row sit idle for
+    the rest of the 120 s lease.
+
+    `revision` is the revision that WAS RENDERED, or None for a pure
+    hand-back that writes no delivery fact whatsoever. It is never the newer
+    revision a stale answer carried: this tick did not put that text on
+    Discord.
+
+    A failed release is not worth handling: the lease expires anyway, which is
+    the same cleanup a crashed tick gets. There is no token against a pre-338
+    api, and nothing to release there either."""
+    if not claim_token:
+        return
+    await api_post("/internal/channel-posts/ack",
+                   params=_channel_post_ack_params(post_id, revision, None,
+                                                   claim_token=claim_token,
+                                                   release=True))
+
+
+async def _adopt_channel_post_message(ch, p, claimed=()):
+    """Recover the Discord message id of a row that was delivered before its
+    id was ever recorded, or return None.
+
+    The six #scr-faq messages were posted by a bot that discarded the id, and
+    nobody has them written down. The row carries adopt_fingerprint — exactly
+    what was sent for it, i.e. content[:2000], which for a message Discord
+    accepted IS its whole text — and this walks the channel oldest-first
+    looking for messages of OURS that carry it.
+
+    WHAT IS COMPARED: nothing is hashed, no prefix is taken and nothing is
+    normalized. The candidate's entire content and the entire fingerprint are
+    compared byte for byte. An earlier version stripped both operands, which
+    made two bodies differing only in edge whitespace compare EQUAL — it
+    widened the set of messages a row would accept in order to tolerate a
+    difference that, if it existed, would mean the stored text is not what was
+    posted. Refusing is the right answer to that: a fingerprint that does not
+    match exactly identifies nothing, and the row keeps its old text (#276).
+    Position is never consulted either — a positional guess would adopt
+    confidently and edit the wrong message, the class of check that cannot
+    fail (#342/#431).
+
+    AMBIGUITY REFUSES, AND THE SERVER IS WHAT DECIDES IT. The scan does not
+    stop at the first hit; it collects every match in the window and adopts
+    only when there is exactly ONE. But exactly-one inside one row's scan does
+    not make the OWNERSHIP unambiguous: two rows whose sent text is identical —
+    or which differ only past Discord's 2,000-character ceiling, so that the
+    same text was posted for both — would each see one surviving message and
+    the one that ran first would take it. The api answers that question over
+    the WHOLE CHANNEL and sends `ambiguous` with the row; nothing is computed
+    here. An earlier version computed it across one response, which made the
+    answer depend on where the 20-row LIMIT fell and on what a concurrent
+    poller had already taken, and treated equal text in two unrelated channels
+    as a collision. REFUSING LEAVES THE CHANNEL EXACTLY AS IT IS — one
+    surviving message or two, whichever it happens to hold — which beats one
+    correct message overwritten with the wrong row's text.
+
+    IDS THAT BELONG TO SOMEBODY ELSE ARE SKIPPED, and there are two sources.
+    `claimed` is the within-tick one: ids another row in THIS response already
+    owns, including ones adopted or sent a moment ago in this same loop, which
+    the api's snapshot predates. `bound_message_ids` is the api's, and it is
+    channel-wide: every id another row in this channel already holds, in this
+    response or not. The api excludes a BOUND row from the `ambiguous` test on
+    the strength of this list being applied here — a bound twin is no longer
+    treated as a rival for the same text, so if its message were left in the
+    scan this row would find it and adopt somebody else's message. Skipping
+    them is not an optimisation; it is the other half of that flag.
+
+    Neither list is the ownership rule. That is `ambiguous`, and it is the
+    api's.
+
+    Returns None on anything unexpected, and the caller then leaves the post
+    alone. Bounded scan — a channel whose sheet has scrolled past the limit
+    reports nothing rather than adopting something plausible."""
+    fingerprint = p.get("adopt_fingerprint") or ""
+    if not fingerprint:
+        return None
+    if p.get("ambiguous"):
+        print(f"[CHANNEL-POST] post {p['id']} shares its recorded text with another "
+              f"row in {p['channel_id']} — ownership is ambiguous, no adoption")
+        return None
+    me = getattr(bot, "user", None)
+    if me is None:
+        return None
+    claimed = {str(c) for c in claimed}
+    claimed.update(str(b) for b in (p.get("bound_message_ids") or []) if b)
+    hits = []
+    try:
+        async for msg in ch.history(limit=200, oldest_first=True):
+            if msg.author.id != me.id:
+                continue
+            if str(msg.id) in claimed:
+                continue
+            if (msg.content or "") == fingerprint:
+                hits.append(msg.id)
+    except discord.Forbidden:
+        print(f"[CHANNEL-POST] cannot read history in {p['channel_id']} (forbidden) — no adoption")
+        return None
+    except Exception as e:
+        print(f"[CHANNEL-POST] history scan failed in {p['channel_id']}: {e} — no adoption")
+        return None
+    if len(hits) != 1:
+        if hits:
+            print(f"[CHANNEL-POST] {len(hits)} messages in {p['channel_id']} carry post {p['id']}'s "
+                  f"recorded text — ambiguous, no adoption")
+        return None
+    print(f"[CHANNEL-POST] adopted message {hits[0]} for post {p['id']} "
+          f"in {p['channel_id']} (content match)")
+    return hits[0]
 
 
 @poll_channel_posts.before_loop
@@ -10652,7 +12563,7 @@ async def _ack_anticheat_flag(flag_id: str, evidence_revision: int) -> bool:
 async def poll_chat_catchup():
     """Backfill any ingame chat messages the WS broadcast missed.
 
-    Background: lopidav reported that his ingame messages persisted to the DB
+    Background: a player reported that their in-game messages persisted to the DB
     (so the server received them on the WS) but never reached Discord — the
     bot's WS subscription appeared healthy yet only some senders' messages
     came through. Rather than chase the broadcast bug, we drain the
@@ -11831,11 +13742,11 @@ async def poll_tournaments():
                         sp1n = m.get("p1_name") or "opponent"
                         sp2n = m.get("p2_name") or "opponent"
                         await _dm_user(sp1d,
-                                       f"🕐 **Next up: vs {sp2n}** (round {rd}). Your match starts {when} — "
+                                       f"🕐 **Next up: vs {_escape_md(sp2n)}** (round {rd}). Your match starts {when} — "
                                        f"short breather, no rush. Want to play right away? You BOTH press "
                                        f"**Play Now** in F5 → Tournaments and it starts immediately.")
                         await _dm_user(sp2d,
-                                       f"🕐 **Next up: vs {sp1n}** (round {rd}). Your match starts {when} — "
+                                       f"🕐 **Next up: vs {_escape_md(sp1n)}** (round {rd}). Your match starts {when} — "
                                        f"short breather, no rush. Want to play right away? You BOTH press "
                                        f"**Play Now** in F5 → Tournaments and it starts immediately.")
                     continue
@@ -11930,7 +13841,7 @@ async def poll_tournaments():
                 prize_txt = ("(cancelled)" if tier == "none"
                              else f"prizes{_roles_txt} (amounts unavailable from this API version)")
             await _announce_in_channel(
-                f"**Tournament complete.**  1st: **{winner}** · 2nd: {runner} · 3rd: {third}  ({prize_txt})"
+                f"**Tournament complete.**  1st: **{_escape_md(winner)}** · 2nd: {_escape_md(runner)} · 3rd: {_escape_md(third)}  ({prize_txt})"
             )
 
 
@@ -11985,12 +13896,12 @@ async def opp_online(ctx):
             if member:
                 break
         if member is None:
-            await ctx.reply(f"{opp_name}: Discord presence unknown (not in guild cache).", ephemeral=True)
+            await ctx.reply(f"{_escape_md(opp_name)}: Discord presence unknown (not in guild cache).", ephemeral=True)
             return
         status = str(member.status)  # online|idle|dnd|offline
         icon = {"online": "🟢", "idle": "🟡", "dnd": "🔴"}.get(status, "⚫")
         label = {"online": "online", "idle": "idle", "dnd": "do not disturb"}.get(status, "offline")
-        await ctx.reply(f"{icon} **{opp_name}** is currently **{label}** in Discord.", ephemeral=True)
+        await ctx.reply(f"{icon} **{_escape_md(opp_name)}** is currently **{label}** in Discord.", ephemeral=True)
     except Exception as e:
         await ctx.reply(f"Couldn't resolve presence: {e}", ephemeral=True)
 
@@ -12007,12 +13918,12 @@ async def dm_opponent(ctx, *, message: str):
         await ctx.reply(f"Rate limit: {_DM_OPPONENT_LIMIT} messages per {_DM_OPPONENT_WINDOW_SECS}s. Wait a moment.", ephemeral=True)
         return
     sender = getattr(ctx.author, "global_name", None) or ctx.author.name
-    body = f"**[Tournament Relay from {sender}]** {message[:1500]}"
+    body = f"**[Tournament Relay from {_escape_md(sender)}]** {message[:1500]}"
     ok = await _dm_user(opp_id, body)
     if ok:
-        await ctx.reply(f"Relayed to {opp_name}.", ephemeral=True)
+        await ctx.reply(f"Relayed to {_escape_md(opp_name)}.", ephemeral=True)
     else:
-        await ctx.reply(f"Couldn't DM {opp_name} — they may have DMs closed.", ephemeral=True)
+        await ctx.reply(f"Couldn't DM {_escape_md(opp_name)} — they may have DMs closed.", ephemeral=True)
 
 
 @tasks.loop(hours=1)
@@ -12054,10 +13965,10 @@ async def nag_pending_async_matches():
             p1n = m.get("p1_name") or "opponent"
             p2n = m.get("p2_name") or "opponent"
             dl_str = _fmt_pt_rel(m.get("deadline_at"))
-            await _dm_user(p1d, f"**Async match still pending**: vs **{p2n}**. Deadline: {dl_str}. "
+            await _dm_user(p1d, f"**Async match still pending**: vs **{_escape_md(p2n)}**. Deadline: {dl_str}. "
                                  f"Use `/dm-opponent` to agree a time, then just play a private "
                                  f"lobby together — it records automatically.")
-            await _dm_user(p2d, f"**Async match still pending**: vs **{p1n}**. Deadline: {dl_str}. "
+            await _dm_user(p2d, f"**Async match still pending**: vs **{_escape_md(p1n)}**. Deadline: {dl_str}. "
                                  f"Use `/dm-opponent` to agree a time, then just play a private "
                                  f"lobby together — it records automatically.")
             nagged += 1
@@ -12783,23 +14694,87 @@ async def before_tournament_notices():
 # Rows are inserted by migrations/admin SQL; this loop DMs the linked player.
 # Durable ack pattern (learning #105); the server serializes the pk as
 # "dm_id" and this reads the same key (learning #152).
-_pdm_seen_ids: set = set()
+# dm_id -> (undeliverable, discord_message_id or None). A SET was not
+# enough (H4): a re-ack after a failed ack has to reproduce the SAME outcome
+# and the SAME message id, or a row whose DM was refused gets re-acked as
+# delivered, and a relay loses the mapping its "Reply to this message"
+# footer depends on.
+_pdm_seen: dict = {}
+
+# dm_ids whose most recent ack did NOT land. The >2000 trim used to run
+# unconditionally, so a rollover that coincided with a failing ack forgot a
+# just-delivered row while the server still had it queued -- and the next
+# poll DMed it again. A duplicate with no crash involved is wider than the
+# at-least-once window this queue documents, so the trim keeps exactly the
+# rows still waiting to be acked.
+_pdm_unacked: set = set()
+
+# NO process map from Discord message id to mail. There used to be two --
+# one keyed by message id, one by Discord id -- because the server could only
+# resolve a reply after the ack had stamped the row, and the bot knew the
+# answer first. Both were reconstructions of an identity that is now written
+# into the DM TEXT inside the mail's own transaction, so there is nothing
+# left for them to bridge. They were also process-local state whose loss made
+# the bot GUESS a thread, which is the failure this whole change removes.
 
 
-async def _ack_pending_dms(dm_ids, undeliverable=False):
-    if not dm_ids or http_session is None or not API_SECRET_KEY:
-        return
+async def _ack_pending_dms(dm_ids, undeliverable=False, claims=None,
+                           retry_ids=None, not_attempted_ids=None):
+    """Report what became of the rows this poll was handed.
+
+    `claims` is {dm_id: claim} straight from the poll response. A settlement
+    is a statement about ONE hand-out, so it has to name which: without the
+    claim, a report that arrived late -- or was replayed -- was applied to
+    whatever the row was doing by then, including a hand-out some later poll
+    was in the middle of. The server ignores an id whose claim it cannot
+    match, so a stale report costs nothing.
+
+    Two settlement buckets, and the difference is whether anything was
+    attempted. `retry_ids` were REACHED and failed for a reason this loop
+    could not name -- they count against the bound, and the bot is the only
+    witness to them. `not_attempted_ids` were handed out and never reached
+    because the batch was cut short; they cost nothing, or an interrupted
+    poll would retire a DM nothing ever tried to send.
+
+    Returns True when the server accepted the ack, and the caller needs that
+    answer: an ack that did not land leaves the row queued, so what this poll
+    learned about it has to outlive the next trim or the row is sent twice."""
+    if not dm_ids and not retry_ids and not not_attempted_ids:
+        return True
+    if http_session is None or not API_SECRET_KEY:
+        return False
     try:
         async with http_session.post(
             f"{API_BASE_URL}/api/v1/internal/pending-dms/ack",
-            json={"dm_ids": list(dm_ids), "undeliverable": bool(undeliverable)},
+            json={"dm_ids": list(dm_ids), "undeliverable": bool(undeliverable),
+                  "claims": {k: v for k, v in (claims or {}).items() if v},
+                  "retry_ids": list(retry_ids or []),
+                  "not_attempted_ids": list(not_attempted_ids or [])},
             headers={"X-Internal-Key": API_SECRET_KEY},
             timeout=aiohttp.ClientTimeout(total=8),
         ) as resp:
             if resp.status != 200:
                 print(f"[PDM] ack failed: {resp.status} {(await resp.text())[:120]}")
+                return False
+            return True
     except Exception as ex:
         print(f"[PDM] ack error: {ex}")
+        return False
+
+
+async def _dm_still_live(dm_id):
+    """The last question before a handed-out DM is sent: was it withdrawn
+    since the hand-out? (v1.41.0 beta round 2, finding 7.) A mail deleted,
+    or the relay turned off, while the row waited behind the batch's earlier
+    sends cancels it server-side, and only asking again can see that.
+
+    Three answers, kept apart (#430): True -- the server says it is still
+    live; False -- the server says it was cancelled, or that the row is
+    gone; None -- the server could not be asked, which is not a yes."""
+    data = await api_get(f"/internal/pending-dms/{dm_id}/cancelled")
+    if not isinstance(data, dict) or not isinstance(data.get("cancelled"), bool):
+        return None
+    return not data["cancelled"]
 
 
 @tasks.loop(seconds=60)
@@ -12809,64 +14784,159 @@ async def poll_pending_dms():
         data = await api_get("/internal/pending-dms")
         if not data or not data.get("dms"):
             return
-        delivered, dead = [], []
-        for d in data["dms"]:
-            if not isinstance(d, dict):
-                continue
-            did_key = d.get("dm_id")
-            if did_key is None:
-                continue
-            if did_key in _pdm_seen_ids:
-                # Handled this process-lifetime — earlier ack must have
-                # failed; re-ack, don't re-DM.
-                delivered.append(did_key)
-                continue
-            discord_id = d.get("discord_id")
-            content = (d.get("content") or "").strip()
-            if not discord_id or not content:
-                # Unlinked player / empty row — permanently undeliverable.
-                _pdm_seen_ids.add(did_key)
-                dead.append(did_key)
-                continue
-            # Unparseable discord_id = permanently undeliverable — without
-            # this, one bad row at the head of the created_at ASC LIMIT 20
-            # window would starve the whole queue forever (the poll would
-            # refetch it every 60s and never ack).
-            try:
-                did_int = int(discord_id)
-            except (TypeError, ValueError):
-                print(f"[PDM] bad discord_id {discord_id!r} — flagging undeliverable")
-                _pdm_seen_ids.add(did_key)
-                dead.append(did_key)
-                continue
-            try:
-                user = bot.get_user(did_int) or await bot.fetch_user(did_int)
-            except discord.NotFound:
-                _pdm_seen_ids.add(did_key)
-                dead.append(did_key)
-                continue
-            except Exception as ex:
-                print(f"[PDM] fetch_user({discord_id}) failed: {ex}")
-                continue
-            if user is None:
-                continue
-            try:
-                await user.send(content[:2000])
-                print(f"[PDM] dm {did_key} → {user} ({d.get('display_name') or d.get('steam_id')})")
-                _pdm_seen_ids.add(did_key)
-                delivered.append(did_key)
-            except discord.Forbidden:
-                print(f"[PDM] {discord_id} has DMs closed — flagging undeliverable")
-                _pdm_seen_ids.add(did_key)
-                dead.append(did_key)
-            except Exception as ex:
-                # Transient (rate limit / gateway blip) — no ack, retried next poll.
-                print(f"[PDM] DM to {discord_id} failed: {ex}")
-            await asyncio.sleep(0.15)
-        if len(_pdm_seen_ids) > 2000:
-            _pdm_seen_ids.clear()
-        await _ack_pending_dms(delivered, undeliverable=False)
-        await _ack_pending_dms(dead, undeliverable=True)
+        delivered, dead, retry = [], [], []
+        handed = [str(x.get("dm_id")) for x in data["dms"]
+                  if isinstance(x, dict) and x.get("dm_id") is not None]
+        # {dm_id: claim} for THIS hand-out. Every settlement below quotes it,
+        # so a report that is replayed, or that arrives after the row has
+        # been handed out again, applies to the hand-out it was about and to
+        # no other.
+        claim_of = {str(x.get("dm_id")): str(x.get("claim") or "")
+                    for x in data["dms"]
+                    if isinstance(x, dict) and x.get("dm_id") is not None}
+        reached = set()
+        try:
+            for d in data["dms"]:
+                if not isinstance(d, dict):
+                    continue
+                did_key = d.get("dm_id")
+                if did_key is None:
+                    continue
+                reached.add(str(did_key))
+                if did_key in _pdm_seen:
+                    # Handled this process-lifetime — earlier ack must have
+                    # failed; re-ack, don't re-DM.
+                    (dead if _pdm_seen[did_key] else delivered).append(did_key)
+                    continue
+                discord_id = d.get("discord_id")
+                content = (d.get("content") or "").strip()
+                if not discord_id or not content:
+                    # Unlinked player / empty row — permanently undeliverable.
+                    _pdm_seen[did_key] = True
+                    dead.append(did_key)
+                    continue
+                # Unparseable discord_id = permanently undeliverable — without
+                # this, one bad row at the head of the created_at ASC LIMIT 20
+                # window would starve the whole queue forever (the poll would
+                # refetch it every 60s and never ack).
+                try:
+                    did_int = int(discord_id)
+                except (TypeError, ValueError):
+                    print(f"[PDM] bad discord_id {discord_id!r} — flagging undeliverable")
+                    _pdm_seen[did_key] = True
+                    dead.append(did_key)
+                    continue
+                try:
+                    user = bot.get_user(did_int) or await bot.fetch_user(did_int)
+                except discord.NotFound:
+                    _pdm_seen[did_key] = True
+                    dead.append(did_key)
+                    continue
+                except Exception as ex:
+                    print(f"[PDM] fetch_user({discord_id}) failed "
+                          f"(hand-out {d.get('attempts')}): {ex}")
+                    retry.append(did_key)
+                    continue
+                if user is None:
+                    retry.append(did_key)
+                    continue
+                # Asked for each row immediately before its send -- not at
+                # hand-out and not once per batch: a row can wait seconds
+                # behind the sends ahead of it, and a cancellation in that
+                # window is what this has to see (finding 7).
+                live = await _dm_still_live(did_key)
+                if live is False:
+                    # Not sent, and settled nowhere: its cancelled_at keeps
+                    # it out of every later claim, so it never resurfaces.
+                    print(f"[PDM] {did_key} cancelled before delivery -- skipped, not sent")
+                    continue
+                if live is None:
+                    # The api could not answer, and a DM is not sent on a
+                    # question nobody answered. This row and the rest of the
+                    # batch go back as unreached -- charge 0, released now --
+                    # and the next poll asks again. Stopping here also bounds
+                    # an api stall to one timeout per poll.
+                    reached.discard(str(did_key))
+                    print(f"[PDM] {did_key} cancellation recheck unavailable -- "
+                          f"not sent; it and the rest of this batch go back uncharged")
+                    break
+                try:
+                    sent = await user.send(content[:2000])
+                    print(f"[PDM] dm {did_key} → {user} ({d.get('display_name') or d.get('steam_id')})")
+                    # The DM text carries its own thread code, so nothing
+                    # about the message that just went out needs recording:
+                    # a reply to it resolves from what the player can see.
+                    _pdm_seen[did_key] = False
+                    delivered.append(did_key)
+                except discord.Forbidden:
+                    print(f"[PDM] {discord_id} has DMs closed — flagging undeliverable")
+                    _pdm_seen[did_key] = True
+                    dead.append(did_key)
+                except Exception as ex:
+                    # Unnamed: a rate limit or gateway blip, or something
+                    # permanent this code has no case for. No ack, so it is
+                    # retried next poll -- and bounded, because the api charged
+                    # the hand-out before this row ever reached the bot.
+                    print(f"[PDM] DM to {discord_id} failed "
+                          f"(hand-out {d.get('attempts')}): {ex}")
+                    retry.append(did_key)
+                await asyncio.sleep(0.15)
+        except Exception as ex:
+            # The batch was cut short. Every line below still has to
+            # run: a row this poll already DMed must be acked or the
+            # next poll DMs it again, and a row charged at hand-out
+            # but never reached must be credited back or an
+            # interrupted poll retires a DM nothing ever tried to
+            # send. Without this handler the escape went straight to
+            # the loop's outer guard and skipped all of it -- which
+            # made the credit-back unreachable, not merely rare.
+            print(f"[PDM] batch cut short after {len(reached)} of "
+                  f"{len(handed)} row(s): {ex}")
+        # Ack FIRST, then trim. Clearing before the ack meant a failed ack
+        # right after a clear reposted the whole batch -- a duplicate with
+        # no crash involved, which is wider than the at-least-once window
+        # this queue documents.
+        ok_live = await _ack_pending_dms(delivered, undeliverable=False,
+                                         claims=claim_of)
+        ok_dead = await _ack_pending_dms(dead, undeliverable=True,
+                                         claims=claim_of)
+        if retry:
+            # REACHED and failed for a reason this loop could not name. This
+            # is the one report only the bot can make, and it is what the
+            # attempt bound counts: nothing is charged at hand-out any more,
+            # so a row nobody tried is never spent. By id, because these are
+            # DMs somebody is waiting on.
+            print("[PDM] %d row(s) failed and were charged one attempt: %s"
+                  % (len(retry), ", ".join(str(x) for x in retry[:10])))
+            await _ack_pending_dms([], retry_ids=retry, claims=claim_of)
+        # Rows this poll was handed and never got to -- the loop was cut
+        # short. Settled at charge 0 and released immediately, so the next
+        # poll picks them up without waiting out the claim.
+        unreached = [i for i in handed if i not in reached]
+        if unreached:
+            print("[PDM] %d row(s) handed out and not reached this poll"
+                  % len(unreached))
+            await _ack_pending_dms([], not_attempted_ids=unreached,
+                                   claims=claim_of)
+        for keys, landed in ((delivered, ok_live), (dead, ok_dead)):
+            for k in keys:
+                if landed:
+                    _pdm_unacked.discard(k)
+                else:
+                    _pdm_unacked.add(k)
+        # An unacked id the server has stopped handing back is retired --
+        # it hit the cap, or another path acked it. Nothing will ever
+        # mention it again, so keeping it would grow this set until
+        # restart. Anything still queued reappears in `handed`.
+        _pdm_unacked.intersection_update(set(handed) | set(_pdm_unacked) & reached)
+        if len(_pdm_seen) > 2000:
+            # Forget only what the server has confirmed. Anything still
+            # unacked is a row the next poll will hand back, and its
+            # recorded outcome is the only thing stopping a second DM.
+            keep = {k: v for k, v in _pdm_seen.items() if k in _pdm_unacked}
+            _pdm_seen.clear()
+            _pdm_seen.update(keep)
+            _pdm_unacked.intersection_update(set(_pdm_seen))
     except Exception as ex:
         print(f"poll_pending_dms error: {ex}")
 
@@ -13135,6 +15205,10 @@ async def on_interaction(interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.component:
             return
         cid = (interaction.data or {}).get("custom_id", "")
+        if cid.startswith("scrmail:"):
+            # Item 5: a tap on the pick-a-thread listing.
+            await _mailpick_click(interaction, cid)
+            return
         if cid.startswith("modcase:"):
             # Mail moderation buttons (Sept 6 item b, B-2): routed to the api
             # with the clicker's Discord id; the server decides.
@@ -13247,6 +15321,15 @@ async def on_interaction(interaction: discord.Interaction):
 # a restart, before poll_tournaments' first tick).
 
 _tournament_board_ids: dict = {}  # channel_id -> message_id
+# Channels whose tournament-board sweep has completed in this process. The
+# leaderboard kept such a set once; its reconcile read replaced it there,
+# and this channel's one board keeps its own, run the same way
+# (v1.41.0 beta round 4, finding 22). A channel owes a sweep from the start
+# of every process, and again after a failed delete of a duplicate or a
+# failed history read; _publish_tournament_board runs one on every tick
+# while it is owed, until a sweep reads the whole history and every delete
+# it tries goes through.
+_tb_swept: set = set()
 
 _BRACKET_SIDE_LABEL = {"W": "WB", "L": "LB", "GF": "Grand Final", "GF_RESET": "GF Reset", "TP": "3rd Place"}
 _BRACKET_SIDE_ORDER = {"W": 0, "L": 1, "GF": 2, "GF_RESET": 3, "TP": 4}
@@ -13407,7 +15490,7 @@ def _build_tournament_board_embed(t, kind: str, tally=None) -> discord.Embed:
                   ("🥉", name_for.get(t.get("third_place_signup_id")))]
         for medal, nm in podium:
             if nm:
-                lines.append(f"{medal} **{nm}**" if medal == "🥇" else f"{medal} {nm}")
+                lines.append(f"{medal} **{_escape_md(nm)}**" if medal == "🥇" else f"{medal} {_escape_md(nm)}")
     else:
         lines.append(f"**Status: {status}**")
     # Prize line (item 2, July 17 round 2): prizes scale with player count —
@@ -13436,7 +15519,7 @@ def _build_tournament_board_embed(t, kind: str, tally=None) -> discord.Embed:
                 bits += " ✓"
             if s.get("forfeited"):
                 bits += " ✗ forfeited"
-            roster.append(f"• {nm}{bits}")
+            roster.append(f"• {_escape_md(nm)}{bits}")
         shown = roster[:24]
         if len(roster) > 24:
             shown.append(f"…and {len(roster) - 24} more")
@@ -13464,6 +15547,52 @@ def _build_tournament_board_embed(t, kind: str, tally=None) -> discord.Embed:
     em = discord.Embed(title=title, description=desc, color=color)
     em.add_field(name="ℹ️ How it works", value=_TOURNEY_HOW_IT_WORKS[kind], inline=False)
     return em
+
+
+async def _adopt_tournament_board(ch):
+    """Find the tournament board already in the channel, and delete older
+    copies of it: the sweep the leaderboard ran before its reconcile read
+    replaced it, kept for this channel's one board (v1.41.0 beta round 4,
+    finding 22). It walks the
+    same whole history (_own_embed_messages), so a copy is found however deep
+    it is buried, and it deletes through the same helper
+    (_delete_board_message), so a delete answered 404 counts as done. A board
+    copy is a message of this bot's whose first embed's title ends with
+    "Tournament", as the rescan always matched; the newest is the keeper.
+
+    The channel is marked swept (_tb_swept) only when the walk reached the
+    channel's first message and every delete tried here went through;
+    anything less leaves the sweep owed, and the next tick runs it again.
+    The rescan used to read the newest 50 messages and forget a failed
+    delete: a duplicate it could not delete was not retried, and one deeper
+    than 50 messages was never found.
+
+    Returns (the keeper's id or None, whether the walk was complete). Only a
+    complete walk shows that no copy of the board is in the channel."""
+    ours, walk_error = await _own_embed_messages(ch)
+    complete = walk_error is None
+    if walk_error is not None:
+        print(f"[TBOARD] rescan failed ({walk_error}) -- the sweep runs again next tick")
+    keeper, dupes = None, 0
+    for msg in ours:
+        if not (msg.embeds[0].title or "").endswith("Tournament"):
+            continue
+        if keeper is None:
+            keeper = msg.id
+            continue
+        err = await _delete_board_message(ch, msg=msg)
+        if err is None:
+            dupes += 1
+        else:
+            complete = False
+            print(f"[TBOARD] couldn't delete duplicate board mid={msg.id}: {err}")
+    if dupes:
+        print(f"[TBOARD] deleted {dupes} duplicate board message(s)")
+    if complete:
+        _tb_swept.add(ch.id)
+    else:
+        _tb_swept.discard(ch.id)
+    return keeper, walk_error is None
 
 
 async def _publish_tournament_board():
@@ -13509,61 +15638,89 @@ async def _publish_tournament_board():
         _build_tournament_board_embed(sync_t, "sync", sync_tally),
         _build_tournament_board_embed(pick("async"), "async"),
     ]
-    # Living-message management — same shape as publish_lb.
+    # Living-message management: one message, its id remembered, edited in
+    # place, and moved to the channel bottom when something was posted after
+    # it (#140). publish_boards runs a SET of messages (last_message_id can't
+    # order a set), so this is its own copy of the pattern -- but since v1.41.0
+    # beta round 4 (finding 22) it runs the leaderboard's mechanism for its one
+    # message, not a third one: an owed sweep over the whole channel
+    # (_adopt_tournament_board, _tb_swept) retried every tick until it
+    # completes, and a move that deletes the old message first and posts the
+    # new one only once the old is proven gone (_delete_board_message, as in
+    # _repost_board_set; finding 21). A fetch, edit or delete that fails
+    # leaves the board as it is, and the next tick tries again. Before, all
+    # three delete sites swallowed a failure and nothing owed a retry: a
+    # buried board whose delete failed stayed beside its replacement, and a
+    # duplicate the rescan could not delete was forgotten; a rescan ran only
+    # after a failed fast-path edit, and read only the newest 50 messages.
     mid = _tournament_board_ids.get(ch.id)
-    if mid:
+    # Whether this tick's walk reached the channel's first message; None when
+    # no walk ran. With no message on record, the board is posted only after
+    # a complete walk; with one, only once that message answers 404.
+    walked = None
+    if mid is None or ch.id not in _tb_swept:
+        keeper, walked = await _adopt_tournament_board(ch)
+        if keeper is not None:
+            _tournament_board_ids[ch.id] = mid = keeper
+    if mid is not None:
         try:
             msg = await ch.fetch_message(mid)
-            if getattr(ch, "last_message_id", None) not in (None, mid):
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                sent = await ch.send(embeds=embeds)
-                _tournament_board_ids[ch.id] = sent.id
-                print(f"[TBOARD] board was buried — reposted at bottom as mid={sent.id}")
-                return
-            await msg.edit(embeds=embeds)
-            print(f"[TBOARD] edited board mid={mid}")
-            return
-        except Exception as e:
-            print(f"[TBOARD] fast-path edit of mid={mid} failed ({e}) — rescanning")
+        except discord.NotFound:
+            msg = None
+            print(f"[TBOARD] board mid={mid} is gone (404) -- posting a fresh message")
             _tournament_board_ids.pop(ch.id, None)
-    # Rescan: adopt the newest board message, delete older duplicates.
-    keeper = None
-    dupes = 0
-    async for msg in ch.history(limit=50):
-        if msg.author == bot.user and msg.embeds and (msg.embeds[0].title or "").endswith("Tournament"):
-            if keeper is None:
-                keeper = msg
-            else:
-                try:
-                    await msg.delete()
-                    dupes += 1
-                except Exception as e:
-                    print(f"[TBOARD] couldn't delete duplicate board mid={msg.id}: {e}")
-    if dupes:
-        print(f"[TBOARD] deleted {dupes} duplicate board message(s)")
-    if keeper is not None:
-        if getattr(ch, "last_message_id", None) not in (None, keeper.id):
-            try:
-                await keeper.delete()
-            except Exception:
-                pass
-            sent = await ch.send(embeds=embeds)
-            _tournament_board_ids[ch.id] = sent.id
-            print(f"[TBOARD] re-anchored board was buried — reposted at bottom as mid={sent.id}")
-            return
-        _tournament_board_ids[ch.id] = keeper.id
-        try:
-            await keeper.edit(embeds=embeds)
-            print(f"[TBOARD] re-anchored to board mid={keeper.id} and edited")
         except Exception as e:
-            print(f"[TBOARD] re-anchor edit of mid={keeper.id} failed: {e}")
+            print(f"[TBOARD] fetch of mid={mid} failed ({e}) -- board left as it is; "
+                  "the fetch is retried next tick")
+            return
+        if msg is not None and getattr(ch, "last_message_id", None) not in (None, mid):
+            # Buried: delete the old message first, and post the new one only
+            # once the old is proven gone.
+            err = await _delete_board_message(ch, msg=msg)
+            if err is not None:
+                print(f"[TBOARD] buried board mid={mid} not deleted ({err}) -- kept and "
+                      "edited in place; the move is retried next tick")
+                try:
+                    await msg.edit(embeds=embeds)
+                    print(f"[TBOARD] edited board mid={mid}")
+                except Exception as e:
+                    print(f"[TBOARD] edit of mid={mid} failed ({e}) -- board left as it is")
+                return
+            _tournament_board_ids.pop(ch.id, None)
+            try:
+                sent = await ch.send(embeds=embeds)
+            except Exception as e:
+                # Proven gone and not replaced: absent for one tick. The next
+                # tick has nothing on record, so it walks the channel, finds
+                # no copy and posts one.
+                print(f"[TBOARD] repost failed ({e}) -- absent until the next tick posts it")
+                return
+            _tournament_board_ids[ch.id] = sent.id
+            print(f"[TBOARD] board was buried -- reposted at bottom as mid={sent.id}")
+            return
+        if msg is not None:
+            try:
+                await msg.edit(embeds=embeds)
+                print(f"[TBOARD] edited board mid={mid}")
+                return
+            except discord.NotFound:
+                print(f"[TBOARD] board mid={mid} is gone (404) -- posting a fresh message")
+                _tournament_board_ids.pop(ch.id, None)
+            except Exception as e:
+                print(f"[TBOARD] edit of mid={mid} failed ({e}) -- board left as it is; "
+                      "the edit is retried next tick")
+                return
+    elif walked is not True:
+        print("[TBOARD] no board on record and no complete walk this tick -- not posted "
+              "until a walk shows no copy of it is in the channel")
         return
-    sent = await ch.send(embeds=embeds)
+    try:
+        sent = await ch.send(embeds=embeds)
+    except Exception as e:
+        print(f"[TBOARD] post failed ({e}) -- absent until the next tick posts it")
+        return
     _tournament_board_ids[ch.id] = sent.id
-    print(f"[TBOARD] posted fresh tournament board in {ch.id}")
+    print(f"[TBOARD] posted fresh tournament board mid={sent.id} in {ch.id}")
 
 
 @tasks.loop(seconds=120)
@@ -13718,10 +15875,10 @@ async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
     if err:
         await _bet_reply(interaction, f"❌ {err}")
         return
-    vs_part = f" (vs {vs_name}, series `{series_id[:8]}`)" if vs_name else f" (series `{series_id[:8]}`)"
+    vs_part = f" (vs {_escape_md(vs_name)}, series `{series_id[:8]}`)" if vs_name else f" (series `{series_id[:8]}`)"
     _tour = f" — 🏆 {tour_tag}" if tour_tag else ""
     await _bet_reply(interaction,
-        f"✅ Bet placed: **{amount:,}g** on **{side_name}**{vs_part}{_tour}.",)
+        f"✅ Bet placed: **{amount:,}g** on **{_escape_md(side_name)}**{vs_part}{_tour}.",)
 
 
 def _discord_bet_error(result) -> str | None:
@@ -13862,14 +16019,14 @@ def _format_live_bet_embed(s: dict) -> discord.Embed:
         kind_label = f" [{tournament_kind.title()}]" if tournament_kind else ""
         base = t_label if t_label else f"Tournament{kind_label}"
         if phase == "pre_match":
-            title = f"🏆 {base} PRE-MATCH: {p1n} ({p1r}) vs {p2n} ({p2r})"
+            title = f"🏆 {base} PRE-MATCH: {_escape_md(p1n)} ({p1r}) vs {_escape_md(p2n)} ({p2r})"
         else:
-            title = f"🏆 {base}: {p1n} ({p1r}) vs {p2n} ({p2r})"
+            title = f"🏆 {base}: {_escape_md(p1n)} ({p1r}) vs {_escape_md(p2n)} ({p2r})"
     else:
-        title = f"🎮 {p1n} ({p1r}) vs {p2n} ({p2r})"
+        title = f"🎮 {_escape_md(p1n)} ({p1r}) vs {_escape_md(p2n)} ({p2r})"
     desc_lines = [
         f"Series: **{p1w} - {p2w}**",
-        f"Odds: **{p1o}x** {p1n} / **{p2o}x** {p2n}",
+        f"Odds: **{p1o}x** {_escape_md(p1n)} / **{p2o}x** {_escape_md(p2n)}",
     ]
     if locked:
         if reason == "game_in_progress":
@@ -13995,8 +16152,8 @@ async def _place_discord_team_bet(interaction: discord.Interaction,
     # Name the MATCHUP, not just the side — the same reason the 1v1 path does
     # (bug #53): a player can be in more than one live series.
     await _bet_reply(interaction,
-        f"✅ Bet placed: **{amount:,}g** on **{side_name}** "
-        f"(vs {vs_name}, 2v2 series `{parent.series_id[:8]}`).",)
+        f"✅ Bet placed: **{amount:,}g** on **{_escape_md(side_name)}** "
+        f"(vs {_escape_md(vs_name)}, 2v2 series `{parent.series_id[:8]}`).",)
 
 
 def _format_team_live_bet_embed(s: dict) -> discord.Embed:
@@ -14013,10 +16170,10 @@ def _format_team_live_bet_embed(s: dict) -> discord.Embed:
     t1w = s.get("t1_wins", 0); t2w = s.get("t2_wins", 0)
     locked = s.get("bets_locked", False)
     reason = s.get("lock_reason")
-    title = f"👥 2v2: {t1a}+{t1b} vs {t2a}+{t2b}"
+    title = f"👥 2v2: {_escape_md(t1a)}+{_escape_md(t1b)} vs {_escape_md(t2a)}+{_escape_md(t2b)}"
     desc_lines = [
-        f"Team 1: **{t1a}** ({t1ar}) + **{t1b}** ({t1br})",
-        f"Team 2: **{t2a}** ({t2ar}) + **{t2b}** ({t2br})",
+        f"Team 1: **{_escape_md(t1a)}** ({t1ar}) + **{_escape_md(t1b)}** ({t1br})",
+        f"Team 2: **{_escape_md(t2a)}** ({t2ar}) + **{_escape_md(t2b)}** ({t2br})",
         f"Series: **{t1w} - {t2w}**",
         f"Odds: **{t1o}x** Team 1 / **{t2o}x** Team 2",
         ("_Bet in-game via the F5 → Leaderboard panel._" if locked else
@@ -14130,7 +16287,7 @@ class FfaBetModal(discord.ui.Modal):
             return
         game_part = f" (game {int(self.game_number)})" if self.game_number else ""
         await _bet_reply(interaction,
-            f"✅ Bet placed: **{amount:,}g** on **{self.name}**{game_part} "
+            f"✅ Bet placed: **{amount:,}g** on **{_escape_md(self.name)}**{game_part} "
             f"in FFA lobby `{str(self.lobby_id)[:8]}`.",)
 
 
@@ -14697,6 +16854,10 @@ class LobbyBetSelect(discord.ui.Select):
 
 class LobbyBetModal(discord.ui.Modal):
     def __init__(self, mode: str, lobby_id: str, target_steams: str, target_label: str):
+        # target_label is the select option's label, built from the players'
+        # names. A modal title is plain text -- Discord renders no Markdown
+        # there -- so the title shows it as typed; the confirmation in
+        # on_submit is Markdown and escapes it (v1.41.0 beta round 5, F26).
         super().__init__(title=f"Bet on {str(target_label)[:38]}")
         self.mode = mode
         self.lobby_id = lobby_id
@@ -14734,8 +16895,9 @@ class LobbyBetModal(discord.ui.Modal):
             await _bet_reply(interaction, f"❌ {perr}")
             return
         label = _LOBBY_BET_MODE_LABEL.get(self.mode, self.mode.upper())
+        # The label is players' names: literal in this Markdown (round 5, F26).
         await _bet_reply(interaction,
-            f"✅ Bet placed: **{amount:,}g** on **{self.target_label}** "
+            f"✅ Bet placed: **{amount:,}g** on **{_escape_md(self.target_label)}** "
             f"in {label} lobby `{self.lobby_id[:8]}` — odds are set when the host starts.",)
 
 

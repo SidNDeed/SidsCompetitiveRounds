@@ -115,8 +115,18 @@ namespace CompetitiveRounds
         // three, so neither host can see the other's setting.
         private static bool Vanilla() { try { return !FfaMode.EngineActive(); } catch { return true; } }
         private static string ModeTag() => Vanilla() ? "vanilla" : "ffa";
-        /// <summary>The same-card rule in force for THIS room.</summary>
-        private static bool RuleOn() => Vanilla() ? RoomRules.SameCards : FfaMode.SameCardRule;
+        /// <summary>Whether the same-card rule is CONFIGURED for this room.
+        /// internal, not private, because StripState() below answers the
+        /// display question and starts here.
+        ///
+        /// This is configuration, not the dealer's state. It used to say the
+        /// banner "labels the rule from this same call, so what the strip says
+        /// and what the engine deals cannot disagree" — and they could, which
+        /// is what the strip got wrong: a latched game that fell back still
+        /// read RuleOn() == true and the strip went on announcing a rule the
+        /// engine was no longer applying. The banner reads StripState(), which
+        /// consults the latch.</summary>
+        internal static bool RuleOn() => Vanilla() ? RoomRules.SameCards : FfaMode.SameCardRule;
         /// <summary>Candidates per set: the FFA lobby's knob, or vanilla's
         /// five slots.</summary>
         private static int CandidateCount()
@@ -165,7 +175,10 @@ namespace CompetitiveRounds
 
         private static string RoomKey()
         {
-            try { return (Fnv1a(PhotonNetwork.CurrentRoom?.Name ?? "") % 1000000u).ToString(); }
+            // RJ-DRIFT change 15: the derivation lives in FfaNumberingRules
+            // (the same FNV-1a, the same modulus, so the value is unchanged),
+            // where the drift gate's advert key uses it too.
+            try { return FfaNumberingRules.RoomKey(PhotonNetwork.CurrentRoom?.Name ?? "").ToString(); }
             catch { return "0"; }
         }
 
@@ -249,6 +262,43 @@ namespace CompetitiveRounds
         /// pick coroutine poll to a verdict before consuming offers (round-3
         /// find N7).</summary>
         public static bool IsLatchedFor(int game) => _latchedGame == game;
+
+        /// <summary>What a standing surface may truthfully say about the
+        /// same-card rule. RuleOn() alone is the CONFIGURATION and stays true
+        /// through every fallback in LatchForGame, so a surface that reads it
+        /// keeps promising shared hands while this seat rolls privately.
+        /// Off — the rule is not configured for this room.
+        /// Pending — configured, no verdict yet this game (between games, or
+        ///   inside the retryable budget). The configuration is all that is
+        ///   known, and it is what a room lobby should show.
+        /// Active — a shared sequence latched: everyone is dealt the same set.
+        /// FellBack — a verdict latched and it was a fallback (capability,
+        ///   seed, pool or hash). This seat rolls privately this game, and a
+        ///   surface must not claim otherwise.</summary>
+        internal enum RuleDisplayState { Off = 0, Pending = 1, Active = 2, FellBack = 3 }
+
+        /// <summary>The tri-state above, derived from the SAME two fields the
+        /// dealer reads (_latchedGame, _active) rather than from the rule
+        /// flags.
+        ///
+        /// "Cannot contradict what is dealt" holds only as long as EVERY exit
+        /// from LatchForGame writes those two fields. It did not: the catch at
+        /// the bottom set `_active = false` and left `_latchedGame` at -1, so
+        /// an exception produced private dealing under a PENDING strip (Codex
+        /// client r2 MEDIUM). The catch now latches like the named fallbacks,
+        /// which is what makes the sentence true rather than intended.
+        /// internal, not private: CompetitiveUI.DrawRoomRulesBanner is the
+        /// caller.</summary>
+        internal static RuleDisplayState StripState()
+        {
+            if (!RuleOn()) return RuleDisplayState.Off;
+            // Deliberately "_latchedGame < 0" and not IsLatchedFor(game): this
+            // surface has no game number of its own and asking for one would
+            // give it a second source of truth to drift from. OnGameStart
+            // clears the latch, so "< 0" is exactly "no verdict this game".
+            if (_latchedGame < 0) return RuleDisplayState.Pending;
+            return _active ? RuleDisplayState.Active : RuleDisplayState.FellBack;
+        }
 
         public static void LatchForGame(int game)
         {
@@ -376,8 +426,24 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[FFA-SEQ] latch failed — private rolls this game: " + ex.Message);
+                // LATCH THE FALLBACK, do not merely disable the dealer (Codex
+                // client r2 MEDIUM, this catch). `_active = false` on its own
+                // left `_latchedGame` at -1, which StripState() reads as
+                // PENDING — so the standing strip went on saying "same cards
+                // for everyone" for a whole game in which this seat rolled
+                // privately, which is the exact contradiction the tri-state
+                // exists to make impossible.
+                //
+                // An exception is not a transient pend: no retry helps, so
+                // this takes the same verdict the NAMED fallbacks take by
+                // writing the same two fields they write — which is also why
+                // the line below is the same sentence latchFallback logs. One
+                // outcome, one wording, one state.
+                _latchPendingSince = -1f;
+                _latchedGame = game;
                 _active = false;
+                Plugin.Log.LogWarning($"[FFA-SEQ] same-card rule OFF this game (mode={ModeTag()}) — "
+                                      + "the latch threw: " + ex.Message);
             }
         }
 
@@ -506,6 +572,16 @@ namespace CompetitiveRounds
         /// index did not advance, that player would re-see Sk later and their
         /// draw k would differ from everyone else's — the invariant the whole
         /// feature exists for, broken by an edge case).</summary>
+        /// <summary>Read-only copy of a player's consumed draw index (the k of
+        /// their latest deal), or -1 when none was consumed this game. Card
+        /// draw evidence records it for an own deal; it never extends or
+        /// advances the sequence.</summary>
+        internal static int DrawIndexOf(int playerId)
+        {
+            int v;
+            return _drawIndex.TryGetValue(playerId, out v) ? v : -1;
+        }
+
         public static void ConsumeOffers(List<int> pickerIds)
         {
             if (pickerIds == null) return;

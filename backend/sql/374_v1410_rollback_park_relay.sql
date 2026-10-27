@@ -23,6 +23,8 @@ WITH c AS (
            cancelled_at = NULL
       FROM c
      WHERE u.id = c.id AND u.delivered_at IS NULL
+       AND NOT u.undeliverable
+       AND u.cancelled_at = c.cancelled_at
  RETURNING u.id, c.cancelled_at, u.delivered_at
 )
 INSERT INTO pending_dms_v1410_parked (id, was_delivered_at,

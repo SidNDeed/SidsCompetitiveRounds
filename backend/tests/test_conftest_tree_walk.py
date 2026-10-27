@@ -124,12 +124,29 @@ def test_one_pass_stays_affordable():
     roots shows up as a failing test rather than as two slow passes per run
     that nobody attributes.
 
-    The ceiling was 40 MiB until the verified-reads lane met main e9a3f1e1:
-    the merged walk measured 40.09 MiB across 720 files as working files on
-    a core.autocrlf=true checkout (39.58 MiB as committed blobs), every file
-    tracked, no new binary directory -- the growth this docstring expects.
-    46 MiB keeps about 6 MiB of headroom; the 29 MiB of fonts the walk
-    excludes, or another set of card PNGs, would still cross it.
+    On main, the ceiling was 40 MiB until the verified-reads lane met main
+    e9a3f1e1: the merged walk measured 40.09 MiB across 720 files as working
+    files on a core.autocrlf=true checkout (39.58 MiB as committed blobs),
+    every file tracked, no new binary directory; main moved to 46 MiB.
+
+    Measured at the v1.41.0 beta's merge of main cd8d846: 42.3 MiB across 725
+    files, every one tracked (main.py 3.7, I18nCatalogues.cs 3.3, the Player
+    Cards art under backend/api/assets 8.8); the ceiling moved from 40 to 48
+    MiB with it, and a directory of binaries still crosses it.
+
+    Measured again at the merged hold 2 tip d3629b36 (the three client lanes
+    folded; main 4395feda, 41.1 MiB across 729 files under its own 46 MiB
+    ceiling, not yet folded): 49.6 MiB across 887 files, every one tracked
+    (plugin 17.8 across 166 files, backend/tests 9.9 across 221, the Player
+    Cards art 8.8 unchanged, backend/api 4.9, backend/sql 4.1, tools 1.3),
+    no new binary directory; the ceiling moves from 48 to 56 MiB, about 6 MiB
+    of headroom again, and the fold of this branch into main takes the
+    larger value.
+
+    Measured at the trunk fold (main 9267b1fe into the merged client lane at
+    92f46014): 50.9 MiB across 918 files as working files on a
+    core.autocrlf=true checkout, no new binary directory; the larger value is
+    kept, and 56 MiB still leaves about 5 MiB of headroom.
     """
     # Ceiling from the measured budget (fix pass 4, logs d4-fix4-walk-measure.log
     # and d4-fix4-walk-commit.log): the fix-pass-4 working tree on 9b8e3cb0 reads
@@ -147,7 +164,7 @@ def test_one_pass_stays_affordable():
     # it with about 3 MiB of headroom and stands; the lane's 44 MiB is not carried.
     stamps = ct._source_stamps()
     total = sum(size for size, _digest in stamps.values())
-    assert total < 46 * 1024 * 1024, (
+    assert total < 56 * 1024 * 1024, (
         "one tree-movement pass now reads %.1f MiB across %d files, and it runs "
         "twice per session" % (total / 1048576.0, len(stamps)))
 

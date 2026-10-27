@@ -43,6 +43,11 @@ namespace CompetitiveRounds
         private static float nextSnapshotAt;
         private static bool cardLayoutDirty = true;
         private static float cachedCardLayoutWidth = -1f;
+        // How many wrapped card lines the cached layout was built for. Part of
+        // the cache key, not decoration: the line budget shrinks on a short
+        // screen, and a layout cached at four lines would keep its height
+        // while the board was laid out for three.
+        private static int cachedCardLayoutLines = -1;
         private static float cachedCardsHeight = 24f;
         private static float cardSeparatorWidth;
 
@@ -76,6 +81,115 @@ namespace CompetitiveRounds
             }
         }
 
+        // ── health precision (v1.41.0, item 10) ─────────────────────────────
+        //
+        // Display-only, and one site covers all three seats: the hold-Tab
+        // board, the spectator seat and the broadcaster HUD all render the
+        // SAME cached cell string (BroadcastStatValue hands out cachedValues,
+        // it does not re-format). Nothing reads a formatted cell
+        // back — the match-history wire is produced by WireNum (:539), which
+        // never reads StatRow.fmt at all and writes "0.###" under
+        // CultureInfo.InvariantCulture. The fmt-independence is WireNum's own
+        // code, not a lesson; the invariant culture is #47's rule.
+        internal static class HealthPrecisionSetting
+        {
+            internal const string ROUNDED = "Rounded";
+            internal const string ONE_DP = "1 decimal";
+            internal const string TWO_DP = "2 decimals";
+
+            private static BepInEx.Configuration.ConfigEntry<string> _entry;
+
+            /// <summary>Bound here rather than in Plugin.cs because this file
+            /// owns the format site, through Plugin.ConfigFileForLevers — the
+            /// same local bind LagNotices.EnsureStartup makes for its self-test
+            /// lever (LagNotices.cs:583). Lazy, and unlike that one a null
+            /// ConfigFile (very early in startup) is retried on the next read
+            /// instead of being latched as "no setting".</summary>
+            private static BepInEx.Configuration.ConfigEntry<string> Entry()
+            {
+                if (_entry != null) return _entry;
+                try
+                {
+                    var cf = Plugin.ConfigFileForLevers;
+                    if (cf == null) return null;
+                    _entry = cf.Bind(
+                        "UI", "HealthPrecision", ROUNDED,
+                        "Decimals on the HP readout (the live scoreboard, spectator seat, broadcaster HUD): "
+                        + "Rounded, 1 decimal or 2 decimals. BOTH halves of \"current/max\" follow it, so a "
+                        + "card that leaves max health on a fraction stops reading as a whole number too. "
+                        + "Local display only - nothing stored or sent changes.");
+                }
+                catch { _entry = null; }
+                return _entry;
+            }
+
+            /// <summary>Current pick, normalised. Anything else in the cfg — a
+            /// hand-edit, a value written by a later build — reads as Rounded,
+            /// i.e. today's board, rather than an unrenderable format.</summary>
+            internal static string Level
+            {
+                get
+                {
+                    string v = "";
+                    try { var e = Entry(); v = e != null ? (e.Value ?? "") : ""; } catch { }
+                    v = v.Trim();
+                    if (string.Equals(v, ONE_DP, StringComparison.OrdinalIgnoreCase)) return ONE_DP;
+                    if (string.Equals(v, TWO_DP, StringComparison.OrdinalIgnoreCase)) return TWO_DP;
+                    return ROUNDED;
+                }
+            }
+
+            /// <summary>Rounded -> 1 decimal -> 2 decimals -> Rounded, through
+            /// Set. Kept for any caller that still steps the setting; the
+            /// settings page writes a chosen level through Set directly.</summary>
+            internal static void Cycle()
+            {
+                string next = Level == ROUNDED ? ONE_DP : Level == ONE_DP ? TWO_DP : ROUNDED;
+                Set(next);
+            }
+
+            /// <summary>The value-taking writer (item 13). The level is
+            /// canonicalised against the three ids, so a caller cannot store a
+            /// display word; null or unknown writes Rounded, which is also how
+            /// an unknown stored value reads. No invalidation call: the board
+            /// re-renders every cell at its next 8 Hz snapshot
+            /// (RefreshSnapshot), and the broadcaster's derived strings rebuild
+            /// on that same generation bump.</summary>
+            internal static void Set(string level)
+            {
+                string v = (level ?? "").Trim();
+                string next = string.Equals(v, ONE_DP, StringComparison.OrdinalIgnoreCase) ? ONE_DP
+                    : string.Equals(v, TWO_DP, StringComparison.OrdinalIgnoreCase) ? TWO_DP
+                    : ROUNDED;
+                try { var e = Entry(); if (e != null) e.Value = next; } catch { }
+            }
+
+            /// <summary>The .NET numeric format the HP row renders with.</summary>
+            internal static string Fmt
+            {
+                get
+                {
+                    string lvl = Level;
+                    return lvl == TWO_DP ? "F2" : lvl == ONE_DP ? "F1" : "F0";
+                }
+            }
+        }
+
+        /// <summary>The HP row's format is a delegate, not a string, so it is
+        /// re-resolved at render time and cycling the precision setting takes
+        /// effect immediately instead of being frozen at static-init.
+        ///
+        /// This is NOT an allocation optimisation and must not be described as
+        /// one. ROWS is a static initialiser that runs once, so a method group
+        /// and a lambda both allocate exactly one delegate for the process.
+        /// Nor is this a per-frame path: the board renders from a throttled
+        /// snapshot (`Time.unscaledTime >= nextSnapshotAt` before
+        /// RefreshSnapshot, ~8 Hz), which is itself what #162 asked for in this
+        /// file. An earlier version of this comment cited #162 for the opposite
+        /// - a per-call saving on a hot path - and #162's own fix is the reason
+        /// that hot path no longer exists.</summary>
+        private static string HealthFmt() => HealthPrecisionSetting.Fmt;
+
         // Stat row description: label + the raw numeric read(s) + how the
         // overlay cell renders them.
         //
@@ -101,9 +215,15 @@ namespace CompetitiveRounds
             public string suffix;                  // display-only unit — never on the wire
             public Func<Player, float> number;     // primary numeric read
             public Func<Player, float> number2;    // secondary read (HP row only), else null
+            // Non-null = the player picks this row's precision at runtime and
+            // `fmt` is only the fallback. Display-only by construction: the
+            // wire side never reads fmt (WireNum), so no setting here can move
+            // a stored build.
+            public Func<string> fmtOf;
             public StatRow(string l, string f, string sfx,
-                           Func<Player, float> n, Func<Player, float> n2 = null)
-            { label = l; fmt = f; suffix = sfx; number = n; number2 = n2; }
+                           Func<Player, float> n, Func<Player, float> n2 = null,
+                           Func<string> fd = null)
+            { label = l; fmt = f; suffix = sfx; number = n; number2 = n2; fmtOf = fd; }
         }
 
         // ── WIRE FORMAT LOCK ────────────────────────────────────────────────
@@ -113,11 +233,22 @@ namespace CompetitiveRounds
         // edit MUST bump BUILD_STATS_WIRE_VERSION and add a new WIRE_Vn table in
         // the same change — never mutate WIRE_V1, stored rows still decode from
         // it. WireTableValid() fails closed if the two stop lining up.
+        //
+        // APPENDING a row past the last index WIRE_V1 references is the single
+        // exception and needs no version bump: WIRE_V1 addresses rows BY INDEX,
+        // so an appended row leaves wireFirstAt[r] at -1 and DecodeBuildStats
+        // skips any row with no field — every stored v1 string still decodes to
+        // exactly the 21 fields it was written with. The appended row is
+        // board-only until some WIRE_V2 carries it ("Scale", added for v1.41.0,
+        // is board-only for that reason).
         private static readonly StatRow[] ROWS = new[]
         {
             // Clamp at 0 — a dead player's health goes negative internally
             // and "-39/100" on the board reads as a bug (July 28 screenshot).
-            new StatRow("HP",          "F0", "",   p => Mathf.Max(0f, p.data.health), p => p.data.MaxHealth),
+            // "F0" is the fallback only — HealthFmt resolves the player's
+            // health-precision pick per render, and DisplayCell applies it to
+            // BOTH halves, so a fractional max health stops reading whole too.
+            new StatRow("HP",          "F0", "",   p => Mathf.Max(0f, p.data.health), p => p.data.MaxHealth, HealthFmt),
             new StatRow("Lives",       "F0", "",   p => p.data.stats.remainingRespawns + 1),
             // Infoholic's damage formula: gun.damage x bulletDamageMultiplier x 55
             // (55 = vanilla base bullet damage).
@@ -140,6 +271,17 @@ namespace CompetitiveRounds
             new StatRow("Jump",        "F2", "",   p => p.data.stats.jump),
             new StatRow("Jumps",       "F0", "",   p => p.data.stats.numberOfJumps),
             new StatRow("Size",        "F2", "",   p => p.data.stats.sizeMultiplier),
+            // The APPLIED body scale, not the multiplier above it. ROUNDS
+            // derives it from max health AND sizeMultiplier —
+            //   transform.localScale = Vector3.one * 1.2f
+            //       * Mathf.Pow(data.MaxHealth / 100f * 1.2f, 0.2f) * sizeMultiplier
+            // (decompile CharacterStatModifiers.ConfigureMassAndSize:262) —
+            // which is why a max-health card moves this row while Size does
+            // not, and why an untouched player reads ~1.24 rather than 1.00.
+            // Read off stats.transform because that is the transform that line
+            // writes, and CharacterData.stats is a GetComponent on the same
+            // object (decompile CharacterData.cs:147).
+            new StatRow("Scale",       "F2", "",   p => p.data.stats.transform.localScale.x),
         };
 
         /// <summary>Renders one board cell from the row's numeric reader(s).
@@ -148,9 +290,22 @@ namespace CompetitiveRounds
         /// "-" for that cell alone.</summary>
         private static string DisplayCell(StatRow row, Player p)
         {
+            string fmt = FmtOf(row);
             float a = row.number(p);
-            if (row.number2 == null) return a.ToString(row.fmt) + row.suffix;
-            return a.ToString(row.fmt) + "/" + row.number2(p).ToString(row.fmt) + row.suffix;
+            if (row.number2 == null) return a.ToString(fmt) + row.suffix;
+            return a.ToString(fmt) + "/" + row.number2(p).ToString(fmt) + row.suffix;
+        }
+
+        /// <summary>The format this row renders with right now: the player's
+        /// health-precision pick for the HP row, the row's own static fmt
+        /// everywhere else. Falls back to that static fmt rather than throwing
+        /// — a settings read must not cost the board a cell.</summary>
+        private static string FmtOf(StatRow row)
+        {
+            var f = row.fmtOf;
+            if (f == null) return row.fmt;
+            try { string s = f(); return string.IsNullOrEmpty(s) ? row.fmt : s; }
+            catch { return row.fmt; }
         }
 
         private static Gun Gun(Player p) => p.data.weaponHandler.gun;
@@ -167,6 +322,7 @@ namespace CompetitiveRounds
         private static string trTitle, trCardsLabel, trNoCards;
         private static bool localeHooked;
         private static int trGen = -1;
+        private static int trKb = -1;
 
         private static void EnsureLocaleStrings()
         {
@@ -178,14 +334,16 @@ namespace CompetitiveRounds
              * loaded, catalogue registered, locale set), so it is the honest key.
              * Kept as a cheap int compare because this runs on the hold-Tab
              * path, which must not allocate per frame (#162). */
-            if (trLabels != null && trGen == I18n.CatalogueGeneration) return;
+            if (trLabels != null && trGen == I18n.CatalogueGeneration && trKb == Keybinds.Revision) return;
             trGen = I18n.CatalogueGeneration;
+            trKb = Keybinds.Revision;   // item 17: the title names the bound scoreboard key
             if (!localeHooked)
             {
                 localeHooked = true;
                 try { I18n.LocaleChanged += () => { trLabels = null; }; } catch { }
             }
-            trTitle = I18n.Tr("MATCH STATS  <color=#888><size=12>(hold Tab)</size></color>");
+            trTitle = I18n.TrF("MATCH STATS  <color=#888><size=12>(hold {0})</size></color>",
+                NativeUI.KeybindRowFace(KeybindRules.Scoreboard));
             trCardsLabel = I18n.Tr("Cards");
             trNoCards = I18n.Tr("<color=#666>no cards</color>");
             var labels = new[]
@@ -200,7 +358,7 @@ namespace CompetitiveRounds
                 I18n.Tr("Bullet slow"), I18n.Tr("Knockback"), I18n.Tr("Spread"),
                 I18n.Tr("Life steal"), I18n.Tr("Block CD"), I18n.Tr("Blocks"),
                 I18n.Tr("Regen"), I18n.Tr("Move spd"), I18n.Tr("Jump"),
-                I18n.Tr("Jumps"), I18n.Tr("Size"),
+                I18n.Tr("Jumps"), I18n.Tr("Size"), I18n.Tr("Scale"),
             };
             if (labels.Length != ROWS.Length)
             {
@@ -552,15 +710,19 @@ namespace CompetitiveRounds
             // Parsed invariantly (that is how it was written), re-rendered
             // through the row's own fmt/suffix so a history cell reads like the
             // board cell. NOT a bit-exact round trip and does not claim to be:
-            // the wire keeps 3 decimals, the board renders 2, so a value that
-            // sits exactly on the 3rd-decimal rounding boundary can land one
-            // step off the digit the board showed. Harmless for a build
-            // read-out, and storing the full float would spend wire width on
-            // digits no surface renders.
+            // the wire keeps 3 decimals, the board renders at most 2, so a
+            // value that sits exactly on the 3rd-decimal rounding boundary can
+            // land one step off the digit the board showed. Harmless for a
+            // build read-out, and storing the full float would spend wire width
+            // on digits no surface renders.
+            // FmtOf, not row.fmt: a stored HP re-renders at the VIEWER's current
+            // health precision, which is what makes a history cell keep reading
+            // like the board cell after that setting moves.
+            string fmt = FmtOf(row);
             if (!TryParseWire(a, out float fa)) return WIRE_MISSING;
-            if (b == null) return fa.ToString(row.fmt) + row.suffix;
+            if (b == null) return fa.ToString(fmt) + row.suffix;
             if (!TryParseWire(b, out float fb)) return WIRE_MISSING;
-            return fa.ToString(row.fmt) + "/" + fb.ToString(row.fmt) + row.suffix;
+            return fa.ToString(fmt) + "/" + fb.ToString(fmt) + row.suffix;
         }
 
         private static bool TryParseWire(string s, out float v)
@@ -727,7 +889,7 @@ namespace CompetitiveRounds
             try
             {
                 if (Event.current == null || Event.current.type != EventType.Repaint) return;
-                if (!Input.GetKey(KeyCode.Tab)) return;
+                if (!Keybinds.Held(KeybindRules.Scoreboard)) return;   // item 17: the bound key
                 if (NativeUI.IsOpen) return;                    // F5 menu owns the screen
                 if (CompetitiveUI.IsChatInputOpen) return;      // typing in chat
                 var pm = PlayerManager.instance;
@@ -742,36 +904,83 @@ namespace CompetitiveRounds
                 float labelW = 118f;
                 float colW = Mathf.Clamp((Screen.width * 0.62f - labelW) / cachedPlayerCount, 130f, 210f);
                 float w = labelW + colW * cachedPlayerCount + 24f;
-                float rowH = 21f;
                 float cardWidth = colW - 8f;
-                if (cardLayoutDirty || Mathf.Abs(cachedCardLayoutWidth - cardWidth) > 0.5f)
-                {
-                    // +3px per line and extra tail slack: the skin's real glyph
-                    // height exceeds lineHeight (#143) — see stCards.clipping.
-                    float lineH = Mathf.Max(15f, stCards.lineHeight + 3f);
-                    int maxLines = 1;
-                    for (int i = 0; i < cachedPlayerCount; i++)
-                        maxLines = Mathf.Max(maxLines, PrepareCardRowLayout(cachedCards[i], cardWidth, 4));
-                    cachedCardsHeight = maxLines * lineH + 8f;
-                    cachedCardLayoutWidth = cardWidth;
-                    cardLayoutDirty = false;
-                }
-                float cardsH = cachedCardsHeight;
                 // Release B §1: the head-to-head header line ("vs NAME · last
                 // played · H2H · ranked series") sits under the title for the
                 // whole sitting once H2HSummary is Ready; "" (no row) before
                 // that and in any room that is not a plain 1v1. Cached text,
-                // richText OFF (the name is server-returned free text).
+                // richText OFF (the name is server-returned free text). Read
+                // here rather than further down because the height budget
+                // below has to know whether this row is present.
                 string h2hLine = H2HSummary.TabLine;
                 float h2hH = string.IsNullOrEmpty(h2hLine) ? 0f : 20f;
-                float h = 34f + h2hH + 26f + ROWS.Length * rowH + cardsH + 16f;
+
+                // ── height budget ─────────────────────────────────────────
+                // Every part of this panel used to be a fixed size, and the
+                // panel was simply centred: 21px per stat row, up to four
+                // wrapped lines of cards, and whatever came out was drawn. At
+                // 1024x576 with the H2H line present, adding the 22nd stat row
+                // put the card row at y=570 with six pixels of screen left
+                // under it -- and the card row is the one thing on this board
+                // that cannot scroll, so those cards were simply not there.
+                //
+                // The pitch and the card block are therefore derived from the
+                // height that is actually available. Both only ever SHRINK:
+                // wherever 21px and four card lines already fitted, the clamp
+                // returns ROW_H_MAX and the loop leaves CARD_LINES_MAX, and the
+                // layout is exactly what it was before.
+                //
+                // What this does NOT promise: a screen short enough that even
+                // ROW_H_MIN and one line of cards overflow still overflows.
+                // At that floor the panel is furniture + 22 rows at ROW_H_MIN
+                // + one card line -- 493px with the H2H row present -- and it
+                // still keeps MARGIN_Y above it, so the screen height where
+                // this starts running off the bottom is 517, not 493. Below
+                // that the fix is a scroll view, not a smaller number.
+                // backend/tests/test_tab_board_layout.py derives that floor
+                // from these same constants and asserts it to the pixel, so
+                // changing one of them moves the test, not just this line.
+                const float ROW_H_MAX = 21f;    // the pitch this board has always drawn
+                const float ROW_H_MIN = 17f;    // 13px cells plus #143's glyph slack
+                const float MARGIN_Y = 24f;     // the minimum the centring already kept
+                const int CARD_LINES_MAX = 4;
+                float furniture = 34f + h2hH + 26f + 16f;   // title, H2H, name row, bottom pad
+                float budget = Mathf.Max(0f, Screen.height - MARGIN_Y * 2f - furniture);
+                // +3px per line and extra tail slack: the skin's real glyph
+                // height exceeds lineHeight (#143) — see stCards.clipping.
+                float lineH = Mathf.Max(15f, stCards.lineHeight + 3f);
+                // The cards give ground first. The stat grid is what the board
+                // is FOR, and one fewer card line is the same reduction
+                // PrepareCardRowLayout already performs for a narrow column:
+                // the cards that no longer fit become its "+N" tail, which is
+                // legible, rather than being drawn past the bottom edge, which
+                // is not.
+                int cardLines = CARD_LINES_MAX;
+                while (cardLines > 1 &&
+                       ROWS.Length * ROW_H_MIN + (cardLines * lineH + 8f) > budget)
+                    cardLines--;
+                if (cardLayoutDirty || cachedCardLayoutLines != cardLines
+                    || Mathf.Abs(cachedCardLayoutWidth - cardWidth) > 0.5f)
+                {
+                    int maxLines = 1;
+                    for (int i = 0; i < cachedPlayerCount; i++)
+                        maxLines = Mathf.Max(maxLines, PrepareCardRowLayout(cachedCards[i], cardWidth, cardLines));
+                    cachedCardsHeight = maxLines * lineH + 8f;
+                    cachedCardLayoutWidth = cardWidth;
+                    cachedCardLayoutLines = cardLines;
+                    cardLayoutDirty = false;
+                }
+                float cardsH = cachedCardsHeight;
+                float rowH = Mathf.Clamp((budget - cardsH) / Mathf.Max(1, ROWS.Length),
+                                         ROW_H_MIN, ROW_H_MAX);
+                float h = furniture + ROWS.Length * rowH + cardsH;
                 float x = (Screen.width - w) / 2f;
-                float y = Mathf.Max(24f, (Screen.height - h) * 0.5f);
+                float y = Mathf.Max(MARGIN_Y, (Screen.height - h) * 0.5f);
 
                 GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
                     ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.88f), 0, 0);
                 GUI.Label(new Rect(x + 12, y + 6, w - 24, 24),
-                    trTitle ?? "MATCH STATS  <color=#888><size=12>(hold Tab)</size></color>", stTitle);
+                    trTitle ?? "", stTitle);
                 if (h2hH > 0f)
                     GUI.Label(new Rect(x + 12, y + 30, w - 24, 20), h2hLine, stH2H);
 
@@ -829,9 +1038,22 @@ namespace CompetitiveRounds
             stH2H = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, richText = false };
             stH2H.normal.textColor = new Color(0.82f, 0.82f, 0.82f);
             stName = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
-            stLabel = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
+            // wordWrap/clipping explicit, for the same reason bug 239 made them
+            // explicit on BroadcastHud's stName/stStat (BroadcastHud.cs:769,
+            // BroadcastHud.cs:776): GUI.skin.label
+            // defaults wordWrap ON, and both of this batch's changes make these
+            // strings longer - the HP row can now render "87.50/100.00" instead of
+            // "88/100", and the label column gained a "Scale" row. Three of the
+            // four bundled translations of it are longer than the English
+            // ("Escala", "Масштаб" twice); Swedish "Skala" is the same five
+            // characters, and character counts are not widths in any case - the
+            // reason for these two properties is the FIXED-height Rect below, not
+            // a measured overflow. A wrapped second line there is not shown
+            // smaller: it is clipped away.
+            // stCards below is deliberately the opposite: card lists are MEANT to wrap.
+            stLabel = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft, wordWrap = false, clipping = TextClipping.Clip };
             stLabel.normal.textColor = new Color(0.75f, 0.78f, 0.85f);
-            stCell = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+            stCell = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, wordWrap = false, clipping = TextClipping.Clip };
             stCards = new GUIStyle(GUI.skin.label)
             { fontSize = 11, fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperCenter, wordWrap = true, richText = true };
             // Bug #114 item 5: ROUNDS' IMGUI skin has taller glyph metrics

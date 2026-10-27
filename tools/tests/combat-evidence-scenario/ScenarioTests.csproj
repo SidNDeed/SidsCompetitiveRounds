@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Combat evidence scenario harness (fix pass 2, M1 and G2): compiles the
+       REAL plugin/CombatEvidence.cs and CombatEvidencePerf.cs with the REAL
+       CombatEvidenceCore.cs, CombatEvidenceWire.g.cs and SeatEvidenceCore.cs
+       against Stubs.cs (working stand-ins for Unity, Photon, Harmony, ROUNDS
+       and the plug-in members the combat files touch). Program.cs drives a
+       scripted 1v1 from one seat's point of view through the patch classes'
+       own prefix, postfix and finalizer methods around stub originals that
+       change the game state as the game does. Variants are built from COPIES
+       (CombatSource override); the tracked files are never modified. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>CombatScenario</AssemblyName>
+    <RootNamespace>CombatScenario</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0169;CS0649;CS0414;CS0162;CS0067;CS0109</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(CombatSource)' == ''">
+    <CombatSource>$(MSBuildThisFileDirectory)..\..\..\plugin\CombatEvidence.cs</CombatSource>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(PerfSource)' == ''">
+    <PerfSource>$(MSBuildThisFileDirectory)..\..\..\plugin\CombatEvidencePerf.cs</PerfSource>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(CoreSource)' == ''">
+    <CoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\CombatEvidenceCore.cs</CoreSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\CombatEvidenceWire.g.cs" />
+    <Compile Include="$(CoreSource)" />
+    <Compile Include="$(CombatSource)" />
+    <Compile Include="$(PerfSource)" Condition="'$(PerfSource)' != 'none'" />
+    <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>

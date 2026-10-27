@@ -368,8 +368,20 @@ MUTANTS = [
                 "Grade(black, grade);\n            Grade(white, grade);\n            Matte(black, white, work, out f.Lit, out f.Partial, out f.Covered);")],
      "targets": ["grade_after_matte"], "controls": ["matte_arith"]},
     {"name": "edge_band_one_short", "file": "DanceMotionCore.cs",
-     "edits": [("internal static bool EdgeClear(", "bool band = y < margin ||", "bool band = y < margin - 1 ||")],
+     "edits": [("internal static bool FirstEdgePixel(", "bool band = y < margin ||", "bool band = y < margin - 1 ||")],
      "targets": ["edge_band"], "controls": ["matte_arith"]},
+    # bug 405: the logged band pixel's row is the PNG's from the top
+    {"name": "edge_row_buffer_order", "file": "DanceMotionCore.cs",
+     "edits": [("internal static FrameOut ProcessPair(", "f.EdgeY = bottomUp ? edge - 1 - ey : ey;", "f.EdgeY = ey;")],
+     "targets": ["edge_first_pixel"], "controls": ["edge_band", "matte_arith"]},
+    # bug 405: the fit before the fix -- the solid square whatever is drawn
+    {"name": "fit_solid_only", "file": "DanceMotionCore.cs",
+     "edits": [("internal static FitMode FitDrawn(", "if (all) return FitMode.Solid;", "if (true) return FitMode.Solid;")],
+     "targets": ["fit_drawn"], "controls": ["edge_band", "edge_first_pixel"]},
+    # bug 405: a capped square free to move off the solid square
+    {"name": "fit_cap_cuts_solid", "file": "DanceMotionCore.cs",
+     "edits": [("internal static FitMode FitDrawn(", "float slack = (cap - side) * 0.5f;", "float slack = cap;")],
+     "targets": ["fit_drawn"], "controls": ["edge_band"]},
     {"name": "selfcheck_no_wrap", "file": "DanceMotionCore.cs",
      "edits": [("internal static string SelfCheck(", "if (frames.Count > 1)", "if (frames.Count > 1 && false)")],
      "targets": ["selfcheck_order"], "controls": ["classify_motion"]},
@@ -396,6 +408,18 @@ MUTANTS = [
     {"name": "remember_key_by_visit", "file": "DanceMotionCore.cs",
      "edits": [("internal static string RememberKey(", "return (steamId ?? \"\") + \"|\" + (danceDescriptor ?? \"\");", "return (steamId ?? \"\") + \"|\" + System.Guid.NewGuid().ToString(\"N\");")],
      "targets": ["remember_key_stable"], "controls": ["t48_decide_truth_table"]},
+    # report 1 (2026-09-30): no base still while a dance is selected. (a) the
+    # pre-fix still-only path: a settled Fallback/None sends the base still
+    {"name": "t58_fallback_sends_base", "file": "DanceMotionCore.cs",
+     "edits": [("internal static StillOnly StillOnlyRoute(", "return transient ? StillOnly.Wait : StillOnly.Nothing;",
+                "return transient ? StillOnly.Wait : StillOnly.Base;")],
+     "targets": ["t58_no_base_still_while_dance_selected", "t58_wait_only_when_transient"],
+     "controls": ["t58_base_still_without_selection", "still_current_rows"]},
+    # (b) the selection never consulted: every route is the base still
+    {"name": "t58_selection_ignored", "file": "DanceMotionCore.cs",
+     "edits": [("internal static bool DanceSelected(", "return supported && !string.IsNullOrEmpty(selectedSku);", "return false;")],
+     "targets": ["t58_no_base_still_while_dance_selected", "t58_wait_only_when_transient"],
+     "controls": ["t58_base_still_without_selection", "t48_decide_truth_table"]},
     # round three, RR-R2-2: the per-entry catch boundary of the rig undo (round
     # two's single boundary: an attempt's failure and the entry's both rethrow)
     {"name": "rig_undo_single_catch", "file": "DanceMotionCore.cs",
@@ -423,6 +447,16 @@ MUTANTS = [
     {"name": "rig_undo_no_retry", "file": "DanceMotionCore.cs",
      "edits": [("internal static int UndoEach<K>(", "attempt < UndoAttempts", "attempt < 1")],
      "targets": ["rig_undo_retry_restores_same_pass"], "controls": ["rig_undo_clean", "remember_key_stable"]},
+    # RR-LAND-1 (Codex LAND LOW 1): a baseline write forgets the delta it supersedes.
+    # (a) the forget removed -- the LAND tree's behaviour: the owed delta survives the
+    # write and the later restore subtracts it from the new baseline
+    {"name": "rig_baseline_no_forget", "file": "DanceMotionCore.cs",
+     "edits": [("internal static void WriteBaseline<K>(", "forget(k);", "")],
+     "targets": ["rig_baseline_write_supersedes_owed"], "controls": ["rig_baseline_write_clean", "rig_undo_clean"]},
+    # (b) the forget before the write: a write that throws has already dropped the owed delta
+    {"name": "rig_baseline_forget_first", "file": "DanceMotionCore.cs",
+     "edits": [("internal static void WriteBaseline<K>(", "write(k);\n            forget(k);", "forget(k);\n            write(k);")],
+     "targets": ["rig_baseline_write_supersedes_owed"], "controls": ["rig_baseline_write_clean", "rig_undo_clean"]},
     # PlayerCardMotionCore
     {"name": "t39_clip_keyed_by_binding", "file": "PlayerCardMotionCore.cs",
      "edits": [("internal Clip Get(string printId, int bindSeq)", "string key = printId;", "string key = printId + \"#\" + bindSeq;")],

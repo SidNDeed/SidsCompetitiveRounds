@@ -333,17 +333,26 @@ def test_one_pool_word_carries_the_steam_id_rule_for_every_membership_reader():
     # member out -- carries the one word, in whatever quoting its own statement is
     # built from. The preview read is in this tuple because the face preview is the
     # reader that drifted: it carried the id clause alone until 2026-09-15. Both
-    # preview routes read membership through it since dance cards B13 (round 2).
+    # preview routes read membership through it since dance cards B13 (round 2),
+    # and so does the drawing helper the Settings full-card preview shares with
+    # the bot's /card preview (board row 24).
     for fn in (main.pc_pool_summary, main.internal_pc_card, main._pc_preview_read):
         src = inspect.getsource(fn)
         assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 1, fn.__name__
         assert "_PC_NOT_BANNED_SQL" not in src and "p.deleted_at IS NULL" not in src, fn.__name__
-    # ...and the two preview routes carry no membership clause of their own
-    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+    # ...and the two preview routes carry no membership clause of their own. On
+    # the v1.41.0 beta merge the face preview reaches the read through
+    # _pc_preview_face, the drawing helper the Settings card preview shares (board
+    # row 24), and that helper is held to the same two rules.
+    assert inspect.getsource(main.internal_pc_face_preview).count(
+        "await _pc_preview_face(db, player_ref, loc, snapshot_id") == 1
+    for fn in (main._pc_preview_face, main.internal_pc_motion_preview):
         src = inspect.getsource(fn)
         assert src.count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
         assert "_PC_POOL_MEMBER_SQL" not in src and "_PC_NOT_BANNED_SQL" not in src, fn.__name__
         assert "p.deleted_at IS NULL" not in src, fn.__name__
+    src = inspect.getsource(main.internal_pc_face_preview)
+    assert "_PC_POOL_MEMBER_SQL" not in src and "_PC_NOT_BANNED_SQL" not in src and "p.deleted_at IS NULL" not in src
     # ...and no reader anywhere tests the id clause on its own, which is a property
     # of the MODULE rather than of a tuple someone remembered to extend. The id
     # clause exists to be part of the word, so the counts below enumerate the

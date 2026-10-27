@@ -114,10 +114,48 @@ FILES = [
     # Room rules (Sept 10): the friendly-fire / same-cards summaries and the
     # game-start toast, all at I18n.Tr/TrF sites.
     "RoomRules.cs",
+    # Title ladders (Sept 19, item 12; five tiers since board row 29) -- per-line
+    # state and caption lines, the unavailable states, the equip messages.
+    # Rung and line NAMES are deliberately absent: they are shop_items rows
+    # that arrive from the server, like every other title, and render raw
+    # (#368). Listed here because the list is FIXED and a new file's strings
+    # are silently unharvestable until it is named (#357).
+    "TitleLaddersUI.cs",
+    # Settings page reorganisation (v1.41.0 item 13): the sub-tab bar, the
+    # help pane, the reset footer and the per-row paint functions live in
+    # a partial of NativeUI; the per-key help text is generated from the
+    # committed descriptor table into SettingsDescriptors.g.cs.  Both are
+    # new files, so both are named here (#357).
+    "NativeUI.Settings.cs", "SettingsDescriptors.g.cs",
+    # The generated value writers (item 13) render recommended-value labels
+    # through I18n.Tr with computed arguments, so nothing there is a literal
+    # to harvest today; named anyway because the list is FIXED and a literal
+    # added there later would otherwise be silently unharvestable (#357).
+    "SettingsDescriptorWriters.g.cs",
+    # The settings drive harness (item 13 round 2): it computes the EXPECTED
+    # language-row lines through I18n.TrF with the painter's own literal
+    # templates, so it adds no string the registry lacks; named because the
+    # list is FIXED and every file with a call site belongs on it (#357).
+    "NativeUI.SettingsDrive.cs",
+    # Secure route (board row 27): every sentence the portal button and the
+    # secure-route checks show a player, at I18n.Tr/TrF sites. Its sibling
+    # SecureRouteRules.cs is deliberately absent: pure decision code with no
+    # display text. Listed because the list is FIXED (#357, #464).
+    "SecureRouteText.cs",
     # FFA assembly and late entry (connect-failure V11): the waiting, exit,
     # re-form, dissolve and joined toasts, all literal notification or
     # I18n.Tr/TrF arguments.
     "FfaAssembly.cs", "FfaLateEntry.cs",
+    # Item 19 (two default avatars by queue kind): the switch, unusable and
+    # recovery notices, the portrait-grid legend and the preset option
+    # labels, all at I18n.Tr/TrF sites. Its sibling AvatarDefaultRules.cs is
+    # deliberately absent: pure decision code with no display text.
+    "AvatarDefaults.cs",
+    # Keybinds (item 17): the Controls page, the key names, the refusal
+    # lines and the round-start toast, all I18n.Tr/TrF sites in a NativeUI
+    # partial. Keybinds.cs and KeybindRules.cs are absent on purpose: they
+    # hold no display text (#357, #464).
+    "NativeUI.Keybinds.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
@@ -176,6 +214,16 @@ _HOLE = re.compile(r"\{\d+[^{}]*\}")
 SHORT_WHOLE_LINES = frozenset({
     "w/ {0}",
     "vs {0}",
+    # v1.41.0 item 21 (Q7): the damage-numbers ME mode word. No Tr("ME")
+    # site exists today (the word reaches the screen only as the value half
+    # of a painted literal that clears the floor itself), so this entry adds
+    # no key on this commit.
+    "ME",
+    # Item 17: the input overlay's semantic cap for the up control, drawn
+    # beside DOWN, LEFT and RIGHT on a spectating seat and on the broadcast
+    # HUD. It is the whole string on its key, never glue; two letters is
+    # below the floor, so the line is asserted here.
+    "UP",
 })
 
 
@@ -302,7 +350,16 @@ def lf(s: str) -> str:
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
 
+# A C# \uXXXX escape is decoded to the character it names, so a source
+# that spells a non-ASCII character as an escape harvests the SAME key the
+# compiled string looks up at runtime (item 13 keeps every added source
+# line ASCII).  Only an escape preceded by an EVEN run of backslashes is a
+# real escape; an escaped backslash followed by u is literal text.
+_U_ESC = re.compile(r"(?<!\\)((?:\\\\)*)\\u([0-9A-Fa-f]{4})")
+
+
 def unescape(s: str) -> str:
+    s = _U_ESC.sub(lambda m: m.group(1) + chr(int(m.group(2), 16)), s)
     return (s.replace('\\"', '"').replace("\\n", "\n")
              .replace("\\r", "\r").replace("\\\\", "\\"))
 
@@ -703,7 +760,11 @@ def harvest_source(fn: str, src: str, found: dict, sites: dict) -> None:
         if block:
             for x in STR_LIT.finditer(block.group(1)):
                 s = lf(unescape(x.group(1)))
-                if looks_translatable(s):
+                # allow_braces: item 17 made two of these descs TEMPLATES
+                # (the bound map-skin key, the bound dance-wheel key) that
+                # render through I18n.TrF; an initializer literal is never a
+                # $-string body, so the hole is the catalogue key's own.
+                if looks_translatable(s, allow_braces=True):
                     note_table(s, "SHOP_TAB_DESCS")
 
 
@@ -733,7 +794,10 @@ def extract():
             raise ValueError("'strings' must be a non-empty list of non-blank strings")
         for s in _lst:
             s = lf(s)
-            if looks_translatable(s):
+            # allow_braces: item 17's two dance descriptions are TrF
+            # templates (the bound wheel key); a json string is never a
+            # $-string body.
+            if looks_translatable(s, allow_braces=True):
                 found.setdefault(s, []).append("shop_strings.json")
                 sites.setdefault(s, set()).add(("shop catalog", "cosmetic name/description", "shop"))
     except SystemExit:

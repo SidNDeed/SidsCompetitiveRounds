@@ -50,6 +50,7 @@ the route sent to, for the evidence log.
 
 import asyncio
 import io
+import json
 import os
 import re
 import sys
@@ -369,6 +370,24 @@ def test_pg_a_player_with_no_titles_gets_every_line_with_nothing_owned():
     assert after == before, (before, after)
 
 
+def test_pg_the_client_compat_fixture_is_what_the_route_answers():
+    """fixtures/title_ladders_five_tier_answer.json is the answer the client's
+    title ladders checks run over (test_title_ladders_current_server_compat,
+    merge pass 6). It must stay what this route answers for the account that
+    owns no rung -- every key and value, steam_id aside -- or those checks
+    prove the client against an answer no server gives."""
+    _require_live_pg()
+    with io.open(os.path.join(HERE, "fixtures", "title_ladders_five_tier_answer.json"),
+                 encoding="utf-8") as fh:
+        fixture = json.load(fh)
+    _ids, _owned, _before, _after, answers = _run(_case([_url(BARE)]))
+    status, body, _sql = answers[0]
+    assert status == 200, (status, body)
+    assert fixture["steam_id"] == "STEAM-ID-PLACEHOLDER" and body["steam_id"] == BARE
+    body = dict(body, steam_id=fixture["steam_id"])
+    assert body == fixture
+
+
 def test_pg_an_unknown_steam_id_is_the_routes_own_404():
     """The route's 404 and a routing 404 share a status code, so the body is
     what tells them apart; both are asked here, on the same stack, so this
@@ -378,7 +397,10 @@ def test_pg_an_unknown_steam_id_is_the_routes_own_404():
     ids, owned, before, after, answers = _run(_case([_url(UNKNOWN), unmounted]))
     (status, body, sql), (r_status, r_body, r_sql) = answers
     _log_sql("unknown steam id", sql)
-    assert (status, body) == (404, {"detail": "Player not found"}), (status, body)
+    # the v1.41.0 beta's body: the route's own 404 carries the no-account marker
+    # the client tells it apart by (title_ladders.NO_ACCOUNT_MARKER)
+    assert (status, body) == (404, {"detail": {"error": "ladder_no_account",
+                                               "message": "Player not found"}}), (status, body)
     _assert_read_only(sql, [["players"]])
     assert (r_status, r_body) == (404, {"detail": "Not Found"}), (r_status, r_body)
     assert r_sql == [], r_sql

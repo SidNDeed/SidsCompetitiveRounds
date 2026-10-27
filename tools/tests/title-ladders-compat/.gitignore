@@ -1,0 +1,4 @@
+# Restore and build output. The test builds into its own temporary directory;
+# restore still writes obj/ here.
+bin/
+obj/

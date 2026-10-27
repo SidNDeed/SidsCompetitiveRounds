@@ -101,6 +101,7 @@ import io
 import os
 import re
 import sys
+import time
 import types
 import uuid
 
@@ -335,14 +336,26 @@ async def _build(case, extra_ddl=None):
 
 @contextlib.asynccontextmanager
 async def _case(extra_ddl=None):
-    """A built, sealed case schema and a session factory bound to it."""
-    async with harness.CaseSchema(DSN, "ladder_hooks") as case:
-        await _build(case, extra_ddl)
-        engine = harness.bound_engine(DSN, case.schema)
-        try:
-            yield case.schema, async_sessionmaker(engine, expire_on_commit=False)
-        finally:
-            await engine.dispose()
+    """A built, sealed case schema and a session factory bound to it.
+
+    The 1v1 podium cache (main._podium_cache, a 60 s process-wide copy) is
+    emptied for the case and put back after it: a podium read from another
+    case's players answers about a different database, and the series-gold
+    "Podium beaten x2" of two runs compared here then depended on which ran
+    first (the v1.41.0 beta's refresh reads the case's own podium)."""
+    saved = dict(main._podium_cache)
+    main._podium_cache.update({"at": 0.0, "ok": False, "ids": [], "map": {}})
+    try:
+        async with harness.CaseSchema(DSN, "ladder_hooks") as case:
+            await _build(case, extra_ddl)
+            engine = harness.bound_engine(DSN, case.schema)
+            try:
+                yield case.schema, async_sessionmaker(engine, expire_on_commit=False)
+            finally:
+                await engine.dispose()
+    finally:
+        main._podium_cache.clear()
+        main._podium_cache.update(saved)
 
 
 # -- fixtures -----------------------------------------------------------------
@@ -564,11 +577,15 @@ async def _team_dc(sm, sid, reporter, dc_player, t1_points, t2_points, room):
         # A direct call gets no FastAPI resolution: an omitted is_fallback would be
         # its Query(False) default object, which is truthy, and the handler would
         # take the 2v2 fallback deferral. This report is a real one (886bed8 LAND).
+        # It names the game token of a series the lead-forfeit test stored one for
+        # (_LF_TOKENS; the v1.41.0 beta's rule), and none elsewhere; with
+        # MATCH_HMAC_SECRET cleared the token's own signature is not checked.
         return await _call(main.team_series_report_dc, series_id=str(sid),
                            reporter_steam_id=reporter, dc_player_steam_id=dc_player,
                            t1_points_total=t1_points, t2_points_total=t2_points,
                            photon_room_id=room, is_fallback=False,
-                           hmac_sig="unsigned", db=db)
+                           hmac_sig="unsigned", game_token=_LF_TOKENS.get(str(sid)),
+                           token_sig="", db=db)
 
 
 async def _ranked_series_id(sm, ids, a=P1, b=P2):
@@ -650,6 +667,9 @@ async def _economy(conn):
             "  JOIN players p ON p.id = g.player_id")),
         "xp": sorted(tuple(r) for r in await conn.fetch(
             "SELECT steam_id, total_xp FROM players")),
+        "balances": sorted(tuple(r) for r in await conn.fetch(
+            "SELECT steam_id, gold_earned, gold_spent, team_gold_earned, team_xp_earned "
+            "  FROM players")),
         "items": sorted(tuple(r) for r in await conn.fetch(
             "SELECT p.steam_id, si.sku FROM player_items pi "
             "  JOIN players p ON p.id = pi.player_id JOIN shop_items si ON si.id = pi.item_id "
@@ -687,6 +707,29 @@ async def _look(schema):
         return await _ladder(conn), await _economy(conn)
     finally:
         await conn.close()
+
+
+async def _on_disk(schema):
+    """What another connection sees at this moment: the match rows, the
+    completed series and the rating_history rows."""
+    conn = await harness.connect_bound(DSN, schema)
+    try:
+        return (await conn.fetchval("SELECT COUNT(*) FROM matches"),
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM ranked_series WHERE status = 'completed'"),
+                await conn.fetchval("SELECT COUNT(*) FROM rating_history"))
+    finally:
+        await conn.close()
+
+
+def _others(snap, steams):
+    """A _ladder reading without the rows of `steams`: what a hook writing
+    for them must leave alone -- everyone else's progress, credits, worn
+    title and rungs."""
+    return {"progress": {k: v for k, v in snap["progress"].items() if k[0] not in steams},
+            "credits": [c for c in snap["credits"] if c[0] not in steams],
+            "worn": {s: v for s, v in snap["worn"].items() if s not in steams},
+            "rungs": [r for r in snap["rungs"] if r[0] not in steams]}
 
 
 async def _get_ladders(schema, steams):
@@ -1044,25 +1087,50 @@ async def _unbound_seat(request, steam_id, db):
     return main.SEAT_UNBOUND
 
 
+# THE GAME TOKEN (the v1.41.0 beta). A crossing is read only from the posts
+# that carried the physical game's token, counted from the series' own first
+# game (team_series.first_game_nonce, migration 359). The lead-forfeit series
+# stores the beta lab's origin (test_team_series_report_dc.LAB_FIRST), each
+# post carries game 2's token signed as the client signs it, and the DC report
+# names the same token, so the three runs differ only in which seats posted.
+LAB_FIRST = "5eed1ab00f1e2d3c"
+_LF_TOKENS = {}
+
+
 async def _lead_forfeit_series(monkeypatch, sm, ids, posters):
     """Team 1 wins game 1 of a team_lhF series through submit_team_match; then
     each seat in `posters` posts the pair 1-1 for game 2 of the stored sitting,
-    naming it (attested). Returns the series id."""
+    naming it (attested) and carrying its token. Returns the series id."""
     sid = await _team_series(sm, ids, "team_lhF")
     g1 = await _submit(sm, main.submit_team_match,
                        _report_2v2(sid, "team_lhF_000001_r1"))
     assert g1[1] is None and g1[0].series_status == "active", g1
+    async with sm() as db:
+        row = (await db.execute(text(
+            "SELECT t1_series_wins, t2_series_wins, photon_room_id FROM team_series "
+            " WHERE id = :i"), {"i": sid})).first()
+        await db.execute(text("UPDATE team_series SET first_game_nonce = :n WHERE id = :i"),
+                         {"n": LAB_FIRST, "i": sid})
+        await db.commit()
+    ordinal = main._team_game_identity(row[0], row[1], row[2])[0]
+    assert ordinal == 2, row
+    wire = "%s:%d:%d" % (main._team_game_chain_nonce(LAB_FIRST, ordinal, ordinal),
+                         ordinal, ordinal)
+    _LF_TOKENS[str(sid)] = wire
     if posters:
         monkeypatch.setattr(main, "MATCH_HMAC_SECRET", _LIVE_POINTS_SECRET)
         monkeypatch.setattr(main, "_seat_gate_for_live_points", _unbound_seat)
         for reporter in posters:
+            token_sig = main._team_game_token_mac(
+                "team-live-points-token:%s:%s:1:1:2:team_lhF:%s" % (sid, reporter, wire))
             async with sm() as db:
                 post = await _call(main.update_team_live_points, series_id=str(sid),
                                    request=None, t1_points=1, t2_points=1,
                                    reporter_steam_id=reporter,
                                    sig=_live_points_sig(str(sid), reporter, 1, 1, 2,
                                                         "team_lhF"),
-                                   game_number=2, photon_room_id="team_lhF", db=db)
+                                   game_number=2, photon_room_id="team_lhF",
+                                   game_token=wire, token_sig=token_sig, db=db)
             assert post[1] is None and post[0]["status"] == "ok", post
         monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
     return sid
@@ -1765,98 +1833,170 @@ def test_pg_r1_a_fault_in_game_one_costs_only_game_ones_credit(opened, monkeypat
             s, run["got2"][s])
 
 
-async def _r3_run(how, tag):
-    """A 1v1 series to completion with the rating pass forced one way: game
-    1 on the case's own sessions, the deciding report on a session whose
-    commit, for `how` == "skip", invalidates the series from another
-    connection as soon as the completion is on disk -- a reversal landing in
-    the one gap between the completion's commit and the rating pass."""
+async def _r3_run(how, tag, armed=None):
+    """A 1v1 series to completion with the deciding report forced one way;
+    game 1 runs on the case's own sessions. For `how` == "fail", `armed`
+    holds the switch of the test's rating-calculation fault: the deciding
+    report is sent once with the fault armed and, after the state is read,
+    once more with it lifted. For `how` == "one_commit", the deciding report
+    runs on a session that counts its commits and, before each, reads from
+    another connection what the database holds at that moment.
+
+    Either way the one write submit_match makes in a session of its own --
+    the podium holders' sync (bug 325), which fires from a cold podium copy,
+    and _case leaves the copy cold -- is routed to the case schema and
+    counted: the copy is warmed on the case's own players before the state
+    is read and held past the reports whatever the seat's load (_case puts
+    the cache back), so a commit on that session during the reports is a
+    finding, and one commit of this function's own proves the count live."""
     async with _case() as (schema, sm):
         ids = await _seed(sm)
         seeded, _ = await _look(schema)
         g1 = await _submit(sm, main.submit_match, _report_1v1("ranked_lh%s_000001_r1" % tag))
         assert g1[1] is None and g1[0].series_status == "active", g1
-        _mid, mid_econ = await _look(schema)
-        reversed_ = []
+        seen, other = [], []
 
-        class _ReverseBetween(AsyncSession):
+        class _Counting(AsyncSession):
             async def commit(self):
+                seen.append(await _on_disk(schema))
                 await super().commit()
-                if reversed_:
-                    return
-                conn = await harness.connect_bound(DSN, schema)
-                try:
-                    done = await conn.execute(
-                        "UPDATE ranked_series SET invalidated_at = NOW() "
-                        " WHERE status = 'completed' AND invalidated_at IS NULL")
-                finally:
-                    await conn.close()
-                if done == "UPDATE 1":
-                    reversed_.append(True)
-        engine = harness.bound_engine(DSN, schema) if how == "skip" else None
-        deciding = sm if engine is None else async_sessionmaker(
-            engine, expire_on_commit=False, class_=_ReverseBetween)
+
+        class _Elsewhere(AsyncSession):
+            async def commit(self):
+                other.append(await _on_disk(schema))
+                await super().commit()
+        engine = harness.bound_engine(DSN, schema)
+        deciding = sm if how != "one_commit" else async_sessionmaker(
+            engine, expire_on_commit=False, class_=_Counting)
+        saved = database.async_session
+        database.async_session = async_sessionmaker(engine, expire_on_commit=False,
+                                                    class_=_Elsewhere)
         try:
-            g2 = await _submit(deciding, main.submit_match,
-                               _report_1v1("ranked_lh%s_000002_r2" % tag))
+            async with sm() as db:
+                await main._podium_player_ids(db)
+            main._podium_cache["at"] = time.monotonic() + 3600
+            del other[:]
+            mid, mid_econ = await _look(schema)
+            room = "ranked_lh%s_000002_r2" % tag
+            g2 = await _submit(deciding, main.submit_match, _report_1v1(room))
+            refused, refused_econ = await _look(schema)
+            g3 = None
+            if how == "fail":
+                armed[0] = False
+                g3 = await _submit(deciding, main.submit_match, _report_1v1(room))
+            other_during = len(other)
+            async with database.async_session() as probe:
+                await probe.execute(text("SELECT 1"))
+                await probe.commit()
+            other_probe = len(other)
+            conn = await harness.connect_bound(DSN, schema)
+            try:
+                disk = [str(r["id"]) for r in await conn.fetch(
+                    "SELECT id FROM matches WHERE photon_room_id = $1", room)]
+            finally:
+                await conn.close()
         finally:
-            if engine is not None:
-                await engine.dispose()
+            database.async_session = saved
+            await engine.dispose()
         after, econ = await _look(schema)
-        refs = [str(g[0].match_id) for g in (g1, g2) if g[1] is None]
-        return dict(seeded=seeded, mid_econ=mid_econ, g2=g2, after=after, econ=econ,
-                    reversed=bool(reversed_), refs=refs)
+        refs = [str(g[0].match_id) for g in (g1, g2, g3) if g is not None and g[1] is None]
+        return dict(seeded=seeded, mid=mid, mid_econ=mid_econ, g2=g2, g3=g3,
+                    refused=refused, refused_econ=refused_econ, after=after, econ=econ,
+                    seen=seen, other=other, other_during=other_during,
+                    other_probe=other_probe, disk=disk, refs=refs)
 
 
-@pytest.mark.parametrize("how", ["fail", "skip"])
-def test_pg_r3_the_1v1_credit_stands_when_the_rating_pass_does_not_run(opened, monkeypatch,
-                                                                       how):
+@pytest.mark.parametrize("how", ["fail", "one_commit"])
+def test_pg_r3_the_1v1_credit_rides_the_reports_one_commit(opened, monkeypatch, how):
     """LOW-R3 (design V3 section 12.6): "Forcing the 1v1 T2 pass to fail or
     take the skip at `backend/api/main.py:8338-8350` leaves the T1 credit
     committed without a rating update; the credit must not cause a match,
     gold or unrelated-ladder mutation." (The line numbers are the base
-    tree's.) The 1v1 rating pass is the second transaction,
-    after the completion's commit. Forced to FAIL (the rating calculation
-    raises) or to take its SKIP (the series is invalidated between the two
-    transactions -- what the pass's authoritative re-read exists to catch),
-    the credits committed with the two games stand: both players +2, one
-    keyed by each game, and nobody else's ladder moves -- while the ratings stay
-    where game 1 left them and no rating history is written. And the credit
-    causes nothing else: the same run with the hook made a no-op answers the
-    same and commits the same matches, series, XP, gold, items and ratings."""
+    tree's.) Re-read for the tree this file runs on: the v1.41.0 candidate
+    (0266237e) moved the 1v1 rating pass INSIDE the report's transaction --
+    _apply_series_rating_pass, no savepoint, no swallow -- so the deciding
+    report has no second transaction, no gap between a match commit and the
+    rating pass, and no skip; a reversal landing in that gap cannot happen.
+    What the credit must not do is unchanged and is proven at the two places
+    the old shape had. FAIL: the rating calculation raises inside the
+    deciding report, and the report is refused whole (the RuntimeError is
+    its answer): no second match row, no completion, no rating, no history
+    and no credit for game 2 either -- the ladder and the economy, player
+    gold balances included, read exactly as they did after game 1, so the
+    credit never stands without the rating it was paid with. Sent again
+    with the fault lifted, the same report is an ordinary first report: the
+    series completes, both ratings move, two history rows are written, the
+    deciding room has exactly one match row on disk and each player's
+    second credit is keyed by it. ONE COMMIT: the deciding report commits
+    its session exactly once, at the moment of that commit another
+    connection still sees only game 1 -- one match, no completed series, no
+    history -- and no other session commits during the reports (the podium
+    holders' sync is warmed beforehand and its session counted; the count
+    is proven live by one commit of the test's own). Either way the credit
+    causes nothing else: the same run with the hook made a no-op answers
+    the same and commits the same matches, series, XP, gold, items and
+    ratings, and everyone other than the two players keeps their progress,
+    credits, worn title and rungs."""
     _require_live_pg()
-    if how == "fail":
-        def _refuse(*a, **k):
+    armed = [how == "fail"]
+    real = main.calculate_new_rating
+
+    def _calc(*a, **k):
+        if armed[0]:
             raise RuntimeError("ladder hooks: rating pass refused")
-        monkeypatch.setattr(main, "calculate_new_rating", _refuse)
-    live = _run(_r3_run(how, "R"))
+        return real(*a, **k)
+    monkeypatch.setattr(main, "calculate_new_rating", _calc)
+    live = _run(_r3_run(how, "R", armed))
 
     async def _no_hook(db, player_ids, *, mode, reference_id, rows=None):
         return []
     monkeypatch.setattr(tl, HOOK, _no_hook)
-    inert = _run(_r3_run(how, "R"))
+    armed[0] = how == "fail"
+    inert = _run(_r3_run(how, "R", armed))
 
-    forced = {"fail": "Series Glicko update error",
-              "skip": "was invalidated/changed between the match commit and the rating pass"}
+    deciding = "g3" if how == "fail" else "g2"
     for label, run in (("hook live", live), ("hook no-op", inert)):
-        assert run["g2"][1] is None and run["g2"][0].series_status == "completed", (
-            label, run["g2"])
-        assert any(forced[how] in ln for ln in run["g2"][2]), (
-            "the rating pass did not take the forced path", label, how, run["g2"][2])
-        assert run["reversed"] == (how == "skip"), (label, run["reversed"])
+        assert run["other_during"] == 0 and run["other_probe"] == 1, (
+            "R3: a session other than the report's committed during the reports",
+            label, run["other"])
+        if how == "fail":
+            assert run["g2"][0] is None and isinstance(run["g2"][1], RuntimeError), (
+                label, run["g2"])
+            assert "rating pass refused" in str(run["g2"][1]), (label, run["g2"][1])
+            assert run["refused_econ"] == run["mid_econ"], (
+                "R3: the refused report committed a match, series, XP, gold, item or rating",
+                label)
+            assert run["refused"] == run["mid"], (
+                "R3: the refused report left ladder state behind", label, run["refused"])
+        else:
+            assert run["seen"] == [(1, 0, 0)], (
+                "R3: the deciding report did not commit exactly once, after all of its work",
+                label, run["seen"])
+        assert run[deciding][1] is None and run[deciding][0].series_status == "completed", (
+            label, run[deciding])
+        assert run["disk"] == [str(run[deciding][0].match_id)], (
+            "R3: the deciding room does not hold exactly the match the answer names",
+            label, run["disk"], run[deciding][0].match_id)
     ok, want = _plus_n(live["seeded"], live["after"], [P1, P2], 2)
-    assert ok, ("R3: the committed credit did not stand", live["after"]["progress"], want)
+    assert ok, ("R3: the two credits did not land", live["after"]["progress"], want)
     assert len(live["refs"]) == 2, live["refs"]
+    assert live["refs"][1] == live["disk"][0], (live["refs"], live["disk"])
     for ref in live["refs"]:
         assert _credited(live["after"], ref, "1v1", [P1, P2]), live["after"]["credits"]
     assert len(live["after"]["credits"]) == 4, live["after"]["credits"]
-    for table in ("glicko_ratings", "glicko_ratings_2v2", "glicko_ratings_ffa"):
-        assert live["econ"][table] == live["mid_econ"][table], ("R3: a rating moved", table)
-    assert live["econ"]["rating_history"] == 0, live["econ"]["rating_history"]
+    assert _others(live["after"], (P1, P2)) == _others(live["seeded"], (P1, P2)), (
+        "R3: someone other than the two players moved", _others(live["after"], (P1, P2)))
+    assert live["econ"]["glicko_ratings"] != live["mid_econ"]["glicko_ratings"], (
+        "R3: the completion did not rate", live["econ"]["glicko_ratings"])
+    for table in ("glicko_ratings_2v2", "glicko_ratings_ffa"):
+        assert live["econ"][table] == live["mid_econ"][table], ("R3: an unrelated rating moved",
+                                                                table)
+    assert live["econ"]["rating_history"] == 2, live["econ"]["rating_history"]
     assert inert["after"] == inert["seeded"], inert["after"]
     assert live["econ"] == inert["econ"], (
-        "R3: the credit changed a match, series, XP, gold, item or rating")
+        "R3: the credit changed a match, series, XP, gold, item, balance or rating")
     assert _answer_digest([live["g2"]]) == _answer_digest([inert["g2"]])
+    assert _answer_digest([live[deciding]]) == _answer_digest([inert[deciding]])
 
 
 @contextlib.asynccontextmanager
@@ -2104,3 +2244,71 @@ def test_pg_rd3_late_one_v_one_gold_reaches_gold_rush(opened, monkeypatch, sourc
             assert again == [] and replay["progress"] == after["progress"], (again, replay)
             assert replay["credits"] == after["credits"]
     _run(_go())
+
+
+def test_pg_m6_slayer_and_streak_late_gold_share_the_one_commit(opened, monkeypatch):
+    """Merge pass 6 (main e9a3f1e1 into the v1.41.0 lane). The lane grants
+    Slayer and the streak tiers re-verified under the player locks and
+    commits them ONCE; the slayer supplement is added without a commit and
+    the streak supplement rides that one commit. Both sources forced in one
+    series: each has its own late credit, and P1's Gold Rush count equals
+    every play gold row the ledger holds for P1 -- so neither source's gold
+    is dropped, counted twice, or filed under the other."""
+    _require_live_pg()
+    line = "gold_rush"
+    _force_late(monkeypatch, "slayer")
+    _force_late(monkeypatch, "streak")
+
+    async def _go():
+        async with _case() as (schema, sm):
+            _ids, refs, _lines = await _late_series(sm, opened, "LB")
+            after, _ = await _look(schema)
+            play, ach = await _play_ledger(schema)
+            assert ach.get(P1, 0) > 0, ach
+            games, _tier = after["progress"][(P1, line)]
+            assert games == play[P1], ("late gold miscounted", games, play)
+            for source in ("slayer", "streak"):
+                key = tl.late_reference(refs[1], source)
+                assert (P1, key, line, "1v1") in after["credits"], (source, after["credits"])
+    _run(_go())
+
+
+def test_m6_the_rating_pass_and_its_gold_supplement_ride_the_reports_one_commit():
+    """Merge pass 6, edit (c), re-read for this tree. The lane savepointed
+    submit_match's rating pass under a handler that printed and carried on,
+    and had that handler put the achievement-gold note back to the mark
+    taken before the pass. The v1.41.0 candidate (0266237e) runs the pass
+    INSIDE the report's transaction with no savepoint and no handler: a
+    failure propagates and the report rolls back whole, note and all. So
+    the mark is taken, the pass runs, the rating supplement is added from
+    that mark, the slayer and streak supplements follow from their own
+    marks, and the report's first commit after the pass carries all three.
+    Nothing restores the note, because nothing continues past a failed
+    pass; the helper that committed one block and restored the note on
+    failure had no caller left and is gone. Whether a handler encloses the
+    pass is asked of submit_match's syntax tree, not of the text between
+    the pass and the commit: a try opened before the pass with its except
+    after the commit would be invisible there."""
+    src = io.open(MAIN_PY, encoding="utf-8").read()
+    call = "await _apply_series_rating_pass(db, series, p1, p2)"
+    assert src.count(call) == 1, src.count(call)
+    i = src.index(call)
+    assert "_ladder_late_mark = _ladder_achievement_mark(db)" in src[i - 400:i], src[i - 400:i]
+    seg = src[i:src.index("await db.commit()", i)]
+    assert ("_ladder_add_late_gold(\n            db, match.id, _ladder_late_mark, "
+            "_ladder_achievement_mark(db), \"rating\")") in seg[:400], seg[:400]
+    assert seg.count("_ladder_add_late_gold(") == 3, seg.count("_ladder_add_late_gold(")
+    for source in ("\"rating\")", "\"slayer\")", "\"streak\")"):
+        assert seg.count(source) == 1, (source, seg.count(source))
+    for absent in ("except", "begin_nested", "_ladder_achievement_restore("):
+        assert absent not in seg, (absent, seg)
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "submit_match")
+    line = src.count("\n", 0, i) + 1
+    assert fn.lineno < line < fn.end_lineno, (fn.lineno, line, fn.end_lineno)
+    enclosing = [t.lineno for t in ast.walk(fn)
+                 if isinstance(t, ast.Try) and t.lineno <= line <= t.end_lineno]
+    assert enclosing == [], ("a handler encloses the rating pass", enclosing)
+    assert "Series Glicko update error" not in src
+    assert "_ladder_commit_with_late_gold" not in src
+    assert "_ladder_achievement_restore(db, _ladder_late_mark)" not in src

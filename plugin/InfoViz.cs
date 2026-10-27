@@ -58,69 +58,82 @@ namespace CompetitiveRounds
         // builder that wants a shape above text must not use Lbl for it.
         private static readonly List<GameObject> _labels = new List<GameObject>();
 
+        /// <summary>One visual of the Info reading pane. Item 17 fix pass 4
+        /// (M2): the failure rule is KeybindRules.InfoVisual.Build - a visual
+        /// that reads the bindings (the Controls article's keyboard guide)
+        /// and throws or builds nothing propagates to the article's repaint
+        /// gate, which blanks the article and keeps its revision due; any
+        /// other visual's failure is a warning and a null, drawn as its text
+        /// form (r1 MEDIUM 5).</summary>
         internal static GameObject Build(string key, Transform parent)
         {
             _inFlight = null;
             _labels.Clear();
-            try
+            return KeybindRules.InfoVisual.Build(key, () => Dispatch(key, parent), ReleaseFailed,
+                w => Plugin.Log.LogWarning(w));
+        }
+
+        /// <summary>What a builder that threw leaves behind - its recorded
+        /// labels and its half-built panel - released.</summary>
+        private static void ReleaseFailed()
+        {
+            _labels.Clear();
+            if (_inFlight != null)
+            { try { UnityEngine.Object.Destroy(_inFlight); } catch { } _inFlight = null; }
+        }
+
+        /// <summary>The builder of one visual key; its exceptions are
+        /// InfoVisual.Build's to judge.</summary>
+        private static GameObject Dispatch(string key, Transform parent)
+        {
+            GameObject made = null;
+            switch (key)
             {
-                GameObject made = null;
-                switch (key)
-                {
-                    case "keyboard": made = BuildKeyboard(parent); break;
-                    case "dot-timeline": made = BuildDotTimeline(parent); break;
-                    case "block-window": made = BuildBlockWindow(parent); break;
-                    case "rank-ladder": made = BuildRankLadder(parent); break;
-                    case "glicko-rd": made = BuildGlickoRd(parent); break;
-                    case "xp-curve": made = BuildXpCurve(parent); break;
-                    case "gold-sources": made = BuildGoldSources(parent); break;
-                    case "series-format": made = BuildSeriesFormat(parent); break;
-                    case "ffa-scoring": made = BuildFfaScoring(parent); break;
-                    case "grow-curve": made = BuildGrowCurve(parent); break;
-                    case "netcode-map": made = BuildNetcodeMap(parent); break;
-                    case "bet-window": made = BuildBetWindow(parent); break;
-                    case "bracket-flow": made = BuildBracketFlow(parent); break;
-                    case "forfeit-clock": made = BuildForfeitClock(parent); break;
-                    case "when-counts": made = BuildWhenCounts(parent); break;
-                    case "refresh-flow": made = BuildRefreshFlow(parent); break;
-                    case "damage-matrix": made = BuildDamageMatrix(parent); break;
-                    case "refresh-gate": made = BuildRefreshGate(parent); break;
-                    case "refresh-sequences": made = BuildRefreshSequences(parent); break;
-                    case "refresh-window-sequences": made = BuildRefreshWindowSequences(parent); break;
-                    case "movement-window": made = BuildMovementWindow(parent); break;
-                    case "team-format": made = BuildTeamFormat(parent); break;
-                    case "report-pipeline": made = BuildReportPipeline(parent); break;
-                    case "visibility-seats": made = BuildVisibilitySeats(parent); break;
-                    case "anticheat-pipeline": made = BuildAnticheatPipeline(parent); break;
-                    case "achievement-tiers": made = BuildAchievementTiers(parent); break;
-                    case "cosmetics-flow": made = BuildCosmeticsFlow(parent); break;
-                    case "ovt-format": made = BuildOvtFormat(parent); break;
-                    default:
-                        Plugin.Log.LogWarning("[INFO-VIZ] unknown viz key '" + key + "'");
-                        break;
-                }
-                // Labels-last pass: send every recorded label to the end of
-                // its sibling list, in creation order, so lines/arrowheads
-                // drawn after a label can never paint over its glyphs.
-                if (made != null)
-                    for (int i = 0; i < _labels.Count; i++)
-                        if (_labels[i] != null) _labels[i].transform.SetAsLastSibling();
-                _labels.Clear();
-                // A builder that deliberately returned null (e.g. xp-curve's
-                // zero-total bail) still owns a created panel — destroy it.
-                if (made == null && _inFlight != null)
-                { try { UnityEngine.Object.Destroy(_inFlight); } catch { } }
-                _inFlight = null;
-                return made;
+                case "keyboard": made = BuildKeyboard(parent); break;
+                case "dot-timeline": made = BuildDotTimeline(parent); break;
+                case "block-window": made = BuildBlockWindow(parent); break;
+                case "rank-ladder": made = BuildRankLadder(parent); break;
+                case "glicko-rd": made = BuildGlickoRd(parent); break;
+                case "xp-curve": made = BuildXpCurve(parent); break;
+                case "gold-sources": made = BuildGoldSources(parent); break;
+                case "series-format": made = BuildSeriesFormat(parent); break;
+                case "ffa-scoring": made = BuildFfaScoring(parent); break;
+                case "grow-curve": made = BuildGrowCurve(parent); break;
+                case "netcode-map": made = BuildNetcodeMap(parent); break;
+                case "bet-window": made = BuildBetWindow(parent); break;
+                case "bracket-flow": made = BuildBracketFlow(parent); break;
+                case "forfeit-clock": made = BuildForfeitClock(parent); break;
+                case "when-counts": made = BuildWhenCounts(parent); break;
+                case "refresh-flow": made = BuildRefreshFlow(parent); break;
+                case "damage-matrix": made = BuildDamageMatrix(parent); break;
+                case "refresh-gate": made = BuildRefreshGate(parent); break;
+                case "refresh-sequences": made = BuildRefreshSequences(parent); break;
+                case "refresh-window-sequences": made = BuildRefreshWindowSequences(parent); break;
+                case "movement-window": made = BuildMovementWindow(parent); break;
+                case "team-format": made = BuildTeamFormat(parent); break;
+                case "report-pipeline": made = BuildReportPipeline(parent); break;
+                case "visibility-seats": made = BuildVisibilitySeats(parent); break;
+                case "anticheat-pipeline": made = BuildAnticheatPipeline(parent); break;
+                case "achievement-tiers": made = BuildAchievementTiers(parent); break;
+                case "cosmetics-flow": made = BuildCosmeticsFlow(parent); break;
+                case "ovt-format": made = BuildOvtFormat(parent); break;
+                default:
+                    Plugin.Log.LogWarning("[INFO-VIZ] unknown viz key '" + key + "'");
+                    break;
             }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning("[INFO-VIZ] build '" + key + "' failed: " + ex.Message);
-                _labels.Clear();
-                if (_inFlight != null)
-                { try { UnityEngine.Object.Destroy(_inFlight); } catch { } _inFlight = null; }
-                return null;
-            }
+            // Labels-last pass: send every recorded label to the end of
+            // its sibling list, in creation order, so lines/arrowheads
+            // drawn after a label can never paint over its glyphs.
+            if (made != null)
+                for (int i = 0; i < _labels.Count; i++)
+                    if (_labels[i] != null) _labels[i].transform.SetAsLastSibling();
+            _labels.Clear();
+            // A builder that deliberately returned null (e.g. xp-curve's
+            // zero-total bail) still owns a created panel — destroy it.
+            if (made == null && _inFlight != null)
+            { try { UnityEngine.Object.Destroy(_inFlight); } catch { } }
+            _inFlight = null;
+            return made;
         }
 
         // ── positioning primitives (bottom-left origin inside the panel) ──
@@ -246,48 +259,51 @@ namespace CompetitiveRounds
             float kw = 40f;
             float top = H - 76f;      // y of the top key row
             float pitch = 36f;
-            // Row 0: ESC + function keys (F5 is the mod menu).
+            // Fix pass 1 F4: every cap's fill is Fill(id), the side the rows
+            // bound to that cap NOW belong to (KeybindRules.BoardCapRole), so a
+            // moved control recolours the board; the defaults reproduce the
+            // board this replaced.
+            // Row 0: ESC + function keys.
             KeyRow(p, 14f, top, new[]
             {
-                new KeyDef("ESC", 52f, KEY_BOTH), new KeyDef("F1", kw, KEY_NONE), new KeyDef("F2", kw, KEY_NONE),
-                new KeyDef("F3", kw, KEY_NONE), new KeyDef("F4", kw, KEY_NONE), new KeyDef("F5", kw, KEY_MOD),
-                new KeyDef("F6", kw, KEY_NONE), new KeyDef("F7", kw, KEY_NONE), new KeyDef("F8", kw, KEY_NONE),
+                new KeyDef("ESC", 52f, Fill("ESC")), new KeyDef("F1", kw, Fill("F1")), new KeyDef("F2", kw, Fill("F2")),
+                new KeyDef("F3", kw, Fill("F3")), new KeyDef("F4", kw, Fill("F4")), new KeyDef("F5", kw, Fill("F5")),
+                new KeyDef("F6", kw, Fill("F6")), new KeyDef("F7", kw, Fill("F7")), new KeyDef("F8", kw, Fill("F8")),
             });
-            // Row 1: backquote + digits (plain since the Aug 31 wheel rework —
-            // the old 1-9/0 quick-chat picks are retired).
+            // Row 1: backquote + digits.
             KeyRow(p, 14f, top - pitch, new[]
             {
-                new KeyDef(I18n.Tr("`"), kw, KEY_NONE),
-                new KeyDef("1", kw, KEY_NONE), new KeyDef("2", kw, KEY_NONE), new KeyDef("3", kw, KEY_NONE),
-                new KeyDef("4", kw, KEY_NONE), new KeyDef("5", kw, KEY_NONE), new KeyDef("6", kw, KEY_NONE),
-                new KeyDef("7", kw, KEY_NONE), new KeyDef("8", kw, KEY_NONE), new KeyDef("9", kw, KEY_NONE),
-                new KeyDef("0", kw, KEY_NONE),
+                new KeyDef(I18n.Tr("`"), kw, Fill("`")),
+                new KeyDef("1", kw, Fill("1")), new KeyDef("2", kw, Fill("2")), new KeyDef("3", kw, Fill("3")),
+                new KeyDef("4", kw, Fill("4")), new KeyDef("5", kw, Fill("5")), new KeyDef("6", kw, Fill("6")),
+                new KeyDef("7", kw, Fill("7")), new KeyDef("8", kw, Fill("8")), new KeyDef("9", kw, Fill("9")),
+                new KeyDef("0", kw, Fill("0")),
             });
             // Row 2: TAB + top letters.
             KeyRow(p, 14f, top - 2f * pitch, new[]
             {
-                new KeyDef(I18n.Tr("TAB"), 62f, KEY_MOD),
-                new KeyDef("Q", kw, KEY_MOD), new KeyDef("W", kw, KEY_GAME),
-                new KeyDef("E", kw, KEY_MOD), new KeyDef("R", kw, KEY_NONE), new KeyDef("T", kw, KEY_MOD),
-                new KeyDef("Y", kw, KEY_NONE), new KeyDef("U", kw, KEY_NONE), new KeyDef("I", kw, KEY_NONE),
-                new KeyDef("O", kw, KEY_NONE), new KeyDef("P", kw, KEY_NONE),
+                new KeyDef(I18n.Tr("TAB"), 62f, Fill("TAB")),
+                new KeyDef("Q", kw, Fill("Q")), new KeyDef("W", kw, Fill("W")),
+                new KeyDef("E", kw, Fill("E")), new KeyDef("R", kw, Fill("R")), new KeyDef("T", kw, Fill("T")),
+                new KeyDef("Y", kw, Fill("Y")), new KeyDef("U", kw, Fill("U")), new KeyDef("I", kw, Fill("I")),
+                new KeyDef("O", kw, Fill("O")), new KeyDef("P", kw, Fill("P")),
             });
             // Row 3: CAPS + home row + ENTER.
             KeyRow(p, 14f, top - 3f * pitch, new[]
             {
-                new KeyDef(I18n.Tr("CAPS"), 73f, KEY_NONE),
-                new KeyDef("A", kw, KEY_GAME), new KeyDef("S", kw, KEY_GAME), new KeyDef("D", kw, KEY_GAME),
-                new KeyDef("F", kw, KEY_NONE), new KeyDef("G", kw, KEY_NONE), new KeyDef("H", kw, KEY_NONE),
-                new KeyDef("J", kw, KEY_NONE), new KeyDef("K", kw, KEY_NONE), new KeyDef("L", kw, KEY_NONE),
-                new KeyDef("ENTER", 76f, KEY_GAME),
+                new KeyDef(I18n.Tr("CAPS"), 73f, Fill("CAPS")),
+                new KeyDef("A", kw, Fill("A")), new KeyDef("S", kw, Fill("S")), new KeyDef("D", kw, Fill("D")),
+                new KeyDef("F", kw, Fill("F")), new KeyDef("G", kw, Fill("G")), new KeyDef("H", kw, Fill("H")),
+                new KeyDef("J", kw, Fill("J")), new KeyDef("K", kw, Fill("K")), new KeyDef("L", kw, Fill("L")),
+                new KeyDef("ENTER", 76f, Fill("ENTER")),
             });
             // Row 4: SHIFT + bottom letters.
             KeyRow(p, 14f, top - 4f * pitch, new[]
             {
-                new KeyDef(I18n.Tr("SHIFT"), 95f, KEY_MOD),
-                new KeyDef("Z", kw, KEY_NONE), new KeyDef("X", kw, KEY_NONE),
-                new KeyDef("C", kw, KEY_NONE), new KeyDef("V", kw, KEY_NONE), new KeyDef("B", kw, KEY_GAME),
-                new KeyDef("N", kw, KEY_NONE), new KeyDef("M", kw, KEY_MOD),
+                new KeyDef(I18n.Tr("SHIFT"), 95f, Fill("SHIFT")),
+                new KeyDef("Z", kw, Fill("Z")), new KeyDef("X", kw, Fill("X")),
+                new KeyDef("C", kw, Fill("C")), new KeyDef("V", kw, Fill("V")), new KeyDef("B", kw, Fill("B")),
+                new KeyDef("N", kw, Fill("N")), new KeyDef("M", kw, Fill("M")),
             });
             // ANSI stagger, measured from "1": Q +22, A +33, Z +55 pixels.
             // The home row is widest and ends at x=563, leaving 77px before
@@ -295,13 +311,13 @@ namespace CompetitiveRounds
             // right of it (x 441-511, inside the home-row edge) - Sept 8 item 3.
             KeyRow(p, 137f, top - 5f * pitch, new[]
             {
-                new KeyDef(I18n.Tr("SPACE"), 300f, KEY_GAME),
-                new KeyDef(I18n.Tr("ALT"), 70f, KEY_MOD),
+                new KeyDef(I18n.Tr("SPACE"), 300f, Fill("SPACE")),
+                new KeyDef(I18n.Tr("ALT"), 70f, Fill("ALT")),
             });
             // Mouse, to the right of the board.
             float mx = 640f, my = top - 3f * pitch;
-            Box(p, mx, my, 46f, 66f, KEY_GAME);
-            Box(p, mx + 50f, my, 46f, 66f, KEY_GAME);
+            Box(p, mx, my, 46f, 66f, Fill("LMB"));
+            Box(p, mx + 50f, my, 46f, 66f, Fill("RMB"));
             Lbl(p, I18n.Tr("LMB"), 12f, Color.white, mx, my + 20f, 46f, 22f, UIFactory.AlignMidCenter);
             Lbl(p, I18n.Tr("RMB"), 12f, Color.white, mx + 50f, my + 20f, 46f, 22f, UIFactory.AlignMidCenter);
             Lbl(p, I18n.Tr("Mouse"), 12f, TXT_DIM, mx, my - 24f, 96f, 20f, UIFactory.AlignMidCenter);
@@ -313,20 +329,21 @@ namespace CompetitiveRounds
             // Function legend, two columns.
             string[] left =
             {
-                I18n.Tr("F5 - open / close the competitive menu"),
-                I18n.Tr("T - open in-game chat"),
-                I18n.Tr("Q (hold) - quick-chat wheel, release to send"),
-                I18n.Tr("E (hold) - dance wheel; dancing locks your controls"),
-                I18n.Tr("M - cycle the chat overlay mode"),
-                I18n.Tr("ALT (tap, while typing in chat) - switch the chat language channel"),
-                I18n.Tr("TAB (hold, in a match) - live scoreboard"),
-                I18n.Tr("SHIFT - cycle your equipped map skins"),
+                // Item 17: every line names the BOUND control, not a fixed key.
+                I18n.TrF("{0} - open / close the competitive menu", Cap(KeybindRules.MenuToggle)),
+                I18n.TrF("{0} - open in-game chat", Cap(KeybindRules.ChatOpen)),
+                I18n.TrF("{0} (hold) - quick-chat wheel, release to send", Cap(KeybindRules.QuickChat)),
+                I18n.TrF("{0} (hold) - dance wheel; dancing locks your controls", Cap(KeybindRules.DanceWheel)),
+                I18n.TrF("{0} - cycle the chat overlay mode", Cap(KeybindRules.ChatOverlayMode)),
+                I18n.TrF("{0} (tap, while typing in chat) - switch the chat language channel", Cap(KeybindRules.ChatChannel)),
+                I18n.TrF("{0} (hold, in a match) - live scoreboard", Cap(KeybindRules.Scoreboard)),
+                I18n.TrF("{0} - cycle your equipped map skins", Cap(KeybindRules.MapSkinCycle)),
             };
             string[] right =
             {
-                I18n.Tr("WASD - move.  SPACE - jump"),
-                I18n.Tr("LMB - shoot.  RMB - block"),
-                I18n.Tr("SPACE (hold, in a lobby) - ready up / join"),
+                I18n.TrF("{0} - move.  {1} - jump", MoveCaps(), Cap(KeybindRules.Jump)),
+                I18n.TrF("{0} - shoot.  {1} - block", Cap(KeybindRules.Fire), Cap(KeybindRules.Block)),
+                I18n.TrF("{0} (hold, in a lobby) - ready up / join", Cap(KeybindRules.Jump)),
                 I18n.Tr("ENTER - room code box / vanilla chat"),
                 I18n.Tr("B (in a lobby) - add a practice bot"),
                 I18n.Tr("ESC - closes this menu first, then the game menu"),
@@ -343,6 +360,35 @@ namespace CompetitiveRounds
         // Numbers restate the Poison article's asset-verified facts (#424):
         // Poison = 10 ticks over 3.0s (one per 0.3s, first on impact), Toxic
         // Cloud = ~17 ticks over 5.0s, block window = 0.3s.
+
+        /// <summary>Item 17: a legend cap, the bound control's name in the
+        /// legend's upper-case style.</summary>
+        private static string Cap(int row) { return NativeUI.KeybindRowFace(row).ToUpperInvariant(); }
+
+        /// <summary>Fix pass 1 F4: a board cap's fill from the CURRENT
+        /// bindings - gold for a mod control, blue for a game control, purple
+        /// for both, plain for none. Item 17 fix pass 4 (M2): nothing is
+        /// swallowed here - a cap role that cannot be read fails the guide's
+        /// build, and the article repaints rather than show a cap in a colour
+        /// the bindings did not decide. An id the board does not carry is -1,
+        /// plain.</summary>
+        private static Color Fill(string id)
+        {
+            int role = Keybinds.BoardCapRole(id);
+            if (role < 0) role = 0;
+            bool mod = (role & KeybindRules.BoardMod) != 0, game = (role & KeybindRules.BoardGame) != 0;
+            return mod && game ? KEY_BOTH : mod ? KEY_MOD : game ? KEY_GAME : KEY_NONE;
+        }
+
+        /// <summary>The four movement caps: run together when each is one
+        /// character (the default reads WASD), slash-separated otherwise.</summary>
+        private static string MoveCaps()
+        {
+            var c = new[] { Cap(KeybindRules.MoveUp), Cap(KeybindRules.MoveLeft), Cap(KeybindRules.MoveDown), Cap(KeybindRules.MoveRight) };
+            bool glyphs = true;
+            foreach (var s in c) if (s.Length != 1) glyphs = false;
+            return glyphs ? string.Concat(c) : string.Join("/", c);
+        }
 
         private static GameObject BuildDotTimeline(Transform parent)
         {

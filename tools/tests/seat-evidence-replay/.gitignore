@@ -1,0 +1,4 @@
+# Build output, case directories and generated mutants. run_replay.py regenerates all of it.
+bin/
+obj/
+work/

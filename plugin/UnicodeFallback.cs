@@ -347,6 +347,48 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Report 3 (2026-09-30): a player-authored name, made safe for
+        /// a TMP element in the list panels (NameGlyphs.Safe: unrenderable code
+        /// points and cut surrogate pairs become '?', controls a space, '&lt;'
+        /// and '&gt;' become '[' and ']'). The name's code points are asked of
+        /// the fallback chain first, so a glyph a fallback font carries is
+        /// kept and one no font carries is replaced instead of reaching TMP --
+        /// the Recent Ranked Series page that held U+13171 rendered blank.</summary>
+        internal static string SafeName(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            try { EnsureCharacters(s); } catch { }
+            return NameGlyphs.Safe(s, CanRender);
+        }
+
+        /// <summary>SafeName's glyph pass alone, for a caller that escapes tag
+        /// characters its own way (NativeUI.FfaSafeRich).</summary>
+        internal static string SafeGlyphs(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            try { EnsureCharacters(s); } catch { }
+            return NameGlyphs.Glyphs(s, CanRender);
+        }
+
+        /// <summary>Whether a code point reaches TMP with a glyph behind it, as
+        /// far as this class knows. ASCII is the game font's own. A code point
+        /// the fallback chain added renders; one every live fallback was asked
+        /// for and lacked does not. What this class cannot answer -- no install,
+        /// or a code point left unresolved by a skipped font -- is kept in the
+        /// basic plane, as it was before this check existed, and refused in
+        /// the supplementary plane, the report-3 case.</summary>
+        internal static bool CanRender(int cp)
+        {
+            if (cp < 0x80) return true;
+            uint u = (uint)cp;
+            if (_installed)
+            {
+                if (_knownCodepoints.Contains(u)) return true;
+                if (_missingCodepoints.Contains(u)) return false;
+            }
+            return cp <= 0xFFFF;
+        }
+
         private static void LogBatchFailureOnce(Exception ex)
         {
             if (_batchFailureLogged) return;
