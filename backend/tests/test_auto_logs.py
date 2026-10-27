@@ -5075,6 +5075,8 @@ async def _a_pass_past_its_ceiling(logdir, held):
         seen["b"] = "ran: %r" % (out,)
     except auto_logs.RetentionPassBusy:
         seen["b"] = "busy"
+    except auto_logs.RetentionPassTimedOut:
+        seen["b"] = "ran: timed out"
     seen["a_open_at_b"] = held.entered - held.finished
     await held.drained()
     await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)

@@ -747,7 +747,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    assert len(manifest) == 402   # v1.41.0 merge pass 4 (c), main 5062f4c4 (the connect-failure LAND above) into the beta: +4, main's four assembly routes (392 before; main's side 388); v1.41.0 merge pass 4, main 0e751993 into the beta: +1, Discord fix round 1's bot pack open (internal/pc/packs/open; 391 before; main's side 384); v1.41.0 merge pass 3, main cd8d846 into the beta: +17 over the beta's 374, main's dance cards +5, 886bed8 r5 +1 (the read-only team series status route), card trading +7 and Discord collection reveal +4, the title-ladder read both sides added counted once (main's side: 383); before that, the beta: ASKS-B lane, board rows 24 and 25: +2 (the Settings card preview and the batch shard; 372 before); v1.41.0 beta round 11: -1 (the physical game 1 issue removed with route (a), finding M1; 373 before); v1.41.0 beta round 8: +1 (the series' physical game 1 issue, finding F31; 372 before); v1.41.0 beta round 2: +1 (the pending-DM cancellation recheck; 371 before); v1.41.0 lane: +6 (auto log upload and prune, the three mail relay routes, the title-ladder read; 365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 406   # v1.41.0 release merge (2026-10-27), main 0f36f018 into the candidate f7ea51c4: main's 400 plus the candidate's 6 routes main did not have, measured by the re-pin (406 recorded, 406 live)
     # main's side before the fold:
     # automatic log upload revival (2026-10-05): main e9a3f1e1's 388 + the autolog lane's 2 new routes
     # (POST /logs/auto and the internal prune; 362 -> 364 on the lane's own side), the union is 390
@@ -759,6 +759,11 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # lane: the union of the lane's 390 and main 6bb8208f's 394 over their
     # shared 388 (main e9a3f1e1) is 396: the trunk's 394 plus the lane's 2,
     # confirmed by the re-pin dry run
+    # seat evidence V2 (claude/seat-evidence-server-v2): +4 (the seat record and compat outcome routes, the
+    # admin seat-evidence view and the release digest registration; 388 before)
+    # seat evidence LAND merge pass (2026-10-19), merge of the lane 520d5d31 with main ca00e375: the
+    # union of main's 396 and the lane's 392 over their shared 388 (14127702) is 400: the trunk's 396
+    # plus the lane's 4, measured by the precommit route measurement and confirmed by the re-pin dry run
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -781,7 +786,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # trunk fold (2026-10-15): the union of the lane's 395 and main's 395 over their shared 387 is
     # 401: the lane's 6 plus main's 6 plus the 2 auto-log routes both sides added (all
     # statically-nonconsumer). The lane's history is on the assertion, main's below it.
-    assert len(static) == 401   # v1.41.0 merge pass 4 (c), main 5062f4c4: +4, main's four assembly routes (391 before; main's side 387); v1.41.0 merge pass 4, main 0e751993: +1, Discord fix round 1 (390 before; main's side 383); v1.41.0 merge pass 3: +17 (373 before; main's side 382); ASKS-B lane: +2 (371 before); v1.41.0 beta round 11: -1 (372 before); v1.41.0 beta round 8: +1 (371 before); v1.41.0 beta round 2: +1 (370 before); v1.41.0 lane: +6 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 405   # v1.41.0 release merge (2026-10-27): main's 399 plus the candidate's 6, all statically-nonconsumer (406 rows, one sentinel-exercised)
     # main's side before the fold:
     # automatic log upload revival (2026-10-05): main e9a3f1e1's 387 + the autolog lane's 2 (both
     # statically-nonconsumer), the union is 389
@@ -793,6 +798,10 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # and main 6bb8208f's 393 over their shared 387 is 395: the trunk's 393
     # plus the lane's 2 (both statically-nonconsumer), confirmed by the
     # re-pin dry run
+    # seat evidence V2 (claude/seat-evidence-server-v2): +4, all statically-nonconsumer (387 before)
+    # seat evidence LAND merge pass (2026-10-19): the union of main's 395 and the lane's 391 over their
+    # shared 387 is 399: the trunk's 395 plus the lane's 4 (all statically-nonconsumer), measured by
+    # the precommit route measurement and confirmed by the re-pin dry run
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -1481,30 +1490,17 @@ def test_the_helper_closure_stays_affordable():
     # on 365 (see the code worst bound); nothing either side reached is
     # missing. The bound moves to 153, ~5% over the measurement, for that
     # reason and no other.
-    # Trunk fold (2026-10-15, the table at the code p90 bound): 154 measured
-    # (position 201 of 401, POST /api/v1/admin/reverse-series: 119 at the
-    # base, 141 on the lane, 142 on the trunk; the two sides' gains over the
-    # base sum to 164, so the fold reaches less than the sum, nothing past
-    # it). The bound moves to 162, ~5% over the measurement, for that reason
-    # and no other.
-    assert all_median <= 162, f"median closure {all_median} of {total}"
-    # v1.41.0 lane merge (2026-09-25): measured 89 / 163 / 480 of 2639 indexed
-    # bindings, against 72 / 140 / 457 for the same walk over MAIN's backend/api
-    # (c2d14ad, 2505). The CODE tier moved only at p90, 65 -> 74: the A1
-    # identity barrier and its lease helpers, which the queue formation routes
-    # really run (26 of them newly reach _identity_lock_many). Its median (21)
-    # and worst (326) did not move. Of the bindings the 364 routes common to
-    # both trees gained, 93% (5671 of 6100) are IMPORT leaves of the lane's
-    # own modules, auto_logs, mail_discord and title_ladders. They import
-    # names that nearly every route writes -- AsyncSession, Depends, text,
-    # get_db, HTTPException, datetime -- and the walk folds in EVERY module
-    # that binds a referenced name, so each such import line joins each such
-    # route's surface: 355 routes gained auto_logs.AsyncSession and
-    # mail_discord.AsyncSession alone. A leaf is never expanded, and it widens
-    # the reviewed surface, which is the only direction this gate may be
-    # wrong in. The bound moves to 172, the ~5% headroom the worst bound has
-    # kept. The median bound stays: measured 89, it did not fail.
-    #
+    # Seat evidence LAND merge pass (2026-10-19), the lane 520d5d31 with
+    # main ca00e375: 159 measured (POST /api/v1/tournaments/{tournament_id}/
+    # matches/{match_id}/forfeit: 124 at the base 14127702, 135 on the lane,
+    # 148 on the trunk; 191 routes above it). Nothing on the route is new to
+    # both sides; the merge adds 11 names over the trunk, every one an
+    # IMPORT-tier binding of the lane's new modules folded in by name
+    # (seat_evidence, review_rules, review_boot and build_no_bytecode binding
+    # os, time, hashlib, datetime, timezone, text); the code median stays 76
+    # (76 on the trunk). The bound moves to 167, ~5%
+    # over the measurement, for that reason and no other.
+    assert all_median <= 167, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1716,12 +1712,17 @@ def test_the_helper_closure_stays_affordable():
     # the trunk), 39 routes above it; the same by-name fold as the median
     # above. The bound moves to 256, ~5% over the measurement, for that
     # reason and no other.
-    # Trunk fold (2026-10-15, the table at the code p90 bound): 264 measured
-    # (position 361 of 401, GET /api/v1/ovt/queue/poll/{steam_id}: 145 at the
-    # base, 179 on the lane, 243 on the trunk; the sum of the two sides' gains
-    # is 277). The bound moves to 277, ~5% over the measurement, for that
-    # reason and no other.
-    assert all_p90 <= 277, f"p90 closure {all_p90} of {total}"
+    # Seat evidence LAND merge pass (2026-10-19): 259 measured on GET
+    # /api/v1/ovt/queue/poll/{steam_id} (145 at the base, 160 on the lane,
+    # 243 on the trunk), 39 routes above it; the merge adds 16 names to it
+    # over the trunk, every one IMPORT-tier and one of them
+    # (seat_evidence.hmac) on neither side, the same by-name fold as the
+    # median above. The bound moves to 272,
+    # ~5% over the measurement, for that reason and no other.
+    # v1.41.0 release merge (2026-10-27), main 0f36f018 into the candidate f7ea51c4: 277 measured
+    # of 4028 indexed bindings (the candidate's own bound was 277 at 264 measured; main's 272 at 259).
+    # The bound moves to 291, ~5% over the measurement, for that reason and no other.
+    assert all_p90 <= 291, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -1800,10 +1801,28 @@ def test_the_helper_closure_stays_affordable():
     # the union plus read_gate.uuid by name). GET /api/v1/pc/packs/result,
     # the trunk's worst (562), measures 579. The bound moves to 642, ~5%
     # over the measurement, for that reason and no other.
-    # Trunk fold (2026-10-15, the table at the code p90 bound): 603 measured
-    # on GET /api/v1/health (356 at the base, 514 on the lane, 472 on the
-    # trunk). Inside 642, so the bound stays.
-    assert all_worst <= 642, f"worst closure {all_worst} of {total}"
+    # Seat evidence V2 (claude/seat-evidence-server-v2, 2026-10-02): the same
+    # route measured 503 at the base 14127702 and 526 on the lane -- +23, and
+    # all 23 are IMPORT leaves: the five new modules (seat_evidence and the
+    # four review modules) each bind stdlib names every route already
+    # references (json, os, hashlib, datetime, timezone, time, math, hmac,
+    # uuid, secrets, stat, text), and the walk folds in every module that binds
+    # a shared name. No code binding of the new modules reaches an existing
+    # route: after the review modules' generic function names were made
+    # distinctive, the code tier moves only on the four new routes and
+    # /api/v1/health (median 22 / p90 97 / worst 370, all under their bounds).
+    # Whole closure over 391 routes: median 76 -> 86, p90 197 -> 196. The
+    # bound moves to 556, ~6% over the measurement, for that reason and no
+    # other; the median and p90 bounds stay.
+    # Seat evidence LAND merge pass (2026-10-19), the lane 520d5d31 with
+    # main ca00e375: 596 measured on GET /api/v1/pc/packs/result (579 on the
+    # trunk; on the lane and at the base the worst is POST
+    # /api/v1/pc/packs/open, 521 and 503). Inside 642, so the bound stays;
+    # the lane's 556 does not apply to the merged tree.
+    # v1.41.0 release merge (2026-10-27), main 0f36f018 into the candidate f7ea51c4: 644 measured
+    # of 4028 indexed bindings (642 was the bound both sides kept). The bound moves to 676, ~5%
+    # over the measurement, for that reason and no other.
+    assert all_worst <= 676, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

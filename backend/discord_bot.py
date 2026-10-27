@@ -12516,7 +12516,23 @@ def _flag_color_and_emoji(reason: str, auto_inv: bool):
     if reason == "too_many_cards":          return (0xE74C3C, "🃏")  # red
     if reason == "short_duration_pattern":  return (0xE67E22, "⏱️")  # orange
     if reason == "inactive_player":         return (0xF1C40F, "💤")  # yellow (advisory)
+    if reason == "review":                  return (0x16A085, "R")   # review rules item (advisory)
     return (0x95A5A6, "🚩")
+
+
+def _review_flag_line(details) -> str:
+    """The text of a review item: the `line` the api rendered from the rules
+    revision's own wording when it opened the item (numbers and recorded text
+    only). The bot adds no wording of its own and reads nothing else from the
+    details. They arrive as an object or as JSON text, whichever the api's
+    driver returned."""
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except ValueError:
+            details = None
+    line = details.get("line") if isinstance(details, dict) else None
+    return line if isinstance(line, str) and line else "review: no line"
 
 
 def _flag_embed_text(value, limit=850):
@@ -12872,7 +12888,9 @@ async def poll_anticheat_flags():
                 f"Suspect(s): {f.get('suspect_steam_text') or 'not attributable'}"
             )
             embed.add_field(name="Steam IDs / suspect", value=_flag_embed_text(ids, 500), inline=False)
-            embed.add_field(name="Detector evidence", value=_flag_embed_text(f.get("evidence_summary"), 700), inline=False)
+            evidence = (_review_flag_line(f.get("flag_details"))
+                        if f.get("flag_reason") == "review" else f.get("evidence_summary"))
+            embed.add_field(name="Detector evidence", value=_flag_embed_text(evidence, 700), inline=False)
             progress = f"{f.get('score_summary')}\nPoints: {f.get('point_progress')}"
             embed.add_field(name="Score / point progress", value=_flag_embed_text(progress, 650), inline=False)
             embed.add_field(name="Cards picked", value=_flag_embed_text(f.get("cards_summary"), 650), inline=False)

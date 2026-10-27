@@ -2,3 +2,5 @@
 backend/tests/evidence/** -text
 # The seat evidence server-comparison fixtures are compared byte for byte with the build: no line-ending conversion.
 tools/tests/seat-evidence-client/server_fixtures/** -text
+# The client lane's generated seat-evidence fixtures are pinned by sha256: no line-ending conversion.
+backend/tests/fixtures/seat_evidence_client_b7/** -text

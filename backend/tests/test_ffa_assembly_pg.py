@@ -5119,6 +5119,474 @@ def test_s64_i_ii_the_false_mark_and_the_refuted_tally(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_early_leave_grace_excludes_game_rating_xp_and_gold(monkeypatch):
+    """T6: a seat leaving below two full field points is absent from this
+    game's rating and receives no game XP or Gold through the real endpoint."""
+    async def body(env):
+        lob = await _s64_lobby(env)
+        s = lob.sids
+        res = _s64_res(lob)
+        res[s[6]] = (0, 1)
+        await env.ready_all(lob, list(range(7)))
+        rows = await _settled(
+            env, lob, 1, res, "early-leave grace", rated=False,
+            reporter=s[0], left={s[6]}, gp_leave={s[6]: 3})
+        row = rows[6]
+        assert row["absent"] is True and row["left_early"] is True
+        assert row["game_points_at_leave"] == 3
+        assert row["rating_change"] is None
+        assert row["xp_gained"] == 0 and row["gold_gained"] == 0
+    run_env(monkeypatch, body)
+
+
+async def _grace_kill_awards(env, pid):
+    keys = await env.conn.fetch(
+        "SELECT achievement_key FROM player_achievements WHERE player_id = $1"
+        " ORDER BY achievement_key", pid)
+    gold = await env.conn.fetch(
+        "SELECT reference_id, amount FROM gold_transactions"
+        " WHERE player_id = $1 AND reason = 'achievement' ORDER BY reference_id", pid)
+    return [r["achievement_key"] for r in keys], [tuple(r) for r in gold]
+
+
+async def _grace_kill_game(env, kills, *, unsigned=False):
+    lob = await _s64_lobby(env)
+    s, res = lob.sids, _s64_res(lob)
+    res[s[5]] = res[s[6]] = (0, 0)
+    await env.ready_all(lob, list(range(7)))
+    if unsigned:
+        await env.set_lobby(lob, kills_tiebreak=False)
+        env.mp.setattr(main, "_verify_ffa_hmac", lambda report: "v1")
+    before = {slot: await _econ(env, lob.pids[slot]) for slot in (5, 6)}
+    report = await env.report_req(
+        lob, 1, res, reporter=s[0], left={s[5], s[6]}, absent={s[5]},
+        gp_leave={s[6]: 0})
+    next(p for p in report.players if p.steam_id == s[6]).kills = kills
+    result = await env.submit(report)
+    assert result.status == 200, result
+    return lob, before, await _mp(env, lob, 1)
+
+
+@pytest.mark.parametrize("kills,keys", [
+    pytest.param(51, ["ffa_kills_50"], id="C1-51"),
+    pytest.param(101, ["ffa_kills_100", "ffa_kills_50"], id="C2-101"),
+])
+def test_early_leave_grace_keeps_signed_kill_achievements(monkeypatch, kills, keys):
+    """C1/C2: signed kill badges and their live gold survive the game grace."""
+    async def body(env):
+        lob, before, rows = await _grace_kill_game(env, kills)
+        pid, row = lob.pids[6], rows[6]
+        assert await _grace_kill_awards(env, pid) == (
+            keys, [(key, main._achievement_gold(key)) for key in keys])
+        after = await _econ(env, pid)
+        assert after[0] == before[6][0]
+        for column in ("total_xp", "ffa_xp_earned"):
+            assert after[1][column] == before[6][1][column]
+        assert after[1]["gold_earned"] == before[6][1]["gold_earned"] + sum(
+            main._achievement_gold(key) for key in keys)
+        assert row["absent"] is True and row["left_early"] is True
+        assert row["game_points_at_leave"] == 0 and row["rating_change"] is None
+        assert row["xp_gained"] == 0 and row["gold_gained"] == 0
+        assert await _grace_kill_awards(env, lob.pids[5]) == ([], [])
+        assert await _econ(env, lob.pids[5]) == before[5]
+        assert rows[5]["absent"] is True and rows[5]["rating_change"] is None
+    run_env(monkeypatch, body)
+
+
+def test_early_leave_grace_keeps_ghosts_excluded_from_achievements(monkeypatch):
+    """C3: the zero-tally ghost in the C1 game remains excluded."""
+    async def body(env):
+        lob, before, rows = await _grace_kill_game(env, 51)
+        assert await _grace_kill_awards(env, lob.pids[5]) == ([], [])
+        assert await _econ(env, lob.pids[5]) == before[5]
+        assert rows[5]["absent"] is True and rows[5]["rating_change"] is None
+        assert rows[5]["xp_gained"] == 0 and rows[5]["gold_gained"] == 0
+    run_env(monkeypatch, body)
+
+
+def test_early_leave_grace_does_not_award_unsigned_kills(monkeypatch):
+    """C4: a v1 report preserves grace but cannot mint a kill badge or gold."""
+    async def body(env):
+        lob, before, rows = await _grace_kill_game(env, 51, unsigned=True)
+        assert await _grace_kill_awards(env, lob.pids[6]) == ([], [])
+        assert await _econ(env, lob.pids[6]) == before[6]
+        row = rows[6]
+        assert row["absent"] is True and row["left_early"] is True
+        assert row["game_points_at_leave"] == 0 and row["rating_change"] is None
+        assert row["xp_gained"] == 0 and row["gold_gained"] == 0
+    run_env(monkeypatch, body)
+
+
+def test_early_leave_grace_keeps_assembly_overlap_excluded(monkeypatch):
+    """C5: grace cannot undo an independent assembly exclusion in game two."""
+    async def body(env):
+        lob = await _s64_lobby(env, t=60.0)
+        s, res = lob.sids, _s64_res(lob)
+        await _omit(env, lob, [0, 2], 6)
+        result = await env.leave(lob, 6)
+        assert result.status == 200, result
+        seat = await env.seat(lob, 6)
+        assert (seat["gone_game"], seat["gone_path"], seat["verdict"]) == (
+            1, "leave", "granted")
+        result = await env.report(
+            lob, 1, res, reporter=s[0], left={s[6]}, gp_leave={s[6]: 5})
+        assert result.status == 200, result
+        before = await _econ(env, lob.pids[6])
+        res[s[6]] = (0, 0)
+        report = await env.report_req(
+            lob, 2, res, reporter=s[0], left={s[6]}, gp_leave={s[6]: 0})
+        next(p for p in report.players if p.steam_id == s[6]).kills = 51
+        result = await env.submit(report)
+        assert result.status == 200, result
+        assert await _grace_kill_awards(env, lob.pids[6]) == ([], [])
+        assert await _econ(env, lob.pids[6]) == before
+        row = (await _mp(env, lob, 2))[6]
+        assert row["absent"] is True and row["left_early"] is True
+        assert row["game_points_at_leave"] == 0 and row["rating_change"] is None
+        assert row["xp_gained"] == 0 and row["gold_gained"] == 0
+    run_env(monkeypatch, body)
+
+
+def test_early_leave_grace_achievement_exclusions_are_independent():
+    """S1: ghost/assembly exclusions feed both achievement filters; grace does not."""
+    import ast
+    import inspect
+    import io
+    import textwrap
+    import tokenize
+
+    raw = inspect.getsource(main.submit_ffa_match)
+    toks = [t for t in tokenize.generate_tokens(io.StringIO(textwrap.dedent(raw)).readline)
+            if t.type != tokenize.COMMENT]
+    src = tokenize.untokenize(toks)
+    tree = ast.parse(src)
+
+    def assignments(name):
+        return sorted((n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                       and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)),
+                      key=lambda n: n.lineno)
+
+    independent = assignments("excluded")
+    assert len(independent) == 2
+    assert ast.dump(independent[0].value) == ast.dump(ast.Name(id="ghosts", ctx=ast.Load()))
+    assembly = independent[1].value
+    assert isinstance(assembly, ast.Await) and isinstance(assembly.value, ast.Call)
+    call = assembly.value
+    assert isinstance(call.func, ast.Name) and call.func.id == "_asm_report_rules"
+    assert [ast.dump(k.value) for k in call.keywords if k.arg == "unrated"] == [
+        ast.dump(ast.Name(id="excluded", ctx=ast.Load()))]
+    union, = assignments("unrated")
+    assert ast.dump(union.value) == ast.dump(ast.BinOp(
+        left=ast.Name(id="excluded", ctx=ast.Load()), op=ast.BitOr(),
+        right=ast.Name(id="graced", ctx=ast.Load())))
+    assert independent[0].lineno < independent[1].lineno < union.lineno
+    assert "_ach_players = sorted(" in src
+    candidates, = assignments("_ach_players")
+    candidate_filter = candidates.value.args[0].generators[0].ifs[0]
+    assert ast.dump(candidate_filter) == ast.dump(ast.Compare(
+        left=ast.Attribute(value=ast.Name(id="p", ctx=ast.Load()), attr="steam_id",
+                           ctx=ast.Load()), ops=[ast.NotIn()],
+        comparators=[ast.Name(id="excluded", ctx=ast.Load())]))
+    winners = [n for n in ast.walk(tree) if isinstance(n, ast.Compare)
+               and n.lineno > candidates.lineno
+               and isinstance(n.left, ast.Attribute)
+               and isinstance(n.left.value, ast.Name) and n.left.value.id == "report"
+               and n.left.attr == "winner_steam_id" and any(
+                   isinstance(op, ast.NotIn) for op in n.ops)]
+    assert len(winners) == 1
+    assert [ast.dump(v) for v in winners[0].comparators] == [
+        ast.dump(ast.Name(id="excluded", ctx=ast.Load()))]
+    assert sum(isinstance(n, ast.Name) and n.id == "unrated" and isinstance(n.ctx, ast.Load)
+               for n in ast.walk(tree)) == 9
+    assert sum(isinstance(n, ast.Name) and n.id == "excluded" and isinstance(n.ctx, ast.Load)
+               for n in ast.walk(tree)) == 4
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
+            assert not any(isinstance(n, ast.Name) and n.id == "graced"
+                           for n in ast.walk(node.right))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "difference":
+            assert not any(isinstance(n, ast.Name) and n.id == "graced"
+                           for arg in node.args for n in ast.walk(arg))
+    trust = raw[raw.index("# TRUST:"):raw.index("# Old clients")]
+    flat = " ".join(line.lstrip().lstrip("#").strip() for line in trust.splitlines())
+    assert ("Achievements are unaffected by the grace: their predicates read the "
+            "ghost and assembly exclusions, not the grace.") in flat
+    module_src = inspect.getsource(main)
+    block = module_src[module_src.index("# Early-leave grace"):
+                       module_src.index("FFA_LEAVE_GRACE_FULL_POINTS =")]
+    flat = " ".join(line.lstrip().lstrip("#").strip() for line in block.splitlines())
+    assert "The grace leaves achievements unaffected." in flat
+
+
+# Fix 2: the stored assembly exclusion snapshot, through both replay routes.
+
+
+def _fix2_assert_snapshot(rows):
+    """F5: every new settlement stores the reasons and the same absence decision."""
+    for slot, row in rows.items():
+        reasons = row["exclusion_reasons"]
+        assert reasons is not None, ("F5 NULL snapshot", slot)
+        assert reasons == sorted(set(reasons)), ("F5 sorted reason set", slot, reasons)
+        assert set(reasons) <= {"ghost", "grace", "asm_a", "asm_b", "asm_d"}
+        assert bool(row["absent"]) == bool(reasons), ("F5 absence", slot, row)
+
+
+async def _fix2_assembly_game(env, reason, *, game=1):
+    """One seat excluded only by the requested assembly rule; others are present."""
+    if reason == "d":
+        lob = await _s64_lobby(env, t=60.0)
+        s, res = lob.sids, _s64_res(lob)
+        await _omit(env, lob, [0, 2], 6)
+        left = await env.leave(lob, 6)
+        assert left.status == 200, left
+        assert await _gone(env, lob, 6) == (1, "leave")
+        first = await env.report(lob, 1, res, reporter=s[0],
+                                 left={s[6]}, gp_leave={s[6]: 5})
+        assert first.status == 200, first
+        game, slot = 2, 6
+    else:
+        lob = await _short(env, 5)
+        await env.at(lob, 50.0)
+        if reason == "a":
+            await _admit(env, lob, 4, 5, 0, [0, 1, 2, 3])
+        await env.at(lob, 55.0)
+        s = lob.sids
+        res = {s[0]: (5, 10), s[1]: (4, 8), s[2]: (3, 6),
+               s[3]: (2, 4), s[4]: (3, 7)}
+        slot = 4
+        if game == 2:
+            first = await env.report(lob, 1, res, reporter=s[0])
+            assert first.status == 200, first
+    settled = await env.report(lob, game, res, reporter=s[0])
+    rows = await _mp(env, lob, game)
+    assert settled.status == 200 and _unrated(rows[slot]), ("F settlement", reason, settled)
+    assert all(_rated(row) for n, row in rows.items() if n != slot), rows
+    return lob, game, slot, res, settled, rows
+
+
+async def _fix2_replay(env, lob, game, res, route, **kw):
+    room = None if route == "same" else "ffa_fix2_again_r%d" % game
+    return await env.report(lob, game, res, reporter=lob.sids[0], room=room, **kw)
+
+
+def _fix2_assert_echo(answer, settled, rows, lob):
+    assert answer.status == 200, ("F identical replay", answer)
+    assert answer["message"] == "Already recorded", answer
+    assert answer["match_id"] == settled["match_id"], (answer, settled)
+    assert answer["placement"] == rows[0]["placement"]
+    assert answer["xp_gained"] == rows[0]["xp_gained"]
+    assert answer["gold_gained"] == rows[0]["gold_gained"]
+    assert answer["rating_changes"] == {
+        lob.sids[slot]: float(row["rating_change"] or 0.0) for slot, row in rows.items()}
+
+
+@pytest.mark.parametrize("reason", ["a", "b", "d"])
+@pytest.mark.parametrize("route", ["same", "different"])
+def test_fix2_f1_assembly_identical_replay(monkeypatch, reason, route):
+    """F1/F5: each assembly-only exclusion echoes on both replay routes."""
+    async def body(env):
+        lob, game, slot, res, settled, rows = await _fix2_assembly_game(env, reason)
+        counts = await _report_counts(env, lob)
+        answer = await _fix2_replay(env, lob, game, res, route)
+        # Keep the baseline failure on the false quarantine, before the new column.
+        _fix2_assert_echo(answer, settled, rows, lob)
+        assert await _report_counts(env, lob) == counts
+        assert counts["quarantine"] == 0
+        assert await _mp(env, lob, game) == rows
+        _fix2_assert_snapshot(rows)
+        assert rows[slot]["exclusion_reasons"] == ["asm_" + reason]
+        assert all(row["exclusion_reasons"] == [] for n, row in rows.items() if n != slot)
+    run_env(monkeypatch, body)
+
+
+@pytest.mark.parametrize("route", ["same", "different"])
+def test_fix2_f2_later_evidence_keeps_settlement_snapshot(monkeypatch, route):
+    """F2/F5: game-one body evidence arriving after game two cannot rewrite its comparison."""
+    async def body(env):
+        lob, game, slot, res, settled, rows = await _fix2_assembly_game(env, "a", game=2)
+        _fix2_assert_snapshot(rows)
+        assert rows[slot]["exclusion_reasons"] == ["asm_a"]
+        assert (await env.seat(lob, slot))["late_body_game"] is None
+        await env.at(lob, 60.0)
+        entered = await env.connect(lob, slot, "entered", game=1)
+        assert entered.status == 200, entered
+        witness = await env.assembly(lob, 0, 1,
+                                     [env.entry(lob, n, 1 + n) for n in range(5)], game=1)
+        assert witness.status == 200, witness
+        assert (await env.seat(lob, slot))["late_body_game"] == 1
+        counts = await _report_counts(env, lob)
+        answer = await _fix2_replay(env, lob, game, res, route)
+        _fix2_assert_echo(answer, settled, rows, lob)
+        assert await _report_counts(env, lob) == counts
+        assert await _mp(env, lob, game) == rows
+        _fix2_assert_snapshot(await _mp(env, lob, game))
+    run_env(monkeypatch, body)
+
+
+@pytest.mark.parametrize("route", ["same", "different"])
+def test_fix2_f3_changed_ghost_claim_is_refused(monkeypatch, route):
+    """F3/F5: the stored ghost reason cannot replace the incoming absent claim."""
+    async def body(env):
+        lob = await _s64_lobby(env)
+        s, res = lob.sids, _s64_res(lob)
+        res[s[6]] = (0, 0)
+        settled = await env.report(lob, 1, res, reporter=s[0], left={s[6]}, absent={s[6]})
+        assert settled.status == 200, settled
+        rows = await _mp(env, lob, 1)
+        _fix2_assert_snapshot(rows)
+        assert rows[6]["exclusion_reasons"] == ["ghost"]
+        counts = await _report_counts(env, lob)
+        answer = await _fix2_replay(env, lob, 1, res, route, left={s[6]})
+        assert answer.status == 409, answer
+        reasons = await env.conn.fetch(
+            "SELECT reason FROM match_report_quarantine WHERE group_id = $1", lob.lid)
+        assert [row["reason"] for row in reasons] == ["ffa_game_contradiction"]
+        assert await _report_counts(env, lob) == dict(counts, quarantine=counts["quarantine"] + 1)
+        assert await _mp(env, lob, 1) == rows
+        _fix2_assert_snapshot(await _mp(env, lob, 1))
+    run_env(monkeypatch, body)
+
+
+@pytest.mark.parametrize("route", ["same", "different"])
+def test_fix2_f4_legacy_null_keeps_conservative_refusal(monkeypatch, route):
+    """F4/F5: a deliberately restored legacy NULL keeps the old reconstruction."""
+    async def body(env):
+        lob, game, slot, res, settled, rows = await _fix2_assembly_game(env, "a")
+        _fix2_assert_snapshot(rows)
+        assert rows[slot]["exclusion_reasons"] == ["asm_a"]
+        await env.conn.execute(
+            "UPDATE ffa_match_players SET exclusion_reasons = NULL"
+            " WHERE match_id = $1 AND player_id = $2", rows[slot]["match_id"], lob.pids[slot])
+        legacy = await _mp(env, lob, game)
+        assert legacy[slot]["exclusion_reasons"] is None
+        counts = await _report_counts(env, lob)
+        answer = await _fix2_replay(env, lob, game, res, route)
+        assert answer.status == 409, answer
+        reasons = await env.conn.fetch(
+            "SELECT reason FROM match_report_quarantine WHERE group_id = $1", lob.lid)
+        assert [row["reason"] for row in reasons] == ["ffa_game_contradiction"]
+        assert await _report_counts(env, lob) == dict(counts, quarantine=counts["quarantine"] + 1)
+        # F5 held before the test's explicit legacy override; the NULL stays NULL.
+        assert await _mp(env, lob, game) == legacy
+    run_env(monkeypatch, body)
+
+
+def test_fix2_f5_ghost_overlap_records_both_reasons(monkeypatch):
+    """F5: assembly recording is independent of an existing ghost exclusion."""
+    async def body(env):
+        lob, game, slot, res, settled, rows = await _fix2_assembly_game(env, "a")
+        _fix2_assert_snapshot(rows)
+        res[lob.sids[slot]] = (0, 0)
+        answer = await env.report(lob, game + 1, res, reporter=lob.sids[0],
+                                  left={lob.sids[slot]}, absent={lob.sids[slot]})
+        assert answer.status == 200, answer
+        overlap = await _mp(env, lob, game + 1)
+        _fix2_assert_snapshot(overlap)
+        assert overlap[slot]["exclusion_reasons"] == ["asm_a", "ghost"]
+        assert _unrated(overlap[slot])
+        assert all(row["exclusion_reasons"] == [] for n, row in overlap.items() if n != slot)
+    run_env(monkeypatch, body)
+
+
+def test_fix2_s2_stored_reasons_comparison_and_triage():
+    """S2: stored assembly arms, incoming ghost claims and legacy direct callers."""
+    from types import SimpleNamespace
+    import test_ffa_game_number_anchor as anchor
+
+    players = [SimpleNamespace(steam_id="seat-%d" % n, rounds_won=rw, points_total=pt,
+                               kills=0, left_early=False, absent=False, game_points_at_leave=None)
+               for n, (rw, pt) in enumerate(((5, 10), (3, 7), (2, 4)))]
+    report = SimpleNamespace(players=players, winner_steam_id="seat-0",
+                             reported_by_steam_id="seat-0", photon_room_id="fix2_r1")
+    prior = {p.steam_id: (p.rounds_won, p.points_total, 0, False, p.steam_id == "seat-1")
+             for p in players}
+    ids = {p.steam_id: "player-%d" % n for n, p in enumerate(players)}
+    row = {"winner_id": ids["seat-0"]}
+    for reason in ("asm_a", "asm_b", "asm_d"):
+        stored = {p.steam_id: [reason] if p.steam_id == "seat-1" else [] for p in players}
+        assert main._ffa_report_contradiction("seat-0", prior, report, True,
+                                              stored_reasons=stored) is None, reason
+        vector = [dict(player_id=ids[p.steam_id], steam_id=p.steam_id,
+                       rounds_won=p.rounds_won, points_total=p.points_total, kills=0,
+                       left_early=False, absent=p.steam_id == "seat-1",
+                       exclusion_reasons=stored[p.steam_id]) for p in players]
+        assert main._triage_row_verdict(report, True, ids, row, vector) == "AGREES", reason
+    assert "did-not-play" in main._ffa_report_contradiction("seat-0", prior, report, True)
+    assert "did-not-play" in main._ffa_report_contradiction(
+        "seat-0", prior, report, True, stored_reasons={"seat-1": None})
+    assert main._triage_capture_verdict(report, True, ids, report, True, ids) == "AGREES"
+    # Reuse an existing anchor five-tuple control, including the default None path.
+    unchanged = anchor._report(anchor.ROW_A, anchor.S3)
+    five_tuples = anchor._vec(anchor.ROW_A)
+    assert main._ffa_report_contradiction(anchor.S3, five_tuples, unchanged, True) is None
+    assert main._ffa_report_contradiction(anchor.S3, five_tuples, unchanged, True,
+                                          stored_reasons=None) is None
+    ghost = players[1]
+    ghost.rounds_won = ghost.points_total = 0
+    ghost.left_early = ghost.absent = True
+    prior[ghost.steam_id] = (0, 0, 0, True, True)
+    assert main._ffa_report_contradiction("seat-0", prior, report, True,
+                                          stored_reasons={ghost.steam_id: ["ghost"]}) is None
+    ghost.absent = False
+    why = main._ffa_report_contradiction("seat-0", prior, report, True,
+                                         stored_reasons={ghost.steam_id: ["ghost"]})
+    assert why is not None and "did-not-play" in why
+    # The effective union is compared: an independent assembly exclusion still wins.
+    assert main._ffa_report_contradiction("seat-0", prior, report, True,
+                                          stored_reasons={ghost.steam_id: ["asm_a"]}) is None
+
+
+def test_fix2_s2_snapshot_sources_are_complete():
+    """S2: every reader carries the stored set and never rebuilds assembly state."""
+    import ast
+    import inspect
+    import textwrap
+
+    for fn in (main._ffa_report_contradiction, main._ffa_prior_field_disagreement,
+               main._triage_row_verdict, main._triage_capture_verdict):
+        source = inspect.getsource(fn)
+        assert source.count("_asm_report_rules(") == 0, fn.__name__
+        assert source.count("ffa_assembly_seats") == 0, fn.__name__
+    for sql in (main._FFA_PRIOR_VECTOR_SQL, main._TRIAGE_SQL_V2_VECTORS):
+        assert sql.count("exclusion_reasons") == 1
+    tree = ast.parse(textwrap.dedent(inspect.getsource(main.submit_ffa_match)))
+    inserts = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
+               and isinstance(n.value, str) and "INSERT INTO ffa_match_players" in n.value]
+    assert len(inserts) == 1
+    assert inserts[0].count("exclusion_reasons") == 1
+    assert inserts[0].count("CAST(:er AS text[])") == 1
+
+
+def test_fix2_s2_assembly_reason_recording_includes_ghosts():
+    """S2: the optional reason collector observes a seat already in the ghost set."""
+    from types import SimpleNamespace
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [dict(steam_id="ghost-seat", slot=1, start_roster=False,
+                         late_admitted_at=1, late_game=1, late_body_game=None,
+                         gone_game=None, lag_games=[])]
+
+    class Database:
+        async def execute(self, statement, params):
+            return Result()
+
+    async def body():
+        reasons = {}
+        out = await main._asm_report_rules(
+            Database(), lobby={"short_started_at": None}, lobby_uuid=uuid.UUID(int=1), g=1,
+            report=SimpleNamespace(reported_by_steam_id="reporter-seat"),
+            id_by_steam={"ghost-seat": "player"}, unrated={"ghost-seat"}, progress={},
+            reasons=reasons)
+        assert out == {"ghost-seat"}
+        assert set(reasons["ghost-seat"]) == {"asm_a"}
+    _run(body())
+
+
 def test_s64_iii_the_seats_own_leave_corroborated(monkeypatch):
     """S64 (iii): actor 7 has left, two current witnesses omit it, none lists
     it, R's own census is 30 s old: R's leave during game 1 writes gone_game

@@ -501,8 +501,9 @@ async def ensure_schema(url, sent):
 
 
 async def reset_schema(url, sent, info):
-    """A case's fresh state: census, every other session on the lane database
-    ended, every build table emptied and the recorded seed rows copied back."""
+    """A case's fresh state: census, termination requested for this role's
+    other client backends on the lane database (#940), every build table
+    emptied and the recorded seed rows copied back."""
     conn = await connect(url, sent, lock_timeout="10s")
     try:
         name = await conn.fetchval(NAME_SQL)
@@ -513,9 +514,16 @@ async def reset_schema(url, sent, info):
             raise _refusal(name, foreign, f"end sessions on or truncate schema {SCHEMA}")
         if state is None or state["state"] != "built" or missing:
             raise RuntimeError(f"schema {SCHEMA} is not a complete build of this harness")
+        # #940: the sweep names only this role's own client backends. Run by a
+        # role that is not a superuser (the seat role), an unfiltered sweep
+        # raises InsufficientPrivilegeError while a superuser session or an
+        # autovacuum worker is on the database; a superuser DSN sees no such
+        # error. A skipped session fails this reset only if it stays connected and
+        # keeps a conflicting lock past this connection's 10 s lock_timeout.
         await send_destructive(conn, "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity"
                                      " WHERE datname = pg_catalog.current_database()"
-                                     " AND pid <> pg_catalog.pg_backend_pid()")
+                                     " AND pid <> pg_catalog.pg_backend_pid()"
+                                     " AND backend_type = 'client backend' AND usename = current_user")
         seeds = dict(s.split("=", 1) for s in (info.get("seeds") or "").split(";") if s)
         tables = [r["t"] for r in await conn.fetch(
             "SELECT c.relname::text AS t FROM pg_catalog.pg_class c"

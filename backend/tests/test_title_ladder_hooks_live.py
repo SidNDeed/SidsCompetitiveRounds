@@ -1424,7 +1424,7 @@ NAME = {W: "W", V: "V", R: "R", G: "G", X: "X"}
 def _sitting_game_1(lobby):
     """Game 1 of the lobby: W wins and V plays it out; R leaves with six
     field points on the board, late enough to be rated; G leaves at one,
-    inside the grace (FFA_LEAVE_GRACE_POINTS), and is unrated."""
+    inside the helper-derived full-points grace, and is unrated."""
     return _report_ffa(lobby, "ffa_lhS_r1", [
         _entry(W, 0, 5, 10), _entry(V, 1, 3, 6),
         _entry(R, 2, 2, 4, left=True, gp=6),

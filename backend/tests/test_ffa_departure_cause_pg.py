@@ -171,6 +171,19 @@ async def _apply_migration_raw() -> list:
         await conn.close()
 
 
+async def _assert_fixture_targets_public_players(conn) -> None:
+    """Prove the lookup and creation schema before any unqualified fixture SQL."""
+    schema, resolved, public = await conn.fetchrow(
+        "SELECT current_schema(), to_regclass('players')::oid, "
+        "to_regclass('public.players')::oid")
+    same_players = resolved == public
+    if schema != "public" or not same_players:
+        raise AssertionError(
+            f"fixture target mismatch: current_schema={schema!r}; "
+            f"unqualified players resolves to public.players={same_players}. "
+            "Point BUG392_TEST_PG_DSN at an empty throwaway database.")
+
+
 async def _assert_target_is_disposable(conn) -> None:
     """The second half of the lens find 3 guard, and the half the DSN string
     cannot answer: is there anything in here worth keeping?
@@ -178,15 +191,24 @@ async def _assert_target_is_disposable(conn) -> None:
     Asked on the connection, immediately before the DROPs, and asked about the
     table whose loss would hurt most. A `players` table that exists and holds
     rows means this is not a fixture database whatever it is called, so the
-    run refuses instead of rebuilding it. An ABSENT table is the expected
-    state for a fresh throwaway and passes; a present-but-empty one is what
-    the second and later runs of this file see, and passes too.
+    run refuses instead of rebuilding it. An absent table passes, and so does
+    a present-but-empty one.
+
+    Two statements, on purpose. PostgreSQL resolves every relation a
+    statement names when it parses the statement, before any CASE arm runs,
+    so one statement that probes for the table and counts it in the same
+    breath raises UndefinedTableError on a database without the table: the
+    count is only issued once the probe has answered that the table exists.
+    The three states are exercised by
+    `test_the_disposability_guard_on_each_state_of_the_players_table`.
+    The shared preflight first proves the unqualified fixture statements
+    address public.players, so the guard checks the table they will rebuild.
     """
-    rows = await conn.fetchval("""
-        SELECT CASE WHEN to_regclass('public.players') IS NULL THEN -1
-                    ELSE (SELECT COUNT(*) FROM players) END
-    """)
-    if rows and rows > 0:
+    await _assert_fixture_targets_public_players(conn)
+    if await conn.fetchval("SELECT to_regclass('public.players')") is None:
+        return
+    rows = await conn.fetchval("SELECT COUNT(*) FROM public.players")
+    if rows > 0:
         raise AssertionError(
             f"the target database holds {rows} row(s) in `players`. This file "
             f"drops and rebuilds that table as a 3-column fixture, so it will "
@@ -244,6 +266,252 @@ async def _lobby(conn, lobby):
     return (await conn.execute(text(
         "SELECT status, invalidation_reason, departed_ids, departure_causes"
         "  FROM ffa_lobbies WHERE id = :l"), {"l": lobby})).mappings().first()
+
+
+# ── the disposability guard itself ───────────────────────────────────────
+
+_FIXTURE_DROPS = [s for s in _statements(SCHEMA_SQL) if s.upper().startswith("DROP")]
+
+
+async def _exercise_disposability_state(state, *, after_drop=None):
+    """Build and check one state; rollback and close even when either fails."""
+    conn = await asyncpg.connect(RAW_DSN)
+    try:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _assert_fixture_targets_public_players(conn)
+            for stmt in _FIXTURE_DROPS:
+                await conn.execute(stmt)
+            if after_drop is not None:
+                await after_drop(conn)
+            if state != "absent":
+                for stmt in _statements(SCHEMA_SQL):
+                    await conn.execute(stmt)
+                await conn.execute(
+                    "INSERT INTO players (id, steam_id) VALUES ($1, $2)",
+                    uuid.uuid4(), "guard-probe-seat")
+            if state == "emptied":
+                await conn.execute("TRUNCATE players CASCADE")
+            present = await conn.fetchval("SELECT to_regclass('public.players')") is not None
+            assert present is (state != "absent"), "the state was not set up"
+            if state == "holds_a_row":
+                with pytest.raises(AssertionError, match=r"holds 1 row\(s\) in `players`"):
+                    await _assert_target_is_disposable(conn)
+            else:
+                await _assert_target_is_disposable(conn)
+        finally:
+            await tr.rollback()
+    finally:
+        await conn.close()
+
+
+@pytest.mark.parametrize("state", ["absent", "holds_a_row", "emptied"])
+def test_the_disposability_guard_on_each_state_of_the_players_table(state):
+    """The guard on the three states it can meet: no `players` table at all
+    (a fresh throwaway database) passes, a table holding a row refuses with
+    the guard's own message, and the same table after TRUNCATE passes.
+
+    Until the guard became two statements the absent state raised
+    UndefinedTableError, and every run on a fresh database failed at the
+    guard; runs on a database that an earlier run had already filled passed,
+    which is how the defect hid. This test sets each state up itself, so its
+    result does not depend on what ran before it: the state is built and
+    asserted inside one transaction that is always rolled back before the
+    connection closes, leaving the database as found."""
+    asyncio.run(_exercise_disposability_state(state))
+
+
+async def _snapshot_guard_entry():
+    """Read only before the regression opens its connection or after it closes."""
+    conn = await asyncpg.connect(RAW_DSN)
+    try:
+        await conn.execute("SET lock_timeout = '2s'")
+        await conn.execute("SET statement_timeout = '5s'")
+        snapshot = {}
+        for table, key in (("players", "id"), ("ffa_lobbies", "id"),
+                           ("ffa_matches", "id"),
+                           ("ffa_match_players", "match_id, player_id")):
+            columns = await conn.fetch(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = $1 "
+                "ORDER BY ordinal_position", table)
+            snapshot[table] = {
+                "count": await conn.fetchval(f"SELECT COUNT(*) FROM public.{table}"),
+                "columns": [tuple(row) for row in columns],
+                "rows": [tuple(row) for row in await conn.fetch(
+                    f"SELECT * FROM public.{table} ORDER BY {key}")],
+            }
+        return snapshot
+    finally:
+        await conn.close()
+
+
+def _assert_guard_entry_equal(before, after):
+    assert before.keys() == after.keys()
+    for table in before:
+        for field in ("count", "columns", "rows"):
+            assert after[table][field] == before[table][field], (table, field)
+
+
+async def _assert_entry_preserved_and_rebuild_refused(before):
+    _assert_guard_entry_equal(before, await _snapshot_guard_entry())
+    with pytest.raises(AssertionError, match=r"holds 3 row\(s\) in `players`"):
+        await _rebuild()
+    _assert_guard_entry_equal(before, await _snapshot_guard_entry())
+
+
+async def _with_populated_guard_entry(check):
+    """Commit our own population, then delete only those ids in FK order."""
+    await _rebuild()  # Refuses a populated entry before any fixture statement.
+    players = [uuid.uuid4() for _ in range(3)]
+    lobby, match = uuid.uuid4(), uuid.uuid4()
+    try:
+        conn = await asyncpg.connect(RAW_DSN)
+        try:
+            tr = conn.transaction()
+            await tr.start()
+            for pid, suffix in zip(players, ("a", "b", "c")):
+                await conn.execute(
+                    "INSERT INTO public.players (id, steam_id, display_name) "
+                    "VALUES ($1, $2, $3)", pid, f"ctl-entry-{suffix}", f"entry-{suffix}")
+            await conn.execute(
+                "INSERT INTO public.ffa_lobbies (id, player_count, member_ids) "
+                "VALUES ($1, 3, $2)", lobby, players)
+            await conn.execute(
+                "INSERT INTO public.ffa_matches (id, lobby_id) VALUES ($1, $2)",
+                match, lobby)
+            await conn.execute(
+                "INSERT INTO public.ffa_match_players (match_id, player_id, placement) "
+                "VALUES ($1, $2, 1)", match, players[0])
+            await tr.commit()
+        finally:
+            await conn.close()
+        before = await _snapshot_guard_entry()
+        assert {table: row["count"] for table, row in before.items()} == {
+            "players": 3, "ffa_lobbies": 1, "ffa_matches": 1, "ffa_match_players": 1}
+        await check(before)
+    finally:
+        conn = await asyncpg.connect(RAW_DSN)
+        try:
+            tr = conn.transaction()
+            await tr.start()
+            await conn.execute(
+                "DELETE FROM public.ffa_match_players WHERE match_id = $1 AND player_id = $2",
+                match, players[0])
+            await conn.execute("DELETE FROM public.ffa_matches WHERE id = $1", match)
+            await conn.execute("DELETE FROM public.ffa_lobbies WHERE id = $1", lobby)
+            await conn.execute("DELETE FROM public.players WHERE id = ANY($1::uuid[])", players)
+            await tr.commit()
+        finally:
+            await conn.close()
+
+
+def test_guard_regression_preserves_populated_entry():
+    """Control (a), and (c) after each of the three regression states."""
+    async def check(before):
+        for state in ("absent", "holds_a_row", "emptied"):
+            await _exercise_disposability_state(state)
+            await _assert_entry_preserved_and_rebuild_refused(before)
+    asyncio.run(_with_populated_guard_entry(check))
+
+
+@pytest.mark.parametrize("failure", ["setup", "guard", "rollback"])
+def test_guard_regression_failures_preserve_populated_entry(failure, monkeypatch):
+    """Controls (b) and (c): each injected failure escapes, with entry intact."""
+    class GuardFailure(RuntimeError):
+        pass
+
+    class RollbackFailure(RuntimeError):
+        pass
+
+    reached = []
+
+    async def fail_setup(conn):
+        assert await conn.fetchval("SELECT to_regclass('public.players')") is None
+        reached.append("setup")
+        await conn.execute("SELECT 1 / 0")
+
+    async def fail_guard(conn):
+        assert await conn.fetchval("SELECT COUNT(*) FROM public.players") == 1
+        reached.append("guard")
+        raise GuardFailure("injected guard failure")
+
+    async def fail_rollback(tr):
+        reached.append("rollback")
+        raise RollbackFailure("injected rollback failure")
+
+    async def check(before):
+        with monkeypatch.context() as patch:
+            after_drop = None
+            if failure == "setup":
+                after_drop = fail_setup
+                expected = asyncpg.DivisionByZeroError
+            elif failure == "guard":
+                patch.setitem(globals(), "_assert_target_is_disposable", fail_guard)
+                expected = GuardFailure
+            else:
+                patch.setattr(asyncpg.transaction.Transaction, "rollback", fail_rollback)
+                expected = RollbackFailure
+            with pytest.raises(expected):
+                await _exercise_disposability_state("holds_a_row", after_drop=after_drop)
+        assert reached == [failure], "the injected failure was not reached exactly once"
+        await _assert_entry_preserved_and_rebuild_refused(before)
+    asyncio.run(_with_populated_guard_entry(check))
+
+
+@pytest.mark.parametrize("public_state", ["empty", "absent", "empty_schema"])
+def test_guard_preflight_refuses_shadow_search_path(public_state):
+    """Controls (d), (e), (g): refuse both wrong lookup and wrong creation schema."""
+    async def check():
+        conn = await asyncpg.connect(RAW_DSN)
+        try:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                await _assert_fixture_targets_public_players(conn)
+                statements = (_statements(SCHEMA_SQL) if public_state == "empty"
+                              else _FIXTURE_DROPS)
+                for stmt in statements:
+                    await conn.execute(stmt)
+                schema = f"harness_shadow_{uuid.uuid4().hex[:8]}"
+                await conn.execute(f"CREATE SCHEMA {schema}")
+                if public_state != "empty_schema":
+                    if public_state == "empty":
+                        await conn.execute(
+                            f"CREATE TABLE {schema}.players (LIKE public.players INCLUDING ALL)")
+                    else:
+                        create_players = next(s for s in _statements(SCHEMA_SQL)
+                                              if s.startswith("CREATE TABLE players"))
+                        await conn.execute(create_players.replace(
+                            "CREATE TABLE players", f"CREATE TABLE {schema}.players", 1))
+                    for suffix in ("a", "b"):
+                        await conn.execute(
+                            f"INSERT INTO {schema}.players (id, steam_id) VALUES ($1, $2)",
+                            uuid.uuid4(), f"ctl-shadow-{suffix}")
+                await conn.execute(f"SET LOCAL search_path TO {schema}, public")
+                if public_state == "empty_schema":
+                    assert await conn.fetchval("SELECT to_regclass('players')") is None
+                    assert await conn.fetchval("SELECT to_regclass('public.players')") is None
+                for guard in (_assert_target_is_disposable, _assert_fixture_targets_public_players):
+                    with pytest.raises(AssertionError, match="fixture target mismatch") as refused:
+                        await guard(conn)
+                    assert str(refused.value) == (
+                        f"fixture target mismatch: current_schema={schema!r}; "
+                        "unqualified players resolves to public.players="
+                        f"{public_state == 'empty_schema'}. "
+                        "Point BUG392_TEST_PG_DSN at an empty throwaway database.")
+                    if public_state != "empty_schema":
+                        assert await conn.fetchval(f"SELECT COUNT(*) FROM {schema}.players") == 2
+                    if public_state == "empty":
+                        assert await conn.fetchval("SELECT COUNT(*) FROM public.players") == 0
+                    else:
+                        assert await conn.fetchval("SELECT to_regclass('public.players')") is None
+            finally:
+                await tr.rollback()
+        finally:
+            await conn.close()
+    asyncio.run(check())
 
 
 # ── (2) the migration ────────────────────────────────────────────────────

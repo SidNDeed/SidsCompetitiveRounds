@@ -148,6 +148,20 @@ def test_one_pass_stays_affordable():
     core.autocrlf=true checkout, no new binary directory; the larger value is
     kept, and 56 MiB still leaves about 5 MiB of headroom.
     """
+    # Ceiling from the measured budget (fix pass 4, logs d4-fix4-walk-measure.log
+    # and d4-fix4-walk-commit.log): the fix-pass-4 working tree on 9b8e3cb0 reads
+    # 40.37 MiB over 735 files in one pass on a CRLF checkout (9b8e3cb0 is 39.93
+    # MiB as committed blobs, trunk e9a3f1e1 39.29 MiB); this lane adds 0.82 MiB
+    # over its merge base, every byte of it read by its tests (the largest: the
+    # client's state-space fixture, 0.21 MiB). The ceiling is the measured total
+    # plus about one lane of the same size per dependent lane still to land
+    # (three), rounded up: 44 MiB.
+    # Seat evidence LAND merge pass (2026-10-24): the merged walk (the lane
+    # 44d5843b with main 93b84eb0) measures 42.80 MiB over 789 files on a CRLF
+    # checkout (trunk 41.16 MiB over 742, the lane 41.19 MiB over 742), by this
+    # function called outside pytest; the 2026-10-19 rehearsal (lane 520d5d31 with
+    # main ca00e375) measured 42.74 MiB over 788. The trunk's 46 MiB ceiling holds
+    # it with about 3 MiB of headroom and stands; the lane's 44 MiB is not carried.
     stamps = ct._source_stamps()
     total = sum(size for size, _digest in stamps.values())
     assert total < 56 * 1024 * 1024, (

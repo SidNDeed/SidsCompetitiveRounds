@@ -937,6 +937,13 @@ class HealthResponse(BaseModel):
     # it raises instead of silently leaving the key out. Absent on any build
     # before that batch, which is how the train reads the old build.
     ffa_game_number: int
+    # ffa_exclusion_reasons: whether this build stores the grace exclusions
+    # (main._FFA_EXCLUSION_REASONS; 1 = the settlement insert names migration
+    # 389's exclusion_reasons column). DERIVED from the compiled literal on
+    # import, never written down (#342); read only by the release train (#306).
+    # Required on both health arms. Absent on any build before the grace
+    # landing, which is how the train reads the old build.
+    ffa_exclusion_reasons: int
     # ovt_solo_split: whether this build refuses a 1v2 report that moves another
     # player into the solo seat once the series holds a recorded game
     # (main._OVT_SOLO_SPLIT; 1 = submit_ovt_match's compiled constants carry the
@@ -1116,6 +1123,22 @@ class HealthResponse(BaseModel):
     # raises instead of silently leaving the key out. Absent on any build
     # before it, which is how the train reads the old build.
     auto_log: int
+    # seat_evidence: whether this build serves the seat-evidence lane
+    # (main._seat_evidence_health_word; 1 = the four seat-evidence routes are
+    # registered on the app, else 0). DERIVED on every request; equal on both
+    # roles by construction; read by nothing else. Declared without a
+    # default, so building the answer without it raises instead of silently
+    # leaving the key out. Absent on any build before the lane.
+    seat_evidence: int
+    # review_eval: 8 hex of the review code's file digest
+    # (review_rules.review_eval: review_boot.py, review_measures.py and
+    # review_rules.py, by file). Equal on both roles; the build discriminator
+    # through the edge. No default, as above.
+    review_eval: str
+    # review_rules: the loaded review rules revision id, or "absent" (none
+    # staged) or "refused" (the staged one failed a check). It reads the id
+    # only, never anything about the revision's contents. No default.
+    review_rules: str
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
@@ -1866,14 +1889,15 @@ class FfaPlayerEntry(BaseModel):
     # left_early = left DURING this game — still rated, so leaving at zero
     # score can't dodge the loss.
     absent: bool = False
-    # Total points the WHOLE FIELD had scored at the moment this player left —
-    # set only on left_early entries, by a client that was still in the room.
-    # Under FFA_LEAVE_GRACE_POINTS the server does not rate them (the 2026-08-20
-    # early-leave grace). None = not reported: a pre-v1.39 client, a present
-    # player, or a carried roster ghost — all of which keep pre-grace behaviour.
-    # Also OUTSIDE the frozen ffa: HMAC canonical, like `absent` and
-    # `damage_dealt`; submit_ffa_match refutes the claim against the signed
-    # tally. Bounded so a crafted value cannot overflow the SMALLINT column.
+    # Total half points the WHOLE FIELD had scored when this seat left,
+    # set only on left_early entries by a client still in the room. A field
+    # total below two full points, measured against the helper-derived
+    # half-point threshold, leaves the seat unrated for this game.
+    # None = not reported: a pre-v1.39 client, a present player, or a carried
+    # roster ghost; all keep pre-grace behaviour. Also OUTSIDE the frozen ffa:
+    # HMAC canonical, like absent and damage_dealt; submit_ffa_match refutes
+    # contradictions in the signed points and rounds. Bounded so a crafted
+    # value cannot overflow the SMALLINT column.
     game_points_at_leave: int | None = Field(None, ge=0, le=32000)
     fps: int | None = Field(None, ge=0, le=10000)
     # Generous hard bounds (reject only absurd bodies — the quarantine path

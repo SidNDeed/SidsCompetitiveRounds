@@ -204,7 +204,17 @@ async def fresh_database(prefix="cfdb"):
     finally:
         admin = await _asyncpg.connect(DSN)
         try:
-            await admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % name)
+            # #940: request termination only for this role's client backends.
+            # PostgreSQL 16 FORCE prechecks every backend's signal rights and can
+            # raise 42501 for a seat role that is not a superuser. The plain drop
+            # signals autovacuum workers itself and waits for backends to leave;
+            # a foreign client that stays connected can still cause 55006 after
+            # that wait. The sweep does not confirm that its candidates exited.
+            await admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = $1 AND pid <> pg_backend_pid() "
+                "AND backend_type = 'client backend' AND usename = current_user", name)
+            await admin.execute('DROP DATABASE IF EXISTS "%s"' % name)
         finally:
             await admin.close()
 

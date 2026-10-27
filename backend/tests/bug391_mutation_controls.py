@@ -957,7 +957,7 @@ SUMMARY = re.compile(
 
 
 def clean_slate() -> str:
-    """Terminate every other backend on the dedicated test database.
+    """Terminate this role's other client backends on the dedicated database.
 
     The suite's per-case fixture does this too, but it cannot help when the
     statement that blocks is the fixture's own DDL: the case then dies inside
@@ -966,9 +966,9 @@ def clean_slate() -> str:
     mutation's run. A cross-run leak of exactly that shape is what once put a
     false REDDENED on this runner's negative control. Bounded by construction:
     Bounded by the NAME check below, not by the belief that the DSN is the
-    right one: this terminates every backend on whatever database it is
-    pointed at, and the sibling lanes keep their own throwaway databases on
-    the same local instance (#342).
+    right one: this terminates this role's client backends (#940) on
+    whatever database it is pointed at, and the sibling lanes keep their own
+    throwaway databases on the same local instance (#342).
     """
     import asyncio
     from sqlalchemy import text
@@ -988,14 +988,23 @@ def clean_slate() -> str:
                         f"this runner terminates every backend on it and the "
                         f"suite drops its tables, so it runs against "
                         f"{EXPECTED_DB!r} and nothing else.")
+                # #940: the sweep names only this role's own client backends. Run by a
+                # role that is not a superuser (the seat role), an unfiltered sweep
+                # raises InsufficientPrivilegeError while a superuser session or an
+                # autovacuum worker is on the database; a superuser DSN sees no such
+                # error. A skipped session fails the suite only if it stays connected and
+                # keeps a conflicting lock past the suite's 15 s DDL lock_timeout.
                 n = (await conn.execute(text(
                     "SELECT count(*) FROM pg_stat_activity"
                     " WHERE datname = current_database()"
-                    "   AND pid <> pg_backend_pid()"))).scalar()
+                    "   AND pid <> pg_backend_pid()"
+                    "   AND backend_type = 'client backend' AND usename = current_user"
+                    ))).scalar()
                 await conn.execute(text(
                     "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
                     " WHERE datname = current_database()"
-                    "   AND pid <> pg_backend_pid()"))
+                    "   AND pid <> pg_backend_pid()"
+                    "   AND backend_type = 'client backend' AND usename = current_user"))
                 await conn.commit()
                 return int(n or 0)
         finally:
@@ -1005,7 +1014,7 @@ def clean_slate() -> str:
         n = asyncio.run(go())
     except Exception as exc:                      # noqa: BLE001 - reported, not raised
         return f"clean-slate probe FAILED: {exc!r}"
-    return f"cleared {n} leftover backend(s)" if n else ""
+    return f"termination requested for {n} candidate client backend(s) of this role" if n else ""
 
 
 def run_suite() -> dict:

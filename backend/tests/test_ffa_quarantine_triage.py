@@ -196,6 +196,7 @@ CREATE TABLE ffa_match_players (
     left_early BOOLEAN NOT NULL DEFAULT FALSE,
     kills INTEGER NOT NULL DEFAULT 0,
     absent BOOLEAN NOT NULL DEFAULT FALSE,
+    exclusion_reasons TEXT[],
     game_points_at_leave SMALLINT,
     PRIMARY KEY (match_id, player_id)
 );
@@ -369,13 +370,19 @@ async def _pg(url):
 
 
 async def _clean_slate(url):
-    """#753: every case starts from a slate it TAKES -- every other backend
-    on the lane database is terminated first, so a lock a dead case left
-    behind cannot hold this one's DDL."""
+    """#753: terminate only the current role's client backends on the lane database.
+    Another role's session may retain a relation lock; the 5 s DDL timeout
+    then fails the fixture with its own error."""
     conn = await _pg(url)
     try:
+        # The sweep terminates only the current role's client backends.
+        # Another role's session may retain a relation lock; the 5 s DDL timeout
+        # then fails the fixture with its own error. The previous unfiltered
+        # sweep caused setup failures against superuser-owned processes in
+        # 8 of 114 and 16 of 114 cases in the two recorded runs.
         await conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-                           " WHERE datname = current_database() AND pid <> pg_backend_pid()")
+                           " WHERE datname = current_database() AND pid <> pg_backend_pid()"
+                           " AND backend_type = 'client backend' AND usename = current_user")
     finally:
         await conn.close()
 
@@ -2514,3 +2521,64 @@ def test_pg_rj_triage_health_carries_the_round_2_marker_on_both_arms(monkeypatch
     assert (down["status"], down["database"]) == ("degraded", "disconnected"), down
     assert up.get("rj_triage") == 2, up
     assert down.get("rj_triage") == 2, down
+
+
+
+
+def test_pg_fix2_stored_assembly_reason_agrees_without_triage_writes(monkeypatch):
+    """T1: the settled assembly snapshot survives an identical capture."""
+    async def body():
+        async with Env(monkeypatch) as env:
+            ids = await env.seats()
+            lid = await env.lobby(games_played=1)
+            incoming = {1: (5, 10, 0, F, F), 2: (2, 4, 0, F, F),
+                        3: (3, 7, 0, F, F)}
+            settled = dict(incoming)
+            settled[3] = (3, 7, 0, F, T)
+            mid = await env.ffa_settle(lid, 1, "Fix2T1", settled, 1, 1, 10)
+            # The same control runs before migration 389: then no snapshot
+            # can be seeded and the final verdict exposes the missing arm.
+            has_snapshot = await env.scalar(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns"
+                " WHERE table_schema = current_schema()"
+                " AND table_name = 'ffa_match_players'"
+                " AND column_name = 'exclusion_reasons')")
+            if has_snapshot:
+                await env.ex(
+                    "UPDATE ffa_match_players SET exclusion_reasons = CAST(:er AS text[])"
+                    " WHERE match_id = :m", {"er": [], "m": mid})
+                await env.ex(
+                    "UPDATE ffa_match_players SET exclusion_reasons = CAST(:er AS text[])"
+                    " WHERE match_id = :m AND player_id = :p",
+                    {"er": ["asm_a"], "m": mid, "p": pid(ids, 3)})
+            qid = await env.ffa_capture(lid, room("Fix2T1", 1), incoming, 1, 1, 20)
+            before = await env.checksums(WATCHED)
+            response = await env.v2("ffa", lid)
+            after = await env.checksums(WATCHED)
+            return mid, qid, response, before, after
+
+    mid, qid, response, before, after = run(body())
+    assert before == after, "the triage route changed a watched table"
+    rows = cap_of(ok(response), qid)["pt3"]["rows"]
+    assert [row["row_id"] for row in rows] == [str(mid)]
+    assert rows[0]["verdict"] == "AGREES", rows
+
+
+
+
+def test_clean_slate_comment_states_current_role_sweep_and_limits():
+    """M2: the cleanup describes its actual reach and remaining blocker."""
+    source = inspect.getsource(_clean_slate)
+    definition = ast.parse(source).body[0]
+    doc = " ".join(ast.get_docstring(definition).lower().split())
+    comments = " ".join(line.strip()[1:].strip().lower()
+                        for line in source.splitlines() if line.lstrip().startswith("#"))
+    comments = " ".join(comments.split())
+    for prose in (doc, comments):
+        for phrase in ("current role", "client backends", "another role",
+                       "relation lock", "5 s", "ddl timeout", "fails the fixture"):
+            assert phrase in prose, (phrase, prose)
+        for promise in ("every other backend", "cannot hold", "every case"):
+            assert promise not in prose, (promise, prose)
+    for phrase in ("setup failures", "superuser-owned", "8 of 114", "16 of 114"):
+        assert phrase in comments, (phrase, comments)
