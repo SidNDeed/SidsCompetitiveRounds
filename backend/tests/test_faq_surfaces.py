@@ -301,9 +301,13 @@ _HYGIENE_SCOPE = (
     "backend/sql/338_faq_channel_post_revisions.sql",
     "backend/sql/340_i18n_keys_item11.sql",
     "backend/sql/341_seed_machine_translations_item11.sql",
+    # The v1.41.0 candidate's test-fix commit (2026-10-27) touched these two
+    # beside the fixture and this module, so they are swept from here on.
+    "backend/tests/discord_collection_harness.py",
     "backend/tests/fixtures/faq_claims.json",
     "backend/tests/route_manifest_net_seat.json",
     "backend/tests/test_faq_surfaces.py",
+    "backend/tests/test_fault_paths_conservative.py",
     "backend/tests/test_mail_bot.py",
     "docs/FAQ.md",
     "docs/faq-refresh-client-contract.md",
