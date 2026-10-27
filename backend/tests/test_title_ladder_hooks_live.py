@@ -101,6 +101,7 @@ import io
 import os
 import re
 import sys
+import time
 import types
 import uuid
 
@@ -666,6 +667,9 @@ async def _economy(conn):
             "  JOIN players p ON p.id = g.player_id")),
         "xp": sorted(tuple(r) for r in await conn.fetch(
             "SELECT steam_id, total_xp FROM players")),
+        "balances": sorted(tuple(r) for r in await conn.fetch(
+            "SELECT steam_id, gold_earned, gold_spent, team_gold_earned, team_xp_earned "
+            "  FROM players")),
         "items": sorted(tuple(r) for r in await conn.fetch(
             "SELECT p.steam_id, si.sku FROM player_items pi "
             "  JOIN players p ON p.id = pi.player_id JOIN shop_items si ON si.id = pi.item_id "
@@ -703,6 +707,29 @@ async def _look(schema):
         return await _ladder(conn), await _economy(conn)
     finally:
         await conn.close()
+
+
+async def _on_disk(schema):
+    """What another connection sees at this moment: the match rows, the
+    completed series and the rating_history rows."""
+    conn = await harness.connect_bound(DSN, schema)
+    try:
+        return (await conn.fetchval("SELECT COUNT(*) FROM matches"),
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM ranked_series WHERE status = 'completed'"),
+                await conn.fetchval("SELECT COUNT(*) FROM rating_history"))
+    finally:
+        await conn.close()
+
+
+def _others(snap, steams):
+    """A _ladder reading without the rows of `steams`: what a hook writing
+    for them must leave alone -- everyone else's progress, credits, worn
+    title and rungs."""
+    return {"progress": {k: v for k, v in snap["progress"].items() if k[0] not in steams},
+            "credits": [c for c in snap["credits"] if c[0] not in steams],
+            "worn": {s: v for s, v in snap["worn"].items() if s not in steams},
+            "rungs": [r for r in snap["rungs"] if r[0] not in steams]}
 
 
 async def _get_ladders(schema, steams):
@@ -1813,48 +1840,70 @@ async def _r3_run(how, tag, armed=None):
     report is sent once with the fault armed and, after the state is read,
     once more with it lifted. For `how` == "one_commit", the deciding report
     runs on a session that counts its commits and, before each, reads from
-    another connection what the database holds at that moment."""
+    another connection what the database holds at that moment.
+
+    Either way the one write submit_match makes in a session of its own --
+    the podium holders' sync (bug 325), which fires from a cold podium copy,
+    and _case leaves the copy cold -- is routed to the case schema and
+    counted: the copy is warmed on the case's own players before the state
+    is read and held past the reports whatever the seat's load (_case puts
+    the cache back), so a commit on that session during the reports is a
+    finding, and one commit of this function's own proves the count live."""
     async with _case() as (schema, sm):
         ids = await _seed(sm)
         seeded, _ = await _look(schema)
         g1 = await _submit(sm, main.submit_match, _report_1v1("ranked_lh%s_000001_r1" % tag))
         assert g1[1] is None and g1[0].series_status == "active", g1
-        mid, mid_econ = await _look(schema)
-        seen = []
+        seen, other = [], []
 
         class _Counting(AsyncSession):
             async def commit(self):
-                conn = await harness.connect_bound(DSN, schema)
-                try:
-                    seen.append((
-                        await conn.fetchval("SELECT COUNT(*) FROM matches"),
-                        await conn.fetchval(
-                            "SELECT COUNT(*) FROM ranked_series WHERE status = 'completed'"),
-                        await conn.fetchval("SELECT COUNT(*) FROM rating_history"),
-                    ))
-                finally:
-                    await conn.close()
+                seen.append(await _on_disk(schema))
                 await super().commit()
-        engine = harness.bound_engine(DSN, schema) if how == "one_commit" else None
-        deciding = sm if engine is None else async_sessionmaker(
+
+        class _Elsewhere(AsyncSession):
+            async def commit(self):
+                other.append(await _on_disk(schema))
+                await super().commit()
+        engine = harness.bound_engine(DSN, schema)
+        deciding = sm if how != "one_commit" else async_sessionmaker(
             engine, expire_on_commit=False, class_=_Counting)
+        saved = database.async_session
+        database.async_session = async_sessionmaker(engine, expire_on_commit=False,
+                                                    class_=_Elsewhere)
         try:
-            g2 = await _submit(deciding, main.submit_match,
-                               _report_1v1("ranked_lh%s_000002_r2" % tag))
+            async with sm() as db:
+                await main._podium_player_ids(db)
+            main._podium_cache["at"] = time.monotonic() + 3600
+            del other[:]
+            mid, mid_econ = await _look(schema)
+            room = "ranked_lh%s_000002_r2" % tag
+            g2 = await _submit(deciding, main.submit_match, _report_1v1(room))
             refused, refused_econ = await _look(schema)
             g3 = None
             if how == "fail":
                 armed[0] = False
-                g3 = await _submit(deciding, main.submit_match,
-                                   _report_1v1("ranked_lh%s_000002_r2" % tag))
+                g3 = await _submit(deciding, main.submit_match, _report_1v1(room))
+            other_during = len(other)
+            async with database.async_session() as probe:
+                await probe.execute(text("SELECT 1"))
+                await probe.commit()
+            other_probe = len(other)
+            conn = await harness.connect_bound(DSN, schema)
+            try:
+                disk = [str(r["id"]) for r in await conn.fetch(
+                    "SELECT id FROM matches WHERE photon_room_id = $1", room)]
+            finally:
+                await conn.close()
         finally:
-            if engine is not None:
-                await engine.dispose()
+            database.async_session = saved
+            await engine.dispose()
         after, econ = await _look(schema)
         refs = [str(g[0].match_id) for g in (g1, g2, g3) if g is not None and g[1] is None]
         return dict(seeded=seeded, mid=mid, mid_econ=mid_econ, g2=g2, g3=g3,
                     refused=refused, refused_econ=refused_econ, after=after, econ=econ,
-                    seen=seen, refs=refs)
+                    seen=seen, other=other, other_during=other_during,
+                    other_probe=other_probe, disk=disk, refs=refs)
 
 
 @pytest.mark.parametrize("how", ["fail", "one_commit"])
@@ -1872,17 +1921,22 @@ def test_pg_r3_the_1v1_credit_rides_the_reports_one_commit(opened, monkeypatch, 
     the old shape had. FAIL: the rating calculation raises inside the
     deciding report, and the report is refused whole (the RuntimeError is
     its answer): no second match row, no completion, no rating, no history
-    and no credit for game 2 either -- the ladder and the economy read
-    exactly as they did after game 1, so the credit never stands without
-    the rating it was paid with. Sent again with the fault lifted, the same
-    report is an ordinary first report: the series completes, both ratings
-    move, two history rows are written and each player's second credit
-    lands under the RETRY's match id. ONE COMMIT: the deciding report
-    commits exactly once, and at the moment of that commit another
+    and no credit for game 2 either -- the ladder and the economy, player
+    gold balances included, read exactly as they did after game 1, so the
+    credit never stands without the rating it was paid with. Sent again
+    with the fault lifted, the same report is an ordinary first report: the
+    series completes, both ratings move, two history rows are written, the
+    deciding room has exactly one match row on disk and each player's
+    second credit is keyed by it. ONE COMMIT: the deciding report commits
+    its session exactly once, at the moment of that commit another
     connection still sees only game 1 -- one match, no completed series, no
-    history. Either way the credit causes nothing else: the same run with
-    the hook made a no-op answers the same and commits the same matches,
-    series, XP, gold, items and ratings."""
+    history -- and no other session commits during the reports (the podium
+    holders' sync is warmed beforehand and its session counted; the count
+    is proven live by one commit of the test's own). Either way the credit
+    causes nothing else: the same run with the hook made a no-op answers
+    the same and commits the same matches, series, XP, gold, items and
+    ratings, and everyone other than the two players keeps their progress,
+    credits, worn title and rungs."""
     _require_live_pg()
     armed = [how == "fail"]
     real = main.calculate_new_rating
@@ -1900,7 +1954,11 @@ def test_pg_r3_the_1v1_credit_rides_the_reports_one_commit(opened, monkeypatch, 
     armed[0] = how == "fail"
     inert = _run(_r3_run(how, "R", armed))
 
+    deciding = "g3" if how == "fail" else "g2"
     for label, run in (("hook live", live), ("hook no-op", inert)):
+        assert run["other_during"] == 0 and run["other_probe"] == 1, (
+            "R3: a session other than the report's committed during the reports",
+            label, run["other"])
         if how == "fail":
             assert run["g2"][0] is None and isinstance(run["g2"][1], RuntimeError), (
                 label, run["g2"])
@@ -1910,22 +1968,24 @@ def test_pg_r3_the_1v1_credit_rides_the_reports_one_commit(opened, monkeypatch, 
                 label)
             assert run["refused"] == run["mid"], (
                 "R3: the refused report left ladder state behind", label, run["refused"])
-            assert run["g3"][1] is None and run["g3"][0].series_status == "completed", (
-                label, run["g3"])
         else:
-            assert run["g2"][1] is None and run["g2"][0].series_status == "completed", (
-                label, run["g2"])
             assert run["seen"] == [(1, 0, 0)], (
                 "R3: the deciding report did not commit exactly once, after all of its work",
                 label, run["seen"])
-    deciding = "g3" if how == "fail" else "g2"
+        assert run[deciding][1] is None and run[deciding][0].series_status == "completed", (
+            label, run[deciding])
+        assert run["disk"] == [str(run[deciding][0].match_id)], (
+            "R3: the deciding room does not hold exactly the match the answer names",
+            label, run["disk"], run[deciding][0].match_id)
     ok, want = _plus_n(live["seeded"], live["after"], [P1, P2], 2)
     assert ok, ("R3: the two credits did not land", live["after"]["progress"], want)
     assert len(live["refs"]) == 2, live["refs"]
-    assert live["refs"][1] == str(live[deciding][0].match_id), (live["refs"], live[deciding])
+    assert live["refs"][1] == live["disk"][0], (live["refs"], live["disk"])
     for ref in live["refs"]:
         assert _credited(live["after"], ref, "1v1", [P1, P2]), live["after"]["credits"]
     assert len(live["after"]["credits"]) == 4, live["after"]["credits"]
+    assert _others(live["after"], (P1, P2)) == _others(live["seeded"], (P1, P2)), (
+        "R3: someone other than the two players moved", _others(live["after"], (P1, P2)))
     assert live["econ"]["glicko_ratings"] != live["mid_econ"]["glicko_ratings"], (
         "R3: the completion did not rate", live["econ"]["glicko_ratings"])
     for table in ("glicko_ratings_2v2", "glicko_ratings_ffa"):
@@ -1934,7 +1994,7 @@ def test_pg_r3_the_1v1_credit_rides_the_reports_one_commit(opened, monkeypatch, 
     assert live["econ"]["rating_history"] == 2, live["econ"]["rating_history"]
     assert inert["after"] == inert["seeded"], inert["after"]
     assert live["econ"] == inert["econ"], (
-        "R3: the credit changed a match, series, XP, gold, item or rating")
+        "R3: the credit changed a match, series, XP, gold, item, balance or rating")
     assert _answer_digest([live["g2"]]) == _answer_digest([inert["g2"]])
     assert _answer_digest([live[deciding]]) == _answer_digest([inert[deciding]])
 
@@ -2225,7 +2285,10 @@ def test_m6_the_rating_pass_and_its_gold_supplement_ride_the_reports_one_commit(
     marks, and the report's first commit after the pass carries all three.
     Nothing restores the note, because nothing continues past a failed
     pass; the helper that committed one block and restored the note on
-    failure had no caller left and is gone."""
+    failure had no caller left and is gone. Whether a handler encloses the
+    pass is asked of submit_match's syntax tree, not of the text between
+    the pass and the commit: a try opened before the pass with its except
+    after the commit would be invisible there."""
     src = io.open(MAIN_PY, encoding="utf-8").read()
     call = "await _apply_series_rating_pass(db, series, p1, p2)"
     assert src.count(call) == 1, src.count(call)
@@ -2239,6 +2302,13 @@ def test_m6_the_rating_pass_and_its_gold_supplement_ride_the_reports_one_commit(
         assert seg.count(source) == 1, (source, seg.count(source))
     for absent in ("except", "begin_nested", "_ladder_achievement_restore("):
         assert absent not in seg, (absent, seg)
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "submit_match")
+    line = src.count("\n", 0, i) + 1
+    assert fn.lineno < line < fn.end_lineno, (fn.lineno, line, fn.end_lineno)
+    enclosing = [t.lineno for t in ast.walk(fn)
+                 if isinstance(t, ast.Try) and t.lineno <= line <= t.end_lineno]
+    assert enclosing == [], ("a handler encloses the rating pass", enclosing)
     assert "Series Glicko update error" not in src
     assert "_ladder_commit_with_late_gold" not in src
     assert "_ladder_achievement_restore(db, _ladder_late_mark)" not in src
