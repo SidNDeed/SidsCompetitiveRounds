@@ -2499,7 +2499,11 @@ def test_every_slot_pair_comparison_in_the_report_and_void_paths_is_accounted_fo
     from collections import Counter
     census = {
         "submit_ovt_match": {"set": 1, "ordered": 1, "scalar": 1,
-                             "containment": 2, "in-list": 1},
+                             "containment": 2},
+        # The tier-rating read moved out of the handler into its own helper
+        # (a read that fails must refuse, not substitute): the in-list it
+        # carries is counted where it now lives.
+        "_ovt_tier_ratings": {"in-list": 1},
         "_ovt_canonical_duo": {"scalar": 1},
         "_ovt_award_seats": {"membership": 2},
         "_ovt_horizon_candidates": {},
