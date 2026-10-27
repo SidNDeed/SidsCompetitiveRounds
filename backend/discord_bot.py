@@ -15321,8 +15321,9 @@ async def on_interaction(interaction: discord.Interaction):
 # a restart, before poll_tournaments' first tick).
 
 _tournament_board_ids: dict = {}  # channel_id -> message_id
-# Channels whose tournament-board sweep has completed in this process: the
-# leaderboard's _lb_swept, kept for this channel and run the same way
+# Channels whose tournament-board sweep has completed in this process. The
+# leaderboard kept such a set once; its reconcile read replaced it there,
+# and this channel's one board keeps its own, run the same way
 # (v1.41.0 beta round 4, finding 22). A channel owes a sweep from the start
 # of every process, and again after a failed delete of a duplicate or a
 # failed history read; _publish_tournament_board runs one on every tick
@@ -15550,8 +15551,9 @@ def _build_tournament_board_embed(t, kind: str, tally=None) -> discord.Embed:
 
 async def _adopt_tournament_board(ch):
     """Find the tournament board already in the channel, and delete older
-    copies of it: the leaderboard's sweep (_adopt_board_messages), reused for
-    this channel's one board (v1.41.0 beta round 4, finding 22). It walks the
+    copies of it: the sweep the leaderboard ran before its reconcile read
+    replaced it, kept for this channel's one board (v1.41.0 beta round 4,
+    finding 22). It walks the
     same whole history (_own_embed_messages), so a copy is found however deep
     it is buried, and it deletes through the same helper
     (_delete_board_message), so a delete answered 404 counts as done. A board

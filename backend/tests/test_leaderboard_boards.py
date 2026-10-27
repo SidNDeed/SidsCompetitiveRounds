@@ -1131,9 +1131,8 @@ def test_an_empty_board_is_published_as_empty_not_left_stale(ns):
     _tick(ns)
     ch = ns["_ch"]
     ffa = ch.messages[-1]
-    ns["_api"].payloads["/ffa/leaderboard"] = {"entries": [], "total_players": 0}
-    ns["_api"].payloads["/ffa/leaderboard?limit=1&min_games=1&include_inactive=true"] = {
-        "entries": _rows_ffa(1), "total_players": 25}
+    ns["_api"].payloads[U_FFA] = {"entries": [], "total_players": 0}
+    ns["_api"].payloads[P_FFA] = {"entries": _rows_ffa(1), "total_players": 25}
     ns["_log"].clear()
     _tick(ns)
     assert not any("ffa: no data this tick" in ln for ln in ns["_log"]), ns["_log"]
@@ -1146,7 +1145,7 @@ def test_an_empty_board_is_published_as_empty_not_left_stale(ns):
     assert "25 inactive hidden (90 days)" in foot, foot
     assert [b.disabled for b in ffa.view.children] == [True, True]
     # No entries list at all is not an answer: the board is left as it is.
-    ns["_api"].payloads["/ffa/leaderboard"] = {"total_players": 0}
+    ns["_api"].payloads[U_FFA] = {"total_players": 0}
     edits = len(ffa.edits)
     ns["_log"].clear()
     _tick(ns)
@@ -1154,18 +1153,6 @@ def test_an_empty_board_is_published_as_empty_not_left_stale(ns):
     assert len(ffa.edits) == edits
 
 
-def test_a_board_nobody_has_played_yet_is_still_posted():
-    """Round 3 finding 14, the other half: a board for a mode nobody has
-    played yet answers entries=[], and was never posted at all. It is posted
-    in its place in the set, as an empty board.
-
-    MUTATION: take an empty list as no data again. Must fail."""
-    n2 = _fresh(broken={"/team/leaderboard": {"entries": [], "total_players": 0}})
-    _tick(n2)
-    ch = n2["_ch"]
-    assert ch.titles() == [T_1V1, T_2V2, T_FFA], ch.titles()
-    assert "(no players)" in ch.messages[1].embeds[0].description
-    assert "0 rated 2v2 players" in ch.messages[1].embeds[-1].footer
 
 
 def test_burial_reposts_the_whole_set_once_and_then_settles(ns):
@@ -1489,9 +1476,16 @@ def test_the_day_count_the_client_prints_is_the_one_the_api_advertises():
         "no client string about the inactive window was found at all, so the "
         "sweep below measured nothing")
     kinds = {kind for _f, kind, _s in surfaces}
-    assert {"SettingsToggle", "Config.Bind", "TrF"} <= kinds, (
-        "the sweep no longer reaches the settings help, the configuration "
-        "descriptions and the translated labels together: it saw %r" % sorted(kinds))
+    assert {"Config.Bind", "TrF"} <= kinds, (
+        "the sweep no longer reaches the configuration descriptions and the "
+        "translated labels together: it saw %r" % sorted(kinds))
+    # The settings help: on the wave A lane it was a literal passed through
+    # SettingsToggle; the merged client's settings rework (SettingsSwitch)
+    # passes it through I18n.Tr, so it is found by its text, not its helper.
+    assert any(kind == "Tr" and s.startswith("Lists players who have not run the mod recently")
+               for _f, kind, s in surfaces), (
+        "the inactive-boards toggle's help is no longer among the surfaces the "
+        "sweep reads: it saw %r" % sorted(s for _f, _k, s in surfaces))
     for name, kind, s in surfaces:
         assert not _LITERAL_DAYS.search(s), (
             "%s (%s) states the inactivity window as a literal: %r. The window "
@@ -1624,31 +1618,6 @@ def test_the_missing_board_detector_can_fail(ns):
     assert sorted(titles) != sorted([T_1V1, T_2V2, T_FFA])
 
 
-def test_a_failed_repost_send_leaves_the_board_absent_for_one_tick_never_twice(ns):
-    """Round 4, finding 21, and what its order costs. The repost used to post
-    each replacement before deleting what it replaced, so no send failure
-    could take a board off the channel (#140) -- and a delete failure left two
-    live copies of it. A replacement is now posted only once its old message
-    is proven gone, so a send that fails right after that delete leaves the
-    board absent for one tick, never on the channel twice. The next tick's
-    complete walk finds no copy of it, posts it, and puts the set back in
-    order: the gap is one tick long, not a new steady state."""
-    _tick(ns)
-    ch = ns["_ch"]
-    ch.post_from_someone_else()                    # bury the set -> next tick reposts
-    ch.send_fails_for_titles = {T_2V2}             # 2v2's replacement will not go out
-    ns["_log"].clear()
-    _tick(ns)
-    titles = _board_titles(ch)
-    assert sorted(titles) == sorted([T_1V1, T_FFA]), titles
-    assert any("2v2: repost failed" in ln and "absent until the next tick" in ln
-               for ln in ns["_log"]), ns["_log"]
-    assert "2v2" not in ns["_lb_message_ids"][CID]
-    ch.send_fails_for_titles = set()
-    ns["_log"].clear()
-    _tick(ns)
-    assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], ch.titles()
-    assert ch.titles()[-3:] == [T_1V1, T_2V2, T_FFA]
 
 
 def test_the_second_copy_detector_can_fail(ns):
@@ -1663,111 +1632,19 @@ def test_the_second_copy_detector_can_fail(ns):
     assert sorted(titles) != sorted([T_1V1, T_2V2, T_FFA])
 
 
-def test_a_failed_repost_delete_keeps_the_board_and_edits_it_in_place(ns):
-    """Round 4, finding 21. The repost used to post the replacement and then
-    try the delete, so a delete that failed left the board on the channel
-    twice. Nothing replaces a board now until its old message is proven gone:
-    when the delete fails, the old message stays this board's message, is
-    edited where it is, and is the only copy.
-
-    MUTATION: the old order (post, then delete). Must fail."""
-    _tick(ns)
-    ch = ns["_ch"]
-    old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
-    ch.post_from_someone_else()
-    ch.delete_fails = {old_2v2}
-    ns["_log"].clear()
-    _tick(ns)
-    titles = _board_titles(ch)
-    assert titles.count(T_2V2) == 1, titles
-    assert sorted(titles) == sorted([T_1V1, T_2V2, T_FFA]), titles
-    assert ns["_lb_message_ids"][CID]["2v2"] == old_2v2
-    assert len(next(m for m in ch.messages if m.id == old_2v2).edits) == 1
-    assert any("2v2: old message mid=%d not deleted" % old_2v2 in ln and "edited in place" in ln
-               for ln in ns["_log"]), ns["_log"]
 
 
-def test_a_failed_repost_delete_is_retried_until_the_board_moves(ns):
-    """Round 3 finding 12, as round 4's order meets it. The old 2v2 message
-    will not delete, so the set cannot reach the bottom: every tick retries
-    the move, and while the delete keeps failing the board stays one copy,
-    edited in place. Once the delete goes through the set is at the bottom
-    in order, the next tick edits all three, and a channel with nothing owed
-    is not swept again.
-
-    MUTATION: the old order (post, then delete). Must fail."""
-    _tick(ns)
-    ch = ns["_ch"]
-    old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
-    ch.post_from_someone_else()
-    ch.delete_fails = {old_2v2}
-    _tick(ns)                                   # 1v1 and FFA move; 2v2 stays, edited
-    assert _board_titles(ch).count(T_2V2) == 1, ch.titles()
-    ns["_log"].clear()
-    _tick(ns)                                   # still refused: the move is retried
-    assert any("2v2: old message mid=%d not deleted" % old_2v2 in ln for ln in ns["_log"]), ns["_log"]
-    assert _board_titles(ch).count(T_2V2) == 1, ch.titles()
-    ch.delete_fails = set()
-    ns["_log"].clear()
-    _tick(ns)                                   # goes through: the set is at the bottom
-    assert old_2v2 in ch.deleted
-    assert ch.titles() == [None, T_1V1, T_2V2, T_FFA], ch.titles()
-    ns["_log"].clear()
-    _tick(ns)
-    assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 3
-    assert CID in ns["_lb_swept"]
-    # ...and a clean channel is not swept again on every tick.
-    calls = []
-    real = ns["_adopt_board_messages"]
-
-    async def counting(*a, **kw):
-        calls.append(1)
-        return await real(*a, **kw)
-    ns["_adopt_board_messages"] = counting
-    _tick(ns)
-    assert calls == [], "a channel with nothing owed was swept again"
 
 
-def test_a_restart_whose_rescan_fails_posts_nothing_it_cannot_prove_absent(ns):
-    """Round 3 finding 15, as round 4's finding 21 meets it. After a restart
-    the id map is empty and the walk is what finds the set already in the
-    channel. When that history read fails, a fresh set used to be posted
-    beside the old one. Nothing is posted now without a complete walk: the
-    tick leaves the channel as it is, the sweep stays owed, and the next
-    tick's walk adopts the old set and edits it in place -- one set
-    throughout, nothing deleted.
-
-    MUTATION: post a board with no message on record after a failed walk.
-    Must fail."""
-    _tick(ns)
-    ch = ns["_ch"]
-    old = dict(ns["_lb_message_ids"][CID])
-    ns["_lb_message_ids"].clear()               # the process restarts: both maps are
-    ns["_lb_swept"].clear()                     # process memory
-    ch.history_raises = True
-    ns["_log"].clear()
-    _tick(ns)
-    assert any("rescan failed" in ln for ln in ns["_log"]), ns["_log"]
-    assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], ch.titles()
-    assert len(ch.sent) == 3 and ch.deleted == []
-    assert ns["_lb_message_ids"][CID] == {}
-    assert CID not in ns["_lb_swept"]
-    ch.history_raises = False
-    ns["_log"].clear()
-    _tick(ns)
-    assert ns["_lb_message_ids"][CID] == old
-    assert ch.deleted == [] and len(ch.sent) == 3
-    assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 3
-    assert CID in ns["_lb_swept"]
 
 
 def test_a_board_dropped_from_the_list_is_retired_on_restart(ns):
     """Round 3 finding 13. LEADERBOARD_BOARDS goes from 1v1,2v2,ffa to
     1v1,2v2 and the bot restarts. The FFA board's title matched nothing in the
     sweep, so it was never adopted and never deleted: the channel kept a board
-    the list no longer names, for good. The restart's sweep now retires it --
-    only it, and only ours -- and the two named boards are adopted and edited
-    in place.
+    the list no longer names, for good. The restart's channel read now retires
+    it -- only it, and only ours -- and the two named boards are adopted and
+    edited in place.
 
     MUTATION: an empty retire map, or one that also holds the named boards.
     Must fail."""
@@ -1779,54 +1656,42 @@ def test_a_board_dropped_from_the_list_is_retired_on_restart(ns):
     old = dict(ns["_lb_message_ids"][CID])
     ns["LEADERBOARD_BOARDS_RAW"] = "1v1,2v2"        # the list changes; the bot restarts
     ns["_lb_message_ids"].clear()
-    ns["_lb_swept"].clear()
     ns["_log"].clear()
     _tick(ns)
     assert ch.deleted == [old["ffa"]], (ch.deleted, old)
     assert ch.titles() == [T_FFA, "Weekly recap", T_1V1, T_2V2], ch.titles()
     assert theirs in ch.messages and note in ch.messages
     assert ns["_lb_message_ids"][CID] == {"1v1": old["1v1"], "2v2": old["2v2"]}
-    assert any("retired 1 board message(s) not in LEADERBOARD_BOARDS" in ln for ln in ns["_log"]), ns["_log"]
+    assert any("retired 1 board message(s) for boards this deployment no longer publishes" in ln
+               for ln in ns["_log"]), ns["_log"]
     assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 2
-    assert CID in ns["_lb_swept"]
 
 
 def test_an_emptied_list_retires_every_board_and_retries_a_refused_one(ns):
     """Round 3 finding 13, the empty list. With LEADERBOARD_BOARDS emptied,
     publish_boards returned before it touched the channel, so every board
-    stayed. The sweep now runs there too and retires every board of ours; it
-    is owed until it completes, so a refused delete is retried on the next
-    tick, and a completed sweep is not run again.
+    stayed. The channel read now runs there too and retires every board of
+    ours; a refused delete is found again by the next tick's read and
+    retried.
 
-    MUTATION: no sweep on the empty list, or a refused retire marked
-    complete. Must fail."""
+    MUTATION: no retirement on the empty list, or a refused delete
+    forgotten. Must fail."""
     _tick(ns)
     ch = ns["_ch"]
     old = dict(ns["_lb_message_ids"][CID])
     ns["LEADERBOARD_BOARDS_RAW"] = ""               # emptied; the bot restarts
     ns["_lb_message_ids"].clear()
-    ns["_lb_swept"].clear()
     ch.delete_fails = {old["2v2"]}
     ns["_log"].clear()
     _tick(ns)
     assert sorted(ch.deleted) == sorted([old["1v1"], old["ffa"]]), (ch.deleted, old)
-    assert any("couldn't retire 2v2 board mid=%d" % old["2v2"] in ln for ln in ns["_log"]), ns["_log"]
-    assert any("LEADERBOARD_BOARDS is empty" in ln for ln in ns["_log"])
-    assert CID not in ns["_lb_swept"]
+    assert any("couldn't delete retired 2v2 board mid=%d" % old["2v2"] in ln
+               for ln in ns["_log"]), ns["_log"]
+    assert any("LEADERBOARD_BOARDS names no board" in ln for ln in ns["_log"])
     ch.delete_fails = set()
     ns["_log"].clear()
     _tick(ns)                                       # retried: the refused one goes too
     assert ch.titles() == [], ch.titles()
-    assert CID in ns["_lb_swept"]
-    calls = []
-    real = ns["_adopt_board_messages"]
-
-    async def counting(*a, **kw):
-        calls.append(1)
-        return await real(*a, **kw)
-    ns["_adopt_board_messages"] = counting
-    _tick(ns)
-    assert calls == [], "a completed sweep ran again"
 
 
 def test_the_owed_delete_queue_and_its_cap_are_gone_from_the_module():
@@ -2333,7 +2198,7 @@ def test_a_transient_edit_failure_retries_the_edit_and_never_posts_a_second_copy
     ch.fetch_fails_once.add(first)                       # e.g. a 429 on that one message
     n2["_log"].clear()
     _tick(n2)
-    assert any(f"1v1: edit of mid={first} failed" in ln and "retried next tick" in ln
+    assert any(f"1v1: edit of mid={first} failed" in ln and "retrying next tick" in ln
                for ln in n2["_log"]), n2["_log"]
     assert not any("posted fresh board message" in ln for ln in n2["_log"]), n2["_log"]
     assert n2["_lb_message_ids"][CID] == ids
@@ -2346,40 +2211,14 @@ def test_a_transient_edit_failure_retries_the_edit_and_never_posts_a_second_copy
     assert ch.deleted == [] and n2["_lb_message_ids"][CID] == ids
 
 
-def test_a_board_deleted_by_hand_is_posted_again_once(ns):
-    """Round 4, finding 21: a 404 is proof. A moderator deletes the 2v2
-    board. On the move path the old message's delete answers 404, which is
-    as good as a delete; on the edit path (here the tail read fails, so the
-    set is edited in place) the edit answers 404 and the board is posted
-    fresh at once. Either way it ends as one copy, and the set in order."""
-    _tick(ns)
-    ch = ns["_ch"]
-    old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
-    ch.messages = [m for m in ch.messages if m.id != old_2v2]      # deleted by hand
-    ch.history_raises = True                                        # the tail read fails
-    ns["_log"].clear()
-    _tick(ns)
-    assert any("2v2: board mid=%d is gone (404)" % old_2v2 in ln for ln in ns["_log"]), ns["_log"]
-    assert _board_titles(ch) == [T_1V1, T_FFA, T_2V2], ch.titles()
-    ch.history_raises = False
-    ns["_log"].clear()
-    _tick(ns)
-    assert ch.titles() == [T_1V1, T_2V2, T_FFA], ch.titles()
-    # The move path: deleted by hand again, with the tail read working.
-    gone = ns["_lb_message_ids"][CID]["2v2"]
-    ch.messages = [m for m in ch.messages if m.id != gone]
-    ns["_log"].clear()
-    _tick(ns)
-    assert ch.titles() == [T_1V1, T_2V2, T_FFA], ch.titles()
-    assert gone not in ch.deleted                        # the 404 was the proof, not a delete
 
 
 def test_a_walk_that_fails_part_way_posts_nothing_it_did_not_reach(ns):
     """Round 4, findings 15 and 21: a partial walk proves nothing absent. The
     set sits under 120 messages of chat and the process restarts; the walk
-    reads 60 messages and fails. Nothing is posted and nothing deleted, the
-    sweep stays owed, and the next tick's complete walk finds the set and
-    moves it -- one set throughout.
+    reads 60 messages and fails. Nothing is posted and nothing deleted, and
+    the next tick's complete read finds the set and moves it -- one set
+    throughout.
 
     MUTATION: post a board with no message on record after a failed walk.
     Must fail."""
@@ -2387,20 +2226,39 @@ def test_a_walk_that_fails_part_way_posts_nothing_it_did_not_reach(ns):
     ch = ns["_ch"]
     _bury(ch)
     ns["_lb_message_ids"].clear()               # the process restarts
-    ns["_lb_swept"].clear()
     ch.history_fails_after = 60
     ns["_log"].clear()
     _tick(ns)
-    assert any("rescan failed (history page failed)" in ln for ln in ns["_log"]), ns["_log"]
+    assert any("channel read failed (history page failed)" in ln for ln in ns["_log"]), ns["_log"]
     assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], ch.titles()
     assert len(ch.sent) == 3 and ch.deleted == []
-    assert CID not in ns["_lb_swept"]
     ch.history_fails_after = None
     _tick(ns)
     assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], ch.titles()
     assert ch.titles()[-3:] == [T_1V1, T_2V2, T_FFA]
-    assert CID in ns["_lb_swept"]
 
+
+# Round-4 tests retired at the v1.41.0 fold (2026-10-27). The beta's round 4
+# (2026-09-25/26) pinned a run-once sweep flag, delete-before-send reposts
+# and a sweep helper (the names in GONE_FROM_SOURCE); the wave A lane
+# replaced all three with one channel read per tick, send before delete,
+# and the fold kept that bot. Each retired test's scenario is pinned against the
+# replacement, with the opposite expectation where the design reversed it:
+#   test_a_board_nobody_has_played_yet_is_still_posted
+#     -> test_an_empty_board_publishes_as_empty_and_keeps_its_place
+#   test_a_failed_repost_send_leaves_the_board_absent_for_one_tick_never_twice
+#     -> test_a_failed_repost_send_never_takes_a_board_off_the_channel
+#   test_a_failed_repost_delete_keeps_the_board_and_edits_it_in_place
+#     -> test_a_failed_repost_delete_leaves_a_duplicate_and_the_next_read_removes_it
+#   test_a_failed_repost_delete_is_retried_until_the_board_moves
+#     -> test_a_failed_repost_delete_leaves_a_duplicate_and_the_next_read_removes_it
+#   test_a_restart_whose_rescan_fails_posts_nothing_it_cannot_prove_absent
+#     -> test_a_cold_start_whose_channel_read_fails_posts_no_second_set
+#   test_a_board_deleted_by_hand_is_posted_again_once
+#     -> test_a_message_that_is_really_gone_is_replaced
+#   test_a_set_buried_deeper_than_any_window_is_found_on_restart
+#     -> test_a_cold_start_under_a_full_scan_of_chat_finds_the_set_it_left
+# The seven that survive above were ported to the read's names and phrases.
 
 # -- round 4: the sweep reads the whole channel (findings 12, 13, 15) ----------
 
@@ -2423,27 +2281,6 @@ def _board_titles(ch):
     return [t for t in ch.titles() if t is not None]
 
 
-def test_a_set_buried_deeper_than_any_window_is_found_on_restart(ns):
-    """Round 4, findings 12, 13 and 15, the depth half. The sweep read the
-    newest 50 messages, so a set buried under more chat than that was never
-    adopted: a restart posted a second set below it, and the first stayed for
-    good. The walk now reads the whole channel. A restart finds the set under
-    120 messages of chat and moves it to the bottom -- one set, never two --
-    and nobody else's message is touched.
-
-    MUTATION: the walk back to the newest 50 messages. Must fail."""
-    _tick(ns)
-    ch = ns["_ch"]
-    old = dict(ns["_lb_message_ids"][CID])
-    _bury(ch)
-    ns["_lb_message_ids"].clear()               # the process restarts
-    ns["_lb_swept"].clear()
-    _tick(ns)
-    assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], _board_titles(ch)
-    assert ch.titles()[-3:] == [T_1V1, T_2V2, T_FFA]
-    assert sorted(ch.deleted) == sorted(old.values()), (ch.deleted, old)
-    assert len(ch.messages) == _DEEP + 3
-    assert CID in ns["_lb_swept"]
 
 
 def test_a_duplicate_set_buried_deep_is_swept_on_restart(ns):
@@ -2457,12 +2294,11 @@ def test_a_duplicate_set_buried_deep_is_swept_on_restart(ns):
     stale = _post_set(ns, "stale")
     _bury(ch)
     current = _post_set(ns, "current")
-    _tick(ns)                                   # a fresh process: nothing tracked, a sweep owed
+    _tick(ns)                                   # a fresh process: nothing tracked
     assert sorted(ch.deleted) == sorted(stale), (ch.deleted, stale)
     assert _board_titles(ch) == [T_1V1, T_2V2, T_FFA], _board_titles(ch)
     assert sorted(ns["_lb_message_ids"][CID].values()) == sorted(current)
     assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 3
-    assert CID in ns["_lb_swept"]
 
 
 def test_a_retired_board_buried_deep_is_still_retired(ns):
@@ -2477,11 +2313,9 @@ def test_a_retired_board_buried_deep_is_still_retired(ns):
     _bury(ch)
     ns["LEADERBOARD_BOARDS_RAW"] = "1v1,2v2"        # the list changes; the bot restarts
     ns["_lb_message_ids"].clear()
-    ns["_lb_swept"].clear()
     _tick(ns)
     assert old["ffa"] in ch.deleted, (ch.deleted, old)
     assert _board_titles(ch) == [T_1V1, T_2V2], _board_titles(ch)
-    assert CID in ns["_lb_swept"]
 
 
 # -- round 4: the tournament board runs the same mechanism (finding 22) --------
