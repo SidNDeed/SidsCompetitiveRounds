@@ -238,8 +238,17 @@ def _bare(stmt):
 #   (tools/i18n_sync_keys.py) has not populated. It writes i18n_proposals
 #   only, which neither this module nor a route it drives reads (the
 #   translation portal's routes do).
+# - 387 and 388 restore one seat's FFA rating after the early-leave ruling
+#   (lesson 933: 387 refused in production and 388 replaced it). Each pins
+#   that seat's players row by id, takes its identity lock first and refuses
+#   on any database without the row, changing nothing; on this fresh schema
+#   the row never exists. Each writes glicko_ratings_ffa and
+#   ffa_match_players rows of that one seat only, tables nothing this module
+#   drives reads (the card face takes its numbers from the pool snapshot).
 HELD_OUT = frozenset({"366_title_refunds_voidshot_kingslayer.sql",
-                      "376_i18n_337_demonic_proposals.sql"})
+                      "376_i18n_337_demonic_proposals.sql",
+                      "387_ffa_rating_restore_2f60481d.sql",
+                      "388_ffa_rating_restore_2f60481d.sql"})
 
 
 def _numbered(upto=None, above=None):

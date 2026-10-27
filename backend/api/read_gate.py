@@ -193,6 +193,9 @@ WRITE_ON_GET: dict[str, str] = {
                                  "sender colours",
     "/api/v1/tournaments/players/{steam_id}/penalty": "the handler recomputes the penalty row "
                                                       "and commits",
+    "/api/v1/pc/face/preview": "session-reached: the caller's own card is drawn by the bot's "
+                               "/card helper, whose Steam prime writes the avatar cache and "
+                               "releases portrait blobs (the class of /api/v1/pc/packs/result)",
 }
 
 # Routes test_write_on_get_inventory flags that are NOT write-on-get, each
@@ -272,14 +275,6 @@ WRITE_REVIEWED: dict[str, tuple[frozenset, str]] = {
         "rows past the hand-out cap or the age bound, then picks, locks and claims "
         "one batch in one statement, and the claim prevents a double hand-out "
         "(5c0f605a)"),
-    "/api/v1/pc/face/preview": (
-        frozenset({"_pc_release_portrait_blob", "_pc_steam_prime", "_pc_steam_process",
-                   "_pc_steam_write", "pc_face_preview"}),
-        "the caller's own card, drawn by _pc_preview_face, the helper the bot's /card "
-        "preview draws with: the handler commits to release the verified actor's "
-        "shared identity lock, then the helper's Steam prime writes the avatar cache "
-        "under the exclusive form of that lock and releases portrait blobs; the "
-        "strict session through the verified actor is by design"),
 }
 _R_PORTAL = ("the portal token's first-use address binding (_portal_auth), written only for "
              "a presented portal token; PORTAL: the gate refuses nothing")

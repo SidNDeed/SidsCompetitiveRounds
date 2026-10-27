@@ -153,11 +153,6 @@ SESSION_REVIEWED: dict[str, tuple[str, str]] = {
         "route table's endpoint to get_set_report by identity and never calls it; "
         "the closure walk expands every name inside a def, so the reference reads "
         "as a reach of get_set_report's session check"),
-    "/api/v1/pc/face/preview": (
-        read_gate.C_PUBLIC,
-        "the caller's own card: the route requires the strict session through the "
-        "verified actor (_pc_verified_actor) by design, HMAC over "
-        "pcread:{steam}:face:preview, and refuses a service account"),
 }
 
 
@@ -242,17 +237,25 @@ def test_read_gate_inventory(capsys):
 
 def test_session_review_controls():
     """The entries are what clear their routes, and only with the class they
-    name: with one entry's class wrong and the other entry removed, both
-    routes are flagged again; an entry for a path no GET route has is
-    stale. Every entry carries a reason."""
-    (p1, (c1, why1)), (p2, (c2, _)) = sorted(SESSION_REVIEWED.items())
-    scratch = {p1: (read_gate.C_PROBE, why1), "/api/v1/zz-no-such-route": (c1, why1)}
-    problems = check_classes(main.app.routes, reviewed=scratch)
-    assert f"{p1} reaches a player-session check but is {c1}" in problems, problems
-    assert f"{p2} reaches a player-session check but is {c2}" in problems, problems
-    assert "stale session review entries: ['/api/v1/zz-no-such-route']" in problems, problems
-    for path, (cls, why) in SESSION_REVIEWED.items():
+    name: with an entry's class wrong, and again with the entry removed, its
+    route is flagged; an entry for a path no GET route has is stale. Every
+    entry carries a reason. Each entry is tried both ways, so the control
+    holds with one entry as with several (2026-10-27: the face preview
+    entry left when its route became WRITE_ON_GET)."""
+    assert SESSION_REVIEWED, "no session review entry to control"
+    stale = "/api/v1/zz-no-such-route"
+    for path, (cls, why) in sorted(SESSION_REVIEWED.items()):
         assert cls and why.strip(), path
+        wrong = dict(SESSION_REVIEWED)
+        wrong[path] = (read_gate.C_PROBE, why)
+        wrong[stale] = (cls, why)
+        problems = check_classes(main.app.routes, reviewed=wrong)
+        assert f"{path} reaches a player-session check but is {cls}" in problems, problems
+        assert f"stale session review entries: ['{stale}']" in problems, problems
+        removed = dict(SESSION_REVIEWED)
+        del removed[path]
+        problems = check_classes(main.app.routes, reviewed=removed)
+        assert f"{path} reaches a player-session check but is {cls}" in problems, problems
 
 
 def test_inventory_controls(tmp_path):
