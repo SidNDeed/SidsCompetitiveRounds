@@ -167,13 +167,10 @@
         {
           "file": "backend/discord_bot.py",
           "text": "the harder ones pay 300g, 500g or 1000g"
-        }
-      ],
-      "owed_to_client_lane": [
+        },
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount, Sync Champion, Async Champion.",
-          "replaces": "- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount."
+          "text": "- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount, Sync Champion, Async Champion."
         }
       ],
       "verdict": "verified"
@@ -205,13 +202,10 @@
         {
           "file": "backend/discord_bot.py",
           "text": "the harder ones pay 300g, 500g or 1000g"
-        }
-      ],
-      "owed_to_client_lane": [
+        },
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman, Sync Finalist, Async Finalist.",
-          "replaces": "- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman."
+          "text": "- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman, Sync Finalist, Async Finalist."
         }
       ],
       "verdict": "verified"
@@ -288,12 +282,10 @@
         "file": "plugin/GameStateWatcher.cs",
         "pattern": "double warnAfter = isTournamentRoom \\? 90 : \\(isFfaRoom \\? 45 : \\(isOvtRoom \\? 35 : \\(isTeamRoom \\? 30 : (\\d+)\\)\\)\\);"
       },
-      "surfaces": [],
-      "owed_to_client_lane": [
+      "surfaces": [
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "a warning at 15 seconds",
-          "replaces": "a warning at 25 seconds"
+          "text": "a warning at 15 seconds"
         }
       ],
       "verdict": "verified"
@@ -402,20 +394,17 @@
       "also": [
         {
           "file": "plugin/NativeUI.cs",
-          "pattern": "for \\(int n = 2; n <= (\\d+); n\\+\\+\\)"
+          "pattern": "^        private const int CosmeticMaxFrames = (\\d+);$"
         }
       ],
       "surfaces": [
         {
           "file": "backend/discord_bot.py",
           "text": "up to **16 frames**"
-        }
-      ],
-      "owed_to_client_lane": [
+        },
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "or up to 16 numbered PNG frames",
-          "replaces": "a PNG or animated frames"
+          "text": "or up to 16 numbered PNG frames"
         }
       ],
       "verdict": "verified"
@@ -427,7 +416,7 @@
       "display": "1.2 MB",
       "anchor": {
         "file": "plugin/NativeUI.cs",
-        "pattern": "bytes == null \\|\\| bytes\\.Length > ([\\d_]+)\\)"
+        "pattern": "^        private const int CosmeticPngMaxBytes = ([\\d_]+);$"
       },
       "surfaces": [
         {
@@ -444,7 +433,7 @@
       "display": "2.2 MB",
       "anchor": {
         "file": "plugin/NativeUI.cs",
-        "pattern": "if \\(bytes\\.Length > ([\\d_]+)\\)$"
+        "pattern": "^        private const int CosmeticGifMaxBytes = ([\\d_]+);$"
       },
       "surfaces": [
         {
@@ -660,13 +649,10 @@
         {
           "file": "backend/discord_bot.py",
           "text": "Format: **512×512 PNG**"
-        }
-      ],
-      "owed_to_client_lane": [
+        },
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "one 512x512 PNG",
-          "replaces": "a PNG or animated frames"
+          "text": "one 512x512 PNG"
         }
       ],
       "verdict": "verified"

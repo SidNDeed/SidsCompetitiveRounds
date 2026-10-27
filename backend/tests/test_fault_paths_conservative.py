@@ -649,13 +649,22 @@ def test_no_handler_in_the_repaired_set_still_swallows_its_read():
 def test_only_one_caller_may_catch_the_session_check_and_it_is_named():
     """A refusal is only a closure if it reaches the caller (#286). The
     session check now raises 503 on an unreadable read, so any handler that
-    catches it turns the refusal back into an admission — with ONE intended
-    exception, which is asserted by name rather than tolerated by silence.
+    catches it turns the refusal back into an admission — with TWO intended
+    exceptions, each asserted by name rather than tolerated by silence.
 
     presence_ping's `in_match` block catches on purpose and in the opposite
     polarity: that claim only ever vetoes destruction and renews a lease, so
     dropping it expires the lease and frees the group, which is the
     self-healing direction (#276).
+
+    _asm_run (the FFA assembly runner, v1.41.0) is the second, named for its
+    polarity too: the session check sits inside its deadline try so a slow
+    check counts against the assembly deadline, but the only handler there
+    that does not re-raise is the one for _AsmDeadline, which the session
+    check never raises; an HTTPException is rolled back and re-raised, and
+    anything else is re-raised unless its SQLSTATE maps to an assembly stage,
+    in which case the answer is 503 asm_deadline -- a refusal, never an
+    admission.
 
     Control: wrap any other `await _check_steam_session(...)` in a
     `try/except Exception: pass` -> RED."""
@@ -681,8 +690,8 @@ def test_only_one_caller_may_catch_the_session_check_and_it_is_named():
                 if (isinstance(n, ast.Call)
                         and getattr(n.func, "id", None) == "_check_steam_session"):
                     caught.append(enclosing.get(id(n)))
-    assert caught == ["presence_ping"], (
-        "a handler other than presence_ping catches the session check: %r" % caught)
+    assert caught == ["_asm_run", "presence_ping"], (
+        "a handler other than _asm_run or presence_ping catches the session check: %r" % caught)
 
 
 def test_the_award_paths_use_the_award_polarity_accessors():

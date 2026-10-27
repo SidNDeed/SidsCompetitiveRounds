@@ -750,7 +750,8 @@ async def _confirmed_mentions(db: AsyncSession, tournament_id: uuid.UUID) -> str
 # lock's own eligible tally (_eligible_slot_tallies). The bot builds the same
 # sentence for the lines it composes (discord_bot.py _tsync_rule; the bot
 # image carries discord_bot.py alone, so it cannot import this module):
-# test_row32_e pins the two byte-equal over every progress shape. ASCII only.
+# test_row32_e_the_server_states_the_bots_start_rule_sentence_byte_for_byte
+# pins the two byte-equal over every progress shape. ASCII only.
 TSYNC_VOTE_HOW = "Vote for every time you can make in F5 -> Tournaments."
 
 

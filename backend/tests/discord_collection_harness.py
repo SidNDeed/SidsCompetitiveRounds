@@ -52,6 +52,7 @@ import re
 import secrets
 import threading
 import time as _time
+import traceback
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -188,6 +189,25 @@ def mod_sig(canon: str) -> str:
 # -- the schema, its census and its one destructive sender -----------------------
 
 SCHEMA = "dc_reveal"
+
+
+def _printing_tracebacks(app):
+    """The ASGI app for the test client, printing a handler's traceback.
+
+    raise_app_exceptions=False is what lets a row read the 500 a route
+    answered instead of failing in the request coroutine, but httpx then
+    swallows the exception whole: a failing row read as
+    (500, 'Internal Server Error') with nothing to go on (2026-10-27, the
+    quorum rows on the v1.41.0 candidate). The traceback goes to stdout on
+    the way out, where pytest captures it per row; the status the client
+    sees is unchanged."""
+    async def wrapped(scope, receive, send):
+        try:
+            await app(scope, receive, send)
+        except Exception:
+            traceback.print_exc()
+            raise
+    return wrapped
 DB_NAME_MARK = "discord_collection"
 BUILD_TABLE = "dc_reveal_build"
 OBJECTS_TABLE = "dc_reveal_objects"
@@ -632,7 +652,9 @@ class Env:
         mp.setattr(main, "_pc_reveal_windows", {})
         mp.setattr(main, "_pc_composite_gate",
                    main._PcCompositeGate(main._PC_COMPOSITE_SLOTS, main._PC_COMPOSITE_QUEUE_DEPTH))
-        mp.setattr(main, "_rank_colors_cache", {"at": 0.0, "ok": False, "map": {}})
+        # failed_at: the Sept 16 lane's failure window (a read that failed is
+        # not retried inside _RANK_COLORS_TTL_SECONDS); the reader indexes it.
+        mp.setattr(main, "_rank_colors_cache", {"at": 0.0, "ok": False, "map": {}, "failed_at": None})
         mp.setattr(main, "_service_player_uuid_cache", None)
         mp.setattr(main, "_RL_BUCKETS", main._rl_defaultdict(main._rl_deque))
         for name in ("_RL_GLOBAL", "_RL_SENSITIVE", "_RL_PC", "_RL_PC_UPLOAD", "_RL_FACE"):
@@ -663,7 +685,8 @@ class Env:
         async with database.async_session() as db:
             await main._pc_load_card_themes(db)
         assert main._PC_CARD_THEMES, "the seeded pc_card_themes did not load"
-        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app, raise_app_exceptions=False),
+        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=_printing_tracebacks(main.app),
+                                                                    raise_app_exceptions=False),
                                         base_url=BASE_URL, timeout=120.0)
         self._n = 0
         return self

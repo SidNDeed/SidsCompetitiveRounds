@@ -200,7 +200,11 @@ def test_a_client_lane_surface_is_recorded_as_owed_not_as_present():
     repair a partial application before looking at it. It is what keeps the
     fixture and the migration describing ONE edit rather than two independent
     guesses. Each row is judged on its own, so a ladder applied in part reds
-    on the row that was applied."""
+    on the row that was applied.
+
+    2026-10-27 (v1.41.0 candidate): the client lane applied all five and this
+    fired on each, so every row now sits under `surfaces`; the four checks
+    stay for any row added later."""
     every_edit = [pair for edits in REKEY_EDITS.values() for pair in edits]
 
     owed = 0
@@ -246,9 +250,13 @@ def test_a_client_lane_surface_is_recorded_as_owed_not_as_present():
                     "and 340 describe different edits"
                     % (c["id"], len(produced), row["text"]))
     assert not problems, "\n".join(problems)
-    assert owed == 5, (
-        "expected item 11's five client-lane surfaces to be recorded as "
-        "owed, found %d" % owed)
+    # v1.41.0 candidate (2026-10-27): the client lane applied all five (both
+    # gold-ladder lines, the 1v1 lone-room warning, the frame cap, the PNG
+    # dimension), and this tripwire moved each row under `surfaces`, where
+    # test_surfaces_agree holds it. Nothing is owed; a row added later is
+    # still held to the four checks above.
+    assert owed == 0, (
+        "expected no item 11 client-lane surface to remain owed, found %d" % owed)
 
 
 # ── 3. No file this item touches carries a local path, a scratch reference
@@ -1129,23 +1137,31 @@ def test_the_uploader_error_texts_quote_the_limits_they_enforce():
     the artist meets in the product, which the FAQ can be right about while
     the error text is wrong.
 
-    SCOPE, and why one half of the pair is missing. Only the SERVER's refusal
-    is pinned. plugin/NativeUI.cs still refuses a PNG over 1,200,000 bytes
-    while telling the artist "1 MB max", this branch does not change that file,
-    and nothing here goes red for it. That is a residual, not a fix: the file
-    belongs to the client lane and the required change is written down for it
-    in docs/faq-refresh-client-contract.md. The two alternatives were both
-    worse — asserting the text this tree carries would PIN the defect, and
-    asserting only that the message sits near its check would be a check that
-    cannot fail on the thing it is for (#342). The GIF pair below is a
-    different literal, is already consistent with its own check, and is pinned
-    so it stays that way."""
+    SCOPE. On the item 11 branch only the SERVER's refusal was pinned:
+    plugin/NativeUI.cs still refused a PNG over 1,200,000 bytes while telling
+    the artist "1 MB max", that file belonged to the client lane, and the
+    required change was written down for it in
+    docs/faq-refresh-client-contract.md, so this test carried that residual
+    as a sentence. The v1.41.0 client lane applied the change
+    (CosmeticPngMaxBytes, CosmeticGifMaxBytes, SizeCapLabel: the check reads
+    the constant and the message formats it), so both halves are pinned here
+    now, each by the name its check and its message share. Asserting the two
+    literals agree would be a check that cannot fail on the thing it is for
+    (#342): the message no longer carries a literal to disagree with."""
     native = _read(NATIVE_UI)
-    gif = re.search(r"bytes\.Length > ([\d_]+)\)\s*\n\s*\{ ShowArtistResult"
-                    r"[^\n]*?GIF too large - about (\d+) MB max", native)
-    assert gif, "NativeUI's GIF refusal no longer sits with its size check"
-    assert abs(int(gif.group(2)) * 1_000_000
-               - int(gif.group(1).replace("_", ""))) < 300_000, gif.groups()
+    gif = re.search(r"bytes\.Length > (Cosmetic\w+MaxBytes)\)\s*\n\s*\{ ShowArtistResult"
+                    r"[^\n]*?GIF too large - \{SizeCapLabel\((Cosmetic\w+MaxBytes)\)\} max", native)
+    assert gif, ("NativeUI's GIF refusal no longer sits with its size check, or no "
+                 "longer quotes the cap it enforces")
+    assert gif.group(1) == gif.group(2) == "CosmeticGifMaxBytes", gif.groups()
+    png = re.search(r"bytes == null \|\| bytes\.Length > (Cosmetic\w+MaxBytes)\)\s*\n\s*return "
+                    r"[^\n]*?PNG missing or too large - \{SizeCapLabel\((Cosmetic\w+MaxBytes)\)\} max",
+                    native)
+    assert png, ("NativeUI's PNG refusal no longer sits with its size check, or no "
+                 "longer quotes the cap it enforces")
+    assert png.group(1) == png.group(2) == "CosmeticPngMaxBytes", png.groups()
+    assert re.search(r"^\s*private static string SizeCapLabel\(int bytes\)", native, re.M), (
+        "SizeCapLabel, which formats both refusals from their constants, is gone")
 
     main = _read("backend/api/main.py")
     b64 = int(re.search(r"^COSMETIC_MAX_B64 = ([\d_]+)", main, re.M)
@@ -1182,22 +1198,27 @@ def test_the_scoped_residuals_are_stated_where_the_next_reader_meets_them():
 
     So the paragraph is pinned from OUTSIDE the test that carries it: this
     reds when only the SCOPE paragraph goes, while the uploader test goes on
-    asserting the limits themselves."""
+    asserting the limits themselves.
+
+    2026-10-27 (v1.41.0 candidate): the client lane swept the client half, so
+    the paragraph now records that resolution, and this pins THAT the same
+    way -- the next tidy-up would otherwise leave the test silent on why the
+    pair is pinned by name."""
     scope = re.sub(r"\s+", " ", _docstring(
         _THIS_FILE, "test_the_uploader_error_texts_quote_the_limits_they_enforce"))
     for sentence in (
-            "SCOPE, and why one half of the pair is missing.",
-            "Only the SERVER's refusal is pinned.",
-            "this branch does not change that file, and nothing here goes red "
-            "for it.",
-            "the file belongs to the client lane and the required change is "
-            "written down for it in docs/faq-refresh-client-contract.md"):
+            "SCOPE. On the item 11 branch only the SERVER's refusal was pinned:",
+            "that file belonged to the client lane, and the required change was "
+            "written down for it in docs/faq-refresh-client-contract.md",
+            "The v1.41.0 client lane applied the change",
+            "so both halves are pinned here now, each by the name its check and "
+            "its message share."):
         assert sentence in scope, (
-            "the uploader test no longer states the scope of what it pins. "
-            "The half it does NOT pin — the client's own refusal message, "
-            "still wrong about its own check — is a residual whether or not "
-            "anybody writes it down, and that paragraph is where the next "
-            "reader meets it. Missing: %r" % sentence[:56])
+            "the uploader test no longer states what it pins and why. The "
+            "residual the item 11 branch carried (the client's own refusal "
+            "message) was resolved by the v1.41.0 client lane, and that "
+            "paragraph is where the next reader learns both halves are now "
+            "pinned by name. Missing: %r" % sentence[:56])
 
 
 def _hooks_dir():
