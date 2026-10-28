@@ -591,15 +591,16 @@ def record(out, line):
 
 
 def cmd_check(args):
-    """Every edit set applies to a scratch copy and the edited main.py compiles."""
+    """Every edit set applies to a scratch copy and every edited .py file compiles."""
     bad = 0
     for r in selected(args.rows):
         for kind in ("mutant", "twin"):
             d = None
             try:
                 d = make_copy(r[kind], r["row"] + "_" + kind)
-                with open(os.path.join(d, MAIN), "rb") as fh:
-                    compile(fh.read(), MAIN, "exec")
+                for rel in sorted({MAIN} | {e[0] for e in r[kind] if e[0].endswith(".py")}):
+                    with open(os.path.join(d, rel), "rb") as fh:
+                        compile(fh.read(), rel, "exec")
                 print("%s %s OK" % (r["row"], kind))
             except (Stale, SyntaxError) as exc:
                 bad += 1
@@ -616,21 +617,25 @@ def _stamp():
 
 
 def cmd_run(args):
-    """One scratch tree for the whole set: every control's edits touch only
-    main.py, so before each run the pristine main.py is written back and that
-    control's edits applied to it (anchors pre-checked for every control
-    before the seat is taken). --hold set takes the seat once for the set
-    and releases it when the set ends; --hold run takes it per pytest run."""
+    """One scratch tree for the whole set: before each run the pristine copy
+    of every file the set's edits touch is written back and that control's
+    edits applied (anchors pre-checked for every control before the seat is
+    taken), so a row may edit any file under COPY, not main.py alone. --hold
+    set takes the seat once for the set and releases it when the set ends;
+    --hold run takes it per pytest run."""
     bad = 0
     todo = [(r, kind) for r in selected(args.rows) for kind in ("mutant", "twin")
             if not args.only or kind == args.only.rstrip("s")]
-    for r, kind in todo:
-        if any(rel != MAIN for rel, _o, _n, _c in r[kind]):
-            raise SystemExit("%s %s edits a file other than main.py" % (r["row"], kind))
     base = make_copy([], "set")
-    main_path = os.path.join(base, MAIN)
-    with open(main_path, "rb") as fh:
-        pristine = fh.read()
+    pristine = {}
+    for rel in sorted({rel for r, kind in todo for rel, _o, _n, _c in r[kind]}):
+        with open(os.path.join(base, rel), "rb") as fh:
+            pristine[rel] = fh.read()
+
+    def restore():
+        for rel, data in pristine.items():
+            with open(os.path.join(base, rel), "wb") as fh:
+                fh.write(data)
     set_lock = None
     try:
         stale = {}
@@ -639,8 +644,7 @@ def cmd_run(args):
                 apply_edits(base, r[kind])
             except Stale as exc:
                 stale[(r["row"], kind)] = str(exc)
-            with open(main_path, "wb") as fh:
-                fh.write(pristine)
+            restore()
         set_lock = take_seat(args.holder) if args.hold == "set" else None
         record(args.out, {"seat_taken": _stamp(), "hold": args.hold})
         for r, kind in todo:
@@ -650,8 +654,7 @@ def cmd_run(args):
                                   "detail": stale[(r["row"], kind)], "ok": False})
                 bad += 1
                 continue
-            with open(main_path, "wb") as fh:
-                fh.write(pristine)
+            restore()
             apply_edits(base, r[kind])
             lock = take_seat(args.holder) if args.hold == "run" else None
             t_take = _stamp()

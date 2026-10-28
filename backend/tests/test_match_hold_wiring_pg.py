@@ -4,8 +4,10 @@ Drives the real main.app routes against a cf_pg case schema: the hold flag is
 latched in the transaction that issues a room, TRUE only when every member's
 queue row carries the rjs1 capability token; it rides every join answer the
 client pins from (the team poll's ready_join, the 1v2 poll's locked payload
-and the 1v2 Start answer); a relock clears it with the room; and both
-continuations copy it for the same room. The structure census pins every
+and the 1v2 Start answer) for a caller whose own row carries the token, and
+is absent, not false, for any other (bar BV-A: a released client reads byte
+for byte what trunk answers; T1.7); a relock clears it with the room; and
+both continuations copy it for the same room. The structure census pins every
 issue site to one latch call within its own function.
 
 MATCH_HOLD_SRC has the meaning of test_match_hold_pg.py (imported first, so
@@ -165,9 +167,14 @@ async def _assert_join_roster(w, mode, answer, caller, tag):
     table = "team_series" if mode == "team" else "ovt_series"
     row = await w.conn.fetchrow("SELECT * FROM %s WHERE id = $1::uuid" % table,
                                 answer["series_id"])
-    assert answer["room_name"] == row["photon_room_id"] and \
-        answer["hold"] == bool(row["hold_v2"] and row["hold_room"] == row["photon_room_id"]), \
-        (tag, "room, series, mode and hold", answer)
+    queue = "team_queue" if mode == "team" else "ovt_queue"
+    caps = await w.conn.fetchval("SELECT caps FROM %s WHERE steam_id = $1" % queue, caller)
+    # the flag rides only for a caller whose own row carries the token
+    want_hold = bool(row["hold_v2"] and row["hold_room"] == row["photon_room_id"]) \
+        if main._match_hold.caps_has_token(caps) else None
+    assert answer["room_name"] == row["photon_room_id"] and answer.get("hold") == want_hold \
+        and ("hold" in answer) == (want_hold is not None), \
+        (tag, "room, series, mode and hold", answer, caps)
     cols = ("t1a_id", "t1b_id", "t2a_id", "t2b_id") if mode == "team" else \
         ("solo_id", "duo_a_id", "duo_b_id")
     if mode == "team":
@@ -253,11 +260,42 @@ def test_t1_6_ovt_start_with_one_row_lacking_rjs1_is_today(monkeypatch, capsys):
             ("T1.6 ovt row", dict(row))
         assert start["hold"] is False, ("T1.6 ovt start answer", start)
         await _assert_join_roster(w, "ovt", start, ps[0][1], "F1.M2 unflagged roster")
-        poll = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % ps[2][1], ps[2][1],
+        poll = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % ps[1][1], ps[1][1],
                           tag="ovt poll")
         assert poll["hold"] is False, ("T1.6 ovt poll answer", poll)
+        # the row lacking the token reads no key at all (bar BV-A, T1.7)
+        plain = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % ps[2][1], ps[2][1],
+                           tag="ovt poll plain")
+        assert plain["status"] == "ready_join" and "hold" not in plain, ("T1.6 plain poll", plain)
     run_w(monkeypatch, body)
     assert "[HOLD]" not in capsys.readouterr().out, ("T1.6 logs",)
+
+
+def test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token(monkeypatch):
+    """T1.7 (bar BV-A, the trunk oracle): the hold key is on the wire only
+    for a caller whose own queue row carries rjs1, at every answer the
+    client pins from: the team poll's ready_join, the 1v2 locked poll and
+    the 1v2 Start. A caller without the token reads the answer trunk gives,
+    key for key; with the token, the same keys plus hold (False in a mixed
+    room). The released v1.40.3 client never sends the token."""
+    async def body(w):
+        ps, poll, row = await team_issue(w, [1, 1, 1, 0])
+        assert poll["status"] == "ready_join" and poll["hold"] is False, ("T1.7 team token", poll)
+        plain = await w.ok("GET", "/api/v1/team/queue/poll/%s" % ps[3][1], ps[3][1],
+                           tag="team poll plain")
+        assert plain["status"] == "ready_join" and "hold" not in plain, ("T1.7 team plain", plain)
+        assert set(poll) - set(plain) == {"hold"}, ("T1.7 team key sets", sorted(poll), sorted(plain))
+        qs, start, srow = await ovt_start(w, [0, 1, 1])
+        assert start["status"] == "ok" and "hold" not in start, ("T1.7 start plain", start)
+        assert (srow["hold_v2"], srow["hold_room"]) == (False, start["room_name"]), dict(srow)
+        token = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % qs[1][1], qs[1][1],
+                           tag="ovt poll token")
+        assert token["status"] == "ready_join" and token["hold"] is False, ("T1.7 ovt token", token)
+        host = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % qs[0][1], qs[0][1],
+                          tag="ovt poll plain")
+        assert host["status"] == "ready_join" and "hold" not in host, ("T1.7 ovt plain", host)
+        assert set(token) - set(host) == {"hold"}, ("T1.7 ovt key sets", sorted(token), sorted(host))
+    run_w(monkeypatch, body)
 
 
 def test_t1_3_team_issue_relock_and_continuation(monkeypatch):

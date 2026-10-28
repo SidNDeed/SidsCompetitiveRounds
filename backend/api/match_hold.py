@@ -208,6 +208,16 @@ async def _bounded_match_db(db: AsyncSession = Depends(get_db)):
 # bodies only when every Stage 2 patch attached at boot (S1 step 1).
 HOLD_CAPS_TOKEN = "rjs1"
 
+
+def caps_has_token(caps) -> bool:
+    """The caller's own queue row carries HOLD_CAPS_TOKEN: the test _latch_sql
+    applies per member (a comma list, the exact token), in Python for the
+    answers that ride the hold flag only to such a caller. For any other
+    caller the key is absent, not false, so a released client reads byte for
+    byte what trunk answers (bar BV-A, the trunk oracle)."""
+    return HOLD_CAPS_TOKEN in str(caps or "").split(",")
+
+
 MODES = ("team", "ovt")
 _SERIES_TABLE = {"team": "team_series", "ovt": "ovt_series"}
 _QUEUE_TABLE = {"team": "team_queue", "ovt": "ovt_queue"}

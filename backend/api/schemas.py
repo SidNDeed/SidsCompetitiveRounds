@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 import log_redaction as _schema_logred   # the credential rule (standard library only); BugReportRequest applies it before its clamps
 
@@ -1628,7 +1628,18 @@ class TeamQueuePollResponse(BaseModel):
     # Stage 2 readmission (V3 S1 step 2, ready_join only): the hold flag the
     # series row latched for room_name. The client pins (room, hold, mode,
     # series, roster = this player, teammates, opponents) from this answer.
-    hold: bool = False
+    # None = not asked: the serializer below leaves the key off the wire, so
+    # a caller whose queue row carries no rjs1 token, the released client
+    # among them, reads byte for byte what trunk answers (bar BV-A, the trunk
+    # oracle); a Stage 2 caller reads True or False.
+    hold: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def _hold_only_when_asked(self, handler):
+        out = handler(self)
+        if isinstance(out, dict) and out.get("hold") is None:
+            out.pop("hold", None)
+        return out
 
 
 class TeamPlayerTelemetry(BaseModel):

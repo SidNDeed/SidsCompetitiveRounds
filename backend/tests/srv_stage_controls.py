@@ -38,8 +38,9 @@ ROWS = [
     {"row": "F1.M2.ROSTER", "node": WT + "test_t1_3_ovt_start_and_poll_carry_the_latched_flag",
      "tag": "F1.M2 Start roster",
      "mutant": [(MAIN,
-                 '            "hold": bool(_start_hold), **_start_roster}\n',
-                 '            "hold": bool(_start_hold)}\n', 1)]},
+                 '            **({"hold": bool(_start_hold)} if _host_s2 else {}),\n'
+              '            **_start_roster}\n',
+                 '            **({"hold": bool(_start_hold)} if _host_s2 else {})}\n', 1)]},
     {"row": "MERGED.FIX1.M1.ROLLBACK",
      "node": RT + "test_merged_fix1_m1_quarantine_preserves_window_transaction",
      "tag": "M1 owner transaction",
@@ -318,13 +319,42 @@ ROWS.extend([{'row': 'FIX2.M3.MEMBER',
   'node': 'test_match_hold_wiring_pg.py::test_t1_3_ovt_start_and_poll_carry_the_latched_flag',
   'tag': 'F1.M2 Start roster',
   'mutant': [('backend/api/main.py',
-              '            "hold": bool(_start_hold), **_start_roster}\n',
-              '            "hold": bool(_start_hold)}\n',
+              '            **({"hold": bool(_start_hold)} if _host_s2 else {}),\n'
+              '            **_start_roster}\n',
+              '            **({"hold": bool(_start_hold)} if _host_s2 else {})}\n',
               1)],
   'twin': [('backend/api/main.py',
-            '            "hold": bool(_start_hold), **_start_roster}\n',
-            '            "hold": bool((_start_hold)), **_start_roster}\n',
+            '            **({"hold": bool(_start_hold)} if _host_s2 else {}),\n'
+              '            **_start_roster}\n',
+            '            **({"hold": bool((_start_hold))} if _host_s2 else {}),\n'
+              '            **_start_roster}\n',
             1)]}])
+
+# c9 (bar BV-A, the trunk oracle): the hold key rides only for a caller whose
+# own queue row carries the token; each gate removed leaks the key to a plain
+# caller, red on T1.7. The serializer row leaks it as null.
+ROWS.extend([
+    {"row": "BVA.TEAM", "node": WT + "test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token",
+     "tag": "T1.7 team plain",
+     "mutant": [(MAIN,
+                 '                hold=hold_out if _match_hold.caps_has_token(me["caps"]) else None,\n',
+                 '                hold=hold_out,\n', 1)]},
+    {"row": "BVA.OVT", "node": WT + "test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token",
+     "tag": "T1.7 ovt plain",
+     "mutant": [(MAIN,
+                 '           if stage2 else {}),\n',
+                 '           if True else {}),\n', 1)]},
+    {"row": "BVA.START", "node": WT + "test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token",
+     "tag": "T1.7 start plain",
+     "mutant": [(MAIN,
+                 '            **({"hold": bool(_start_hold)} if _host_s2 else {}),\n',
+                 '            **({"hold": bool(_start_hold)} if True else {}),\n', 1)]},
+    {"row": "BVA.SER", "node": WT + "test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token",
+     "tag": "T1.7 team plain",
+     "mutant": [("backend/api/schemas.py",
+                 '        if isinstance(out, dict) and out.get("hold") is None:\n',
+                 '        if False:\n', 1)]},
+])
 
 # Fix 2 M5: each route must leave the capture's advisory key available.
 # Each row's one anchor is inside _triage_read_txn; a READ ONLY transaction

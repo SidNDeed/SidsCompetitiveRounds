@@ -17222,7 +17222,7 @@ _TEAM_CALLER_ROW_COLS = """
             tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
             tq.completed_series, tq.fallback_rating, tq.region, tq.status, tq.series_id,
             tq.team_assigned, tq.room_name, tq.room_region, tq.ready,
-            tq.joined_at, tq.matched_at, tq.queue_type,
+            tq.joined_at, tq.matched_at, tq.queue_type, tq.caps,
             -- r1 follow-up (pre-existing): these two were never
             -- selected, so the CALLER's manual-queue team choice fell
             -- to None and filled arbitrarily while the other three
@@ -48983,7 +48983,9 @@ async def team_queue_poll(steam_id: str, request: Request,
                 my_ready=bool(me["ready"]),
                 rules=_rules_payload(rules),
                 rules_prop=_rules_prop(rules),
-                hold=hold_out,
+                # Only a caller whose own row carries the token reads the
+                # flag; for any other the key is absent (schemas, bar BV-A).
+                hold=hold_out if _match_hold.caps_has_token(me["caps"]) else None,
             )
 
         # Matched but not all-ready
@@ -53074,7 +53076,8 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
             n = (await db.execute(text("SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"))).scalar() or 0
             return {"status": "searching", "queue_count": int(n)}
         await db.commit()
-        return await _ovt_poll_locked_payload(db, me["series_id"], steam_id, request=request)
+        return await _ovt_poll_locked_payload(db, me["series_id"], steam_id, request=request,
+                                              stage2=_match_hold.caps_has_token(me["caps"]))
 
     # A1 phase 1 -- COMMIT the independent preflight before forming. Everything
     # above is maintenance this poll owes whether or not it locks a trio: the
@@ -53220,7 +53223,8 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # Post-commit, own transaction: a locked trio is out of every other queue.
     await _evict_other_queue_searching(
         db, [r["player_id"] for r in lobby], "ovt_queue", "a 1v2 lobby")
-    return await _ovt_poll_locked_payload(db, series_id, steam_id, request=request)
+    return await _ovt_poll_locked_payload(db, series_id, steam_id, request=request,
+                                          stage2=_match_hold.caps_has_token(me["caps"]))
 
 
 async def _ovt_join_roster(db: AsyncSession, series_id, steam_id: str):
@@ -53249,7 +53253,7 @@ async def _ovt_join_roster(db: AsyncSession, series_id, steam_id: str):
 
 
 async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str,
-                                   request=None) -> dict:
+                                   request=None, stage2: bool = False) -> dict:
     s, roster = await _ovt_join_roster(db, series_id, steam_id)
     if s is None:
         return {"status": "searching", "queue_count": 0}
@@ -53264,8 +53268,11 @@ async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str,
         "room_region": s["region"],
         "rules": _rules_payload(_rules),
         "rules_prop": _rules_prop(_rules),
-        # Stage 2 (V3 S1): the flag latched for THIS room (PinFromJoin).
-        "hold": bool(s["hold_v2"]) and s["hold_room"] == s["photon_room_id"],
+        # Stage 2 (V3 S1): the flag latched for THIS room (PinFromJoin), for
+        # a caller whose own row carries the token; absent for any other
+        # (bar BV-A: a released client reads byte for byte trunk's answer).
+        **({"hold": bool(s["hold_v2"]) and s["hold_room"] == s["photon_room_id"]}
+           if stage2 else {}),
         **roster,
     }
 
@@ -58314,6 +58321,12 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
     me, lrow, live = await _lobby_start_common(db, "ovt", req.steam_id, request=request)
+    # The hold flag rides only for a host whose own row carries the token
+    # (Stage 2); for any other the key is absent, not false, so a released
+    # client reads byte for byte what trunk answers (bar BV-A, the oracle).
+    _host_s2 = _match_hold.caps_has_token((await db.execute(
+        text("SELECT caps FROM ovt_queue WHERE steam_id = :sid"),
+        {"sid": req.steam_id})).scalar())
     lobby_id = me["series_id"]
     _lobby_rules = _rules_from_lobby_row(lrow)
     # Sides: first member who wants solo takes it, else the earliest joiner —
@@ -58374,7 +58387,8 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     return {"status": "ok", "series_id": str(series_id), "lobby_id": str(lobby_id),
             "room_name": room, "room_region": (region or "us")[:8],
             "rules": _rules_payload(_lobby_rules), "rules_prop": _rules_prop(_lobby_rules),
-            "hold": bool(_start_hold), **_start_roster}
+            **({"hold": bool(_start_hold)} if _host_s2 else {}),
+            **_start_roster}
 
 
 # ── FFA host lobbies (July 29 redesign — Sid's spec) ───────────────────────

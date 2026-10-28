@@ -1720,10 +1720,14 @@ def _without_hook_savepoint(name):
     """main.<name>, compiled from main.py's own source with the one
     `async with db.begin_nested():` that holds the hook's call replaced by
     its body -- nothing else changed -- and with main's globals as they are
-    at the call."""
+    at the call. A route split into its checks and a settle body (the team
+    report since Stage 2 V3 S5) holds the savepoint in the one module-level
+    coroutine it awaits with the report: that body is stripped and compiled
+    beside the route, which reaches it by name."""
     tree = ast.parse(io.open(MAIN_PY, encoding="utf-8").read())
-    fn = next(n for n in tree.body
-              if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == name)
+    fns = {n.name: n for n in tree.body
+           if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))}
+    fn = fns[name]
     removed = []
 
     class _Strip(ast.NodeTransformer):
@@ -1738,9 +1742,26 @@ def _without_hook_savepoint(name):
                 return node.body
             return node
     _Strip().visit(fn)
+    body = [fn]
+    if not removed:
+        callees = sorted({n.value.func.id for n in ast.walk(fn)
+                          if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
+                          and isinstance(n.value.func, ast.Name) and n.value.func.id in fns
+                          and any(isinstance(a, ast.Name) and a.id == "report"
+                                  for a in n.value.args)})
+        hits = []
+        for callee in callees:
+            before = len(removed)
+            _Strip().visit(fns[callee])
+            if len(removed) > before:
+                hits.append(fns[callee])
+        assert len(hits) == 1, ("expected one settle body holding the hook savepoint for %s"
+                                % name, callees, removed)
+        body.append(hits[0])
     assert len(removed) == 1, ("expected one hook savepoint in %s" % name, removed)
-    fn.decorator_list = []
-    module = ast.Module(body=[fn], type_ignores=[])
+    for node in body:
+        node.decorator_list = []
+    module = ast.Module(body=body, type_ignores=[])
     ast.fix_missing_locations(module)
     namespace = dict(vars(main))
     exec(compile(module, "%s [%s without its hook savepoint]" % (MAIN_PY, name), "exec"),
