@@ -1659,9 +1659,17 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # statement, and a settle a bound ends changes nothing and leaves the
     # window for the next tick (test_match_hold_reports_pg T5.9).
     # Before: 31/21/28/18.
+    # Both settle bodies end by freeing the series' queue rows through
+    # _lock_queue_rows_ordered (ovt_queue, team_queue), under the same armed
+    # session. The RJ server re-land (2026-10-28) wrote that lock out as one
+    # literal per table, chosen by branch, because the janitor's walker
+    # resolves literals only: the f-string it replaced was a site the walker
+    # could not see, so the 25 waits counted before this line left this one
+    # out. Four literals, one lock; each call runs the one its table names.
     report_bounded = {("_settle_ovt_report", "FOR NO KEY UPDATE"): 1,
                       ("_settle_team_report", "FOR UPDATE"): 2,
-                      ("_settle_team_report", "FOR NO KEY UPDATE"): 1}
+                      ("_settle_team_report", "FOR NO KEY UPDATE"): 1,
+                      ("_lock_queue_rows_ordered", "FOR UPDATE"): 4}
     rfuncs = {f for f, _c in report_bounded}
     rgot = {}
     for r in census["waits"]:
@@ -1678,9 +1686,9 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
                 and [a.id for a in first.value.args] == [w.items[0].optional_vars.id]), \
             ast.dump(first)
     assert len(census["declines"]) == 31, census["declines"]
-    assert len(census["waits"]) == 25, census["waits"]
+    assert len(census["waits"]) == 29, census["waits"]   # 25 before the queue-row lock became visible
     assert len(census["decline_sites"]) == 28, census["decline_sites"]
-    assert len(census["wait_sites"]) == 22, census["wait_sites"]
+    assert len(census["wait_sites"]) == 26, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 
 def test_a_lock_taking_path_outside_the_counted_set_reds_the_census():
