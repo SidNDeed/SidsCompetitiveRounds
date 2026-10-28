@@ -173,10 +173,26 @@ ALTER TABLE team_series  ADD COLUMN IF NOT EXISTS hold_v2   BOOLEAN NOT NULL DEF
 ALTER TABLE team_series  ADD COLUMN IF NOT EXISTS hold_room VARCHAR(64);
 ALTER TABLE ovt_series   ADD COLUMN IF NOT EXISTS hold_v2   BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE ovt_series   ADD COLUMN IF NOT EXISTS hold_room VARCHAR(64);
-ALTER TABLE team_matches ADD COLUMN IF NOT EXISTS fallback_cls VARCHAR(1)
-  CONSTRAINT ck_team_matches_fallback_cls CHECK (fallback_cls IS NULL OR fallback_cls IN ('c', 'r', 'u'));
-ALTER TABLE ovt_matches  ADD COLUMN IF NOT EXISTS fallback_cls VARCHAR(1)
-  CONSTRAINT ck_ovt_matches_fallback_cls CHECK (fallback_cls IS NULL OR fallback_cls IN ('c', 'r', 'u'));
+ALTER TABLE team_matches ADD COLUMN IF NOT EXISTS fallback_cls VARCHAR(1);
+ALTER TABLE ovt_matches  ADD COLUMN IF NOT EXISTS fallback_cls VARCHAR(1);
+-- The CHECKs ride guarded statements of their own (378's form): an inline
+-- column constraint is skipped together with its column when the column
+-- already exists (a re-run, or a schema whose ORM step added the column
+-- first, as backend/tests/test_pc_trades.py's harness does), and the proof
+-- below then finds the constraint missing.
+DO $$
+BEGIN
+    BEGIN
+        ALTER TABLE team_matches ADD CONSTRAINT ck_team_matches_fallback_cls
+            CHECK (fallback_cls IS NULL OR fallback_cls IN ('c', 'r', 'u'));
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER TABLE ovt_matches ADD CONSTRAINT ck_ovt_matches_fallback_cls
+            CHECK (fallback_cls IS NULL OR fallback_cls IN ('c', 'r', 'u'));
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+END $$;
 
 -- Proof: every relation this file creates has its intended kind, and every
 -- column, constraint and explicit index this file owns has its complete
