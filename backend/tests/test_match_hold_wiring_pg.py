@@ -162,19 +162,33 @@ def _sig(canonical):
     return _hmac.new(SECRET.encode(), canonical.encode(), hashlib.sha256).hexdigest()
 
 
-async def _assert_join_roster(w, mode, answer, caller, tag):
-    """Compare the join's exact slot projection with the persisted roster."""
+# the keys trunk's 1v2 Start answers with (a8551547): a host whose row lacks
+# the token reads exactly these (bar BV-A)
+TRUNK_OVT_START_KEYS = frozenset({"status", "series_id", "lobby_id", "room_name",
+                                  "room_region", "rules", "rules_prop"})
+
+
+async def _assert_join_roster(w, mode, answer, caller, tag, *, start=False):
+    """Compare the join's exact slot projection with the persisted roster
+    (`start`: a 1v2 Start answer, whose roster rides only for a token host)."""
     table = "team_series" if mode == "team" else "ovt_series"
     row = await w.conn.fetchrow("SELECT * FROM %s WHERE id = $1::uuid" % table,
                                 answer["series_id"])
     queue = "team_queue" if mode == "team" else "ovt_queue"
-    caps = await w.conn.fetchval("SELECT caps FROM %s WHERE steam_id = $1" % queue, caller)
-    # the flag rides only for a caller whose own row carries the token
+    # the flag rides only for a caller whose own row carries the token (the
+    # latch's own test, restated in asyncpg form)
+    me_s2 = bool(await w.conn.fetchval(
+        "SELECT $1 = ANY(string_to_array(caps, ',')) FROM %s WHERE steam_id = $2" % queue,
+        main._match_hold.HOLD_CAPS_TOKEN, caller))
     want_hold = bool(row["hold_v2"] and row["hold_room"] == row["photon_room_id"]) \
-        if main._match_hold.caps_has_token(caps) else None
+        if me_s2 else None
     assert answer["room_name"] == row["photon_room_id"] and answer.get("hold") == want_hold \
         and ("hold" in answer) == (want_hold is not None), \
-        (tag, "room, series, mode and hold", answer, caps)
+        (tag, "room, series, mode and hold", answer, me_s2)
+    if start and not me_s2:
+        # a 1v2 Start answer to a host without the token is trunk's, key for key
+        assert set(answer) == TRUNK_OVT_START_KEYS, (tag, "plain Start keys", sorted(answer))
+        return
     cols = ("t1a_id", "t1b_id", "t2a_id", "t2b_id") if mode == "team" else \
         ("solo_id", "duo_a_id", "duo_b_id")
     if mode == "team":
@@ -219,7 +233,7 @@ def test_t1_3_ovt_start_and_poll_carry_the_latched_flag(monkeypatch):
         assert (row["hold_v2"], row["hold_room"]) == (True, start["room_name"]), \
             ("T1.3 ovt start row", dict(row))
         assert start["hold"] is True, ("T1.3 ovt start answer", start)
-        await _assert_join_roster(w, "ovt", start, ps[0][1], "F1.M2 Start roster")
+        await _assert_join_roster(w, "ovt", start, ps[0][1], "F1.M2 Start roster", start=True)
         poll = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % ps[1][1], ps[1][1],
                           tag="ovt poll")
         assert (poll["status"], poll["room_name"], poll["hold"]) == \
@@ -259,7 +273,7 @@ def test_t1_6_ovt_start_with_one_row_lacking_rjs1_is_today(monkeypatch, capsys):
         assert (row["hold_v2"], row["hold_room"]) == (False, start["room_name"]), \
             ("T1.6 ovt row", dict(row))
         assert start["hold"] is False, ("T1.6 ovt start answer", start)
-        await _assert_join_roster(w, "ovt", start, ps[0][1], "F1.M2 unflagged roster")
+        await _assert_join_roster(w, "ovt", start, ps[0][1], "F1.M2 unflagged roster", start=True)
         poll = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % ps[1][1], ps[1][1],
                           tag="ovt poll")
         assert poll["hold"] is False, ("T1.6 ovt poll answer", poll)
@@ -276,8 +290,9 @@ def test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token(monkeypatch):
     for a caller whose own queue row carries rjs1, at every answer the
     client pins from: the team poll's ready_join, the 1v2 locked poll and
     the 1v2 Start. A caller without the token reads the answer trunk gives,
-    key for key; with the token, the same keys plus hold (False in a mixed
-    room). The released v1.40.3 client never sends the token."""
+    key for key (the Start's roster among the keys only a token host reads);
+    with the token, the same keys plus hold (False in a mixed room, True in
+    a room of tokens). The released v1.40.3 client never sends the token."""
     async def body(w):
         ps, poll, row = await team_issue(w, [1, 1, 1, 0])
         assert poll["status"] == "ready_join" and poll["hold"] is False, ("T1.7 team token", poll)
@@ -287,7 +302,17 @@ def test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token(monkeypatch):
         assert set(poll) - set(plain) == {"hold"}, ("T1.7 team key sets", sorted(poll), sorted(plain))
         qs, start, srow = await ovt_start(w, [0, 1, 1])
         assert start["status"] == "ok" and "hold" not in start, ("T1.7 start plain", start)
+        assert set(start) == TRUNK_OVT_START_KEYS, ("T1.7 start plain keys", sorted(start))
         assert (srow["hold_v2"], srow["hold_room"]) == (False, start["room_name"]), dict(srow)
+        # a host carrying the token reads the flag and the roster it pins, in
+        # a mixed room (False) and in a room of three tokens (True)
+        for flags, want in (([1, 0, 1], False), ([1, 1, 1], True)):
+            _, s2start, s2row = await ovt_start(w, flags)
+            assert s2start.get("hold") is want and (s2row["hold_v2"], s2row["hold_room"]) == \
+                (want, s2start["room_name"]), ("T1.7 start token", flags, s2start)
+            assert set(s2start) == TRUNK_OVT_START_KEYS | {"hold", "side_assigned",
+                                                            "solo_extra_pick", "solo", "duo"}, \
+                ("T1.7 start token keys", sorted(s2start))
         token = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % qs[1][1], qs[1][1],
                            tag="ovt poll token")
         assert token["status"] == "ready_join" and token["hold"] is False, ("T1.7 ovt token", token)

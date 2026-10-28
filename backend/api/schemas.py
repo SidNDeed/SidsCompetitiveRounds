@@ -1625,13 +1625,16 @@ class TeamQueuePollResponse(BaseModel):
     # Room rules (migration 306, ready_join only) — see QueuePollResponse.
     rules: dict | None = None
     rules_prop: str | None = None
-    # Stage 2 readmission (V3 S1 step 2, ready_join only): the hold flag the
-    # series row latched for room_name. The client pins (room, hold, mode,
-    # series, roster = this player, teammates, opponents) from this answer.
-    # None = not asked: the serializer below leaves the key off the wire, so
-    # a caller whose queue row carries no rjs1 token, the released client
-    # among them, reads byte for byte what trunk answers (bar BV-A, the trunk
-    # oracle); a Stage 2 caller reads True or False.
+    # Stage 2 readmission (V3 S1 step 2): the hold flag the series row latched
+    # for room_name, a property of the room this answer names, so it rides on
+    # the ready_join answer only (no room, no key: a matched or relocked
+    # answer names none) and only for a caller whose own queue row carries the
+    # rjs1 token, read in the statement that reads the flag. The client pins
+    # (room, hold, mode, series, roster = this player, teammates, opponents)
+    # from that answer. None = not asked: the serializer below leaves the key
+    # off the wire, so any other caller, the released client among them, reads
+    # byte for byte what trunk answers (bar BV-A, the trunk oracle); a Stage 2
+    # caller reads True or False.
     hold: bool | None = None
 
     @model_serializer(mode="wrap")

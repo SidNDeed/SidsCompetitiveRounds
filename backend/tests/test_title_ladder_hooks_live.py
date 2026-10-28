@@ -1748,7 +1748,8 @@ def _without_hook_savepoint(name):
                           if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
                           and isinstance(n.value.func, ast.Name) and n.value.func.id in fns
                           and any(isinstance(a, ast.Name) and a.id == "report"
-                                  for a in n.value.args)})
+                                  for a in list(n.value.args)
+                                  + [k.value for k in n.value.keywords])})
         hits = []
         for callee in callees:
             before = len(removed)

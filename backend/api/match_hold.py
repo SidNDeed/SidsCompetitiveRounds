@@ -209,13 +209,15 @@ async def _bounded_match_db(db: AsyncSession = Depends(get_db)):
 HOLD_CAPS_TOKEN = "rjs1"
 
 
-def caps_has_token(caps) -> bool:
-    """The caller's own queue row carries HOLD_CAPS_TOKEN: the test _latch_sql
-    applies per member (a comma list, the exact token), in Python for the
-    answers that ride the hold flag only to such a caller. For any other
-    caller the key is absent, not false, so a released client reads byte for
-    byte what trunk answers (bar BV-A, the trunk oracle)."""
-    return HOLD_CAPS_TOKEN in str(caps or "").split(",")
+def caps_token_sql(caps_expr: str) -> str:
+    """SQL for "this caps column carries HOLD_CAPS_TOKEN" (a comma list, the
+    exact token; bind :tok = HOLD_CAPS_TOKEN): the one test the latch applies
+    per member. A gate deciding who reads the flag evaluates it inside the
+    statement that reads the flag, so the flag and the caller's token state
+    come from one snapshot; for a caller without the token the key is absent,
+    not false, and a released client reads byte for byte what trunk answers
+    (bar BV-A, the trunk oracle)."""
+    return f"CAST(:tok AS text) = ANY(string_to_array({caps_expr}, ','))"
 
 
 MODES = ("team", "ovt")
@@ -354,7 +356,7 @@ def _latch_sql(mode: str) -> str:
         f"   SET hold_room = CAST(:room AS varchar),"
         f"       hold_v2 = (SELECT count(*) = {n} FROM {_QUEUE_TABLE[mode]} q"
         f"                   WHERE q.player_id IN ({members})"
-        f"                     AND CAST(:tok AS text) = ANY(string_to_array(q.caps, ',')))"
+        f"                     AND {caps_token_sql('q.caps')})"
         f" WHERE s.id = CAST(:sid AS uuid)"
         f"   AND s.hold_room IS DISTINCT FROM CAST(:room AS varchar)")
 

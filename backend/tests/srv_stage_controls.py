@@ -38,9 +38,8 @@ ROWS = [
     {"row": "F1.M2.ROSTER", "node": WT + "test_t1_3_ovt_start_and_poll_carry_the_latched_flag",
      "tag": "F1.M2 Start roster",
      "mutant": [(MAIN,
-                 '            **({"hold": bool(_start_hold)} if _host_s2 else {}),\n'
-              '            **_start_roster}\n',
-                 '            **({"hold": bool(_start_hold)} if _host_s2 else {})}\n', 1)]},
+                 '            **({"hold": _ovt_room_hold(_s), **_start_roster} if _ovt_me_s2(_s) else {})}\n',
+                 '            **({"hold": _ovt_room_hold(_s)} if _ovt_me_s2(_s) else {})}\n', 1)]},
     {"row": "MERGED.FIX1.M1.ROLLBACK",
      "node": RT + "test_merged_fix1_m1_quarantine_preserves_window_transaction",
      "tag": "M1 owner transaction",
@@ -65,8 +64,9 @@ ROWS = [
     {"row": "M1.5", "node": WT + "test_t1_3_ovt_start_and_poll_carry_the_latched_flag",
      "tag": "T1.3 ovt start row",
      "mutant": [(MAIN,
-                 '    _start_hold = await _match_hold._hold_latch(db, "ovt", series_id, room)\n',
-                 '    _start_hold = False\n', 1)]},
+                 '    # Stage 2 (V3 S1 step 2): the 1v2 Start issues the room here; latch.\n'
+                 '    await _match_hold._hold_latch(db, "ovt", series_id, room)\n',
+                 '    # Stage 2 (V3 S1 step 2): the 1v2 Start issues the room here; latch.\n', 1)]},
     # NX1: a relock keeps the flag of the room it leaves (both relocks).
     {"row": "M1.6", "node": WT + "test_t1_3_team_issue_relock_and_continuation",
      "tag": "T1.3 relock clears",
@@ -319,15 +319,12 @@ ROWS.extend([{'row': 'FIX2.M3.MEMBER',
   'node': 'test_match_hold_wiring_pg.py::test_t1_3_ovt_start_and_poll_carry_the_latched_flag',
   'tag': 'F1.M2 Start roster',
   'mutant': [('backend/api/main.py',
-              '            **({"hold": bool(_start_hold)} if _host_s2 else {}),\n'
-              '            **_start_roster}\n',
-              '            **({"hold": bool(_start_hold)} if _host_s2 else {})}\n',
+              '            **({"hold": _ovt_room_hold(_s), **_start_roster} if _ovt_me_s2(_s) else {})}\n',
+              '            **({"hold": _ovt_room_hold(_s)} if _ovt_me_s2(_s) else {})}\n',
               1)],
   'twin': [('backend/api/main.py',
-            '            **({"hold": bool(_start_hold)} if _host_s2 else {}),\n'
-              '            **_start_roster}\n',
-            '            **({"hold": bool((_start_hold))} if _host_s2 else {}),\n'
-              '            **_start_roster}\n',
+            '            **({"hold": _ovt_room_hold(_s), **_start_roster} if _ovt_me_s2(_s) else {})}\n',
+            '            **({"hold": _ovt_room_hold((_s)), **_start_roster} if _ovt_me_s2(_s) else {})}\n',
             1)]}])
 
 # c9 (bar BV-A, the trunk oracle): the hold key rides only for a caller whose
@@ -337,23 +334,29 @@ ROWS.extend([
     {"row": "BVA.TEAM", "node": WT + "test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token",
      "tag": "T1.7 team plain",
      "mutant": [(MAIN,
-                 '                hold=hold_out if _match_hold.caps_has_token(me["caps"]) else None,\n',
+                 '                hold=hold_out if me_s2 else None,\n',
                  '                hold=hold_out,\n', 1)]},
     {"row": "BVA.OVT", "node": WT + "test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token",
      "tag": "T1.7 ovt plain",
      "mutant": [(MAIN,
-                 '           if stage2 else {}),\n',
-                 '           if True else {}),\n', 1)]},
+                 '        **({"hold": _ovt_room_hold(s)} if _ovt_me_s2(s) else {}),\n',
+                 '        **({"hold": _ovt_room_hold(s)} if True else {}),\n', 1)]},
     {"row": "BVA.START", "node": WT + "test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token",
      "tag": "T1.7 start plain",
      "mutant": [(MAIN,
-                 '            **({"hold": bool(_start_hold)} if _host_s2 else {}),\n',
-                 '            **({"hold": bool(_start_hold)} if True else {}),\n', 1)]},
+                 '            **({"hold": _ovt_room_hold(_s), **_start_roster} if _ovt_me_s2(_s) else {})}\n',
+                 '            **({"hold": _ovt_room_hold(_s), **_start_roster} if True else {})}\n', 1)]},
     {"row": "BVA.SER", "node": WT + "test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token",
      "tag": "T1.7 team plain",
      "mutant": [("backend/api/schemas.py",
                  '        if isinstance(out, dict) and out.get("hold") is None:\n',
                  '        if False:\n', 1)]},
+    # c10: the one 1v2 gate helper answers "Stage 2" for every caller.
+    {"row": "BVA.ME_S2", "node": WT + "test_t1_7_the_flag_rides_only_for_a_caller_carrying_the_token",
+     "tag": "T1.7 start plain",
+     "mutant": [(MAIN,
+                 '    return bool(s is not None and s["me_s2"])\n',
+                 '    return s is not None\n', 1)]},
 ])
 
 # Fix 2 M5: each route must leave the capture's advisory key available.
