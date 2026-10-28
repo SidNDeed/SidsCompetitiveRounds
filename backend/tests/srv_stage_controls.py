@@ -111,18 +111,21 @@ ROWS = [
      "mutant": [(MAIN,
                  '        _fighters = max(_fighters, _s2_r)\n',
                  '        _fighters = _fighters\n', 1)]},
-    # NX4: the DC report re-evaluates the crossing instead of the frozen one.
-    {"row": "M5.1", "node": RT + "test_t5_1_dc_report_reads_the_crossing_the_hold_froze",
-     "tag": "T5.1 frozen",
+    # NX4: the record of a held game is sealed. Without the seal's read in
+    # update_team_live_points the post during an open hold is recorded
+    # (M5.1); without the DC report's close the open hold outlives the
+    # report (M5.2). The twins are the site comments.
+    {"row": "M5.1", "node": RT + "test_t5_1_the_record_of_a_held_game_is_sealed",
+     "tag": "T5.1b post during the hold",
      "mutant": [(MAIN,
-                 '(_hold_crossed if _hold_crossed is not None\n'
-                 '                 else await _team_game_crossed_two(db, sid_uuid, s, total_points))',
-                 '(await _team_game_crossed_two(db, sid_uuid, s, total_points))', 1)],
-     "twin": [(MAIN,
-               '(_hold_crossed if _hold_crossed is not None\n'
-               '                 else await _team_game_crossed_two(db, sid_uuid, s, total_points))',
-               '((_hold_crossed) if _hold_crossed is not None\n'
-               '                 else await _team_game_crossed_two(db, sid_uuid, s, total_points))', 1)]},
+                 '        _held = await _team_game_hold_seal(db, sid, _held_row.hold_room,\n'
+                 '                                           _held_row.photon_room_id)\n',
+                 '        _held = None\n', 1)]},
+    {"row": "M5.2", "node": RT + "test_t5_1_the_record_of_a_held_game_is_sealed",
+     "tag": "T5.1c closed with the report",
+     "mutant": [(MAIN,
+                 '    await _team_dc_hold_close(db, sid_uuid, s)\n',
+                 '', 1)]},
     # M5.10 follows the causal receipt guard in the hold mutation runner.
     # NX6: the deletion omits one table (the player's own presence rows).
     {"row": "M6.1", "node": XT + "test_nx6_deletion_leaves_no_stage2_row_naming_the_player",

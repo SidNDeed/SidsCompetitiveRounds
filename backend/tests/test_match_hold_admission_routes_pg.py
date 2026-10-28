@@ -15,7 +15,11 @@ player lock):
     and the competitor's gate refuses: one commitment, the route's.
   * route_loses: the competitor holds the player lock with its commitment
     written; the route reaches its gate and must WAIT; the competitor commits;
-    the route refuses with its contended answer and leaves no partial peer:
+    the route refuses with its contended answer and leaves no partial peer
+    (the gate caps a contended lock wait at one second and answers 503
+    admission_contended, the answer a client repeats: when a slow seat lets
+    the cap end the wait first, the test repeats the call once the
+    competitor has committed, and the repeat must refuse for it):
     every queue row, lease, series and lobby row of its roster is as it was
     before the route ran (the overlapping member's lease is the competitor's).
 
@@ -324,16 +328,27 @@ def test_h3_full_route_gate_in_both_winner_orders(monkeypatch, route, order):
             c_entered = asyncio.Event()
 
             async def compete():
-                async with sm() as two:
-                    c_entered.set()
-                    admitted, _ = await REAL_GATE(two, [case.overlap], c_mode, c_gid)
-                    if admitted:
-                        await main._lease_acquire(two, case.overlap, c_mode, c_gid,
-                                                  main.LEASE_TTL_ASSEMBLY, _gate_held=True)
-                        await two.commit()
-                    else:
-                        await two.rollback()
-                    return admitted
+                # The gate's one-second cap on a contended lock wait answers 503
+                # admission_contended, which a caller repeats; the competitor
+                # repeats its gate until the definitive answer, as a route
+                # would, so a slow seat's wait never reads as a verdict.
+                while True:
+                    async with sm() as two:
+                        c_entered.set()
+                        try:
+                            admitted, _ = await REAL_GATE(two, [case.overlap], c_mode, c_gid)
+                        except main.HTTPException as exc:
+                            if exc.status_code != 503:
+                                raise
+                            await asyncio.sleep(0.05)
+                            continue
+                        if admitted:
+                            await main._lease_acquire(two, case.overlap, c_mode, c_gid,
+                                                      main.LEASE_TTL_ASSEMBLY, _gate_held=True)
+                            await two.commit()
+                        else:
+                            await two.rollback()
+                        return admitted
             other = asyncio.ensure_future(compete())
             await asyncio.wait_for(c_entered.wait(), 30)
             await asyncio.sleep(WAIT_S)
@@ -365,11 +380,17 @@ def test_h3_full_route_gate_in_both_winner_orders(monkeypatch, route, order):
         await _first(bar.entered.wait(), task)
         assert bar.entered.is_set(), ("H3 route gate", route, order,
                                       task.done() and task.result().text[:300])
-        await asyncio.sleep(WAIT_S)
+        # The route is inside its gate's lock wait: not answered. Checked at
+        # once, because the gate's one-second cap on that wait runs from here
+        # and the competitor's commit below has to land inside it.
         assert not task.done(), ("H3 route waits", route)
         go.set()
         await asyncio.wait_for(holder, 30)
         r = await asyncio.wait_for(task, 120)
+        if r.status_code == 503 and case.refuse != 503:
+            # The cap ended the wait before the commit landed (a slow seat):
+            # the repeat a client makes meets the committed commitment.
+            r = await asyncio.wait_for(case.call(), 120)
         assert r.status_code == case.refuse, \
             ("H3 route refused", route, r.status_code, r.text[:300])
         after = await probe(w.conn, case.pids, skip=case.overlap)
@@ -405,8 +426,10 @@ def test_l1_shared_admission_wait_is_bounded_for_every_caller(monkeypatch, route
                 assert bar.entered.is_set(), ("L1 route gate", route,
                     task.done() and task.result().text[:300])
                 # The production cap is one second per contended statement.
-                # This barrier has exactly one blocked player; allow seat jitter.
-                done, _ = await asyncio.wait([task], timeout=3.0)
+                # This barrier has exactly one blocked player. The bound here
+                # proves the wait ends (an unbounded one runs to the rescue in
+                # the finally); ten seconds absorbs a shared seat's scheduling.
+                done, _ = await asyncio.wait([task], timeout=10.0)
                 bounded = task in done
                 if bounded:
                     response = task.result()

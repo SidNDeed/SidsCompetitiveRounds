@@ -411,8 +411,11 @@ def test_nx2_live_points_during_an_open_team_hold_are_recorded_and_ignored(
         monkeypatch, capsys):
     """NX2 (V3 S2): while a team hold of the series is open, a member's
     live-points post answers ignored with reason hold_open, writes no points
-    and no per-game record, and logs the post; once the hold is closed the
-    same post is filed as today."""
+    and no per-game record, and logs the post. The record of the held game
+    is sealed: after the hold closed without an entry the same post is
+    ignored with reason hold_closed (the DC report reads the record the
+    hold write found); once the hold closed by an entry the game went on
+    and the post is filed as today."""
     async def body(env):
         s, g, _ = await hold_test.opened_series(env)
         r = await hold_test.open_hold(env, s, 1, 0, g, rid="req-nx2-live")
@@ -446,7 +449,17 @@ def test_nx2_live_points_during_an_open_team_hold_are_recorded_and_ignored(
             ("NX2 no game record",)
 
         await env.conn.execute(
-            "UPDATE match_seat_holds SET closed_at = clock_timestamp(), closed_reason = 'ended'"
+            "UPDATE match_seat_holds SET closed_at = clock_timestamp(), closed_reason = 'lapsed'"
+            " WHERE id = $1::uuid", hid)
+        sealed = await post()
+        assert sealed.status_code == 200 and \
+            (sealed.json()["status"], sealed.json()["reason"]) == ("ignored", "hold_closed"), \
+            ("NX2 sealed after the lapse", sealed.status_code, sealed.text)
+        row = await env.conn.fetchrow(
+            "SELECT live_t1_points, live_t2_points FROM team_series WHERE id = $1", s.sid)
+        assert (row[0] or 0, row[1] or 0) == (0, 0), ("NX2 no points after the lapse", dict(row))
+        await env.conn.execute(
+            "UPDATE match_seat_holds SET closed_reason = 'entered', entered_at = clock_timestamp()"
             " WHERE id = $1::uuid", hid)
         filed = await post()
         assert filed.status_code == 200 and filed.json()["status"] == "ok", \
@@ -456,4 +469,4 @@ def test_nx2_live_points_during_an_open_team_hold_are_recorded_and_ignored(
         assert (row[0], row[1]) == (2, 2), ("NX2 points after close", dict(row))
     hold_test.run_env(monkeypatch, body, prefix="rjs2nx2l")
     out = capsys.readouterr().out
-    assert out.count("[HOLD] live points ignored") == 1, ("NX2 log", out[-800:])
+    assert out.count("[HOLD] live points ignored") == 2, ("NX2 log", out[-800:])
