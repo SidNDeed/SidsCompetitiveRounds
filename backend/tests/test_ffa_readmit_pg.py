@@ -1401,3 +1401,58 @@ def test_h5_report_repeats_participant_lookup_below_the_lobby_lock(monkeypatch):
         assert deleted.status == 200 and answer.status == 404 and raw == 0, \
             ("H5 report identity", deleted.status, answer.status, raw)
     run_env(monkeypatch, body)
+
+
+# -- the finishing count of a readmission lobby --------------------------------
+
+def test_fin_a_seat_gone_during_the_game_did_not_finish_it(monkeypatch):
+    """The "N or more players" shutout tiers count the players who FINISHED
+    the game. A readmission lobby's count reads server rows only: the unrated
+    set with the seats the rows show gone during the game and not back. A
+    seat witnessed gone during game 1 and never readmitted is rated for the
+    game (it left after the grace threshold: a loss) and did not finish it,
+    so the count is three of four; the same seat claimed, bound and entered
+    before the report finished it: four of four."""
+    async def body(env):
+        calls = []
+        real = main._ffa_finishing_count
+
+        def finishing(member_ids, departed_ids, report, effective_absent=None):
+            out = real(member_ids, departed_ids, report, effective_absent)
+            calls.append((None if effective_absent is None else set(effective_absent), out))
+            return out
+
+        env.mp.setattr(main, "_ffa_finishing_count", finishing)
+
+        async def report(lob, tag):
+            results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7),
+                       lob.sids[2]: (2, 5), lob.sids[3]: (1, 2)}
+            rep = await env.report_req(lob, 1, results, reporter=lob.sids[0])
+            a = await env.submit(rep)
+            assert a.status == 200, (tag + " report", a.status, a.body)
+            rows = await A._mp(env, lob, 1)
+            assert A._rated(rows[1]), (tag + " rated", rows[1])
+            return calls[-1]
+
+        # (a) gone during game 1 (two witnesses), never readmitted: rated, not finished.
+        lob = await _held(env)
+        await env.at(lob, 90.0)
+        await env.census_of(lob, 0, [0, 2, 3])
+        absent, out = await report(lob, "FIN gone")
+        assert absent == {lob.pids[1]} and out == (3, 3, 3), \
+            ("FIN gone not finished", absent, out)
+
+        # (b) the same seat claimed, bound and entered before the report: finished.
+        lob = await _held(env)
+        await env.at(lob, 90.0)
+        o = await _offer(env, lob, 1)
+        assert o["readmissible"] == 1, ("FIN offer", o.body)
+        _a, b = await _claim_bind(env, lob, 1, 1, 9)
+        assert b["status"] == "admitted_late", ("FIN bind", b.body)
+        await _corroborate(env, lob, 1, 9)
+        e = await _readmit(env, lob, 1, "entered", 1, actor=9, game=1)
+        assert e["status"] == "entered", ("FIN entered", e.body)
+        await env.at(lob, 96.0)
+        absent, out = await report(lob, "FIN returner")
+        assert absent == set() and out == (4, 4, 4), ("FIN returner finished", absent, out)
+    run_env(monkeypatch, body)

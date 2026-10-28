@@ -274,6 +274,24 @@ ROWS = [
                   '            continue\n',
                   '        if True:\n'
                   '            continue\n', 1)]},
+    # The finishing count of a readmission lobby: the seats the rows show gone
+    # during the game and not back did not finish it, rated or not. FIN.GONE
+    # reads the unrated set alone (the H1 pass's form); FIN.ROW fills the gone
+    # set from earlier games only.
+    {"row": "FIN.GONE", "node": RP + "test_fin_a_seat_gone_during_the_game_did_not_finish_it",
+     "tag": "FIN gone not finished",
+     "mutant": [(MAIN,
+                  '                    ({id_by_steam[sid] for sid in (unrated | _rdm_gone)}\n'
+                  '                     if _rdm_on else None))\n',
+                  '                    ({id_by_steam[sid] for sid in unrated}\n'
+                  '                     if _rdm_on else None))\n', 1)]},
+    {"row": "FIN.ROW", "node": RP + "test_fin_a_seat_gone_during_the_game_did_not_finish_it",
+     "tag": "FIN gone not finished",
+     "mutant": [(MAIN,
+                  '            if (r["gone_game"] is not None and int(r["gone_game"]) <= g) \\\n'
+                  '                    or (sid in historical_gone and historical_gone[sid] <= g):\n',
+                  '            if (r["gone_game"] is not None and int(r["gone_game"]) < g) \\\n'
+                  '                    or (sid in historical_gone and historical_gone[sid] < g):\n', 1)]},
     {"row": "F1.H2", "node": RJ + "test_h2_bound_but_unentered_returner_is_u",
      "tag": "H2 bound unentered",
      "mutant": [(MAIN,

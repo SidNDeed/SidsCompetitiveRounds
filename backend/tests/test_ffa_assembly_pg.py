@@ -5297,8 +5297,13 @@ def test_early_leave_grace_achievement_exclusions_are_independent():
     assert len(winners) == 1
     assert [ast.dump(v) for v in winners[0].comparators] == [
         ast.dump(ast.Name(id="excluded", ctx=ast.Load()))]
+    # Nine reads, and a tenth: a readmission lobby's finishing count reads the
+    # union with the seats the rows show gone during the game (the pair
+    # test_ffa_readmit_pg.py::test_fin_a_seat_gone_during_the_game_did_not_finish_it).
+    # The grace inside it can only lower that count, as left_early does on a
+    # flag-false lobby's attested account; no achievement predicate reads it.
     assert sum(isinstance(n, ast.Name) and n.id == "unrated" and isinstance(n.ctx, ast.Load)
-               for n in ast.walk(tree)) == 9
+               for n in ast.walk(tree)) == 10
     assert sum(isinstance(n, ast.Name) and n.id == "excluded" and isinstance(n.ctx, ast.Load)
                for n in ast.walk(tree)) == 4
     for node in ast.walk(tree):

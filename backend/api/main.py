@@ -62488,7 +62488,8 @@ async def _asm_payload_fields(db, lobby, lobby_id, steam_id) -> dict:
 # -- Writer 7: the report's own rules (V3-F4; V5; V9, N1; V11, N9, N10) ------
 
 async def _asm_report_rules(db, *, lobby, lobby_uuid, g, report, id_by_steam,
-                            unrated, progress, reasons=None, settled_cls=None):
+                            unrated, progress, reasons=None, settled_cls=None,
+                            gone_in_game=None):
     """Writer 7 in an assembly_v1 lobby, with the ghost exclusions as `unrated`
     (the grace joins the rating/economy set after this writer) and
     before any row is written. First the refusals, each through
@@ -62499,6 +62500,10 @@ async def _asm_report_rules(db, *, lobby, lobby_uuid, g, report, id_by_steam,
     for every game up to the first its peers saw it kept in; (b) in a
     short-started lobby, a seat the server never granted game g; (d) a seat
     whose gone record names an earlier game. No report field is read (N1).
+    If supplied, gone_in_game (a set) receives the seats the rows show gone
+    during or before game g and not re-entered: with the unrated set, the
+    absence set of a readmission lobby's finishing count (every such seat
+    did not finish g, rated for it or not).
     If supplied, reasons records the applied assembly reason independently of
     the seat already belonging to unrated; the exclusion and print stay the same."""
     rows = (await db.execute(text(
@@ -62579,6 +62584,17 @@ async def _asm_report_rules(db, *, lobby, lobby_uuid, g, report, id_by_steam,
     if added:
         print(f"[FFA-ASM] lobby {_asm_id8(lobby_uuid)} report game={g} "
               f"unrated={','.join(added)}")
+    if gone_in_game is not None:
+        # The seats the rows show gone during or before game g and not back:
+        # the seat row's own open gone record, or a readmission row's gone
+        # interval that no entered receipt closed. They did not finish g,
+        # whether or not they are rated for it; no report field is read.
+        for sid, r in by.items():
+            if sid not in id_by_steam:
+                continue
+            if (r["gone_game"] is not None and int(r["gone_game"]) <= g) \
+                    or (sid in historical_gone and historical_gone[sid] <= g):
+                gone_in_game.add(sid)
     return out
 
 
@@ -65589,8 +65605,12 @@ def _ffa_finishing_count(member_ids, departed_ids, report,
     """
     seated = set(member_ids or ())
     if effective_absent is not None:
-        # Readmit-v1's server-row decision is both accounts: no unsigned client
-        # flag may lower or raise an achievement tier in these lobbies.
+        # Readmit-v1: the server rows are both accounts. The caller passes the
+        # unrated set with the seats the rows show gone during the game and
+        # not back (a rated seat that left after the grace threshold did not
+        # finish either). No unsigned client flag raises a tier here; the
+        # early-leave grace inside the unrated set can only lower the count,
+        # as left_early does on a flag-false lobby's attested account.
         server = len(seated - (seated & set(effective_absent)))
         return server, server, server
     departed = seated & set(departed_ids or ())
@@ -66443,11 +66463,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # Writer 7 (the connect-failure design, I2): the refusals (c), (d), (e)
     # and the unrating (a), (b), (d) of an assembly lobby, before the grace
     # joins the rating/economy set. The independent exclusions only grow.
+    _rdm_gone: set = set()   # readmission: seats the rows show gone during the game
     if lobby.get("assembly_v1"):
         excluded = await _asm_report_rules(
             db, lobby=lobby, lobby_uuid=lobby_uuid, g=_game_number, report=report,
             id_by_steam=id_by_steam, unrated=excluded, progress=_progress,
-            reasons=_exclusion_reasons, settled_cls=_rdm_settle)
+            reasons=_exclusion_reasons, settled_cls=_rdm_settle,
+            gone_in_game=_rdm_gone)
     unrated = excluded | graced
     # V3 P3: a lone lagged report settles recorded, with rating and gold
     # skipped for every player of the game (Q7, the conservative direction).
@@ -66989,7 +67011,8 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                     member_set,
                     lobby["departed_ids"] if "departed_ids" in lobby else member_set,
                     report,
-                    ({id_by_steam[sid] for sid in unrated} if _rdm_on else None))
+                    ({id_by_steam[sid] for sid in (unrated | _rdm_gone)}
+                     if _rdm_on else None))
 
                 # 1-3: shutout tiers, WINNER only, nested (a 5-player 5-0
                 # unlocks all three). "5-0" = the winner converted 5 full
