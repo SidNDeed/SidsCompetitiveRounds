@@ -259,7 +259,7 @@
           ],
           "main",
           "admin_quarantine_triage_group",
-          "f2cfd8c37452e0951f0e0cb277f9842960c367da"
+          "a7265eb53ef142a1ae152fa8b451d459f40b427e"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/accept",
@@ -520,7 +520,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "6bb41865de53364900374cb37d081b432325da90"
+          "a8ff65d198b10c9fc04214b7103e54e48e1a5a71"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -3880,7 +3880,7 @@
       [
         "main",
         "lifespan",
-        "d64436942c788c7236b0ba819303f7085f9ea60a"
+        "ceace484af3718fe3c2ecc96916dd6bcd4a78403"
       ]
     ]
   },
