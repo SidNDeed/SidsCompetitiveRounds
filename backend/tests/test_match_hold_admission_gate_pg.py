@@ -10,6 +10,7 @@ import asyncio
 import ast
 import inspect
 import os
+import re
 import sys
 import textwrap
 import uuid
@@ -38,28 +39,36 @@ def test_h3_every_admission_site_uses_shared_gate_recheck_and_rollback():
     assert "ovt_queue" in gate and "ffa_queue" in gate
     assert "clock_timestamp()" in gate
 
+    # (helper, sites in the function). queue_poll and team_queue_poll carry
+    # two each: the formation's lease at discovery (1v1) or assembly (2v2),
+    # and the in-game lease where the room is issued (A1 round 2: the issuing
+    # pass commits the seats to a live game, and the first lease lapsed
+    # minutes into it). Each site refuses the gate's False with a rollback.
     sites = {
-        "queue_poll": "_lease_acquire_many",
-        "team_queue_poll": "_lease_acquire_many",
-        "_team_relock_existing_series": "_lease_acquire_many",
-        "ovt_queue_poll": "_lease_acquire_many",
-        "_lobby_enroll_caller": "_lease_acquire",
-        "team_lobby_start": "_lease_acquire_many",
-        "ovt_lobby_start": "_lease_acquire_many",
-        "_ffa_lobby_enroll_caller": "_lease_acquire",
-        "_ffa_lock_roster": "_lease_acquire_many",
-        "_ffa_queue_poll_inner": "_lease_acquire_many",
+        "queue_poll": ("_lease_acquire_many", 2),
+        "team_queue_poll": ("_lease_acquire_many", 2),
+        "_team_relock_existing_series": ("_lease_acquire_many", 1),
+        "ovt_queue_poll": ("_lease_acquire_many", 1),
+        "_lobby_enroll_caller": ("_lease_acquire", 1),
+        "team_lobby_start": ("_lease_acquire_many", 1),
+        "ovt_lobby_start": ("_lease_acquire_many", 1),
+        "_ffa_lobby_enroll_caller": ("_lease_acquire", 1),
+        "_ffa_lock_roster": ("_lease_acquire_many", 1),
+        "_ffa_queue_poll_inner": ("_lease_acquire_many", 1),
     }
-    for name, helper in sites.items():
+    for name, (helper, count) in sites.items():
         source = inspect.getsource(getattr(main, name))
         calls = [node.func.id for node in ast.walk(
             ast.parse(textwrap.dedent(source)))
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and node.func.id in ("_lease_acquire", "_lease_acquire_many")]
-        assert calls == [helper], (name, calls)
-        tail = source[source.rfind(helper):]
-        assert "is False" in tail, name
-        assert "await db.rollback()" in tail, name
+        assert calls == [helper] * count, (name, calls)
+        starts = [m.start() for m in re.finditer(re.escape(helper + "("), source)]
+        assert len(starts) == count, (name, starts)
+        for i, start in enumerate(starts):
+            tail = source[start:starts[i + 1] if i + 1 < count else len(source)]
+            assert "is False" in tail, (name, i)
+            assert "await db.rollback()" in tail, (name, i)
 
     open_source = inspect.getsource(match_hold.match_hold_open)
     claim_source = inspect.getsource(match_hold.match_hold_claim)

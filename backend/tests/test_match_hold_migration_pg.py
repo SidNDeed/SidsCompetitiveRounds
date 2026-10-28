@@ -232,8 +232,7 @@ def test_383_first_apply_rerun_defaults_and_constraints():
                 "    OR (table_name IN ('team_series', 'ovt_series') AND column_name = 'hold_v2'))",
                 list(NEW_TABLES))
             assert {(r["table_name"], r["column_name"]) for r in booleans} == {
-                ("match_seat_holds", "crossed_at_hold"), ("team_series", "hold_v2"),
-                ("ovt_series", "hold_v2")}
+                ("team_series", "hold_v2"), ("ovt_series", "hold_v2")}
             for r in booleans:
                 assert (r["is_nullable"], r["column_default"]) == ("NO", "false"), dict(r)
             terminal = await conn.fetchrow(
@@ -282,7 +281,7 @@ def test_383_first_apply_rerun_defaults_and_constraints():
             h1 = await conn.fetchval(hold % ("", ""), "team_pre383", tsid, g1, pids[0], 1,
                                      pids[1])
             assert await conn.fetchval(
-                "SELECT crossed_at_hold FROM match_seat_holds WHERE id = $1", h1) is False
+                "SELECT seq FROM match_seat_holds WHERE id = $1", h1) == 0
             assert await refused(hold % ("", ""), "team_pre383", tsid, g2, pids[2], 1,
                                  pids[1]), "two open holds in one room"
             assert await refused(hold % (", closed_at", ", clock_timestamp()"),

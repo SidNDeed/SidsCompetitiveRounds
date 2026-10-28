@@ -2266,14 +2266,22 @@ def test_a_watch_is_recorded_only_under_the_tuple_the_master_observed():
     # round 8 MEDIUM 1: and resolves it a second time, under the same lock,
     # after its last write of the room and the attestation and before the
     # read-back; a source that moved is written to the row, which the answer
-    # then names; a roster that moved refuses the attest (as the first check)
+    # then names; a roster that moved refuses the attest (as the first check,
+    # the server-held set of a readmission lobby or a flagged stage 2 room
+    # counted as present, exact equality elsewhere)
     assert att.count("_spectate_authoritative_roster(") == 2
     final = att.index("final_roster, final_ref = await _spectate_authoritative_roster(db, req.mode, req.room_name)")
     wrote = att.index("SELECT id, source_ref, generation FROM spectate_games WHERE id = :gid")
     assert first < att.index("INSERT INTO spectate_attestations") < final < wrote
     assert att.count("if final_roster is not None: if not final_roster: raise HTTPException(status_code=409, "
-                     "detail=\"room_unknown\") if set(roster) != final_roster or req.steam_id not in final_roster: "
-                     "raise HTTPException(status_code=409, detail=\"roster_mismatch\")") == 1
+                     "detail=\"room_unknown\") _final_ok = await _rdm_attest_check(db, req.mode, final_ref, "
+                     "roster, final_roster, req.steam_id) _final_held = await _s2_spectate_held(db, req.mode, "
+                     "final_ref, req.room_name) if _final_held is not None: _final_ok = _rdm_attest_ok(roster, "
+                     "final_roster, _final_held, req.steam_id) elif _s2_short: raise HTTPException(status_code=422, "
+                     "detail=\"bad_cardinality\") if _final_ok is not None: if not _final_ok: raise HTTPException("
+                     "status_code=409, detail=\"roster_mismatch\") elif set(roster) != final_roster or "
+                     "req.steam_id not in final_roster: raise HTTPException(status_code=409, "
+                     "detail=\"roster_mismatch\")") == 1
     rewrite = att.index('if final_ref[:64] != derived_ref[:64]: await db.execute(text("UPDATE spectate_games SET '
                         'source_ref = :ref WHERE id = :gid"), {"ref": final_ref[:64], "gid": str(game["id"])})')
     assert final < rewrite < wrote

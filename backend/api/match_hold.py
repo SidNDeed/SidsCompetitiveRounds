@@ -483,7 +483,7 @@ END_REASONS = frozenset({
 _HOLD_COLS = ("id, mode, room_name, series_id, game_id, player_id, n, slot, team, "
               "opener_player_id, held_anchor_at, held_at, held_until, seq, offered_at, "
               "claimed_at, verifier, bound_at, bound_actor, bound_region, entered_at, "
-              "closed_at, closed_reason, crossed_at_hold")
+              "closed_at, closed_reason")
 
 
 def _slot_ok(mode: str, slot: int, team: int) -> bool:
@@ -850,15 +850,19 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
     and still active, both players series members on the seat posted. The
     anchor is the held seat's last present_at in this room, which no late or
     withheld open moves: held_until = anchor + HOLD_S, held_at = the DB clock
-    of this transaction. A team hold stores _team_game_crossed_two from the
-    locked series row as crossed_at_hold. The held player's lease is released.
+    of this transaction. From this write the per-game record of a team game
+    is sealed (main._team_game_hold_seal: the live-points route ignores a
+    post while a hold of the series is open, and after the latest hold of
+    the game in progress closed other than by an entry), so a DC report
+    reads the record as the hold write found it. The held player's lease
+    is released.
     Every request, refused or not, writes its match_hold_open_attempts row in
     the same transaction; a refusal is never a hold. A repeat for the same
     (room, G, held player) answers the existing open row. The ledger row is
     inserted before any action and is the serialization point of its request
     id: of two uses of one id, exactly one acts, and the other answers the
     tuple the first recorded."""
-    from main import _lease_admission_gate, _lease_release, _team_game_crossed_two
+    from main import _lease_admission_gate, _lease_release
 
     mode = _mode_or_400(req.mode)
     room = req.room.strip()
@@ -933,16 +937,11 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
         elif pres["left_iv"] < timedelta(seconds=MIN_WINDOW_S):
             reason = "window_spent"
         else:
-            crossed = False
-            if mode == "team":
-                crossed = bool(await _team_game_crossed_two(db, game["series_id"], {
-                    "t1_series_wins": row["w0"], "t2_series_wins": row["w1"],
-                    "photon_room_id": row["photon_room_id"]}))
             await _lease_release(db, held)
             made = (await db.execute(text(
                 "INSERT INTO match_seat_holds (mode, room_name, series_id, game_id, player_id,"
                 "        n, slot, team, opener_player_id, held_anchor_at, held_at, held_until,"
-                "        seq, crossed_at_hold, drop_t1_points, drop_t2_points)"
+                "        seq, drop_t1_points, drop_t2_points)"
                 " SELECT CAST(:mode AS varchar), CAST(:room AS varchar), CAST(:sid AS uuid),"
                 "        CAST(:g AS uuid), CAST(:pid AS uuid),"
                 "        (SELECT COALESCE(max(n), 0) + 1 FROM match_seat_holds"
@@ -951,12 +950,12 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
                 "        CAST(:slot AS smallint), CAST(:team AS smallint), CAST(:opener AS uuid),"
                 "        CAST(:anchor AS timestamptz), CAST(:now AS timestamptz),"
                 "        CAST(:anchor AS timestamptz) + make_interval(secs => CAST(:hs AS integer)),"
-                "        0, CAST(:crossed AS boolean), CAST(:p1 AS smallint), CAST(:p2 AS smallint)"
+                "        0, CAST(:p1 AS smallint), CAST(:p2 AS smallint)"
                 f" RETURNING {_HOLD_COLS}"),
                 {"mode": mode, "room": room, "sid": str(game["series_id"]),
                  "g": str(req.game_id), "pid": str(held), "slot": req.slot, "team": req.team,
                  "opener": str(opener), "anchor": pres["present_at"], "now": now,
-                 "hs": HOLD_S, "crossed": crossed, "p1": req.t1_points,
+                 "hs": HOLD_S, "p1": req.t1_points,
                  "p2": req.t2_points})).mappings().first()
     if reason is not None:
         await _finish_open_attempt(db, req, now, "refused", reason, None)

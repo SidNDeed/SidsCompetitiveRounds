@@ -4719,7 +4719,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:54181 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:54224 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4785,7 +4785,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:53982 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:54025 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4855,7 +4855,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:53313 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:53356 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -38545,35 +38545,43 @@ async def update_team_live_points(
     await _assert_no_service_subject(db, affected_player_ids=list(team_subjects))
     _seat = await _seat_gate_for_live_points(request, reporter_steam_id, db)
 
-    # Stage 2 (design V3 S2): while a team hold of this series is open, the
-    # crossing evidence is the one the hold froze (crossed_at_hold), so a post
-    # is recorded (seat attestation and a log line) and its points are ignored
-    # with reason hold_open. The series row is locked first, and the hold is
-    # read by a statement issued after that lock is granted, so a hold opening
-    # concurrently either committed before this read or waits for this post,
-    # which then precedes its crossing read. A non-member or a series that is
-    # not live falls through to the UPDATE below, which refuses it as today.
-    # A series without the Stage 2 flag reads no hold table: match_hold_open
-    # opens a hold only in a room the series is flagged for.
+    # Stage 2 (design V3 S2 and S5): the per-game record of a held team game
+    # is SEALED. While a hold of this series is open, and after the latest
+    # hold of the game in progress closed other than by an entry (the game
+    # did not go on: it lapsed, was ended toward today, or the DC report
+    # closed it), a post is recorded (seat attestation and a log line) and
+    # its points are ignored, with reason hold_open or hold_closed
+    # (_team_game_hold_seal). The record is the only input of the DC
+    # report's lead-forfeit this file writes (_record_team_game_points has
+    # this one caller), so the report then reads, fresh and under the game
+    # token rule (F25 to M1), exactly what the hold write found: nothing
+    # during or after the hold moved an input. The series row is locked
+    # first, and the hold is read by a statement issued after that lock is
+    # granted, so a hold opening concurrently either committed before this
+    # read or waits for this post, which then precedes the hold. A
+    # non-member or a series that is not live falls through to the UPDATE
+    # below, which refuses it as today. A series without the Stage 2 flag
+    # reads no hold table: match_hold_open opens a hold only in a room the
+    # series is flagged for.
     _held_row = (await db.execute(text("""
-        SELECT s.live_t1_points, s.live_t2_points, s.hold_v2
+        SELECT s.live_t1_points, s.live_t2_points, s.hold_v2, s.hold_room, s.photon_room_id
           FROM team_series s
          WHERE s.id = :sid AND s.status = 'active' AND s.invalidated_at IS NULL
            AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)
            FOR NO KEY UPDATE OF s
     """), {"sid": sid, "pid": reporter.id})).first()
-    _held = bool(_held_row is not None and _held_row.hold_v2 and (await db.execute(text(
-        "SELECT EXISTS (SELECT 1 FROM match_seat_holds h"
-        " WHERE h.series_id = CAST(:sid AS uuid) AND h.mode = 'team'"
-        "   AND h.closed_at IS NULL)"), {"sid": str(sid)})).scalar())
-    if _held:
+    _held = None
+    if _held_row is not None and _held_row.hold_v2:
+        _held = await _team_game_hold_seal(db, sid, _held_row.hold_room,
+                                           _held_row.photon_room_id)
+    if _held is not None:
         await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat,
                                        (t1_points or 0) + (t2_points or 0))
         await db.commit()
-        print(f"[HOLD] live points ignored series={sid} reason=hold_open "
+        print(f"[HOLD] live points ignored series={sid} reason={_held} "
               f"pair={t1_points}-{t2_points}")
         _l1, _l2 = int(_held_row[0] or 0), int(_held_row[1] or 0)
-        return {"status": "ignored", "reason": "hold_open",
+        return {"status": "ignored", "reason": _held,
                 "live_t1_points": _l1, "live_t2_points": _l2,
                 "bets_locked": (_l1 + _l2) >= 2}
 
@@ -39267,42 +39275,76 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
     return crossed
 
 
-async def _team_dc_hold_crossing(db, sid, s):
-    """The crossing a team hold of the game in progress froze, or None.
-    Closes an open hold of that game as expiry_report first (the caller
-    holds the series row lock and commits). Holds closed by an entry are
-    passed over: the game continued after them.
+async def _team_game_hold_seal(db, sid, hold_room, photon_room_id):
+    """Why a team live-points post is ignored for the series' game in
+    progress, or None (Stage 2 V3 S2 and S5): 'hold_open' while any hold of
+    the series is open; 'hold_closed' when the latest hold of the game in
+    progress (the latest match_games row of the stored sitting room, the
+    game _team_dc_hold_close names) closed other than by an entry, because
+    the game did not go on after it. After an entry the game continued and
+    posts count again; a next game of the room (a new match_games row) has
+    no hold and is open to posts. The caller holds the series row lock.
 
-    None without a statement when the series is not flagged for its
+    None without a hold statement when the series is not flagged for its
+    stored room (hold_v2 is the caller's test, hold_room = photon_room_id
+    this one): match_hold_open opens a hold only in such a room, the same
+    flag test every other Stage 2 reader applies."""
+    if (await db.execute(text(
+            "SELECT EXISTS (SELECT 1 FROM match_seat_holds h"
+            " WHERE h.series_id = CAST(:sid AS uuid) AND h.mode = 'team'"
+            "   AND h.closed_at IS NULL)"), {"sid": str(sid)})).scalar():
+        return "hold_open"
+    room = (photon_room_id or "").strip()
+    if not room or (hold_room or "") != photon_room_id:
+        return None
+    why = (await db.execute(text(
+        "SELECT h.closed_reason FROM match_seat_holds h"
+        " WHERE h.series_id = CAST(:sid AS uuid) AND h.mode = 'team'"
+        "   AND h.room_name = CAST(:room AS varchar)"
+        "   AND h.game_id = (SELECT g.id FROM match_games g"
+        "                     WHERE g.series_id = CAST(:sid AS uuid)"
+        "                       AND g.room_name = CAST(:room AS varchar)"
+        "                     ORDER BY g.seq DESC LIMIT 1)"
+        " ORDER BY h.held_at DESC LIMIT 1"), {"sid": str(sid), "room": room})).scalar()
+    if why is not None and why != "entered":
+        return "hold_closed"
+    return None
+
+
+async def _team_dc_hold_close(db, sid, s):
+    """Closes an open team hold of the game in progress (the latest
+    match_games row of the stored sitting room) as expiry_report, in the
+    DC report's own transaction: the caller holds the series row lock and
+    commits, so the result and the closure are one commit. The report
+    then reads the per-game record fresh: the record of a held game is
+    sealed (_team_game_hold_seal), so it is the one the hold write found.
+
+    Nothing without a statement when the series is not flagged for its
     stored room (hold_v2, hold_room = photon_room_id): match_hold_open
-    opens a hold only in such a room, and an unflagged series reads the
-    per-game record as today, the same flag test every other Stage 2
-    reader applies."""
+    opens a hold only in such a room, the same flag test every other
+    Stage 2 reader applies."""
     room = (s["photon_room_id"] or "").strip()
     if not room or not s["hold_v2"] or (s["hold_room"] or "") != s["photon_room_id"]:
-        return None
+        return
     g = (await db.execute(text(
         "SELECT id FROM match_games WHERE series_id = CAST(:sid AS uuid)"
         "   AND room_name = CAST(:room AS varchar) ORDER BY seq DESC LIMIT 1"),
         {"sid": str(sid), "room": room})).scalar()
     if g is None:
-        return None
-    h = (await db.execute(text(
-        "SELECT id, closed_at, crossed_at_hold FROM match_seat_holds"
+        return
+    hid = (await db.execute(text(
+        "SELECT id FROM match_seat_holds"
         " WHERE series_id = CAST(:sid AS uuid) AND mode = 'team'"
         "   AND room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
-        "   AND (closed_at IS NULL OR closed_reason <> 'entered')"
-        " ORDER BY (closed_at IS NULL) DESC, held_at DESC LIMIT 1"
-        " FOR NO KEY UPDATE"), {"sid": str(sid), "room": room, "g": str(g)})).mappings().first()
-    if h is None:
-        return None
-    if h["closed_at"] is None:
-        await db.execute(text(
-            "UPDATE match_seat_holds SET closed_at = clock_timestamp(),"
-            "       closed_reason = 'expiry_report'"
-            " WHERE id = CAST(:hid AS uuid) AND closed_at IS NULL"), {"hid": str(h["id"])})
-        print(f"[HOLD] closed by DC report series={sid} room={room}")
-    return bool(h["crossed_at_hold"])
+        "   AND closed_at IS NULL"
+        " FOR NO KEY UPDATE"), {"sid": str(sid), "room": room, "g": str(g)})).scalar()
+    if hid is None:
+        return
+    await db.execute(text(
+        "UPDATE match_seat_holds SET closed_at = clock_timestamp(),"
+        "       closed_reason = 'expiry_report'"
+        " WHERE id = CAST(:hid AS uuid) AND closed_at IS NULL"), {"hid": str(hid)})
+    print(f"[HOLD] closed by DC report series={sid} room={room}")
 
 
 @app.post("/api/v1/ffa/lobbies/{lobby_id}/live-points", tags=["Betting"])
@@ -51462,11 +51504,13 @@ async def team_series_report_dc(
     # the stored sitting room. A DC report of a member arriving while a
     # hold of that game is open closes it (closed_reason expiry_report) in
     # this transaction, under the series row lock taken above, so the
-    # result below and the closure are one commit. When a hold of the game
-    # closed other than by an entry, its crossed_at_hold is the crossing
-    # read below: nothing during the hold moved an input. After an entry
-    # the game continued, and the record is read fresh as today.
-    _hold_crossed = await _team_dc_hold_crossing(db, sid_uuid, s)
+    # result below and the closure are one commit. The crossing is then
+    # read below from the per-game record as today, under the game token
+    # rule: the record of a held game is sealed (_team_game_hold_seal), so
+    # nothing during or after the hold moved an input, and what the report
+    # reads is what the hold write found. After an entry the game
+    # continued, and the record is open to its posts again.
+    await _team_dc_hold_close(db, sid_uuid, s)
 
     # ── Deferred fallback: the report that decides nothing ─────────────────
     # is_fallback marks a report filed by a survivor that is NOT the elected
@@ -51626,12 +51670,11 @@ async def team_series_report_dc(
     # restart DC (little or no play) or an even series is NOT auto-decided — it drops
     # to dc_incomplete below for manual resolution in the mod admin panel, so a 2v2
     # that breaks and needs a restart never auto-penalizes anyone.
-    # The crossing is the one a hold of the game froze when there is one
-    # (Stage 2 V3 S5, read above), else the per-game record read now.
+    # The record of a held game is sealed (Stage 2 V3 S5, the closure
+    # above), so this fresh read is the hold write's.
     if ((other_team_existing_wins or 0) >= 1
-            and (_hold_crossed if _hold_crossed is not None
-                 else await _team_game_crossed_two(db, sid_uuid, s, total_points,
-                                                   token=dc_game_token))):
+            and await _team_game_crossed_two(db, sid_uuid, s, total_points,
+                                             token=dc_game_token)):
         # Record a synthetic forfeit game for history parity.
         #
         # The synthetic room id is PER SERIES, never the bare literal it used to
@@ -54542,19 +54585,20 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
 
 # -- The 1v2 solo-seat build marker (/health `ovt_solo_split`) -------------
 # A 1v2 series keeps one solo-versus-duo split for every game. Once a series
-# holds a recorded game, submit_ovt_match refuses a report that puts another
-# of its three players in the solo seat: it answers 403 "Reported solo seat
-# does not match the series" before anything is written, and logs the refusal
-# with both splits. The batch adds no route and no key to any GET answer both
+# holds a recorded game, _settle_ovt_report (the settle submit_ovt_match
+# delegates to since the stage 2 report window) refuses a report that puts
+# another of its three players in the solo seat: it answers 403 "Reported
+# solo seat does not match the series" before anything is written, and logs
+# the refusal with both splits. The batch adds no route and no key to any GET answer both
 # builds serve -- the refusal rides only the report answer, which needs a
 # signed report -- so this word is what tells the new build from the old one.
 # The release train asserts it on both roles and reads any value but the
 # expected one as the old build; nothing else reads it (#306).
 #
-# DERIVED, never written down (#342): 1 when submit_ovt_match's compiled
+# DERIVED, never written down (#342): 1 when _settle_ovt_report's compiled
 # string constants carry both the refusal's HTTPException detail and the
 # trailing literal segment of its log line, else 0. Both are read from the
-# endpoint's code object, not from its source text, so a comment beside
+# settle's code object, not from its source text, so a comment beside
 # either cannot move the value, and an edit to either string reads 0.
 def _ovt_const_literal(code, text: str) -> str:
     """`text` when it is one of `code`'s compiled constants, else ''."""
@@ -54567,9 +54611,9 @@ def _ovt_solo_split_marker(detail: str, log_segment: str) -> int:
 
 
 _OVT_SOLO_SPLIT = _ovt_solo_split_marker(
-    _ovt_const_literal(submit_ovt_match.__code__,
+    _ovt_const_literal(_settle_ovt_report.__code__,
                        "Reported solo seat does not match the series"),
-    _ovt_const_literal(submit_ovt_match.__code__,
+    _ovt_const_literal(_settle_ovt_report.__code__,
                        " recorded game(s); a series keeps one solo-versus-duo split for every game"))
 
 
@@ -67169,8 +67213,8 @@ def _ffa_game_number_marker(insert_sql: str, lookup_sql: str) -> int:
 _FFA_GAME_NUMBER = _ffa_game_number_marker(
     _ffa_match_insert_literal(submit_ffa_match.__code__), _FFA_PRIOR_GAME_SQL)
 # Its sibling _OVT_SOLO_SPLIT (the /health `ovt_solo_split` word) is derived
-# the same way, from two of submit_ovt_match's compiled string constants, and
-# is defined right after that endpoint.
+# the same way, from two of _settle_ovt_report's compiled string constants
+# (the settle submit_ovt_match delegates to), and is defined right after it.
 
 
 # -- The FFA grace build marker (/health `ffa_exclusion_reasons`) ----------
@@ -70429,7 +70473,11 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
 # (test_title_ladders.py's whole-file test). health_check reads the word at
 # request time, so it is bound here, after the last of the three. The title
 # ladders batch's own build word is `title_ladders` (_title_ladders_health_word).
-_LADDER_HOOK_SITES = (submit_match, submit_team_match, submit_ffa_match)
+# The 2v2 site is _settle_team_report: since the stage 2 report window (V3
+# S5) submit_team_match only receives the report and delegates to that
+# settle, where the hook rides, so the handler's own code never loads the
+# name (test_title_ladders.COMPLETION_SITES names the same function).
+_LADDER_HOOK_SITES = (submit_match, _settle_team_report, submit_ffa_match)
 _LADDER_HOOK = title_ladders.hooked_site_count(_LADDER_HOOK_SITES)
 # CONNECT-FAILURE, reported on /health as `connect_failure` (the connect-
 # failure design, V11). A marker whose only purpose is to be probed (#306):
@@ -73696,12 +73744,27 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
     # no longer the room's refuses the attest (its writes roll back). A change
     # that commits after this statement is not excluded here; the validation
     # resolves again under the lock and refuses a request that echoes a
-    # source that is no longer authoritative.
+    # source that is no longer authoritative. The acceptance is the first
+    # resolution's, re-evaluated over this one and its ref: in a readmission
+    # lobby (V3 P4.9) or the flagged room of a 2v2 or 1v2 series (V3 S3
+    # step 6) the attested set united with H, the members the server holds,
+    # must equal the roster with every member outside H attested; exact set
+    # equality elsewhere.
     final_roster, final_ref = await _spectate_authoritative_roster(db, req.mode, req.room_name)
     if final_roster is not None:
         if not final_roster:
             raise HTTPException(status_code=409, detail="room_unknown")
-        if set(roster) != final_roster or req.steam_id not in final_roster:
+        _final_ok = await _rdm_attest_check(db, req.mode, final_ref, roster, final_roster,
+                                            req.steam_id)
+        _final_held = await _s2_spectate_held(db, req.mode, final_ref, req.room_name)
+        if _final_held is not None:
+            _final_ok = _rdm_attest_ok(roster, final_roster, _final_held, req.steam_id)
+        elif _s2_short:
+            raise HTTPException(status_code=422, detail="bad_cardinality")
+        if _final_ok is not None:
+            if not _final_ok:
+                raise HTTPException(status_code=409, detail="roster_mismatch")
+        elif set(roster) != final_roster or req.steam_id not in final_roster:
             raise HTTPException(status_code=409, detail="roster_mismatch")
     if final_ref[:64] != derived_ref[:64]:
         await db.execute(text("UPDATE spectate_games SET source_ref = :ref WHERE id = :gid"),

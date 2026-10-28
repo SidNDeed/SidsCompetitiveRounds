@@ -95,10 +95,23 @@ class _SessionLookupUnavailable(RuntimeError):
     """Only the authentication fixture raises this datastore sentinel."""
 
 
+class _NoopSavepoint:
+    """The savepoint the session check opens around its read, which then
+    raises inside it."""
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class _SessionLookupErrorDB:
     def __init__(self):
         self.info = {}
         self.timeout_setups = 0
+
+    def begin_nested(self):
+        return _NoopSavepoint()
 
     async def execute(self, *args, **kwargs):
         sql = str(args[0])
@@ -328,7 +341,12 @@ def test_m2_gate_loser_rearms_transaction_timeouts(monkeypatch):
 ])
 def test_h1_real_helper_soft_fail_paths_require_verified_session(
         monkeypatch, method, path, body, params):
-    """Log-only and lookup-error returns never authorize a stage 2 route."""
+    """A log-only return never authorizes a stage 2 route (401
+    session_required from the route's own requirement), and a session read
+    that does not complete is answered 503 session_check_unavailable by
+    the check itself (main._check_steam_session: neither soft-failed, which
+    would admit a subject it never established, nor 401'd, which no read
+    supports) before the route runs."""
     real_check = main._check_steam_session
     app = FastAPI()
     app.include_router(match_hold.router)
@@ -360,9 +378,10 @@ def test_h1_real_helper_soft_fail_paths_require_verified_session(
 
             log_only = await unauthorized()
             lookup_error = await unauthorized({"X-Session-Token": "unavailable"})
-        for response in (log_only, lookup_error):
-            assert response.status_code == 401
-            assert response.json() == {"detail": "session_required"}
+        assert log_only.status_code == 401, log_only.text
+        assert log_only.json() == {"detail": "session_required"}
+        assert lookup_error.status_code == 503, lookup_error.text
+        assert lookup_error.json() == {"detail": "session_check_unavailable"}
         assert len(seen_dbs) == 2
         assert [db.timeout_setups for db in seen_dbs] == [1, 1]
 
@@ -927,7 +946,7 @@ def test_m3_bind_actor_conflict_uses_live_deadlines(monkeypatch):
                 " (mode, room_name, series_id, game_id, player_id, n, slot, team,"
                 "  opener_player_id, held_anchor_at, held_at, held_until, seq, offered_at,"
                 "  claimed_at, verifier, bound_at, bound_actor, bound_region,"
-                "  crossed_at_hold, drop_t1_points, drop_t2_points)"
+                "  drop_t1_points, drop_t2_points)"
                 " SELECT mode, room_name, series_id, game_id, $2, 1, 2, 1,"
                 "        opener_player_id, held_anchor_at, held_at,"
                 "        CASE WHEN CAST($3 AS text) = 'held_expired'"
@@ -938,7 +957,7 @@ def test_m3_bind_actor_conflict_uses_live_deadlines(monkeypatch):
                 "             WHEN CAST($3 AS text) = 'entry_expired'"
                 "             THEN clock_timestamp() - interval '61 seconds'"
                 "             ELSE clock_timestamp() END, $4, 'eu',"
-                "        crossed_at_hold, drop_t1_points, drop_t2_points"
+                "        drop_t1_points, drop_t2_points"
                 "   FROM match_seat_holds WHERE id = $1",
                 uuid.UUID(hid), s.pid(2), state, actor)
 
@@ -992,32 +1011,6 @@ def test_m2_lock_timeout_rolls_back_before_a_blocker_releases(monkeypatch):
             "SELECT count(*) FROM queue_leases WHERE player_id = $1", s.pid(1)) == 1
 
     run_env(monkeypatch, body, prefix="rjs2m2lock")
-
-
-def test_t2_1_open_stores_the_crossing_of_the_locked_series(monkeypatch):
-    """A team hold stores what _team_game_crossed_two answers for the series
-    row read under the lock (wins and room), as crossed_at_hold; a 1v2 hold
-    never asks it."""
-    seen = []
-
-    async def crossed(db, series_id, row, reported_points=None):
-        seen.append((series_id, dict(row)))
-        return True
-
-    async def body(env):
-        monkeypatch.setattr(main, "_team_game_crossed_two", crossed)
-        s, g, _ = await opened_series(env)
-        await env.conn.execute(
-            "UPDATE team_series SET t1_series_wins = 1 WHERE id = $1", s.sid)
-        out = (await open_hold(env, s, 1, 0, g)).json()
-        assert (await hold_db(env, out["hold_id"]))["crossed_at_hold"] is True
-        assert seen == [(s.sid, {"t1_series_wins": 1, "t2_series_wins": 0,
-                                 "photon_room_id": s.room})], seen
-        o, go, _ = await opened_series(env, "ovt")
-        out = (await open_hold(env, o, 1, 0, go)).json()
-        assert (await hold_db(env, out["hold_id"]))["crossed_at_hold"] is False
-        assert len(seen) == 1
-    run_env(monkeypatch, body)
 
 
 def test_t2_2_closure_once_for_every_reason(monkeypatch):

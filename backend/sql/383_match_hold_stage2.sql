@@ -25,9 +25,9 @@
 --                           route insert into.
 --
 -- Additive only: every statement is IF NOT EXISTS, so the file re-runs
--- clean. hold_v2 and crossed_at_hold are BOOLEAN NOT NULL DEFAULT FALSE
--- explicitly: a schema default overrides the ORM default, and every series
--- issued before this file (or by old code) must read unflagged.
+-- clean. hold_v2 is BOOLEAN NOT NULL DEFAULT FALSE explicitly: a schema
+-- default overrides the ORM default, and every series issued before this
+-- file (or by old code) must read unflagged.
 --
 -- DEPLOY ORDER: THIS FILE FIRST, then the api, as two SHAs (learning #477).
 -- This file ships as a migration-only precursor commit: deploy that SHA, run
@@ -91,7 +91,6 @@ CREATE TABLE IF NOT EXISTS match_seat_holds (
   entered_at        TIMESTAMPTZ,
   closed_at         TIMESTAMPTZ,
   closed_reason     VARCHAR(48),
-  crossed_at_hold   BOOLEAN     NOT NULL DEFAULT FALSE,
   drop_t1_points    SMALLINT,
   drop_t2_points    SMALLINT,
   CONSTRAINT ck_msh_mode CHECK (mode IN ('team', 'ovt')),
@@ -274,9 +273,8 @@ BEGIN
             ('match_seat_holds', 21, 'entered_at', 'timestamp with time zone', false, ''),
             ('match_seat_holds', 22, 'closed_at', 'timestamp with time zone', false, ''),
             ('match_seat_holds', 23, 'closed_reason', 'character varying(48)', false, ''),
-            ('match_seat_holds', 24, 'crossed_at_hold', 'boolean', true, 'false'),
-            ('match_seat_holds', 25, 'drop_t1_points', 'smallint', false, ''),
-            ('match_seat_holds', 26, 'drop_t2_points', 'smallint', false, ''),
+            ('match_seat_holds', 24, 'drop_t1_points', 'smallint', false, ''),
+            ('match_seat_holds', 25, 'drop_t2_points', 'smallint', false, ''),
             ('match_hold_open_attempts', 1, 'request_id', 'character varying(64)', true, ''),
             ('match_hold_open_attempts', 2, 'room_name', 'character varying(64)', true, ''),
             ('match_hold_open_attempts', 3, 'game_id', 'uuid', false, ''),

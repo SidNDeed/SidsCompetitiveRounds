@@ -7,7 +7,8 @@ batch -- absent on the build before it, 1 on this one, on both roles -- and the
 train reads any other value as the old build.
 
 The value is DERIVED from two string constants the batch introduced (#342): 1
-when submit_ovt_match's compiled constants carry the refusal's HTTPException
+when _settle_ovt_report's compiled constants (the settle submit_ovt_match
+delegates to since the stage 2 report window) carry the refusal's HTTPException
 detail AND the trailing literal segment of its log line, 0 when either one is
 edited or gone. That makes it a statement about the code that ships rather
 than a stamp beside it, and the last test here runs the statement on a COPY of
@@ -107,20 +108,20 @@ def test_the_marker_is_derived_from_the_two_literals_and_reads_1_here():
                 if isinstance(n, ast.Constant) and isinstance(n.value, (int, bool))]
     assert ast.unparse(value.func) == "_ovt_solo_split_marker"
     assert [ast.unparse(a) for a in value.args] == [
-        "_ovt_const_literal(submit_ovt_match.__code__, %r)" % DETAIL,
-        "_ovt_const_literal(submit_ovt_match.__code__, %r)" % SEGMENT]
+        "_ovt_const_literal(_settle_ovt_report.__code__, %r)" % DETAIL,
+        "_ovt_const_literal(_settle_ovt_report.__code__, %r)" % SEGMENT]
     assert not value.keywords
     # What it reads is what the endpoint runs: the detail the refusal raises,
     # and the one compiled segment of the refusal's log line that carries the
     # series rule -- the f-string's literal text after its last expression.
-    consts = main.submit_ovt_match.__code__.co_consts
+    consts = main._settle_ovt_report.__code__.co_consts
     assert DETAIL in consts and SEGMENT in consts
-    source = inspect.getsource(main.submit_ovt_match)
+    source = inspect.getsource(main._settle_ovt_report)
     assert source.count('raise HTTPException(403, "%s")' % DETAIL) == 1
     ruled = [c for c in consts if isinstance(c, str) and "solo-versus-duo split" in c]
     assert ruled == [SEGMENT], ruled
     assert main._OVT_SOLO_SPLIT == 1
-    code = main.submit_ovt_match.__code__
+    code = main._settle_ovt_report.__code__
     assert main._ovt_solo_split_marker(main._ovt_const_literal(code, DETAIL),
                                        main._ovt_const_literal(code, SEGMENT)) == 1
 
@@ -135,7 +136,7 @@ def test_the_derivation_reads_each_literal_and_nothing_beside_it():
     too."""
     marker = main._ovt_solo_split_marker
     literal = main._ovt_const_literal
-    code = main.submit_ovt_match.__code__
+    code = main._settle_ovt_report.__code__
     assert marker(literal(code, DETAIL), literal(code, SEGMENT)) == 1
 
     def code_of(source):

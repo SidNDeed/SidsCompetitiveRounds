@@ -1,9 +1,12 @@
 """NX4: the expiry outcomes and the report acceptance after a return (design
 V3 S5), at the real main.app routes.
 
-T5.1: a team hold frozen at one point, a live post during it, then a DC
-report: dc_incomplete, as a report at the hold write would be; the report
-closes the open hold (expiry_report) in its own commit. T5.4 at the routes,
+T5.1: the per-game record of a held team game is sealed: with game 2's
+token on both teams' posts a DC report completes the series (today's
+lead-forfeit, under main's game token rule), while a post during a hold and
+one after its lapse are ignored and the same report settles dc_incomplete,
+as a report at the hold write would have; the report closes an open hold
+(expiry_report) in its own commit. T5.4 at the routes,
 both modes: for every non-empty set of the classes C, R and unclassed among
 the filers, exactly one report settles, from the first non-empty class and
 inside it the lowest Steam id; with fresh beats the lowest class C fighter
@@ -207,56 +210,155 @@ async def recorded(env, mode, s):
         % ("team_matches" if mode == "team" else "ovt_matches"), s.sid)]
 
 
+# -- the physical game's token (main, beta rounds 5 to 11: F25 to M1) ---------
+#
+# A lead-forfeit is read only from posts carrying the token of the physical
+# game the DC report names, and only when that token is counted from the
+# series' physical game 1 on record (team_series.first_game_nonce), which
+# nothing in the api writes: a test of the rule writes one, as
+# test_team_series_report_dc does, and the helpers here are that module's,
+# computed apart from main's. Game 2 of the original sitting is the game in
+# progress below; its nonce is chained from the origin with the game's own
+# number as the epoch.
+FIRST_GAME = "5eed1ab00f1e2d3c"
+
+
+def _chain(issued, ordinal, epoch):
+    if ordinal == 1:
+        return issued
+    message = ("team-game-chain:%d:%d" % (ordinal, epoch)).encode("ascii")
+    return _hmac.new(issued.encode("ascii"), message, hashlib.sha256).hexdigest()[:16]
+
+
+def _game_token(ordinal):
+    return "%s:%d:%d" % (_chain(FIRST_GAME, ordinal, ordinal), ordinal, ordinal)
+
+
+async def _game_two_up(env, s):
+    """Team 2 a game up with physical game 1 on record: game 2 is in progress
+    and a lead-forfeit of it is eligible once both teams post two points with
+    its token. Returns that token."""
+    await env.conn.execute(
+        "UPDATE team_series SET t2_series_wins = 1, first_game_nonce = $2 WHERE id = $1",
+        s.sid, FIRST_GAME)
+    return _game_token(2)
+
+
+async def _live_post(s, i, token, t1=2, t2=2):
+    """A live-points post of seat i naming game 2 of the sitting and carrying
+    its token, through the real route."""
+    steam = s.steam(i)
+    return await _call("POST", "/api/v1/team/series/%s/live-points" % s.sid, steam, params={
+        "t1_points": t1, "t2_points": t2, "reporter_steam_id": steam,
+        "game_number": 2, "photon_room_id": s.room, "game_token": token,
+        "token_sig": _sig("team-live-points-token:%s:%s:%d:%d:2:%s:%s"
+                          % (s.sid, steam, t1, t2, s.room, token)),
+        "sig": _sig("team-live-points-game:%s:%s:%d:%d:2:%s" % (s.sid, steam, t1, t2, s.room))})
+
+
+async def _dc_report(s, token, rep_i=2, dc_i=1):
+    """Seat rep_i (team 2) reports seat dc_i (team 1) disconnected, naming
+    the game's token, through the real route."""
+    rep, dc = s.steam(rep_i), s.steam(dc_i)
+    return await _call("POST", "/api/v1/team/series/%s/report-dc" % s.sid, rep, params={
+        "reporter_steam_id": rep, "dc_player_steam_id": dc, "t1_points_total": 2,
+        "t2_points_total": 2, "photon_room_id": s.room,
+        "hmac_sig": _sig("%s:%s:%s:dc" % (rep, s.sid, dc)),
+        "game_token": token,
+        "token_sig": _sig("team-dc-token:%s:%s:%s:%s" % (rep, s.sid, dc, token))})
+
+
+async def _crossed(env, s, token):
+    """The record rule's verdict for game 2, asked as the DC report asks it:
+    under the series row lock, for the token the report names. Writes
+    nothing."""
+    async with env.sm() as db:
+        row = (await db.execute(main.text(
+            "SELECT t1_series_wins, t2_series_wins, photon_room_id FROM team_series"
+            " WHERE id = :sid FOR NO KEY UPDATE"), {"sid": s.sid})).mappings().first()
+        verdict = await main._team_game_crossed_two(db, s.sid, row,
+                                                    token=main._team_game_wire_token(token))
+        await db.rollback()
+        return verdict
+
+
 # -- T5.1 --------------------------------------------------------------------
 
-def test_t5_1_dc_report_reads_the_crossing_the_hold_froze(monkeypatch, capsys):
-    """T5.1: team 2 is a game up; the hold of seat 1 is opened at one point
-    (crossed_at_hold false); during it a live post is ignored and the
-    per-game record is then raised to both teams at two (what a fresh read
-    would see); the DC report closes the open hold as expiry_report in its
-    own commit and settles dc_incomplete, as a report at the hold write
-    would."""
-    async def body(env):
-        _mount(env, monkeypatch)
-        s = await hold_test.seed_series(env.conn, "team")
-        await env.conn.execute("UPDATE team_series SET t2_series_wins = 1 WHERE id = $1", s.sid)
+def test_t5_1_the_record_of_a_held_game_is_sealed(monkeypatch, capsys):
+    """T5.1: three series with team 2 a game up, physical game 1 on record
+    and game 2 in progress, so a lead-forfeit of game 2 is eligible under
+    main's game token rule. (a) No hold: both teams post two points with
+    game 2's token, the record proves the crossing for that token, and a DC
+    report naming it completes the series to team 2. (b) A hold of seat 1
+    opened before any post: a post during it is ignored hold_open; after the
+    hold lapsed (the sweep) a post is ignored hold_closed; the record proves
+    no crossing, and the same DC report settles dc_incomplete with the hold
+    still closed lapsed, as a report at the hold write would have settled.
+    (c) A hold open when the DC report arrives: the report closes it
+    expiry_report in its own commit and settles dc_incomplete."""
+    async def start(env, s):
+        token = await _game_two_up(env, s)
         g = (await hold_test.game_start(env, s, 0))["game_id"]
         for i in range(4):
             await hold_test.beat(env, s, i)
+        return token, g
+
+    async def body(env):
+        _mount(env, monkeypatch)
+        # (a) the control: today's lead-forfeit from token-carrying posts, no hold
+        s = await hold_test.seed_series(env.conn, "team")
+        token, _ = await start(env, s)
+        for i in (0, 2):
+            r = await _live_post(s, i, token)
+            assert r.status_code == 200 and r.json().get("status") == "ok", \
+                ("T5.1a post", i, r.status_code, r.text[:300])
+        assert await _crossed(env, s, token) is True, ("T5.1a record",)
+        r = await _dc_report(s, token)
+        assert r.status_code == 200 and r.json()["status"] == "completed", \
+            ("T5.1a lead-forfeit", r.status_code, r.text[:300])
+        # (b) the seal: a hold before any post; posts during it and after its lapse
+        s = await hold_test.seed_series(env.conn, "team")
+        token, g = await start(env, s)
         await hold_test.backdate_presence(env, s, 1, 30)
         r = await hold_test.open_hold(env, s, 1, 0, g, rid="req-t51-open")
-        assert r.status_code == 200 and r.json()["status"] == "opened", ("T5.1 open", r.text)
+        assert r.status_code == 200 and r.json()["status"] == "opened", ("T5.1b open", r.text)
         hid = r.json()["hold_id"]
-        assert (await hold_test.hold_db(env, hid))["crossed_at_hold"] is False, ("T5.1 at hold",)
-        steam = s.steam(0)
-        lp = await _call("POST", "/api/v1/team/series/%s/live-points" % s.sid, steam, params={
-            "t1_points": 2, "t2_points": 2, "reporter_steam_id": steam,
-            "sig": _sig("team-live-points:%s:%s:2:2" % (s.sid, steam))})
-        assert lp.status_code == 200 and lp.json().get("reason") == "hold_open", \
-            ("T5.1 live post", lp.status_code, lp.text[:300])
-        async with env.sm() as db:
-            row = (await db.execute(main.text(
-                "SELECT t1_series_wins, t2_series_wins, photon_room_id FROM team_series"
-                " WHERE id = :sid FOR NO KEY UPDATE"), {"sid": s.sid})).mappings().first()
-            game = main._team_game_identity(row["t1_series_wins"], row["t2_series_wins"],
-                                            row["photon_room_id"])
-            for seat in (0, 2):
-                await main._record_team_game_points(db, s.sid, 2, 2, game, seat,
-                                                    attested=game)
-            assert await main._team_game_crossed_two(db, s.sid, row), ("T5.1 record raised",)
-            await db.commit()
-        rep, dc = s.steam(2), s.steam(1)
-        r = await _call("POST", "/api/v1/team/series/%s/report-dc" % s.sid, rep, params={
-            "reporter_steam_id": rep, "dc_player_steam_id": dc, "t1_points_total": 2,
-            "t2_points_total": 2, "photon_room_id": s.room,
-            "hmac_sig": _sig("%s:%s:%s:dc" % (rep, s.sid, dc))})
+        r = await _live_post(s, 0, token)
+        assert r.status_code == 200 and r.json().get("reason") == "hold_open", \
+            ("T5.1b post during the hold", r.status_code, r.text[:300])
+        await hold_test.shift_hold(env, hid, hold_test.match_hold.HOLD_S + 1)
+        await hold_test.sweep(env)
+        assert (await hold_test.hold_db(env, hid))["closed_reason"] == "lapsed", ("T5.1b lapse",)
+        for i in (0, 2):
+            r = await _live_post(s, i, token)
+            assert r.status_code == 200 and r.json().get("reason") == "hold_closed", \
+                ("T5.1b post after the lapse", i, r.status_code, r.text[:300])
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM team_series_games WHERE series_id = $1", s.sid) == 0, \
+            ("T5.1b record rows",)
+        assert await _crossed(env, s, token) is False, ("T5.1b record",)
+        r = await _dc_report(s, token)
         assert r.status_code == 200 and r.json()["status"] == "dc_incomplete", \
-            ("T5.1 frozen", r.status_code, r.text[:300])
+            ("T5.1b sealed", r.status_code, r.text[:300])
+        h = await hold_test.hold_db(env, hid)
+        st = await env.conn.fetchval("SELECT status FROM team_series WHERE id = $1", s.sid)
+        assert (h["closed_reason"], st) == ("lapsed", "dc_incomplete"), \
+            ("T5.1b the lapsed hold stays", h["closed_reason"], st)
+        # (c) an open hold is closed by the report, in the report's commit
+        s = await hold_test.seed_series(env.conn, "team")
+        token, g = await start(env, s)
+        await hold_test.backdate_presence(env, s, 1, 30)
+        r = await hold_test.open_hold(env, s, 1, 0, g, rid="req-t51-open-c")
+        assert r.status_code == 200 and r.json()["status"] == "opened", ("T5.1c open", r.text)
+        hid = r.json()["hold_id"]
+        r = await _dc_report(s, token)
+        assert r.status_code == 200 and r.json()["status"] == "dc_incomplete", \
+            ("T5.1c held", r.status_code, r.text[:300])
         h = await hold_test.hold_db(env, hid)
         st = await env.conn.fetchval("SELECT status FROM team_series WHERE id = $1", s.sid)
         assert (h["closed_reason"], st) == ("expiry_report", "dc_incomplete"), \
-            ("T5.1 closed with the report", h["closed_reason"], st)
-        assert "[HOLD] closed by DC report" in capsys.readouterr().out, ("T5.1 log",)
+            ("T5.1c closed with the report", h["closed_reason"], st)
+        assert "[HOLD] closed by DC report" in capsys.readouterr().out, ("T5.1c log",)
     hold_test.run_env(monkeypatch, body, prefix="rjs2nx4d")
 
 
@@ -414,7 +516,7 @@ def test_t5_8_unflagged_rooms_answer_as_today(monkeypatch):
     or journal row is written."""
     async def body(env):
         _mount(env, monkeypatch)
-        real_rx, real_dc = main._report_window_receive, main._team_dc_hold_crossing
+        real_rx, real_dc = main._report_window_receive, main._team_dc_hold_close
 
         async def _off_rx(db, mode, report):
             return None
@@ -433,9 +535,9 @@ def test_t5_8_unflagged_rooms_answer_as_today(monkeypatch):
             assert answers[0] == answers[1], ("T5.8 report as today", mode, answers)
         answers = []
         for off in (False, True):
-            monkeypatch.setattr(main, "_team_dc_hold_crossing", _off_dc if off else real_dc)
+            monkeypatch.setattr(main, "_team_dc_hold_close", _off_dc if off else real_dc)
             s = await hold_test.seed_series(env.conn, "team", flag=False)
-            await env.conn.execute("UPDATE team_series SET t2_series_wins = 1 WHERE id = $1", s.sid)
+            token = await _game_two_up(env, s)
             async with env.sm() as db:
                 row = (await db.execute(main.text(
                     "SELECT t1_series_wins, t2_series_wins, photon_room_id FROM team_series"
@@ -443,14 +545,11 @@ def test_t5_8_unflagged_rooms_answer_as_today(monkeypatch):
                 game = main._team_game_identity(row["t1_series_wins"], row["t2_series_wins"],
                                                 row["photon_room_id"])
                 for seat in (0, 2):
-                    await main._record_team_game_points(db, s.sid, 2, 2, game, seat,
-                                                        attested=game)
+                    await main._record_team_game_points(
+                        db, s.sid, 2, 2, game, seat, attested=game,
+                        token=main._team_game_wire_token(token))
                 await db.commit()
-            rep, dc = s.steam(2), s.steam(1)
-            r = await _call("POST", "/api/v1/team/series/%s/report-dc" % s.sid, rep, params={
-                "reporter_steam_id": rep, "dc_player_steam_id": dc, "t1_points_total": 2,
-                "t2_points_total": 2, "photon_room_id": s.room,
-                "hmac_sig": _sig("%s:%s:%s:dc" % (rep, s.sid, dc))})
+            r = await _dc_report(s, token)
             assert r.status_code == 200, ("T5.8 dc", off, r.status_code, r.text[:300])
             js = r.json()
             js.pop("new_ratings", None)
