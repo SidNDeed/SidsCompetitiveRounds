@@ -97,9 +97,22 @@ class Session:
 
 # ── the hook sites ────────────────────────────────────────────────────────────
 
-HOOKS = (("submit_match", "1v1"), ("submit_team_match", "team"),
-         ("_complete_team_series_with_ratings", "team"), ("submit_ovt_match", "ovt"),
+# The team and 1v2 report handlers delegate to their settle functions since
+# the stage 2 report window (submit_team_match -> _settle_team_report,
+# submit_ovt_match -> _settle_ovt_report); the roll sits in the settle body.
+# test_the_report_handlers_delegate_to_the_settle_that_rolls pins the
+# delegation, so the hook table cannot drift away from the handlers.
+HOOKS = (("submit_match", "1v1"), ("_settle_team_report", "team"),
+         ("_complete_team_series_with_ratings", "team"), ("_settle_ovt_report", "ovt"),
          ("submit_ffa_match", "ffa"))
+
+
+def test_the_report_handlers_delegate_to_the_settle_that_rolls():
+    for handler, settle in (("submit_team_match", "_settle_team_report"),
+                            ("submit_ovt_match", "_settle_ovt_report")):
+        body = _fn(handler)
+        assert "_pc_grant_earned_packs(" not in body, handler
+        assert body.count(f"return await {settle}(db, report)") == 1, handler
 
 
 def test_every_completion_path_rolls_once_inside_its_own_savepoint():
@@ -140,7 +153,7 @@ def test_the_1v1_roll_sits_in_the_completion_branch_with_the_series_winner():
 
 
 def test_the_team_rolls_follow_the_winning_side_on_both_completion_paths():
-    inline = _fn("submit_team_match")
+    inline = _fn("_settle_team_report")
     at = inline.index("_pc_grant_earned_packs(")
     assert inline.index("if series_completed:") < at
     call = inline[at:at + 400]
@@ -157,7 +170,7 @@ def test_the_team_rolls_follow_the_winning_side_on_both_completion_paths():
 
 
 def test_the_1v2_roll_follows_the_completed_update_and_the_winning_side():
-    body = _fn("submit_ovt_match")
+    body = _fn("_settle_ovt_report")
     at = body.index("_pc_grant_earned_packs(")
     upd = body.index("UPDATE ovt_series SET status='completed', winner_side=:ws, completed_at=NOW()")
     assert body.index("if series_done:") < upd < at

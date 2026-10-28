@@ -316,12 +316,15 @@ def _controls(nl):
     which is also why each anchor names an endpoint's own call line, never the
     binding's copy of the name."""
     # the v1.41.0 beta's two calls pass the game token on a second line: the
-    # post's own (the writer) and the report's (the reader)
+    # post's own (the writer) and the report's (the reader); the reader's call
+    # is the DC report's fresh read of the sealed record (RJ server lane:
+    # the hold write found what this read finds, so no frozen arm precedes it)
     writer_call = ("    await %s(db, sid, t1_points, t2_points, _game, _slot, _attested,"
                    % WRITER + nl + " " * 35 + "token=_token)")
     reader_line = ("            and await %s(db, sid_uuid, s, total_points," % READER + nl
                    + " " * 45 + "token=dc_game_token)):")
-    reader_cond = "    if ((other_team_existing_wins or 0) >= 1" + nl + reader_line
+    reader_cond = ("    if ((other_team_existing_wins or 0) >= 1" + nl
+                   + reader_line)
     pre_fix_cond = "    if (other_team_existing_wins or 0) >= 1 and total_points >= 2:"
     return [
         # The pre-fix condition: the report's snapshot decides. The two

@@ -55,10 +55,13 @@ MIGRATION_365 = os.path.join(SQL_DIR, "365_title_ladders_five_tiers.sql")
 MAIN_PY = os.path.join(API_DIR, "main.py")
 MODULE_PY = os.path.join(API_DIR, "title_ladders.py")
 
-# The ranked game-reporting sites, re-derived by SYMBOL: one per mode.
+# The ranked game-reporting sites, re-derived by SYMBOL: one per mode. The
+# 2v2 site is the settle: since the stage 2 report window (design V3 S5)
+# submit_team_match only receives the report and delegates to
+# _settle_team_report, which plays the game, so the credit rides there.
 COMPLETION_SITES = {
     "1v1": "submit_match",
-    "2v2": "submit_team_match",
+    "2v2": "_settle_team_report",
     "ffa": "submit_ffa_match",
 }
 
@@ -67,11 +70,13 @@ COMPLETION_SITES = {
 # nobody got round to, which is precisely the failure the coverage check
 # exists to catch -- so each exclusion is written down and asserted in both
 # directions: the symbol must still exist, and it must carry no hook. 1v2
-# reports unrated (test_ovt_is_excluded_while_it_reports_unrated). The 2v2
-# settlement completes a series after the fact and plays no game; it was a
-# site while ladders counted series.
+# reports unrated (test_ovt_is_excluded_while_it_reports_unrated); its site
+# is the settle submit_ovt_match delegates to since the stage 2 report
+# window, where the 1v2 game is written. The 2v2 settlement completes a
+# series after the fact and plays no game; it was a site while ladders
+# counted series.
 EXCLUDED_SITES = {
-    "ovt": "submit_ovt_match",
+    "ovt": "_settle_ovt_report",
     "2v2-settled": "_complete_team_series_with_ratings",
 }
 HOOK = "record_completed_games"
@@ -762,7 +767,7 @@ import title_ladders
 async def submit_match(db):
     await title_ladders.record_completed_games(db, [1], mode="1v1", reference_id="a")
 
-async def submit_team_match(db):
+async def _settle_team_report(db):
     await title_ladders.record_completed_games(db, [1], mode="2v2", reference_id="b")
 
 async def submit_ffa_match(db):
@@ -1438,8 +1443,9 @@ def _paren_list(text, open_at):
 def test_ovt_is_excluded_while_it_reports_unrated():
     """The exclusion is read off the code, not carried as an opinion.
 
-    `submit_ovt_match` writes `is_ranked` as a literal `false` in its INSERT
-    into ovt_matches -- a constant, not a bind parameter a caller could set --
+    `_settle_ovt_report` (the settle submit_ovt_match delegates to) writes
+    `is_ranked` as a literal `false` in its INSERT into ovt_matches -- a
+    constant, not a bind parameter a caller could set --
     and the ladder credits COMPLETED RATED series. Those two facts are what
     put 1v2 in EXCLUDED_SITES rather than any view about the mode.
 
@@ -1450,7 +1456,7 @@ def test_ovt_is_excluded_while_it_reports_unrated():
     """
     lines = _read(MAIN_PY).split("\n")
     span = _function_span(lines, EXCLUDED_SITES["ovt"])
-    assert span is not None, "submit_ovt_match was renamed or moved"
+    assert span is not None, "_settle_ovt_report was renamed or moved"
 
     body = "\n".join(span)
     # The statement, not the first mention of it. A comment in this function
@@ -1458,7 +1464,7 @@ def test_ovt_is_excluded_while_it_reports_unrated():
     # one produced a "column list" of English prose. Identify the real one by
     # the column it must contain.
     starts = [m.start() for m in re.finditer(r"INSERT INTO ovt_matches\s*\(", body)]
-    assert starts, "submit_ovt_match no longer INSERTs into ovt_matches"
+    assert starts, "_settle_ovt_report no longer INSERTs into ovt_matches"
     hits = [(a, _paren_list(body, body.index("(", a))) for a in starts]
     real = [(a, cs) for a, cs in hits if "is_ranked" in cs]
     assert len(real) == 1, (
@@ -1474,7 +1480,7 @@ def test_ovt_is_excluded_while_it_reports_unrated():
         "rewritten rather than trusted" % (len(cols), len(vals)))
     written = vals[cols.index("is_ranked")]
     assert written == "false", (
-        "submit_ovt_match now writes is_ranked=%s instead of the literal "
+        "_settle_ovt_report now writes is_ranked=%s instead of the literal "
         "false. 1v2 is excluded from the title ladders ONLY because it "
         "reports unrated; if that has changed, decide whether 1v2 credits a "
         "ladder and move it from EXCLUDED_SITES to COMPLETION_SITES (or "

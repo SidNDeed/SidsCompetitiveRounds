@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 import log_redaction as _schema_logred   # the credential rule (standard library only); BugReportRequest applies it before its clamps
 
@@ -1112,6 +1112,19 @@ class HealthResponse(BaseModel):
     # Absent on any build before that batch, which is how the train reads the
     # old build.
     connect_failure: int
+    # ffa_readmit: how many of the FFA mid-game readmission wiring sites (the
+    # flag at lock, present_at, the hold, the janitor arms, the readmission
+    # route, discovery, epoch version 2, the report journal and the spectator
+    # headroom) load their helper in this build (main._FFA_READMIT; 9 = every
+    # one). DERIVED from compiled code, never written down (#342); the release
+    # train's build discriminator for the readmission batch, read by nothing
+    # else (#306). No default, so building the answer without it raises.
+    ffa_readmit: int
+    # match_hold: the 2v2 and 1v2 mid-game readmission server half
+    # (main._MATCH_HOLD; 1 = this build). A marker read by nothing else
+    # (#306); the release train's build discriminator for it. No default,
+    # so building the answer without it raises.
+    match_hold: int
     # auto_log: the automatic post-match log upload (main._auto_log_health_word).
     # auto_logs.AUTO_LOG_REVISION when POST /api/v1/logs/auto is MOUNTED on the
     # app that answers -- read from the routing table on every request, never
@@ -1567,6 +1580,10 @@ class TeamQueueJoinRequest(BaseModel):
     display_name: str | None = Field(None, max_length=64)
     region: str | None = Field(None, max_length=8)
     queue_type: str | None = Field(None, max_length=8)  # 'auto' (default) or 'manual'
+    # Stage 2 readmission (V3 S1 step 1): the client's capability list, "rjs1"
+    # when every Stage 2 patch attached at boot; stored on the queue row
+    # (bounded to the column there, so a longer list never refuses a join).
+    caps: str = ""
 
 
 class TeamQueueMember(BaseModel):
@@ -1608,6 +1625,24 @@ class TeamQueuePollResponse(BaseModel):
     # Room rules (migration 306, ready_join only) — see QueuePollResponse.
     rules: dict | None = None
     rules_prop: str | None = None
+    # Stage 2 readmission (V3 S1 step 2): the hold flag the series row latched
+    # for room_name, a property of the room this answer names, so it rides on
+    # the ready_join answer only (no room, no key: a matched or relocked
+    # answer names none) and only for a caller whose own queue row carries the
+    # rjs1 token, read in the statement that reads the flag. The client pins
+    # (room, hold, mode, series, roster = this player, teammates, opponents)
+    # from that answer. None = not asked: the serializer below leaves the key
+    # off the wire, so any other caller, the released client among them, reads
+    # byte for byte what trunk answers (bar BV-A, the trunk oracle); a Stage 2
+    # caller reads True or False.
+    hold: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def _hold_only_when_asked(self, handler):
+        out = handler(self)
+        if isinstance(out, dict) and out.get("hold") is None:
+            out.pop("hold", None)
+        return out
 
 
 class TeamPlayerTelemetry(BaseModel):
@@ -1668,6 +1703,11 @@ class TeamMatchReport(BaseModel):
     t1b_telemetry: TeamPlayerTelemetry | None = None
     t2a_telemetry: TeamPlayerTelemetry | None = None
     t2b_telemetry: TeamPlayerTelemetry | None = None
+    # Stage 2 (V3 S5): the advisory game id of a flagged room's report and
+    # its separate signature over "game-id:{G}:{reporter}:{room}", outside
+    # the frozen eleven-field canonical. None from every other report.
+    game_id: str | None = Field(None, max_length=64)
+    game_id_sig: str | None = Field(None, max_length=128)
 
 
 class TeamMatchResponse(BaseModel):
@@ -1756,6 +1796,11 @@ class OvtMatchReport(BaseModel):
     solo_damage_timeline: str | None = Field(None, max_length=1024)
     duo_a_damage_timeline: str | None = Field(None, max_length=1024)
     duo_b_damage_timeline: str | None = Field(None, max_length=1024)
+    # Stage 2 (V3 S5): the advisory game id of a flagged room's report and
+    # its separate signature over "game-id:{G}:{reporter}:{room}", outside
+    # the frozen ten-field canonical. None from every other report.
+    game_id: str | None = Field(None, max_length=64)
+    game_id_sig: str | None = Field(None, max_length=128)
 
 
 class OvtMatchResponse(BaseModel):
@@ -1948,6 +1993,10 @@ class FfaMatchReport(BaseModel):
     # engine (score-progression hover graph). Outside the frozen HMAC
     # canonical; absent from pre-timeline clients.
     timeline: str | None = Field(None, max_length=2000)
+    # FFA readmission (V3 P3): 1 when the reporting seat holds a local lag
+    # record for this game. Outside the HMAC canonical and advisory: it can
+    # only move its own report behind the continuous reports of the game.
+    self_lag: int = Field(0, ge=0, le=1)
 
 
 class FfaMatchResponse(BaseModel):

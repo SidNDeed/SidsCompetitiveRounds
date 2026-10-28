@@ -2151,7 +2151,7 @@ def _insert_columns():
 def test_s27_the_schema_census_both_directions(monkeypatch):
     """S27: information_schema.columns of ffa_lobbies equals the union of the
     four classes, the classes are disjoint, and REFORM's INSERT names exactly
-    that union (46 columns, N12)."""
+    that union (47 columns, N12)."""
     async def body(env):
         cols = {r[0] for r in await env.conn.fetch(
             "SELECT column_name FROM information_schema.columns"
@@ -2162,7 +2162,7 @@ def test_s27_the_schema_census_both_directions(monkeypatch):
         assert set(names) - cols == set(), ("S27 class not live", sorted(set(names) - cols))
         assert cols - set(names) == set(), ("S27 live not classed", sorted(cols - set(names)))
         ins = _insert_columns()
-        assert len(ins) == len(set(ins)) == 46 and set(ins) == set(names), \
+        assert len(ins) == len(set(ins)) == 47 and set(ins) == set(names), \
             ("S27 insert", len(ins), sorted(set(ins) ^ set(names)))
     run_env(monkeypatch, body, fresh=True)
 
@@ -2772,6 +2772,7 @@ def test_s11f_the_leave_columns(monkeypatch):
     """S11(f), writer 5: left_at, left_cause, left_label and left_path."""
     async def body(env):
         for cause, label, want in (("", "menu_leave", (None, "menu_leave", "kept")),
+                                   ("", "readmit_refused", (None, "readmit_refused", "kept")),
                                    ("in_room_timeout", "room_exit",
                                     ("in_room_timeout", "room_exit", "departure")),
                                    ("", "not_a_site", (None, "unlabelled", "kept"))):
@@ -5296,8 +5297,13 @@ def test_early_leave_grace_achievement_exclusions_are_independent():
     assert len(winners) == 1
     assert [ast.dump(v) for v in winners[0].comparators] == [
         ast.dump(ast.Name(id="excluded", ctx=ast.Load()))]
+    # Nine reads, and a tenth: a readmission lobby's finishing count reads the
+    # union with the seats the rows show gone during the game (the pair
+    # test_ffa_readmit_pg.py::test_fin_a_seat_gone_during_the_game_did_not_finish_it).
+    # The grace inside it can only lower that count, as left_early does on a
+    # flag-false lobby's attested account; no achievement predicate reads it.
     assert sum(isinstance(n, ast.Name) and n.id == "unrated" and isinstance(n.ctx, ast.Load)
-               for n in ast.walk(tree)) == 9
+               for n in ast.walk(tree)) == 10
     assert sum(isinstance(n, ast.Name) and n.id == "excluded" and isinstance(n.ctx, ast.Load)
                for n in ast.walk(tree)) == 4
     for node in ast.walk(tree):
@@ -6664,7 +6670,7 @@ _N12_CLASSES = {
     "COPY_AND": ("is_ranked", "kills_tiebreak", "sudden_death"),
     "FRESH": ("id", "status", "photon_room_id", "region", "player_count", "member_ids",
               "created_at", "host_player_id", "reformed_from", "bets_disabled", "assembly_v1",
-              "admission_v1", "region_why", "region_detail"),
+              "admission_v1", "readmit_v1", "region_why", "region_detail"),
     "RESET": ("games_played", "departed_ids", "departure_causes", "live_total_points",
               "live_points_game", "completed_at", "invalidated_at", "invalidation_reason",
               "reformed_to", "start_granted_at", "short_started_at", "asm_rule",
@@ -6676,19 +6682,19 @@ _N12_CLASSES = {
 
 def test_n12_the_46_column_partition(monkeypatch):
     """Section 12, N12: the L' partition, class by class and column by column,
-    is V11's table (COPY 9, COPY-AND 3, FRESH 14, RESET 20), disjoint, and
+    is V11's table (COPY 9, COPY-AND 3, FRESH 15, RESET 20), disjoint, and
     its union is information_schema's ffa_lobbies."""
     async def body(env):
         classes = main._ASM_REFORM_CLASSES
         assert {k: set(v) for k, v in classes.items()} == \
             {k: set(v) for k, v in _N12_CLASSES.items()}, ("N12 classes", classes)
         assert {k: len(v) for k, v in classes.items()} == \
-            {"COPY": 9, "COPY_AND": 3, "FRESH": 14, "RESET": 20}, "N12 counts"
+            {"COPY": 9, "COPY_AND": 3, "FRESH": 15, "RESET": 20}, "N12 counts"
         names = [c for v in classes.values() for c in v]
         cols = {r[0] for r in await env.conn.fetch(
             "SELECT column_name FROM information_schema.columns"
             " WHERE table_schema = current_schema() AND table_name = 'ffa_lobbies'")}
-        assert len(names) == len(set(names)) == 46 and set(names) == cols, \
+        assert len(names) == len(set(names)) == 47 and set(names) == cols, \
             ("N12 union", sorted(set(names) ^ cols))
     run_env(monkeypatch, body, fresh=True)
 

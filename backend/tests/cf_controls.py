@@ -43,7 +43,7 @@ sys.path.insert(0, HERE)
 import cf_controls_rows as rows_mod  # noqa: E402
 
 HOST = "postgresql+asyncpg://postgres@127.0.0.1:55432/"
-COPY = ("backend/api", "backend/sql", "backend/tests")
+COPY = ("backend",)  # the whole tree the tests reach, never a derived list (learning 915)
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "bin", "obj", ".pytest_cache")
 TIMEOUT_S = 1800
 
@@ -94,6 +94,14 @@ def apply_edits(base, edits):
             path = os.path.join(base, rel)
         with open(path, "rb") as fh:
             text = fh.read().decode("utf-8")
+        # Anchors are written in their author's line ends (LF for the server
+        # rows, CRLF for the client rows) and the checkout has its own: read
+        # both sides in the checkout's convention, idempotently, so a row
+        # matches on a CRLF seat and on an LF seat alike. (A blanket LF->CRLF
+        # step doubles the CR of every CRLF-written anchor.)
+        nl = "\r\n" if "\r\n" in text else "\n"
+        old = old.replace("\r\n", "\n").replace("\n", nl)
+        new = new.replace("\r\n", "\n").replace("\n", nl)
         found = text.count(old)
         if found != count:
             raise Stale("%s: %d occurrence(s) of %r, want %d" % (rel, found, old[:80], count))

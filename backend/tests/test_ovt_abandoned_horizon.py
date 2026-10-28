@@ -1175,8 +1175,8 @@ def _blocks_of(node):
 
 
 def _resolved_branch():
-    """The `if series["status"] != "active":` branch of `submit_ovt_match`."""
-    fn = _fn_named("submit_ovt_match")
+    """The `if series["status"] != "active":` branch of `_settle_ovt_report`."""
+    fn = _fn_named("_settle_ovt_report")
     for node in ast.walk(fn):
         if not isinstance(node, ast.If):
             continue
@@ -1247,7 +1247,7 @@ def test_the_settled_arm_pays_with_names_that_are_bound_before_it():
     listed here: a hardcoded list stops measuring the moment the arm gains a
     dependency (#342).
     """
-    fn = _fn_named("submit_ovt_match")
+    fn = _fn_named("_settle_ovt_report")
     flat = _straightline(fn.body)
     arm_idx = None
     bound: dict = {}
@@ -1277,7 +1277,7 @@ def test_the_settled_arm_pays_with_names_that_are_bound_before_it():
 
     # Every name this function assigns ITSELF, at any depth, but not the
     # locals of the helpers nested in it — those are their own scope. A name
-    # in this set is a local of `submit_ovt_match`, so reading it before it is
+    # in this set is a local of `_settle_ovt_report`, so reading it before it is
     # bound is a NameError and not a module lookup.
     local_assigned = _assigned_in_scope(fn)
     # Names the arm binds for itself before using them are not dependencies
@@ -1347,7 +1347,7 @@ def test_the_settled_arm_pays_no_more_games_than_the_sitting_can_have():
     # are a check that cannot fail (#342), so the live arm's own comparison
     # must read the same name rather than a bare number.
     assert main.OVT_SERIES_MAX_GAMES == main.OVT_SERIES_WINS_REQUIRED * 2 - 1
-    live = ast.unparse(_fn_named("submit_ovt_match"))
+    live = ast.unparse(_fn_named("_settle_ovt_report"))
     assert "series_done = solo_wins >= 2" not in live.replace("  ", " "), live[:200]
     assert live.count("OVT_SERIES_WINS_REQUIRED") >= 2, (
         live.count("OVT_SERIES_WINS_REQUIRED"))
@@ -1375,7 +1375,7 @@ def test_the_report_sinks_series_lock_waits_so_the_void_cannot_be_missed():
     committing janitor releases one, then reads the committed row. A declining
     read here would answer on a row version it did not wait to see.
     """
-    lock = _only(_sql_literals(main.submit_ovt_match), "FOR NO KEY UPDATE")
+    lock = _only(_sql_literals(main._settle_ovt_report), "FOR NO KEY UPDATE")
     up = " ".join(lock.split()).upper()
     assert "FOR NO KEY UPDATE" in up, lock
     assert "SKIP LOCKED" not in up, lock
@@ -1600,10 +1600,95 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # once the 886bed8 LAND's +1 above is merged in).
     assert sum(r["func"] == "_pc_motion_janitor" for r in census["declines"]) == 2, census["declines"]
     assert not any(r["func"] == "_pc_motion_janitor" for r in census["waits"]), census["waits"]
-    assert len(census["declines"]) == 30, census["declines"]
-    assert len(census["waits"]) == 13, census["waits"]
-    assert len(census["decline_sites"]) == 27, census["decline_sites"]
-    assert len(census["wait_sites"]) == 10, census["wait_sites"]
+    # FFA readmission (the round 1 census ruling, 2026-10-17): the readmission
+    # janitor (_ffa_readmit_janitor, reached from queue_cleanup_loop) adds one
+    # decline at one site, the lapse's entry lock (_rdm_lapse_lobby, FOR NO
+    # KEY UPDATE SKIP LOCKED), and eight waits at eight sites: the lobby row
+    # twice (_ffa_lock_lobby_slot), the lobby's queue rows
+    # (_ffa_lock_queue_rows), the journal window three times
+    # (_ffa_settle_window, _ffa_report_gate, _rdm_journal_recheck) and the
+    # report body's players and glicko_ratings_ffa passes (submit_ffa_match).
+    # Each of the eight is BOUNDED, which is what the count alone cannot say:
+    # both readmission sessions are armed by _rdm_janitor_bound before their
+    # first statement, and it sets lock_timeout and statement_timeout on every
+    # transaction they begin (an after_begin listener, so a transaction begun
+    # after the report body's own rollback is armed too); a timeout ends only
+    # that lobby or window, with one bound line, for the next tick
+    # (test_ffa_readmit_pg T4.16 to T4.18, test_ffa_report_journal_pg T3.7 to
+    # T3.9). Lock order on every path holding a lobby and its queue rows:
+    # the lobby, then the queue rows in UUID order, then the leases; the one
+    # inverse order in reach, delete_player_data's players row before the
+    # lobby, is base code shared with the report route and ends as 40P01,
+    # caught per window. Before: 30/13 and 27/10.
+    bounded = {("_ffa_lock_lobby_slot", "FOR NO KEY UPDATE"): 2,
+               ("_ffa_lock_queue_rows", "FOR UPDATE"): 1,
+               ("_ffa_settle_window", "FOR UPDATE"): 1,
+               ("_ffa_report_gate", "FOR UPDATE"): 1,
+               ("_rdm_journal_recheck", "FOR UPDATE"): 1,
+               ("submit_ffa_match", "FOR NO KEY UPDATE"): 1,
+               ("submit_ffa_match", "FOR UPDATE"): 1}
+    funcs = {f for f, _c in bounded}
+    got = {}
+    for r in census["waits"]:
+        if r["func"] in funcs:
+            got[(r["func"], r["clause"])] = got.get((r["func"], r["clause"]), 0) + 1
+    assert got == bounded, got
+    assert [r["func"] for r in census["declines"]].count("_rdm_lapse_lobby") == 1, \
+        census["declines"]
+    arms = [n for n in ast.walk(ast.parse(textwrap.dedent(
+        inspect.getsource(main._ffa_readmit_janitor)))) if isinstance(n, ast.AsyncWith)]
+    assert len(arms) == 2, len(arms)
+    for w in arms:
+        first = w.body[0]
+        assert (isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)
+                and getattr(first.value.func, "id", None) == "_rdm_janitor_bound"
+                and [a.id for a in first.value.args] == [w.items[0].optional_vars.id]), \
+            ast.dump(first)
+    bound_sql = " ".join(main._RDM_JANITOR_BOUND_SQL.split())
+    assert "set_config('lock_timeout', CAST(:lv AS text), true)" in bound_sql, bound_sql
+    assert "set_config('statement_timeout', CAST(:sv AS text), true)" in bound_sql, bound_sql
+    assert 0 < main.RDM_JANITOR_LOCK_TIMEOUT_MS < main.RDM_JANITOR_STATEMENT_TIMEOUT_MS
+    # Stage 2 report windows (the census ruling of 2026-10-19, pointer
+    # handoff-0926/relaunch_srv_stage_s3_census_1019.md): the report window
+    # janitor (_report_window_janitor, reached from queue_cleanup_loop) adds
+    # four waits at four sites and no decline, in the settle bodies its
+    # windows run: _settle_ovt_report (the ovt_series row, FOR NO KEY UPDATE)
+    # and _settle_team_report (the team_series row and the glicko_ratings_2v2
+    # rows, FOR UPDATE; the players rows, FOR NO KEY UPDATE). Every session
+    # the janitor opens is armed by _rdm_janitor_bound before its first
+    # statement, and a settle a bound ends changes nothing and leaves the
+    # window for the next tick (test_match_hold_reports_pg T5.9).
+    # Before: 31/21/28/18.
+    # Both settle bodies end by freeing the series' queue rows through
+    # _lock_queue_rows_ordered (ovt_queue, team_queue), under the same armed
+    # session. The RJ server re-land (2026-10-28) wrote that lock out as one
+    # literal per table, chosen by branch, because the janitor's walker
+    # resolves literals only: the f-string it replaced was a site the walker
+    # could not see, so the 25 waits counted before this line left this one
+    # out. Four literals, one lock; each call runs the one its table names.
+    report_bounded = {("_settle_ovt_report", "FOR NO KEY UPDATE"): 1,
+                      ("_settle_team_report", "FOR UPDATE"): 2,
+                      ("_settle_team_report", "FOR NO KEY UPDATE"): 1,
+                      ("_lock_queue_rows_ordered", "FOR UPDATE"): 4}
+    rfuncs = {f for f, _c in report_bounded}
+    rgot = {}
+    for r in census["waits"]:
+        if r["func"] in rfuncs:
+            rgot[(r["func"], r["clause"])] = rgot.get((r["func"], r["clause"]), 0) + 1
+    assert rgot == report_bounded, rgot
+    rarms = [n for n in ast.walk(ast.parse(textwrap.dedent(
+        inspect.getsource(main._report_window_janitor)))) if isinstance(n, ast.AsyncWith)]
+    assert len(rarms) == 3, len(rarms)
+    for w in rarms:
+        first = w.body[0]
+        assert (isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)
+                and getattr(first.value.func, "id", None) == "_rdm_janitor_bound"
+                and [a.id for a in first.value.args] == [w.items[0].optional_vars.id]), \
+            ast.dump(first)
+    assert len(census["declines"]) == 31, census["declines"]
+    assert len(census["waits"]) == 29, census["waits"]   # 25 before the queue-row lock became visible
+    assert len(census["decline_sites"]) == 28, census["decline_sites"]
+    assert len(census["wait_sites"]) == 26, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 
 def test_a_lock_taking_path_outside_the_counted_set_reds_the_census():
@@ -1754,7 +1839,7 @@ def test_the_ovt_earned_pack_grant_is_dominated_by_the_completion_write():
     the grant moved above that write, which is precisely the move that would
     turn this arm's `invalidated_at` into a pack reversal.
     """
-    fn = _fn_named("submit_ovt_match")
+    fn = _fn_named("_settle_ovt_report")
     # A pin that measured an empty set would pass forever (#342): exactly one
     # statement list must order the completion write ahead of the grant.
     assert _dominates(fn, "UPDATE ovt_series SET status='completed'",
@@ -1997,7 +2082,7 @@ def test_the_void_and_a_report_serialise_on_the_same_series_row():
     commits. That is what makes "whichever commits second sees the first" a
     property of the tree rather than a sentence about it.
     """
-    report_lock = _only(_sql_literals(main.submit_ovt_match),
+    report_lock = _only(_sql_literals(main._settle_ovt_report),
                         "FOR NO KEY UPDATE")
 
     async def go():
@@ -2044,7 +2129,7 @@ def test_the_janitor_declines_a_row_the_report_sink_is_holding():
     read declines and the row is left `active` for the next tick — so the two
     can never both decide this row, whichever arrives first.
     """
-    report_lock = _only(_sql_literals(main.submit_ovt_match),
+    report_lock = _only(_sql_literals(main._settle_ovt_report),
                         "FOR NO KEY UPDATE")
 
     async def go():
@@ -2428,16 +2513,21 @@ def test_the_report_is_canonicalised_before_any_slot_comparison_or_write():
     """H1 (a): the canonical form runs BEFORE any comparison and any write,
     and AFTER the signature check.
 
-    In the handler's straight-line body: exactly one
-    `report = _ovt_canonical_duo(report)`, after `_verify_ovt_hmac(report)`
+    Across the handler prefix and settlement's straight-line body: exactly
+    one `report = _ovt_canonical_duo(report)`, after `_verify_ovt_hmac(report)`
     (the signature covers the order the client sent, so canonicalising first
     would refuse every report whose pair arrives reversed) and before every
     statement that reads a duo seat or runs a database statement; nothing
     rebinds `report` after it. Then the order the answer rests on: the series
     row lock, the room lock, the replay check, the INSERT.
     """
-    fn = _fn_named("submit_ovt_match")
-    body = _straightline(fn.body)
+    fn = _fn_named("_settle_ovt_report")
+    # Follow the pinned delegation so the caller's signature check stays
+    # before the sink's canonicalisation, comparisons, and writes.
+    handler = _fn_named("submit_ovt_match")
+    assert ast.unparse(handler.body[-1]) == (
+        "return await _settle_ovt_report(db, report)")
+    body = _straightline(handler.body[:-1]) + _straightline(fn.body)
     src = [ast.unparse(st) for st in body]
 
     def is_canonical(st) -> bool:
@@ -2459,7 +2549,8 @@ def test_the_report_is_canonicalised_before_any_slot_comparison_or_write():
     for s in src[:c]:
         assert not _DUO_SLOT.search(s), s
         assert "db.execute" not in s and "db.add" not in s, s
-    rebinds = [n for n in ast.walk(fn)
+    scope = ast.Module(body=[handler, fn], type_ignores=[])
+    rebinds = [n for n in ast.walk(scope)
                if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign))
                and any(isinstance(t, ast.Name) and t.id == "report"
                        for t in (n.targets if isinstance(n, ast.Assign)
@@ -2498,11 +2589,14 @@ def test_every_slot_pair_comparison_in_the_report_and_void_paths_is_accounted_fo
     """
     from collections import Counter
     census = {
-        "submit_ovt_match": {"set": 1, "ordered": 1, "scalar": 1,
-                             "containment": 2},
+        "submit_ovt_match": {},
         # The tier-rating read moved out of the handler into its own helper
         # (a read that fails must refuse, not substitute): the in-list it
-        # carries is counted where it now lives.
+        # carries is counted where it now lives. The settlement itself moved
+        # into _settle_ovt_report (NX4, the report window), which carries the
+        # rest.
+        "_settle_ovt_report": {"set": 1, "ordered": 1, "scalar": 1,
+                               "containment": 2},
         "_ovt_tier_ratings": {"in-list": 1},
         "_ovt_canonical_duo": {"scalar": 1},
         "_ovt_award_seats": {"membership": 2},
@@ -2780,11 +2874,11 @@ def test_the_key_conflicts_on_either_order_of_the_duo_pair():
     same (room, solo, duo_a, duo_b), so the second WAITS on the first's
     uncommitted key entry and fails with a unique violation when the first
     commits: one row. The statement is the handler's own INSERT, read out of
-    submit_ovt_match, on the table the production migration builds, and that
+    _settle_ovt_report, on the table the production migration builds, and that
     table's only UNIQUE is asserted to be the ordered key this rests on.
     """
     from sqlalchemy.exc import IntegrityError
-    insert = _only(_sql_literals(main.submit_ovt_match), "INSERT INTO ovt_matches")
+    insert = _only(_sql_literals(main._settle_ovt_report), "INSERT INTO ovt_matches")
     names = set(re.findall(r"(?<!:):(\w+)", insert))
     lo, hi = SIDS[1], SIDS[2]
 
@@ -2854,7 +2948,7 @@ def test_a_report_that_reaches_the_insert_anyway_is_answered_as_already_recorded
     gold.
     """
     _sink_patch(monkeypatch)
-    insert = _only(_sql_literals(main.submit_ovt_match), "INSERT INTO ovt_matches")
+    insert = _only(_sql_literals(main._settle_ovt_report), "INSERT INTO ovt_matches")
     names = set(re.findall(r"(?<!:):(\w+)", insert))
     lo, hi = SIDS[1], SIDS[2]
 
@@ -3154,3 +3248,23 @@ def test_a_settled_series_refuses_a_report_moving_the_solo_seat_too(
     out = capsys.readouterr().out
     assert sum("report refused, nothing written" in ln
                for ln in out.splitlines()) == 1, out
+
+
+def test_submit_ovt_match_delegates_to_settle_ovt_report():
+    """The non-windowed route returns the settlement result exactly once."""
+    fn = _fn_named("submit_ovt_match")
+    expected = ast.parse(
+        "_windowed = await _report_window_receive(db, 'ovt', report)\n"
+        "if _windowed is not None:\n"
+        "    return _windowed\n"
+        "return await _settle_ovt_report(db, report)\n")
+    assert [ast.dump(st) for st in fn.body[-3:]] == [
+        ast.dump(st) for st in expected.body], ast.unparse(fn)
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "_settle_ovt_report"]
+    assert len(calls) == 1, [ast.unparse(n) for n in calls]
+    literals = [n.value for n in ast.walk(fn)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    for needle in ("FOR NO KEY UPDATE", "INSERT INTO ovt_matches"):
+        assert not any(needle in literal for literal in literals), needle

@@ -379,7 +379,9 @@ async def _clean_slate(url):
         # Another role's session may retain a relation lock; the 5 s DDL timeout
         # then fails the fixture with its own error. The previous unfiltered
         # sweep caused setup failures against superuser-owned processes in
-        # 8 of 114 and 16 of 114 cases in the two recorded runs.
+        # 8 of 114 and 16 of 114 cases in the two recorded runs (2026-10-20: a
+        # superuser session or an autovacuum worker on the lane database made
+        # it raise InsufficientPrivilegeError before any case ran).
         await conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
                            " WHERE datname = current_database() AND pid <> pg_backend_pid()"
                            " AND backend_type = 'client backend' AND usename = current_user")
@@ -510,8 +512,10 @@ class Env:
                                   reporter=pid(ids, reporter), player_ids=list(ids.values()),
                                   payload=pl, created=created, **kw)
 
-    async def real_capture(self, **kw):
-        """The production capture, _quarantine_report, on a session of its own."""
+    async def real_capture(self, *, session=None, **kw):
+        """The production capture; a timed caller may supply its prepared session."""
+        if session is not None:
+            return await main._quarantine_report(session, **kw)
         async with async_sessionmaker(self.seed, expire_on_commit=False)() as s:
             return await main._quarantine_report(s, **kw)
 
@@ -654,65 +658,142 @@ async def _warm_route(env, route, lid):
 # ── K2: no lock of the view delays a capture, on every route ──────────────
 
 @pytest.mark.parametrize("route", ["V1", "V2", "D1"])
-def test_pg_k2_a_capture_commits_while_the_route_is_open(route, monkeypatch):
-    """The route is held open right after its first read of
-    match_report_quarantine (its second read), and a capture of a pending
-    group runs on a second connection meanwhile; it must COMMIT within that
-    hold. The hold lasts at most 0.7 s -- the route's own 1 s idle bound
-    would end a longer one -- so the commit is asked for while the route is
-    still open, inside V5's 2 s. The route is first called once, untimed
-    (_warm_route), so the hold is not also spent on the process's first-call
-    cost."""
+def test_pg_k2_a_capture_commits_while_the_route_is_open(route, monkeypatch, capsys):
+    """A prepared capture is at its first production statement before the
+    route takes its hold. Observe both backends while the capture has 0.7 s
+    to commit inside that hold, preserving the route's own one-second idle
+    bound and the capture's two-second requirement."""
     async def body():
         async with Env(monkeypatch) as env:
             w = await walk_w1(env, "K2")
             ids = await env.seats()
             await _warm_route(env, route, w["lid"])
-            state = {"n": 0, "held": None, "task": None}
-            orig_read, orig_run = main._TriageReadHandle.read, main._TriageReadHandle.run
+            state = {"route": route, "n": 0, "held": None, "samples": [],
+                     "operation_ready": None, "operation_started": None, "committed": None}
+            ready, go = asyncio.Event(), asyncio.Event()
+            observer = await _pg(env.url)
+            task = None
+            try:
+                # Binding to an externally owned connection retains this
+                # backend across _quarantine_report's initial rollback.
+                async with env.seed.connect() as connection:
+                    state["capture_pid"] = (await connection.execute(text("SELECT pg_backend_pid()"))).scalar()
+                    await connection.rollback()
+                    async with async_sessionmaker(bind=connection, expire_on_commit=False)() as session:
+                        try:
+                            original_execute = session.execute
 
-            async def hold():
-                state["n"] += 1
-                if state["n"] != 2:
-                    return
-                t_start = time.monotonic()
-                state["task"] = asyncio.ensure_future(env.real_capture(
-                    mode="ffa", reason="ffa_game_contradiction", status_code=409,
-                    payload=report(w["lid"], room("K2", 9), steam(3), steam(3), players_of(ACC_C)),
-                    group_id=w["lid"], photon_room_id=room("K2", 9), reporter_id=pid(ids, 3),
-                    player_ids=list(ids.values())))
-                try:
-                    await asyncio.wait_for(asyncio.shield(state["task"]), 0.7)
-                    state["held"] = ("committed", time.monotonic() - t_start)
-                except asyncio.TimeoutError:
-                    state["held"] = ("waiting", time.monotonic() - t_start)
+                            async def execute(statement, *args, **kw):
+                                if state["operation_ready"] is None:
+                                    state["operation_ready"] = time.monotonic()
+                                    ready.set()
+                                    await go.wait()
+                                    state["operation_started"] = time.monotonic()
+                                return await original_execute(statement, *args, **kw)
 
-            async def read(self, statement, params=None):
-                out = await orig_read(self, statement, params)
-                await hold()
-                return out
+                            monkeypatch.setattr(session, "execute", execute)
 
-            async def run_(self, helper, *args, savepoint=False):
-                out = await orig_run(self, helper, *args, savepoint=savepoint)
-                await hold()
-                return out
+                            async def capture():
+                                result = await env.real_capture(
+                                    session=session, mode="ffa", reason="ffa_game_contradiction", status_code=409,
+                                    payload=report(w["lid"], room("K2", 9), steam(3), steam(3), players_of(ACC_C)),
+                                    group_id=w["lid"], photon_room_id=room("K2", 9), reporter_id=pid(ids, 3),
+                                    player_ids=list(ids.values()))
+                                state["committed"] = time.monotonic()
+                                return result
 
-            monkeypatch.setattr(main._TriageReadHandle, "read", read)
-            monkeypatch.setattr(main._TriageReadHandle, "run", run_)
-            if route == "V1":
-                resp = await env.v1()
-            elif route == "V2":
-                resp = await env.v2("ffa", w["lid"])
-            else:
-                resp = await env.d1()
-            outcome = await state["task"] if state["task"] is not None else None
-            return resp, state["held"], outcome
-    resp, held, outcome = run(body())
-    assert resp.status_code == 200, (resp.status_code, resp.text[:500])
-    assert held is not None, "the route never reached its first read of match_report_quarantine"
-    assert held[0] == "committed", f"the capture was still waiting {held[1]:.2f}s into the hold"
-    assert held[1] <= 2.0
-    assert outcome == "recorded"
+                            task = asyncio.create_task(capture())
+                            await asyncio.wait_for(ready.wait(), 5.0)
+                            orig_read, orig_run = main._TriageReadHandle.read, main._TriageReadHandle.run
+
+                            async def sample():
+                                tick = time.monotonic()
+                                rows = await observer.fetch(
+                                    "SELECT pid, state, wait_event_type, wait_event, pg_blocking_pids(pid) AS blockers"
+                                    " FROM pg_stat_activity WHERE pid = ANY($1::int[])",
+                                    [state["capture_pid"], state["route_pid"]])
+                                state["samples"].append({
+                                    "tick": tick, "at": time.monotonic(),
+                                    "backends": [dict(row) for row in rows]})
+
+                            async def hold(handle):
+                                state["n"] += 1
+                                if state["n"] != 2:
+                                    return
+                                route_connection = await handle._db.connection()
+                                raw = await route_connection.get_raw_connection()
+                                state["route_pid"] = raw.driver_connection.get_server_pid()
+                                # This query is prepared too; neither backend's
+                                # connection setup is charged to the capture.
+                                await sample()
+                                state["hold_started"] = time.monotonic()
+                                go.set()
+                                deadline = state["hold_started"] + 0.7
+                                while not task.done():
+                                    await sample()
+                                    left = deadline - time.monotonic()
+                                    if left <= 0:
+                                        break
+                                    try:
+                                        await asyncio.wait_for(asyncio.shield(task), min(0.025, left))
+                                    except asyncio.TimeoutError:
+                                        pass
+                                state["hold_finished"] = time.monotonic()
+                                state["held"] = (
+                                    "committed" if task.done() else "waiting",
+                                    (state["committed"] or state["hold_finished"]) - state["hold_started"])
+                                await sample()
+
+                            async def read(self, statement, params=None):
+                                result = await orig_read(self, statement, params)
+                                await hold(self)
+                                return result
+
+                            async def run_(self, helper, *args, savepoint=False):
+                                result = await orig_run(self, helper, *args, savepoint=savepoint)
+                                await hold(self)
+                                return result
+
+                            monkeypatch.setattr(main._TriageReadHandle, "read", read)
+                            monkeypatch.setattr(main._TriageReadHandle, "run", run_)
+                            if route == "V1":
+                                response = await env.v1()
+                            elif route == "V2":
+                                response = await env.v2("ffa", w["lid"])
+                            else:
+                                response = await env.d1()
+                            state["route_status"] = response.status_code
+                            go.set()  # also releases the task if the route never reached its hold
+                            outcome = await asyncio.wait_for(task, 5.0)
+                            return response, state, outcome
+                        finally:
+                            # Stop the producer while its session and connection
+                            # still exist, before either async context closes.
+                            go.set()
+                            if task is not None:
+                                if not task.done():
+                                    task.cancel()
+                                await asyncio.gather(task, return_exceptions=True)
+            finally:
+                await observer.close()
+
+    response, state, outcome = run(body())
+    capture_blockers = sorted({pid for sample in state["samples"] for backend in sample["backends"]
+                               if backend["pid"] == state["capture_pid"] for pid in backend["blockers"]})
+    state["capture_blockers"] = capture_blockers
+    state["route_blocked_capture"] = state.get("route_pid") in capture_blockers
+    state["dispatch_delay"] = (None if state["operation_started"] is None else
+                               state["operation_started"] - state.get("hold_started", state["operation_started"]))
+    state["timing_attribution"] = ("route blocker observed" if state["route_blocked_capture"] else
+                                   "other database blocker observed" if capture_blockers else
+                                   "no database blocker observed; dispatch delay recorded")
+    _k2c_record("K2-RECORD " + json.dumps(state, sort_keys=True), [], capsys)
+    held = state["held"]
+    assert held is not None, ("FIX2 M5 capture premise", "the route never reached its quarantine read", state)
+    assert held[0] == "committed", ("FIX2 M5 capture during route", state)
+    assert held[1] <= 2.0, ("FIX2 M5 capture two-second bound", state)
+    assert response.status_code == 200, (response.status_code, response.text[:500], state)
+    assert outcome == "recorded", (outcome, state)
 
 
 # ── K2c: relation-lock holding of at most 5.5 s from t0, on every route ──
@@ -733,23 +814,29 @@ class _Thread(threading.Thread):
     def __init__(self, name, factory):
         super().__init__(name=name, daemon=True)
         self.factory, self.result, self.error, self.done_at = factory, None, None, None
+        self.loop, self.task = None, None
 
     def run(self):
         try:
-            self.result = asyncio.run(self.factory())
+            async def owned():
+                self.loop, self.task = asyncio.get_running_loop(), asyncio.current_task()
+                return await self.factory()
+            self.result = asyncio.run(owned())
         except BaseException as e:   # recorded, never swallowed: the verdict reads it
             self.error = e
         finally:
             self.done_at = time.monotonic()
 
 
-async def _observe(url, pid_box, t0_box, cap_s=45.0):
+async def _observe(url, pid_box, t0_box, cap_s=45.0, timing=None):
     """The lock observer: samples pg_locks every 50 ms on its own connection,
     each sample stamped with time.monotonic() -- the clock t0 is taken on --
     both when its query starts (tick) and when it returns (at). It stops
     only after a sample that STARTED at or past t0 + 12 s (or at its cap)."""
     conn = await _pg(url)
     samples = []
+    if timing is not None:
+        timing["samples"] = samples
     try:
         oid = await conn.fetchrow("SELECT 'match_report_quarantine'::regclass::oid AS q,"
                                   " 'ffa_matches'::regclass::oid AS m, 'ffa_lobbies'::regclass::oid AS l")
@@ -761,8 +848,13 @@ async def _observe(url, pid_box, t0_box, cap_s=45.0):
             rows = await conn.fetch("SELECT pid, relation, mode, granted FROM pg_locks"
                                     " WHERE locktype = 'relation' AND relation = ANY($1::oid[])", list(names))
             act = await conn.fetchrow("SELECT state FROM pg_stat_activity WHERE pid = $1", p) if p else None
+            capture_pid = timing.get("capture_pid") if timing is not None else None
+            capture_activity = await conn.fetchrow(
+                "SELECT state, wait_event_type, wait_event, pg_blocking_pids(pid) AS blockers"
+                " FROM pg_stat_activity WHERE pid = $1", capture_pid) if capture_pid else None
             samples.append({
                 "tick": tick, "at": time.monotonic(), "pid": p,
+                "capture_activity": dict(capture_activity) if capture_activity is not None else None,
                 "route": sorted({names[r["relation"]] for r in rows if r["pid"] == p and r["granted"]}),
                 "state": act["state"] if act else None,
                 "waiting": sorted({(r["pid"], names[r["relation"]], r["mode"]) for r in rows if not r["granted"]}),
@@ -800,54 +892,190 @@ async def _hold_staggered(url, base_box, ready, n=10, step=0.9, wait_cap=20.0):
             await c.execute("COMMIT")
             released.append(time.monotonic())
     finally:
+        close_errors = []
         for c in conns:
             try:
                 await c.close()
-            except Exception:
-                pass
+            except Exception as error:
+                close_errors.append(error)
+        if close_errors:
+            raise AssertionError(("NO VERDICT: staggered holder connections did not close",
+                                  [type(error).__name__ for error in close_errors])) from close_errors[0]
     return released
 
 
-async def _hold_capture_key(url, group, t0_box, ready, release_s, wait_cap=20.0):
-    """K21's holder, in case (iv)'s shape: its own connection takes the
-    capture's advisory key -- mrq:<group>, the key _quarantine_report takes
-    before its first read of the table -- and releases it release_s after t0,
-    so the capture commits at a known offset from t0. The routes take no
-    advisory key (K2d), so none of the route's reads waits on it."""
-    c = await _pg(url)
+def _k2c_alter_timing(samples, alter_done):
+    samples = tuple(samples or ())
+    last_lock = max((sample["at"] for sample in samples if sample["route"]), default=None)
+    release = next((sample["at"] for sample in samples
+                    if last_lock is not None and sample["tick"] > last_lock and not sample["route"]), None)
+    alter_run = (max(0.0, alter_done - release)
+                 if alter_done is not None and release is not None else None)
+    return release, alter_run
+
+
+
+async def _hold_capture_key(url, group, t0_box, ready, release_s, timing, wait_cap=20.0):
+    """Target the calibrated commit using the verdict's observed ALTER run."""
+    connection = await _pg(url)
     try:
-        await c.execute("BEGIN")
-        await c.execute("SELECT pg_advisory_xact_lock(hashtext('mrq:' || CAST($1 AS text)))", str(group))
+        timing["key_pid"] = connection.get_server_pid()
+        await connection.execute("BEGIN")
+        timing["holder_key_started"] = time.monotonic()
+        await connection.execute("SELECT pg_advisory_xact_lock(hashtext('mrq:' || CAST($1 AS text)))", str(group))
+        timing["holder_key_acquired"] = time.monotonic()
         ready.set()
         start = time.monotonic()
-        while "t0" not in t0_box and time.monotonic() - start < wait_cap:
+        while True:
+            t0 = t0_box.get("t0")
+            release, alter_run = _k2c_alter_timing(timing.get("samples"), timing.get("alter_done"))
+            if t0 is not None and alter_run is not None:
+                break
+            if time.monotonic() - start >= wait_cap:
+                raise AssertionError("K21 premise: no observed route release and ALTER completion")
             await asyncio.sleep(0.005)
-        delay = t0_box.get("t0", time.monotonic()) + release_s - time.monotonic()
+        tail = timing.get("calibration_tail_s")
+        assert tail is not None and math.isfinite(tail) and tail >= 0, "K21 premise: no measured post-key tail"
+        target_commit = t0 + release_s + alter_run
+        target = target_commit - tail
+        timing["key_plan"] = {"target": target, "target_commit": target_commit, "calibration_tail_s": tail,
+                              "alter_run": alter_run, "release_seen": release}
+        delay = target - time.monotonic()
         if delay > 0:
             await asyncio.sleep(delay)
-        await c.execute("COMMIT")
-        return time.monotonic()
+        timing["holder_commit_started"] = time.monotonic()
+        holder_commit_started_perf = time.perf_counter()
+        await connection.execute("COMMIT")
+        timing["holder_commit_done"] = time.monotonic()
+        timing["holder_commit_s"] = time.perf_counter() - holder_commit_started_perf
+        return timing["holder_commit_done"]
     finally:
-        await c.close()
+        await connection.close()
 
 
-async def _alter(url):
-    c = await _pg(url)
+async def _alter(url, timing=None):
+    connection = await _pg(url)
     try:
-        await c.execute("ALTER TABLE match_report_quarantine ADD COLUMN k2c_probe integer")
-        return time.monotonic()
+        await connection.execute("ALTER TABLE match_report_quarantine ADD COLUMN k2c_probe integer")
+        completed = time.monotonic()
+        if timing is not None:
+            timing["alter_done"] = completed
+        return completed
     finally:
-        await c.close()
+        await connection.close()
 
 
-async def _capture_elsewhere(dsn, kw):
+
+async def _capture_elsewhere(dsn, kw, timing, ready, go, cancel, *, calibrate=False):
+    """Prepare one retained backend; observe production calls without replacing SQL."""
     eng = create_async_engine(dsn, pool_size=1, max_overflow=0)
+    phases = timing["capture_phases"] = {}
+    phase = None
+    timing["capture_prepare_started"] = time.monotonic()
     try:
-        async with async_sessionmaker(eng, expire_on_commit=False)() as s:
-            outcome = await main._quarantine_report(s, **kw)
-        return outcome, time.monotonic()
+        async with eng.connect() as connection:
+            timing["capture_pid"] = (await connection.execute(text("SELECT pg_backend_pid()"))).scalar()
+            await connection.rollback()
+            async with async_sessionmaker(bind=connection, expire_on_commit=False)() as session:
+                execute_original, commit_original = session.execute, session.commit
+
+                async def execute(statement, *args, **kwargs):
+                    sql = " ".join(str(statement).lower().split())
+                    label = ("advisory_key" if "pg_advisory_xact_lock" in sql else
+                             "pending_count" if "select count(*)" in sql else
+                             "variant_read" if "select payload" in sql and "photon_room_id is null" in sql else
+                             "on_file_read" if "select payload" in sql else
+                             "insert" if sql.startswith("insert into match_report_quarantine") else "other_sql")
+                    stage = {"stage": label, "ordinal": len(phase["stages"]), "started": time.monotonic()}
+                    phase["stages"].append(stage)
+                    started_perf = time.perf_counter()
+                    try:
+                        result = await execute_original(statement, *args, **kwargs)
+                        stage["ok"] = True
+                        return result
+                    except BaseException as error:
+                        stage["error"] = type(error).__name__
+                        raise
+                    finally:
+                        stage["done"] = time.monotonic()
+                        done_perf = time.perf_counter()
+                        stage["seconds"] = done_perf - started_perf
+                        if label == "advisory_key" and stage.get("ok"):
+                            phase["key_started"], phase["key_acquired"] = stage["started"], stage["done"]
+                            phase["key_started_perf"], phase["key_acquired_perf"] = started_perf, done_perf
+
+                async def commit():
+                    stage = {"stage": "commit", "ordinal": len(phase["stages"]), "started": time.monotonic()}
+                    phase["stages"].append(stage)
+                    phase["commit_started"] = stage["started"]
+                    phase["commit_started_perf"] = started_perf = time.perf_counter()
+                    try:
+                        await commit_original()
+                        stage["ok"] = True
+                        phase["commit_done"] = time.monotonic()
+                        phase["commit_done_perf"] = time.perf_counter()
+                    except BaseException as error:
+                        stage["error"] = type(error).__name__
+                        raise
+                    finally:
+                        stage["done"] = phase.get("commit_done", time.monotonic())
+                        done_perf = phase.get("commit_done_perf", time.perf_counter())
+                        stage["seconds"] = done_perf - started_perf
+
+                session.execute, session.commit = execute, commit
+
+                async def capture(label, values):
+                    nonlocal phase
+                    phase = {"stages": [], "started": time.monotonic()}
+                    phases[label] = phase
+                    outcome = await main._quarantine_report(session, **values)
+                    phase["returned"] = time.monotonic()
+                    phase["outcome"] = outcome
+                    return outcome
+
+                # Serialization, connection setup and statement preparation precede t0.
+                prepared_kw = dict(kw, payload=json.dumps(kw["payload"], default=str))
+                if calibrate:
+                    rooms = []
+                    for label in ("warmup", "calibration"):
+                        room_id = "RJTK21_" + label + "_" + uuid.uuid4().hex[:12]
+                        rooms.append(room_id)
+                        payload = dict(kw["payload"], photon_room_id=room_id)
+                        values = dict(kw, photon_room_id=room_id, payload=json.dumps(payload, default=str))
+                        outcome = await capture(label, values)
+                        assert outcome == "recorded", ("K21 calibration capture", label, outcome)
+                    measured = phases["calibration"]
+                    assert ("key_acquired" in measured and "commit_done" in measured
+                            and "key_acquired_perf" in measured and "commit_done_perf" in measured), "K21 calibration stages missing"
+                    timing["calibration_tail_s"] = measured["commit_done_perf"] - measured["key_acquired_perf"]
+                    timing["calibration_commit_s"] = measured["commit_done_perf"] - measured["commit_started_perf"]
+                    # Remove precisely the two calibration rows before the measured route.
+                    await execute_original(text("DELETE FROM match_report_quarantine"
+                                                " WHERE group_id = :g AND photon_room_id IN (:a, :b)"),
+                                           {"g": kw["group_id"], "a": rooms[0], "b": rooms[1]})
+                    await commit_original()
+                timing["capture_prepared"] = time.monotonic()
+                ready.set()
+                waiting = time.monotonic()
+                while not go.is_set():
+                    if cancel.is_set():
+                        return "cancelled", None
+                    if time.monotonic() - waiting >= 30.0:
+                        raise AssertionError("K21 premise: capture dispatch was never released")
+                    await asyncio.sleep(0.005)
+                if cancel.is_set():
+                    return "cancelled", None
+                outcome = await capture("capture", prepared_kw)
+                # The production commit acknowledgement is authoritative; closing
+                # a session, printing and disposing the engine are recorded separately.
+                return outcome, phase.get("commit_done")
+    except BaseException as error:
+        timing["capture_error"] = type(error).__name__
+        raise
     finally:
+        ready.set()
         await eng.dispose()
+        timing["capture_disposed"] = time.monotonic()
 
 
 async def _k2c_show(maker):
@@ -886,8 +1114,7 @@ def _k2c_verdict(case, route, box):
     seen_before = [s for s in lock_samples if t0 is not None and s["at"] < t0 + K2C_BOUND_S]
     held_after = [s for s in lock_samples if t0 is not None and s["tick"] > t0 + K2C_BOUND_S]
     last_lock = max((s["at"] for s in lock_samples), default=None)
-    release = next((s["at"] for s in samples if last_lock is not None and s["tick"] > last_lock
-                    and not s["route"]), None)
+    release, alter_run = _k2c_alter_timing(samples, box.get("alter_done"))
     gone = next((s["at"] for s in samples if s["pid"] and s["state"] is None and t0 is not None
                  and s["tick"] > t0), None)
     alter_waited = any(w[1] == "match_report_quarantine" and w[2] == "AccessExclusiveLock"
@@ -896,7 +1123,6 @@ def _k2c_verdict(case, route, box):
                          for s in samples for w in s["waiting"])
     alter_done = box.get("alter_done")
     cap = box.get("capture") or (None, None)
-    alter_run = (max(0.0, alter_done - release) if (alter_done is not None and release is not None) else None)
     cover = samples[-1]["tick"] if samples else None
     fields = {
         "case": case, "route": route, "status": box.get("status"),
@@ -1031,9 +1257,17 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
         event.listen(eng.sync_engine, "before_cursor_execute", on_execute)
         maker = async_sessionmaker(eng, expire_on_commit=False)
         threads = {}
+        capture_ready, capture_go, capture_cancel = threading.Event(), threading.Event(), threading.Event()
         try:
             box["show_before"] = await _k2c_show(maker)
-            threads["observer"] = _Thread("k2c-observer", lambda: _observe(url, pid_box, t0_box))
+            threads["capture"] = _Thread("k2c-capture", lambda: _capture_elsewhere(
+                dsn, fx["capture_kw"], box, capture_ready, capture_go, capture_cancel,
+                calibrate=capture_key_until is not None))
+            threads["capture"].start()
+            assert capture_ready.wait(30), "NO VERDICT: capture preparation did not complete"
+            assert box.get("capture_prepared") is not None, (
+                "NO VERDICT: capture preparation failed", box.get("capture_error"), box.get("capture_phases"))
+            threads["observer"] = _Thread("k2c-observer", lambda: _observe(url, pid_box, t0_box, timing=box))
             threads["observer"].start()
             if case == "iv":
                 ready = threading.Event()
@@ -1043,11 +1277,10 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
             if capture_key_until is not None:
                 key_ready = threading.Event()
                 threads["key"] = _Thread("k21-key", lambda: _hold_capture_key(
-                    url, fx["capture_kw"]["group_id"], t0_box, key_ready, capture_key_until))
+                    url, fx["capture_kw"]["group_id"], t0_box, key_ready, capture_key_until, box))
                 threads["key"].start()
                 assert key_ready.wait(15), "the K21 holder never took the capture's advisory key"
-            threads["alter"] = _Thread("k2c-alter", lambda: _alter(url))
-            threads["capture"] = _Thread("k2c-capture", lambda: _capture_elsewhere(dsn, fx["capture_kw"]))
+            threads["alter"] = _Thread("k2c-alter", lambda: _alter(url, box))
             orig_ended = main._triage_ended_early
 
             def ended_early(exc):
@@ -1076,7 +1309,8 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                 base_box["base"] = box["trigger"]
                 threads["alter"].start()
                 time.sleep(0.15)
-                threads["capture"].start()
+                box["capture_dispatch"] = time.monotonic()
+                capture_go.set()
                 time.sleep(0.10)
                 if case == "i":
                     await asyncio.sleep(0.3)
@@ -1141,6 +1375,8 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                 th = threads.get(name)
                 if th is not None and th.ident is not None:
                     th.join(45)
+            if "holder" in threads and threads["holder"].error is not None:
+                raise AssertionError("NO VERDICT: staggered holder did not complete cleanly") from threads["holder"].error
             box["t0"] = t0_box.get("t0")
             obs = threads["observer"]
             box["samples"] = obs.result or []
@@ -1160,7 +1396,32 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                     detail.append(f"K21 holder error: {threads['key'].error!r}")
             box["show_after"] = await _k2c_show(maker)
         finally:
-            await eng.dispose()
+            capture_cancel.set()
+            capture_go.set()
+            active_workers = [worker for worker in threads.values()
+                              if worker.ident is not None and worker.is_alive()]
+            cleanup_errors = []
+            try:
+                # Cancel all owned workers first, so one blocked cleanup cannot
+                # delay releasing another worker's advisory or relation lock.
+                for worker in active_workers:
+                    loop, task = worker.loop, worker.task
+                    if loop is None or task is None:
+                        worker.join(1)
+                        loop, task = worker.loop, worker.task
+                    if worker.is_alive() and loop is not None and task is not None:
+                        try:
+                            loop.call_soon_threadsafe(task.cancel)
+                        except RuntimeError:
+                            if not loop.is_closed():
+                                cleanup_errors.append(worker.name + ": cancellation refused")
+                for worker in active_workers:
+                    worker.join(15)
+                    if worker.is_alive():
+                        cleanup_errors.append(worker.name + ": thread remains alive")
+                assert not cleanup_errors, ("NO VERDICT: owned workers did not quiesce", cleanup_errors)
+            finally:
+                await eng.dispose()
     printed = capsys.readouterr().out
     detail.extend("route printed: " + ln for ln in printed.splitlines() if ln.startswith("[TRIAGE]"))
     for s in sent:
@@ -1183,13 +1444,52 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
         detail.append("the failed read, as the route saw it: " + " <- ".join(chain))
     if case == "ii":
         detail.extend(_server_log_lines(box.get("route_pid")))
+    capture_phases = {}
+    for name, phase in box.get("capture_phases", {}).items():
+        capture_phases[name] = {
+            "outcome": phase.get("outcome"),
+            "stages": [{key: (round(value - t0, 6) if key in ("started", "done") and t0 is not None
+                             else round(value, 6) if isinstance(value, float) else value)
+                        for key, value in stage.items()} for stage in phase["stages"]]}
+    capture_phase = box.get("capture_phases", {}).get("capture", {})
+    key_wait = (capture_phase["key_acquired_perf"] - capture_phase["key_started_perf"]
+                if "key_acquired_perf" in capture_phase else None)
+    commit_seconds = (capture_phase["commit_done_perf"] - capture_phase["commit_started_perf"]
+                      if "commit_done_perf" in capture_phase else None)
+    key_observed = any(box.get("key_pid") in (sample.get("capture_activity") or {}).get("blockers", [])
+                       for sample in box.get("samples", []))
+    stage_record = {
+        "case": case, "route": route, "phases": capture_phases,
+        "capture_key_wait_s": key_wait, "capture_commit_s": commit_seconds,
+        "capture_key_blocker_observed": key_observed,
+        "calibration_tail_s": box.get("calibration_tail_s"),
+        "calibration_commit_s": box.get("calibration_commit_s"),
+        "holder_commit_s": box.get("holder_commit_s"),
+        "timestamp_clock": "monotonic", "duration_clock": "perf_counter",
+        "clock_resolution_s": {name: time.get_clock_info(name).resolution
+                               for name in ("monotonic", "perf_counter")}}
+    detail.append("K2C-STAGES " + json.dumps(stage_record, sort_keys=True))
     if capture_key_until is not None:
         kr = box.get("key_released")
         kr_rel = None if kr is None or t0 is None else round(kr - t0, 3)
+        plan = box.get("key_plan") or {}
+        target = plan.get("target")
+        planned = None if target is None or t0 is None else target - t0
         detail.append(f"K21: the capture's advisory key (mrq:<its group>) was held from before t0; released at "
-                      f"{kr_rel} s from t0, planned {capture_key_until:.3f} s")
+                      f"{kr_rel} s from t0, planned {planned}, observed ALTER compensation {plan.get('alter_run')}")
         if out is not None:
-            out["key_released"] = kr_rel
+            _, alter_run = _k2c_alter_timing(box.get("samples"), box.get("alter_done"))
+            capture_done = (box.get("capture") or (None, None))[1]
+            out.update(key_released=None if kr is None or t0 is None else kr - t0,
+                       planned_release=planned, planned_alter_run=plan.get("alter_run"),
+                       alter_run=alter_run,
+                       capture_done=None if capture_done is None or t0 is None else capture_done - t0,
+                       calibration_tail_s=box.get("calibration_tail_s"),
+                       calibration_commit_s=box.get("calibration_commit_s"),
+                       target_commit=None if plan.get("target_commit") is None or t0 is None else plan["target_commit"] - t0,
+                       capture_key_wait_s=key_wait, capture_commit_s=commit_seconds,
+                       capture_key_blocker_observed=key_observed, stage_record=stage_record,
+                       holder_commit_s=stage_record["holder_commit_s"])
     verdict, line = _k2c_verdict(case, route, box)
     _k2c_record(line, detail, capsys)
     return verdict, line
@@ -1203,15 +1503,16 @@ def test_pg_k2c_relation_locks_released_within_5_5s_of_t0(case, route, monkeypat
     assert verdict == "PASS", line
 
 
-# ── K21: a capture committing past K2c's bound is a FAIL (round 2, L2) ─────
+# -- K21: a capture committing past K2c's bound is a FAIL (round 2, L2) -----
 # K2c's verdict fails a capture that commits later than 5.5 s from t0 plus
 # the ALTER's own run, with no slack past that. Case (i) on each route, with
-# the capture's advisory key held by _hold_capture_key until K21_PAST_S past
-# 5.5 s: the capture commits just after the key's release, inside the 0.5 s
+# the capture's advisory key held until the target commit time less the
+# measured warmed post-key tail. K21_PAST_S is the target commit offset,
+# not verdict slack; the actual production commit must land inside the 0.5 s
 # that 6702efd's verdict still passed. A case is evidence only when that
 # premise held; otherwise it is NO VERDICT, never a pass.
 
-K21_PAST_S = 0.2
+K21_PAST_S = 0.25
 
 
 @pytest.mark.parametrize("route", ["V1", "V2", "D1"])
@@ -1221,13 +1522,27 @@ def test_pg_k21_a_capture_committing_past_the_bound_is_a_fail(route, monkeypatch
                                   capture_key_until=K2C_BOUND_S + K21_PAST_S, out=seen))
     head, _, why = line.partition(" why=")
     f = dict(re.findall(r"(\w+)=(\S*)", head))
-    num = (lambda v: None if v in (None, "None") else float(v))
-    done, alter_run, released = num(f.get("capture_done")), num(f.get("alter_run")) or 0.0, seen.get("key_released")
-    past = None if done is None else round(done - K2C_BOUND_S - alter_run, 3)
-    _k2c_record(f"K21-RECORD route={route} planned_release={K2C_BOUND_S + K21_PAST_S:.3f}"
-                f" key_released={released} capture_done={f.get('capture_done')} alter_run={f.get('alter_run')}"
-                f" past_bound={past} verdict={verdict}", [], capsys)
+    done, alter_run, released = seen.get("capture_done"), seen.get("alter_run"), seen.get("key_released")
+    past = None if done is None or alter_run is None else done - K2C_BOUND_S - alter_run
+    _k2c_record(f"K21-RECORD route={route} planned_release={seen.get('planned_release')}"
+                f" key_released={released} capture_done={done} alter_run={alter_run}"
+                f" planned_alter_run={seen.get('planned_alter_run')} past_bound={past} verdict={verdict}"
+                f" calibration_tail_s={seen.get('calibration_tail_s')}"
+                f" calibration_commit_s={seen.get('calibration_commit_s')}"
+                f" target_commit={seen.get('target_commit')}"
+                f" prediction_error={None if done is None or seen.get('target_commit') is None else done - seen['target_commit']}"
+                f" capture_key_wait_s={seen.get('capture_key_wait_s')}"
+                f" capture_commit_s={seen.get('capture_commit_s')}"
+                f" holder_commit_s={seen.get('holder_commit_s')}"
+                f" key_blocker_observed={seen.get('capture_key_blocker_observed')}"
+                f" stages={json.dumps(seen.get('stage_record'), sort_keys=True)}", [], capsys)
     premise = []
+    if not seen.get("capture_key_blocker_observed"):
+        premise.append("the capture was never observed waiting on the holder's advisory key")
+    if seen.get("capture_commit_s") is None or seen.get("capture_key_wait_s") is None:
+        premise.append("the actual key wait or successful commit completion was not measured")
+    if alter_run is None or seen.get("planned_alter_run") != alter_run:
+        premise.append("the holder and verdict did not share the observed ALTER compensation")
     if f.get("status") != "200":
         premise.append(f"the route answered {f.get('status')}")
     if f.get("held_after_bound") != "0":
@@ -1236,11 +1551,11 @@ def test_pg_k21_a_capture_committing_past_the_bound_is_a_fail(route, monkeypatch
         premise.append(f"capture outcome {f.get('capture')}")
     elif released is None or done < released:
         premise.append(f"the capture committed at {done}, not after the key's release at {released}")
-    elif not 0.0 < past < 0.5:
+    elif past is None or not 0.0 < past < 0.5:
         premise.append(f"the capture committed {past} s past the bound, outside (0, 0.5)")
     if verdict == "NO_VERDICT" or premise:
         pytest.fail("NO VERDICT (not a pass): " + "; ".join(premise or ["K2c gave no verdict"]) + ": " + line)
-    assert verdict == "FAIL", line
+    assert verdict == "FAIL", ("FIX2 M5 strict capture bound", line)
     assert why == f"capture committed at {f['capture_done']}, past 5.5 s + the ALTER's run", line
 
 

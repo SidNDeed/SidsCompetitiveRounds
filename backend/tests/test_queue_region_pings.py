@@ -443,6 +443,25 @@ class _Result:
     def scalar(self):
         return self._rows[0] if self._rows else None
 
+    # The lease admission gate (stage 2, inside _lease_acquire_many) reads
+    # through these at the ranked room issue and queue_ready's re-acquire:
+    # clock_timestamp() by scalar_one, the lock_timeout swap by
+    # mappings().one(), the queue union and the leases by mappings().all(),
+    # the live holds by scalars().all().
+    def all(self):
+        return list(self._rows)
+
+    def one(self):
+        assert len(self._rows) == 1, self._rows
+        return self._rows[0]
+
+    def scalar_one(self):
+        assert len(self._rows) == 1, self._rows
+        return self._rows[0]
+
+    def scalars(self):
+        return self
+
 
 class FakeJoinSession:
     """Records the join upsert and REFUSES one that lost a typed bind or a
@@ -564,6 +583,32 @@ class FakeIssuanceSession:
         params = dict(params or {})
         sql = " ".join(str(statement).split())
         self.statements.append((sql, params))
+        # The lease admission gate's reads (stage 2; _lease_acquire_many at
+        # the ranked room issue and at queue_ready's re-acquire), answered
+        # with the pair's own state: its two ranked queue rows and its
+        # group-less ranked leases are the keys the site allows, and no live
+        # match seat hold exists, so the gate admits the formation. These
+        # sit above the ranked_queue branch, whose projection parser would
+        # otherwise take the union.
+        if sql == "SELECT clock_timestamp()":
+            return _Result([_now()])
+        if "set_config('lock_timeout'" in sql:
+            return _Result([{"value": "0"}]) if "FROM previous" in sql else _Result([])
+        if "FROM players" in sql and "FOR NO KEY UPDATE" in sql:
+            return _Result([params.get("pid")])
+        if "UNION ALL" in sql and "FROM ranked_queue" in sql:
+            asked = {str(p) for p in params.get("pids", ())}
+            return _Result([{"player_id": pid, "mode": "ranked", "group_id": None,
+                             "status": row["status"]}
+                            for pid, row in self.rows.items() if str(pid) in asked])
+        if "FROM match_seat_holds" in sql:
+            return _Result([])
+        if "FROM queue_leases" in sql and "pids" in params:
+            if self.lease_mode is None:
+                return _Result([])
+            asked = {str(p) for p in params["pids"]}
+            return _Result([{"player_id": pid, "mode": self.lease_mode, "group_id": None}
+                            for pid in self.rows if str(pid) in asked])
         if sql.startswith("SELECT") and " FROM ranked_queue" in sql and "FOR UPDATE" not in sql:
             cols = _projection(sql)
             if "sid" in params:

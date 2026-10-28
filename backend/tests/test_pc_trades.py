@@ -227,8 +227,9 @@ def _bare(stmt):
 
 
 # Held out of every replay here, by name (the class: the module docstring).
-# Each refuses by design, changing nothing, on this harness's fresh schema,
-# and that refusal is a production guard, so the file stays as it is.
+# Each refuses by design, changing nothing, on a database its guard does not
+# describe (this harness's fresh schema, or the later-files leg's re-applied
+# one), and that refusal is a production guard, so the file stays as it is.
 # - 366 is the refund of a production census (one paying title_regicide
 #   holder) and refuses on any database that census does not describe. It
 #   touches no object this module reads (shop_items, players, player_items
@@ -247,8 +248,18 @@ def _bare(stmt):
 #   drives reads those values: the card face takes its numbers from the
 #   pool snapshot, the census here only counts the tables and the health
 #   word only probes ffa_match_players.
+# - 384 takes over five client keys 379 inserted (their context) and keeps
+#   a durable ownership record; its guard refuses, by design and changing
+#   nothing, when a key it owns was edited since. The later-files leg
+#   (test_m53) re-applies every file above 353 in order a second time, so
+#   379 rewrites the five keys first and 384 then refuses. 385 seeds the
+#   machine translations of 384's keys and refuses without them. Both
+#   write i18n_keys and i18n_proposals only, which neither this module nor
+#   a route it drives reads.
 HELD_OUT = frozenset({"366_title_refunds_voidshot_kingslayer.sql",
                       "376_i18n_337_demonic_proposals.sql",
+                      "384_i18n_keys_stage2_hold.sql",
+                      "385_seed_machine_translations_stage2_hold.sql",
                       "387_ffa_rating_restore_2f60481d.sql",
                       "388_ffa_rating_restore_2f60481d.sql"})
 

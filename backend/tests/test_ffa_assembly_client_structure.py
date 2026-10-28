@@ -1785,6 +1785,12 @@ def test_k42_per_site_views_and_fence():
 
 CENSUS = TOOLS / "kept_view_census" / "kept_view_census.py"
 CLASSES = TOOLS / "kept_view_census" / "classes.tsv"
+# One census process over plugin/ peaks near 1.9 GB (measured 2026-10-28 on
+# the VM seat: 120 s, 402 rows). The LXC seat unit runs under a 6 GB memory
+# ceiling, so four concurrent census workers (about 7.7 GB) were killed on
+# every seat, main included, before the red-pairs test could report; two fit
+# with margin. Raise it where memory allows (SCR_K42_CENSUS_WORKERS=4).
+_CENSUS_WORKERS = max(1, int(os.environ.get("SCR_K42_CENSUS_WORKERS", "2")))
 
 _PROBE_HEAD = "using System.Collections.Generic;\nnamespace CompetitiveRounds\n{\n    internal static class ProbeK42\n    {\n"
 _PROBE_TAIL = "    }\n}\n"
@@ -1892,7 +1898,7 @@ def test_k42_census_red_pairs():
             "alias": ("alias", True, False), "alias_twin": ("alias_twin", True, False),
             "branch": ("branch", True, False), "branch_twin": ("branch_twin", True, False)}
     try:
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=_CENSUS_WORKERS) as pool:
             fut = {k: pool.submit(_census_fixture, v[0], os.path.join(root, k), v[1], v[2]) for k, v in jobs.items()}
             res = {k: f.result() for k, f in fut.items()}
     finally:

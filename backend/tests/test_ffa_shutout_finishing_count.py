@@ -291,11 +291,13 @@ def test_every_departed_ids_writer_updates_the_lobby_row_the_report_locks():
     because every writer of departed_ids is an UPDATE of the ffa_lobbies row,
     which waits for the report's FOR NO KEY UPDATE on that row. A writer of
     any other shape would break that, so the writers are counted from the
-    module's own string constants: six today, and a seventh has to be looked
+    module's own string constants: seven today, and an eighth has to be looked
     at before this count moves. Three are ffa_queue_leave's; three arrived
     with the connect-failure landing (_asm_deferred_departure,
-    _ffa_expire_admissions and _asm_start_short), each an UPDATE of the same
-    ffa_lobbies row, so each waits for the report's lock the same way."""
+    _ffa_expire_admissions and _asm_start_short), and one with the FFA
+    readmission lane (_rdm_delete_player: a deleted player's active readmit
+    seat departs its lobby), each an UPDATE of the same ffa_lobbies row, so each waits for
+    the report's lock the same way."""
     tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
     writers = [n.value for n in ast.walk(tree)
                if isinstance(n, ast.Constant) and isinstance(n.value, str)
@@ -304,7 +306,7 @@ def test_every_departed_ids_writer_updates_the_lobby_row_the_report_locks():
     offenders = [w.strip()[:120] for w in writers
                  if not re.match(r"\s*UPDATE\s+ffa_lobbies\b", w)]
     assert not offenders, offenders
-    assert len(writers) == 6, [w.strip()[:120] for w in writers]
+    assert len(writers) == 7, [w.strip()[:120] for w in writers]
     assert "FOR NO KEY UPDATE" in main._FFA_LOBBY_LOCK_SQL
     assert "FROM ffa_lobbies" in main._FFA_LOBBY_LOCK_SQL
 
@@ -314,7 +316,8 @@ def test_every_departed_ids_writer_updates_the_lobby_row_the_report_locks():
 HARNESS_SCHEMA = "ffa_trophies_harness"
 LANE_MARKER = re.compile(r"(?:^|_)ffa_trophies(?:_|$)")
 # Dependency order: each table is dropped before the tables it references.
-HARNESS_TABLES = ("player_achievements", "gold_transactions", "glicko_ratings_ffa",
+HARNESS_TABLES = ("ffa_report_windows", "player_achievements", "gold_transactions",
+                  "glicko_ratings_ffa",
                   "match_report_quarantine", "ffa_match_players", "ffa_matches",
                   "ffa_lobbies", "players")
 HARNESS_DROP = ["DROP TABLE IF EXISTS %s.%s RESTRICT" % (HARNESS_SCHEMA, t)
@@ -341,7 +344,10 @@ CREATE TABLE @S@.players (
     gold_earned INTEGER NOT NULL DEFAULT 0,
     gold_spent INTEGER NOT NULL DEFAULT 0,
     ffa_gold_earned INTEGER NOT NULL DEFAULT 0,
-    active_player_color_id BIGINT
+    active_player_color_id BIGINT,
+    -- as 017_anonymize_not_delete.sql adds it, nullable with no default, the
+    -- live-identity filter of the report's participant lookup reads it
+    deleted_at TIMESTAMPTZ
 )
 ;;
 CREATE TABLE @S@.ffa_lobbies (
@@ -476,6 +482,27 @@ CREATE TABLE @S@.player_achievements (
 )
 """
 HARNESS_DDL = [s.strip().replace("@S@", HARNESS_SCHEMA) for s in _DDL.split(";;") if s.strip()]
+
+# FFA readmission (378): the report path reads ffa_lobbies.readmit_v1 and the
+# ffa_report_windows table on every report, so the harness carries both. They
+# are read from the migration file itself, each definition required to occur
+# exactly once, and every table they name is placed in the harness schema.
+# The harness drops its tables first, so the CREATE runs without IF NOT
+# EXISTS, the plain form test_every_harness_statement_names_its_schema reads.
+READMIT_MIGRATION = SQL_DIR / "378_ffa_readmission.sql"
+_READMIT_DEFINITIONS = (r"ALTER TABLE ffa_lobbies ADD COLUMN IF NOT EXISTS readmit_v1\b[^;]*;",
+                        r"CREATE TABLE IF NOT EXISTS ffa_report_windows \([^;]*\);")
+
+
+def _readmit_ddl(sql):
+    found = [re.findall(p, sql) for p in _READMIT_DEFINITIONS]
+    assert [len(f) for f in found] == [1, 1], [len(f) for f in found]
+    return [re.sub(r"\b(ffa_lobbies|ffa_report_windows|players)\b", HARNESS_SCHEMA + r".\1",
+                   f[0].rstrip(";").replace("CREATE TABLE IF NOT EXISTS ", "CREATE TABLE "))
+            for f in found]
+
+
+HARNESS_DDL = HARNESS_DDL + _readmit_ddl(READMIT_MIGRATION.read_text(encoding="utf-8"))
 
 # Every relation outside the system schemas, with the table an index or a
 # column-owned sequence belongs to. Temporary schemas are other sessions'
@@ -875,7 +902,9 @@ def test_pg_the_old_roster_count_pays_the_replayed_sitting_all_three_tiers(capsy
     "no tier" is the rule's doing, not the harness's."""
     require_pg()
 
-    def roster_count(member_ids, departed_ids, report):
+    # The production signature (fix 1 H1 added effective_absent, which the
+    # call site always passes); the old count read none of it.
+    def roster_count(member_ids, departed_ids, report, effective_absent=None):
         seated = len(set(member_ids or ()))
         return seated, seated, seated
 

@@ -345,7 +345,13 @@ class Env:
         """Move every timestamp of the lobby, its seat rows and its kept
         epochs by `delta` (the lobby's own history moves; nothing else)."""
         for table, key in (("ffa_lobbies", "id"), ("ffa_assembly_seats", "lobby_id"),
-                           ("ffa_kept_epochs", "lobby_id")):
+                           ("ffa_kept_epochs", "lobby_id"),
+                           # The readmission tables (migration 378) are the
+                           # lobby's history too; absent before it, skipped.
+                           ("ffa_seat_readmissions", "lobby_id"),
+                           ("ffa_readmit_attempts", "lobby_id"),
+                           ("ffa_report_windows", "lobby_id"),
+                           ("ffa_report_journal", "lobby_id")):
             cols = [r[0] for r in await self.conn.fetch(
                 "SELECT column_name FROM information_schema.columns"
                 " WHERE table_schema = current_schema() AND table_name = $1"

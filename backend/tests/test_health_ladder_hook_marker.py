@@ -151,7 +151,7 @@ def test_the_derivation_counts_each_hooked_site_and_nothing_beside_it():
         rest = tuple(fn for fn in three if fn.__name__ != name)
         assert len(rest) == 2, name
         assert count(rest + (variant,)) == 2, name
-    assert count((main.submit_ovt_match,)) == 0
+    assert count((main.submit_ovt_match, main._settle_ovt_report)) == 0
     assert count((main._complete_team_series_with_ratings,)) == 0
     assert count(()) == 0
 
