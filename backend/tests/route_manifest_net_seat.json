@@ -2380,7 +2380,7 @@
           ],
           "main",
           "ovt_lobby_start",
-          "65a880b59976e6384af2551cf9b003b5cb257df8"
+          "dde80127ff0c5d1d5a21c99169abddd9b4f3611e"
         ],
         [
           "/api/v1/ovt/lobby/state",
@@ -2425,7 +2425,7 @@
           ],
           "main",
           "ovt_queue_poll",
-          "749a69047d30e1db4fe7f5944597b7f81b1394a7"
+          "385d8a0cf7e35c947a7077e8212022e5aedadbe5"
         ],
         [
           "/api/v1/ovt/queue/recent-joins",
@@ -2839,7 +2839,7 @@
           ],
           "main",
           "team_queue_poll",
-          "53116cd9c4feaa1d1a924a07b5554a37910a3730"
+          "1a7ea41a50dc01cb6f7e209b6243bda218121ef4"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3880,7 +3880,7 @@
       [
         "main",
         "lifespan",
-        "d02ba248bd63779396fbeb0fcdc6f1e713c33178"
+        "53ec9a0327ad43a68da70d9d297e7b0dee35a0c4"
       ]
     ]
   },
