@@ -1789,6 +1789,24 @@
           "be873dd601caefb756401725afacf33a3afc467d"
         ],
         [
+          "/api/v1/ffa/lobby/{lobby_id}/readmit",
+          [
+            "POST"
+          ],
+          "main",
+          "ffa_lobby_readmit",
+          "aa97fe977b5d3c318df9282ddff33d5d03b50591"
+        ],
+        [
+          "/api/v1/ffa/readmit/offer",
+          [
+            "GET"
+          ],
+          "main",
+          "ffa_readmit_offer",
+          "737568d5beb08813b15c9a2b08723900045a68b6"
+        ],
+        [
           "/api/v1/ffa/queue/join",
           [
             "POST"
@@ -3723,6 +3741,102 @@
           "main",
           "pc_face_preview",
           "4097bccf24f9a5b9f7ccb37c3efddefde6d4f4c5"
+        ]
+      ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "match hold router (backend/api/match_hold.py, mounted by main.py include_router): the ten Stage 2 readmission routes under /api/v1/match (game/start, hold/open, hold/beat, hold/{hold_id}/end, claim, bind, entered, hold/{hold_id}/state, hold/by-room, hold/mine). Every handler requires a verified session (steam_sessions, players) and reads team_series or ovt_series by an explicit column list, match_games, match_seat_holds, match_seat_presence, match_hold_open_attempts, match_hold_attempts, queue_leases and the four queue tables; hold/{hold_id}/entered also finishes its room's held reports (match_report_journal, match_report_windows and the settle bodies). Every answer is a fixed projection (_state_payload's named fields or a literal dict); no handler reads the matches table or a Match ORM row, so no W1 private Match column can reach an output. Static classification: handler-implementation drift (a matches read, or a whole-row answer) would need re-review. Enumerated only under the pinned fastapi==0.115.0 (0.141 wraps included routers as _IncludedRouter, invisible to app.routes) - the test asserts the pin.",
+      "routes": [
+        [
+          "/api/v1/match/game/start",
+          [
+            "POST"
+          ],
+          "match_hold",
+          "match_game_start",
+          "5c4cb22e5d656cc6d558212d6c1a5205a3387df1"
+        ],
+        [
+          "/api/v1/match/hold/beat",
+          [
+            "POST"
+          ],
+          "match_hold",
+          "match_hold_beat",
+          "0038308feec3f12d19bb27c65a6dd49a77056134"
+        ],
+        [
+          "/api/v1/match/hold/by-room",
+          [
+            "GET"
+          ],
+          "match_hold",
+          "match_hold_by_room",
+          "1ffd450a2f1b12af5b8734b91a64b4edfdd2915a"
+        ],
+        [
+          "/api/v1/match/hold/mine",
+          [
+            "GET"
+          ],
+          "match_hold",
+          "match_hold_mine",
+          "b32be25e98649490b929daba34e740005164098a"
+        ],
+        [
+          "/api/v1/match/hold/open",
+          [
+            "POST"
+          ],
+          "match_hold",
+          "match_hold_open",
+          "8cc98fa39564e1db5f8bb4126f04888927e9eef3"
+        ],
+        [
+          "/api/v1/match/hold/{hold_id}/bind",
+          [
+            "POST"
+          ],
+          "match_hold",
+          "match_hold_bind",
+          "dce88ad7f3750e66edfa45f166f1c0b779f67776"
+        ],
+        [
+          "/api/v1/match/hold/{hold_id}/claim",
+          [
+            "POST"
+          ],
+          "match_hold",
+          "match_hold_claim",
+          "d5b0e5700983acf486043de4e539a712eef12311"
+        ],
+        [
+          "/api/v1/match/hold/{hold_id}/end",
+          [
+            "POST"
+          ],
+          "match_hold",
+          "match_hold_end",
+          "db8d4a6448184acb8a453fd63df953ca9407f088"
+        ],
+        [
+          "/api/v1/match/hold/{hold_id}/entered",
+          [
+            "POST"
+          ],
+          "match_hold",
+          "match_hold_entered",
+          "1a3931cb09aa2c53a3007452c6054fc58986009e"
+        ],
+        [
+          "/api/v1/match/hold/{hold_id}/state",
+          [
+            "GET"
+          ],
+          "match_hold",
+          "match_hold_state",
+          "b4cc0470b4e8bc841f6faffe4459201e91ac23ea"
         ]
       ]
     }

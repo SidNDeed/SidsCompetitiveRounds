@@ -1112,6 +1112,10 @@ class TeamQueue(Base):
     mod_version = Column(String(16), nullable=True)
     seen_settings_version = Column(Integer, nullable=False, default=0)
     rules = Column(JSONB, nullable=True)
+    # Migration 383 (Stage 2 readmission): the capability list the join or
+    # lobby body advertised ("rjs1" = every Stage 2 patch attached). Declared
+    # exactly as 383 adds it (#346: an undeclared ORM column is a no-op).
+    caps = Column(String(64), nullable=False, default="", server_default=text("''"))
 
 
 class TeamSeries(Base):
@@ -1142,6 +1146,11 @@ class TeamSeries(Base):
     # Migration 306: frozen room rules {"ff", "sc"} copied from the four
     # team_queue rows at room issuance (NULL = pre-release series).
     rules = Column(JSONB, nullable=True)
+    # Migration 383 (Stage 2 readmission, V3 S1 step 2): the hold flag,
+    # latched once per room issue for hold_room; declared exactly as 383 adds
+    # them (BOOLEAN NOT NULL DEFAULT FALSE: a schema default wins, #346).
+    hold_v2 = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    hold_room = Column(String(64), nullable=True)
 
 
 class TeamMatch(Base):
@@ -1182,9 +1191,14 @@ class TeamMatch(Base):
     t1b_end_stats = Column(Text, nullable=True)
     t2a_end_stats = Column(Text, nullable=True)
     t2b_end_stats = Column(Text, nullable=True)
+    # Migration 383 (Stage 2 readmission, V3 S5): the server class of the
+    # report that settled this game; NULL for a report outside a flagged room.
+    fallback_cls = Column(String(1), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("photon_room_id", "t1a_id", "t1b_id", "t2a_id", "t2b_id", name="uq_team_match"),
+        CheckConstraint("fallback_cls IS NULL OR fallback_cls IN ('c', 'r', 'u')",
+                        name="ck_team_matches_fallback_cls"),
     )
 
 
