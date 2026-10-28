@@ -174,7 +174,7 @@ async def _ranked_queue_poll(w, mp):
     me = ps[0][1]
     return Case("queue_poll", "ranked", [p for p, _ in ps], ps[1][0],
                 lambda: w.call("GET", "/api/v1/queue/poll/%s" % me, me), 503,
-                _status("matched"))
+                _status("matched"), k=2)
 
 
 async def _team_queue_poll(w, mp, players=None):
@@ -184,7 +184,7 @@ async def _team_queue_poll(w, mp, players=None):
     me = ps[0][1]
     return Case("team_queue_poll", "team", [p for p, _ in ps], ps[1][0],
                 lambda: w.call("GET", "/api/v1/team/queue/poll/%s" % me, me), 503,
-                _status("matched"))
+                _status("matched"), k=2)
 
 
 async def _team_relock(w, mp):

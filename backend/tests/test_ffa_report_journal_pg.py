@@ -605,11 +605,16 @@ def test_h1_readmit_economics_use_only_server_absence(monkeypatch):
         # rating, XP, gold and placement, the beaten payouts and the finishing
         # count are the same in both.
         arms = {}
+        leavers = {}
         last = None
         for absent in (False, True):
             del pool_calls[:]
             del finish_calls[:]
-            lob = await _lobby(env)
+            # Reported ten minutes in: the pace ceiling (twice the fitted
+            # pace over the elapsed window) clears the 22 claimed battles at
+            # either live count, so the pool is the claim and not the clock
+            # and the two arms' XP and gold compare exactly.
+            lob = await _lobby(env, t_report=600.0)
             await _fresh(env, lob, 0)
             results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7),
                        lob.sids[2]: (2, 5), lob.sids[3]: (0, 0)}
@@ -626,17 +631,21 @@ def test_h1_readmit_economics_use_only_server_absence(monkeypatch):
                 " FROM ffa_match_players mp JOIN ffa_matches m ON m.id = mp.match_id"
                 " WHERE m.lobby_id = $1", lob.lid)}
             vec = [rows[pid] for pid in lob.pids]
-            leaver = vec[3]
+            leavers[absent] = vec[3]
+            arms[absent] = ([(v["absent"], v["rating_change"], v["xp_gained"],
+                              v["gold_gained"], v["placement"],
+                              sorted(v["exclusion_reasons"] or [])) for v in vec],
+                            # the payout helper walks the roster in the
+                            # lobby's own id order: a set of calls, not a list
+                            sorted(pool_calls), list(finish_calls))
+            last = (lob, rep)
+        # The flag moved nothing: the whole vector first, then the ruling.
+        assert arms[False] == arms[True], ("H1 graced either way", arms[False], arms[True])
+        for absent, leaver in leavers.items():
             assert (leaver["absent"] and leaver["rating_change"] is None
                     and (leaver["xp_gained"] or 0) == 0 and (leaver["gold_gained"] or 0) == 0
                     and sorted(leaver["exclusion_reasons"] or []) == ["grace"]), \
                 ("H1 grace unrated", absent, leaver)
-            arms[absent] = ([(v["absent"], v["rating_change"], v["xp_gained"],
-                              v["gold_gained"], v["placement"],
-                              sorted(v["exclusion_reasons"] or [])) for v in vec],
-                            list(pool_calls), list(finish_calls))
-            last = (lob, rep)
-        assert arms[False] == arms[True], ("H1 graced either way", arms[False], arms[True])
         assert (1, 2, 3) in pool_calls, ("H1 beaten payout", pool_calls)
         assert finish_calls[-1] == (3, 3, 3), ("H1 finishing", finish_calls)
 

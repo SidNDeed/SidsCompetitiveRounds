@@ -37,7 +37,7 @@ import xml.etree.ElementTree as ET
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 HOST = "postgresql+asyncpg://postgres@127.0.0.1:55432/"
-COPY = ("backend/api", "backend/sql", "backend/tests")
+COPY = ("backend",)  # the whole tree the tests reach, never a derived list (learning 915)
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".env", "*.env")
 TIMEOUT_S = 900
 MAIN = "backend/api/main.py"

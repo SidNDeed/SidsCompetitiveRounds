@@ -43,7 +43,7 @@ sys.path.insert(0, HERE)
 import cf_controls_rows as rows_mod  # noqa: E402
 
 HOST = "postgresql+asyncpg://postgres@127.0.0.1:55432/"
-COPY = ("backend/api", "backend/sql", "backend/tests")
+COPY = ("backend",)  # the whole tree the tests reach, never a derived list (learning 915)
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "bin", "obj", ".pytest_cache")
 TIMEOUT_S = 1800
 
