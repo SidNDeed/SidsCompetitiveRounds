@@ -195,7 +195,9 @@ async def _team_relock(w, mp):
         " spawn_confirmed_by, region) VALUES (gen_random_uuid(), $1, $2, $3, $4, 1, 0, "
         " 'active', 0, clock_timestamp(), 0, '[]'::jsonb, 'eu')", *[p for p, _ in ps])
     c = await _team_queue_poll(w, mp, players=ps)
-    c.site = "_team_relock_existing_series"
+    # The queue-poll case carries that route's k (2, its second site); the
+    # relock function has one admission site, so the case names its own k.
+    c.site, c.k = "_team_relock_existing_series", 1
     return c
 
 
