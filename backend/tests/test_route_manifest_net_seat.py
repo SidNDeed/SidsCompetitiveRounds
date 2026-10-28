@@ -1015,7 +1015,13 @@ def test_the_helper_closure_stays_affordable():
     # The bound moves to 82, ~5% over the measurement, for that reason and
     # no other.
     # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
-    # RELAND_MEASURE_CODE_MEDIAN
+    # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
+    # measured 79 / 157 / 481 of 4294 indexed bindings over 417 routes,
+    # against 77 / 144 / 476 of 4027 over 405 on main and 78 / 152 / 424 of
+    # 3767 over 407 on the lane. The median route is GET
+    # /api/v1/tournaments/history on main and at the merge, 77 -> 79: the
+    # match_hold router and MODES, which every route reaches once main holds
+    # the lane's modules. Inside 82, so the bound stays.
     assert code_median <= 82, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
@@ -1424,7 +1430,12 @@ def test_the_helper_closure_stays_affordable():
     # above it. The bound moves to 160, ~5% over the measurement, for that
     # reason and no other.
     # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
-    # RELAND_MEASURE_CODE_P90
+    # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
+    # 157 measured at GET /api/v1/tournaments/current, the lane's rank route
+    # (152 there; 144 on main at POST /api/v1/team/matches, whose settle body
+    # the lane's hold readers lift past the rank, 144 -> 242). The rank route
+    # gains the match_hold router and MODES on main's side, 155 -> 157.
+    # Inside 160, so the bound stays.
     assert code_p90 <= 160, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
@@ -1516,7 +1527,13 @@ def test_the_helper_closure_stays_affordable():
     # Trunk fold (2026-10-15, the table at the code p90 bound): the worst is
     # GET /api/v1/health at 459: 273 at the base, 387 on the lane, 346 on the
     # trunk. Inside 477, so the bound stays.
-    assert code_worst <= 477, f"worst code closure {code_worst} of {total}"
+    # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
+    # the worst is GET /api/v1/health at 481: 476 on main, 351 on the lane,
+    # the union by name (+5 on main: the three health words the lane adds,
+    # _FFA_READMIT, _FFA_READMIT_SITES and _MATCH_HOLD, and the match_hold
+    # router and MODES). The bound moves to 505, ~5% over the measurement,
+    # for that reason and no other.
+    assert code_worst <= 505, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -1558,8 +1575,19 @@ def test_the_helper_closure_stays_affordable():
     # /api/v1/releases/recent. The bound moves to 168, ~5% over the
     # measurement, for that reason and no other.
     # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
-    # RELAND_MEASURE_ALL_MEDIAN
-    assert all_median <= 168, f"median closure {all_median} of {total}"
+    # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
+    # 180 measured at GET /api/v1/internal/chat/mod-actions, main's rank
+    # route (166 there; 161 on the lane at GET /api/v1/ovt/recent). The two
+    # folds add: on main's side the rank route gains the match_hold and
+    # match_report_window import lines main now reaches (AsyncSession,
+    # Depends, HTTPException, Request, get_db, hashlib, hmac, text; datetime,
+    # hashlib, hmac, text) and the match_hold router and MODES, +14; on the
+    # lane's side it gains the mail_discord, seat_evidence, review_rules,
+    # review_boot and build_no_bytecode import lines the lane never held,
+    # +19. Every route moves by the same names; no route crossed into a hub.
+    # The bound moves to 189, ~5% over the measurement, for that reason and
+    # no other.
+    assert all_median <= 189, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1788,8 +1816,16 @@ def test_the_helper_closure_stays_affordable():
     # bound moved to 290 on the lane, ~5% over the measurement, for that
     # reason and no other.
     # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
-    # RELAND_MEASURE_ALL_P90
-    assert all_p90 <= 291, f"p90 closure {all_p90} of {total}"
+    # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
+    # 302 measured at POST /api/v1/pc/portrait, the lane's rank route (277
+    # there; 277 on main at POST /api/v1/team/queue/join, which the merge
+    # lifts to 296 by the same names, below the rank). The rank route gains
+    # on main's side the match_hold router and the match_hold and
+    # match_report_window import lines, +16; on the lane's side the
+    # mail_discord router, the service-uuid cache constants and main's
+    # module import lines, +25. The bound moves to 317, ~5% over the
+    # measurement, for that reason and no other.
+    assert all_p90 <= 317, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -1889,6 +1925,11 @@ def test_the_helper_closure_stays_affordable():
     # v1.41.0 release merge (2026-10-27), main 0f36f018 into the candidate f7ea51c4: 644 measured
     # of 4028 indexed bindings (642 was the bound both sides kept). The bound moves to 676, ~5%
     # over the measurement, for that reason and no other.
+    # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547:
+    # 665 measured at GET /api/v1/health (644 on main, 492 on the lane; +21
+    # on main by name: the three health words, the match_hold router and
+    # MODES, and the match_hold and match_report_window import lines).
+    # Inside 676, so the bound stays.
     assert all_worst <= 676, f"worst closure {all_worst} of {total}"
 
 
