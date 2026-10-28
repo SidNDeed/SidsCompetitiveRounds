@@ -460,6 +460,7 @@ K1_ANCHORS = [
     ("late_seeded", "FfaLateEntry.cs", ("void CheckPendingSnapshot(",)),
     ("late_digest", "FfaLateEntry.cs", ("void CheckPendingSnapshot(",)),
     ("late_scale", "FfaLateEntry.cs", ("void CheckPendingSnapshot(",)),
+    ("late_game", "FfaLateEntry.cs", ("void CheckPendingSnapshot(",)),   # RJ readmission C4 (05425cd4)
     ("late_cards", "FfaLateEntry.cs", ("void OnSelfKept(",)),
     ("game_join", "FfaLateEntry.cs", ("void OnSelfKept(",)),
     ("late_spawn", "FfaLateEntry.cs", ("void LateSpawn(",)),
@@ -928,6 +929,10 @@ I3_SITES = {
     "wrong_region": ("FfaAssembly.cs", "Exit", None),
     "start_timeout": ("FfaAssembly.cs", "Exit", None),
     "join_timeout": ("FfaAssembly.cs", "Exit", None),
+    # RJ readmission C4 (05425cd4): a refused readmission leaves the queue with
+    # its own label. The server set gains it in the server lane (amendment A1
+    # of the merged server rulings); until then the WP2 assertion below is red.
+    "readmit_refused": ("FfaReadmit.cs", "Refusal", None),
 }
 
 
@@ -965,14 +970,19 @@ def leave_sites():
 
 
 def test_k10_n11_wp2_every_leave_labelled():
-    """K10: every FfaLeaveQueue( call passes a label. N11 (binding): the 21
-    I3 site-to-label values, each at its site with its unchanged cause, equal
-    the server's _PREROOM_LEAVE_LABELS (WP2), each at most 14 characters."""
+    """K10: every FfaLeaveQueue( call passes a label. N11 (binding): the 22
+    I3 site-to-label values (21, and readmit_refused since the readmission
+    client lane), each at its site with its unchanged cause, equal
+    the server's _PREROOM_LEAVE_LABELS (WP2), each at most 16 characters: the
+    width of the FfaLeaveQueue label parameter and of the labels column
+    (355_ffa_assembly.sql:71,142), the only bound a label has; the census is
+    15 (readmit_refused), under that 16, and the design texts' "at most 14"
+    was the census of the 21-label table, never a bound (ruling k10, 20 Oct)."""
     sites, unlabelled, dup = leave_sites()
     server = server_const("_PREROOM_LEAVE_LABELS")
     wrong = sorted(lab for lab, want in I3_SITES.items() if sites.get(lab) != want)
     facts = {"labels": sorted(sites), "unlabelled": unlabelled, "dup": dup, "wrong_site": wrong,
-             "server": sorted(server or []), "long": sorted(x for x in sites if len(x) > 14)}
+             "server": sorted(server or []), "long": sorted(x for x in sites if len(x) > 16)}
     trace(facts)
     assert not unlabelled, ("K10 labelled", unlabelled)
     assert not dup, ("N11 one site per label", dup)
@@ -1018,7 +1028,14 @@ def test_k11_wp1_caps():
         "asm_terms": sorted(and_terms(asm.group(1))) if asm else [],
         "quarantine_terms": sorted(and_terms(qa.group(1))) if qa else [],
         "adm_terms": sorted(and_terms(adm.group(1))) if adm else [],
-        "returns": re.findall(r"if \(([^)]*)\) return ([^;]*);", caps),
+        # RJ readmission C4z (c54227bb): Caps() returns through the pure rule
+        # FfaReadmitEntryRules.CapsList (V3 P4.6: ffa_adm1 only together with
+        # ffa_rdm1); its two returns are the ones Caps() held inline.
+        "caps_rule": bool(re.search(r"return FfaReadmitEntryRules\.CapsList\(asm, adm, CapsToken, AdmCapsToken\);",
+                                    caps)),
+        "returns": re.findall(r"if \(([^)]*)\) return ([^;]*);",
+                              kept(block("FfaReadmitEntryRules.cs", "internal static string CapsList("))),
+        "rdm_token": re.findall(r"const string RdmCapsToken = \"([^\"]*)\";", kept(src("FfaReadmitEntryRules.cs"))),
         "adm_production": bool(re.search(r"const bool AdmProductionEnabled = false;", kept(fa))),
         "advertise": bool(re.search(r"bool AdvertiseAdm => AdmProductionEnabled \|\| G3Build;", kept(fa))),
         "g3_release": rel.group(1) if rel else None, "g3_g3": g3.group(1) if g3 else None,
@@ -1036,8 +1053,10 @@ def test_k11_wp1_caps():
         ("K11 quarantine attached", facts["quarantine_terms"])
     assert facts["adm_terms"] == sorted(["asm", "AdmissionListComplete()", "CallInHoldAttached", "AdvertiseAdm"]), \
         ("K11 adm terms", facts["adm_terms"])
-    assert facts["returns"] == [("asm && adm", 'CapsToken + "," + AdmCapsToken'), ("asm", "CapsToken")], \
-        ("K11 advertise", facts["returns"])
+    assert facts["caps_rule"], ("K11 caps rule", caps[:300])
+    assert facts["returns"] == [("asm && adm", 'asmToken + "," + admToken + "," + RdmCapsToken'),
+                                ("asm", "asmToken")], ("K11 advertise", facts["returns"])
+    assert facts["rdm_token"] == ["ffa_rdm1"], ("K11 rdm token", facts["rdm_token"])
     assert facts["adm_production"] and facts["advertise"], ("K11 production flag", facts)
     assert facts["g3_release"] == "false" and facts["g3_g3"] == "true", ("K11 g3 build", facts)
     assert facts["enroll_calls"] == 1, ("K11 enroll", facts["enroll_calls"])
@@ -1619,20 +1638,33 @@ def test_k39_k40_reporter_rule_and_ghosts():
     the relay records a leave only for an actor the quarantine does not name."""
     rb = block("GameStateWatcher.cs", "bool TryReportFfaMatch(")
     k = kept(rb)
-    lag = first(rb, r"FfaLateEntry\.LagGame == reportGame")
+    # RJ readmission C3 (a9c019dd): the lag skip and the election are the pure
+    # rules FfaReportRules.LagSkipsReport and FilerOf. Outside a readmission
+    # lobby they are the inline rules that stood here; inside one every
+    # present kept seat files and the server elects (V3 P3 step 1).
+    fr = kept(src("FfaReportRules.cs"))
+    lsr = kept(block("FfaReportRules.cs", "internal static bool LagSkipsReport("))
+    fo = kept(block("FfaReportRules.cs", "internal static string FilerOf("))
+    lag = first(rb, r"FfaReportRules\.LagSkipsReport\(readmitLobby, reportGame, FfaLateEntry\.LagGame\)")
     sits = first(rb, r"FfaLateEntry\.LocalSitsOut\(\)")
-    elect = first(rb, r"FfaLateRules\.ElectReporter\(")
+    elect = first(rb, r"FfaReportRules\.FilerOf\(")
     li = kept(block("FfaLateEntry.cs", "internal static bool LateInSitting("))
     lg = kept(block("FfaLateEntry.cs", "internal static bool LaggedInGame("))
     nl = block("GameStateWatcher.cs", "void NotifyPlayerLeftRoom(")
     rec = first(nl, r"FfaMode\.RecordLeaver\(")
     facts = {
-        "lag_skip": 0 <= lag < sits < elect and "report_skip why=lag_out" in k,
-        "elect_args": bool(re.search(r"ElectReporter\(candActors, a => FfaLateEntry\.LaggedInGame\(a, reportGame\), "
-                                     r"a => FfaLateEntry\.LateInSitting\(a\)\)", norm(k))),
-        "self_barred": bool(re.search(r"selfBarred = FfaLateEntry\.LateInSitting\(ownActor\) \|\| "
-                                      r"FfaLateEntry\.LaggedInGame\(ownActor, reportGame\);", k)),
-        "fallback": "if (lowest == null && !selfBarred) lowest = localSteamId;" in norm(k),
+        "lag_skip": 0 <= lag < sits < elect and "report_skip why=lag_out" in k
+        and "return !readmitLobby && reportGame > 0 && localLagGame == reportGame;" in norm(lsr)
+        and "bool readmitLobby = FfaAssembly.ReadmitLobby;" in k,
+        "elect_args": bool(re.search(r"FilerOf\(readmitLobby, localSteamId, ownActor, candActors, sidOfActor, "
+                                     r"a => FfaLateEntry\.LaggedInGame\(a, reportGame\), "
+                                     r"a => FfaLateEntry\.LateInSitting\(a\), FfaLateRules\.ElectReporter,", norm(k)))
+        and "int elected = elect(candActors, lagged, late);" in norm(fo),
+        "self_barred": "bool selfBarred = (late != null && late(ownActor)) || (lagged != null && lagged(ownActor));"
+        in norm(fo),
+        "fallback": "if (lowest == null && !selfBarred) lowest = localSid;" in norm(fo)
+        and norm(fo).index("if (readmitLobby) return localSid;") < norm(fo).index("int elected = elect(")
+        and fr.count("if (readmitLobby) return localSid;") == 1,
         "own_late_local": "if (actor == OwnActor()) return !string.IsNullOrEmpty(AdmittedLateLobby);" in norm(li),
         "own_lag_local": "if (actor == OwnActor()) return LagGame == g && g > 0;" in norm(lg),
         "late_lobby": "return !string.IsNullOrEmpty(v) && v == Lobby8;" in norm(li),
@@ -2200,7 +2232,14 @@ def test_wp4_wp8_answer_keys():
     facts = {k: [k in server, client_reads(files, k)] for k in WP4_KEYS + WP4_ENTRY}
     kinds_server = dict_values_for(server_def("_asm_answer_lists"), "kind")
     pa = kept(block("FfaAssembly.cs", "internal static Answer ParseAnswer("))
-    kinds_client = sorted(set(re.findall(r"kind == \"([a-z])\"", pa)))
+    # RJ readmission C4 (05425cd4): ParseAnswer hands the answer's kind to
+    # FfaReadmitEntryRules.GrantKind, whose s/l branch is the comparison that
+    # stood here. Its r branch reads the readmission kind (the server lane's
+    # epoch entries), which the answer lists do not write.
+    gk = kept(block("FfaReadmitEntryRules.cs", "internal static char GrantKind("))
+    assert len(re.findall(r"FfaReadmitEntryRules\.GrantKind\(kind,", pa)) == 1, ("WP4 kind source", pa[:300])
+    sl = re.search(r"if \(([^)]*)\) return serverKind\[0\];", gk)
+    kinds_client = sorted(set(re.findall(r"serverKind == \"([a-z])\"", sl.group(1)))) if sl else []
     dl = dict_values_for(server_def("_asm_deadline_answer"), "error")
     pf = kept(block("FfaAssembly.cs", "void PostFail("))
     facts.update({"kinds": [sorted(kinds_server), kinds_client], "deadline": sorted(dl),
@@ -2246,8 +2285,14 @@ def test_wp5_room_and_player_properties():
     facts = {
         "consts": consts, "literals": literals, "uses": uses,
         "late_format": "h[PropLate] = Lobby8;" in le and "v == Lobby8" in le,
-        "bd_format": bool(re.search(r"string bd = I\(FfaMode\.GameNumber\) \+ \":\" \+ I\(PointK\) \+ \":\"\s*\+ "
-                                    r"FfaLateRules\.BoundaryDigest\(", le)) and "ParseBd(p.Bd" in lr,
+        # RJ readmission C4 (05425cd4): the {hash} part is computed first, the
+        # readmission digest in a readmission lobby, else the boundary digest;
+        # the {g}:{k}:{hash} format is unchanged.
+        "bd_format": bool(re.search(r"string hash = FfaAssembly\.ReadmitLobby\s*\? "
+                                    r"FfaReadmitEntryRules\.ReadmitDigest\([^;]*\)\s*: "
+                                    r"FfaLateRules\.BoundaryDigest\([^;]*\);\s*"
+                                    r"string bd = I\(FfaMode\.GameNumber\) \+ \":\" \+ I\(PointK\) \+ \":\" \+ hash;",
+                                    le)) and "ParseBd(p.Bd" in lr,
         "lag_format": bool(re.search(r"return lobby8 \+ \":\" \+ g\.ToString\([^)]*\) \+ \":\"\s*\+ k\.ToString",
                                      lr)) and "parts.Length != 3 || parts[0] != lobby8" in lr,
     }
@@ -2269,7 +2314,7 @@ PIN_SNAPSHOT_LENGTHS = ["a.Length<16", "a.Length>=18"]
 PIN_BUILD_SNAPSHOT_MD5 = "7c4bb1a127357abd8c9b499118735cd1"
 WP6_TAIL = ["marker", "pointsTotal", "kills", "game", "levelId", "picks", "seed", "k", "n", "scale"]
 WP6_EXPR = {"LateMarker": "marker", "ptot": "pointsTotal", "kl": "kills", "g": "game", "level": "levelId",
-            "new string[0]": "picks", "(int)seed": "seed", "PointK": "k", "PointEpoch": "n",
+            "picks": "picks", "(int)seed": "seed", "PointK": "k", "PointEpoch": "n",
             "AppliedScaleTag()": "scale"}
 
 
@@ -2281,6 +2326,11 @@ def test_wp6_late_snapshot_tail():
     ss = block("FfaLateEntry.cs", "void SendSnapshot(")
     tail = re.search(r"var tail = new object\[\] \{([^}]*)\};", kept(ss))
     order = [WP6_EXPR.get(norm(x), "?" + norm(x)) for x in tail.group(1).split(",")] if tail else []
+    # RJ readmission C4 (05425cd4): the picks element is the local `picks`,
+    # the empty string array outside a readmission lobby, as before.
+    picks_def = bool(re.search(r"string\[\] picks = readmit\s*\? FfaReadmitEntryRules\.EncodePicks\([^;]*\)\s*"
+                               r": new string\[0\];", kept(ss)))
+    assert picks_def, ("WP6 picks element", kept(ss)[:300])
     lvl = re.search(r"int level = ([^;]*);", kept(ss))
     pos = {f: 18 + i for i, f in enumerate(WP6_TAIL)}
     ol = kept(block("FfaLateEntry.cs", "void OnLateSnapshot("))

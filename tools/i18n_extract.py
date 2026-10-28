@@ -146,6 +146,11 @@ FILES = [
     # re-form, dissolve and joined toasts, all literal notification or
     # I18n.Tr/TrF arguments.
     "FfaAssembly.cs", "FfaLateEntry.cs",
+    # FFA mid-game readmission (design V3 P4.5): the rejoin bar, its
+    # buttons, the held-seat lines and one refusal text per reason, all
+    # literal notification or I18n.Tr/TrF arguments. Its sibling
+    # FfaReadmitEntryRules.cs is absent on purpose: pure rules, no text.
+    "FfaReadmit.cs",
     # Item 19 (two default avatars by queue kind): the switch, unusable and
     # recovery notices, the portrait-grid legend and the preset option
     # labels, all at I18n.Tr/TrF sites. Its sibling AvatarDefaultRules.cs is
@@ -156,6 +161,10 @@ FILES = [
     # partial. Keybinds.cs and KeybindRules.cs are absent on purpose: they
     # hold no display text (#357, #464).
     "NativeUI.Keybinds.cs",
+    # RJ Stage 2 (team and 1v2 seat hold): the room banner lines and the
+    # returner's offer, buttons and outcome lines, all I18n.Tr/TrF sites.
+    # The other TeamHold*.cs files hold no display text.
+    "TeamHoldBanner.cs", "TeamHoldReturn.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

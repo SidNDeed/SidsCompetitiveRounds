@@ -87,6 +87,15 @@ $wireFiles = @(
     # inert twin.
     'plugin/NativeUI.cs',
     'plugin/CompetitiveUI.cs',
+    # W25's closed caller sets name members in these three since the
+    # readmission and seat-evidence lanes: the FFA probe's and the readmit
+    # poll's callers (FfaReadmit.cs), the compat base's one caller
+    # (SeatEvidence.cs) and the re-form's re-entry into the lock arm
+    # (FfaAssembly.cs). Without them a mutant root resolves those sets to
+    # nothing and W25 stops being an inert twin.
+    'plugin/FfaReadmit.cs',
+    'plugin/SeatEvidence.cs',
+    'plugin/FfaAssembly.cs',
     'plugin/CompetitiveRounds.csproj',
     'tools/tests/bug389-seam/Program.cs',
     # H1 and H2 read this one: the round's finding bodies, from which the
@@ -1282,10 +1291,11 @@ Say ''
 # now reads the one comment-blanked view, so both reddens.
 #
 # W23 is the inert twin and must stay GREEN - the patches file does not move.
+# The FFA merge lives in ArmFfaLock since ce466f38 (merged round 3, T3c).
 $wireBlockCommentCall = New-WireRoot 'blockcommentcall' 'plugin/ApiClient.cs' `
-    'public static void UpdateFfaQueuePoll(bool force)' `
-    '                            ProximityVictimGate.StageInto(prejoin);' `
-    '                            /* ProximityVictimGate.StageInto(prejoin); */' ''
+    'public static void ArmFfaLock(string resp, int gen, bool reform)' `
+    '                    ProximityVictimGate.StageInto(prejoin);' `
+    '                    /* ProximityVictimGate.StageInto(prejoin); */' ''
 $runWireBlockCommentCall = Invoke-Suite 'wire-blockcommentcall' $seam $wireBlockCommentCall
 if (-not (Assert-Mutation 'a staging call left only inside a block comment' $runWireBlockCommentCall 'W25' 'W1')) { $overall = 1 }
 if (-not (Assert-Mutation 'block-commented staging call, the member anchor sees it too' $runWireBlockCommentCall 'W7c' 'W1')) { $overall = 1 }
@@ -1359,6 +1369,88 @@ if (-not (Assert-Mutation 'a staging entry point reached from the initialisation
 if (-not (Assert-Mutation 'staging call inside Initialize, W23 inert twin' $runWireStageApiMember 'W25' 'W23')) { $overall = 1 }
 Say ''
 
+# ---------- merged fix 2 M1: count calls, including siblings in one file -----
+# Each mutant keeps the permitted call in place and adds one syntactic call.
+# W25 must reject the extra identity; W1 remains the independent GREEN control.
+$wireMergeApiSameFile = New-WireRoot 'mergeapisamefile' 'plugin/ApiClient.cs' `
+    'public static void Initialize(string url)' `
+    '            baseUrl = url.TrimEnd(''/'');' `
+    '            baseUrl = url.TrimEnd(''/'');
+            ArmFfaLock("", 0, false);' ''
+$runWireMergeApiSameFile = Invoke-Suite 'wire-mergeapisamefile' $seam $wireMergeApiSameFile
+if (-not (Assert-Mutation 'M1 extra lock-arm caller in the host file' $runWireMergeApiSameFile 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+$wireMergeSameLine = New-WireRoot 'mergesameline' 'plugin/FfaAssembly.cs' `
+    'internal static void Move(string lockRaw, float receiptRt)' `
+    '            ApiClient.ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true);' `
+    '            ApiClient.ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true); ApiClient.ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true);' ''
+$runWireMergeSameLine = Invoke-Suite 'wire-mergesameline' $seam $wireMergeSameLine
+if (-not (Assert-Mutation 'M1 two re-entry calls on one line' $runWireMergeSameLine 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+$wireParserApiSameFile = New-WireRoot 'parserapisamefile' 'plugin/ApiClient.cs' `
+    'public static void Initialize(string url)' `
+    '            baseUrl = url.TrimEnd(''/'');' `
+    '            baseUrl = url.TrimEnd(''/'');
+            ParseTeamQueuePoll("");' ''
+$runWireParserApiSameFile = Invoke-Suite 'wire-parserapisamefile' $seam $wireParserApiSameFile
+if (-not (Assert-Mutation 'M1 extra parser caller in the host file' $runWireParserApiSameFile 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+$wireNativeTickSameFile = New-WireRoot 'nativeticksamefile' 'plugin/CompetitiveUI.cs' `
+    'public static void PlayMatchFoundSound()' `
+    '                if (matchFoundClip == null)' `
+    '                NativeUI.Tick();
+                if (matchFoundClip == null)' ''
+$runWireNativeTickSameFile = Invoke-Suite 'wire-nativeticksamefile' $seam $wireNativeTickSameFile
+if (-not (Assert-Mutation 'M1 extra native tick caller in the permitted file' $runWireNativeTickSameFile 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+$wireCompTickSameFile = New-WireRoot 'compticksamefile' 'plugin/Plugin.cs' `
+    'private void Start()' `
+    '            CacheTmpReferences();' `
+    '            CacheTmpReferences(); CompetitiveUI.Tick();' ''
+$runWireCompTickSameFile = Invoke-Suite 'wire-compticksamefile' $seam $wireCompTickSameFile
+if (-not (Assert-Mutation 'M1 extra competitive tick caller outside the persistent tick' $runWireCompTickSameFile 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+# The CODE view blanks comments; CallSitesIn also requires '(' after the name
+# and walks whitespace between segments. These controls retain one permitted call.
+$callNl = [string][char]10
+$wireMergeCallSplit = New-WireRoot 'mergecallsplit' 'plugin/FfaAssembly.cs' `
+    'internal static void Move(string lockRaw, float receiptRt)' `
+    '            ApiClient.ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true);' `
+    ('            ApiClient' + $callNl + '                .ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true);') ''
+$runWireMergeCallSplit = Invoke-Suite 'wire-mergecallsplit' $seam $wireMergeCallSplit
+if (-not (Assert-Inert 'M1 permitted call split across lines' $runWireMergeCallSplit @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
+$wireMergeCallSpace = New-WireRoot 'mergecallspace' 'plugin/FfaAssembly.cs' `
+    'internal static void Move(string lockRaw, float receiptRt)' `
+    '            ApiClient.ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true);' `
+    '            ApiClient  .  ArmFfaLock  ( lockRaw , ApiClient.FfaGenNow , true );' ''
+$runWireMergeCallSpace = Invoke-Suite 'wire-mergecallspace' $seam $wireMergeCallSpace
+if (-not (Assert-Inert 'M1 permitted call with extra whitespace' $runWireMergeCallSpace @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
+$wireMergeCallComment = New-WireRoot 'mergecallcomment' 'plugin/FfaAssembly.cs' `
+    'internal static void Move(string lockRaw, float receiptRt)' `
+    '            ApiClient.ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true);' `
+    '            ApiClient.ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true); // ApiClient.ArmFfaLock(x); ParseTeamQueuePoll(x); NativeUI.Tick(); CompetitiveUI.Tick();' ''
+$runWireMergeCallComment = Invoke-Suite 'wire-mergecallcomment' $seam $wireMergeCallComment
+if (-not (Assert-Inert 'M1 call names inside a comment' $runWireMergeCallComment @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
+$wireMergeCallString = New-WireRoot 'mergecallstring' 'plugin/FfaAssembly.cs' `
+    'internal static void Move(string lockRaw, float receiptRt)' `
+    '            ApiClient.ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true);' `
+    '            ApiClient.ArmFfaLock(lockRaw, ApiClient.FfaGenNow, true);
+            string ignoredCall = "ApiClient.ArmFfaLock ParseTeamQueuePoll NativeUI.Tick CompetitiveUI.Tick";' ''
+$runWireMergeCallString = Invoke-Suite 'wire-mergecallstring' $seam $wireMergeCallString
+if (-not (Assert-Inert 'M1 call names inside a string literal' $runWireMergeCallString @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
 # ---------- lift a merge OUT of the response callback it runs in -------------
 # "AFTER baseUrl" WAS NOT THE PROPERTY. The round-7 clause asked only that a
 # merge sit at a larger offset than its member's baseUrl request, and a
@@ -1374,8 +1466,8 @@ $wireStageUnbound = New-WireRootEdits 'stageunbound' 'plugin/ApiClient.cs' @(
       '                            ProximityVictimGate.StageInto(prejoin);',
       '                            // (mutant) the merge has left the response callback'),
     @('public static void UpdateOvtQueuePoll(bool force)',
-      '            }));',
-      '            }));
+      '               extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));',
+      '               extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));
             ProximityVictimGate.StageInto(new ExitGames.Client.Photon.Hashtable());')
 )
 $runWireStageUnbound = Invoke-Suite 'wire-stageunbound' $seam $wireStageUnbound
@@ -1638,10 +1730,13 @@ Say ''
 # `baseUrl ??= ...` reads as a writer and leaves the previous value standing.
 # ClassifyWrite did not know the operator at all, so the write was invisible;
 # R8 now also requires every write to that field to be a form that retargets.
+# The boot verdict now writes route.CurrentBase on BOTH branches, so the anchor
+# is bounded to the fallback branch: the region from its 'if (!reachable)' to
+# the fallback flag it sets next (one site inside).
 $wireNullCoalesceAssign = New-WireRoot 'nullcoalesceassign' 'plugin/ApiClient.cs' `
-    'private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)' `
-    '                baseUrl = Plugin.LegacyApiUrl.TrimEnd(''/'');' `
-    '                baseUrl ??= Plugin.LegacyApiUrl.TrimEnd(''/'');' ''
+    'if (!reachable)' `
+    '                baseUrl = route.CurrentBase;' `
+    '                baseUrl ??= route.CurrentBase;' '                UsingLegacyFallback = true;'
 $runWireNullCoalesceAssign = Invoke-Suite 'wire-nullcoalesceassign' $seam $wireNullCoalesceAssign
 if (-not (Assert-Mutation 'a null-coalescing write to the request prefix' $runWireNullCoalesceAssign 'W25' 'W1')) { $overall = 1 }
 Say ''

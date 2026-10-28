@@ -421,8 +421,16 @@ def test_h1_no_elapsed_time_arms_the_fallback():
     # two-digit string is a claim the tree cannot satisfy -- which is how such a
     # check gets weakened until it cannot fail (#342; #432 says to assert the
     # occurrence count within the FUNCTION span, never file-wide).
+    # Merged round 3 (RJ Stage 2 5a805a02, K1): the callback's DC path is split
+    # into the decision (BuildDcPlan, from the election comment to its end) and
+    # its execution (ExecuteDcPlan); the span is both, so the absence still
+    # covers every line between the election and the post.
     dc = plug[plug.index("// Reporter election: exactly ONE PROMPT report"):]
-    dc = dc[:dc.index('Plugin.Log.LogWarning($"[2v2-DC] report error')]
+    dc = dc[:dc.index("/// <summary>The floor election's census")]
+    ex = plug[plug.index("internal static void ExecuteDcPlan(DcPlan plan)"):]
+    ex = ex[:ex.index("/// <summary>The 2v2 DC decision of a departure")]
+    assert "ApiClient.ReportTeamSeriesDc(" in ex and "DcReportSync.ArmFallback(" in ex
+    dc = dc + "\n" + ex
     # ...and over the CODE, with the comment lines removed.  The prose above the
     # election says what the +45 s net was and why it is gone; deleting that
     # sentence to satisfy a text search would delete the record of the change.
@@ -595,9 +603,15 @@ def test_h1_the_elected_seats_departure_is_itself_a_disconnect():
     left = left[:left.index('Plugin.Log.LogWarning($"[2v2-DC] report error')]
     # the ordering the failure scenario rests on, asserted rather than assumed
     assert "DcReportSync.NoteActorLeft(p)" in left
-    assert left.index("DcReportSync.NoteActorLeft(p)") < left.index("ApiClient.ReportTeamSeriesDc(")
+    # Merged round 3 (RJ Stage 2 5a805a02, K1): the classification is
+    # BuildDcPlan (built under the hold, or built and executed in place), and
+    # the post is in ExecuteDcPlan; NoteActorLeft still runs before both.
+    assert left.index("DcReportSync.NoteActorLeft(p)") < left.index("BuildDcPlan(p, leaverIsSpectator)")
+    assert left.index("DcReportSync.NoteActorLeft(p)") < left.index("ExecuteDcPlan(BuildDcPlan(p, leaverIsSpectator))")
     # ...and the elected seat's departure does reach the same prompt path
-    assert "ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points," in left
+    ex = plug[plug.index("internal static void ExecuteDcPlan(DcPlan plan)"):]
+    ex = ex[:ex.index("/// <summary>The 2v2 DC decision of a departure")]
+    assert "ApiClient.ReportTeamSeriesDc(plan.SeriesId, plan.MyId, plan.DcSteamId, plan.T1Points, plan.T2Points," in ex
 
     # so the watch stands down there instead of firing
     assert fallback("", True) == "stand-down"
@@ -939,19 +953,23 @@ def test_h1_mutation_dropping_the_split_check_reopens_the_race():
 
 
 def test_h1_source_matches_the_model():
-    src = _src("Plugin.cs")
+    # Merged round 3 (RJ Stage 2 5a805a02, K1): Plugin.BuildDcPlan reads the
+    # roster and the room-wide capability; the quorum and the 2/2 split are
+    # TeamHoldRules.DecideDc's, over the census list (count = survivors.Count).
+    src = _src("Plugin.cs") + "\n" + _src("TeamHoldRules.cs")
 
     def claim(s):
         return ("bool roomWide = DcReportSync.AllCapable(survivors, out missingCap);" in s
-                and "bool unique = teamsKnown && survivors.Count == 3 && roomWide;" in s
+                and "int count = survivors != null ? survivors.Count : 0;" in s
+                and "bool unique = r.TeamsKnown && count == 3 && roomWide;" in s
                 and "dcTeamCount != 2 || nonDcCount != 2" in s
                 and "PhotonNetwork.PlayerList" in s)
 
     _assert_discriminating(
         claim, src,
         _mutate(src,
-                "bool unique = teamsKnown && survivors.Count == 3 && roomWide;",
-                "bool unique = teamsKnown && survivors.Count == 3;", "H1 quorum"),
+                "bool unique = r.TeamsKnown && count == 3 && roomWide;",
+                "bool unique = r.TeamsKnown && count == 3;", "H1 quorum"),
         "H1 room-wide quorum")
 
 
@@ -964,15 +982,17 @@ def test_h1_the_totals_are_this_seats_snapshot_in_both_arms():
     conservative outcome (#283)."""
     src = _src("Plugin.cs")
 
+    # Merged round 3 (RJ Stage 2 5a805a02, K1): the totals are latched into the
+    # plan in the leave frame, and ExecuteDcPlan posts the plan's fields.
     def claim(s):
-        return ("int t1Points = GameStateWatcher.LastP1Points;" in s
-                and "int t2Points = GameStateWatcher.LastP2Points;" in s
+        return ("plan.T1Points = GameStateWatcher.LastP1Points;" in s
+                and "plan.T2Points = GameStateWatcher.LastP2Points;" in s
                 and "conservativeOnly" not in s)
 
     _assert_discriminating(
         claim, src,
-        _mutate(src, "int t1Points = GameStateWatcher.LastP1Points;",
-                "int t1Points = conservativeOnly ? 0 : GameStateWatcher.LastP1Points;",
+        _mutate(src, "plan.T1Points = GameStateWatcher.LastP1Points;",
+                "plan.T1Points = conservativeOnly ? 0 : GameStateWatcher.LastP1Points;",
                 "H1 honest totals"),
         "H1 honest totals")
 
@@ -1005,8 +1025,17 @@ def test_l3_dc_team_seat_stands_down_when_another_is_eligible():
                 "return !lowerLooksEligible;", "L3 two-sided"),
         "L3 stand-down of an eligible seat that is not the lowest eligible one")
     plug = _src("Plugin.cs")
+    rules = _src("TeamHoldRules.cs")
     assert "otherEligible" not in plug, "the unconditional stand-down is back in Plugin.cs"
-    assert "out onFloor, out _, out consistentView)) return;" in plug
+    assert "otherEligible" not in rules, "the unconditional stand-down is in TeamHoldRules.cs"
+    # Merged round 3 (RJ Stage 2 5a805a02, K1): the floor is TeamHoldRules.
+    # DecideDc's; a false ShouldReport yields Kind Nothing, which ExecuteDcPlan
+    # executes as no report.
+    assert "out onFloor, out teamsKnown2, out consistent);" in rules
+    assert "r.Kind = report ? DcKind.Floor : DcKind.Nothing;" in rules
+    ex = plug[plug.index("internal static void ExecuteDcPlan(DcPlan plan)"):]
+    ex = ex[:ex.index("/// <summary>The 2v2 DC decision of a departure")]
+    assert "case TeamHoldRules.DcKind.Nothing" not in ex and "default:\n                    return;" in ex
 
     # the model, over the sentinel's whole sweep: the ruled rule meets both
     # halves of the requirement ...
@@ -2003,12 +2032,22 @@ def test_the_dc_report_is_retried_and_carries_the_room_it_was_observed_in():
         "DC observed room")
 
     plug = _src("Plugin.cs")
-    assert "ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,\n                                             observedRoom, false);" in plug
+    # Merged round 3 (RJ Stage 2 5a805a02, K1): the one call is ExecuteDcPlan's,
+    # over the plan's fields.
+    assert "ApiClient.ReportTeamSeriesDc(plan.SeriesId, plan.MyId, plan.DcSteamId, plan.T1Points, plan.T2Points,\n                                                 plan.ObservedRoom, false);" in plug
     # and the room is captured at the OBSERVATION, before either arm can leave:
-    # the watch arm returns without posting, so its eventual fallback carries the
-    # room the disconnect was seen in and not whatever room it is in by then.
-    head = plug[plug.index("string observedRoom = \"\";"):]
-    assert head.index("DcReportSync.ArmFallback(") < head.index("ApiClient.ReportTeamSeriesDc(")
+    # BuildDcPlan reads it in the leave frame, before the decision, into the
+    # plan; both arms of ExecuteDcPlan send the plan's room and never read the
+    # current room, so a fallback carries the room the disconnect was seen in.
+    build = plug[plug.index("private DcPlan BuildDcPlan(Photon.Realtime.Player p, bool leaverIsSpectator)"):]
+    build = build[:build.index("/// <summary>The floor election's census")]
+    head = build[build.index("string observedRoom = \"\";"):]
+    assert head.index("ObservedRoom = observedRoom,") < head.index("TeamHoldRules.DecideDc(")
+    ex = plug[plug.index("internal static void ExecuteDcPlan(DcPlan plan)"):]
+    ex = ex[:ex.index("/// <summary>The 2v2 DC decision of a departure")]
+    assert ex.index("DcReportSync.ArmFallback(") < ex.index("ApiClient.ReportTeamSeriesDc(")
+    assert ex.count("plan.ObservedRoom, plan.Survivors);") == 1 and ex.count("plan.ObservedRoom, false);") == 1
+    assert "CurrentRoom" not in ex
 
 
 def test_the_dc_election_capability_follows_the_pre_join_protocol():
@@ -5624,7 +5663,10 @@ def test_r4_h2_the_outcome_protocol_has_its_own_key_and_the_watch_takes_its_quor
 
     # the call site hands the census list, not a fresh guess at the roster
     plug = _src("Plugin.cs")
-    assert "observedRoom, survivors);" in plug
+    # Merged round 3 (RJ Stage 2 5a805a02, K1): the plan carries the census list
+    # (Survivors = survivors) and ExecuteDcPlan hands it on.
+    assert "plan.ObservedRoom, plan.Survivors);" in plug
+    assert "Survivors = survivors," in plug
 
     def claim(s):
         if "internal static class DcReportSync" not in s:
@@ -6229,16 +6271,32 @@ def test_r4lens_f3_the_outcome_quorum_is_dominated_by_the_election_quorum():
     plug = _src("Plugin.cs")
 
     # STRUCTURE: ArmFallback has exactly one caller, and it is the census arm
+    # Merged round 3 (RJ Stage 2 5a805a02, K1): the one caller is ExecuteDcPlan,
+    # which runs the plan BuildDcPlan decided in the leave callback (in place,
+    # or from the hold's drop cut); its Fallback arm is the census arm.
     sites = _call_sites("ArmFallback")
-    assert sites == {("Plugin.cs", "OnPlayerLeftRoom")}, sites
+    assert sites == {("Plugin.cs", "ExecuteDcPlan")}, sites
 
     # ...and that caller hands on the same list the election quorum ran over
-    assert "observedRoom, survivors);" in plug
+    rules = _src("TeamHoldRules.cs")
+    assert "plan.ObservedRoom, plan.Survivors);" in plug
     assert "DcReportSync.AllCapable(survivors, out missingCap)" in plug
-    assert (plug.index("DcReportSync.AllCapable(survivors")
-            < plug.index("DcReportSync.ArmFallback(seriesId, elected"))
-    # and the call sits under the census arm's own gate
-    assert "bool unique = teamsKnown && survivors.Count == 3 && roomWide;" in plug
+    build = plug[plug.index("private DcPlan BuildDcPlan(Photon.Realtime.Player p, bool leaverIsSpectator)"):]
+    build = build[:build.index("/// <summary>The floor election's census")]
+    assert (build.index("DcReportSync.AllCapable(survivors")
+            < build.index("Survivors = survivors,")
+            < build.index("TeamHoldRules.DecideDc(myVal, myTeam, dcTeam, SteamIdOf(p), roomWide, missingCap,"))
+    ex = plug[plug.index("internal static void ExecuteDcPlan(DcPlan plan)"):]
+    ex = ex[:ex.index("/// <summary>The 2v2 DC decision of a departure")]
+    assert (ex.index("case TeamHoldRules.DcKind.Fallback:")
+            < ex.index("DcReportSync.ArmFallback(plan.SeriesId, plan.Elected")
+            < ex.index("case TeamHoldRules.DcKind.Prompt:"))
+    # and the Fallback kind is decided only under the census arm's own gate
+    assert "bool unique = r.TeamsKnown && count == 3 && roomWide;" in rules
+    assert rules.count("r.Kind = DcKind.Fallback;") == 1
+    gate = rules.index("bool unique = r.TeamsKnown && count == 3 && roomWide;")
+    arm = rules.index("if (unique)\n            {\n                if (myTeam == dcTeam) { r.Kind = DcKind.StandDown; return r; }")
+    assert gate < arm < rules.index("r.Kind = DcKind.Fallback;") < rules.index("bool onFloor, teamsKnown2, consistent;")
 
     # BOTH keys ride one merge and one revoke, so a seat carries both or neither
     body = ra[ra.index("internal static class DcReportSync"):]

@@ -504,6 +504,27 @@ namespace CompetitiveRounds
             return ownedApplyDepth > 0;
         }
 
+        /// <summary>Bug 444: whether item 19's apply selects through the menu
+        /// portrait (vanilla's ClickButton, which also moves the portrait
+        /// Frame marker) instead of calling SelectFace(0, playerFaces[slot],
+        /// slot) directly. ClickButton passes the portrait's own myFace, not
+        /// playerFaces[slot] (d/CharacterCreatorPortrait.cs:72). myFace is a
+        /// serialized field, so until the portrait's Start runs in the current
+        /// scene it holds Unity's default: an all-zero face that is not null
+        /// (Start at :29 is what sets it to the preset). Selecting through such
+        /// a portrait commits the slot number with an all-zero face, and the
+        /// face carrier, the card-pick popup and the spawn all read that face.
+        /// So the portrait route is taken only when exactly one menu portrait
+        /// carries the slot AND that portrait holds the slot's own preset
+        /// object; otherwise the direct select applies playerFaces[slot].
+        /// Nothing is lost: a portrait that has not started marks itself,
+        /// because its Start calls ClickButton when selectedFaceID[0] is its
+        /// index (:32-35).</summary>
+        internal virtual bool SelectsThroughPortrait(int hits, bool portraitHoldsSlotFace)
+        {
+            return hits == 1 && portraitHoldsSlotFace;
+        }
+
         /// <summary>Fix pass 3 (H3): whether a popup face the ledger owes is
         /// still owed (the deferral is bounded; past the bound vanilla's face
         /// stands and the ledger says so).</summary>

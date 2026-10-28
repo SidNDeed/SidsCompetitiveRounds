@@ -336,7 +336,8 @@ public class CharacterCreatorPortrait : UnityEngine.MonoBehaviour
 {
     public int playerId = -1;
     public PlayerFace myFace;
-    public void ClickButton() { CharacterCreatorHandler.instance.SelectFace(0, myFace, transform.GetSiblingIndex()); }
+    internal int Clicks;                               // bug 444: how often the apply went through this portrait
+    public void ClickButton() { Clicks++; CharacterCreatorHandler.instance.SelectFace(0, myFace, transform.GetSiblingIndex()); }
 }
 
 public class CharacterCreatorItemEquipper : UnityEngine.MonoBehaviour
@@ -389,11 +390,20 @@ namespace CompetitiveRounds
         public const string PROP_FACE = "cr_face";
         internal static int Publishes;
         internal static int Throws;                    // fix pass 3 (M8): the next N publishes throw
+        // Bug 444: the outcome the production writer (Plugin.cs, FacePublisher)
+        // decides for the face this seat has selected, through the same rule
+        // over the same input, selectedPlayerFaces[0]. Keep until a publish.
+        internal static FaceCarrierAction LastAction = FaceCarrierAction.Keep;
         public static FaceCarrierAction PublishLocal()
         {
             Publishes++;
             if (Throws > 0) { Throws--; throw new InvalidOperationException("probe: the carrier publish threw"); }
-            return FaceCarrierAction.Publish;
+            var cch = CharacterCreatorHandler.instance;
+            bool listed = cch != null && cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0;
+            var face = listed ? cch.selectedPlayerFaces[0] : null;
+            var ids = face != null ? AvatarFaceIds.Of(face.eyeID, face.mouthID, face.detailID, face.detail2ID) : new AvatarFaceIds();
+            LastAction = new AvatarRules().CarrierAction(false, cch != null, true, listed, ids);
+            return LastAction;
         }
     }
 

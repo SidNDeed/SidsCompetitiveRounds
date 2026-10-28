@@ -5,6 +5,11 @@ using UnityEngine;
 
 namespace CompetitiveRounds
 {
+    // One PRNG for the shared fold and the RJ readmission offer record (V3 P2):
+    // the struct moved verbatim into FfaReadmitRules, which the rules harness
+    // compiles without Unity.
+    using XorShift128 = CompetitiveRounds.FfaReadmitRules.XorShift128;
+
     /// <summary>
     /// Same-card rule engine (ffa-configurable-lobbies §1a/§4c/§7e).
     ///
@@ -54,31 +59,7 @@ namespace CompetitiveRounds
         public const int FeatureLevel = 1;
 
         // ── deterministic PRNG (xorshift128 — integer-only, no UnityEngine.Random) ──
-        private struct XorShift128
-        {
-            private uint x, y, z, w;
-            public XorShift128(uint seed)
-            {
-                x = seed == 0 ? 2463534242u : seed;
-                y = x * 1812433253u + 1;
-                z = y * 1812433253u + 1;
-                w = z * 1812433253u + 1;
-                // warm up so near-zero seeds decorrelate
-                for (int i = 0; i < 8; i++) Next8();
-            }
-            private uint Next8()
-            {
-                uint t = x ^ (x << 11);
-                x = y; y = z; z = w;
-                w = w ^ (w >> 19) ^ (t ^ (t >> 8));
-                return w;
-            }
-            public uint Next() { return Next8(); }
-            public int NextInt(int maxExclusive)
-            {
-                return maxExclusive <= 0 ? 0 : (int)(Next() % (uint)maxExclusive);
-            }
-        }
+        // FfaReadmitRules.XorShift128, aliased at the top of this file.
 
         private static uint Fnv1a(string s)
         {
@@ -192,6 +173,99 @@ namespace CompetitiveRounds
             _usedLocalSubstitutes.Clear();
             _drawIndex.Clear();
             _pool = null; _poolWeights = null; _noRepeat = null;
+            // RJ readmission P2 step 3: the replicated ledger resets at game start.
+            Spend.Reset();
+        }
+
+        // ── RJ readmission P2 (design V3): the offer record's view of the engine ──
+
+        /// <summary>The replicated no-repeat substitute ledger of the game
+        /// (FfaReadmitRules.SpendState).</summary>
+        internal static readonly FfaReadmitRules.SpendState Spend = new FfaReadmitRules.SpendState();
+
+        /// <summary>The set at a fold index, extending the fold (never
+        /// restarting it), exactly as TryGetCandidates extends it; null when the
+        /// engine is not active or the index is out of reach.</summary>
+        internal static string[] SetAt(int idx)
+        {
+            if (!_active || idx < 0) return null;
+            while (idx >= _seq.Count && _seq.Count < 256)
+                _seq.Add(GenerateNextSet());
+            return idx < _seq.Count ? _seq[idx] : null;
+        }
+
+        internal static void SetDrawIndex(int pid, int k)
+        {
+            _drawIndex[pid] = k;
+        }
+
+        /// <summary>One card's facts for the record: the prefab name, the given
+        /// weight, its category names, the category names it blacklists,
+        /// allowMultiple and its Gun's lockGunToDefault.</summary>
+        internal static FfaReadmitRules.CardFacts FactsOf(CardInfo c, int weight)
+        {
+            var f = new FfaReadmitRules.CardFacts { Name = c.gameObject.name, Weight = weight };
+            try
+            {
+                var cats = new List<string>();
+                if (c.categories != null) foreach (var x in c.categories) cats.Add(x != null ? x.name : null);
+                f.Categories = cats.ToArray();
+                var bl = new List<string>();
+                if (c.blacklistedCategories != null) foreach (var x in c.blacklistedCategories) bl.Add(x != null ? x.name : null);
+                f.Blacklisted = bl.ToArray();
+                f.AllowMultiple = c.allowMultiple;
+                var g = c.GetComponent<Gun>();
+                f.LockGun = g != null && g.lockGunToDefault;
+            }
+            catch { }
+            return f;
+        }
+
+        /// <summary>The shared pool as the record reads it (array order, the
+        /// integer weights, the no-repeat names); null when the engine is not
+        /// active this game.</summary>
+        internal static FfaReadmitRules.OfferPool OfferPoolNow()
+        {
+            if (!_active || _pool == null || _poolWeights == null) return null;
+            var p = new FfaReadmitRules.OfferPool();
+            for (int i = 0; i < _pool.Length; i++) p.Add(FactsOf(_pool[i], _poolWeights[i]));
+            if (_noRepeat != null) foreach (var n in _noRepeat) p.NoRepeat.Add(n);
+            return p;
+        }
+
+        internal static FfaReadmitRules.SeqState SeqStateNow()
+        {
+            return new FfaReadmitRules.SeqState
+            {
+                Seed = _seed,
+                OpeningDraws = OpeningDraws(),
+                SetAt = SetAt,
+                UsedNoRepeatFold = _usedNoRepeat,
+            };
+        }
+
+        /// <summary>V3 P2 steps 3 and 4: adopt the cycle's record (the ledger,
+        /// and under rule s every listed draw index); the local-only set learns
+        /// the ledger too, so a fallback screen never re-offers a spent
+        /// substitute.</summary>
+        internal static void AdoptOfferRecord(FfaReadmitRules.FfaOfferRecord rec)
+        {
+            if (rec == null) return;
+            FfaReadmitRules.AdoptRecord(rec, Spend, SetDrawIndex);
+            foreach (var n in rec.Ledger) _usedLocalSubstitutes.Add(n);
+        }
+
+        /// <summary>V3 P4.3 step 6: the returner's draw indices and ledger from
+        /// the digest-covered tail, set after OnGameStart cleared them (the
+        /// latch never touches either; the fold is recomputed from the seed).</summary>
+        internal static void SeedReadmit(FfaReadmitEntryRules.Tail t)
+        {
+            if (t == null) return;
+            foreach (var s in t.Slots)
+                if (s.DrawIndex >= 0) _drawIndex[s.Slot] = s.DrawIndex;
+            Spend.Reset();
+            Spend.Ledger.AddRange(t.Ledger);
+            foreach (var n in t.Ledger) _usedLocalSubstitutes.Add(n);
         }
 
         public static void OnRoomLeft() { OnGameStart(); }

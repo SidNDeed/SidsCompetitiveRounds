@@ -63,23 +63,25 @@ namespace CompetitiveRounds
                    && FfaLateEntry.QuarantineAttached();
         }
 
-        /// <summary>The admission list of sec3.5 needs the Stage 1 automatic
-        /// pick record and the RJ-DRIFT room game number, neither of which
-        /// exists on this lane (DEPENDENCY). So this build never advertises
-        /// ffa_adm1, whatever AdvertiseAdm says.</summary>
+        /// <summary>The admission list of sec3.5: this build carries the
+        /// readmission client (V3 P1 to P4: the automatic pick record, the
+        /// offer record, every present seat filing, the claim, bind and late
+        /// entry), so the list is complete (V3 P4.6). ffa_adm1 still needs
+        /// the call-in hold and AdvertiseAdm, and Caps() sends it only
+        /// together with ffa_rdm1.</summary>
         internal static bool AdmissionListComplete()
         {
-            return false;
+            return true;
         }
 
-        /// <summary>The enroll call's caps, comma-joined ("" when neither).</summary>
+        /// <summary>The enroll call's caps, comma-joined ("" when there is no
+        /// assembly); ffa_adm1 only together with ffa_rdm1 (V3 P4.6, the
+        /// pure rule FfaReadmitEntryRules.CapsList).</summary>
         internal static string Caps()
         {
             bool asm = AsmCapable();
             bool adm = asm && AdmissionListComplete() && CallInHoldAttached && AdvertiseAdm;
-            if (asm && adm) return CapsToken + "," + AdmCapsToken;
-            if (asm) return CapsToken;
-            return "";
+            return FfaReadmitEntryRules.CapsList(asm, adm, CapsToken, AdmCapsToken);
         }
 
         /// <summary>Plugin.Awake, after the Harmony pass: every attach flag is
@@ -125,6 +127,36 @@ namespace CompetitiveRounds
             public int ServerAgeMs = -1;
             public float ReceivedRt;
             public bool Reform;
+            /// <summary>V3 P4.6: the lock payload's `readmit` (1 when the server
+            /// wrote readmit_v1 at lock), as received; the sitting's gate reads
+            /// the pin (ReadmitPin), never this field.</summary>
+            public int Readmit;
+        }
+
+        /// <summary>RJ readmission (V3 P4.6): the readmit flag of the sitting,
+        /// pinned from the lock payload with the lobby and room; null until a
+        /// gated lock pins one.</summary>
+        internal static FfaReadmitRules.ReadmitPin ReadmitPin;
+
+        /// <summary>Whether this room runs the readmission rules (V3 P2 gate,
+        /// P3, P4): the pinned flag for the pinned room, never re-derived from
+        /// present, kept or bodied actors.</summary>
+        internal static bool ReadmitLobby
+        {
+            get
+            {
+                try
+                {
+                    string room = PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null;
+                    return FfaReadmitRules.GateOn(new FfaReadmitRules.GateView
+                    {
+                        Pin = ReadmitPin,
+                        Room = room,
+                        PresentAllAdvertise = () => false,
+                    });
+                }
+                catch { return false; }
+            }
         }
 
         /// <summary>The latest gated lock (assembly: 1); null after an ungated
@@ -211,6 +243,12 @@ namespace CompetitiveRounds
                 float now = Time.realtimeSinceStartup;
                 NewSitting(lobby);
                 NoteStatement(room, lobby, assembly, asmStarted, now);
+                // V3 P4.6: the readmission flag is pinned here, at lock, with the
+                // lobby and room, for the whole sitting. An absent key (an older
+                // server) or an ungated lock pins false; a later lock of the same
+                // lobby (a reform) keeps the pinned flag and moves only the room.
+                int readmit = FfaReadmitRules.LockReadmit(assembly, ExtractJsonInt(m, "readmit", 0));
+                ReadmitPin = FfaReadmitRules.PinFromLock(ReadmitPin, lobby, room, readmit);
                 if (assembly != 1)
                 {
                     Lock = null;
@@ -230,6 +268,7 @@ namespace CompetitiveRounds
                     ServerAgeMs = ExtractJsonInt(m, "server_age_ms", -1),
                     ReceivedRt = now,
                     Reform = reform,
+                    Readmit = readmit,
                 };
                 Lock = l;
                 StartHoldS = Window(m, "start_hold_s", 30f);
@@ -265,7 +304,8 @@ namespace CompetitiveRounds
                 _lockStatus = "";
                 _spawnPrinted.Clear();
                 Plugin.Log.LogInfo("[FFA-ASM] gated lock lobby=" + JoinTimeline.Id8(lobby) + " admission="
-                                   + l.Admission + " n=" + l.N + " slot=" + l.Slot + (reform ? " reform=1" : ""));
+                                   + l.Admission + " n=" + l.N + " slot=" + l.Slot + (reform ? " reform=1" : "")
+                                   + " readmit=" + (ReadmitPin != null && ReadmitPin.Flag ? 1 : 0));
                 return true;
             }
             catch (Exception ex)
@@ -503,6 +543,9 @@ namespace CompetitiveRounds
             public bool HasLate;
             public string EpochRaw;
             public string LockRaw;
+            /// <summary>V3 P4: a readmission lobby's live seat holds,
+            /// [{slot, hold_s}], when the server sends them (absent: none shown).</summary>
+            public string HoldsRaw;
             public float Rt;
         }
 
@@ -538,6 +581,7 @@ namespace CompetitiveRounds
                 Game = ExtractJsonInt(m, "game", 0),
                 EpochRaw = ExtractJsonRaw(m, "epoch"),
                 LockRaw = ExtractJsonRaw(m, "lock"),
+                HoldsRaw = ExtractJsonRaw(m, "holds"),
                 Rt = Time.realtimeSinceStartup,
             };
             string adm = ExtractJsonRaw(m, "admissible");
@@ -556,13 +600,37 @@ namespace CompetitiveRounds
                 if (actor > 0)   // a late entry is never null (I2 writer 6, V3-F3)
                     a.Late.Add(new FfaLateRules.EpochEntry(ExtractJsonInt(e, "slot", 0), actor));
             }
+            // The answer's own epoch entries (unverified here: used only to
+            // lower a grant to kind r, the conservative direction).
+            var answerEpoch = new List<FfaLateRules.EpochEntry>();
+            try
+            {
+                foreach (var o in JsonObjects(ExtractJsonRaw(Members(a.EpochRaw ?? "{}"), "kept")))
+                {
+                    var e = Members(o);
+                    answerEpoch.Add(FfaReadmitEntryRules.EpochEntryOf(ExtractJsonInt(e, "slot", 0), ExtractJsonInt(e, "actor", 0),
+                                                                 ExtractJsonString(e, "kind"), ExtractJsonInt(e, "game", -1),
+                                                                 ExtractJsonInt(e, "v", 1), ExtractJsonString(e, "verifier")));
+                }
+            }
+            catch { }
             foreach (var o in JsonObjects(ExtractJsonRaw(m, "granted")))
             {
                 var e = Members(o);
                 string kind = ExtractJsonString(e, "kind") ?? "";
                 int actor = ExtractJsonInt(e, "actor", 0);
-                if (actor > 0 && (kind == "s" || kind == "l"))
-                    a.Granted.Add(new FfaLateRules.GrantEntry(ExtractJsonInt(e, "slot", 0), actor, kind[0]));
+                int slot = ExtractJsonInt(e, "slot", 0);
+                // V3 P4.3 step 1: a seat whose (slot, actor) a kind r epoch entry
+                // names is kind r, whatever kind its seat row reports, so a
+                // readmitted actor is never kept as start roster before entry.
+                bool otherActor = false;
+                foreach (var g in Granted)
+                    if (g.Slot == slot && g.Actor != actor) { otherActor = true; break; }
+                bool readmit = ReadmitPin != null && ReadmitPin.Flag && ReadmitPin.Lobby == lobby;
+                char k = FfaReadmitEntryRules.GrantKind(kind, slot, actor, answerEpoch, FfaLateEntry.Record,
+                                                        readmit, otherActor);
+                if (actor > 0 && k != '\0')
+                    a.Granted.Add(new FfaLateRules.GrantEntry(slot, actor, k));
             }
             return a;
         }
@@ -581,6 +649,10 @@ namespace CompetitiveRounds
             string room = a.Room;
             NoteStatement(room, a.Lobby, a.Assembly, a.AsmStarted, a.Rt);
             if (a.ServerAgeMs >= 0) _lastAgeMs = a.ServerAgeMs;
+            if (ReadmitPin != null && ReadmitPin.Flag && ReadmitPin.Lobby == a.Lobby)
+            {
+                try { FfaReadmit.OnHoldsAnswer(a.HoldsRaw); } catch { }
+            }
             bool postEntry = !string.IsNullOrEmpty(room) && room == CurrentRoomName();
             if (a.Status != _lockStatus)
             {
@@ -1033,6 +1105,20 @@ namespace CompetitiveRounds
                 if (ok) HandleAnswer(ParseAnswer("assembly", why, lobby, resp));
             });
             return true;
+        }
+
+        /// <summary>The readmission presence census (V3 P4.1, P4.2): one
+        /// census of a readmission lobby's granted seat, single-flight like
+        /// every other; FfaReadmit decides when (PresenceDue).</summary>
+        internal static bool SendPresenceCensus(string lobby)
+        {
+            return !string.IsNullOrEmpty(lobby) && SendCensus(lobby, "presence");
+        }
+
+        /// <summary>This seat's live region in the census's form.</summary>
+        internal static string LiveRegionCode()
+        {
+            try { return RegionCode(ApiClient.LiveOnlineRegion()); } catch { return ""; }
         }
 
         private static bool IsDecision(string status)
@@ -1851,6 +1937,7 @@ namespace CompetitiveRounds
             string lobby = !string.IsNullOrEmpty(RoomLobbyId) ? RoomLobbyId : (Lock != null ? Lock.Lobby : "");
             if (why == "join_timeout" && !string.IsNullOrEmpty(FfaLateEntry.AdmittedLateLobby))
                 lobby = FfaLateEntry.AdmittedLateLobby;
+            FfaReadmit.Abandon(lobby);
             ApiClient.FfaClientClears();
             if (string.IsNullOrEmpty(lobby)) return;
             _releaseLobby = lobby;
@@ -2011,6 +2098,7 @@ namespace CompetitiveRounds
             try { CountHoldTick(); } catch { }
             try { CurrentGate(); } catch { }
             try { FfaLateEntry.Tick(); } catch (Exception ex) { Plugin.Log.LogWarning("[FFA-LATE] tick: " + ex.Message); }
+            try { FfaReadmit.Tick(); } catch (Exception ex) { Plugin.Log.LogWarning("[FFA-RDM] tick: " + ex.Message); }
         }
 
         /// <summary>FfaMode.OnRoomLeft: per-room state that must not outlive the
@@ -2018,6 +2106,7 @@ namespace CompetitiveRounds
         /// set are the sitting's and stay.</summary>
         internal static void OnRoomLeft(string room)
         {
+            FfaReadmit.Abandon(room, byRoom: true);
             StartHoldActive = false;
             DropHeld();
             _spawnOpenRoom = null;

@@ -443,6 +443,9 @@ namespace CompetitiveRounds
             DrawLogViewerModal();
             DrawBlockDebug();  // debug-only; toggle via BlockDebugEnabled below
             DrawInputOverlay();
+            // V3 P4.2: the non-modal FFA readmission bar. Drawn before the
+            // session report, so the report (and any popup) covers it.
+            if (!PageImguiHidden) { try { FfaReadmit.DrawBar(); } catch { } }
             // v1.28: the physical "match-found stuck" escape-hatch overlay is retired.
             // Its real target — the EscapeMenuHandler/SetInputActive NRE that wedged
             // Escape and locked inputs — is now fixed in code (PlayerManagerSetInputActiveNullGuard
@@ -6216,16 +6219,15 @@ namespace CompetitiveRounds
         private static int bugSeverityIdx = 1;   // default = medium
         private static int bugCategoryIdx = 3;   // default = other
         private static bool bugSendLogs = true;  // pre-checked per requirement
-        private static string bugSubmitStatus = "";
-        private static bool bugSubmitting = false;
+        private static readonly LogBundleCore.PendingSubmission _bugSubmission =
+            new LogBundleCore.PendingSubmission();
         private static Vector2 bugDescScroll, bugReproScroll;
         private static GUIStyle bugTitleStyle, bugLabelStyle, bugFieldStyle, bugAreaStyle, bugButtonStyle, bugBtnPickedStyle;
 
         public static void OpenBugReportModal()
         {
             bugModalOpen = true;
-            bugSubmitStatus = "";
-            bugSubmitting = false;
+            _bugSubmission.Reopen();
         }
 
         private static void EnsureBugStyles()
@@ -6346,19 +6348,19 @@ namespace CompetitiveRounds
             }
 
             // Status line
-            if (!string.IsNullOrEmpty(bugSubmitStatus))
-                GUI.Label(new Rect(x, y + 460, w, 20), bugSubmitStatus, bugLabelStyle);
+            if (!string.IsNullOrEmpty(_bugSubmission.Status))
+                GUI.Label(new Rect(x, y + 460, w, 20), _bugSubmission.Status, bugLabelStyle);
 
             // Buttons
-            bool disabled = bugSubmitting || string.IsNullOrEmpty(bugDescription) || bugDescription.Trim().Length < 4;
-            GUI.enabled = !bugSubmitting;
+            bool disabled = !_bugSubmission.CanSubmit || string.IsNullOrEmpty(bugDescription) || bugDescription.Trim().Length < 4;
+            GUI.enabled = _bugSubmission.CanSubmit;
             if (GUI.Button(new Rect(x, y + h - 44, 120, 30), I18n.Tr("Cancel"), bugButtonStyle))
             {
                 bugModalOpen = false; GUI.enabled = true; return;
             }
             GUI.enabled = !disabled;
             if (GUI.Button(new Rect(x + w - 160, y + h - 44, 160, 30),
-                           bugSubmitting ? I18n.Tr("Submitting...") : I18n.Tr("Submit Report"),
+                           !_bugSubmission.CanSubmit ? I18n.Tr("Submitting...") : I18n.Tr("Submit Report"),
                            bugButtonStyle))
             {
                 SubmitBugReportNow();
@@ -6366,86 +6368,208 @@ namespace CompetitiveRounds
             GUI.enabled = true;
         }
 
+        /// <summary>
+        /// NOTHING PROPORTIONAL TO THE LOGS RUNS ON THE GAME THREAD here either
+        /// (night of 2026-10-19: the form built a 3.3 M-char bundle inline and
+        /// held one frame for 907 ms in a live 1v2 game; the other seats saw a
+        /// 1.7 s gap in this seat's stream). The split is the automatic
+        /// upload's:
+        ///
+        ///   MAIN THREAD, on Submit: the form fields, CaptureLogBundleInputs
+        ///   (three paths and the audio snapshot) and starting the worker.
+        ///   WORKER: the capped reads, the assembly, the scrub, the JSON body,
+        ///   its UTF-8 bytes and the transport's body-key check.
+        ///   MAIN THREAD, from the always-on tick (PumpBugFormBundle): the
+        ///   [LOG-SCRUB] line and handing the finished bytes to the same
+        ///   POST /api/v1/bug-reports request the form always sent.
+        ///
+        /// The pump runs from Plugin's persistent tick, not from the modal's
+        /// OnGUI, so a report whose page is closed while it builds is still
+        /// sent, as the old synchronous send always was.
+        /// </summary>
         private static void SubmitBugReportNow()
         {
-            bugSubmitting = true;
-            bugSubmitStatus = "<color=#88CCFF>" + I18n.Tr("Submitting...") + "</color>";
+            string pendingStatus = "<color=#88CCFF>" + I18n.Tr("Submitting...") + "</color>";
+            if (!_bugSubmission.Begin(pendingStatus) || _bugFormJob.Busy) return;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             string sid = MatchTracker.LocalSteamId;
             string name = MatchTracker.LocalDisplayName ?? "";
             string desc = (bugDescription ?? "").Trim();
             string repro = (bugRepro ?? "").Trim();
             string sev = BUG_SEVERITIES[Mathf.Clamp(bugSeverityIdx, 0, BUG_SEVERITIES.Length - 1)];
             string cat = BUG_CATEGORIES[Mathf.Clamp(bugCategoryIdx, 0, BUG_CATEGORIES.Length - 1)];
-            string logBundle = bugSendLogs ? BuildLogBundle() : null;
+            if (string.IsNullOrEmpty(sid))
+            {
+                // ApiClient.SubmitBugReport's own first refusal, kept.
+                OnBugReportAnswer(false, "steam_id missing");
+                return;
+            }
+            LogBundleInputs inputs = bugSendLogs ? CaptureLogBundleInputs() : null;
+            string modVersion = Plugin.ModVersion;
+            string gameVersion = ApiClient.SafeApplicationVersion();
+            double captureMs = sw.Elapsed.TotalMilliseconds;
 
-            ApiClient.SubmitBugReport(sid, name, desc, repro, sev, cat, logBundle,
-                (ok, resp) =>
+            bool started = _bugFormJob.Start("SCR-BugFormBundle", () =>
+            {
+                var r = new BugFormBundle { CaptureMs = captureMs };
+                var bsw = System.Diagnostics.Stopwatch.StartNew();
+                string logBundle = null;
+                if (inputs != null)
                 {
-                    bugSubmitting = false;
-                    if (ok)
-                    {
-                        // Pull bug_number out of the response so the user sees a
-                        // human-friendly ID they can quote in chat.
-                        int bn = ApiClient.ExtractJsonIntPublic(resp ?? "", "bug_number");
-                        bugSubmitStatus = bn > 0
-                            ? I18n.TrF("<color=#88FF88>Sent! Thank you. Filed as <b>#{0}</b>.</color>", bn)
-                            : I18n.Tr("<color=#88FF88>Sent! Thank you.</color>");
-                        bugDescription = "";
-                        bugRepro = "";
-                        string notif = bn > 0 ? I18n.TrF("Bug report sent. Thanks! (#{0})", bn)
-                                              : I18n.Tr("Bug report sent. Thanks!");
-                        ShowNotification(notif, new Color(0.5f, 1f, 0.5f), 5f);
-                        bugModalOpen = false;
-                    }
-                    else
-                    {
-                        // The failure detail is server-sent English (class D) —
-                        // it stays raw inside the translated template's hole.
-                        // Colour lives OUTSIDE the translated literal so the key is
-                        // the plain sentence. Baked-in markup made this the same
-                        // message as NativeUI's "Failed: {0}" under two different
-                        // keys, so translators had to translate it twice (reported
-                        // by a translator, 2026-08-07).
-                        bugSubmitStatus = "<color=#FF6666>"
-                                        + I18n.TrF("Failed: {0}", (resp ?? "").Replace("\n", " "))
-                                        + "</color>";
-                    }
-                });
+                    var info = new LogBundleCore.ComposeInfo();
+                    logBundle = ComposeLogBundle(inputs, info);
+                    r.Scrubbed = info.Scrubbed;
+                    r.Diagnostic = info.Diagnostic;
+                    r.ComposeThreadId = info.ThreadId;
+                }
+                string body = ApiClient.BuildBugReportBody(sid, name, modVersion, gameVersion,
+                                                           desc, repro, sev, cat, logBundle);
+                r.Body = System.Text.Encoding.UTF8.GetBytes(body);
+                r.Probe = ApiClient.SensitiveBodyProbe(body);
+                r.BuildMs = bsw.Elapsed.TotalMilliseconds;
+                return r;
+            },
+            // The type name only: an exception message from a file read can
+            // carry the path that produced it, and it has not been scrubbed.
+            ex => new BugFormBundle { Failure = ex.GetType().Name, CaptureMs = captureMs });
+            if (!started)
+                FailBugReportBuild("could not start the report builder");
+        }
+
+        /// <summary>What the bug form's worker hands back. Immutable once published.</summary>
+        private sealed class BugFormBundle
+        {
+            internal byte[] Body;
+            internal string Probe;
+            internal int Scrubbed;
+            internal string Diagnostic;
+            internal string Failure;
+            internal int ComposeThreadId;
+            internal double CaptureMs, BuildMs;
+        }
+
+        private static readonly LogBundleCore.OffMainJob<BugFormBundle> _bugFormJob =
+            new LogBundleCore.OffMainJob<BugFormBundle>();
+
+        /// <summary>MAIN THREAD, once a frame from Plugin's persistent tick.
+        /// Hands a finished bug-form bundle to the request; O(1) apart from
+        /// the transport copying the finished bytes.</summary>
+        internal static void PumpBugFormBundle()
+        {
+            int workerId;
+            var r = _bugFormJob.TakeFinished(out workerId);
+            if (r == null)
+            {
+                if (workerId != 0)
+                    FailBugReportBuild("the report could not be built");
+                return;
+            }
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            if (r.Failure != null)
+            {
+                Plugin.Log.LogWarning("[BUG-REPORT] the report could not be built (" + r.Failure + ")");
+                FailBugReportBuild("the report could not be built");
+                return;
+            }
+            if (!string.IsNullOrEmpty(r.Diagnostic))
+            {
+                LastScrubReplacements = r.Scrubbed;
+                if (r.Scrubbed < 0) Plugin.Log.LogError(r.Diagnostic);
+                else Plugin.Log.LogInfo(r.Diagnostic);
+            }
+            ApiClient.SubmitBugReportBody(r.Body, r.Probe, OnBugReportAnswer);
+            LogBundleThreadLine("bug form", r.ComposeThreadId, workerId, r.CaptureMs, r.BuildMs,
+                                sw.Elapsed.TotalMilliseconds, r.Body?.Length ?? 0);
+        }
+
+        /// <summary>The positive signal of the off-main build: which thread
+        /// composed the bundle against the registered main thread, and what
+        /// the main thread spent. A compose on the main thread is a WARNING
+        /// (the freeze is back), never silent.</summary>
+        internal static void LogBundleThreadLine(string producer, int composeThreadId, int workerThreadId,
+                                                 double captureMs, double buildMs, double handoffMs, int bodyBytes)
+        {
+            int main = LogBundleCore.MainThreadId;
+            bool onMain = composeThreadId != 0 && composeThreadId == main;
+            string line = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "[LOG-BUNDLE] {0}: composed on thread {1} (worker {2}, main {3}){4}; main thread: capture {5:F2} ms, hand-off {6:F2} ms; worker build {7:F0} ms; body {8} bytes",
+                producer, composeThreadId, workerThreadId, main, onMain ? " ON THE MAIN THREAD" : " off the main thread",
+                captureMs, handoffMs, buildMs, bodyBytes);
+            if (onMain) Plugin.Log.LogWarning(line); else Plugin.Log.LogInfo(line);
+        }
+
+        private static void OnBugReportAnswer(bool ok, string resp)
+        {
+            if (ok)
+            {
+                // Pull bug_number out of the response so the user sees a
+                // human-friendly ID they can quote in chat.
+                int bn = ApiClient.ExtractJsonIntPublic(resp ?? "", "bug_number");
+                _bugSubmission.Answer(bn > 0
+                    ? I18n.TrF("<color=#88FF88>Sent! Thank you. Filed as <b>#{0}</b>.</color>", bn)
+                    : I18n.Tr("<color=#88FF88>Sent! Thank you.</color>"));
+                bugDescription = "";
+                bugRepro = "";
+                string notif = bn > 0 ? I18n.TrF("Bug report sent. Thanks! (#{0})", bn)
+                                      : I18n.Tr("Bug report sent. Thanks!");
+                ShowNotification(notif, new Color(0.5f, 1f, 0.5f), 5f);
+                bugModalOpen = false;
+            }
+            else
+            {
+                _bugSubmission.Answer(BugReportFailureStatus(resp));
+            }
+        }
+
+        private static void FailBugReportBuild(string reason)
+        {
+            _bugSubmission.BuildFailure(BugReportFailureStatus(reason));
+        }
+
+        private static string BugReportFailureStatus(string resp)
+        {
+            // Keep the existing translated failure template and raw server detail.
+            return "<color=#FF6666>"
+                 + I18n.TrF("Failed: {0}", (resp ?? "").Replace("\n", " "))
+                 + "</color>";
         }
 
         // Builds the bug-report log bundle: previous-session BepInEx snapshot
         // + current BepInEx + Unity, each capped INDIVIDUALLY so all three
-        // fit in the submit cap with all three represented. Without per-section
-        // budgets the post-concat ApiClient cap would tail-trim — losing the
-        // BepInEx logs (which are usually the triage signal) when Unity's log
-        // happened to be large.
+        // are represented. Without per-section budgets the post-concat
+        // ApiClient cap would tail-trim, losing the BepInEx logs (usually the
+        // triage signal) when Unity's log happened to be large.
         //
-        // Budget split:
+        // Budget split (upper bounds per file, unchanged):
         //   BepInEx current     1.5M  — most important for live diagnosis
         //   BepInEx prev        1.0M  — crash-on-prior-launch context
         //   Unity Player.log    1.0M  — engine-side hint when needed
-        // That is 3.5M of LOG TEXT, which is exactly
-        // ApiClient.BUG_REPORT_LOG_CAP_CHARS and not under it — and the
-        // section headers and the audio self-check are on top. The comment
-        // here used to claim "~3.4M total, under 3.5M", which was arithmetic
-        // nobody had done (Codex r1 LOW, CompetitiveUI.cs:6141). Both senders
-        // therefore TAIL-TRIM to the cap, and the trim is deliberate rather
-        // than an accident the numbers were supposed to avoid: the audio
-        // self-check rides at the END for that reason, and what a full bundle
-        // gives up is the oldest lines of the previous session's log. If the
-        // per-section budgets are ever meant to fit whole, they have to come
-        // down — not the comment.
-        // Tail-most slice of each (most recent N chars) is taken. Each section
-        // emits a clearly delimited header so a triage reader can split the
-        // concatenation back into pieces.
+        //
+        // HEAD AND TAIL (night of 2026-10-19, bug 447): a capped file keeps
+        // its first LogBundleCore.HEAD_KEEP_CHARS (the boot banner, the
+        // cr_build line, the Harmony patch summary) and its last part up to
+        // its cap, with one [LOG-CAP] line naming the omitted byte range and
+        // the file's size. The tail-only read cut the build identity out of
+        // every capped LogOutput.log.
+        //
+        // FITTING THE SENDER CAP: the section caps total 3.5M characters,
+        // exactly ApiClient.BUG_REPORT_LOG_CAP_CHARS, including cap markers.
+        // Section headers and the audio self-check add to that total, and
+        // scrubbing can expand it. LogBundleCore.Compose reserves every
+        // required section head and reduces the current, previous and Unity
+        // TAIL windows against the actual scrubbed lengths. A successful
+        // bundle is within the cap before either builder receives it; a
+        // required-head payload that cannot fit is withheld.
+        // The audio self-check still rides at the END.
         private const int BUNDLE_CAP_BEP_CURRENT = 1_500_000;
         private const int BUNDLE_CAP_BEP_PREV    = 1_000_000;
         private const int BUNDLE_CAP_UNITY       = 1_000_000;
 
-        /// <summary>Replacement count from the most recent BuildLogBundle()
-        /// scrub. Read by the BUG FORM's own logging. The automatic upload does
-        /// NOT read it — it takes the count ComposeLogBundle hands back, so two
-        /// bundles in flight cannot report each other's figure.</summary>
+        /// <summary>Replacement count from the most recent bug-form bundle
+        /// scrub, written on the main thread by PumpBugFormBundle. The
+        /// automatic upload does NOT read it: it takes the count its own
+        /// compose hands back, so two bundles in flight cannot report each
+        /// other's figure.</summary>
         internal static int LastScrubReplacements { get; private set; }
 
         /// <summary>Everything a log bundle needs that can only be read on the
@@ -6479,80 +6603,29 @@ namespace CompetitiveRounds
             return i;
         }
 
-        /// <summary>THREAD-SAFE by contract — this is the expensive half, and
-        /// the automatic post-match upload runs it on a worker thread (Codex r1
-        /// HIGH, AutoLogUpload.cs:184: reading, scrubbing and escaping up to
-        /// 3.5 M characters at room exit was a visible freeze on the game
-        /// thread). It touches NO Unity API, NO Photon state, NO logger and NO
-        /// mutable static: every input arrives in <paramref name="inputs"/> and
-        /// every output leaves through a parameter or the return value. Keep it
-        /// that way — a single Plugin.Log call or Application.* read here puts
-        /// the freeze back, silently, on a worker thread where it may instead
-        /// throw.
+        /// <summary>THREAD-SAFE by contract, and WORKER THREAD ONLY by use:
+        /// both producers (the bug form, SubmitBugReportNow, and the automatic
+        /// upload, AutoLogUpload.OnRoomLeft) run it through
+        /// LogBundleCore.OffMainJob, and <paramref name="info"/> records the
+        /// thread it ran on so the [LOG-BUNDLE] line can say so. It touches NO
+        /// Unity API, NO Photon state, NO logger and NO mutable static: every
+        /// input arrives in <paramref name="inputs"/> and every output leaves
+        /// through <paramref name="info"/> or the return value.
         ///
-        /// <paramref name="scrubbed"/> is -1 when the scrub could not complete;
-        /// the returned text is then the withheld-content sentence, never the
-        /// unscrubbed bundle. <paramref name="diagnostic"/> is the line the
-        /// CALLER logs once it is back on the main thread.</summary>
-        internal static string ComposeLogBundle(LogBundleInputs inputs, out int scrubbed, out string diagnostic)
+        /// THE scrub site is inside: both senders ship this exact text, and
+        /// the section headers embed the log FILE PATHS, so the scrub runs
+        /// after they are appended. info.Scrubbed is -1 when the scrub could
+        /// not complete; the returned text is then the withheld-content
+        /// sentence, never the unscrubbed bundle. info.Diagnostic is the line
+        /// the CALLER logs once it is back on the main thread.</summary>
+        internal static string ComposeLogBundle(LogBundleInputs inputs, LogBundleCore.ComposeInfo info)
         {
             if (inputs == null) inputs = new LogBundleInputs();
-            string bep     = ApiClient.ReadLogTail(inputs.BepPath,     maxChars: BUNDLE_CAP_BEP_CURRENT);
-            string bepPrev = ApiClient.ReadLogTail(inputs.BepPrevPath, maxChars: BUNDLE_CAP_BEP_PREV);
-            string uni     = ApiClient.ReadLogTail(inputs.UniPath,     maxChars: BUNDLE_CAP_UNITY);
-            var sb = new System.Text.StringBuilder();
-            if (!string.IsNullOrEmpty(bepPrev))
-            {
-                sb.AppendLine($"===== BepInEx LogOutput-prev.log [{inputs.BepPrevPath}]  ({bepPrev.Length:N0} chars, cap {BUNDLE_CAP_BEP_PREV:N0}) =====");
-                sb.AppendLine(bepPrev);
-                sb.AppendLine();
-            }
-            sb.AppendLine($"===== BepInEx LogOutput.log [{inputs.BepPath ?? "(path unknown)"}]  ({(bep?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_BEP_CURRENT:N0}) =====");
-            sb.AppendLine(string.IsNullOrEmpty(bep) ? "(not found)" : bep);
-            sb.AppendLine();
-            sb.AppendLine($"===== Unity Player.log [{inputs.UniPath ?? "(path unknown)"}]  ({(uni?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_UNITY:N0}) =====");
-            sb.AppendLine(string.IsNullOrEmpty(uni) ? "(not found)" : uni);
-            sb.AppendLine();
-            sb.AppendLine("===== audio self-check (at submit) =====");
-            sb.AppendLine(inputs.AudioSnapshot ?? "(audio self-check not captured)");
-
-            // THE scrub site. It is here, and not at either sender, because
-            // both senders ship this exact text: a scrub at one call site
-            // would leave the other one unscrubbed the first time somebody
-            // added a third sender. The section headers above embed the log
-            // FILE PATHS, and Unity's log lives under the user profile, so the
-            // scrub has to run after they are appended.
-            //
-            // A null return is the scrub reporting that it could not do its
-            // job. The text is withheld in that case: a bug report or an
-            // upload that arrives as one honest sentence is a far better
-            // outcome than one that arrives carrying a machine's account name.
-            string cleaned = LogScrub.Scrub(sb.ToString(), out scrubbed);
-            if (cleaned == null)
-            {
-                scrubbed = -1;
-                diagnostic = "[LOG-SCRUB] scrub failed — log bundle withheld rather than sent unscrubbed";
-                return "[log bundle withheld: the local-path scrub failed on this machine]";
-            }
-            diagnostic = $"[LOG-SCRUB] bundle {cleaned.Length:N0} chars, {scrubbed} local-identity replacement(s)";
-            return cleaned;
-        }
-
-        /// <summary>The BUG FORM's producer: capture + compose in one go, on
-        /// the thread that called it. The form is a menu click with a modal
-        /// already on screen and a spinner the player is watching, so a pause
-        /// there is the expected cost of pressing Send; the ROOM-EXIT producer
-        /// is the one that may not pause, and it schedules the same two halves
-        /// itself. Internal, not private, because AutoLogUpload used to call
-        /// this and the shape is still the single producer of the TEXT.</summary>
-        internal static string BuildLogBundle()
-        {
-            int scrubbed; string diagnostic;
-            string cleaned = ComposeLogBundle(CaptureLogBundleInputs(), out scrubbed, out diagnostic);
-            LastScrubReplacements = scrubbed;
-            if (scrubbed < 0) Plugin.Log.LogError(diagnostic);
-            else Plugin.Log.LogInfo(diagnostic);
-            return cleaned;
+            return LogBundleCore.Compose(inputs.BepPath, inputs.BepPrevPath, inputs.UniPath, inputs.AudioSnapshot,
+                                         BUNDLE_CAP_BEP_CURRENT, BUNDLE_CAP_BEP_PREV, BUNDLE_CAP_UNITY,
+                                         ApiClient.BUG_REPORT_LOG_CAP_CHARS,
+                                         (string text, out int n) => LogScrub.Scrub(text, out n),
+                                         info);
         }
 
         // Walks from the plugin assembly's location back to <ROUNDS>/BepInEx/.
@@ -6632,27 +6705,103 @@ namespace CompetitiveRounds
         }
 
         // ── Log viewer modal ────────────────────────────────────────────
+        // Night of 2026-10-19 sweep: the viewer used to read three 400k
+        // tails on the game thread at Open and at Refresh, asked the file
+        // system for the Unity log path on every OnGUI event (UnityLogPath
+        // probes File.Exists), and laid out one label of up to 400,000
+        // characters on every OnGUI event. Now the paths are captured once
+        // at Open or Refresh, the reads and the line split run on a worker
+        // (LogBundleCore.OffMainJob), and only the lines inside the scroll
+        // viewport are drawn, so a frame's cost no longer scales with the log.
         private static bool logViewerOpen = false;
         private static int logViewerTab = 0;     // 0=BepInEx, 1=BepInEx-prev, 2=Unity
         private static Vector2 logViewerScroll;
-        private static string logViewerBepCache, logViewerBepPrevCache, logViewerUniCache;
+        private static string[][] logViewerLines = new string[3][];
+        private static string[] logViewerPaths = new string[3];
         private static GUIStyle logViewerStyle, logViewerTabStyle, logViewerTabActiveStyle;
+        private const int LOG_VIEWER_TAIL_CHARS = 400_000;
+        private const float LOG_VIEWER_LINE_H = 14f;
+        private const int LOG_VIEWER_LINE_DRAW_CHARS = 1000;
+
+        private sealed class LogViewerRead
+        {
+            internal string[] Paths;
+            internal string[][] Lines;
+            internal int[] Chars;
+        }
+
+        private static readonly LogBundleCore.OffMainJob<LogViewerRead> _logViewerJob =
+            new LogBundleCore.OffMainJob<LogViewerRead>();
+        private static readonly LogBundleCore.ReadRequestLatch _logViewerRequests =
+            new LogBundleCore.ReadRequestLatch();
 
         private static void OpenLogViewer()
         {
             logViewerOpen = true;
-            logViewerBepCache     = ApiClient.ReadLogTail(BepInExLogPath(), maxChars: 400_000);
-            logViewerBepPrevCache = ApiClient.ReadLogTail(BepInExLogPreviousPath(), maxChars: 400_000);
-            logViewerUniCache     = ApiClient.ReadLogTail(UnityLogPath(), maxChars: 400_000);
-            Plugin.Log.LogInfo($"[BUG-REPORT-VIEWER] bep_path={BepInExLogPath()} bep_chars={logViewerBepCache?.Length ?? 0}; " +
-                               $"prev_path={BepInExLogPreviousPath()} prev_chars={logViewerBepPrevCache?.Length ?? 0}; " +
-                               $"uni_path={UnityLogPath()} uni_chars={logViewerUniCache?.Length ?? 0}");
+            StartLogViewerRead();
+        }
+
+        /// <summary>MAIN THREAD: coalesce open and refresh requests.</summary>
+        private static void StartLogViewerRead()
+        {
+            _logViewerRequests.Request();
+        }
+
+        /// <summary>MAIN THREAD: the three paths (cheap), then the worker.</summary>
+        private static bool DispatchLogViewerRead()
+        {
+            var paths = new string[3];
+            try { paths[0] = BepInExLogPath(); } catch { }
+            try { paths[1] = BepInExLogPreviousPath(); } catch { }
+            try { paths[2] = UnityLogPath(); } catch { }
+            logViewerPaths = paths;
+            return _logViewerJob.Start("SCR-LogViewerRead", () =>
+            {
+                var r = new LogViewerRead { Paths = paths, Lines = new string[3][], Chars = new int[3] };
+                for (int i = 0; i < 3; i++)
+                {
+                    string text = ApiClient.ReadLogTail(paths[i], maxChars: LOG_VIEWER_TAIL_CHARS);
+                    r.Chars[i] = text?.Length ?? 0;
+                    r.Lines[i] = SplitViewerLines(text);
+                }
+                return r;
+            }, ex => null);
+        }
+
+        /// <summary>WORKER THREAD. Lines without their CR, each cut to what a
+        /// row can show; null for an empty text.</summary>
+        private static string[] SplitViewerLines(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            string[] lines = text.Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string l = lines[i];
+                if (l.Length > 0 && l[l.Length - 1] == '\r') l = l.Substring(0, l.Length - 1);
+                if (l.Length > LOG_VIEWER_LINE_DRAW_CHARS) l = l.Substring(0, LOG_VIEWER_LINE_DRAW_CHARS) + " ...";
+                lines[i] = l;
+            }
+            return lines;
+        }
+
+        /// <summary>MAIN THREAD: consume a finished read before dispatching a pending refresh.</summary>
+        private static void PumpLogViewerRead()
+        {
+            int wid;
+            var r = _logViewerRequests.Pump(_logViewerJob, DispatchLogViewerRead, out wid);
+            if (r == null) return;
+            logViewerLines = r.Lines;
+            logViewerPaths = r.Paths;
+            Plugin.Log.LogInfo($"[BUG-REPORT-VIEWER] bep_path={r.Paths[0]} bep_chars={r.Chars[0]}; " +
+                               $"prev_path={r.Paths[1]} prev_chars={r.Chars[1]}; " +
+                               $"uni_path={r.Paths[2]} uni_chars={r.Chars[2]}");
         }
 
         private static void DrawLogViewerModal()
         {
             if (!logViewerOpen) return;
             if (!NativeUI.IsOpen) { logViewerOpen = false; return; }
+            PumpLogViewerRead();
             if (logViewerStyle == null)
             {
                 logViewerStyle = new GUIStyle(GUI.skin.label)
@@ -6694,39 +6843,50 @@ namespace CompetitiveRounds
                 logViewerTab = 2;
             if (GUI.Button(new Rect(x + w - 200, y + 28, 90, 26), I18n.Tr("Refresh"), logViewerTabStyle))
             {
-                logViewerBepCache     = ApiClient.ReadLogTail(BepInExLogPath(), maxChars: 400_000);
-                logViewerBepPrevCache = ApiClient.ReadLogTail(BepInExLogPreviousPath(), maxChars: 400_000);
-                logViewerUniCache     = ApiClient.ReadLogTail(UnityLogPath(), maxChars: 400_000);
+                StartLogViewerRead();
             }
             if (GUI.Button(new Rect(x + w - 100, y + 28, 100, 26), I18n.Tr("Close"), logViewerTabStyle))
             { logViewerOpen = false; return; }
 
-            string body, path;
-            switch (logViewerTab)
+            int tab = Mathf.Clamp(logViewerTab, 0, 2);
+            string[] lines = logViewerLines != null ? logViewerLines[tab] : null;
+            string path = logViewerPaths != null ? logViewerPaths[tab] : null;
+            string message = null;
+            if (lines == null || lines.Length == 0)
             {
-                case 0: body = logViewerBepCache;     path = BepInExLogPath();         break;
-                case 1: body = logViewerBepPrevCache; path = BepInExLogPreviousPath(); break;
-                default: body = logViewerUniCache;    path = UnityLogPath();           break;
-            }
-            if (string.IsNullOrEmpty(body))
-            {
-                if (logViewerTab == 1)
-                    body = I18n.TrF("(no previous-session log yet — gets written by the mod when ROUNDS is closed cleanly, so on first ever launch this is empty)\n\nExpected path: {0}",
-                                    path ?? I18n.Tr("unknown"));
+                if (_logViewerJob.Busy)
+                    message = "...";
+                else if (tab == 1)
+                    message = I18n.TrF("(no previous-session log yet — gets written by the mod when ROUNDS is closed cleanly, so on first ever launch this is empty)\n\nExpected path: {0}",
+                                       path ?? I18n.Tr("unknown"));
                 else
-                    body = I18n.TrF("(no log content read from: {0})", path ?? I18n.Tr("unknown path"));
+                    message = I18n.TrF("(no log content read from: {0})", path ?? I18n.Tr("unknown path"));
             }
 
             float bodyY = y + 64;
             float bodyH = h - 70;
             // Wide content rect so horizontal scrolling works for very long lines.
             float contentW = w - 30;
-            float estLines = body.Length / 110f + 4;
-            float contentH = Mathf.Max(bodyH - 12, estLines * 14f);
+            if (message != null)
+            {
+                logViewerScroll = GUI.BeginScrollView(new Rect(x, bodyY, w, bodyH),
+                                                      logViewerScroll,
+                                                      new Rect(0, 0, contentW, bodyH - 12));
+                GUI.Label(new Rect(4, 4, contentW - 8, bodyH - 16), message, logViewerStyle);
+                GUI.EndScrollView();
+                return;
+            }
+            float contentH = Mathf.Max(bodyH - 12, lines.Length * LOG_VIEWER_LINE_H + 8f);
             logViewerScroll = GUI.BeginScrollView(new Rect(x, bodyY, w, bodyH),
                                                   logViewerScroll,
                                                   new Rect(0, 0, contentW, contentH));
-            GUI.Label(new Rect(4, 4, contentW - 8, contentH - 4), body, logViewerStyle);
+            // Only the rows inside the viewport: the frame's cost is bounded by
+            // the window height, not by the length of the log.
+            int first = Mathf.Max(0, Mathf.FloorToInt((logViewerScroll.y - 4f) / LOG_VIEWER_LINE_H));
+            int count = Mathf.CeilToInt(bodyH / LOG_VIEWER_LINE_H) + 2;
+            int last = Mathf.Min(lines.Length, first + count);
+            for (int i = first; i < last; i++)
+                GUI.Label(new Rect(4, 4 + i * LOG_VIEWER_LINE_H, contentW - 8, LOG_VIEWER_LINE_H), lines[i], logViewerStyle);
             GUI.EndScrollView();
         }
 

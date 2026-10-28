@@ -1243,6 +1243,38 @@ internal static class Program
         return kept;
     }
 
+    /// <summary>A syntactic call is identified by its file, enclosing member,
+    /// and opening-parenthesis offset in the CODE view. Qualified and bare
+    /// searches for the same call share that offset; two calls on one line do
+    /// not. Line numbers are only display coordinates, never identities.</summary>
+    private sealed class CallIdentity
+    {
+        internal readonly string File;
+        internal readonly string Member;
+        internal readonly int At;
+        internal CallIdentity(string file, string member, int at)
+        { File = file; Member = member; At = at; }
+        internal string Owner { get { return File + " :: " + Member; } }
+        internal string Key { get { return Owner + " @" + At; } }
+    }
+
+    private static List<CallIdentity> DistinctCallsIn(string rel, string blanked, params string[] names)
+    {
+        var calls = new List<CallIdentity>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string name in names)
+            foreach (int start in CallSitesIn(blanked, name))
+            {
+                // CallSitesIn has already matched the name followed by '('.
+                // Its opening parenthesis normalizes qualified and bare hits.
+                int at = blanked.IndexOf('(', start);
+                var call = new CallIdentity(rel, EnclosingMemberOf(blanked, at) ?? "(no enclosing member)", at);
+                if (seen.Add(call.Key)) calls.Add(call);
+            }
+        calls.Sort((a, b) => a.At.CompareTo(b.At));
+        return calls;
+    }
+
     /// <summary>One construction site: the offset of its `new` keyword, the type
     /// spelling that construction carries, and whether that spelling has a
     /// type-argument list - which is what tells a PAIR from a MAP of pairs.</summary>
@@ -2858,10 +2890,17 @@ internal static class Program
             "plugin/ApiClient.cs",
             "public static void UpdateOvtQueuePoll(bool force)",
             "ProximityVictimGate.StageInto(prejoin);");
+        // W7c - the FFA pre-join merge lives in ArmFfaLock since ce466f38 (the
+        // lock arm the poll and the re-form path share); W7d asserts the poll
+        // still reaches it, so the advert still rides every FFA pre-join.
         CheckAnchorInMember("W7c Wiring_TheAdvertRidesTheFreeForAllPreJoin",
             "plugin/ApiClient.cs",
-            "public static void UpdateFfaQueuePoll(bool force)",
+            "public static void ArmFfaLock(string resp, int gen, bool reform)",
             "ProximityVictimGate.StageInto(prejoin);");
+        CheckAnchorInMember("W7d Wiring_TheFreeForAllPollArmsTheLockThatStagesTheAdvert",
+            "plugin/ApiClient.cs",
+            "public static void UpdateFfaQueuePoll(bool force)",
+            "ArmFfaLock(resp, gen, false);");
 
         // W8 - the no-owning-ring reasoning sits on the member that implements
         // it, not on the diagnostic sink it once drifted onto.
@@ -3534,6 +3573,8 @@ internal static class Program
         // constructor every other attachment route has to go through, so it
         // bounds routes this suite has not thought of.
         int patchSites = 0, patchAll = 0, harmonyCtors = 0;
+        int harmonyHome = 0, harmonyIce = 0;
+        const string iceRel = "plugin/IdentityClockEvidence.cs";
         var patchWhere = new List<string>();
         foreach (string rel in shippedCs)
         {
@@ -3544,6 +3585,8 @@ internal static class Program
             int pa = CallsToIn(blanked, "PatchAll");
             int hc = CountOf(blanked, "new Harmony(");
             patchSites += cp; patchAll += pa; harmonyCtors += hc;
+            if (rel == "plugin/Plugin.cs") harmonyHome += hc;
+            else if (rel == iceRel) harmonyIce += hc;
             if (cp + pa + hc != 0)
                 patchWhere.Add(rel + " CreateClassProcessor=" + cp + " PatchAll=" + pa + " newHarmony=" + hc);
         }
@@ -3556,9 +3599,47 @@ internal static class Program
             reachProblems.Add("and no PatchAll call may stand beside it anywhere in the assembly, or patches "
                 + "attach from a second site the reachability argument does not bound; found " + patchAll
                 + ": " + patchMap);
-        if (harmonyCtors != 1)
-            reachProblems.Add("and exactly one Harmony instance may be constructed in the assembly, since every "
-                + "other attachment route goes through one; found " + harmonyCtors + ": " + patchMap);
+        // THE CLOSED SET IS TWO NAMED SITES (merged round 3, T3c). Plugin.cs's
+        // bootstrap instance is the one patch site above. The second is the
+        // identity-clock evidence fixture: one instance in PostBoot.PatchListed
+        // that adds a single no-op postfix to one named method, reached only
+        // from ArmFromFile below its config-file gate (absent file: nothing is
+        // constructed). It patches no class processor and attaches none of the
+        // three cleanup callbacks, so the attachment count it could move is
+        // none. Any other constructor, a second one in either file, or that
+        // site in another shape or off its gate, is outside the set.
+        bool iceOk = harmonyIce == 0;
+        string iceWhy = "";
+        if (harmonyIce == 1)
+        {
+            SurfaceFile icePair;
+            string ice = surface.TryGetValue(iceRel, out icePair) ? icePair.Code : null;
+            int po, pc, ao, ac; string pp, ap;
+            if (ice == null) iceWhy = "cannot read " + iceRel;
+            else if (!TryMemberSpan(ice, "private static void PatchListed(string key)", out po, out pc, out pp)) iceWhy = pp;
+            else if (!TryMemberSpan(ice, "internal static void ArmFromFile()", out ao, out ac, out ap)) iceWhy = ap;
+            else
+            {
+                string patchBody = ice.Substring(po, pc - po + 1);
+                string armBody = ice.Substring(ao, ac - ao + 1);
+                var listed = CallSitesIn(ice, "PatchListed");
+                int gate = armBody.IndexOf("if (!File.Exists(path)) return;", StringComparison.Ordinal);
+                int call = armBody.IndexOf("PatchListed(", StringComparison.Ordinal);
+                if (CountOf(patchBody, "new Harmony(OWNER).Patch(target, postfix: new HarmonyMethod(typeof(PostBoot), nameof(Noop)));") != 1)
+                    iceWhy = "its constructor must be the one no-op postfix statement inside PostBoot.PatchListed";
+                else if (listed.Count != 1 || listed[0] < ao || listed[0] > ac)
+                    iceWhy = "PatchListed must be called exactly once, from ArmFromFile; found " + listed.Count;
+                else if (gate < 0 || call < 0 || gate > call)
+                    iceWhy = "ArmFromFile must reach PatchListed only below its config-file gate";
+                else iceOk = true;
+            }
+        }
+        else if (harmonyIce > 1) iceWhy = "found " + harmonyIce + " in " + iceRel;
+        if (harmonyHome != 1 || harmonyCtors != harmonyHome + harmonyIce || !iceOk)
+            reachProblems.Add("and the Harmony instances constructed in the assembly must be the closed set of two "
+                + "named sites - exactly one in plugin/Plugin.cs, and at most the config-gated no-op postfix of "
+                + iceRel + " - since every other attachment route goes through one; found " + harmonyCtors
+                + ": " + patchMap + (iceWhy.Length != 0 ? " (" + iceWhy + ")" : ""));
 
         // --- the disabled flag: ONE-WAY, over the same enumerated surface -----
         //
@@ -3659,7 +3740,7 @@ internal static class Program
         //       below the gate;
         //   R6  the CALLER SET AT MEMBER GRAIN, over every file: each staging
         //       entry-point call site is resolved to the member that encloses it
-        //       and that member must be one of the 8 named below - so a call
+        //       and that member must be one of the 9 named below - so a call
         //       lifted out of a tab refresher into another NativeUI member, or
         //       added to a sixth ApiClient member, reddens and is named. This
         //       is what R3/R4 could not do: R3 skipped every file that was not
@@ -3730,8 +3811,23 @@ internal static class Program
                 new[] { "private static void ParseTeamQueuePoll(string response)",
                         "public static void UpdateTeamQueuePoll(string steamId)" },
                 new[] { "public static void UpdateOvtQueuePoll(bool force)", null },
-                new[] { "public static void UpdateFfaQueuePoll(bool force)", null }
+                // The FFA merge lives in ArmFfaLock since ce466f38 (W7c/W7d): the
+                // lock arm builds no request, so it takes the parser's form - its
+                // ApiClient call site must sit inside the poll's response
+                // callback - and its one other entry, the re-form path, is named
+                // in stageReentry below rather than waved past.
+                new[] { "public static void ArmFfaLock(string resp, int gen, bool reform)",
+                        "public static void UpdateFfaQueuePoll(bool force)" }
             };
+            // NAMED RE-ENTRIES of a merge member that builds no request, outside
+            // ApiClient.cs, one call per named member. The FFA re-form arms the
+            // same lock from FfaAssembly.Move, which runs on the server's
+            // "reformed" answer (R9 closes Move's own caller set to that answer
+            // handler). A caller in any other member, or a second one in Move,
+            // reddens and is named.
+            var stageReentry = new Dictionary<string, string[]>(StringComparer.Ordinal);
+            stageReentry["ArmFfaLock"] = new[]
+                { "plugin/FfaAssembly.cs :: internal static void Move(string lockRaw, float receiptRt)" };
             foreach (string[] pair in stageMembers)
             {
                 string sig = pair[0], host = pair[1];
@@ -3776,26 +3872,34 @@ internal static class Program
                             + ", merge at " + site);
                     continue;
                 }
-                // The parser's own entry: called exactly once in the assembly,
-                // from inside the named host, after that host's request.
+                // Every call in ApiClient must be the one host callback call;
+                // calls outside ApiClient must match the named re-entries.
                 int ho, hc; string hp;
                 if (!TryMemberSpan(apiBlank, host, out ho, out hc, out hp)) { reachProblems.Add(hp); continue; }
                 string name = MemberName(sig);
                 var callers = new List<string>();
                 int inHost = 0;
+                int apiCalls = 0;
+                string[] reentry;
+                if (!stageReentry.TryGetValue(name, out reentry)) reentry = new string[0];
+                var reentryFound = new List<string>();
                 foreach (string rel in shippedCs)
                 {
                     SurfaceFile b2Pair;
                     if (!surface.TryGetValue(rel, out b2Pair)) continue;
                     string b2 = b2Pair.Code;
-                    var sites = CallSitesIn(b2, name);
-                    if (rel != apiRel) sites.AddRange(CallSitesIn(b2, "ApiClient." + name));
-                    if (sites.Count == 0) continue;
-                    callers.Add(rel + " x" + sites.Count);
-                    if (rel != apiRel) continue;
-                    foreach (int at in sites)
+                    var calls = DistinctCallsIn(rel, b2, name, "ApiClient." + name);
+                    foreach (CallIdentity call in calls)
                     {
-                        if (at < ho || at > hc) continue;
+                        callers.Add(call.Key);
+                        if (rel != apiRel)
+                        {
+                            reentryFound.Add(call.Owner);
+                            continue;
+                        }
+                        apiCalls++;
+                        int at = call.At;
+                        if (call.Member != host || at < ho || at > hc) continue;
                         int hostUrl = apiBlank.IndexOf("baseUrl", ho, StringComparison.Ordinal);
                         if (hostUrl < 0 || hostUrl >= hc || hostUrl >= at) continue;
                         // R7 for the borrowed request: the parser's call site
@@ -3806,12 +3910,21 @@ internal static class Program
                         if (at >= lo && at <= lc) inHost++;
                     }
                 }
-                if (callers.Count != 1 || inHost != 1)
+                var reentryWant = new List<string>(reentry);
+                reentryFound.Sort(StringComparer.Ordinal);
+                reentryWant.Sort(StringComparer.Ordinal);
+                bool reentryOk = string.Join(" | ", reentryFound.ToArray())
+                    == string.Join(" | ", reentryWant.ToArray());
+                if (apiCalls != 1 || inHost != 1 || !reentryOk)
                     reachProblems.Add("'" + name + "' carries a merge but builds no request, so its own entry "
-                        + "is what makes it downstream: it must be called exactly once in the assembly, from "
-                        + "INSIDE the response callback of '" + host + "'s baseUrl request; found "
+                        + "is what makes it downstream: it must be called exactly once in " + apiRel + ", from "
+                        + "INSIDE the response callback of '" + host + "'s baseUrl request, and elsewhere only "
+                        + "from its named re-entries ("
+                        + (reentryWant.Count == 0 ? "none" : string.Join(" | ", reentryWant.ToArray()))
+                        + "); found "
                         + (callers.Count == 0 ? "no caller" : string.Join(" | ", callers.ToArray()))
-                        + ", " + inHost + " of them in place");
+                        + ", " + inHost + " of them in place, re-entries "
+                        + (reentryFound.Count == 0 ? "none" : string.Join(" | ", reentryFound.ToArray())));
             }
         }
 
@@ -3844,7 +3957,13 @@ internal static class Program
             {
                 "public static void Initialize(string url)",
                 "private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)",
-                "private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)"
+                "private static void OnSecureRouteRestored(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)",
+                // The disabled seat's compat base (seat-evidence lane): sets the
+                // prefix only while it is still EMPTY, on a seat where the
+                // other-plug-in check disabled the mod, so Initialize never runs
+                // and the gate flag below never opens the tick. Named here, and
+                // its one caller closed in R9, like the three above.
+                "internal static void SeatEvidenceCompatBase(string url)"
             };
             var urlWhere = new List<string>();
             bool initWrites = false;
@@ -3855,7 +3974,8 @@ internal static class Program
                 if (owner != null && owner == urlWriters[0]) initWrites = true;
                 if (owner == null || Array.IndexOf(urlWriters, owner) < 0)
                     reachProblems.Add("the request prefix may be written only from " + urlWriters[0]
-                        + ", the boot probe's verdict or the secure-route flip; found a write at " + apiRel + " line "
+                        + ", the boot probe's verdict, the secure-route flip or the disabled seat's compat base; "
+                        + "found a write at " + apiRel + " line "
                         + w.Line + " inside '" + (owner ?? "no member") + "'");
                 // AND EVERY ONE OF THOSE WRITES MUST ACTUALLY RETARGET IT. The
                 // prefix is declared with the EMPTY string, which is not null,
@@ -3912,15 +4032,49 @@ internal static class Program
             new[] { apiRel + " :: private static void OnSecureRunConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)" };
         callerBound["ApiClient.OnSecureRouteRestored"] =
             new[] { apiRel + " :: private static void OnSecureRunConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)" };
-        callerBound["ApiClient.FfaProbeServerState"] =
+        callerBound["ApiClient.SeatEvidenceCompatBase"] =
+            new[] { "plugin/SeatEvidence.cs :: private static void DisabledSeatSession()" };
+        // THE READMISSION ROUTE (V3 P4.2). The FFA tab no longer calls the probe
+        // itself: it calls FfaReadmit.DiscoverThenProbe, which probes when no
+        // readmission is offered (two sites), and the readmission bar's Decline
+        // and the claim answer's Act probe after a refusal. DiscoverThenProbe's
+        // own caller is closed to the tab refresher R5 places, so the tab route
+        // is still walked to the gate; Decline is an IMGUI button and Act runs on
+        // the claim's reply - the routes no scan can walk, placed by name like
+        // FfaKickFromLobby and FfaEnrollResult.
+        const string rdmRel = "plugin/FfaReadmit.cs";
+        callerBound["ApiClient.FfaProbeServerState"] = new[]
+        {
+            rdmRel + " :: internal static void DiscoverThenProbe()",
+            rdmRel + " :: internal static void DiscoverThenProbe()",
+            rdmRel + " :: internal static void Decline()",
+            rdmRel + " :: private static void Act(string step, FfaReadmitEntryRules.RdmNext next, FfaReadmitEntryRules.RdmAnswer a)"
+        };
+        callerBound["FfaReadmit.DiscoverThenProbe"] =
             new[] { uiRel + " :: private static void MaybeRefreshFfaTab()" };
+        // FfaStartReadmitPoll is a permitted member of the staging entry-point set
+        // (R6); its one caller is the claim answer's Act.
+        callerBound["ApiClient.FfaStartReadmitPoll"] = new[]
+            { rdmRel + " :: private static void Act(string step, FfaReadmitEntryRules.RdmNext next, FfaReadmitEntryRules.RdmAnswer a)" };
+        // The FFA re-form's re-entry into ArmFfaLock (R7 stageReentry) is closed
+        // one link up, to the two replies that carry a re-formed lock: the
+        // server's assembly answer and the FFA queue poll's own reply.
+        callerBound["FfaAssembly.Move"] = new[]
+        {
+            "plugin/FfaAssembly.cs :: internal static void HandleAnswer(Answer a)",
+            apiRel + " :: public static void UpdateFfaQueuePoll(bool force)"
+        };
         // { qualified spelling, bare spelling, the file that DECLARES it }
         string[][] callerTargets = new[]
         {
             new[] { "ApiClient.Initialize",             "Initialize",             apiRel },
             new[] { "ApiClient.OnBootProbeConcluded",   "OnBootProbeConcluded",   apiRel },
             new[] { "ApiClient.OnSecureRouteRestored",  "OnSecureRouteRestored",  apiRel },
-            new[] { "ApiClient.FfaProbeServerState",    "FfaProbeServerState",    apiRel }
+            new[] { "ApiClient.SeatEvidenceCompatBase", "SeatEvidenceCompatBase", apiRel },
+            new[] { "ApiClient.FfaProbeServerState",    "FfaProbeServerState",    apiRel },
+            new[] { "FfaReadmit.DiscoverThenProbe",     "DiscoverThenProbe",      rdmRel },
+            new[] { "ApiClient.FfaStartReadmitPoll",    "FfaStartReadmitPoll",    apiRel },
+            new[] { "FfaAssembly.Move",                 "Move",                   "plugin/FfaAssembly.cs" }
         };
         var callerMap = new List<string>();
         foreach (string[] t in callerTargets)
@@ -3980,7 +4134,24 @@ internal static class Program
         // counter, one screen of this file away. The line is collapsed, an
         // optional leading `global` is consumed, and what is left is read as
         // `using`, then the rest of the directive.
-        const string apiType = "ApiClient";
+        //
+        // THE ANSWERED STATIC IMPORT. The readmission lane's session report
+        // model imports its own rules type statically. A static import is only a
+        // hazard here when the type it imports OWNS a member this bound searches
+        // for, so the owner types are read out of callerTargets (never typed
+        // twice) and an import of one of them reddens wherever it appears. Any
+        // other static import still reddens unless it is answered below, by file
+        // and by its exact collapsed directive - so a new one has to be answered
+        // the same way, and an answered one that changes its type reddens again.
+        var ownerTypes = new List<string>();
+        foreach (string[] t in callerTargets)
+        {
+            string owner = t[0].Substring(0, t[0].IndexOf('.'));
+            if (!ownerTypes.Contains(owner)) ownerTypes.Add(owner);
+        }
+        var answeredStatic = new Dictionary<string, string>(StringComparer.Ordinal);
+        answeredStatic["plugin/SessionReportModel.cs"] = "using static CompetitiveRounds.SessionReportRules;";
+        var answeredSeen = new List<string>();
         foreach (string rel in shippedCs)
         {
             SurfaceFile usingViewPair;
@@ -3992,16 +4163,27 @@ internal static class Program
                 if (t.StartsWith("global ", StringComparison.Ordinal)) t = t.Substring("global ".Length);
                 if (!t.StartsWith("using ", StringComparison.Ordinal)) continue;
                 string directive = t.Substring("using ".Length);
+                string named = directive.TrimEnd(';', ' ');
+                string lastName = named.Substring(named.LastIndexOf('.') + 1).Trim();
                 if (directive.StartsWith("static ", StringComparison.Ordinal))
-                    reachProblems.Add(rel + " carries '" + Collapse(raw) + "' - a static import can bring a bare "
-                        + "member name into a file where this bound searches qualified only, so the "
-                        + "caller set would no longer be closed");
+                {
+                    string answer;
+                    bool ownsTarget = ownerTypes.Contains(lastName);
+                    if (!ownsTarget && answeredStatic.TryGetValue(rel, out answer) && answer == Collapse(raw))
+                        answeredSeen.Add(rel + " '" + answer + "'");
+                    else
+                        reachProblems.Add(rel + " carries '" + Collapse(raw) + "' - a static import can bring a bare "
+                            + "member name into a file where this bound searches qualified only, so the "
+                            + "caller set would no longer be closed");
+                }
                 else if (directive.IndexOf('=') > 0
-                         && directive.TrimEnd(';', ' ').EndsWith(apiType, StringComparison.Ordinal))
+                         && ownerTypes.Exists(o => named.EndsWith(o, StringComparison.Ordinal)))
                     reachProblems.Add(rel + " carries '" + Collapse(raw) + "' - an alias gives the writers' owner a "
                         + "second name and this bound searches for one");
             }
         }
+        Console.WriteLine("NOTE  W25 answered static imports (their types own no bounded member): "
+            + (answeredSeen.Count == 0 ? "none" : string.Join("; ", answeredSeen.ToArray())));
 
         // R2 - the gate flag.
         SurfaceScan initScan = ScanField(shippedCs, surface,
@@ -4107,7 +4289,7 @@ internal static class Program
         // staging call moved out of a tab refresher into a menu member, or added
         // to a sixth ApiClient member, changed no count and no file and stayed
         // green. The set below is written out because it is the CLAIM: these
-        // 8 members, and no others, reach a staging entry point. Its price
+        // 9 members, and no others, reach a staging entry point. Its price
         // is that it must be edited when a caller legitimately moves; that is
         // the point - the edit is where a reader is told the route changed.
         //
@@ -4122,6 +4304,9 @@ internal static class Program
         // reached through a delegate the menu stores, FfaEnrollResult and
         // HandleResolveProbe from response callbacks. R7 and R8 are what bound
         // those, and the set here is what stops a NEW one appearing unremarked.
+        // FfaStartReadmitPoll (V3 P4.2) is the readmission claim's poll start:
+        // R9 closes its one caller to FfaReadmit's Act, which runs on the claim's
+        // reply.
         var entryWhere = new List<string>();
         var entryMembers = new List<string>();
         var permittedMembers = new Dictionary<string, string[]>(StringComparer.Ordinal);
@@ -4134,6 +4319,7 @@ internal static class Program
             "private static void FfaEnrollResult(bool ok, string resp, string intendedLobbyId, bool wasRecovery)",
             "public static void FfaProbeServerState()",
             "private void HandleResolveProbe(string status, string resp, string sid)",
+            "internal static void FfaStartReadmitPoll()",
             "public static void FfaKickFromLobby(string targetSteamId)"
         };
         foreach (string rel in shippedCs)
@@ -4230,11 +4416,12 @@ internal static class Program
                     SurfaceFile b2Pair;
                     if (!surface.TryGetValue(rel, out b2Pair)) continue;
                     string b2 = b2Pair.Code;
-                    var sites = CallSitesIn(b2, "NativeUI.Tick");
-                    if (sites.Count == 0) continue;
-                    uiTickSites.Add(rel + " x" + sites.Count);
-                    if (rel != compRel) continue;
-                    foreach (int at in sites) if (at >= co && at <= cc) inComp++;
+                    foreach (CallIdentity call in DistinctCallsIn(rel, b2, "NativeUI.Tick"))
+                    {
+                        uiTickSites.Add(call.Key);
+                        if (rel == compRel && call.Member == "public static void Tick()"
+                            && call.At >= co && call.At <= cc) inComp++;
+                    }
                 }
                 if (uiTickSites.Count != 1 || inComp != 1)
                     reachProblems.Add("NativeUI.Tick must be called exactly once in the assembly, from inside "
@@ -4248,12 +4435,12 @@ internal static class Program
                 SurfaceFile b2Pair;
                 if (!surface.TryGetValue(rel, out b2Pair)) continue;
                 string b2 = b2Pair.Code;
-                var sites = CallSitesIn(b2, "CompetitiveUI.Tick");
-                if (sites.Count == 0) continue;
-                compTickSites.Add(rel + " x" + sites.Count);
-                if (rel != pluginRel || gateAt < 0 || tickOpen < 0) continue;
-                foreach (int at in sites)
-                    if (at > gateAt && at >= tickOpen && at <= tickClose) compInTick++;
+                foreach (CallIdentity call in DistinctCallsIn(rel, b2, "CompetitiveUI.Tick"))
+                {
+                    compTickSites.Add(call.Key);
+                    if (rel == pluginRel && gateAt >= 0 && tickOpen >= 0
+                        && call.At > gateAt && call.At >= tickOpen && call.At <= tickClose) compInTick++;
+                }
             }
             if (compTickSites.Count != 1 || compInTick != 1)
                 reachProblems.Add("CompetitiveUI.Tick must be called exactly once in the assembly, from the "

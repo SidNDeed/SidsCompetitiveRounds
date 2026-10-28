@@ -331,13 +331,16 @@ def test_the_strip_reads_the_state_the_latch_failure_actually_leaves():
 def test_the_bundle_budget_comment_states_the_figure_it_is_measured_against():
     """The comment said "~3.4M total, under 3.5M", which is arithmetic about a
     number that is not the limit. Nothing red when the old figure returned,
-    because no test read the comment at all."""
+    because no test read the comment at all. The auto-log lane rewrote that
+    paragraph as FITTING THE SENDER CAP, so the window is anchored there."""
     ui = _read("plugin", "CompetitiveUI.cs")
-    window = ui[ui.index("That is 3.5M of LOG TEXT"):][:1200]
+    window = ui[ui.index("FITTING THE SENDER CAP"):][:1200]
     assert "3.4M" not in window or "used to claim" in window, (
         "the 3.4M arithmetic is asserted again rather than recorded as wrong: "
         + window[:400])
     assert "3.5M" in window, "the budget comment no longer names the figure"
+    assert "BUG_REPORT_LOG_CAP_CHARS" in window, (
+        "the budget comment no longer names the cap it is measured against")
 
 
 def test_the_ladder_tier_prose_does_not_return_to_the_fraction_it_had_wrong():

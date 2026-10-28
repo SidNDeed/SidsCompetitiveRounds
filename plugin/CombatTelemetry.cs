@@ -215,6 +215,13 @@ namespace CompetitiveRounds
                     // counts feeding self-death %.
                     if (!data.isPlaying || data.dead) return;
 
+                    // Stage 2 S0: the accepted-death ledger. The first of
+                    // RPCA_Die, RPCA_Die_Phoenix and a departure to claim
+                    // (slot, scoreboard tuple, life) wins; a lost claim counts
+                    // nothing. Outside the rooms the log records in this is
+                    // always true, so nothing changes there.
+                    if (!TeamHoldGlue.ClaimDieAllowsRecord(__instance)) return;
+
                     int kind = 0;
                     DamageStamp stamp;
                     if (LastDamageByView.TryGetValue(data.view.ViewID, out stamp)

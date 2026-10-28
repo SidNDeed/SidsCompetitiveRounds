@@ -4,3 +4,5 @@ backend/tests/evidence/** -text
 tools/tests/seat-evidence-client/server_fixtures/** -text
 # The client lane's generated seat-evidence fixtures are pinned by sha256: no line-ending conversion.
 backend/tests/fixtures/seat_evidence_client_b7/** -text
+# The kept-view classes table ends an empty guard field with a TAB: no trailing-blank diagnostic.
+tools/kept_view_census/classes.tsv whitespace=-blank-at-eol

@@ -503,6 +503,9 @@ namespace CompetitiveRounds
         private void Awake()
         {
             Log = Logger;
+            // The thread every [LOG-BUNDLE] line compares its compose thread
+            // against: Awake runs on Unity's main thread.
+            try { LogBundleCore.RegisterMainThread(); } catch { }
 
             // BepInEx 5 defaults AppendLog=false, which truncates LogOutput.log
             // on every launch — meaning if a player crashes and reopens to file
@@ -1421,6 +1424,8 @@ namespace CompetitiveRounds
                 // combat patch as attached, and the producers the census proves.
                 try { CombatEvidence.BootLine(); } catch { }
                 try { IdentityClockEvidence.BootLine(); } catch { }
+                // Stage 2: every hold patch named as attached or not (#83).
+                try { TeamHoldGlue.BootLine(); } catch { }
                 // Item 21: one line naming both damage-number hook pairs as attached (#83).
                 try { DamageNumbers.BootLine(); } catch { }
             }
@@ -3524,6 +3529,10 @@ namespace CompetitiveRounds
 
             if (Plugin.modDisabled) return;
 
+            // Stage 2 (2v2 and 1v2 readmission): the seat log's point-start
+            // probe and the hold upkeep.
+            try { TeamHoldGlue.Tick(); } catch { }
+
             // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }
 
@@ -3723,6 +3732,13 @@ namespace CompetitiveRounds
             // snapshot the room-exit callback needs, because OnLeftRoom runs
             // after PhotonNetwork has already let go of the room.
             try { AutoLogUpload.Tick(); } catch { }
+            // The bug form's bundle is built on a worker; its finished body is
+            // handed to the request here, on the always-on tick, so a report
+            // whose page closed while it was building is still sent.
+            try { CompetitiveUI.PumpBugFormBundle(); } catch { }
+            // [CLOCK]: one time line a minute, so every mod line can be placed
+            // within a minute and two seats aligned on the Photon server clock.
+            try { LogClock.Tick(); } catch { }
             // Quick-chat sends through the vanilla chat RPC since Sept 1 and
             // needs no receive hook (event code 48 is retired, never shipped).
             // Dance emotes (Aug 31 item 5) ride event code 49; Tick runs the
@@ -3961,6 +3977,11 @@ namespace CompetitiveRounds
         {
             if (!initialized || Plugin.modDisabled) return;
             CompetitiveUI.DrawUI();
+            // RJ Stage 2 (S2): the non-modal hold banner; draws nothing
+            // unless this client holds or just ended a hold.
+            try { TeamHoldBanner.Draw(); } catch { }
+            // RJ Stage 2 (S3): the rejoin offer and its outcome line.
+            try { TeamHoldReturn.DrawOffer(); } catch { }
         }
 
         /// <summary>
@@ -4023,6 +4044,8 @@ namespace CompetitiveRounds
             try { PortraitRender.OnHostDestroyed(this); } catch { }
             // The animated player-colour loop, when this host runs it, stops here too.
             try { PlayerColorCosmetic.OnHostDestroyed(this); } catch { }
+            // Finalize this host's entered request before this teardown creates its replacement.
+            try { FfaReadmit.OnHostDestroyed(this); } catch { }
             Plugin.Log.LogWarning("[PERSIST] Destroyed! Attempting respawn...");
             MainMenuInjector.Reset();
 
@@ -4955,9 +4978,12 @@ namespace CompetitiveRounds
             // block honouring for any poison stream starting inside it). The
             // sticky incapable flag is untouched either way.
             try { if (!leaverIsSpectatorReplicated) PoisonSync.NoteRosterChange("PlayerLeft"); } catch { }
-            if (!Diag2v2.IsActive()) return;
-            try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
-            catch { }
+            bool diagActive = Diag2v2.IsActive();
+            if (diagActive)
+            {
+                try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
+                catch { }
+            }
 
             // 2v2 DC reporting: when a player drops mid-series, the surviving seats
             // the election below picks report the DC to the server: ONE elected
@@ -4995,13 +5021,94 @@ namespace CompetitiveRounds
             // path yet by design (unscored beta; the match report handles the
             // recorded outcome). FFA likewise: leavers are recorded in the
             // normal FFA report (left_early), never via the 2v2 DC pipeline.
-            if (Diag2v2.IsOvt() || Diag2v2.IsFfa()) return;
-            if (leaverIsSpectator) return;   // spectator exit: no DC pipeline
+            //
+            // RJ Stage 2 (S1 step 9): a departure the hold classifier admits is
+            // held. This seat's plan is built in the leave frame and latched in
+            // the drop cut, unexecuted; the expiry runs it from the cut. Every
+            // other departure, and any exception, takes the path of today:
+            // build the plan and execute it in the same frame. The hold runs
+            // ahead of the Diag2v2 gate because the cascade prefix
+            // (NCH_OnPlayerLeftRoom_Hold_Patch) reads the same memo whatever
+            // that gate says: a suppressed cascade always gets its cut.
+            bool held = false;
             try
             {
-                if (p == null) return;
+                held = TeamHold.OnLeave(p, cut =>
+                {
+                    var pl = BuildDcPlan(p, leaverIsSpectator);
+                    cut.Eligibility = pl != null ? pl.Kind : TeamHoldRules.DcKind.Nothing;
+                    return pl;
+                });
+            }
+            catch { held = false; }
+            if (held || !diagActive) return;
+            try { ExecuteDcPlan(BuildDcPlan(p, leaverIsSpectator)); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
+        }
+
+        /// <summary>One seat's 2v2 DC outcome of a departure, decided and not
+        /// yet executed: the report fields, the watched seat and the log lines
+        /// in the order the decision produced them. Built in the leave frame;
+        /// executed in that frame, or by the RJ Stage 2 expiry from the drop
+        /// cut.</summary>
+        internal sealed class DcPlan
+        {
+            internal TeamHoldRules.DcKind Kind = TeamHoldRules.DcKind.Nothing;
+            internal string SeriesId, MyId, DcSteamId, ObservedRoom;
+            internal int T1Points, T2Points;
+            internal bool Census;
+            internal Photon.Realtime.Player Elected;
+            internal List<Photon.Realtime.Player> Survivors;
+            internal readonly List<string> Logs = new List<string>();
+        }
+
+        /// <summary>Executes a plan: its log lines in order, then the report
+        /// (prompt or floor) or the fallback watch. Nothing, a stand-down and a
+        /// null plan do nothing.</summary>
+        internal static void ExecuteDcPlan(DcPlan plan)
+        {
+            if (plan == null) return;
+            foreach (var line in plan.Logs) Plugin.Log.LogInfo(line);
+            switch (plan.Kind)
+            {
+                case TeamHoldRules.DcKind.Fallback:
+                    // `Survivors` is the fighter seats present at the drop — the
+                    // same census list arm (1) elected from. ArmFallback takes the
+                    // OUTCOME-protocol quorum over it and refuses, audibly, in a
+                    // room where any of them is running a different one.
+                    DcReportSync.ArmFallback(plan.SeriesId, plan.Elected, plan.MyId, plan.DcSteamId,
+                                             plan.ObservedRoom, plan.Survivors);
+                    return;
+                case TeamHoldRules.DcKind.Prompt:
+                case TeamHoldRules.DcKind.Floor:
+                    // Every seat reaching this line is posting PROMPTLY: the census
+                    // arm's elected reporter, or a floor-election seat. The physical
+                    // game's token (v1.41.0 beta round 5, F25; round 6, F27 and F28)
+                    // is read inside ApiClient.ReportTeamSeriesDc as the report is
+                    // built, for a prompt report only, and logged there.
+                    ApiClient.ReportTeamSeriesDc(plan.SeriesId, plan.MyId, plan.DcSteamId, plan.T1Points, plan.T2Points,
+                                                 plan.ObservedRoom, false);
+                    Plugin.Log.LogInfo($"[2v2-DC] reporter={plan.MyId} dc={plan.DcSteamId} series={plan.SeriesId} "
+                        + $"pts={plan.T1Points}/{plan.T2Points} census={plan.Census} room={plan.ObservedRoom} (prompt)");
+                    return;
+                default:
+                    return;
+            }
+        }
+
+        /// <summary>The 2v2 DC decision of a departure, exactly the rule the
+        /// leave callback ran in place before RJ Stage 2 split it from its
+        /// execution. Null: no DC pipeline for this departure (a 1v2 or FFA
+        /// room, a spectator, no series, the assembly phase, no ids).</summary>
+        private DcPlan BuildDcPlan(Photon.Realtime.Player p, bool leaverIsSpectator)
+        {
+            if (!Diag2v2.IsActive()) return null;
+            if (Diag2v2.IsOvt() || Diag2v2.IsFfa()) return null;
+            if (leaverIsSpectator) return null;   // spectator exit: no DC pipeline
+            {
+                if (p == null) return null;
                 string seriesId = ApiClient.ActiveTeamSeriesId;
-                if (string.IsNullOrEmpty(seriesId)) return;
+                if (string.IsNullOrEmpty(seriesId)) return null;
 
                 // Suppress DC reports during the assembly phase (between Photon
                 // room join and "Round 1 active"). Two real testers (4-player
@@ -5019,7 +5126,7 @@ namespace CompetitiveRounds
                 {
                     Plugin.Log.LogInfo($"[2v2-DC] suppressed during assembly phase " +
                         $"(IsInMatch=false), leaver='{p?.NickName}' actor={p?.ActorNumber}");
-                    return;
+                    return null;
                 }
 
                 // Resolve the DC'd player's Steam ID from their custom props.
@@ -5031,7 +5138,7 @@ namespace CompetitiveRounds
                         dcSteamId = p.CustomProperties["unity_id"]?.ToString();
                 }
                 if (string.IsNullOrEmpty(dcSteamId) && !string.IsNullOrEmpty(p.UserId)) dcSteamId = p.UserId;
-                if (string.IsNullOrEmpty(dcSteamId) || dcSteamId.StartsWith("photon_")) return;
+                if (string.IsNullOrEmpty(dcSteamId) || dcSteamId.StartsWith("photon_")) return null;
 
                 // Reporter election: exactly ONE PROMPT report wherever the rule can
                 // be proven ROOM-WIDE, delayed redundancy behind it, and this seat's
@@ -5194,8 +5301,8 @@ namespace CompetitiveRounds
                 //     from its own per-game record and only logs the totals (v1.41.0
                 //     beta round 2 finding 1).
                 string myId = MatchTracker.LocalSteamId;
-                if (string.IsNullOrEmpty(myId)) return;
-                long myVal; if (!long.TryParse(myId, out myVal)) return;
+                if (string.IsNullOrEmpty(myId)) return null;
+                long myVal; if (!long.TryParse(myId, out myVal)) return null;
 
                 int dcTeam = TeamIdOf(p);
                 int myTeam = TeamIdOf(PhotonNetwork.LocalPlayer);
@@ -5253,33 +5360,17 @@ namespace CompetitiveRounds
                 // previous build would post its own report beside ours anyway.
                 int missingCap = -1;
                 bool roomWide = DcReportSync.AllCapable(survivors, out missingCap);
-                bool unique = teamsKnown && survivors.Count == 3 && roomWide;
-                long lowestNonDc = long.MaxValue;
-                int nonDcCount = 0, dcTeamCount = 1;   // the leaver is on the DC team
-                var seenIds = new HashSet<long>();
-                bool sawSelf = false;
-                if (unique)
-                {
-                    long dcId = SteamIdOf(p);
-                    if (dcId < 0) unique = false; else seenIds.Add(dcId);
-                }
-                if (unique)
-                {
-                    for (int i = 0; i < survivors.Count; i++)
-                    {
-                        var s = survivors[i];
-                        long sid = SteamIdOf(s);
-                        int st = TeamIdOf(s);
-                        if (sid < 0 || st < 0 || !seenIds.Add(sid)) { unique = false; break; }
-                        if (s.IsLocal) { sawSelf = true; if (sid != myVal) { unique = false; break; } }
-                        if (st == dcTeam) dcTeamCount++;
-                        else { nonDcCount++; if (sid < lowestNonDc) lowestNonDc = sid; }
-                    }
-                }
-                // A 2v2 sitting is 2/2. Anything else means at least one seat is
-                // advertising a team it is not on, and the split is the cheapest
-                // replicated cross-check that catches it.
-                if (unique && (!sawSelf || dcTeamCount != 2 || nonDcCount != 2)) unique = false;
+                // The arm (1) census and the floor election are one pure rule,
+                // TeamHoldRules.DecideDc (the RJ Stage 2 harness runs it): four
+                // distinct readable ids, readable teams, this seat among the
+                // survivors as itself, and a 2/2 split. A 2v2 sitting is 2/2;
+                // anything else means at least one seat is advertising a team it
+                // is not on, and the split is the cheapest replicated cross-check
+                // that catches it.
+                var census1 = new List<TeamHoldRules.DcSurvivor>();
+                for (int i = 0; i < survivors.Count; i++)
+                    census1.Add(new TeamHoldRules.DcSurvivor(SteamIdOf(survivors[i]), TeamIdOf(survivors[i]),
+                                                             survivors[i].IsLocal, survivors[i].ActorNumber));
 
                 // The room is a fact of the OBSERVATION, not of the dispatch — read
                 // it HERE, before either arm can leave the room. A delayed or
@@ -5290,11 +5381,21 @@ namespace CompetitiveRounds
                 string observedRoom = "";
                 try { observedRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
 
-                if (unique)
+                var plan = new DcPlan
                 {
-                    if (myTeam == dcTeam) return;                 // the other team elects
-                    if (myVal == lowestNonDc)
-                        Plugin.Log.LogInfo("[2v2-DC] elected from the replicated census "
+                    SeriesId = seriesId, MyId = myId, DcSteamId = dcSteamId, ObservedRoom = observedRoom,
+                    Survivors = survivors,
+                };
+                // The floor census is enumerated only when arm (1) is refused.
+                var d = TeamHoldRules.DecideDc(myVal, myTeam, dcTeam, SteamIdOf(p), roomWide, missingCap,
+                                               census1, FloorCensus(p));
+                plan.Kind = d.Kind;
+                plan.Census = d.Unique;
+                if (d.Unique)
+                {
+                    if (d.Kind == TeamHoldRules.DcKind.StandDown) return plan;   // the other team elects
+                    if (d.Kind == TeamHoldRules.DcKind.Prompt)
+                        plan.Logs.Add("[2v2-DC] elected from the replicated census "
                             + "(2/2 teams, four distinct ids, every survivor advertising "
                             + DcReportSync.CapabilityProp + ") — the one prompt reporter");
                     else
@@ -5306,24 +5407,19 @@ namespace CompetitiveRounds
                         // "terminal" means here.
                         Photon.Realtime.Player elected = null;
                         for (int i = 0; i < survivors.Count; i++)
-                            if (SteamIdOf(survivors[i]) == lowestNonDc) { elected = survivors[i]; break; }
-                        Plugin.Log.LogInfo("[2v2-DC] not the elected seat — watching actor "
+                            if (survivors[i].ActorNumber == d.ElectedActor) { elected = survivors[i]; break; }
+                        plan.Elected = elected;
+                        plan.Logs.Add("[2v2-DC] not the elected seat — watching actor "
                             + (elected != null ? elected.ActorNumber.ToString() : "?")
                             + " for a terminal outcome of its report (" + DcReportSync.OutcomeProp
                             + "); this seat posts NOTHING until one is known");
-                        // `survivors` is the fighter seats still present — the same
-                        // census list arm (1) elected from. ArmFallback takes the
-                        // OUTCOME-protocol quorum over it and refuses, audibly, in a
-                        // room where any of them is running a different one.
-                        DcReportSync.ArmFallback(seriesId, elected, myId, dcSteamId,
-                                                 observedRoom, survivors);
-                        return;
+                        return plan;
                     }
                 }
                 else
                 {
                     if (teamsKnown && survivors.Count == 3 && !roomWide)
-                        Plugin.Log.LogInfo("[2v2-DC] census arm refused: "
+                        plan.Logs.Add("[2v2-DC] census arm refused: "
                             + (missingCap >= 0 ? $"actor {missingCap}" : "a survivor")
                             + $" does not advertise {DcReportSync.CapabilityProp} — floor election "
                             + "(that seat runs its own build's rule)");
@@ -5366,29 +5462,18 @@ namespace CompetitiveRounds
                     // fighter view keeps a spectator or a stranger out of it. The
                     // bound, and what it does not cover, is stated once in
                     // DcReporterElection.ShouldReport.
-                    var census = new List<DcReporterElection.Peer>();
-                    foreach (var pp in RoomActors.ActiveFighters())   // census: reporter election over fighters only
-                    {
-                        if (pp == null || pp.ActorNumber == p.ActorNumber) continue;  // skip the leaver
-                        if (pp.IsLocal) continue;
-                        string ppSid = null;
-                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("u_id"))
-                            ppSid = pp.CustomProperties["u_id"]?.ToString();
-                        census.Add(new DcReporterElection.Peer(ppSid, TeamIdOf(pp)));
-                    }
-                    bool onFloor, consistentView;
-                    if (!DcReporterElection.ShouldReport(myVal, myTeam, dcTeam, census,
-                            out onFloor, out _, out consistentView)) return;
-                    if (consistentView)
-                        Plugin.Log.LogInfo(myTeam == dcTeam
+                    // The census is FloorCensus below, DecideDc enumerates it here.
+                    if (d.Kind != TeamHoldRules.DcKind.Floor) return plan;
+                    if (d.ConsistentView)
+                        plan.Logs.Add(myTeam == dcTeam
                             ? "[2v2-DC] reporting from a consistent 2/2 view as the seat advertising the leaver's team "
                               + "(the server refuses it if that team is true; the lower id of the other team reports as well)"
                             : "[2v2-DC] reporting from a consistent 2/2 view as the lower id of the team that stayed");
                     else if (!teamsKnown)
-                        Plugin.Log.LogInfo($"[2v2-DC] reporting with the teams unreadable (my t_id={myTeam}, "
+                        plan.Logs.Add($"[2v2-DC] reporting with the teams unreadable (my t_id={myTeam}, "
                             + $"leaver t_id={dcTeam}); the server accepts only the team that stayed");
-                    else if (!onFloor)
-                        Plugin.Log.LogInfo("[2v2-DC] reporting as the non-disconnected team's lowest id "
+                    else if (!d.OnFloor)
+                        plan.Logs.Add("[2v2-DC] reporting as the non-disconnected team's lowest id "
                             + "(the two lowest ids in the room report as well)");
                 }
 
@@ -5398,21 +5483,30 @@ namespace CompetitiveRounds
                 // tree's server decides whether the abandoned game saw real play
                 // from its own per-game record, never from these (v1.41.0 beta
                 // round 2 finding 1).
-                int t1Points = GameStateWatcher.LastP1Points;
-                int t2Points = GameStateWatcher.LastP2Points;
-                // Every seat reaching this line is posting PROMPTLY: the census arm's
-                // elected reporter, or a floor-election seat. The watch arm returned
-                // above without posting, so there is no delay parameter left to get
-                // wrong.
-                // The physical game's token (v1.41.0 beta round 5, F25; round 6,
-                // F27 and F28) is read inside ApiClient.ReportTeamSeriesDc as the
-                // report is built, for a prompt report only, and logged there.
-                ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,
-                                             observedRoom, false);
-                Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} "
-                    + $"pts={t1Points}/{t2Points} census={unique} room={observedRoom} (prompt)");
+                // Latched with the decision, in the leave frame: the points of the
+                // drop, whether the plan runs now or at an RJ Stage 2 expiry. The
+                // watch arm returned above without a report, so there is no delay
+                // parameter left to get wrong.
+                plan.T1Points = GameStateWatcher.LastP1Points;
+                plan.T2Points = GameStateWatcher.LastP2Points;
+                return plan;
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
+        }
+
+        /// <summary>The floor election's census: the fighter view
+        /// (RoomActors.ActiveFighters) without the leaver and this seat, read
+        /// lazily so it is enumerated only when arm (1) is refused.</summary>
+        private static IEnumerable<DcReporterElection.Peer> FloorCensus(Photon.Realtime.Player p)
+        {
+            foreach (var pp in RoomActors.ActiveFighters())   // census: reporter election over fighters only
+            {
+                if (pp == null || pp.ActorNumber == p.ActorNumber) continue;  // skip the leaver
+                if (pp.IsLocal) continue;
+                string ppSid = null;
+                if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("u_id"))
+                    ppSid = pp.CustomProperties["u_id"]?.ToString();
+                yield return new DcReporterElection.Peer(ppSid, TeamIdOf(pp));
+            }
         }
 
         /// <summary>Fighter-side face re-send for a just-joined spectator
@@ -5477,6 +5571,9 @@ namespace CompetitiveRounds
             // evaluation and is logged; it never decides the face (fix pass 1,
             // BR-H1: only the every-fighter census can answer Modded).
             AvatarDefaults.Evaluate("E12-roomprops");
+            // RJ Stage 2 (S4 step 5): an absent seat's grant (cr_tap) is
+            // applied through the one seat-log writer on every client.
+            try { TeamHoldPick.OnRoomProps(propertiesThatChanged); } catch { }
         }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {

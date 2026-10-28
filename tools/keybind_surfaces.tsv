@@ -617,6 +617,8 @@ eacb6cd01d29de35	N	rule:N1	Announce my pulls: <color=#888>...</color>
 cf84a98d6cf7f156	N	rule:N1	Announcement
 c294dd8cfffa97ad	N	rule:N1	Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' Elo and his
 857132eebe84c050	N	rule:N1	Another Round
+26795e3f58417857	N	rule:N1	Another player is using your seat identity
+07b5dcb71a45699b	N	rule:N1	Another player left. The match ends as a disconnect.
 4c632b2b3d50160e	N	rev:2c0a303db2f9d4f6 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	Anti-cheat
 4c459601c34257dd	N	rule:N1	Apex
 cfde026b5eb11e8b	N	rule:N1	Apex Shark
@@ -642,6 +644,7 @@ c40497b1048c1314	N	rule:N1	Async Champion
 0b5c4206710a5a0d	N	rule:N1	Auras
 eeee9b76ec5d1cfa	N	rule:N1	Aurora
 96fe497e8d08bf63	N	rule:N1	Aurora Gradient
+0ef31b05fb51c0f4	N	rule:N1	Automatic pick: {0}
 4b223773afab914d	N	rule:N1	Avatar auto-switch: <color=#88CCFF>OFF</color>
 bea9ed715393b1ce	N	rule:N1	Avatar auto-switch: <color=#88CCFF>ON</color>
 d6c1ae4f4abe4b83	N	rule:N1	Avatar defaults
@@ -894,6 +897,7 @@ ea95f55d84ec2572	N	rule:N1	Chat overlay: MUTED - hidden, and the room is told
 f960a3c53bbd484f	N	rule:N1	Chat overlay: NORMAL - messages fade out
 f8143ac3985dcfb6	N	rule:N1	Chat overlay: PINNED - messages stay on screen
 5c05b0ae062af07a	N	rule:N1	Checking the secure connection...
+6ef502c0684ae18a	N	rule:N1	Checking whether {0} can rejoin
 f9491ed1720722bc	N	rule:N1	Choose a metric
 745fffa486b3d6bc	N	rule:N1	Choose cards (left) to compare {0}.
 20e26e2d014fa87e	N	rule:N1	Choose up to {0} of their cards
@@ -987,6 +991,7 @@ d84f4bebe1e56b63	N	rule:N1	Cosmetic trails: <color=#FF9966>OFF</color>
 5aaebe531cb9cf09	P	rule:P	Cosmetics live in the F5 Shop tab and are bought with the gold you earn by playing. This page covers
 80718cedfe6e4c0f	N	rule:N1	Could not cancel: {0}
 a7a003049dda8ac7	O	rule:O	Could not close repair reminder: 
+a946a02658260725	N	rule:N1	Could not confirm your seat. Retrying
 121a6b29710d7dbf	N	rule:N1	Could not decode one of the animation frames.
 030e0672400e1534	N	rule:N1	Could not join as spectator - the game may have ended.
 eb7a493539c5d8c3	N	rule:N1	Could not load this report
@@ -994,6 +999,7 @@ e85a2435937a0b9f	N	rule:N1	Could not load this report (error {0})
 c5df9fd9a7f89cc7	N	rule:N1	Could not open that cosmetic preview.
 e2a5bce45d00a56d	N	rule:N1	Could not record the pack open on this PC - nothing was sent to the server
 172d12cc28092147	N	rule:N1	Could not record the purchase on this PC - nothing was sent to the server
+b259a93aa0fdab38	N	rule:N1	Could not rejoin at this point
 ea1ef48f04095e33	N	rule:N1	Could not spectate this game.
 034bec883ab3debd	N	rule:N1	Couldn't change Appear offline - try again
 6fd5880619ade7b9	N	rule:N1	Couldn't change Show Discord on leaderboard - try again
@@ -1950,6 +1956,7 @@ c610f55babd60201	N	rule:N1	Not enough gold for a pack
 53e9d819b2c611a2	N	rule:N1	Not granted
 b8a8dabdec32830a	N	rule:N1	Not great. Not terrible.
 bcdd436f6f0ca66e	N	rule:N1	Not in queue.
+e45714907316a161	N	rule:N1	Not now
 55657e24a43eff6a	N	rule:N1	Not on sale yet
 f9f151938094b0bc	N	rule:N1	Not ready yet
 93039e609d94a24f	N	rule:N1	Not set
@@ -2178,6 +2185,7 @@ c5b3b9f5cd30f77e	N	rule:N1	Predator
 97a6e94ae4eed9bb	N	rule:N1	President Meow
 f759566b7428a79b	N	rev:7580b72803876541 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.
 425872a6007bf097	F	rev:faf33a04a3aee3c3 fixed:Esc Escape cancels and closes; not rebindable	Press Esc to leave
+30a77f9e3bf9ae01	F	rev:e1e05ef619fea083 fixed:Esc Escape opens the game menu, where the leave is taken; Escape is reserved and not rebindable	Press Esc to leave. The match then ends as a disconnect.
 86df78d70f5dd74c	P	rule:P	Press [{0}] when ready
 74ddb069e508c3a9	N	rev:d7ce71ceadda2550 Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	Press a key...
 6925d2481c0e8eef	P	rule:P	Press\n[{0}]\nto join
@@ -2366,6 +2374,7 @@ ad0e59467721c89f	N	rule:N1	Region Time
 d3c9dbb10b2776ca	N	rule:N1	Region distribution
 8d4e4ef3ea5252ec	N	rule:N1	Regular
 89891d2edf2bd28e	N	rule:N1	Rejected Reports
+c6240d696b95c745	N	rule:N1	Rejoin
 cce7155371fc2668	N	rev:2171f8408984c6f0 a live-scoreboard stat label (TabStatsOverlay.EnsureLocaleStrings is binding-dependent: it names the scoreboard key through KeybindRowFace); names no key	Reload
 35360f9710e17843	N	rule:N1	Reloader
 2b8ca1c6f332d7ac	N	rule:N1	Rematch?
@@ -2501,6 +2510,7 @@ c88d0a58ce821760	N	rule:N1	Searching for ranked match...
 c2e5f7ff5a1b8a7c	N	rule:N1	Searing electric-green body color.
 6605cbf9da74dcde	N	rule:N1	Searing-lime neon name with a soft glow halo. Visible to everyone; modded players also see the glow.
 fbdf3954fe302a96	N	rule:N1	Seasonal Spring
+90aaed15747edd34	N	rule:N1	Seat held for {0}: {1}
 b8581dbd72a99b71	N	rule:N1	Seats full
 c18052444ebb91e7	N	rule:N1	Secure connection restored - opening the portal.
 7f7f6fed4b22a7ad	N	rule:N1	Secure connection unavailable - signed-in features are off until it is back.
@@ -2821,6 +2831,7 @@ f336e5fc9ed94a2e	N	rule:N1	That game is no longer live.
 76bc0d691ad98e46	N	rule:N1	That game is not ready to watch yet.
 305633f7eec553c6	N	rev:325dea07ee5f9745 Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	That key is already used by another control.
 e53f93d56ad81c38	N	rev:08f4d43b626a458d Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	That key types into the chat box it would switch.
+89af1992a09f84e3	N	rule:N1	That match has ended
 65da818dfea711e0	N	rule:N1	That mode is not accepting spectators right now.
 fef5d1e1e1a42b59	N	rule:N1	That pack is not available any more
 79cdb72e24e93884	N	rev:b9cb32052bf52d47 'hold' means wait, keep or own here; names no key	That pack is still opening - hold on
@@ -2899,6 +2910,7 @@ d2ba265f2e2a73f9	N	rule:N1	The report request could not be started
 af4a8124e218a23a	N	rev:4ea5594b6d9d0e3d rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If
 c56bfd5ef74259ff	O	rule:O	The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If
 8a37ccdd1183d3dc	N	rule:N1	The same actions in a different order
+599201187ca682b1	N	rule:N1	The seat was released before you returned
 d5b117f10ffc8778	N	rule:N1	The secure connection to {0} answered with an error (HTTP {1}). The portal needs it; the game keeps 
 e3fc95f79db81ac0	N	rule:N1	The secure connection to {0} answered, but not as the SCR server. The portal needs it; the game keep
 2562ef774723433b	N	rule:N1	The secure connection to {0} could not be opened. The portal needs it; the game keeps working on the
@@ -3742,6 +3754,8 @@ ee87adceb5e62cb4	N	rule:N1	Yellow Cursor
 89ffbc49c5cd513f	N	rule:N1	Yin & Yang
 905cb326c779f012	N	rule:N1	You
 6dedde4e05ca9340	N	rule:N1	You already have an open trade with that player
+812fabb863224450	N	rule:N1	You are back in the match
+dbfce522b1a9fd91	N	rule:N1	You are in another queue
 3116b2c0ca286eb2	N	rule:N1	You are muted - mail is unavailable while the mute lasts.
 61e42e3be6e519b6	N	rule:N1	You are not in the card pool yet, so there is no card to show - this is your picture.
 086119d1f4355c9d	N	rule:N1	You can shard up to {0} cards at once
@@ -3758,6 +3772,7 @@ f3dbe5f67e8948cd	N	rev:7da211c1ebd615f4 the dance wheel's own text (CompetitiveU
 2c03ffc19cad63fd	N	rule:N1	You have sent all the proposals allowed today - try again after midnight UTC
 3744760206c9232c	N	rule:N1	You have too many proposals waiting - cancel one first
 628d45b2a5677a7d	N	rule:N1	You joined the match in progress. This game is unrated for you.
+58e59499aca516fd	N	rule:N1	You left that match
 908c526215debbd4	N	rule:N1	You should join Competitive Rounds, it's a discord community
 bfcb6f0bdfeaee7d	N	rule:N1	You show up.
 a3c31f7b1830ce22	N	rule:N1	You two have made all the trades allowed today - try again after midnight UTC
@@ -3771,6 +3786,7 @@ e03e13e5bb0bbe77	N	rule:N1	Your Block Rate
 340d94cdc21e867b	N	rule:N1	Your FFA lobby closed.
 499f287d8dde2272	O	rule:O	Your FFA lobby was dissolved.
 28271452910576a3	N	rule:N1	Your FFA match continued without you - you've been removed from it.
+a09387a2e372ec9a	N	rule:N1	Your FFA match is still running. Rejoin? {0}
 068fd40efe11d831	N	rule:N1	Your Hit Rate
 fafa7a2e2b4157b6	N	rule:N1	Your Player Cards settings changed elsewhere - refreshed, try again
 ef6344b64f474181	N	rule:N1	Your block list is full - unblock someone first.
@@ -3781,6 +3797,7 @@ b94232afdb4a102e	N	rule:N1	Your card trading is off - turn it on in Settings
 586d2a346956f0f8	N	rule:N1	Your game is dropping frames (worst {0} ms)
 a2e51f8d50cb3129	N	rule:N1	Your last pack ({0}) - {1}
 c2c4b1271a540c47	N	rule:N1	Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>
+3bddba2aa07f0439	N	rule:N1	Your match is still running. Rejoin? {0}
 71214d5968543108	N	rule:N1	Your message was removed and you are muted for {0} minutes (auto-moderation).
 2bbe77e5794acb11	N	rule:N1	Your name fades from warm amber into deep pink.
 932d39ba6afffe50	N	rule:N1	Your no-show penalty: <color=#FFCC44>{0}%</color>
@@ -4100,6 +4117,7 @@ eeb8efa38b04f779	N	rule:N1	your aura
 6287c791cf7634cf	N	rule:N1	your trail
 8fa729e9316bef96	N	rule:N1	{0:N0} XP
 f6150e902e7ef2d4	N	rule:N1	{0}  {1}%  ({2} picks)
+0afb928a9a1a63e4	N	rule:N1	{0} (away) got {1}
 a6bf4f2389295dfd	P	rule:P	{0} (hold) - dance wheel; dancing locks your controls
 affafc49cfe48945	P	rule:P	{0} (hold) - quick-chat wheel, release to send
 383be83bbc34d04d	P	rule:P	{0} (hold, in a lobby) - ready up / join
@@ -4129,6 +4147,8 @@ fbea931837908137	N	rule:N1	{0} Hit Rate
 4b2e608f2980000e	N	rule:N1	{0} cards
 4a93a5aeeee725af	N	rule:N1	{0} d ago
 9344533c4118c35c	N	rule:N1	{0} days ago
+7648b75aafbc51b1	N	rule:N1	{0} did not return. The match ends as a disconnect.
+dde36fb32699b8f4	N	rule:N1	{0} did not return; seat released
 f274e414cfaafd05	N	rule:N1	{0} dps
 5519c24b363f6799	N	rule:N1	{0} elo
 2e77263bcf3946e6	N	rule:N1	{0} games
@@ -4138,8 +4158,10 @@ cceed712efad9af4	N	rev:622b0c1853f78422 W and L are the win and loss counts of a
 f29997e604005ce5	N	rule:N1	{0} h ago
 60af1d144ac434a9	N	rule:N1	{0} half-point events
 787f96a4ec9fb1c5	O	rule:O	{0} is already your title.
+cc3dd7d00b80a320	N	rule:N1	{0} is back
 061163b74173560c	O	rule:O	{0} is earned at {1} series on this line.
 793854d7e383649b	N	rule:N1	{0} is now your title.
+37a2e787a323c769	N	rule:N1	{0} is rejoining
 1ab5b75b0bfcc6c6	N	rule:N1	{0} item(s), {1} cop(ies) out there.
 a2df9cb008e9644c	N	rev:24567407ced4bc49 a key-press statistic: counts presses, names no key	{0} keys/s
 b752606308eb98d0	N	rule:N1	{0} kills   {1} dmg

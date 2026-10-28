@@ -510,6 +510,13 @@ namespace CompetitiveRounds
         /// through IsUnauthorized, which tests the latch FIRST, so the actor
         /// whose latch is being decided is removed from the evidence before it
         /// is weighed.</summary>
+        /// <summary>V3 P4.4: the same release, called by a readmission lobby's
+        /// grant change (FfaLateEntry.OnGrantedChanged).</summary>
+        internal static void ReleaseCoveredLatches()
+        {
+            ReleaseLatchesTheRosterNowCovers();
+        }
+
         private static void ReleaseLatchesTheRosterNowCovers()
         {
             try
@@ -700,6 +707,20 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The locked roster's slot of a Steam id, -1 when absent.</summary>
+        private static int LockedRosterSlotOf(string sid)
+        {
+            try
+            {
+                var roster = ApiClient.FfaLockedRoster;
+                if (roster == null || string.IsNullOrEmpty(sid)) return -1;
+                for (int i = 0; i < roster.Count; i++)
+                    if (roster[i] != null && roster[i].steam_id == sid) return i;
+            }
+            catch { }
+            return -1;
+        }
+
         /// <summary>An actor that is neither a frozen-roster fighter nor a
         /// declared spectator. Only meaningful once the roster is frozen;
         /// returns false before that (pre-spectator behaviour).</summary>
@@ -727,6 +748,28 @@ namespace CompetitiveRounds
                 // firewall by simply not publishing an identity.
                 if (string.IsNullOrEmpty(sid)) return true;
                 if (!_fighterSteamIds.Contains(sid)) return true;
+                // V3 P4.2 identity, the kind r conjunct: in a readmission room an
+                // actor whose u_id names a seat with a kind r epoch entry is a
+                // fighter only if it is that entry's actor, whether or not the
+                // seat's old actor is still present.
+                if (FfaAssembly.ReadmitLobby)
+                {
+                    var kindR = FfaReadmitEntryRules.KindRUnauthorized(actor.ActorNumber, LockedRosterSlotOf(sid),
+                                                                       FfaLateEntry.Record);
+                    if (kindR.HasValue) return kindR.Value;
+                }
+                // RJ Stage 2 S3 step 4, the held-seat conjunct: in a flagged
+                // room an actor whose u_id names the held seat is a fighter
+                // only if it is X, the bound actor of that seat's hold. The
+                // departed actor itself is not judged by it (its departure
+                // stays a fighter's departure).
+                var cut = TeamHold.Cut;
+                if (cut != null && actor.ActorNumber != cut.Actor)
+                {
+                    var held = TeamHoldRules.HeldSeatUnauthorized(TeamHoldWriter.CurrentRoom(), TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH),
+                                                                  actor.ActorNumber, sid, cut.LeaverUid, cut.Slot);
+                    if (held.HasValue) return held.Value;
+                }
                 // DUPLICATE-IDENTITY rule (Codex r3 CRITICAL): a roster
                 // fighter's identity belongs to the EARLIEST actor carrying
                 // it. A later actor claiming the same u_id while the real one

@@ -1,0 +1,914 @@
+"""Stage 2 (2v2 and 1v2 readmission) client rules harness.
+
+Builds the REAL plugin/SeatDeckLog.cs, plugin/TeamHoldRules.cs and
+plugin/TeamHoldNet.cs, as they ship, with Program.cs, and runs every scripted
+fixture, each in its own process. Then mutants planted into COPIES of those
+files (the tracked files are never written): each mutant's target fixture
+must FAIL and its negative control fixture must PASS (#391). Exit 0 only when
+everything holds.
+
+    python tools/tests/rj-stage2-client/run_stage2.py --work <scratch dir> [--piece K0]
+        [--stub-kinds]
+
+--stub-kinds checks declaration kinds and their in-memory mutant only; it
+does not create the required --work folder or invoke a compiler.
+
+--work is required: every build output and mutant copy goes there, never into
+the tree. --piece limits the fixtures and mutants to one piece (K0 to K6);
+without it every piece runs. The K0 run also runs the S0 inventory check (the
+application sites of RPCA_Pick and OFFLINE_Pick) and its negative control.
+"""
+import argparse
+import glob
+import hashlib
+import os
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+PLUGIN = os.path.join(REPO, "plugin")
+PROJ = os.path.join(HERE, "Stage2Tests.csproj")
+FILES = {"seat": "SeatDeckLog.cs", "rules": "TeamHoldRules.cs", "net": "TeamHoldNet.cs",
+         "return": "TeamHoldReturn.cs", "writer": "TeamHoldWriter.cs", "watcher": "GameStateWatcher.cs"}
+PROPS = {"seat": "SeatSource", "rules": "RulesSource", "net": "NetSource"}
+
+# Fixture name prefix per piece.
+PIECES = {
+    "K0": ("t01_", "t02_", "t0_"),
+    "K1": ("t11_", "t12_", "t15_", "t16_", "t1_"),
+    "K2": ("t23_", "t24_", "t25_", "t26_", "t29_", "t2_"),
+    "K3": ("t33_", "t37_", "t38_", "t39_", "t3_"),
+    "K4": ("t43_", "t45_", "t4_"),
+    "K5": ("t52_", "t56_", "t58_", "t5_"),
+    "K6": ("t6_",),
+    # The refit lane (claude/rj-stage2-refit), one entry per continuation piece.
+    "KX1": ("tx1_", "t16_"),
+    "KX2": ("t27_",),
+    "KX3": ("t35_", "tx3_"),
+    "KX4": ("t34_", "tx4_"),
+    "KX5": ("t41_", "t42_", "t44_", "tx5_"),
+    "KX6": ("t55_", "t57_", "tx6_"),
+    "KX8": ("tx8_", "t16_", "t29_", "t39_", "t58_"),
+    "KX9A": ("t16_", "tx9_", "t6_claimed"),
+    "KX9B": ("t16_", "t29_", "t36_", "t39_", "t58_", "tx9_"),
+}
+
+# (name, piece, file, [(old, new), ...], target fixture, control fixture);
+# each old occurs exactly once in the file.
+MUTANTS = [
+    # K0, S0
+    ("M0.1", "K0", "seat", [
+        ("            for (int i = 0; i < it.Slots.Length; i++)\n                Commit(ViewKey(it.ViewId), it.Slots[i], it.Name);\n        }",
+         "        }"),
+        ("internal static void ObserveEndPick(int slot, string name) { }",
+         "internal static void ObserveEndPick(int slot, string name) { Commit(\"e\" + SeatOf(slot).Deals, slot, name); }")],
+     "t01_opening_2v2", "t02_dup_die"),
+    ("M0.2", "K0", "seat", [
+        ("_intents.Push(new Intent { ViewId = viewId, Name = name, Slots = slots ?? new int[0] });",
+         "_intents.Push(new Intent { ViewId = viewId, Name = name, Slots = slots ?? new int[0] });\n"
+         "            foreach (var s in slots ?? new int[0]) Commit(ViewKey(viewId), s, name);")],
+     "t01_throw", "t01_opening_2v2"),
+    ("M0.3", "K0", "seat", [
+        ("internal static void ObserveEndPick(int slot, string name) { }",
+         "internal static void ObserveEndPick(int slot, string name) { Commit(\"e\" + SeatOf(slot).Deals, slot, name); }")],
+     "t01_duplicate", "t01_opening_2v2"),
+    ("M0.4", "K0", "seat", [
+        ("internal static void ObserveOfflinePick(int slot, string name) { _replays++; }",
+         "internal static void ObserveOfflinePick(int slot, string name) { _replays++; Commit(\"o\" + _replays, slot, name); }")],
+     "t01_replay", "t01_opening_2v2"),
+    ("M0.5", "K0", "seat", [
+        ("var c = TryClaim(slot, tuple, CLAIM_DEPART);",
+         "var c = TryClaim(slot, \"departure|\" + tuple, CLAIM_DEPART);")],
+     "t02_leave_then_die", "t02_dup_die"),
+    ("M0.6", "K0", "seat", [
+        ("return TryClaim(slot, tuple, CLAIM_PHOENIX);", "return Claim.Won;")],
+     "t02_phoenix_then_leave", "t02_dup_die"),
+    # K1, S1
+    ("M1.1", "K1", "rules", [
+        ("if (i == null || i.Pin == null || !i.Pin.Hold) return false;",
+         "if (i == null || i.Pin == null || !(i.Pin.Hold || i.QuorumCapable)) return false;")],
+     "t11_quorum_not_flag", "t11_gate_all_true"),
+    ("M1.2", "K1", "rules", [
+        ("if (i.IsSpec) return false;",
+         "if (i.IsSpec) return false;\n                if (i.LocalUnauthorized || !i.LocalInMatch) return false;")],
+     "t11_stale_cache", "t11_gate_all_true"),
+    ("M1.3", "K1", "rules", [
+        ("string mode = i.Pin.Mode;",
+         "string mode = (i.RoomName ?? \"\").StartsWith(\"ovt_\") ? MODE_OVT : (i.RoomName ?? \"\").StartsWith(\"team_\") ? MODE_TEAM : \"\";")],
+     "t11_hosted_lobby", "t11_gate_all_true"),
+    ("M1.4", "K1", "rules", [
+        ("catch { r = false; }", "catch { r = true; }")],
+     "t12_three_clients_throw", "t11_gate_all_true"),
+    ("M1.9", "K1", "rules", [
+        ("internal const bool ViaMasterArm = true;", "internal const bool ViaMasterArm = false;")],
+     "t15_2v2_team_down", "t15_2v2_partner_alive"),
+    ("M1.10", "K1", "rules", [
+        ("            if (observed != 'p' && observed != 'o' && observed != 'x') return Resolve.Wait;\n", "")],
+     "t15_handover_wait", "t15_2v2_team_down"),
+    # K1, lane-added: the extracted election must answer as the base callback did.
+    ("M1.E", "K1", "rules", [
+        ("int nonDcCount = 0, dcTeamCount = 1;", "int nonDcCount = 0, dcTeamCount = 0;")],
+     "t1_dc_equiv", "t11_gate_all_true"),
+    # K2, S2
+    ("M2.8", "K2", "rules", [
+        ("if (room.State == 'p') return Verdict.Act;", "return Verdict.Act;")],
+     "t23_forged_b_e_x", "t23_verified_o"),
+    ("M2.9", "K2", "rules", [
+        ("if (observed != 'p' && observed != 'o' && observed != 'x') return Resolve.Wait;",
+         "if (observed == '\\u0001') return Resolve.Wait;")],
+     "t24_resolve_waits", "t24_promote_before_p"),
+    ("M2.10", "K2", "rules", [
+        ("if (P == Phase.Pending && now - PendingAt >= OpenTimeoutS) return End(now, \"no_answer\");", "")],
+     "t24_404_by_room_ends", "t24_during_post"),
+    ("M2.11", "K2", "rules", [
+        ("if (FirstP >= 0 && VerifiedO < 0 && now - FirstP >= PendingS) return true;", "")],
+     "t25_pending_ceiling", "t25_bind_ceiling"),
+    ("M2.12", "K2", "rules", [
+        ("Step.Visualize, Step.Wait1, Step.LoadNext, Step.Wait05, Step.Fence, Step.SyncUp,",
+         "Step.Visualize, Step.Wait1, Step.LoadNext, Step.Wait05, Step.SyncUp,")],
+     "t26_point_fenced", "t26_round_pick_inside"),
+    # K2, lane-added: a state is not refuted before this client's own read answers.
+    ("M2.E", "K2", "rules", [
+        ("if (server == null) return Verdict.Inert;", "if (server == null) server = new TeamHoldNet.StateAnswer();")],
+     "t23_read_pending", "t23_verified_o"),
+    # H1: production replay outcomes and their release/admission gates.
+    ('M-H1f-route', "K3", "return", [('                else End("room_left", TeamHoldNet.ReturnEndReason(_route.S.ToString(), "room_left"));', '                else { }')], 't3_replay_route_left', 't3_replay_completed_exit'),
+    ('M-H1a', "K3", 'writer', [(
+        '            if (!TeamHoldReturn.ReplayReady(_survivorReplay, k.HoldId, cut.Slot)) return false;',
+        '')],
+     't3_replay_skipped_bound', 't3_replay_bound_then_entered'),
+    ('M-H1b', "K3", 'return', [(
+        '                        yield return null;',
+        '                        work.State = ReplayState.Completed;\n                        yield return null;')],
+     't3_replay_skipped_bound', 't3_replay_bound_then_entered'),
+    ('M-H1c', "K3", 'return', [(
+        '                if (work.State == ReplayState.Running) work.State = ReplayState.Failed;',
+        '                if (work.State == ReplayState.Running) work.State = ReplayState.Completed;')],
+     't3_replay_missing', 't3_replay_bound_then_entered'),
+    ('M-H1e-team', "K3", 'return', [(
+        '            if (_enteredPosted || !ReplayReady(_returnReplay, _claimed.HoldId, a.Slot)) return;',
+        '            if (_enteredPosted) return;')],
+     't3_replay_returner', 't3_replay_bound_then_entered'),
+    ('M-H1f-team', "K3", 'return', [(
+        ' && ReferenceEquals(work.Room, room)',
+        '')],
+     't3_replay_room_change', 't3_replay_bound_then_entered'),
+    ('M-H1g-state', "K3", 'rules', [(
+        "                if ((a.State == 'b' || a.State == 'e') && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                Th(k);",
+        "                if (a.State == 'b' && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                Th(k);")],
+     't3_bound_entered', 't3_replay_bound_then_entered'),
+    ('M-H1g-byroom', "K3", 'rules', [(
+        "                    if ((a.State == 'b' || a.State == 'e') && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                    if (a.DeadlineS",
+        "                    if (a.State == 'b' && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                    if (a.DeadlineS")],
+     't3_bound_entered', 't3_replay_bound_then_entered'),
+    # H3: actual OnGameOver dispatch and existing builder validation.
+    ('M-H3a', 'KX6', 'watcher', [('                    bool sent = TryReportOvtMatch(reportRoomId, duration);', '                    bool sent = false;\n                    if (RoomActors.ActiveFighterCount() == 3)\n                        sent = TryReportOvtMatch(reportRoomId, duration);')], 'tx6_route_ovt_held', 'tx6_route_every_returned_filer'),
+    ('M-H3b', 'KX6', 'watcher', [('                if (teamReportEligible && hasSeries)', '                if (teamReportEligible && hasSeries && RoomActors.ActiveFighterCount() == 4)')], 'tx6_route_team_held', 'tx6_route_every_returned_filer'),
+    ('M-H3c', 'KX6', 'watcher', [('return !offline && (flagged || elected);', 'return !offline && elected;')], 'tx6_route_every_returned_filer', 'tx6_route_unflagged_election'),
+    ('M-H3d', 'KX6', 'watcher', [('return !offline && (flagged || elected);', 'return flagged || elected;')], 'tx6_route_offline', 'tx6_route_every_returned_filer'),
+    # K3, S3
+    ("M3.5", "K3", "rules", [
+        ("internal static string SnapshotDigest(Snapshot s) { return Fnv64Hex(s.Format()); }",
+         "internal static string SnapshotDigest(Snapshot s) { return Fnv64Hex(s.HoldId + \":\" + s.G + \":\" + s.Boundary()); }")],
+     "t33_mutations", "t33_honest"),
+    ("M3.6", "K3", "rules", [
+        ("if (expectedPeers < 1 || present < expectedPeers) return \"digest missing\";",
+         "if (expectedPeers < 1 || present < expectedPeers - 1) return \"digest missing\";")],
+     "t33_ovt_digest_absent", "t33_honest"),
+    ("M3.7", "K3", "rules", [
+        ("if (BoundaryDigest(snap.BR0, snap.BR1, snap.BP0, snap.BP1, snap.BNames) != serverBoundaryDigest) return \"boundary checkpoint mismatch\";", "")],
+     "t33_colluding_duo", "t33_honest"),
+    ("M3.16", "K3", "rules", [
+        ("if (string.IsNullOrEmpty(rdt) || string.IsNullOrEmpty(holdId) || string.IsNullOrEmpty(verifierHex)) return false;",
+         "return true;")],
+     "t37_token", "t37_genuine"),
+    # K4, S4
+    ("M4.5", "K4", "rules", [
+        ("return TryParseHold(th, out k) && IsLive(k.State) && k.Slot == slot;",
+         "return !bodyResolves;")],
+     "t43_delayed_purge", "t43_before_phase"),
+    ("M4.6", "K4", "seat", [
+        ("if (seat.Deals > k) { superseded = true; return false; }", "")],
+     "t43_after_own_pick", "t43_before_phase"),
+    # K5, S5
+    ("M5.2", "K5", "rules", [
+        ("case DcKind.Floor: r.Add(ExpiryOp.ReportFloor); break;",
+         "case DcKind.Floor: case DcKind.StandDown: r.Add(ExpiryOp.ReportFloor); break;")],
+     "t52_stand_down_kept", "t56_ovt_no_report"),
+    ("M5.3", "K5", "rules", [
+        ("                switch (cut.Eligibility)",
+         "                if (presentAtExpiry != null && presentAtExpiry.Count < 2 && cut.Eligibility == DcKind.Fallback) { r.Add(ExpiryOp.ReportPrompt); r.Add(ExpiryOp.VanillaLeave); return r; }\n"
+         "                switch (cut.Eligibility)")],
+     "t52_census_changed", "t52_clean_census"),
+    ("M5.9", "K5", "rules", [
+        ("            if (cut.Mode == MODE_TEAM)\n            {\n                switch (cut.Eligibility)",
+         "            if (cut.Mode == MODE_TEAM || cut.Mode == MODE_OVT)\n            {\n                switch (cut.Eligibility)")],
+     "t56_ovt_no_report", "t52_clean_census"),
+    # K6, S6 ladder lines (lane-added: each removes or widens one emission).
+    ("M6.E1", "K6", "rules", [
+        ("                SeatDeckLog.Emit(\"[HOLD] auto grant slot=\" + I(slot) + \" card=\" + card);\n", "")],
+     "t6_auto_grant", "t6_grant_superseded"),
+    ("M6.E2", "K6", "rules", [
+        ("if (r && inputs != null) SeatDeckLog.Emit(", "if (inputs != null) SeatDeckLog.Emit(")],
+     "t6_negative", "t6_cascade_suppressed"),
+    ("M6.E3", "K6", "rules", [
+        ("if (next != 'o' || prev == 'o' || prev == 'c'", "if (next != 'o' || prev == 'c'")],
+     "t6_held", "t6_offered"),
+    ("M6.E4", "K6", "net", [
+        ("if (a.Ok) SeatDeckLog.Emit(\"[HOLD] claimed slot=\"", "SeatDeckLog.Emit(\"[HOLD] claimed slot=\"")],
+     "t6_claimed", "t6_bound"),
+    ("M6.E5", "K6", "seat", [
+        ("            if (first)\n                Emit(\"[SEATLOG] drift slot=\"", "            if (first && slot < 0)\n                Emit(\"[SEATLOG] drift slot=\"")],
+     "t6_drift", "t0_drift"),
+    # KX1 (lane-added: the transport binding has no V3 mutant row).
+    ("MX1.1", "KX1", "net", [
+        ("try { carried = !string.IsNullOrEmpty(token()) && carries(path); } catch { carried = false; }",
+         "carried = true;")],
+     "tx1_no_token_today", "tx1_token_reaches_route"),
+    ("MX1.2", "KX1", "net", [
+        ("if (code == 401) { body = SessionRequired; return; }", "")],
+     "tx1_401_today", "tx1_map_codes"),
+    ("MX1.3", "KX1", "net", [
+        ("TeamHoldRules.PinRoom(room, BoolField(TopLevel(answer), \"hold\"), mode, seriesId, roster);",
+         "TeamHoldRules.PinRoom(room, true, mode, seriesId, roster);")],
+     "t16_join_pin_today", "tx1_server_shapes"),
+    # KX2, live points (V3 M2.13; MX2.1 and MX2.2 lane-added).
+    ("M2.13", "KX2", "rules", [
+        ("return !(Held(room) && stamp > _observedAt);", "return true;")],
+     "t27_open_delayed_reordered", "t27_no_post_while_held"),
+    ("MX2.1", "KX2", "rules", [
+        ("                Observe(room, th);\n                if (ThLive(th)) return 0;\n", "                Observe(room, th);\n")],
+     "t27_no_post_while_held", "t27_open_delayed_reordered"),
+    ("MX2.2", "KX2", "rules", [
+        ("else if (_room == room && _g == k.G && _slot == k.Slot) { _observedAt = -1;", "else if (_room == room) { _observedAt = -1;")],
+     "t27_lift_and_rooms", "t27_open_delayed_reordered"),
+    # KX3, admission (V3 M3.11, M3.12, M3.17; MX3.1 lane-added).
+    ("M3.11", "KX3", "rules", [
+        ("if (!Flagged(room)) return null;", "return null;")],
+     "t35_span_games", "t35_release_at_bind"),
+    ("M3.12", "KX3", "rules", [
+        ("var ids = new List<string>(pin.Roster);",
+         "var ids = new List<string>(pin.Roster); foreach (var u in present()) if (!ids.Contains(u)) ids.Add(u);")],
+     "t35_stranger", "t35_span_games"),
+    ("M3.17", "KX3", "rules", [
+        ("return k.BoundActor <= 0 || actor != k.BoundActor;", "return null;")],
+     "tx3_held_seat_identity", "t35_span_games"),
+    ("MX3.1", "KX3", "rules", [
+        ("if (lastReleased == id) return false;", "")],
+     "t35_release_at_bind", "t35_span_games"),
+    # KX4, registration (V3 M3.8, M3.9, M3.10; MX4.1 to MX4.3 lane-added).
+    ("M3.8", "KX4", "rules", [
+        ("            int at = index(ids, newId);\n            if (at < 0) return -1;\n            list.Insert(at, null);\n            return at;\n",
+         "            if (ids.Contains(newId)) return -1;\n            return newId;\n")],
+     "t34_high_slot", "t34_duplicate_and_today"),
+    ("M3.9", "KX4", "rules", [
+        ("            list.Insert(at, null);\n", "")],
+     "t34_low_slot", "t34_high_slot"),
+    ("M3.10", "KX4", "rules", [
+        ("list.Insert(at, null);", "list.Insert(at, null); list.Insert(at, null);")],
+     "t34_high_slot", "t34_duplicate_and_today"),
+    ("MX4.1", "KX4", "rules", [
+        ("{ return readmitLobby || Flagged(room); }", "{ return readmitLobby; }")],
+     "t34_high_slot", "tx4_seed_plan"),
+    ("MX4.2", "KX4", "rules", [
+        ("p.DrawIndex = st.Deals;", "p.DrawIndex = st.Deals - 1;")],
+     "tx4_seed_plan", "t34_high_slot"),
+    ("MX4.3", "KX4", "rules", [
+        ("            list.RemoveAll(p => p == null || dead(p));\n", "")],
+     "t34_low_slot", "t34_high_slot"),
+    # KX5, the record (V3 M4.1, M4.2, M4.3, M4.4, M4.7).
+    ("M4.1", "KX5", "rules", [
+        ("internal static bool BuildsRecord(bool flagged, bool holdLive) { return flagged; }",
+         "internal static bool BuildsRecord(bool flagged, bool holdLive) { return flagged && holdLive; }")],
+     "t41_twin_run", "tx5_off_codec"),
+    ("M4.2", "KX5", "rules", [
+        ("return r != null ? r.FirstOf(slot) : null;",
+         "return r != null && r.ListOf(slot) != null && r.ListOf(slot).Count > 1 ? r.ListOf(slot)[1] : null;")],
+     "t41_twin_run", "t42_ledger"),
+    ("M4.3", "KX5", "rules", [
+        ("FfaReadmitRules.AdoptRecord(rec, spend, setDrawIndex);",
+         "FfaReadmitRules.AdoptRecord(rec, new FfaReadmitRules.SpendState(), setDrawIndex);")],
+     "t42_ledger", "tx5_off_codec"),
+    ("M4.4", "KX5", "rules", [
+        ("FfaReadmitRules.AdoptRecord(rec, spend, setDrawIndex);", ""),
+        ("internal static void NoteGrantApplied(FfaReadmitRules.SpendState spend, string card) { }",
+         "internal static void NoteGrantApplied(FfaReadmitRules.SpendState spend, string card) { if (card != null) spend.Ledger.Add(card); }")],
+     "t42_ledger", "tx5_off_codec"),
+    ("M4.7", "KX5", "rules", [
+        ("if (h != null) return h;", "")],
+     "t44_rule_p_promotion", "t41_twin_run"),
+    # KX6, reports after a return (V3 M5.8; MX6.1 to MX6.4 lane-added).
+    ("M5.8", "KX6", "rules", [
+        ("            if (Flagged(room)) return true;\n            return me == lowest;\n",
+         "            return me == lowest;\n")],
+     "t55_every_present_files", "t57_held_census"),
+    ("MX6.1", "KX6", "rules", [
+        ("presentUids.Count != need - 1", "presentUids.Count > need - 1")],
+     "t57_held_census", "t55_every_present_files"),
+    ("MX6.2", "KX6", "rules", [
+        ("if (u == heldUid || !pin.Roster.Contains(u)) return null;", "if (u == heldUid) return null;")],
+     "t57_held_census", "t55_every_present_files"),
+    ("MX6.3", "KX6", "rules", [
+        ('return "game-id:" + (g ?? "") + ":" + (reporter ?? "") + ":" + (room ?? "");',
+         'return "game-id:" + (g ?? "") + ":" + (room ?? "") + ":" + (reporter ?? "");')],
+     "tx6_game_id", "t55_every_present_files"),
+    ("MX6.4", "KX6", "rules", [
+        ('return body != null && body.Replace(" ", "").IndexOf(', 'return body != null || body.Replace(" ", "").IndexOf(')],
+     "tx6_journaled_terminal", "t55_every_present_files"),
+    # KX8, the capability token (MX8.1 lane-added).
+    ("MX8.1", "KX8", "rules", [
+        ("return allAttached ? ", "return true ? ")],
+     "tx8_caps", "t16_join_pin_today"),
+    # KX9 Part A, the request side (MX9.1 to MX9.4 lane-added).
+    ("MX9.1", "KX9A", "net", [
+        (".Append(\",\\\"series_id\\\":\").Append(Q(seriesId))\n", "\n")],
+     "t16_server_model_fields", "t16_join_pin_today"),
+    ("MX9.2", "KX9A", "net", [
+        ("+ \",\\\"held_steam_id\\\":\" + Q(heldSteam)", "+ \",\\\"held_steam\\\":\" + Q(heldSteam)")],
+     "t16_server_model_fields", "t16_join_pin_today"),
+    ("MX9.3", "KX9A", "net", [
+        ("internal static string ClaimBody(string steamId) { return \"{\\\"steam_id\\\":\" + Q(steamId) + \"}\"; }",
+         "internal static string ClaimBody(string steamId) { return \"{}\"; }")],
+     "t16_server_model_fields", "t16_join_pin_today"),
+    ("MX9.4", "KX9A", "net", [
+        ("            return \"refused\";\n        }\n\n        /// <summary>The returner's end",
+         "            return local;\n        }\n\n        /// <summary>The returner's end")],
+     "t16_end_reasons_server_set", "t16_join_pin_today"),
+    ("MX9.5", "KX9A", "net", [
+        ("Verifier = Field(body, \"verifier\")", "Verifier = Field(body, \"hand_over_verifier\")")],
+     "tx9_verifier_k3", "t16_join_pin_today"),
+    # KX9 Part B, the server's landed answers (MX9.6 to MX9.12 lane-added).
+    ("MX9.6", "KX9B", "net", [
+        ('BoolField(TopLevel(answer), "hold")', 'BoolField(answer, "hold")')],
+     "t16_join_hold_top_level", "t16_join_pin_today"),
+    ("MX9.7", "KX9B", "net", [
+        ("                Roster = RosterIds(body),\n", "                Roster = null,\n")],
+     "t39_claim_roster_pins", "t16_join_pin_today"),
+    ("MX9.8", "KX9B", "net", [
+        ('Slot = IntField(top, "slot", -1)', 'Slot = IntField(body, "slot", -1)')],
+     "t39_claim_top_level_slot", "t16_join_pin_today"),
+    ("MX9.9", "KX9B", "net", [
+        ('return allAttached ? "?rdm=1" : "";', 'return "";')],
+     "t39_rdm_poll_belt", "t16_join_pin_today"),
+    ("MX9.10", "KX9B", "net", [
+        ('Field(TopLevel(body), "status") != "readmissible"', 'Field(TopLevel(body), "status") != "readmissable"')],
+     "t39_rdm_poll_belt", "t16_join_pin_today"),
+    ("MX9.11", "KX9B", "rules", [
+        ("string room = HoldRoomOfReport(reportRoom);", "string room = reportRoom;")],
+     "t58_game_id_raw_room", "t16_join_pin_today"),
+    ("MX9.12", "KX9B", "rules", [
+        ("            return presentUids.Count;\n", "            return -1;\n")],
+     "t36_attest_short_roster", "t16_join_pin_today"),
+]
+
+# The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an
+# application (not a patch attribute, a hook-table string or a comment) is in a
+# file whose calls are FFA-only or spectator replays. Anything else names a new
+# writer the seat log does not see.
+CALL = re.compile(r'(\.OFFLINE_Pick\s*\(|\.RPCA_Pick\s*\(|RPC\(\s*"RPCA_Pick")')
+ALLOWED_CALLERS = {"plugin/FfaMode.cs", "plugin/SpectatorSync.cs"}
+
+
+def inventory(lines):
+    bad = []
+    for ln in lines:
+        parts = ln.split(":", 2)
+        if len(parts) < 3:
+            continue
+        path, code = parts[0], parts[2].strip()
+        if code.startswith("//") or code.startswith("///") or code.startswith("*"):
+            continue
+        if CALL.search(code) and path not in ALLOWED_CALLERS:
+            bad.append(ln)
+    return bad
+
+
+def _blank_csharp(text):
+    """Blank comments and literals while preserving offsets and newlines."""
+    chars, size = list(text), len(text)
+
+    def comment(at):
+        if text.startswith('//', at):
+            end = text.find('\n', at + 2)
+            return size if end < 0 else end
+        if text.startswith('/*', at):
+            end = text.find('*/', at + 2)
+            if end < 0:
+                raise ValueError('unclosed C# comment')
+            return end + 2
+        return None
+
+    def literal(at):
+        start = at
+        while at < size and text[at] in '$@':
+            at += 1
+        if at >= size or text[at] not in '\"\'':
+            return None
+        quote, prefix = text[at], text[start:at]
+        verbatim, interpolated = '@' in prefix, '$' in prefix
+        if quote == '\"' and not verbatim and text.startswith('\"\"\"', at):
+            raise ValueError('raw C# literal requires lexer support')
+        at += 1
+        while at < size:
+            if text[at] == quote:
+                if verbatim and at + 1 < size and text[at + 1] == quote:
+                    at += 2
+                    continue
+                return at + 1
+            if not verbatim and text[at] == '\\':
+                at += 2
+                continue
+            if interpolated and text[at] == '{':
+                if text.startswith('{{', at):
+                    at += 2
+                    continue
+                depth = 1
+                at += 1
+                while at < size and depth:
+                    end = comment(at)
+                    if end is None:
+                        end = literal(at)
+                    if end is not None:
+                        at = end
+                        continue
+                    depth += (text[at] == '{') - (text[at] == '}')
+                    at += 1
+                continue
+            at += 1
+        raise ValueError('unclosed C# literal')
+
+    at = 0
+    while at < size:
+        end = comment(at)
+        if end is None:
+            end = literal(at)
+        if end is None:
+            at += 1
+            continue
+        for pos in range(at, end):
+            if chars[pos] not in '\r\n':
+                chars[pos] = ' '
+        at = end
+    return ''.join(chars)
+
+
+def _type_declarations(path, text):
+    code = _blank_csharp(text)
+    pattern = re.compile(
+        r'\bnamespace\s+(?P<namespace>[@\w]+(?:\s*\.\s*[@\w]+)*)\s*(?P<nsend>[{;])'
+        r'|(?P<mods>(?:(?:public|private|protected|internal|static|sealed|abstract|partial|new|unsafe|readonly|ref)\s+)*)'
+        r'\b(?P<kind>class|struct|enum|interface)\s+(?P<name>@?[A-Za-z_]\w*)'
+        r'|(?P<brace>[{}])')
+    scopes, rows, pending, file_namespace = [], [], None, ''
+    for match in pattern.finditer(code):
+        if match.group('namespace'):
+            name = re.sub(r'\s+', '', match.group('namespace')).replace('@', '')
+            if match.group('nsend') == ';':
+                if file_namespace or scopes:
+                    raise ValueError('unsupported nested file namespace: ' + path)
+                file_namespace = name
+            else:
+                scopes.append(('namespace', name))
+        elif match.group('kind'):
+            if pending is not None:
+                raise ValueError('type declaration without a body: ' + path)
+            nesting = [name for kind, name in scopes if kind == 'type']
+            namespace = '.'.join(([file_namespace] if file_namespace else [])
+                                 + [name for kind, name in scopes if kind == 'namespace'])
+            local = '.'.join(nesting + [match.group('name').lstrip('@')])
+            mods, kind = match.group('mods').split(), match.group('kind')
+            static = 'static' in mods
+            # Static classes compare on static; structs and enums are intrinsically sealed.
+            sealed = kind in ('struct', 'enum') or ('sealed' in mods and not static)
+            rows.append(dict(path=path, line=code.count('\n', 0, match.start()) + 1,
+                             name=(namespace + '.' if namespace else '') + local,
+                             local=local, kind=kind, static=static, sealed=sealed, partial='partial' in mods))
+            pending = ('type', match.group('name').lstrip('@'))
+        elif match.group('brace') == '{':
+            scopes.append(pending or ('block', ''))
+            pending = None
+        else:
+            if not scopes:
+                raise ValueError('unmatched C# brace: ' + path)
+            scopes.pop()
+    if scopes or pending:
+        raise ValueError('unclosed C# declaration: ' + path)
+    return rows
+
+
+def _kind(row):
+    return (row['kind'], row['static'], row['sealed'])
+
+
+def _kind_text(kind):
+    return '%s static=%s sealed=%s' % kind
+
+
+def _production_sources(tree):
+    paths = sorted(glob.glob(os.path.join(tree, 'plugin', '**', '*.cs'), recursive=True))
+    return {os.path.relpath(path, tree).replace(os.sep, '/'): open(path, encoding='utf-8-sig').read()
+            for path in paths if not {'obj', 'bin'}.intersection(os.path.relpath(path, tree).split(os.sep))}
+
+
+def _project_sources(tree, project):
+    """Read default Compile property expansions without invoking MSBuild."""
+    root = ET.parse(os.path.join(tree, project)).getroot()
+    folder = os.path.dirname(os.path.join(tree, project)) + os.sep
+    props = {'MSBuildThisFileDirectory': folder}
+    for group in root.findall('PropertyGroup'):
+        for node in group:
+            if node.text is not None and node.tag not in props:
+                props[node.tag] = node.text
+
+    def expand(value):
+        for _ in range(len(props) + 1):
+            updated = re.sub(r'\$\(([^)]+)\)', lambda m: props.get(m.group(1), m.group(0)), value)
+            if updated == value:
+                return value
+            value = updated
+        raise ValueError('cyclic project properties: ' + project)
+
+    linked, sources = set(), set()
+    for node in root.findall('./ItemGroup/Compile'):
+        value = expand(node.attrib.get('Include', '')).replace('\\', os.sep)
+        if '$(' in value:
+            if value not in ('$(ProductionSource)', '$(GenDir)' + os.sep + 'Reducers.cs'):
+                raise ValueError('unresolved Compile source: ' + project)
+            continue  # Generated declarations are censused from actual in-memory source below.
+        path = os.path.normpath(value if os.path.isabs(value) else os.path.join(folder, value))
+        matches = sorted(glob.glob(path))
+        if not matches:
+            raise ValueError('missing Compile source in ' + project)
+        for match in matches:
+            relative = os.path.relpath(match, tree).replace(os.sep, '/')
+            if relative.startswith('../') or not relative.endswith('.cs'):
+                raise ValueError('Compile source outside the C# tree: ' + project)
+            sources.add(relative)
+            if relative.startswith('plugin/'):
+                linked.add(relative)
+    return sources, linked
+
+
+def _stub_kind_rows(stubs, production, mapped, external, harness_only, standins, linked):
+    index = {}
+    for path, text in sorted(production.items()):
+        for row in _type_declarations(path, text):
+            index.setdefault(row['name'], []).append(row)
+
+    def resolve(row):
+        candidates = [row['name'], 'CompetitiveRounds.' + row['local']]
+        parts = row['local'].split('.')
+        if len(parts) > 1 and parts[0] in standins:
+            candidates += ['CompetitiveRounds.' + standins[parts[0]] + '.' + '.'.join(parts[1:]),
+                           'CompetitiveRounds.' + '.'.join(parts[1:])]
+        return [name for name in dict.fromkeys(candidates) if name in index]
+
+    result = []
+    for path, text in sorted(stubs.items()):
+        for row in _type_declarations(path, text):
+            matches, name = resolve(row), row['name']
+            declared = int(name in mapped) + int(name in external) + int(name in harness_only)
+            status, target, expected = 'EQUAL', '-', None
+            if declared > 1:
+                resolution, status = 'AMBIGUOUS', 'DIFFERS'
+            elif path in linked:
+                resolution, target = 'PRODUCTION', name
+            elif name in mapped:
+                resolution, target = 'MAPPED', mapped[name]
+                if matches and matches != [target]:
+                    status = 'DIFFERS'
+            elif name in external or name in harness_only:
+                resolution = 'EXTERNAL' if name in external else 'HARNESS-ONLY'
+                expected = external.get(name)
+                if matches:
+                    status, target = 'DIFFERS', 'SHADOW ' + ','.join(matches)
+            elif len(matches) == 1:
+                resolution, target = 'PRODUCTION', matches[0]
+            else:
+                resolution, status = ('AMBIGUOUS' if matches else 'UNRESOLVED'), 'DIFFERS'
+                target = ','.join(matches) or '-'
+            refs = index.get(target, [])
+            if resolution in ('PRODUCTION', 'MAPPED'):
+                signatures = {_kind(ref) for ref in refs}
+                if not refs or len(signatures) != 1 or (len(refs) > 1 and not all(r['partial'] for r in refs)):
+                    status = 'DIFFERS'
+                else:
+                    expected = _kind(refs[0])
+            if expected is not None and _kind(row) != expected:
+                status = 'DIFFERS'
+            result.append(dict(row, resolution=resolution, target=target, expected=expected,
+                               production_sites=','.join(r['path'] + ':' + str(r['line']) for r in refs) or '-',
+                               status=status))
+    return result
+
+
+def _print_stub_kinds(rows):
+    print('stub file:line | qualified name | stub kind | resolution | production file:line | production kind | verdict')
+    for row in rows:
+        print('%s:%s | %s | %s | %s:%s | %s | %s | %s' % (
+            row['path'], row['line'], row['name'], _kind_text(_kind(row)), row['resolution'], row['target'],
+            row['production_sites'], _kind_text(row['expected']) if row['expected'] is not None else '-', row['status']))
+    counts = {key: sum(r['resolution'] == key for r in rows)
+              for key in ('PRODUCTION', 'MAPPED', 'EXTERNAL', 'HARNESS-ONLY', 'UNRESOLVED', 'AMBIGUOUS')}
+    print('stub kinds: declarations=%d %s differences=%d' % (
+        len(rows), ' '.join('%s=%d' % item for item in counts.items()), sum(r['status'] != 'EQUAL' for r in rows)))
+
+
+def _stub_kind_control(tree, sources, linked, mapped, external, harness_only, standins, mutants, generated):
+    """Run before work-folder creation or build; mutate in-memory copies only."""
+    try:
+        production = _production_sources(tree)
+        stubs = {path: open(os.path.join(tree, path), encoding='utf-8-sig').read() for path in sources}
+        stubs.update({path: production[path] for path in linked})
+        stubs.update(generated)
+        rows = _stub_kind_rows(stubs, production, mapped, external, harness_only, standins, linked)
+        _print_stub_kinds(rows)
+        baseline = bool(rows) and all(r['status'] == 'EQUAL' for r in rows)
+        print('stub-kind control', 'GREEN' if baseline else 'RED')
+        ok = baseline
+        for mid, side, path, old, new, expected_name in mutants:
+            texts = dict(stubs if side == 'stub' else production)
+            raw = texts[path]
+            if raw.count(old) != 1:
+                print('BAD mutant %s: anchor occurs %d times' % (mid, raw.count(old)))
+                ok = False
+                continue
+            texts[path] = raw.replace(old, new, 1)
+            changed = _stub_kind_rows(texts if side == 'stub' else stubs,
+                                      texts if side == 'production' else production,
+                                      mapped, external, harness_only, standins, linked)
+            differences = [r for r in changed if r['status'] != 'EQUAL']
+            hit = baseline and bool(differences) and any(r['name'] == expected_name for r in differences)
+            ok = ok and hit
+            print('%s mutant %s (stub kinds): target %s=%s; control=%s' % (
+                'CAUGHT' if hit else 'MISSED', mid, expected_name, 'RED' if differences else 'GREEN',
+                'GREEN' if baseline else 'RED'))
+        return ok
+    except (OSError, ValueError, KeyError, ET.ParseError) as exc:
+        print('stub-kind control RED:', str(exc))
+        return False
+
+
+def stub_kinds():
+    harness = 'CompetitiveRounds.Stage2Harness.'
+    replay = 'CompetitiveRounds.Stage2Replay.'
+    base = harness + 'GameOverReportRouterBase.'
+    external = {replay + name: ('class', False, True) for name in (
+        'Player', 'CardInfo', 'GM_ArmsRace', 'PlayerManager')}
+    external.update({replay + 'PhotonNetwork': ('class', True, False),
+                     base + 'Photon.Realtime.Player': ('class', False, True)})
+    harness_only = {harness + name for name in (
+        'Program', 'Program.PointSim', 'Program.PointSim.P', 'Program.Seat', 'Program.WriterRig',
+        'Program.SharedFake', 'Program.LiveSim', 'Program.Pl', 'Program.RecordRun', 'GameOverReportRouterBase',
+        'GameOverReportRouter')}
+    # Photon and Realtime are namespace facades represented by harness types.
+    harness_only.update({base + 'Photon', base + 'Photon.Realtime', base + 'Plugin.Logger',
+                         replay + 'PhotonNetwork.Peer', replay + 'Player.Data', replay + 'Player.View'})
+    mapped = {base + 'HeldCut': 'CompetitiveRounds.TeamHoldRules.DropCut'}
+    standins = {'GameOverReportRouterBase': 'GameStateWatcher'}
+    folder = 'tools/tests/rj-stage2-client/'
+    try:
+        sources, linked = _project_sources(REPO, folder + 'Stage2Tests.csproj')
+        sources.update(os.path.relpath(p, REPO).replace(os.sep, '/')
+                       for p in glob.glob(os.path.join(REPO, folder, 'Program*.cs')))
+        generated = {'generated/Production.cs': gen_production({})}
+        mutants = [('M-STUB-3', 'stub', folder + 'ProgramKX6.cs',
+                    'protected sealed class TeamReportPayload', 'protected struct TeamReportPayload',
+                    base + 'TeamReportPayload')]
+        return _stub_kind_control(REPO, sources, linked, mapped, external, harness_only, standins, mutants, generated)
+    except (OSError, ValueError, KeyError, RuntimeError, StopIteration, ET.ParseError) as exc:
+        print('stub-kind control RED:', str(exc))
+        return False
+
+
+def sha(path):
+    return hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+
+
+def extract_member(source, signature):
+    start = source.index(signature)
+    opening = source.index("{", start)
+    depth = 0
+    # Extraction signatures select code whose braces in literals/comments balance.
+    for end in range(opening, len(source)):
+        if source[end] == "{":
+            depth += 1
+        elif source[end] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:end + 1]
+    raise ValueError("unclosed production member " + signature)
+
+
+def gameover_report_source(text):
+    text = text.replace("\r\n", "\n")
+    # All slices are the production source, including the dispatch conditions.
+    lines = text.splitlines(keepends=True)
+    def member(signature):
+        starts = [i for i, line in enumerate(lines) if line.lstrip().startswith(signature)]
+        if len(starts) != 1:
+            raise RuntimeError("H3 member anchor: " + signature)
+        start = starts[0]
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].rstrip() == "        }")
+        return "".join(lines[start:end + 1])
+    def block(source, prefix):
+        ls = source.splitlines(keepends=True)
+        starts = [i for i, line in enumerate(ls) if line.lstrip().startswith(prefix)]
+        if len(starts) != 1:
+            raise RuntimeError("H3 block anchor: " + prefix)
+        start = starts[0]
+        indent = ls[start][:len(ls[start]) - len(ls[start].lstrip())]
+        end = next(i for i in range(start + 1, len(ls)) if ls[i].rstrip() == indent + "}")
+        return "".join(ls[start:end + 1])
+    on = member("private static void OnGameOver(")
+    eligibility = on[on.index("            bool teamReportEligible ="):]
+    eligibility = eligibility[:eligibility.index(";\n") + 2]
+    ovt_route = block(on, 'if (rn1.StartsWith("ovt_")')
+    team_route = block(on, "if (teamReportEligible && hasSeries")
+    ovt = member("private static bool TryReportOvtMatch(")
+    team = member("private static TeamReportPayload BuildTeamReportPayload(")
+    def census_prefix(source):
+        body = source[source.index("{\n") + 2:]
+        return body[:body.index("            var pm = PlayerManager.instance;")]
+    ovt_filer = next(line for line in ovt.splitlines(keepends=True) if "if (!TeamHoldRules.Files(" in line)
+    team_filer = block(team, "if (!TeamHoldRules.Files(")
+    return ("\nnamespace CompetitiveRounds.Stage2Harness {\n"
+        "internal sealed class GameOverReportRouter : GameOverReportRouterBase {\n"
+        + member("internal static bool TeamReportRouteAllowed(")
+        + "internal static void Run() { bool routedTeamMatch = false;\n" + eligibility + ovt_route + team_route + "}\n"
+        + "private static bool TryReportOvtMatch(string reportRoomId, int duration) { OvtCalls++;\n"
+        + census_prefix(ovt) + "string lowest = Lowest;\n" + ovt_filer
+        + "Reported = true; return true; }\n"
+        + "private static bool TryReportTeamMatch(string reportRoomId, int duration) { TeamCalls++; return BuildTeamReportPayload(reportRoomId, duration) != null; }\n"
+        + "private static TeamReportPayload BuildTeamReportPayload(string reportRoomId, int duration) {\n"
+        + census_prefix(team) + "string lowestSid = Lowest;\n" + team_filer
+        + "Reported = true; return new TeamReportPayload { LocalIsReporter = true }; }\n"
+        + member("private static string HeldCensusSid(") + "} }\n")
+
+def gen_production(overrides):
+    def read(key):
+        with open(overrides.get(key, os.path.join(PLUGIN, FILES[key])), encoding="utf-8-sig") as f:
+            return f.read()
+    ret, writer = read("return"), read("writer")
+    # Dispatch is extracted too: the fixture cannot pass if Tick stops calling
+    # the production gate, or if a guard is restored around the extracted gate.
+    activate = ret[ret.index("case TeamHoldRules.ReturnRoute.Stage.Activate:"):ret.index("case TeamHoldRules.ReturnRoute.Stage.Entered:")]
+    entered = writer[writer.index("                        case 'e':", writer.index("internal static class TeamHoldLoop")):]
+    entered = entered[:entered.index("                        case 'x':")]
+    activation_wired = "ActivateReplay(route, a, now);" in activate and "route.Done" not in activate
+    survivor_wired = "if (SurvivorEntered(cut, k)) return;" in entered and "Release(cut)" not in entered
+    members = [extract_member(ret, sig).replace("private static", "internal static") for sig in (
+        "internal enum ReplayState", "internal sealed class ReplayWork", "internal sealed class ReplaySlot",
+        "internal static void InvalidateReplay", "internal static bool ReplayIdentity", "internal static bool ReplayReady",
+        "private static bool ReplayCurrent", "internal static ReplayWork Replay(bool", "internal static IEnumerator ReplayRun",
+        "private static void ActivateReplay", "private static void PostEntered", "internal static void OnRoomLeft()") ]
+    loop = [extract_member(writer, sig).replace("private static", "internal static") for sig in (
+        "private static void SurvivorReplay", "private static bool SurvivorEntered")]
+    return """using System;
+using System.Collections;
+using System.Collections.Generic;
+namespace CompetitiveRounds.Stage2Replay {
+internal static partial class TeamHoldReturn {
+internal static bool ActivationWired = %s;
+%s
+}
+internal static partial class TeamHoldLoop {
+internal static bool SurvivorWired = %s;
+%s
+}
+}
+""" % (str(activation_wired).lower(), "\n".join(members), str(survivor_wired).lower(), "\n".join(loop)) + gameover_report_source(read("watcher"))
+
+def build(work, tag, overrides):
+    out = os.path.join(work, tag)
+    os.makedirs(out, exist_ok=True)
+    generated = os.path.join(out, "Production.cs")
+    with open(generated, "w", encoding="utf-8") as f:
+        f.write(gen_production(overrides))
+    cmd = ["dotnet", "build", PROJ, "-c", "Release", "-nologo", "-v", "q",
+           "-p:IntermediateOutputPath=" + os.path.join(out, "obj") + os.sep,
+           "-p:OutDir=" + os.path.join(out, "bin") + os.sep,
+           "-p:ProductionSource=" + generated]
+    for key, path in overrides.items():
+        if key in PROPS:
+            cmd.append("-p:" + PROPS[key] + "=" + path)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout[-4000:], r.stderr[-2000:])
+        return None
+    return os.path.join(out, "bin", "Stage2Tests.dll")
+
+
+def run_case(dll, case):
+    r = subprocess.run(["dotnet", dll, case], capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--work", required=True)
+    ap.add_argument("--piece", default=None)
+    # The refit lane logs fixtures and mutants apart: fixtures runs every
+    # fixture of the piece (and the K0 inventory), mutants every mutant.
+    ap.add_argument("--part", choices=("all", "fixtures", "mutants"), default="all")
+    ap.add_argument("--stub-kinds", action="store_true", help="check all type declarations without building or writing")
+    a = ap.parse_args()
+    kinds_ok = stub_kinds()
+    if not kinds_ok or a.stub_kinds:
+        print("RESULT", "PASS" if kinds_ok else "FAIL")
+        return 0 if kinds_ok else 1
+    work = os.path.abspath(a.work)
+    os.makedirs(work, exist_ok=True)
+    head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", REPO, "status", "--porcelain"], capture_output=True, text=True).stdout.strip()
+    print("commit", head)
+    print("tree", "clean" if not dirty else "DIRTY:\n" + dirty)
+    print("piece", a.piece or "all")
+    tracked = [f for f in FILES.values() if os.path.exists(os.path.join(PLUGIN, f))]
+    before = {f: sha(os.path.join(PLUGIN, f)) for f in tracked}
+    ok = True
+
+    if a.piece in (None, "K0"):
+        g = subprocess.run(["git", "-C", REPO, "grep", "-n", r"RPCA_Pick\|OFFLINE_Pick", "--", "plugin/"],
+                           capture_output=True, text=True)
+        lines = [ln for ln in g.stdout.splitlines() if ln.strip()]
+        bad = inventory(lines)
+        print("inventory: %d lines name RPCA_Pick or OFFLINE_Pick; %d unexpected application call(s)" % (len(lines), len(bad)))
+        for ln in bad:
+            print("  UNEXPECTED", ln)
+        planted = lines + ["plugin/Plugin.cs:1:                acs.OFFLINE_Pick(new[] { player });"]
+        control = inventory(planted)
+        control_ok = len(control) == len(bad) + 1
+        print("inventory negative control (one planted call in plugin/Plugin.cs): %s" % ("CAUGHT" if control_ok else "MISSED"))
+        ok = ok and len(lines) > 0 and not bad and control_ok
+
+    dll = build(work, "base", {})
+    if dll is None:
+        print("BUILD FAILED (base)")
+        return 1
+    listed = subprocess.run(["dotnet", dll, "--list"], capture_output=True, text=True).stdout.split()
+    prefixes = PIECES[a.piece] if a.piece else tuple(p for v in PIECES.values() for p in v)
+    cases = [c for c in listed if c.startswith(prefixes)]
+    passed = 0
+    for case in (cases if a.part != "mutants" else []):
+        rc, out = run_case(dll, case)
+        print(out)
+        passed += rc == 0
+        ok = ok and rc == 0
+    if a.part != "mutants":
+        print("fixtures: %d of %d pass" % (passed, len(cases)))
+        ok = ok and len(cases) > 0
+
+    mutants = [m for m in MUTANTS if (a.piece is None or m[1] == a.piece) and a.part != "fixtures"]
+    caught = 0
+    for name, piece, key, edits, target, control in mutants:
+        src = os.path.join(PLUGIN, FILES[key])
+        raw = open(src, "rb").read().decode("utf-8")
+        nl = "\r\n" if "\r\n" in raw else "\n"
+        text = raw
+        good = True
+        for old, new in edits:
+            o, n = old.replace("\n", nl), new.replace("\n", nl)
+            count = text.count(o)
+            if count != 1:
+                print("BAD mutant %s: anchor occurs %d times" % (name, count))
+                good = False
+                break
+            text = text.replace(o, n)
+        if not good:
+            ok = False
+            continue
+        path = os.path.join(work, "mut_" + name.replace(".", "_") + "_" + FILES[key])
+        open(path, "wb").write(text.encode("utf-8"))
+        mdll = build(work, "mut_" + name.replace(".", "_"), {key: path})
+        if mdll is None:
+            print("BAD mutant %s: does not build" % name)
+            ok = False
+            continue
+        if target not in listed or control not in listed:
+            print("BAD mutant %s: fixture missing" % name)
+            ok = False
+            continue
+        trc, tout = run_case(mdll, target)
+        crc, _ = run_case(mdll, control)
+        hit = trc != 0 and crc == 0
+        caught += hit
+        ok = ok and hit
+        print("%s mutant %s (%s): target %s=%s; control %s=%s%s" % (
+            "CAUGHT" if hit else "MISSED", name, piece, target, "FAIL" if trc else "PASS", control,
+            "PASS" if crc == 0 else "FAIL", "" if hit else " (" + tout[-200:] + ")"))
+    print("mutants: %d of %d caught" % (caught, len(mutants)))
+
+    unchanged = all(sha(os.path.join(PLUGIN, f)) == before[f] for f in tracked)
+    print("tracked plugin files unchanged:", unchanged)
+    ok = ok and unchanged
+    print("RESULT", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

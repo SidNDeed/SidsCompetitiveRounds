@@ -40,15 +40,27 @@ namespace CompetitiveRounds
         {
             public int Slot;
             public int Actor;
-            public char Kind;   // 's' start roster, 'l' admitted late
+            public char Kind;   // 's' start roster, 'l' admitted late, 'r' readmitted (V3 P4.3 step 1)
             public GrantEntry(int slot, int actor, char kind) { Slot = slot; Actor = actor; Kind = kind; }
         }
 
+        /// <summary>One kept-epoch entry. Chain version 1 entries carry only
+        /// slot and actor (kind l, no game, no verifier); version 2 entries
+        /// (V3 P4.8, RJ2-H11) also carry their kind, game and, for kind r,
+        /// the SHA-256 verifier of the readmission token.</summary>
         internal struct EpochEntry
         {
             public int Slot;
             public int Actor;
-            public EpochEntry(int slot, int actor) { Slot = slot; Actor = actor; }
+            public char Kind;
+            public int Game;        // -1 when the entry names none
+            public int V;           // chain version, 1 or 2
+            public string Verifier; // kind r only
+            public EpochEntry(int slot, int actor) { Slot = slot; Actor = actor; Kind = 'l'; Game = -1; V = 1; Verifier = null; }
+            public EpochEntry(int slot, int actor, char kind, int game, int v, string verifier)
+            {
+                Slot = slot; Actor = actor; Kind = kind; Game = game; V = v; Verifier = verifier;
+            }
         }
 
         /// <summary>A client's copy of the server's kept-epoch record: the
@@ -116,7 +128,13 @@ namespace CompetitiveRounds
         /// <summary>The chain at epoch n over a record's entries, the client's
         /// twin of the server's _ffa_epoch_chain: FNV-1a 64 over
         /// "{prev}:{lobby8}:{i}:{slot}:{actor}", prev "0" for epoch 1. Epoch 0
-        /// (nothing applied) is "0". Null when the entries do not reach n.</summary>
+        /// (nothing applied) is "0". Null when the entries do not reach n.
+        /// Each entry is hashed by its own chain version (V3 P4.8): a version
+        /// 2 entry over "{prev}:{lobby8}:{i}:{slot}:{actor}:{kind}:{game}:
+        /// {verifier}:v2" (game and verifier empty when absent), the twin of
+        /// _ffa_epoch_chain_v2. Versions never decrease within a record: a
+        /// version 1 entry after a version 2 one, or any other version,
+        /// verifies nothing (null).</summary>
         internal static string ChainOf(string lobby8, IList<EpochEntry> entries, int n)
         {
             if (n <= 0)
@@ -124,14 +142,42 @@ namespace CompetitiveRounds
             if (entries == null || entries.Count < n)
                 return null;
             string prev = "0";
+            int lastV = 1;
             for (int i = 0; i < n; i++)
             {
                 var e = entries[i];
-                prev = Hex16(Fnv64(prev + ":" + lobby8 + ":" + (i + 1).ToString(CultureInfo.InvariantCulture)
-                                   + ":" + e.Slot.ToString(CultureInfo.InvariantCulture)
-                                   + ":" + e.Actor.ToString(CultureInfo.InvariantCulture)));
+                int v = e.V == 0 ? 1 : e.V;
+                if ((v != 1 && v != 2) || v < lastV)
+                    return null;
+                lastV = v;
+                string s = prev + ":" + lobby8 + ":" + (i + 1).ToString(CultureInfo.InvariantCulture)
+                           + ":" + e.Slot.ToString(CultureInfo.InvariantCulture)
+                           + ":" + e.Actor.ToString(CultureInfo.InvariantCulture);
+                if (v == 2)
+                    s += ":" + (e.Kind == '\0' ? 'l' : e.Kind) + ":"
+                         + (e.Game < 0 ? "" : e.Game.ToString(CultureInfo.InvariantCulture)) + ":"
+                         + (e.Verifier ?? "") + ":v2";
+                prev = Hex16(Fnv64(s));
             }
             return prev;
+        }
+
+        /// <summary>The verified kind r entry of a slot (V3 P4.2 identity, P4.3
+        /// step 1): the LAST kind r entry for that slot within the first `upto`
+        /// entries of the record, or false when there is none. A later bind of
+        /// the same seat (a second drop, hold n + 1) supersedes an earlier one.</summary>
+        internal static bool KindREntry(EpochRecord rec, int slot, int upto, out EpochEntry entry)
+        {
+            entry = default(EpochEntry);
+            if (rec == null || rec.Entries == null) return false;
+            bool found = false;
+            int lim = Math.Min(upto < 0 ? rec.Entries.Count : upto, rec.Entries.Count);
+            for (int i = 0; i < lim; i++)
+            {
+                var e = rec.Entries[i];
+                if (e.Slot == slot && e.Kind == 'r' && e.V == 2) { entry = e; found = true; }
+            }
+            return found;
         }
 
         /// <summary>What an answer's `epoch` does to the record held (item 13):

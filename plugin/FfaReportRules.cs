@@ -205,6 +205,53 @@ namespace CompetitiveRounds
             return !string.IsNullOrEmpty(reportRoomId);
         }
 
+        /// <summary>RJ readmission P3 (client half): whether this seat's own
+        /// lag record keeps it from filing game reportGame. Outside a
+        /// readmission lobby a seat that entered LAG_OUT in the game files
+        /// nothing (V11 item 12, read from the local record, #428). In a
+        /// readmission lobby it files, marked self_lag (SelfLag below): the
+        /// server classes the report from its own rows and the mark can only
+        /// demote it.</summary>
+        internal static bool LagSkipsReport(bool readmitLobby, int reportGame, int localLagGame)
+        {
+            return !readmitLobby && reportGame > 0 && localLagGame == reportGame;
+        }
+
+        /// <summary>The advisory self_lag mark: set only in a readmission lobby,
+        /// only from this seat's own local lag record for the game.</summary>
+        internal static bool SelfLag(bool readmitLobby, int reportGame, int localLagGame)
+        {
+            return readmitLobby && reportGame > 0 && localLagGame == reportGame;
+        }
+
+        /// <summary>RJ readmission P3 (client half): the Steam id this seat
+        /// names as the filer of the game, or null when it names nobody (the
+        /// game unreported on this seat). The caller files exactly when the
+        /// answer is its own Steam id.
+        ///
+        /// In a readmission lobby every present kept seat files its own report
+        /// and the SERVER elects from its own rows; no client reads cr_lag,
+        /// cr_late or any fact only it holds to decide filing (V3 P3 step 1).
+        /// Outside one the client election runs exactly as before: elect over
+        /// the candidates (lowest Steam id first, skipping a late or lagged
+        /// seat), the ordinal fallback when no present id parses, and the
+        /// seat's fallback to itself only when its own bars are clear.</summary>
+        internal static string FilerOf(bool readmitLobby, string localSid, int ownActor,
+                                       IList<int> candActors, IDictionary<int, string> sidOfActor,
+                                       Func<int, bool> lagged, Func<int, bool> late,
+                                       Func<IList<int>, Func<int, bool>, Func<int, bool>, int> elect,
+                                       bool noPresentIdParses, Func<string> ordinalElection)
+        {
+            if (readmitLobby) return localSid;
+            int elected = elect(candActors, lagged, late);
+            string lowest = null;
+            if (elected >= 0) sidOfActor.TryGetValue(elected, out lowest);
+            else if (noPresentIdParses && ordinalElection != null) lowest = ordinalElection();
+            bool selfBarred = (late != null && late(ownActor)) || (lagged != null && lagged(ownActor));
+            if (lowest == null && !selfBarred) lowest = localSid;
+            return lowest;
+        }
+
         /// <summary>One seat's report-number snapshot: the ONLY path from the
         /// host's mutable room property to a report key.
         ///

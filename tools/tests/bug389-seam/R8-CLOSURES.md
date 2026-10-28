@@ -64,8 +64,11 @@ holds both documents to the count in both directions, so the legend a reader use
 to find the logs cannot name a set that is not there. An absent evidence set is a
 FAILURE, never a skip.
 
+BLIND-CONTROLS: r4 = 1
+BLIND-CONTROLS: r5 = 1
+BLIND-CONTROLS: r6 = 2
+BLIND-CONTROLS: r7 = 2
 BLIND-CONTROLS: r8 = 3
-BLIND-CONTROLS: r9 = 1
 
 ROUND-7 FINDINGS, BY NUMBER.
 

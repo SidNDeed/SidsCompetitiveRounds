@@ -18,11 +18,11 @@ namespace CompetitiveRounds
     /// kept-actor view, the quarantine, the authority fence, the count's
     /// EVT_SCALE, LAG_OUT, the boundary digest and the late seat's path.
     ///
-    /// Every decision is FfaLateRules' (Unity-free, executed by the late-rules
-    /// harness); this class feeds it plain values and applies the answer. In a
-    /// room the gate reads as ungated every view here passes every actor and
-    /// every master, so an ungated room keeps today's behaviour. Every view
-    /// fails safe: IsKeptActor is true, and the fence passes, on an exception.
+    /// Epoch decisions use FfaLateRules (Unity-free, executed by the late-rules
+    /// harness); this adapter also checks identity-bound replay completion at
+    /// readmission ACK and entry. Ungated rooms keep today's behaviour. The
+    /// legacy kept-rule and fence exception fallbacks are unchanged; a
+    /// readmission readiness exception separately refuses that entry.
     ///
     /// The kept epoch's events (EVT_READY, EVT_EPOCH, EVT_EPOCH_ACK and
     /// EVT_CALLIN) and the late entry exist only in an admission room (sec5.1,
@@ -144,6 +144,7 @@ namespace CompetitiveRounds
             _lateWaits.Clear();
             _runningRoom = null;
             _knownKept.Clear();
+            ClearReadmitReplay();
         }
 
         // ------------------------------------------------------------ the views (item 13)
@@ -188,10 +189,16 @@ namespace CompetitiveRounds
             return FfaLateRules.KeptSender(actor, FfaAssembly.Granted, Record, PointEpoch);
         }
 
-        /// <summary>The one kept-actor view: !GatedRunning || (HoldsGrant &amp;&amp;
-        /// kept(a)). True on an exception.</summary>
+        /// <summary>The kept-actor view also requires completed replay for a
+        /// readmitted kind-r entry; readiness exceptions refuse that entry.
+        /// The legacy kept-rule exception fallback remains true.</summary>
         internal static bool IsKeptActor(int actor)
         {
+            if (FfaAssembly.ReadmitLobby)
+            {
+                try { if (!ReadmitActorPrepared(actor, PointEpoch)) return false; }
+                catch { return false; }
+            }
             try
             {
                 return FfaLateRules.KeptActorValue(FfaAssembly.CurrentGate(), HoldsGrant, actor,
@@ -395,6 +402,13 @@ namespace CompetitiveRounds
         internal static void OnGrantedChanged()
         {
             ConfirmProvisionalScale();
+            // V3 P4.4: in a readmission lobby a grant change re-evaluates the
+            // roster latches, so a kind r grant releases an actor latched before
+            // its u_id was readable (the roster write stays the other trigger).
+            if (FfaReadmitEntryRules.GrantChangeReleasesLatches(FfaAssembly.ReadmitLobby))
+            {
+                try { RoomActors.ReleaseCoveredLatches(); } catch { }
+            }
             try { RoomActors.InvalidateFighterCache(); } catch { }
             ApplyQuarantine();
             FenceMaster();
@@ -411,8 +425,12 @@ namespace CompetitiveRounds
             foreach (var o in FfaAssembly.JsonObjects(FfaAssembly.ExtractJsonRaw(m, "kept")))
             {
                 var e = FfaAssembly.Members(o);
-                entries.Add(new FfaLateRules.EpochEntry(FfaAssembly.ExtractJsonInt(e, "slot", 0),
-                                                        FfaAssembly.ExtractJsonInt(e, "actor", 0)));
+                entries.Add(FfaReadmitEntryRules.EpochEntryOf(FfaAssembly.ExtractJsonInt(e, "slot", 0),
+                                                         FfaAssembly.ExtractJsonInt(e, "actor", 0),
+                                                         FfaAssembly.ExtractJsonString(e, "kind"),
+                                                         FfaAssembly.ExtractJsonInt(e, "game", -1),
+                                                         FfaAssembly.ExtractJsonInt(e, "v", 1),
+                                                         FfaAssembly.ExtractJsonString(e, "verifier")));
             }
             string l8 = JoinTimeline.Id8(lobby);
             string d = FfaLateRules.RecordDecision(Record, l8, n, chain, entries);
@@ -679,7 +697,10 @@ namespace CompetitiveRounds
                 List<int> missing;
                 while (true)
                 {
-                    ackComplete = FfaLateRules.AckComplete(barrier, PresentActors(), _acks, proposal, self, out missing);
+                    bool prepared = PrepareReadmitEpoch(nStar);
+                    ackComplete = FfaLateRules.AckComplete(barrier, PresentActors(), _acks, proposal, self, out missing)
+                        && ReadmitBoundaryReady(prepared);
+                    if (!prepared && !missing.Contains(self)) missing.Add(self);
                     if (ackComplete || Time.realtimeSinceStartup - a0 >= FfaAssembly.EpochAckS) break;
                     yield return null;
                 }
@@ -780,11 +801,64 @@ namespace CompetitiveRounds
                                                    + " sender=" + I(e.Sender));
                 return;
             }
-            if (Raise(EVT_EPOCH_ACK, new object[] { p.Lobby8, p.N, p.Chain, p.G, p.K },
-                      new RaiseEventOptions { TargetActors = new[] { e.Sender } }))
+            _replayProposal = p;
+            _replayAck = () =>
             {
-                _ackSent[Key(p.G, p.K)] = true;
-                JoinTimeline.Step("epoch_ack_tx", "n=" + I(p.N));
+                if (!_replayProposal.HasValue) return false;
+                var held = _replayProposal.Value;
+                if (!string.Equals(held.Lobby8, p.Lobby8, StringComparison.Ordinal)
+                    || held.N != p.N || !string.Equals(held.Chain, p.Chain, StringComparison.Ordinal)
+                    || held.G != p.G || held.K != p.K || held.From != p.From || e.Sender != p.From) return false;
+                if (Raise(EVT_EPOCH_ACK, new object[] { p.Lobby8, p.N, p.Chain, p.G, p.K },
+                          new RaiseEventOptions { TargetActors = new[] { e.Sender } }))
+                {
+                    _ackSent[Key(p.G, p.K)] = true;
+                    JoinTimeline.Step("epoch_ack_tx", "n=" + I(p.N));
+                    return true;
+                }
+                return false;
+            };
+            TryAckReadmitProposal();
+        }
+
+        internal static bool ReadmitBoundaryReady(bool replayCompleted)
+        {
+            return replayCompleted;
+        }
+
+        internal static bool ReadmitEnteredReady(bool readmitted, bool kept, bool replayCompleted)
+        {
+            return !readmitted || (kept && replayCompleted);
+        }
+
+        private static FfaLateRules.Proposal? _replayProposal;
+        private static Func<bool> _replayAck;
+
+        private static void TryAckReadmitProposal()
+        {
+            if (!_replayProposal.HasValue) { _replayAck = null; return; }
+            var p = _replayProposal.Value;
+            if (LagOutNow() || (_lastHold != null && _lastHold.G == p.G && _lastHold.K == p.K && _lastHold.Done))
+            {
+                _replayProposal = null;
+                _replayAck = null;
+                return;
+            }
+            int g = FfaMode.GameNumber;
+            bool kKnown = !LateArmed || _snapK >= 0;
+            int k = LateArmed && _snapK >= 0 ? _snapK : PointK;
+            if (!HoldsGrant || FfaLateRules.ValidateEpoch(p, MasterActor(), MasterKept(), Lobby8, Record, EpochApplied,
+                                                        AppliedChain, g, k, kKnown, PresentActors()) != null)
+            {
+                _replayProposal = null;
+                _replayAck = null;
+                return;
+            }
+            if (!ReadmitBoundaryReady(PrepareReadmitEpoch(p.N))) return;
+            if (_replayAck != null && _replayAck())
+            {
+                _replayProposal = null;
+                _replayAck = null;
             }
         }
 
@@ -987,6 +1061,13 @@ namespace CompetitiveRounds
         /// the present seats' toast).</summary>
         private static void AfterPair(string src, bool down, int g, int k)
         {
+            if (_replayProposal.HasValue && _replayProposal.Value.G == g && _replayProposal.Value.K == k)
+            {
+                _replayProposal = null;
+                _replayAck = null;
+            }
+            PrepareReadmitEpoch(PointEpoch);
+            CommitReadmitEpoch(PointEpoch);
             try { RoomActors.InvalidateFighterCache(); } catch { }
             KeptLine(src, down);
             ApplyQuarantine();
@@ -996,17 +1077,121 @@ namespace CompetitiveRounds
             if (Record != null)
                 for (int i = 0; i < PointEpoch && i < Record.Entries.Count; i++) nowKept.Add(Record.Entries[i].Actor);
             bool someoneJoined = false;
+            bool readmitLobby = FfaAssembly.ReadmitLobby;
             foreach (int a in nowKept)
             {
                 if (_knownKept.Contains(a)) continue;
                 _knownKept.Add(a);
-                if (a == own) OnSelfKept(g);
+                // Preparation belongs to the returning slot's outcome;
+                // this transition keeps its returning-seat toast.
+                int rslot = readmitLobby ? FfaReadmitEntryRules.ReplaySlotAtKeep(Record, PointEpoch, a, null) : -1;
+                if (a == own)
+                {
+                    _pendingSelfKeptGame = g;
+                    OnSelfKept(g);
+                }
+                else if (rslot >= 0)
+                {
+                    if (!LateArmed)
+                    {
+                        string who = "P" + I(rslot);
+                        try { who = GameStateWatcher.StripRichText(FfaMode.SeatName(rslot) ?? who); } catch { }
+                        try { CompetitiveUI.ShowNotification(I18n.TrF("{0} is back", who), new Color(0.6f, 0.9f, 1f), 5f); } catch { }
+                    }
+                }
                 else if (BodyActors().Contains(a)) someoneJoined = true;
             }
             if (someoneJoined && !LateArmed)
             {
                 try { CompetitiveUI.ShowNotification("A player joined the match", new Color(0.6f, 0.9f, 1f), 5f); } catch { }
             }
+            try { ReplayTick(); } catch { }
+        }
+
+        private static readonly Dictionary<int, FfaMode.ReadmitReplayOutcome> _pendingReplay =
+            new Dictionary<int, FfaMode.ReadmitReplayOutcome>();
+        private static int _pendingSelfKeptGame;
+
+        private static void ClearReadmitReplay()
+        {
+            FfaMode.InvalidateReadmitReplays();
+            _pendingReplay.Clear();
+            _replayProposal = null;
+            _replayAck = null;
+            _pendingSelfKeptGame = 0;
+        }
+
+        private static bool ReadmitActorPrepared(int actor, int epoch)
+        {
+            if (!FfaAssembly.ReadmitLobby || Record == null) return true;
+            for (int i = Math.Min(epoch, Record.Entries.Count) - 1; i >= 0; i--)
+            {
+                var entry = Record.Entries[i];
+                if (entry.Actor != actor) continue;
+                if (entry.Kind != 'r' || entry.V != 2) return true;
+                FfaMode.ReadmitReplayOutcome replay;
+                return _pendingReplay.TryGetValue(actor, out replay)
+                    && FfaMode.ReadmitReplayPrepared(replay, FfaAssembly.RoomLobbyId, FfaAssembly.CurrentRoomName(),
+                                                    entry.Slot, i + 1, actor);
+            }
+            return true;
+        }
+
+        private static bool PrepareReadmitEpoch(int epoch)
+        {
+            try { return PrepareReadmitEpochCore(epoch); }
+            catch { return false; }
+        }
+
+        private static bool PrepareReadmitEpochCore(int epoch)
+        {
+            if (!FfaAssembly.ReadmitLobby) return true;
+            if (Record == null) return false;
+            bool prepared = true;
+            var present = PresentActors();
+            var seen = new HashSet<int>();
+            for (int i = Math.Min(epoch, Record.Entries.Count) - 1; i >= 0; i--)
+            {
+                var entry = Record.Entries[i];
+                if (!seen.Add(entry.Actor) || !present.Contains(entry.Actor) || entry.Kind != 'r' || entry.V != 2) continue;
+                FfaMode.ReadmitReplayOutcome replay;
+                if (!_pendingReplay.TryGetValue(entry.Actor, out replay)
+                    || !FfaMode.ReadmitReplayNames(replay, FfaAssembly.RoomLobbyId, FfaAssembly.CurrentRoomName(),
+                                                   entry.Slot, i + 1, entry.Actor))
+                {
+                    FfaMode.CancelReadmitReplay(replay);
+                    replay = FfaMode.ReadmitReplayAtKeep(FfaAssembly.RoomLobbyId, entry.Slot, i + 1, entry.Actor);
+                    _pendingReplay[entry.Actor] = replay;
+                }
+                if (!ReadmitActorPrepared(entry.Actor, epoch)) prepared = false;
+            }
+            return prepared;
+        }
+
+        private static void CommitReadmitEpoch(int epoch)
+        {
+            try
+            {
+                if (!FfaAssembly.ReadmitLobby || Record == null) return;
+                var seen = new HashSet<int>();
+                for (int i = Math.Min(epoch, Record.Entries.Count) - 1; i >= 0; i--)
+                {
+                    var entry = Record.Entries[i];
+                    if (!seen.Add(entry.Actor) || entry.Kind != 'r' || entry.V != 2) continue;
+                    FfaMode.ReadmitReplayOutcome replay;
+                    if (_pendingReplay.TryGetValue(entry.Actor, out replay))
+                        FfaMode.CommitReadmitReplay(replay, FfaAssembly.RoomLobbyId, FfaAssembly.CurrentRoomName(),
+                                                   entry.Slot, i + 1, entry.Actor);
+                }
+            }
+            catch { }
+        }
+
+        private static void ReplayTick()
+        {
+            CommitReadmitEpoch(PointEpoch);
+            TryAckReadmitProposal();
+            if (_pendingSelfKeptGame > 0) OnSelfKept(_pendingSelfKeptGame);
         }
 
         private static void CallInHoldTick()
@@ -1587,8 +1772,13 @@ namespace CompetitiveRounds
             if (!(HoldsGrant && Kept(own))) return;
             int level = -1;
             try { level = MapManager.instance != null ? MapManager.instance.currentLevelID : -1; } catch { }
-            string bd = I(FfaMode.GameNumber) + ":" + I(PointK) + ":"
-                        + FfaLateRules.BoundaryDigest(FfaMode.GameNumber, PointK, I(level), LocalSlots());
+            // V3 P4.3 step 4: a readmission lobby (the pinned flag, so every
+            // seat of the lobby uses one format) digests the roster slots,
+            // never the kept bodies.
+            string hash = FfaAssembly.ReadmitLobby
+                ? FfaReadmitEntryRules.ReadmitDigest(FfaMode.GameNumber, PointK, I(level), FfaMode.ReadmitTail(ReadmitSlots()))
+                : FfaLateRules.BoundaryDigest(FfaMode.GameNumber, PointK, I(level), LocalSlots());
+            string bd = I(FfaMode.GameNumber) + ":" + I(PointK) + ":" + hash;
             if (bd == _bdLast) return;
             _bdLast = bd;
             try
@@ -1603,6 +1793,8 @@ namespace CompetitiveRounds
         // ------------------------------------------------------------ the late entry (item 5)
 
         private static bool _lateEntered;
+        private static string _readmitEnteredLobby;
+        private static int _readmitEnteredGame;
         private static int _lateLoads;
         private static int _lateFailures;
         private static float _lateArmedRt;
@@ -1613,6 +1805,28 @@ namespace CompetitiveRounds
         private static object[] _pendingSnap;
         private static int _pendingCallIns;
         private static int _requestSeq = 1;
+
+        /// <summary>The completed local entry belongs to this admission's
+        /// lobby and game, not to a timer or the current room state.</summary>
+        internal static bool ReadmitEntryCompleted(string lobby, int game)
+        {
+            return _lateEntered && !string.IsNullOrEmpty(lobby) && AdmittedLateLobby == lobby
+                   && _readmitEnteredLobby == lobby && _readmitEnteredGame == game;
+        }
+
+        /// <summary>V3 P4.3 step 10: a readmission bind of this process's own
+        /// seat (a second drop in the same session included) starts a fresh
+        /// late entry; the previous entry's latches would otherwise refuse it.</summary>
+        internal static void PrepareReadmitEntry()
+        {
+            AdmittedLateLobby = null;
+            LateArmed = false;
+            _lateEntered = false;
+            _readmitEnteredLobby = null;
+            _readmitEnteredGame = 0;
+            _lateFailures = 0;
+            _pendingSnap = null;
+        }
 
         /// <summary>Step 1, on `admitted_late {game g}`.</summary>
         internal static void OnAdmittedLate(FfaAssembly.Answer a)
@@ -1712,6 +1926,28 @@ namespace CompetitiveRounds
         internal static void OnLateRequest(int sender, int seq)
         {
             if (!MasterMaySend() || !AdmissionRoomNow()) return;
+            if (FfaAssembly.ReadmitLobby)
+            {
+                // V3 P4.3 step 1 and P4.2 identity: kind l on today's conditions;
+                // kind r also needs the verified kind r entry of its slot to name
+                // the requester and its cr_rdt token to hash to that entry's
+                // verifier. Two token refusals close the late seat's entry.
+                string rdt = null;
+                try { rdt = CrOf(ActorByNumber(sender), FfaReadmitEntryRules.RdtProp); } catch { }
+                var verdict = FfaReadmitEntryRules.LateRequest(sender, FfaAssembly.Granted, LateList, Record, Record != null ? Record.N : 0,
+                                                               slotOf => UidOnRosterSlot(sender, slotOf), rdt);
+                if (verdict == FfaReadmitEntryRules.LateReq.RefuseToken)
+                {
+                    Refused("token", sender);
+                    int c;
+                    _tokenRefusals.TryGetValue(sender, out c);
+                    _tokenRefusals[sender] = ++c;
+                    if (c >= 2) SendSnapshot(sender, seq, true);
+                    return;
+                }
+                if (verdict == FfaReadmitEntryRules.LateReq.Accept) _lateRequests[sender] = seq;
+                return;
+            }
             bool kindL = false;
             int slot = -1;
             foreach (var e in FfaAssembly.Granted)
@@ -1732,6 +1968,22 @@ namespace CompetitiveRounds
             _lateRequests[sender] = seq;
         }
 
+        private static readonly Dictionary<int, int> _tokenRefusals = new Dictionary<int, int>();
+
+        /// <summary>Whether the actor's u_id is the locked roster's entry for
+        /// the slot (today's kind l rule, shared by kind r).</summary>
+        private static bool UidOnRosterSlot(int actor, int slot)
+        {
+            try
+            {
+                string sid = RoomActors.SteamIdOf(ActorByNumber(actor));
+                var roster = ApiClient.FfaLockedRoster;
+                return !string.IsNullOrEmpty(sid) && roster != null && slot >= 0 && slot < roster.Count
+                       && roster[slot] != null && roster[slot].steam_id == sid;
+            }
+            catch { return false; }
+        }
+
         /// <summary>The late snapshot: the spectator's BuildSnapshot with the
         /// late tail appended (the spectator's parse ignores it).</summary>
         private static void SendSnapshot(int actor, int seq, bool closed)
@@ -1747,18 +1999,25 @@ namespace CompetitiveRounds
                 if (snap == null) return;
                 int g = FfaMode.GameNumber;
                 int[] teams = snap.Length > 9 ? snap[9] as int[] : null;
-                int maxTeam = 1;
-                if (teams != null) foreach (int t in teams) if (t > maxTeam) maxTeam = t;
-                var ptot = new int[maxTeam + 1];
-                var kl = new int[maxTeam + 1];
-                for (int t = 0; t <= maxTeam; t++) { ptot[t] = FfaMode.PointsTotalFor(t); kl[t] = FfaMode.KillsFor(t); }
+                // V3 P4.3 step 3: in a readmission lobby the arrays are the
+                // roster's size and the reserved picks field carries the
+                // roster-slot tail; elsewhere today's body-derived size and an
+                // empty picks field.
+                bool readmit = FfaAssembly.ReadmitLobby;
+                int size = FfaReadmitEntryRules.TailSize(readmit, RosterCount(), teams);
+                var ptot = new int[size];
+                var kl = new int[size];
+                for (int t = 0; t < size; t++) { ptot[t] = FfaMode.PointsTotalFor(t); kl[t] = FfaMode.KillsFor(t); }
+                string[] picks = readmit
+                    ? FfaReadmitEntryRules.EncodePicks(FfaMode.ReadmitTail(ReadmitSlots()))
+                    : new string[0];
                 uint seed = 0;
                 try { seed = FfaMode.SpawnShuffleSeed(); } catch { }
                 // WP6: the late tail, in order after the snapshot's 18 fields:
                 // marker 18, pointsTotal 19, kills 20, game 21, levelId 22 (the
                 // snapshot's own, index 5), picks 23, seed 24, k 25, n 26, scale 27.
                 int level = N(snap, 5, -1);
-                var tail = new object[] { LateMarker, ptot, kl, g, level, new string[0], (int)seed, PointK, PointEpoch, AppliedScaleTag() };
+                var tail = new object[] { LateMarker, ptot, kl, g, level, picks, (int)seed, PointK, PointEpoch, AppliedScaleTag() };
                 payload = new object[snap.Length + tail.Length];
                 Array.Copy(snap, payload, snap.Length);
                 Array.Copy(tail, 0, payload, snap.Length, tail.Length);
@@ -1824,11 +2083,44 @@ namespace CompetitiveRounds
                 return;
             }
             _pendingSnap = null;
-            try
+            if (FfaAssembly.ReadmitLobby)
             {
-                FfaMode.LateSeedScores(g, a[11] as int[], a[12] as int[], a[19] as int[], a[20] as int[]);
+                // V3 P4.3 steps 6 and 7: the tail game, the server's g and the
+                // room's cr_ffa_cyc game agree, or the seat fails closed; then
+                // the roster-sized seed and every slot's deck, history, draw
+                // index and the ledger.
+                var rt = ReadmitTailOf(a);
+                int cycGame = FfaMode.PublishedGameNumber();
+                bool agree = rt != null && FfaReadmitEntryRules.GameAgrees(g, _lateGame, cycGame);
+                JoinTimeline.Step("late_game", "tail=" + I(g) + " server=" + I(_lateGame) + " room=" + I(cycGame) + " match=" + (agree ? "1" : "0"));
+                if (!agree)
+                {
+                    LateFailure();
+                    return;
+                }
+                bool seeded = false;
+                try
+                {
+                    int[] r, p, pt, kl;
+                    FfaReadmitEntryRules.TailArrays(rt, RosterCount(), out r, out p, out pt, out kl);
+                    FfaMode.LateSeedScores(g, r, p, pt, kl);
+                    seeded = FfaMode.ReadmitSeedSeat(rt);
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning("[FFA-RDM] seed: " + ex.Message); }
+                if (!seeded)
+                {
+                    LateFailure();
+                    return;
+                }
             }
-            catch (Exception ex) { Plugin.Log.LogWarning("[FFA-LATE] seed scores: " + ex.Message); }
+            else
+            {
+                try
+                {
+                    FfaMode.LateSeedScores(g, a[11] as int[], a[12] as int[], a[19] as int[], a[20] as int[]);
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning("[FFA-LATE] seed scores: " + ex.Message); }
+            }
             _runningRoom = FfaAssembly.CurrentRoomName();
             FfaAssembly.NoteTrigger(_runningRoom, "late_entry");
             uint mine = 0;
@@ -1848,8 +2140,38 @@ namespace CompetitiveRounds
             LateSpawn();
         }
 
+        /// <summary>V3 P4.3 steps 3 and 4: the readmission tail of a snapshot
+        /// (picks 23, points total 19, kills 20), or null when it is not one.</summary>
+        private static FfaReadmitEntryRules.Tail ReadmitTailOf(object[] a)
+        {
+            try { return FfaReadmitEntryRules.DecodePicks(a[23] as string[], a[19] as int[], a[20] as int[]); }
+            catch { return null; }
+        }
+
+        private static int RosterCount()
+        {
+            try { var r = ApiClient.FfaLockedRoster; return r != null ? r.Count : 0; }
+            catch { return 0; }
+        }
+
+        /// <summary>The slots a readmission lobby's tail and digest cover:
+        /// every roster slot (FfaReadmitEntryRules.DigestSlotSet).</summary>
+        private static List<int> ReadmitSlots()
+        {
+            var kept = new List<int>();
+            try { foreach (var p in KeptPlayers()) if (p != null) kept.Add(p.TeamID); } catch { }
+            return FfaReadmitEntryRules.DigestSlotSet(FfaAssembly.ReadmitLobby, RosterCount(), kept);
+        }
+
         private static string SnapshotDigest(object[] a, int g, int k, int level)
         {
+            if (FfaAssembly.ReadmitLobby)
+            {
+                // The returner digests the tail exactly as every kept peer
+                // digests its own roster view; no tail, no digest (fails closed).
+                var rt = ReadmitTailOf(a);
+                return rt != null ? FfaReadmitEntryRules.ReadmitDigest(g, k, I(level), rt) : "";
+            }
             var slots = new List<FfaLateRules.SlotState>();
             try
             {
@@ -1916,23 +2238,43 @@ namespace CompetitiveRounds
             JoinTimeline.Step("late_spawn", "after_ms=" + I((int)((Time.realtimeSinceStartup - _lateArmedRt) * 1000f)));
         }
 
-        /// <summary>The call-in stamp that commits an epoch listing this seat:
-        /// its slot's recorded picks (the Stage 1 record, not built on this
-        /// lane: none), the `entered` POST, the toast and game_join.</summary>
+        /// <summary>The committed epoch admits this seat after its readmission
+        /// replay completes, then posts entered and records the toast/game_join.</summary>
         private static void OnSelfKept(int g)
         {
             if (string.IsNullOrEmpty(AdmittedLateLobby) || _lateEntered) return;
+            if (!ReadmitEnteredReady(FfaReadmit.ReadmittedInto(AdmittedLateLobby), Kept(OwnActor()),
+                                    ReadmitActorPrepared(OwnActor(), PointEpoch))) return;
             _lateEntered = true;
+            _readmitEnteredLobby = AdmittedLateLobby;
+            _readmitEnteredGame = _lateGame;
+            _pendingSelfKeptGame = 0;
             LateArmed = false;
             JoinTimeline.Step("late_cards", "n=0");
             string lobby = AdmittedLateLobby;
-            FfaAssembly.ReceiptThen(lobby, "entered", "\"game\":" + I(Math.Max(1, Math.Min(999, g))), ok =>
+            // game_join is stepped (and the owed toast cleared) at ONE site for
+            // both routes: a kind l seat after its `entered` receipt, a kind r
+            // seat at once.
+            Action<bool> joined = ok =>
             {
                 if (!ok) return;
                 JoinTimeline.Step("game_join", "game=" + I(g));
                 FfaAssembly.ClearOwedToast();
                 JoinTimeline.Disarm("game_join");
-            });
+            };
+            if (FfaReadmit.ReadmittedInto(lobby))
+            {
+                // V3 P4.3 step 11: a kind r seat posts `entered` (g, n and its
+                // bound actor) on the readmission route, which spends the token,
+                // and is told it is back, not that it joined unrated.
+                FfaReadmit.LadderEntered();
+                FfaReadmit.PostEntered(Math.Max(1, Math.Min(999, g)));
+                joined(true);
+                try { CompetitiveUI.ShowNotification("You are back in the match", new Color(0.6f, 0.9f, 1f), 7f); }
+                catch { }
+                return;
+            }
+            FfaAssembly.ReceiptThen(lobby, "entered", "\"game\":" + I(Math.Max(1, Math.Min(999, g))), joined);
             try
             {
                 CompetitiveUI.ShowNotification("You joined the match in progress. This game is unrated for you.",
@@ -1951,6 +2293,7 @@ namespace CompetitiveRounds
             try { CallInHoldTick(); } catch (Exception ex) { Plugin.Log.LogWarning("[FFA-LATE] hold: " + ex.Message); }
             try { ReadyTick(); } catch { }
             try { DigestTick(); } catch { }
+            try { ReplayTick(); } catch { }
             float now = Time.realtimeSinceStartup;
             if (_pendingSnap != null && now - _snapCheckRt > 0.5f)
             {
@@ -1968,6 +2311,8 @@ namespace CompetitiveRounds
         /// episode and the per-room state go.</summary>
         internal static void OnRoomLeft(string room)
         {
+            _readmitEnteredLobby = null;
+            _readmitEnteredGame = 0;
             LagOutEnd("room_exit");
             _scale.Clear();
             _latchMaster.Clear();
@@ -1987,6 +2332,8 @@ namespace CompetitiveRounds
             _deathScheduled = false;
             if (LateArmed) LateArmed = false;
             _readySent = 0;
+            _tokenRefusals.Clear();
+            ClearReadmitReplay();
         }
 
         private static string I(int v) { return v.ToString(CultureInfo.InvariantCulture); }
@@ -2154,6 +2501,48 @@ namespace CompetitiveRounds
             if (original != null) return exception;
             if (exception == null) FfaLateEntry.RegisterPostfixAttached = true;
             return exception;
+        }
+    }
+
+    /// <summary>V3 P4.3 step 9, readmission rooms only: the player list stays
+    /// sorted by PlayerID with no holes; a registration lands at its sorted
+    /// position and never over a live entry, and a duplicate PlayerID is
+    /// refused with a log line. Vanilla writes the list at forceIndex, so a
+    /// compacted list (FFA purges) would take the returner over a live
+    /// fighter; here a placeholder is inserted at the sorted index and
+    /// forceIndex is pointed at it. Runs after the registration firewall
+    /// (Priority.Low, __runOriginal), and binds the forced index positionally
+    /// (#364, #83). KX4: the same in every flagged team or 1v2 room (Stage 2
+    /// S3 step 8), through TeamHoldRules.PlaceRegistration. Elsewhere
+    /// vanilla runs untouched.</summary>
+    [HarmonyPatch(typeof(PlayerManager), "RegisterPlayer")]
+    internal static class FfaReadmit_RegisterOrder_Patch
+    {
+        [HarmonyPriority(Priority.Low)]
+        private static bool Prefix(Player __0, ref int __1, bool __runOriginal)
+        {
+            if (!__runOriginal) return false;
+            try
+            {
+                // KX4: the FFA readmission lobbies and every flagged room
+                // (a team or 1v2 room whose join answer pinned a hold).
+                if (!TeamHoldRules.SortedRegistration(FfaAssembly.ReadmitLobby, TeamHoldWriter.CurrentRoom())
+                    || __0 == null || __1 < 0) return true;
+                var list = PlayerManager.instance != null ? PlayerManager.instance.players : null;
+                if (list == null) return true;
+                int at = TeamHoldRules.PlaceRegistration(list, p => p.gameObject == null || p.data == null,
+                                                         p => p.PlayerID, __1, FfaReadmitEntryRules.RegisterIndex);
+                if (at < 0)
+                {
+                    Plugin.Log.LogWarning("[FFA-RDM] registration refused: PlayerID " + __1 + " is already registered");
+                    return false;
+                }
+                if (at != __1)
+                    Plugin.Log.LogInfo("[FFA-RDM] registration of PlayerID " + __1 + " at sorted index " + at);
+                __1 = at;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[FFA-RDM] registration order: " + ex.Message); }
+            return true;
         }
     }
 

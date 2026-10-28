@@ -52,5 +52,5 @@ NativeUI.Keybinds.cs	KeybindPaintRow	1	befb2074ef840355	display	self	colours a C
 NativeUI.Keybinds.cs	KeybindResetRow	1	341c4e67f56f8f47	registry	-	the Controls row's reset button handler: the per-row reset writer; the row repaints from the revision
 NativeUI.Keybinds.cs	KeybindRowFace	1	8ad08b4f28d18909	producer	-	a row's face
 Plugin.cs	Prefix#26	1	18f21d2b9e197860	input	-	MapSkinCycle held: the manual map-art cycle
-Plugin.cs	Update#2	1	eba1b8344996ebf6	input	-	MenuToggle edge: opens the menu
+Plugin.cs	Update#2	1	33eecebb712ae429	input	-	MenuToggle edge: opens the menu
 TabStatsOverlay.cs	Draw	1	b2a9c72a08978a83	input	-	Scoreboard held: the overlay shows while the key is held; its hint is the EnsureLocaleStrings site

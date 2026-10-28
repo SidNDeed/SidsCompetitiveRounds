@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Stage 2 (2v2 and 1v2 readmission) client rules harness, in the pure-rules
+       form of tools/late-rules-harness and the replay form of
+       tools/tests/card-draw-replay: compiles the REAL plugin/SeatDeckLog.cs,
+       plugin/TeamHoldRules.cs and plugin/TeamHoldNet.cs as they ship (none of
+       them references Unity, Photon or Harmony) with Program.cs, which holds
+       the scripted fixtures. Mutants are built from COPIES of those files
+       (SeatSource, RulesSource, NetSource overrides); the tracked files are
+       never modified. run_stage2.py drives it. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Stage2Tests</AssemblyName>
+    <RootNamespace>CompetitiveRounds.Stage2Harness</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0169;CS0649;CS0414;CS0162</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(SeatSource)' == ''">
+    <SeatSource>$(MSBuildThisFileDirectory)..\..\..\plugin\SeatDeckLog.cs</SeatSource>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RulesSource)' == ''">
+    <RulesSource>$(MSBuildThisFileDirectory)..\..\..\plugin\TeamHoldRules.cs</RulesSource>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(NetSource)' == ''">
+    <NetSource>$(MSBuildThisFileDirectory)..\..\..\plugin\TeamHoldNet.cs</NetSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(SeatSource)" />
+    <Compile Include="$(RulesSource)" Condition="Exists('$(RulesSource)')" />
+    <Compile Include="$(NetSource)" Condition="Exists('$(NetSource)')" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\DcReporterElection.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaReadmitEntryRules.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaLateRules.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaReadmitRules.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program*.cs" />
+    <Compile Include="$(ProductionSource)" />
+  </ItemGroup>
+
+</Project>

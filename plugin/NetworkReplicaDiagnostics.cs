@@ -43,7 +43,9 @@ namespace CompetitiveRounds
             int excess = arrivalGapMs - senderGapMs;
             return excess < 0 ? 0 : excess;
         }
-        private const int JitterLogMaximumPerRoom = 16;
+        // The room line budget lives in NetJitterBudgetCore (TOTAL 16, of
+        // which RESERVE 4 are held for gaps above BIG_GAP_MS 1000 ms).
+        private static readonly NetJitterBudgetCore _jitterBudget = new NetJitterBudgetCore();
         private const int GameSummaryLogMaximumPerRoom = 128;
 
         private static readonly Dictionary<int, ActorStats> Actors =
@@ -59,7 +61,6 @@ namespace CompetitiveRounds
         private static bool _gamePartial;
         private static bool _battleActive;
         private static bool _spectatorActivationAllowed;
-        private static bool _jitterLogBudgetSpent;
         private static Photon.Realtime.Room _observedRoom;
         private static bool _roomOrphanViewsOverflowed;
         private static bool _gameOrphanViewsOverflowed;
@@ -157,24 +158,22 @@ namespace CompetitiveRounds
             _ctxExcessMs = sampled ? sample.DeliveryExcessMs : 0;
 
             if (sampled && sample.ArrivalGapMs >= ArrivalGapLogThresholdMs &&
-                sample.DeliveryExcessMs >= JitterLogThresholdMs &&
-                !_jitterLogBudgetSpent)
+                sample.DeliveryExcessMs >= JitterLogThresholdMs)
             {
-                if (VanillaFixSupport.TryReserveDiag(
-                    JitterDiagKey, JitterLogMaximumPerRoom))
+                // Night 2026-10-19: the room budget keeps a reserve for gaps
+                // above 1000 ms and every qualifying gap is offered to the
+                // room-end top list, spent budget or not (NetJitterBudgetCore).
+                bool reserve;
+                if (_jitterBudget.Offer(actorNumber, sample.ArrivalGapMs, sample.SenderGapMs,
+                        sample.DeliveryExcessMs, _gameOrdinal, out reserve))
                 {
                     VanillaFixSupport.WriteReservedDiag(
                         "[NET-JITTER] actor=" + actorNumber.ToString(CultureInfo.InvariantCulture) +
                         " arrivalGap=" + sample.ArrivalGapMs.ToString(CultureInfo.InvariantCulture) + "ms" +
                         " senderGap=" + sample.SenderGapMs.ToString(CultureInfo.InvariantCulture) + "ms" +
                         " excess=" + sample.DeliveryExcessMs.ToString(CultureInfo.InvariantCulture) + "ms" +
-                        " game=" + _gameOrdinal.ToString(CultureInfo.InvariantCulture));
-                }
-                else
-                {
-                    // Avoid even a dictionary lock after the fixed room
-                    // budget is known exhausted; room edges clear both.
-                    _jitterLogBudgetSpent = true;
+                        " game=" + _gameOrdinal.ToString(CultureInfo.InvariantCulture) +
+                        (reserve ? " reserve=1" : ""));
                 }
             }
         }
@@ -427,7 +426,7 @@ namespace CompetitiveRounds
                     VanillaFixSupport.ResetDiag(JitterDiagKey);
                     VanillaFixSupport.ResetDiag(GameSummaryDiagKey);
                     VanillaFixSupport.ResetDiag(ViewSummaryDiagKey);   // r4 MEDIUM 6: the per-room NET-VIEW budget resets on the same room edges
-                    _jitterLogBudgetSpent = false;
+                    _jitterBudget.ResetLines();
                     return;
                 }
 
@@ -451,7 +450,7 @@ namespace CompetitiveRounds
                 VanillaFixSupport.ResetDiag(JitterDiagKey);
                 VanillaFixSupport.ResetDiag(GameSummaryDiagKey);
                 VanillaFixSupport.ResetDiag(ViewSummaryDiagKey);   // r4 MEDIUM 6: the per-room NET-VIEW budget resets on the same room edges
-                _jitterLogBudgetSpent = false;
+                _jitterBudget.ResetRoom();
                 NetDiag.RebaseOrphanCounter();
                 _roomActive = true;
                 _observedRoom = currentRoom;
@@ -584,7 +583,7 @@ namespace CompetitiveRounds
                 VanillaFixSupport.ResetDiag(JitterDiagKey);
                 VanillaFixSupport.ResetDiag(GameSummaryDiagKey);
                 VanillaFixSupport.ResetDiag(ViewSummaryDiagKey);   // r4 MEDIUM 6: the per-room NET-VIEW budget resets on the same room edges
-                _jitterLogBudgetSpent = false;
+                _jitterBudget.ResetRoom();
                 NetDiag.RebaseOrphanCounter();
             }
         }
@@ -1094,7 +1093,38 @@ namespace CompetitiveRounds
                 " orphanSer=" + _roomOrphans.ToString(CultureInfo.InvariantCulture) +
                 " orphanViews=" + DistinctText(RoomOrphanViews.Count, _roomOrphanViewsOverflowed) +
                 " droppedActorEvents=" + _roomDroppedActorEvents.ToString(CultureInfo.InvariantCulture) +
+                _jitterBudget.SummaryFields() +
                 ActorSummary(game: false));
+        }
+
+        /// <summary>Night 2026-10-19 (InboundStallCore): the remote Player
+        /// streams of the current game and their cumulative accepted batch
+        /// counts, so a stall line can say which streams stopped. Allocation
+        /// free; at most actors.Length entries; the actors with a confirmed
+        /// Player view (fighter seats) or, on a spectator seat, any view.</summary>
+        internal static int SnapshotRemoteStreams(int[] actors, long[] batches)
+        {
+            int n = 0;
+            try
+            {
+                if (actors == null || batches == null) return 0;
+                bool spectator = SpectatorSession.IsLocalSpectator;
+                using (var en = Actors.GetEnumerator())
+                {
+                    for (int i = 0; i < ACTOR_SCAN_CAP && en.MoveNext(); i++)
+                    {
+                        ActorStats a = en.Current.Value;
+                        if (a == null || a.Game.Views == 0) continue;
+                        if (!spectator && a.PlayerViewId == 0) continue;
+                        if (n >= actors.Length || n >= batches.Length) break;
+                        actors[n] = en.Current.Key;
+                        batches[n] = a.Game.Batches;
+                        n++;
+                    }
+                }
+            }
+            catch { }
+            return n;
         }
 
         private static string ActorSummary(bool game)
@@ -1204,7 +1234,7 @@ namespace CompetitiveRounds
             _battleActive = false;
             _spectatorActivationAllowed = false;
             _spectatorSnapshotSeen = false;
-            _jitterLogBudgetSpent = false;
+            _jitterBudget.ResetRoom();
             _observedRoom = null;
             _roomOrphanViewsOverflowed = false;
             _gameOrphanViewsOverflowed = false;
