@@ -4719,7 +4719,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:54157 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:54181 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4785,7 +4785,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:53958 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:53982 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4855,7 +4855,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:53300 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:53313 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -15810,10 +15810,23 @@ async def _lock_queue_rows_ordered(db: AsyncSession, table: str, player_ids, *,
     for pid in sorted(seen, key=str):
         if before_each is not None:
             await before_each()
-        await db.execute(
-            text(f"SELECT 1 FROM {table} WHERE player_id = :pid FOR UPDATE"),
-            {"pid": pid},
-        )
+        # One literal statement per table, chosen by branch: the janitor's
+        # boot self-test (_janitor_sql_inventory) reaches this lock and
+        # resolves every statement it reaches statically; a spliced table
+        # name is a site it cannot resolve. The guard above refuses any
+        # other table, so the chain is exhaustive.
+        if table == "ranked_queue":
+            await db.execute(text("SELECT 1 FROM ranked_queue WHERE player_id = :pid FOR UPDATE"),
+                             {"pid": pid})
+        elif table == "team_queue":
+            await db.execute(text("SELECT 1 FROM team_queue WHERE player_id = :pid FOR UPDATE"),
+                             {"pid": pid})
+        elif table == "ovt_queue":
+            await db.execute(text("SELECT 1 FROM ovt_queue WHERE player_id = :pid FOR UPDATE"),
+                             {"pid": pid})
+        elif table == "ffa_queue":
+            await db.execute(text("SELECT 1 FROM ffa_queue WHERE player_id = :pid FOR UPDATE"),
+                             {"pid": pid})
 
 
 # ── v1.40.1: reciprocal 1v1 pair predicates (one writer for every site) ──────
@@ -53581,10 +53594,21 @@ async def _report_window_settle(db, mode, entry, out=None):
     if not outcome.get("new_settlement") or outcome.get("physical_game") != physical_game:
         raise _mrw_mod().ReportAlreadyRecorded(
             outcome.get("physical_game"), receipt=out is not None)
-    await db.execute(text(
-        "UPDATE " + _WINDOW_TABLES[mode][1] + " SET fallback_cls = CAST(:cls AS varchar)"
-        " WHERE series_id = CAST(:sid AS uuid) AND photon_room_id = CAST(:room AS varchar)"),
-        {"cls": cls, "sid": str(report.series_id), "room": (report.photon_room_id or "")[:64]})
+    # One literal statement per mode (the match table _WINDOW_TABLES[mode][1]
+    # names): the janitor's boot self-test (_janitor_sql_inventory) reaches
+    # this settle and resolves every statement it reaches statically; a
+    # spliced table name is a site it cannot resolve.
+    _cls_binds = {"cls": cls, "sid": str(report.series_id), "room": (report.photon_room_id or "")[:64]}
+    if mode == "team":
+        await db.execute(text(
+            "UPDATE team_matches SET fallback_cls = CAST(:cls AS varchar)"
+            " WHERE series_id = CAST(:sid AS uuid) AND photon_room_id = CAST(:room AS varchar)"), _cls_binds)
+    elif mode == "ovt":
+        await db.execute(text(
+            "UPDATE ovt_matches SET fallback_cls = CAST(:cls AS varchar)"
+            " WHERE series_id = CAST(:sid AS uuid) AND photon_room_id = CAST(:room AS varchar)"), _cls_binds)
+    else:
+        raise ValueError(f"unknown report window mode {mode!r}")
     print(f"[HOLD] report settled mode={mode} cls={cls} room={report.photon_room_id}")
     return resp
 
@@ -54443,11 +54467,24 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
             db.add(GoldTransaction(player_id=pid, amount=bonus,
                                    reason=("ovt_series_win" if side == winner_side else "ovt_series_loss"),
                                    reference_id=str(series_uuid)))
-            # Accumulate the bonus on this player's own slot column.
-            slot = "solo" if pid == solo_id else ("duo_a" if pid == duo_a_id else "duo_b")
-            await db.execute(text(
-                f"UPDATE ovt_series SET {slot}_gold_earned = {slot}_gold_earned + :g WHERE id = :sid"
-            ), {"g": bonus, "sid": series_uuid})
+            # Accumulate the bonus on this player's own slot column: one literal
+            # statement per column, chosen by the two seat comparisons the slot
+            # label used to be derived from (the janitor's boot self-test,
+            # _janitor_sql_inventory, reaches this settle through the stage 2
+            # report window and resolves every statement it reaches statically;
+            # a spliced column name is a site it cannot resolve).
+            if pid == solo_id:
+                await db.execute(text(
+                    "UPDATE ovt_series SET solo_gold_earned = solo_gold_earned + :g WHERE id = :sid"
+                ), {"g": bonus, "sid": series_uuid})
+            elif pid == duo_a_id:
+                await db.execute(text(
+                    "UPDATE ovt_series SET duo_a_gold_earned = duo_a_gold_earned + :g WHERE id = :sid"
+                ), {"g": bonus, "sid": series_uuid})
+            else:
+                await db.execute(text(
+                    "UPDATE ovt_series SET duo_b_gold_earned = duo_b_gold_earned + :g WHERE id = :sid"
+                ), {"g": bonus, "sid": series_uuid})
         # Bump per-player completed-series / side game counts (rating table rows
         # created lazily so the future ranked replay has counts to read).
         for pid, is_solo in ((solo_id, True), (duo_a_id, False), (duo_b_id, False)):
