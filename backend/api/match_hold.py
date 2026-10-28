@@ -56,8 +56,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
+from read_gate import ReadGateRoute
 
-router = APIRouter(prefix="/api/v1/match", tags=["Match Hold"])
+# Verified reads: the GET routes here carry the read gate (read_gate.py):
+# by-room and {hold_id}/state are PLAYER (the caller's own hold, under its
+# session), mine is WRITE_ON_GET (it records the offered attempt row).
+router = APIRouter(prefix="/api/v1/match", tags=["Match Hold"], route_class=ReadGateRoute)
 
 DB_REQUEST_TIMEOUT_S = 8.0
 DB_LOCK_TIMEOUT_MS = 5000

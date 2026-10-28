@@ -178,6 +178,11 @@ WRITE_ON_GET: dict[str, str] = {
                                          "seat lease",
     "/api/v1/ffa/queue/poll/{steam_id}": "FFA queue transitions, bet settlement and refunds, "
                                          "the seat lease",
+    "/api/v1/ffa/readmit/offer": "records the caller's offered readmission attempt (the "
+                                 "attempt row the per-hold cap counts) and commits it before "
+                                 "answering",
+    "/api/v1/match/hold/mine": "records the caller's offered attempt row and offered_at on "
+                               "the caller's live hold, committed before the answer",
     "/api/v1/team/lobby/state": "renews the lobby lease and stores region pings",
     "/api/v1/team/lobby/resolve": "lobby resolution commits",
     "/api/v1/ovt/lobby/state": "renews the lobby lease and stores region pings",
@@ -216,6 +221,11 @@ _R_TRIAGE = ("the commit ends the triage's REPEATABLE READ, READ ONLY transactio
 _R_INTERNAL = ("INTERNAL class: the gate never refuses or looks anything up on it; the "
                "internal key requirement is enforced by rate_limit_gate and the handler, "
                "unchanged")
+_R_STAMP = ("the session check's one-time arming stamp, written only for a presented "
+            "verified session")
+_R_HOLD = ("PLAYER: the caller's own hold rows, read under the verified session the "
+           "handler itself requires (match_hold._require_verified_session); the "
+           "handler rolls back and writes nothing of its own")
 WRITE_REVIEWED: dict[str, tuple[frozenset, str]] = {
     "/api/v1/achievements/{key}/earners": (_PODIUM, _R_PODIUM),
     "/api/v1/chat/recent": (_PODIUM, _R_PODIUM),
@@ -253,6 +263,10 @@ WRITE_REVIEWED: dict[str, tuple[frozenset, str]] = {
                                     "the session check's one-time arming stamp, written only "
                                     "for a presented verified session; ADMIN_SIGNED: the gate "
                                     "refuses nothing"),
+    "/api/v1/match/hold/by-room": (frozenset({"_check_steam_session"}),
+                                   _R_STAMP + "; " + _R_HOLD),
+    "/api/v1/match/hold/{hold_id}/state": (frozenset({"_check_steam_session"}),
+                                           _R_STAMP + "; " + _R_HOLD),
     "/api/v1/internal/chat/mod-actions": (frozenset({"internal_chat_mod_actions"}),
                                           _R_INTERNAL),
     "/api/v1/internal/chat/since": (_PODIUM, _R_INTERNAL),
@@ -355,6 +369,8 @@ PLAYER: frozenset = frozenset({
     "/api/v1/mail/sent",
     "/api/v1/mail/settings",
     "/api/v1/mail/status",
+    "/api/v1/match/hold/by-room",
+    "/api/v1/match/hold/{hold_id}/state",
     "/api/v1/pc/card",
     "/api/v1/pc/collection",
     "/api/v1/pc/me",

@@ -525,20 +525,37 @@ DESIGN_PLAYER_30 = {
     "/api/v1/mail/{message_id}": C_WOG,
 }
 
+# The stage 2 match hold (the RJ server lane, 2026-10-28) added three GET
+# routes after the design's 30, each read under the session the handler
+# requires: by-room and {hold_id}/state answer the caller's own hold row and
+# are PLAYER (their one writer, the session check's arming stamp, is reviewed
+# in read_gate.WRITE_REVIEWED); mine records the offered attempt row and
+# offered_at on the caller's live hold, committed before the answer, so it is
+# WRITE_ON_GET like the design's 14. They are reconciled here beside the
+# design's rows, so the live PLAYER set is still exactly the mapped PLAYER
+# rows and nothing else.
+STAGE2_HOLD_PLAYER = {
+    "/api/v1/match/hold/by-room": C_PLAYER,
+    "/api/v1/match/hold/mine": C_WOG,
+    "/api/v1/match/hold/{hold_id}/state": C_PLAYER,
+}
+DESIGN_PLAYER = {**DESIGN_PLAYER_30, **STAGE2_HOLD_PLAYER}
+
 
 def check_design_player_mapping(routes, mapping=None, player=None, write_on_get=None) -> list[str]:
-    """Every problem with the 30-template reconciliation: a count other than
-    30, a template that is not a live GET, a class other than the mapping
+    """Every problem with the template reconciliation: a count other than
+    the design's 30 plus the stage 2 hold's 3, a template that is not a live GET, a class other than the mapping
     says, a superseding class other than WRITE_ON_GET or one without its
     written reason, a superseded template that is not both session-reached
     and a writer, and a PLAYER class that differs from the mapping's PLAYER
     rows (a route gained or lost outside the design's list)."""
-    mapping = DESIGN_PLAYER_30 if mapping is None else mapping
+    mapping = DESIGN_PLAYER if mapping is None else mapping
     player = read_gate.PLAYER if player is None else player
     write_on_get = read_gate.WRITE_ON_GET if write_on_get is None else write_on_get
     problems = []
-    if len(mapping) != 30:
-        problems.append(f"the design named 30 templates; the mapping has {len(mapping)}")
+    if len(mapping) != 30 + len(STAGE2_HOLD_PLAYER):
+        problems.append(f"the design named 30 templates and the stage 2 hold added "
+                        f"{len(STAGE2_HOLD_PLAYER)}; the mapping has {len(mapping)}")
     by_path = {r.path: r for r in _get_routes(routes)}
 
     def cls_of(t):
@@ -569,9 +586,10 @@ def check_design_player_mapping(routes, mapping=None, player=None, write_on_get=
     live_player = {p for p in by_path if cls_of(p) == C_PLAYER}
     mapped_player = {t for t, c in mapping.items() if c == C_PLAYER}
     for t in sorted(live_player - mapped_player):
-        problems.append(f"{t} is PLAYER but not one of the design's 30")
+        problems.append(f"{t} is PLAYER but not one of the mapped PLAYER rows "
+                        f"(the design's 30 and the stage 2 hold's 3)")
     for t in sorted(mapped_player - live_player):
-        problems.append(f"{t} is one of the design's PLAYER rows but is not PLAYER")
+        problems.append(f"{t} is one of the mapped PLAYER rows but is not PLAYER")
     return problems
 
 
@@ -581,25 +599,28 @@ def test_design_player_30_mapping():
     for c in DESIGN_PLAYER_30.values():
         counts[c] = counts.get(c, 0) + 1
     assert counts == {C_PLAYER: 16, C_WOG: 14}, counts
-    assert set(read_gate.PLAYER) == {t for t, c in DESIGN_PLAYER_30.items() if c == C_PLAYER}
+    assert len(STAGE2_HOLD_PLAYER) == 3
+    assert sorted(STAGE2_HOLD_PLAYER.values()) == sorted([C_PLAYER, C_PLAYER, C_WOG])
+    assert not set(STAGE2_HOLD_PLAYER) & set(DESIGN_PLAYER_30)
+    assert set(read_gate.PLAYER) == {t for t, c in DESIGN_PLAYER.items() if c == C_PLAYER}
 
 
 def test_design_player_30_controls():
-    """The checker reports: a template mapped to the wrong class, a 29-row
+    """The checker reports: a template mapped to the wrong class, a 32-row
     mapping, a PLAYER class that gained a route, one that lost a route, and a
     superseding class no requirement justifies."""
-    wrong = dict(DESIGN_PLAYER_30, **{"/api/v1/mail/sent": C_WOG})
+    wrong = dict(DESIGN_PLAYER, **{"/api/v1/mail/sent": C_WOG})
     assert any("/api/v1/mail/sent is PLAYER; the mapping says WRITE_ON_GET" in p
                for p in check_design_player_mapping(main.app.routes, mapping=wrong))
-    short = dict(DESIGN_PLAYER_30)
+    short = dict(DESIGN_PLAYER)
     short.pop("/api/v1/report")
-    assert any("the mapping has 29" in p for p in check_design_player_mapping(main.app.routes, mapping=short))
+    assert any("the mapping has 32" in p for p in check_design_player_mapping(main.app.routes, mapping=short))
     gained = set(read_gate.PLAYER) | {"/api/v1/leaderboard"}
-    assert any("/api/v1/leaderboard is PLAYER but not one of the design's 30" in p
+    assert any("/api/v1/leaderboard is PLAYER but not one of the mapped PLAYER rows" in p
                for p in check_design_player_mapping(main.app.routes, player=gained))
     lost = set(read_gate.PLAYER) - {"/api/v1/mail/settings"}
-    assert any("/api/v1/mail/settings is one of the design's PLAYER rows but is not PLAYER" in p
+    assert any("/api/v1/mail/settings is one of the mapped PLAYER rows but is not PLAYER" in p
                for p in check_design_player_mapping(main.app.routes, player=lost))
-    odd = dict(DESIGN_PLAYER_30, **{"/api/v1/report": read_gate.C_PUBLIC})
+    odd = dict(DESIGN_PLAYER, **{"/api/v1/report": read_gate.C_PUBLIC})
     assert any("which no requirement justifies" in p
                for p in check_design_player_mapping(main.app.routes, mapping=odd))
