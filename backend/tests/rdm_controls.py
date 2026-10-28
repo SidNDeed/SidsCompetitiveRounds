@@ -281,10 +281,8 @@ ROWS = [
     {"row": "FIN.GONE", "node": RP + "test_fin_a_seat_gone_during_the_game_did_not_finish_it",
      "tag": "FIN gone not finished",
      "mutant": [(MAIN,
-                  '                    ({id_by_steam[sid] for sid in (unrated | _rdm_gone)}\n'
-                  '                     if _rdm_on else None))\n',
-                  '                    ({id_by_steam[sid] for sid in unrated}\n'
-                  '                     if _rdm_on else None))\n', 1)]},
+                  '                               | _rdm_gone) if _rdm_on else None\n',
+                  '                               ) if _rdm_on else None\n', 1)]},
     {"row": "FIN.ROW", "node": RP + "test_fin_a_seat_gone_during_the_game_did_not_finish_it",
      "tag": "FIN gone not finished",
      "mutant": [(MAIN,
@@ -292,6 +290,17 @@ ROWS = [
                   '                    or (sid in historical_gone and historical_gone[sid] <= g):\n',
                   '            if (r["gone_game"] is not None and int(r["gone_game"]) < g) \\\n'
                   '                    or (sid in historical_gone and historical_gone[sid] < g):\n', 1)]},
+    # FIN.LATE: the absence set reads the whole unrated set (a seat unrated
+    # only because it was admitted late and kept in was there at the end).
+    {"row": "FIN.LATE", "node": RP + "test_fin_a_late_admitted_seat_kept_in_finished_it",
+     "tag": "FIN late present",
+     "mutant": [(MAIN,
+                  '                _rdm_absent = ({sid for sid in unrated\n'
+                  '                                if _exclusion_reasons.get(sid, set()) != {"asm_a"}}\n'
+                  '                               | _rdm_gone) if _rdm_on else None\n',
+                  '                _rdm_absent = ({sid for sid in unrated\n'
+                  '                                if True}\n'
+                  '                               | _rdm_gone) if _rdm_on else None\n', 1)]},
     {"row": "F1.H2", "node": RJ + "test_h2_bound_but_unentered_returner_is_u",
      "tag": "H2 bound unentered",
      "mutant": [(MAIN,

@@ -65606,11 +65606,14 @@ def _ffa_finishing_count(member_ids, departed_ids, report,
     seated = set(member_ids or ())
     if effective_absent is not None:
         # Readmit-v1: the server rows are both accounts. The caller passes the
-        # unrated set with the seats the rows show gone during the game and
-        # not back (a rated seat that left after the grace threshold did not
-        # finish either). No unsigned client flag raises a tier here; the
-        # early-leave grace inside the unrated set can only lower the count,
-        # as left_early does on a flag-false lobby's attested account.
+        # unrated seats that were not there at the end (ghost, grace, short-
+        # start, gone in an earlier game) with the seats the rows show gone
+        # during the game and not back (a rated seat that left after the grace
+        # threshold did not finish either); a seat unrated only because it was
+        # admitted late and kept in was there at the end and counts, as it
+        # does on a flag-false lobby's accounts. No unsigned client flag raises
+        # a tier here; the early-leave grace can only lower the count, as
+        # left_early does on a flag-false lobby's attested account.
         server = len(seated - (seated & set(effective_absent)))
         return server, server, server
     departed = seated & set(departed_ids or ())
@@ -67007,12 +67010,19 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 # A lobby row without departed_ids cannot vouch for anyone, so
                 # it counts every seat as departed: no tier rather than a guess
                 # (every production row carries it, migration 159).
+                # A readmission lobby's absence set, from the rows and the grace:
+                # every unrated seat except one unrated ONLY because it was
+                # admitted late and kept in this game (asm_a: it was there at
+                # the end), plus the seats the rows show gone during the game.
+                _rdm_absent = ({sid for sid in unrated
+                                if _exclusion_reasons.get(sid, set()) != {"asm_a"}}
+                               | _rdm_gone) if _rdm_on else None
                 _n_played, _n_server, _n_attested = _ffa_finishing_count(
                     member_set,
                     lobby["departed_ids"] if "departed_ids" in lobby else member_set,
                     report,
-                    ({id_by_steam[sid] for sid in (unrated | _rdm_gone)}
-                     if _rdm_on else None))
+                    ({id_by_steam[sid] for sid in _rdm_absent}
+                     if _rdm_absent is not None else None))
 
                 # 1-3: shutout tiers, WINNER only, nested (a 5-player 5-0
                 # unlocks all three). "5-0" = the winner converted 5 full

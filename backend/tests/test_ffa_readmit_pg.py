@@ -1456,3 +1456,38 @@ def test_fin_a_seat_gone_during_the_game_did_not_finish_it(monkeypatch):
         absent, out = await report(lob, "FIN returner")
         assert absent == set() and out == (4, 4, 4), ("FIN returner finished", absent, out)
     run_env(monkeypatch, body)
+
+
+def test_fin_a_late_admitted_seat_kept_in_finished_it(monkeypatch):
+    """A seat admitted late and first seen kept in during game 1 is unrated
+    for it (writer 7's rule (a): its game is not rated) and was there at the
+    end: the finishing count of a readmission lobby counts it, as a flag-false
+    lobby's accounts do. Four of four, the seat unrated with the reason asm_a."""
+    async def body(env):
+        calls = []
+        real = main._ffa_finishing_count
+
+        def finishing(member_ids, departed_ids, report, effective_absent=None):
+            out = real(member_ids, departed_ids, report, effective_absent)
+            calls.append((None if effective_absent is None else set(effective_absent), out))
+            return out
+
+        env.mp.setattr(main, "_ffa_finishing_count", finishing)
+        lob = await _rdm_lobby(env)
+        await env.set_seat(lob, 3, start_roster=False, late_admitted_at=20.0,
+                           late_game=1, late_body_game=1)
+        await env.at(lob, 60.0)
+        # The reporter's fresh census elects it: the report settles at
+        # receipt instead of being journaled (P3).
+        await env.census_of(lob, 0, [0, 1, 2, 3])
+        results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7),
+                   lob.sids[2]: (2, 5), lob.sids[3]: (1, 2)}
+        rep = await env.report_req(lob, 1, results, reporter=lob.sids[0])
+        a = await env.submit(rep)
+        assert a.status == 200, ("FIN late report", a.status, a.body)
+        rows = await A._mp(env, lob, 1)
+        assert A._unrated(rows[3]) and rows[3]["exclusion_reasons"] == ["asm_a"], \
+            ("FIN late unrated", rows[3])
+        absent, out = calls[-1]
+        assert absent == set() and out == (4, 4, 4), ("FIN late present", absent, out)
+    run_env(monkeypatch, body)
