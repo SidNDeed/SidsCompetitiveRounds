@@ -463,9 +463,13 @@ def apply_edits(base, edits):
         path = os.path.join(base, rel)
         with open(path, "rb") as fh:
             data = fh.read().decode("utf-8")
-        if "\r\n" in data:
-            # A checkout with CRLF line ends: the registry is written in LF.
-            old, new = old.replace("\n", "\r\n"), new.replace("\n", "\r\n")
+        # Read both sides in the checkout's line-end convention, idempotently
+        # (the rule cf_controls.apply_edits applies; every row here is written
+        # in LF, so on a CRLF seat this is the LF->CRLF step and on an LF seat
+        # the identity).
+        nl = "\r\n" if "\r\n" in data else "\n"
+        old = old.replace("\r\n", "\n").replace("\n", nl)
+        new = new.replace("\r\n", "\n").replace("\n", nl)
         found = data.count(old)
         if found != count:
             raise Stale("%s: %d occurrence(s) of %r, want %d" % (rel, found, old[:80], count))
