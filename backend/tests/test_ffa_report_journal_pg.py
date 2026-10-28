@@ -572,11 +572,15 @@ def test_t3_6_flag_false_keeps_today(monkeypatch):
 
 
 def test_h1_readmit_economics_use_only_server_absence(monkeypatch):
-    """H1: unsigned absence and leave-score claims move no readmit-v1
-    economy.  The one server-derived set feeds rating, gold, beaten counts,
-    payout size, finishing tiers, persistence and duplicate comparison; a
-    server-recorded earlier-game ghost remains excluded and flag-false keeps
-    the legacy client-derived decision."""
+    """H1: the unsigned absent claim moves no readmit-v1 economy, and the
+    leave-score claim moves it only through the early-leave grace, the same
+    way whatever the absent flag says.  The re-land's Codex round (F1) found
+    the claim read and then discarded: a claimed early leaver was skipped by
+    the grace, rated and paid, where the unclaimed one was graced.  One
+    server-derived set feeds rating, gold, XP, beaten counts, payout size,
+    finishing tiers, persistence and duplicate comparison; a server-recorded
+    earlier-game ghost remains excluded and flag-false keeps the legacy
+    client-derived decision."""
     async def body(env):
         pool_calls = []
         finish_calls = []
@@ -595,30 +599,50 @@ def test_h1_readmit_economics_use_only_server_absence(monkeypatch):
         env.mp.setattr(main, "_ffa_pool_shape", pool)
         env.mp.setattr(main, "_ffa_finishing_count", finishing)
 
-        # A present zero-tally seat is falsely marked absent and graced by the
-        # reporter.  No server row says it left this game.
-        lob = await _lobby(env)
-        await _fresh(env, lob, 0)
-        results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7),
-                   lob.sids[2]: (2, 5), lob.sids[3]: (0, 0)}
-        rep = await env.report_req(lob, 1, results, reporter=lob.sids[0])
-        players = [p.model_copy(update={"left_early": True, "absent": True,
-                                         "game_points_at_leave": 0})
-                   if p.steam_id == lob.sids[3] else p for p in rep.players]
-        rep = rep.model_copy(update={"players": players})
-        a = await env.submit(rep)
-        row = await env.conn.fetchrow(
-            "SELECT mp.absent, mp.rating_change, mp.gold_gained"
-            " FROM ffa_match_players mp JOIN ffa_matches m ON m.id = mp.match_id"
-            " WHERE m.lobby_id = $1 AND mp.player_id = $2", lob.lid, lob.pids[3])
-        assert (a.status == 200 and row is not None and not row["absent"]
-                and row["rating_change"] is not None and row["gold_gained"] > 0), \
-            ("H1 present economics", a.status, None if row is None else dict(row))
-        assert (1, 3, 4) in pool_calls, ("H1 beaten payout", pool_calls)
-        assert finish_calls[-1] == (4, 4, 4), ("H1 finishing", finish_calls)
+        # The pair: a zero-tally seat that left at zero field points, with the
+        # reporter's absent flag false and then true.  Both are graced: the
+        # leaver is unrated with no game XP or gold, and every other seat's
+        # rating, XP, gold and placement, the beaten payouts and the finishing
+        # count are the same in both.
+        arms = {}
+        last = None
+        for absent in (False, True):
+            del pool_calls[:]
+            del finish_calls[:]
+            lob = await _lobby(env)
+            await _fresh(env, lob, 0)
+            results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7),
+                       lob.sids[2]: (2, 5), lob.sids[3]: (0, 0)}
+            rep = await env.report_req(lob, 1, results, reporter=lob.sids[0])
+            players = [p.model_copy(update={"left_early": True, "absent": absent,
+                                             "game_points_at_leave": 0})
+                       if p.steam_id == lob.sids[3] else p for p in rep.players]
+            rep = rep.model_copy(update={"players": players})
+            a = await env.submit(rep)
+            assert a.status == 200, ("H1 graced either way", absent, a.status, a.body)
+            rows = {r["player_id"]: dict(r) for r in await env.conn.fetch(
+                "SELECT mp.player_id, mp.absent, mp.rating_change, mp.xp_gained,"
+                "       mp.gold_gained, mp.placement, mp.exclusion_reasons"
+                " FROM ffa_match_players mp JOIN ffa_matches m ON m.id = mp.match_id"
+                " WHERE m.lobby_id = $1", lob.lid)}
+            vec = [rows[pid] for pid in lob.pids]
+            leaver = vec[3]
+            assert (leaver["absent"] and leaver["rating_change"] is None
+                    and (leaver["xp_gained"] or 0) == 0 and (leaver["gold_gained"] or 0) == 0
+                    and sorted(leaver["exclusion_reasons"] or []) == ["grace"]), \
+                ("H1 grace unrated", absent, leaver)
+            arms[absent] = ([(v["absent"], v["rating_change"], v["xp_gained"],
+                              v["gold_gained"], v["placement"],
+                              sorted(v["exclusion_reasons"] or [])) for v in vec],
+                            list(pool_calls), list(finish_calls))
+            last = (lob, rep)
+        assert arms[False] == arms[True], ("H1 graced either way", arms[False], arms[True])
+        assert (1, 2, 3) in pool_calls, ("H1 beaten payout", pool_calls)
+        assert finish_calls[-1] == (3, 3, 3), ("H1 finishing", finish_calls)
 
         # The same signed account with different raw client absence fields is
         # an idempotent echo because its persisted server decision is equal.
+        lob, rep = last
         echo_players = [p.model_copy(update={"left_early": False, "absent": False,
                                               "game_points_at_leave": None})
                         for p in rep.players]

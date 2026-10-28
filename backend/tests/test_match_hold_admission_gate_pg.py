@@ -8,6 +8,7 @@ the same meaning as in the other match-hold PostgreSQL suites.
 
 import asyncio
 import ast
+import collections
 import inspect
 import os
 import re
@@ -30,6 +31,77 @@ import test_match_hold_pg as hold_test  # noqa: E402
 match_hold = hold_test.match_hold
 
 
+ACQUIRERS = ("_lease_acquire", "_lease_acquire_many")
+GATE = "_lease_admission_gate"
+Site = collections.namedtuple("Site", "lineno end_lineno callee held")
+_INVENTORY = {}
+
+
+def admission_sites():
+    """Every admission call in main.py by the module-level function that makes
+    it, in source order: a call of _lease_acquire, _lease_acquire_many or the
+    gate itself.  `held` marks an acquire made with _gate_held=True, the form
+    a direct gate caller uses after its own gate.  Derived from the AST, not
+    listed by hand: a site a reviewer forgot is a site this inventory shows
+    and the census below refuses (the re-land's Codex round, F2, found four
+    hand-listed omissions: queue_ready's two sites and both continuations)."""
+    if "sites" not in _INVENTORY:
+        tree = ast.parse(inspect.getsource(main))
+        sites, ends = {}, {}
+        for fn in tree.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            found = []
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id in ACQUIRERS + (GATE,)):
+                    held = any(kw.arg == "_gate_held" and isinstance(kw.value, ast.Constant)
+                               and kw.value.value is True for kw in node.keywords)
+                    found.append(Site(node.lineno, node.end_lineno, node.func.id, held))
+            if found:
+                sites[fn.name] = sorted(found)
+                ends[fn.name] = fn.end_lineno
+        _INVENTORY["sites"], _INVENTORY["ends"] = sites, ends
+    return _INVENTORY["sites"]
+
+
+def formation_sites():
+    """(function, k) of every formation site: an unheld acquirer call outside
+    the acquirers, k its source-order index among the function's calls."""
+    return sorted((name, k) for name, sites in admission_sites().items()
+                  if name not in ACQUIRERS
+                  for k, site in enumerate(sites, 1)
+                  if site.callee in ACQUIRERS and not site.held)
+
+
+# The census: every function of main.py that makes an admission call, with
+# its calls in source order. The two acquirers gate once, and _lease_acquire_many
+# then acquires per player under the gate it holds; _rdm_claim gates directly
+# and acquires under that gate. Every other entry is a formation site, whose
+# refusal takes the shared form checked below. queue_poll, queue_ready and
+# team_queue_poll carry two sites each: the polls' room issuance (first in
+# source) and their discovery or assembly, in different requests; queue_ready's
+# formation renewal and its in-game fence, in one request.
+CENSUS = {
+    "_lease_acquire": [(GATE, False)],
+    "_lease_acquire_many": [(GATE, False), ("_lease_acquire", True)],
+    "queue_poll": [("_lease_acquire_many", False)] * 2,
+    "queue_ready": [("_lease_acquire_many", False)] * 2,
+    "team_queue_poll": [("_lease_acquire_many", False)] * 2,
+    "_team_relock_existing_series": [("_lease_acquire_many", False)],
+    "team_series_continuation": [("_lease_acquire_many", False)],
+    "ovt_queue_poll": [("_lease_acquire_many", False)],
+    "ovt_series_continuation": [("_lease_acquire_many", False)],
+    "_lobby_enroll_caller": [("_lease_acquire", False)],
+    "team_lobby_start": [("_lease_acquire_many", False)],
+    "ovt_lobby_start": [("_lease_acquire_many", False)],
+    "_ffa_lobby_enroll_caller": [("_lease_acquire", False)],
+    "_ffa_lock_roster": [("_lease_acquire_many", False)],
+    "_rdm_claim": [(GATE, False), ("_lease_acquire", True)],
+    "_ffa_queue_poll_inner": [("_lease_acquire_many", False)],
+}
+
+
 def test_h3_every_admission_site_uses_shared_gate_recheck_and_rollback():
     gate = inspect.getsource(main._lease_admission_gate)
     assert "for pid in pid_text:" in gate
@@ -39,36 +111,29 @@ def test_h3_every_admission_site_uses_shared_gate_recheck_and_rollback():
     assert "ovt_queue" in gate and "ffa_queue" in gate
     assert "clock_timestamp()" in gate
 
-    # (helper, sites in the function). queue_poll and team_queue_poll carry
-    # two each: the formation's lease at discovery (1v1) or assembly (2v2),
-    # and the in-game lease where the room is issued (A1 round 2: the issuing
-    # pass commits the seats to a live game, and the first lease lapsed
-    # minutes into it). Each site refuses the gate's False with a rollback.
-    sites = {
-        "queue_poll": ("_lease_acquire_many", 2),
-        "team_queue_poll": ("_lease_acquire_many", 2),
-        "_team_relock_existing_series": ("_lease_acquire_many", 1),
-        "ovt_queue_poll": ("_lease_acquire_many", 1),
-        "_lobby_enroll_caller": ("_lease_acquire", 1),
-        "team_lobby_start": ("_lease_acquire_many", 1),
-        "ovt_lobby_start": ("_lease_acquire_many", 1),
-        "_ffa_lobby_enroll_caller": ("_lease_acquire", 1),
-        "_ffa_lock_roster": ("_lease_acquire_many", 1),
-        "_ffa_queue_poll_inner": ("_lease_acquire_many", 1),
-    }
-    for name, (helper, count) in sites.items():
-        source = inspect.getsource(getattr(main, name))
-        calls = [node.func.id for node in ast.walk(
-            ast.parse(textwrap.dedent(source)))
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id in ("_lease_acquire", "_lease_acquire_many")]
-        assert calls == [helper] * count, (name, calls)
-        starts = [m.start() for m in re.finditer(re.escape(helper + "("), source)]
-        assert len(starts) == count, (name, starts)
-        for i, start in enumerate(starts):
-            tail = source[start:starts[i + 1] if i + 1 < count else len(source)]
-            assert "is False" in tail, (name, i)
-            assert "await db.rollback()" in tail, (name, i)
+    found = admission_sites()
+    assert {name: [(s.callee, s.held) for s in sites] for name, sites in found.items()} \
+        == CENSUS, ("H3 census", found)
+    lines = inspect.getsource(main).splitlines()
+    for name, sites in found.items():
+        for k, site in enumerate(sites):
+            end = sites[k + 1].lineno - 1 if k + 1 < len(sites) else _INVENTORY["ends"][name]
+            tail = "\n".join(lines[site.lineno - 1:end])
+            if site.held:
+                # An acquire under a gate the function holds: the gate is an
+                # earlier call of the same function.
+                assert any(s.callee == GATE for s in sites[:k]), (name, site)
+                continue
+            if site.callee == GATE:
+                assert "admitted, _ = await _lease_admission_gate" in tail, (name, site)
+                if name not in ACQUIRERS:
+                    # The direct form: the refusal answers before any write.
+                    assert "if not admitted:" in tail, (name, site)
+                    assert "return await _rdm_refuse(" in tail, (name, site)
+                continue
+            # The shared form: each site refuses the gate's False with a rollback.
+            assert "is False" in tail, (name, site)
+            assert "await db.rollback()" in tail, (name, site)
 
     open_source = inspect.getsource(match_hold.match_hold_open)
     claim_source = inspect.getsource(match_hold.match_hold_claim)

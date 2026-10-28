@@ -65429,7 +65429,8 @@ def _ffa_score_shape_error(report, score_target: int, n_players: int) -> str | N
 
 def _ffa_leave_decision(report, kills_in_canonical: bool, *,
                         grace_half: int,
-                        points_to_win_round: int) -> tuple[set, set, list[str]]:
+                        points_to_win_round: int,
+                        read_absent: bool = True) -> tuple[set, set, list[str]]:
     """Who this report says did not PLAY the game it describes: the carried
     roster ghosts, the early-leave graces, and the log lines that say so.
 
@@ -65449,12 +65450,19 @@ def _ffa_leave_decision(report, kills_in_canonical: bool, *,
     the claimed field total, and signed round wins refute a points tally too
     small to contain them. Kills never refute the grace.
 
+    `read_absent=False` leaves the absent arm unread (a readmission lobby,
+    where the server's own seat records decide who did not play): no seat is
+    a ghost, so the grace arm reads every early leaver the report names. The
+    claim must not be read here and discarded by the caller, because a seat
+    the claim took is a seat the grace skips, and that seat was then rated
+    and paid (the re-land's Codex round, F1).
+
     Returns (ghosts, graced, log_lines). The caller prints the lines; this
     function has no side effects, so the comparison path can ask the same
     question without logging a second copy of the endpoint's own evidence."""
     log: list[str] = []
     ghosts: set = set()
-    for p in report.players:
+    for p in (report.players if read_absent else ()):
         if not (p.left_early and bool(getattr(p, "absent", False))):
             continue
         if p.rounds_won > 0 or p.points_total > 0 or (kills_in_canonical and p.kills > 0):
@@ -66372,19 +66380,23 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     #       Achievements are unaffected by the grace: their predicates read the
     #       ghost and assembly exclusions, not the grace.
     # Old clients omit the field entirely -> no grace, pre-fix behaviour.
+    #
+    # Readmission lobbies (V3): the client's absent claims are not read, and
+    # not read in the decision itself (read_absent) rather than discarded
+    # after it. The server's own seat records decide who did not play (writer
+    # 7's admission, short-start and gone rules, and the settle class), while
+    # the early-leave grace still reads this report and reads EVERY early
+    # leaver it names: a seat that leaves before two full field points and is
+    # not readmitted is never rated for the game, whatever its tally and
+    # whatever the report's absent flag says (ruling of 2026-10-18), and a
+    # returner that finished the game is not a leaver in it. Reading the claim
+    # and clearing the ghosts afterwards let the claim pre-empt the grace, and
+    # a claimed early leaver was rated and paid (the re-land's Codex round, F1).
     ghosts, graced, _leave_log = _ffa_leave_decision(
         report, kills_in_canonical,
         grace_half=_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND),
-        points_to_win_round=FFA_POINTS_TO_WIN_ROUND)
-    if _rdm_on:
-        # Readmission lobbies (V3): the client's absent claims are not read;
-        # the server's own seat records decide who did not play (writer 7's
-        # admission, short-start and gone rules, and the settle class). The
-        # early-leave grace still reads this report: a seat that leaves before
-        # two full field points and is not readmitted is never rated for the
-        # game, whatever its tally (ruling of 2026-10-18), and a returner that
-        # finished the game is not a leaver in it.
-        ghosts = set()
+        points_to_win_round=FFA_POINTS_TO_WIN_ROUND,
+        read_absent=not _rdm_on)
     for _line in _leave_log:
         print(_line)
     # Rating and economy use `unrated`; achievement predicates use

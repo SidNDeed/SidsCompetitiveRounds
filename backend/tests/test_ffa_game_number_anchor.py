@@ -1243,7 +1243,8 @@ def test_the_leave_rule_has_exactly_one_definition():
     assert ("ghosts, graced, _leave_log = _ffa_leave_decision(\n"
             "        report, kills_in_canonical,\n"
             "        grace_half=_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND),\n"
-            "        points_to_win_round=FFA_POINTS_TO_WIN_ROUND)") in src
+            "        points_to_win_round=FFA_POINTS_TO_WIN_ROUND,\n"
+            "        read_absent=not _rdm_on)") in src
     assert "ghosts.add(" not in src and "graced.add(" not in src
     assert "_ffa_leave_decision(" in inspect.getsource(main._ffa_report_contradiction)
     tree = ast.parse(inspect.getsource(main))

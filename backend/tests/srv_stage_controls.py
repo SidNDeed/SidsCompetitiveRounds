@@ -182,13 +182,48 @@ H3_SITES = [
      '    if (await _lease_acquire_many(\n'
      '            db, [r["player_id"] for r in ordered], "ffa",\n'
      '            lobby_id, LEASE_TTL_ASSEMBLY)) is False:\n'),
+    # The re-land's Codex round (F2): the sites the hand-listed census missed
+    # (the polls' room issuance, queue_ready's two, both continuations). The
+    # node of queue_ready's in-game site is its injected-refusal order.
+    ("ranked_queue_poll_issue",
+     '            if (await _lease_acquire_many(\n'
+     '                    db, [my_pid, opp["player_id"]], "ranked",\n'
+     '                    series.id, LEASE_TTL_INGAME,\n'
+     '                    allowed_keys=(("ranked", None), ("ranked", series.id)))) is False:\n'),
+    ("queue_ready_formation",
+     '        if (await _lease_acquire_many(\n'
+     '                db, [player.id, opp["player_id"]], "ranked", None,\n'
+     '                LEASE_TTL_POLLING, allowed_keys=(("ranked", None),))) is False:\n'),
+    ("queue_ready_ingame",
+     '        if (await _lease_acquire_many(\n'
+     '                db, [player.id, opp["player_id"]], "ranked",\n'
+     '                existing_series.id, LEASE_TTL_INGAME,\n'
+     '                allowed_keys=(("ranked", None),\n'
+     '                              ("ranked", existing_series.id)))) is False:\n'),
+    ("team_queue_poll_issue",
+     '                if (await _lease_acquire_many(\n'
+     '                        db, [p["player_id"] for p in all_4], "team",\n'
+     '                        me["series_id"], LEASE_TTL_INGAME)) is False:\n'),
+    ("team_series_continuation",
+     '    if (await _lease_acquire_many(\n'
+     '            db, [id_by_steam[_s] for _s in (t1 + t2)], "team",\n'
+     '            new_id, LEASE_TTL_INGAME,\n'
+     '            allowed_group_ids=(prior["id"],))) is False:\n'),
+    ("ovt_series_continuation",
+     '    if (await _lease_acquire_many(\n'
+     '            db, [id_by_steam[_s] for _s in steams], "ovt",\n'
+     '            new_id, LEASE_TTL_INGAME,\n'
+     '            allowed_group_ids=(prior["id"],))) is False:\n'),
 ]
 # Short row codes: the scratch copy path carries the row name, and Windows
 # path limits refuse the longest sql file names under a long one.
 H3_CODE = {"ranked_queue_poll": "rq", "team_queue_poll": "tq", "team_relock": "tr",
            "ovt_queue_poll": "oq", "lobby_enroll": "le", "team_lobby_start": "ts",
            "ovt_lobby_start": "os", "ffa_lobby_enroll": "fe", "ffa_lock_roster": "fl",
-           "ffa_queue_poll": "fq"}
+           "ffa_queue_poll": "fq", "ranked_queue_poll_issue": "ri",
+           "queue_ready_formation": "rf", "queue_ready_ingame": "rg",
+           "team_queue_poll_issue": "ti", "team_series_continuation": "tc",
+           "ovt_series_continuation": "oc"}
 for _name, _site in H3_SITES:
     _node = "%s[%s-route_loses]" % (HT, _name)
     ROWS.append({"row": "H3.%s.G" % H3_CODE[_name], "node": _node, "tag": "H3 route gate",
@@ -197,6 +232,18 @@ for _name, _site in H3_SITES:
     ROWS.append({"row": "H3.%s.R" % H3_CODE[_name], "node": _node, "tag": "H3 route refused",
                  "mutant": [(MAIN, _site, _site.replace(")) is False:", ")) is False and False:",
                                                         1), 1)]})
+
+# The direct gate site (_rdm_claim): the refusal ignored, the claim proceeds
+# over another live commitment. Red on the readmission suite's NX0c route test.
+ROWS.append({"row": "H3.rc.R",
+             "node": "test_ffa_readmit_pg.py::test_nx0c_claim_takes_the_admission_gate_over_an_open_match_hold",
+             "tag": "NX0c refused",
+             "mutant": [(MAIN,
+                         '    if not admitted:\n'
+                         '        return await _rdm_refuse(ctx, pid, me, "claim", n, "other_mode")\n',
+                         '    if False:\n'
+                         '        return await _rdm_refuse(ctx, pid, me, "claim", n, "other_mode")\n',
+                         1)]})
 
 ROWS.append({'row': 'F1.H4.RECEIPT',
  'node': 'test_match_hold_deletion_pg.py::test_fix1_h4_report_writers_guard_before_their_first_lock[route]',

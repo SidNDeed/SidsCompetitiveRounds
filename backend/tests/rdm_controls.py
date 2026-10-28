@@ -256,23 +256,24 @@ ROWS = [
                  '    await ctx.db.execute(text(\n'
                   '        "DELETE FROM queue_leases WHERE player_id = :pid AND mode = \'ffa\''
                   ' AND group_id = :lid"),\n', 1)]},
+    # F1 of the re-land's Codex round: the absent claim read in a readmission
+    # lobby (read_absent=True) makes the claimed early leaver a ghost where the
+    # unclaimed one is graced, so the pair's decisions differ (H1 graced either
+    # way); a grace that reads nobody (F1.H1b) rates and pays both leavers.
     {"row": "F1.H1", "node": RJ + "test_h1_readmit_economics_use_only_server_absence",
-     "tag": "H1 present economics",
+     "tag": "H1 graced either way",
      "mutant": [(MAIN,
-                  '    if _rdm_on:\n'
-                  '        ghosts, graced, _leave_log = set(), set(), []\n'
-                  '    else:\n'
-                  '        ghosts, graced, _leave_log = _ffa_leave_decision(report, kills_in_canonical)\n',
-                  '    if False:\n'
-                  '        ghosts, graced, _leave_log = set(), set(), []\n'
-                  '    else:\n'
-                  '        ghosts, graced, _leave_log = _ffa_leave_decision(report, kills_in_canonical)\n',
-                  1),
-                 (MAIN,
-                  '    if lobby.get("readmit_v1"):\n'
-                  '        unrated = set()\n',
-                  '    if False:\n'
-                  '        unrated = set()\n', 1)]},
+                  '        points_to_win_round=FFA_POINTS_TO_WIN_ROUND,\n'
+                  '        read_absent=not _rdm_on)\n',
+                  '        points_to_win_round=FFA_POINTS_TO_WIN_ROUND,\n'
+                  '        read_absent=True)\n', 1)]},
+    {"row": "F1.H1b", "node": RJ + "test_h1_readmit_economics_use_only_server_absence",
+     "tag": "H1 grace unrated",
+     "mutant": [(MAIN,
+                  '        if not p.left_early or p.steam_id in ghosts or _gp is None:\n'
+                  '            continue\n',
+                  '        if True:\n'
+                  '            continue\n', 1)]},
     {"row": "F1.H2", "node": RJ + "test_h2_bound_but_unentered_returner_is_u",
      "tag": "H2 bound unentered",
      "mutant": [(MAIN,
