@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "e36926f0c31c084ca1ee4e07b66fe59606b85819"
+          "c0483d1ea95f7d7c62af53c330fa5751b0ec7024"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -727,7 +727,7 @@
           ],
           "main",
           "pc_open_pack",
-          "a2ec25f54f8b0a571fd2a891a332df05e4d846c5"
+          "4ceefeeba2979488b2ac0eb3af5b69123a508304"
         ],
         [
           "/api/v1/pc/packs/result",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "048c2336f15916266b39c6abc26ca8275d17f894"
+          "99db7258fcea8bbe5563a57cda3d8e6d8e08bf3e"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "update_team_live_points",
-          "4b17585f5cf08126b675fa2cc66cba6c8de38695"
+          "e1b400d33354c90454f5fd8def6f29b31c2aa465"
         ],
         [
           "/api/v1/team/series/{series_id}/report-dc",
@@ -1249,7 +1249,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "ec1a079fe139f102781758e35d8e1212a0d133a5"
+          "fdd513da095f0d49288077d58f5d7624db49371c"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "3e6e765c16245798a7e6d81c8cd99df2c81ef48d"
+          "769d6d40d3ace5cbf86fd4cccdead75b0c5906ef"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2425,7 +2425,7 @@
           ],
           "main",
           "ovt_queue_poll",
-          "b3b18124acd6b11e17a302d1d544c4c83e3db3e4"
+          "22c3abb91ceb4571a10f552f721a6a86efa1a228"
         ],
         [
           "/api/v1/ovt/queue/recent-joins",
@@ -2677,7 +2677,7 @@
           ],
           "main",
           "spectate_participant_attest",
-          "db69ee0446fdff33306c529cd1498a73cf100813"
+          "02a47c9771ffe28ba7119bab98d23773b5be8aa0"
         ],
         [
           "/api/v1/spectate/validate",
@@ -2839,7 +2839,7 @@
           ],
           "main",
           "team_queue_poll",
-          "cb62d88840ec8634e429afa1652835a985733413"
+          "cb8d185a87943468528f5a4af4e2a4b18d1e795c"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3269,7 +3269,7 @@
           ],
           "main",
           "internal_pc_open_pack",
-          "b249dc721a0fe4a71308efa84821e4d8e4baa63e"
+          "c60a172ef4a93d741ed7d64f4018eaf2bde068a8"
         ],
         [
           "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
@@ -3773,7 +3773,7 @@
           ],
           "match_hold",
           "match_hold_by_room",
-          "a14abf08ff382e73ee13c6ef0deb9a89d1e29de5"
+          "f84839dd8e7de0491a46efae3e379777a1354e1e"
         ],
         [
           "/api/v1/match/hold/mine",
@@ -3782,7 +3782,7 @@
           ],
           "match_hold",
           "match_hold_mine",
-          "c9f2a727e54cda0cfffbd0d77037df19825e052f"
+          "86d4359694ba7a1deb335eb264c25fd0ec8ac385"
         ],
         [
           "/api/v1/match/hold/open",
@@ -3791,7 +3791,7 @@
           ],
           "match_hold",
           "match_hold_open",
-          "902b95f804afdca8b109744d2e39fd041eca88cf"
+          "1f5dd25e16d9861fc0f95892920d459b68490c62"
         ],
         [
           "/api/v1/match/hold/{hold_id}/bind",
@@ -3800,7 +3800,7 @@
           ],
           "match_hold",
           "match_hold_bind",
-          "13efb01330767ebd6f20b6ea59bc75b84253d7bf"
+          "531acf33bdb458869078cf3dda342d13a807d353"
         ],
         [
           "/api/v1/match/hold/{hold_id}/claim",
@@ -3809,7 +3809,7 @@
           ],
           "match_hold",
           "match_hold_claim",
-          "67b3737793a500078125e34178769dff73eed0b4"
+          "a0f5267b23b4127dfd8cebdeb10aaf1f8fb89ad1"
         ],
         [
           "/api/v1/match/hold/{hold_id}/end",
@@ -3818,7 +3818,7 @@
           ],
           "match_hold",
           "match_hold_end",
-          "93dfc4c2b7eb23cdca132028ccf388bd54b55e96"
+          "58c49f00fb215be08b7418e716b2c213c522121f"
         ],
         [
           "/api/v1/match/hold/{hold_id}/entered",
@@ -3827,7 +3827,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "e52b64a3771d3873f3edd4ea92ec3e0feb4f94ab"
+          "f5ae757ac450ea3fd0bbb038d9647dd04dd0e795"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -3836,7 +3836,7 @@
           ],
           "match_hold",
           "match_hold_state",
-          "3be17e7939555c8458f676654579ffb9c7421c21"
+          "7df0ce2e7025b9e76bef3edd3f825f8c8be1308a"
         ]
       ]
     }
@@ -3880,7 +3880,7 @@
       [
         "main",
         "lifespan",
-        "9a66bf22d0423140ca3386f60a114ed7b70206ce"
+        "d64436942c788c7236b0ba819303f7085f9ea60a"
       ]
     ]
   },
