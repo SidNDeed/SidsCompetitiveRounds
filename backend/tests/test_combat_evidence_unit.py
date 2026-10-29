@@ -821,9 +821,21 @@ def _consts_at(rev):
     return out
 
 
+def _merge_base():
+    """HEAD's merge base with main, by the ref this checkout carries; the suite
+    seat's lane bundle carries none (learning 1030), so there the test skips
+    by name instead of erroring."""
+    for ref in ("main", "origin/main"):
+        try:
+            return _git("merge-base", "HEAD", ref).strip()
+        except subprocess.CalledProcessError:
+            continue
+    pytest.skip("no main ref on this checkout")
+
+
 def test_l5_the_advertised_version_and_the_floor_are_unchanged():
     main = _main()
-    base = _git("merge-base", "HEAD", "main").strip()
+    base = _merge_base()
     assert _consts_at(base) == {"LATEST_MOD_VERSION": main.LATEST_MOD_VERSION,
                                 "MIN_MOD_VERSION": main.MIN_MOD_VERSION}
 

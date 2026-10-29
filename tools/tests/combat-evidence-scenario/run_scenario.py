@@ -226,7 +226,7 @@ def mirror_check(cm, rec):
                 fields = [(f[0], -1 if f[0] == "mask" else f[1], f[2]) for f in fields]
             ok = isinstance(v, list) and len(v) <= cm.SPEC[k][1] and all(_row_ok(x, fields) for x in v)
         else:
-            ok = cm.check_field(k, v)
+            ok = cm.check_field(k, v, False)
         if not ok:
             return k
     cnt = [("c", 0, A1_HI)]

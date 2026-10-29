@@ -1029,13 +1029,13 @@ _DOMAIN_PREDICATES = (
     ("api/seat_evidence.py", "DELETE", "dedup_key NOT LIKE 'card %'"),
     ("sql/370_card_evidence.sql", "UPDATE", "dedup_key LIKE 'card %'"),
     ("sql/rollback_370_card_evidence.sql", "DELETE", "domain = 'card'"),
-    # the combat lane (its migration 369 adds the domain value; its rollback
+    # the combat lane (its migration 390 adds the domain value; its rollback
     # deletes the combat rows by domain, or by key prefix when the column is gone)
     ("api/combat_evidence.py", "INSERT", "VALUES ('combat'"),
     ("api/combat_evidence.py", "DELETE", "domain = 'combat'"),
     ("api/combat_evidence.py", "DELETE", "domain = 'combat'"),
-    ("sql/rollback_369_combat_evidence.sql", "DELETE", "domain = 'combat'"),
-    ("sql/rollback_369_combat_evidence.sql", "DELETE", "left(dedup_key, 7) = 'combat '"),
+    ("sql/rollback_390_combat_evidence.sql", "DELETE", "domain = 'combat'"),
+    ("sql/rollback_390_combat_evidence.sql", "DELETE", "left(dedup_key, 7) = 'combat '"),
 )
 
 

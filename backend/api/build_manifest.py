@@ -397,6 +397,10 @@ def health_word():
             raw = MANIFEST.read_bytes()
         except FileNotFoundError:
             raw = None
+        except OSError:
+            # present but unreadable (a permission, a directory in its place): the
+            # word is refused, never an error escaping into /health
+            raw = b""
         _WORD["word"] = word_for(raw)
     return _WORD["word"]
 

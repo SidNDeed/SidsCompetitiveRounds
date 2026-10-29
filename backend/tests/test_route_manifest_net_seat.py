@@ -1655,10 +1655,11 @@ def test_the_helper_closure_stays_affordable():
     # The same fold by name as before, +24 on the route at the rank: the new
     # modules' import lines (combat_evidence's datetime, hashlib, hmac, json,
     # text and timezone; build_manifest's hashlib, json and os; apt_lock's
-    # hashlib), the json binding of nine more modules the two dumps lead to
-    # (auto_logs, identity_clock_evidence, match_hold, pc_face, pc_portrait,
-    # pc_steam, review_rules, seat_evidence and tournaments), 21 import lines
-    # in all, and the three helpers build_manifest.encode, card_measures.dumps
+    # hashlib), the json binding of eleven more modules the two dumps lead to
+    # (auto_logs, card_measures, combat_measures, identity_clock_evidence,
+    # match_hold, pc_face, pc_portrait, pc_steam, review_rules, seat_evidence
+    # and tournaments), 21 import lines in all, and the three helpers
+    # build_manifest.encode, card_measures.dumps
     # and combat_measures.dumps. Over the 423 shared routes: +24 on 170, +23
     # on 53, +25 on 41. The rank position moves 211 -> 212 with the two new
     # routes. No route crossed into a hub. The bound moves to 231, ~5% over

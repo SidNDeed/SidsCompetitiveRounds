@@ -1,9 +1,9 @@
--- rollback_369_combat_evidence.sql
+-- rollback_390_combat_evidence.sql
 --
--- Removes what 369_combat_evidence.sql added: its five tables (the lane's four
--- and the switch-seed ledger), the runtime switches its own insert seeded (369
+-- Removes what 390_combat_evidence.sql added: its five tables (the lane's four
+-- and the switch-seed ledger), the runtime switches its own insert seeded (390
 -- records those in combat_evidence_seeded_keys; a switch row that existed
--- before 369 ran is left in place), and the value 'combat' of the
+-- before 390 ran is left in place), and the value 'combat' of the
 -- seat_evidence_findings domain CHECK, put back to 'seat' | 'card' (migration
 -- 370's form) once the combat rows are gone. No other table has a foreign key
 -- into the five, so the drop reaches nothing outside them (their own keys into
@@ -19,7 +19,7 @@
 -- It discards every stored combat record, contribution and daily row.
 -- Combat findings live in seat_evidence_findings (scope 'game', dedup key in
 -- the combat namespace: it starts with 'combat ' with a space, which no seat
--- evidence dedup key can contain; since 369 they also carry domain 'combat')
+-- evidence dedup key can contain; since 390 they also carry domain 'combat')
 -- and are removed here too; every seat and card evidence finding stays. flagged_matches rows the worker posted are NOT
 -- removed (the audit log is append-only).
 
@@ -49,7 +49,7 @@ DROP TABLE IF EXISTS combat_contrib;
 DROP TABLE IF EXISTS combat_games;
 DROP TABLE IF EXISTS combat_evidence;
 
--- Only the switch rows 369's own insert created, as its ledger records.
+-- Only the switch rows 390's own insert created, as its ledger records.
 DO $$
 BEGIN
     IF to_regclass('combat_evidence_seeded_keys') IS NOT NULL THEN

@@ -538,8 +538,8 @@ def _value_items(doc, tables=None) -> tuple:
         if not isinstance(ps, dict):
             raise NoVerdict("a parameter family that is not an object")
         for k, v in ps.items():
-            if isinstance(v, dict):
-                raise NoVerdict("an object as a measure parameter")
+            if isinstance(v, dict) and _profile_values(fam, k, v, vals):
+                continue                # one deal profile's value set, derived
             vals.add(v, _keys(k) or _keys(str(fam).rsplit(".", 1)[-1]), str(fam), "measure parameter")
     rules = doc.get("rules") or []
     if not isinstance(rules, list):
@@ -1100,6 +1100,26 @@ def _dispatch(cmd, rest, needles):
         return report("seal", seal(*rest, needles))
     print(__doc__.split("Modes:")[1].split("Exit 0")[0].rstrip())
     return 2
+
+
+# A measure-parameter family keyed by deal profile identity (card_measures
+# PROFILE_KEYED): review_rules.compile_rules admits one full value set per
+# full-digest profile id there and no other object where a parameter stands.
+# The id is a key the revision shares with the public deal profile; the value
+# set holds the deciding values, derived as any family's are. Defined after
+# _dispatch so the line-keyed pins of this module's earlier sites hold.
+_PROFILE_ID = re.compile(r"[0-9a-f]{64}")
+
+
+def _profile_values(fam, key, values, vals) -> bool:
+    """One profile's value set into vals; the refusal for any other object."""
+    if not (isinstance(key, str) and _PROFILE_ID.fullmatch(key)):
+        raise NoVerdict("an object as a measure parameter")
+    for k, v in values.items():
+        if isinstance(v, dict):
+            raise NoVerdict("an object as a profile-keyed measure parameter")
+        vals.add(v, _keys(k) or _keys(str(fam).rsplit(".", 1)[-1]), str(fam), "measure parameter")
+    return True
 
 
 if __name__ == "__main__":

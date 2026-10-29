@@ -1,4 +1,4 @@
-"""Combat evidence against a real PostgreSQL 16: migration 369 applied twice,
+"""Combat evidence against a real PostgreSQL 16: migration 390 applied twice,
 rolled back and applied again (combat_evidence_pg); the combat route's
 session rule, envelope answers, raw-first store, first-record rule, conflict
 marker and hourly cap; the worker's combat pass with no revision (attach
@@ -201,7 +201,7 @@ def _no_time(snap):
     return out
 
 
-def test_migration_369_twice_rollback_and_again(live):
+def test_migration_390_twice_rollback_and_again(live):
     s = live.snaps
     assert s["first"] == s["again"]                                  # a re-run writes nothing
     for t in cp.CEV_TABLES:
@@ -210,7 +210,7 @@ def test_migration_369_twice_rollback_and_again(live):
     assert set(cp.CEV_SWITCHES) <= keys
     assert not set(cp.CEV_SWITCHES) & {r[0] for r in s["rolled"]["runtime_settings"]}
     assert s["rolled"] == s["before"]                                # the rollback moves nothing else
-    assert _no_time(s["third"]) == _no_time(s["first"])              # and 369 reapplies whole
+    assert _no_time(s["third"]) == _no_time(s["first"])              # and 390 reapplies whole
     on = {r[0]: r[1] for r in s["first"]["runtime_settings"]}
     assert all(on[k] == "1" for k in cp.CEV_SWITCHES)
 
@@ -218,8 +218,8 @@ def test_migration_369_twice_rollback_and_again(live):
 def test_m7_the_rollback_removes_exactly_the_combat_namespace_and_keeps_every_seat_row(live):
     """M-7: seat evidence findings in the legal key forms nearest the combat
     namespace (a seat stable key spelled `combat|...`, `combatX`, `combat_`,
-    scope game and sitting) beside combat findings; the 369 rollback removes
-    the combat rows only, every seat row stays byte for byte, and 369 then
+    scope game and sitting) beside combat findings; the 390 rollback removes
+    the combat rows only, every seat row stays byte for byte, and 390 then
     reapplies whole."""
     snaps = live.snaps
     lo, hi = cp._LO, cp._HI

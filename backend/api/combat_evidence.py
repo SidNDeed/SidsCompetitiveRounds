@@ -1,4 +1,4 @@
-"""Combat evidence, server half (combat contract one; migration 369).
+"""Combat evidence, server half (combat contract one; migration 390).
 
 What this module holds, and what it never does:
 
@@ -58,7 +58,7 @@ AGG_RETENTION_DAYS = 365
 # can never equal or start with this prefix. Every combat finding write, read
 # and stale delete uses dedup_key(); the rollback deletes by this prefix.
 # Since migration 370 (the card draw lane) the table carries a `domain` column;
-# migration 369 admits 'combat' in its CHECK, every combat statement below names
+# migration 390 admits 'combat' in its CHECK, every combat statement below names
 # that domain, and the rollback removes exactly the combat rows. A combat
 # finding never reads as a seat or card one.
 DEDUP_PREFIX = "combat "
