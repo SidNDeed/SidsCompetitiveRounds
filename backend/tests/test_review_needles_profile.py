@@ -27,6 +27,9 @@ OTHER_PROFILE = hashlib.sha256(b"another synthetic deal profile").hexdigest()
 
 
 def _store(tmp, doc):
+    # one revision per store: a root that already holds one would let an
+    # earlier revision's refusal stand in for the one under test
+    assert not [d for d in os.listdir(str(tmp)) if d.startswith("rules-")], os.listdir(str(tmp))
     rdir = os.path.join(str(tmp), "rules-" + hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()[:12])
     os.makedirs(os.path.join(rdir, "data"))
     with open(os.path.join(rdir, "rules.json"), "w", encoding="utf-8") as f:
@@ -59,13 +62,15 @@ def test_a_value_the_compiler_would_refuse_is_still_a_needle_in_either_family(tm
     assert _hit("slack was not numeric slack here", needles)         # the same for the flat family
 
 
-def test_an_object_under_a_key_that_is_not_a_profile_id_is_refused(tmp_path):
+@pytest.mark.parametrize("shape", ["flat-family", "short-profile-key"])
+def test_an_object_under_a_key_that_is_not_a_profile_id_is_refused(tmp_path, shape):
+    # each shape alone in its own store: the refusal under test is the only
+    # one the store can raise
     doc = tk.synthetic_doc()
-    doc["measure_params"]["params.age_sum"] = {"budget_slack_ms": {"common": 17}}
-    with pytest.raises(rn.NoVerdict, match="an object as a measure parameter"):
-        rn.derive(_store(tmp_path, doc))
-    doc = tk.synthetic_doc()
-    doc["measure_params"][WEIGHTS] = {"deadbeef": {"common": 5, "uncommon": 3, "rare": 1}}   # not a full digest
+    if shape == "flat-family":
+        doc["measure_params"]["params.age_sum"] = {"budget_slack_ms": {"common": 17}}
+    else:
+        doc["measure_params"][WEIGHTS] = {"deadbeef": {"common": 5, "uncommon": 3, "rare": 1}}   # not a full digest
     with pytest.raises(rn.NoVerdict, match="an object as a measure parameter"):
         rn.derive(_store(tmp_path, doc))
 
