@@ -1951,12 +1951,16 @@ def test_m2_the_fault_bound_is_pinned_and_the_fault_word_fits_its_column():
     assert "fault_rev VARCHAR(%d)" % rev_width in sql
 
 
-def test_m2_the_parked_word_is_required_and_on_both_arms():
+def test_m2_the_parked_word_is_required_and_on_both_arms(monkeypatch):
     import schemas
     f = schemas.HealthResponse.model_fields["card_evidence_parked"]
     assert f.annotation is int and f.is_required()
     assert inspect.getsource(_main().health_check).count("card_evidence_parked=_cev.parked()") == 2
-    assert ce.parked() == ce.PARKED_UNKNOWN < 0                    # no pass has run in this process
+    # the negative unknown is the state before any pass in the PROCESS; a
+    # live file run earlier in the same process has moved it, so the state
+    # the functions read is reset here, not assumed
+    monkeypatch.setattr(ce, "_PARKED", {"n": ce.PARKED_UNKNOWN, "oldest_s": ce.PARKED_UNKNOWN})
+    assert ce.parked() == ce.PARKED_UNKNOWN < 0
 
 
 def test_m2_a_visit_that_raises_is_recorded_and_the_pass_moves_on():
@@ -2104,12 +2108,16 @@ def test_m4_fix4_a_parked_game_is_re_probed_and_a_waiting_retry_is_held():
     assert '"reprobe": CARD_RETRY_LIMITS["reprobe_s"]' in src
 
 
-def test_m4_fix4_the_parked_age_is_required_and_on_both_arms():
+def test_m4_fix4_the_parked_age_is_required_and_on_both_arms(monkeypatch):
     import schemas
     f = schemas.HealthResponse.model_fields["card_evidence_parked_oldest_s"]
     assert f.annotation is int and f.is_required()
     assert inspect.getsource(_main().health_check).count(
         "card_evidence_parked_oldest_s=_cev.parked_oldest_s()") == 2
+    # the negative unknown is the state before any pass in the PROCESS; a
+    # live file run earlier in the same process has moved it, so the state
+    # the functions read is reset here, not assumed
+    monkeypatch.setattr(ce, "_PARKED", {"n": ce.PARKED_UNKNOWN, "oldest_s": ce.PARKED_UNKNOWN})
     assert ce.parked_oldest_s() == ce.PARKED_UNKNOWN < 0
 
 
