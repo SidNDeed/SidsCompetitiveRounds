@@ -58,6 +58,7 @@
 -- (after the rollback it re-marks the posted card findings that one kept).
 
 BEGIN;
+SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE IF NOT EXISTS card_evidence (
     id                 BIGSERIAL    PRIMARY KEY,

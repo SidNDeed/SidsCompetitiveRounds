@@ -179,7 +179,19 @@ SELECTORS = frozenset({
     # measures module's name (review_boot.SOURCE_ONLY, the source-only
     # loader's identity check)
     "identity_clock_evidence_accept", "identity_clock_evidence_worker",
-    "identity_clock_evidence_purge", "ic.seat", "ic.point", "identity_clock_measures"})
+    "identity_clock_evidence_purge", "ic.seat", "ic.point", "identity_clock_measures",
+    # the card-draw lane (re-land 2026-10-29): the measures module's name
+    # (review_boot.SOURCE_ONLY, the source-only loader's identity check)
+    "card_measures"})
+
+# Card contract words are accepted only with provenance from the public
+# binding that defines them; the same spelling from any other source is not.
+SELECTOR_PROVENANCE = frozenset({
+    ("card_evidence", "SWITCHES"),
+    ("card_measures", "CARD_SUBJECTS"),
+    ("card_measures", "WINDOW"),
+    ("card_measures", "WINDOW_SUBJECT"),
+})
 
 # Contract bounds and scheduling: pinned BY VALUE. A deciding value added to
 # one of these makes the pin differ, and the guard refuses it.
@@ -277,7 +289,19 @@ DYNAMIC_ALLOWED = {
 # into code it does not follow, a comprehension over constants): refused
 # wherever it reaches a decision, never passed as unknown.
 _UNRESOLVED = object()
+_SELECTOR_REFUSAL = object()
 _CHOICE_MAX = 64        # members a choice may grow to through arithmetic; beyond it, unresolved
+
+
+class _Bound:
+    """A resolved closed value and the public binding that supplied it."""
+    __slots__ = ("value", "origin")
+
+    def __init__(self, value, origin):
+        self.value, self.origin = value, origin
+
+    def __eq__(self, other):
+        return isinstance(other, _Bound) and self.value == other.value and self.origin == other.origin
 
 
 class _Choice:
@@ -410,6 +434,7 @@ class _Scan:
                     todo.extend(x for x in c.args.defaults + c.args.kw_defaults if x is not None)
                 else:
                     todo.extend(c.bases)
+                    todo.extend(part.value for part in c.keywords)
             elif isinstance(c, ast.Lambda):
                 todo.extend(x for x in c.args.defaults + c.args.kw_defaults if x is not None)
             elif isinstance(c, ast.comprehension):
@@ -529,6 +554,8 @@ class _Scan:
         self._rv = {}
         self._lv = {}
         self._params_runtime = False
+        self._selector_mode = False
+        self._selector_refused = False
 
     def _fn_around(self, node):
         p = self._parents_all.get(id(node))
@@ -669,6 +696,19 @@ class _Scan:
         cache[key] = v
         return v
 
+    @staticmethod
+    def _plain(v):
+        return v.value if isinstance(v, _Bound) else v
+
+    def _binding_value(self, v, binding):
+        """Reset inherited provenance at an approved public binding."""
+        if binding not in SELECTOR_PROVENANCE or v is self._NONE or v is _UNRESOLVED:
+            return v
+        if isinstance(v, _Choice):
+            return _Choice([self._binding_value(m, binding) for m in v.vals],
+                           v.runtime, v.owners)
+        return _Bound(self._plain(v), binding)
+
     def module_value(self, name):
         """The constant a module-level name stands for, or _NONE (a PINNED
         name is judged by its pin, never at its uses)."""
@@ -678,15 +718,35 @@ class _Scan:
             node = self.assigns[name]
             if node.value is None:
                 return self._NONE
-            return self._memo(self._mv, name, lambda: self._container(
-                name, self._ev(node.value, []), None))
+            return self._memo(self._mv, name, lambda: self._binding_value(
+                self._container(name, self._ev(node.value, []), None), (self.mod, name)))
         if self.top_stores.get(name, 0) > 1:
-            return self._memo(self._mv, name, lambda: self._rebound(name, None))
+            return self._memo(self._mv, name, lambda: self._binding_value(
+                self._rebound(name, None), (self.mod, name)))
         if name in self.from_imports and name not in self.defs and name not in self.assigns:
             m, attr = self.from_imports[name]
             peer = self.peer(m.split(".")[0])
-            return peer.module_value(attr) if peer is not None else self._NONE
+            if peer is None:
+                return self._NONE
+            return self._selector_peer_value(peer, attr) if self._selector_mode \
+                else peer.module_value(attr)
         return self._NONE
+
+    def _selector_peer_value(self, peer, name):
+        """Read a peer binding in the same isolated selector evaluation."""
+        if peer is self or peer._selector_mode:
+            return peer.module_value(name)
+        keep_mode, keep_refused = peer._selector_mode, peer._selector_refused
+        keep_caches = peer._mv, peer._lv, peer._rv, peer._av
+        peer._selector_mode, peer._selector_refused = True, False
+        peer._mv, peer._lv, peer._rv, peer._av = {}, {}, {}, {}
+        try:
+            value = peer.module_value(name)
+            self._selector_refused = self._selector_refused or peer._selector_refused
+            return value
+        finally:
+            peer._mv, peer._lv, peer._rv, peer._av = keep_caches
+            peer._selector_mode, peer._selector_refused = keep_mode, keep_refused
 
     def peer(self, m):
         if m == self.mod:
@@ -890,6 +950,458 @@ class _Scan:
             state = _UNRESOLVED                 # an escape: an alias or a callee may write it
         return state
 
+    _SELECTOR_CONSUMER_COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+    def _selector_consumer_scope_facts(self, scope, name):
+        """The direct bindings and declarations for one lexical scope."""
+        cache = getattr(self, "_selector_consumer_scope_cache", None)
+        if cache is None:
+            cache = self._selector_consumer_scope_cache = {}
+        key = id(scope) if scope is not None else None, name
+        if key in cache:
+            return cache[key]
+        if isinstance(scope, self._SELECTOR_CONSUMER_COMPS):
+            bindings = [part for gen in scope.generators for part in ast.walk(gen.target)
+                        if isinstance(part, ast.Name) and part.id == name]
+            out = bindings, False, False
+            cache[key] = out
+            return out
+        if scope is None:
+            body = self.tree.body
+        elif isinstance(scope, ast.Lambda):
+            body = [scope.body]
+        else:
+            body = scope.body
+        own, _counts, globals_ = self._scope_info(body)
+        nonlocals = {item for part in own if isinstance(part, ast.Nonlocal)
+                     for item in part.names}
+        bindings = []
+        for part in own:
+            if isinstance(part, ast.Name) and part.id == name \
+                    and isinstance(part.ctx, (ast.Store, ast.Del)):
+                bindings.append(part)
+            elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                    and part.name == name:
+                bindings.append(part)
+            elif isinstance(part, (ast.Import, ast.ImportFrom)) and any(
+                    (alias.asname or alias.name).split(".")[len(())] == name
+                    for alias in part.names):
+                bindings.append(part)
+            elif isinstance(part, ast.ImportFrom) and any(
+                    alias.name == "*" for alias in part.names):
+                bindings.append(part)
+            elif isinstance(part, ast.ExceptHandler) and part.name == name:
+                bindings.append(part)
+            elif isinstance(part, (ast.MatchAs, ast.MatchStar)) and part.name == name:
+                bindings.append(part)
+            elif isinstance(part, ast.MatchMapping) and part.rest == name:
+                bindings.append(part)
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            args = scope.args
+            bindings.extend(part for part in
+                            args.posonlyargs + args.args + args.kwonlyargs
+                            if part.arg == name)
+            if args.vararg is not None and args.vararg.arg == name:
+                bindings.append(args.vararg)
+            if args.kwarg is not None and args.kwarg.arg == name:
+                bindings.append(args.kwarg)
+        for top in body:
+            for part in ast.walk(top):
+                if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                        and part.name == name \
+                        and self._selector_consumer_use_scopes(part)[len(())] is scope:
+                    bindings.append(part)
+        seen = set()
+        bindings = [part for part in bindings
+                    if id(part) not in seen and not seen.add(id(part))]
+        out = bindings, name in globals_, name in nonlocals
+        cache[key] = out
+        return out
+
+    def _selector_consumer_outer_fns(self, scope):
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return self._chain(scope)
+        fn = self._fn_around(scope)
+        return [] if fn is None else [fn] + self._chain(fn)
+
+    def _selector_consumer_binding_owner(self, scope, name):
+        """The scope whose binding a direct store in `scope` changes."""
+        _bindings, global_, nonlocal_ = self._selector_consumer_scope_facts(scope, name)
+        if scope is None or global_:
+            return None
+        if nonlocal_:
+            for fn in self._selector_consumer_outer_fns(scope):
+                bindings, outer_global, outer_nonlocal = \
+                    self._selector_consumer_scope_facts(fn, name)
+                if bindings and not outer_global and not outer_nonlocal:
+                    return fn
+            return None
+        return scope
+
+    def _selector_consumer_use_scopes(self, node):
+        """Lexical scopes active where `node` executes, innermost first."""
+        out, parent, skip_class = [], self._parents_all.get(id(node)), False
+        while parent is not None:
+            if isinstance(parent, self._SELECTOR_CONSUMER_COMPS):
+                first, *_rest = parent.generators
+                if not self._selector_within(node, first.iter):
+                    out.append(parent)
+                    skip_class = True
+            elif isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if any(self._selector_within(node, part) for part in parent.body):
+                    out.append(parent)
+                    skip_class = True
+            elif isinstance(parent, ast.Lambda):
+                if self._selector_within(node, parent.body):
+                    out.append(parent)
+                    skip_class = True
+            elif isinstance(parent, ast.ClassDef):
+                if any(self._selector_within(node, part) for part in parent.body):
+                    if not skip_class:
+                        out.append(parent)
+                    skip_class = True
+            parent = self._parents_all.get(id(parent))
+        out.append(None)
+        return out
+
+    def _selector_consumer_owner(self, node, name):
+        """The lexical binding read by a Name at one selector use site."""
+        for scope in self._selector_consumer_use_scopes(node):
+            bindings, global_, nonlocal_ = self._selector_consumer_scope_facts(scope, name)
+            if global_:
+                return None
+            if nonlocal_:
+                return self._selector_consumer_binding_owner(scope, name)
+            if bindings:
+                if isinstance(scope, ast.ClassDef) \
+                        and not self._selector_prior_shadow(node, name, scope.body):
+                    continue
+                return self._selector_consumer_binding_owner(scope, name)
+        return None
+
+    def _selector_consumer_binding_sites(self, owner, name):
+        """Every binding site whose store can change `owner`'s binding."""
+        scopes = [None] + [part for part in ast.walk(self.tree)
+                           if isinstance(part, self._SCOPES + self._SELECTOR_CONSUMER_COMPS)]
+        out = []
+        for scope in scopes:
+            bindings, _global, _nonlocal = self._selector_consumer_scope_facts(scope, name)
+            if bindings and self._selector_consumer_binding_owner(scope, name) is owner:
+                out.extend((scope, part) for part in bindings)
+        return out
+
+    def _selector_consumer_assignments(self, owner, name):
+        """Direct simple assignments that may establish approved provenance."""
+        if isinstance(owner, self._SELECTOR_CONSUMER_COMPS):
+            return []
+        if owner is None:
+            body = self.tree.body
+        elif isinstance(owner, ast.Lambda):
+            body = [owner.body]
+        else:
+            body = owner.body
+        own, _counts, _globals = self._scope_info(body)
+        out = []
+        for part in own:
+            if not isinstance(part, (ast.Assign, ast.AnnAssign)) or part.value is None:
+                continue
+            targets = part.targets if isinstance(part, ast.Assign) else [part.target]
+            if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+                out.append((part, self._scope_fns(part)))
+        return sorted(out, key=lambda item: item[len(())].lineno)
+
+    @staticmethod
+    def _selector_consumer_import_origin(node, name):
+        if isinstance(node, ast.Import):
+            alias = next((part for part in reversed(node.names)
+                          if (part.asname or part.name.split(".")[len(())]) == name), None)
+            return None if alias is None else (alias.name.split(".")[len(())], None)
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            alias = next((part for part in reversed(node.names)
+                          if part.name != "*" and (part.asname or part.name) == name), None)
+            return None if alias is None else (node.module.split(".")[len(())], alias.name)
+        return None
+
+    def _selector_consumer_module_source(self, owner, name, attr):
+        for scope, part in self._selector_consumer_binding_sites(owner, name):
+            source = self._selector_consumer_import_origin(part, name)
+            if source is not None and source[len((None,))] is None \
+                    and (source[len(())], attr) in SELECTOR_PROVENANCE:
+                baseline = part if scope is owner else None
+                return source[len(())], baseline
+        return None
+
+    def _selector_consumer_module_aliases(self, module):
+        out = []
+        for part in ast.walk(self.tree):
+            if not isinstance(part, ast.Import):
+                continue
+            scope = self._selector_consumer_use_scopes(part)[len(())]
+            seen = set()
+            for alias in reversed(part.names):
+                name = alias.asname or alias.name.split(".")[len(())]
+                if name in seen:
+                    continue
+                seen.add(name)
+                if alias.name.split(".")[len(())] != module:
+                    continue
+                owner = self._selector_consumer_binding_owner(scope, name)
+                baseline = part if scope is owner and (
+                    not isinstance(owner, ast.ClassDef) or part in owner.body) else None
+                out.append((name, owner, baseline))
+        return out
+
+    def _selector_consumer_write(self, target):
+        """The selector value after one write in the reading module."""
+        if isinstance(target, (ast.arg, ast.ExceptHandler, ast.MatchAs,
+                               ast.MatchStar, ast.MatchMapping)):
+            return self._NONE
+        if isinstance(target, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                               ast.Import, ast.ImportFrom)):
+            return _UNRESOLVED
+        parents, child = self._all_parents(), target
+        while child is not None:
+            parent = parents.get(id(child))
+            if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                if parent.value is None:
+                    return None
+                value = self._ev(parent.value, self._scope_fns(target))
+                return self._NONE if self._runtime(value) else _UNRESOLVED
+            if isinstance(parent, ast.Delete):
+                return _UNRESOLVED
+            if isinstance(parent, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith,
+                                   ast.comprehension)):
+                return self._NONE
+            if isinstance(parent, self._SCOPES):
+                break
+            child = parent
+        return _UNRESOLVED
+
+    def _selector_consumer_uses(self, uses, value, skip=None, container=True):
+        """Check reads, writes and escapes of one approved container value."""
+        skipped = skip if isinstance(skip, frozenset) else frozenset((skip,))
+        active = [use for use in uses if use not in skipped]
+        parents = self._all_parents()
+        unsafe_copier = any(
+            isinstance(parents.get(id(use)), ast.Call)
+            and use in parents[id(use)].args
+            and isinstance(parents[id(use)].func, ast.Name)
+            and parents[id(use)].func.id in self._COPIERS
+            and (not container or not self._selector_builtin(
+                parents[id(use)].func, parents[id(use)].func.id,
+                self._scope_fns(parents[id(use)].func))) for use in active)
+        state = self._container_uses(active, value.value)
+        if state is self._NONE:
+            return self._NONE
+        if unsafe_copier:
+            return _UNRESOLVED
+        return value if state is value.value else state
+
+    def _selector_consumer_bound(self, origin):
+        """The declared approved container at `origin`, before consumer writes."""
+        if origin not in SELECTOR_PROVENANCE:
+            return None
+        scan = self.peer(origin[len(())])
+        if scan is None:
+            return None
+        for part in scan.tree.body:
+            if not isinstance(part, (ast.Assign, ast.AnnAssign)) or part.value is None:
+                continue
+            targets = part.targets if isinstance(part, ast.Assign) else [part.target]
+            if not any(isinstance(target, ast.Name) and target.id == origin[len((None,))]
+                       for target in targets):
+                continue
+            value = scan._binding_value(scan._ev(part.value, []), origin)
+            if isinstance(value, _Bound) and isinstance(value.value, (tuple, list, dict, set)):
+                return value
+        return None
+
+    def _selector_consumer_origin(self, node, fns, seen=frozenset()):
+        """The approved container source named by one consumer binding."""
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            owner = self._selector_consumer_owner(node.value, node.value.id)
+            source = self._selector_consumer_module_source(owner, node.value.id, node.attr)
+            if source is not None:
+                return source[len(())], node.attr
+        parts = None
+        if isinstance(node, (ast.Tuple, ast.List)) \
+                and not any(isinstance(part, ast.Starred) for part in node.elts):
+            parts = node.elts
+        elif isinstance(node, ast.BoolOp):
+            parts = node.values
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in self._PURE \
+                and self._selector_builtin(node.func, node.func.id, fns) \
+                and not any(isinstance(part, ast.Starred) for part in node.args) \
+                and all(part.arg is not None for part in node.keywords):
+            parts = list(node.args) + [part.value for part in node.keywords]
+        if parts is not None:
+            origins = [self._selector_consumer_origin(part, fns, seen) for part in parts]
+            return origins[len(())] if origins and all(
+                origin is not None and origin == origins[len(())] for origin in origins) else None
+        if not isinstance(node, ast.Name):
+            return None
+        owner = self._selector_consumer_owner(node, node.id)
+        key = self.mod, id(owner) if owner is not None else None, node.id
+        if key in seen:
+            return None
+        if owner is None and self._selector_consumer_bound((self.mod, node.id)) is not None:
+            return self.mod, node.id
+        for _scope, part in self._selector_consumer_binding_sites(owner, node.id):
+            origin = self._selector_consumer_import_origin(part, node.id)
+            if origin in SELECTOR_PROVENANCE:
+                return origin
+        for part, scope_fns in self._selector_consumer_assignments(owner, node.id):
+            value = self._ev(part.value, scope_fns)
+            if isinstance(value, _Bound) \
+                    and self._selector_consumer_bound(value.origin) is not None:
+                return value.origin
+            origin = self._selector_consumer_origin(part.value, scope_fns, seen | {key})
+            if origin is not None:
+                return origin
+        return None
+
+    def _selector_consumer_result(self, value, states):
+        if any(state is self._NONE for state in states):
+            return self._NONE
+        if any(state is _UNRESOLVED for state in states):
+            return _UNRESOLVED
+        return value
+
+    def _selector_consumer_sources(self, source, origin, fns, seen):
+        """The provenance-bearing reads inside one consumer alias binding."""
+        reads = []
+        for part in ast.walk(source):
+            if isinstance(part, (ast.Name, ast.Attribute)) \
+                    and isinstance(part.ctx, ast.Load) \
+                    and self._selector_consumer_origin(part, fns, seen) == origin:
+                reads.append((part, self._ev(part, fns)))
+        skip = frozenset(part for part, _value in reads)
+        return [self._selector_consumer_value(part, value, fns, skip, seen)
+                for part, value in reads]
+
+    def _selector_consumer_module(self, base, attr, value, bound, skip=None,
+                                  owner=None, baseline=None):
+        """Check a container read through a module alias in this module."""
+        matching = [part for part in ast.walk(self.tree)
+                    if isinstance(part, ast.Attribute) and isinstance(part.value, ast.Name)
+                    and part.value.id == base and part.attr == attr
+                    and self._selector_consumer_owner(part.value, base) is owner]
+        states = [self._selector_consumer_uses(
+            [part for part in matching if isinstance(part.ctx, ast.Load)], bound, skip)]
+        states.extend(self._selector_consumer_write(part) for part in matching
+                      if isinstance(part.ctx, (ast.Store, ast.Del)))
+        parents, outside = self._all_parents(), []
+        for part in self._names.get(base, ()):
+            if self._selector_consumer_owner(part, base) is not owner:
+                continue
+            parent = parents.get(id(part))
+            if isinstance(parent, ast.Attribute) and parent.value is part:
+                if parent.attr == "__dict__":
+                    subscript = parents.get(id(parent))
+                    if isinstance(subscript, ast.Subscript) and subscript.value is parent:
+                        key = self._ev(subscript.slice, self._scope_fns(subscript))
+                        if key == attr and isinstance(subscript.ctx, (ast.Store, ast.Del)):
+                            states.append(self._selector_consumer_write(subscript))
+                        elif key is self._NONE:
+                            states.append(self._NONE)
+                        elif key is _UNRESOLVED:
+                            states.append(_UNRESOLVED)
+                    else:
+                        states.append(_UNRESOLVED)
+                continue
+            outside.append(part)
+        states.append(self._selector_consumer_uses(outside, bound, container=False))
+        for _scope, target in self._selector_consumer_binding_sites(owner, base):
+            if target is baseline:
+                continue
+            states.append(self._selector_consumer_write(target))
+        return self._selector_consumer_result(value, states)
+
+    def _selector_consumer_name(self, node, value, fns, skip, seen):
+        name, owner = node.id, self._selector_consumer_owner(node, node.id)
+        key = self.mod, id(owner) if owner is not None else None, name
+        if key in seen:
+            return _UNRESOLVED
+        origin, imported = None, False
+        sites = self._selector_consumer_binding_sites(owner, name)
+        baseline = None
+        if owner is None and (self.mod, name) in SELECTOR_PROVENANCE:
+            origin = self.mod, name
+        else:
+            for scope, part in sites:
+                candidate = self._selector_consumer_import_origin(part, name)
+                if candidate in SELECTOR_PROVENANCE:
+                    origin, imported = candidate, True
+                    baseline = part if scope is owner else None
+                    break
+        bindings = self._selector_consumer_assignments(owner, name)
+        if origin == (self.mod, name):
+            baseline = next((part for part, _scope_fns in bindings), None)
+        source = source_fns = None
+        if origin is None and (len(bindings) == len((None,))
+                               or isinstance(owner, ast.ClassDef)):
+            for part, scope_fns in bindings:
+                evaluated = self._ev(part.value, scope_fns)
+                candidate = evaluated.origin if isinstance(evaluated, _Bound) \
+                    and self._selector_consumer_bound(evaluated.origin) is not None \
+                    else self._selector_consumer_origin(part.value, scope_fns, seen | {key})
+                if candidate is not None:
+                    origin, baseline = candidate, part
+                    source, source_fns = part.value, scope_fns
+                    break
+        if origin is None and isinstance(value, _Bound) \
+                and self._selector_consumer_bound(value.origin) is not None:
+            origin = value.origin
+        bound = self._selector_consumer_bound(origin)
+        if bound is None:
+            return value
+        seed = bound if source is not None or baseline is not None else value
+        baseline_certain = baseline is not None and (
+            not isinstance(owner, ast.ClassDef) or baseline in owner.body)
+        baseline_nodes = {id(part) for part in ast.walk(baseline)} if baseline_certain else set()
+        states = [self._selector_consumer_uses(
+            [part for part in self._names.get(name, ())
+             if self._selector_consumer_owner(part, name) is owner],
+            bound, skip)]
+        states.extend(self._selector_consumer_write(target)
+                      for _scope, target in sites
+                      if id(target) not in baseline_nodes)
+        if source is not None:
+            states.extend(self._selector_consumer_sources(
+                source, origin, source_fns, seen | {key}))
+        if imported:
+            for base, alias_owner, alias_baseline in \
+                    self._selector_consumer_module_aliases(origin[len(())]):
+                states.append(self._selector_consumer_module(
+                    base, origin[len((None,))], bound, bound,
+                    owner=alias_owner, baseline=alias_baseline))
+        return self._selector_consumer_result(seed, states)
+
+    def _selector_consumer_value(self, node, value, fns, skip=None, seen=frozenset()):
+        """Validate approved container provenance in the selector's reading scope."""
+        if isinstance(node, ast.Name):
+            return self._selector_consumer_name(node, value, fns, skip, seen)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            owner = self._selector_consumer_owner(node.value, node.value.id)
+            source = self._selector_consumer_module_source(owner, node.value.id, node.attr)
+            if source is None:
+                return self._selector_consumer_name(node.value, value, fns, skip, seen)
+            module, baseline = source
+            bound = self._selector_consumer_bound((module, node.attr))
+            if bound is not None:
+                states = [self._selector_consumer_module(
+                    base, node.attr, bound, bound, skip,
+                    owner=alias_owner, baseline=alias_baseline)
+                    for base, alias_owner, alias_baseline in
+                    self._selector_consumer_module_aliases(module)]
+                seed = bound if baseline is not None else value
+                return self._selector_consumer_result(seed, states)
+        return value
+
+    def _selector_consumer(self, node, fns):
+        return self._selector_consumer_value(node, self._ev(node, fns), fns)
+
     def _all_parents(self):
         return self._parents_all
 
@@ -997,10 +1509,36 @@ class _Scan:
             return self._ev_op(node, fns)
         if isinstance(node, ast.Call):
             return self._ev_call(node, fns)
+        if isinstance(node, ast.NamedExpr):
+            return self._ev(node.value, fns)
+        if isinstance(node, (ast.JoinedStr, ast.FormattedValue)):
+            return self._ev_string(node, fns)
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.Lambda,
-                             ast.JoinedStr, ast.FormattedValue, ast.NamedExpr, ast.Starred)):
+                             ast.Starred)):
             return self._closed(node, fns)
         return N
+
+    def _ev_string(self, node, fns):
+        """A formatted string, retaining an origin only when every part has it."""
+        N, U = self._NONE, _UNRESOLVED
+        if isinstance(node, ast.JoinedStr):
+            vals = [self._ev(v, fns) for v in node.values]
+            if any(v is N for v in vals):
+                return N
+            if any(v is U for v in vals):
+                return U
+            return self._lift(lambda *xs: "".join(xs), vals)
+        value = self._ev(node.value, fns)
+        if value is N or value is U:
+            return value
+        conversions = {ord("s"): str, ord("r"): repr, ord("a"): ascii}
+        convert = conversions.get(node.conversion, lambda v: v)
+        if node.format_spec is None:
+            return self._lift(lambda v: format(convert(v)), [value])
+        spec = self._ev(node.format_spec, fns)
+        if spec is N or spec is U:
+            return spec
+        return self._lift(lambda v, s: format(convert(v), s), [value, spec])
 
     def _owners(self, base, fns):
         """The class ids a read `base.X` can see, None when the receiver's
@@ -1020,7 +1558,10 @@ class _Scan:
             owners = self._owners(node.value.id, fns)
             if owners is False:
                 peer = self.peer(self.mod_alias[node.value.id].split(".")[0])
-                return peer.module_value(node.attr) if peer is not None else N  # a library's own value
+                if peer is None:
+                    return N                              # a library's own value
+                return self._selector_peer_value(peer, node.attr) if self._selector_mode \
+                    else peer.module_value(node.attr)
             return self._attr_value(node.attr, owners)
         return self._attr_value(node.attr, None)
 
@@ -1038,15 +1579,28 @@ class _Scan:
     def _runtime(self, v) -> bool:
         """Whether a value reads runtime input: _NONE, or a choice one of
         whose bindings, returns or arms does."""
+        v = self._plain(v)
         return v is self._NONE or (isinstance(v, _Choice) and v.runtime)
 
-    def _lift(self, fn, vals):
+    def _lift(self, fn, vals, receiver_origin=False):
         """fn over closed values; with a _Choice among them, over every
         combination of members (a _Choice of the results, at most
         _CHOICE_MAX of them, else _UNRESOLVED). A failure is _UNRESOLVED."""
+        def apply(xs):
+            if receiver_origin:
+                receiver, *_rest = xs
+                origin = receiver.origin if isinstance(receiver, _Bound) else None
+            else:
+                bound = [v for v in xs if isinstance(v, _Bound)]
+                origin = bound.pop().origin if bound and len(bound) == len(xs) else None
+                if origin is not None and any(v.origin != origin for v in bound):
+                    origin = None
+            out = fn(*[self._plain(v) for v in xs])
+            return _Bound(out, origin) if origin is not None else out
+
         if not any(isinstance(v, _Choice) for v in vals):
             try:
-                return fn(*vals)
+                return apply(vals)
             except Exception:                   # noqa: BLE001 -- any evaluation failure: no value
                 return _UNRESOLVED
         members = [v.vals if isinstance(v, _Choice) else (v,) for v in vals]
@@ -1058,7 +1612,7 @@ class _Scan:
         out = []
         for combo in itertools.product(*members):
             try:
-                out.append(fn(*combo))
+                out.append(apply(combo))
             except Exception:                   # noqa: BLE001 -- any evaluation failure: no value
                 return _UNRESOLVED
         return _Choice(out, any(isinstance(v, _Choice) and v.runtime for v in vals),
@@ -1086,8 +1640,10 @@ class _Scan:
                 return U
             if t is N:                              # either arm, chosen at run time
                 return self._combine([self._ev(node.body, fns), self._ev(node.orelse, fns), N])
+            if isinstance(t, _Bound):
+                t = t.value
             if isinstance(t, _Choice):
-                arms = {bool(m) for m in t.vals}
+                arms = {bool(self._plain(m)) for m in t.vals}
                 outs = [self._ev(node.body if a else node.orelse, fns) for a in sorted(arms)]
                 if t.runtime:
                     outs += [self._ev(node.body, fns), self._ev(node.orelse, fns), N]
@@ -1146,10 +1702,410 @@ class _Scan:
 
     _PURE = {"min": min, "max": max, "abs": abs, "round": round, "sum": sum, "sorted": sorted,
              "tuple": tuple, "list": list, "frozenset": frozenset, "set": set, "bool": bool,
-             "int": int, "float": float, "str": str, "len": len, "dict": dict, "reversed": tuple}
+             "int": int, "float": float, "str": str, "len": len, "dict": dict, "format": format,
+             "reversed": tuple}
+
+    _SELECTOR_STRING_METHODS = frozenset({
+        "capitalize", "casefold", "center", "expandtabs", "ljust", "lower", "lstrip",
+        "removeprefix", "removesuffix", "replace", "rjust", "rstrip", "strip",
+        "swapcase", "title", "translate", "upper", "zfill",
+    })
+    _SELECTOR_NONSTRING_METHODS = frozenset({
+        "encode", "endswith", "find", "isalnum", "isalpha", "isascii", "isdecimal",
+        "isdigit", "isidentifier", "islower", "isnumeric", "isprintable", "isspace",
+        "istitle", "isupper", "partition", "rfind", "rindex", "rpartition", "rsplit",
+        "split", "splitlines", "startswith",
+    })
+
+    @staticmethod
+    def _selector_within(node, root):
+        return root is node or any(part is node for part in ast.walk(root))
+
+    @staticmethod
+    def _selector_captures(nodes, name):
+        for part in nodes:
+            if isinstance(part, ast.ExceptHandler) and part.name == name:
+                return True
+            if isinstance(part, (ast.MatchAs, ast.MatchStar)) and part.name == name:
+                return True
+            if isinstance(part, ast.MatchMapping) and part.rest == name:
+                return True
+        return False
+
+    def _selector_scope_binds(self, nodes, name):
+        own, counts, _glob = self._scope_info(nodes)
+        annotations = [part for part in own if isinstance(part, ast.AnnAssign)
+                       and part.value is None and isinstance(part.target, ast.Name)
+                       and part.target.id == name]
+        captured = self._selector_captures(own, name)
+        imported = any(isinstance(part, ast.ImportFrom)
+                       and any(alias.name == "*" for alias in part.names) for part in own)
+        return counts.get(name, len(())) > len(annotations) or captured or imported
+
+    def _selector_prior_shadow(self, node, name, body):
+        position = node.lineno, node.col_offset
+        for statement in body:
+            if not self._selector_within(node, statement):
+                if self._selector_scope_binds([statement], name):
+                    return True
+                continue
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                    and any(self._selector_within(node, part) for part in statement.body):
+                return False
+            own, _counts, _glob = self._scope_info([statement])
+            for part in own:
+                if isinstance(part, ast.NamedExpr) and isinstance(part.target, ast.Name) \
+                        and part.target.id == name:
+                    end = (getattr(part, "end_lineno", part.lineno),
+                           getattr(part, "end_col_offset", part.col_offset))
+                    if end <= position:
+                        return True
+            current = node
+            while current is not statement:
+                parent = self._parents_all.get(id(current))
+                if parent is None:
+                    break
+                for _field, parts in ast.iter_fields(parent):
+                    if isinstance(parts, list) and current in parts:
+                        prefix = parts[:parts.index(current)]
+                        if self._selector_scope_binds(prefix, name):
+                            return True
+                if isinstance(parent, (ast.For, ast.AsyncFor)) \
+                        and any(self._selector_within(node, part)
+                                for part in parent.body + parent.orelse) \
+                        and any(isinstance(part, ast.Name) and part.id == name
+                                for part in ast.walk(parent.target)):
+                    return True
+                if isinstance(parent, (ast.With, ast.AsyncWith)):
+                    for item in parent.items:
+                        if self._selector_within(node, item.context_expr):
+                            break
+                        if item.optional_vars is not None and any(
+                                isinstance(part, ast.Name) and part.id == name
+                                for part in ast.walk(item.optional_vars)):
+                            return True
+                if isinstance(parent, ast.ExceptHandler) and parent.name == name \
+                        and any(self._selector_within(node, part) for part in parent.body):
+                    return True
+                if isinstance(parent, ast.match_case) \
+                        and not self._selector_within(node, parent.pattern) \
+                        and self._selector_captures([parent.pattern], name):
+                    return True
+                current = parent
+            return False
+        return False
+
+    def _selector_lexical_shadow(self, node, name, fns):
+        for fn in fns:
+            _exprs, _defaults, bound, _stores = self._locals(fn)
+            if name in bound or self._selector_captures(self._own(fn), name):
+                return True
+        parent, skip_class = self._parents_all.get(id(node)), False
+        while parent is not None:
+            if isinstance(parent, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                first, *_rest = parent.generators
+                inner = not self._selector_within(node, first.iter)
+                visible = set()
+                for gen in parent.generators:
+                    if self._selector_within(node, gen.iter):
+                        break
+                    visible.update(part.id for part in ast.walk(gen.target)
+                                   if isinstance(part, ast.Name))
+                    if any(self._selector_within(node, part) for part in gen.ifs):
+                        break
+                if name in visible:
+                    return True
+                if inner:
+                    skip_class = True
+            elif isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                body = [parent.body] if isinstance(parent, ast.Lambda) else parent.body
+                if any(self._selector_within(node, part) for part in body):
+                    skip_class = True
+            elif isinstance(parent, ast.ClassDef):
+                if not skip_class and self._selector_prior_shadow(node, name, parent.body):
+                    return True
+                skip_class = True
+            parent = self._parents_all.get(id(parent))
+        return False
+
+    def _selector_builtin(self, node, name, fns):
+        if not isinstance(node, ast.Name) or node.id != name or not hasattr(builtins, name):
+            return False
+        if self._selector_consumer_owner(node, name) is not None:
+            return False
+        if any(scope is not None for scope, _target in
+               self._selector_consumer_binding_sites(None, name)):
+            return False
+        if self._selector_lexical_shadow(node, name, fns):
+            return False
+        _own, counts, _glob = self._scope_info(self.tree.body)
+        global_write = self.top_stores.get(name, len(())) > counts.get(name, len(()))
+        if global_write:
+            return False
+        if fns:
+            return not self._selector_scope_binds(self.tree.body, name)
+        return not self._selector_prior_shadow(node, name, self.tree.body)
+
+    def _selector_fail(self):
+        self._selector_refused = True
+        return _UNRESOLVED
+
+    def _selector_inputs(self, nodes, fns):
+        values = [self._ev(node.value if isinstance(node, ast.Starred) else node, fns)
+                  for node in nodes]
+        if any(self._runtime(value) for value in values):
+            return self._NONE
+        if any(value is _UNRESOLVED for value in values):
+            return self._selector_fail()
+        return self._BUSY
+
+    def _selector_method(self, node, fns):
+        f = node.func
+        if not isinstance(f, ast.Attribute) or f.attr in ("format", "format_map", "join") \
+                or f.attr in self._READ_METHODS:
+            return self._BUSY
+        base = self._ev(f.value, fns)
+        supplied = list(node.args) + [part.value for part in node.keywords]
+        if base is self._NONE:
+            return self._NONE
+        if base is _UNRESOLVED:
+            value = self._selector_inputs(supplied, fns)
+            return value if value is self._NONE else self._selector_fail()
+        members = base.vals if isinstance(base, _Choice) else (base,)
+        if not members or not all(isinstance(self._plain(value), str) for value in members):
+            return self._BUSY
+        expanded = any(isinstance(part, ast.Starred) for part in node.args) \
+            or any(part.arg is None for part in node.keywords)
+        if expanded:
+            value = self._selector_inputs(supplied, fns)
+            return value if value is self._NONE else self._selector_fail()
+        args = [self._ev(part, fns) for part in node.args]
+        kws = {part.arg: self._ev(part.value, fns) for part in node.keywords}
+        values = args + list(kws.values())
+        if any(self._runtime(value) for value in values):
+            return self._NONE
+        if any(value is _UNRESOLVED for value in values):
+            return self._selector_fail()
+        if f.attr in self._SELECTOR_NONSTRING_METHODS:
+            return self._BUSY
+        if f.attr not in self._SELECTOR_STRING_METHODS:
+            return self._selector_fail()
+        names, positional = list(kws), len(args)
+
+        def invoke(receiver, *parts):
+            positional_values = parts[:positional]
+            named_values = dict(zip(names, parts[positional:]))
+            return getattr(receiver, f.attr)(*positional_values, **named_values)
+        value = self._lift(invoke, [base] + args + [kws[name] for name in names],
+                           receiver_origin=True)
+        return self._selector_fail() if value is _UNRESOLVED else value
+
+    def _selector_take(self, value, reverse, default):
+        if value is self._NONE:
+            return self._NONE
+        if value is _UNRESOLVED:
+            return self._selector_fail()
+        if isinstance(value, _Choice):
+            selected, runtime = [], value.runtime
+            for member in value.vals:
+                result = self._selector_take(member, reverse, default)
+                if result is self._NONE:
+                    runtime = True
+                elif result is _UNRESOLVED:
+                    return result
+                else:
+                    selected.append(result)
+            if not selected:
+                return self._NONE if runtime else self._selector_fail()
+            try:
+                only, = selected
+            except ValueError:
+                only = self._BUSY
+            if only is not self._BUSY and not runtime and not value.owners:
+                return only
+            return _Choice(selected, runtime, value.owners)
+        origin = value.origin if isinstance(value, _Bound) else None
+        plain = self._plain(value)
+        if isinstance(plain, dict):
+            items = list(plain)
+        elif isinstance(plain, (tuple, list, str)):
+            items = list(plain)
+        else:
+            return self._selector_fail()
+        if reverse:
+            items.reverse()
+        if not items:
+            return self._selector_fail() if default is self._BUSY else default
+        item, *_rest = items
+        return _Bound(item, origin) if origin is not None else item
+
+    def _selector_container_source(self, node, fns, seen=frozenset()):
+        """The single visible literal-container binding behind node, if any."""
+        if isinstance(node, ast.Name):
+            for fn in fns:
+                exprs, _defaults, bound, _stores = self._locals(fn)
+                if node.id in exprs:
+                    key = self.mod, id(fn), node.id
+                    if key in seen:
+                        return None
+                    value = exprs[node.id]
+                    if isinstance(value, (ast.Tuple, ast.List, ast.Dict)):
+                        return self, value, [fn] + self._chain(fn)
+                    if isinstance(value, (ast.Name, ast.Attribute)):
+                        return self._selector_container_source(
+                            value, [fn] + self._chain(fn), seen | {key})
+                    return None
+                if node.id in bound:
+                    return None
+            assignment = self.assigns.get(node.id)
+            if assignment is not None and assignment.value is not None \
+                    and self.top_stores.get(node.id) == len((node.id,)):
+                key = self.mod, None, node.id
+                if key in seen:
+                    return None
+                if isinstance(assignment.value, (ast.Tuple, ast.List, ast.Dict)):
+                    return self, assignment.value, []
+                if isinstance(assignment.value, (ast.Name, ast.Attribute)):
+                    return self._selector_container_source(assignment.value, [], seen | {key})
+            if node.id in self.from_imports and node.id not in self.defs \
+                    and node.id not in self.assigns:
+                module, attr = self.from_imports[node.id]
+                peer = self.peer(module.split(".")[len(())])
+                return peer._selector_module_container(attr, seen) if peer is not None else None
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
+                and self._owners(node.value.id, fns) is False:
+            peer = self.peer(self.mod_alias[node.value.id].split(".")[len(())])
+            return peer._selector_module_container(node.attr, seen) if peer is not None else None
+        return None
+
+    def _selector_module_container(self, name, seen):
+        key = self.mod, None, name
+        if key in seen:
+            return None
+        assignment = self.assigns.get(name)
+        if assignment is not None and assignment.value is not None \
+                and self.top_stores.get(name) == len((name,)):
+            if isinstance(assignment.value, (ast.Tuple, ast.List, ast.Dict)):
+                return self, assignment.value, []
+            if isinstance(assignment.value, (ast.Name, ast.Attribute)):
+                return self._selector_container_source(assignment.value, [], seen | {key})
+        if name in self.from_imports and name not in self.defs and name not in self.assigns:
+            module, attr = self.from_imports[name]
+            peer = self.peer(module.split(".")[len(())])
+            return peer._selector_module_container(attr, seen | {key}) if peer is not None else None
+        return None
+
+    def _selector_peer_ordered(self, peer, node, fns, reverse, default):
+        if peer is self or peer._selector_mode:
+            return peer._selector_ordered(node, fns, reverse, default)
+        keep_mode, keep_refused = peer._selector_mode, peer._selector_refused
+        keep_caches = peer._mv, peer._lv, peer._rv, peer._av
+        peer._selector_mode, peer._selector_refused = True, False
+        peer._mv, peer._lv, peer._rv, peer._av = {}, {}, {}, {}
+        try:
+            value = peer._selector_ordered(node, fns, reverse, default)
+            self._selector_refused = self._selector_refused or peer._selector_refused
+            return value
+        finally:
+            peer._mv, peer._lv, peer._rv, peer._av = keep_caches
+            peer._selector_mode, peer._selector_refused = keep_mode, keep_refused
+
+    def _selector_ordered(self, node, fns, reverse, default):
+        source = self._selector_container_source(node, fns)
+        if source is not None:
+            resolved = self._selector_consumer(node, fns)
+            if self._runtime(resolved):
+                return self._NONE
+            if resolved is _UNRESOLVED:
+                return self._selector_fail()
+            scan, expression, source_fns = source
+            return self._selector_take(resolved, reverse, default) if isinstance(resolved, _Bound) \
+                else self._selector_peer_ordered(scan, expression, source_fns, reverse, default)
+        if isinstance(node, (ast.Tuple, ast.List)):
+            if any(isinstance(part, ast.Starred) for part in node.elts):
+                value = self._selector_inputs(node.elts, fns)
+                return value if value is self._NONE else self._selector_fail()
+            values = [self._ev(part, fns) for part in node.elts]
+            if any(self._runtime(value) for value in values):
+                return self._NONE
+            if any(value is _UNRESOLVED for value in values):
+                return self._selector_fail()
+            pairs = list(zip(node.elts, values))
+            if reverse:
+                pairs.reverse()
+            if not pairs:
+                return self._selector_fail() if default is self._BUSY else default
+            (_part, selected), *_rest = pairs
+            return selected
+        if isinstance(node, ast.Dict) and all(key is not None for key in node.keys):
+            values = [self._ev(part, fns) for part in node.keys + node.values]
+            if any(self._runtime(value) for value in values):
+                return self._NONE
+            if any(value is _UNRESOLVED for value in values):
+                return self._selector_fail()
+            keys = [self._ev(part, fns) for part in node.keys]
+            if reverse:
+                keys.reverse()
+            if not keys:
+                return self._selector_fail() if default is self._BUSY else default
+            selected, *_rest = keys
+            return selected
+        return self._selector_take(self._selector_consumer(node, fns), reverse, default)
+
+    def _selector_next(self, node, fns):
+        if not self._selector_builtin(node.func, "next", fns):
+            return self._BUSY
+        supplied = list(node.args) + [part.value for part in node.keywords]
+        if node.keywords or any(isinstance(part, ast.Starred) for part in node.args):
+            value = self._selector_inputs(supplied, fns)
+            return value if value is self._NONE else self._selector_fail()
+        try:
+            inner, = node.args
+            default = self._BUSY
+        except ValueError:
+            try:
+                inner, default_node = node.args
+            except ValueError:
+                value = self._selector_inputs(supplied, fns)
+                return value if value is self._NONE else self._selector_fail()
+            default = self._ev(default_node, fns)
+            if self._runtime(default):
+                return self._NONE
+            if default is _UNRESOLVED:
+                return self._selector_fail()
+        if not isinstance(inner, ast.Call):
+            return self._BUSY
+        inner_supplied = list(inner.args) + [part.value for part in inner.keywords]
+        if inner.keywords or any(isinstance(part, ast.Starred) for part in inner.args):
+            value = self._selector_inputs(inner_supplied, fns)
+            return value if value is self._NONE else self._selector_fail()
+        direction = next((name for name in ("iter", "reversed")
+                          if self._selector_builtin(inner.func, name, fns)), None)
+        if direction is None:
+            return self._BUSY
+        try:
+            source, = inner.args
+        except ValueError:
+            value = self._selector_inputs(inner_supplied, fns)
+            return value if value is self._NONE else self._selector_fail()
+        value = self._selector_ordered(source, fns, direction == "reversed", default)
+        if value in (self._NONE, _UNRESOLVED):
+            return value
+        members = value.vals if isinstance(value, _Choice) else (value,)
+        return value if any(isinstance(self._plain(member), str) for member in members) else self._NONE
+
+    def _selector_call(self, node, fns):
+        value = self._selector_next(node, fns)
+        if value is not self._BUSY:
+            return value
+        return self._selector_method(node, fns)
 
     def _ev_call(self, node, fns):
         N, U = self._NONE, _UNRESOLVED
+        if self._selector_mode:
+            value = self._selector_call(node, fns)
+            if value is not self._BUSY:
+                return value
         if any(isinstance(a, ast.Starred) for a in node.args) or any(k.arg is None for k in node.keywords):
             return N
         args = [self._ev(a, fns) for a in node.args]
@@ -1169,11 +2125,32 @@ class _Scan:
                 out = pure(*xs[:n], **dict(zip(names, xs[n:])))
                 return tuple(out) if f.id == "reversed" else out
             return self._lift(call, args + [kws[k] for k in names])
+        if isinstance(f, ast.Attribute) and f.attr in ("format", "format_map", "join"):
+            base = self._ev(f.value, fns)
+            if base is N or any(v is N for v in args + list(kws.values())):
+                return N
+            if base is U or any(v is U for v in args + list(kws.values())):
+                return U
+            plain = self._plain(base)
+            if isinstance(plain, str) or (isinstance(base, _Choice)
+                    and all(isinstance(self._plain(m), str) for m in base.vals)):
+                names, n, attr = list(kws), len(args), f.attr
+
+                def string_call(b, *xs):
+                    positional, named = xs[:n], dict(zip(names, xs[n:]))
+                    if attr == "format":
+                        return b.format(*positional, **named)
+                    if attr == "format_map":
+                        return b.format_map(*positional, **named)
+                    if named or any(isinstance(x, (set, frozenset)) for x in positional):
+                        raise TypeError
+                    return b.join(*positional)
+                return self._lift(string_call, [base] + args + [kws[k] for k in names])
         if isinstance(f, ast.Attribute) and f.attr in self._READ_METHODS:
             base = self._ev(f.value, fns)
             containers = (dict, tuple, list, str)
-            if isinstance(base, containers) or (isinstance(base, _Choice)
-                                                and all(isinstance(m, containers) for m in base.vals)):
+            if isinstance(self._plain(base), containers) or (isinstance(base, _Choice)
+                    and all(isinstance(self._plain(m), containers) for m in base.vals)):
                 if not closed:
                     return N
                 if any(v is U for v in args + list(kws.values())):
@@ -1250,13 +2227,40 @@ class _Scan:
         return out
 
     def resolve(self, node, parents):
-        """The constant a Load of a name, attribute, entry or call stands for
-        here, _UNRESOLVED, or _NONE."""
-        if not isinstance(node, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)) \
+        """The resolved constant, carrying approved binding provenance when
+        present, or _UNRESOLVED or _NONE."""
+        if not isinstance(node, ast.expr) \
                 or not isinstance(getattr(node, "ctx", ast.Load()), ast.Load):
             return self._NONE
         fns = self._enclosing_fns(node, parents)
-        return self._ev(node, fns)
+        v = self._ev(node, fns)
+        if v is self._NONE and not isinstance(node, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)):
+            closed = self._closed(node, fns)
+            if closed is _UNRESOLVED:
+                return closed
+        return v
+
+    def _selector_resolve(self, node, parents):
+        """Resolve one decision operand with call-shaped values enabled."""
+        if not isinstance(node, ast.expr) \
+                or not isinstance(getattr(node, "ctx", ast.Load()), ast.Load):
+            return self._NONE
+        keep_mode, keep_refused = self._selector_mode, self._selector_refused
+        keep_caches = self._mv, self._lv, self._rv, self._av
+        self._selector_mode, self._selector_refused = True, False
+        self._mv, self._lv, self._rv, self._av = {}, {}, {}, {}
+        try:
+            fns = self._enclosing_fns(node, parents)
+            value = self._ev(node, fns)
+            if value is self._NONE \
+                    and not isinstance(node, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)):
+                closed = self._closed(node, fns)
+                if closed is _UNRESOLVED:
+                    value = closed
+            return _SELECTOR_REFUSAL if self._selector_refused else value
+        finally:
+            self._mv, self._lv, self._rv, self._av = keep_caches
+            self._selector_mode, self._selector_refused = keep_mode, keep_refused
 
     def _decides(self, node, parents):
         """Whether a value reaches a decision: a comparison, a branch or loop
@@ -1303,6 +2307,7 @@ class _Scan:
 
     def _judge(self, v, node, parents):
         """Judge one closed value at its use."""
+        v = self._plain(v)
         p = parents.get(id(node))
         if isinstance(v, (tuple, list, frozenset, set)):
             if isinstance(p, ast.Compare) and node is not p.left:
@@ -1473,23 +2478,106 @@ class _Scan:
             if not isinstance(op, _SEL_OPS):
                 continue
             strings = []
+            selector_refused = False
+            _left, right = pair
             for x in pair:
-                r = self.resolve(x, parents) if parents is not None else self._NONE
-                vals = r.vals if isinstance(r, _Choice) else (r,)     # every member of a choice
+                r = self._selector_resolve(x, parents) if parents is not None else self._NONE
                 if isinstance(x, ast.Constant) and isinstance(x.value, str):
-                    strings.append(x.value)
-                elif any(isinstance(v, str) for v in vals):
-                    strings.extend(v for v in vals if isinstance(v, str))   # a followed binding
-                elif isinstance(op, (ast.In, ast.NotIn)) and x is pair[1] \
-                        and isinstance(x, (ast.Tuple, ast.List, ast.Set)):
-                    strings.extend(e.value for e in x.elts
-                                   if isinstance(e, ast.Constant) and isinstance(e.value, str))
-                elif isinstance(op, (ast.In, ast.NotIn)) and x is pair[1] \
-                        and any(isinstance(v, (tuple, list, frozenset, dict)) for v in vals):
-                    strings.extend(e for v in vals if isinstance(v, (tuple, list, frozenset, dict))
-                                   for e in v if isinstance(e, str))
-            if any(s not in SELECTORS for s in strings):
+                    strings.append((x.value, None))
+                elif isinstance(op, (ast.In, ast.NotIn)) and x is right \
+                        and isinstance(x, (ast.Tuple, ast.List, ast.Set, ast.Dict)):
+                    members = x.keys if isinstance(x, ast.Dict) else x.elts
+                    for member in members:
+                        if member is None:
+                            continue
+                        mv = self._selector_resolve(member, parents)
+                        if mv is _SELECTOR_REFUSAL:
+                            selector_refused = True
+                            continue
+                        found = self._selector_values(mv)
+                        refusal = self._selector_refusal(member, mv, parents, found)
+                        if refusal is not None:
+                            self.add(node.lineno, refusal)
+                        strings.extend(found)
+                else:
+                    descend = isinstance(x, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)) \
+                        or (isinstance(op, (ast.In, ast.NotIn)) and x is right)
+                    if r is _SELECTOR_REFUSAL:
+                        selector_refused = True
+                        continue
+                    found = self._selector_values(r, descend=descend)
+                    refusal = self._selector_refusal(x, r, parents, found)
+                    if refusal is not None:
+                        self.add(node.lineno, refusal)
+                    strings.extend(found)
+            if selector_refused:
+                self.add(node.lineno, "unresolved")
+            if any(not self._selector_ok(s, origin) for s, origin in strings):
                 self.add(node.lineno, "select")
+
+    def _selector_values(self, v, origin=None, descend=True):
+        """String values with their individual approved-binding provenance."""
+        if isinstance(v, _Bound):
+            v, origin = v.value, v.origin
+        if isinstance(v, _Choice):
+            return tuple(item for m in v.vals
+                         for item in self._selector_values(m, origin, descend))
+        if isinstance(v, str):
+            return ((v, origin),)
+        if descend and isinstance(v, (tuple, list, frozenset, set, dict)):
+            return tuple(item for m in v
+                         for item in self._selector_values(m, origin, descend))
+        return ()
+
+    def _selector_refusal(self, node, v, parents, strings):
+        """A compound string operand must resolve to one decision binding."""
+        if v is _UNRESOLVED:
+            if not self._string_expression(node, parents):
+                return None
+            refusal = "unresolved"
+        elif isinstance(v, _Choice) and v.owners and strings:
+            refusal = "ambiguous (%s)" % " ".join(v.owners)
+        else:
+            return None
+        simple = (ast.Name, ast.Attribute, ast.Subscript, ast.Call)
+        for part in ast.walk(node):
+            if part is node or not isinstance(part, simple) or not self._decides(part, parents):
+                continue
+            resolved = self.resolve(part, parents)
+            if (v is _UNRESOLVED and resolved is _UNRESOLVED) or \
+                    (isinstance(v, _Choice) and isinstance(resolved, _Choice) and resolved.owners):
+                return None
+        if isinstance(node, simple) and self._decides(node, parents):
+            return None
+        return refusal
+
+    def _string_expression(self, node, parents):
+        """Whether an unevaluable expression is nevertheless string-shaped."""
+        for part in ast.walk(node):
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                return True
+            if isinstance(part, ast.JoinedStr):
+                return True
+            if isinstance(part, ast.Call) and ((isinstance(part.func, ast.Name)
+                    and part.func.id == "format") or (isinstance(part.func, ast.Attribute)
+                    and part.func.attr in ("format", "format_map", "join"))):
+                return True
+            if part is not node and isinstance(part, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)):
+                if self._selector_values(self.resolve(part, parents)):
+                    return True
+        return False
+
+    def _selector_ok(self, word, origin):
+        if word in SELECTORS:
+            return True
+        if origin not in SELECTOR_PROVENANCE:
+            return False
+        mod, name = origin
+        scan = self.peer(mod)
+        if scan is None:
+            return False
+        values = scan._selector_values(scan.module_value(name))
+        return any(candidate == word for candidate, _binding in values)
 
     def _module_bool(self, top):
         nodes = self.tree.body if top is self.tree else [top]

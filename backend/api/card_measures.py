@@ -234,16 +234,16 @@ def _f_inc(v):
 def _f_cards(v):
     if not isinstance(v, list) or len(v) > CAPS["cards"]:
         return False
-    last = -1
-    for c in v:
+    previous_cards = [None] + v
+    for previous, c in zip(previous_cards, v):
         if not isinstance(c, list) or len(c) != WIDTH["card"]:
             return False
         ix, name, rar = c
-        if not _rng(ix, 0, W["ix_max"]) or ix <= last:
+        previous_ix, _pn, _pr = previous if previous is not None else (None, None, None)
+        if not _rng(ix, 0, W["ix_max"]) or (previous_ix is not None and ix <= previous_ix):
             return False
         if not isinstance(name, str) or len(name) > CAPS["name"] or not _rng(rar, I32_LO, I32_HI):
             return False
-        last = ix
     return True
 
 
@@ -585,14 +585,14 @@ def _rejects_vanilla(census, cand, held, gl):
     needed and the gun bit was not read."""
     c = census.cards[cand]
     if _blacklisted(census, c, held):
-        return True
+        return _blacklisted(census, c, held)
     if not c[2] and any(census.cards[h][0] == c[0] for h in held):
-        return True
+        return not c[2]
     if c[-1]:
         if gl < 0:
             return None
         return gl == 1
-    return False
+    return bool(c[-1])
 
 
 def _rejects_local(census, cand, held, gl):
@@ -600,24 +600,24 @@ def _rejects_local(census, cand, held, gl):
     blacklist and the gun-lock clauses only, on every slot."""
     c = census.cards[cand]
     if _blacklisted(census, c, held):
-        return True
+        return _blacklisted(census, c, held)
     if c[-1]:
         if gl < 0:
             return None
         return gl == 1
-    return False
+    return bool(c[-1])
 
 
 def _blacklisted(census, c, held) -> bool:
     cats = c[3]
     if not cats:
-        return False
+        return bool(cats)
     names = {x for x in cats if x is not None}
     for h in held:
         black = census.cards[h][4]
         if black and any(b is not None and b in names for b in black):
-            return True
-    return False
+            return bool(black)
+    return not bool(cats)
 
 
 def _gen_slots(f, dealer_self, series_sc):
@@ -645,12 +645,12 @@ def _heldrej(census, sl, held, gl, gens):
         g = gens[j]
         if g == GEN["opening"]:
             continue
-        if g == GEN["later"]:
-            r = _rejects_local(census, ix, held, gl)
-        elif j == 0:
+        if g != GEN["later"] and j == 0:
             continue
-        else:
-            r = _rejects_vanilla(census, ix, held, gl)
+        # Opening is skipped above; an engine-later draw uses local legality,
+        # and every other post-first draw uses the vanilla held-card rule.
+        r = (_rejects_local(census, ix, held, gl) if g == GEN["later"] else
+             _rejects_vanilla(census, ix, held, gl))
         if r is None:
             return None
         if r:
@@ -679,10 +679,10 @@ def expectation(census, sl, held, gl, weights):
             if cand in earlier:
                 continue
             if j > 0:
-                r = _rejects_vanilla(census, cand, held, gl)
-                if r is None:
+                rejected = _rejects_vanilla(census, cand, held, gl)
+                if rejected is None:
                     return None
-                if r:
+                if rejected:
                     continue
             per[c[1]] += wv[c[1]]
         total = sum(per)
@@ -880,7 +880,7 @@ def _locally_rejected(census, name, held, gl, earlier):
     if cand is None:
         return None
     if cand in earlier:
-        return True
+        return cand in earlier
     return _rejects_local(census, cand, held, gl)
 
 
@@ -983,16 +983,17 @@ def _same_cards(facts, per_rec_rows, two, series_sc) -> dict:
     if series_sc is None:
         return out
     if series_sc == WORD["off"]:
-        stated, unknown = 0, False
+        unknown_sources, stated = [], 0
         for rf in facts:
             for e in rf.rec["hd"]:
                 f = _hand_fields(e)
                 if f["w"] != 0:
                     continue
                 if f["src"] < 0:
-                    unknown = True
-                else:
-                    stated += sum(_bits(f["src"], len(f["sl"])))
+                    unknown_sources.append(f["src"])
+                    continue
+                stated += sum(_bits(f["src"], len(f["sl"])))
+        unknown = any(unknown_sources)
         out["b4.sc.norule"] = None if unknown else stated
         return out
     out["b4.sc.norule"] = 0

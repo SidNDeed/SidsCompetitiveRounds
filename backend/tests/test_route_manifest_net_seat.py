@@ -747,10 +747,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421
-    # plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census
-    # registration), measured by the step 5 dry re-pin of the refit and written by its commit (b).
-    assert len(manifest) == 421   # identity-clock evidence re-land (2026-10-29), claude/identity-clock-server refit onto main a38a6b5a: main's 418 plus the lane's 3 (the identity-clock record route, the admin identity-clock view and the game-file digest registration), confirmed by the re-pin dry run
+    assert len(manifest) == 424   # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
+    # identity-clock evidence re-land (2026-10-29), claude/identity-clock-server refit onto main a38a6b5a: main's 418 plus the lane's 3 (the identity-clock record route, the admin identity-clock view and the game-file digest registration), confirmed by the re-pin dry run
     # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547: main's 406 plus the lane's 12 (the two FFA readmit routes and the ten match hold routes), carried by the structural row union and confirmed by the re-pin dry run
     # v1.41.0 release merge (2026-10-27), main 0f36f018 into the candidate f7ea51c4: main's 400 plus the candidate's 6 routes main did not have, measured by the re-pin (406 recorded, 406 live)
     # main's side before the fold:
@@ -798,9 +796,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # trunk fold (2026-10-15): the union of the lane's 395 and main's 395 over their shared 387 is
     # 401: the lane's 6 plus main's 6 plus the 2 auto-log routes both sides added (all
     # statically-nonconsumer). The lane's history is on the assertion, main's below it.
-    # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer
-    # (measured by the step 5 dry re-pin of the refit, written by its commit (b)).
-    assert len(static) == 420   # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
+    assert len(static) == 423   # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer (424 rows, one sentinel-exercised; measured by the step 5 dry re-pin of the refit, written by its commit (b))
+    # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
     # RJ server re-land (2026-10-28): main's 405 plus the lane's 12, all statically-nonconsumer (418 rows, one sentinel-exercised)
     # v1.41.0 release merge (2026-10-27): main's 399 plus the candidate's 6, all statically-nonconsumer (406 rows, one sentinel-exercised)
     # main's side before the fold:
@@ -1945,6 +1942,13 @@ def test_the_helper_closure_stays_affordable():
     # identity_clock_evidence's asyncio, datetime, hashlib, hmac, json, rm,
     # text and timezone imports; and identity_clock_measures.rm). The bound
     # moves to 717, ~5% over the measurement, for that reason and no other.
+    # card draw evidence re-land (2026-10-29), claude/card-draw-server refit
+    # onto main 15da9a83: 702 measured at GET /api/v1/health (683 on main;
+    # +19 by name: card_evidence's PARKED_UNKNOWN, _PARKED, parked and
+    # parked_oldest_s with its asyncio, datetime, hashlib, hmac, text and
+    # timezone imports; card_measures' covered, dumps, hashlib, json, math
+    # and rm; and main's _CARD_EVIDENCE_ROUTES, _card_evidence_health_word
+    # and _cev). Inside 717, so the bound stays.
     assert all_worst <= 717, f"worst closure {all_worst} of {total}"
 
 

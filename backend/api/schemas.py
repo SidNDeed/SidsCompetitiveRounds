@@ -1161,8 +1161,9 @@ class HealthResponse(BaseModel):
     # the same unknown value, no default.
     card_evidence_parked_oldest_s: int
     # review_eval: 8 hex of the review code's file digest
-    # (review_rules.review_eval: review_boot.py, review_measures.py and
-    # review_rules.py, by file). Equal on both roles; the build discriminator
+    # (review_rules.review_eval: card_measures.py, identity_clock_measures.py,
+    # review_boot.py, review_measures.py and review_rules.py, by file). Equal
+    # on both roles; the build discriminator
     # through the edge. No default, as above.
     review_eval: str
     # review_rules: the loaded review rules revision id, or "absent" (none

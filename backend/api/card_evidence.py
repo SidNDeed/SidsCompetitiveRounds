@@ -56,6 +56,7 @@ try:
 except ImportError:                           # the driver's own classes are optional here
     pg_exc = None
 
+import review_boot   # FIRST: card_measures is executed from source only (review_boot.SOURCE_ONLY)
 import card_measures as cm
 import review_rules as rr
 import seat_evidence as se
@@ -663,14 +664,14 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
         await db.execute(text("UPDATE card_games SET processed_at = now(), seen_inputs = :fp, "
                               + _CLEAR + "WHERE " + _WHERE_GAME), dict(b, fp=fp))
         return "unchanged", 0, 0, False
-    final = match is not None and ((len(named) >= cm.W["players"] and not other_key) or expired)
+    records = _records(named) if match is not None else []
+    purged = any(not _has_lists(r["rec"]) for r in records)
+    final = purged or (match is not None and ((len(named) >= cm.W["players"] and not other_key) or expired))
     fired = errors = 0
     evaluated = None
     fault = None
     if match is not None and named:
-        records = _records(named)
-        if any(not _has_lists(r["rec"]) for r in records):
-            final = True          # lists purged: nothing left to derive
+        if purged:                # lists purged: nothing left to derive
             if g["evaluated_rev"] != rev:
                 # what another revision derived from the lists is not this
                 # revision's: retired, the windows it was in evaluated again
@@ -765,15 +766,15 @@ def operational(exc) -> bool:
     seen, todo = set(), [exc]
     while todo:
         e = todo.pop()
+        is_operational = (isinstance(e, _OPERATIONAL)
+                          or (isinstance(e, sa_exc.DBAPIError) and e.connection_invalidated is True))
         if not isinstance(e, BaseException) or id(e) in seen:
             continue
         seen.add(id(e))
-        if isinstance(e, _OPERATIONAL):
-            return True
-        if isinstance(e, sa_exc.DBAPIError) and e.connection_invalidated is True:
-            return True
+        if is_operational:
+            break
         todo += [e.orig if isinstance(e, sa_exc.StatementError) else None, e.__cause__, e.__context__]
-    return False
+    return is_operational
 
 
 # The games parked under the revision of the last card pass (see the
@@ -841,7 +842,7 @@ async def games_pass(session_factory, state=None, limit: int = None) -> dict:
             "lim": limit or CARD_LIMITS["games_per_pass"], "rev": rev,
             "cap": CARD_FAULT_LIMITS["attempts"], "reprobe": CARD_RETRY_LIMITS["reprobe_s"]})).all()
     for key, lo, hi, fp in cands:
-        failed = None
+        failure = None
         try:
             async with session_factory() as db:
                 try:
@@ -856,9 +857,10 @@ async def games_pass(session_factory, state=None, limit: int = None) -> dict:
                         pass
                     raise
         except Exception as exc:              # noqa: BLE001 -- recorded on the game, next game
-            failed = operational(exc)
+            failure = exc
             st, fired, errors, done = "error:" + type(exc).__name__, 0, 0, False
-        if failed is not None:
+        if failure is not None:
+            failed = operational(failure)
             word = "operational" if failed else "deterministic"
             stats[word] = stats.get(word, 0) + 1
             try:
