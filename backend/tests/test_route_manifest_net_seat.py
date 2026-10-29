@@ -1602,7 +1602,17 @@ def test_the_helper_closure_stays_affordable():
     # +19. Every route moves by the same names; no route crossed into a hub.
     # The bound moves to 189, ~5% over the measurement, for that reason and
     # no other.
-    assert all_median <= 189, f"median closure {all_median} of {total}"
+    # card draw evidence re-land (2026-10-29), claude/card-draw-server refit
+    # onto main 15da9a83: 196 measured at GET /api/v1/artist/{steam_id}/sales
+    # (190 on main; main's rank route GET /api/v1/queue/count 189 -> 195). The
+    # same fold by name as before: the lane's new modules' import lines
+    # (card_evidence's datetime, hashlib, hmac, text and timezone,
+    # card_measures' hashlib), +6 on 204 of the 420 shared routes, +5 on 31
+    # and +7 on 49; the code tier at the rank route is unchanged (86). The
+    # rank position moves 210 -> 211 with the three new routes. No route
+    # crossed into a hub. The bound moves to 205, ~5% over the measurement,
+    # for that reason and no other.
+    assert all_median <= 205, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1840,7 +1850,18 @@ def test_the_helper_closure_stays_affordable():
     # mail_discord router, the service-uuid cache constants and main's
     # module import lines, +25. The bound moves to 317, ~5% over the
     # measurement, for that reason and no other.
-    assert all_p90 <= 317, f"p90 closure {all_p90} of {total}"
+    # card draw evidence re-land (2026-10-29), claude/card-draw-server refit
+    # onto main 15da9a83: 337 measured at POST /api/v1/ffa/lobby/start (303
+    # on main; main's rank route POST /api/v1/pc/portrait 312 -> 322 by the
+    # median's import fold, below the new rank). The rank position moves
+    # 378 -> 380 with the three new routes, and the route at the rank gains
+    # +34 by shared names: the import lines of card_evidence, card_measures
+    # and identity_clock_evidence and the json bindings they lead to (18),
+    # card_measures' wire and need constants with the W and IC_WIRE
+    # bindings (13), and card_measures' _gate, covered and dumps (3); none
+    # of it executed by the route. The bound moves to 353, ~5% over the
+    # measurement, for that reason and no other.
+    assert all_p90 <= 353, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
