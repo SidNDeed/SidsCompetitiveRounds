@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 import sys
 
-SOURCE_ONLY = ("review_measures", "review_rules")
+SOURCE_ONLY = ("identity_clock_measures", "review_measures", "review_rules")
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOADED = {}         # stem -> (the module this loader executed, the bytes it executed)
 PRIOR = set()       # closure stems found executed by another route
