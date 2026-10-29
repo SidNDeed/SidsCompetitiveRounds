@@ -38,6 +38,7 @@ from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_relea
 from database import get_asm_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 import review_boot, seat_evidence as _sev   # review_boot FIRST: the review closure executes from source only
+import card_evidence as _cev
 import review_rules as _review_rules
 import identity_clock_evidence as _ice
 import conn_ranges as _conn_ranges
@@ -4652,6 +4653,10 @@ async def review_worker_pass(session_factory, purge: bool):
     print(_review_pass_line(state.word, games, sittings), flush=True)
     print(f"[SEAT-EVIDENCE] games={games} sittings={sittings} purge={purged}", flush=True)
     print(f"[IDENTITY-CLOCK] games={identity} purge={identity_purged}", flush=True)
+    # The card pass: the same published state, its own transactions per game.
+    cards = await _cev.games_pass(session_factory, state)
+    card_purged = await _cev.purge_pass(session_factory) if purge else None
+    print(f"[CARD-EVIDENCE] games={cards} purge={card_purged}", flush=True)
     return state.word, games, sittings, purged
 
 
@@ -4745,7 +4750,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:54255 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:54456 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4811,7 +4816,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:54056 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:54257 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4881,7 +4886,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:53387 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:53588 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7606,6 +7611,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               match_hold=_MATCH_HOLD,
                               auto_log=_auto_log_health_word(),
                               seat_evidence=_seat_evidence_health_word(),
+                              card_evidence=_card_evidence_health_word(),
+                              card_evidence_parked=_cev.parked(),
+                              card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
@@ -7654,6 +7662,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               match_hold=_MATCH_HOLD,
                               auto_log=_auto_log_health_word(),
                               seat_evidence=_seat_evidence_health_word(),
+                              card_evidence=_card_evidence_health_word(),
+                              card_evidence_parked=_cev.parked(),
+                              card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
@@ -8895,6 +8906,85 @@ async def admin_seat_evidence(
     return await _sev.admin_view(db, match_id=str(match_id) if match_id else None,
                                  stable_game_key=stable_game_key,
                                  rs=_review_rules.current_rules().ruleset)
+
+
+@app.post("/api/v1/matches/card-evidence", tags=["Matches"])
+async def submit_card_evidence(request: Request, db: AsyncSession = Depends(get_db)):
+    """One seat's card draw record for one ranked game.
+
+    The FIRST decision is the session, as the seat-evidence route: 401 unless
+    the request carries a verified session for the seat the body names; then
+    the accept switch (503 card_evidence_off), the envelope (400/413/422), the
+    signature over the card string (403), the record (422), both accounts
+    (409 not_ready). After that it writes the card_evidence table and nothing
+    else: never a player row, a match, a series, a rating, gold, match_cards
+    or flagged_matches. Evaluation runs later, in review_worker_loop."""
+    seat, body = await _sev_claimed_seat(request)
+    if not seat or not await _strict_steam_session_ok(request, seat, db):
+        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+    try:
+        if await _cev.setting(db, "card_evidence_accept", "0") != "1":
+            return JSONResponse(status_code=503, content={"error": "card_evidence_off"})
+        env = _cev.parse_envelope(body)
+        if not _cev.verify_sig(MATCH_HMAC_SECRET, env):
+            return JSONResponse(status_code=403, content={"detail": "signature"})
+        rec = _cev.parse_record(env)
+        rows = (await db.execute(
+            select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
+        )).all()
+        by_steam = {r.steam_id: r.id for r in rows}
+        if env["seat"] not in by_steam or env["other"] not in by_steam:
+            return JSONResponse(status_code=409, content={"status": "not_ready"})
+        return await _cev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
+                                       _sev_header_version(request))
+    except _sev.EvidenceRefused as r:
+        return _sev_refusal(r)
+
+
+@app.get("/api/v1/admin/card-evidence", tags=["Admin"])
+async def admin_card_evidence(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    match_id: UUID | None = Query(None),
+    stable_game_key: str | None = Query(None, max_length=60),
+    db: AsyncSession = Depends(get_db),
+):
+    """The reviewer's view of one game's card evidence: both records, the
+    measures computed now, the stored hand and phase rows, contributions and
+    findings, and the per-day count of records naming an unregistered census.
+    Admin only."""
+    if (match_id is None) == (stable_game_key is None):
+        raise HTTPException(400, "Give exactly one of match_id or stable_game_key")
+    target = str(match_id) if match_id is not None else stable_game_key
+    await _require_admin(db, admin_steam_id, "card_evidence", target, hmac_signature)
+    return await _cev.admin_view(db, match_id=str(match_id) if match_id else None,
+                                 stable_game_key=stable_game_key,
+                                 rs=_review_rules.current_rules().ruleset)
+
+
+@app.post("/api/v1/admin/card-pool-census", tags=["Admin"])
+async def admin_register_card_census(
+    request: Request,
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    digest: str = Query(..., max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Register one card-pool census: the body is the census dump file a
+    reference seat wrote (CompetitiveRounds.card-census.json). The admin
+    signature covers the digest; the dump must state that same digest, and
+    the digest must be the digest of its own census text."""
+    await _require_admin(db, admin_steam_id, "card_census", digest, hmac_signature)
+    try:
+        doc = _json.loads(await request.body())
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "body"})
+    if not isinstance(doc, dict) or doc.get("digest") != digest:
+        return JSONResponse(status_code=422, content={"detail": "digest"})
+    try:
+        return await _cev.register_census(db, doc)
+    except _sev.EvidenceRefused as r:
+        return _sev_refusal(r)
 
 
 @app.post("/api/v1/admin/release-digests", tags=["Admin"])
@@ -54480,7 +54570,7 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4824 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4855 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -70731,6 +70821,15 @@ _IDENTITY_CLOCK_ROUTES = (submit_identity_clock_evidence, admin_identity_clock_e
 def _identity_clock_health_word() -> int:
     registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
     return 1 if all(id(fn) in registered for fn in _IDENTITY_CLOCK_ROUTES) else 0
+# Card draw evidence: `card_evidence` on /health is 1 when this app registers
+# all three card routes, else 0. Derived from the routing table on every
+# call, as seat_evidence above; equal on both roles by construction.
+_CARD_EVIDENCE_ROUTES = (submit_card_evidence, admin_card_evidence, admin_register_card_census)
+
+
+def _card_evidence_health_word() -> int:
+    registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
+    return 1 if all(id(fn) in registered for fn in _CARD_EVIDENCE_ROUTES) else 0
 
 
 def _pc_motion_health_word() -> int:

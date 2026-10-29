@@ -72,6 +72,12 @@ such a row is refused by name (`_time_of_day_dependent`), under EVERY
 population the run executes (fix pass 5): the base rules' statements, the old
 worker's statements, the literal and each compiled sitting mutant
 (`_executed_populations`).
+
+Each fixture row is planted at ROW_HOUR plus its own minute, UTC, on the day
+`days_ago` before the run's UTC today, and the labels name that day. A
+planted row whose UTC day, read back in the planting transaction, is not
+exactly that day (a minute that crosses a UTC midnight) is REFUSED by index
+(PlacementRefused) before any equivalence assertion runs.
 """
 
 import ast
@@ -123,6 +129,10 @@ DAY_S = 86400
 
 class FrozenDayRefused(AssertionError):
     """A frozen sitting identity names a day the run cannot thaw."""
+
+
+class PlacementRefused(AssertionError):
+    """A planted fixture row's UTC day is not the day its labels name."""
 
 
 def _sitting_day(today, days_ago):
@@ -528,6 +538,26 @@ async def _old_pass(conn):
     return rows, found
 
 
+async def _check_placement(conn, rows):
+    """Every planted fixture row ended on exactly the UTC day its labels name:
+    the run's UTC today minus its days_ago (a sitting identity's day). Read
+    back from the rows as planted, in the planting transaction (one instant:
+    the same now() the placement and today use), before any assertion; a
+    row whose minute moves it across a UTC midnight is refused by index."""
+    today = await conn.fetchval("SELECT (now() AT TIME ZONE 'UTC')::date")
+    placed = {str(r["id"]): r["d"] for r in await conn.fetch(
+        "SELECT id, (ended_at AT TIME ZONE 'UTC')::date AS d FROM matches")}
+    bad = []
+    for i, r in enumerate(rows):
+        want = _sitting_day(today, r["days_ago"])
+        got = placed.get(str(uuid.UUID(r["id"])))
+        if got != want:
+            bad.append("row %d (days_ago %r, minute %r): placed on %s, labelled %s"
+                       % (i, r["days_ago"], r["minute"], got, want))
+    if bad:
+        raise PlacementRefused("planted fixture rows not on their labelled UTC day: " + "; ".join(bad))
+
+
 def _new_sitting(rs, rule, rows):
     return [(d, m, _stored({"items": it})) for d, m, it in rs.sitting_items(rule, rows)]
 
@@ -568,6 +598,7 @@ async def _sitting_run(muts=()):
                 " - make_interval(days => $%d) + make_interval(hours => $%d) + make_interval(mins => $%d), "
                 "now(), CASE WHEN $%d THEN now() END)" % (cols, ph, n + 1, n + 2, n + 3, n + 4),
                 *vals, r["days_ago"], ROW_HOUR, r["minute"], r["invalidated"])
+        await _check_placement(conn, fx["rows"])
         # the worker's dirty set over the OLD candidate window only: the same
         # sittings the old worker would have evaluated in this snapshot
         await conn.execute(

@@ -6,3 +6,5 @@ tools/tests/seat-evidence-client/server_fixtures/** -text
 backend/tests/fixtures/seat_evidence_client_b7/** -text
 # The kept-view classes table ends an empty guard field with a TAB: no trailing-blank diagnostic.
 tools/kept_view_census/classes.tsv whitespace=-blank-at-eol
+# The card draw fixtures are the client lane's generated files, accepted byte for byte.
+backend/tests/fixtures/card_evidence/** -text

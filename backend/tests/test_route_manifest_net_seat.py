@@ -747,7 +747,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    assert len(manifest) == 421   # identity-clock evidence re-land (2026-10-29), claude/identity-clock-server refit onto main a38a6b5a: main's 418 plus the lane's 3 (the identity-clock record route, the admin identity-clock view and the game-file digest registration), confirmed by the re-pin dry run
+    assert len(manifest) == 424   # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
+    # identity-clock evidence re-land (2026-10-29), claude/identity-clock-server refit onto main a38a6b5a: main's 418 plus the lane's 3 (the identity-clock record route, the admin identity-clock view and the game-file digest registration), confirmed by the re-pin dry run
     # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547: main's 406 plus the lane's 12 (the two FFA readmit routes and the ten match hold routes), carried by the structural row union and confirmed by the re-pin dry run
     # v1.41.0 release merge (2026-10-27), main 0f36f018 into the candidate f7ea51c4: main's 400 plus the candidate's 6 routes main did not have, measured by the re-pin (406 recorded, 406 live)
     # main's side before the fold:
@@ -795,7 +796,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # trunk fold (2026-10-15): the union of the lane's 395 and main's 395 over their shared 387 is
     # 401: the lane's 6 plus main's 6 plus the 2 auto-log routes both sides added (all
     # statically-nonconsumer). The lane's history is on the assertion, main's below it.
-    assert len(static) == 420   # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
+    assert len(static) == 423   # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer (424 rows, one sentinel-exercised; measured by the step 5 dry re-pin of the refit, written by its commit (b))
+    # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
     # RJ server re-land (2026-10-28): main's 405 plus the lane's 12, all statically-nonconsumer (418 rows, one sentinel-exercised)
     # v1.41.0 release merge (2026-10-27): main's 399 plus the candidate's 6, all statically-nonconsumer (406 rows, one sentinel-exercised)
     # main's side before the fold:
@@ -1438,7 +1440,18 @@ def test_the_helper_closure_stays_affordable():
     # the lane's hold readers lift past the rank, 144 -> 242). The rank route
     # gains the match_hold router and MODES on main's side, 155 -> 157.
     # Inside 160, so the bound stays.
-    assert code_p90 <= 160, f"p90 code closure {code_p90} of {total}"
+    # card draw evidence re-land (2026-10-29), claude/card-draw-server refit
+    # onto main 15da9a83: 170 measured at POST /api/v1/pc/portrait/motion (169
+    # on main; +1, card_measures.dumps by the shared name). The population
+    # grows 420 -> 423 /api/v1 routes: the admin card view (192) enters above
+    # the rank, the record route (122) and the census (47) below, so the rank
+    # position moves 378 -> 380, past GET /api/v1/tournaments/current (157,
+    # unchanged) and POST /api/v1/ffa/lobby/start (145 -> 161: card_measures'
+    # wire and need constants and the W and IC_WIRE bindings, reached by
+    # shared names and not executed). 331 routes measure the same as on main
+    # and 64 gain the one shared name dumps. The bound moves to 178, ~5% over
+    # the measurement, for that reason and no other.
+    assert code_p90 <= 178, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1589,7 +1602,17 @@ def test_the_helper_closure_stays_affordable():
     # +19. Every route moves by the same names; no route crossed into a hub.
     # The bound moves to 189, ~5% over the measurement, for that reason and
     # no other.
-    assert all_median <= 189, f"median closure {all_median} of {total}"
+    # card draw evidence re-land (2026-10-29), claude/card-draw-server refit
+    # onto main 15da9a83: 196 measured at GET /api/v1/artist/{steam_id}/sales
+    # (190 on main; main's rank route GET /api/v1/queue/count 189 -> 195). The
+    # same fold by name as before: the lane's new modules' import lines
+    # (card_evidence's datetime, hashlib, hmac, text and timezone,
+    # card_measures' hashlib), +6 on 204 of the 420 shared routes, +5 on 31
+    # and +7 on 49; the code tier at the rank route is unchanged (86). The
+    # rank position moves 210 -> 211 with the three new routes. No route
+    # crossed into a hub. The bound moves to 205, ~5% over the measurement,
+    # for that reason and no other.
+    assert all_median <= 205, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1827,7 +1850,19 @@ def test_the_helper_closure_stays_affordable():
     # mail_discord router, the service-uuid cache constants and main's
     # module import lines, +25. The bound moves to 317, ~5% over the
     # measurement, for that reason and no other.
-    assert all_p90 <= 317, f"p90 closure {all_p90} of {total}"
+    # card draw evidence re-land (2026-10-29), claude/card-draw-server refit
+    # onto main 15da9a83: 337 measured at POST /api/v1/ffa/lobby/start (303
+    # on main; main's rank route POST /api/v1/pc/portrait 312 -> 322 by the
+    # shared-name fold, nine import lines and card_measures.dumps, below the
+    # new rank). The rank position moves 378 -> 380 with the three new
+    # routes, and the route at the rank gains +34 by shared names: the
+    # import lines of card_evidence, card_measures
+    # and identity_clock_evidence and the json bindings they lead to (18),
+    # card_measures' wire and need constants with the W and IC_WIRE
+    # bindings (13), and card_measures' _gate, covered and dumps (3); none
+    # of it executed by the route. The bound moves to 353, ~5% over the
+    # measurement, for that reason and no other.
+    assert all_p90 <= 353, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -1940,6 +1975,13 @@ def test_the_helper_closure_stays_affordable():
     # identity_clock_evidence's asyncio, datetime, hashlib, hmac, json, rm,
     # text and timezone imports; and identity_clock_measures.rm). The bound
     # moves to 717, ~5% over the measurement, for that reason and no other.
+    # card draw evidence re-land (2026-10-29), claude/card-draw-server refit
+    # onto main 15da9a83: 702 measured at GET /api/v1/health (683 on main;
+    # +19 by name: card_evidence's PARKED_UNKNOWN, _PARKED, parked and
+    # parked_oldest_s with its asyncio, datetime, hashlib, hmac, text and
+    # timezone imports; card_measures' covered, dumps, hashlib, json, math
+    # and rm; and main's _CARD_EVIDENCE_ROUTES, _card_evidence_health_word
+    # and _cev). Inside 717, so the bound stays.
     assert all_worst <= 717, f"worst closure {all_worst} of {total}"
 
 
