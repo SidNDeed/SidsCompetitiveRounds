@@ -231,9 +231,18 @@ def test_m4_every_argument_kind_of_the_registry_is_classified_and_every_value_ki
     registry declares is either value-bearing or a name, so a new kind fails
     here until the needles cover it; and the shapes revision uses an argument
     of every value-bearing kind."""
-    # operators and sittings carry (name, kind) arguments; a params family's
-    # args name its profile keys (card_measures PROFILE_KEYED), no argument kinds
-    kinds = {k for e in rm.REGISTRY.values() if e.kind in ("operator", "sitting") for _n, k in e.args}
+    # every entry is classified: operators and sittings carry (name, kind)
+    # arguments; a params family's args are its profile keys (card_measures
+    # PROFILE_KEYED), strings the family does not list as parameter keys; no
+    # other kind carries arguments, so a misplaced or unknown kind fails here
+    kinds = set()
+    for e in rm.REGISTRY.values():
+        if e.kind in ("operator", "sitting"):
+            kinds |= {k for _n, k in e.args}
+        elif e.kind == "params":
+            assert all(isinstance(a, str) and a not in e.data for a in e.args), (e.name, e.args)
+        else:
+            assert not e.args, (e.name, e.kind, e.args)
     assert kinds <= VALUE_KINDS | NAME_KINDS, kinds - VALUE_KINDS - NAME_KINDS
     used = set()
     doc = shapes_doc()
