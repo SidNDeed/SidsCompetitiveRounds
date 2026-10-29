@@ -6,7 +6,12 @@ them for the Docker build and for local tests, and `fonts.lock.json` pins
 the SHA-256 of every file so two builds of one ref use identical bytes.
 
     python fetch_fonts.py            # fetch + verify against the lock
+    python fetch_fonts.py --verify   # verify only: never fetches; 1 on a missing or moved font
     python fetch_fonts.py --record   # first fetch: write the lock
+
+The Dockerfile runs the fetch above the code copy (a code-only rebuild reuses
+that layer) and `--verify` as its last step, after the copy, so the bytes the
+image carries are the locked bytes whatever the copy brought.
 
 All fonts are OFL-licensed (Noto, Kalam).
 """
@@ -81,6 +86,26 @@ def sha256_of(path):
     return h.hexdigest()
 
 
+def verify(lock):
+    """0 when every font of FONTS is present with its locked SHA-256 and
+    size, else 1 (each failure printed). Never fetches."""
+    bad = 0
+    for name in FONTS:
+        path = os.path.join(HERE, name)
+        if not os.path.isfile(path):
+            print("%s: missing" % name, file=sys.stderr)
+            bad += 1
+            continue
+        digest, size = sha256_of(path), os.path.getsize(path)
+        if digest != lock[name]["sha256"] or size != lock[name]["bytes"]:
+            print("%s: sha256 %s (%d bytes) != locked %s (%d bytes)"
+                  % (name, digest, size, lock[name]["sha256"], lock[name]["bytes"]), file=sys.stderr)
+            bad += 1
+            continue
+        print("%-32s %10d  %s  verified" % (name, size, digest))
+    return 1 if bad else 0
+
+
 def main(argv):
     record = "--record" in argv
     lock = {}
@@ -90,6 +115,8 @@ def main(argv):
     if not record and set(lock) != set(FONTS):
         print("fonts.lock.json does not list exactly the fonts of FONTS; run --record", file=sys.stderr)
         return 2
+    if "--verify" in argv:
+        return verify(lock)
     out = {}
     for name, url in FONTS.items():
         path = os.path.join(HERE, name)

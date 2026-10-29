@@ -1029,6 +1029,13 @@ _DOMAIN_PREDICATES = (
     ("api/seat_evidence.py", "DELETE", "dedup_key NOT LIKE 'card %'"),
     ("sql/370_card_evidence.sql", "UPDATE", "dedup_key LIKE 'card %'"),
     ("sql/rollback_370_card_evidence.sql", "DELETE", "domain = 'card'"),
+    # the combat lane (its migration 369 adds the domain value; its rollback
+    # deletes the combat rows by domain, or by key prefix when the column is gone)
+    ("api/combat_evidence.py", "INSERT", "VALUES ('combat'"),
+    ("api/combat_evidence.py", "DELETE", "domain = 'combat'"),
+    ("api/combat_evidence.py", "DELETE", "domain = 'combat'"),
+    ("sql/rollback_369_combat_evidence.sql", "DELETE", "domain = 'combat'"),
+    ("sql/rollback_369_combat_evidence.sql", "DELETE", "left(dedup_key, 7) = 'combat '"),
 )
 
 
@@ -1061,7 +1068,7 @@ def test_every_write_on_the_shared_findings_table_is_kept_to_one_domain():
     rows = _domain_table()
     assert None not in [p for _f, _k, p in rows], rows
     assert rows == sorted(_DOMAIN_PREDICATES, key=lambda r: (r[0], r[1], r[2]))   # the count is checkable
-    assert len(rows) == 9
+    assert len(rows) == 14
     # the seat purge names the card key form; control: without it the row is unclassified
     purge = [s for kk, s in _finding_writes("api/seat_evidence.py") if "changed_at <" in s]
     assert len(purge) == 1 and "dedup_key NOT LIKE 'card %'" in purge[0]

@@ -191,10 +191,16 @@ def test_the_image_installs_the_text_shaper_the_renderer_loads_at_runtime():
     """Pillow's wheel bundles libraqm but loads libfribidi at runtime. Without
     the package the renderer runs the basic engine, health reports
     pc_raqm=false and every face route refuses with text_shaping_unavailable
-    -- production on 2026-09-12: both boxes healthy, first pack open refused."""
+    -- production on 2026-09-12: both boxes healthy, first pack open refused.
+    Since combat fix pass 10 the package is installed from apt.lock (pinned
+    by the .deb's SHA-256) by apt_lock.py, so the lock must name it and the
+    Dockerfile must run that step."""
     df = _read(DOCKERFILE)
-    apt = re.search(r"^RUN .*apt-get install .*libfribidi0.*$", df, re.M)
-    assert apt, "the Dockerfile installs no libfribidi0, so the renderer cannot shape text"
+    lock = _read(os.path.join(API, "apt.lock"))
+    assert re.search(r"^libfribidi0 \S+ amd64 [0-9a-f]{64}$", lock, re.M), (
+        "apt.lock does not name libfribidi0, so the renderer cannot shape text")
+    apt = re.search(r"^RUN apt-get update && python apt_lock\.py install apt\.lock .*$", df, re.M)
+    assert apt, "the Dockerfile does not install apt.lock, so the renderer cannot shape text"
     copy_all = re.search(r"^COPY \. \.\s*$", df, re.M)
     assert copy_all and apt.start() < copy_all.start(), (
         "the shaper layer must sit above the code copy so a code-only rebuild reuses it")

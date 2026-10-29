@@ -1,6 +1,48 @@
-# No bytecode cache enters the api image. The review loader binds a rules
-# revision to the source bytes of its code; a cache in the image could run in
-# place of that source (build_no_bytecode.py fails the build if one exists).
+# What the api image build must never take from a checkout. Docker sends the
+# build context (this directory) minus every path matched here, and the
+# Dockerfile's `COPY . .` copies what was sent. Docker reads a line starting
+# with # as a comment, so each reason sits on the line above its pattern.
+
+# Bytecode caches: derived from the sources, written by any local run or test.
+# None enters the image: the review loader binds a rules revision to the
+# source bytes of its code (build_no_bytecode.py fails the build if one exists).
 **/__pycache__
 **/*.pyc
 **/*.pyo
+
+# Test artefacts.
+**/.pytest_cache
+**/.coverage
+**/htmlcov
+
+# Local virtual environments.
+.venv
+venv
+**/.venv
+
+# Logs and database dumps.
+**/*.log
+logs
+db-backups
+
+# Configuration values and key material: delivered to the container by the
+# compose file's environment and mounts, never baked into the image.
+**/.env
+**/.env.*
+**/*.key
+**/*.pem
+
+# The renderer's font binaries: the build fetches each one from its pinned URL
+# and verifies it against assets/fonts/fonts.lock.json, and verifies them again
+# after the code copy; a font from a checkout must never reach the image.
+assets/fonts/*.ttf
+assets/fonts/*.otf
+assets/fonts/*.ttc
+assets/fonts/*.part
+
+# The private card-art staging directory: the running container mounts the
+# private bundle read-only at this path.
+assets/pc/cards
+
+# Written by the build itself (build_manifest.py), after the copy.
+build-manifest.json

@@ -747,7 +747,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    assert len(manifest) == 424   # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
+    assert len(manifest) == 426   # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit onto main 3f4c9fc9: main's 424 plus the lane's 2 (the combat record route and the admin combat-evidence view), confirmed by the re-pin dry run
+    # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
     # identity-clock evidence re-land (2026-10-29), claude/identity-clock-server refit onto main a38a6b5a: main's 418 plus the lane's 3 (the identity-clock record route, the admin identity-clock view and the game-file digest registration), confirmed by the re-pin dry run
     # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547: main's 406 plus the lane's 12 (the two FFA readmit routes and the ten match hold routes), carried by the structural row union and confirmed by the re-pin dry run
     # v1.41.0 release merge (2026-10-27), main 0f36f018 into the candidate f7ea51c4: main's 400 plus the candidate's 6 routes main did not have, measured by the re-pin (406 recorded, 406 live)
@@ -796,7 +797,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # trunk fold (2026-10-15): the union of the lane's 395 and main's 395 over their shared 387 is
     # 401: the lane's 6 plus main's 6 plus the 2 auto-log routes both sides added (all
     # statically-nonconsumer). The lane's history is on the assertion, main's below it.
-    assert len(static) == 423   # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer (424 rows, one sentinel-exercised; measured by the step 5 dry re-pin of the refit, written by its commit (b))
+    assert len(static) == 425   # combat evidence re-land (2026-10-29): main's 423 plus the lane's 2, both statically-nonconsumer (426 rows, one sentinel-exercised)
+    # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer (424 rows, one sentinel-exercised; measured by the step 5 dry re-pin of the refit, written by its commit (b))
     # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
     # RJ server re-land (2026-10-28): main's 405 plus the lane's 12, all statically-nonconsumer (418 rows, one sentinel-exercised)
     # v1.41.0 release merge (2026-10-27): main's 399 plus the candidate's 6, all statically-nonconsumer (406 rows, one sentinel-exercised)
@@ -1026,7 +1028,18 @@ def test_the_helper_closure_stays_affordable():
     # /api/v1/tournaments/history on main and at the merge, 77 -> 79: the
     # match_hold router and MODES, which every route reaches once main holds
     # the lane's modules. Inside 82, so the bound stays.
-    assert code_median <= 82, f"median code closure {code_median} of {total}"
+    # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit
+    # onto main 3f4c9fc9: 83 measured at GET /api/v1/cards/pickers-summary
+    # (80 on main; main's rank route GET /api/v1/artist/status/{steam_id}
+    # 80 -> 83) of 5137 indexed bindings over 425 routes, against 80 of 4761
+    # over 423 on main. +3 on the route at the rank by shared names, none
+    # executed by it: build_manifest.encode (a method name its source
+    # carries), card_measures.dumps and combat_measures.dumps. Over the 423
+    # shared routes: +3 on 282, +2 on 56, 0 on 36, more only where a combat
+    # helper's name is reached. The rank position moves 211 -> 212 with the
+    # two new routes. The bound moves to 87, ~5% over the measurement, for
+    # that reason and no other.
+    assert code_median <= 87, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
     #
@@ -1451,6 +1464,17 @@ def test_the_helper_closure_stays_affordable():
     # shared names and not executed). 331 routes measure the same as on main
     # and 64 gain the one shared name dumps. The bound moves to 178, ~5% over
     # the measurement, for that reason and no other.
+    # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit
+    # onto main 3f4c9fc9: 177 measured at POST /api/v1/matches/seat-evidence
+    # (122 on main; +55 by shared names, none executed by the seat route:
+    # combat_evidence's parse_envelope, parse_record, record_canonical,
+    # record_sign, setting, store_record and verify_sig with its seven
+    # contract constants, combat_measures' 13 helpers and 27 layout tables
+    # they lead to, and build_manifest.encode). The population grows
+    # 423 -> 425 /api/v1 routes: the admin combat view (334) enters above
+    # the rank and the combat record route (177) at it, so the rank position
+    # moves 380 -> 382, past main's rank route POST /api/v1/pc/portrait/motion
+    # (170 -> 172). Inside 178, so the bound stays.
     assert code_p90 <= 178, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
@@ -1548,7 +1572,20 @@ def test_the_helper_closure_stays_affordable():
     # _FFA_READMIT, _FFA_READMIT_SITES and _MATCH_HOLD, and the match_hold
     # router and MODES). The bound moves to 505, ~5% over the measurement,
     # for that reason and no other.
-    assert code_worst <= 505, f"worst code closure {code_worst} of {total}"
+    # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit
+    # onto main 3f4c9fc9: the worst is GET /api/v1/health at 568 (493 on
+    # main; +75 by name: main's _COMBAT_EVIDENCE_ROUTES and
+    # _combat_evidence_health_word (2); build_manifest's health_word and the
+    # manifest and lock readers it calls, 11 helpers and 11 constants, with
+    # apt_lock's Refused (23), the one part the health route executes; and,
+    # through the two route functions the route list holds, combat_measures'
+    # 13 helpers and 26 layout tables (39) and the bindings the shared
+    # names re, _HEX, W, icm and HERE lead to in card_evidence,
+    # card_measures, identity_clock_evidence, identity_clock_measures,
+    # review_boot and review_rules (11), none executed by the health route).
+    # The bound moves to 596, ~5% over the measurement, for that reason and
+    # no other.
+    assert code_worst <= 596, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -1612,7 +1649,21 @@ def test_the_helper_closure_stays_affordable():
     # rank position moves 210 -> 211 with the three new routes. No route
     # crossed into a hub. The bound moves to 205, ~5% over the measurement,
     # for that reason and no other.
-    assert all_median <= 205, f"median closure {all_median} of {total}"
+    # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit
+    # onto main 3f4c9fc9: 220 measured at GET /api/v1/mail/blocks (196 on
+    # main; main's rank route GET /api/v1/artist/{steam_id}/sales 196 -> 220).
+    # The same fold by name as before, +24 on the route at the rank: the new
+    # modules' import lines (combat_evidence's datetime, hashlib, hmac, json,
+    # text and timezone; build_manifest's hashlib, json and os; apt_lock's
+    # hashlib), the json binding of nine more modules the two dumps lead to
+    # (auto_logs, identity_clock_evidence, match_hold, pc_face, pc_portrait,
+    # pc_steam, review_rules, seat_evidence and tournaments), 21 import lines
+    # in all, and the three helpers build_manifest.encode, card_measures.dumps
+    # and combat_measures.dumps. Over the 423 shared routes: +24 on 170, +23
+    # on 53, +25 on 41. The rank position moves 211 -> 212 with the two new
+    # routes. No route crossed into a hub. The bound moves to 231, ~5% over
+    # the measurement, for that reason and no other.
+    assert all_median <= 231, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1862,7 +1913,17 @@ def test_the_helper_closure_stays_affordable():
     # bindings (13), and card_measures' _gate, covered and dumps (3); none
     # of it executed by the route. The bound moves to 353, ~5% over the
     # measurement, for that reason and no other.
-    assert all_p90 <= 353, f"p90 closure {all_p90} of {total}"
+    # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit
+    # onto main 3f4c9fc9: 375 measured at GET /api/v1/queue/poll/{steam_id}
+    # (360 on main; main's rank route POST /api/v1/ffa/lobby/start 337 -> 360).
+    # +15 on the route at the rank by name, none of it executed by the route:
+    # combat_evidence's seven import lines (datetime, hashlib, hmac, json,
+    # text, timedelta and timezone), build_manifest's encode with its hashlib,
+    # json and os, apt_lock's hashlib, and combat_measures' dumps with its
+    # json and rm. The rank position moves 380 -> 382 with the two new
+    # routes. The bound moves to 393, ~5% over the measurement, for that
+    # reason and no other.
+    assert all_p90 <= 393, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -1982,7 +2043,19 @@ def test_the_helper_closure_stays_affordable():
     # timezone imports; card_measures' covered, dumps, hashlib, json, math
     # and rm; and main's _CARD_EVIDENCE_ROUTES, _card_evidence_health_word
     # and _cev). Inside 717, so the bound stays.
-    assert all_worst <= 717, f"worst closure {all_worst} of {total}"
+    # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit
+    # onto main 3f4c9fc9: 812 measured at GET /api/v1/health (702 on main;
+    # +110 by name: the 75 helpers and constants of the code tier above, and
+    # 35 import lines: build_manifest's csv, hashlib, json, os, Path, re and
+    # sys; apt_lock's Path, hashlib, re and sys; combat_evidence's datetime,
+    # hashlib, hmac, json, text and timezone; combat_measures' json, math, rm
+    # and struct; main's _build_manifest; and the re import the manifest
+    # reader's source leads to in card_evidence, card_measures, conn_ranges,
+    # identity_clock_evidence (with icm), mail_discord, pc_portrait, pc_steam,
+    # read_gate, review_rules (with icm), seat_evidence and steamid64). The
+    # bound moves to 852, ~5% over the measurement, for that reason and no
+    # other.
+    assert all_worst <= 852, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

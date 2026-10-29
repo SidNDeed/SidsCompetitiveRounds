@@ -1,0 +1,7 @@
+{
+ "group_max": 3132,
+ "limit": 16384,
+ "never_trimmed_max": 10754,
+ "point_max": 96,
+ "protected_floor": 1
+}

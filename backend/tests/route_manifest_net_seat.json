@@ -3905,6 +3905,28 @@
           "905107daf93358a9775b337013cca133d74a3c5d"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "combat evidence (backend/api/combat_evidence.py, combat_measures.py; the two routes live in main.py), each route's reads named from this gate's own reached closure (every reached function's source and every reached string binding, scanned for SQL table words and ORM selects). The walk folds in every module that binds a shared name, and combat_evidence shares setting, store_record and admin_view with seat_evidence and card_evidence, so those lanes' same-named helpers are in the closure of both routes though no combat request executes them; their tables are named here as reached. The record route reads steam_sessions (the verified-session check, main._seat_attestation_verdict), runtime_settings (the accept switch, combat_evidence.setting; seat_evidence.setting and card_evidence.setting by the shared name), players (the two seats' ids, an ORM select in main.submit_combat_evidence) and combat_evidence (the seat's earlier record of the game for the conflict marker and the seat's recent record count, combat_evidence.store_record; seat_evidence and card_evidence with their store_record by the shared name); it writes combat_evidence (the record, and the conflict marker on an earlier one) and answers a fixed status body. The admin view, a GET, reaches through the verified-reads route class every GET carries (read_gate.ReadGateRoute: the mode from runtime_settings, the session from steam_sessions, the operator key from api_operator_keys) and then reads admin_users (the admin check, main._require_admin through _is_admin), combat_games (the pairs of the game named by match id or stable game key, each pair's attachment, coverage, faults and finalisation), combat_evidence joined to players (the stored records with both seats' steam ids) and seat_evidence_findings (the combat domain's rows by the game's dedup key) (combat_evidence.admin_view); card_evidence.admin_view, card_evidence._report, card_evidence._registry, seat_evidence.admin_view and seat_evidence._registry, reached by the shared names and not executed, read card_contrib, card_evidence, card_games, card_hand_outside, card_phase_outside, card_pool_registry, match_cards, client_compat_events, mod_release_digests, seat_evidence, seat_evidence_games, seat_evidence_findings, players and, from matches, the columns their own groups state (the card group: only photon_room_id by the game's match id; the seat group: id, player1_id, player2_id, p1_rounds_won, p2_rounds_won, is_ranked and photon_room_id). It answers a projection: the stored records, the attachment, the rebuild faults, the findings, and the pair view computed now with each gun's display case and every not-run input. The attach lookup that reads matches (id, photon_room_id, player1_id, player2_id and ended_at, combat_evidence.evaluate_game) runs from review_worker_pass and is in no route's reached surface. Static source review: no combat route executes a read of any matches column; the folded card and seat admin views, which no combat request executes, read the columns their groups state; no W1 private Match column is read by or reaches any output.",
+      "routes": [
+        [
+          "/api/v1/admin/combat-evidence",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_combat_evidence"
+        ],
+        [
+          "/api/v1/matches/combat-evidence",
+          [
+            "POST"
+          ],
+          "main",
+          "submit_combat_evidence"
+        ]
+      ]
     }
   ],
   "entry_points": {

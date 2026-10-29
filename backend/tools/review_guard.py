@@ -5,11 +5,12 @@ every value that decides an outcome belongs to the rules revision, which is
 not part of this repository. This guard checks that, as a transitive analysis
 over the source of every tree it is given:
 
-  * JUDGING modules (review_measures, review_rules, card_measures, and any
-    local module one of them imports) are
+  * JUDGING modules (review_measures, review_rules, identity_clock_measures,
+    card_measures, combat_measures, and any local module one of them imports) are
     scanned whole: code, module-level constants, string constants (SQL and
     text included) and comments;
-  * seat_evidence and card_evidence are scanned from their REVIEW ROOTS
+  * seat_evidence, identity_clock_evidence, card_evidence and combat_evidence
+    are scanned from their REVIEW ROOTS
     (every function that
     touches the review modules or a loaded ruleset) through every module
     -level function and constant they reach, and main.py from its review
@@ -124,8 +125,10 @@ import sys
 import tokenize
 
 API = "backend/api/"
-JUDGING = ("review_measures", "review_rules", "identity_clock_measures", "card_measures")
-ROOTED = {"seat_evidence": None, "identity_clock_evidence": None, "card_evidence": None, "main": ("review_worker_loop", "review_worker_pass",
+JUDGING = ("review_measures", "review_rules", "identity_clock_measures", "card_measures",
+           "combat_measures")
+ROOTED = {"seat_evidence": None, "identity_clock_evidence": None, "card_evidence": None,
+          "combat_evidence": None, "main": ("review_worker_loop", "review_worker_pass",
                                           "review_rules_refresh_loop", "_review_pass_line")}
 REVIEW_NAMES = {"rm", "rr", "_review_rules", "review_measures", "review_rules"}
 REVIEW_PARAMS = {"rs", "state", "ruleset"}
@@ -182,7 +185,19 @@ SELECTORS = frozenset({
     "identity_clock_evidence_purge", "ic.seat", "ic.point", "identity_clock_measures",
     # the card-draw lane (re-land 2026-10-29): the measures module's name
     # (review_boot.SOURCE_ONLY, the source-only loader's identity check)
-    "card_measures"})
+    "card_measures",
+    # the combat lane (re-land 2026-10-29): its three switch names, the
+    # measures module's name (review_boot.SOURCE_ONLY), the rule scope word,
+    # the wire's spec kinds and the field names its layout code compares,
+    # the side letter, and the pairing case and not-run words of its views
+    "combat_evidence_accept", "combat_evidence_worker", "combat_evidence_purge",
+    "combat_measures", "combat",
+    "rows", "enum", "hist", "groups", "omit",
+    "caps", "mask", "p3top", "pt", "pid", "stamp", "d_gaps", "frc_transit", "gap_prev",
+    "gap_prev_s", "len_g", "len_cg", "a1sum", "p3an0", "p3an1", "p3dp0", "p3dp1", "cx_s",
+    "cx_o", "measuring_seat", "s",
+    "both_agree", "both_differ", "only_owner", "only_measuring", "inconsistent", "uncounted",
+    "trimmed", "missing_record", "not_collected", "not_run"})
 
 # Card contract words are accepted only with provenance from the public
 # binding that defines them; the same spelling from any other source is not.
@@ -191,6 +206,8 @@ SELECTOR_PROVENANCE = frozenset({
     ("card_measures", "CARD_SUBJECTS"),
     ("card_measures", "WINDOW"),
     ("card_measures", "WINDOW_SUBJECT"),
+    ("combat_evidence", "SWITCHES"),
+    ("review_measures", "COMBAT_SUBJECTS"),
 })
 
 # Contract bounds and scheduling: pinned BY VALUE. A deciding value added to
@@ -244,6 +261,17 @@ PINNED = {
                                        "unregistered_days": 30, "admin_rows": 50},
     ("card_evidence", "CARD_FAULT_LIMITS"): {"attempts": 5, "word_chars": 40},
     ("card_evidence", "CARD_RETRY_LIMITS"): {"op_base_s": 30, "op_cap_s": 900, "reprobe_s": 3600},
+    ("combat_evidence", "GAME_EXPIRY_DAYS"): 14,
+    ("combat_evidence", "GAMES_PER_PASS"): 500,
+    # the combat measures' structural constants (re-land 2026-10-29): the two
+    # seats, the per-mille unit, the byte proof's separators per protected
+    # group, the homing clamp bound and the wire's bounce wait in single
+    # precision (a unit test holds it equal to f32 of the wire's value)
+    ("combat_measures", "SEATS"): 2,
+    ("combat_measures", "PER_MILLE"): 1000,
+    ("combat_measures", "GROUP_SEPARATORS"): 2,
+    ("combat_measures", "HOMING_CLAMP"): 1,
+    ("combat_measures", "BOUNCE_WAIT_S"): 0.10000000149011612,
     ("card_measures", "WINDOW_DAYS_MAX"): 400,
 }
 # A wire layout too large to restate here: pinned by the sha256 of
@@ -251,23 +279,35 @@ PINNED = {
 PINNED_SHA = {
     ("card_measures", "CARD_WIRE"):
         "d6ded319fd6a81a1a5d6819412f7c2d6743256d0f78a98e0aaea82970818ba68",
+    # The combat wire layout (field bounds, list caps, tier order, enum codes)
+    # and its amendment, pinned the same way.
+    ("combat_measures", "COMBAT_WIRE"):
+        "cf51bb58df95b57e062ad4dcbfc90c6d34b57469d58012e85108c308561b295f",
+    ("combat_measures", "COMBAT_WIRE_A1"):
+        "d303b52f7c482bce35db16627a29380a364bb8acfe0230c358b594ffc007c412",
 }
 SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge",
             "identity_clock_evidence_accept", "identity_clock_evidence_worker",
             "identity_clock_evidence_purge",
-            "card_evidence_accept", "card_evidence_worker", "card_evidence_purge"}
+            "card_evidence_accept", "card_evidence_worker", "card_evidence_purge",
+            "combat_evidence_accept", "combat_evidence_worker", "combat_evidence_purge"}
 SETTINGS_READERS = {("seat_evidence", "setting"), ("identity_clock_evidence", "ice_setting"),
-                    ("card_evidence", "setting")}
+                    ("card_evidence", "setting"), ("combat_evidence", "setting")}
 ENV_KEYS = {"SCR_REVIEW_ROOT", "SYSTEMROOT"}
 
 # Identifiers that carry a digit and decide nothing: match-row columns of the
 # two seats, their SQL aliases, digest and encoding names, the Windows
-# system library the non-following open calls.
+# system library the non-following open calls, the combat wire's own key
+# names (a closed list) and its public vocabulary names (the dotted b-family
+# names).
 _SAFE_TEXT = re.compile(
     r"\bp[12]_\w+|\bplayer[12](?:_id)?\b|\b[ps][12]\b|sha256\b|\butf-8\b|\bint(?:32|64)\b"
     r"|\bkernel32\b"
     r"|\bb4(?:\.[a-z_]*)*|\bheld0\b"
-    r"|\bnoqa: ?[A-Z]+\d+(?:, ?[A-Z]+\d+)*")
+    r"|\bnoqa: ?[A-Z]+\d+(?:, ?[A-Z]+\d+)*"
+    r"|\bt0(?:_src)?\b|\bframe_p50_us\b|\ba1(?:s|p|m|n|sum)\b"
+    r"|\bp3(?:n|dp0|an0|dp1|an1|hm|self|top|tb|ht)\b|\bb5_(?:tot|s|o|h|c|r)\b|\b(?:s0|pid0|b[135])\b"
+    r"|\bb[1235](?:\.[a-z_]+)+")
 _STANDALONE = re.compile(r"(?<![\w.])[01](?![\w.])")
 _DIGIT = re.compile(r"\d")
 
