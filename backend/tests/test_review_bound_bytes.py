@@ -123,7 +123,7 @@ def test_m2_review_boot_is_imported_before_any_closure_module():
 ENTRY = r'''
 import importlib, os, sys
 API = sys.argv[1]
-CLOSURE = ("review_boot", "review_measures", "review_rules")
+CLOSURE = ("review_boot", "review_measures", "review_rules", "identity_clock_measures")
 SNAP = {}
 class Stop(BaseException):
     pass
@@ -251,6 +251,7 @@ sys.path.insert(0, api)
 if mode in ("plain", "prior", "prior_removed"):
     import review_measures                 # the ordinary import system, before review_boot
 if mode == "plain":
+    import identity_clock_measures         # the third stem, the ordinary way as well
     import review_rules as rr              # imports review_boot itself, too late
 else:
     import review_boot
@@ -275,7 +276,10 @@ except rr.Refused as e:
 print("published", sorted(n for n in os.listdir(store) if n.startswith("rules-")))
 """
 
-STEMS = ("review_measures", "review_rules")
+# review_boot.SOURCE_ONLY, the stems executed only from source bytes: the
+# identity-clock measures module joined it in the identity-clock re-land
+# (2026-10-29), so the planted-cache witnesses cover it as well
+STEMS = ("review_measures", "review_rules", "identity_clock_measures")
 
 
 def _api_copy(tmp_path):
@@ -369,9 +373,9 @@ def test_m2_control_the_same_caches_run_when_imported_the_ordinary_way_and_are_r
     api = _api_copy(tmp_path)
     env, flags = _plant(tmp_path, api, where)
     lines = _child(tmp_path, api, "plain", env, flags)
-    assert lines[0] == "witness review_measures,review_rules"     # each plant is a cache CPython runs
+    assert lines[0] == "witness identity_clock_measures,review_measures,review_rules"   # each plant is a cache CPython runs
     assert lines[1] == ("refused stale: closure module executed outside the source-only loader: "
-                        "review_measures,review_rules")
+                        "identity_clock_measures,review_measures,review_rules")
     assert lines[2] == "published []"
 
 

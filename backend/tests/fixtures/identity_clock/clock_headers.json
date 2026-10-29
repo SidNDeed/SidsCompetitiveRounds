@@ -1,0 +1,34 @@
+[
+ {
+  "header": "0123456789ab.5000000.4000000.123456",
+  "state": "ok"
+ },
+ {
+  "header": null,
+  "state": "absent"
+ },
+ {
+  "header": "",
+  "state": "absent"
+ },
+ {
+  "header": "ba9876543210.5000000.4000000.123456",
+  "state": "other_proc"
+ },
+ {
+  "header": "0123456789AB.5000000.4000000.123456",
+  "state": "malformed"
+ },
+ {
+  "header": "0123456789ab.5000000.4000000.2147483648",
+  "state": "malformed"
+ },
+ {
+  "header": "0123456789ab.5000000.4000000.-2147483648",
+  "state": "ok"
+ },
+ {
+  "header": "0123456789ab.10000000000000.1.1",
+  "state": "malformed"
+ }
+]

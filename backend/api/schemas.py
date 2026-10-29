@@ -1152,6 +1152,15 @@ class HealthResponse(BaseModel):
     # staged) or "refused" (the staged one failed a check). It reads the id
     # only, never anything about the revision's contents. No default.
     review_rules: str
+    # identity_clock_evidence: 1 when this build registers the three
+    # identity-clock routes (main._identity_clock_health_word), else 0.
+    # DERIVED on every request; equal on both roles. No default.
+    identity_clock_evidence: int
+    # conn_ranges: the loaded offline range-list revision id, or "absent"
+    # (none staged) or "refused" (the staged one failed a check). The id
+    # only; never anything about the list's contents or any address. No
+    # default.
+    conn_ranges: str
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
