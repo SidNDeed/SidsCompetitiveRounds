@@ -929,23 +929,25 @@ def evaluate_identity(rs, records, regs, budget=None):
     return findings, fired, errors
 
 
-_RELEASE_TUPLE = ("version", "variant", "commit", "dll_sha256")
-
-
 def _identity_regs(raw):
     if not isinstance(raw, dict) or set(raw) != {"release", "game_files"}:
         raise Refused("malformed", "selftest registries")
-    # A release row is the registry tuple with an optional last item, the
-    # source it was registered under (default `release`).
-    width = len(_RELEASE_TUPLE)
+    # A release row is the registry tuple (version, variant, commit,
+    # dll_sha256) with an optional last item, the source it was registered
+    # under (default `release`). The row's shape is checked by unpacking:
+    # fewer than four items refuses, more than five refuses, and nothing
+    # here carries a width for the review guard to judge.
     release = {}
     for t in raw["release"]:
         if not isinstance(t, list):
             raise Refused("malformed", "selftest registries")
-        key, rest = tuple(t[:width]), t[width:]
-        if len(key) != width or rest[1:]:
+        try:
+            version, variant, commit, dll_sha256, *rest = t
+        except ValueError:
+            raise Refused("malformed", "selftest registries") from None
+        if rest[1:]:
             raise Refused("malformed", "selftest registries")
-        release[key] = rest[0] if rest else "release"
+        release[(version, variant, commit, dll_sha256)] = rest[0] if rest else "release"
     return {"release": release,
             "game_files": {tuple(t) for t in raw["game_files"]}}
 

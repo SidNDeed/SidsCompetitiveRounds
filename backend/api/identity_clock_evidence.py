@@ -624,26 +624,27 @@ async def ice_evaluate_one(db, key: str, lo, hi, regs, rs) -> tuple:
             "WHERE stable_game_key = :k AND pair_lo = :lo AND pair_hi = :hi"),
             {"k": key, "lo": lo, "hi": hi})
         return "unchanged", 0, 0, False
-    final = match is not None and ((len(named) >= ICE_SEATS and not other_key) or expired)
+    # `final` is bound once: an attached game is final when a named record's
+    # lists are already purged (no later evaluation can run), when both
+    # seats are named with no stray key, or when it has expired.
+    purged = match is not None and any(r["lists_purged_at"] is not None for r in named)
+    final = match is not None and (purged or (len(named) >= ICE_SEATS and not other_key) or expired)
     fired = errors = 0
     evaluated = None
-    if match is not None and named:
-        if any(r["lists_purged_at"] is not None for r in named):
-            final = True
-        else:
-            findings, _fired, errors = await asyncio.to_thread(rs.evaluate_identity, views, regs)
-            dedup = ice_dedup_key(key, lo, hi)
-            produced = set()
-            for rule, det in findings:
-                fid = await se.upsert_finding(db, "game", dedup, rule.id, rev, match["id"], det)
-                produced.add(rule.id)
-                await se.post_finding(db, fid, rs)
-            fired = len(findings)
-            await db.execute(text(
-                "DELETE FROM seat_evidence_findings WHERE scope = 'game' AND dedup_key = :k "
-                "AND flag_id IS NULL AND NOT (rule_id = ANY(CAST(:ids AS varchar[])))"),
-                {"k": dedup, "ids": sorted(produced) or [""]})
-            evaluated = rev
+    if match is not None and named and not purged:
+        findings, _fired, errors = await asyncio.to_thread(rs.evaluate_identity, views, regs)
+        dedup = ice_dedup_key(key, lo, hi)
+        produced = set()
+        for rule, det in findings:
+            fid = await se.upsert_finding(db, "game", dedup, rule.id, rev, match["id"], det)
+            produced.add(rule.id)
+            await se.post_finding(db, fid, rs)
+        fired = len(findings)
+        await db.execute(text(
+            "DELETE FROM seat_evidence_findings WHERE scope = 'game' AND dedup_key = :k "
+            "AND flag_id IS NULL AND NOT (rule_id = ANY(CAST(:ids AS varchar[])))"),
+            {"k": dedup, "ids": sorted(produced) or [""]})
+        evaluated = rev
     await db.execute(text(
         "UPDATE identity_clock_games SET match_id = :m, signature = :s, processed_at = now(), "
         "  records_n = CAST(:n AS smallint), paired_points = CAST(:pp AS int), "

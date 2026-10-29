@@ -169,7 +169,14 @@ SELECTORS = frozenset({
     # the case table's public class names (the admin view's counts), reached
     # since fix pass 4 judges every binding of a name at its use
     "a", "c", "disagree", "expired", "hit_unmatched", "incomplete", "no_reset", "other_window",
-    "unkeyed_reset"})
+    "unkeyed_reset",
+    # the identity-clock lane (re-land 2026-10-29): its three operational
+    # switch names (ice_setting reads only ICE_SWITCHES), the identity
+    # scope's two rule subjects (the loader checks ICM_SUBJECTS) and the
+    # measures module's name (review_boot.SOURCE_ONLY, the source-only
+    # loader's identity check)
+    "identity_clock_evidence_accept", "identity_clock_evidence_worker",
+    "identity_clock_evidence_purge", "ic.seat", "ic.point", "identity_clock_measures"})
 
 # Contract bounds and scheduling: pinned BY VALUE. A deciding value added to
 # one of these makes the pin differ, and the guard refuses it.
