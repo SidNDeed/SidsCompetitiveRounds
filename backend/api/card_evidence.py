@@ -1,0 +1,1039 @@
+"""Card draw evidence, server half (migration 370).
+
+What this module holds, and what it never does:
+
+  * the envelope check, the signature (its own `card-evidence:v1:` string,
+    new and separate from the 7-field match HMAC and from the seat evidence
+    string) and the record check (card_measures.check_record);
+  * storage: the first card record per (stable game key, seat), the conflict
+    marker, the hourly cap, and the census registry an admin fills from a
+    reference seat's census dump;
+  * the worker's card pass: attaching records to their ranked match, and with
+    a loaded rules revision the derived rows (hand and phase measures that
+    read other than zero, per-game contributions, daily sums) and the card
+    rules over them; the purge;
+  * the admin read.
+
+Judging is not here. The descriptions of the evidence are the public
+vocabulary in card_measures; which of them opens a review item, at what value,
+over which window and with what words, is a rules revision that is not part of
+this repository. With no valid revision the pass attaches records and purges,
+writes no derived row and opens nothing.
+
+Outside this lane's own tables, statements here read `matches`,
+`ranked_series`, `players`, `match_cards` (the report projection, read only)
+and `runtime_settings`, and write only `seat_evidence_findings` (rows of the
+card evidence domain only, `domain = 'card'`) and, through
+seat_evidence.post_finding, `flagged_matches` (advisory rows,
+`flag_reason = 'review'`, `auto_invalidated = false`, only for a rule the
+revision arms). The lane's own tables are `card_evidence`,
+`card_pool_registry`, `card_games`, `card_hand_outside`,
+`card_phase_outside`, `card_contrib` and `card_player_daily`. No statement
+here writes a match result, a rating, gold, `match_cards` or `card_offers`;
+a test scans every statement of this module.
+
+A card finding's key is built so that it can never equal a seat finding's:
+it is `card` and a SPACE, then the game or window fields, and no seat
+finding key can hold a space (a stable game key is printable ASCII without
+the space, `"` and the backslash; the other parts are ids and dates). Its
+rows also carry their own domain, and every card statement on the shared
+table names that domain.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import re
+from datetime import datetime, timedelta, timezone
+
+import sqlalchemy.exc as sa_exc
+from sqlalchemy import text
+
+try:
+    import asyncpg.exceptions as pg_exc
+except ImportError:                           # the driver's own classes are optional here
+    pg_exc = None
+
+import card_measures as cm
+import review_rules as rr
+import seat_evidence as se
+
+W = cm.CARD_WIRE
+EvidenceRefused = se.EvidenceRefused
+# Scheduling and retention bounds (operational; pinned by value in the guard).
+CARD_LIMITS = {"games_per_pass": 500, "expiry_days": 14, "list_retention_days": 120,
+               "derived_retention_days": 400, "unregistered_days": 30, "admin_rows": 50}
+# The bound on visits that raise (operational; pinned by value in the guard):
+# how many deterministic faults in a row park a game under one revision, and
+# the width of the recorded error word (card_games.derive_fault).
+CARD_FAULT_LIMITS = {"attempts": 5, "word_chars": 40}
+# The retry schedule (operational; pinned by value in the guard), in seconds:
+# an operational failure (database, pool, connection, timeout) is retried
+# after op_base_s, doubling per failure in a row up to op_cap_s, and never
+# counts toward the park; a parked game is visited again (re-probed) once
+# reprobe_s has passed since its last visit, with or without new input.
+CARD_RETRY_LIMITS = {"op_base_s": 30, "op_cap_s": 900, "reprobe_s": 3600}
+SWITCHES = ("card_evidence_accept", "card_evidence_worker", "card_evidence_purge")
+LIST_KEYS = ("cards", "held0", "ph", "hd", "ap")
+_PRINTABLE = re.compile(r"[ -~]+")
+_HAND_KEYS = cm.HAND_RULES + cm.PICK_RULES
+_PHASE_KEYS = cm.PHASE_RULES
+
+
+# -- the envelope and the signature ----------------------------------------------
+
+def parse_envelope(payload) -> dict:
+    """The seat evidence envelope checks (contract, both steam ids, the stable
+    and attach keys, the signature's form), then the card bounds: a record of
+    at most the card cap, printable ASCII. Raises EvidenceRefused(400/413/422)."""
+    env = se.parse_envelope(payload)
+    if len(env["record_bytes"]) > W["record_max_bytes"]:
+        raise EvidenceRefused(413, "record_bytes")
+    if not _PRINTABLE.fullmatch(env["record_text"]):
+        raise EvidenceRefused(422, "record_ascii")
+    return env
+
+
+def parse_record(env: dict) -> dict:
+    try:
+        return cm.parse_record_text(env["record_text"])
+    except cm.Refusal as r:
+        raise EvidenceRefused(422, r.field)
+
+
+def record_canonical(env: dict) -> str:
+    h = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
+    return (W["prefix"] + env["seat"] + ":" + env["other"] + ":"
+            + h(env["stable"].encode("ascii")) + ":" + h(env["attach"].encode("ascii")) + ":"
+            + h(env["record_bytes"]))
+
+
+def record_sign(key: str, env: dict) -> str:
+    return hmac.new(key.encode(), record_canonical(env).encode(), hashlib.sha256).hexdigest()
+
+
+def verify_sig(key: str, env: dict) -> bool:
+    if not key:
+        return False
+    return hmac.compare_digest(env["sig"], record_sign(key, env))
+
+
+# -- the route's stores --------------------------------------------------------------
+
+async def setting(db, key: str, default: str = "0") -> str:
+    """An operational switch of this lane (whether a part runs, never what it
+    judges); only the names in SWITCHES are read."""
+    if key not in SWITCHES:
+        raise KeyError(key)
+    row = (await db.execute(text("SELECT value FROM runtime_settings WHERE key = :k"),
+                            {"k": key})).first()
+    return default if row is None else str(row[0])
+
+
+async def store_record(db, env: dict, rec: dict, seat_id, other_id, header_version) -> dict:
+    """Insert the first card record for (stable key, seat), or answer the
+    repeat: the same record again is already_recorded; a different one sets
+    the conflict marker once and answers 409, the first record kept.
+    Serialized per seat by a transaction advisory lock, so the hourly cap and
+    the first-record rule hold under concurrent deliveries."""
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                     {"k": "card_evidence:" + str(seat_id)})
+    digest = hashlib.sha256(env["record_bytes"]).hexdigest()
+    prior = (await db.execute(text(
+        "SELECT id, attach_key, other_player_id, payload_sha256 FROM card_evidence "
+        "WHERE stable_game_key = :k AND seat_player_id = :s FOR UPDATE"),
+        {"k": env["stable"], "s": seat_id})).mappings().first()
+    if prior is not None:
+        if (prior["attach_key"] == env["attach"] and prior["other_player_id"] == other_id
+                and prior["payload_sha256"] == digest):
+            return {"status": "already_recorded"}
+        kind = ("attach_key" if prior["attach_key"] != env["attach"]
+                else "other_seat" if prior["other_player_id"] != other_id else "payload")
+        # The marker gives the row a new input generation: a visit that read
+        # the row without it recorded the old one (card_games.seen_inputs),
+        # so the candidate query schedules the game again whenever this
+        # commits (see _CANDIDATES).
+        await db.execute(text(
+            "UPDATE card_evidence SET conflict_at = COALESCE(conflict_at, clock_timestamp()), "
+            "  conflict_kind = COALESCE(conflict_kind, :ck), "
+            "  gen = CASE WHEN conflict_at IS NULL THEN nextval('card_input_gen') ELSE gen END "
+            "WHERE id = :i"),
+            {"ck": kind, "i": prior["id"]})
+        await db.commit()
+        raise EvidenceRefused(409, "conflict")
+    recent = (await db.execute(text(
+        "SELECT count(*) FROM card_evidence WHERE seat_player_id = :s "
+        "AND received_at > now() - make_interval(hours => 1)"), {"s": seat_id})).scalar_one()
+    if recent >= W["hourly_cap"]:
+        raise EvidenceRefused(429, "seat_hourly_cap")
+    count, pool_digest, pool_state = rec["pool"]
+    await db.execute(text(
+        "INSERT INTO card_evidence (stable_game_key, attach_key, seat_player_id, other_player_id, "
+        "  header_mod_version, pool_digest, pool_state, deal_profile, payload, payload_sha256, "
+        "  payload_bytes) "
+        "VALUES (:k, :a, :s, :o, :hv, :pd, :ps, :dp, CAST(:p AS jsonb), :dg, :n)"),
+        {"k": env["stable"], "a": env["attach"], "s": seat_id, "o": other_id,
+         "hv": header_version, "pd": pool_digest or None, "ps": pool_state,
+         "dp": cm.deal_profile(rec), "p": env["record_text"], "dg": digest,
+         "n": len(env["record_bytes"])})
+    await db.commit()
+    return {"status": "recorded"}
+
+
+async def register_census(db, doc) -> dict:
+    """Admin registration of one reference seat's census dump. The stated
+    digest must be the digest of the dump's own census text and the text its
+    own canonical form (card_measures.census_from_dump); a dump that is not is
+    refused 422 and nothing is stored."""
+    try:
+        c = cm.census_from_dump(doc)
+    except cm.Refusal as r:
+        raise EvidenceRefused(422, r.field)
+    got = (await db.execute(text(
+        "INSERT INTO card_pool_registry (digest, census, card_count, slot_count, game_dll_sha256) "
+        "VALUES (:d, CAST(:c AS jsonb), :n, :ns, :g) ON CONFLICT (digest) DO NOTHING RETURNING digest"),
+        {"d": c.digest, "c": cm.dumps(doc), "n": c.count, "ns": c.slots, "g": c.game_sha})).first()
+    await db.commit()
+    return {"status": "registered" if got else "already_registered", "digest": c.digest,
+            "card_count": c.count, "slot_count": c.slots}
+
+
+# -- the worker's card pass (primary only) ----------------------------------------------
+
+async def _registry(db, digests, gens=None) -> dict:
+    """The registered censuses for the digests a game's records name; with
+    gens (a dict), each one's input generation read in the same statement,
+    by digest."""
+    if not digests:
+        return {}
+    rows = (await db.execute(text(
+        "SELECT census, digest, gen FROM card_pool_registry WHERE digest = ANY(CAST(:d AS varchar[]))"),
+        {"d": sorted(digests)})).all()
+    out = {}
+    keys = list(cm.W["dump_keys"])
+    for doc, digest, gen in rows:
+        if gens is not None:
+            gens[digest] = gen
+        # jsonb keeps no key order: the stored dump is put back in the file's
+        # order (same key set, nothing added) before the whole check runs again
+        doc = se._jsonv(doc)
+        if isinstance(doc, dict) and set(doc) == set(keys):
+            doc = {kk: doc[kk] for kk in keys}
+        c = cm.census_from_dump(doc)
+        out[c.digest] = c
+    return out
+
+
+# Input generations. Every published input carries a value of the sequence
+# card_input_gen: a record from its insert, again when its conflict marker is
+# set, a census from its registration. A visit records the generations of
+# exactly the rows it read (seen_inputs, _inputs_fp: each record's
+# generation with its census's, zero for none, in generation order; a game
+# has at most one record per seat, so the list is short). The candidate
+# query builds the same list over what is committed when it runs (_FP_SQL).
+# An input whose transaction commits after a visit read the game, whenever
+# that transaction started, is not in the visit's list, so the two differ
+# and the game is scheduled again: the comparison is of what was read
+# against what is committed, never of two clock times.
+_FP_SQL = "string_agg(e.gen::text || ':' || COALESCE(p.gen, 0)::text, ',' ORDER BY e.gen)"
+_FP_FROM = "FROM card_evidence e LEFT JOIN card_pool_registry p ON p.digest = e.pool_digest "
+
+
+def _inputs_fp(rows, gens) -> str:
+    """The input generations one visit read (rows: its records with their
+    gen and pool_digest; gens: the census generations it read, by digest),
+    in the form _FP_SQL builds."""
+    return ",".join("%d:%d" % (r["gen"], gens.get(r["pool_digest"], 0))
+                    for r in sorted(rows, key=lambda r: r["gen"]))
+
+
+# Games waiting for work, least recently processed first. With a revision:
+# every game not yet final; every game whose last visit was under another
+# revision, its lists held or purged (a purged game is visited once per
+# revision, so what another revision derived from it is retired); every game
+# whose committed inputs differ from the ones its last completed visit read
+# (a record received, a conflict marked, a census registered). With none:
+# only games not yet attached to their match.
+# Either way not a game waiting out a retry (retry_at in the future: an
+# operational failure, bounded backoff, see _fault; the game is visited
+# once it passes), and not a parked game: one whose visits under this
+# revision (or with none) raised a deterministic fault
+# CARD_FAULT_LIMITS["attempts"] times in a row, unless its committed inputs
+# differ from the ones read before its last faulted visit (fault_inputs) or
+# its last visit is CARD_RETRY_LIMITS["reprobe_s"] old (the re-probe:
+# nothing is excluded for good), or it carries an operational retry (fix
+# pass 5: a parked game whose re-probe failed operationally waits out only
+# that bounded retry_at, never the park clock as well; the park clause
+# applies only to a game with no retry_at, and every recorded outcome other
+# than an operational failure clears it). A visit that raises is recorded on the game
+# (_fault) and the pass moves on; nothing about it is finalized or stamped
+# evaluated. A visit that completes without a fault clears every fault
+# field; a new revision restarts the count.
+_CANDIDATES = text(
+    "WITH f AS (SELECT e.stable_game_key k, LEAST(e.seat_player_id, e.other_player_id) lo, "
+    "       GREATEST(e.seat_player_id, e.other_player_id) hi, max(e.received_at) rx, "
+    "       " + _FP_SQL + " fp "
+    "  " + _FP_FROM
+    + " GROUP BY e.stable_game_key, LEAST(e.seat_player_id, e.other_player_id), "
+    "          GREATEST(e.seat_player_id, e.other_player_id)) "
+    "SELECT f.k, f.lo, f.hi, f.fp FROM f "
+    "  LEFT JOIN card_games g ON g.stable_game_key = f.k AND g.pair_lo = f.lo AND g.pair_hi = f.hi "
+    " WHERE (g.retry_at IS NULL OR g.retry_at <= now()) "
+    "   AND ((CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
+    "    OR (CAST(:rev AS varchar) IS NOT NULL AND (g.finalized_at IS NULL "
+    "        OR g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) "
+    "        OR g.seen_inputs IS DISTINCT FROM f.fp))) "
+    "   AND NOT (COALESCE(g.fault_attempts, 0) >= CAST(:cap AS int) "
+    "        AND g.retry_at IS NULL "
+    "        AND g.fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) "
+    "        AND g.fault_inputs IS NOT DISTINCT FROM f.fp "
+    "        AND g.processed_at > now() - make_interval(secs => CAST(:reprobe AS int))) "
+    " ORDER BY g.processed_at NULLS FIRST, f.rx LIMIT CAST(:lim AS int)")
+
+_MATCH = text(
+    "SELECT m.id, m.ended_at, m.photon_room_id, "
+    "       CASE WHEN jsonb_typeof(s.rules -> 'sc') = 'boolean' "
+    "            THEN CASE WHEN (s.rules ->> 'sc')::boolean THEN 'on' ELSE 'off' END END AS sc "
+    "  FROM matches m LEFT JOIN ranked_series s ON s.id = m.series_id "
+    " WHERE m.photon_room_id = ANY(CAST(:keys AS varchar[])) AND m.is_ranked IS TRUE "
+    "   AND ((m.player1_id = :lo AND m.player2_id = :hi) OR (m.player1_id = :hi AND m.player2_id = :lo)) "
+    "   AND m.ended_at <= now() - make_interval(secs => CAST(:lag AS int)) "
+    " ORDER BY m.ended_at LIMIT 1")
+
+_WHERE_GAME = "stable_game_key = :k AND pair_lo = :lo AND pair_hi = :hi"
+
+
+def _records(rows) -> list:
+    return [{"seat": str(r["seat_player_id"]), "other": str(r["other_player_id"]),
+             "rec": se._jsonv(r["payload"]), "conflict": r["conflict_at"] is not None} for r in rows]
+
+
+def _has_lists(rec) -> bool:
+    return all(k in rec for k in LIST_KEYS)
+
+
+def _signature(match, rows, named_ids, registry) -> str:
+    regs = ",".join(sorted(registry))
+    return "%s|%s|%s|%s" % (
+        match["id"] if match else "-", match["sc"] if match else "-",
+        ",".join("%d:%d:%d" % (r["id"], 1 if r["conflict_at"] else 0, 1 if r["id"] in named_ids else 0)
+                 for r in rows),
+        hashlib.sha256(regs.encode("ascii")).hexdigest())
+
+
+async def _report(db, match_id):
+    """The match report's picked card names per player (str player id), as
+    match_cards holds them for this match; None when the match has no
+    match_cards row (no report to compare). A read: nothing here writes
+    match data or changes a report."""
+    rows = (await db.execute(text(
+        "SELECT player_id, card_name FROM match_cards WHERE match_id = :m ORDER BY id"),
+        {"m": match_id})).all()
+    if not rows:
+        return None
+    out = {}
+    for player, name in rows:
+        out.setdefault(str(player), []).append(name)
+    return out
+
+
+def _nonzero(row, keys) -> dict:
+    return {k: row[k] for k in keys if row.get(k) is not None and row[k] != 0}
+
+
+async def _write_outside(db, key, lo, hi, view, rev) -> int:
+    await db.execute(text("DELETE FROM card_hand_outside WHERE " + _WHERE_GAME),
+                     {"k": key, "lo": lo, "hi": hi})
+    await db.execute(text("DELETE FROM card_phase_outside WHERE " + _WHERE_GAME),
+                     {"k": key, "lo": lo, "hi": hi})
+    n = 0
+    for row, meta in view["hands"]:
+        bad = _nonzero(row, _HAND_KEYS)
+        if bad:
+            await db.execute(text(
+                "INSERT INTO card_hand_outside (stable_game_key, pair_lo, pair_hi, recorder_player_id, "
+                "  dealer_player_id, phase, deal, rules_rev, measures) "
+                "VALUES (:k, :lo, :hi, CAST(:r AS uuid), CAST(:d AS uuid), :o, :dl, :rev, CAST(:m AS jsonb)) "
+                "ON CONFLICT DO NOTHING"),
+                {"k": key, "lo": lo, "hi": hi, "r": meta["recorder"], "d": meta["dealer"],
+                 "o": meta["o"], "dl": meta["k"], "rev": rev, "m": cm.dumps(bad)})
+            n += 1
+    for row, meta in view["phases"]:
+        bad = _nonzero(row, _PHASE_KEYS)
+        if bad:
+            await db.execute(text(
+                "INSERT INTO card_phase_outside (stable_game_key, pair_lo, pair_hi, recorder_player_id, "
+                "  phase, rules_rev, measures) "
+                "VALUES (:k, :lo, :hi, CAST(:r AS uuid), :o, :rev, CAST(:m AS jsonb)) "
+                "ON CONFLICT DO NOTHING"),
+                {"k": key, "lo": lo, "hi": hi, "r": meta["recorder"], "o": meta["o"], "rev": rev,
+                 "m": cm.dumps(bad)})
+            n += 1
+    return n
+
+
+_DAILY_COLS = ("hands", "slots", "notrun_hands") + tuple(
+    part + "_" + name for part in ("obs", "exp", "var") for name in cm.RARITIES)
+
+
+async def _recompute_daily(db, keys) -> None:
+    """Each daily row named in `keys` (subject, day, source, coverage,
+    profile, revision) recomputed from card_contrib, under a per-subject
+    transaction advisory lock so two games of one dealer cannot interleave."""
+    for subject in sorted({k[0] for k in keys}):
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                         {"k": "card_daily:" + subject})
+    sums = ", ".join("COALESCE(sum(c.%s), 0)" % c for c in _DAILY_COLS)
+    for subject, day, source, coverage, profile, rev in sorted(keys):
+        b = {"s": subject, "d": day, "src": source, "cov": coverage, "p": profile, "rev": rev}
+        await db.execute(text(
+            "DELETE FROM card_player_daily WHERE subject_player_id = CAST(:s AS uuid) AND day = :d "
+            "AND source = :src AND coverage = :cov AND deal_profile = :p AND rules_rev = :rev"), b)
+        await db.execute(text(
+            "INSERT INTO card_player_daily (subject_player_id, day, source, coverage, deal_profile, "
+            "  rules_rev, games, " + ", ".join(_DAILY_COLS) + ") "
+            "SELECT CAST(:s AS uuid), CAST(:d AS date), CAST(:src AS varchar), CAST(:cov AS varchar), "
+            "  CAST(:p AS varchar), CAST(:rev AS varchar), "
+            "  count(DISTINCT (c.stable_game_key, c.pair_lo, c.pair_hi)), " + sums + " "
+            "  FROM card_contrib c WHERE c.subject_player_id = CAST(:s AS uuid) AND c.utc_day = CAST(:d AS date) "
+            "   AND c.source = CAST(:src AS varchar) AND c.coverage = CAST(:cov AS varchar) "
+            "   AND c.deal_profile = CAST(:p AS varchar) AND c.rules_rev = CAST(:rev AS varchar) "
+            "HAVING count(*) > 0"), b)
+
+
+async def _write_contrib(db, key, lo, hi, view, rs, match) -> list:
+    """Replace this game's contributions -- those of every revision, so
+    nothing an earlier revision derived from the game outlives its
+    re-evaluation -- and recompute every daily row they touched, before and
+    after. Returns every touched key (dealer, day, source, coverage, profile,
+    revision), the retired ones as well as the new ones, so each window
+    either side of the change is evaluated (and its findings cleaned)
+    again."""
+    rev = rs.rev
+    day = match["ended_at"].astimezone(timezone.utc).date()
+    old = (await db.execute(text(
+        "DELETE FROM card_contrib WHERE " + _WHERE_GAME + " "
+        "RETURNING subject_player_id, utc_day, source, coverage, deal_profile, rules_rev"),
+        {"k": key, "lo": lo, "hi": hi})).all()
+    touched = {(str(r[0]), r[1], r[2], r[3], r[4], r[5]) for r in old}
+    for c in cm.contributions(view):
+        vals = {"k": key, "lo": lo, "hi": hi, "r": c["recorder"], "s": c["subject"],
+                "src": c["source"], "cov": c["coverage"], "p": c["profile"], "rev": rev, "d": day,
+                "m": match["id"], "hands": c["hands"], "slots": c["slots"],
+                "notrun_hands": c["notrun_hands"]}
+        for part in ("obs", "exp", "var"):
+            for i, name in enumerate(cm.RARITIES):
+                vals[part + "_" + name] = c[part][i]
+        await db.execute(text(
+            "INSERT INTO card_contrib (stable_game_key, pair_lo, pair_hi, recorder_player_id, "
+            "  subject_player_id, source, coverage, deal_profile, rules_rev, utc_day, match_id, "
+            + ", ".join(_DAILY_COLS) + ") "
+            "VALUES (:k, :lo, :hi, CAST(:r AS uuid), CAST(:s AS uuid), :src, :cov, :p, :rev, :d, :m, "
+            + ", ".join(":" + c_ for c_ in _DAILY_COLS) + ")"), vals)
+        touched.add((c["subject"], day, c["source"], c["coverage"], c["profile"], rev))
+    await _recompute_daily(db, touched)
+    return sorted(touched)
+
+
+async def _drop_other_revisions(db, key, lo, hi, rev) -> list:
+    """A game whose lists are purged derives nothing new, and what another
+    revision derived from it is not this revision's: those contributions go
+    and their daily rows are recomputed. Returns the touched keys."""
+    old = (await db.execute(text(
+        "DELETE FROM card_contrib WHERE " + _WHERE_GAME + " AND rules_rev IS DISTINCT FROM CAST(:rev AS varchar) "
+        "RETURNING subject_player_id, utc_day, source, coverage, deal_profile, rules_rev"),
+        {"k": key, "lo": lo, "hi": hi, "rev": rev})).all()
+    touched = {(str(r[0]), r[1], r[2], r[3], r[4], r[5]) for r in old}
+    await _recompute_daily(db, touched)
+    return sorted(touched)
+
+
+_SUM_COLS = ("games",) + _DAILY_COLS
+
+
+async def _windows(db, keys, rs) -> tuple:
+    """The windows a change of daily rows lies in, under this revision. A
+    window ending on day E sums the class's daily rows of E - w + 1 .. E, so
+    a daily row of day d is in the window of every endpoint d .. d + w - 1:
+    each changed key -- before and after the change, whatever revision wrote
+    it -- expands to its class (dealer, source, coverage, profile) over those
+    w endpoints. Returns (windows, owned): a window for each such endpoint
+    that has a daily row of the class under this revision (windows end on the
+    days a game of the class was played, as a from-scratch evaluation reads
+    them), and the window finding key of every such endpoint, so a finding
+    whose window changed or no longer exists is retired. The work: one read
+    of the class's daily rows and at most w window sums per class the game's
+    contributions had or have, w at most card_measures.WINDOW_DAYS_MAX.
+    Nothing without a window in the revision."""
+    win = rs.params.get(cm.WINDOW)
+    if not win:
+        return [], set()
+    w = int(win[cm.WINDOW_KEY])
+    ends = {}
+    for subject, day, source, coverage, profile, _rev in keys:
+        ends.setdefault((subject, source, coverage, profile), set()).update(
+            day + timedelta(days=i) for i in range(w))
+    out, owned = [], set()
+    for cls in sorted(ends):
+        subject, source, coverage, profile = cls
+        days = sorted(ends[cls])
+        owned.update(window_key(subject, source, coverage, profile, e) for e in days)
+        rows = (await db.execute(text(
+            "SELECT day, " + ", ".join(_SUM_COLS) + " FROM card_player_daily "
+            "WHERE subject_player_id = CAST(:s AS uuid) AND source = :src AND coverage = :cov "
+            "AND deal_profile = :p AND rules_rev = :rev "
+            "AND day > CAST(:a AS date) - CAST(:w AS int) AND day <= CAST(:b AS date)"),
+            {"s": subject, "src": source, "cov": coverage, "p": profile, "rev": rs.rev,
+             "a": days[0], "b": days[-1], "w": w})).mappings().all()
+        by_day = {r["day"]: r for r in rows}
+        for e in days:
+            if e not in by_day:
+                continue
+            sums = dict.fromkeys(_SUM_COLS, 0)
+            for d, r in by_day.items():
+                if e - timedelta(days=w) < d <= e:
+                    for c in _SUM_COLS:
+                        sums[c] += int(r[c])
+            agg = {c: sums[c] for c in ("games", "hands", "slots", "notrun_hands")}
+            agg.update(source=source, coverage=coverage)
+            for part in ("obs", "exp", "var"):
+                agg[part] = [sums[part + "_" + name] for name in cm.RARITIES]
+            out.append(((subject, e, source, coverage, profile), agg))
+    return out, owned
+
+
+def game_key(key, lo, hi) -> str:
+    """A card game's finding key (scope game): `card`, a space, the game."""
+    return "card %s|%s|%s" % (key, lo, hi)
+
+
+def window_key(subject, source, coverage, profile, day) -> str:
+    """A card window's finding key (scope sitting): `card win`, a space, the
+    window. Two spaces, so it never equals a game key either."""
+    return "card win %s|%s|%s|%s|%s" % (subject, source, coverage, profile, day)
+
+
+async def upsert_card_finding(db, scope, dedup_key, rule_id, rules_rev, match_id, details) -> int:
+    """seat_evidence.upsert_finding for the card domain: one row per (domain
+    card, scope, key, rule); a repeat with the same details leaves changed_at
+    alone. The conflict target is the unique index over the domain column,
+    which this lane's migration adds to the shared table."""
+    det = se._dumps(se.bounded_details(details))
+    row = (await db.execute(text(
+        "INSERT INTO seat_evidence_findings (domain, scope, dedup_key, rule_id, rules_rev, match_id, details) "
+        "VALUES ('card', :s, :k, :rid, :rev, CAST(:m AS uuid), CAST(:d AS jsonb)) "
+        "ON CONFLICT (domain, scope, dedup_key, rule_id) DO UPDATE SET "
+        "  details = EXCLUDED.details, rules_rev = EXCLUDED.rules_rev, "
+        "  match_id = COALESCE(EXCLUDED.match_id, seat_evidence_findings.match_id), "
+        "  changed_at = CASE WHEN seat_evidence_findings.details = EXCLUDED.details "
+        "                    THEN seat_evidence_findings.changed_at ELSE now() END, "
+        "  computed_at = now() "
+        "RETURNING id"), {"s": scope, "k": dedup_key, "rid": rule_id, "rev": rules_rev,
+                          "m": None if match_id is None else str(match_id), "d": det})).first()
+    return int(row[0])
+
+
+async def _post_findings(db, findings, dedup_of, rs, match_id) -> tuple:
+    """Upsert one finding per (dedup key, rule) the evaluation produced and
+    post those the revision arms. Returns (count, produced (scope, key, rule
+    id))."""
+    grouped = {}
+    for rule, items in findings:
+        for k, item in items:
+            grouped.setdefault((dedup_of(k), rule), []).append(item)
+    for (dedup, rule), items in sorted(grouped.items(), key=lambda x: (x[0][0][1], x[0][1].id)):
+        scope, key = dedup
+        fid = await upsert_card_finding(db, scope, key, rule.id, rs.rev, match_id, {"items": items})
+        await se.post_finding(db, fid, rs)
+    return len(grouped), {(d[0], d[1], rule.id) for (d, rule) in grouped}
+
+
+async def _retire_findings(db, rev, produced, own=(), stale_games=(), stale_prefixes=()) -> int:
+    """Remove every unposted card finding this evaluation owns that it did
+    not produce. Owned whatever revision stamped it (`own`, (scope, key)):
+    the game's key when its view was derived, and the key of every window a
+    changed daily row lies in. Owned when another revision stamped it: the
+    game's key when nothing new was derived from it (`stale_games`), and
+    every window key, whatever its endpoint, of a class the game's
+    contributions had or have (`stale_prefixes`): a finding another revision
+    wrote is never this revision's, whether or not this revision has a
+    window, or a weight set, for that class. Only the card domain, only
+    unposted rows. Returns how many were removed."""
+    rows = (await db.execute(text(
+        "SELECT id, scope, dedup_key, rule_id FROM seat_evidence_findings "
+        "WHERE domain = 'card' AND flag_id IS NULL AND ("
+        "  (scope = 'game' AND dedup_key = ANY(CAST(:og AS varchar[]))) "
+        "  OR (scope = 'sitting' AND dedup_key = ANY(CAST(:ow AS varchar[]))) "
+        "  OR (rules_rev IS DISTINCT FROM CAST(:rev AS varchar) AND ("
+        "      (scope = 'game' AND dedup_key = ANY(CAST(:sg AS varchar[]))) "
+        "      OR (scope = 'sitting' AND EXISTS (SELECT 1 FROM unnest(CAST(:sp AS varchar[])) AS p(x) "
+        "                                       WHERE left(dedup_key, length(p.x)) = p.x)))))"),
+        {"og": sorted(kk for s, kk in own if s == "game"),
+         "ow": sorted(kk for s, kk in own if s == "sitting"), "rev": rev,
+         "sg": sorted(stale_games), "sp": sorted(stale_prefixes)})).all()
+    drop = sorted(r[0] for r in rows if (r[1], r[2], r[3]) not in produced)
+    if drop:
+        await db.execute(text(
+            "DELETE FROM seat_evidence_findings WHERE id = ANY(CAST(:ids AS bigint[])) "
+            "AND domain = 'card' AND flag_id IS NULL"), {"ids": drop})
+    return len(drop)
+
+
+async def _evaluate(db, rs, view, touched, key, lo, hi, match_id) -> tuple:
+    """The card rules over the game (when its view was derived: `view` not
+    None) and over every window its changed daily rows lie in; each finding
+    upserted and posted when the revision arms it; then every unposted card
+    finding the game or those windows own that this evaluation did not
+    produce is retired (_retire_findings). Returns (fired, rule errors)."""
+    wins, owned = await _windows(db, touched, rs)
+    windows = [cm.window_row(agg) for _k, agg in wins]
+    subjects = cm.card_subjects(view if view is not None else {}, windows)
+    findings, notes, _fired, errors = await asyncio.to_thread(rs.evaluate_card, subjects)
+    game_dedup = ("game", game_key(key, lo, hi))
+
+    def dedup_of(k):
+        if k[0] == cm.WINDOW_SUBJECT:
+            s, d, src, cov, p = wins[k[1]][0]
+            return ("sitting", window_key(s, src, cov, p, d))
+        return game_dedup
+    if notes:
+        findings = [(rule, [(k, dict(it, notes=[ln for _r, ln in notes])) for k, it in items])
+                    for rule, items in findings]
+    fired, produced = await _post_findings(db, findings, dedup_of, rs, match_id)
+    own = ([game_dedup] if view is not None else []) + [("sitting", w) for w in sorted(owned)]
+    prefixes = {window_key(s, src, cov, p, "") for s, _d, src, cov, p, _r in touched}
+    await _retire_findings(db, rs.rev, produced, own,
+                           stale_games=[] if view is not None else [game_dedup[1]],
+                           stale_prefixes=prefixes)
+    return fired, errors
+
+
+async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
+    """One game, in the caller's transaction (see the candidate query for
+    which games come here). Attaches the records to their ranked match (one
+    ended at least READY_LAG_S ago; each record only to the match its own
+    attach key names); with no revision that is all. With one, re-derives when
+    the readiness signature (match, series rule, records, conflicts, which
+    censuses are registered) or the revision changed: the hand and phase
+    rows, the contributions and daily sums, the card rules over the game and
+    over each touched window. Final once the match is attached and both
+    records name it, or after the expiry, or with lists purged. Returns
+    (state, fired, rule errors, evaluated)."""
+    lim = CARD_LIMITS
+    b = {"k": key, "lo": lo, "hi": hi}
+    await db.execute(text(
+        "INSERT INTO card_games (stable_game_key, pair_lo, pair_hi) VALUES (:k, :lo, :hi) "
+        "ON CONFLICT DO NOTHING"), b)
+    g = (await db.execute(text(
+        "SELECT signature, first_seen_at, finalized_at, evaluated_rev, match_id FROM card_games "
+        "WHERE " + _WHERE_GAME + " FOR UPDATE"), b)).mappings().first()
+    rev = rs.rev if rs is not None else None
+    rows = (await db.execute(text(
+        "SELECT id, seat_player_id, other_player_id, attach_key, payload, pool_digest, conflict_at, "
+        "       received_at, gen FROM card_evidence "
+        "WHERE stable_game_key = :k AND LEAST(seat_player_id, other_player_id) = :lo "
+        "  AND GREATEST(seat_player_id, other_player_id) = :hi ORDER BY id FOR SHARE"), b)).mappings().all()
+    if not rows:
+        return "empty", 0, 0, False
+    keys = sorted({r["attach_key"] for r in rows})
+    match = (await db.execute(_MATCH, {"keys": keys, "lo": lo, "hi": hi,
+                                       "lag": se.READY_LAG_S})).mappings().first()
+    digests = {r["pool_digest"] for r in rows if r["pool_digest"]}
+    gens = {}
+    if rs is None:
+        if digests:
+            gens = dict((await db.execute(text(
+                "SELECT digest, gen FROM card_pool_registry WHERE digest = ANY(CAST(:d AS varchar[]))"),
+                {"d": sorted(digests)})).all())
+        await db.execute(text(
+            "UPDATE card_games SET match_id = :m, series_sc = :sc, processed_at = now(), "
+            "  seen_inputs = :fp, " + _CLEAR + "WHERE "
+            + _WHERE_GAME), dict(b, m=match["id"] if match else None, sc=match["sc"] if match else None,
+                                 fp=_inputs_fp(rows, gens)))
+        return ("attached" if match else "waiting"), 0, 0, False
+    named, other_key = se.attached_records(rows, match)
+    named_ids = {r["id"] for r in named}
+    registry = await _registry(db, digests, gens)
+    fp = _inputs_fp(rows, gens)
+    sig = _signature(match, rows, named_ids, registry)
+    expired = g["first_seen_at"] < datetime.now(timezone.utc) - timedelta(days=lim["expiry_days"])
+    if sig == g["signature"] and g["evaluated_rev"] == rev and not (expired and match is not None):
+        await db.execute(text("UPDATE card_games SET processed_at = now(), seen_inputs = :fp, "
+                              + _CLEAR + "WHERE " + _WHERE_GAME), dict(b, fp=fp))
+        return "unchanged", 0, 0, False
+    final = match is not None and ((len(named) >= cm.W["players"] and not other_key) or expired)
+    fired = errors = 0
+    evaluated = None
+    fault = None
+    if match is not None and named:
+        records = _records(named)
+        if any(not _has_lists(r["rec"]) for r in records):
+            final = True          # lists purged: nothing left to derive
+            if g["evaluated_rev"] != rev:
+                # what another revision derived from the lists is not this
+                # revision's: retired, the windows it was in evaluated again
+                touched = await _drop_other_revisions(db, key, lo, hi, rev)
+                fired, errors = await _evaluate(db, rs, None, touched, key, lo, hi, match["id"])
+        else:
+            report = await _report(db, match["id"])
+            try:
+                view = await asyncio.to_thread(cm.card_view, records, registry, match["sc"],
+                                               rs.params.get(cm.WEIGHTS), report)
+            except Exception as exc:          # noqa: BLE001 -- recorded on the game, next game
+                view = None
+                fault = type(exc).__name__
+            if view is not None:
+                await _write_outside(db, key, lo, hi, view, rev)
+                touched = await _write_contrib(db, key, lo, hi, view, rs, match)
+                fired, errors = await _evaluate(db, rs, view, touched, key, lo, hi, match["id"])
+                evaluated = rev
+    # a final game is stamped with the revision that visited it, derived or
+    # not, so the candidate query visits it again only under another one
+    stamp = evaluated or (rev if final and fault is None else None)
+    # a view that raised is a deterministic fault of this game's records
+    # (_FAULT_COUNT: counted, recorded with the inputs it read); a visit
+    # without one clears every fault field and records the inputs it read
+    await db.execute(text(
+        "UPDATE card_games SET match_id = :m, series_sc = :sc, signature = :s, processed_at = now(), "
+        "  derive_fault = :fault, evaluated_rev = COALESCE(CAST(:ev AS varchar), evaluated_rev), "
+        "  finalized_at = CASE WHEN :f THEN COALESCE(finalized_at, now()) ELSE NULL END, "
+        "  seen_inputs = CASE WHEN CAST(:fault AS varchar) IS NULL THEN CAST(:fp AS varchar) "
+        "    ELSE seen_inputs END, "
+        + _FAULT_COUNT + "WHERE " + _WHERE_GAME),
+        dict(b, m=match["id"] if match else None, sc=match["sc"] if match else None,
+             s=sig if fault is None else None, fault=fault, ev=stamp,
+             f=bool(final) and fault is None, rev=rev, fp=fp, cap=CARD_FAULT_LIMITS["attempts"]))
+    state = "final" if final and fault is None else ("evaluated" if evaluated else
+                                                     ("fault" if fault else "waiting"))
+    return state, fired, errors, evaluated is not None
+
+
+# Every fault field cleared: a visit that completed (any arm).
+_CLEAR = ("derive_fault = NULL, fault_attempts = 0, fault_rev = NULL, fault_inputs = NULL, "
+          "parked_at = NULL, op_attempts = 0, retry_at = NULL ")
+
+# A deterministic fault on the game row: the count grows while the faults
+# are under one revision (or none) and starts again under another; reaching
+# CARD_FAULT_LIMITS["attempts"] parks the game (parked_at: when it first
+# reached the bound under this revision), recorded with the inputs the
+# faulted visit read (fault_inputs). Any visit, faulted this way or not, ends
+# an operational backoff; a visit without a fault clears every fault field.
+_FAULT_COUNT = (
+    "  fault_attempts = CASE WHEN CAST(:fault AS varchar) IS NULL THEN 0 "
+    "    WHEN fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) THEN fault_attempts + 1 ELSE 1 END, "
+    "  parked_at = CASE WHEN CAST(:fault AS varchar) IS NOT NULL "
+    "    AND fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) "
+    "    AND fault_attempts + 1 >= CAST(:cap AS int) THEN COALESCE(parked_at, now()) ELSE NULL END, "
+    "  fault_rev = CASE WHEN CAST(:fault AS varchar) IS NULL THEN NULL ELSE CAST(:rev AS varchar) END, "
+    "  fault_inputs = CASE WHEN CAST(:fault AS varchar) IS NULL THEN NULL ELSE CAST(:fp AS varchar) END, "
+    "  op_attempts = 0, retry_at = NULL ")
+
+# An operational failure on the game row: never counted toward the park; the
+# game waits out a backoff (retry_delay) and is then visited again, parked or
+# not (the candidate query's park clause skips a game with a retry_at).
+_OP_RETRY = ("  op_attempts = op_attempts + 1, "
+             "  retry_at = now() + make_interval(secs => CAST(:delay AS int)) ")
+
+
+def retry_delay(failures_before: int) -> int:
+    """The backoff after an operational failure, in seconds, given how many
+    came in a row before it: op_base_s, doubling per failure, never more
+    than op_cap_s (CARD_RETRY_LIMITS)."""
+    lim = CARD_RETRY_LIMITS
+    room = (lim["op_cap_s"] // lim["op_base_s"]).bit_length()
+    return min(lim["op_cap_s"], lim["op_base_s"] << min(max(failures_before, 0), room))
+
+
+# What makes a failure operational: the database, its pool, the connection
+# or a timeout, at any depth of the exception's cause chain (SQLAlchemy
+# wraps the driver's error). Everything else is deterministic.
+_OPERATIONAL = [ConnectionError, TimeoutError, sa_exc.OperationalError, sa_exc.InterfaceError,
+                sa_exc.TimeoutError, sa_exc.DisconnectionError]
+if pg_exc is not None:
+    _OPERATIONAL += [pg_exc.PostgresConnectionError, pg_exc.InterfaceError,
+                     pg_exc.TransactionRollbackError, pg_exc.InsufficientResourcesError,
+                     pg_exc.OperatorInterventionError, pg_exc.PostgresSystemError,
+                     pg_exc.LockNotAvailableError]
+_OPERATIONAL = tuple(_OPERATIONAL)
+
+
+def operational(exc) -> bool:
+    """Whether a visit's exception is operational (see _OPERATIONAL);
+    otherwise it is deterministic."""
+    seen, todo = set(), [exc]
+    while todo:
+        e = todo.pop()
+        if not isinstance(e, BaseException) or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, _OPERATIONAL):
+            return True
+        if isinstance(e, sa_exc.DBAPIError) and e.connection_invalidated is True:
+            return True
+        todo += [e.orig if isinstance(e, sa_exc.StatementError) else None, e.__cause__, e.__context__]
+    return False
+
+
+# The games parked under the revision of the last card pass (see the
+# candidate query), and how long ago the oldest of them was parked, in whole
+# seconds (none parked: zero); before this worker's first pass, and on a box
+# that runs no worker, the unknown value. Shown on /health as
+# card_evidence_parked and card_evidence_parked_oldest_s.
+PARKED_UNKNOWN = -1
+_PARKED = {"n": PARKED_UNKNOWN, "oldest_s": PARKED_UNKNOWN}
+
+# Test hook: when set, called with each candidate's key before it is
+# visited, inside its transaction (a raise there is a faulted visit). Never
+# set outside the tests.
+_VISIT_HOOK = None
+
+
+def parked() -> int:
+    return _PARKED["n"]
+
+
+def parked_oldest_s() -> int:
+    return _PARKED["oldest_s"]
+
+
+async def _fault(session_factory, key, lo, hi, rev, word, is_operational, fp) -> None:
+    """Record a visit that raised, in a transaction of its own (the visit's
+    was rolled back): the error word and the visit time, and either the
+    operational backoff (_OP_RETRY) or the deterministic count with the
+    revision and the inputs (_FAULT_COUNT). The inputs recorded are the ones
+    the candidate query read before the visit (fp), never a later reading:
+    an input committed after that read differs from them and wakes a parked
+    game. Nothing is finalized, signed or stamped evaluated."""
+    async with session_factory() as db:
+        b = {"k": key, "lo": lo, "hi": hi}
+        await db.execute(text(
+            "INSERT INTO card_games (stable_game_key, pair_lo, pair_hi) VALUES (:k, :lo, :hi) "
+            "ON CONFLICT DO NOTHING"), b)
+        word = word[:CARD_FAULT_LIMITS["word_chars"]]
+        if is_operational:
+            before = (await db.execute(text(
+                "SELECT op_attempts FROM card_games WHERE " + _WHERE_GAME + " FOR UPDATE"), b)).scalar()
+            await db.execute(text(
+                "UPDATE card_games SET derive_fault = :fault, processed_at = now(), " + _OP_RETRY
+                + "WHERE " + _WHERE_GAME), dict(b, fault=word, delay=retry_delay(before)))
+        else:
+            await db.execute(text(
+                "UPDATE card_games SET derive_fault = :fault, processed_at = now(), " + _FAULT_COUNT
+                + "WHERE " + _WHERE_GAME),
+                dict(b, fault=word, rev=rev, fp=fp, cap=CARD_FAULT_LIMITS["attempts"]))
+        await db.commit()
+
+
+async def games_pass(session_factory, state=None, limit: int = None) -> dict:
+    """The card games waiting for work, each in its own transaction. A visit
+    that raises is rolled back, recorded on its game by kind (_fault) and
+    counted, and the pass moves on to the next game; the parked count and
+    the oldest parked age are read at the end of the pass."""
+    rs = state.ruleset if state is not None else None
+    rev = rs.rev if rs else None
+    stats = {"evaluated": 0, "fired": 0, "rule_errors": 0}
+    async with session_factory() as db:
+        if await setting(db, "card_evidence_worker") != "1":
+            return {"off": 1}
+        cands = (await db.execute(_CANDIDATES, {
+            "lim": limit or CARD_LIMITS["games_per_pass"], "rev": rev,
+            "cap": CARD_FAULT_LIMITS["attempts"], "reprobe": CARD_RETRY_LIMITS["reprobe_s"]})).all()
+    for key, lo, hi, fp in cands:
+        failed = None
+        try:
+            async with session_factory() as db:
+                try:
+                    if _VISIT_HOOK is not None:
+                        _VISIT_HOOK(key)
+                    st, fired, errors, done = await evaluate_card_game(db, key, lo, hi, rs)
+                    await db.commit()
+                except Exception:
+                    try:
+                        await db.rollback()
+                    except Exception:         # noqa: BLE001 -- the visit's own error is the one kept
+                        pass
+                    raise
+        except Exception as exc:              # noqa: BLE001 -- recorded on the game, next game
+            failed = operational(exc)
+            st, fired, errors, done = "error:" + type(exc).__name__, 0, 0, False
+        if failed is not None:
+            word = "operational" if failed else "deterministic"
+            stats[word] = stats.get(word, 0) + 1
+            try:
+                await _fault(session_factory, key, lo, hi, rev, st, failed, fp)
+            except Exception:                 # noqa: BLE001 -- counted; the game is visited again
+                stats["fault_unrecorded"] = stats.get("fault_unrecorded", 0) + 1
+        stats[st] = stats.get(st, 0) + 1
+        stats["evaluated"] += 1 if done else 0
+        stats["fired"] += fired
+        stats["rule_errors"] += errors
+    async with session_factory() as db:
+        n, age = (await db.execute(text(
+            "SELECT count(*), COALESCE(floor(EXTRACT(EPOCH FROM now() - min(parked_at))), 0) "
+            "FROM card_games WHERE fault_attempts >= CAST(:cap AS int) "
+            "AND fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar)"),
+            {"cap": CARD_FAULT_LIMITS["attempts"], "rev": rev})).one()
+        _PARKED["n"], _PARKED["oldest_s"] = int(n), int(age)
+    stats["parked"] = _PARKED["n"]
+    return stats
+
+
+async def purge_pass(session_factory) -> dict:
+    """Retention: the hand lists out of the payload after the list retention;
+    records never attached after the expiry; derived rows after the derived
+    retention, and this lane's unposted findings (card domain) after the
+    derived retention too; the seat purge leaves them alone. flagged_matches
+    rows, and a finding a flag points at, are never removed."""
+    lim = CARD_LIMITS
+    out = {}
+    async with session_factory() as db:
+        if await setting(db, "card_evidence_purge") != "1":
+            return {"off": 1}
+        out["lists"] = (await db.execute(text(
+            "UPDATE card_evidence SET payload = payload - 'cards' - 'held0' - 'ph' - 'hd' - 'ap', "
+            "  lists_purged_at = now() "
+            "WHERE lists_purged_at IS NULL "
+            "  AND received_at < now() - make_interval(days => CAST(:d AS int))"),
+            {"d": lim["list_retention_days"]})).rowcount
+        out["unattached"] = (await db.execute(text(
+            "DELETE FROM card_evidence e "
+            "WHERE e.received_at < now() - make_interval(days => CAST(:d AS int)) "
+            "  AND NOT EXISTS (SELECT 1 FROM card_games g "
+            "    WHERE g.stable_game_key = e.stable_game_key "
+            "      AND g.pair_lo = LEAST(e.seat_player_id, e.other_player_id) "
+            "      AND g.pair_hi = GREATEST(e.seat_player_id, e.other_player_id) "
+            "      AND g.match_id IS NOT NULL)"), {"d": lim["expiry_days"]})).rowcount
+        out["games"] = (await db.execute(text(
+            "DELETE FROM card_games g WHERE g.match_id IS NULL "
+            "  AND NOT EXISTS (SELECT 1 FROM card_evidence e "
+            "    WHERE e.stable_game_key = g.stable_game_key "
+            "      AND LEAST(e.seat_player_id, e.other_player_id) = g.pair_lo "
+            "      AND GREATEST(e.seat_player_id, e.other_player_id) = g.pair_hi)"))).rowcount
+        d = {"d": lim["derived_retention_days"]}
+        out["derived"] = 0
+        for q in (
+                "DELETE FROM card_contrib WHERE utc_day < (now() - make_interval(days => CAST(:d AS int)))::date",
+                "DELETE FROM card_player_daily WHERE day < (now() - make_interval(days => CAST(:d AS int)))::date",
+                "DELETE FROM card_hand_outside WHERE computed_at < now() - make_interval(days => CAST(:d AS int))",
+                "DELETE FROM card_phase_outside WHERE computed_at < now() - make_interval(days => CAST(:d AS int))"):
+            out["derived"] += (await db.execute(text(q), d)).rowcount
+        # this lane's unposted findings (the card domain only), on the derived
+        # retention: a finding is derived from the same evidence as the rows above
+        out["findings"] = (await db.execute(text(
+            "DELETE FROM seat_evidence_findings WHERE domain = 'card' AND flag_id IS NULL "
+            "  AND changed_at < now() - make_interval(days => CAST(:d AS int))"), d)).rowcount
+        await db.commit()
+    return out
+
+
+# -- the admin read ------------------------------------------------------------------
+
+def _jsonable(view) -> dict:
+    """The view's measures as the admin read shows them (rows only)."""
+    return {"hands": [row for row, _m in view["hands"]],
+            "phases": [row for row, _m in view["phases"]],
+            "records": [row for row, _m in view["records"]],
+            "pairs": [row for row, _m in view["pairs"]],
+            "game": view["game"],
+            "not_run_because": view["uncovered"]}
+
+
+async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dict:
+    """Both card records of a game, the measures computed now, the stored
+    hand and phase rows, contributions and findings (rule id, revision,
+    details, the posted flag), and per UTC day how many records named a
+    census digest that is not registered. Steam ids only."""
+    lim = CARD_LIMITS
+    if match_id is not None:
+        games = (await db.execute(text(
+            "SELECT stable_game_key, pair_lo, pair_hi, match_id, series_sc, finalized_at, "
+            "       evaluated_rev, derive_fault FROM card_games WHERE match_id = CAST(:m AS uuid)"),
+            {"m": match_id})).mappings().all()
+    else:
+        games = (await db.execute(text(
+            "SELECT stable_game_key, pair_lo, pair_hi, match_id, series_sc, finalized_at, "
+            "       evaluated_rev, derive_fault FROM card_games WHERE stable_game_key = :k"),
+            {"k": stable_game_key})).mappings().all()
+    keys = sorted({g["stable_game_key"] for g in games} | ({stable_game_key} if stable_game_key else set()))
+    unreg = (await db.execute(text(
+        "SELECT (e.received_at AT TIME ZONE 'UTC')::date d, count(*) FROM card_evidence e "
+        " WHERE e.received_at > now() - make_interval(days => CAST(:d AS int)) "
+        "   AND e.pool_digest IS NOT NULL "
+        "   AND NOT EXISTS (SELECT 1 FROM card_pool_registry p WHERE p.digest = e.pool_digest) "
+        " GROUP BY 1 ORDER BY 1"), {"d": lim["unregistered_days"]})).all()
+    out = {"review_rules": rs.rev if rs is not None else rr.health_word(), "games": [],
+           "unregistered_by_day": [{"day": r[0].isoformat(), "records": int(r[1])} for r in unreg]}
+    for key in keys:
+        rows = (await db.execute(text(
+            "SELECT e.id, e.attach_key, e.seat_player_id, e.other_player_id, ps.steam_id seat_steam, "
+            "       po.steam_id other_steam, e.payload, e.pool_digest, e.pool_state, e.deal_profile, "
+            "       e.conflict_at, e.conflict_kind, e.received_at, e.lists_purged_at, e.payload_bytes "
+            "  FROM card_evidence e JOIN players ps ON ps.id = e.seat_player_id "
+            "  JOIN players po ON po.id = e.other_player_id "
+            " WHERE e.stable_game_key = :k ORDER BY e.id LIMIT CAST(:n AS int)"),
+            {"k": key, "n": lim["admin_rows"]})).mappings().all()
+        by_pair = {}
+        for r in rows:
+            by_pair.setdefault(se._norm_pair(r["seat_player_id"], r["other_player_id"]), []).append(r)
+        for (lo, hi), prs in by_pair.items():
+            g = next((x for x in games if x["stable_game_key"] == key and x["pair_lo"] == lo
+                      and x["pair_hi"] == hi), None)
+            match = None
+            if g is not None and g["match_id"] is not None:
+                match = {"id": g["match_id"], "photon_room_id": (await db.execute(text(
+                    "SELECT photon_room_id FROM matches WHERE id = :m"), {"m": g["match_id"]})).scalar()}
+            named, _other = se.attached_records(prs, match)
+            view_rows = named if match is not None else prs
+            records = [r for r in _records(view_rows) if _has_lists(r["rec"])]
+            registry = await _registry(db, {r["pool_digest"] for r in prs if r["pool_digest"]})
+            report = await _report(db, match["id"]) if match is not None else None
+            view = cm.card_view(records, registry, g["series_sc"] if g else None,
+                                rs.params.get(cm.WEIGHTS) if rs is not None else None, report)
+            b = {"k": key, "lo": lo, "hi": hi}
+            hand = (await db.execute(text(
+                "SELECT recorder_player_id, dealer_player_id, phase, deal, rules_rev, measures "
+                "FROM card_hand_outside WHERE " + _WHERE_GAME + " ORDER BY phase, deal"), b)).mappings().all()
+            phase = (await db.execute(text(
+                "SELECT recorder_player_id, phase, rules_rev, measures FROM card_phase_outside "
+                "WHERE " + _WHERE_GAME + " ORDER BY phase"), b)).mappings().all()
+            contrib = (await db.execute(text(
+                "SELECT recorder_player_id, subject_player_id, source, coverage, deal_profile, rules_rev, "
+                "       utc_day, " + ", ".join(_DAILY_COLS) + " FROM card_contrib WHERE " + _WHERE_GAME
+                + " ORDER BY rules_rev, subject_player_id, source"), b)).mappings().all()
+            findings = (await db.execute(text(
+                "SELECT rule_id, rules_rev, details, flag_id FROM seat_evidence_findings "
+                "WHERE domain = 'card' AND scope = 'game' AND dedup_key = :d ORDER BY rule_id"),
+                {"d": game_key(key, lo, hi)})).mappings().all()
+            out["games"].append({
+                "stable_game_key": key,
+                "match_id": str(match["id"]) if match else None,
+                "series_sc": g["series_sc"] if g else None,
+                "final": bool(g and g["finalized_at"]),
+                "evaluated_rev": g["evaluated_rev"] if g else None,
+                "derive_fault": g["derive_fault"] if g else None,
+                "records": [{"seat_steam_id": r["seat_steam"], "other_steam_id": r["other_steam"],
+                             "attach_key": r["attach_key"], "received_at": r["received_at"].isoformat(),
+                             "pool_digest": r["pool_digest"], "pool_state": r["pool_state"],
+                             "pool_registered": bool(r["pool_digest"]) and r["pool_digest"] in registry,
+                             "deal_profile": r["deal_profile"], "conflict_kind": r["conflict_kind"],
+                             "payload_bytes": r["payload_bytes"],
+                             "lists_purged": r["lists_purged_at"] is not None,
+                             "names_the_match": (r["id"] in {x["id"] for x in named}) if match else None,
+                             "record": se._jsonv(r["payload"])} for r in prs],
+                "measures": _jsonable(view),
+                "hand_rows": [dict(h, recorder_player_id=str(h["recorder_player_id"]),
+                                   dealer_player_id=str(h["dealer_player_id"]) if h["dealer_player_id"] else None,
+                                   measures=se._jsonv(h["measures"])) for h in hand],
+                "phase_rows": [dict(p, recorder_player_id=str(p["recorder_player_id"]),
+                                    measures=se._jsonv(p["measures"])) for p in phase],
+                "contributions": [dict(c, recorder_player_id=str(c["recorder_player_id"]),
+                                       subject_player_id=str(c["subject_player_id"]),
+                                       utc_day=c["utc_day"].isoformat()) for c in contrib],
+                "findings": [{"rule_id": f["rule_id"], "rules_rev": f["rules_rev"],
+                              "details": se._jsonv(f["details"]),
+                              "posted_flag_id": str(f["flag_id"]) if f["flag_id"] else None}
+                             for f in findings],
+            })
+    return out

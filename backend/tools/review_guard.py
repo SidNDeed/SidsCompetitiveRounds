@@ -5,11 +5,12 @@ every value that decides an outcome belongs to the rules revision, which is
 not part of this repository. This guard checks that, as a transitive analysis
 over the source of every tree it is given:
 
-  * JUDGING modules (review_measures, review_rules, and any local module
-    one of them imports) are
+  * JUDGING modules (review_measures, review_rules, card_measures, and any
+    local module one of them imports) are
     scanned whole: code, module-level constants, string constants (SQL and
     text included) and comments;
-  * seat_evidence is scanned from its REVIEW ROOTS (every function that
+  * seat_evidence and card_evidence are scanned from their REVIEW ROOTS
+    (every function that
     touches the review modules or a loaded ruleset) through every module
     -level function and constant they reach, and main.py from its review
     worker functions the same way; any local module either imports is
@@ -42,7 +43,8 @@ Within that reach it refuses:
   setting  a runtime setting read other than the operational switches, or
            the settings table named outside the one reader;
   env      an environment read other than the allowlisted keys;
-  pinned   a pinned bound whose value differs from its pin;
+  pinned   a pinned bound whose value differs from its pin (a large wire
+           layout is pinned by the sha256 of its literal value's repr);
   unresolved  a value with no runtime input that the guard cannot evaluate
            (a constant passed into code it does not follow, a comprehension
            over constants, a container written or aliased with constants)
@@ -112,6 +114,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import hashlib
 import io
 import itertools
 import os
@@ -121,8 +124,8 @@ import sys
 import tokenize
 
 API = "backend/api/"
-JUDGING = ("review_measures", "review_rules", "identity_clock_measures")
-ROOTED = {"seat_evidence": None, "identity_clock_evidence": None, "main": ("review_worker_loop", "review_worker_pass",
+JUDGING = ("review_measures", "review_rules", "identity_clock_measures", "card_measures")
+ROOTED = {"seat_evidence": None, "identity_clock_evidence": None, "card_evidence": None, "main": ("review_worker_loop", "review_worker_pass",
                                           "review_rules_refresh_loop", "_review_pass_line")}
 REVIEW_NAMES = {"rm", "rr", "_review_rules", "review_measures", "review_rules"}
 REVIEW_PARAMS = {"rs", "state", "ruleset"}
@@ -156,7 +159,7 @@ SELECTORS = frozenset({
     "ge", "gt", "honoured", "int", "json", "label", "le", "list", "literal", "lt", "m",
     "missing", "ne", "not", "note", "nt", "num", "open", "params", "pointer", "posix",
     "post_rows", "read", "refused", "identity", "rel", "reporter", "row", "rules-none", "seat", "side",
-    "sitting",
+    "sitting", "card", "core.card",
     "sub", "unhonoured", "v", "validate", "window_days", "{", "}",
     # reached through followed bindings since fix pass 3 (the resolver now
     # sees a tuple's members): the public format's file names, the record's
@@ -224,11 +227,25 @@ PINNED = {
         "origin_patchers": 3, "origin_other": 4, "origin_none": 5, "origin_unreadable": 6,
         "boot": 0, "start": 1, "pick": 2, "over": 3, "unknown": -1},
     ("identity_clock_measures", "ICM_GAME"): {"move_step_ms": 20, "hold_frames": 10},
+    ("card_evidence", "CARD_LIMITS"): {"games_per_pass": 500, "expiry_days": 14,
+                                       "list_retention_days": 120, "derived_retention_days": 400,
+                                       "unregistered_days": 30, "admin_rows": 50},
+    ("card_evidence", "CARD_FAULT_LIMITS"): {"attempts": 5, "word_chars": 40},
+    ("card_evidence", "CARD_RETRY_LIMITS"): {"op_base_s": 30, "op_cap_s": 900, "reprobe_s": 3600},
+    ("card_measures", "WINDOW_DAYS_MAX"): 400,
+}
+# A wire layout too large to restate here: pinned by the sha256 of
+# repr(ast.literal_eval(value)); any changed bound, code or word changes it.
+PINNED_SHA = {
+    ("card_measures", "CARD_WIRE"):
+        "d6ded319fd6a81a1a5d6819412f7c2d6743256d0f78a98e0aaea82970818ba68",
 }
 SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge",
             "identity_clock_evidence_accept", "identity_clock_evidence_worker",
-            "identity_clock_evidence_purge"}
-SETTINGS_READERS = {("seat_evidence", "setting"), ("identity_clock_evidence", "ice_setting")}
+            "identity_clock_evidence_purge",
+            "card_evidence_accept", "card_evidence_worker", "card_evidence_purge"}
+SETTINGS_READERS = {("seat_evidence", "setting"), ("identity_clock_evidence", "ice_setting"),
+                    ("card_evidence", "setting")}
 ENV_KEYS = {"SCR_REVIEW_ROOT", "SYSTEMROOT"}
 
 # Identifiers that carry a digit and decide nothing: match-row columns of the
@@ -237,6 +254,7 @@ ENV_KEYS = {"SCR_REVIEW_ROOT", "SYSTEMROOT"}
 _SAFE_TEXT = re.compile(
     r"\bp[12]_\w+|\bplayer[12](?:_id)?\b|\b[ps][12]\b|sha256\b|\butf-8\b|\bint(?:32|64)\b"
     r"|\bkernel32\b"
+    r"|\bb4(?:\.[a-z_]*)*|\bheld0\b"
     r"|\bnoqa: ?[A-Z]+\d+(?:, ?[A-Z]+\d+)*")
 _STANDALONE = re.compile(r"(?<![\w.])[01](?![\w.])")
 _DIGIT = re.compile(r"\d")
@@ -654,7 +672,7 @@ class _Scan:
     def module_value(self, name):
         """The constant a module-level name stands for, or _NONE (a PINNED
         name is judged by its pin, never at its uses)."""
-        if (self.mod, name) in PINNED:
+        if (self.mod, name) in PINNED or (self.mod, name) in PINNED_SHA:
             return self._NONE
         if name in self.assigns and self.top_stores.get(name, 0) == 1:
             node = self.assigns[name]
@@ -1328,6 +1346,15 @@ class _Scan:
                 targets = top.targets if isinstance(top, ast.Assign) else [top.target]
                 names = [t.id for t in targets if isinstance(t, ast.Name)]
                 for n in names:
+                    if (self.mod, n) in PINNED_SHA:
+                        pinned_node = top.value
+                        try:
+                            digest = hashlib.sha256(
+                                repr(ast.literal_eval(top.value)).encode()).hexdigest()
+                        except ValueError:
+                            digest = None
+                        if digest != PINNED_SHA[(self.mod, n)]:
+                            self.add(top.lineno, "pinned")
                     if (self.mod, n) in PINNED:
                         pinned_node = top.value
                         try:
@@ -1470,7 +1497,9 @@ class _Scan:
             if isinstance(n, (ast.Assign, ast.AnnAssign)) and isinstance(n.value, ast.Constant) \
                     and isinstance(n.value.value, bool) and n in self.tree.body:
                 targets = n.targets if isinstance(n, ast.Assign) else [n.target]
-                if not all(isinstance(t, ast.Name) and (self.mod, t.id) in PINNED for t in targets):
+                if not all(isinstance(t, ast.Name) and ((self.mod, t.id) in PINNED
+                                                        or (self.mod, t.id) in PINNED_SHA)
+                           for t in targets):
                     self.add(n.lineno, "bool")
 
     def _fn_of(self, node):

@@ -1143,6 +1143,23 @@ class HealthResponse(BaseModel):
     # default, so building the answer without it raises instead of silently
     # leaving the key out. Absent on any build before the lane.
     seat_evidence: int
+    # card_evidence: whether this build serves the card draw evidence lane
+    # (main._card_evidence_health_word; 1 = the three card routes are
+    # registered on the app, else 0). Derived on every request; equal on both
+    # roles; no default, as above. Absent on any build before the lane.
+    card_evidence: int
+    # card_evidence_parked: how many card games the worker's last card pass
+    # left parked under its revision (card_evidence.parked: visits that
+    # raised a deterministic fault up to the attempt bound, skipped until new
+    # input, another revision or the re-probe interval). Read from this
+    # process's memory, so it answers on both arms;
+    # card_evidence.PARKED_UNKNOWN before this worker's first pass and on a
+    # box that runs no worker. No default, as above.
+    card_evidence_parked: int
+    # card_evidence_parked_oldest_s: how long ago, in whole seconds, the
+    # oldest of those games was parked (none parked: zero); the same source,
+    # the same unknown value, no default.
+    card_evidence_parked_oldest_s: int
     # review_eval: 8 hex of the review code's file digest
     # (review_rules.review_eval: review_boot.py, review_measures.py and
     # review_rules.py, by file). Equal on both roles; the build discriminator
