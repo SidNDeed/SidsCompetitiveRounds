@@ -1853,9 +1853,10 @@ def test_the_helper_closure_stays_affordable():
     # card draw evidence re-land (2026-10-29), claude/card-draw-server refit
     # onto main 15da9a83: 337 measured at POST /api/v1/ffa/lobby/start (303
     # on main; main's rank route POST /api/v1/pc/portrait 312 -> 322 by the
-    # median's import fold, below the new rank). The rank position moves
-    # 378 -> 380 with the three new routes, and the route at the rank gains
-    # +34 by shared names: the import lines of card_evidence, card_measures
+    # shared-name fold, nine import lines and card_measures.dumps, below the
+    # new rank). The rank position moves 378 -> 380 with the three new
+    # routes, and the route at the rank gains +34 by shared names: the
+    # import lines of card_evidence, card_measures
     # and identity_clock_evidence and the json bindings they lead to (18),
     # card_measures' wire and need constants with the W and IC_WIRE
     # bindings (13), and card_measures' _gate, covered and dumps (3); none
