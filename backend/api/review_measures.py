@@ -43,6 +43,14 @@ RESET_KEYED = 1
 RESET_UNKEYED = 2
 HIT_SENT_LEN = 10
 
+# The subjects a combat rule evaluates over (combat_measures builds their rows).
+COMBAT_SUBJECTS = ("combat.direction", "combat.cycle", "combat.shot", "combat.refill",
+                   "combat.stat", "combat.point", "combat.block", "combat.contact",
+                   "combat.top", "combat.aim", "combat.push", "combat.vchange",
+                   "combat.bounce", "combat.chain", "combat.death", "combat.regen",
+                   "combat.b3", "combat.tbounce", "combat.homing", "combat.react",
+                   "combat.interval", "combat.refused", "combat.record")
+
 REGISTRY: dict = {}
 SEATS = 2      # the two seats of a game
 

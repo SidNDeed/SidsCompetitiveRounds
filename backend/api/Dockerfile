@@ -49,11 +49,28 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # text_shaping_unavailable. That is what production did on 2026-09-12: both
 # boxes healthy, fonts present, first pack open refused. The release train now
 # asserts pc_raqm on both boxes; test_pc_deploy_wiring.py holds this line.
-RUN apt-get update && apt-get install -y --no-install-recommends libfribidi0 && rm -rf /var/lib/apt/lists/*
+# The package is pinned by the DIGEST of its .deb, not by its version alone
+# (combat fix pass 10): apt.lock names it with its version, architecture and
+# SHA-256, and apt_lock.py downloads it with `apt-get download`, refuses the
+# build unless the directory holds exactly the locked files with exactly the
+# locked SHA-256s, and only then hands them to `dpkg -i`; it records the
+# SHA-256 of what dpkg installed in /var/lib/scr-build/apt-installed.lock,
+# which build_manifest.py compares with apt.lock. So a same-version .deb with
+# different bytes refuses here. When the archive supersedes the version, the
+# download fails and so does the build; apt.lock says how to re-pin. Nothing
+# here runs `apt-get install`: no package the lock does not name is installed.
+COPY apt.lock apt_lock.py ./
+RUN apt-get update && python apt_lock.py install apt.lock /tmp/scr-apt /var/lib/scr-build/apt-installed.lock && rm -rf /var/lib/apt/lists/* /tmp/scr-apt
 
-# Install dependencies first (cached layer)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies first (cached layer). requirements.lock is the content
+# lock of requirements.txt (every package pinned to ONE wheel by its hash);
+# with --require-hashes pip refuses any wheel whose bytes are not the one
+# hashed there and any package the lock does not list. --report records, for
+# every package pip installed, the SHA-256 of the archive it verified, outside
+# /app so the code copy cannot replace it; build_manifest.py compares those
+# with the lock.
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: --report /var/lib/scr-build/pip-report.json -r requirements.lock
 
 # Player Cards renderer fonts. The font FILES are not in the repo (gitignored,
 # ~30 MB); fetch_fonts.py pulls each one from a COMMIT-pinned URL and verifies
@@ -70,9 +87,19 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY assets/fonts/fetch_fonts.py assets/fonts/fonts.lock.json ./assets/fonts/
 RUN python assets/fonts/fetch_fonts.py
 
-# Copy application code
+# Copy application code. .dockerignore keeps caches, logs, key material, the
+# font binaries and the private card-art staging out of the context.
 COPY . .
 RUN python -B build_no_bytecode.py /app
+
+# Last: verify the fonts again (no fetch; a missing or moved font fails the
+# build), so the bytes the image carries are the verified ones whatever the
+# copy brought; then write build-manifest.json (build_manifest.py: the context
+# digest, and the identity of every installed artifact -- each Python
+# package's verified wheel SHA-256 and RECORD digest, each dpkg package's .deb
+# SHA-256 or `base` -- compared with requirements.lock and apt.lock; any
+# difference fails the build), which /health answers as `build_manifest`.
+RUN python assets/fonts/fetch_fonts.py --verify && python build_manifest.py write
 
 # Run with uvicorn.
 #

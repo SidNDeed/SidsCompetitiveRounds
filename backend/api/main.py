@@ -39,9 +39,11 @@ from database import get_asm_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 import review_boot, seat_evidence as _sev   # review_boot FIRST: the review closure executes from source only
 import card_evidence as _cev
+import combat_evidence as _cbev
 import review_rules as _review_rules
 import identity_clock_evidence as _ice
 import conn_ranges as _conn_ranges
+import build_manifest as _build_manifest   # standard library only: /health `build_manifest`
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
@@ -3865,6 +3867,9 @@ async def lifespan(app: FastAPI):
             # started no worker (an absent pass line alone cannot tell a
             # disabled worker from a log that was not collected).
             print("[REVIEW] worker=standby-disabled", flush=True)
+            # The combat evidence pass runs inside the same worker, so it is
+            # primary-only too; this is the standby's positive signal for it.
+            print("[COMBAT] worker=standby-disabled", flush=True)
             # The floor still has to track the primary — see the docstring.
             tasks.append(asyncio.create_task(
                 _supervised("min_version_follow", min_version_follow_loop)))
@@ -3916,6 +3921,7 @@ async def lifespan(app: FastAPI):
             # evaluating under the loaded rules revision, posting advisory
             # review items, the purge. PRIMARY ONLY with the other writers.
             print("[REVIEW] worker=primary", flush=True)
+            print("[COMBAT] worker=primary", flush=True)
             tasks.append(asyncio.create_task(
                 _supervised("review_worker", review_worker_loop)))
             # Detached one-shot, deliberately NOT under _supervised (its while-True
@@ -4657,6 +4663,10 @@ async def review_worker_pass(session_factory, purge: bool):
     cards = await _cev.games_pass(session_factory, state)
     card_purged = await _cev.purge_pass(session_factory) if purge else None
     print(f"[CARD-EVIDENCE] games={cards} purge={card_purged}", flush=True)
+    # The combat pass: the same published state, its own transactions per game.
+    combat = await _cbev.games_pass(session_factory, state)
+    combat_purged = await _cbev.purge_pass(session_factory) if purge else None
+    print(f"[COMBAT] games={combat} purge={combat_purged}", flush=True)
     return state.word, games, sittings, purged
 
 
@@ -4750,7 +4760,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:54456 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:54525 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4816,7 +4826,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:54257 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:54326 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4886,7 +4896,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:53588 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:53657 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7614,6 +7624,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence=_card_evidence_health_word(),
                               card_evidence_parked=_cev.parked(),
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
+                              combat_evidence=_combat_evidence_health_word(),
+                              build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
@@ -7665,6 +7677,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence=_card_evidence_health_word(),
                               card_evidence_parked=_cev.parked(),
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
+                              combat_evidence=_combat_evidence_health_word(),
+                              build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
@@ -8985,6 +8999,61 @@ async def admin_register_card_census(
         return await _cev.register_census(db, doc)
     except _sev.EvidenceRefused as r:
         return _sev_refusal(r)
+
+
+@app.post("/api/v1/matches/combat-evidence", tags=["Matches"])
+async def submit_combat_evidence(request: Request, db: AsyncSession = Depends(get_db)):
+    """One seat's combat record for one ranked game (combat contract one).
+
+    The session rule and signing are the seat evidence route's: the FIRST
+    decision is the session (401 unless the request carries a verified
+    session for the seat the body names), before any other route work.
+    After it, this route writes the combat_evidence table and nothing else,
+    storing the record before anything is derived: it never
+    creates a player row, never touches a match, a series, a rating, gold
+    or flagged_matches. Every derivation runs later, in review_worker_loop."""
+    seat, body = await _sev_claimed_seat(request)
+    if not seat or not await _strict_steam_session_ok(request, seat, db):
+        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+    try:
+        if await _cbev.setting(db, "combat_evidence_accept", "0") != "1":
+            return JSONResponse(status_code=503, content={"error": "combat_evidence_off"})
+        env = _cbev.parse_envelope(body)
+        if not _cbev.verify_sig(MATCH_HMAC_SECRET, env):
+            return JSONResponse(status_code=403, content={"detail": "signature"})
+        rec = _cbev.parse_record(env)
+        rows = (await db.execute(
+            select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
+        )).all()
+        by_steam = {r.steam_id: r.id for r in rows}
+        if env["seat"] not in by_steam or env["other"] not in by_steam:
+            return JSONResponse(status_code=409, content={"status": "not_ready"})
+        return await _cbev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
+                                       _sev_header_version(request))
+    except _cbev.EvidenceRefused as r:
+        return _sev_refusal(r)
+
+
+@app.get("/api/v1/admin/combat-evidence", tags=["Admin"])
+async def admin_combat_evidence(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    match_id: UUID | None = Query(None),
+    stable_game_key: str | None = Query(None, max_length=60),
+    db: AsyncSession = Depends(get_db),
+):
+    """The reviewer's view of one game's combat evidence, per canonical seat
+    pair: the stored records, the attachment, the rebuild faults, the
+    findings, and the pair view computed now with each gun's display case
+    (only the measuring record, only the owner's, both agree, both differ)
+    and every missing, trimmed or incompatible input shown NOT-RUN. Admin only."""
+    if (match_id is None) == (stable_game_key is None):
+        raise HTTPException(400, "Give exactly one of match_id or stable_game_key")
+    target = str(match_id) if match_id is not None else stable_game_key
+    await _require_admin(db, admin_steam_id, "combat_evidence", target, hmac_signature)
+    return await _cbev.admin_view(db, match_id=str(match_id) if match_id else None,
+                                 stable_game_key=stable_game_key,
+                                 rs=_review_rules.current_rules().ruleset)
 
 
 @app.post("/api/v1/admin/release-digests", tags=["Admin"])
@@ -54570,7 +54639,7 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4855 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4865 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -70830,6 +70899,18 @@ _CARD_EVIDENCE_ROUTES = (submit_card_evidence, admin_card_evidence, admin_regist
 def _card_evidence_health_word() -> int:
     registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
     return 1 if all(id(fn) in registered for fn in _CARD_EVIDENCE_ROUTES) else 0
+
+
+# Combat evidence (combat contract one): `combat_evidence` on /health is 1
+# when this app registers both combat evidence routes, else 0. Derived on
+# every call from the routing table, so it is equal on both roles; the
+# combat pass's primary-only start is shown by its own log markers.
+_COMBAT_EVIDENCE_ROUTES = (submit_combat_evidence, admin_combat_evidence)
+
+
+def _combat_evidence_health_word() -> int:
+    registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
+    return 1 if all(id(fn) in registered for fn in _COMBAT_EVIDENCE_ROUTES) else 0
 
 
 def _pc_motion_health_word() -> int:

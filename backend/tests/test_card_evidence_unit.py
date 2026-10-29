@@ -1029,6 +1029,13 @@ _DOMAIN_PREDICATES = (
     ("api/seat_evidence.py", "DELETE", "dedup_key NOT LIKE 'card %'"),
     ("sql/370_card_evidence.sql", "UPDATE", "dedup_key LIKE 'card %'"),
     ("sql/rollback_370_card_evidence.sql", "DELETE", "domain = 'card'"),
+    # the combat lane (its migration 390 adds the domain value; its rollback
+    # deletes the combat rows by domain, or by key prefix when the column is gone)
+    ("api/combat_evidence.py", "INSERT", "VALUES ('combat'"),
+    ("api/combat_evidence.py", "DELETE", "domain = 'combat'"),
+    ("api/combat_evidence.py", "DELETE", "domain = 'combat'"),
+    ("sql/rollback_390_combat_evidence.sql", "DELETE", "domain = 'combat'"),
+    ("sql/rollback_390_combat_evidence.sql", "DELETE", "left(dedup_key, 7) = 'combat '"),
 )
 
 
@@ -1061,7 +1068,7 @@ def test_every_write_on_the_shared_findings_table_is_kept_to_one_domain():
     rows = _domain_table()
     assert None not in [p for _f, _k, p in rows], rows
     assert rows == sorted(_DOMAIN_PREDICATES, key=lambda r: (r[0], r[1], r[2]))   # the count is checkable
-    assert len(rows) == 9
+    assert len(rows) == 14
     # the seat purge names the card key form; control: without it the row is unclassified
     purge = [s for kk, s in _finding_writes("api/seat_evidence.py") if "changed_at <" in s]
     assert len(purge) == 1 and "dedup_key NOT LIKE 'card %'" in purge[0]
@@ -1944,12 +1951,16 @@ def test_m2_the_fault_bound_is_pinned_and_the_fault_word_fits_its_column():
     assert "fault_rev VARCHAR(%d)" % rev_width in sql
 
 
-def test_m2_the_parked_word_is_required_and_on_both_arms():
+def test_m2_the_parked_word_is_required_and_on_both_arms(monkeypatch):
     import schemas
     f = schemas.HealthResponse.model_fields["card_evidence_parked"]
     assert f.annotation is int and f.is_required()
     assert inspect.getsource(_main().health_check).count("card_evidence_parked=_cev.parked()") == 2
-    assert ce.parked() == ce.PARKED_UNKNOWN < 0                    # no pass has run in this process
+    # the negative unknown is the state before any pass in the PROCESS; a
+    # live file run earlier in the same process has moved it, so the state
+    # the functions read is reset here, not assumed
+    monkeypatch.setattr(ce, "_PARKED", {"n": ce.PARKED_UNKNOWN, "oldest_s": ce.PARKED_UNKNOWN})
+    assert ce.parked() == ce.PARKED_UNKNOWN < 0
 
 
 def test_m2_a_visit_that_raises_is_recorded_and_the_pass_moves_on():
@@ -2097,12 +2108,16 @@ def test_m4_fix4_a_parked_game_is_re_probed_and_a_waiting_retry_is_held():
     assert '"reprobe": CARD_RETRY_LIMITS["reprobe_s"]' in src
 
 
-def test_m4_fix4_the_parked_age_is_required_and_on_both_arms():
+def test_m4_fix4_the_parked_age_is_required_and_on_both_arms(monkeypatch):
     import schemas
     f = schemas.HealthResponse.model_fields["card_evidence_parked_oldest_s"]
     assert f.annotation is int and f.is_required()
     assert inspect.getsource(_main().health_check).count(
         "card_evidence_parked_oldest_s=_cev.parked_oldest_s()") == 2
+    # the negative unknown is the state before any pass in the PROCESS; a
+    # live file run earlier in the same process has moved it, so the state
+    # the functions read is reset here, not assumed
+    monkeypatch.setattr(ce, "_PARKED", {"n": ce.PARKED_UNKNOWN, "oldest_s": ce.PARKED_UNKNOWN})
     assert ce.parked_oldest_s() == ce.PARKED_UNKNOWN < 0
 
 

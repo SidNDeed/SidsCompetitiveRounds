@@ -338,13 +338,28 @@ def load(store, rev):
     return rr.State(rs.rev, rs)
 
 
+def seat_doc():
+    """The testkit's synthetic draft as a seat-only revision. The shared
+    base draft declares every registry family (the needle tool's closure
+    tests reach every parameter position through it), so the card families
+    come out here: a seat-only revision holds no card weight set and no
+    window, and card_measures.contributions derives no row under it. Left
+    in, the base's weight set (keyed by a synthetic profile no game has)
+    would derive none either, while reading as a weighed revision."""
+    import review_testkit as tk
+    doc = tk.synthetic_doc()
+    doc["measure_params"] = {f: v for f, v in doc["measure_params"].items()
+                             if f not in (cm.WEIGHTS, cm.WINDOW)}
+    return doc
+
+
 # fix pass 3 (M2): every revision shape the loader accepts, as (draft,
 # self-test cases, has card rules). Seat rules only, card rules only, both,
 # card rules with each optional card family absent, card families with no
 # card rule, and an empty draft.
 def revision_shapes():
     import review_testkit as tk
-    seat, card = tk.synthetic_doc(), card_doc()
+    seat, card = seat_doc(), card_doc()
     both = dict(seat, rules=seat["rules"] + card["rules"],
                 measure_params=dict(seat["measure_params"], **card["measure_params"]))
     no_win = (ID_WIN,)

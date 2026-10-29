@@ -1,0 +1,132 @@
+[
+ {
+  "control_residual": {
+   "ang": 0,
+   "d_along": 0,
+   "d_perp": 0
+  },
+  "frames": [
+   0.016,
+   0.017,
+   0.033,
+   0.016,
+   0.0167
+  ],
+  "mutant_residual": {
+   "ang": 10,
+   "d_along": 0,
+   "d_perp": 3
+  },
+  "name": "straight",
+  "pred": {
+   "vx": "0x1.bc00000000000p+5",
+   "vy": "-0x1.a000000000000p+1",
+   "x": "0x1.be95180000000p+2",
+   "y": "-0x1.490f280000000p+1"
+  },
+  "prm": {
+   "allow_stop": false,
+   "drag": 0.0,
+   "drag_min": 0.0,
+   "gravity": 0.0,
+   "mult": 1.0,
+   "sim": 1.0,
+   "sim_gravity": 1
+  },
+  "state": {
+   "vx": 55.5,
+   "vy": -3.25,
+   "x": 1.5,
+   "y": -2.25
+  },
+  "turn_per_frame": 0.002
+ },
+ {
+  "control_residual": {
+   "ang": 0,
+   "d_along": 0,
+   "d_perp": 0
+  },
+  "frames": [
+   0.016,
+   0.017,
+   0.033,
+   0.016,
+   0.0167,
+   0.05,
+   0.016
+  ],
+  "mutant_residual": {
+   "ang": 14,
+   "d_along": 0,
+   "d_perp": 11
+  },
+  "name": "drag",
+  "pred": {
+   "vx": "0x1.25b68c0000000p+6",
+   "vy": "0x1.6f242e0000000p+3",
+   "x": "0x1.9015100000000p+3",
+   "y": "0x1.f41a540000000p+0"
+  },
+  "prm": {
+   "allow_stop": false,
+   "drag": 0.7,
+   "drag_min": 1.0,
+   "gravity": 0.0,
+   "mult": 1.0,
+   "sim": 1.0,
+   "sim_gravity": 1
+  },
+  "state": {
+   "vx": 80.0,
+   "vy": 12.5,
+   "x": 0.0,
+   "y": 0.0
+  },
+  "turn_per_frame": 0.002
+ },
+ {
+  "control_residual": {
+   "ang": 0,
+   "d_along": 0,
+   "d_perp": 0
+  },
+  "frames": [
+   0.016,
+   0.017,
+   0.033,
+   0.016,
+   0.0167,
+   0.05,
+   0.016
+  ],
+  "mutant_residual": {
+   "ang": 14,
+   "d_along": 0,
+   "d_perp": 6
+  },
+  "name": "gravity_drag_mult",
+  "pred": {
+   "vx": "0x1.3370140000000p+5",
+   "vy": "0x1.d5c62e0000000p+3",
+   "x": "0x1.035d300000000p+1",
+   "y": "0x1.663d4a0000000p+2"
+  },
+  "prm": {
+   "allow_stop": false,
+   "drag": 0.35,
+   "drag_min": 1.0,
+   "gravity": 30.0,
+   "mult": 0.75,
+   "sim": 1.25,
+   "sim_gravity": 0
+  },
+  "state": {
+   "vx": 40.0,
+   "vy": 20.0,
+   "x": -4.0,
+   "y": 3.0
+  },
+  "turn_per_frame": 0.002
+ }
+]

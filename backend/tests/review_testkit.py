@@ -8,6 +8,7 @@ at it.
 """
 
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -41,6 +42,10 @@ def cmp(a, rel, b):
     return {"op": "op.cmp", "args": {"a": a, "rel": rel, "b": b}}
 
 
+# A deal profile identity (a full sha256), the key of the card weights' one value set.
+PROFILE = hashlib.sha256(b"synthetic deal profile").hexdigest()
+
+
 def synthetic_doc():
     """A draft with synthetic values: a one-record rule, a two-seat rule and
     its negation, a note, and one sitting rule."""
@@ -54,6 +59,14 @@ def synthetic_doc():
                                   "own_window_ms": 222},
             "params.age_sum": {"budget_slack_ms": 17},
             "params.blocks_missing": {"in_flight_ms": 1777},
+            # the identity-clock and card families, one value set each (the card
+            # weights per deal profile): every family the registry declares
+            "params.ic_tdg": {"cut_bin": 3},
+            "params.ic_cad": {"window": 5},
+            "params.ic_fit": {"min_points": 4, "min_span_ms": 4444},
+            "params.ic_point": {"rung": 2},
+            "params.card_weights": {PROFILE: {"common": 5, "uncommon": 3, "rare": 1}},
+            "params.card_window": {"window_days": 7},
         },
         "rules": [
             {"id": ID_PUB, "scope": "game", "subject": "seat", "effect": "flag", "post": False,

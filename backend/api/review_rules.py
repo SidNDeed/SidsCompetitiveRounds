@@ -51,6 +51,7 @@ import review_boot as rb
 import card_measures as cm
 import review_measures as rm
 import identity_clock_measures as icm
+import combat_measures as cbm
 
 CONTRACT_BOUNDS = {
     "files_max": 64,
@@ -94,8 +95,8 @@ CLOSURE_DOMAIN = b"scr-review-whole-closure\n"
 # rules call. A revision's closure names at least these; any further file it
 # names must be one review_boot executes (review_boot.SOURCE_ONLY), or the
 # load refuses.
-CODE_REQUIRED = ("card_measures.py", "identity_clock_measures.py", "review_boot.py",
-                 "review_measures.py", "review_rules.py")
+CODE_REQUIRED = ("card_measures.py", "combat_measures.py", "identity_clock_measures.py",
+                 "review_boot.py", "review_measures.py", "review_rules.py")
 
 _HEX = re.compile(r"[a-f\d]+")
 _REV_DIR = re.compile(r"rules-[a-f\d]{%d}" % _BOUNDS["rev_hex"])
@@ -365,6 +366,10 @@ class Ruleset:
     def card_rules(self):
         return [r for r in self.rules if r.scope == "card"]
 
+    @property
+    def combat_rules(self):
+        return [r for r in self.rules if r.scope == "combat"]
+
     def rule(self, rule_id):
         return next((r for r in self.rules if r.id == rule_id), None)
 
@@ -405,6 +410,17 @@ class Ruleset:
         if entry is None:
             return None
         return entry.impl[-1](self, case, budget)
+
+    # Combat rules run through the combat core the revision bound; a
+    # revision with no combat rule binds none and evaluates nothing here.
+    def evaluate_combat(self, records, budget=None):
+        core = self.core.get(COMBAT_CORE)
+        if core is None:
+            return [], [], 0
+        return core.impl[0](self, records, budget)
+
+    def run_combat_selftest(self, cases, deadline):
+        return self.core[COMBAT_CORE].impl[-1](self, cases, deadline)
 
     def render_line(self, rule, items):
         return self.core["core.render"].impl[0](rule, items)
@@ -709,6 +725,15 @@ def compile_rules(doc, bind, data) -> Ruleset:
             r.when = _compile_pred(raw["when"], bind, r.subject, data)
             r.sitting = None
             r.show = [(s[0], _compile_expr({"m": s[1]}, bind, r.subject)[1]) for s in show]
+        elif r.scope == "combat":
+            if set(raw) != RULE_KEYS | {"subject", "when"}:
+                raise Refused("malformed", "rule keys")
+            r.subject = raw["subject"]
+            if r.subject not in rm.COMBAT_SUBJECTS:
+                raise Refused("malformed", "subject")
+            r.when = _compile_pred(raw["when"], bind, r.subject, data)
+            r.sitting = None
+            r.show = [(s[0], _compile_expr({"m": s[1]}, bind, r.subject)[1]) for s in show]
         elif r.scope == "sitting":
             if set(raw) != RULE_KEYS | {"sitting"}:
                 raise Refused("malformed", "rule keys")
@@ -736,6 +761,8 @@ def compile_rules(doc, bind, data) -> Ruleset:
     # against this code.
     if rs.card_rules:
         rs.core[CARD_CORE] = bind(CARD_CORE, "core")
+    if rs.combat_rules:
+        rs.core[COMBAT_CORE] = bind(COMBAT_CORE, "core")
     families = {n for n, k in bind.kinds.items() if k == "params"}
     if not families <= set(rs.params):
         raise Refused("malformed", "measure_params missing a family a measure needs")
@@ -1018,6 +1045,7 @@ def run_selftest(rs, cases, deadline):
 
 CORE_ENTRIES = ("core.game", "core.render", "core.sitting")
 IDENTITY_CORE = "core.identity"
+COMBAT_CORE = "core.combat"
 
 
 def evaluate_identity(rs, records, regs, budget=None):
@@ -1094,6 +1122,74 @@ def run_identity_selftest(rs, cases, deadline):
         if errors or sorted(fired) != sorted(case["fire"]):
             raise Refused("selftest")
     _check_time(deadline)
+
+
+def evaluate_combat(rs, records, budget=None):
+    """Every combat rule of `rs` over one game's combat records (one or two,
+    of one stable key and one canonical seat pair). The rows each rule's
+    subject ranges over come from the public pair view. Returns (findings,
+    fired, errors) exactly as evaluate_game does."""
+    subjects = cbm.combat_subjects(cbm.pair_view(records))
+    memo = {}
+    findings, notes, fired, errors = [], [], [], 0
+    for rule in rs.combat_rules:
+        try:
+            items = []
+            for ctx in subjects.get(rule.subject, ()):
+                if eval_pred(rule.when, ctx, memo, rs, budget) is True:
+                    items.append({label: _measure_value(m, ctx, memo, rs) for label, m in rule.show})
+        except _WorkExceeded:
+            raise
+        except Exception:                 # noqa: BLE001 -- one rule cannot stop another
+            errors += 1
+            continue
+        if not items:
+            continue
+        fired.append(rule.id)
+        if rule.effect == "flag":
+            findings.append((rule, {"items": items}))
+        else:
+            notes.append(rs.render_line(rule, items))
+    if notes:
+        for _rule, det in findings:
+            det["notes"] = list(notes)
+    return findings, fired, errors
+
+
+def run_combat_selftest(rs, cases, deadline):
+    """Each synthetic combat case (its records checked against the wire
+    layout first) must fire exactly the combat rule ids it lists."""
+    budget = _Budget(_BOUNDS["work_max"])
+    for case in cases:
+        _check_time(deadline)
+        if (not isinstance(case, dict) or set(case) != {"combat", "fire"}
+                or not isinstance(case["combat"], list)):
+            raise Refused("malformed", "selftest case")
+        records = []
+        for r in case["combat"]:
+            try:
+                # A stored case is JSON whose key order the store does not
+                # keep; the key SETS (record and omit) must be the layout's,
+                # and the record is checked in the layout's order.
+                rec = r["rec"]
+                if not isinstance(rec, dict) or set(rec) != set(cbm.KEYS):
+                    raise cbm.Refusal("record")
+                rec = {k: rec[k] for k in cbm.KEYS}
+                if isinstance(rec["omit"], dict) and set(rec["omit"]) == set(cbm.OMIT_KEYS):
+                    rec["omit"] = {k: rec["omit"][k] for k in cbm.OMIT_KEYS}
+                cbm.check_record(rec)
+                records.append({"seat": r["seat"], "other": r["other"], "rec": rec})
+            except (cbm.Refusal, KeyError, TypeError):
+                raise Refused("malformed", "selftest record")
+        try:
+            _f, fired, errors = rs.evaluate_combat(records, budget=budget)
+        except _WorkExceeded:
+            raise Refused("work", "selftest work")
+        if errors or sorted(fired) != sorted(case["fire"]):
+            raise Refused("selftest")
+    _check_time(deadline)
+
+
 CARD_CORE = "core.card"
 
 
@@ -1107,6 +1203,9 @@ def _register_core():
                                                   _measure_value, icm.icm_subjects,
                                                   _identity_regs, run_identity_selftest)))
     rm._register(rm.Entry("core", CARD_CORE, (evaluate_card, card_case)))
+    rm._register(rm.Entry("core", COMBAT_CORE, (evaluate_combat, eval_pred, eval_expr,
+                                                _measure_value, cbm.pair_view, cbm.combat_subjects,
+                                                cbm.check_record, run_combat_selftest)))
 
 
 if __name__ != "__main__" and "core.game" not in rm.REGISTRY:
@@ -1252,12 +1351,18 @@ def load_dir(rdir: str, *, deadline: float | None = None) -> Ruleset:
             or not isinstance(selftest["cases"], list) or len(selftest["cases"]) > _BOUNDS["cases_max"]):
         raise Refused("malformed", "selftest")
     identity_cases = [c for c in selftest["cases"] if isinstance(c, dict) and "identity" in c]
-    game_cases = [c for c in selftest["cases"] if not (isinstance(c, dict) and "identity" in c)]
+    combat_cases = [c for c in selftest["cases"] if isinstance(c, dict) and "combat" in c]
+    game_cases = [c for c in selftest["cases"]
+                  if not (isinstance(c, dict) and ("identity" in c or "combat" in c))]
     rs.run_selftest(game_cases, deadline)
     if identity_cases and not rs.identity_rules:
         raise Refused("malformed", "identity selftest cases without an identity rule")
     if rs.identity_rules:
         rs.run_identity_selftest(identity_cases, deadline)
+    if combat_cases and not rs.combat_rules:
+        raise Refused("malformed", "combat selftest cases without a combat rule")
+    if rs.combat_rules:
+        rs.run_combat_selftest(combat_cases, deadline)
     rs.run_sitting_selftest()
     rs.rev = digest[: _BOUNDS["rev_hex"]]
     rs.digest = digest

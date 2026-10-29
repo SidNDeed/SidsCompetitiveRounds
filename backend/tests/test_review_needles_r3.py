@@ -231,7 +231,18 @@ def test_m4_every_argument_kind_of_the_registry_is_classified_and_every_value_ki
     registry declares is either value-bearing or a name, so a new kind fails
     here until the needles cover it; and the shapes revision uses an argument
     of every value-bearing kind."""
-    kinds = {k for e in rm.REGISTRY.values() for _n, k in (e.args or ())}
+    # every entry is classified: operators and sittings carry (name, kind)
+    # arguments; a params family's args are its profile keys (card_measures
+    # PROFILE_KEYED), strings the family does not list as parameter keys; no
+    # other kind carries arguments, so a misplaced or unknown kind fails here
+    kinds = set()
+    for e in rm.REGISTRY.values():
+        if e.kind in ("operator", "sitting"):
+            kinds |= {k for _n, k in e.args}
+        elif e.kind == "params":
+            assert all(isinstance(a, str) and a not in e.data for a in e.args), (e.name, e.args)
+        else:
+            assert not e.args, (e.name, e.kind, e.args)
     assert kinds <= VALUE_KINDS | NAME_KINDS, kinds - VALUE_KINDS - NAME_KINDS
     used = set()
     doc = shapes_doc()
@@ -4791,6 +4802,26 @@ _MEASURED_CLEAN = {"review_needles.py": [
         ('snapshot_rows', 'implicit iteration through unresolved base snap'),
         ('main', 'call of unlisted callable review_tripwire.verdict through unresolved base review_tripwire.verdict'),
         ('main', 'implicit truth test through unresolved base review_tripwire.verdict()'),
+        ('_profile_values',
+         'call of protocol-running callable isinstance through unresolved base key'),
+        ('_profile_values',
+         'call of protocol-running callable isinstance through unresolved base v'),
+        ('_profile_values', 'call of protocol-running callable str through unresolved base fam'),
+        ('_profile_values', 'implicit iteration through unresolved base values.items()'),
+        ('_profile_values',
+         "implicit result disposal through unresolved base vals.add(v, _keys(k) or _keys(str(fam).rsplit('.', 1)[-1]), str(fam), 'measure parameter')"),
+        ('_profile_values',
+         "implicit subscript read through unresolved base str(fam).rsplit('.', 1)"),
+        ('_profile_values', 'implicit truth test through unresolved base _keys(k)'),
+        ('_profile_values',
+         'implicit truth test through unresolved base isinstance(key, str) and _PROFILE_ID.fullmatch(key)'),
+        ('_profile_values', 'method call add through unresolved base vals'),
+        ('_profile_values',
+         'unproven pure method call fullmatch through unresolved base _PROFILE_ID'),
+        ('_profile_values', 'unproven pure method call items through unresolved base values'),
+        ('_profile_values', 'unproven pure method call rsplit through unresolved base str(fam)'),
+        ('_value_items',
+         'implicit truth test through unresolved base isinstance(v, dict) and _profile_values(fam, k, v, vals)'),
 ]}
 
 

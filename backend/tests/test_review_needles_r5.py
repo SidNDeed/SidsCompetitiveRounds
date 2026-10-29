@@ -199,9 +199,12 @@ def _positions():
     entries = rm.REGISTRY.values()
     for e in sorted((e for e in entries if e.kind == "params"), key=lambda e: e.name):
         for k in sorted(e.data):
-            def place(x, fam=e.name, k=k):
+            def place(x, fam=e.name, k=k, keyed=bool(e.args)):
                 doc = _base_doc()
-                doc["measure_params"][fam][k] = x
+                values = doc["measure_params"][fam]
+                if keyed:       # one value set per deal profile (card_measures PROFILE_KEYED)
+                    values = values[tk.PROFILE]
+                values[k] = x
                 doc["rules"] = [_game_rule(tk.cmp(tk.M(MEASURE), "gt", tk.M(MEASURE)))]
                 return doc, {}, {}
             out.append(("param %s.%s" % (e.name, k), place, k))

@@ -8,3 +8,5 @@ backend/tests/fixtures/seat_evidence_client_b7/** -text
 tools/kept_view_census/classes.tsv whitespace=-blank-at-eol
 # The card draw fixtures are the client lane's generated files, accepted byte for byte.
 backend/tests/fixtures/card_evidence/** -text
+# The combat evidence canonical fixtures are reproduced byte for byte by the client.
+backend/tests/fixtures/combat_evidence/** -text
