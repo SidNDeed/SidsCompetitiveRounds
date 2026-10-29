@@ -149,15 +149,20 @@ row("S6", "test_s6_answers_and_the_lobby_lock", [
          '    lob, k = await _lock_of(db, lobby_id)\n'))))
 
 # -- S7 --------------------------------------------------------------------
-_CARRY = ('    await ctx.db.execute(text(\n'
-          '        "UPDATE ffa_bets SET lobby_id = :new WHERE lobby_id = :old AND settled_at IS NULL"),\n'
-          '        {"new": new, "old": old})\n')
+# v1.41.0 merged fix 1b (2ee832a8): the carry runs only for a ranked-locked
+# parent (`if _locked_ranked:`), one level deeper, its WHERE clause on its own
+# line; the else branch refunds. Re-anchored at main 9a2dbb28.
+_CARRY = ('        await ctx.db.execute(text(\n'
+          '            "UPDATE ffa_bets SET lobby_id = :new"\n'
+          '            " WHERE lobby_id = :old AND settled_at IS NULL"),\n'
+          '            {"new": new, "old": old})\n')
 row("S7", "test_s7_reform_carries_wagers_and_refunds_none", [
     M("refund_at_reform", "S7 carried",
-      E(MAIN, _CARRY, '    await _reconcile_ffa_lobby_bets(ctx.db, old, "assembly reformed")\n'),
+      E(MAIN, _CARRY, '        await _reconcile_ffa_lobby_bets(ctx.db, old, "assembly reformed")\n'),
       note="today's refund at the close in place of the carry"),
     M("carry_skipped", "S7 carried",
-      E(MAIN, _CARRY, '')),
+      E(MAIN, _CARRY, '        pass\n'),
+      note="the carry branch emptied (a bare pass: the if _locked_ranked block must still parse)"),
 ], T("conjunct_order",
      E(MAIN, _CARRY, _CARRY.replace("WHERE lobby_id = :old AND settled_at IS NULL",
                                     "WHERE settled_at IS NULL AND lobby_id = :old"))))
@@ -308,7 +313,7 @@ row("S12", "test_s12_start_short_is_one_transaction_and_refunds_none", [
 
 # -- S12b ------------------------------------------------------------------
 _LR_END = ('        raise HTTPException(status_code=503, detail="admission_contended")\n'
-           '    return room, region, ordered\n')
+           '    return room, region, ordered, _locked_ranked\n')
 _RF_UPD = ('        "UPDATE ffa_lobbies SET status = \'canceled\', invalidation_reason = '
            '\'assembly_reformed\',"\n')
 row("S12b", "test_s12b_reform_is_one_transaction", [
@@ -676,7 +681,7 @@ _M355_TAIL = ("    IF cardinality(missing) > 0 THEN\n"
               "\n"
               "COMMIT;\n")
 _RESET_END = '              "arrived_at_dissolve"),\n}\n'
-_COPY_AND_LINE = '    "COPY_AND": ("kills_tiebreak", "sudden_death"),\n'
+_COPY_AND_LINE = '    "COPY_AND": ("is_ranked", "kills_tiebreak", "sudden_death"),\n'
 row("S27", "test_s27_the_schema_census_both_directions", [
     M("fixture_migration_column", "S27 live not classed",
       E(M355, _M355_TAIL, _M355_TAIL.replace(
@@ -686,8 +691,8 @@ row("S27", "test_s27_the_schema_census_both_directions", [
       E(MAIN, _RESET_END, _RESET_END.replace('"arrived_at_dissolve"),',
                                              '"arrived_at_dissolve", "live_top_points"),'))),
 ], T("class_order",
-     E(MAIN, _COPY_AND_LINE, _COPY_AND_LINE.replace('("kills_tiebreak", "sudden_death")',
-                                                   '("sudden_death", "kills_tiebreak")'))))
+     E(MAIN, _COPY_AND_LINE, _COPY_AND_LINE.replace('"kills_tiebreak", "sudden_death")',
+                                                   '"sudden_death", "kills_tiebreak")'))))
 
 # -- S27b ------------------------------------------------------------------
 _INS_COLS = [c.strip() for c in _INS_HEAD.split("(", 1)[1].rsplit(")", 1)[0].split(",")
@@ -1614,10 +1619,10 @@ _ASM_WORK_RELOAD = ('    await _asm_census_write(ctx, me, state, req, resolved, 
                     '    me = ctx.seat_of(pid)\n')
 _LEFT_TWIN = (
     E(MAIN, '    left = ASM_TXN_DEADLINE_S * 1000 - _asm_elapsed_ms(t0)\n', '    left = _asm_left_ms(t0)\n'),
-    E(MAIN, "\n\nasync def _asm_begin(db, t0) -> None:\n",
-      "\n\ndef _asm_left_ms(t0) -> int:\n"
-      "    return ASM_TXN_DEADLINE_S * 1000 - _asm_elapsed_ms(t0)\n"
-      "\n\nasync def _asm_begin(db, t0) -> None:\n"))
+    E(MAIN, '\n\nasync def _asm_begin(db, t0, *, stage="pool") -> None:\n',
+      '\n\ndef _asm_left_ms(t0) -> int:\n'
+      '    return ASM_TXN_DEADLINE_S * 1000 - _asm_elapsed_ms(t0)\n'
+      '\n\nasync def _asm_begin(db, t0, *, stage="pool") -> None:\n'))
 row("S54", "test_s54_the_lock_deadline_ordered", [
     M("drop_lock_timeout", "S54 i log",
       E(MAIN, _SETCFG, '        "SELECT set_config(\'statement_timeout\', CAST(:v AS text), true)"),\n'),
@@ -2294,8 +2299,14 @@ _M1B_CHECK = ('    if me["released_at"] is None:\n'
               '        if (marked.rowcount or 0) > 0:\n'
               '            held["mark"] = "lock"\n'
               + _M1B_LEASE)
+# RJ server re-land: the log line closes with the carried-seat chain's
+# dropped list (one more line), and the chain release sits between the locked
+# step and the log, so M1b's round-two mutant edits the two apart.
+_M1B_CARRIED = ('            + (f" carried_dropped={\',\'.join(_asm_id8(x) for x in dropped)}" '
+                'if dropped else ""))\n')
 _M1B_PRINT = ('    ctx.log(f"release slot={me[\'slot\']} why={req.why} lease={held[\'lease\']} "\n'
-              '            f"row={0 if row is None else 1} mark={held[\'mark\']}")\n')
+              '            f"row={0 if row is None else 1} mark={held[\'mark\']}"\n'
+              + _M1B_CARRIED)
 row("M1", "test_m1_the_release_marker_and_lease_are_one_unit", [
     M("round_one_ordering", "M1 no record",
       E(MAIN, _M1_UNIT, _M1_ROUND1), E(MAIN, _REL_ME, _M1_WORK1), E(MAIN, _M1B_CHECK, ""),
@@ -2328,10 +2339,11 @@ _M1B_PRE_R2 = ('        marked = await db.execute(text(\n'
                '        await _asm_begin(db, t0)\n'
                '    return _pre\n')
 _M1B_PRINT_R2 = ('    ctx.log(f"release slot={me[\'slot\']} why={req.why} lease={held[\'lease\']} "\n'
-                 '            f"row={0 if row is None else 1}")\n')
+                 '            f"row={0 if row is None else 1}"\n'
+                 + _M1B_CARRIED)
 row("M1b", "test_m1b_a_release_racing_the_start_closes_under_the_lock", [
     M("round_two_release", "M1b marker",
-      E(MAIN, _M1B_CHECK + _M1B_PRINT, _M1B_PRINT_R2), E(MAIN, _M1_UNIT, _M1B_PRE_R2),
+      E(MAIN, _M1B_CHECK, ''), E(MAIN, _M1B_PRINT, _M1B_PRINT_R2), E(MAIN, _M1_UNIT, _M1B_PRE_R2),
       note="the negative control: de70bb4's release restored, so the release whose "
            "pre-step met Start's uncommitted seat row answers 200 with no marker, its lease "
            "kept"),
@@ -2388,12 +2400,14 @@ row("M2b", "test_m2b_a_refused_attest_after_a_keeps_the_expiry", [
      E(MAIN, _M2B_SHORT, '    if lob is None or not lob["short_started_at"]:\n')))
 
 _CLS_COPY = ('    "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap",\n'
-             '             "same_card_rule", "is_ranked", "settings_known", "settings_changed_at",\n')
+             '             "same_card_rule", "settings_known", "settings_changed_at",\n')
 _CLS_RESET_END = ('              "dissolve_after_ms", "present_at_dissolve", "absent_at_dissolve",\n'
                   '              "arrived_at_dissolve"),\n')
 row("N12a", "test_n12_the_46_column_partition", [
     M("a_column_moved", "N12 classes",
-      E(MAIN, _CLS_COPY, _CLS_COPY.replace('"is_ranked", ', "")),
+      # RJ server re-land: is_ranked sits in COPY_AND now (the ranked lock);
+      # the moved column stays is_ranked, taken out of COPY_AND.
+      E(MAIN, _COPY_AND_LINE, _COPY_AND_LINE.replace('"is_ranked", ', "")),
       E(MAIN, _CLS_RESET_END, _CLS_RESET_END.replace('"arrived_at_dissolve"),',
                                                      '"arrived_at_dissolve", "is_ranked"),'))),
 ], T("order_within_a_class",

@@ -36,6 +36,8 @@ PL = "plugin/Plugin.cs"
 FA = "plugin/FfaAssembly.cs"
 FLE = "plugin/FfaLateEntry.cs"
 FLR = "plugin/FfaLateRules.cs"
+FRER = "plugin/FfaReadmitEntryRules.cs"
+FRR = "plugin/FfaReportRules.cs"
 FM = "plugin/FfaMode.cs"
 FMS = "plugin/FfaMapScale.cs"
 FCS = "plugin/FfaCardSequence.cs"
@@ -328,8 +330,14 @@ def MV(rel, sigs, what, to, after=True):
 
 def RR(rel, old, new, count=1):
     """An exact replacement on the raw text (an inactive #if branch, which
-    the stripped text blanks)."""
-    n = _src(rel).count(old)
+    the stripped text blanks), counted in the file's own line ends: the
+    anchor is written in LF and a CRLF checkout must not read it as stale
+    (learning #1043, the rule cf_controls.apply_edits applies, idempotent)."""
+    text = _src(rel)
+    nl = "\r\n" if "\r\n" in text else "\n"
+    old = old.replace("\r\n", "\n").replace("\n", nl)
+    new = new.replace("\r\n", "\n").replace("\n", nl)
+    n = text.count(old)
     if n != count:
         return _stale(rel, "%d raw match(es) of %r" % (n, old[:60]))
     return E(rel, old, new, count)
@@ -697,8 +705,12 @@ row("K13", N("k13"), [
 # ---------------------------------------------------------------- K11, WP1, K46
 
 row("K11", N("k11"), [
+    # RJ readmission C4z (c54227bb): Caps() returns through the pure rule
+    # FfaReadmitEntryRules.CapsList, so the advertise mutant edits that rule.
     M("advertise_without_adm", "K11 advertise",
-      R(FA, (), 'if (asm && adm) return CapsToken + "," + AdmCapsToken;', 'if (asm) return CapsToken + "," + AdmCapsToken;')),
+      R(FRER, ("internal static string CapsList(",),
+        'if (asm && adm) return asmToken + "," + admToken + "," + RdmCapsToken;',
+        'if (asm) return asmToken + "," + admToken + "," + RdmCapsToken;')),
     M("asm_always", "K11 asm source", R(FA, (), "bool asm = AsmCapable();", "bool asm = true;")),
     M("quarantine_without_damage", "K11 quarantine attached",
       R(FLE, (), "&& RegisterPostfixAttached && damage;", "&& RegisterPostfixAttached;")),
@@ -1029,7 +1041,8 @@ row("K38", N("k38"), [
       MV(FM, _DSG, "if (FfaLateEntry.MasterMaySend()) yield return FfaLateEntry.MasterBoundary();",
          'catch (Exception ex) { Plugin.Log.LogError($"[FFA] CallInNewMap(start): {ex.Message}"); }')),
     M("ack_skipped", "K38 stamp",
-      R(FLE, _MB, "ackComplete = FfaLateRules.AckComplete(barrier, PresentActors(), _acks, proposal, self, out missing);",
+      R(FLE, _MB, "ackComplete = FfaLateRules.AckComplete(barrier, PresentActors(), _acks, proposal, self, out missing)"
+                  " && ReadmitBoundaryReady(prepared);",
         "ackComplete = true; missing = new List<int>();")),
     M("fence_after_raise", "K38 stamp", MV(FLE, _MB, _STAMPFENCE, _CALLIN)),
     M("refusal_acks", "K38 ack", D(FLE, _OP, _REFUSED)),
@@ -1057,7 +1070,11 @@ row("K38", N("k38"), [
 _TRF = ("bool TryReportFfaMatch(",)
 _LIS = ("internal static bool LateInSitting(",)
 _LIG = ("internal static bool LaggedInGame(",)
-_SELF = "bool selfBarred = FfaLateEntry.LateInSitting(ownActor) || FfaLateEntry.LaggedInGame(ownActor, reportGame);"
+# RJ readmission C3 (a9c019dd): the election and the seat's self-fallback are
+# the pure rule FfaReportRules.FilerOf; the lag lambda is its call's argument
+# in TryReportFfaMatch.
+_FO = ("internal static string FilerOf(",)
+_SELF = "bool selfBarred = (late != null && late(ownActor)) || (lagged != null && lagged(ownActor));"
 _LAGCALL = "FfaLateRules.LagNames(CrOf(ActorByNumber(actor), PropLag), Lobby8, g, 0)"
 row("K39", N("k39"), [
     M("own_late_needs_game", "K39 local records",
@@ -1066,15 +1083,16 @@ row("K39", N("k39"), [
     M("late_any_lobby", "K39 late lobby",
       R(FLE, _LIS, "return !string.IsNullOrEmpty(v) && v == Lobby8;", "return !string.IsNullOrEmpty(v);")),
     M("fallback_unbarred", "K39 election",
-      R(GSW, _TRF, "if (lowest == null && !selfBarred) lowest = localSteamId;", "if (lowest == null) lowest = localSteamId;")),
+      R(FRR, _FO, "if (lowest == null && !selfBarred) lowest = localSid;", "if (lowest == null) lowest = localSid;")),
     M("barred_by_property", "K39 election",
-      R(GSW, _TRF, _SELF, "bool selfBarred = PhotonNetwork.LocalPlayer.CustomProperties.ContainsKey(FfaLateEntry.PropLate);")),
+      R(FRR, _FO, _SELF,
+        "bool selfBarred = Photon.Pun.PhotonNetwork.LocalPlayer.CustomProperties.ContainsKey(FfaLateEntry.PropLate);")),
     M("election_ignores_lag", "K39 election",
-      R(GSW, _TRF, "a => FfaLateEntry.LaggedInGame(a, reportGame), a => FfaLateEntry.LateInSitting(a));",
-        "a => false, a => FfaLateEntry.LateInSitting(a));")),
+      R(GSW, _TRF, "a => FfaLateEntry.LaggedInGame(a, reportGame), a => FfaLateEntry.LateInSitting(a),",
+        "a => false, a => FfaLateEntry.LateInSitting(a),")),
     M("lag_any_game", "K39 lag lobby",
       R(FLE, _LIG, _LAGCALL, "FfaLateRules.LagNames(CrOf(ActorByNumber(actor), PropLag), Lobby8, -1, 0)")),
-    M("self_lag_unbarred", "K39 election", R(GSW, _TRF, _SELF, "bool selfBarred = FfaLateEntry.LateInSitting(ownActor);")),
+    M("self_lag_unbarred", "K39 election", R(FRR, _FO, _SELF, "bool selfBarred = late != null && late(ownActor);")),
 ], T("lag_prop_local",
      R(FLE, _LIG, "return " + _LAGCALL + ";",
        "string lagProp = CrOf(ActorByNumber(actor), PropLag);\n^return FfaLateRules.LagNames(lagProp, Lobby8, g, 0);")),
@@ -1291,8 +1309,9 @@ row("K47", N("k47"), [
     M("first_freeze_fighters", "K47 three freezes",
       R(GSW, (), "RoomActors.FreezeFighterRoster(lockIds ?? sids);", "RoomActors.FreezeFighterRoster(sids);")),
 ], T("gated_local",
-     R(GSW, ("private static List<string> GatedFreezeIds(",), "if (!FfaAssembly.IsGatedRoom(room)) return null;",
-       "bool gated = FfaAssembly.IsGatedRoom(room);\n^if (!gated) return null;"),
+     R(GSW, ("private static List<string> GatedFreezeIds(",),
+       "if (!FfaAssembly.IsGatedRoom(room)) return TeamHoldRules.LockRoster(room, PresentFighterIds);",
+       "bool gated = FfaAssembly.IsGatedRoom(room);\n^if (!gated) return TeamHoldRules.LockRoster(room, PresentFighterIds);"),
      note="deviation: the gated test through a local"),
     extra=XT)
 
@@ -1343,13 +1362,14 @@ row("WP5", N("wp5"), [
 ], T("modifier_order", R(FLE, (), 'internal const string PropLag = "cr_lag";', 'const internal string PropLag = "cr_lag";')),
     extra=XT)
 
-_TAIL = ("var tail = new object[] { LateMarker, ptot, kl, g, level, new string[0], (int)seed, PointK, PointEpoch, "
+# RJ readmission C4 (05425cd4): the picks element is the local `picks`.
+_TAIL = ("var tail = new object[] { LateMarker, ptot, kl, g, level, picks, (int)seed, PointK, PointEpoch, "
          "AppliedScaleTag() };")
 row("WP6", N("wp6"), [
     M("tail_order_swapped", "WP6 append order", R(FLE, (), _TAIL, _TAIL.replace("ptot, kl", "kl, ptot"))),
 ], T("tail_split",
      R(FLE, (), _TAIL, "var tail = new object[] { LateMarker, ptot, kl, g, level,\n"
-                       "^^new string[0], (int)seed, PointK, PointEpoch, AppliedScaleTag() };")),
+                       "^^picks, (int)seed, PointK, PointEpoch, AppliedScaleTag() };")),
     extra=XT)
 
 
