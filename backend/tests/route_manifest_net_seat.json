@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "6914fc57faf3600a0d4f427a18c6286d6c8b4d39"
+          "b99b8985703d1b166bf58d7c3097189916d055b5"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3650,7 +3650,7 @@
           ],
           "main",
           "admin_seat_evidence",
-          "eee8a3ec7854bd69541936320d0c0f656ce49271"
+          "776e3b54b9fb15922de3383d5cbc22e41f3c1885"
         ],
         [
           "/api/v1/client/compat-outcome",
@@ -3884,7 +3884,7 @@
           ],
           "main",
           "admin_card_evidence",
-          "c5d5c50528e193ddd7f34b8bb5823ce2ecd7e624"
+          "43d1c67ac7fc8068294eab5801a4c2d84be5b05f"
         ],
         [
           "/api/v1/admin/card-pool-census",
@@ -3917,7 +3917,7 @@
           ],
           "main",
           "admin_combat_evidence",
-          "4a719471a567fd540eebe0400d037e98be1ff82e"
+          "65ba4598a87bcba28c46b8f563b24e90c34ec681"
         ],
         [
           "/api/v1/matches/combat-evidence",
