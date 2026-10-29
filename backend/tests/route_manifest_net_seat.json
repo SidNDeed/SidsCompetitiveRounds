@@ -3839,6 +3839,36 @@
           "7df0ce2e7025b9e76bef3edd3f825f8c8be1308a"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "identity-clock evidence (backend/api/identity_clock_evidence.py, conn_ranges.py; the three routes live in main.py): the evidence route answers fixed status bodies and stores the record, the clock header state and readings, and a connection class word with the range-list revision id (it reads players for the two seats' ids and nothing else); the game-file registration answers a fixed status body; the admin view projects identity_clock_evidence rows (with the two seats' steam ids), identity_clock_games rows (match id and counts), their game-scope findings, the server clock fit and the public pair view computed from the stored records; it reads only id and photon_room_id of matches. The evaluation that reads the attach lookup's match columns (ice_evaluate_one) runs from review_worker_loop and is not in any of these routes' reached surface. Static source review: no W1 private Match column is read by or reaches any output.",
+      "routes": [
+        [
+          "/api/v1/admin/game-file-digests",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_register_game_file_digest"
+        ],
+        [
+          "/api/v1/admin/identity-clock-evidence",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_identity_clock_evidence"
+        ],
+        [
+          "/api/v1/matches/identity-clock-evidence",
+          [
+            "POST"
+          ],
+          "main",
+          "submit_identity_clock_evidence"
+        ]
+      ]
     }
   ],
   "entry_points": {

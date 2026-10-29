@@ -1932,7 +1932,15 @@ def test_the_helper_closure_stays_affordable():
     # on main by name: the three health words, the match_hold router and
     # MODES, and the match_hold and match_report_window import lines).
     # Inside 676, so the bound stays.
-    assert all_worst <= 676, f"worst closure {all_worst} of {total}"
+    # identity-clock evidence re-land (2026-10-29), claude/identity-clock-server
+    # refit onto main a38a6b5a: 683 measured at GET /api/v1/health (665 on
+    # main; +18 by name: main's _IDENTITY_CLOCK_ROUTES, _conn_ranges and
+    # _identity_clock_health_word; conn_ranges' _CR_STATE and
+    # ranges_health_word with its hashlib, os, stat and time imports;
+    # identity_clock_evidence's asyncio, datetime, hashlib, hmac, json, rm,
+    # text and timezone imports; and identity_clock_measures.rm). The bound
+    # moves to 717, ~5% over the measurement, for that reason and no other.
+    assert all_worst <= 717, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):
