@@ -8,12 +8,34 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine as _sqlalchemy_create_async_engine
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql+asyncpg://comp_rounds:changeme@localhost:5432/competitive_rounds",
 )
+
+
+# Every engine this module builds comes from the create_async_engine below:
+# SQLAlchemy's, with hide_parameters=True added (fence round 2, M1). A
+# statement that fails while it executes -- cancelled, past its
+# statement_timeout, its connection lost -- raises a DBAPIError, and that
+# exception's text is what reaches a log: uvicorn writes it, traceback and
+# all, under "Exception in ASGI application" when a route does not catch it,
+# and a print of the exception shows the same text. SQLAlchemy's default text
+# includes the statement's bound values ("[parameters: (...)]"), so a failed
+# lookup by Discord id put the id in the error log. With the flag that part
+# reads "[SQL parameters hidden due to hide_parameters=True]" for every
+# statement any engine here runs, whichever route runs it; the statement text
+# itself, placeholders and all, still appears. Not covered: a value
+# PostgreSQL writes into its own message or DETAIL line (asyncpg puts DETAIL
+# into the exception's text, and a key violation's DETAIL names the key's
+# value), a value formatted into the SQL text instead of bound, and code that
+# formats exc.params itself.
+def create_async_engine(url, **options):
+    return _sqlalchemy_create_async_engine(url, hide_parameters=True, **options)
+
 
 # Pool sizing: under load (queue polls every 2s × 60 active testers + the
 # match-submit / live-bets / leaderboard routes overlapping) the prior
