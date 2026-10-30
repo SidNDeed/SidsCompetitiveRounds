@@ -28,6 +28,17 @@
 -- is latest and 398 is reapplied). The provenance row is deleted, so a
 -- rerun is a no-op and 398 can be applied again.
 --
+-- LOCK FIRST, THEN COMPARE. The DO's first statements lock every row it
+-- may restore or delete -- the five shop_items rows, the five submissions
+-- and their 398 provenance rows -- FOR NO KEY UPDATE, in id order,
+-- shop_items first (398's order), and holds them to COMMIT. Every
+-- comparison against the provenance row therefore reads committed values
+-- that cannot change before the revert that acts on them: a publication
+-- by a person that commits while this file waits is seen and LEFT ALONE,
+-- never reverted or aborted on an earlier reading. A writer that holds one
+-- of the rows longer than lock_timeout (5 s) aborts this file whole,
+-- changing nothing; rerun it.
+--
 -- `psql -f` does not wrap a file in a transaction, so this file does (#340).
 -- Lock bound (learning #1072): wait 5 s; hold 25 s + 5 s plus the COMMIT's
 -- local completion.
@@ -63,6 +74,24 @@ DECLARE
     undone_ids BIGINT[] := ARRAY[]::BIGINT[];
     pre      INT;
 BEGIN
+    -- Lock first, then compare (see the header).
+    PERFORM 1 FROM shop_items si
+     WHERE si.id IN (SELECT CAST(expected[j][2] AS BIGINT)
+                       FROM generate_subscripts(expected, 1) AS j)
+     ORDER BY si.id
+       FOR NO KEY UPDATE;
+    PERFORM 1 FROM cosmetic_submissions cs
+     WHERE cs.id IN (SELECT CAST(expected[j][1] AS BIGINT)
+                       FROM generate_subscripts(expected, 1) AS j)
+     ORDER BY cs.id
+       FOR NO KEY UPDATE;
+    PERFORM 1 FROM shop_item_release_provenance p
+     WHERE p.migration = '398'
+       AND p.shop_item_id IN (SELECT CAST(expected[j][2] AS BIGINT)
+                                FROM generate_subscripts(expected, 1) AS j)
+     ORDER BY p.shop_item_id
+       FOR NO KEY UPDATE;
+
     FOR i IN 1 .. array_length(expected, 1) LOOP
         v_sub  := CAST(expected[i][1] AS BIGINT);
         v_shop := CAST(expected[i][2] AS BIGINT);

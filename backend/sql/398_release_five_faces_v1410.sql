@@ -63,6 +63,24 @@
 -- the sku and the field of the first row that does not hold the result.
 -- Rollback: rollback_398_release_five_faces_v1410.sql.
 --
+-- LOCK FIRST, THEN JUDGE. Every check reads a row this file later writes:
+-- the five shop_items rows (the flip, the minimum, the description) and
+-- the five submissions (the trigger stamps their published revision). The
+-- DO's first statements lock all ten, FOR NO KEY UPDATE, in id order,
+-- shop_items before submissions (the order the publishing UPDATE and its
+-- trigger take them), and holds them to COMMIT. That is the weakest row
+-- lock that conflicts with an UPDATE of the same row, so a concurrent
+-- writer (an artist's description, a re-approval) either commits before
+-- the lock is granted, and every later read sees its value, or waits
+-- until this file commits. No decision rests on a value another
+-- transaction can change before the write that acts on it: the
+-- placeholder test, the approved-value checks, the flip and the
+-- provenance row all read the locked rows. Provenance rows for '398' are
+-- written only by this file and rollback_398, which take the same
+-- shop_items locks first, so the two never interleave. A writer that
+-- holds one of the rows longer than lock_timeout (5 s) aborts this file
+-- whole, changing nothing; rerun it.
+--
 -- `psql -f` does not wrap a file in a transaction, so this file does (#340).
 -- Lock bound (learning #1072): wait 5 s; hold 25 s + 5 s plus the COMMIT's
 -- local completion.
@@ -106,6 +124,19 @@ DECLARE
     already   INT := 0;
     flipped_ids BIGINT[] := ARRAY[]::BIGINT[];
 BEGIN
+    -- Lock first, then judge (see the header): every row this DO writes,
+    -- before the first check reads any of them.
+    PERFORM 1 FROM shop_items si
+     WHERE si.id IN (SELECT CAST(expected[j][2] AS BIGINT)
+                       FROM generate_subscripts(expected, 1) AS j)
+     ORDER BY si.id
+       FOR NO KEY UPDATE;
+    PERFORM 1 FROM cosmetic_submissions cs
+     WHERE cs.id IN (SELECT CAST(expected[j][1] AS BIGINT)
+                       FROM generate_subscripts(expected, 1) AS j)
+     ORDER BY cs.id
+       FOR NO KEY UPDATE;
+
     FOR i IN 1 .. array_length(expected, 1) LOOP
         v_sub   := CAST(expected[i][1] AS BIGINT);
         v_shop  := CAST(expected[i][2] AS BIGINT);

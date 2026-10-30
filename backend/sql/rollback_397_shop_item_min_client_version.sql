@@ -10,6 +10,14 @@
 -- needs. Nothing is dropped then; clear the cause (rollback_398) and rerun.
 -- A rerun after a successful drop is a no-op.
 --
+-- LOCK FIRST, THEN COUNT. Each count runs only after its table is held
+-- ACCESS EXCLUSIVE (the mode the drop takes anyway; shop_items first, the
+-- order 398 writes them in): a minimum or provenance row written by a
+-- transaction still open when this file starts is committed before the
+-- lock is granted and is counted, so the refusal sees it; nothing is
+-- dropped on a count read before a concurrent write landed. A table that
+-- no longer exists is not locked, so a rerun still takes no lock.
+--
 -- Same lock bound as 397 (learning #1072): wait 5 s, hold at most 25 s +
 -- 5 s plus the COMMIT's local completion.
 
@@ -23,6 +31,15 @@ DO $r397$
 DECLARE
   n bigint;
 BEGIN
+  IF EXISTS (SELECT 1 FROM pg_attribute a
+              WHERE a.attrelid = to_regclass(format('%I.shop_items', current_schema()))
+                AND a.attname = 'min_client_version'
+                AND NOT a.attisdropped) THEN
+    EXECUTE 'LOCK TABLE shop_items IN ACCESS EXCLUSIVE MODE';
+  END IF;
+  IF to_regclass(format('%I.shop_item_release_provenance', current_schema())) IS NOT NULL THEN
+    EXECUTE 'LOCK TABLE shop_item_release_provenance IN ACCESS EXCLUSIVE MODE';
+  END IF;
   IF EXISTS (SELECT 1 FROM pg_attribute a
               WHERE a.attrelid = to_regclass(format('%I.shop_items', current_schema()))
                 AND a.attname = 'min_client_version'

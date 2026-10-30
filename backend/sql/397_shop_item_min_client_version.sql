@@ -38,6 +38,11 @@
 -- EXCLUSIVE before it looks for the column). The post-check refuses a
 -- same-named column of another type, which the guard alone would accept.
 -- The table is CREATE ... IF NOT EXISTS and its post-check reads its columns.
+-- Two runs at once need no extra lock: a second run whose guard read the
+-- column as missing waits on the first's ACCESS EXCLUSIVE, and ADD COLUMN
+-- IF NOT EXISTS looks again only once it holds that lock, so it adds
+-- nothing; its CREATE TABLE runs after the first has committed. This file
+-- reads no row value before writing one.
 -- Explicit transaction (learning #340).
 --
 -- HOW LONG THE LOCK CAN LIVE (learning #1072). lock_timeout bounds only the

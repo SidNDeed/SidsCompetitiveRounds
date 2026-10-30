@@ -527,3 +527,98 @@ def test_a_failed_post_check_names_the_sku_and_the_field(trigger, fragment):
         return str(ei.value)
     msg = asyncio.run(_with_schema("t398_postcheck_%d" % len(trigger), body))
     assert fragment in msg, msg
+
+
+# ---------------------------------------------------------------- live: concurrent writers
+#
+# Event-gated two-session cases (Codex COSMETICS-R2 F3). Session A opens a
+# transaction and writes a row the migration (session B) reads and later
+# writes; B is started, a third connection waits until B is waiting on a lock,
+# and only then A commits. Every read-then-write in 398 and rollback_398 must
+# act on rows locked before the first check, so B judges A's committed value.
+
+async def _second(name):
+    import asyncpg
+    c = await asyncpg.connect(DSN.replace("+asyncpg", ""))
+    await c.execute("SET search_path TO %s" % name)
+    return c
+
+
+async def _wait_blocked(pid):
+    """True once backend `pid` is waiting on a lock (capped at about 10 s).
+    A separate connection: pg_stat_activity is snapshotted per transaction."""
+    import asyncpg
+    mon = await asyncpg.connect(DSN.replace("+asyncpg", ""))
+    try:
+        for _ in range(200):
+            w = await mon.fetchval(
+                "SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1", pid)
+            if w == "Lock":
+                return True
+            await asyncio.sleep(0.05)
+        return False
+    finally:
+        await mon.close()
+
+
+async def _race(name, conn, writer_sql, migration_sql):
+    """A writes and holds; B (conn) runs the migration; A commits once B
+    waits. Returns B's exception, or None."""
+    a = await _second(name)
+    try:
+        await a.execute("BEGIN")
+        await a.execute(writer_sql)
+        task = asyncio.ensure_future(conn.execute(migration_sql))
+        blocked = await _wait_blocked(conn.get_server_pid())
+        await a.execute("COMMIT")
+        try:
+            await task
+            err = None
+        except Exception as e:                      # B's outcome, judged by the caller
+            err = e
+        assert blocked, "the migration never waited on the writer's row lock"
+        return err
+    finally:
+        await a.close()
+
+
+@live
+def test_an_artist_description_committed_mid_publication_is_kept():
+    """An /artist/set-desc commit that lands while 398 runs must win: 398 must
+    not write its earlier reading of the placeholder over it, and must record
+    no description write for that row."""
+    async def body(conn):
+        await _seed(conn)
+        err = await _race("t398_race_desc", conn,
+                          "UPDATE shop_items SET description = 'Warm and red.' WHERE id = 571",
+                          _sql(MIGRATION))
+        assert err is None, err
+        st = _by_id(await _state(conn))
+        assert st[571]["descr"] == "Warm and red.", st[571]
+        assert _published(st[571]) and st[358]["descr"] == SHIPPED
+        prov = await conn.fetchrow(
+            "SELECT description_before, description_written FROM shop_item_release_provenance"
+            " WHERE migration = '398' AND shop_item_id = 571")
+        assert prov["description_written"] is None, dict(prov)
+        assert prov["description_before"] == "Warm and red.", dict(prov)
+    asyncio.run(_with_schema("t398_race_desc", body))
+
+
+@live
+def test_a_republication_committed_mid_rollback_is_left_alone():
+    """A revision-2 publication of orbit that commits while rollback_398 runs:
+    the rollback must judge orbit on the committed values (left alone, named)
+    and still revert the other four, never abort on a stale reading."""
+    async def body(conn):
+        await _seed(conn)
+        await conn.execute(_sql(MIGRATION))
+        err = await _race("t398_race_rb", conn,
+                          "UPDATE cosmetic_submissions SET approved_placement_revision = 2,"
+                          " published_placement_revision = 2 WHERE id = 70",
+                          _sql(ROLLBACK))
+        assert err is None, err
+        st = _by_id(await _state(conn))
+        assert st[358]["catalog_ready"] and st[358]["pub"] == 2 and st[358]["prov"] == 1
+        assert all(_pre_image(st[i]) for i in (359, 569, 570, 571)), st
+        assert any("face_detail_orbit LEFT ALONE" in n for n in _NOTICES), _NOTICES
+    asyncio.run(_with_schema("t398_race_rb", body))

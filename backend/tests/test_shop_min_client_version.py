@@ -431,3 +431,85 @@ def test_a_gift_to_a_recipient_at_the_floor_lands(monkeypatch):
     _patch_auth(monkeypatch)
     outcome, owned = asyncio.run(_routes("tfloor_gift_new", lambda db: _gift(db, R_NEW)))
     assert outcome == "gifted" and owned == 1, outcome
+
+
+# ---------------------------------------------------------------- live: concurrent writers
+#
+# Event-gated two-session cases (Codex COSMETICS-R2): session A writes and
+# holds, session B runs the migration, a third connection waits until B is
+# waiting on a lock, then A commits.
+
+async def _second(name):
+    import asyncpg
+    c = await asyncpg.connect(_pg_dsn())
+    await c.execute('SET search_path TO "%s"' % name)
+    return c
+
+
+async def _wait_blocked(pid):
+    import asyncpg
+    mon = await asyncpg.connect(_pg_dsn())
+    try:
+        for _ in range(200):
+            w = await mon.fetchval(
+                "SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1", pid)
+            if w == "Lock":
+                return True
+            await asyncio.sleep(0.05)
+        return False
+    finally:
+        await mon.close()
+
+
+async def _race(name, conn, writer_sqls, migration_sql):
+    a = await _second(name)
+    try:
+        await a.execute("BEGIN")
+        for s in writer_sqls:
+            await a.execute(s)
+        task = asyncio.ensure_future(conn.execute(migration_sql))
+        blocked = await _wait_blocked(conn.get_server_pid())
+        await a.execute("COMMIT")
+        try:
+            await task
+            err = None
+        except Exception as e:
+            err = e
+        assert blocked, "the migration never waited on the writer's lock"
+        return err
+    finally:
+        await a.close()
+
+
+@live
+def test_rollback_397_counts_a_floor_committed_while_it_waits():
+    """A floor that commits while rollback_397 runs must be counted: the
+    rollback refuses and drops nothing, never drops a column whose values
+    it read before they existed."""
+    async def body(conn):
+        await conn.execute(BARE_SHOP)
+        await conn.execute(MIGRATION.read_text(encoding="utf-8"))
+        err = await _race("t397_race_rb", conn,
+                          ["UPDATE shop_items SET min_client_version = '1.41.0' WHERE id = 1"],
+                          ROLLBACK.read_text(encoding="utf-8"))
+        assert err is not None and "rollback 397" in str(err), err
+        await conn.execute("ROLLBACK")                 # the refused file left B's transaction aborted
+        assert await conn.fetchval("SELECT min_client_version FROM shop_items") == "1.41.0"
+    asyncio.run(_in_schema("t397_race_rb", body))
+
+
+@live
+def test_two_397_runs_at_once_both_succeed():
+    """Regression, no mutant: the second run's ADD COLUMN IF NOT EXISTS waits
+    on the first's ACCESS EXCLUSIVE and re-checks after its commit, and its
+    CREATE TABLE IF NOT EXISTS runs after that, so 397 has no read-then-write
+    a lock would change."""
+    async def body(conn):
+        await conn.execute(BARE_SHOP)
+        sql = MIGRATION.read_text(encoding="utf-8")
+        uncommitted = sql[: sql.rindex("COMMIT;")]
+        err = await _race("t397_race_fwd", conn, [uncommitted], sql)
+        assert err is None, err
+        assert await conn.fetchval(
+            "SELECT to_regclass('shop_item_release_provenance') IS NOT NULL")
+    asyncio.run(_in_schema("t397_race_fwd", body))
