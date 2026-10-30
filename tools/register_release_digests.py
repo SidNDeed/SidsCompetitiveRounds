@@ -648,7 +648,34 @@ def migration_text(name, rows):
                                                        _sql_text(r["sha256"]),
                                                        "," if i + 1 < len(games) else "", r["name"]))
         lines.append("ON CONFLICT DO NOTHING;")
-    lines += ["", "COMMIT;", ""]
+    # The post-check in 376's form: every row above must now be present as the exact tuple.
+    # Both primary keys are the whole tuple (368:110, 372:108), so ON CONFLICT DO NOTHING
+    # skips only an identical row and the count after the inserts must be complete: the
+    # NOTICE is the operator's acceptance line; the raise is a guard that should never fire
+    # (a tuple absent after its own insert means the inserts did not run here).
+    lines += ["", "DO $$", "DECLARE", "  rel_missing integer := 0;", "  game_missing integer := 0;", "BEGIN"]
+    if rel:
+        lines += ["  SELECT count(*) INTO rel_missing FROM (VALUES %s)" % ", ".join(
+                      "(%s, %s, %s, %s)" % (_sql_text(r["version"]), _sql_text(r["variant"]),
+                                            _sql_text(r["commit"]), _sql_text(r["dll_sha256"])) for r in rel),
+                  "    AS want(version, variant, commit_sha, dll_sha256)",
+                  "   WHERE NOT EXISTS (SELECT 1 FROM mod_release_digests r WHERE r.version = want.version",
+                  "                     AND r.variant = want.variant AND r.commit_sha = want.commit_sha",
+                  "                     AND r.dll_sha256 = want.dll_sha256);"]
+    if games:
+        lines += ["  SELECT count(*) INTO game_missing FROM (VALUES %s)" % ", ".join(
+                      "(%d, %s, %s)" % (r["file_id"], _sql_text(r["game_version"]), _sql_text(r["sha256"]))
+                      for r in games),
+                  "    AS want(file_id, game_version, sha256)",
+                  "   WHERE NOT EXISTS (SELECT 1 FROM game_file_digests g WHERE g.file_id = want.file_id",
+                  "                     AND g.game_version = want.game_version AND g.sha256 = want.sha256);"]
+    lines += ["  IF rel_missing > 0 OR game_missing > 0 THEN",
+              "    RAISE EXCEPTION 'migration %s: %% release row(s) and %% game-file row(s) did not land"
+              " after their own inserts; nothing was committed', rel_missing, game_missing;" % name,
+              "  END IF;",
+              "  RAISE NOTICE 'migration %s: %d release row(s) and %d game-file row(s) present';"
+              % (name, len(rel), len(games)),
+              "END $$;", "", "COMMIT;", ""]
     return "\n".join(lines)
 
 
@@ -674,7 +701,6 @@ def _parser():
     ap.add_argument("--game-version", help="the game-file rows' label (default steam.<buildid> of the "
                                            "install's Steam app manifest)")
     ap.add_argument("--admin", help="an admin_users steam id (the real api run)")
-    ap.add_argument("--base", help="the API base URL (default: the SCR_API_BASE environment variable)")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print what would be registered; send nothing")
     mode.add_argument("--emit-sql", metavar="FILE",
@@ -787,7 +813,7 @@ def main(argv=None, environ=None, transport=None):
         return EXIT_OK
 
     secret = env.get("ADMIN_HMAC_SECRET", "")
-    base = args.base or env.get("SCR_API_BASE", "")
+    base = env.get("SCR_API_BASE", "")
     missing = []
     print("ENV      ADMIN_HMAC_SECRET is %s" % ("set (value not printed)" if secret else "NOT SET"))
     if not secret:
@@ -795,7 +821,7 @@ def main(argv=None, environ=None, transport=None):
     if base:
         print("ENV      API base %s" % base)
     else:
-        print("ENV      SCR_API_BASE is NOT SET (or pass --base)")
+        print("ENV      SCR_API_BASE is NOT SET")
         missing.append("SCR_API_BASE")
     if not args.admin:
         print("ARG      --admin is not given")

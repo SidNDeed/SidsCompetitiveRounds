@@ -465,8 +465,13 @@ def test_d7_emit_sql_shape_and_no_overwrite(tmp_path, install):
     sql = target.read_text(encoding="ascii")
     assert sql.startswith("-- fixture_release_digests.sql: digest registry rows: v1.41.0 standalone commit "
                           "%s; 17 game-file digests under steam.%s." % (fx.FULL_SHA[:12], fx.BUILD_ID))
-    statements = [s for s in re.split(r";\s*\n", re.sub(r"--[^\n]*", "", sql)) if s.strip()]
-    assert [s.split()[0] for s in statements] == ["BEGIN", "INSERT", "INSERT", "COMMIT"]
+    body = re.sub(r"--[^\n]*", "", sql)
+    blocks = re.findall(r"DO \$\$.*?END \$\$;", body, flags=re.S)
+    assert len(blocks) == 1 and "RAISE EXCEPTION" in blocks[0] and blocks[0].count("NOT EXISTS") == 2
+    assert ("RAISE NOTICE 'migration fixture_release_digests.sql: 1 release row(s) and 17 game-file row(s) present';"
+            in blocks[0])
+    statements = [s for s in re.split(r";\s*\n", body.replace(blocks[0], "DO;")) if s.strip()]
+    assert [s.split()[0] for s in statements] == ["BEGIN", "INSERT", "INSERT", "DO", "COMMIT"]
     assert sql.count("ON CONFLICT DO NOTHING;") == 2
     assert ("('1.41.0', 'standalone', '%s', '%s', 'release')" % (fx.FULL_SHA[:12], hashlib.sha256(data).hexdigest())
             in sql)
@@ -502,3 +507,17 @@ def test_real_dll_when_named():
     assert got["variant"] == "standalone" and got["dll_sha256"] == hashlib.sha256(data).hexdigest()
     print("real DLL: version %s variant %s commit %s sha256 %s"
           % (got["version"], got["variant"], got["commit"], got["dll_sha256"]))
+
+
+# -- M1 (Codex DIGESTS-R1): the base URL comes from the environment only ----------------------------
+
+def test_m1_a_base_url_on_the_command_line_is_refused_before_anything_runs(tmp_path):
+    """A `--base` option used to bypass the environment-only rule (DIGESTS-R1 M1). The option is gone:
+    argparse refuses it before the DLL is read or a request is built, and nothing is sent; the
+    environment case itself is D5's third row (secret set, SCR_API_BASE unset: exit 2, no request)."""
+    dll, _data = _dll(tmp_path)
+    rec = _Recorder()
+    with pytest.raises(SystemExit) as refused:
+        _run(_argv(dll, "1.41.0", None, "--admin", _admin(), "--base", "http://t"),
+             {"ADMIN_HMAC_SECRET": SECRET, "SCR_API_BASE": "http://t"}, rec)
+    assert refused.value.code == 2 and rec.calls == []
