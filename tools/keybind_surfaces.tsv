@@ -1431,6 +1431,7 @@ c57604db5869f605	N	rule:N1	Gold
 9a0b8f00e52aa6ef	N	rule:N1	Gold Rush
 e8a08aa75e862bc7	N	rule:N1	Gold Sources
 a5a0320e13168f43	F	rev:860add3332aedb4b fixed:F5 F5 always opens the mod menu; no Controls row moves it	Gold betting runs on live 1v1, 2v2 and FFA games. This page covers who can bet, how the odds are pri
+ff880310fcc325b3	N	rule:N1	Gold headband
 fb482885e3df2220	N	rule:N1	Gold per game
 5d781d48be47bf4f	N	rule:N1	Gold ring: your modded default
 d78f50fe39240af5	N	rule:N1	Gold this set
@@ -2034,6 +2035,7 @@ a54036d0cbe93724	N	rule:N1	Opponent's updates are arriving late
 1af2afeff5d2f90a	N	rule:N1	Orange Cursor
 a986c975fdbd804c	N	rule:N1	Orange melting into pink. Golden hour, every round. Two-color gradient.
 3997c754c441e48d	N	rule:N1	Orange-to-yellow gradient that sears the arena.
+b6c22d03acdc6806	N	rule:N1	Orbit
 95e92e3918fc6682	N	rule:N1	Orchid Gradient
 6e6a6f2086bb5fe5	N	rule:N1	Other
 a08428d584d214df	N	rule:N1	Otherreport reason
@@ -2216,6 +2218,7 @@ e04ea281201a233a	N	rule:N1	Prizes & Rules
 f33e1d33043740f2	N	rule:N1	Pronoun title.
 e72f43c478074c8d	N	rule:N1	Prospector
 b79f48c35188b397	N	rule:N1	Prowler
+9e1406f62ccd3c0e	N	rule:N1	Pumpking Hat
 acb0a780d2622033	N	rule:N1	Pup
 1bd8f1b24f475d07	N	rule:N1	Pure aggression
 58574a4f8f3a1703	N	rule:N1	Pure greyscale — minimum visual distraction.
@@ -2360,6 +2363,7 @@ ef916cd7f6aaa4e1	N	rule:N1	Record removed.
 e51c55255be9007d	N	rule:N1	Records
 8944bac56fb71a84	N	rule:N1	Red Cursor
 126a8e3bc4cc743f	N	rule:N1	Red Name
+347e5e3118d0a520	N	rule:N1	Red Scarf
 272e33806900fb11	N	rule:N1	Red ring: this preset has items an unmodded player cannot see, so it cannot be your vanilla default
 17cf3ff04e9a66a2	N	rule:N1	Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.
 653b3acdfbacbb68	N	rule:N1	Reduced keeps the hit feedback without the camera motion
@@ -3925,6 +3929,7 @@ a7f8e7cc0d43d21e	N	rule:N1	just now
 4cbe09f6351f1f35	N	rule:N1	kill boundary
 4b11e02d76ac718f	N	rule:N1	kills
 6758adebb0322838	N	rule:N1	largest visible win in heavy firefights
+d7c3ca35dc2b8189	N	rule:N1	leafy mushroom
 4c87891558ebeb3b	N	rule:N1	legendary
 d4ba8333c2ff32a5	N	rule:N1	length {0}
 86e8ad488933c8a5	N	rule:N1	lets trades find your binder
