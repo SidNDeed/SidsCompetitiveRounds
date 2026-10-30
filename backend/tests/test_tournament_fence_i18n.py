@@ -721,25 +721,28 @@ def test_393_seed_coverage_counts_only_current_pending_or_approved(live_pg, case
 def test_393_is_timed_as_one_statement(live_pg):
     """Amendment to FENCE-R1 H4, live: the 30 s hold bound in 393's header
     rests on statement_timeout timing its DO block as ONE statement. A copy
-    with the budget cut to 3 s and three 1.5 s pauses inside the DO block -
+    with the budget cut to 6 s and three 3 s pauses inside the DO block -
     each well under the budget, their sum over it - is cancelled for
     statement timeout (57014) no earlier than its budget and before the
-    pauses could all have ended (4.5 s), with nothing committed. CONTROL: the
+    pauses could all have ended (9 s), with nothing committed. CONTROL: the
     same three pauses as top-level statements right after the bounds each get
-    a 3 s budget of their own, and that copy commits all four keys - which is
-    why the file keeps all of its work inside the one block. (The 1.5 s of
-    headroom under the ceiling is for a loaded shared server: one run with
-    2 s and 0.9 s pauses took 2.8 s while other suites ran.)"""
+    a 6 s budget of their own, and that copy commits all four keys - which is
+    why the file keeps all of its work inside the one block. Margins for a
+    loaded shared server (Codex FENCE-R2 residual 22): the cancel may arrive
+    up to 3 s after the budget ends, and each control pause may run up to 3 s
+    long, before either reading turns false. They were 1.5 s each with a 3 s
+    budget and 1.5 s pauses; one run with a 2 s budget and 0.9 s pauses took
+    2.8 s while other suites ran."""
     keys = sorted(r["key_id"] for r in _fence_keys().values())
     sql = _read(M393)
     bound = "SET LOCAL statement_timeout = '25s';\n"
     assert sql.count(bound) == 1
-    cut = sql.replace(bound, "SET LOCAL statement_timeout = '3s';\n", 1)
+    cut = sql.replace(bound, "SET LOCAL statement_timeout = '6s';\n", 1)
     step = "    -- 2. The four keys:"
     assert cut.count(step) == 1
-    inside = cut.replace(step, "    PERFORM pg_sleep(1.5);\n" * 3 + step, 1)
-    top = cut.replace("SET LOCAL statement_timeout = '3s';\n",
-                      "SET LOCAL statement_timeout = '3s';\n" + "SELECT pg_sleep(1.5);\n" * 3, 1)
+    inside = cut.replace(step, "    PERFORM pg_sleep(3);\n" * 3 + step, 1)
+    top = cut.replace("SET LOCAL statement_timeout = '6s';\n",
+                      "SET LOCAL statement_timeout = '6s';\n" + "SELECT pg_sleep(3);\n" * 3, 1)
     assert inside != cut and top != cut
 
     async def go():
@@ -753,7 +756,7 @@ def test_393_is_timed_as_one_statement(live_pg):
             with pytest.raises(asyncpg.exceptions.QueryCanceledError, match="statement timeout"):
                 await conn.execute(inside)
             took = time.monotonic() - t0
-            assert 2.9 <= took < 4.5, took
+            assert 5.9 <= took < 9.0, took
             await conn.execute("ROLLBACK")
             assert await live() == 0
             # control: the same pauses, one budget each - the file commits
