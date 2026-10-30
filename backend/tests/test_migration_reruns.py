@@ -1936,18 +1936,20 @@ def test_396_rollback_takes_it_back_once_and_a_later_396_commits_nothing():
 def test_396_seed_check_refuses_a_literal_that_a_crlf_checkout_reached():
     """The control for the CRLF arm above. Every literal in 396 is one line,
     which is what keeps a CRLF checkout away from the text. The same file
-    with one seed's escaped line breaks written as real ones still applies
-    from an LF copy (the control: the bytes are the same), and from a CRLF
-    copy that seed carries carriage returns, which its md5 post-check
-    refuses, with nothing stored."""
+    with one seed's || chr(10) || joins written as real line breaks inside
+    one literal still applies from an LF copy (the control: the bytes are the
+    same), and from a CRLF copy that seed carries carriage returns, which its
+    md5 post-check refuses, with nothing stored."""
     sql = migration_text("396")
     lines = sql.split("\n")
     rows = [i for i, line in enumerate(lines)
-            if line.lstrip().startswith("(E'") and "', 'es', E'" in line]
+            if re.match(r"\('[0-9a-f]{16}', 'es', '[0-9a-f]{40}', '", line.lstrip())]
     assert len(rows) == 4, rows
     seed = lines[rows[0]]
-    assert seed.count("\\n") > 0 and "\\\\" not in seed, "no escaped line break to spread"
-    lines[rows[0]] = seed.replace("\\n", "\n")
+    spread_seed, joins = re.subn(r"' \|\| ((?:chr\(10\) \|\| )+)'",
+                                 lambda m: "\n" * m.group(1).count("chr(10)"), seed)
+    assert joins > 0 and "chr(" not in spread_seed, "no line break joined in to spread"
+    lines[rows[0]] = spread_seed
     spread = "\n".join(lines)
 
     def attempt(text):

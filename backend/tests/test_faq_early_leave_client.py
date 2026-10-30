@@ -138,38 +138,37 @@ def _allowlist():
     return allow
 
 
+_SQL_PART = re.compile(r"'((?:[^']|'')*)'|chr\((\d+)\)")
+_SQL_JOIN = re.compile(r"\s*\|\|\s*")
+
+
 def _sql_literals(line):
-    """The string literals of one VALUES row, in order and decoded: E'' with
-    the backslash escapes 396's writer uses, plain '' with doubled quotes."""
+    """The string values of one VALUES row, in order and decoded. 396 writes
+    each as ONE plain '' literal (quotes doubled), joined only by
+    || chr(10) || for a line break and || chr(183) || for a middle dot: no
+    E'' string and no two literals side by side (the land tool's data-only
+    check refuses both)."""
     out, i = [], 0
     while True:
-        j = line.find("'", i)
-        if j < 0:
+        m = _SQL_PART.search(line, i)
+        if m is None:
             return out
-        escaped = line[j - 1:j] == "E" and not line[j - 2:j - 1].isalnum()
-        buf, k = [], j + 1
+        assert line[m.start() - 1:m.start()] not in ("E", "e"), "an E'' literal: %s" % line[:80]
+        buf = []
         while True:
-            c = line[k]
-            if escaped and c == "\\":
-                n = line[k + 1]
-                if n == "u":
-                    buf.append(chr(int(line[k + 2:k + 6], 16)))
-                    k += 6
-                    continue
-                assert n in "nt\\'", "unexpected escape \\%s" % n
-                buf.append({"n": "\n", "t": "\t", "\\": "\\", "'": "'"}[n])
-                k += 2
-                continue
-            if c == "'":
-                if line.startswith("''", k):
-                    buf.append("'")
-                    k += 2
-                    continue
+            if m.group(1) is not None:
+                buf.append(m.group(1).replace("''", "'"))
+            else:
+                assert m.group(2) in ("10", "183"), "chr(%s) joined into a text" % m.group(2)
+                buf.append(chr(int(m.group(2))))
+            j = _SQL_JOIN.match(line, m.end())
+            nxt = _SQL_PART.match(line, j.end()) if j else None
+            if nxt is None:
                 break
-            buf.append(c)
-            k += 1
+            m = nxt
+        assert not re.match(r"\s*'", line[m.end():]), "two literals side by side: %s" % line[:80]
         out.append("".join(buf))
-        i = k + 1
+        i = m.end()
 
 
 def _block(lines, start, end):
@@ -190,7 +189,7 @@ def m396_rows():
     for line in _block(lines, "FROM (VALUES", ") AS v(key_id, namespace, msgctxt, source_hash, sensitive, context)"):
         lit = _sql_literals(line)
         assert len(lit) == 5, (len(lit), line[:80])
-        flag = re.search(r"', (TRUE|FALSE), CAST\(E'", line)
+        flag = re.search(r"', (TRUE|FALSE), CAST\('", line)
         assert flag, line[:80]
         keys[lit[0]] = (lit[1], lit[2], lit[3], lit[4])
         sensitive[lit[0]] = flag.group(1) == "TRUE"
@@ -374,9 +373,9 @@ def test_396_and_its_rollback_retire_and_revive_exactly_386s_keys():
         assert _ids_in(ladder._read(path)) == new | set(old), (
             path.name, sorted(_ids_in(ladder._read(path)) ^ (new | set(old))))
     rollback = ladder._read(R396)
-    retire_new = re.search(r"SET retired_at = clock_timestamp\(\), updated_at = clock_timestamp\(\)\s+"
+    retire_new = re.search(r"SET retired_at = NOW\(\), updated_at = NOW\(\)\s+"
                            r"WHERE namespace = 'client'\s+AND key_id IN \(([^)]*)\)", rollback)
-    revive_old = re.search(r"SET retired_at = NULL, updated_at = clock_timestamp\(\)\s+"
+    revive_old = re.search(r"SET retired_at = NULL, updated_at = NOW\(\)\s+"
                            r"WHERE namespace = 'client'\s+AND key_id IN \(([^)]*)\)", rollback)
     assert retire_new and _ids_in(retire_new.group(1)) == new, retire_new
     assert revive_old and _ids_in(revive_old.group(1)) == set(old), revive_old

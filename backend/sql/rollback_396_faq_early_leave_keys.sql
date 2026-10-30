@@ -46,20 +46,20 @@ SET LOCAL synchronous_commit = local;
 DO $r396$
 BEGIN
     UPDATE i18n_keys
-       SET retired_at = clock_timestamp(), updated_at = clock_timestamp()
+       SET retired_at = NOW(), updated_at = NOW()
      WHERE namespace = 'client'
        AND key_id IN ('44732e465b16cee1', '6173541088dbb882', '9d365a214640aebd', '0ab13f648dd0175b')
        AND retired_at IS NULL;
 
     UPDATE i18n_keys
-       SET retired_at = NULL, updated_at = clock_timestamp()
+       SET retired_at = NULL, updated_at = NOW()
      WHERE namespace = 'client'
        AND key_id IN ('3988c8d80e42f69d', '3bb08fc59139b367', '439cd5d90ee1b6d3', '79023ff50ab9d08e')
        AND retired_at IS NOT NULL;
 
     UPDATE i18n_proposals
        SET status = 'superseded', review_note = 'key retired by rollback_396',
-           reviewed_at = clock_timestamp()
+           reviewed_at = NOW()
      WHERE key_id IN ('44732e465b16cee1', '6173541088dbb882', '9d365a214640aebd', '0ab13f648dd0175b')
        AND status = 'pending';
 END $r396$;
