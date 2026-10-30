@@ -7491,6 +7491,19 @@ _FFA_HOLD_FENCES = 1
 # match_report_window. Both boxes must answer it before any client sends
 # rjs1 (bug 266). Raise it when the readmission server half changes shape.
 _MATCH_HOLD = 1
+# The tournament fence lane's server half (the Aug 31 fence batch,
+# re-authored), reported on /health as `tournament_fence`. A marker whose only
+# purpose is to be probed (#306), as the match_hold marker above is: nothing
+# reads it and no behaviour depends on it. 1 = this build carries the
+# double-elimination topology fix for 9 to 16 players, the serialized
+# tournament lifecycle (signup, unsignup, the votes, lock and start under one
+# per-tournament lock, each re-reading the status) and the locked-leave gate
+# on unsignup. The lane adds no route -- every tournament route answers on the
+# build before it -- so this constant is the release train's build
+# discriminator for its landing (learnings #780, #794): equal on both roles,
+# in both health arms, absent on the build before it. Raise it when the
+# fence's server half changes shape.
+_TOURNAMENT_FENCE = 1
 # Its sibling _FFA_GAME_NUMBER (the /health `ffa_game_number` word) is DERIVED
 # from two SQL literals rather than written here, so it is defined after
 # submit_ffa_match, whose insert it reads.
@@ -7637,6 +7650,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               connect_failure=_CONNECT_FAILURE,
                               ffa_readmit=_FFA_READMIT,
                               match_hold=_MATCH_HOLD,
+                              tournament_fence=_TOURNAMENT_FENCE,
                               auto_log=_auto_log_health_word(),
                               seat_evidence=_seat_evidence_health_word(),
                               card_evidence=_card_evidence_health_word(),
@@ -7691,6 +7705,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               connect_failure=_CONNECT_FAILURE,
                               ffa_readmit=_FFA_READMIT,
                               match_hold=_MATCH_HOLD,
+                              tournament_fence=_TOURNAMENT_FENCE,
                               auto_log=_auto_log_health_word(),
                               seat_evidence=_seat_evidence_health_word(),
                               card_evidence=_card_evidence_health_word(),

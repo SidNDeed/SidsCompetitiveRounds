@@ -1125,6 +1125,13 @@ class HealthResponse(BaseModel):
     # (#306); the release train's build discriminator for it. No default,
     # so building the answer without it raises.
     match_hold: int
+    # tournament_fence: the tournament fence lane's server half
+    # (main._TOURNAMENT_FENCE; 1 = this build: the double-elimination
+    # topology fix, the serialized tournament lifecycle and the locked-leave
+    # gate on unsignup). A marker read by nothing else (#306); the release
+    # train's build discriminator for it, since the lane adds no route. No
+    # default, so building the answer without it raises.
+    tournament_fence: int
     # auto_log: the automatic post-match log upload (main._auto_log_health_word).
     # auto_logs.AUTO_LOG_REVISION when POST /api/v1/logs/auto is MOUNTED on the
     # app that answers -- read from the routing table on every request, never
