@@ -435,6 +435,52 @@ def test_a_missing_row_refuses_whole():
              "shop item 329 (face_detail_well_wraped_hat) does not exist")
 
 
+PREREQ_397 = SQL / "397_shop_item_min_client_version.sql"
+TRIGGER_SRC = SQL / "148_cosmetic_placement_and_macro_evidence.sql"
+
+
+def _release_trigger_ddl():
+    """The live shop_items UPDATE trigger (BEFORE UPDATE OF catalog_ready),
+    from 148 as the 398 test installs it."""
+    s = TRIGGER_SRC.read_text(encoding="utf-8").replace("\r\n", "\n")
+    fn = re.search(r"CREATE OR REPLACE FUNCTION stamp_shop_item_catalog_release\(\).*?\$\$;", s, re.S).group(0)
+    trg = re.search(r"CREATE TRIGGER trg_shop_item_catalog_release.*?;", s, re.S).group(0)
+    return fn + "\n" + trg
+
+
+@live
+def test_on_the_397_schema_only_description_moves():
+    """Main at b2257fe1 carries 397 (shop_items.min_client_version and the
+    release provenance table; live on the primary 2026-10-30) and 398's files.
+    399 neither reads nor writes 397's column, and its UPDATE does not name
+    catalog_ready, so the live BEFORE UPDATE OF catalog_ready trigger does not
+    fire: every column but description is unchanged, both ways."""
+    async def body(conn):
+        await conn.execute("ALTER TABLE shop_items ADD COLUMN released_at TIMESTAMPTZ, "
+                           "ADD COLUMN rarity VARCHAR(16) NOT NULL DEFAULT 'rare', "
+                           "ADD COLUMN stock_limit INTEGER")
+        await conn.execute(_sql(PREREQ_397))
+        await conn.execute(_release_trigger_ddl())
+        await _seed(conn)
+        await conn.execute("UPDATE shop_items SET released_at = '2026-07-24T00:00:00Z' WHERE catalog_ready")
+        await conn.execute("UPDATE shop_items SET min_client_version = '1.40.0' WHERE id = 357")
+
+        async def snap():
+            return {r["id"]: dict(r) for r in await conn.fetch("SELECT * FROM shop_items ORDER BY id")}
+        before = await snap()
+        await conn.execute(_sql(MIGRATION))
+        after = await snap()
+        for i, row in before.items():
+            changed = {k for k in row if row[k] != after[i][k]}
+            assert changed == ({"description"} if i in NEW else set()), (i, changed)
+            if i in NEW:
+                assert after[i]["description"] == NEW[i]
+        assert await conn.fetchval("SELECT count(*) FROM shop_item_release_provenance") == 0
+        await conn.execute(_sql(ROLLBACK))
+        assert await snap() == before
+    asyncio.run(_with_schema("t399_on_397", body))
+
+
 @live
 def test_the_rollback_refuses_a_wrong_sku_whole():
     async def body(conn):
