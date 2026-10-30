@@ -55,18 +55,22 @@
 -- idle_in_transaction_session_timeout ends the session, and the server rolls the
 -- transaction back, when the runner stops for 5 s between statements. The statement
 -- and idle budgets are separate and PostgreSQL 16 has no transaction_timeout, so the
--- longest this file can hold i18n locks is their SUM: up to 25 s in the statement that
--- takes them plus up to 5 s waiting for COMMIT, 30 s in all (not counting any time the
--- COMMIT itself spends waiting on a synchronous standby). The sum holds only because
--- ALL the work below is ONE statement, a single DO block whose inner statements share
--- its 25 s: every further top-level statement would bring a 25 s budget of its own.
--- Any bound that fires aborts the whole file with nothing committed.
+-- longest this file can hold i18n locks before its COMMIT is their SUM: up to 25 s in
+-- the statement that takes them plus up to 5 s waiting for COMMIT, 30 s in all. The
+-- sum holds only because ALL the work below is ONE statement, a single DO block whose
+-- inner statements share its 25 s: every further top-level statement would bring a
+-- 25 s budget of its own. COMMIT itself is outside statement_timeout, and the locks
+-- are held until it ends, so the fourth line, synchronous_commit = local, keeps it
+-- from waiting on a synchronous standby: the COMMIT's own wait is then the local WAL
+-- flush only, which no setting bounds. Any timeout that fires aborts the whole file
+-- with nothing committed.
 -- ROLLBACK: rollback_393_i18n_tournament_fence_strings.sql.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL idle_in_transaction_session_timeout = '5s';
 SET LOCAL statement_timeout = '25s';
+SET LOCAL synchronous_commit = local;
 
 -- ALL the work is this one statement (see BOUNDS): 1. the key hash guard, 2. the four
 -- keys and their post-check, 3. the seeds, 4. the seed coverage post-check.

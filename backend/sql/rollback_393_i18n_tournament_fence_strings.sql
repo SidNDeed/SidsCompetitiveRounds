@@ -12,18 +12,21 @@
 -- DEPLOY ORDER: only while no shipped client carries these four strings, or with
 -- that client's rollback. A client that already shows them keeps its bundled
 -- drafts, and the next key sync from such a client makes the keys live again.
--- Explicit transaction (learning #340) under the same three bounds as 393: 5 s on
+-- Explicit transaction (learning #340) under the same four lines as 393: 5 s on
 -- each lock wait, 25 s on each top-level statement, 5 s on a pause between
--- statements. The statement and idle budgets are separate (PostgreSQL 16 has no
--- transaction_timeout), so the longest this file can hold locks is their SUM, 30 s
--- (not counting any time its COMMIT spends waiting on a synchronous standby), and
--- that holds because both UPDATEs run inside ONE statement, a DO block whose inner
--- statements share its 25 s.
+-- statements, and synchronous_commit = local. The statement and idle budgets are
+-- separate (PostgreSQL 16 has no transaction_timeout), so the longest this file
+-- can hold locks before its COMMIT is their SUM, 30 s, and that holds because both
+-- UPDATEs run inside ONE statement, a DO block whose inner statements share its
+-- 25 s. COMMIT itself is outside statement_timeout; with synchronous_commit = local
+-- it does not wait on a synchronous standby, so its own wait is the local WAL flush
+-- only, which no setting bounds.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL idle_in_transaction_session_timeout = '5s';
 SET LOCAL statement_timeout = '25s';
+SET LOCAL synchronous_commit = local;
 
 DO $r393$
 BEGIN

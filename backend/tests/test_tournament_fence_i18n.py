@@ -26,11 +26,13 @@ What is pinned here:
   * 393's key hash guard names exactly the four (key_id, source_hash) pairs it
     writes, and its key arm can only update a row that already carries that
     source_hash (FENCE-R1 H1);
-  * 393 and rollback_393 set lock_timeout, idle_in_transaction_session_timeout
-    and statement_timeout (25 s) as the three statements right after BEGIN,
-    before anything reads, locks or writes, and then do ALL their work in ONE
-    DO block, so their lock hold is bounded by the statement budget plus the
-    idle budget, 30 s (FENCE-R1 H4 and its amendment);
+  * 393 and rollback_393 set lock_timeout, idle_in_transaction_session_timeout,
+    statement_timeout (25 s) and synchronous_commit = local as the four
+    statements right after BEGIN, before anything reads, locks or writes,
+    and then do ALL their work in ONE DO block, so their lock hold before
+    COMMIT is bounded by the statement budget plus the idle budget, 30 s,
+    and their COMMIT does not wait on a synchronous standby (FENCE-R1 H4
+    and its two amendments);
   * on PostgreSQL (SCR_MIGRATION_TEST_PG_DSN, fail-not-skip like
     test_migration_reruns.py): 393 applied twice on the real i18n tables
     (181 + 212) writes no row on its second run, measured by value AND xmin,
@@ -41,7 +43,9 @@ What is pinned here:
     it that sum past the budget are cancelled, while the same pauses as
     top-level statements each get a budget of their own and the file
     commits), and a runner that stops before COMMIT is ended at the 5 s idle
-    bound with nothing committed;
+    bound with nothing committed; inside each file's transaction the server
+    reports the four values, and after it the session's own settings are
+    back (SET LOCAL);
     a row at one of its key_ids with another source_hash, live or retired,
     makes it RAISE with that row untouched, while a superseded body row is
     never touched and its own retired same-hash row is made live again;
@@ -233,30 +237,38 @@ def test_393_key_hash_guard_names_the_four_keys_it_writes():
 
 BOUNDS = ("SET LOCAL lock_timeout = '5s';",
           "SET LOCAL idle_in_transaction_session_timeout = '5s';",
-          "SET LOCAL statement_timeout = '25s';")
+          "SET LOCAL statement_timeout = '25s';",
+          "SET LOCAL synchronous_commit = local;")
 
 
 @pytest.mark.parametrize("path", [M393, R393], ids=["393", "rollback_393"])
 def test_393_and_its_rollback_set_their_bounds_before_anything_runs(path):
-    """FENCE-R1 H4: the three bounds are the three statements right after
-    BEGIN, so no read, lock or write precedes them; each is set once and
-    nothing later names the same settings; the file is one transaction.
-    The amendment: everything between the bounds and COMMIT is ONE DO
-    block, because statement_timeout gives each top-level statement its own
-    budget and the header's 30 s hold bound (25 s statement + 5 s idle)
-    holds only for a single statement."""
+    """FENCE-R1 H4: the bounds are the statements right after BEGIN, so no
+    read, lock or write precedes them; each is set once and nothing later
+    names the same settings; the file is one transaction. The amendments:
+    everything between the bounds and COMMIT is ONE DO block, because
+    statement_timeout gives each top-level statement its own budget and the
+    header's 30 s hold bound (25 s statement + 5 s idle, the sum asserted
+    from the file's own lines) holds only for a single statement; and the
+    fourth line is synchronous_commit = local, because COMMIT is outside
+    statement_timeout and must not wait on a synchronous standby."""
     body = [ln.strip() for ln in _read(path).splitlines()
             if ln.strip() and not ln.lstrip().startswith("--")]
     assert body[0] == "BEGIN;" and body[-1] == "COMMIT;", (body[0], body[-1])
     assert body.count("BEGIN;") == 1 and body.count("COMMIT;") == 1
-    assert tuple(body[1:4]) == BOUNDS, body[1:4]
-    later = [ln for ln in body[4:] if re.search(
-        r"(?i)\b(lock_timeout|idle_in_transaction_session_timeout|statement_timeout)\b", ln)]
+    n = 1 + len(BOUNDS)
+    assert tuple(body[1:n]) == BOUNDS, body[1:n]
+    secs = {m.group(1): int(m.group(2)) for m in (re.match(
+        r"SET LOCAL (\w+) = '(\d+)s';$", ln) for ln in body[1:n]) if m}
+    assert secs["statement_timeout"] + secs["idle_in_transaction_session_timeout"] == 30, secs
+    later = [ln for ln in body[n:] if re.search(
+        r"(?i)\b(lock_timeout|idle_in_transaction_session_timeout|statement_timeout"
+        r"|synchronous_commit)\b", ln)]
     assert later == [], later
-    tag = re.match(r"DO (\$\w*\$)$", body[4])
-    assert tag, body[4]
+    tag = re.match(r"DO (\$\w*\$)$", body[n])
+    assert tag, body[n]
     assert body[-2] == "END %s;" % tag.group(1), body[-2]
-    rest = "\n".join(body[4:-1])
+    rest = "\n".join(body[n:-1])
     assert rest.count(tag.group(1)) == 2, "the DO block's tag appears inside its body"
     assert len(re.findall(r"(?m)^DO \$", rest)) == 1, "more than one top-level DO"
 
@@ -451,6 +463,8 @@ def test_393_gives_up_on_a_held_key_row_at_its_lock_bound(live_pg):
         runner, schema = await _fresh_i18n(live_pg)
         holder = None
         try:
+            # only the file's own line may end the wait (learning #1072)
+            await runner.execute("SET lock_timeout = 0")
             await runner.execute(sql)
             # a run that got past the held row would re-seed these four
             refresh = _fence_keys()["refresh"]["key_id"]
@@ -765,6 +779,8 @@ def test_393_a_runner_stopped_before_commit_is_ended_at_the_idle_bound(live_pg):
         conn, schema = await _fresh_i18n(live_pg)
         other = None
         try:
+            # only the file's own line may end the session (learning #1072)
+            await conn.execute("SET idle_in_transaction_session_timeout = 0")
             await conn.execute(head)
             await asyncio.sleep(7)
             with pytest.raises((asyncpg.exceptions.IdleInTransactionSessionTimeoutError,
@@ -777,4 +793,40 @@ def test_393_a_runner_stopped_before_commit_is_ended_at_the_idle_bound(live_pg):
                 "SELECT count(*) FROM i18n_keys WHERE key_id = ANY($1::text[])", keys) == 0
         finally:
             await _drop(live_pg, schema, conn, other)
+    _run(go())
+
+
+@pytest.mark.parametrize("path", [M393, R393], ids=["393", "rollback_393"])
+def test_393_and_its_rollback_bounds_are_in_effect_in_their_transaction(live_pg, path):
+    """The four lines, live: each file's text up to its DO block (BEGIN and
+    the four SET LOCAL lines) is run on a session whose own settings are
+    zeroed (synchronous_commit on), and inside that transaction the server
+    reports the file's four values; after ROLLBACK the session's own settings
+    are back, so nothing outlives the file. With the structural test (nothing
+    later names these settings) this is what is in effect when the file's
+    COMMIT runs: synchronous_commit = local, so that COMMIT waits for the
+    local WAL flush and not for a synchronous standby."""
+    sql = _read(path)
+    head = sql.split("\nDO $", 1)[0]
+    assert head.count("BEGIN;") == 1 and "COMMIT;" not in head
+    want = {"lock_timeout": "5s", "idle_in_transaction_session_timeout": "5s",
+            "statement_timeout": "25s", "synchronous_commit": "local"}
+    own = {"lock_timeout": "0", "idle_in_transaction_session_timeout": "0",
+           "statement_timeout": "0", "synchronous_commit": "on"}
+
+    async def go():
+        conn = await asyncpg.connect(live_pg)
+        try:
+            for k, v in own.items():
+                await conn.execute("SET %s = %s" % (k, v))
+            before = {k: await conn.fetchval("SHOW %s" % k) for k in want}
+            await conn.execute(head)
+            inside = {k: await conn.fetchval("SHOW %s" % k) for k in want}
+            await conn.execute("ROLLBACK")
+            after = {k: await conn.fetchval("SHOW %s" % k) for k in want}
+        finally:
+            await conn.close()
+        assert before == own, before
+        assert inside == want, inside
+        assert after == own, after
     _run(go())
