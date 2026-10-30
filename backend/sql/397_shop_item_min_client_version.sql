@@ -49,7 +49,7 @@
 -- COMMIT's local completion. PostgreSQL disables the statement timer before
 -- it commits; synchronous_commit = local keeps that wait off any standby.
 -- The ALTER rewrites no row (nullable, no default); its CHECK is validated
--- by one scan of shop_items (about 600 rows).
+-- by one scan of shop_items (417 rows on the primary, read 2026-10-30).
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
