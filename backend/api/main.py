@@ -6504,6 +6504,43 @@ def _supported_music_skus(request: Request) -> list[str]:
     return [_sku for _sku, _floor in _MUSIC_SKU_FLOORS.items() if cv >= _floor]
 
 
+# Per-item client floor (migration 397, shop_items.min_client_version). An item
+# whose definition first ships in client X carries X, because an older admitted
+# client's Catalog cannot equip it. Every surface that lists or transfers an
+# item consults _client_meets_item_floor exactly once: /shop/items and
+# /shop/newest omit the item for an older caller, /shop/purchase refuses an
+# older caller before any gold moves, and /artist/gift refuses a recipient
+# whose last-seen version (players.mod_version) is older or unknown. NULL = no
+# floor. Versions are compared as integer tuples by the strict parser music
+# uses (never a string compare: "1.100.0" < "1.41.0" as text). A floor that
+# does not parse fails CLOSED -- the item is hidden from and refused to
+# everyone -- and so does a missing or unparseable caller version.
+def _shop_caller_version(request) -> tuple[int, ...] | None:
+    """The caller's X-Mod-Version as a strict integer tuple, else None. Reads
+    the header, then the value the version-gate middleware stashed."""
+    raw = None
+    if request is not None:
+        try:
+            raw = request.headers.get("X-Mod-Version")
+        except Exception:
+            raw = None
+    if not raw:
+        raw = _current_mod_version.get()
+    return _music_strict_version(raw)
+
+
+def _client_meets_item_floor(min_client_version, client_version) -> bool:
+    """True when an item with this floor may reach a client at client_version
+    (a strict tuple from _shop_caller_version / _music_strict_version, or
+    None for unknown)."""
+    if min_client_version is None:
+        return True
+    floor = _music_strict_version(min_client_version)
+    if floor is None or client_version is None:
+        return False
+    return tuple(client_version) >= floor
+
+
 # Maintenance mode — set to True via /admin/maintenance/start. While True, all non-bypass
 # requests get a 503 with Retry-After:30. Internal callers (X-Internal-Key) still go through
 # so the deploy script + bot can finish work. Reset to False on container start (it's just a
@@ -28313,6 +28350,15 @@ async def list_shop_items(request: Request, steam_id: str | None = Query(None), 
     except Exception:
         rows = [r for r in rows if r.kind != "music_album"]
 
+    # Per-item client floor (migration 397): omit what this caller's client
+    # cannot equip. Fail closed: any error drops every floored row.
+    try:
+        _cvf = _shop_caller_version(request)
+        rows = [r for r in rows
+                if _client_meets_item_floor(r.min_client_version, _cvf)]
+    except Exception:
+        rows = [r for r in rows if r.min_client_version is None]
+
     # Artist annotations (v1.30): display name per artist steam id, plus a
     # sold-count per stock-limited item so the shop can render "3 of 10 left"
     # and grey out sold-out rows. Both maps are tiny (a handful of artist
@@ -28395,6 +28441,14 @@ async def newest_shop_items(request: Request,
     # asyncpg can never mistype the bind (#275 class; PREPARE-verified
     # 2026-09-01: parameter_types = {"character varying[]"}).
     _msk = _supported_music_skus(request)
+    # Per-item client floor (migration 397), resolved in Python like the music
+    # skus and bound into BOTH populations, so a hidden row can neither be
+    # listed nor take a batch-day slot.
+    _cvf = _shop_caller_version(request)
+    _hide = [s for s, m in (await db.execute(text(
+        "SELECT sku, min_client_version FROM shop_items "
+        "WHERE min_client_version IS NOT NULL"))).all()
+        if not _client_meets_item_floor(m, _cvf)]
     rows = (await db.execute(text("""
         SELECT si.sku, si.kind, si.name, si.rarity, si.price, si.preview_color,
                si.stock_limit,
@@ -28408,6 +28462,7 @@ async def newest_shop_items(request: Request,
         LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
         WHERE si.rotation_pool IS NULL
           AND si.catalog_ready
+          AND NOT (si.sku = ANY(CAST(:hide AS varchar[])))
           AND (si.kind = 'face'
                OR (si.kind = 'music_album' AND si.sku = ANY(CAST(:msk AS varchar[]))))
           AND (:batches = 0 OR COALESCE(si.released_at, si.created_at)::date IN (
@@ -28416,13 +28471,15 @@ async def newest_shop_items(request: Request,
                     FROM shop_items
                     WHERE rotation_pool IS NULL
                       AND catalog_ready
+                      AND NOT (sku = ANY(CAST(:hide AS varchar[])))
                       AND (kind = 'face'
                            OR (kind = 'music_album' AND sku = ANY(CAST(:msk AS varchar[]))))
                     ORDER BY d DESC LIMIT :batches
                 ) recent_days))
         ORDER BY COALESCE(si.released_at, si.created_at) DESC
         LIMIT :lim
-    """), {"lim": limit, "batches": batches, "msk": _msk})).mappings().all()
+    """), {"lim": limit, "batches": batches, "msk": _msk,
+          "hide": _hide})).mappings().all()
     # (The dance version gate that used to sit here is dead under the
     # kind='face' filter and was removed; /shop/items keeps its copy.)
     return {
@@ -36388,13 +36445,18 @@ async def purchase_item(
     # gets the pre-lock refusal, not a debit. Rule: any later unpublish UPDATE
     # must take a lock mode that conflicts with this FOR SHARE (#202).
     _locked = (await db.execute(text(
-        "SELECT price, artist_steam_id, stock_limit, catalog_ready "
+        "SELECT price, artist_steam_id, stock_limit, catalog_ready, min_client_version "
         "FROM shop_items WHERE id = :iid FOR SHARE"
     ), {"iid": item.id})).mappings().first()
     if _locked is None:
         raise HTTPException(status_code=404, detail="Item not found")
     if not _locked["catalog_ready"]:
         raise HTTPException(status_code=409, detail="This cosmetic is approved but has not shipped in the mod yet")
+    # Per-item client floor (migration 397): an older client's Catalog cannot
+    # equip this item. Refused here, under the lock and before any gold moves.
+    if not _client_meets_item_floor(_locked["min_client_version"],
+                                    _shop_caller_version(request)):
+        raise HTTPException(status_code=409, detail="This item requires a newer mod version")
     live_price = int(_locked["price"])
     live_artist = _locked["artist_steam_id"]
     live_stock = _locked["stock_limit"]
@@ -42258,6 +42320,14 @@ async def artist_gift(
     )).scalar_one_or_none()
     if target is None:
         raise HTTPException(status_code=404, detail="Player not found — they need to have used the mod once")
+    # Per-item client floor (migration 397), judged on the RECIPIENT's
+    # last-seen version: a gift to a client that cannot equip the item is
+    # refused, and so is one to a recipient with no recorded version.
+    if not _client_meets_item_floor(item.min_client_version,
+                                    _music_strict_version(target.mod_version)):
+        raise HTTPException(status_code=409, detail=(
+            "This item requires a newer mod version than the recipient has used; "
+            "they need to update the mod first"))
     await _assert_no_service_subject(
         db,
         affected_player_ids=[target.id],
