@@ -57,7 +57,8 @@ ANCHOR = datetime(2026, 1, 1, tzinfo=timezone.utc)
 SLACK_S = 2                         # same host clock; whole-second floor
 BUILD_SLACK_S = 60                  # a build-time stamp is one the database clock took after the
                                     # lane's open() began, minus this much clock drift
-MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()   # to_char(.., \'Mon\') is English
+MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()   # to_char(.., 'Mon') is English
+PIN_AT = ANCHOR + timedelta(hours=12)    # the build-time shop stamps land here (see _pin_build_clock)
 
 
 def _seconds_since_anchor(value, result) -> bool:
@@ -135,17 +136,21 @@ def _seed(lane):
 
 def _pin_build_clock(lane, built_after):
     """Move every shop item stamp the build took from the database clock onto
-    ANCHOR's day, keeping the stamps distinct and in their build order.
+    one fixed day, keeping the stamps distinct and in their build order.
 
     Migration 148's trigger stamps released_at = NOW() on each item a release
     migration flips catalog-ready, and created_at defaults to the same clock;
-    /shop/items answers released_iso and /shop/newest answers added/added_iso
-    as DATES of those stamps. Two sides built on different UTC days therefore
-    answer different dates (lesson 1062: red on every run straddling 00:00Z),
-    and a same-day run cannot see it. One shift per lane puts the earliest
-    build stamp at ANCHOR and the rest minutes after it, so every side answers
-    ANCHOR's day and /shop/newest keeps its order (it sorts by the stamp; a
-    collapse to one instant would leave the order among ties to the heap)."""
+    /shop/items answers released_iso and /shop/newest answers added and
+    date_iso as DATES of those stamps. Two sides built on different UTC days
+    therefore answer different dates (lesson 1062: red on every run straddling
+    00:00Z), and a same-day run cannot see it. One shift per lane puts the
+    earliest build stamp at PIN_AT and the rest minutes after it, so every
+    side answers the same dates whatever day built it, and /shop/newest keeps
+    its order (it sorts by the stamp; a collapse to one instant would leave the
+    order among ties to the heap). PIN_AT is noon UTC on ANCHOR's day: Python
+    dates it in UTC and to_char dates it in the session's zone (Pacific on
+    this seat), and noon is the same calendar day in every zone within eleven
+    hours of UTC."""
     since = built_after - timedelta(seconds=BUILD_SLACK_S)
     window = "released_at >= $1 OR created_at >= $1"
     before = lane.fetch("SELECT id, released_at, created_at FROM shop_items WHERE " + window + " ORDER BY id", since)
@@ -154,7 +159,7 @@ def _pin_build_clock(lane, built_after):
     assert before, "no shop item carries a build-time stamp; the pin is dead"
     stamps = [v for r in before for v in (r["released_at"], r["created_at"]) if v is not None and v >= since]
     assert max(stamps) - min(stamps) < timedelta(hours=1), (min(stamps), max(stamps))   # one build, one day
-    shift = ANCHOR - min(stamps)
+    shift = PIN_AT - min(stamps)
     expect = {r["id"]: tuple(v + shift if v is not None and v >= since else v
                              for v in (r["released_at"], r["created_at"])) for r in before}
     # The target instants are computed here and written as values: `stamp + $2`
@@ -265,9 +270,11 @@ def _date_forms(day):
 
 def build_day_leaks(requests, results, days):
     """Every date-only value in an answer that names a day of this run's build
-    window, outside the paths NOISE declares: such a value is a database-clock
-    stamp truncated to a date, which two sides built on different UTC days
-    answer differently and a same-day run cannot see vary (lesson 1062).
+    window, outside the paths NOISE declares. Every such value seen so far was
+    a database-clock stamp truncated to a date, which two sides built on
+    different UTC days answer differently and a same-day run cannot see vary
+    (lesson 1062); a literal that happens to equal a build day is reported
+    too, and either way the answer must not depend on the build day.
     Returns (site, method, url, session, path, value) per leak."""
     forms = {form for day in days for form in _date_forms(day)}
     leaks = []
@@ -387,7 +394,9 @@ def test_1403_replay_matches_trunk_oracle(three_lanes, tmp_path, capsys):
     # No answer names a day of the build window as a date-only value (see
     # build_day_leaks): _pin_build_clock is what keeps this empty, and this is
     # what notices the next build-time stamp a response starts to carry.
-    days = _build_days(built_from, datetime.now(timezone.utc))
+    # One day wider on each side: to_char renders in the session's zone, so a
+    # build-time stamp can date as the day before or after the UTC build day.
+    days = _build_days(built_from - timedelta(days=1), datetime.now(timezone.utc) + timedelta(days=1))
     leaks = [(side,) + leak for side, out in (("base", base), ("lane", lane), ("control", ctl))
              for leak in build_day_leaks(requests, out["results"], days)]
     with capsys.disabled():
