@@ -35,7 +35,7 @@ import subprocess
 import sys
 import tarfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -55,6 +55,9 @@ CALLS_AT_TAG = 255                  # the tag never changes
 # so h2h's last_seen_s = floor(database now - ANCHOR).
 ANCHOR = datetime(2026, 1, 1, tzinfo=timezone.utc)
 SLACK_S = 2                         # same host clock; whole-second floor
+BUILD_SLACK_S = 60                  # a build-time stamp is one the database clock took after the
+                                    # lane's open() began, minus this much clock drift
+MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()   # to_char(.., \'Mon\') is English
 
 
 def _seconds_since_anchor(value, result) -> bool:
@@ -130,6 +133,44 @@ def _seed(lane):
                  "VALUES ($1, $2, true, now(), now() + interval '1 day')", ME, K.sha(SESSION))
 
 
+def _pin_build_clock(lane, built_after):
+    """Move every shop item stamp the build took from the database clock onto
+    ANCHOR's day, keeping the stamps distinct and in their build order.
+
+    Migration 148's trigger stamps released_at = NOW() on each item a release
+    migration flips catalog-ready, and created_at defaults to the same clock;
+    /shop/items answers released_iso and /shop/newest answers added/added_iso
+    as DATES of those stamps. Two sides built on different UTC days therefore
+    answer different dates (lesson 1062: red on every run straddling 00:00Z),
+    and a same-day run cannot see it. One shift per lane puts the earliest
+    build stamp at ANCHOR and the rest minutes after it, so every side answers
+    ANCHOR's day and /shop/newest keeps its order (it sorts by the stamp; a
+    collapse to one instant would leave the order among ties to the heap)."""
+    since = built_after - timedelta(seconds=BUILD_SLACK_S)
+    window = "released_at >= $1 OR created_at >= $1"
+    before = lane.fetch("SELECT id, released_at, created_at FROM shop_items WHERE " + window + " ORDER BY id", since)
+    # The negative control: the build DOES stamp the clock. If this ever reads
+    # empty the trigger or the default changed and this pin is dead code to remove.
+    assert before, "no shop item carries a build-time stamp; the pin is dead"
+    stamps = [v for r in before for v in (r["released_at"], r["created_at"]) if v is not None and v >= since]
+    assert max(stamps) - min(stamps) < timedelta(hours=1), (min(stamps), max(stamps))   # one build, one day
+    shift = ANCHOR - min(stamps)
+    expect = {r["id"]: tuple(v + shift if v is not None and v >= since else v
+                             for v in (r["released_at"], r["created_at"])) for r in before}
+    # The target instants are computed here and written as values: `stamp + $2`
+    # with an interval that carries days is calendar arithmetic in the
+    # session's time zone, and the first run of this pin came back one hour off
+    # across the DST change between October and January (local-refined-run3).
+    for sid, (released_at, created_at) in expect.items():
+        lane.execute("UPDATE shop_items SET released_at = $2, created_at = $3 WHERE id = $1",
+                     sid, released_at, created_at)
+    after = lane.fetch("SELECT id, released_at, created_at FROM shop_items WHERE id = ANY($1) ORDER BY id",
+                       list(expect))
+    assert {r["id"]: (r["released_at"], r["created_at"]) for r in after} == expect
+    assert lane.fetch("SELECT count(*) FROM shop_items WHERE " + window, since)[0][0] == 0
+    return len(before)
+
+
 def _run(tree, lane, req_path, out_path, freeze):
     env = dict(os.environ, API_SECRET_KEY=K.INTERNAL_KEY, PYTHONDONTWRITEBYTECODE="1")
     env.pop("SCR_REPLICA_MODE", None)
@@ -196,6 +237,51 @@ def _paths(a, b, prefix=""):
     return set() if a == b else {prefix or "/"}
 
 
+def _leaves(doc, prefix=""):
+    """Every scalar in a decoded body, as (JSON path, value) in _paths' syntax."""
+    if isinstance(doc, dict):
+        for k, v in doc.items():
+            yield from _leaves(v, prefix + "/" + str(k))
+    elif isinstance(doc, list):
+        for i, v in enumerate(doc):
+            yield from _leaves(v, prefix + "/" + str(i))
+    else:
+        yield prefix or "/", doc
+
+
+def _build_days(start, end):
+    """Every UTC day the build window touched, first to last."""
+    days, day = [], start.date()
+    while day <= end.date():
+        days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def _date_forms(day):
+    """The two date-only spellings the api emits: ISO, and to_char 'Mon FMDD'."""
+    return day.isoformat(), MONTHS[day.month - 1] + " " + str(day.day)
+
+
+def build_day_leaks(requests, results, days):
+    """Every date-only value in an answer that names a day of this run's build
+    window, outside the paths NOISE declares: such a value is a database-clock
+    stamp truncated to a date, which two sides built on different UTC days
+    answer differently and a same-day run cannot see vary (lesson 1062).
+    Returns (site, method, url, session, path, value) per leak."""
+    forms = {form for day in days for form in _date_forms(day)}
+    leaks = []
+    for req, r in zip(requests, results):
+        declared = dict(_declared(req))
+        doc = _decode(r)
+        if isinstance(doc, bytes):
+            continue
+        for path, value in _leaves(doc):
+            if isinstance(value, str) and value in forms and path not in declared:
+                leaks.append((req["site"], req["method"], req["url"], req["session"], path, value))
+    return leaks
+
+
 def compare(requests, base, lane, ctl):
     """Every disagreement of the lane with trunk, judged against the frozen
     replay. Returns (problems, counts).
@@ -255,18 +341,21 @@ def three_lanes():
     PG.require_live_pg()
     lanes = []
     try:
+        built_from = datetime.now(timezone.utc)
         for prefix in ("rg_oracle_base", "rg_oracle_lane", "rg_oracle_ctl"):
+            built_after = datetime.now(timezone.utc)
             lane = PG.Lane(prefix).open()
             lanes.append(lane)
             _seed(lane)
-        yield lanes
+            _pin_build_clock(lane, built_after)
+        yield lanes, built_from
     finally:
         for lane in lanes:
             lane.close()
 
 
 def test_1403_replay_matches_trunk_oracle(three_lanes, tmp_path, capsys):
-    base_lane, lane_lane, ctl_lane = three_lanes
+    (base_lane, lane_lane, ctl_lane), built_from = three_lanes
     sha = _base_sha()
     trunk = _export(sha, str(tmp_path / "trunk"))
     requests = Q.request_list(WORKTREE, ME, ME2, UUID, SESSION)
@@ -295,6 +384,16 @@ def test_1403_replay_matches_trunk_oracle(three_lanes, tmp_path, capsys):
         for p in problems[:40]:
             print("[bv-a problem]", p)
     assert not problems
+    # No answer names a day of the build window as a date-only value (see
+    # build_day_leaks): _pin_build_clock is what keeps this empty, and this is
+    # what notices the next build-time stamp a response starts to carry.
+    days = _build_days(built_from, datetime.now(timezone.utc))
+    leaks = [(side,) + leak for side, out in (("base", base), ("lane", lane), ("control", ctl))
+             for leak in build_day_leaks(requests, out["results"], days)]
+    with capsys.disabled():
+        for leak in leaks[:40]:
+            print("[bv-a build-day leak]", leak)
+    assert not leaks, leaks[:10]
     # Every declared noisy value was seen and validated on all three sides,
     # and nothing else varied: the freeze took the boards and the link code
     # out of the varying set.
@@ -356,3 +455,23 @@ def test_compare_control():
     bad_len = dict(card(1030, t=at + 30), headers=[["content-length", "1"],
                                                    ["content-type", "application/json"]])
     assert compare(h2h, [base], [bad_len], [ctl])[0]
+
+
+def test_build_day_sweep_control():
+    """The sweep reports a date-only value naming a build day in either
+    spelling, on any side; not another day, not a number, not a value at a
+    path NOISE declares for the request; and the window spans the days."""
+    day = datetime(2026, 10, 30, 23, 59, tzinfo=timezone.utc)
+    days = _build_days(day, day + timedelta(minutes=2))
+    assert [d.isoformat() for d in days] == ["2026-10-30", "2026-10-31"], days
+    req = [{"site": "s", "method": "GET", "url": "/api/v1/shop/items", "session": False}]
+    hit = _r(b'{"items": [{"released_iso": "2026-10-30", "added": "Oct 31", "n": 20261030}]}')
+    assert [leak[4:] for leak in build_day_leaks(req, [hit], days)] == [
+        ("/items/0/released_iso", "2026-10-30"), ("/items/0/added", "Oct 31")]
+    miss = _r(b'{"items": [{"released_iso": "2026-10-29", "added": "Oct 29", "t": "2026-10-30T01:02:03Z"}]}')
+    assert build_day_leaks(req, [miss], days) == []
+    assert build_day_leaks(req, [_r(b"not json")], days) == []
+    # a path NOISE declares for the request is judged by its own check, not here
+    h2h = [{"site": "s", "method": "GET", "url": "/api/v1/h2h/1/2", "session": True}]
+    declared = _r(b'{"profile": {"last_seen_s": "2026-10-30"}, "line": "2026-10-30"}')
+    assert [leak[4] for leak in build_day_leaks(h2h, [declared], days)] == ["/line"]
