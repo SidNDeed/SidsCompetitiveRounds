@@ -18,9 +18,18 @@
 -- separate (PostgreSQL 16 has no transaction_timeout), so the longest this file
 -- can hold locks before its COMMIT is their SUM, 30 s, and that holds because both
 -- UPDATEs run inside ONE statement, a DO block whose inner statements share its
--- 25 s. COMMIT itself is outside statement_timeout; with synchronous_commit = local
--- it does not wait on a synchronous standby, so its own wait is the local WAL flush
--- only, which no setting bounds.
+-- 25 s.
+-- THE COMMIT. PostgreSQL disables the statement timer before it commits, so the
+-- COMMIT's own work is outside every timeout above, and the locks are held until
+-- it ends. synchronous_commit = local keeps that work LOCAL: it never waits for a
+-- standby's confirmation, whatever synchronous_standby_names says now or later
+-- (read on the primary 2026-10-30: empty, synchronous_commit on, server 16.15).
+-- BOUNDED: everything before COMMIT -- each lock wait (5 s, and every one sits
+-- inside the DO block's 25 s) and the hold up to COMMIT (statement 25 s + idle
+-- 5 s = 30 s). NOT BOUNDED: the COMMIT's local completion -- the WAL flush and
+-- the transaction-status (pg_xact) write, which can read an evicted page -- I/O
+-- that no PostgreSQL setting bounds, for this or any transaction. The hold is
+-- therefore 30 s plus the COMMIT's local completion.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';

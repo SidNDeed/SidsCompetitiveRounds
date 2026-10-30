@@ -807,8 +807,9 @@ def test_393_and_its_rollback_bounds_are_in_effect_in_their_transaction(live_pg,
     reports the file's four values; after ROLLBACK the session's own settings
     are back, so nothing outlives the file. With the structural test (nothing
     later names these settings) this is what is in effect when the file's
-    COMMIT runs: synchronous_commit = local, so that COMMIT waits for the
-    local WAL flush and not for a synchronous standby."""
+    COMMIT runs: synchronous_commit = local, so that COMMIT never waits for a
+    standby's confirmation; what no setting bounds is its local completion,
+    the WAL flush and the transaction-status (pg_xact) write."""
     sql = _read(path)
     head = sql.split("\nDO $", 1)[0]
     assert head.count("BEGIN;") == 1 and "COMMIT;" not in head

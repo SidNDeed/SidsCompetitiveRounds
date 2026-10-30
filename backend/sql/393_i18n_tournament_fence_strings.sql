@@ -59,11 +59,19 @@
 -- the statement that takes them plus up to 5 s waiting for COMMIT, 30 s in all. The
 -- sum holds only because ALL the work below is ONE statement, a single DO block whose
 -- inner statements share its 25 s: every further top-level statement would bring a
--- 25 s budget of its own. COMMIT itself is outside statement_timeout, and the locks
--- are held until it ends, so the fourth line, synchronous_commit = local, keeps it
--- from waiting on a synchronous standby: the COMMIT's own wait is then the local WAL
--- flush only, which no setting bounds. Any timeout that fires aborts the whole file
--- with nothing committed.
+-- 25 s budget of its own. Any timeout that fires aborts the whole file with nothing
+-- committed.
+-- THE COMMIT. PostgreSQL disables the statement timer before it commits, so the
+-- COMMIT's own work is outside every timeout above, and the locks are held until it
+-- ends. The fourth line, synchronous_commit = local, keeps that work LOCAL: it never
+-- waits for a standby's confirmation, whatever synchronous_standby_names says now or
+-- later (read on the primary 2026-10-30: empty, synchronous_commit on, server 16.15).
+-- BOUNDED: everything before COMMIT -- each lock wait (5 s, and every one sits inside
+-- the DO block's 25 s) and the hold up to COMMIT (statement 25 s + idle 5 s = 30 s).
+-- NOT BOUNDED: the COMMIT's local completion -- the WAL flush and the
+-- transaction-status (pg_xact) write, which can read an evicted page -- I/O that no
+-- PostgreSQL setting bounds, for this or any transaction. The hold is therefore 30 s
+-- plus the COMMIT's local completion.
 -- ROLLBACK: rollback_393_i18n_tournament_fence_strings.sql.
 
 BEGIN;
