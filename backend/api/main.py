@@ -7612,6 +7612,15 @@ def _janitor_selftest_marker() -> int:
 # edge only by a marker both roles answer alike, because no probe says
 # which box answered. Absent on any build before it.
 _JANITOR_SELFTEST_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the
+# cosmetics lane's build marker (shop_items.min_client_version, migration
+# 397, and the per-item floor every shop list and transfer route honours),
+# reported on /health as `shop_floor`. The lane adds no route and no other
+# health word, so without it no phase of the train could tell a box on the
+# new build from a stale one (learnings 780, 794). A code constant, equal on
+# both boxes by construction, probed by the release train and read by
+# nothing else (#306). Absent on any build before it.
+_SHOP_FLOOR_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
@@ -7681,6 +7690,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               combat_evidence=_combat_evidence_health_word(),
                               admin_evidence=_admin_evidence_health_word(),
+                              shop_floor=_SHOP_FLOOR_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7735,6 +7745,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               combat_evidence=_combat_evidence_health_word(),
                               admin_evidence=_admin_evidence_health_word(),
+                              shop_floor=_SHOP_FLOOR_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),

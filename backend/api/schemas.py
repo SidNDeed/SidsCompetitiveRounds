@@ -1172,6 +1172,15 @@ class HealthResponse(BaseModel):
     # landing's build discriminator, since the report routes answer 403 on
     # every build (the internal prefix) and cannot be probed for presence.
     admin_evidence: int
+    # shop_floor: release-train verification plumbing, not a design
+    # mechanism (main._SHOP_FLOOR_BUILD; 1 = this build carries the
+    # cosmetics lane: shop_items.min_client_version, migration 397). A code
+    # constant, equal on both roles by construction, so the train can read
+    # it through the edge; the lane adds no route and no other health word,
+    # and it is the only key that tells a stale box from a refreshed one
+    # (learnings 780, 794). Probed by the release train and read by nothing
+    # else (#306). No default, as above. Absent on any build before it.
+    shop_floor: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not
