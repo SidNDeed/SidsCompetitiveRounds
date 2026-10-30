@@ -332,6 +332,18 @@ _BRANCH_POINT = "0266237"
 _ITEM_ANCHORS = ("backend/tests/test_faq_surfaces.py",
                  "backend/tests/fixtures/faq_claims.json")
 
+# A COMMIT OF ANOTHER LANE THAT TOUCHES AN ANCHOR is named here, because the
+# path filter would count it as this item's. The FAQ early-leave lane's
+# migration 396 rewrites the early-leave bullet of the economy text that hold
+# 3 pins, so that lane's commit changed hold 3 in this module beside its own
+# files (396 and its rollback, the client texts with their catalogue rows and
+# key manifests, and its tests). Those are that lane's and ship under its
+# review; they are not this item's to sweep or to hand back. A named commit
+# must be one the log lists, so the record cannot outlive the commit it names.
+_OTHER_LANE_COMMITS = (
+    "f683d3440dc006981401d5637204767523f6809d",
+)
+
 # A DRIVE-LETTER PATH, any of them and not only one under a home directory: a
 # path that resolves on one seat is wrong on every other (round 4's psql
 # default was one, and a fresh checkout with only the DSN set selected a client
@@ -546,15 +558,23 @@ def test_the_hygiene_scope_is_every_file_this_item_touches():
     work. A file one of those commits touched is either swept or handed back,
     so the scope cannot silently miss one; and a recorded file is one a commit
     of the item touched, so the scope cannot be padded with files it does not
-    own. A clone without the branch point skips this half and says why; the
-    sweep itself needs no history."""
+    own. A commit _OTHER_LANE_COMMITS names is another lane's that had to
+    touch an anchor: it is left out, and it must be one the log lists. A
+    clone without the branch point skips this half and says why; the sweep
+    itself needs no history."""
     if _git("rev-parse", "--verify", _BRANCH_POINT + "^{commit}").returncode != 0:
         pytest.skip("the branch point %s is not in this clone, so this item's "
                     "commits cannot be listed" % _BRANCH_POINT)
     proc = _git("log", "--no-merges", "--format=%H",
                 _BRANCH_POINT + "..HEAD", "--", *_ITEM_ANCHORS)
     assert proc.returncode == 0, proc.stderr or proc.stdout
-    commits = proc.stdout.split()
+    listed = proc.stdout.split()
+    stale = sorted(set(_OTHER_LANE_COMMITS) - set(listed))
+    assert not stale, (
+        "_OTHER_LANE_COMMITS names %s, which the log of this item's anchors "
+        "does not list: the record outlives the commit it names (a rebase or "
+        "a squash gives a commit a new id)" % stale)
+    commits = [sha for sha in listed if sha not in _OTHER_LANE_COMMITS]
     # Seven commits of this item precede round 5. Fewer means the log read
     # the wrong range, and both assertions below would hold vacuously (#304).
     assert len(commits) >= 7, (
