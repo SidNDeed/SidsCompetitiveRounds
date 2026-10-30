@@ -77,6 +77,26 @@ NOISE = [
     ("GET", "/api/v1/h2h/", "/profile/last_seen_s", _seconds_since_anchor),
 ]
 
+# Lists whose order among ADJACENT rows sharing a key the trunk never fixed:
+# (method, url path, JSON path of the list, run key, tiebreak). Every side's
+# list has each run of adjacent rows with an equal run key put in tiebreak
+# order before anything is compared; nothing else in the answer moves.
+#
+# /shop/items ordered by price alone until the lane that added `, id`
+# (lesson 1062's file, shop-order-1410): PostgreSQL answers equal prices in
+# whatever order its sort leaves the heap's rows. The build alone lays the
+# heap out the same every time; _pin_build_clock's UPDATEs then write each
+# pinned row's new version wherever its page has room, which depends on what
+# pruning had reclaimed, so trunk's own base and control disagreed at
+# /items/1 and /items/10 (/items/12 and /13 in another run) from the day the
+# pin landed. From that lane on, trunk answers ties in id order and this
+# settling is the identity on every side. Only ADJACENT runs are settled: the
+# owned achievement rows the route appends after the catalogue keep their
+# place, and a row moved to another price is still a difference.
+TIES = [
+    ("GET", "/api/v1/shop/items", "/items", "price", "id"),
+]
+
 
 # -- exhaustiveness ----------------------------------------------------------
 
@@ -198,6 +218,45 @@ def _answer(r):
     return r["status"], sorted(map(tuple, r["headers"])), r["body"]
 
 
+def _encode(doc) -> bytes:
+    """The bytes the api's JSONResponse renders for doc."""
+    return json.dumps(doc, ensure_ascii=False, allow_nan=False, indent=None,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def _settle(req, r):
+    """r with every TIES list's runs of adjacent equal-key rows in tiebreak
+    order. An answer that does not round-trip through _encode byte for byte,
+    or whose list is not rows that all carry both keys, is returned as it is:
+    it is then compared raw, so a tie the settling cannot reach still counts."""
+    path = req["url"].split("?")[0]
+    ties = [(lst, key, tie) for method, url, lst, key, tie in TIES
+            if req["method"] == method and path == url]
+    if not ties:
+        return r
+    raw = base64.b64decode(r["body"])
+    doc = _decode(r)
+    if isinstance(doc, bytes) or _encode(doc) != raw:
+        return r
+    for lst, key, tie in ties:
+        try:
+            rows = _at(doc, lst)
+        except (KeyError, IndexError, ValueError, TypeError):
+            continue
+        if not isinstance(rows, list) or not all(isinstance(x, dict) and key in x and tie in x for x in rows):
+            continue
+        i = 0
+        while i < len(rows):
+            j = i
+            while j + 1 < len(rows) and rows[j + 1][key] == rows[i][key]:
+                j += 1
+            rows[i:j + 1] = sorted(rows[i:j + 1], key=lambda x: x[tie])
+            i = j + 1
+    body = _encode(doc)
+    assert len(body) == len(raw)       # a permutation; the content-length still holds
+    return dict(r, body=base64.b64encode(body).decode())
+
+
 def _declared(req):
     return [(path, check) for method, prefix, path, check in NOISE
             if req["method"] == method and req["url"].startswith(prefix)]
@@ -299,9 +358,11 @@ def compare(requests, base, lane, ctl):
     value present on any side must pass its validator, the statuses must be
     equal, and the headers equal except a content-length that matches its own
     body. A trunk variation NOISE does not declare is itself a problem: the
-    oracle then cannot compare that answer, and says so."""
+    oracle then cannot compare that answer, and says so. Every side is
+    settled first (_settle: the TIES lists' equal-key runs in tiebreak order)."""
     problems, counts = [], {"deterministic": 0, "varying": 0, "validated": 0}
     for req, b, l, c in zip(requests, base, lane, ctl):
+        b, l, c = (_settle(req, x) for x in (b, l, c))
         where = (req["site"], req["method"], req["url"], req["session"])
         if _answer(b) == _answer(c) and not _carries_declared(req, b):
             counts["deterministic"] += 1
@@ -385,6 +446,7 @@ def test_1403_replay_matches_trunk_oracle(three_lanes, tmp_path, capsys):
               f"varying {counts['varying']} validated {counts['validated']} "
               f"trunk statuses {sorted(statuses.items())} problems {len(problems)}")
         for q, b, c in zip(requests, base["results"], ctl["results"]):
+            b, c = _settle(q, b), _settle(q, c)
             if _answer(b) != _answer(c):
                 print("[bv-a varying on trunk]", q["method"], q["url"], "session" if q["session"] else "",
                       sorted(_paths(_decode(b), _decode(c)))[:6])
@@ -464,6 +526,50 @@ def test_compare_control():
     bad_len = dict(card(1030, t=at + 30), headers=[["content-length", "1"],
                                                    ["content-type", "application/json"]])
     assert compare(h2h, [base], [bad_len], [ctl])[0]
+
+
+def _shop(*rows):
+    """A /shop/items body in the api's own encoding: rows are (id, price)."""
+    return _r(_encode({"items": [{"id": i, "sku": "s%d" % i, "price": p} for i, p in rows]}))
+
+
+def test_settle_control(monkeypatch):
+    """TIES settles trunk's equal-price order and nothing else: base and
+    control that disagree only inside a run of adjacent equal prices compare
+    equal, and so does a lane in id order; a row moved to another price, a
+    changed row inside a run, a merge of two NON-adjacent equal-price runs, a
+    body the settling cannot round-trip and another url are all still
+    reported. With TIES empty the tie disagreement is reported again, so the
+    declaration is what accepts it."""
+    shop = [{"site": "s", "method": "GET", "url": "/api/v1/shop/items?steam_id=1", "session": True}]
+    base = _shop((3, 100), (1, 100), (2, 100), (7, 200), (5, 300))
+    ctl = _shop((2, 100), (3, 100), (1, 100), (7, 200), (5, 300))
+    lane = _shop((1, 100), (2, 100), (3, 100), (7, 200), (5, 300))
+    assert not compare(shop, [base], [lane], [ctl])[0]
+    assert not compare(shop, [base], [base], [ctl])[0]
+    counts = compare(shop, [base], [lane], [ctl])[1]
+    assert counts == {"deterministic": 1, "varying": 0, "validated": 0}, counts
+    # a row at another price is a difference
+    assert compare(shop, [base], [_shop((1, 100), (2, 100), (7, 100), (3, 200), (5, 300))], [ctl])[0]
+    # a changed row inside a run is a difference
+    changed = _r(_encode({"items": [{"id": 1, "sku": "x", "price": 100}, {"id": 2, "sku": "s2", "price": 100},
+                                    {"id": 3, "sku": "s3", "price": 100}, {"id": 7, "sku": "s7", "price": 200},
+                                    {"id": 5, "sku": "s5", "price": 300}]}))
+    assert compare(shop, [base], [changed], [ctl])[0]
+    # only ADJACENT equal prices form a run: an appended row keeps its place
+    tail = _shop((3, 100), (1, 100), (7, 200), (2, 100))
+    assert compare(shop, [tail], [_shop((1, 100), (2, 100), (3, 100), (7, 200))], [tail])[0]
+    assert not compare(shop, [tail], [_shop((1, 100), (3, 100), (7, 200), (2, 100))], [tail])[0]
+    # a body that does not round-trip is compared raw
+    spaced = _r(b'{"items": [{"id": 3, "price": 100}, {"id": 1, "price": 100}]}')
+    plain = _r(b'{"items": [{"id": 1, "price": 100}, {"id": 3, "price": 100}]}')
+    assert compare(shop, [spaced], [spaced], [plain])[0]
+    # another url is not settled
+    other = [{"site": "s", "method": "GET", "url": "/api/v1/shop/newest", "session": False}]
+    assert compare(other, [base], [lane], [ctl])[0]
+    # negative control: without the declaration trunk's tie disagreement is a problem
+    monkeypatch.setattr(sys.modules[__name__], "TIES", [])
+    assert compare(shop, [base], [lane], [ctl])[0]
 
 
 def test_build_day_sweep_control():
