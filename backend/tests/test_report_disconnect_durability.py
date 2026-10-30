@@ -309,6 +309,7 @@ class FakeSession:
         self.freshness_params = {}
         self.count_reads = 0
         self.insert_params = None
+        self.insert_sql = None
         self.dedup_params = None
         # r14 MEDIUM 3/6. The grant is the authority the predicate reads, and
         # the bracket rows are the lifecycle it re-asks while holding them.
@@ -438,6 +439,17 @@ class FakeSession:
                     sql, main.DC_MIN_LIVE_POINTS,
                     main._dc_require_verified_seat()) else [])
             return _Result([(1,)] if self.series_fresh else [])
+        # Ahead of the generic ranked_series read below: the insert reads
+        # ranked_series inside its leave-anchor subquery (migration 391), and
+        # that substring must not route it to the series load.
+        if sql.startswith("INSERT INTO dc_events"):
+            assert "RETURNING" in sql, (
+                "the insert must report whether it was the one that recorded the event"
+            )
+            self.inserts += 1
+            self.insert_params = dict(params or {})
+            self.insert_sql = sql
+            return _Result([(1,)] if self.insert_wins else [])
         if "FROM ranked_series" in sql:
             self.series_loads += 1
             return _Result([self.named_series] if self.named_series is not None else [])
@@ -450,13 +462,6 @@ class FakeSession:
         if "FROM dc_events" in sql:
             self.dedup_params = dict(params or {})
             return _Result([(1,)] if self.event_exists else [])
-        if sql.startswith("INSERT INTO dc_events"):
-            assert "RETURNING" in sql, (
-                "the insert must report whether it was the one that recorded the event"
-            )
-            self.inserts += 1
-            self.insert_params = dict(params or {})
-            return _Result([(1,)] if self.insert_wins else [])
         if sql.startswith("UPDATE series_dc_grants"):
             assert "spent_at IS NULL" in sql, (
                 "the mark is not first-write-wins, so a replay can move a "
@@ -550,6 +555,28 @@ def test_the_request_that_inserts_the_row_is_the_one_that_counts():
     assert session.inserts == 1
     assert session.increments == 1
     assert session.commits == 1
+
+
+def test_the_inserted_row_carries_the_leave_anchor():
+    """Migration 391, the wiring: the insert that decides also writes
+    leave_anchor_at, read in the same statement from the LEAVER's verified
+    presence in this series and else the series' last activity, with the
+    same three binds the gate always had. What the statement writes is
+    executed against PostgreSQL in test_dc_leave_anchor_pg.py."""
+    session = FakeSession(_players(), stored_count=4)
+    assert _call(session)["status"] == "recorded"
+    sql = session.insert_sql
+    assert "leave_anchor_at" in sql.split("VALUES", 1)[0]
+    anchor = sql.split("VALUES", 1)[1]
+    assert "FROM series_progress sp" in anchor and "sp.surface = 'ranked'" in anchor
+    assert "sp.player_id = CAST(:dp AS uuid)" in anchor, (
+        "the anchor is the leaver's presence, never the reporter's")
+    assert "SELECT s.last_activity_at FROM ranked_series s" in anchor
+    assert "ON CONFLICT DO NOTHING RETURNING 1" in anchor, (
+        "first-write-wins: a replay must not move the anchor")
+    assert session.insert_params == {"sid": CURRENT_SERIES, "dp": LEAVER, "rp": REPORTER}
+    assert session.series_loads == 0, (
+        "the insert was routed to the series load: the fake no longer sees it")
 
 
 def test_a_replay_that_loses_the_insert_counts_nothing():
