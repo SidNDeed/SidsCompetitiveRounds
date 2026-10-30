@@ -35,6 +35,9 @@ RUN pip install --no-cache-dir \
       aiohttp==3.14.3 \
       matplotlib==3.11.2
 COPY discord_bot.py .
+# The admin evidence report's PNG render worker, started by the bot as its own
+# process (design 5.2).
+COPY aer_render_worker.py .
 # The boot line comes from this shell, before python starts (r9 M4): the deploy
 # train binds the bot's ready line to the generation the boot line names, and a
 # replacement that stalls anywhere in python still leaves its boot line in the

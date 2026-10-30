@@ -15209,6 +15209,11 @@ async def on_interaction(interaction: discord.Interaction):
             # Item 5: a tap on the pick-a-thread listing.
             await _mailpick_click(interaction, cid)
             return
+        if cid.startswith("aer:"):
+            # Admin evidence report page buttons (design 5.4): the request
+            # rides the custom_id, the api decides with the clicker's id.
+            await _aer_click(interaction, cid)
+            return
         if cid.startswith("modcase:"):
             # Mail moderation buttons (Sept 6 item b, B-2): routed to the api
             # with the clicker's Discord id; the server decides.
@@ -17188,6 +17193,815 @@ async def cmd_gambler(ctx):
             await ctx.send(f"🎲 You now have **{GAMBLER_ROLE_NAME}** — you'll be pinged when a bet opens.", ephemeral=True)
     except discord.Forbidden:
         await ctx.send("I can't manage that role — make sure my bot role is above the Gambler role.", ephemeral=True)
+
+
+# ── Admin evidence report: /evidence (phase 1a, item 1a-6) ────────────────
+# Admin evidence design 5.1 (name, gate, delivery), 5.4 (pagination), 5.5
+# (the summary page, display half) and 3.3 (the 1a slot table and decoder).
+# Who may see a report is the api's decision (the internal key plus the
+# actor's Discord id, design 4.2). The bot keeps the command to the admin
+# channel, acknowledges privately, asks the api with the clicker's or caller's
+# id, and only after a served page sends the one public message to the admin
+# channel. Every other answer is one ephemeral word from `_aer_word`.
+
+# The 1a cell slot tables and the escaped set, duplicated verbatim from
+# backend/api/admin_evidence.py (the bot image copies only this file,
+# backend/Dockerfile.bot); test_discord_evidence_bot.py asserts both equal.
+AER_WIRE = {
+    "1a": {
+        "summary": ("ki", "n", "val", "own_mean", "own_median", "own_n",
+                    "own_state", "pop_rank", "pop_n", "pop_p50", "pop_p90",
+                    "pop_p99", "state"),
+        "seat": ("ki", "val", "own_mean", "own_n", "own_state", "own_rank",
+                 "pop_rank", "pop_n", "state"),
+        "pair": ("ki", "val", "own_mean", "own_n", "own_state", "own_rank",
+                 "pop_rank", "pop_n", "state"),
+    },
+}
+AER_CELL_STATES = ("ok", "not_recorded", "unknown", "flag_only", "not_run")
+AER_OWN_STATES = ("complete", "partial", "truncated", "none")
+
+
+def _aer_escaped_set():
+    cps = set(range(0x00, 0x20)) | {0x7F} | set(range(0x80, 0xA0))   # Unicode Cc
+    cps |= {0x2028, 0x2029}
+    cps |= {0x061C, 0x200E, 0x200F}                                  # Bidi_Control
+    cps |= set(range(0x202A, 0x202F)) | set(range(0x2066, 0x206A))
+    cps.add(0x60)                                                     # backtick
+    return frozenset(cps)
+
+
+AER_ESC = _aer_escaped_set()
+AER_REFUSED = "Evidence report refused."
+AER_PREFIX = "Evidence report: "
+AER_POSTED = "Posted."
+AER_TIMEOUT_S = 30
+AER_CUSTOM_ID_MAX = 100
+AER_GAMES_DEFAULT = 10          # the api's DISPLAY_DEFAULTS["games"], under an equality test
+AER_ROOT = "/api/v1/internal/evidence-report/"
+_AER_SHAPES = {"g": "game", "s": "series", "o": "pair", "p": "player"}
+_AER_LETTERS = {shape: letter for letter, shape in _AER_SHAPES.items()}
+_AER_TOP_KEYS = frozenset({"shape", "page", "pages", "subjects", "rules", "population",
+                           "baseline", "registry", "catalog", "games"})
+_AER_SUMMARY_KEYS = frozenset({"windows", "summary"})
+_AER_GAME_KEYS = frozenset({"match_id", "code", "ended_at", "is_ranked", "invalidated",
+                            "series_id", "rounds", "seats", "pair_cells", "flags"})
+_AER_WINDOW_KEYS = frozenset({"oi", "basis", "subj", "games", "covered", "flag_obs",
+                              "newest", "oldest"})
+_AER_CATALOG_KEYS = frozenset({"ki", "key", "base", "fam", "unit", "kind"})
+_AER_SPREAD_KEYS = frozenset({"p50", "p90", "p99"})
+_AER_FLAG_KEYS = frozenset({"reason", "subject", "reviewed", "current", "created_at"})
+
+# The decoded page (design 3.3): immutable, built only from a response that
+# passed the 1a closed schema. Cells are tuples in their AER_WIRE slot order.
+BotPage = collections.namedtuple("BotPage", (
+    "shape", "page", "pages", "subjects", "population", "baseline", "registry",
+    "catalog", "games", "windows", "summary"))
+
+
+class AerSchemaError(ValueError):
+    """A response that does not meet the phase's closed schema."""
+
+
+def _aer_check_number(value):
+    if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+        raise AerSchemaError("not a nullable number: %r" % (value,))
+    return value
+
+
+def _aer_check_int(value, lo=None, nullable=False):
+    if value is None and nullable:
+        return value
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AerSchemaError("not an integer: %r" % (value,))
+    if lo is not None and value < lo:
+        raise AerSchemaError("below %d: %r" % (lo, value))
+    return value
+
+
+def _aer_check_text(value, nullable=False):
+    """Encoded text holding no escaped-set code point."""
+    if value is None and nullable:
+        return value
+    if not isinstance(value, str) or any(ord(ch) in AER_ESC for ch in value):
+        raise AerSchemaError("not encoded text")
+    return value
+
+
+def _aer_check_list(value, length):
+    if not isinstance(value, list) or len(value) != length:
+        raise AerSchemaError("not a fixed list of %d" % length)
+    return value
+
+
+def _aer_keys(obj, required, optional=frozenset()):
+    if not isinstance(obj, dict):
+        raise AerSchemaError("not an object")
+    keys = set(obj)
+    if not required <= keys or not keys <= (required | optional):
+        raise AerSchemaError("keys %s" % sorted(keys ^ (required | optional)))
+    return obj
+
+
+def _aer_cell(row, table, catalog, phase="1a"):
+    slots = AER_WIRE[phase][table]
+    if not isinstance(row, list) or len(row) != len(slots):
+        raise AerSchemaError("%s cell slot count" % table)
+    cell = dict(zip(slots, row))
+    ki = _aer_check_int(cell["ki"], 0)
+    if ki not in catalog:
+        raise AerSchemaError("cell key not in the catalog")
+    if cell["state"] not in AER_CELL_STATES or cell["own_state"] not in AER_OWN_STATES:
+        raise AerSchemaError("cell state")
+    if table == "summary":
+        if catalog[ki]["kind"] != "R":
+            raise AerSchemaError("summary cell kind")
+        for slot in ("n",):
+            _aer_check_int(cell[slot], 0)
+        for slot in ("own_n", "pop_n"):
+            _aer_check_int(cell[slot], 0, nullable=True)
+        for slot in ("val", "own_mean", "own_median", "pop_rank", "pop_p50", "pop_p90",
+                     "pop_p99"):
+            _aer_check_number(cell[slot])
+    else:
+        if catalog[ki]["kind"] == "R":
+            _aer_check_number(cell["val"])
+        else:
+            _aer_check_text(cell["val"], nullable=True)
+        for slot in ("own_n", "pop_n"):
+            _aer_check_int(cell[slot], 0, nullable=True)
+        for slot in ("own_mean", "own_rank", "pop_rank"):
+            _aer_check_number(cell[slot])
+    return tuple(row)
+
+
+def _aer_decode_response(body, phase="1a", *, expected=None):
+    """`_aer_fetch`'s parsed JSON checked against the phase's closed schema
+    (design 3.3) and returned as a BotPage; any other shape raises
+    AerSchemaError. Phase 1a: rules exactly {"report":"absent"}, no class or
+    mark slot anywhere, spread slots on base catalog entries only, flag_obs on
+    seat windows only, each summary cell's key a window key of the page's
+    catalog."""
+    if phase != "1a":
+        raise AerSchemaError("unknown phase %r" % (phase,))
+    if not isinstance(body, dict):
+        raise AerSchemaError("not an object")
+    shape = body.get("shape")
+    if not isinstance(shape, str) or shape not in _AER_LETTERS:
+        raise AerSchemaError("shape")
+    page = _aer_check_int(body.get("page"), 1)
+    summary_page = shape in ("pair", "player") and page == 1
+    _aer_keys(body, _AER_TOP_KEYS | (_AER_SUMMARY_KEYS if summary_page else frozenset()))
+    pages = _aer_check_int(body["pages"], 1)
+    if page > pages or body["rules"] != {"report": "absent"}:
+        raise AerSchemaError("page or rules")
+    if expected is not None and shape != expected.get("shape"):
+        raise AerSchemaError("response shape")
+    if expected is not None and page != expected.get("page"):
+        raise AerSchemaError("response page")
+    if not isinstance(body["subjects"], list):
+        raise AerSchemaError("subjects")
+    subjects = []
+    for s in body["subjects"]:
+        _aer_keys(s, frozenset({"steam_id", "name"}))
+        if s["steam_id"] is not None and not (isinstance(s["steam_id"], str)
+                                              and s["steam_id"].isdigit()):
+            raise AerSchemaError("subject steam id")
+        subjects.append((s["steam_id"], _aer_check_text(s["name"], nullable=True)))
+    population_keys = frozenset({"key", "days", "lag_s", "games", "computed_at", "truncated"})
+    if summary_page:
+        population_keys |= {"win_computed_at"}
+    population = _aer_keys(body["population"], population_keys)
+    if population["key"] != "all":
+        raise AerSchemaError("population key")
+    for key in ("days", "lag_s", "games"):
+        _aer_check_int(population[key], 0)
+    if not isinstance(population["computed_at"], str) or (summary_page and not isinstance(
+            population["win_computed_at"], str)):
+        raise AerSchemaError("population timestamp")
+    if not isinstance(population["truncated"], list) or any(
+            isinstance(ki, bool) or not isinstance(ki, int) or ki < 0
+            for ki in population["truncated"]):
+        raise AerSchemaError("population truncated")
+    baseline = _aer_keys(body["baseline"], frozenset({"own_games", "scan"}))
+    for key in ("own_games", "scan"):
+        _aer_check_int(baseline[key], 0)
+    registry = _aer_keys(body["registry"], frozenset({"fingerprint", "census"}))
+    if not isinstance(registry["fingerprint"], str) or not re.fullmatch(
+            r"[0-9a-f]{8}", registry["fingerprint"]):
+        raise AerSchemaError("registry fingerprint")
+    census = _aer_keys(registry["census"], frozenset({"M", "N", "O", "C"}))
+    for pair in census.values():
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise AerSchemaError("registry census")
+        for count in pair:
+            _aer_check_int(count, 0)
+    if not isinstance(body["catalog"], list):
+        raise AerSchemaError("catalog")
+    catalog = {}
+    canonical_keys = set()
+    catalog_row_keys = (_AER_CATALOG_KEYS if summary_page
+                        else _AER_CATALOG_KEYS | _AER_SPREAD_KEYS)
+    for row in body["catalog"]:
+        _aer_keys(row, catalog_row_keys)
+        ki = _aer_check_int(row["ki"], 0)
+        if ki in catalog:
+            raise AerSchemaError("duplicate catalog ki")
+        _aer_check_int(row["base"], 0, nullable=True)
+        for k in ("key", "fam", "unit", "kind"):
+            _aer_check_text(row[k])
+        if row["key"] in canonical_keys:
+            raise AerSchemaError("duplicate catalog key")
+        if row["kind"] not in ("R", "T", "D"):
+            raise AerSchemaError("catalog kind")
+        if summary_page and row["base"] is None:
+            raise AerSchemaError("summary catalog base")
+        if summary_page and row["kind"] != "R":
+            raise AerSchemaError("summary catalog kind")
+        if not summary_page and row["base"] is not None:
+            raise AerSchemaError("game catalog row")
+        key_fields = row["key"].split("|")
+        if len(key_fields) != 7:
+            raise AerSchemaError("catalog key fields")
+        if key_fields[2] != "seat":
+            raise AerSchemaError("catalog key scope")
+        if key_fields[5] not in (("win_median.cell", "win_max.cell")
+                                 if summary_page else ("cell",)):
+            raise AerSchemaError("catalog key aggregation")
+        for k in _AER_SPREAD_KEYS & set(row):
+            _aer_check_number(row[k])
+        canonical_keys.add(row["key"])
+        catalog[ki] = dict(row)
+    catalog_kis = frozenset(catalog)
+    games = []
+    if not isinstance(body["games"], list):
+        raise AerSchemaError("games")
+    for g in body["games"]:
+        _aer_keys(g, _AER_GAME_KEYS)
+        seats = []
+        if not isinstance(g["seats"], list) or g["pair_cells"] != []:
+            raise AerSchemaError("seats")
+        if len(g["seats"]) != 2:
+            raise AerSchemaError("seat count")
+        for seat in g["seats"]:
+            _aer_keys(seat, frozenset({"subject", "reporter", "cells"}))
+            subject = _aer_check_int(seat["subject"], 0)
+            if subject >= len(subjects) or not isinstance(seat["reporter"], bool) or not isinstance(
+                    seat["cells"], list):
+                raise AerSchemaError("seat")
+            cells = tuple(_aer_cell(c, "seat", catalog, phase) for c in seat["cells"])
+            if not cells:
+                raise AerSchemaError("empty seat cells")
+            if len(cells) != len(catalog_kis) or {cell[0] for cell in cells} != catalog_kis:
+                raise AerSchemaError("seat cell coverage")
+            seats.append((subject, seat["reporter"], cells))
+        if sum(seat[1] for seat in seats) > 1:
+            raise AerSchemaError("reporter count")
+        for k in ("code", "ended_at", "match_id"):
+            _aer_check_text(g[k])
+        for k in ("invalidated", "series_id"):
+            _aer_check_text(g[k], nullable=True)
+        rounds = _aer_check_list(g["rounds"], 2)
+        for score in rounds:
+            _aer_check_int(score, 0)
+        if not isinstance(g["is_ranked"], bool) or not isinstance(g["flags"], list):
+            raise AerSchemaError("game fields")
+        flags = []
+        for f in g["flags"]:
+            _aer_keys(f, _AER_FLAG_KEYS)
+            if not all(isinstance(f[k], bool) for k in ("reviewed", "current")) or (
+                    f["subject"] is not None and _aer_check_int(f["subject"], 0) >= len(subjects)):
+                raise AerSchemaError("flag")
+            _aer_check_text(f["reason"])
+            _aer_check_text(f["created_at"])
+            flags.append(dict(f))
+        games.append(dict(g, seats=tuple(seats), flags=tuple(flags)))
+    windows, summary = (), ()
+    if summary_page:
+        if games or not isinstance(body["windows"], list) or not isinstance(body["summary"], list):
+            raise AerSchemaError("summary page")
+        window_plan = ((0, None),) if shape == "player" else ((0, 1), (1, 0))
+        if len(body["windows"]) != len(window_plan):
+            raise AerSchemaError("window plan count")
+        wins = []
+        for position, w in enumerate(body["windows"]):
+            _aer_keys(w, _AER_WINDOW_KEYS)
+            oi = _aer_check_int(w["oi"], 0)
+            if oi != position:
+                raise AerSchemaError("window position")
+            for k in ("games", "covered"):
+                _aer_check_int(w[k], 0)
+            for k in ("newest", "oldest"):
+                _aer_check_text(w[k])
+            subj = _aer_check_list(w["subj"], 3)
+            if (subj[0] not in ("seat", "pair")
+                    or w["basis"] not in ("player", "pair")
+                    or (subj[0] != "seat" and w["flag_obs"] is not None)):
+                raise AerSchemaError("window")
+            subject = _aer_check_int(subj[1], 0)
+            partner = _aer_check_int(subj[2], 0, nullable=True)
+            if subj[0] != "seat":
+                raise AerSchemaError("window scope")
+            if w["basis"] != shape:
+                raise AerSchemaError("window basis")
+            if subject >= len(subjects):
+                raise AerSchemaError("window subject")
+            if ((shape == "player" and partner is not None)
+                    or (shape == "pair" and (partner is None or partner >= len(subjects)
+                                             or partner == subject))):
+                raise AerSchemaError("window subject shape")
+            if window_plan[position:position + 1] != ((subject, partner),):
+                raise AerSchemaError("window plan subjects")
+            if subj[0] == "seat":
+                _aer_check_int(w["flag_obs"], 0)
+            elif partner is None:
+                raise AerSchemaError("window subject")
+            wins.append(dict(w))
+        cells = []
+        for s in body["summary"]:
+            _aer_keys(s, frozenset({"oi", "cells"}))
+            oi = _aer_check_int(s["oi"], 0)
+            if oi >= len(wins) or not isinstance(s["cells"], list):
+                raise AerSchemaError("summary window")
+            rows = tuple(_aer_cell(c, "summary", catalog, phase) for c in s["cells"])
+            if not rows:
+                raise AerSchemaError("empty summary cells")
+            if len(rows) != len(catalog_kis) or {row[0] for row in rows} != catalog_kis:
+                raise AerSchemaError("summary cell coverage")
+            cells.append((oi, rows))
+        if len(cells) != len(wins) or {row[0] for row in cells} != set(range(len(wins))):
+            raise AerSchemaError("summary row coverage")
+        windows, summary = tuple(wins), tuple(cells)
+    return BotPage(shape, page, pages, tuple(subjects), dict(body["population"]),
+                   dict(body["baseline"]), dict(body["registry"]), catalog, tuple(games),
+                   windows, summary)
+
+
+def _aer_word(status, body, headers=None):
+    """The one closed status handler (design 5.1), shared by the command and
+    the page buttons: every answer that is not a served page is exactly one
+    of these ephemeral words. Status 0 is an api the bot could not reach; an
+    answer outside the api's documented words is `unavailable (schema)`."""
+    detail = body.get("detail") if isinstance(body, dict) else None
+    detail = detail if isinstance(detail, str) else ""
+    if status == 0:
+        return AER_PREFIX + "api unreachable."
+    if status == 403:
+        return AER_REFUSED
+    if status == 400 and re.fullmatch(r"bad_argument( \([a-z_ ;]{1,60}\))?", detail):
+        field = _aer_enc_text(detail[len("bad_argument"):].strip()[1:-1])
+        return AER_PREFIX + ("bad argument (%s)." % field if field else "bad argument.")
+    if status == 404:
+        return AER_PREFIX + "not found."
+    if status == 409:
+        return AER_PREFIX + "primary unavailable."
+    if status == 429:
+        retry = str({k.lower(): v for k, v in (headers or {}).items()}.get("retry-after", ""))
+        if retry.isdigit():
+            return AER_PREFIX + "rate limit, retry in %d s." % int(retry)
+    if status == 503:
+        m = re.fullmatch(r"(?:unavailable \(([a-z_]{1,40})\)|([a-z_]{1,40}))", detail)
+        if m:
+            return AER_PREFIX + "unavailable (%s)." % _aer_enc_text(m.group(1) or m.group(2))
+    if status == 500 and detail == "too_large":
+        return AER_PREFIX + "unavailable (too_large)."
+    return AER_PREFIX + "unavailable (schema)."
+
+
+def _aer_outcome(status, body, headers=None, *, expected=None):
+    """`(BotPage, None)` for a served page that meets the 1a schema, else
+    `(None, word)`."""
+    if status == 200:
+        try:
+            return _aer_decode_response(body, "1a", expected=expected), None
+        except AerSchemaError:
+            return None, AER_PREFIX + "unavailable (schema)."
+    return None, _aer_word(status, body, headers)
+
+
+def _aer_path(req):
+    """The api path for one request; the arguments are passed as typed and
+    the api answers `bad_argument` for any it does not accept."""
+    q = lambda v: urllib.parse.quote(str(v), safe="")   # noqa: E731
+    shape, page = req["shape"], req["page"]
+    if shape in ("game", "series"):
+        return "%s%s/%s?page=%s" % (AER_ROOT, shape, q(req["code"]), q(page))
+    if shape == "pair":
+        return "%spair?a=%s&b=%s&games=%s&page=%s" % (AER_ROOT, q(req["a"]), q(req["b"]),
+                                                     q(req["games"]), q(page))
+    return "%splayer/%s?games=%s&page=%s" % (AER_ROOT, q(req["steam_id"]), q(req["games"]),
+                                             q(page))
+
+
+def _aer_custom_id(req, page):
+    """Design 5.4: a page button encodes only the request."""
+    letter = _AER_LETTERS[req["shape"]]
+    if req["shape"] in ("game", "series"):
+        parts = [req["code"]]
+    elif req["shape"] == "pair":
+        parts = [req["a"], req["b"], req["games"]]
+    else:
+        parts = [req["steam_id"], req["games"]]
+    return ":".join(["aer", letter] + [str(p) for p in parts] + [str(page)])
+
+
+def _aer_parse_custom_id(cid):
+    """The request a page button encodes, or None for any other form."""
+    parts = cid.split(":") if isinstance(cid, str) else []
+    if len(parts) < 4 or parts[0] != "aer" or parts[1] not in _AER_SHAPES:
+        return None
+    shape = _AER_SHAPES[parts[1]]
+    want = {"game": 4, "series": 4, "pair": 6, "player": 5}[shape]
+    if len(parts) != want or not parts[-1].isdigit() or not all(parts[2:]):
+        return None
+    req = {"shape": shape, "page": int(parts[-1])}
+    if shape in ("game", "series"):
+        req["code"] = parts[2]
+    elif shape == "pair":
+        if not parts[4].isdigit():
+            return None
+        req.update(a=parts[2], b=parts[3], games=int(parts[4]))
+    else:
+        if not parts[3].isdigit():
+            return None
+        req.update(steam_id=parts[2], games=int(parts[3]))
+    return req
+
+
+def _aer_view(req, page, pages):
+    """Prev and Next, restart-safe (the raw listener answers them); Prev is
+    disabled on page 1 and Next on the last page."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Prev",
+                                    custom_id=_aer_custom_id(req, max(page - 1, 0)),
+                                    disabled=page <= 1))
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Next",
+                                    custom_id=_aer_custom_id(req, page + 1),
+                                    disabled=page >= pages))
+    return view
+
+
+def _aer_local_gate(interaction):
+    """Design 5.1: the admin channel itself, inside the guild. A thread has
+    its own channel id, so a thread, another channel and a DM are all
+    refused here, before any api call."""
+    return interaction.guild is not None and interaction.channel_id == ADMIN_CHANNEL_ID
+
+
+async def _aer_message(page, req):
+    """The public message for one served page: `(content, files)`, the page
+    header plus either one PNG drawn from the render plan or, when no PNG
+    comes back in time, the text fallback (design 5.2, 5.3). One message per
+    page either way."""
+    # the caller's own argument, shown as encoded display text (design 6.4,
+    # root (e)): every escaped-set code point is written as `\u{<hex>}`
+    target = _aer_enc_text(req.get("code") or req.get("steam_id")
+                           or "%s %s" % (req.get("a"), req.get("b")))
+    header = ("Evidence report: %s %s, page %d of %d"
+              % (page.shape, target, page.page, page.pages))
+    tag = re.sub("[^0-9A-Za-z]+", "-", target).strip("-")[:40] or "report"
+    plan = _aer_plan(page)
+    png = await _aer_render(plan)
+    if png is not None:
+        return header, [discord.File(io.BytesIO(png),
+                                     filename="evidence-%s-p%d.png" % (tag, page.page))]
+    return _aer_fallback(header, plan, tag, page.page)
+
+
+async def _aer_fetch(path, actor_id):
+    """GET one report page from the api (API_BASE_URL, the primary) with the
+    internal key and the actor's Discord id: `(status, parsed JSON or None,
+    headers)`, `(0, None, {})` when the api cannot be reached."""
+    if http_session is None or not API_SECRET_KEY:
+        return 0, None, {}
+    try:
+        async with http_session.get(
+                API_BASE_URL + path,
+                headers={"X-Internal-Key": API_SECRET_KEY,
+                         "X-Actor-Discord-Id": str(actor_id)},
+                timeout=aiohttp.ClientTimeout(total=AER_TIMEOUT_S)) as resp:
+            raw = await resp.read()
+            headers = {str(k): str(v) for k, v in resp.headers.items()}
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except Exception:
+                body = None
+            return resp.status, body, headers
+    except Exception:
+        return 0, None, {}
+
+
+async def _aer_command(interaction, req):
+    """One `/evidence` subcommand: local gate, private ack, the api with the
+    caller's id, then either one ephemeral word or one public message in the
+    admin channel followed by `Posted.`."""
+    if not _aer_local_gate(interaction):
+        await interaction.response.send_message(AER_REFUSED, ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    status, body, headers = await _aer_fetch(_aer_path(req), interaction.user.id)
+    page, word = _aer_outcome(status, body, headers, expected=req)
+    if page is None:
+        await interaction.followup.send(word, ephemeral=True)
+        return
+    content, files = await _aer_message(page, req)
+    await interaction.channel.send(content, files=files,
+                                   view=_aer_view(req, page.page, page.pages),
+                                   allowed_mentions=discord.AllowedMentions.none())
+    await interaction.followup.send(AER_POSTED, ephemeral=True)
+
+
+async def _aer_click(interaction, cid):
+    """A Prev or Next press (design 5.4): local gate, private ack, a fresh api
+    call with the clicker's id; only a served page edits the one public
+    message (content, attachments replaced, view). No report data is kept."""
+    req = _aer_parse_custom_id(cid)
+    if req is None or not _aer_local_gate(interaction):
+        await interaction.response.send_message(AER_REFUSED, ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    status, body, headers = await _aer_fetch(_aer_path(req), interaction.user.id)
+    page, word = _aer_outcome(status, body, headers, expected=req)
+    if page is None:
+        await interaction.followup.send(word, ephemeral=True)
+        return
+    content, files = await _aer_message(page, req)
+    await interaction.message.edit(content=content, attachments=files,
+                                   view=_aer_view(req, page.page, page.pages),
+                                   allowed_mentions=discord.AllowedMentions.none())
+    await interaction.followup.send(AER_POSTED, ephemeral=True)
+
+
+# ── Admin evidence report: render plan, PNG worker, text fallback ─────────
+# Design 5.2, 5.3 and 5.6, phase 1a. The plan is built from the BotPage alone
+# and is the only thing the PNG worker and the fallback read. Every item lists
+# the page fields it shows (`fields`) and the text each one is shown as
+# (`parts`, in the same order); every page field is shown by exactly one item.
+# Phase 1a has no class, mark or swatch item kind and one neutral cell fill.
+
+AER_PROV_LETTER = {"SELF": "S", "PEER": "P", "OTHER": "O", "D:SELF": "D",
+                   "D:PEER": "D", "FLAG": "F", "MEAS": "M"}   # the api's PROV_LETTER, under an equality test
+AER_LEGEND_1A = (
+    "- = not recorded",
+    "? = unknown",
+    "T = own baseline truncated",
+    "FLAG = kept only when an advisory heuristic fired; not ranked",
+    "S SELF, P PEER, O OTHER, D derived, F FLAG, M MEAS",
+    "max/median of n = window over n values",
+    "\\u{..} = escaped character",
+    "ranks are mid-ranks in [0,1]",
+)
+AER_ITEM_KINDS_1A = ("title", "status", "subject", "game", "seat", "cell", "flag", "window",
+                     "summary_head", "summary", "label", "population", "baseline", "census",
+                     "legend", "footer")
+AER_RENDER_TIMEOUT_S = 15
+AER_FALLBACK_MSG_MAX = 1900
+AER_WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aer_render_worker.py")
+_AER_STATUS_KEYS = ("truncated", "computed_at", "lag_s")
+_AER_SLOT_LABELS = {"ki": "#", "n": "n=", "val": "val=", "own_mean": "own=",
+                    "own_median": "own_med=", "own_n": "own_n=", "own_state": "own_state=",
+                    "own_rank": "own_rank=", "pop_rank": "pop_rank=", "pop_n": "pop_n=",
+                    "pop_p50": "p50=", "pop_p90": "p90=", "pop_p99": "p99=", "state": "state="}
+_AER_WINDOW_LABELS = (("oi", "oi="), ("basis", "basis="), ("subj", "subj="), ("games", "games="),
+                      ("covered", "covered="), ("flag_obs", "flag_obs="), ("newest", "newest="),
+                      ("oldest", "oldest="))
+_AER_CATALOG_LABELS = (("ki", "#"), ("key", ""), ("base", "base="), ("fam", "fam="),
+                       ("unit", "unit="), ("kind", "kind="), ("p50", "p50="), ("p90", "p90="),
+                       ("p99", "p99="))
+_AER_FLAG_LABELS = (("reason", ""), ("subject", "subject="), ("reviewed", "reviewed="),
+                    ("current", "current="), ("created_at", "at="))
+_AER_PNG_MAGIC = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+AerItem = collections.namedtuple("AerItem", ("kind", "fields", "parts", "text"))
+_aer_worker_proc = None     # the long-lived render worker, started on first use
+_aer_worker_lock = None     # an asyncio.Lock: one plan in the worker at a time
+
+
+def _aer_enc_text(value):
+    """The api's `_aer_enc` for a value from a part of the page the decoder
+    does not check slot by slot (population, baseline, registry, window
+    dates): backslash doubled, each escaped-set code point written as
+    backslash, `u{<hex>}`."""
+    bs = chr(0x5C)
+    return "".join(bs * 2 if ch == bs else ("%su{%x}" % (bs, ord(ch)) if ord(ch) in AER_ESC else ch)
+                   for ch in str(value))
+
+
+def _aer_txt(value, state=None):
+    """A checked display slot as plan text: None as `-` (`?` when the cell's
+    state is unknown), a bool as yes or no, a number exactly (repr), encoded
+    text as the api wrote it."""
+    if value is None:
+        return "?" if state == "unknown" else "-"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return value
+    return _aer_free(value)
+
+
+def _aer_free(value):
+    """A value from an unchecked part of the page: numbers and None as
+    `_aer_txt`, text and anything else (compact JSON) encoded."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return _aer_txt(value)
+    if not isinstance(value, str):
+        value = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return _aer_enc_text(value)
+
+
+def _aer_item(kind, head, pairs):
+    """One plan item from `(field path, label, part)` triples."""
+    fields = tuple(p for p, _l, _t in pairs)
+    parts = tuple(t for _p, _l, t in pairs)
+    text = " ".join([head] + ["%s%s" % (lbl, t) for _p, lbl, t in pairs]).strip()
+    return AerItem(kind, fields, parts, text)
+
+
+def _aer_cell_item(page, path, table, cell, phase="1a"):
+    """One seat or summary cell: the provenance letter and variable of its
+    catalog key, then every wire slot in AER_WIRE order."""
+    slots = AER_WIRE[phase][table]
+    c = dict(zip(slots, cell))
+    key = str(page.catalog[c["ki"]]["key"]).split("|")
+    letter = AER_PROV_LETTER.get(key[1], "?") if len(key) > 1 else "?"
+    head = " ".join([letter, key[0]] + ([key[5]] if len(key) > 5 and key[5] != "cell" else []))
+    pairs = []
+    for slot in slots:
+        part = _aer_txt(c[slot], c["state"] if slot == "val" else None)
+        pairs.append((path + (slot,), _AER_SLOT_LABELS[slot], part))
+    return _aer_item("cell" if table == "seat" else "summary", head, tuple(pairs))
+
+
+def _aer_plan(page, phase="1a"):
+    """The render plan of one BotPage (design 5.2): a tuple of AerItems in
+    registry and subject order, never value order. Pure: the same page always
+    gives the same plan."""
+    if phase != "1a":
+        raise AerSchemaError("unknown phase %r" % (phase,))
+    items = []
+    add = items.append
+    add(_aer_item("title", "EVIDENCE", ((("shape",), "", _aer_txt(page.shape)),
+                                       (("page",), "page ", _aer_txt(page.page)),
+                                       (("pages",), "of ", _aer_txt(page.pages)))))
+    pop = page.population
+    add(_aer_item("status", "STATUS", ((("rules", "report"), "", "UNCOLORED (absent)"),) + tuple(
+        (("population", k), k + "=", _aer_free(pop[k])) for k in _AER_STATUS_KEYS if k in pop)))
+    for i, (steam, name) in enumerate(page.subjects):
+        add(_aer_item("subject", "SUBJECT #%d" % i, ((("subjects", i, "name"), "", _aer_txt(name)),
+                                                    (("subjects", i, "steam_id"), "", _aer_txt(steam)))))
+    for gi, g in enumerate(page.games):
+        at = ("games", gi)
+        add(_aer_item("game", "GAME", (
+            (at + ("code",), "", _aer_txt(g["code"])),
+            (at + ("ended_at",), "", _aer_txt(g["ended_at"])),
+            (at + ("is_ranked",), "", "ranked" if g["is_ranked"] else "casual"),
+            (at + ("invalidated",), "", "valid" if g["invalidated"] is None
+             else "INVALIDATED " + _aer_txt(g["invalidated"])),
+            (at + ("rounds",), "rounds ", "-".join(_aer_free(r) for r in g["rounds"])
+             if isinstance(g["rounds"], list) else _aer_free(g["rounds"])),
+            (at + ("series_id",), "series ", _aer_txt(g["series_id"])),
+            (at + ("match_id",), "id ", _aer_txt(g["match_id"])))))
+        for si, (subject, reporter, cells) in enumerate(g["seats"]):
+            add(_aer_item("seat", "SEAT", ((at + ("seats", si, "subject"), "#", _aer_txt(subject)),
+                                           (at + ("seats", si, "reporter"), "",
+                                            "R" if reporter else "-"))))
+            for ci, cell in enumerate(cells):
+                add(_aer_cell_item(page, at + ("seats", si, "cells", ci), "seat", cell, phase))
+        for fi, f in enumerate(g["flags"]):
+            add(_aer_item("flag", "FLAG", tuple(
+                (at + ("flags", fi, k), lbl,
+                 _aer_txt(f[k]) if k != "subject" else ("-" if f[k] is None else "#%d" % f[k]))
+                for k, lbl in _AER_FLAG_LABELS)))
+    for wi, w in enumerate(page.windows):
+        add(_aer_item("window", "WINDOW", tuple(
+            (("windows", wi, k), lbl,
+             " ".join(_aer_free(x) for x in w[k]) if k == "subj" else _aer_free(w[k]))
+            for k, lbl in _AER_WINDOW_LABELS)))
+    for si, (oi, rows) in enumerate(page.summary):
+        add(_aer_item("summary_head", "SUMMARY", ((("summary", si, "oi"), "window #", _aer_txt(oi)),)))
+        for ci, cell in enumerate(rows):
+            add(_aer_cell_item(page, ("summary", si, "cells", ci), "summary", cell, phase))
+    for ki in sorted(page.catalog):
+        row = page.catalog[ki]
+        add(_aer_item("label", "KEY", tuple(
+            (("catalog", ki, k), lbl, _aer_txt(row[k])) for k, lbl in _AER_CATALOG_LABELS if k in row)))
+    add(_aer_item("population", "POPULATION", tuple(
+        (("population", k), _aer_enc_text(k) + "=", _aer_free(pop[k]))
+        for k in sorted(pop) if k not in _AER_STATUS_KEYS)))
+    add(_aer_item("baseline", "BASELINE", tuple(
+        (("baseline", k), _aer_enc_text(k) + "=", _aer_free(page.baseline[k]))
+        for k in sorted(page.baseline))))
+    reg = page.registry
+    add(_aer_item("census", "CENSUS", tuple(
+        (("registry", k), "", _aer_free(reg[k])) for k in ("census",) if k in reg)))
+    for line in AER_LEGEND_1A:
+        add(AerItem("legend", (), (), line))
+    add(_aer_item("footer", "REGISTRY", tuple(
+        (("registry", k), _aer_enc_text(k) + "=", _aer_free(reg[k]))
+        for k in sorted(reg) if k != "census")))
+    return tuple(items)
+
+
+def _aer_fallback(header, plan, tag, n):
+    """The text fallback (design 5.3, 1a): every plan item's text, one line
+    each, as one message: inline in one code block up to
+    AER_FALLBACK_MSG_MAX characters, else the header and one complete
+    attachment. Encoded text holds no backtick; nothing is truncated."""
+    text = "\n".join(item.text for item in plan)
+    if len(text) <= AER_FALLBACK_MSG_MAX:
+        return header + "\n```\n" + text + "\n```", []
+    return header, [discord.File(io.BytesIO(text.encode("utf-8")),
+                                 filename="evidence-%s-p%d.txt" % (tag, n))]
+
+
+async def _aer_worker_spawn():
+    """Start the render worker as a fresh python interpreter running
+    aer_render_worker.py (an exec, so no copy of the bot's state); it imports
+    matplotlib itself and shares nothing with `_mpl_render_lock`."""
+    import sys
+    return await asyncio.create_subprocess_exec(
+        sys.executable, "-I", AER_WORKER_PATH, stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+
+
+async def _aer_worker_exchange(proc, data):
+    proc.stdin.write(len(data).to_bytes(4, "big") + data)
+    await proc.stdin.drain()
+    size = int.from_bytes(await proc.stdout.readexactly(4), "big")
+    return json.loads((await proc.stdout.readexactly(size)).decode("utf-8"))
+
+
+async def _aer_render(plan):
+    """One PNG for the plan, or None: without matplotlib at once; otherwise
+    from the long-lived worker within AER_RENDER_TIMEOUT_S. A worker that
+    times out, dies or answers out of shape is killed and replaced on the
+    next call."""
+    global _aer_worker_proc, _aer_worker_lock
+    import base64
+    if not _MPL_AVAILABLE:
+        return None
+    if _aer_worker_lock is None:
+        _aer_worker_lock = asyncio.Lock()
+    async with _aer_worker_lock:
+        proc = _aer_worker_proc
+        try:
+            if proc is None or proc.returncode is not None:
+                proc = _aer_worker_proc = await _aer_worker_spawn()
+            data = json.dumps([[item.kind, item.text] for item in plan]).encode("utf-8")
+            reply = await asyncio.wait_for(_aer_worker_exchange(proc, data), AER_RENDER_TIMEOUT_S)
+            png = base64.b64decode(reply["png"])
+            if not png.startswith(_AER_PNG_MAGIC) or len(reply["drawn"]) != len(plan):
+                raise ValueError("render reply out of shape")
+            return png
+        except Exception:
+            _aer_worker_proc = None
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), 5)
+                except Exception:
+                    pass
+            return None
+
+
+# Slash only, neither guild_only nor default_permissions: every refusal
+# reaches the callback, and authority is the api's (design 5.1).
+evidence_group = app_commands.Group(name="evidence",
+                                    description="Admin evidence report (admin channel)")
+
+
+@evidence_group.command(name="game", description="Report one game")
+@app_commands.describe(code="Game id (32 hex) or its 12-character code", page="Page")
+async def evidence_game(interaction: discord.Interaction, code: str, page: int = 1):
+    await _aer_command(interaction, {"shape": "game", "code": code, "page": page})
+
+
+@evidence_group.command(name="series", description="Report one ranked series")
+@app_commands.describe(code="Series or game id (32 hex) or a 12-character code", page="Page")
+async def evidence_series(interaction: discord.Interaction, code: str, page: int = 1):
+    await _aer_command(interaction, {"shape": "series", "code": code, "page": page})
+
+
+@evidence_group.command(name="pair", description="Report the newest games of two players")
+@app_commands.describe(a="Steam id of the first player", b="Steam id of the second player",
+                       games="Games to cover", page="Page")
+async def evidence_pair(interaction: discord.Interaction, a: str, b: str,
+                        games: int = AER_GAMES_DEFAULT, page: int = 1):
+    await _aer_command(interaction, {"shape": "pair", "a": a, "b": b, "games": games,
+                                     "page": page})
+
+
+@evidence_group.command(name="player", description="Report the newest games of one player")
+@app_commands.describe(steam_id="Steam id of the player", games="Games to cover", page="Page")
+async def evidence_player(interaction: discord.Interaction, steam_id: str,
+                          games: int = AER_GAMES_DEFAULT, page: int = 1):
+    await _aer_command(interaction, {"shape": "player", "steam_id": steam_id, "games": games,
+                                     "page": page})
+
+
+bot.tree.add_command(evidence_group)
 
 
 if __name__ == "__main__":

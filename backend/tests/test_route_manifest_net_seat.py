@@ -30,6 +30,24 @@ from net_seat_contract import (
 
 
 MANIFEST_PATH = Path(__file__).with_name("route_manifest_net_seat.json")
+
+# The closed class-to-schema table (admin evidence design 4.7 item 1): the
+# fields each manifest row of a class carries, in order. The loader, the
+# allowed-class assertion and the repinner all read this one table; a class
+# not in it is refused everywhere, and a fingerprinted class is one whose
+# schema ends in `source_sha1`.
+#   sentinel-exercised        checked by being RUN with all 50 sentinels
+#   statically-nonconsumer    a static source review cleared its output
+#   admin-authorized-consumer serves W1 columns, but only to an internal-key
+#                             caller whose actor resolves to an admin
+_IDENTITY_FIELDS = ("path", "methods", "module", "qualname")
+ROUTE_CLASS_SCHEMA = {
+    "sentinel-exercised": _IDENTITY_FIELDS,
+    "statically-nonconsumer": _IDENTITY_FIELDS + ("source_sha1",),
+    "admin-authorized-consumer": _IDENTITY_FIELDS + ("source_sha1",),
+}
+FINGERPRINTED_CLASSES = frozenset(
+    cls for cls, fields in ROUTE_CLASS_SCHEMA.items() if "source_sha1" in fields)
 # The enumeration is only exhaustive on the PINNED FastAPI: 0.141+ wraps
 # include_router() targets as _IncludedRouter entries that app.routes never
 # flattens, which silently drops every tournaments route from this gate.
@@ -700,12 +718,13 @@ def _load_manifest():
     assert identity_fields == ["path", "methods", "module", "qualname"]
     static_review_fields = document["static_review_fields"]
     assert static_review_fields == ["source_sha1"]
+    assert tuple(identity_fields) == _IDENTITY_FIELDS
     entries = []
     for group in document["groups"]:
         classification = group["classification"]
-        route_fields = identity_fields + (
-            static_review_fields if classification == "statically-nonconsumer" else []
-        )
+        assert classification in ROUTE_CLASS_SCHEMA, (
+            "unknown route classification %r" % (classification,))
+        route_fields = list(ROUTE_CLASS_SCHEMA[classification])
         for route_values in group["routes"]:
             entry = dict(zip(route_fields, route_values, strict=True))
             entry["classification"] = group["classification"]
@@ -747,7 +766,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    assert len(manifest) == 426   # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit onto main 3f4c9fc9: main's 424 plus the lane's 2 (the combat record route and the admin combat-evidence view), confirmed by the re-pin dry run
+    assert len(manifest) == 430   # admin evidence report re-land (2026-10-29), claude/admin-evidence-server refit onto main 3fc331e2: main's 426 plus the lane's 4 (the four GET report routes under /api/v1/internal/evidence-report/: game, series, pair and player, the admin-authorized-consumer class), confirmed by the re-pin dry run
+    # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit onto main 3f4c9fc9: main's 424 plus the lane's 2 (the combat record route and the admin combat-evidence view), confirmed by the re-pin dry run
     # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
     # identity-clock evidence re-land (2026-10-29), claude/identity-clock-server refit onto main a38a6b5a: main's 418 plus the lane's 3 (the identity-clock record route, the admin identity-clock view and the game-file digest registration), confirmed by the re-pin dry run
     # RJ server re-land (2026-10-28), the lane 0d61570f onto main a8551547: main's 406 plus the lane's 12 (the two FFA readmit routes and the ten match hold routes), carried by the structural row union and confirmed by the re-pin dry run
@@ -775,11 +795,13 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # match_hold router NX1 mounted (game/start, hold/open, beat, end, claim,
     # bind, entered, state, by-room, mine; 398 before), confirmed by the
     # re-pin dry run
+    # the lane's side (claude/admin-evidence-server, 400 at its tip 39367600):
+    # admin evidence report 1a-5 (lane claude/admin-evidence-server, base main
+    # 9267b1fe's 396): +4, the four GET report routes R1 to R4 under
+    # /api/v1/internal/evidence-report/ (game, series, pair, player), all
+    # admin-authorized-consumer, confirmed by the re-pin dry run
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
-    assert all(
-        entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
-        for entry in manifest
-    )
+    assert all(entry["classification"] in ROUTE_CLASS_SCHEMA for entry in manifest)
     assert all(isinstance(entry["reason"], str) and entry["reason"].strip() for entry in manifest)
 
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
@@ -825,17 +847,123 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # every answer is a fixed projection (_state_payload's named fields or a
     # literal dict) and no handler reads the matches table (397 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
+    # admin evidence report 1a-5: the class holds exactly R1 to R4, each run
+    # with all 50 sentinels by
+    # test_admin_authorized_consumers_serve_sentinels_only_to_admins
+    # (test_admin_evidence_routes_pg.py) and fingerprinted like a static row.
+    authorized = [entry for entry in manifest
+                  if entry["classification"] == "admin-authorized-consumer"]
+    assert sorted(_manifest_id(entry)["qualname"] for entry in authorized) == [
+        "evidence_report_game", "evidence_report_pair", "evidence_report_player",
+        "evidence_report_series"]
+    assert {entry["module"] for entry in authorized} == {"admin_evidence"}
+    assert len(manifest) == len(exercised) + len(static) + len(authorized)
 
     actual_by_identity = {
         json.dumps(_manifest_id(entry), sort_keys=True): entry for entry in live_routes
     }
-    for entry in static:
+    fingerprinted = [entry for entry in manifest
+                     if entry["classification"] in FINGERPRINTED_CLASSES]
+    assert len(fingerprinted) == len(static) + len(authorized)
+    for entry in fingerprinted:
         identity = _manifest_id(entry)
         live = actual_by_identity[json.dumps(identity, sort_keys=True)]
         assert entry["source_sha1"] == live["source_sha1"], (
             f"{identity['methods']} {identity['path']} source fingerprint changed; "
             "re-review this handler"
         )
+
+
+def test_one_row_per_class_round_trips_through_the_class_schema(tmp_path, monkeypatch):
+    """Admin evidence design 4.7 item 4. The first row of each class, loaded
+    and re-written through `ROUTE_CLASS_SCHEMA`, is the row in the file; every
+    class of the table occurs. A row missing its class's field and a class the
+    table does not name are refused by the loader itself (a stale digest is
+    refused by the exhaustive test's fingerprint loop)."""
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    loaded = {json.dumps(_manifest_id(e), sort_keys=True): e for e in _load_manifest()}
+    seen = {}
+    for group in document["groups"]:
+        cls = group["classification"]
+        if cls in seen:
+            continue
+        row = group["routes"][0]
+        entry = loaded[json.dumps(dict(zip(_IDENTITY_FIELDS, row[:4])), sort_keys=True)]
+        assert entry["classification"] == cls
+        assert [entry[field] for field in ROUTE_CLASS_SCHEMA[cls]] == row, cls
+        seen[cls] = row
+    assert sorted(seen) == sorted(ROUTE_CLASS_SCHEMA)
+
+    def refused(mutate):
+        doc = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        group = next(g for g in doc["groups"]
+                     if g["classification"] == "admin-authorized-consumer")
+        mutate(group)
+        path = tmp_path / ("m%d.json" % len(list(tmp_path.iterdir())))
+        path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "MANIFEST_PATH", path)
+        try:
+            _load_manifest()
+        except (AssertionError, ValueError):
+            return True
+        finally:
+            monkeypatch.undo()
+        return False
+
+    assert refused(lambda g: g["routes"][0].pop())          # missing source_sha1
+    assert refused(lambda g: g.update(classification="admin-authorised-consumer"))
+    assert not refused(lambda g: None)                      # the control loads
+
+
+EVIDENCE_HANDLERS = frozenset({
+    ("admin_evidence", "evidence_report_game"), ("admin_evidence", "evidence_report_series"),
+    ("admin_evidence", "evidence_report_pair"), ("admin_evidence", "evidence_report_player")})
+# The bot's evidence handlers (1a-6): the four `/evidence` subcommands and
+# the raw component listener that routes an `aer:` page button to
+# `_aer_click`. Every other function of discord_bot.py stays off `_aer_*`.
+EVIDENCE_BOT_HANDLERS = frozenset({"evidence_game", "evidence_series", "evidence_pair",
+                                   "evidence_player", "on_interaction"})
+
+
+def test_aer_helpers_are_reached_only_from_the_evidence_handlers():
+    """Admin evidence design 4.7 item 6. No route other than R1 to R4 reaches
+    an `_aer_*` binding through its reviewed closure (the gate's own walk,
+    which follows attribute names, so `_admin_evidence._aer_x(...)` from a
+    main.py handler counts), and in discord_bot.py only `_aer_*` functions
+    and the evidence handlers name one."""
+    reaching = []
+    evidence_seen = set()
+    for route in main.app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        key = _binding_key(endpoint)
+        if key in EVIDENCE_HANDLERS:
+            evidence_seen.add(key)
+            assert any(n.startswith("_aer_") for _m, n in _reached(_route_seeds(route)))
+            continue
+        hits = sorted(n for _m, n in _reached(_route_seeds(route)) if n.startswith("_aer_"))
+        if hits:
+            reaching.append((getattr(route, "path", "?"), hits[:3]))
+    assert evidence_seen == EVIDENCE_HANDLERS
+    assert reaching == [], reaching[:5]
+
+    bot = Path(__file__).parents[1] / "discord_bot.py"
+    tree = ast.parse(bot.read_text(encoding="utf-8"))
+    outside = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name.startswith("_aer_") or node.name in EVIDENCE_BOT_HANDLERS:
+            continue
+        for sub in ast.walk(node):
+            name = (sub.id if isinstance(sub, ast.Name)
+                    else sub.attr if isinstance(sub, ast.Attribute) else None)
+            if name and name.startswith("_aer_"):
+                outside.append((node.name, name, sub.lineno))
+    # nested functions inside an allowed handler are walked as their own
+    # nodes too; a nested def is allowed only by its own name
+    assert outside == [], outside[:5]
 
 
 def test_the_helper_surface_is_computed_and_not_hand_curated():
@@ -1039,6 +1167,28 @@ def test_the_helper_closure_stays_affordable():
     # helper's name is reached. The rank position moves 211 -> 212 with the
     # two new routes. The bound moves to 87, ~5% over the measurement, for
     # that reason and no other.
+    # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
+    # refit onto main 3fc331e2: 85 measured at GET /api/v1/release-notes/{locale}
+    # (83 on main; main's rank route GET /api/v1/cards/leaders-summary 83 -> 85)
+    # of 5319 indexed bindings over 429 routes, against 83 of 5137 over 425 on
+    # main. +2 on the route at the rank: the report router's two data bindings
+    # (admin_evidence.router and EVIDENCE_ROOT), which every route reaching
+    # main.app folds in by name, neither executed by it. Over the 425 shared
+    # routes: +2 on 423, +4 on the health route (the admin_evidence health
+    # word it runs and the word's route tuple), 0 on one. No other binding
+    # of admin_evidence is reached from outside its four routes: this walk
+    # resolves bare and attribute names across modules, so the module's
+    # helpers carry a lane prefix wherever a same-named binding exists
+    # elsewhere (_aer_player_id against match_hold's _player_id, _aer_deadline
+    # against a _deadline name in main's handlers, AER_CONTRACT_BOUNDS and
+    # AerEntry against review_measures' and review_rules', _AER_HEX against
+    # build_manifest's, card_measures' and review_rules', AER_SEATS against
+    # combat_measures', review_measures' and seat_evidence's, _aer_clock
+    # against combat_measures', _aer_log against review_rules'); with the
+    # lane's own names the hold, match, queue and lobby routes measured +6 to
+    # +12 here and reached _aer_rows and _aer_fail. The four report routes
+    # measure 218 and enter above the rank; the rank position moves
+    # 212 -> 214. Inside 87, so the bound stays.
     assert code_median <= 87, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
@@ -1475,7 +1625,16 @@ def test_the_helper_closure_stays_affordable():
     # the rank and the combat record route (177) at it, so the rank position
     # moves 380 -> 382, past main's rank route POST /api/v1/pc/portrait/motion
     # (170 -> 172). Inside 178, so the bound stays.
-    assert code_p90 <= 178, f"p90 code closure {code_p90} of {total}"
+    # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
+    # refit onto main 3fc331e2: 214 measured at GET /api/v1/broadcast/target
+    # (212 on main; main's rank route POST /api/v1/matches/combat-evidence
+    # 177 -> 179, the same two data bindings as at the median). The population
+    # grows 425 -> 429: the four report routes measure 218 each and enter
+    # above the rank, so the rank position moves 382 -> 386, four routes up a
+    # steep stretch (177, 184, 203, 203 and 212 at positions 382 to 386 on
+    # main). The bound moves to 225, ~5% over the measurement, for that
+    # reason and no other.
+    assert code_p90 <= 225, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1585,6 +1744,12 @@ def test_the_helper_closure_stays_affordable():
     # review_boot and review_rules (11), none executed by the health route).
     # The bound moves to 596, ~5% over the measurement, for that reason and
     # no other.
+    # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
+    # refit onto main 3fc331e2: 572 measured at GET /api/v1/health (568 on
+    # main): +2 by name, neither executed by the health route (admin_evidence's
+    # router and EVIDENCE_ROOT), and +2 the route does run, the admin_evidence
+    # health word and its route tuple (the four report endpoints held as
+    # values, not walked). Inside 596, so the bound stays.
     assert code_worst <= 596, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
@@ -1664,7 +1829,21 @@ def test_the_helper_closure_stays_affordable():
     # on 53, +25 on 41. The rank position moves 211 -> 212 with the two new
     # routes. No route crossed into a hub. The bound moves to 231, ~5% over
     # the measurement, for that reason and no other.
-    assert all_median <= 231, f"median closure {all_median} of {total}"
+    # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
+    # refit onto main 3fc331e2: 232 measured at GET
+    # /api/v1/players/{steam_id}/ffa-history (220 on main; main's rank route
+    # POST /api/v1/series/{series_id}/live-points 220 -> 232). +12 on the
+    # route at the rank by name: the report router's two data bindings and
+    # admin_evidence's import lines (AsyncSession, Depends, HTTPException,
+    # Request, get_db, hashlib, hmac, json, os and time). Over the 425 shared
+    # routes the same fold adds +12 on 163, +11 on 67, +13 on 38, +10 on 35,
+    # +9 on 32, +7 on 20, +14 on 19 and +16 on 15: each route gains the
+    # import line of every name its closure already reaches by name, hashlib,
+    # json, time, math, Optional and the rest. The four report routes measure
+    # 403 and enter above the rank; the rank position moves 212 -> 214. No
+    # route crossed into a hub. The bound moves to 245, ~5% over the
+    # measurement, for that reason and no other.
+    assert all_median <= 245, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1924,7 +2103,15 @@ def test_the_helper_closure_stays_affordable():
     # json and rm. The rank position moves 380 -> 382 with the two new
     # routes. The bound moves to 393, ~5% over the measurement, for that
     # reason and no other.
-    assert all_p90 <= 393, f"p90 closure {all_p90} of {total}"
+    # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
+    # refit onto main 3fc331e2: 403 measured at GET
+    # /api/v1/internal/evidence-report/game/{code}, one of the four report
+    # routes (403 whole and 218 code each), which enter at the rank: the
+    # population grows 425 -> 429, the rank position moves 382 -> 386, and
+    # main's rank route GET /api/v1/queue/poll/{steam_id} measures 375 -> 387
+    # by the same fold as the median. The bound moves to 425, ~5% over the
+    # measurement, for that reason and no other.
+    assert all_p90 <= 425, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -2056,6 +2243,14 @@ def test_the_helper_closure_stays_affordable():
     # read_gate, review_rules (with icm), seat_evidence and steamid64). The
     # bound moves to 852, ~5% over the measurement, for that reason and no
     # other.
+    # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
+    # refit onto main 3fc331e2: 830 measured at GET /api/v1/health (812 on
+    # main): +16 by name, none executed by the health route (admin_evidence's
+    # two data bindings router and EVIDENCE_ROOT, and fourteen import lines:
+    # asyncio, AsyncSession, dataclass, Depends, field, get_db, hashlib, hmac,
+    # HTTPException, json, math, os, Request and time), and +2 the route does
+    # run, the admin_evidence health word and its route tuple. Inside 852, so
+    # the bound stays.
     assert all_worst <= 852, f"worst closure {all_worst} of {total}"
 
 

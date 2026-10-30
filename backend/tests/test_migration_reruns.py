@@ -136,6 +136,21 @@ PREREQ = {
     """,
     # 333 creates its own table and guards its only foreign reference.
     "333": "",
+    # 377 indexes `matches` only; the columns its four indexes name, plus one
+    # existing order index so the re-run is measured beside it.
+    "377": """
+        CREATE TABLE matches (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            player1_id  UUID NOT NULL,
+            player2_id  UUID NOT NULL,
+            series_id   UUID,
+            ended_at    TIMESTAMPTZ NOT NULL DEFAULT now());
+        CREATE INDEX idx_matches_player1 ON matches (player1_id, ended_at DESC);
+        INSERT INTO matches (player1_id, player2_id, series_id, ended_at)
+             VALUES (gen_random_uuid(), gen_random_uuid(), NULL, now()),
+                    (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(),
+                     now() - interval '1 day');
+    """,
     "336": """
         CREATE TABLE bug_reports (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -198,6 +213,7 @@ TABLES = {
     "333": ("pc_card_themes",),
     "336": ("bug_reports",),
     "337": ("shop_items",),
+    "377": ("matches",),
 }
 
 MIGRATION_FILES = {
@@ -208,6 +224,7 @@ MIGRATION_FILES = {
     "337": "337_demon_body_color.sql",
     "365": "365_title_ladders_five_tiers.sql",
     "366": "366_title_refunds_voidshot_kingslayer.sql",
+    "377": "377_admin_evidence_indexes.sql",
 }
 
 
@@ -234,11 +251,13 @@ async def _fingerprint(conn, tables) -> dict:
 
 
 async def _objects(conn) -> dict:
-    """Constraint and index OIDs in this schema.
+    """Constraint, index and extended-statistics OIDs in this schema.
 
     A DROP-then-ADD ends in the same textual definition and a different OID.
     The OID is how "it did nothing" is told apart from "it did the same thing
-    again", and the second one took a table lock.
+    again", and the second one took a table lock. Statistics objects are
+    listed beside indexes because 377 creates one (`stx_matches_pair`); a
+    re-run that dropped and re-created it would also re-sample the table.
     """
     rows = await conn.fetch("""
         SELECT c.conname AS name, c.oid::text AS oid, 'constraint' AS what
@@ -249,6 +268,10 @@ async def _objects(conn) -> dict:
         SELECT ci.relname, ci.oid::text, 'index'
           FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid
           JOIN pg_namespace n ON n.oid = ci.relnamespace
+         WHERE n.nspname = current_schema()
+        UNION ALL
+        SELECT s.stxname, s.oid::text, 'statistics'
+          FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace
          WHERE n.nspname = current_schema()
          ORDER BY 3, 1""")
     return {(r["what"], r["name"]): r["oid"] for r in rows}
@@ -366,7 +389,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -378,7 +401,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -391,7 +414,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -410,7 +433,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -433,6 +456,21 @@ def test_a_second_run_removes_no_relation_from_the_database(number):
         "migration %s removed %s from the database on its second run. A "
         "re-run may not delete a relation it did not create."
         % (number, gone))
+
+
+def test_377_keeps_its_statistics_object_across_a_second_run():
+    """The object census above can only see a replaced statistics object if
+    one exists: 377 must leave `stx_matches_pair` after its first run and the
+    SAME object (one OID) after its second, its guard issuing neither the
+    `CREATE STATISTICS` nor the `ANALYZE` again."""
+    applied = _run(_apply_twice("377"))
+    key = ("statistics", "stx_matches_pair")
+    assert key in applied.objects_first, (
+        "377 left no statistics object stx_matches_pair: %r"
+        % sorted(applied.objects_first))
+    assert applied.objects_second.get(key) == applied.objects_first[key], (
+        "377's second run replaced or removed stx_matches_pair: %r -> %r"
+        % (applied.objects_first[key], applied.objects_second.get(key)))
 
 
 def test_336_probe_cleanup_cannot_reach_a_same_named_ordinary_table():
@@ -549,7 +587,7 @@ _HOLDERS = {
 }
 
 _LOCK_CASES = [(number, table, who)
-               for number in ("331", "332", "333", "336")
+               for number in ("331", "332", "333", "336", "377")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 

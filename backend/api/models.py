@@ -450,6 +450,18 @@ class Match(Base):
         Index("idx_matches_player1", "player1_id", ended_at.desc()),
         Index("idx_matches_player2", "player2_id", ended_at.desc()),
         Index("idx_matches_ended", ended_at.desc()),
+        # Admin evidence report order indexes (migration 377): each ends in
+        # the `id` its ordering breaks ties on, so a report read is an
+        # index-ordered scan under its LIMIT with no sort in between.
+        Index("idx_matches_pair", "player1_id", "player2_id",
+              ended_at.desc(), id.desc()),
+        Index("idx_matches_p1_order", "player1_id", ended_at.desc(), id.desc()),
+        Index("idx_matches_p2_order", "player2_id", ended_at.desc(), id.desc()),
+        Index("idx_matches_series", "series_id", "ended_at", "id",
+              postgresql_where=series_id.isnot(None)),
+        # Migration 377 also creates the statistics object stx_matches_pair
+        # (kind mcv, on player1_id and player2_id). SQLAlchemy has no
+        # construct for a statistics object, so it is named here only.
     )
 
 

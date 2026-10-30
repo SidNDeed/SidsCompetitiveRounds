@@ -16,11 +16,12 @@ WHAT A WRITE REFUSES, AND WHAT IT SAYS BEFORE IT WRITES. Each of these is a
 refusal this tool implements, checked before the file is touched; a refusal
 writes nothing at all, not the rows that happened to pass:
 
-  * CLASSIFICATION. A moved ROUTE is re-pinned only when its group is
-    classified `statically-nonconsumer` -- a route whose output a static source
-    review has cleared. Any other class (a route exercised with sentinels, or
-    one no review has cleared) needs that review again, and a new digest is
-    not a substitute for it. Entry points carry no classification and are
+  * CLASSIFICATION. A moved ROUTE is re-pinned only when its group's class
+    is a fingerprinted one of the gate's `ROUTE_CLASS_SCHEMA`:
+    `statically-nonconsumer` (a static source review cleared its output) or
+    `admin-authorized-consumer` (the admin evidence report routes). Any other
+    class (the route exercised with sentinels, or one no table names) needs
+    its review again, and a new digest is not a substitute for it. Entry points carry no classification and are
     re-pinned under the identity-set rule below.
   * DIGEST UNIQUENESS. The file is edited as TEXT, one digest at a time, so
     the document is not re-serialized around the change: every old digest
@@ -43,7 +44,7 @@ the gate stops meaning anything.
 TWO MORE FAMILIES, carried in from the automatic-log lane at its merge of
 main (2026-10-05):
 
-  * FIRST FINGERPRINTS. A statically-nonconsumer row written by hand with no
+  * FIRST FINGERPRINTS. A row of a fingerprinted class written by hand with no
     digest (four elements: the classification and the reason are the human's
     call) gets its first digest here, from the same `_route_identities`, and is
     reported apart from `moved` -- a first fingerprint is not a drift.
@@ -86,12 +87,17 @@ REPO = BACKEND.parent
 MANIFEST = BACKEND / "tests" / "route_manifest_net_seat.json"
 MANIFEST_REL = "backend/tests/route_manifest_net_seat.json"
 
-# The one classification under which a moved route may be re-pinned here.
-REPINNABLE_CLASS = "statically-nonconsumer"
-
 for p in (BACKEND / "tests", BACKEND / "api", BACKEND):
     sys.path.insert(0, str(p))
 import test_route_manifest_net_seat as gate  # noqa: E402  (imports main.app)
+
+# The classifications under which a moved route may be re-pinned here, and a
+# hand-written four-element row seeded: the fingerprinted classes of the
+# gate's own closed table (`ROUTE_CLASS_SCHEMA`), never a second list.
+# `statically-nonconsumer` (a static source review cleared its output) and
+# `admin-authorized-consumer` (the admin evidence report routes, run with all
+# 50 sentinels by their own test); `sentinel-exercised` carries no digest.
+REPINNABLE_CLASSES = gate.FINGERPRINTED_CLASSES
 
 
 def rows(doc):
@@ -173,13 +179,13 @@ def main():
                 # A four-element row carries no fingerprint. For the
                 # sentinel-exercised route that is correct and permanent --
                 # it is checked by being RUN with all 50 sentinels, not by its
-                # source. For a statically-nonconsumer row it means a route
+                # source. For a row of a fingerprinted class it means a route
                 # was just added to the manifest and its sha has not been
                 # taken yet, so take it HERE rather than letting someone paste
                 # one in: the classification and the reason are the human's
                 # call, the sha never is (#596). Reported separately from
                 # `moved`, because a first fingerprint is not a drift.
-                if cls != REPINNABLE_CLASS:
+                if cls not in REPINNABLE_CLASSES:
                     continue
                 k = (r[0], tuple(r[1]), r[2], r[3])
                 if k not in live:
@@ -272,8 +278,9 @@ def main():
     for kind, name, cls, old, new in plan:
         n_old, n_new = raw.count(old), raw.count(new)
         why = []
-        if kind == "route" and cls != REPINNABLE_CLASS:
-            why.append("classification %r is not %r" % (cls, REPINNABLE_CLASS))
+        if kind == "route" and cls not in REPINNABLE_CLASSES:
+            why.append("classification %r is not one of %r"
+                       % (cls, sorted(REPINNABLE_CLASSES)))
         if n_old != 1:
             why.append("the old digest occurs %d times in the file, not once" % n_old)
         if n_new != 0:

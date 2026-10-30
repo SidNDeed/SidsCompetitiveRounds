@@ -1165,6 +1165,13 @@ class HealthResponse(BaseModel):
     # registered on the app, else 0). Derived on every request; equal on both
     # roles. No default, as above. Absent on any build before the lane.
     combat_evidence: int
+    # admin_evidence: whether this build serves the admin evidence report
+    # (main._admin_evidence_health_word; 1 = the four report routes are
+    # registered on the app, else 0). Derived on every request; equal on both
+    # roles. No default, as above. Absent on any build before the lane; the
+    # landing's build discriminator, since the report routes answer 403 on
+    # every build (the internal prefix) and cannot be probed for presence.
+    admin_evidence: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not
