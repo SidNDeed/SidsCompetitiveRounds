@@ -24718,17 +24718,75 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static string tForfeitArmKey = null;
         private static float tForfeitArmedAt = -1f;
 
-        private static void OnForfeitClicked()
+        // The exact snapshot OBJECT the last COMPLETE RefreshTournaments
+        // pass painted. Null whenever no clean paint stands: the
+        // no-tournament branch, page (re)build, and the whole span of every
+        // repaint (entry-invalidate, publish-at-end — so a mid-paint
+        // exception fails closed). Click-time fences compare against it
+        // because
+        // the shared CachedTournament can disagree with what is on screen in
+        // both directions: after a sub-tab switch the cache still holds the
+        // PREVIOUS kind's snapshot until the forced /current lands (and a
+        // FAILED request leaves it stale until a later poll), while painted
+        // controls can outlive their snapshot (the no-tournament branch hides
+        // only signup and my-match, so an earlier paint's vote/Force Start
+        // controls stay clickable under it). An object reference — not the
+        // tournament_id — because a same-id refresh can swap CONTENT under
+        // the painted controls (r1 find 3: slot options remapping checkbox
+        // indices, the my-match array moving under Play Now); every /current
+        // parse allocates a fresh snapshot, so reference identity IS
+        // painted-content identity.
+        private static ApiClient.TournamentSnapshot tPaintedTournament = null;
+
+        // Click-time identity fence for the tournament-MUTATING callbacks
+        // (Aug 30 follow-up pass — the KNOWN RESIDUAL in RefreshTournaments;
+        // same identity-fence shape as SelectedPlayerAchievements, and the
+        // generalization of OnForfeitClicked's kind fence, Phase B r1 find 3).
+        // Returns the cached snapshot only when it IS the object the panel
+        // last painted AND matches the kind the player has selected;
+        // otherwise the click landed on a stale hybrid (switch in flight,
+        // failed refresh, rollover, or a same-id content refresh between
+        // paints) — abort the POST, kick a forced refresh so the panel
+        // converges, and say why the click did nothing (a silent return here
+        // reads as a dead button, the exact complaint that motivated the
+        // pre-null-return sub-tab recolor). Cost of the reference check: a
+        // click in the sub-tick gap between a poll's cache write and the
+        // MarkDirty repaint aborts with the toast and succeeds on retry —
+        // that gap is exactly when screen and data genuinely disagree.
+        private static ApiClient.TournamentSnapshot TFencedTournament()
         {
             var t = ApiClient.CachedTournament;
-            if (t == null || string.IsNullOrEmpty(t.tournament_id) || t.matches == null) return;
-            // Kind fence (Phase B r1 find 3): CachedTournament is ONE slot
-            // shared by both sub-tabs — after a sub-tab switch the stale
-            // other-kind snapshot renders until the forced GET lands, and a
-            // key built only from tournament+match ids would stay armed
-            // across it. A destructive submit must never fire off a
-            // snapshot whose kind is not the kind the user is looking at.
-            if (!string.Equals(t.kind, ApiClient.TournamentKind, StringComparison.Ordinal)) return;
+            string kindNow = string.IsNullOrEmpty(ApiClient.TournamentKind) ? "sync" : ApiClient.TournamentKind;
+            // The kind check is NOT redundant with the reference check: in
+            // the sub-tab stale window the painted object IS the live cache
+            // (both the previous kind's snapshot), so only kind-vs-selected
+            // catches it. A snapshot without kind (older server) leaves the
+            // check open instead of failing every click.
+            bool kindOk = t == null || string.IsNullOrEmpty(t.kind)
+                || string.Equals(t.kind, kindNow, StringComparison.Ordinal);
+            if (t != null && !string.IsNullOrEmpty(t.tournament_id) && kindOk
+                && ReferenceEquals(t, tPaintedTournament))
+                return t;
+            CompetitiveUI.ShowNotification("Tournament info is refreshing - try again in a moment", new Color(1f, 0.75f, 0.35f));
+            var sid = MatchTracker.LocalSteamId;
+            if (!string.IsNullOrEmpty(sid) && sid != "unknown")
+                ApiClient.FetchTournamentCurrent(sid, force: true);
+            dirty = true;
+            return null;
+        }
+
+        private static void OnForfeitClicked()
+        {
+            // Painted-snapshot fence first (r5 find 5): with the token
+            // nulled for the whole repaint, Forfeit must not be the one
+            // mutator that can still arm or fire off a half-painted page.
+            // The shared fence subsumes the original standalone kind check
+            // here (Phase B r1 find 3 — a destructive submit must never
+            // fire off the other sub-tab's snapshot); the (tournament,
+            // match) arm key below still guards the two-press window on
+            // top of it.
+            var t = TFencedTournament();
+            if (t == null || t.matches == null) return;
             string matchId = null;
             foreach (var m in t.matches)
             {
@@ -24825,6 +24883,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
         private static GameObject BuildTournamentsTab(Transform parent)
         {
+            // A rebuilt page has painted NOTHING yet — a token surviving from
+            // the previous page's paint could match the current cache and let
+            // pre-first-paint clicks through (r2 find 7).
+            tPaintedTournament = null;
             var panel = new GameObject("Tournaments");
             panel.transform.SetParent(parent, false);
             panel.AddComponent<RectTransform>();
@@ -24952,8 +25014,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 () =>
                 {
                     var id = MatchTracker.LocalSteamId;
-                    var t = ApiClient.CachedTournament;
-                    if (t == null || string.IsNullOrEmpty(t.tournament_id) || string.IsNullOrEmpty(id) || id == "unknown") return;
+                    if (string.IsNullOrEmpty(id) || id == "unknown") return;
+                    var t = TFencedTournament();
+                    if (t == null) return;
                     // Item 3: sync signups must pick >= 1 start time — the vote
                     // rides the signup request (server enforces it too).
                     if (ApiClient.TournamentKind != "async")
@@ -24974,8 +25037,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 () =>
                 {
                     var id = MatchTracker.LocalSteamId;
-                    var t = ApiClient.CachedTournament;
-                    if (t != null && !string.IsNullOrEmpty(t.tournament_id) && !string.IsNullOrEmpty(id) && id != "unknown")
+                    if (string.IsNullOrEmpty(id) || id == "unknown") return;
+                    // Fenced: a stale-window leave is not freely un-doable —
+                    // the server refuses an unconfirmed leave of a LOCKED
+                    // tournament (bracket surgery, no re-signup), and this
+                    // click must never target the other sub-tab's tournament.
+                    var t = TFencedTournament();
+                    if (t != null)
                         ApiClient.TournamentUnsignup(t.tournament_id, id);
                 }, sizeDelta: new Vector2(150, 28));
             txtTUnsignupBtn.SetActive(false);
@@ -25036,8 +25104,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddLE(submitRow, prefH: 28, flexH: 0);
             tVoteSaveBtn = UIFactory.CreateButton("TVSubmit", submitRow.transform, "Save Votes", 15f, C_WHITE, new Color(0.22f, 0.38f, 0.65f, 0.95f), () =>
             {
-                var t = ApiClient.CachedTournament;
-                if (t == null || string.IsNullOrEmpty(t.tournament_id)) return;
+                // Fenced: tSlotChecked indices are only meaningful against
+                // the time_slot_options the panel PAINTED — mapping them
+                // onto a different snapshot posts someone's votes onto the
+                // wrong slots (or the wrong kind's tournament entirely).
+                var t = TFencedTournament();
+                if (t == null) return;
                 var selected = new List<string>();
                 for (int i = 0; i < tSlotChecked.Count && i < (t.time_slot_options?.Length ?? 0); i++)
                     if (tSlotChecked[i]) selected.Add(t.time_slot_options[i]);
@@ -25057,8 +25129,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             { var tfcGO = (txtTForceCount as Component)?.gameObject; if (tfcGO != null && UIFactory.tLE != null) { var tfcEl = tfcGO.GetComponent(UIFactory.tLE); if (tfcEl != null) UnityEngine.Object.Destroy(tfcEl as UnityEngine.Object); UIFactory.AddLE(tfcGO, minW: 60, prefW: 280, prefH: 26, minH: 26, flexW: 0); } }
             txtTForceBtn = UIFactory.CreateButton("TFS", submitRow.transform, "Force Start", 15f, C_WHITE, new Color(0.55f, 0.35f, 0.15f, 0.95f), () =>
             {
-                var t = ApiClient.CachedTournament;
-                if (t != null && !string.IsNullOrEmpty(t.tournament_id))
+                var t = TFencedTournament();
+                if (t != null)
                     ApiClient.TournamentForceStartVote(t.tournament_id, MatchTracker.LocalSteamId);
             }, sizeDelta: new Vector2(110, 26));
             if (UIFactory.tLE != null) { var fsEl = txtTForceBtn.GetComponent(UIFactory.tLE); if (fsEl != null) UnityEngine.Object.Destroy(fsEl as UnityEngine.Object); }
@@ -25085,16 +25157,19 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddLE(matchBtnRow, prefH: 28, flexH: 0);
             txtTReadyBtn = UIFactory.CreateButton("TRdy", matchBtnRow.transform, "Ready Up", 15f, C_WHITE, new Color(0.22f, 0.50f, 0.30f, 0.95f), () =>
             {
-                var t = ApiClient.CachedTournament;
-                if (t != null && !string.IsNullOrEmpty(t.tournament_id))
+                var t = TFencedTournament();
+                if (t != null)
                     ApiClient.TournamentReady(t.tournament_id, MatchTracker.LocalSteamId);
             }, sizeDelta: new Vector2(200, 26));
             // Item 2 (July 17 round 2): skip the between-rounds break — the
             // match starts the moment BOTH players press this.
             tPlayNowBtn = UIFactory.CreateButton("TPlayNow", matchBtnRow.transform, "Play Now (skip break)", 15f, C_WHITE, new Color(0.55f, 0.40f, 0.15f, 0.95f), () =>
             {
-                var t = ApiClient.CachedTournament;
-                if (t == null || string.IsNullOrEmpty(t.tournament_id) || t.matches == null) return;
+                // Fenced: play-now flips the match early once both press it —
+                // firing it at the other sub-tab's tournament (or a rolled-
+                // over snapshot) is a cross-tournament write.
+                var t = TFencedTournament();
+                if (t == null || t.matches == null) return;
                 foreach (var m in t.matches)
                 {
                     if (m.status == "scheduled" &&
@@ -25706,9 +25781,17 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             crt.anchoredPosition = new Vector2(topLeftPx.x, -topLeftPx.y);
             crt.sizeDelta = new Vector2(CELL_W, CELL_H);
 
-            // Two text rows: p1 + p2 with the score on the right.
-            string p1Name = blankNames ? "?" : (m.p1_display_name ?? (m.is_bye ? "BYE" : "TBD"));
-            string p2Name = blankNames ? "?" : (m.p2_display_name ?? (m.is_bye ? "BYE" : "TBD"));
+            // Two text rows: p1 + p2 with the score on the right. A
+            // FULLY-vacant terminal bye (both seats empty — vacancy
+            // propagation, fence r4 find 6) renders as dashes: no player
+            // was ever in this slot pair, and "BYE vs BYE" reads like a
+            // data bug. The cell itself stays — connector geometry and the
+            // bracket shape read better with the empty slot visible.
+            bool vacantBye = m.status == "bye_auto"
+                && string.IsNullOrEmpty(m.p1_display_name)
+                && string.IsNullOrEmpty(m.p2_display_name);
+            string p1Name = blankNames ? "?" : (m.p1_display_name ?? (vacantBye ? "-" : (m.is_bye ? "BYE" : "TBD")));
+            string p2Name = blankNames ? "?" : (m.p2_display_name ?? (vacantBye ? "-" : (m.is_bye ? "BYE" : "TBD")));
             string p1Score = "", p2Score = "";
             if (m.status == "completed")
             {
@@ -26029,6 +26112,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
         private static void RefreshTournaments()
         {
+            // Invalidate the painted token BEFORE any control mutation
+            // (r3 find 6): a repaint of the SAME cached object that throws
+            // midway would otherwise leave the previous token valid for a
+            // half-repainted page. From here until the publish at the very
+            // end, the click fences fail closed.
+            tPaintedTournament = null;
             // Bracket name-hover regions are re-registered by every
             // RenderVisualBracket pass (the bracket is torn down and rebuilt
             // per refresh), so clear the shared list here or regions
@@ -26055,34 +26144,38 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             if (tSubTabAsyncBtn != null) { UIFactory.SetImageColor(tSubTabAsyncBtn, isAsync ? C_TABACT : C_TAB); UIFactory.SetColor(UIFactory.GetButtonText(tSubTabAsyncBtn), isAsync ? C_WHITE : C_LABEL); UIFactory.SetBold(UIFactory.GetButtonText(tSubTabAsyncBtn), isAsync); }
 
             var t = ApiClient.CachedTournament;
-            // KNOWN RESIDUAL, deliberately NOT fenced here (Aug 30 r2 LOW ->
+            // The RENDER stays deliberately unfenced (Aug 30 r2 LOW ->
             // r3 MEDIUM -> reverted, #327's revert-over-patch): after a
             // sub-tab switch (manual click or tab-entry auto-select) the cache
             // holds the PREVIOUS kind's tournament until a newer /current
             // response replaces it, so this refresh paints a HYBRID: the
             // isAsync-driven surfaces (sub-tab recolor, info title) follow the
-            // newly selected kind while the header/status/bracket data and the
-            // action callbacks below read the stale CachedTournament. The
-            // window is normally sub-second (switches fetch force:true, which
-            // bypasses the 5s throttle) but a slow request runs to its timeout
-            // and a FAILED request leaves the stale cache in place until a
-            // later poll succeeds. A local `t = null` fence at this line was
-            // tried and was WORSE: this refresh does not tear down the built
-            // page, so the fence rendered a "Loading" header while the old
-            // kind's vote panel / Force Start controls stayed live underneath
-            // (the null branch hides only signup and my-match). Save Votes,
-            // Force Start and Leave Signup are NOT kind-fenced at click time
-            // and can post against the previous kind's tournament inside this
-            // window — pre-existing since the sub-tabs shipped. That is NOT
-            // always freely un-doable (r5 review): the server accepts
-            // unsignup even AFTER lock, so a stale-window Leave Signup can
-            // bye_auto the player's own bracket match, and re-signup after
-            // lock is rejected. Self-inflicted only — no other player's
-            // result, no money, no Glicko — which is why it rides the
-            // dedicated follow-up pass (click-time kind fences AND the
-            // server-side locked-unsignup rejection) instead of this release.
+            // newly selected kind while the header/status/bracket data follow
+            // the stale CachedTournament. The window is normally sub-second
+            // (switches fetch force:true, which bypasses the 5s throttle) but
+            // a slow request runs to its timeout and a FAILED request leaves
+            // the stale cache in place until a later poll succeeds. A local
+            // `t = null` fence at this line was tried and was WORSE: this
+            // refresh does not tear down the built page, so the fence rendered
+            // a "Loading" header while the old kind's vote panel / Force Start
+            // controls stayed live underneath (the null branch hides only
+            // signup and my-match). Do NOT retry that shape. What closed the
+            // RESIDUAL this comment used to declare is the CLICK-time fence
+            // instead: all seven mutators — Signup, Leave Signup, Save
+            // Votes, Force Start, Ready Up, Play Now and Forfeit — go
+            // through TFencedTournament (painted-snapshot reference +
+            // selected-kind check against tPaintedTournament; Forfeit keeps
+            // its two-press arm key ON TOP of it), and the server now
+            // refuses an unconfirmed unsignup of a LOCKED tournament — the
+            // one action in the window that was not freely un-doable (r5:
+            // it could bye_auto the player's own bracket match with
+            // re-signup rejected).
             if (t == null)
             {
+                // Record that the visible page matches NO tournament: stale
+                // controls a previous paint left visible must not post
+                // against whatever snapshot arrives next.
+                tPaintedTournament = null;
                 UIFactory.SetText(txtTState, "Loading...");
                 UIFactory.SetText(txtTWhen, "");
                 if (txtTSignupBtn != null) txtTSignupBtn.SetActive(false);
@@ -26090,6 +26183,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 if (tMyMatchPanel != null) tMyMatchPanel.SetActive(false);
                 return;
             }
+            // Everything below paints FROM t. The painted token was
+            // invalidated at method entry and is published only at the very
+            // END (r2 find 7 + r3 find 6): a mid-paint exception leaves NO
+            // valid token — every mutating click fences (toast + refetch)
+            // until the next clean full paint, which is the fail-closed
+            // outcome for a half-painted page. There are no other returns
+            // between here and the end.
 
             // Header label by status.
             // Item 12: Tr each switch literal — switch-case assignments are
@@ -26754,6 +26854,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             }
             for (int i = brkIdx; i < tBracketRowPool.Count; i++) tBracketRowPool[i].SetActive(false);
 
+            // Publish the painted token LAST (r2 find 7): only a fully
+            // painted page may authorize the click-time fences above.
+            tPaintedTournament = t;
         }
 
         private static bool _tVoteLocalEdited = false;
