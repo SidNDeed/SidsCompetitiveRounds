@@ -309,6 +309,20 @@ async def _seed(conn):
     s.loaded = ("matches", "ranked_series")
     for table in s.loaded:
         await conn.execute("VACUUM (ANALYZE) %s" % table)
+    # The visibility map is this seed's postcondition (the gate reads
+    # relallvisible == relpages). With autovacuum off on both tables, only
+    # another backend's snapshot can hold a page back; one bounded re-run
+    # covers a transient one, and the gate still asserts.
+    for table in s.loaded:
+        for _attempt in range(2):
+            row = await conn.fetchrow("""
+                SELECT c.relpages, c.relallvisible
+                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = current_schema() AND c.relname = $1""", table)
+            if row["relallvisible"] == row["relpages"]:
+                break
+            await asyncio.sleep(1.0)
+            await conn.execute("VACUUM (ANALYZE) %s" % table)
     s.stats_target = await conn.fetchval("SHOW default_statistics_target")
     return s
 
@@ -339,6 +353,14 @@ def db():
         await d.conn.execute('SET search_path TO "%s"' % d.schema)
         await d.conn.execute(PREREQ)
         await d.conn.execute(MIGRATION.read_text(encoding="utf-8"))
+        # The fixture owns its tables' statistics (ruling 1 below): no
+        # autovacuum worker may ANALYZE a loaded table mid-load or hold a
+        # snapshot while the fixture's VACUUM sets the visibility map (suite
+        # seat 2, 2026-10-30: 113 of 742 matches pages all-visible after the
+        # fixture's VACUUM, the rest held back by an autovacuum ANALYZE the
+        # 60,030-row load had triggered).
+        for table in ("matches", "ranked_series"):
+            await d.conn.execute("ALTER TABLE %s SET (autovacuum_enabled = false)" % table)
         d.seed = await _seed(d.conn)
 
     async def down():

@@ -2,7 +2,7 @@
 
 Phase 1a of the admin evidence report (design V10). This module is the one
 home of the report's closed key registry (`REPORT_REGISTRY`), its bounds
-(`CONTRACT_BOUNDS`) and display defaults (`DISPLAY_DEFAULTS`), the cell
+(`AER_CONTRACT_BOUNDS`) and display defaults (`DISPLAY_DEFAULTS`), the cell
 identity (design 2.1), the provenance letters, and the one encoding boundary
 every displayed string passes through (`_aer_enc`, `AER_ESC`, `AER_WIRE`,
 design 2.12 and 3.3).
@@ -45,7 +45,7 @@ from read_gate import ReadGateRoute
 # Every numeric literal a report path depends on lives in one of these two
 # tables (design 6.4 reads literals outside them as findings).
 
-CONTRACT_BOUNDS = {
+AER_CONTRACT_BOUNDS = {
     "GAMES_MIN": 1,
     "GAMES_MAX": 30,
     "PAGE_GAMES": 5,
@@ -66,9 +66,10 @@ CONTRACT_BOUNDS = {
     "WIN_DERIVED_BYTES_MAX": 2 * 1024 * 1024,
     "POP_TTL_S": 3600,
     "REPORT_INFLIGHT_MAX": 2,
-    # 128 at the design; 225 from the P9 cold figure on Linux (see
-    # BASE_RSS_FLOOR_MB below for the measurement and the derivation).
-    "POP_MEM_BUDGET_MB": 225,
+    # 128 at the design; 225 from the P9 cold figure on Linux at the lane's
+    # base; 245 from the re-measurement at the re-land onto main (see
+    # BASE_RSS_FLOOR_MB below for both measurements and the derivation).
+    "POP_MEM_BUDGET_MB": 245,
     "GAME_SETS_LIVE": 4,
     "WINDOW_SOURCES_LIVE": 8,
     # Routes (design 4.6): reports per actor per window, in process.
@@ -81,7 +82,7 @@ DISPLAY_DEFAULTS = {
     "own_games": 20,
     "pop_days": 30,
     "games": 10,
-    # D4's READY_LAG_S (review_measures.py CONTRACT_BOUNDS["ready_lag_s"] at
+    # D4's READY_LAG_S (review_measures.py AER_CONTRACT_BOUNDS["ready_lag_s"] at
     # the D4 round 15 pin); re-read at D4_TIP when the D4 files land.
     "lag_s": 120,
 }
@@ -224,7 +225,7 @@ FAMILIES = (
 
 
 @dataclass(frozen=True)
-class Entry:
+class AerEntry:
     """One catalog entry: a base key (`base is None`) or a window key."""
     ki: int
     key: str
@@ -274,12 +275,12 @@ def _expand(families):
                                  source=source, coverage="na", agg="cell",
                                  stratum="na", unit=v.unit, kind=v.kind,
                                  base=None, decl=v))
-    entries = [Entry(ki=i, **b) for i, b in enumerate(base)]
+    entries = [AerEntry(ki=i, **b) for i, b in enumerate(base)]
     for b in list(entries[:len(base)]):
         if not b.ranked:
             continue
         for agg in WINDOW_AGGS:
-            entries.append(Entry(
+            entries.append(AerEntry(
                 ki=len(entries),
                 key=aer_key_id(b.var, b.prov, b.scope, b.source, b.coverage,
                            "%s.%s" % (agg, b.agg), b.stratum),
@@ -471,7 +472,7 @@ def wire_row(table, cell, phase="1a"):
 
 # ── Cell data (design 2.3 to 2.5, 2.7 display half) ────────────────────────
 
-SEATS = ("p1", "p2")
+AER_SEATS = ("p1", "p2")
 
 
 def _aer_other(seat):
@@ -484,7 +485,7 @@ def _columns():
         for v in fam.variables:
             for c in (v.column if isinstance(v.column, tuple) else (v.column,)):
                 if "{s}" in c:
-                    cols.update(c.format(s=s) for s in SEATS)
+                    cols.update(c.format(s=s) for s in AER_SEATS)
                 else:
                     cols.add(c)
     return tuple(sorted(cols))
@@ -527,12 +528,12 @@ def _timeline_display(text):
             continue
         windows.append((-int(parts[1]), pos, item.strip()))
     windows.sort()
-    return ",".join(w[2] for w in windows[:CONTRACT_BOUNDS["TIMELINE_WINDOWS_MAX"]])
+    return ",".join(w[2] for w in windows[:AER_CONTRACT_BOUNDS["TIMELINE_WINDOWS_MAX"]])
 
 
 def _display_value(entry, raw):
     if entry.kind == "T":
-        return str(raw)[:CONTRACT_BOUNDS["TEXT_MAX"]]
+        return str(raw)[:AER_CONTRACT_BOUNDS["TEXT_MAX"]]
     if entry.kind == "D":
         if entry.var == "macro.timeline":
             return _timeline_display(raw)
@@ -707,7 +708,7 @@ class Baseline:
 
     @property
     def truncated_read(self):
-        return self.read > CONTRACT_BOUNDS["BASELINE_SCAN"]
+        return self.read > AER_CONTRACT_BOUNDS["BASELINE_SCAN"]
 
 
 async def read_baseline(db, account, anchor_ended, anchor_id, covered=(), partner=None):
@@ -716,7 +717,7 @@ async def read_baseline(db, account, anchor_ended, anchor_id, covered=(), partne
 
     params = {"g_ended": anchor_ended, "g_id": anchor_id,
               "covered": [c for c in covered],
-              "scan": CONTRACT_BOUNDS["BASELINE_SCAN"] + 1}
+              "scan": AER_CONTRACT_BOUNDS["BASELINE_SCAN"] + 1}
     if partner is None:
         params["s"] = account
         sql = SEAT_BASELINE_SQL
@@ -910,7 +911,7 @@ def population_branches(entries=None, partner=False):
     for e in entries:
         if e.is_window or not e.ranked or e.source != "match_row":
             continue
-        for seat in SEATS:
+        for seat in AER_SEATS:
             col_seat = _aer_other(seat) if e.decl.subject == "opposite" else seat
             val = _value_sql(e, col_seat)
             po = (", %s AS po" % _seat_account_sql(_aer_other(seat))) if partner else ""
@@ -1030,7 +1031,7 @@ class PopulationUnavailable(Exception):
     detail = "unavailable (population)"
 
 
-_log = logging.getLogger("admin_evidence")
+_aer_log = logging.getLogger("admin_evidence")
 
 
 async def rebuild_game_population(conn, key, pop_days, lag_s, ranked_only=False,
@@ -1041,7 +1042,7 @@ async def rebuild_game_population(conn, key, pop_days, lag_s, ranked_only=False,
     anywhere in the complete eligible relation raises PopulationUnavailable
     before anything is kept."""
     from sqlalchemy import text   # deferred: the registry half needs no driver
-    cap = CONTRACT_BOUNDS["POP_VALUES_MAX"] if cap is None else cap
+    cap = AER_CONTRACT_BOUNDS["POP_VALUES_MAX"] if cap is None else cap
     sql = population_sql(population_branches(), ranked_only=ranked_only)
     params = {"pop_days": pop_days, "lag_s": lag_s, "cap": cap}
     values, truncated = {}, {}
@@ -1065,8 +1066,8 @@ async def rebuild_window_source(conn, key, basis, pop_days, lag_s, ranked_only=F
     a repeated identity anywhere in the complete eligible relation raises
     PopulationUnavailable before anything is kept."""
     from sqlalchemy import text
-    wmax = CONTRACT_BOUNDS["WIN_VALUES_MAX"] if wmax is None else wmax
-    depth = CONTRACT_BOUNDS["WIN_UNIT_DEPTH"] if depth is None else depth
+    wmax = AER_CONTRACT_BOUNDS["WIN_VALUES_MAX"] if wmax is None else wmax
+    depth = AER_CONTRACT_BOUNDS["WIN_UNIT_DEPTH"] if depth is None else depth
     sql = window_source_sql(population_branches(partner=True), basis,
                             ranked_only=ranked_only)
     params = {"pop_days": pop_days, "lag_s": lag_s, "wmax": wmax, "depth": depth}
@@ -1184,12 +1185,24 @@ def process_rss_mb(peak=False):
 #           = 223.1 -> 225; peak x 1.25 = 200.6 is inside it.
 # The worst-case cache (15,923,456 counted bytes) then fits the budget gate
 # at the measured B: 225/1.25 - 160.4 - 2 = 17.6 MB.
-BASE_RSS_FLOOR_MB = 165
+#
+# Re-measured at the re-land onto main 3fc331e2 (2026-10-30, suite seat 2,
+# Python 3.12.15, the same fresh-interpreter form): B 177.5 MB and peak
+# 177.6 MB, the api having grown by the identity-clock, card and combat
+# evidence servers and the build manifest since the lane's base (nothing of
+# this module changed). The same derivation, each rounded up to the next
+# multiple of 5:
+#   floor   177.5 -> 180
+#   budget  (B 177.5 + 18.1) x 1.25 = 244.5 -> 245; peak x 1.25 = 222.0 is
+#           inside it.
+# The worst-case cache (15,923,456 counted bytes, 15.2 MB) fits the budget
+# gate at the measured B: 245/1.25 - 177.5 - 2 = 16.5 MB.
+BASE_RSS_FLOOR_MB = 180
 
 
 def budget_bytes(base_rss_mb):
     """The cache's byte budget (design 2.6): `POP_MEM_BUDGET_MB/1.25 - B - 2` MB."""
-    return int((CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - base_rss_mb - 2)
+    return int((AER_CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - base_rss_mb - 2)
                * 1024 * 1024)
 
 
@@ -1220,7 +1233,7 @@ class PopulationCache:
 
     def current(self, key):
         g = self.live.get(key)
-        if g is None or self._clock() - g.computed_at >= CONTRACT_BOUNDS["POP_TTL_S"]:
+        if g is None or self._clock() - g.computed_at >= AER_CONTRACT_BOUNDS["POP_TTL_S"]:
             return None
         return g
 
@@ -1239,7 +1252,7 @@ class PopulationCache:
         if old is not None:
             self._retire(old)
         same = [g for g in self.live.values() if g.kind == kind]
-        while len(same) > CONTRACT_BOUNDS[self.LIVE_MAX[kind]]:
+        while len(same) > AER_CONTRACT_BOUNDS[self.LIVE_MAX[kind]]:
             oldest = same[0]
             same = same[1:]
             self.live = {k: value for k, value in self.live.items()
@@ -1315,10 +1328,10 @@ class PopulationCache:
                       computed_at=lease.computed_at, _bytes=nbytes)
         self.memo[mk] = stored
         self.memo_bytes += nbytes
-        if self.memo_bytes > CONTRACT_BOUNDS["WIN_DERIVED_BYTES_MAX"]:
+        if self.memo_bytes > AER_CONTRACT_BOUNDS["WIN_DERIVED_BYTES_MAX"]:
             kept = collections.OrderedDict()
             for key, value in self.memo.items():
-                if self.memo_bytes > CONTRACT_BOUNDS["WIN_DERIVED_BYTES_MAX"]:
+                if self.memo_bytes > AER_CONTRACT_BOUNDS["WIN_DERIVED_BYTES_MAX"]:
                     self.memo_bytes -= value["_bytes"]
                 else:
                     kept[key] = value
@@ -1336,25 +1349,25 @@ def _packed_bytes(*maps):
     return sum(len(a) * a.itemsize for m in maps for a in m.values())
 
 
-def _deadline(deadline):
+def _aer_deadline(deadline):
     if deadline is not None:
         return deadline
-    return (time.monotonic() + CONTRACT_BOUNDS["REPORT_DEADLINE_S"]
-            - CONTRACT_BOUNDS["AUDIT_RESERVE_S"])
+    return (time.monotonic() + AER_CONTRACT_BOUNDS["REPORT_DEADLINE_S"]
+            - AER_CONTRACT_BOUNDS["AUDIT_RESERVE_S"])
 
 
 async def _admit_and_publish(cache, key, values, truncated, offsets, t0, deadline):
     nbytes = _packed_bytes(values, offsets or {})
     cache.in_progress += nbytes
     try:
-        await cache.admit(nbytes, _deadline(deadline))
+        await cache.admit(nbytes, _aer_deadline(deadline))
     except PopulationUnavailable as exc:
-        _log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
+        _aer_log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
         raise
     finally:
         cache.in_progress -= nbytes
     g = cache.publish(key, values, truncated, offsets)
-    _log.info("admin_evidence population rebuilt: key=%r gen=%d size=%d truncated=%s "
+    _aer_log.info("admin_evidence population rebuilt: key=%r gen=%d size=%d truncated=%s "
               "duration_ms=%d bytes=%d", key, g.gen, sum(len(a) for a in values.values()),
               sorted(truncated), int((time.monotonic() - t0) * 1000), g.nbytes())
     return g
@@ -1370,7 +1383,7 @@ async def refresh_game_set(cache, conn, key, pop_days, lag_s, ranked_only=False,
         values, truncated = await rebuild_game_population(
             conn, key, pop_days, lag_s, ranked_only=ranked_only, cap=cap)
     except PopulationUnavailable as exc:
-        _log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
+        _aer_log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
         raise
     return await _admit_and_publish(cache, key, values, truncated, None, t0, deadline)
 
@@ -1384,7 +1397,7 @@ async def refresh_window_source(cache, conn, key, basis, pop_days, lag_s,
             conn, key, basis, pop_days, lag_s, ranked_only=ranked_only, wmax=wmax,
             depth=depth)
     except PopulationUnavailable as exc:
-        _log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
+        _aer_log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
         raise
     return await _admit_and_publish(cache, key, values, truncated, offsets, t0, deadline)
 
@@ -1414,7 +1427,7 @@ def _evidence_refusal():
 
 def _refuse_class(cls):
     """Log the failure class once, without the actor id (design 4.2)."""
-    _log.info("admin_evidence refused: %s", cls)
+    _aer_log.info("admin_evidence refused: %s", cls)
 
 
 def _key_matches(given):
@@ -1463,7 +1476,7 @@ async def _evidence_gate(request, db):
     is the same `403 refused`."""
     from sqlalchemy import text
     d = request.headers.get("X-Actor-Discord-Id")
-    if (d is None or not 1 <= len(d) <= CONTRACT_BOUNDS["ACTOR_ID_MAX_DIGITS"]
+    if (d is None or not 1 <= len(d) <= AER_CONTRACT_BOUNDS["ACTOR_ID_MAX_DIGITS"]
             or not d.isascii() or not d.isdigit()):
         _refuse_class("bad_actor")
         _aer_fail(403, REFUSED)
@@ -1481,14 +1494,14 @@ async def _evidence_gate(request, db):
 
 # Argument forms (design 1.2).
 
-_HEX = frozenset("0123456789abcdef")
+_AER_HEX = frozenset("0123456789abcdef")
 
 
 def _aer_ident(raw):
     """`("full", 32 hex)` or `("code", 12 hex)`: lowercased, dashes stripped;
     anything else is `400 bad_argument`."""
     s = (raw or "").strip().lower().replace("-", "")
-    if s and set(s) <= _HEX:
+    if s and set(s) <= _AER_HEX:
         if len(s) == 32:
             return "full", s
         if len(s) == 12:
@@ -1498,7 +1511,7 @@ def _aer_ident(raw):
 
 def _aer_steam(raw):
     s = raw or ""
-    lo, hi = CONTRACT_BOUNDS["STEAM_ID_MIN_DIGITS"], CONTRACT_BOUNDS["STEAM_ID_MAX_DIGITS"]
+    lo, hi = AER_CONTRACT_BOUNDS["STEAM_ID_MIN_DIGITS"], AER_CONTRACT_BOUNDS["STEAM_ID_MAX_DIGITS"]
     if lo <= len(s) <= hi and s.isascii() and s.isdigit():
         return s
     _aer_fail(400, "bad_argument")
@@ -1517,7 +1530,7 @@ def _aer_pages(shape, c):
     """Page count for `c` selected games (design 1.2): game and series
     `ceil(c/5)`; pair and player `1 + ceil(c/5)`, page 1 the summary. Shared by
     route, bot and tests."""
-    per = CONTRACT_BOUNDS["PAGE_GAMES"]
+    per = AER_CONTRACT_BOUNDS["PAGE_GAMES"]
     games = (c + per - 1) // per
     return games + 1 if shape in ("pair", "player") else games
 
@@ -1635,14 +1648,14 @@ async def _select_series(db, ident):
         sid = got[0]["series_id"] if got else None
         if sid is None:
             _aer_fail(404, "not_found")
-    lim = CONTRACT_BOUNDS["SERIES_GAMES_MAX"] + 1
+    lim = AER_CONTRACT_BOUNDS["SERIES_GAMES_MAX"] + 1
     rows = await _aer_rows(db, R2_SERIES_SQL, {"sid": str(sid), "lim": lim})
-    if len(rows) > CONTRACT_BOUNDS["SERIES_GAMES_MAX"]:
+    if len(rows) > AER_CONTRACT_BOUNDS["SERIES_GAMES_MAX"]:
         _aer_fail(500, "too_large")
     return sid, [r["id"] for r in rows]
 
 
-async def _player_id(db, steam):
+async def _aer_player_id(db, steam):
     rows = await _aer_rows(db, PLAYER_BY_STEAM_SQL, {"steam": steam})
     if not rows:
         _aer_fail(404, "not_found")
@@ -1662,11 +1675,11 @@ def _rate_charge(actor, now=None):
     """At most RATE_MAX reports per actor per RATE_WINDOW_S, after the gate;
     over it, `429 rate` with `Retry-After`."""
     now = time.monotonic() if now is None else now
-    window = CONTRACT_BOUNDS["RATE_WINDOW_S"]
+    window = AER_CONTRACT_BOUNDS["RATE_WINDOW_S"]
     q = _RATE.setdefault(actor, collections.deque())
     while q and now - q[0] >= window:
         q.popleft()
-    if len(q) >= CONTRACT_BOUNDS["RATE_MAX"]:
+    if len(q) >= AER_CONTRACT_BOUNDS["RATE_MAX"]:
         retry = max(1, int(math.ceil(window - (now - q[0]))))
         _aer_fail(429, "rate", headers={"Retry-After": str(retry)})
     q.append(now)
@@ -1731,7 +1744,7 @@ def _code(match_id):
 
 
 def _text(value):
-    return _aer_enc((value or "")[:CONTRACT_BOUNDS["TEXT_MAX"]])
+    return _aer_enc((value or "")[:AER_CONTRACT_BOUNDS["TEXT_MAX"]])
 
 
 def _catalog_row(entry, spread=None):
@@ -1796,7 +1809,7 @@ async def _game_page(rep, games, cohort, subjects, game_set):
         mid = str(row["id"])
         current = current_flags(flags.get(mid, ()))
         seats = []
-        for seat in SEATS:
+        for seat in AER_SEATS:
             account = row["player1_id" if seat == "p1" else "player2_id"]
             base = await read_baseline(db, account, row["ended_at"], row["id"],
                                        covered=[str(c) for c in cohort])
@@ -1886,7 +1899,7 @@ async def _audit(db, actor, shape, target, details):
             "details": json.dumps(details, separators=(",", ":"), sort_keys=True)})
         await db.commit()
     except Exception as exc:      # any failed insert: no row, no body
-        _log.warning("admin_evidence audit unavailable: %s", type(exc).__name__)
+        _aer_log.warning("admin_evidence audit unavailable: %s", type(exc).__name__)
         try:
             await db.rollback()
         except Exception:
@@ -1894,7 +1907,7 @@ async def _audit(db, actor, shape, target, details):
         _aer_fail(503, "audit_unavailable")
 
 
-def _clock():
+def _aer_clock():
     return time.monotonic()
 
 
@@ -1902,10 +1915,10 @@ async def _aer_serve(shape, request, db, actor):
     """Parse, probe, bound, read, build, size-check, audit, return (design
     4.4 order); `actor` is the steam id `_evidence_gate` returned."""
     from sqlalchemy import text
-    t0 = _clock()
-    deadline = (t0 + CONTRACT_BOUNDS["REPORT_DEADLINE_S"]
-                - CONTRACT_BOUNDS["AUDIT_RESERVE_S"])
-    gmax = CONTRACT_BOUNDS["GAMES_MAX"]
+    t0 = _aer_clock()
+    deadline = (t0 + AER_CONTRACT_BOUNDS["REPORT_DEADLINE_S"]
+                - AER_CONTRACT_BOUNDS["AUDIT_RESERVE_S"])
+    gmax = AER_CONTRACT_BOUNDS["GAMES_MAX"]
     page = _aer_int(request, "page", 1, 1, 10 ** 6)
     games_arg = None
     if shape in ("game", "series"):
@@ -1916,16 +1929,16 @@ async def _aer_serve(shape, request, db, actor):
         if steams[0] == steams[1]:
             _aer_fail(400, "bad_argument")
         games_arg = _aer_int(request, "games", DISPLAY_DEFAULTS["games"],
-                             CONTRACT_BOUNDS["GAMES_MIN"], gmax)
+                             AER_CONTRACT_BOUNDS["GAMES_MIN"], gmax)
     else:
         steams = (_aer_steam(request.path_params.get("steam_id")),)
         games_arg = _aer_int(request, "games", DISPLAY_DEFAULTS["games"],
-                             CONTRACT_BOUNDS["GAMES_MIN"], gmax)
+                             AER_CONTRACT_BOUNDS["GAMES_MIN"], gmax)
 
     if (await db.execute(text("SELECT pg_is_in_recovery()"))).scalar():
         _aer_fail(409, "primary_only")
     _rate_charge(actor)
-    await _wait_until(lambda: _INFLIGHT[0] < CONTRACT_BOUNDS["REPORT_INFLIGHT_MAX"], deadline)
+    await _wait_until(lambda: _INFLIGHT[0] < AER_CONTRACT_BOUNDS["REPORT_INFLIGHT_MAX"], deadline)
     _INFLIGHT[0] += 1
     rep = _Report(db, _aer_cache(), deadline)
     try:
@@ -1937,12 +1950,12 @@ async def _aer_serve(shape, request, db, actor):
             sid, ids = await _select_series(db, ident)
             target["series"] = str(sid)
         elif shape == "pair":
-            accounts = (await _player_id(db, steams[0]), await _player_id(db, steams[1]))
+            accounts = (await _aer_player_id(db, steams[0]), await _aer_player_id(db, steams[1]))
             ids = [r["id"] for r in await _aer_rows(db, R3_PAIR_SQL, {
                 "a": str(accounts[0]), "b": str(accounts[1]), "games": games_arg})]
             target["steam"], b_pid = steams[0], str(accounts[1])
         else:
-            accounts = (await _player_id(db, steams[0]),)
+            accounts = (await _aer_player_id(db, steams[0]),)
             ids = [r["id"] for r in await _aer_rows(db, R4_PLAYER_SQL, {
                 "s": str(accounts[0]), "games": games_arg})]
             target["steam"] = steams[0]
@@ -1952,7 +1965,7 @@ async def _aer_serve(shape, request, db, actor):
         if not 1 <= page <= pages:
             _aer_fail(400, "bad_argument (page)")
         game_set = await rep.lease(_display_key())
-        per = CONTRACT_BOUNDS["PAGE_GAMES"]
+        per = AER_CONTRACT_BOUNDS["PAGE_GAMES"]
         summary_page = shape in ("pair", "player") and page == 1
         first = (page - 2 if shape in ("pair", "player") else page - 1) * per
         page_ids = [] if summary_page else ids[first:first + per]
@@ -1978,7 +1991,7 @@ async def _aer_serve(shape, request, db, actor):
                                "computed_at": _iso(game_set.computed_at),
                                "truncated": sorted(game_set.truncated)},
                 "baseline": {"own_games": DISPLAY_DEFAULTS["own_games"],
-                             "scan": CONTRACT_BOUNDS["BASELINE_SCAN"]},
+                             "scan": AER_CONTRACT_BOUNDS["BASELINE_SCAN"]},
                 "registry": registry_block()}
         if summary_page:
             windows, summary, win_at = await _summary_page(
@@ -1993,7 +2006,7 @@ async def _aer_serve(shape, request, db, actor):
                                for e in REPORT_REGISTRY if not e.is_window]
             body["games"] = await _game_page(rep, rows, ids, subjects, game_set)
         encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        if len(encoded) > CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]:
+        if len(encoded) > AER_CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]:
             _aer_fail(500, "too_large")
         details = {"schema": "1a", "shape": shape, "games": games_arg if games_arg else c,
                    "page": page, "pages": pages, "b_pid": b_pid,
@@ -2001,7 +2014,7 @@ async def _aer_serve(shape, request, db, actor):
                    "registry": body["registry"]["fingerprint"],
                    "pop_computed_at": body["population"]["computed_at"],
                    "codes": [_code(i) for i in (page_ids or ids)], "via": "discord"}
-        if _clock() > deadline:
+        if _aer_clock() > deadline:
             _aer_fail(503, "deadline")
         await _audit(db, actor, shape, target, details)
         return Response(content=encoded, media_type="application/json")

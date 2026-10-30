@@ -294,7 +294,7 @@ def test_p3_every_refusal_is_identical_and_precedes_parsing(rig, monkeypatch, ma
             for label, key, actor in (
                     ("no key", None, admin), ("wrong key", KEY + "x", admin),
                     ("no actor", KEY, None), ("malformed actor", KEY, "12a4"),
-                    ("too long actor", KEY, "1" * (ae.CONTRACT_BOUNDS["ACTOR_ID_MAX_DIGITS"] + 1)),
+                    ("too long actor", KEY, "1" * (ae.AER_CONTRACT_BOUNDS["ACTOR_ID_MAX_DIGITS"] + 1)),
                     ("unlinked actor", KEY, unlinked), ("non-roster actor", KEY, linked)):
                 rig.stmts.clear()
                 status, content, _h = await rig.get(path, key=key, actor=actor)
@@ -457,7 +457,7 @@ def test_p6_one_audit_row_per_page_over_seven_pages_of_pair_and_player(rig):
                 assert new == [], shape
                 continue
             assert status == 200, (shape, page, content[:300])
-            assert len(content) <= ae.CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]
+            assert len(content) <= ae.AER_CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]
             body = _body(content)
             assert (body["shape"], body["page"], body["pages"]) == (shape, page, 7)
             assert body["rules"] == {"report": "absent"}
@@ -501,7 +501,7 @@ def test_p9_pair_summary_ttl_boundary_uses_one_window_generation(rig, monkeypatc
         if basis is not None:
             window_leases.append((generation.gen, generation.computed_at))
             if len(window_leases) == 1:
-                clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"]
+                clock.t += ae.AER_CONTRACT_BOUNDS["POP_TTL_S"]
         return generation
 
     def memo_get(self, comp, generation):
@@ -565,7 +565,7 @@ def test_p6_a_deadline_before_the_audit_is_503_with_no_row(rig, monkeypatch):
         calls[0] += 1
         return time.monotonic() + (0 if calls[0] == 1 else 3600)
 
-    monkeypatch.setattr(ae, "_clock", clock)
+    monkeypatch.setattr(ae, "_aer_clock", clock)
 
     async def go():
         admin = await _admin(rig)
@@ -732,7 +732,7 @@ def test_p11_zero_and_one_game_cohorts(rig):
 def test_size_a_page_of_full_width_escaped_text_stays_under_the_bound(rig):
     # Every character escapes (a stored NUL is not text, so 0x00 is left out).
     cps = "".join(chr(c) for c in sorted(ae.AER_ESC) if c)
-    wide = (cps * ae.CONTRACT_BOUNDS["TEXT_MAX"])[: ae.CONTRACT_BOUNDS["TEXT_MAX"]]
+    wide = (cps * ae.AER_CONTRACT_BOUNDS["TEXT_MAX"])[: ae.AER_CONTRACT_BOUNDS["TEXT_MAX"]]
 
     async def go():
         admin = await _admin(rig)
@@ -748,9 +748,9 @@ def test_size_a_page_of_full_width_escaped_text_stays_under_the_bound(rig):
     assert status == 200, content[:300]
     body = _body(content)
     assert body["subjects"][0]["name"] == ae._aer_enc(wide)
-    assert len(content) <= ae.CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]
+    assert len(content) <= ae.AER_CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]
     print("GATE size: full-width escaped page %d bytes of %d"
-          % (len(content), ae.CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]))
+          % (len(content), ae.AER_CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]))
 
 
 def test_rate_bound_per_actor_with_retry_after(rig):
@@ -759,15 +759,15 @@ def test_rate_bound_per_actor_with_retry_after(rig):
         other = await _admin(rig)
         path = "%s/player/%s" % (ROOT, _digits(17))
         first = [(await rig.get(path, actor=admin))[0]
-                 for _ in range(ae.CONTRACT_BOUNDS["RATE_MAX"])]
+                 for _ in range(ae.AER_CONTRACT_BOUNDS["RATE_MAX"])]
         over = await rig.get(path, actor=admin)
         another = await rig.get(path, actor=other)
         return first, over, another
 
     first, over, another = rig.run(go())
-    assert first == [404] * ae.CONTRACT_BOUNDS["RATE_MAX"]
+    assert first == [404] * ae.AER_CONTRACT_BOUNDS["RATE_MAX"]
     assert (over[0], _body(over[1])) == (429, {"detail": "rate"})
-    assert 1 <= int(over[2]["Retry-After"]) <= ae.CONTRACT_BOUNDS["RATE_WINDOW_S"]
+    assert 1 <= int(over[2]["Retry-After"]) <= ae.AER_CONTRACT_BOUNDS["RATE_WINDOW_S"]
     assert another[0] == 404
     print("GATE rate: %d served, the next 429 rate Retry-After %s, another actor unaffected"
           % (len(first), over[2]["Retry-After"]))
@@ -980,7 +980,7 @@ def test_p9_a_duplicate_refuses_through_the_routes_and_the_twin_served(rig, monk
             key = ae._display_key()
             g0, gen0 = cache.live[key], cache._gen
             await _z_duplicate(rig, games[1])
-            clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"]
+            clock.t += ae.AER_CONTRACT_BOUNDS["POP_TTL_S"]
             n0 = len(await rig.audits())
             out = [(shape, await rig.get(p.replace("games=abc", "games=3"), actor=admin))
                    for shape, p in paths.items()]

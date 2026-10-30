@@ -1174,17 +1174,21 @@ def test_the_helper_closure_stays_affordable():
     # main. +2 on the route at the rank: the report router's two data bindings
     # (admin_evidence.router and EVIDENCE_ROOT), which every route reaching
     # main.app folds in by name, neither executed by it. Over the 425 shared
-    # routes: +2 on 380; +6 on 28 (27 hold, match and queue routes that reach
-    # admin_evidence's player lookup through the shared names
-    # PLAYER_BY_STEAM_SQL, _player_id, _aer_rows and _aer_fail, and the health
-    # route: CONTRACT_BOUNDS and _HEX by name plus the admin_evidence health
-    # word it runs and the word's route tuple); +8 on 6 and +12 on 2 (the lobby
-    # and queue routes that reach its CONTRACT_BOUNDS, Entry, Var and
-    # _deadline, and through the name CONTRACT_BOUNDS the same table of
-    # review_measures and review_rules); +4 on 6 (CONTRACT_BOUNDS and _HEX);
-    # one route each at +3, +7 and 0. The four report routes measure
-    # 231 and enter above the rank; the rank position moves 212 -> 214.
-    # Inside 87, so the bound stays.
+    # routes: +2 on 423, +4 on the health route (the admin_evidence health
+    # word it runs and the word's route tuple), 0 on one. No other binding
+    # of admin_evidence is reached from outside its four routes: this walk
+    # resolves bare and attribute names across modules, so the module's
+    # helpers carry a lane prefix wherever a same-named binding exists
+    # elsewhere (_aer_player_id against match_hold's _player_id, _aer_deadline
+    # against a _deadline name in main's handlers, AER_CONTRACT_BOUNDS and
+    # AerEntry against review_measures' and review_rules', _AER_HEX against
+    # build_manifest's, card_measures' and review_rules', AER_SEATS against
+    # combat_measures', review_measures' and seat_evidence's, _aer_clock
+    # against combat_measures', _aer_log against review_rules'); with the
+    # lane's own names the hold, match, queue and lobby routes measured +6 to
+    # +12 here and reached _aer_rows and _aer_fail. The four report routes
+    # measure 218 and enter above the rank; the rank position moves
+    # 212 -> 214. Inside 87, so the bound stays.
     assert code_median <= 87, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
@@ -1625,7 +1629,7 @@ def test_the_helper_closure_stays_affordable():
     # refit onto main 3fc331e2: 214 measured at GET /api/v1/broadcast/target
     # (212 on main; main's rank route POST /api/v1/matches/combat-evidence
     # 177 -> 179, the same two data bindings as at the median). The population
-    # grows 425 -> 429: the four report routes measure 231 each and enter
+    # grows 425 -> 429: the four report routes measure 218 each and enter
     # above the rank, so the rank position moves 382 -> 386, four routes up a
     # steep stretch (177, 184, 203, 203 and 212 at positions 382 to 386 on
     # main). The bound moves to 225, ~5% over the measurement, for that
@@ -1741,11 +1745,11 @@ def test_the_helper_closure_stays_affordable():
     # The bound moves to 596, ~5% over the measurement, for that reason and
     # no other.
     # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
-    # refit onto main 3fc331e2: 574 measured at GET /api/v1/health (568 on
-    # main): +4 by name, none executed by the health route (admin_evidence's
-    # router, EVIDENCE_ROOT, CONTRACT_BOUNDS and _HEX), and +2 the route does
-    # run, the admin_evidence health word and its route tuple (the four report
-    # endpoints held as values, not walked). Inside 596, so the bound stays.
+    # refit onto main 3fc331e2: 572 measured at GET /api/v1/health (568 on
+    # main): +2 by name, neither executed by the health route (admin_evidence's
+    # router and EVIDENCE_ROOT), and +2 the route does run, the admin_evidence
+    # health word and its route tuple (the four report endpoints held as
+    # values, not walked). Inside 596, so the bound stays.
     assert code_worst <= 596, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
@@ -1826,18 +1830,19 @@ def test_the_helper_closure_stays_affordable():
     # routes. No route crossed into a hub. The bound moves to 231, ~5% over
     # the measurement, for that reason and no other.
     # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
-    # refit onto main 3fc331e2: 233 measured at GET /api/v1/cards (221 on main;
-    # main's rank route POST /api/v1/series/{series_id}/live-points 220 -> 242).
-    # +12 on the route at the rank by name: the report router's two data
-    # bindings and admin_evidence's import lines (AsyncSession, Depends,
-    # HTTPException, Request, get_db, hashlib, hmac, json, os and time). Over
-    # the 425 shared routes the same fold adds +12 on 153, +11 on 59, +13 on
-    # 36, +9 on 32, +10 on 27, +14 on 21, +16 on 21, +7 on 20, and between +4
-    # and +33 on the other 56 (more where a route reaches admin_evidence's
-    # data names, as at the code median). The four report routes measure 420
-    # and enter above the rank; the rank position moves 212 -> 214. No route
-    # crossed into a hub. The bound moves to 245, ~5% over the measurement,
-    # for that reason and no other.
+    # refit onto main 3fc331e2: 232 measured at GET
+    # /api/v1/players/{steam_id}/ffa-history (220 on main; main's rank route
+    # POST /api/v1/series/{series_id}/live-points 220 -> 232). +12 on the
+    # route at the rank by name: the report router's two data bindings and
+    # admin_evidence's import lines (AsyncSession, Depends, HTTPException,
+    # Request, get_db, hashlib, hmac, json, os and time). Over the 425 shared
+    # routes the same fold adds +12 on 163, +11 on 67, +13 on 38, +10 on 35,
+    # +9 on 32, +7 on 20, +14 on 19 and +16 on 15: each route gains the
+    # import line of every name its closure already reaches by name, hashlib,
+    # json, time, math, Optional and the rest. The four report routes measure
+    # 403 and enter above the rank; the rank position moves 212 -> 214. No
+    # route crossed into a hub. The bound moves to 245, ~5% over the
+    # measurement, for that reason and no other.
     assert all_median <= 245, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
@@ -2099,17 +2104,14 @@ def test_the_helper_closure_stays_affordable():
     # routes. The bound moves to 393, ~5% over the measurement, for that
     # reason and no other.
     # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
-    # refit onto main 3fc331e2: 419 measured at POST /api/v1/pc/trades/decline
-    # (405 on main; main's rank route GET /api/v1/queue/poll/{steam_id}
-    # 375 -> 391). +14 on the route at the rank by the same fold as the
-    # median: the two data bindings and twelve import lines (AsyncSession,
-    # Depends, HTTPException, Request, dataclass, field, get_db, hashlib,
-    # hmac, json, math and time). The four report routes measure 420 each and
-    # enter just above the rank, so the rank position moves 382 -> 386, four
-    # routes up a steep stretch (375 to 404 at positions 382 to 386 on main).
-    # The bound moves to 440, ~5% over the measurement, for that reason and
-    # no other.
-    assert all_p90 <= 440, f"p90 closure {all_p90} of {total}"
+    # refit onto main 3fc331e2: 403 measured at GET
+    # /api/v1/internal/evidence-report/game/{code}, one of the four report
+    # routes (403 whole and 218 code each), which enter at the rank: the
+    # population grows 425 -> 429, the rank position moves 382 -> 386, and
+    # main's rank route GET /api/v1/queue/poll/{steam_id} measures 375 -> 387
+    # by the same fold as the median. The bound moves to 425, ~5% over the
+    # measurement, for that reason and no other.
+    assert all_p90 <= 425, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -2242,13 +2244,13 @@ def test_the_helper_closure_stays_affordable():
     # bound moves to 852, ~5% over the measurement, for that reason and no
     # other.
     # admin evidence report re-land (2026-10-29), claude/admin-evidence-server
-    # refit onto main 3fc331e2: 832 measured at GET /api/v1/health (812 on
-    # main): +18 by name, none executed by the health route (admin_evidence's
-    # four data bindings router, EVIDENCE_ROOT, CONTRACT_BOUNDS and _HEX, and
-    # fourteen import lines: asyncio, AsyncSession, dataclass, Depends, field,
-    # get_db, hashlib, hmac, HTTPException, json, math, os, Request and time),
-    # and +2 the route does run, the admin_evidence health word and its route
-    # tuple. Inside 852, so the bound stays.
+    # refit onto main 3fc331e2: 830 measured at GET /api/v1/health (812 on
+    # main): +16 by name, none executed by the health route (admin_evidence's
+    # two data bindings router and EVIDENCE_ROOT, and fourteen import lines:
+    # asyncio, AsyncSession, dataclass, Depends, field, get_db, hashlib, hmac,
+    # HTTPException, json, math, os, Request and time), and +2 the route does
+    # run, the admin_evidence health word and its route tuple. Inside 852, so
+    # the bound stays.
     assert all_worst <= 852, f"worst closure {all_worst} of {total}"
 
 

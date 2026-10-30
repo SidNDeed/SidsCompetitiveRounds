@@ -82,7 +82,7 @@ from test_admin_evidence_cells_pg import MATCH_REQUIRED, Live, require_pg  # noq
 HITCH = next(e for e in ae.REPORT_REGISTRY
              if not e.is_window and e.var == "net.hitch50" and e.prov == "SELF")
 NOW = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
-CAP = ae.CONTRACT_BOUNDS["POP_VALUES_MAX"]
+CAP = ae.AER_CONTRACT_BOUNDS["POP_VALUES_MAX"]
 
 
 @pytest.fixture()
@@ -297,7 +297,7 @@ def test_p9_publish_retires_the_old_generation_and_its_derived_results():
     assert cache.cache_bytes() == g1.nbytes() + g2.nbytes()
     cache.release(g1)
     assert g1 not in cache.retired and cache.cache_bytes() == g2.nbytes()
-    clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"]
+    clock.t += ae.AER_CONTRACT_BOUNDS["POP_TTL_S"]
     assert cache.current(key) is None
     print("GATE p9 generations: gen %d retired under its lease (%d bytes counted, "
           "then %d), derived result evicted, gen %d expires at POP_TTL_S"
@@ -341,8 +341,8 @@ def test_p9_live_generations_stay_within_four_game_sets_and_eight_window_sources
                              {}, offsets={HITCH.ki: ae.array("i", [0, 1])})
                for i in range(9)]
     live = list(cache.live.values())
-    assert sum(g.kind == "game" for g in live) == ae.CONTRACT_BOUNDS["GAME_SETS_LIVE"]
-    assert sum(g.kind == "window" for g in live) == ae.CONTRACT_BOUNDS["WINDOW_SOURCES_LIVE"]
+    assert sum(g.kind == "game" for g in live) == ae.AER_CONTRACT_BOUNDS["GAME_SETS_LIVE"]
+    assert sum(g.kind == "window" for g in live) == ae.AER_CONTRACT_BOUNDS["WINDOW_SOURCES_LIVE"]
     assert games[0].retired and windows[0].retired
     assert not games[1].retired and not windows[1].retired
     print("GATE p9 live caps: %d game sets, %d window sources live; the oldest of each retired"
@@ -409,7 +409,7 @@ def test_p9_generation_a_warm_result_is_recomputed_after_its_source_expires(live
         lease = cache.lease(g1)
         dist = ae.window_population(g1.values[ki], g1.offsets[ki], "win_median", 2)
         r1 = dict(cache.memo_put(comp, lease, ae.pop_measures(dist, 15.0), 64))
-        clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"] - 1
+        clock.t += ae.AER_CONTRACT_BOUNDS["POP_TTL_S"] - 1
         warm = cache.current(key) is g1 and cache.memo_get(comp, lease) is not None
         cache.release(lease)
         w = uuid.uuid4()
@@ -447,7 +447,7 @@ def _big(n_bytes):
 
 def _gate_cache(budget_mb):
     """A cache whose budget is `budget_mb`: B set so POP_MEM_BUDGET_MB/1.25 - B - 2 = it."""
-    b = ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - 2 - budget_mb
+    b = ae.AER_CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - 2 - budget_mb
     return ae.PopulationCache(clock=_Clock(), base_rss_mb=b)
 
 
@@ -572,7 +572,7 @@ def test_p9_duplicate_game_population_refuses(live, monkeypatch, caplog, placeme
                        + [(dup, "p1", Z_KI, 500.0)])
         twin = await ae.refresh_game_set(cache, live.conn, key, 30, 120, cap=small)
         await _z_facts(live, [(dup, "p1", Z_KI, 501.0)])
-        clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"]
+        clock.t += ae.AER_CONTRACT_BOUNDS["POP_TTL_S"]
         try:
             await ae.refresh_game_set(cache, live.conn, key, 30, 120, cap=small)
         except ae.PopulationUnavailable as exc:
@@ -619,7 +619,7 @@ def test_p9_duplicate_window_source_refuses(live, monkeypatch, caplog, basis, pl
                                               wmax=wmax)
         u, i = _WINDOW_PLACEMENT[placement]
         await _z_facts(live, [(units[u][i], "p1", Z_KI, 100 * u + i + 0.5)])
-        clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"]
+        clock.t += ae.AER_CONTRACT_BOUNDS["POP_TTL_S"]
         try:
             await ae.refresh_window_source(cache, live.conn, key, basis, 30, 120, wmax=wmax)
         except ae.PopulationUnavailable as exc:
@@ -645,8 +645,8 @@ import main                      # the api's own imports (design 2.6: main.py)
 import admin_evidence as ae
 from array import array
 b = ae.process_rss_mb()
-P = ae.CONTRACT_BOUNDS["POP_VALUES_MAX"]
-W = ae.CONTRACT_BOUNDS["WIN_VALUES_MAX"]
+P = ae.AER_CONTRACT_BOUNDS["POP_VALUES_MAX"]
+W = ae.AER_CONTRACT_BOUNDS["WIN_VALUES_MAX"]
 R = sum(1 for e in ae.REPORT_REGISTRY if not e.is_window and e.ranked)
 cache = ae.PopulationCache(base_rss_mb=b)
 def vals(n):
@@ -725,7 +725,7 @@ def test_p9_cold_start_base_rss_and_peak_within_the_budget():
     line = ("GATE p9 cold start (%s, Python %s): B %.1f MB (floor %.1f), peak %.1f MB "
             "x 1.25 = %.1f (budget %d), cache %d bytes against %d, %d live, %d retired"
             % (m["platform"], m["python"], m["b"], ae.BASE_RSS_FLOOR_MB, m["peak"],
-               m["peak"] * 1.25, ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m["cache_bytes"],
+               m["peak"] * 1.25, ae.AER_CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m["cache_bytes"],
                m["budget"], m["live"], m["retired"]))
     print(line)
     warnings.warn(line)
@@ -735,7 +735,7 @@ def test_p9_cold_start_base_rss_and_peak_within_the_budget():
                     "container's resident set); this figure is the %s working set, "
                     "reported, not gated: %s" % (P9_OFF_LINUX, sys.platform, sys.platform, line))
     assert m["b"] <= ae.BASE_RSS_FLOOR_MB, "B %.1f MB misses the floor: a budget decision" % m["b"]
-    assert m["peak"] * 1.25 <= ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m
+    assert m["peak"] * 1.25 <= ae.AER_CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m
     assert m["cache_bytes"] <= m["budget"], "the worst-case cache misses the budget gate: %s" % m
 
 
@@ -758,7 +758,7 @@ def test_p9_cache_bytes_within_five_percent_of_tracemalloc(live, monkeypatch):
     monkeypatch.setattr(ae, "population_branches",
                         lambda entries=None, partner=False: _z_branches(partner=partner, kis=kis))
     start = NOW - dt.timedelta(days=10)
-    units = ae.CONTRACT_BOUNDS["WIN_VALUES_MAX"]
+    units = ae.AER_CONTRACT_BOUNDS["WIN_VALUES_MAX"]
     cache = ae.PopulationCache(clock=_Clock())
     game_key = ("display", "all", "z", 30, 120)
     window_key = game_key + ("pair",)

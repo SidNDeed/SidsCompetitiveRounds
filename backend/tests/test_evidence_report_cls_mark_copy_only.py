@@ -920,7 +920,7 @@ class Pass:
     # -- module-level scans (literals) --
     def scan_module(self, mod):
         bounds_nodes = set()
-        for name in ("CONTRACT_BOUNDS", "DISPLAY_DEFAULTS"):
+        for name in ("CONTRACT_BOUNDS", "AER_CONTRACT_BOUNDS", "DISPLAY_DEFAULTS"):
             if name in mod.consts:
                 for n in ast.walk(mod.consts[name]):
                     bounds_nodes.add(id(n))
@@ -4967,7 +4967,7 @@ def _fix9_population_namespace():
     from array import array
     from dataclasses import dataclass, field
 
-    wanted = {"CONTRACT_BOUNDS", "SIZING_BASE_RSS_MB", "BASE_RSS_FLOOR_MB",
+    wanted = {"AER_CONTRACT_BOUNDS", "SIZING_BASE_RSS_MB", "BASE_RSS_FLOOR_MB",
               "Generation", "PopulationUnavailable", "budget_bytes", "PopulationCache",
               "_Report", "_summary_page", "_code"}
     selected, found = [], set()
@@ -4994,7 +4994,7 @@ def _fix9_generation(ns, key, gen=1, count=1, leases=0):
 def test_fix9_publish_preserves_replacement_order_and_live_caps():
     ns = _fix9_population_namespace()
     cache = ns["PopulationCache"](clock=lambda: 0.0)
-    bounds = ns["CONTRACT_BOUNDS"]
+    bounds = ns["AER_CONTRACT_BOUNDS"]
     ng, nw = bounds["GAME_SETS_LIVE"], bounds["WINDOW_SOURCES_LIVE"]
     games = [cache.publish(("game", i), {0: ns["array"]("d", [1.0])}, {})
              for i in range(ng)]
@@ -5069,7 +5069,7 @@ def test_fix9_memo_put_preserves_lru_and_bytes():
     ns = _fix9_population_namespace()
     cache = ns["PopulationCache"]()
     source = _fix9_generation(ns, ("source",), gen=7)
-    cap = ns["CONTRACT_BOUNDS"]["WIN_DERIVED_BYTES_MAX"]
+    cap = ns["AER_CONTRACT_BOUNDS"]["WIN_DERIVED_BYTES_MAX"]
     unit = cap // 4
     for label in ("a", "b", "c"):
         cache.memo_put((label,), source, {"pop_rank": 0.25}, unit)
@@ -5096,7 +5096,7 @@ def test_fix9_admit_preserves_broadcast_newcomer_and_deadline():
     asyncio, time = ns["asyncio"], ns["time"]
 
     def make_cache(retired_count):
-        base = ns["CONTRACT_BOUNDS"]["POP_MEM_BUDGET_MB"] / 1.25 - 2 - 80 / (1024 * 1024)
+        base = ns["AER_CONTRACT_BOUNDS"]["POP_MEM_BUDGET_MB"] / 1.25 - 2 - 80 / (1024 * 1024)
         cache = ns["PopulationCache"](base_rss_mb=base)
         cache.live = {("live",): _fix9_generation(ns, ("live",), count=5)}
         cache.retired = [_fix9_generation(ns, ("old", i), gen=i + 2, count=5, leases=1)
@@ -5464,7 +5464,7 @@ def test_fix9_memo_methods_keep_linear_entry_visits(operation, count):
     for i in range(count):
         cache.memo[((i,), generation.key, generation.gen)] = {"_bytes": 1}
     cache.memo_bytes = count
-    ns["CONTRACT_BOUNDS"] = dict(ns["CONTRACT_BOUNDS"], WIN_DERIVED_BYTES_MAX=count)
+    ns["AER_CONTRACT_BOUNDS"] = dict(ns["AER_CONTRACT_BOUNDS"], WIN_DERIVED_BYTES_MAX=count)
     visits[0] = 0
     if operation == "retire":
         cache._retire(generation)

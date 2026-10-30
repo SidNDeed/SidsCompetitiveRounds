@@ -282,7 +282,7 @@ def test_p8_501_newer_null_games_make_the_baseline_truncated_never_n0(live):
         return rows[0], base
 
     row, base = live.run(go())
-    assert base.read == ae.CONTRACT_BOUNDS["BASELINE_SCAN"] + 1
+    assert base.read == ae.AER_CONTRACT_BOUNDS["BASELINE_SCAN"] + 1
     c = _cell(ae.game_seat_cells(row, a, None, base), HITCH)
     assert c["own_state"] == "truncated"
     assert c["own_n"] is None and c["own_mean"] is None and c["own_rank"] is None
