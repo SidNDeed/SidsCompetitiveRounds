@@ -584,6 +584,154 @@ def test_391_refuses_a_same_named_column_of_another_type():
     assert col["type"] == "text", col
 
 
+# How long 391 can hold its lock. lock_timeout bounds only the WAIT for the
+# table lock; a first run that has it keeps ACCESS EXCLUSIVE until COMMIT, so
+# a runner stopped between the DO and COMMIT would stop the table for as long
+# as it stays stopped. Both files therefore open with three timeouts and hold
+# exactly one statement between them and COMMIT.
+
+_391_FILES = {
+    "migration": "391_dc_events_leave_anchor.sql",
+    "rollback": "rollback_391_dc_events_leave_anchor.sql",
+}
+_391_TIMEOUTS = (
+    "SET LOCAL lock_timeout = '5s'",
+    "SET LOCAL idle_in_transaction_session_timeout = '5s'",
+    "SET LOCAL statement_timeout = '30s'",
+)
+
+
+def _top_level_statements(sql: str) -> list:
+    """The file's statements in order, comments dropped, each without its
+    terminating semicolon and otherwise as written (adjacent string
+    literals need their newline). A semicolon inside a dollar-quoted body
+    (the DO block) does not end a statement."""
+    body = "\n".join(line for line in sql.splitlines()
+                     if not line.lstrip().startswith("--"))
+    out, cur, i, tag = [], [], 0, None
+    while i < len(body):
+        if tag is None:
+            m = re.match(r"\$[A-Za-z0-9_]*\$", body[i:])
+            if m:
+                tag = m.group(0)
+                cur.append(tag)
+                i += len(tag)
+                continue
+            if body[i] == ";":
+                stmt = "".join(cur).strip()
+                if stmt:
+                    out.append(stmt)
+                cur, i = [], i + 1
+                continue
+            cur.append(body[i])
+            i += 1
+        else:
+            j = body.find(tag, i)
+            assert j >= 0, "unterminated %s in the file" % tag
+            cur.append(body[i:j + len(tag)])
+            i, tag = j + len(tag), None
+    assert not " ".join("".join(cur).split()), "text after the last semicolon"
+    return out
+
+
+@pytest.mark.parametrize("which", sorted(_391_FILES))
+def test_391_opens_with_three_timeouts_and_one_statement_before_commit(which):
+    """BEGIN, the three SET LOCAL lines, ONE statement (the DO block in the
+    migration, the DROP in the rollback), COMMIT -- nothing else, in that
+    order."""
+    stmts = [" ".join(s.split()) for s in _top_level_statements(
+        (SQL_DIR / _391_FILES[which]).read_text(encoding="utf-8"))]
+    assert stmts[0] == "BEGIN" and stmts[-1] == "COMMIT", stmts
+    assert tuple(stmts[1:4]) == _391_TIMEOUTS, (
+        "%s: the statements after BEGIN are %r; they must be exactly %r"
+        % (_391_FILES[which], stmts[1:4], _391_TIMEOUTS))
+    assert len(stmts) == 6, (
+        "%s: %d statements between the timeouts and COMMIT (%r); the "
+        "transaction must hold exactly one" % (_391_FILES[which], len(stmts) - 5, stmts[4:-1]))
+    if which == "migration":
+        assert stmts[4].startswith("DO $"), stmts[4]
+    else:
+        assert stmts[4].startswith("ALTER TABLE dc_events DROP COLUMN"), stmts[4]
+
+
+async def _391_stopped_before_commit(which, idle_for):
+    """Run the file up to (not including) COMMIT, read the three settings
+    inside that transaction, then leave the session idle for `idle_for`
+    seconds as a stopped runner would. Returns the settings, whether
+    another session could then take ACCESS EXCLUSIVE on dc_events within
+    one second, what the stopped session's next statement met, and whether
+    the column exists afterwards."""
+    stmts = _top_level_statements((SQL_DIR / _391_FILES[which]).read_text(encoding="utf-8"))
+    assert stmts[-1] == "COMMIT", stmts
+    schema = "m391i_%s" % uuid.uuid4().hex[:10]
+    other = await asyncpg.connect(DSN)
+    runner = await asyncpg.connect(DSN)
+    try:
+        await other.execute('CREATE SCHEMA "%s"' % schema)
+        await other.execute('SET search_path TO "%s"' % schema)
+        await runner.execute('SET search_path TO "%s"' % schema)
+        await other.execute(PREREQ["391"])
+        if which == "rollback":
+            await other.execute(migration_text("391"))
+        for stmt in stmts[:-1]:
+            await runner.execute(stmt)
+        settings = {
+            name: await runner.fetchval("SHOW %s" % name)
+            for name in ("lock_timeout", "idle_in_transaction_session_timeout",
+                         "statement_timeout")}
+        await asyncio.sleep(idle_for)
+        try:
+            await other.execute(
+                "BEGIN; SET LOCAL lock_timeout = '1s'; "
+                "LOCK TABLE dc_events IN ACCESS EXCLUSIVE MODE; ROLLBACK;")
+            lock = "taken"
+        except Exception as ex:
+            lock = type(ex).__name__
+            await other.execute("ROLLBACK")
+        try:
+            await runner.fetchval("SELECT 1")
+            runner_next = "answered"
+        except Exception as ex:
+            runner_next = type(ex).__name__
+        column = await _391_column(other)
+        return settings, lock, runner_next, column
+    finally:
+        try:
+            await runner.close()
+        except Exception:
+            pass
+        try:
+            await other.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await other.close()
+
+
+@pytest.mark.parametrize("which", sorted(_391_FILES))
+def test_391_a_runner_stopped_before_commit_loses_its_lock(which):
+    """The behaviour the timeouts exist for. A runner that stops after the
+    DO (or the DROP) and never sends COMMIT is ended by the server once it
+    has idled 5 s, the transaction rolls back, and the table lock goes with
+    it: another session takes ACCESS EXCLUSIVE inside one second, and the
+    file's change is undone (the migration's column absent, the rollback's
+    column still there). Without idle_in_transaction_session_timeout the
+    session idles on, holding the lock, and the other session times out."""
+    settings, lock, runner_next, column = _run(_391_stopped_before_commit(which, 6.5))
+    assert lock == "taken", (
+        "%s: after the runner idled 6.5 s inside its transaction another session "
+        "still could not lock dc_events (%s); the stopped runner kept its lock"
+        % (_391_FILES[which], lock))
+    assert runner_next != "answered", (
+        "%s: the stopped runner's session was still alive after 6.5 s idle in "
+        "its transaction" % _391_FILES[which])
+    assert settings == {"lock_timeout": "5s",
+                        "idle_in_transaction_session_timeout": "5s",
+                        "statement_timeout": "30s"}, settings
+    if which == "migration":
+        assert column is None, "the stopped first run's column survived its rollback: %r" % column
+    else:
+        assert column is not None, "the stopped rollback's DROP survived its rollback"
+
+
 def test_336_probe_cleanup_cannot_reach_a_same_named_ordinary_table():
     """THE CONTROL FOR THE ARM ABOVE, ON THE STATEMENT IT WAS WRITTEN FOR.
 

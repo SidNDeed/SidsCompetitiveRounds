@@ -33,11 +33,24 @@
 -- (test_a_second_run_takes_no_blocking_lock holds this file to that). The
 -- post-check refuses a same-named column of another type, which the guard
 -- alone would accept. Explicit transaction (learning #340).
+--
+-- HOW LONG THE LOCK CAN LIVE. lock_timeout bounds only the WAIT to acquire
+-- the table lock; once the first run holds ACCESS EXCLUSIVE it keeps it
+-- until COMMIT. So the transaction is the three timeouts, ONE DO block and
+-- COMMIT, nothing between: statement_timeout bounds the DO itself, and
+-- idle_in_transaction_session_timeout ends the session (the server rolls
+-- the transaction back and the lock goes with it) when the runner stops
+-- between the DO and COMMIT. test_391_a_runner_stopped_before_commit_*
+-- holds this file to that.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
+SET LOCAL idle_in_transaction_session_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
 
-DO $m391add$
+DO $m391$
+DECLARE
+  got text;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_attribute a
                   WHERE a.attrelid = to_regclass(format('%I.dc_events', current_schema()))
@@ -51,12 +64,8 @@ BEGIN
       'rows written before migration 391''s api and when neither stamp exists. '
       'created_at is when the report was accepted.';
   END IF;
-END $m391add$;
 
-DO $m391check$
-DECLARE
-  got text;
-BEGIN
+  -- The post-check: the guard above only asks whether the name exists.
   SELECT format_type(a.atttypid, a.atttypmod) INTO got
     FROM pg_attribute a
    WHERE a.attrelid = to_regclass(format('%I.dc_events', current_schema()))
@@ -66,6 +75,6 @@ BEGIN
     RAISE EXCEPTION '391: dc_events.leave_anchor_at is %, not timestamp with time zone',
       coalesce(got, 'missing');
   END IF;
-END $m391check$;
+END $m391$;
 
 COMMIT;
