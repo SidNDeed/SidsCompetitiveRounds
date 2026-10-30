@@ -510,7 +510,7 @@ namespace CompetitiveRounds
                 else
                     SetMsgRaw(ok
                         ? I18n.Tr("<color=#88FF88>Purchased!</color>")
-                        : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", resp));
+                        : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", NativeUI.TrItemFloorRefusal(resp) ?? resp));
                 if (ok)
                 {
                     var who = LocalId;

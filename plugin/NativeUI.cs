@@ -9540,10 +9540,31 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
         private static void ShowArtistResult(bool ok, string msg)
         {
+            string floor = ok ? null : TrItemFloorRefusal(msg);
             CompetitiveUI.ShowNotification(ok ? (string.IsNullOrEmpty(msg) ? "Done." : msg)
+                                              : floor != null ? I18n.TrF("Failed: {0}", floor)
                                               : $"Failed: {ExtractServerDetail(msg)}",
                 ok ? new Color(0.4f, 0.9f, 0.5f) : new Color(1f, 0.45f, 0.4f));
             dirty = true;
+        }
+
+        // The per-item client floor refusals (migration 397) carry no machine
+        // code, unlike price_changed, so they are recognised the same way the
+        // price_changed 409 is (status 409 plus the server's words) and shown
+        // from the catalogue. Each literal must equal the server's detail
+        // string byte for byte: the shop purchase route and the artist gift
+        // route in backend/api/main.py (pinned by
+        // backend/tests/test_i18n_item_floor_refusals.py). Any other answer
+        // returns null and the caller keeps its raw text.
+        internal static string TrItemFloorRefusal(string resp)
+        {
+            if (string.IsNullOrEmpty(resp) || !resp.StartsWith("HTTP 409", StringComparison.Ordinal)) return null;
+            string detail = ExtractServerDetail(resp);
+            if (detail == "This item requires a newer mod version")
+                return I18n.Tr("This item requires a newer mod version");
+            if (detail == "This item requires a newer mod version than the recipient has used; they need to update the mod first")
+                return I18n.Tr("This item requires a newer mod version than the recipient has used; they need to update the mod first");
+            return null;
         }
 
         // Server errors arrive as {"detail":"..."} — surface just the message.
@@ -11409,7 +11430,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             else
                                 UIFactory.SetTextRaw(txtShopStatus, ok
                                     ? I18n.Tr("<color=#88FF88>Purchased!</color>")
-                                    : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", resp));
+                                    : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", TrItemFloorRefusal(resp) ?? resp));
                             dirty = true;
                         };
                         if (r.kind == "music_album")
@@ -25446,7 +25467,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static readonly System.Globalization.CultureInfo _INV = System.Globalization.CultureInfo.InvariantCulture;
         private static string _FmtSlot(string iso, bool includeTz = true)
         {
-            if (string.IsNullOrEmpty(iso)) return "(TBD)";
+            if (string.IsNullOrEmpty(iso)) return I18n.Tr("(TBD)");
             try
             {
                 var utc = DateTime.Parse(iso, _INV, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
@@ -25707,8 +25728,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             crt.sizeDelta = new Vector2(CELL_W, CELL_H);
 
             // Two text rows: p1 + p2 with the score on the right.
-            string p1Name = blankNames ? "?" : (m.p1_display_name ?? (m.is_bye ? "BYE" : "TBD"));
-            string p2Name = blankNames ? "?" : (m.p2_display_name ?? (m.is_bye ? "BYE" : "TBD"));
+            string p1Name = blankNames ? "?" : (m.p1_display_name ?? (m.is_bye ? I18n.Tr("BYE") : I18n.Tr("TBD")));
+            string p2Name = blankNames ? "?" : (m.p2_display_name ?? (m.is_bye ? I18n.Tr("BYE") : I18n.Tr("TBD")));
             string p1Score = "", p2Score = "";
             if (m.status == "completed")
             {
@@ -26718,8 +26739,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         if (brkIdx >= tBracketRowPool.Count) break;
                         var row = tBracketRowPool[brkIdx];
                         var txt = tBracketRowTexts[brkIdx];
-                        string p1 = m.p1_display_name ?? (m.is_bye ? "BYE" : "TBD");
-                        string p2 = m.p2_display_name ?? (m.is_bye ? "BYE" : "TBD");
+                        string p1 = m.p1_display_name ?? (m.is_bye ? I18n.Tr("BYE") : I18n.Tr("TBD"));
+                        string p2 = m.p2_display_name ?? (m.is_bye ? I18n.Tr("BYE") : I18n.Tr("TBD"));
                         string scoreLine = "";
                         if (m.status == "completed" || m.status == "forfeit" || m.status == "double_forfeit")
                             scoreLine = (m.status == "completed") ? $" ({m.p1_series_wins}-{m.p2_series_wins})" : $" ({m.status.Replace('_', ' ')})";

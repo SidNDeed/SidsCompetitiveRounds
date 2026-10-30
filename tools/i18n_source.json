@@ -35,6 +35,7 @@
   " <color=#888888>(left)</color>",
   " at x{0}",
   "(AoE)",
+  "(TBD)",
   "(click to change)",
   "(loading...)",
   "(menu only)",
@@ -612,6 +613,7 @@
   "BLOCK",
   "BOARD",
   "BOARD\u0004pc.stat.board",
+  "BYE",
   "Babel",
   "Baby Mouse",
   "Back",
@@ -1263,6 +1265,7 @@
   "Floating Name",
   "Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room.",
   "Floating pink hearts rise from your body.",
+  "FloraBelle",
   "Follow my character",
   "For sale",
   "For the silly ones. Takes up the mouth slot",
@@ -2622,6 +2625,7 @@
   "Stop spectating?",
   "Stopped searching",
   "Storm Halo",
+  "Straw Hat",
   "Stray",
   "Strike",
   "Strike through your name. Stackable with other name styles.",
@@ -2657,6 +2661,7 @@
   "System notices cannot be reported.",
   "TAB",
   "TABLE OF DAMAGE INTERACTIONS",
+  "TBD",
   "THE 0.3 SECOND WINDOW",
   "THE DUO",
   "THE ROAD TO LEVEL 100",
@@ -2821,6 +2826,8 @@
   "This account was deleted - there is no pack to recover",
   "This is so sad. Please give this man a break",
   "This is your only copy of this card",
+  "This item requires a newer mod version",
+  "This item requires a newer mod version than the recipient has used; they need to update the mod first",
   "This lobby closed before the match started. Nothing was counted.",
   "This lobby is no longer open - the setting was not changed.",
   "This lobby uses settings your mod version can't play - update the mod.",
@@ -3750,6 +3757,11 @@
   "(AoE)": {
    "surface": "InfoViz",
    "location": "MatrixRowLabel",
+   "kind": "Tr"
+  },
+  "(TBD)": {
+   "surface": "NativeUI",
+   "location": "_FmtSlot",
    "kind": "Tr"
   },
   "(click to change)": {
@@ -6636,6 +6648,11 @@
    "surface": "PcLabels",
    "location": "Tr",
    "kind": "TrC:pc.stat.board"
+  },
+  "BYE": {
+   "surface": "NativeUI",
+   "location": "CreateBracketCell, RefreshTournaments",
+   "kind": "Tr"
   },
   "Babel": {
    "surface": "ApiClient, shop catalog",
@@ -9739,7 +9756,7 @@
   },
   "Failed: {0}": {
    "surface": "CompetitiveUI, NativeUI",
-   "location": "BugReportFailureStatus, CreateShopRow",
+   "location": "BugReportFailureStatus, CreateShopRow, ShowArtistResult",
    "kind": "TrF"
   },
   "False": {
@@ -9888,6 +9905,11 @@
    "kind": "Tr"
   },
   "Floating pink hearts rise from your body.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "FloraBelle": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -16687,6 +16709,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Straw Hat": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Stray": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -16860,6 +16887,11 @@
   "TABLE OF DAMAGE INTERACTIONS": {
    "surface": "InfoViz",
    "location": "BuildDamageMatrix, TextFallback",
+   "kind": "Tr"
+  },
+  "TBD": {
+   "surface": "NativeUI",
+   "location": "CreateBracketCell, RefreshTournaments",
    "kind": "Tr"
   },
   "THE 0.3 SECOND WINDOW": {
@@ -17680,6 +17712,16 @@
   "This is your only copy of this card": {
    "surface": "PlayerCardsUI",
    "location": "RefreshCompose",
+   "kind": "Tr"
+  },
+  "This item requires a newer mod version": {
+   "surface": "NativeUI",
+   "location": "TrItemFloorRefusal",
+   "kind": "Tr"
+  },
+  "This item requires a newer mod version than the recipient has used; they need to update the mod first": {
+   "surface": "NativeUI",
+   "location": "TrItemFloorRefusal",
    "kind": "Tr"
   },
   "This lobby closed before the match started. Nothing was counted.": {

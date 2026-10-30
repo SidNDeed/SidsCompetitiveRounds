@@ -33,6 +33,7 @@ df993b1068f9d239	N	rule:N1	 3rd Place
 e0aa04851ac53a1b	N	rule:N1	 <color=#888888>(left)</color>
 2446ef58482e3824	N	rule:N1	 at x{0}
 bc253868db188d01	N	rule:N1	(AoE)
+5c57672a980af63e	N	rule:N1	(TBD)
 bb30f7c5455dcb90	O	rule:O	(click / use < >)
 7ac566c71a837d87	N	rev:b414fc4f61d514ca a click or press on one of the mod's own buttons, rows, tiles or links; names no key	(click to change)
 f28e610419f1325a	N	rule:N1	(loading...)
@@ -667,6 +668,7 @@ caacb9c4120653dd	N	rule:N1	Azure Comet
 bf55ddd9725aa1a8	K	rule:K	BLOCK
 3e91add48ae124e4	N	rule:N1	BOARD
 cf25c3fab4d5689f	N	rule:N1	BOARDpc.stat.board
+4eb996ceb7f4fea1	N	rule:N1	BYE
 f3bf8dee016caf43	N	rule:N1	Babel
 df1290e565c4e950	N	rev:502eba0e04dc5c94 a cosmetic's display name; names no binding	Baby Mouse
 b52b36b7269fbfc5	N	rule:N1	Back
@@ -1344,6 +1346,7 @@ cdc31cb72e817957	N	rule:N1	Flame Crest
 455a8cfec6c15aa9	N	rule:N1	Floating Name
 b67fef8cb2f99487	N	rule:N1	Floating numbers above a player showing damage taken and health received, using the same decimals as
 6c741cc15dd127d0	N	rule:N1	Floating pink hearts rise from your body.
+12676290b1175bac	N	rule:N1	FloraBelle
 08fcdd22fef005ba	N	rule:N1	Follow my character
 8c2e0e1d55b89016	N	rule:N1	For sale
 95f3d46ddbd9f040	N	rule:N1	For the silly ones. Takes up the mouth slot
@@ -2752,6 +2755,7 @@ bcecf4562f1709b1	N	rule:N1	Stock
 629d05ffa81ba428	N	rule:N1	Stop spectating?
 db825a8ff1b5076d	N	rule:N1	Stopped searching
 e6dc9396aa17a023	N	rule:N1	Storm Halo
+5fd30f1f438be65e	N	rule:N1	Straw Hat
 32637968b7743063	N	rule:N1	Stray
 f9ae58aa354c8516	N	rule:N1	Strike
 78d736bb8b31ffc0	N	rule:N1	Strike through your name. Stackable with other name styles.
@@ -2787,6 +2791,7 @@ e5c7727a106e2f8e	N	rule:N1	Syncing...
 ecee915ad4e312b5	N	rule:N1	System notices cannot be reported.
 38d4aa698a701e22	N	rev:83190dd3a64fdad9 a keyboard-guide label at a fixed physical cap, or the guide's heading and legend; the Fill producer colours each cap from the bindings, the label names the cap itself	TAB
 704ef77f6c313746	N	rule:N1	TABLE OF DAMAGE INTERACTIONS
+a6303a49483c1564	N	rule:N1	TBD
 24808976280582a1	N	rule:N1	THE 0.3 SECOND WINDOW
 5e8adebb89e8a50a	N	rule:N1	THE DUO
 ae857850d9f6a01d	N	rule:N1	THE ROAD TO LEVEL 100
@@ -2954,6 +2959,8 @@ e2c34a89258190d3	N	rule:N1	Thicker menu text. Uses the game's own font at a heav
 04d45c0b9eb0bed3	N	rule:N1	This account was deleted - there is no pack to recover
 439df3824c961ecc	N	rule:N1	This is so sad. Please give this man a break
 b8e8e823660003eb	N	rule:N1	This is your only copy of this card
+985b07e43a526732	N	rule:N1	This item requires a newer mod version
+387933644b2eb228	N	rule:N1	This item requires a newer mod version than the recipient has used; they need to update the mod first
 6c017ee044ef4c2b	N	rule:N1	This lobby closed before the match started. Nothing was counted.
 1d11fc4b57f6bc04	N	rule:N1	This lobby is no longer open - the setting was not changed.
 e1b42ad8989065e6	N	rule:N1	This lobby uses settings your mod version can't play - update the mod.
