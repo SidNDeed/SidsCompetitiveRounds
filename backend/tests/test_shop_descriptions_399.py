@@ -7,7 +7,7 @@ Two halves:
   rows read on the primary on 2026-10-30 (id and sku); every old text is the
   placeholder the approve path writes for that sku's slot; every new text is
   in the house form (slot prefix, "Equip in the Character editor."), ASCII,
-  unique, not already a live description, free of the words the read-only
+  unique, free of the words the read-only
   wrapper's filter rejects (the landing spec's count names them), and says
   "(animated)" exactly when the face's CosmeticDef animates; every message is
   ONE string literal; the UPDATE guards and the rollback's inverse are in
@@ -189,13 +189,14 @@ def test_animated_exactly_when_the_catalog_animates():
         assert ("(animated)" in new) == ("Fps" in body), sku
 
 
-def test_new_text_is_not_already_a_live_description():
-    """The landing's routed read looks for each new text in /shop/items: it
-    must not already be there on an unapplied box. tools/shop_strings.json is
-    the live catalogue's display strings."""
+def test_old_text_is_a_shop_display_string():
+    """Each placeholder 399 replaces is one of the shop's display strings
+    (tools/shop_strings.json). Whether a NEW text is already on a live row is
+    a fact about the database, not the tree (the client-strings branch adds
+    the new texts to this file before 399 runs): the landing spec's second
+    preflight read proves it on the primary."""
     live = set(json.loads(SHOP_STRINGS.read_text(encoding="utf-8"))["strings"])
-    for _id, sku, old, new in _rows(MIGRATION):
-        assert new not in live, sku
+    for _id, sku, old, _new in _rows(MIGRATION):
         assert old in live, sku
 
 
