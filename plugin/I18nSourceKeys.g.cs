@@ -1065,6 +1065,7 @@ namespace CompetitiveRounds
             "Despawn off-screen bullets — host clears bullets that exit the camera viewport.",
             "Detail: a shooting star circling overhead (animated). Equip in the Character editor.",
             "Detail: certified angel. Equip in the Character editor.",
+            "Detail: community cosmetic. Equip in the Character editor.",
             "Detail: community cosmetic. Ships with the next mod update; equip in the Character editor.",
             "Detail: cozy star-studded earmuffs. Equip in the Character editor.",
             "Detail: heavy is the head. Equip in the Character editor.",
