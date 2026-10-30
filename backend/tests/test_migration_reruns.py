@@ -601,8 +601,30 @@ _391_TIMEOUTS = (
     "SET LOCAL lock_timeout = '5s'",
     "SET LOCAL idle_in_transaction_session_timeout = '5s'",
     "SET LOCAL statement_timeout = '25s'",
+    "SET LOCAL synchronous_commit = local",
 )
 _391_HOLD_BOUND_S = 30.0
+
+
+def _391_commit_waits_locally(stmts) -> bool:
+    """True when exactly one SET LOCAL synchronous_commit line sets it to
+    `local`: the COMMIT (outside every timeout) then waits for the local WAL
+    flush only, never for a synchronous standby."""
+    got = [s for s in stmts if s.startswith("SET LOCAL synchronous_commit")]
+    return got == ["SET LOCAL synchronous_commit = local"]
+
+
+def test_the_commit_wait_check_refuses_a_missing_or_other_value():
+    """The negative control of the fourth line: missing, any other value
+    and a duplicate all fail; only `local` passes."""
+    head = ["BEGIN", "SET LOCAL lock_timeout = '5s'"]
+    assert _391_commit_waits_locally(head + ["SET LOCAL synchronous_commit = local"])
+    assert not _391_commit_waits_locally(head)
+    for other in ("on", "remote_apply", "remote_write", "off", "'local'"):
+        assert not _391_commit_waits_locally(
+            head + ["SET LOCAL synchronous_commit = %s" % other]), other
+    assert not _391_commit_waits_locally(
+        head + ["SET LOCAL synchronous_commit = local"] * 2)
 _PG_UNITS = {"us": 1e-6, "ms": 1e-3, "s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
 
 
@@ -679,16 +701,21 @@ def test_391_opens_with_three_timeouts_and_one_statement_before_commit(which):
     stmts = [" ".join(s.split()) for s in _top_level_statements(
         (SQL_DIR / _391_FILES[which]).read_text(encoding="utf-8"))]
     assert stmts[0] == "BEGIN" and stmts[-1] == "COMMIT", stmts
-    assert tuple(stmts[1:4]) == _391_TIMEOUTS, (
+    n = len(_391_TIMEOUTS)
+    assert tuple(stmts[1:1 + n]) == _391_TIMEOUTS, (
         "%s: the statements after BEGIN are %r; they must be exactly %r"
-        % (_391_FILES[which], stmts[1:4], _391_TIMEOUTS))
-    assert len(stmts) == 6, (
-        "%s: %d statements between the timeouts and COMMIT (%r); the "
-        "transaction must hold exactly one" % (_391_FILES[which], len(stmts) - 5, stmts[4:-1]))
+        % (_391_FILES[which], stmts[1:1 + n], _391_TIMEOUTS))
+    assert len(stmts) == n + 3, (
+        "%s: %d statements between the SET LOCAL lines and COMMIT (%r); the "
+        "transaction must hold exactly one" % (_391_FILES[which], len(stmts) - n - 2,
+                                               stmts[1 + n:-1]))
     if which == "migration":
-        assert stmts[4].startswith("DO $"), stmts[4]
+        assert stmts[1 + n].startswith("DO $"), stmts[1 + n]
     else:
-        assert stmts[4].startswith("ALTER TABLE dc_events DROP COLUMN"), stmts[4]
+        assert stmts[1 + n].startswith("ALTER TABLE dc_events DROP COLUMN"), stmts[1 + n]
+    assert _391_commit_waits_locally(stmts), (
+        "%s: the COMMIT is outside every timeout; it must wait for the local "
+        "WAL flush only (SET LOCAL synchronous_commit = local)" % _391_FILES[which])
     bound = _391_hold_bound(stmts)
     assert bound <= _391_HOLD_BOUND_S, (
         "%s: statement_timeout + idle_in_transaction_session_timeout = %ss; the "
@@ -722,12 +749,13 @@ async def _391_stopped_before_commit(which, idle_for):
         for name in ("lock_timeout", "statement_timeout",
                      "idle_in_transaction_session_timeout"):
             await runner.execute("SET %s = 0" % name)
+        await runner.execute("SET synchronous_commit = on")
         for stmt in stmts[:-1]:
             await runner.execute(stmt)
         settings = {
             name: await runner.fetchval("SHOW %s" % name)
             for name in ("lock_timeout", "idle_in_transaction_session_timeout",
-                         "statement_timeout")}
+                         "statement_timeout", "synchronous_commit")}
         await asyncio.sleep(idle_for)
         try:
             await other.execute(
@@ -774,7 +802,8 @@ def test_391_a_runner_stopped_before_commit_loses_its_lock(which):
         "its transaction" % _391_FILES[which])
     assert settings == {"lock_timeout": "5s",
                         "idle_in_transaction_session_timeout": "5s",
-                        "statement_timeout": "25s"}, settings
+                        "statement_timeout": "25s",
+                        "synchronous_commit": "local"}, settings
     if which == "migration":
         assert column is None, "the stopped first run's column survived its rollback: %r" % column
     else:
