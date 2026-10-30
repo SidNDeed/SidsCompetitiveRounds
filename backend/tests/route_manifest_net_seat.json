@@ -637,7 +637,7 @@
           ],
           "main",
           "submit_macro_evidence",
-          "beeb45cd4400241dab840bfcb07df191a9d37ba4"
+          "8ce0a64af5db6ed01ab1e88893a58d2c4110a8e2"
         ],
         [
           "/api/v1/ovt/leaderboard",
@@ -1078,7 +1078,7 @@
           ],
           "main",
           "get_similar_players",
-          "35ac6bb90032ed3bb18376d4b1dfa6b579044eb5"
+          "254233085074d7a42e7c908bf7c5b61d33332bf5"
         ],
         [
           "/api/v1/players/{steam_id}/team-bets",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "1e98c859c11be9b86b07d6db9530bf4342ae346f"
+          "52303f6f62e386971d738123df6a0e3b047108df"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2578,7 +2578,7 @@
           ],
           "main",
           "report_disconnect",
-          "f6b1f535a2519b2ef2b094315d76345a630e54d7"
+          "f91c3a43abc8f7e1160fc3d0f6ba3a7525c87d1e"
         ],
         [
           "/api/v1/settings/allow-spectators",
