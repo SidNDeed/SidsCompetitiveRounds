@@ -7613,6 +7613,14 @@ def _janitor_selftest_marker() -> int:
 # which box answered. Absent on any build before it.
 _JANITOR_SELFTEST_BUILD = 1
 # Release-train verification plumbing, not a design mechanism: the
+# small-abc lane's build marker (dc_events.leave_anchor_at, migration 391),
+# reported on /health as `leave_anchor`. The lane adds no route and no other
+# health word, so without it no phase of the train could tell a box on the
+# new build from a stale one (learnings 780, 794). A code constant, equal on
+# both boxes by construction, probed by the release train and read by
+# nothing else (#306). Absent on any build before it.
+_LEAVE_ANCHOR_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the
 # cosmetics lane's build marker (shop_items.min_client_version, migration
 # 397, and the per-item floor every shop list and transfer route honours),
 # reported on /health as `shop_floor`. The lane adds no route and no other
@@ -7690,6 +7698,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               combat_evidence=_combat_evidence_health_word(),
                               admin_evidence=_admin_evidence_health_word(),
+                              leave_anchor=_LEAVE_ANCHOR_BUILD,
                               shop_floor=_SHOP_FLOOR_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
@@ -7745,6 +7754,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               combat_evidence=_combat_evidence_health_word(),
                               admin_evidence=_admin_evidence_health_word(),
+                              leave_anchor=_LEAVE_ANCHOR_BUILD,
                               shop_floor=_SHOP_FLOOR_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
@@ -8452,15 +8462,287 @@ async def _check_fps_lag_flags(
 
 # ── Routes: Match Submission ───────────────────────────────────
 
+from fastapi import BackgroundTasks  # noqa: E402
+from sqlalchemy import exc as _sa_exc  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
+
+
+def _macro_evidence_answer(match_id) -> dict:
+    """The one answer every accepted macro-evidence POST gets: the same status
+    and body whatever flag rows the caller has. No flag id, no path word."""
+    return {"status": "recorded", "match_id": str(match_id)}
+
+
+# Waits between the background attach's attempts, seconds. After the last
+# one the evidence is recorded as its own new flag (the fallback).
+_MACRO_ATTACH_DELAYS = (0.5, 1.0, 2.0, 4.0)
+# lock_timeout inside an attempt (the merge lock, the insert's key lock)
+# and inside the fallback, which waits longer for the merge lock because it
+# is the last chance to record.
+_MACRO_ATTACH_LOCK_TIMEOUT = "2s"
+_MACRO_FALLBACK_LOCK_TIMEOUT = "10s"
+# The only SQLSTATE classes treated as certainly permanent: 22 data
+# exception, 23 integrity constraint violation, 42 syntax error or access
+# rule violation. Every other database error is retried.
+_MACRO_PERMANENT_CLASSES = {"22", "23", "42"}
+
+
+def _attach_error_sqlstate(ex):
+    """The PostgreSQL SQLSTATE behind `ex`, however the driver and
+    SQLAlchemy wrapped it; None when there is none."""
+    seen, todo = set(), [ex]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        for attr in ("sqlstate", "pgcode"):
+            v = getattr(e, attr, None)
+            if isinstance(v, str) and len(v) == 5:
+                return v
+        todo.extend((getattr(e, "orig", None), e.__cause__, e.__context__))
+    return None
+
+
+def _attach_error_is_database(ex) -> bool:
+    """True when `ex`, or anything it wraps, is a database or connection
+    error: any SQLAlchemy DBAPIError (OperationalError, InterfaceError, ...),
+    a pool timeout or disconnect, an asyncpg error, or an OS-level
+    connection error (refused, reset, timed out)."""
+    seen, todo = set(), [ex]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, (_sa_exc.DBAPIError, _sa_exc.DisconnectionError,
+                          _sa_exc.TimeoutError, OSError, TimeoutError,
+                          asyncio.TimeoutError)):
+            return True
+        if type(e).__module__.split(".")[0] == "asyncpg":
+            return True
+        todo.extend((getattr(e, "orig", None), e.__cause__, e.__context__))
+    return False
+
+
+def _attach_error_is_permanent(ex) -> bool:
+    """Certainly permanent, so retrying cannot help: a SQLSTATE in class 22,
+    23 or 42, or an error that is no database or connection error at all (a
+    programming error on our side). Everything else -- a deadlock, a
+    failover's 57P01 / 57P03 / 25006, a connection refused or reset arriving
+    as InterfaceError with no SQLSTATE -- is retried through the delays."""
+    state = _attach_error_sqlstate(ex)
+    if state is not None:
+        return state[:2] in _MACRO_PERMANENT_CLASSES
+    return not _attach_error_is_database(ex)
+
+
+async def _macro_evidence_merge_lock(db: AsyncSession, match_id, reporter_steam: str,
+                                    lock_timeout: str) -> None:
+    """Take the transaction-scoped advisory lock keyed on (match, reporter):
+    'macro-evidence-match:<match id>:<reporter steam id>'. That pair is the
+    unit the merge is scoped to (the existing-flag lookup selects the
+    reporter's suspected_macro row on the match), and a fingerprint names
+    one match and one reporter, so every attach that could dedupe against,
+    merge into, supersede or insert beside the same flag row serialises
+    here, whatever its fingerprint. It is a lock on a VALUE because the flag
+    row may not exist yet. Taken under a lock_timeout, so a wait ends in
+    55P03 and joins the retry ladder. hashtext is 32-bit: a collision only
+    serialises two unrelated attaches, never merges them."""
+    await db.execute(text("SELECT set_config('lock_timeout', :t, true)"),
+                     {"t": lock_timeout})
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock(hashtext("
+        "'macro-evidence-match:' || CAST(:mid AS text) || ':' || CAST(:sid AS text)))"
+    ), {"mid": str(match_id), "sid": reporter_steam})
+
+
+async def _macro_evidence_attach_once(db: AsyncSession, ev: dict, may_lock: bool,
+                                      fallback_sqlstate=None, fallback_error=None) -> str:
+    """One attempt at the flag-dependent half of a macro-evidence POST, in
+    its own transaction, under the (match, reporter) advisory lock from the
+    dedupe read to the commit. Returns what happened: already_recorded (a
+    delivery of this exact evidence is on a flag row), evidence_upgraded
+    (merged into the caller's unreviewed flag), recorded (a new row,
+    superseding a reviewed flag when there is one). With may_lock the flag
+    row lock is NOWAIT, so a held row raises 55P03 instead of queueing; without
+    it (the fallback) no flag row is locked and the evidence becomes its own
+    new row, marked with the SQLSTATE that sent it there."""
+    fingerprint = ev["fingerprint"]
+    await _macro_evidence_merge_lock(
+        db, ev["match_id"], ev["reporter_steam"],
+        _MACRO_ATTACH_LOCK_TIMEOUT if may_lock else _MACRO_FALLBACK_LOCK_TIMEOUT)
+
+    async def attached_already() -> bool:
+        return (await db.execute(text(
+            "SELECT 1 FROM flagged_matches "
+            "WHERE flag_reason = 'suspected_macro' "
+            "  AND flag_details->>'evidence_fingerprint' = :fingerprint "
+            "LIMIT 1"
+        ), {"fingerprint": fingerprint})).first() is not None
+
+    if await attached_already():
+        await db.rollback()
+        return "already_recorded"
+    details = dict(ev["details"])
+    if may_lock:
+        existing_flag = (await db.execute(text(
+            "SELECT id FROM flagged_matches "
+            "WHERE match_id = :mid AND flag_reason = 'suspected_macro' "
+            "  AND COALESCE(flag_details->>'suspect_steam', "
+            "               flag_details->>'reporter_steam') = :sid "
+            "ORDER BY (reviewed_at IS NULL) DESC, created_at DESC "
+            "LIMIT 1"
+        ), {"mid": ev["match_id"], "sid": ev["reporter_steam"]})).mappings().first()
+        if existing_flag is not None:
+            flag = (await db.execute(
+                select(FlaggedMatch)
+                .where(FlaggedMatch.id == existing_flag["id"])
+                .with_for_update(nowait=True)
+            )).scalar_one_or_none()
+            if flag is not None and flag.reviewed_at is None:
+                # A reporter-carried peer snapshot can arrive first, but it is
+                # capped and can be one bucket stale. Merge the participant's
+                # signed local evidence into it and requeue Discord.
+                #
+                # The merge must never WEAKEN what the peer already captured.
+                # The peer snapshot is relayed mid-match over the cr_gstats
+                # heartbeat, while this submission is built at match end on the
+                # suspect's own machine, so a blind dict.update() would let a
+                # tampered client replace an incriminating captured peak with
+                # clean end-of-match numbers. Peaks/durations therefore take
+                # the MAX of the two, and the longer suspect-window timeline
+                # wins; only descriptive fields are overwritten. Both sources
+                # are recorded for the admin.
+                merged_details = (
+                    dict(flag.flag_details)
+                    if isinstance(flag.flag_details, dict) else {}
+                )
+
+                def _keep_stronger(key: str):
+                    old_v, new_v = merged_details.get(key), details.get(key)
+                    try:
+                        if old_v is not None and new_v is not None:
+                            return max(float(old_v), float(new_v)) == float(old_v)
+                    except (TypeError, ValueError):
+                        pass
+                    return False
+
+                preserved = {
+                    k: merged_details[k]
+                    for k in ("macro_suspect_seconds", "peak_keys_per_second",
+                              "peak_clicks_per_second", "peak_events_per_second",
+                              "duration_seconds")
+                    if _keep_stronger(k)
+                }
+                old_windows = merged_details.get("suspect_windows") or ""
+                new_windows = details.get("suspect_windows") or ""
+                prior_source = merged_details.get("evidence_source")
+                merged_details.update(details)
+                merged_details.update(preserved)
+                if len(str(old_windows)) > len(str(new_windows)):
+                    merged_details["suspect_windows"] = old_windows
+                if preserved or len(str(old_windows)) > len(str(new_windows)):
+                    merged_details["evidence_source"] = (
+                        f"{details.get('evidence_source')} + retained peer-captured peaks"
+                    )
+                    merged_details["peer_evidence_source"] = prior_source
+                flag.flag_details = merged_details
+                flag.discord_posted_at = None
+                await db.commit()
+                return "evidence_upgraded"
+            if flag is not None:
+                # Preserve the completed audit decision and open a fresh
+                # item for materially stronger evidence that arrived afterward.
+                details["supersedes_reviewed_flag_id"] = str(flag.id)
+    else:
+        details["attach_fallback_sqlstate"] = fallback_sqlstate
+        details["attach_fallback_error"] = fallback_error
+        if fallback_sqlstate == "55P03":
+            details["attach_lock_unavailable"] = True
+    db.add(FlaggedMatch(
+        match_id=ev["match_id"],
+        series_id=ev["series_id"],
+        player_steam_ids=list(ev["player_steam_ids"]),
+        flag_reason="suspected_macro",
+        flag_details=details,
+        auto_invalidated=False,
+    ))
+    await db.commit()
+    return "recorded"
+
+
+async def _macro_evidence_attach(session_factory, ev: dict) -> str:
+    """The flag-dependent half of a macro-evidence POST, run as a background
+    task. It runs once the response has been handed to the server for
+    transmission (which can overlap the outward forwarding of the body; this
+    claims nothing about the bytes having left) and never inside the request
+    path, so no flag row (held, missing, failing) can change the answer's
+    status, body or latency.
+
+    Every failure is retried after each of _MACRO_ATTACH_DELAYS unless it is
+    certainly permanent (_attach_error_is_permanent: SQLSTATE class 22, 23
+    or 42, or a programming error on our side). After the last attempt, or at
+    once on a permanent failure, the fallback records the evidence as its own
+    new flag under the merge lock (flag_details.attach_fallback_sqlstate and
+    attach_fallback_error name what sent it there), and the fallback itself
+    is retried through the same delays. Only a fallback that fails
+    permanently, or on its last attempt, logs NOT RECORDED with the evidence
+    fingerprint: the client has already had its 2xx and will not resend.
+    Returns the outcome word."""
+    tag = str(ev.get("fingerprint", ""))[:12]
+    delays = _MACRO_ATTACH_DELAYS
+    last_state = last_error = None
+    for attempt in range(len(delays) + 1):
+        try:
+            async with session_factory() as db:
+                outcome = await _macro_evidence_attach_once(db, ev, True)
+            print(f"[MACRO-EVIDENCE] {tag} {outcome} (attempt {attempt + 1})")
+            return outcome
+        except Exception as ex:
+            last_state, last_error = _attach_error_sqlstate(ex), type(ex).__name__
+            permanent = _attach_error_is_permanent(ex)
+            print(f"[MACRO-EVIDENCE] {tag} attempt {attempt + 1} failed "
+                  f"({'permanent' if permanent else 'retried'} "
+                  f"{last_state or last_error})")
+            if permanent:
+                break
+        if attempt < len(delays):
+            await asyncio.sleep(delays[attempt])
+    for attempt in range(len(delays) + 1):
+        try:
+            async with session_factory() as db:
+                outcome = await _macro_evidence_attach_once(
+                    db, ev, False, last_state, last_error)
+            print(f"[MACRO-EVIDENCE] {tag} {outcome} "
+                  f"(fallback attempt {attempt + 1} after {last_state or last_error})")
+            return outcome
+        except Exception as ex:
+            if _attach_error_is_permanent(ex) or attempt == len(delays):
+                print(f"[MACRO-EVIDENCE] {tag} NOT RECORDED: {type(ex).__name__}: {ex}")
+                return "failed"
+        await asyncio.sleep(delays[attempt])
+    return "failed"                                      # pragma: no cover
+
+
 @app.post("/api/v1/matches/macro-evidence", tags=["Matches"])
 async def submit_macro_evidence(
     request: Request,
+    background_tasks: BackgroundTasks,
     payload: dict = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
     """Attach a participant's exact local macro windows to its just-recorded
     1v1 match. Each client sends this independently, so the elected reporter
-    does not need to receive the final Photon property before game-over."""
+    does not need to receive the final Photon property before game-over.
+
+    The request path reads no flag row. It validates, finds the match and
+    answers _macro_evidence_answer(match); everything that depends on flag
+    rows (the retry dedupe, the merge, the supersede, the new row) runs in
+    _macro_evidence_attach as a background task, once the response has been
+    handed to the server for transmission and never inside the request
+    path, so the status, body and latency are the same whatever flag rows
+    exist."""
     reporter_steam = str(payload.get("reporter_steam_id") or "")
     p1_steam = str(payload.get("p1_steam_id") or "")
     p2_steam = str(payload.get("p2_steam_id") or "")
@@ -8560,21 +8842,9 @@ async def submit_macro_evidence(
     await _check_steam_session(request, reporter_steam, db)
     _presence_touch(reporter_steam)
 
-    # Lost-response retry after a successful attach. This lookup remains valid
-    # after the exact match leaves any timing window.
-    prior_attach = (await db.execute(text(
-        "SELECT id, match_id FROM flagged_matches "
-        "WHERE flag_reason = 'suspected_macro' "
-        "  AND flag_details->>'evidence_fingerprint' = :fingerprint "
-        "LIMIT 1"
-    ), {"fingerprint": evidence_fingerprint})).mappings().first()
-    if prior_attach is not None:
-        return {
-            "status": "already_recorded",
-            "match_id": str(prior_attach["match_id"]),
-            "flag_id": str(prior_attach["id"]),
-        }
-
+    # From here on nothing reads a flag row. A 409 engages the client's
+    # bounded retry loop while the elected reporter's insert races this
+    # request; it depends on the match, never on a flag.
     players = (await db.execute(
         select(Player).where(Player.steam_id.in_([p1_steam, p2_steam]))
     )).scalars().all()
@@ -8587,128 +8857,32 @@ async def submit_macro_evidence(
     # a rematch to a previous same-score game. Current clients negotiate a
     # shared per-game Photon token; mixed-version evidence attaches only when
     # its exact legacy room ID matches the elected reporter's ID.
-    identity_filters = (
-        Match.player1_id == by_steam[p1_steam].id,
-        Match.player2_id == by_steam[p2_steam].id,
-        Match.p1_rounds_won == p1_rounds,
-        Match.p2_rounds_won == p2_rounds,
-    )
     match = (await db.execute(
         select(Match).where(
-            *identity_filters,
+            Match.player1_id == by_steam[p1_steam].id,
+            Match.player2_id == by_steam[p2_steam].id,
+            Match.p1_rounds_won == p1_rounds,
+            Match.p2_rounds_won == p2_rounds,
             Match.photon_room_id == room_id,
-        ).limit(1).with_for_update()
+        ).limit(1)
     )).scalar_one_or_none()
     if match is None:
-        # The normal reporter often races this request. A 409 deliberately
-        # engages the client's bounded retry loop.
         raise HTTPException(409, "Match is not recorded yet")
 
-    # The first fingerprint check happens before correlation. Recheck after
-    # acquiring the Match row lock so two simultaneous identical deliveries
-    # cannot both pass the pre-lock lookup and create duplicate flags.
-    prior_attach = (await db.execute(text(
-        "SELECT id, match_id FROM flagged_matches "
-        "WHERE flag_reason = 'suspected_macro' "
-        "  AND flag_details->>'evidence_fingerprint' = :fingerprint "
-        "LIMIT 1"
-    ), {"fingerprint": evidence_fingerprint})).mappings().first()
-    if prior_attach is not None:
-        return {
-            "status": "already_recorded",
-            "match_id": str(prior_attach["match_id"]),
-            "flag_id": str(prior_attach["id"]),
-        }
-
-    existing_flag = (await db.execute(text(
-        "SELECT id FROM flagged_matches "
-        "WHERE match_id = :mid AND flag_reason = 'suspected_macro' "
-        "  AND COALESCE(flag_details->>'suspect_steam', "
-        "               flag_details->>'reporter_steam') = :sid "
-        "ORDER BY (reviewed_at IS NULL) DESC, created_at DESC "
-        "LIMIT 1"
-    ), {"mid": match.id, "sid": reporter_steam})).mappings().first()
-    if existing_flag is not None:
-        # Lock and inspect the live review state. An admin may have reviewed the
-        # row after the lookup above while this request waited on its row lock.
-        flag = (await db.execute(
-            select(FlaggedMatch)
-            .where(FlaggedMatch.id == existing_flag["id"])
-            .with_for_update()
-        )).scalar_one_or_none()
-        if flag is not None and flag.reviewed_at is None:
-            # A reporter-carried peer snapshot can arrive first, but it is
-            # capped and can be one bucket stale. Merge the participant's signed
-            # local evidence into it and requeue Discord.
-            #
-            # The merge must never WEAKEN what the peer already captured. The
-            # peer snapshot is relayed mid-match over the cr_gstats heartbeat,
-            # while this submission is built at match end on the suspect's own
-            # machine — so a blind dict.update() would let a tampered client
-            # replace an incriminating captured peak with clean end-of-match
-            # numbers. Peaks/durations therefore take the MAX of the two, and
-            # the longer suspect-window timeline wins; only descriptive fields
-            # are overwritten. Both sources are recorded for the admin.
-            merged_details = (
-                dict(flag.flag_details)
-                if isinstance(flag.flag_details, dict) else {}
-            )
-
-            def _keep_stronger(key: str):
-                old_v, new_v = merged_details.get(key), direct_details.get(key)
-                try:
-                    if old_v is not None and new_v is not None:
-                        return max(float(old_v), float(new_v)) == float(old_v)
-                except (TypeError, ValueError):
-                    pass
-                return False
-
-            preserved = {
-                k: merged_details[k]
-                for k in ("macro_suspect_seconds", "peak_keys_per_second",
-                          "peak_clicks_per_second", "peak_events_per_second",
-                          "duration_seconds")
-                if _keep_stronger(k)
-            }
-            old_windows = merged_details.get("suspect_windows") or ""
-            new_windows = direct_details.get("suspect_windows") or ""
-            prior_source = merged_details.get("evidence_source")
-            merged_details.update(direct_details)
-            merged_details.update(preserved)
-            if len(str(old_windows)) > len(str(new_windows)):
-                merged_details["suspect_windows"] = old_windows
-            if preserved or len(str(old_windows)) > len(str(new_windows)):
-                merged_details["evidence_source"] = (
-                    f"{direct_details.get('evidence_source')} + retained peer-captured peaks"
-                )
-                merged_details["peer_evidence_source"] = prior_source
-            flag.flag_details = merged_details
-            flag.discord_posted_at = None
-            await db.commit()
-            return {
-                "status": "evidence_upgraded",
-                "match_id": str(match.id),
-                "flag_id": str(flag.id),
-            }
-        if flag is not None:
-            # Preserve the completed audit decision and open a fresh review
-            # item for materially stronger evidence that arrived afterward.
-            direct_details["supersedes_reviewed_flag_id"] = str(flag.id)
-    flag = FlaggedMatch(
-        match_id=match.id,
-        series_id=match.series_id,
-        player_steam_ids=[p1_steam, p2_steam],
-        flag_reason="suspected_macro",
-        flag_details=direct_details,
-        auto_invalidated=False,
-    )
-    db.add(flag)
-    await db.commit()
-    return {
-        "status": "recorded",
-        "match_id": str(match.id),
-        "flag_id": str(flag.id),
+    evidence = {
+        "match_id": match.id,
+        "series_id": match.series_id,
+        "player_steam_ids": [p1_steam, p2_steam],
+        "reporter_steam": reporter_steam,
+        "fingerprint": evidence_fingerprint,
+        "details": direct_details,
     }
+    background_tasks.add_task(
+        _macro_evidence_attach,
+        async_sessionmaker(db.bind, class_=AsyncSession, expire_on_commit=False),
+        evidence,
+    )
+    return _macro_evidence_answer(match.id)
 
 
 async def _apply_series_rating_pass(db: AsyncSession, series, p1, p2) -> bool:
@@ -15318,16 +15492,15 @@ async def get_similar_players(
     endpoint: one pool select, one batched DPS aggregate, one batched card
     aggregate — scoring happens in Python over <=201 vectors.
 
-    Macro suspects are EXCLUDED from the pool: any flagged_matches row with
-    flag_reason='suspected_macro' attributing the player
-    (flag_details->>'suspect_steam', with 'reporter_steam' as the legacy
-    attribution key) that an admin has not dismissed. Review-flow semantics
-    (read from the flag review endpoint, not guessed): reviewed_at IS NULL =
-    pending, review_action in ('confirmed_cheat','false_positive');
-    "dismissed" = 'false_positive', so the exclusion predicate is
-    review_action IS DISTINCT FROM 'false_positive' — pending and confirmed
-    flags both exclude. An input-rate profile built on macro'd inputs would
-    poison the neighbor list for everyone it matched."""
+    The answer does not depend on whether any player carries a review flag
+    (small docket item c): the pool reads no flagged_matches row, so a
+    flagged player is pooled, scored and listed exactly as an unflagged one
+    with the same record. The pool used to leave out every player with an
+    undismissed suspected_macro flag, which made this public list change
+    with a flag that is reviewed in private. A review outcome reaches the
+    answer only through what it changes in the record itself: an
+    invalidated match leaves the ranked match count, DPS and card
+    aggregates this route reads."""
     player = (await db.execute(
         select(Player).where(Player.steam_id == steam_id)
     )).scalar_one_or_none()
@@ -15355,12 +15528,6 @@ async def get_similar_players(
          WHERE p.deleted_at IS NULL
            AND p.id != :pid
            AND c.ranked_matches >= 10
-           AND NOT EXISTS (
-               SELECT 1 FROM flagged_matches fm
-                WHERE fm.flag_reason = 'suspected_macro'
-                  AND COALESCE(fm.flag_details->>'suspect_steam',
-                               fm.flag_details->>'reporter_steam') = p.steam_id
-                  AND fm.review_action IS DISTINCT FROM 'false_positive')
          ORDER BY c.ranked_matches DESC
          LIMIT 200
     """), {"pid": player.id})).mappings().all()
@@ -21316,9 +21483,29 @@ async def _report_disconnect_once(
     # report durable. So the INSERT is the gate. RETURNING tells this request
     # whether it is the one that recorded the event, and only that request
     # counts it; a loser answers exactly like the fast path above.
+    #
+    # THE LEAVE ANCHOR (migration 391). created_at is when this report was
+    # ACCEPTED, and the outbox can deliver it long after the leave. The row
+    # also carries the leave by the rule the hold logic anchors a dropped seat
+    # on: the last server evidence of that seat's presence (match_hold.py: the
+    # held seat's last present_at; the FFA readmission hold: present_at, else
+    # verdict_at). 1v1 has no hold and no presence beat, so the evidence is
+    # the LEAVER's own last verified live-points stamp in this series (the
+    # series_progress attestation the evidence arm reads), else the series'
+    # last recorded activity. It is computed inside this INSERT, so only the
+    # row that wins carries it, and a replay that loses the conflict moves
+    # nothing. Evidence only: no count, rating or gold reads it.
     inserted = (await db.execute(text(
-        "INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id) "
-        "VALUES (:sid, :dp, :rp) ON CONFLICT DO NOTHING RETURNING 1"
+        "INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id,"
+        " leave_anchor_at) "
+        "VALUES (CAST(:sid AS uuid), CAST(:dp AS uuid), CAST(:rp AS uuid),"
+        " COALESCE((SELECT sp.last_seen_at FROM series_progress sp"
+        "            WHERE sp.surface = 'ranked'"
+        "              AND sp.subject_id = CAST(:sid AS uuid)"
+        "              AND sp.player_id = CAST(:dp AS uuid)),"
+        "           (SELECT s.last_activity_at FROM ranked_series s"
+        "             WHERE s.id = CAST(:sid AS uuid)))) "
+        "ON CONFLICT DO NOTHING RETURNING 1"
     ), {"sid": resolved_series_id, "dp": disconnected.id, "rp": reporter.id})).first()
     if inserted is None:
         # The ORM row was loaded before the insert below decided anything, so
