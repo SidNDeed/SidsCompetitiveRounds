@@ -48,7 +48,11 @@
 -- restored by the Codex FENCE-R1 H3). So a pair whose claude-mt draft of this text was
 -- rejected, or whose only pending proposal is of another text, stops the file: it does
 -- not re-propose a rejected machine text, and it does not commit an uncovered pair.
--- Explicit transaction (#340). Run order: deploy API -> apply this file.
+-- Explicit transaction (#340).
+-- DEPLOY ORDER: this file first, then the api and the bot. No api or bot code names
+-- these four keys or their proposals: both builds read them only through the same
+-- generic i18n routes, so neither order breaks the code, and applying this file
+-- first lets any refusal described here stop a landing before any code deploys.
 -- BOUNDS, set right after BEGIN: lock_timeout ends any single lock WAIT at 5 s (it
 -- applies per acquisition, learning #689, so it bounds each wait, not their sum);
 -- statement_timeout gives EACH top-level statement its own 25 s; and
