@@ -15177,6 +15177,27 @@ async def _tournament_checkin_response(match_id, steam_id, answer):
         return False, None, None, f"request failed: {ex}"
 
 
+def _discord_tail(discord_id) -> str:
+    """A Discord id as a log line may carry it: its last four digits, enough
+    to follow one clicker through the lines of an incident, never the id
+    itself (fence round 1, M1)."""
+    s = str(discord_id or "")
+    return ("..." + s[-4:]) if s else "?"
+
+
+def _scrub_discord_id(text, discord_id) -> str:
+    """`text` (usually an exception) as a string with every copy of the full
+    Discord id replaced by its tail: an exception's text can quote the
+    request URL, and the by-discord lookup carries the id in its path.
+    Never raises, so a log line in an except block cannot itself fail."""
+    try:
+        out = str(text)
+    except Exception:
+        out = "<unprintable>"
+    s = str(discord_id or "")
+    return out.replace(s, _discord_tail(s)) if s else out
+
+
 async def _tdlc_verify_clicker(discord_id, expected_steam_id):
     """A delivered DM can outlive a Discord unlink/relink. Re-resolve the
     clicker's current link before letting an old button alter match state."""
@@ -15201,7 +15222,8 @@ async def _tdlc_verify_clicker(discord_id, expected_steam_id):
                 return False, "this prompt no longer belongs to your linked SCR account"
             return True, ""
     except Exception as ex:
-        print(f"[TDLC] link verification failed for discord {discord_id}: {ex}")
+        print(f"[TDLC] link verification failed for discord {_discord_tail(discord_id)}: "
+              f"{type(ex).__name__}: {_scrub_discord_id(ex, discord_id)}")
         return False, "couldn't verify your linked account right now"
 
 
@@ -15392,7 +15414,10 @@ async def on_interaction(interaction: discord.Interaction):
                 # can see the prompt; surface the server's reason.
                 await interaction.followup.send(f"❌ Couldn't remove you: {detail}")
     except Exception as ex:
-        print(f"[TOURNAMENT-INTERACTION] error: {ex}")
+        # The clicker's Discord id stays out of the log even when an
+        # exception's text quotes it (fence round 1, M1).
+        _uid = getattr(getattr(interaction, "user", None), "id", None)
+        print(f"[TOURNAMENT-INTERACTION] error: {_scrub_discord_id(ex, _uid)}")
 
 
 # ── Tournament board in #scr-tournaments (v1.32) ──────────────────────────
