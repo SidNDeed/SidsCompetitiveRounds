@@ -27,14 +27,21 @@ What is pinned here:
     writes, and its key arm can only update a row that already carries that
     source_hash (FENCE-R1 H1);
   * 393 and rollback_393 set lock_timeout, idle_in_transaction_session_timeout
-    and statement_timeout as the three statements right after BEGIN, before
-    anything reads, locks or writes (FENCE-R1 H4);
+    and statement_timeout (25 s) as the three statements right after BEGIN,
+    before anything reads, locks or writes, and then do ALL their work in ONE
+    DO block, so their lock hold is bounded by the statement budget plus the
+    idle budget, 30 s (FENCE-R1 H4 and its amendment);
   * on PostgreSQL (SCR_MIGRATION_TEST_PG_DSN, fail-not-skip like
     test_migration_reruns.py): 393 applied twice on the real i18n tables
     (181 + 212) writes no row on its second run, measured by value AND xmin,
     and each post-check RAISES with nothing committed when its condition
     fails; a transaction holding one fence key row makes 393 fail with
     lock_not_available at its 5 s bound instead of waiting for the holder;
+    statement_timeout times 393's DO block as ONE statement (pauses inside
+    it that sum past the budget are cancelled, while the same pauses as
+    top-level statements each get a budget of their own and the file
+    commits), and a runner that stops before COMMIT is ended at the 5 s idle
+    bound with nothing committed;
     a row at one of its key_ids with another source_hash, live or retired,
     makes it RAISE with that row untouched, while a superseded body row is
     never touched and its own retired same-hash row is made live again;
@@ -215,10 +222,10 @@ def test_393_key_hash_guard_names_the_four_keys_it_writes():
     guard cannot drift from what the upsert writes; the upsert's conflict arm
     is gated on the existing row's source_hash and never sets source_hash."""
     sql = _read(M393)
-    guard = sql.split("DO $guard393$", 1)[1].split("END $guard393$;", 1)[0]
+    guard = sql.split("INTO clash", 1)[1].split("INSERT INTO i18n_keys", 1)[0]
     pairs = set(re.findall(r"\(E'([0-9a-f]{16})', E'([0-9a-f]{40})'\)", guard))
     assert pairs == {(r["key_id"], r["source_hash"]) for r in _fence_keys().values()}, pairs
-    assert sql.index("DO $guard393$") < sql.index("INSERT INTO i18n_keys")
+    assert sql.index("INTO clash") < sql.index("INSERT INTO i18n_keys")
     arm = sql.split("ON CONFLICT (key_id) DO UPDATE", 1)[1].split(";", 1)[0]
     assert "source_hash =" not in arm.split(" WHERE ", 1)[0], "the arm rewrites source_hash"
     assert "WHERE i18n_keys.source_hash = EXCLUDED.source_hash" in arm
@@ -226,14 +233,18 @@ def test_393_key_hash_guard_names_the_four_keys_it_writes():
 
 BOUNDS = ("SET LOCAL lock_timeout = '5s';",
           "SET LOCAL idle_in_transaction_session_timeout = '5s';",
-          "SET LOCAL statement_timeout = '30s';")
+          "SET LOCAL statement_timeout = '25s';")
 
 
 @pytest.mark.parametrize("path", [M393, R393], ids=["393", "rollback_393"])
 def test_393_and_its_rollback_set_their_bounds_before_anything_runs(path):
     """FENCE-R1 H4: the three bounds are the three statements right after
     BEGIN, so no read, lock or write precedes them; each is set once and
-    nothing later names the same settings; the file is one transaction."""
+    nothing later names the same settings; the file is one transaction.
+    The amendment: everything between the bounds and COMMIT is ONE DO
+    block, because statement_timeout gives each top-level statement its own
+    budget and the header's 30 s hold bound (25 s statement + 5 s idle)
+    holds only for a single statement."""
     body = [ln.strip() for ln in _read(path).splitlines()
             if ln.strip() and not ln.lstrip().startswith("--")]
     assert body[0] == "BEGIN;" and body[-1] == "COMMIT;", (body[0], body[-1])
@@ -242,6 +253,12 @@ def test_393_and_its_rollback_set_their_bounds_before_anything_runs(path):
     later = [ln for ln in body[4:] if re.search(
         r"(?i)\b(lock_timeout|idle_in_transaction_session_timeout|statement_timeout)\b", ln)]
     assert later == [], later
+    tag = re.match(r"DO (\$\w*\$)$", body[4])
+    assert tag, body[4]
+    assert body[-2] == "END %s;" % tag.group(1), body[-2]
+    rest = "\n".join(body[4:-1])
+    assert rest.count(tag.group(1)) == 2, "the DO block's tag appears inside its body"
+    assert len(re.findall(r"(?m)^DO \$", rest)) == 1, "more than one top-level DO"
 
 
 def test_393_seeds_are_the_bundled_toast_drafts():
@@ -684,4 +701,80 @@ def test_393_seed_coverage_counts_only_current_pending_or_approved(live_pg, case
             assert _changed(before, await _fingerprint(conn, tables)) == 0
         finally:
             await _drop(live_pg, schema, conn)
+    _run(go())
+
+
+def test_393_is_timed_as_one_statement(live_pg):
+    """Amendment to FENCE-R1 H4, live: the 30 s hold bound in 393's header
+    rests on statement_timeout timing its DO block as ONE statement. A copy
+    with the budget cut to 3 s and three 1.5 s pauses inside the DO block -
+    each well under the budget, their sum over it - is cancelled for
+    statement timeout (57014) no earlier than its budget and before the
+    pauses could all have ended (4.5 s), with nothing committed. CONTROL: the
+    same three pauses as top-level statements right after the bounds each get
+    a 3 s budget of their own, and that copy commits all four keys - which is
+    why the file keeps all of its work inside the one block. (The 1.5 s of
+    headroom under the ceiling is for a loaded shared server: one run with
+    2 s and 0.9 s pauses took 2.8 s while other suites ran.)"""
+    keys = sorted(r["key_id"] for r in _fence_keys().values())
+    sql = _read(M393)
+    bound = "SET LOCAL statement_timeout = '25s';\n"
+    assert sql.count(bound) == 1
+    cut = sql.replace(bound, "SET LOCAL statement_timeout = '3s';\n", 1)
+    step = "    -- 2. The four keys:"
+    assert cut.count(step) == 1
+    inside = cut.replace(step, "    PERFORM pg_sleep(1.5);\n" * 3 + step, 1)
+    top = cut.replace("SET LOCAL statement_timeout = '3s';\n",
+                      "SET LOCAL statement_timeout = '3s';\n" + "SELECT pg_sleep(1.5);\n" * 3, 1)
+    assert inside != cut and top != cut
+
+    async def go():
+        conn, schema = await _fresh_i18n(live_pg)
+
+        async def live():
+            return await conn.fetchval(
+                "SELECT count(*) FROM i18n_keys WHERE key_id = ANY($1::text[])", keys)
+        try:
+            t0 = time.monotonic()
+            with pytest.raises(asyncpg.exceptions.QueryCanceledError, match="statement timeout"):
+                await conn.execute(inside)
+            took = time.monotonic() - t0
+            assert 2.9 <= took < 4.5, took
+            await conn.execute("ROLLBACK")
+            assert await live() == 0
+            # control: the same pauses, one budget each - the file commits
+            await conn.execute(top)
+            assert await live() == 4
+        finally:
+            await _drop(live_pg, schema, conn)
+    _run(go())
+
+
+def test_393_a_runner_stopped_before_commit_is_ended_at_the_idle_bound(live_pg):
+    """Amendment to FENCE-R1 H4, live: the other half of the sum. 393 run up
+    to, not including, its COMMIT, and then nothing: after the 5 s idle bound
+    the server ends the session and rolls the transaction back, so the COMMIT
+    that finally arrives fails and a second session sees none of the four
+    keys. Without the bound the session waits, and the late COMMIT commits."""
+    keys = sorted(r["key_id"] for r in _fence_keys().values())
+    sql = _read(M393)
+    head, sep, _ = sql.rpartition("COMMIT;")
+    assert sep and "COMMIT;" not in head
+
+    async def go():
+        conn, schema = await _fresh_i18n(live_pg)
+        other = None
+        try:
+            await conn.execute(head)
+            await asyncio.sleep(7)
+            with pytest.raises((asyncpg.exceptions.IdleInTransactionSessionTimeoutError,
+                                asyncpg.exceptions.ConnectionDoesNotExistError,
+                                asyncpg.exceptions.InterfaceError, ConnectionError)):
+                await conn.execute("COMMIT")
+            other = await asyncpg.connect(live_pg)
+            await other.execute('SET search_path TO "%s"' % schema)
+            assert await other.fetchval(
+                "SELECT count(*) FROM i18n_keys WHERE key_id = ANY($1::text[])", keys) == 0
+        finally:
+            await _drop(live_pg, schema, conn, other)
     _run(go())

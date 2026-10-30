@@ -12,27 +12,34 @@
 -- DEPLOY ORDER: only while no shipped client carries these four strings, or with
 -- that client's rollback. A client that already shows them keeps its bundled
 -- drafts, and the next key sync from such a client makes the keys live again.
--- Explicit transaction (learning #340) under the same three bounds as 393: a
--- 5 s limit on each lock wait, 30 s on each statement, 5 s on a pause between
--- statements.
+-- Explicit transaction (learning #340) under the same three bounds as 393: 5 s on
+-- each lock wait, 25 s on each top-level statement, 5 s on a pause between
+-- statements. The statement and idle budgets are separate (PostgreSQL 16 has no
+-- transaction_timeout), so the longest this file can hold locks is their SUM, 30 s
+-- (not counting any time its COMMIT spends waiting on a synchronous standby), and
+-- that holds because both UPDATEs run inside ONE statement, a DO block whose inner
+-- statements share its 25 s.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL idle_in_transaction_session_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SET LOCAL statement_timeout = '25s';
 
-UPDATE i18n_keys
-   SET retired_at = clock_timestamp(), updated_at = clock_timestamp()
- WHERE namespace = 'client'
-   AND key_id IN ('c4d5526dfaef7312', '8b0f70cb42c1cda3',
-                  'f76648a14f012b93', 'fc5b6244bdd13c72')
-   AND retired_at IS NULL;
+DO $r393$
+BEGIN
+    UPDATE i18n_keys
+       SET retired_at = clock_timestamp(), updated_at = clock_timestamp()
+     WHERE namespace = 'client'
+       AND key_id IN ('c4d5526dfaef7312', '8b0f70cb42c1cda3',
+                      'f76648a14f012b93', 'fc5b6244bdd13c72')
+       AND retired_at IS NULL;
 
-UPDATE i18n_proposals
-   SET status = 'superseded', review_note = 'key retired by rollback_393',
-       reviewed_at = clock_timestamp()
- WHERE key_id IN ('c4d5526dfaef7312', '8b0f70cb42c1cda3',
-                  'f76648a14f012b93', 'fc5b6244bdd13c72')
-   AND status = 'pending';
+    UPDATE i18n_proposals
+       SET status = 'superseded', review_note = 'key retired by rollback_393',
+           reviewed_at = clock_timestamp()
+     WHERE key_id IN ('c4d5526dfaef7312', '8b0f70cb42c1cda3',
+                      'f76648a14f012b93', 'fc5b6244bdd13c72')
+       AND status = 'pending';
+END $r393$;
 
 COMMIT;
