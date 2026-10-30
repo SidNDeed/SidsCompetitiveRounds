@@ -112,4 +112,4 @@ Pick one of the two methods below — don't use both at the same time.
 
 - **Discord**: https://discord.gg/4tsWadH6tc
 - **GitHub**: https://github.com/SidNDeed/SidsCompetitiveRounds
-- **Thunderstore**: https://thunderstore.io/c/rounds/p/SidNDeed/SidsCompetitiveRounds/
+- **Thunderstore**: https://thunderstore.io/c/rounds/p/Team_Sid/SidsCompetitiveRounds/

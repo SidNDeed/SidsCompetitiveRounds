@@ -341,8 +341,10 @@ SELECT md5(string_agg(x, '|' ORDER BY x)) FROM (
 # What DROP SCHEMA ... CASCADE would remove OUTSIDE the schema: every object
 # that depends on an object inside it and does not itself live inside it. A
 # dependent's schema is read through the relation that owns it (a view's
-# rule, a column default, a trigger); a dependent of any other kind counts as
-# outside, so an unrecognised one refuses rather than passes.
+# rule, a column default, a trigger, a policy) or through its own namespace (a
+# constraint, function, type, or extended statistics object such as 377's
+# stx_matches_pair); a dependent of any other kind counts as outside, so an
+# unrecognised one refuses rather than passes.
 _FOREIGN_DEPENDENTS_SQL = """
 WITH dep AS (
     SELECT d.classid, d.objid, d.objsubid
@@ -363,6 +365,8 @@ WITH dep AS (
         WHEN 'pg_type'::regclass THEN (SELECT y.typnamespace FROM pg_type y WHERE y.oid = dep.objid)
         WHEN 'pg_policy'::regclass THEN (SELECT c.relnamespace FROM pg_policy o
                                            JOIN pg_class c ON c.oid = o.polrelid WHERE o.oid = dep.objid)
+        WHEN 'pg_statistic_ext'::regclass THEN (SELECT s.stxnamespace FROM pg_statistic_ext s
+                                                  WHERE s.oid = dep.objid)
         END AS nsp
       FROM dep
 )
