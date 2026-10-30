@@ -259,7 +259,7 @@ namespace CompetitiveRounds
             // in submission order), values from the approved_* snapshot (#165):
             // approved placement revision 1, offset (0,0), single frame each.
             // Display names are the submissions' own spellings, verbatim.
-            // Migration 395 publishes them; its guard pins each sku's scale,
+            // Migration 398 publishes them; its guard pins each sku's scale,
             // offset, revision and frame count to these rows.
             new CosmeticDef { Sku = "face_detail_gold_headband",   DisplayName = "Gold headband",    Slot = CharacterItemType.Detail, PngFile = "detail_gold_headband.png",   Scale = 1.45f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_detail_orbit",           DisplayName = "Orbit",            Slot = CharacterItemType.Detail, PngFile = "detail_orbit.png",           Scale = 1.6f,  Offset = Vector2.zero },
