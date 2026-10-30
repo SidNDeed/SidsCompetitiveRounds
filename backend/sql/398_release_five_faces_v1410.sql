@@ -104,8 +104,7 @@ DECLARE
     ];
     want_rev     CONSTANT INT  := 1;
     min_version  CONSTANT TEXT := '1.41.0';
-    placeholder  CONSTANT TEXT := 'Detail: community cosmetic. Ships with the next mod update; '
-                                  'equip in the Character editor.';
+    placeholder  CONSTANT TEXT := 'Detail: community cosmetic. Ships with the next mod update; equip in the Character editor.';
     shipped_desc CONSTANT TEXT := 'Detail: community cosmetic. Equip in the Character editor.';
     -- v_ prefixes, never bare column names (#442: a bare identifier resolves
     -- as the PL/pgSQL variable and makes a WHERE ambiguous).
@@ -168,31 +167,26 @@ BEGIN
                             v_sku, cs_rec.slot;
         END IF;
         IF cs_rec.approved_placement_revision IS DISTINCT FROM want_rev THEN
-            RAISE EXCEPTION '398: % approved revision moved to % (client built against %) - '
-                            'recompile the catalog before publishing',
+            RAISE EXCEPTION '398: % approved revision moved to % (client built against %) - recompile the catalog before publishing',
                             v_sku, cs_rec.approved_placement_revision, want_rev;
         END IF;
         IF (ROUND(CAST(cs_rec.approved_render_scale AS NUMERIC), 3)
                 IS NOT DISTINCT FROM ROUND(v_scale, 3)) IS NOT TRUE THEN
-            RAISE EXCEPTION '398: % approved scale is % but the client was built with % - '
-                            'recompile the catalog before publishing',
+            RAISE EXCEPTION '398: % approved scale is % but the client was built with % - recompile the catalog before publishing',
                             v_sku, cs_rec.approved_render_scale, v_scale;
         END IF;
         -- A NULL offset is not (0,0): IS DISTINCT FROM refuses it.
         IF cs_rec.approved_render_offset_x IS DISTINCT FROM CAST(0 AS REAL)
            OR cs_rec.approved_render_offset_y IS DISTINCT FROM CAST(0 AS REAL) THEN
-            RAISE EXCEPTION '398: % approved offset is now (%,%) but the client was built '
-                            'with (0,0) - recompile the catalog before publishing',
+            RAISE EXCEPTION '398: % approved offset is now (%,%) but the client was built with (0,0) - recompile the catalog before publishing',
                             v_sku, cs_rec.approved_render_offset_x, cs_rec.approved_render_offset_y;
         END IF;
         IF cs_rec.frame_count IS DISTINCT FROM 1 THEN
-            RAISE EXCEPTION '398: % frame_count is now % but the client bundled 1 frame - '
-                            'ship every frame or none (#317)', v_sku, cs_rec.frame_count;
+            RAISE EXCEPTION '398: % frame_count is now % but the client bundled 1 frame - ship every frame or none (#317)', v_sku, cs_rec.frame_count;
         END IF;
         IF cs_rec.png_bytes IS DISTINCT FROM v_bytes
            OR cs_rec.art_md5 IS DISTINCT FROM v_md5 THEN
-            RAISE EXCEPTION '398: % stored art is now % bytes md5 % but the client bundled '
-                            '% bytes md5 % - re-extract the PNG before publishing',
+            RAISE EXCEPTION '398: % stored art is now % bytes md5 % but the client bundled % bytes md5 % - re-extract the PNG before publishing',
                             v_sku, cs_rec.png_bytes, cs_rec.art_md5, v_bytes, v_md5;
         END IF;
 
@@ -214,18 +208,15 @@ BEGIN
 
         IF si_rec.catalog_ready IS TRUE THEN
             IF NOT FOUND THEN
-                RAISE EXCEPTION '398: % is already published but not by 398 (no provenance '
-                                'row) - refusing to claim it', v_sku;
+                RAISE EXCEPTION '398: % is already published but not by 398 (no provenance row) - refusing to claim it', v_sku;
             END IF;
             already := already + 1;            -- post-image: rerun no-op
         ELSIF si_rec.catalog_ready IS FALSE THEN
             IF FOUND THEN
-                RAISE EXCEPTION '398: % is unpublished but 398''s provenance row is still '
-                                'present - run rollback_398, or clear the row, first', v_sku;
+                RAISE EXCEPTION '398: % is unpublished but 398''s provenance row is still present - run rollback_398, or clear the row, first', v_sku;
             END IF;
             IF si_rec.min_client_version IS NOT NULL THEN
-                RAISE EXCEPTION '398: % already carries min_client_version % (set outside 398) '
-                                '- refusing', v_sku, si_rec.min_client_version;
+                RAISE EXCEPTION '398: % already carries min_client_version % (set outside 398) - refusing', v_sku, si_rec.min_client_version;
             END IF;
             IF si_rec.description IS NOT DISTINCT FROM placeholder THEN
                 v_desc := shipped_desc;
@@ -257,12 +248,10 @@ BEGIN
               JOIN cosmetic_submissions cs ON cs.id = v_sub AND cs.shop_sku = si.sku
              WHERE si.id = v_shop;
             IF pv_rec.released_at IS NULL THEN
-                RAISE EXCEPTION '398: post-check FAILED: % released_at is NULL - the publish '
-                                'trigger did not stamp it', v_sku;
+                RAISE EXCEPTION '398: post-check FAILED: % released_at is NULL - the publish trigger did not stamp it', v_sku;
             END IF;
             IF pv_rec.pub IS DISTINCT FROM want_rev THEN
-                RAISE EXCEPTION '398: post-check FAILED: % published_placement_revision is %, '
-                                'expected %', v_sku, pv_rec.pub, want_rev;
+                RAISE EXCEPTION '398: post-check FAILED: % published_placement_revision is %, expected %', v_sku, pv_rec.pub, want_rev;
             END IF;
             -- Provenance: what this file wrote, read back after the trigger,
             -- so the rollback can tell 398's publication from a later one.
@@ -326,14 +315,12 @@ BEGIN
                             v_sku, si_rec.min_client_version, min_version;
         END IF;
         IF si_rec.description IS NOT DISTINCT FROM placeholder THEN
-            RAISE EXCEPTION '398: post-check FAILED: % description still says it ships '
-                            'with the next mod update', v_sku;
+            RAISE EXCEPTION '398: post-check FAILED: % description still says it ships with the next mod update', v_sku;
         END IF;
         IF si_rec.p_released_at IS DISTINCT FROM si_rec.released_at
            OR si_rec.p_pub IS DISTINCT FROM si_rec.pub
            OR si_rec.p_min IS DISTINCT FROM si_rec.min_client_version THEN
-            RAISE EXCEPTION '398: post-check FAILED: % provenance (released_at %, revision %, '
-                            'minimum %) does not match the row (%, %, %)', v_sku,
+            RAISE EXCEPTION '398: post-check FAILED: % provenance (released_at %, revision %, minimum %) does not match the row (%, %, %)', v_sku,
                             si_rec.p_released_at, si_rec.p_pub, si_rec.p_min,
                             si_rec.released_at, si_rec.pub, si_rec.min_client_version;
         END IF;

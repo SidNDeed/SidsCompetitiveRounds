@@ -135,9 +135,7 @@ BEGIN
                 already := already + 1;        -- pre-image: rerun no-op
             ELSE
                 kept := kept + 1;
-                RAISE NOTICE 'rollback 398: % LEFT ALONE - no 398 provenance row, so its '
-                             'current state (catalog_ready %, released_at %, published revision '
-                             '%, minimum %) is not 398''s to undo', v_sku, si_rec.catalog_ready,
+                RAISE NOTICE 'rollback 398: % LEFT ALONE - no 398 provenance row, so its current state (catalog_ready %, released_at %, published revision %, minimum %) is not 398''s to undo', v_sku, si_rec.catalog_ready,
                              si_rec.released_at, cs_rec.published_placement_revision,
                              si_rec.min_client_version;
             END IF;
@@ -150,9 +148,7 @@ BEGIN
            OR cs_rec.published_placement_revision IS DISTINCT FROM pv_rec.published_revision
            OR si_rec.min_client_version IS DISTINCT FROM pv_rec.min_client_version THEN
             kept := kept + 1;
-            RAISE NOTICE 'rollback 398: % LEFT ALONE - it no longer carries what 398 wrote: '
-                         'catalog_ready % (398: true), released_at % (398: %), published '
-                         'revision % (398: %), minimum % (398: %)', v_sku,
+            RAISE NOTICE 'rollback 398: % LEFT ALONE - it no longer carries what 398 wrote: catalog_ready % (398: true), released_at % (398: %), published revision % (398: %), minimum % (398: %)', v_sku,
                          si_rec.catalog_ready, si_rec.released_at, pv_rec.released_at,
                          cs_rec.published_placement_revision, pv_rec.published_revision,
                          si_rec.min_client_version, pv_rec.min_client_version;
@@ -195,8 +191,7 @@ BEGIN
                IS NOT DISTINCT FROM pv_rec.published_revision;
         GET DIAGNOSTICS k = ROW_COUNT;
         IF k IS DISTINCT FROM CAST(1 AS BIGINT) THEN
-            RAISE EXCEPTION 'rollback 398: resetting % published revision touched % rows, '
-                            'expected 1', v_sku, k;
+            RAISE EXCEPTION 'rollback 398: resetting % published revision touched % rows, expected 1', v_sku, k;
         END IF;
 
         DELETE FROM shop_item_release_provenance p
@@ -224,8 +219,7 @@ BEGIN
        AND NOT EXISTS (SELECT 1 FROM shop_item_release_provenance p
                         WHERE p.migration = '398' AND p.shop_item_id = si.id);
     IF pre IS DISTINCT FROM undone THEN
-        RAISE EXCEPTION 'rollback 398: post-check FAILED: % of % reverted faces back at the '
-                        'pre-image', pre, undone;
+        RAISE EXCEPTION 'rollback 398: post-check FAILED: % of % reverted faces back at the pre-image', pre, undone;
     END IF;
     RAISE NOTICE 'rollback 398: post-check OK: undone %, already at the pre-image %, left alone %',
                  undone, already, kept;
