@@ -199,6 +199,22 @@ PREREQ = {
     "365": _lane.prereq_sql(),
     "366": (_lane.prereq_sql() + "\n" + _lane.migration_text("365_title_ladders_five_tiers.sql")
             + "\n" + _lane.CENSUS_SEED),
+    # 391 adds one column to `dc_events`: the table as migration 101 creates
+    # it, with two accepted reports, so a second run is measured against rows
+    # that exist.
+    "391": """
+        CREATE TABLE dc_events (
+            id                      BIGSERIAL PRIMARY KEY,
+            series_id               UUID NOT NULL,
+            disconnected_player_id  UUID NOT NULL,
+            reporter_player_id      UUID NOT NULL,
+            created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_dc_event_series_player UNIQUE (series_id, disconnected_player_id));
+        CREATE INDEX idx_dc_events_series ON dc_events (series_id);
+        INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id)
+             VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid()),
+                    (gen_random_uuid(), gen_random_uuid(), gen_random_uuid());
+    """,
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -214,6 +230,7 @@ TABLES = {
     "336": ("bug_reports",),
     "337": ("shop_items",),
     "377": ("matches",),
+    "391": ("dc_events",),
 }
 
 MIGRATION_FILES = {
@@ -225,6 +242,7 @@ MIGRATION_FILES = {
     "365": "365_title_ladders_five_tiers.sql",
     "366": "366_title_refunds_voidshot_kingslayer.sql",
     "377": "377_admin_evidence_indexes.sql",
+    "391": "391_dc_events_leave_anchor.sql",
 }
 
 
@@ -389,7 +407,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -401,7 +419,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -414,7 +432,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -433,7 +451,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -471,6 +489,336 @@ def test_377_keeps_its_statistics_object_across_a_second_run():
     assert applied.objects_second.get(key) == applied.objects_first[key], (
         "377's second run replaced or removed stx_matches_pair: %r -> %r"
         % (applied.objects_first[key], applied.objects_second.get(key)))
+
+
+async def _391_column(conn):
+    """(type, nullable, default, comment) of dc_events.leave_anchor_at in
+    the current schema, or None when the column does not exist."""
+    row = await conn.fetchrow("""
+        SELECT format_type(a.atttypid, a.atttypmod) AS type,
+               NOT a.attnotnull AS nullable,
+               pg_get_expr(d.adbin, d.adrelid) AS default_expr,
+               col_description(a.attrelid, a.attnum) AS comment
+          FROM pg_attribute a
+          LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+         WHERE a.attrelid = to_regclass(format('%I.dc_events', current_schema()))
+           AND a.attname = 'leave_anchor_at' AND NOT a.attisdropped""")
+    return None if row is None else dict(row)
+
+
+def test_391_adds_a_nullable_leave_anchor_and_backfills_nothing():
+    """The column 391 promises: timestamptz, nullable, no default, its
+    comment present; every row that existed before it reads NULL (no
+    backfill from created_at, which is the acceptance time); and the
+    rollback file removes the column again."""
+    async def go():
+        schema = "m391c_%s" % uuid.uuid4().hex[:10]
+        conn = await asyncpg.connect(DSN)
+        try:
+            await conn.execute('CREATE SCHEMA "%s"' % schema)
+            await conn.execute('SET search_path TO "%s"' % schema)
+            await conn.execute(PREREQ["391"])
+            assert await _391_column(conn) is None
+            await conn.execute(migration_text("391"))
+            col = await _391_column(conn)
+            nulls = await conn.fetchval(
+                "SELECT count(*) FROM dc_events WHERE leave_anchor_at IS NULL")
+            total = await conn.fetchval("SELECT count(*) FROM dc_events")
+            await conn.execute(
+                (SQL_DIR / "rollback_391_dc_events_leave_anchor.sql").read_text(encoding="utf-8"))
+            after_rollback = await _391_column(conn)
+            return col, nulls, total, after_rollback
+        finally:
+            try:
+                await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            finally:
+                await conn.close()
+
+    col, nulls, total, after_rollback = _run(go())
+    assert col is not None, "391 did not add dc_events.leave_anchor_at"
+    assert col["type"] == "timestamp with time zone", col
+    assert col["nullable"] is True and col["default_expr"] is None, col
+    assert col["comment"] and "last server evidence" in col["comment"], col
+    assert total == 2 and nulls == total, (
+        "391 wrote a value into %d of %d existing rows; it must backfill nothing"
+        % (total - nulls, total))
+    assert after_rollback is None, "the rollback file left the column behind"
+
+
+def test_391_refuses_a_same_named_column_of_another_type():
+    """The post-check, with its control: a `leave_anchor_at` that already
+    exists as text is accepted by the catalog guard (it only asks whether
+    the name exists), so only the post-check can refuse it. The control is
+    the same file over the table without the column, which must apply."""
+    async def go(pre_column):
+        schema = "m391t_%s" % uuid.uuid4().hex[:10]
+        conn = await asyncpg.connect(DSN)
+        try:
+            await conn.execute('CREATE SCHEMA "%s"' % schema)
+            await conn.execute('SET search_path TO "%s"' % schema)
+            await conn.execute(PREREQ["391"])
+            if pre_column:
+                await conn.execute("ALTER TABLE dc_events ADD COLUMN leave_anchor_at TEXT")
+            try:
+                await conn.execute(migration_text("391"))
+                verdict = None
+            except Exception as ex:
+                verdict = "%s: %s" % (type(ex).__name__, ex)
+                # the file's own BEGIN is still open and aborted
+                await conn.execute("ROLLBACK")
+            return verdict, await _391_column(conn)
+        finally:
+            try:
+                await conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            try:
+                await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            finally:
+                await conn.close()
+
+    control, col = _run(go(False))
+    assert control is None and col["type"] == "timestamp with time zone", (control, col)
+    verdict, col = _run(go(True))
+    assert verdict is not None and "391: dc_events.leave_anchor_at is text" in verdict, verdict
+    assert col["type"] == "text", col
+
+
+# How long 391 can hold its lock BEFORE COMMIT. lock_timeout bounds only the WAIT for the
+# table lock; a first run that has it keeps ACCESS EXCLUSIVE until COMMIT, so
+# a runner stopped between the DO and COMMIT would stop the table for as long
+# as it stays stopped. Both files therefore open with three timeouts and hold
+# exactly one statement between them and COMMIT. statement_timeout and
+# idle_in_transaction_session_timeout have separate budgets and PostgreSQL 16
+# has no transaction_timeout, so the hold up to COMMIT is bounded by THEIR
+# SUM, held here to _391_HOLD_BOUND_S. The COMMIT's own local completion (the
+# WAL flush and the transaction-status write) is outside every setting, for
+# this and every PostgreSQL transaction; the fourth line keeps it local (no
+# standby wait). The stated bound is 30 s plus that local completion.
+
+_391_FILES = {
+    "migration": "391_dc_events_leave_anchor.sql",
+    "rollback": "rollback_391_dc_events_leave_anchor.sql",
+}
+_391_TIMEOUTS = (
+    "SET LOCAL lock_timeout = '5s'",
+    "SET LOCAL idle_in_transaction_session_timeout = '5s'",
+    "SET LOCAL statement_timeout = '25s'",
+    "SET LOCAL synchronous_commit = local",
+)
+_391_HOLD_BOUND_S = 30.0
+
+
+def _391_commit_waits_locally(stmts) -> bool:
+    """True when exactly one SET LOCAL synchronous_commit line sets it to
+    `local`: the COMMIT (outside every timeout) then completes locally -- WAL
+    flush and transaction-status write, which no setting bounds -- and never
+    waits for a synchronous standby."""
+    got = [s for s in stmts if s.startswith("SET LOCAL synchronous_commit")]
+    return got == ["SET LOCAL synchronous_commit = local"]
+
+
+def test_the_commit_wait_check_refuses_a_missing_or_other_value():
+    """The negative control of the fourth line: missing, any other value
+    and a duplicate all fail; only `local` passes."""
+    head = ["BEGIN", "SET LOCAL lock_timeout = '5s'"]
+    assert _391_commit_waits_locally(head + ["SET LOCAL synchronous_commit = local"])
+    assert not _391_commit_waits_locally(head)
+    for other in ("on", "remote_apply", "remote_write", "off", "'local'"):
+        assert not _391_commit_waits_locally(
+            head + ["SET LOCAL synchronous_commit = %s" % other]), other
+    assert not _391_commit_waits_locally(
+        head + ["SET LOCAL synchronous_commit = local"] * 2)
+_PG_UNITS = {"us": 1e-6, "ms": 1e-3, "s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
+
+
+def _pg_seconds(value: str) -> float:
+    """A PostgreSQL time setting in seconds; a bare number is milliseconds
+    (the unit of both timeouts). 0 means unbounded, returned as inf."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(us|ms|s|min|h|d)?\s*", value)
+    assert m, value
+    n = float(m.group(1)) * _PG_UNITS[m.group(2) or "ms"]
+    return float("inf") if n == 0 else n
+
+
+def _391_hold_bound(stmts) -> float:
+    """Seconds a run of these statements can HOLD a lock it took BEFORE
+    COMMIT: its statement_timeout plus its idle_in_transaction_session_timeout,
+    each read from its SET LOCAL line (missing = unbounded). The COMMIT's
+    local completion (WAL flush, transaction-status write) is on top, as the
+    migration states; no setting bounds it."""
+    def setting(name):
+        got = [re.fullmatch(r"SET LOCAL %s = '([^']*)'" % name, s) for s in stmts]
+        got = [g.group(1) for g in got if g]
+        assert len(got) <= 1, (name, got)
+        return _pg_seconds(got[0]) if got else float("inf")
+    return setting("statement_timeout") + setting("idle_in_transaction_session_timeout")
+
+
+def test_the_hold_bound_check_refuses_thirty_plus_five():
+    """The negative control of the sum rule: the round-1 values (30 s
+    statement, 5 s idle) exceed the before-COMMIT bound; each missing line is
+    unbounded."""
+    head = ["BEGIN", "SET LOCAL lock_timeout = '5s'"]
+    assert _391_hold_bound(head + ["SET LOCAL idle_in_transaction_session_timeout = '5s'",
+                                   "SET LOCAL statement_timeout = '30s'"]) == 35.0
+    assert _391_hold_bound(head + ["SET LOCAL statement_timeout = '25s'"]) == float("inf")
+    assert _391_hold_bound(head + ["SET LOCAL idle_in_transaction_session_timeout = '5000'",
+                                   "SET LOCAL statement_timeout = '25s'"]) == 30.0
+
+
+def _top_level_statements(sql: str) -> list:
+    """The file's statements in order, comments dropped, each without its
+    terminating semicolon and otherwise as written (adjacent string
+    literals need their newline). A semicolon inside a dollar-quoted body
+    (the DO block) does not end a statement."""
+    body = "\n".join(line for line in sql.splitlines()
+                     if not line.lstrip().startswith("--"))
+    out, cur, i, tag = [], [], 0, None
+    while i < len(body):
+        if tag is None:
+            m = re.match(r"\$[A-Za-z0-9_]*\$", body[i:])
+            if m:
+                tag = m.group(0)
+                cur.append(tag)
+                i += len(tag)
+                continue
+            if body[i] == ";":
+                stmt = "".join(cur).strip()
+                if stmt:
+                    out.append(stmt)
+                cur, i = [], i + 1
+                continue
+            cur.append(body[i])
+            i += 1
+        else:
+            j = body.find(tag, i)
+            assert j >= 0, "unterminated %s in the file" % tag
+            cur.append(body[i:j + len(tag)])
+            i, tag = j + len(tag), None
+    assert not " ".join("".join(cur).split()), "text after the last semicolon"
+    return out
+
+
+@pytest.mark.parametrize("which", sorted(_391_FILES))
+def test_391_opens_with_three_timeouts_and_one_statement_before_commit(which):
+    """BEGIN, the four SET LOCAL lines, ONE statement (the DO block in the
+    migration, the DROP in the rollback), COMMIT -- nothing else, in that
+    order. What this proves: everything before COMMIT is bounded (statement +
+    idle <= 30 s) and the COMMIT waits for no standby. What it cannot prove,
+    because no setting provides it: a bound on the COMMIT's local completion
+    (WAL flush, transaction-status write)."""
+    stmts = [" ".join(s.split()) for s in _top_level_statements(
+        (SQL_DIR / _391_FILES[which]).read_text(encoding="utf-8"))]
+    assert stmts[0] == "BEGIN" and stmts[-1] == "COMMIT", stmts
+    n = len(_391_TIMEOUTS)
+    assert tuple(stmts[1:1 + n]) == _391_TIMEOUTS, (
+        "%s: the statements after BEGIN are %r; they must be exactly %r"
+        % (_391_FILES[which], stmts[1:1 + n], _391_TIMEOUTS))
+    assert len(stmts) == n + 3, (
+        "%s: %d statements between the SET LOCAL lines and COMMIT (%r); the "
+        "transaction must hold exactly one" % (_391_FILES[which], len(stmts) - n - 2,
+                                               stmts[1 + n:-1]))
+    if which == "migration":
+        assert stmts[1 + n].startswith("DO $"), stmts[1 + n]
+    else:
+        assert stmts[1 + n].startswith("ALTER TABLE dc_events DROP COLUMN"), stmts[1 + n]
+    assert _391_commit_waits_locally(stmts), (
+        "%s: the COMMIT is outside every timeout; it must complete locally "
+        "and wait for no standby (SET LOCAL synchronous_commit = local)" % _391_FILES[which])
+    bound = _391_hold_bound(stmts)
+    assert bound <= _391_HOLD_BOUND_S, (
+        "%s: statement_timeout + idle_in_transaction_session_timeout = %ss; the "
+        "two budgets are separate (PostgreSQL 16 has no transaction_timeout), so "
+        "the lock can be held that long before COMMIT, over the %ss before-COMMIT "
+        "bound (the COMMIT's local completion is on top)"
+        % (_391_FILES[which], bound, _391_HOLD_BOUND_S))
+
+
+async def _391_stopped_before_commit(which, idle_for):
+    """Run the file up to (not including) COMMIT, read the three settings
+    inside that transaction, then leave the session idle for `idle_for`
+    seconds as a stopped runner would. Returns the settings, whether
+    another session could then take ACCESS EXCLUSIVE on dc_events within
+    one second, what the stopped session's next statement met, and whether
+    the column exists afterwards."""
+    stmts = _top_level_statements((SQL_DIR / _391_FILES[which]).read_text(encoding="utf-8"))
+    assert stmts[-1] == "COMMIT", stmts
+    schema = "m391i_%s" % uuid.uuid4().hex[:10]
+    other = await asyncpg.connect(DSN)
+    runner = await asyncpg.connect(DSN)
+    try:
+        await other.execute('CREATE SCHEMA "%s"' % schema)
+        await other.execute('SET search_path TO "%s"' % schema)
+        await runner.execute('SET search_path TO "%s"' % schema)
+        await other.execute(PREREQ["391"])
+        if which == "rollback":
+            await other.execute(migration_text("391"))
+        # Unbounded session defaults, so only the file's own SET LOCAL lines
+        # can end the stopped runner (a database or role default would
+        # otherwise pass this test for a file without them).
+        for name in ("lock_timeout", "statement_timeout",
+                     "idle_in_transaction_session_timeout"):
+            await runner.execute("SET %s = 0" % name)
+        await runner.execute("SET synchronous_commit = on")
+        for stmt in stmts[:-1]:
+            await runner.execute(stmt)
+        settings = {
+            name: await runner.fetchval("SHOW %s" % name)
+            for name in ("lock_timeout", "idle_in_transaction_session_timeout",
+                         "statement_timeout", "synchronous_commit")}
+        await asyncio.sleep(idle_for)
+        try:
+            await other.execute(
+                "BEGIN; SET LOCAL lock_timeout = '1s'; "
+                "LOCK TABLE dc_events IN ACCESS EXCLUSIVE MODE; ROLLBACK;")
+            lock = "taken"
+        except Exception as ex:
+            lock = type(ex).__name__
+            await other.execute("ROLLBACK")
+        try:
+            await runner.fetchval("SELECT 1")
+            runner_next = "answered"
+        except Exception as ex:
+            runner_next = type(ex).__name__
+        column = await _391_column(other)
+        return settings, lock, runner_next, column
+    finally:
+        try:
+            await runner.close()
+        except Exception:
+            pass
+        try:
+            await other.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await other.close()
+
+
+@pytest.mark.parametrize("which", sorted(_391_FILES))
+def test_391_a_runner_stopped_before_commit_loses_its_lock(which):
+    """The behaviour the timeouts exist for. A runner that stops after the
+    DO (or the DROP) and never sends COMMIT is ended by the server once it
+    has idled 5 s, the transaction rolls back, and the table lock goes with
+    it: another session takes ACCESS EXCLUSIVE inside one second, and the
+    file's change is undone (the migration's column absent, the rollback's
+    column still there). Without idle_in_transaction_session_timeout the
+    session idles on, holding the lock, and the other session times out."""
+    settings, lock, runner_next, column = _run(_391_stopped_before_commit(which, 6.5))
+    assert lock == "taken", (
+        "%s: after the runner idled 6.5 s inside its transaction another session "
+        "still could not lock dc_events (%s); the stopped runner kept its lock"
+        % (_391_FILES[which], lock))
+    assert runner_next != "answered", (
+        "%s: the stopped runner's session was still alive after 6.5 s idle in "
+        "its transaction" % _391_FILES[which])
+    assert settings == {"lock_timeout": "5s",
+                        "idle_in_transaction_session_timeout": "5s",
+                        "statement_timeout": "25s",
+                        "synchronous_commit": "local"}, settings
+    if which == "migration":
+        assert column is None, "the stopped first run's column survived its rollback: %r" % column
+    else:
+        assert column is not None, "the stopped rollback's DROP survived its rollback"
 
 
 def test_336_probe_cleanup_cannot_reach_a_same_named_ordinary_table():
@@ -587,7 +935,7 @@ _HOLDERS = {
 }
 
 _LOCK_CASES = [(number, table, who)
-               for number in ("331", "332", "333", "336", "377")
+               for number in ("331", "332", "333", "336", "377", "391")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 
