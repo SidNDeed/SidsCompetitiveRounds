@@ -1,5 +1,6 @@
-"""Migration 395 (the five v1.41.0 community faces) EXECUTED, not read, and
-pinned to the art and the Catalog rows the client ships.
+"""Migration 398 (the five v1.41.0 community faces; first written as 395)
+EXECUTED, not read, and pinned to the art and the Catalog rows the client
+ships.
 
 Two halves:
 
@@ -13,14 +14,17 @@ Two halves:
   test_shop_migration_337.py uses):
 
       A1_TEST_PG_DSN="postgresql+asyncpg://postgres@127.0.0.1:55432/a1test" \\
-          python -m pytest backend/tests/test_release_faces_395.py
+          python -m pytest backend/tests/test_release_faces_398.py
 
-  Each case builds its OWN schema with the production trigger body read from
+  Each case builds its OWN schema, applies migration 397 (the column and the
+  provenance table 398 needs), installs the production trigger body read from
   148_cosmetic_placement_and_macro_evidence.sql (its LF-normalised prosrc
   matched the primary's md5 on 2026-10-30), seeds the measured pre-image with
   the REAL bundled PNG bytes, and drops the schema afterwards. It runs: apply
-  twice (rerun no-op), rollback twice, re-apply; and one negative case per
-  guard, each of which must RAISE and leave every row unpublished.
+  twice (rerun no-op), rollback twice, re-apply; one negative case per guard,
+  each of which must RAISE and leave every row unpublished; the rollback
+  leaving a later publication by a person alone; and the post-check naming
+  the sku and the field it found wrong.
 """
 import asyncio
 import hashlib
@@ -32,13 +36,18 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SQL = ROOT / "backend" / "sql"
-MIGRATION = SQL / "395_release_five_faces_v1410.sql"
-ROLLBACK = SQL / "rollback_395_release_five_faces_v1410.sql"
+MIGRATION = SQL / "398_release_five_faces_v1410.sql"
+ROLLBACK = SQL / "rollback_398_release_five_faces_v1410.sql"
+PREREQ = SQL / "397_shop_item_min_client_version.sql"
 TRIGGER_SRC = SQL / "148_cosmetic_placement_and_macro_evidence.sql"
 CATALOG = ROOT / "plugin" / "CustomCosmetics.cs"
 ART = ROOT / "plugin" / "cosmetics"
 
 DSN = os.environ.get("A1_TEST_PG_DSN")
+
+PLACEHOLDER = ("Detail: community cosmetic. Ships with the next mod update; "
+               "equip in the Character editor.")
+SHIPPED = "Detail: community cosmetic. Equip in the Character editor."
 
 # (submission id, shop item id, sku, png file, scale) -- the 2026-10-30
 # reading of the primary. bytes/md5 come from the migration text itself.
@@ -52,7 +61,7 @@ FACES = [
 
 
 def _migration_rows():
-    """The expected[] rows of 395, parsed from the file."""
+    """The expected[] rows of 398, parsed from the file."""
     text = MIGRATION.read_text(encoding="utf-8")
     rows = re.findall(
         r"\['(\d+)', '(\d+)', '([a-z_]+)',\s*'([\d.]+)', '(\d+)', '([0-9a-f]{32})'\]",
@@ -116,6 +125,16 @@ def test_rollback_names_the_same_ids():
         [(f[0], f[1], f[2]) for f in FACES]
 
 
+def test_the_floor_is_the_client_that_ships_the_catalog_rows():
+    """398 sets min_client_version to the version whose Catalog carries the
+    five; Plugin.ModVersion names the version this branch builds."""
+    m = re.search(r"min_version\s+CONSTANT TEXT := '([\d.]+)';",
+                  MIGRATION.read_text(encoding="utf-8"))
+    assert m and m.group(1) == "1.41.0"
+    plugin = (ROOT / "plugin" / "Plugin.cs").read_text(encoding="utf-8")
+    assert 'public const string ModVersion = "1.41.0";' in plugin
+
+
 def test_house_shape():
     for path in (MIGRATION, ROLLBACK):
         lines = [l.strip() for l in path.read_text(encoding="utf-8").splitlines()
@@ -130,6 +149,13 @@ def test_house_shape():
         assert lines[5] == "DO $$", path.name
         assert lines[-2:] == ["END $$;", "COMMIT;"], path.name
         assert sum(1 for l in lines if l == "DO $$") == 1, path.name
+
+
+def test_397_sorts_before_398_and_no_other_file_takes_either_number():
+    names = sorted(p.name for p in SQL.glob("39[0-9]_*.sql"))
+    assert [n for n in names if n.startswith("397_")] == [PREREQ.name]
+    assert [n for n in names if n.startswith("398_")] == [MIGRATION.name]
+    assert not list(SQL.glob("395_*.sql")), "395 was renumbered 398"
 
 
 # ---------------------------------------------------------------- live
@@ -190,8 +216,9 @@ CREATE TABLE player_items (id BIGSERIAL PRIMARY KEY, item_id BIGINT NOT NULL);
 async def _seed(conn, mutate=None):
     for sub, shop, sku, png, scale in FACES:
         data = (ART / png).read_bytes()
-        si = dict(id=shop, sku=sku, kind="face", name=sku, price=750, rarity="rare",
-                  stock_limit=-1, released_at=None, catalog_ready=False)
+        si = dict(id=shop, sku=sku, kind="face", name=sku, description=PLACEHOLDER,
+                  price=750, rarity="rare", stock_limit=-1, released_at=None,
+                  catalog_ready=False)
         cs = dict(id=sub, name=sku, slot="detail", png_data=data, png_bytes=len(data),
                   status="approved", shop_sku=sku, approved_render_scale=float(scale),
                   approved_render_offset_x=0.0, approved_render_offset_y=0.0,
@@ -213,20 +240,35 @@ async def _seed(conn, mutate=None):
 
 async def _state(conn):
     return await conn.fetch(
-        "SELECT si.id, si.catalog_ready, si.released_at IS NOT NULL AS stamped, "
-        "si.stock_limit, cs.published_placement_revision AS pub "
+        "SELECT si.id, si.catalog_ready, si.released_at, si.released_at IS NOT NULL AS stamped, "
+        "si.stock_limit, si.min_client_version AS floor, si.description AS descr, "
+        "cs.published_placement_revision AS pub, "
+        "(SELECT count(*) FROM shop_item_release_provenance p "
+        "  WHERE p.migration = '398' AND p.shop_item_id = si.id) AS prov "
         "FROM shop_items si JOIN cosmetic_submissions cs ON cs.shop_sku = si.sku "
         "ORDER BY si.id")
+
+
+def _by_id(rows):
+    return {r["id"]: r for r in rows}
+
+
+# NOTICEs the server sent on the current case's connection (asyncpg's
+# Connection takes no new attributes, so they are collected here).
+_NOTICES = []
 
 
 async def _with_schema(name, body):
     import asyncpg
     conn = await asyncpg.connect(DSN.replace("+asyncpg", ""))
+    _NOTICES.clear()
+    conn.add_log_listener(lambda c, m: _NOTICES.append(m.message))
     try:
         await conn.execute("DROP SCHEMA IF EXISTS %s CASCADE" % name)
         await conn.execute("CREATE SCHEMA %s" % name)
         await conn.execute("SET search_path TO %s" % name)
         await conn.execute(DDL)
+        await conn.execute(_sql(PREREQ))
         await conn.execute(_trigger_ddl())
         return await body(conn)
     finally:
@@ -242,31 +284,42 @@ def _sql(path):
     return path.read_text(encoding="utf-8")
 
 
+def _published(r, rev=1):
+    return (r["catalog_ready"] and r["stamped"] and r["pub"] == rev
+            and r["floor"] == "1.41.0" and r["prov"] == 1)
+
+
+def _pre_image(r):
+    return (not r["catalog_ready"] and not r["stamped"] and r["pub"] == 0
+            and r["floor"] is None and r["stock_limit"] == -1 and r["prov"] == 0)
+
+
 @live
 def test_apply_rerun_rollback_reapply():
     async def body(conn):
         await _seed(conn)
         await conn.execute(_sql(MIGRATION))
         first = await _state(conn)
-        assert all(r["catalog_ready"] and r["stamped"] and r["pub"] == 1 for r in first), first
-        assert all(r["stock_limit"] == -1 for r in first)        # stock untouched
-        await conn.execute(_sql(MIGRATION))                       # rerun: no-op
+        assert all(_published(r) for r in first), first
+        assert all(r["descr"] == SHIPPED for r in first), first       # no future claim
+        assert all(r["stock_limit"] == -1 for r in first)             # stock untouched
+        await conn.execute(_sql(MIGRATION))                            # rerun: no-op
         assert await _state(conn) == first
 
         await conn.execute("UPDATE shop_items SET stock_limit = 10 WHERE id = 359")
         await conn.execute("INSERT INTO player_items (item_id) VALUES (359)")
         await conn.execute(_sql(ROLLBACK))
         rolled = await _state(conn)
-        assert all(not r["catalog_ready"] and not r["stamped"] and r["pub"] == 0
-                   and r["stock_limit"] == -1 for r in rolled), rolled
+        assert all(_pre_image(r) for r in rolled), rolled
+        assert all(r["descr"] == PLACEHOLDER for r in rolled), rolled
         assert await conn.fetchval("SELECT count(*) FROM player_items") == 1  # owners kept
-        await conn.execute(_sql(ROLLBACK))                        # rerun: no-op
+        await conn.execute(_sql(ROLLBACK))                             # rerun: no-op
         assert await _state(conn) == rolled
 
-        await conn.execute(_sql(MIGRATION))                       # re-apply
+        await conn.execute(_sql(MIGRATION))                            # re-apply
         again = await _state(conn)
-        assert all(r["catalog_ready"] and r["stamped"] and r["pub"] == 1 for r in again)
-    asyncio.run(_with_schema("t395_cycle", body))
+        assert all(_published(r) for r in again)
+    asyncio.run(_with_schema("t398_cycle", body))
 
 
 def _neg(target, change):
@@ -282,14 +335,24 @@ def _neg(target, change):
 NEGATIVES = {
     "scale_moved":   (_neg("face_detail_orbit", lambda si, cs: (si, {**cs, "approved_render_scale": 1.7})),
                       "approved scale is"),
+    "scale_null":    (_neg("face_detail_orbit", lambda si, cs: (si, {**cs, "approved_render_scale": None})),
+                      "approved scale is <NULL>"),
     "offset_moved":  (_neg("face_detail_orbit", lambda si, cs: (si, {**cs, "approved_render_offset_y": 0.2})),
                       "approved offset is now"),
+    "offset_x_null": (_neg("face_detail_orbit", lambda si, cs: (si, {**cs, "approved_render_offset_x": None})),
+                      "approved offset is now (<NULL>,0)"),
+    "offset_y_null": (_neg("face_detail_orbit", lambda si, cs: (si, {**cs, "approved_render_offset_y": None})),
+                      "approved offset is now (0,<NULL>)"),
     "revision_2":    (_neg("face_detail_red_scarf", lambda si, cs: (si, {**cs, "approved_placement_revision": 2})),
                       "approved revision moved"),
+    "revision_null": (_neg("face_detail_red_scarf", lambda si, cs: (si, {**cs, "approved_placement_revision": None})),
+                      "approved revision moved to <NULL>"),
     "denied":        (_neg("face_detail_red_scarf", lambda si, cs: (si, {**cs, "status": "denied"})),
                       "is no longer approved"),
     "animated":      (_neg("face_detail_pumpking_hat", lambda si, cs: (si, {**cs, "frame_count": 3})),
                       "frame_count is now 3"),
+    "frames_null":   (_neg("face_detail_pumpking_hat", lambda si, cs: (si, {**cs, "frame_count": None})),
+                      "frame_count is now <NULL>"),
     "art_changed":   (_neg("face_detail_pumpking_hat", lambda si, cs: (si, {**cs, "png_data": cs["png_data"] + b"x", "png_bytes": cs["png_bytes"] + 1})),
                       "stored art is now"),
     "art_same_size": (_neg("face_detail_pumpking_hat", lambda si, cs: (si, {**cs, "png_data": cs["png_data"][:-1] + b"x"})),
@@ -302,6 +365,10 @@ NEGATIVES = {
                       "no cosmetic_submissions row"),
     "kind_mismatch": (_neg("face_detail_gold_headband", lambda si, cs: ({**si, "kind": "title"}, cs)),
                       "expected (face_detail_gold_headband, face)"),
+    "floor_set_elsewhere": (_neg("face_detail_gold_headband", lambda si, cs: ({**si, "min_client_version": "1.40.0"}, cs)),
+                      "already carries min_client_version 1.40.0"),
+    "published_by_someone_else": (_neg("face_detail_orbit", lambda si, cs: ({**si, "catalog_ready": True, "released_at": None}, cs)),
+                      "already published but not by 398"),
 }
 
 
@@ -311,14 +378,15 @@ def test_every_guard_refuses_whole(case):
     async def body(conn):
         mutate, fragment = NEGATIVES[case]
         await _seed(conn, mutate)
+        before = await _state(conn)
+        sql = _sql(MIGRATION)
         with pytest.raises(Exception) as ei:
-            await conn.execute(_sql(MIGRATION))
-        assert "395" in str(ei.value) and fragment in str(ei.value), (case, str(ei.value))
+            await conn.execute(sql)
+        assert "398" in str(ei.value) and fragment in str(ei.value), (case, str(ei.value))
         await conn.execute("ROLLBACK")
-        st = await _state(conn)
-        assert not any(r["catalog_ready"] for r in st), (case, st)   # nothing landed
+        assert await _state(conn) == before, case                   # nothing landed
         return str(ei.value)
-    msg = asyncio.run(_with_schema("t395_neg_%s" % case, body))
+    msg = asyncio.run(_with_schema("t398_neg_%s" % case, body))
     assert msg
 
 
@@ -330,19 +398,132 @@ def test_matching_control_passes():
         await _seed(conn, _neg("none", lambda si, cs: (si, cs)))
         await conn.execute(_sql(MIGRATION))
         return await _state(conn)
-    st = asyncio.run(_with_schema("t395_control", body))
-    assert len(st) == 5 and all(r["catalog_ready"] for r in st)
+    st = asyncio.run(_with_schema("t398_control", body))
+    assert len(st) == 5 and all(_published(r) for r in st)
 
 
 @live
-def test_rollback_refuses_a_state_that_is_neither_image():
-    """Unpublished but stamped is neither 395's post-image nor the measured
-    pre-image: the rollback must refuse rather than guess."""
+def test_an_artist_description_is_left_as_written_both_ways():
+    async def body(conn):
+        await _seed(conn, _neg("face_detail_red_scarf",
+                               lambda si, cs: ({**si, "description": "Warm and red."}, cs)))
+        await conn.execute(_sql(MIGRATION))
+        up = _by_id(await _state(conn))
+        assert up[571]["descr"] == "Warm and red." and _published(up[571])
+        assert up[358]["descr"] == SHIPPED
+        assert any("face_detail_red_scarf carries its artist" in n for n in _NOTICES)
+        # After the release the orbit artist writes a description of their own.
+        await conn.execute("UPDATE shop_items SET description = 'Round and round.' WHERE id = 358")
+        await conn.execute(_sql(ROLLBACK))
+        down = _by_id(await _state(conn))
+        assert all(_pre_image(r) for r in down.values()), down
+        assert down[571]["descr"] == "Warm and red."
+        assert down[358]["descr"] == "Round and round."               # not 398's text: kept
+        assert down[359]["descr"] == PLACEHOLDER                      # 398's text: restored
+    asyncio.run(_with_schema("t398_desc", body))
+
+
+# Later publications by a person, each of which the rollback must leave alone.
+async def _republish_revision_2(conn):
+    await conn.execute("UPDATE cosmetic_submissions SET approved_placement_revision = 2,"
+                       " published_placement_revision = 2 WHERE id = 70")
+
+
+async def _republish_after_rollback(conn):
+    await conn.execute(_sql(ROLLBACK))
+    await conn.execute("UPDATE shop_items SET catalog_ready = TRUE WHERE id = 358")
+
+
+async def _restamp_release(conn):
+    await conn.execute("UPDATE shop_items SET released_at = released_at + interval '1 day'"
+                       " WHERE id = 358")
+
+
+LATER = {"revision_2": _republish_revision_2,
+         "republished_after_rollback": _republish_after_rollback,
+         "release_restamped": _restamp_release}
+
+
+@live
+@pytest.mark.parametrize("case", sorted(LATER))
+def test_the_rollback_leaves_a_later_publication_alone(case):
+    async def body(conn):
+        await _seed(conn)
+        await conn.execute(_sql(MIGRATION))
+        await LATER[case](conn)
+        before = _by_id(await _state(conn))[358]
+        await conn.execute(_sql(ROLLBACK))
+        after = _by_id(await _state(conn))
+        assert after[358] == before, (case, before, after[358])      # orbit untouched
+        assert after[358]["catalog_ready"] and after[358]["stamped"]
+        assert all(_pre_image(after[i]) for i in (359, 569, 570, 571)), after
+        assert any("face_detail_orbit LEFT ALONE" in n for n in _NOTICES), _NOTICES
+    asyncio.run(_with_schema("t398_later_%s" % case, body))
+
+
+@live
+def test_the_rollback_leaves_an_unpublished_but_stamped_row_alone():
+    """Unpublished but stamped is neither 398's post-image nor the measured
+    pre-image: the rollback names it and does not touch it."""
     async def body(conn):
         await _seed(conn)
         await conn.execute("UPDATE shop_items SET released_at = now() WHERE id = 358")
+        before = await _state(conn)
+        await conn.execute(_sql(ROLLBACK))
+        assert await _state(conn) == before
+        return _NOTICES
+    notices = asyncio.run(_with_schema("t398_rb_mixed", body))
+    assert any("face_detail_orbit LEFT ALONE" in n for n in notices), notices
+
+
+@live
+def test_a_rerun_refuses_when_398s_record_outlived_its_publication():
+    async def body(conn):
+        await _seed(conn)
+        await conn.execute(_sql(MIGRATION))
+        await conn.execute("UPDATE shop_items SET catalog_ready = FALSE, released_at = NULL,"
+                           " min_client_version = NULL WHERE id = 358")
+        sql = _sql(MIGRATION)
         with pytest.raises(Exception) as ei:
-            await conn.execute(_sql(ROLLBACK))
+            await conn.execute(sql)
         return str(ei.value)
-    msg = asyncio.run(_with_schema("t395_rb_mixed", body))
-    assert "rollback 395" in msg and "not at the pre-image" in msg, msg
+    msg = asyncio.run(_with_schema("t398_stale_prov", body))
+    assert "398: face_detail_orbit is unpublished but 398's provenance row" in msg, msg
+
+
+# A trigger that stamps less than the live one: the post-check must name the
+# first row it finds wrong and the field.
+NO_STAMP = """
+CREATE OR REPLACE FUNCTION stamp_shop_item_catalog_release() RETURNS TRIGGER
+LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END; $f$;
+"""
+STAMP_TIME_ONLY = """
+CREATE OR REPLACE FUNCTION stamp_shop_item_catalog_release() RETURNS TRIGGER
+LANGUAGE plpgsql AS $f$
+BEGIN
+    IF NEW.catalog_ready AND NOT OLD.catalog_ready AND NEW.released_at IS NULL THEN
+        NEW.released_at = NOW();
+    END IF;
+    RETURN NEW;
+END; $f$;
+"""
+
+
+@live
+@pytest.mark.parametrize("trigger,fragment", [
+    (NO_STAMP, "post-check FAILED: face_detail_gold_headband released_at is NULL"),
+    (STAMP_TIME_ONLY, "post-check FAILED: face_detail_gold_headband "
+                      "published_placement_revision is 0, expected 1"),
+], ids=["no_stamp", "time_only"])
+def test_a_failed_post_check_names_the_sku_and_the_field(trigger, fragment):
+    async def body(conn):
+        await _seed(conn)
+        await conn.execute(trigger)
+        sql = _sql(MIGRATION)
+        with pytest.raises(Exception) as ei:
+            await conn.execute(sql)
+        await conn.execute("ROLLBACK")
+        assert not any(r["catalog_ready"] for r in await _state(conn))
+        return str(ei.value)
+    msg = asyncio.run(_with_schema("t398_postcheck_%d" % len(trigger), body))
+    assert fragment in msg, msg
