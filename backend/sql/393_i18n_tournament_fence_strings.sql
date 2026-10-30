@@ -37,9 +37,13 @@
 -- line endings of the checkout that applies this file.
 -- IDEMPOTENT: the key arm updates a row only WHERE it differs from the value written
 -- here (IS DISTINCT FROM over every column the arm sets, retired_at included), and a
--- seed pair is skipped while any pending proposal exists for it, so a second run writes
--- no row. Both post-checks RAISE, and nothing is committed, unless all four keys are
--- live with the expected metadata and all eight seed pairs are covered.
+-- seed pair is skipped while any pending proposal exists for it, while a claude-mt
+-- draft of the same text exists in any status, and while a CURRENT approved
+-- translation exists (approved against this source_hash: approving a machine draft
+-- queued over it would overwrite it; the source migration 269's rule, restored by the
+-- Codex FENCE-R1 H2), so a second run writes no row. Both post-checks RAISE, and
+-- nothing is committed, unless all four keys are live with the expected metadata and
+-- all eight seed pairs are covered.
 -- Explicit transaction (#340). Run order: deploy API -> apply this file.
 -- BOUNDS, set before anything else runs (the same three lines 391 and 392 carry):
 -- lock_timeout ends any single lock WAIT at 5 s (it applies per acquisition,
@@ -158,7 +162,14 @@ SELECT v.key_id, v.lang, v.source_hash, v.target, 'claude-mt',
    SELECT 1 FROM i18n_proposals p2
     WHERE p2.key_id = v.key_id AND p2.language_code = v.lang
       AND p2.proposer_steam_id = 'claude-mt'
-      AND p2.source_hash = v.source_hash);
+      AND p2.source_hash = v.source_hash)
+   -- A CURRENT approved translation (approved against this source_hash) needs no
+   -- machine draft: approving a draft queued over it would overwrite it.
+   AND NOT EXISTS (
+   SELECT 1 FROM i18n_entries e
+    WHERE e.key_id = v.key_id AND e.language_code = v.lang
+      AND e.state = 'approved'
+      AND e.approved_source_hash = v.source_hash);
 
 DO $$
 DECLARE

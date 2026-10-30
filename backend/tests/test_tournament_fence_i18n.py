@@ -38,6 +38,8 @@ What is pinned here:
     a row at one of its key_ids with another source_hash, live or retired,
     makes it RAISE with that row untouched, while a superseded body row is
     never touched and its own retired same-hash row is made live again;
+    a translation approved against the current text gets no machine draft
+    queued over it and stays untouched (FENCE-R1 H2);
     rollback_393 retires the four keys, supersedes their pending proposals
     and writes nothing on a second run.
 """
@@ -581,6 +583,47 @@ def test_393_leaves_a_superseded_body_row_alone_and_revives_its_own_retired_row(
             assert await conn.fetchval(
                 "SELECT retired_at IS NULL AND source_hash = $2 FROM i18n_keys WHERE key_id = $1",
                 how["key_id"], how["source_hash"]) is True
+        finally:
+            await _drop(live_pg, schema, conn)
+    _run(go())
+
+
+def test_393_queues_no_machine_draft_over_a_current_approved_translation(live_pg):
+    """FENCE-R1 H2: where a translation approved against the CURRENT source
+    text exists for a seed pair, 393 queues no claude-mt draft for that pair,
+    the approved row is untouched (value and xmin), and the run commits (the
+    approval covers the pair). Controls in the same run: an approval of an
+    OLDER text and a 'machine' entry suppress nothing - those pairs get their
+    drafts, as do the five pairs with no entry, seven drafts in all."""
+    keys = _fence_keys()
+    refresh, leave = keys["refresh"], keys["leave"]
+    stale = hashlib.sha1(b"An older wording of the toast").hexdigest()
+
+    async def go():
+        conn, schema = await _fresh_i18n(live_pg)
+        try:
+            for k in (refresh, leave):
+                await conn.execute(
+                    "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, context,"
+                    " updated_at) VALUES ($1, 'client', $2, $3, $4, $5, clock_timestamp())",
+                    k["key_id"], k["msgctxt"], k["source_hash"], k["sensitive"], k["context"])
+            entry = ("INSERT INTO i18n_entries (key_id, language_code, target, state, approved_source_hash,"
+                     " approved_by_steam_id) VALUES ($1, $2, $3, $4, $5, 'reviewer-test')")
+            await conn.execute(entry, refresh["key_id"], "es", "Traduccion aprobada", "approved",
+                               refresh["source_hash"])
+            await conn.execute(entry, refresh["key_id"], "ru", "Staryi perevod", "approved", stale)
+            await conn.execute(entry, leave["key_id"], "uk", "Mashynnyi", "machine", leave["source_hash"])
+            approved = await _rows(conn, "i18n_entries", refresh["key_id"])
+
+            await conn.execute(_read(M393))
+
+            drafts = {(r["key_id"], r["language_code"]) for r in await conn.fetch(
+                "SELECT key_id, language_code FROM i18n_proposals"
+                " WHERE proposer_steam_id = 'claude-mt' AND status = 'pending'")}
+            assert (refresh["key_id"], "es") not in drafts, "a machine draft was queued over an approval"
+            assert {(refresh["key_id"], "ru"), (leave["key_id"], "uk")} <= drafts
+            assert len(drafts) == 7, sorted(drafts)
+            assert await _rows(conn, "i18n_entries", refresh["key_id"]) == approved
         finally:
             await _drop(live_pg, schema, conn)
     _run(go())
