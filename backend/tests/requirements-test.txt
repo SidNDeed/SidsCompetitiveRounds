@@ -1,0 +1,30 @@
+# Test-only dependencies of backend/tests.
+#
+# The api image installs backend/api/requirements.lock (resolved from
+# backend/api/requirements.txt) and never this file. A test seat installs
+# this file, which takes the api requirements first:
+#
+#     python -m pip install -r backend/tests/requirements-test.txt
+#
+# Every package a test or the api imports unguarded is declared by name here
+# or in the api file; test_requirements_declared.py holds that and lists its
+# exceptions. Pinned to the versions the VM seat runs the suite with.
+-r ../api/requirements.txt
+
+# The runner.
+pytest==9.1.1
+
+# FastAPI's TestClient and the route rigs of the database-gated tests import
+# httpx. The api file does not reach it: httpx is in fastapi's "standard"
+# extra, and requirements.txt names fastapi without extras.
+httpx==0.28.1
+
+# test_review_choice_two_absent.py imports yaml. The api file reaches PyYAML
+# only through the uvicorn[standard] extra; a test that imports a package
+# declares it by name.
+PyYAML==6.0.3
+
+# test_leaderboard_boards.py imports the real discord.py, the library the bot
+# runs. The bot image declares it inside Dockerfile.bot's pip install line;
+# the two pins stay equal (test_requirements_declared.py holds that).
+discord.py==2.7.1
