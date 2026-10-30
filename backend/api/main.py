@@ -28470,10 +28470,20 @@ async def list_shop_items(request: Request, steam_id: str | None = Query(None), 
     # (blank swatch) and Buy would 409. It stays visible to its artist on the
     # Artist tab ("awaiting mod update") until the release that ships its art
     # flips catalog_ready. House/existing items default catalog_ready = true.
+    #
+    # ORDER BY price, id: price alone is not a total order (the catalogue has
+    # dozens of equal-price rows), and PostgreSQL answers ties in whatever
+    # order its sort leaves the heap's rows. Every UPDATE of a shop row (a
+    # release migration, the catalog-release trigger, a stock or price edit)
+    # writes the row's new version elsewhere in the heap, and where depends
+    # on what page pruning had reclaimed by then, so even two builds of one
+    # tree answered different tie orders (shop-order-1410). The client sorts
+    # most categories by price alone, so the tie order reached the screen.
+    # id is the item's age: ties now list oldest first, on every read.
     rows = (await db.execute(
         select(ShopItem)
         .where(ShopItem.rotation_pool.is_(None), ShopItem.catalog_ready.is_(True))
-        .order_by(ShopItem.price)
+        .order_by(ShopItem.price, ShopItem.id)
     )).scalars().all()
 
     owned_ids: set[int] = set()
@@ -28524,7 +28534,7 @@ async def list_shop_items(request: Request, steam_id: str | None = Query(None), 
         # granted. A rung is earned by playing the ladder, and listing forty
         # unearned ones turns the ladder into a dropdown.
         if ach_q is not None:
-            pool = (await db.execute(ach_q.order_by(ShopItem.price))).scalars().all()
+            pool = (await db.execute(ach_q.order_by(ShopItem.price, ShopItem.id))).scalars().all()
             rows.extend(r for r in pool
                         if r.id in owned_ids or _auto_owned(steam_id, r.sku))
 
