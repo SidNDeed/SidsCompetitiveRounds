@@ -21268,9 +21268,29 @@ async def _report_disconnect_once(
     # report durable. So the INSERT is the gate. RETURNING tells this request
     # whether it is the one that recorded the event, and only that request
     # counts it; a loser answers exactly like the fast path above.
+    #
+    # THE LEAVE ANCHOR (migration 391). created_at is when this report was
+    # ACCEPTED, and the outbox can deliver it long after the leave. The row
+    # also carries the leave by the rule the hold logic anchors a dropped seat
+    # on: the last server evidence of that seat's presence (match_hold.py: the
+    # held seat's last present_at; the FFA readmission hold: present_at, else
+    # verdict_at). 1v1 has no hold and no presence beat, so the evidence is
+    # the LEAVER's own last verified live-points stamp in this series (the
+    # series_progress attestation the evidence arm reads), else the series'
+    # last recorded activity. It is computed inside this INSERT, so only the
+    # row that wins carries it, and a replay that loses the conflict moves
+    # nothing. Evidence only: no count, rating or gold reads it.
     inserted = (await db.execute(text(
-        "INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id) "
-        "VALUES (:sid, :dp, :rp) ON CONFLICT DO NOTHING RETURNING 1"
+        "INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id,"
+        " leave_anchor_at) "
+        "VALUES (CAST(:sid AS uuid), CAST(:dp AS uuid), CAST(:rp AS uuid),"
+        " COALESCE((SELECT sp.last_seen_at FROM series_progress sp"
+        "            WHERE sp.surface = 'ranked'"
+        "              AND sp.subject_id = CAST(:sid AS uuid)"
+        "              AND sp.player_id = CAST(:dp AS uuid)),"
+        "           (SELECT s.last_activity_at FROM ranked_series s"
+        "             WHERE s.id = CAST(:sid AS uuid)))) "
+        "ON CONFLICT DO NOTHING RETURNING 1"
     ), {"sid": resolved_series_id, "dp": disconnected.id, "rp": reporter.id})).first()
     if inserted is None:
         # The ORM row was loaded before the insert below decided anything, so

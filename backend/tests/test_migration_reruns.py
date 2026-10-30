@@ -199,6 +199,22 @@ PREREQ = {
     "365": _lane.prereq_sql(),
     "366": (_lane.prereq_sql() + "\n" + _lane.migration_text("365_title_ladders_five_tiers.sql")
             + "\n" + _lane.CENSUS_SEED),
+    # 391 adds one column to `dc_events`: the table as migration 101 creates
+    # it, with two accepted reports, so a second run is measured against rows
+    # that exist.
+    "391": """
+        CREATE TABLE dc_events (
+            id                      BIGSERIAL PRIMARY KEY,
+            series_id               UUID NOT NULL,
+            disconnected_player_id  UUID NOT NULL,
+            reporter_player_id      UUID NOT NULL,
+            created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_dc_event_series_player UNIQUE (series_id, disconnected_player_id));
+        CREATE INDEX idx_dc_events_series ON dc_events (series_id);
+        INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id)
+             VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid()),
+                    (gen_random_uuid(), gen_random_uuid(), gen_random_uuid());
+    """,
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -214,6 +230,7 @@ TABLES = {
     "336": ("bug_reports",),
     "337": ("shop_items",),
     "377": ("matches",),
+    "391": ("dc_events",),
 }
 
 MIGRATION_FILES = {
@@ -225,6 +242,7 @@ MIGRATION_FILES = {
     "365": "365_title_ladders_five_tiers.sql",
     "366": "366_title_refunds_voidshot_kingslayer.sql",
     "377": "377_admin_evidence_indexes.sql",
+    "391": "391_dc_events_leave_anchor.sql",
 }
 
 
@@ -389,7 +407,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -401,7 +419,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -414,7 +432,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -433,7 +451,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -471,6 +489,99 @@ def test_377_keeps_its_statistics_object_across_a_second_run():
     assert applied.objects_second.get(key) == applied.objects_first[key], (
         "377's second run replaced or removed stx_matches_pair: %r -> %r"
         % (applied.objects_first[key], applied.objects_second.get(key)))
+
+
+async def _391_column(conn):
+    """(type, nullable, default, comment) of dc_events.leave_anchor_at in
+    the current schema, or None when the column does not exist."""
+    row = await conn.fetchrow("""
+        SELECT format_type(a.atttypid, a.atttypmod) AS type,
+               NOT a.attnotnull AS nullable,
+               pg_get_expr(d.adbin, d.adrelid) AS default_expr,
+               col_description(a.attrelid, a.attnum) AS comment
+          FROM pg_attribute a
+          LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+         WHERE a.attrelid = to_regclass(format('%I.dc_events', current_schema()))
+           AND a.attname = 'leave_anchor_at' AND NOT a.attisdropped""")
+    return None if row is None else dict(row)
+
+
+def test_391_adds_a_nullable_leave_anchor_and_backfills_nothing():
+    """The column 391 promises: timestamptz, nullable, no default, its
+    comment present; every row that existed before it reads NULL (no
+    backfill from created_at, which is the acceptance time); and the
+    rollback file removes the column again."""
+    async def go():
+        schema = "m391c_%s" % uuid.uuid4().hex[:10]
+        conn = await asyncpg.connect(DSN)
+        try:
+            await conn.execute('CREATE SCHEMA "%s"' % schema)
+            await conn.execute('SET search_path TO "%s"' % schema)
+            await conn.execute(PREREQ["391"])
+            assert await _391_column(conn) is None
+            await conn.execute(migration_text("391"))
+            col = await _391_column(conn)
+            nulls = await conn.fetchval(
+                "SELECT count(*) FROM dc_events WHERE leave_anchor_at IS NULL")
+            total = await conn.fetchval("SELECT count(*) FROM dc_events")
+            await conn.execute(
+                (SQL_DIR / "rollback_391_dc_events_leave_anchor.sql").read_text(encoding="utf-8"))
+            after_rollback = await _391_column(conn)
+            return col, nulls, total, after_rollback
+        finally:
+            try:
+                await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            finally:
+                await conn.close()
+
+    col, nulls, total, after_rollback = _run(go())
+    assert col is not None, "391 did not add dc_events.leave_anchor_at"
+    assert col["type"] == "timestamp with time zone", col
+    assert col["nullable"] is True and col["default_expr"] is None, col
+    assert col["comment"] and "last server evidence" in col["comment"], col
+    assert total == 2 and nulls == total, (
+        "391 wrote a value into %d of %d existing rows; it must backfill nothing"
+        % (total - nulls, total))
+    assert after_rollback is None, "the rollback file left the column behind"
+
+
+def test_391_refuses_a_same_named_column_of_another_type():
+    """The post-check, with its control: a `leave_anchor_at` that already
+    exists as text is accepted by the catalog guard (it only asks whether
+    the name exists), so only the post-check can refuse it. The control is
+    the same file over the table without the column, which must apply."""
+    async def go(pre_column):
+        schema = "m391t_%s" % uuid.uuid4().hex[:10]
+        conn = await asyncpg.connect(DSN)
+        try:
+            await conn.execute('CREATE SCHEMA "%s"' % schema)
+            await conn.execute('SET search_path TO "%s"' % schema)
+            await conn.execute(PREREQ["391"])
+            if pre_column:
+                await conn.execute("ALTER TABLE dc_events ADD COLUMN leave_anchor_at TEXT")
+            try:
+                await conn.execute(migration_text("391"))
+                verdict = None
+            except Exception as ex:
+                verdict = "%s: %s" % (type(ex).__name__, ex)
+                # the file's own BEGIN is still open and aborted
+                await conn.execute("ROLLBACK")
+            return verdict, await _391_column(conn)
+        finally:
+            try:
+                await conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            try:
+                await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            finally:
+                await conn.close()
+
+    control, col = _run(go(False))
+    assert control is None and col["type"] == "timestamp with time zone", (control, col)
+    verdict, col = _run(go(True))
+    assert verdict is not None and "391: dc_events.leave_anchor_at is text" in verdict, verdict
+    assert col["type"] == "text", col
 
 
 def test_336_probe_cleanup_cannot_reach_a_same_named_ordinary_table():
@@ -587,7 +698,7 @@ _HOLDERS = {
 }
 
 _LOCK_CASES = [(number, table, who)
-               for number in ("331", "332", "333", "336", "377")
+               for number in ("331", "332", "333", "336", "377", "391")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 
