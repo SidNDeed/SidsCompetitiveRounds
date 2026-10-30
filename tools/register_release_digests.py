@@ -614,8 +614,25 @@ def _sql_text(value):
     return "'%s'" % value
 
 
+_MIGRATION_NAME = re.compile(r"[A-Za-z0-9_]{1,80}\.sql")
+
+
+def _sql_target(path):
+    """argparse type for --emit-sql. The base name goes verbatim into the file's header comment and its
+    RAISE literals, so it is restricted to letters, digits and underscores plus the .sql suffix: a
+    quote in the name was an SQL injection and a percent sign a broken RAISE placeholder (DIGESTS-R2
+    H1). Refused before the DLL is read or anything is written."""
+    base = os.path.basename(path)
+    if not _MIGRATION_NAME.fullmatch(base):
+        raise argparse.ArgumentTypeError("the migration file name may use letters, digits and underscores "
+                                         "and must end in .sql: %r" % base)
+    return path
+
+
 def migration_text(name, rows):
     """The identical inserts as a data-only migration of the house shape."""
+    if not _MIGRATION_NAME.fullmatch(name):
+        raise ValueError("migration name %r cannot be embedded in the migration text" % name)
     rel = [r for r in rows if r["kind"] == "release"]
     games = [r for r in rows if r["kind"] == "game_file"]
     what = []
@@ -703,7 +720,7 @@ def _parser():
     ap.add_argument("--admin", help="an admin_users steam id (the real api run)")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print what would be registered; send nothing")
-    mode.add_argument("--emit-sql", metavar="FILE",
+    mode.add_argument("--emit-sql", metavar="FILE", type=_sql_target,
                       help="write the inserts as a data-only migration instead of calling the api")
     return ap
 

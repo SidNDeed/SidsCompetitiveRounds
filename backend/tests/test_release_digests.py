@@ -481,8 +481,9 @@ def test_d7_emit_sql_shape_and_no_overwrite(tmp_path, install):
     code, out = _run(_argv(dll, "1.41.0", root, "--emit-sql", str(target)))
     assert code == rrd.EXIT_REFUSED and "exists; the writer never replaces a file" in out
     assert target.read_bytes() == before
-    code, out = _run(_argv(dll, "1.41.0", root, "--emit-sql", str(tmp_path / "x.txt")))
-    assert code == rrd.EXIT_REFUSED and not (tmp_path / "x.txt").exists()
+    with pytest.raises(SystemExit) as refused:   # a .txt name is refused by the name guard, before the DLL is read (DIGESTS-R2 H1)
+        _run(_argv(dll, "1.41.0", root, "--emit-sql", str(tmp_path / "x.txt")))
+    assert refused.value.code == 2 and not (tmp_path / "x.txt").exists()
 
 
 # -- a real Roslyn image, when one is named ----------------------------------------------------
@@ -521,3 +522,28 @@ def test_m1_a_base_url_on_the_command_line_is_refused_before_anything_runs(tmp_p
         _run(_argv(dll, "1.41.0", None, "--admin", _admin(), "--base", "http://t"),
              {"ADMIN_HMAC_SECRET": SECRET, "SCR_API_BASE": "http://t"}, rec)
     assert refused.value.code == 2 and rec.calls == []
+
+
+# -- H1 (Codex DIGESTS-R2): the migration file name goes into SQL literals, so it is restricted ----
+
+@pytest.mark.parametrize("bad", [
+    "377_x'; CREATE TABLE digest_probe(i int); RAISE NOTICE 'x.sql",   # the injection Codex wrote
+    "377_release_100%.sql",                                            # a RAISE placeholder
+    "377 release.sql",                                                 # a space
+    "377_x.sql\n",                                                     # a newline ends the header comment
+    "377_x.txt",                                                       # not a migration
+    "377-x.sql",                                                       # a dash: not in the house form
+])
+def test_h1_a_migration_file_name_that_cannot_sit_in_a_literal_is_refused_before_anything_runs(tmp_path, bad):
+    dll, _data = _dll(tmp_path)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    with pytest.raises(SystemExit) as refused:
+        _run(_argv(dll, "1.41.0", None, "--emit-sql", str(tmp_path) + "/" + bad), {}, _Recorder())
+    assert refused.value.code == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_h1_migration_text_itself_refuses_a_name_it_cannot_embed():
+    with pytest.raises(ValueError):
+        rrd.migration_text("377_x'.sql", [])
+    assert rrd.migration_text("377_x.sql", []).startswith("-- 377_x.sql: digest registry rows: .")

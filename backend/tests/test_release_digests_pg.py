@@ -274,3 +274,19 @@ def test_p4_the_emitted_migration_holds_the_api_rows_and_reruns_to_nothing(rig, 
     before = rig.registries(fresh, stamped=True)
     assert rig.run(rig.script(sql, fresh)) == "COMMIT"
     assert rig.registries(fresh, stamped=True) == before
+
+
+def test_p5_the_post_check_block_raises_when_its_rows_are_absent(rig, release, tmp_path):
+    """The emitted file's DO block is a guard that should never fire after its own inserts (both primary keys are
+    the whole tuple); run alone against a schema holding none of the rows it must raise, and nothing commits."""
+    argv, _expected = release
+    path = tmp_path / "fixture_release_digests.sql"
+    code, out = _run(argv + ["--emit-sql", str(path)], {})
+    assert code == rrd.EXIT_OK, out
+    sql = path.read_text(encoding="ascii")
+    block = re.search(r"DO \$\$.*?END \$\$;", sql, re.S).group(0)
+    fresh = rig.run(rig.new_schema())
+    with pytest.raises(Exception) as raised:
+        rig.run(rig.script("BEGIN;\n" + block + "\nCOMMIT;\n", fresh))
+    assert "did not land" in str(raised.value) and "1 release row(s) and 17 game-file row(s)" in str(raised.value)
+    assert rig.registries(fresh) == ([], [])
