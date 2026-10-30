@@ -120,15 +120,49 @@ def _guarded(node, parent):
     return False
 
 
+def _importorskip_of(stmt):
+    """The top-level package a STATEMENT `pytest.importorskip("pkg")` (bare,
+    or its value assigned) skips on; None for any other statement. A call
+    nested inside another statement (an `if`, an argument) is not one."""
+    value = stmt.value if isinstance(stmt, (ast.Expr, ast.Assign, ast.AnnAssign)) else None
+    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "importorskip" and value.args
+            and isinstance(value.args[0], ast.Constant)
+            and isinstance(value.args[0].value, str)):
+        return value.args[0].value.split(".")[0]
+    return None
+
+
+def _skipped_before(node, parent, mod):
+    """True when THIS import site is reached only after `mod` imported: a
+    statement earlier in a block that encloses the site is
+    pytest.importorskip(mod), so that scope stops before the site when the
+    package is missing. Judged per site: an importorskip in one function
+    guards nothing at module level or in another function."""
+    child = node
+    while child in parent:
+        anc = parent[child]
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(anc, field, None)
+            if not isinstance(block, list):
+                continue
+            for i, stmt in enumerate(block):
+                if stmt is child:
+                    if any(_importorskip_of(s) == mod for s in block[:i]):
+                        return True
+                    break
+        child = anc
+    return False
+
+
 def imports_of(source):
-    """{top-level module: guarded?} for every absolute import in `source`; a
-    module imported both ways counts as unguarded."""
+    """{top-level module: guarded?} for every absolute import in `source`.
+    Each import SITE is judged by its own guard (an enclosing try that
+    catches the failed import, or an importorskip of the package earlier in
+    an enclosing block); a module with any unguarded site counts as
+    unguarded."""
     tree = ast.parse(source)
     parent = _parents(tree)
-    skipped = {n.args[0].value.split(".")[0] for n in ast.walk(tree)
-               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-               and n.func.attr == "importorskip" and n.args
-               and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)}
     out = {}
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
@@ -139,7 +173,7 @@ def imports_of(source):
             continue
         g = _guarded(n, parent)
         for m in mods:
-            out[m] = out.get(m, True) and (g or m in skipped)
+            out[m] = out.get(m, True) and (g or _skipped_before(n, parent, m))
     return out
 
 
@@ -247,6 +281,51 @@ def test_the_scanner_reports_a_bare_import_and_skips_a_guarded_one():
     assert got == {"alpha_pkg": False, "beta_pkg": False, "gamma_pkg": True,
                    "delta_pkg": True, "eps_pkg": False, "zeta_pkg": False,
                    "eta_pkg": True}, got
+
+
+def test_an_importorskip_guards_only_the_sites_after_it_in_its_own_scope():
+    """The SMALL-ABC-R1 MEDIUM: a guard elsewhere in the file does not guard
+    a bare module-level import. Each form alone, then both together."""
+    guarded_only = ("import pytest\n"
+                    "def test_draw():\n"
+                    "    pytest.importorskip('theta_pkg')\n"
+                    "    import theta_pkg.image\n")
+    assert imports_of(guarded_only)["theta_pkg"] is True
+    bare_too = "import theta_pkg\n" + guarded_only
+    assert imports_of(bare_too)["theta_pkg"] is False
+    other_scope = ("import pytest\n"
+                   "def a():\n    pytest.importorskip('theta_pkg')\n"
+                   "def b():\n    import theta_pkg\n")
+    assert imports_of(other_scope)["theta_pkg"] is False
+    after_the_import = ("import pytest\n"
+                        "def a():\n    import theta_pkg\n"
+                        "    pytest.importorskip('theta_pkg')\n")
+    assert imports_of(after_the_import)["theta_pkg"] is False
+    conditional = ("import pytest\n"
+                   "def a(x):\n    if x:\n        pytest.importorskip('theta_pkg')\n"
+                   "    import theta_pkg\n")
+    assert imports_of(conditional)["theta_pkg"] is False
+    module_skip = ("import pytest\n"
+                   "theta = pytest.importorskip('theta_pkg')\n"
+                   "import theta_pkg\n"
+                   "def a():\n    import theta_pkg.sub\n")
+    assert imports_of(module_skip)["theta_pkg"] is True
+
+
+def test_a_bare_import_beside_a_guarded_one_turns_the_census_red():
+    """The finding's own case on the real file: a mandatory top-level
+    `import matplotlib` added to test_discord_evidence_render.py, which keeps
+    its function-local importorskip, is reported as undeclared; the file as
+    it stands is not."""
+    rel = "tests/test_discord_evidence_render.py"
+    source = (BACKEND / rel).read_text(encoding="utf-8")
+    assert SCAN[rel]["matplotlib"] is True, SCAN[rel].get("matplotlib")
+    scan = dict(SCAN)
+    scan[rel] = imports_of("import matplotlib\n" + source)
+    assert scan[rel]["matplotlib"] is False
+    missing = undeclared(third_party(scan), DECLARED)
+    assert missing == {"matplotlib": [rel]}, missing
+    assert undeclared(third_party(dict(SCAN)), DECLARED) == {}
 
 
 def test_the_17_oct_finding_turns_the_check_red():
