@@ -589,18 +589,35 @@ def _evidence(rig):
     return task.args[1]
 
 
+async def _advisory_waiters(rig) -> int:
+    """Sessions of the test database waiting for an advisory lock now."""
+    from sqlalchemy import text as _text
+    async with rig.sessions.connect() as c:
+        return (await c.execute(_text(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+            "AND NOT granted AND database = "
+            "(SELECT oid FROM pg_database WHERE datname = current_database())"
+        ))).scalar_one()
+
+
 async def _two_attaches(rig, attach_once, ev, ev2=None, may_lock=False):
     """Attach #1 (of `ev`) takes the merge lock, finds nothing, inserts and
-    then pauses before its COMMIT; attach #2 (of `ev2`, default the same
-    evidence) starts while #1 holds the lock; then #1 commits. With
-    may_lock False both are fallback attaches (every NOWAIT attempt
-    exhausted, the Codex SMALL-ABC-R3 scenario); with True both are first
-    attempts (R4: two fingerprints for one match). Returns both outcomes."""
+    then pauses AT its COMMIT; only then does attach #2 (of `ev2`, default
+    the same evidence) start; #1 commits once #2 has finished or is seen
+    waiting for an advisory lock (pg_locks, capped at 5 s). Event-gated, not
+    sleep-timed, so #2's wait is never longer than #1's COMMIT however slow
+    the seat is (a fixed-sleep version let a loaded run outlast the 2 s
+    attempt lock_timeout). With may_lock False both are fallback attaches
+    (every NOWAIT attempt exhausted, the Codex SMALL-ABC-R3 scenario); with
+    True both are first attempts (R4: two fingerprints for one match).
+    Returns both outcomes."""
     from sqlalchemy.ext.asyncio import AsyncSession
     gate = asyncio.Event()
+    at_commit = asyncio.Event()
 
     class Paused(AsyncSession):
         async def commit(self):
+            at_commit.set()
             await gate.wait()
             await super().commit()
 
@@ -614,10 +631,17 @@ async def _two_attaches(rig, attach_once, ev, ev2=None, may_lock=False):
             return await attach_once(db, evidence, may_lock, *marker)
 
     first = asyncio.ensure_future(one(Paused, ev))
-    await asyncio.sleep(0.5)
-    assert not first.done()
+    paused = asyncio.ensure_future(at_commit.wait())
+    await asyncio.wait({first, paused}, timeout=30,
+                       return_when=asyncio.FIRST_COMPLETED)
+    paused.cancel()
+    assert at_commit.is_set() and not first.done(), (
+        first.result() if first.done() else "attach #1 never reached its COMMIT")
     second = asyncio.ensure_future(one(AsyncSession, ev2 or ev))
-    await asyncio.sleep(0.5)
+    for _ in range(100):
+        if second.done() or await _advisory_waiters(rig):
+            break
+        await asyncio.sleep(0.05)
     gate.set()
     return await asyncio.gather(first, second)
 
