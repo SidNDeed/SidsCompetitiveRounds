@@ -43,7 +43,11 @@
 -- queued over it would overwrite it; the source migration 269's rule, restored by the
 -- Codex FENCE-R1 H2), so a second run writes no row. Both post-checks RAISE, and
 -- nothing is committed, unless all four keys are live with the expected metadata and
--- all eight seed pairs are covered.
+-- all eight seed pairs are covered by a pending proposal or an approved translation of
+-- the CURRENT source text (the seed post-check; the source migration 269's rule,
+-- restored by the Codex FENCE-R1 H3). So a pair whose claude-mt draft of this text was
+-- rejected, or whose only pending proposal is of another text, stops the file: it does
+-- not re-propose a rejected machine text, and it does not commit an uncovered pair.
 -- Explicit transaction (#340). Run order: deploy API -> apply this file.
 -- BOUNDS, set before anything else runs (the same three lines 391 and 392 carry):
 -- lock_timeout ends any single lock WAIT at 5 s (it applies per acquisition,
@@ -171,6 +175,9 @@ SELECT v.key_id, v.lang, v.source_hash, v.target, 'claude-mt',
       AND e.state = 'approved'
       AND e.approved_source_hash = v.source_hash);
 
+-- Seed coverage post-check (enforcing): a pair is covered only by a PENDING proposal at
+-- this source_hash or an entry APPROVED against it. A rejected or superseded draft, or a
+-- proposal or approval of another text, leaves the pair uncovered.
 DO $$
 DECLARE
   uncovered INTEGER;
@@ -181,11 +188,13 @@ BEGIN
    WHERE NOT EXISTS (
            SELECT 1 FROM i18n_proposals p
             WHERE p.key_id = v.key_id AND p.language_code = v.lang
-              AND (p.source_hash = v.source_hash OR p.status = 'pending'))
+              AND p.source_hash = v.source_hash
+              AND p.status = 'pending')
      AND NOT EXISTS (
            SELECT 1 FROM i18n_entries e
             WHERE e.key_id = v.key_id AND e.language_code = v.lang
-              AND e.state = 'approved');
+              AND e.state = 'approved'
+              AND e.approved_source_hash = v.source_hash);
   IF uncovered <> 0 THEN
     SELECT string_agg(x.key_id || '/' || x.lang, ', ')
       INTO sample
@@ -193,15 +202,17 @@ BEGIN
              WHERE NOT EXISTS (
                      SELECT 1 FROM i18n_proposals p
                       WHERE p.key_id = v.key_id AND p.language_code = v.lang
-                        AND (p.source_hash = v.source_hash OR p.status = 'pending'))
+                        AND p.source_hash = v.source_hash
+                        AND p.status = 'pending')
                AND NOT EXISTS (
                      SELECT 1 FROM i18n_entries e
                       WHERE e.key_id = v.key_id AND e.language_code = v.lang
-                        AND e.state = 'approved')
+                        AND e.state = 'approved'
+                        AND e.approved_source_hash = v.source_hash)
              LIMIT 5) x;
-    RAISE EXCEPTION 'migration 393: % of 8 seed pairs did not land (e.g. %); nothing committed', uncovered, sample;
+    RAISE EXCEPTION 'migration 393: % of 8 seed pairs have neither a pending proposal nor an approved translation of the current source text (e.g. %); nothing committed', uncovered, sample;
   END IF;
-  RAISE NOTICE 'migration 393: 4 keys live, all 8 toast seed pairs covered (2 keys x es/ru/uk/sv)';
+  RAISE NOTICE 'migration 393: 4 keys live, all 8 toast seed pairs covered at the current source text (2 keys x es/ru/uk/sv)';
 END $$;
 
 COMMIT;

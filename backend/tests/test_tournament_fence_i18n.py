@@ -39,7 +39,10 @@ What is pinned here:
     makes it RAISE with that row untouched, while a superseded body row is
     never touched and its own retired same-hash row is made live again;
     a translation approved against the current text gets no machine draft
-    queued over it and stays untouched (FENCE-R1 H2);
+    queued over it and stays untouched (FENCE-R1 H2); a pair whose only
+    evidence is a rejected claude-mt draft or a pending proposal of another
+    text makes the seed post-check RAISE, while a pending human proposal of
+    the current text covers its pair (FENCE-R1 H3);
     rollback_393 retires the four keys, supersedes their pending proposals
     and writes nothing on a second run.
 """
@@ -624,6 +627,61 @@ def test_393_queues_no_machine_draft_over_a_current_approved_translation(live_pg
             assert {(refresh["key_id"], "ru"), (leave["key_id"], "uk")} <= drafts
             assert len(drafts) == 7, sorted(drafts)
             assert await _rows(conn, "i18n_entries", refresh["key_id"]) == approved
+        finally:
+            await _drop(live_pg, schema, conn)
+    _run(go())
+
+
+@pytest.mark.parametrize("case", ["rejected_draft", "stale_pending", "human_pending"])
+def test_393_seed_coverage_counts_only_current_pending_or_approved(live_pg, case):
+    """FENCE-R1 H3. After a first run seeded all eight pairs, one pair's
+    evidence is changed and 393 runs again:
+      * rejected_draft - its claude-mt draft is rejected. The insert does not
+        re-propose a rejected machine text, so nothing covers the pair;
+      * stale_pending - its pending proposal names another source_hash. The
+        insert waits on any pending proposal, so nothing current covers it;
+    each makes the seed post-check RAISE naming that pair, with nothing
+    committed (both tables byte-identical, value and xmin). Control:
+      * human_pending - the draft is replaced by a pending human proposal of
+        the current text, which covers the pair: the run commits and queues
+        no draft beside it."""
+    from test_migration_reruns import _changed, _fingerprint
+    keys = _fence_keys()
+    key_id = keys["leave" if case != "stale_pending" else "refresh"]["key_id"]
+    src_hash = keys["leave" if case != "stale_pending" else "refresh"]["source_hash"]
+    lang = {"rejected_draft": "sv", "stale_pending": "uk", "human_pending": "es"}[case]
+    tables = ("i18n_keys", "i18n_proposals", "i18n_entries")
+
+    async def go():
+        conn, schema = await _fresh_i18n(live_pg)
+        try:
+            await conn.execute(_read(M393))
+            draft = ("key_id = $1 AND language_code = $2 AND proposer_steam_id = 'claude-mt'")
+            if case == "rejected_draft":
+                await conn.execute("UPDATE i18n_proposals SET status = 'rejected' WHERE " + draft,
+                                   key_id, lang)
+            elif case == "stale_pending":
+                await conn.execute("UPDATE i18n_proposals SET source_hash = $3 WHERE " + draft,
+                                   key_id, lang, hashlib.sha1(b"An older wording").hexdigest())
+            else:
+                await conn.execute("DELETE FROM i18n_proposals WHERE " + draft, key_id, lang)
+                await conn.execute(
+                    "INSERT INTO i18n_proposals (key_id, language_code, source_hash, proposed_target,"
+                    " proposer_steam_id, license_assent, status) VALUES ($1, $2, $3, 'No se pudo salir',"
+                    " 'reviewer-test', TRUE, 'pending')", key_id, lang, src_hash)
+            before = await _fingerprint(conn, tables)
+            if case == "human_pending":
+                await conn.execute(_read(M393))
+                assert await conn.fetchval(
+                    "SELECT count(*) FROM i18n_proposals WHERE key_id = $1 AND language_code = $2"
+                    "   AND status = 'pending'", key_id, lang) == 1
+                assert _changed(before, await _fingerprint(conn, tables)) == 0
+                return
+            with pytest.raises(asyncpg.exceptions.RaiseError,
+                               match=r"1 of 8 seed pairs have neither .* \(e\.g\. %s/%s\)" % (key_id, lang)):
+                await conn.execute(_read(M393))
+            await conn.execute("ROLLBACK")
+            assert _changed(before, await _fingerprint(conn, tables)) == 0
         finally:
             await _drop(live_pg, schema, conn)
     _run(go())
