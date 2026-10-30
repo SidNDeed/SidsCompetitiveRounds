@@ -89,15 +89,18 @@ NOISE = [
 # pinned row's new version wherever its page has room, which depends on what
 # pruning had reclaimed, so trunk's own base and control disagreed at
 # /items/1 and /items/10 (/items/12 and /13 in another run) from the day the
-# pin landed. From that lane on, trunk answers ties in id order and this
-# settling is the identity on every side. Only ADJACENT runs are settled, and
-# EVERY adjacent run is: the owned achievement rows the route appends after
-# the catalogue are settled like the catalogue's, and a run is not split where
-# the catalogue ends, because no field of an answered row names its pool (the
-# rows carry id, sku, kind, name, price, owned, ...; catalogue rows can be
-# owned too). So an appended row whose price equals the last catalogue price
-# can be settled into the catalogue's run; an appended row at another price
-# keeps its place, and a row moved to another price is still a difference.
+# pin landed. From that lane on, trunk answers each pool's ties in id order,
+# so settling changes nothing on a side unless a joined run (below) is out of
+# id order across the pool boundary; the current fixture has none. Only
+# ADJACENT runs are settled, and EVERY adjacent run is: the owned achievement
+# rows the route appends after the catalogue are settled like the catalogue's,
+# and a run is not split where the catalogue ends, because no field of an
+# answered row names its pool (the rows carry id, sku, kind, name, price,
+# owned, ...; catalogue rows can be owned too). So appended rows whose price
+# equals the last catalogue price join the catalogue's run and are sorted with
+# it ([5, 9] + [7] at one price becomes [5, 7, 9]); appended rows at another
+# price are sorted among themselves and keep their place between the price
+# runs around them; a row moved to another price is still a difference.
 TIES = [
     ("GET", "/api/v1/shop/items", "/items", "price", "id"),
 ]
