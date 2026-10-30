@@ -23,6 +23,9 @@ What is pinned here:
     positive control (#680), and no superseded body key survives;
   * every new or changed catalogue entry passes main._i18n_validate, the
     server's submit/approve validator (with a negative control);
+  * 393's key hash guard names exactly the four (key_id, source_hash) pairs it
+    writes, and its key arm can only update a row that already carries that
+    source_hash (FENCE-R1 H1);
   * 393 and rollback_393 set lock_timeout, idle_in_transaction_session_timeout
     and statement_timeout as the three statements right after BEGIN, before
     anything reads, locks or writes (FENCE-R1 H4);
@@ -32,6 +35,9 @@ What is pinned here:
     and each post-check RAISES with nothing committed when its condition
     fails; a transaction holding one fence key row makes 393 fail with
     lock_not_available at its 5 s bound instead of waiting for the holder;
+    a row at one of its key_ids with another source_hash, live or retired,
+    makes it RAISE with that row untouched, while a superseded body row is
+    never touched and its own retired same-hash row is made live again;
     rollback_393 retires the four keys, supersedes their pending proposals
     and writes nothing on a second run.
 """
@@ -197,6 +203,20 @@ def test_393_is_one_transaction_with_single_line_literals():
         stripped = re.sub(_E, "", ln)
         stripped = re.sub(r"'[^'\n]*'", "", stripped)
         assert "'" not in stripped, ln[:120]
+
+
+def test_393_key_hash_guard_names_the_four_keys_it_writes():
+    """FENCE-R1 H1, static: the guard's pairs are the key rows' pairs, so the
+    guard cannot drift from what the upsert writes; the upsert's conflict arm
+    is gated on the existing row's source_hash and never sets source_hash."""
+    sql = _read(M393)
+    guard = sql.split("DO $guard393$", 1)[1].split("END $guard393$;", 1)[0]
+    pairs = set(re.findall(r"\(E'([0-9a-f]{16})', E'([0-9a-f]{40})'\)", guard))
+    assert pairs == {(r["key_id"], r["source_hash"]) for r in _fence_keys().values()}, pairs
+    assert sql.index("DO $guard393$") < sql.index("INSERT INTO i18n_keys")
+    arm = sql.split("ON CONFLICT (key_id) DO UPDATE", 1)[1].split(";", 1)[0]
+    assert "source_hash =" not in arm.split(" WHERE ", 1)[0], "the arm rewrites source_hash"
+    assert "WHERE i18n_keys.source_hash = EXCLUDED.source_hash" in arm
 
 
 BOUNDS = ("SET LOCAL lock_timeout = '5s';",
@@ -471,6 +491,96 @@ def test_rollback_393_retires_the_keys_supersedes_their_pending_and_reruns_clean
             await conn.execute(_read(R393))
             second = await _fingerprint(conn, ("i18n_keys", "i18n_proposals"))
             assert _changed(first, second) == 0, "a second run of rollback_393 wrote a row"
+        finally:
+            await _drop(live_pg, schema, conn)
+    _run(go())
+
+
+async def _rows(conn, table, key_id):
+    """Every row of `table` for `key_id`, as value AND version (xmin): equal
+    lists mean nothing wrote those rows, not merely that their values match."""
+    return [r[0] for r in await conn.fetch(
+        "SELECT t::text || '|' || t.xmin::text FROM %s t WHERE key_id = $1 ORDER BY 1" % table, key_id)]
+
+
+def test_393_refuses_a_fence_key_id_that_carries_another_source_hash(live_pg):
+    """FENCE-R1 H1: a row at one of 393's key_ids whose source_hash is not the
+    one 393 writes - live, then retired - makes 393 RAISE before any write,
+    naming the id, and the row survives byte for byte with nothing else
+    written. The source migration 269 refused it the same way."""
+    leave = _fence_keys()["leave"]["key_id"]
+    other = "Some other English"
+    sql = _read(M393)
+
+    async def go():
+        conn, schema = await _fresh_i18n(live_pg)
+        try:
+            await conn.execute(
+                "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, updated_at)"
+                " VALUES ($1, 'client', $2, $3, FALSE, clock_timestamp())",
+                leave, other, hashlib.sha1(other.encode("utf-8")).hexdigest())
+            for state in ("live", "retired"):
+                if state == "retired":
+                    await conn.execute(
+                        "UPDATE i18n_keys SET retired_at = clock_timestamp() WHERE key_id = $1", leave)
+                before = await _rows(conn, "i18n_keys", leave)
+                with pytest.raises(asyncpg.exceptions.RaiseError,
+                                   match=r"key %s \(%s\) already present with a different source_hash"
+                                   % (leave, state)):
+                    await conn.execute(sql)
+                await conn.execute("ROLLBACK")
+                assert await _rows(conn, "i18n_keys", leave) == before, state
+                assert await conn.fetchval("SELECT count(*) FROM i18n_keys") == 1, state
+                assert await conn.fetchval("SELECT count(*) FROM i18n_proposals") == 0, state
+        finally:
+            await _drop(live_pg, schema, conn)
+    _run(go())
+
+
+def test_393_leaves_a_superseded_body_row_alone_and_revives_its_own_retired_row(live_pg):
+    """The re-key exception, both halves (FENCE-R1 H1). A superseded body row -
+    the same context, its own key_id and hash, live, with an approved entry and
+    a pending proposal - is neither compared nor written: 393 commits and that
+    row, entry and proposal are byte-identical. A retired row at 393's own
+    TournHow id with the SAME hash (an earlier landing of the same text that a
+    key sync retired) is made live again."""
+    keys = _fence_keys()
+    how = keys["how"]
+    old = how["msgctxt"].replace("availability-check DM", "availability check")
+    assert old != how["msgctxt"]
+    old_id = hashlib.sha1(("client\0" + old).encode("utf-8")).hexdigest()[:16]
+    old_hash = hashlib.sha1(old.encode("utf-8")).hexdigest()
+    assert old_id != how["key_id"]
+
+    async def go():
+        conn, schema = await _fresh_i18n(live_pg)
+        try:
+            await conn.execute(
+                "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, context, updated_at)"
+                " VALUES ($1, 'client', $2, $3, TRUE, $4, clock_timestamp())",
+                old_id, old, old_hash, how["context"])
+            await conn.execute(
+                "INSERT INTO i18n_entries (key_id, language_code, target, state, approved_source_hash,"
+                " approved_by_steam_id) VALUES ($1, 'es', 'Texto aprobado', 'approved', $2, 'reviewer-test')",
+                old_id, old_hash)
+            await conn.execute(
+                "INSERT INTO i18n_proposals (key_id, language_code, source_hash, proposed_target,"
+                " proposer_steam_id, status) VALUES ($1, 'ru', $2, 'Tekst', 'reviewer-test', 'pending')",
+                old_id, old_hash)
+            await conn.execute(
+                "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, context,"
+                " updated_at, retired_at) VALUES ($1, 'client', $2, $3, TRUE, $4, clock_timestamp(),"
+                " clock_timestamp())",
+                how["key_id"], how["msgctxt"], how["source_hash"], how["context"])
+            before = [await _rows(conn, t, old_id) for t in ("i18n_keys", "i18n_entries", "i18n_proposals")]
+            assert [len(b) for b in before] == [1, 1, 1]
+
+            await conn.execute(_read(M393))
+            after = [await _rows(conn, t, old_id) for t in ("i18n_keys", "i18n_entries", "i18n_proposals")]
+            assert after == before, "393 wrote a superseded body row"
+            assert await conn.fetchval(
+                "SELECT retired_at IS NULL AND source_hash = $2 FROM i18n_keys WHERE key_id = $1",
+                how["key_id"], how["source_hash"]) is True
         finally:
             await _drop(live_pg, schema, conn)
     _run(go())

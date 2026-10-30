@@ -17,6 +17,18 @@
 -- next sync write the same row. The keys this edit supersedes ("Failed" and the two
 -- previous bodies) are NOT retired here: retirement by absence belongs to the key sync
 -- that ships with the client (learning #1032), and the shipped client still shows them.
+-- KEY HASH GUARD (the source migration 269's refusal, restored by the Codex FENCE-R1
+-- H1). A client key_id is derived from its English, so an existing row at one of these
+-- four ids whose source_hash is not the one written here cannot be a re-key of this
+-- text: it is a damaged row or an id collision. The guard RAISES on such a row, live or
+-- retired, before any write, and the key arm's ON CONFLICT updates only a row whose
+-- source_hash already matches, so a different-hash row that appears after the guard
+-- has read is left as it is and fails the post-check. The exception is a re-keyed
+-- body, and it never shares an id: the edited TournHow and TournForfeits bodies arrive
+-- under NEW key_ids, while the superseded body rows keep their own ids, hashes, entries
+-- and proposals, live or retired, and this file neither compares nor writes them. The
+-- one retired row it does change is a SAME-hash row at one of its own ids (an earlier
+-- landing of this exact text that a later key sync retired), which it makes live again.
 -- SEEDS: PENDING proposals for the two toasts only (2 keys x es/ru/uk/sv = 8 pairs),
 -- same contract as 385: sentinel proposer 'claude-mt', license_assent TRUE at the
 -- machine-v1 terms revision; the same text as the bundled plugin/I18nCatalogues.cs
@@ -44,6 +56,28 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL idle_in_transaction_session_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
+-- Key hash guard (see the header): before any write, refuse an existing row at one of
+-- the four ids whose source_hash is not the one this file writes.
+DO $guard393$
+DECLARE
+    clash TEXT;
+BEGIN
+    SELECT string_agg(k.key_id || CASE WHEN k.retired_at IS NULL THEN ' (live)' ELSE ' (retired)' END,
+                      ', ' ORDER BY k.key_id)
+      INTO clash
+      FROM i18n_keys k
+      JOIN (VALUES
+        (E'c4d5526dfaef7312', E'0d891dd93ff117f9cb982affdfdf2659f6fec53e'),
+        (E'8b0f70cb42c1cda3', E'e3303e8feef02cd0711fbca17db104b380e423c2'),
+        (E'f76648a14f012b93', E'dde2afe15d21de6b5ce4e0a459c84f911313a441'),
+        (E'fc5b6244bdd13c72', E'3960e8a1336364cf16f4a14fde90e1b691431c08')
+      ) AS x(key_id, source_hash) ON x.key_id = k.key_id
+     WHERE k.source_hash IS DISTINCT FROM x.source_hash;
+    IF clash IS NOT NULL THEN
+        RAISE EXCEPTION 'migration 393: key % already present with a different source_hash; a client key_id is derived from its English, so this is a damaged row or an id collision, never a re-key; nothing committed', clash;
+    END IF;
+END $guard393$;
+
 INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, max_px, context, updated_at)
 SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.context, clock_timestamp()
   FROM (VALUES
@@ -54,13 +88,14 @@ SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.con
   ) AS v(key_id, namespace, msgctxt, source_hash, sensitive, context)
 ON CONFLICT (key_id) DO UPDATE
    SET namespace = EXCLUDED.namespace, msgctxt = EXCLUDED.msgctxt,
-       source_hash = EXCLUDED.source_hash, sensitive = EXCLUDED.sensitive,
-       max_px = EXCLUDED.max_px, context = EXCLUDED.context,
-       retired_at = NULL, updated_at = clock_timestamp()
- WHERE (i18n_keys.namespace, i18n_keys.msgctxt, i18n_keys.source_hash, i18n_keys.sensitive,
+       sensitive = EXCLUDED.sensitive, max_px = EXCLUDED.max_px,
+       context = EXCLUDED.context, retired_at = NULL, updated_at = clock_timestamp()
+ -- never a different-hash row (the key hash guard): it stays as found and fails the post-check
+ WHERE i18n_keys.source_hash = EXCLUDED.source_hash
+   AND (i18n_keys.namespace, i18n_keys.msgctxt, i18n_keys.sensitive,
         i18n_keys.max_px, i18n_keys.context, i18n_keys.retired_at)
        IS DISTINCT FROM
-       (EXCLUDED.namespace, EXCLUDED.msgctxt, EXCLUDED.source_hash, EXCLUDED.sensitive,
+       (EXCLUDED.namespace, EXCLUDED.msgctxt, EXCLUDED.sensitive,
         EXCLUDED.max_px, EXCLUDED.context, CAST(NULL AS TIMESTAMPTZ));
 
 -- Post-check (enforcing): every expected key live with the expected source text, hash,
