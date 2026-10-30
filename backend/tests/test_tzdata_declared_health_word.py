@@ -1,9 +1,12 @@
 """The tzdata batch's build discriminator: /health carries `tzdata_declared`,
 the module constant main._TZDATA_DECLARED_BUILD (1), on both health_check
-arms, required by the schema. The batch changes no route and, on the image,
-no behaviour (zoneinfo reads the system zone database before the package),
-so the release train can tell a refreshed box from a stale one only by this
-key (learnings 780, 794). A constant equal on both roles, so the train can
+arms, required by the schema. The batch adds no route, and on the image
+zone resolution is unchanged for every key the system zone database holds
+(zoneinfo searches TZPATH before the package). The `build_manifest` word
+also changes (one more wheel, so the build context and wheel inventory
+move), but its value cannot be predicted (it hashes a file only the image
+build writes); this key is the one whose expected value is known before the
+build (learnings 780, 794). A constant equal on both roles, so the train can
 read it through the edge. The form is the shop_floor test's
 (test_shop_floor_health_word.py)."""
 import ast

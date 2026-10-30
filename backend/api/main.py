@@ -7631,12 +7631,17 @@ _LEAVE_ANCHOR_BUILD = 1
 _SHOP_FLOOR_BUILD = 1
 # Release-train verification plumbing, not a design mechanism: the build
 # marker of the batch that declares tzdata (requirements.txt and its lock),
-# reported on /health as `tzdata_declared`. The batch changes no route and,
-# on the image, no behaviour (zoneinfo reads the system zone database
-# first), so without it no phase of the train could tell a box on the new
-# build from a stale one (learnings 780, 794). A code constant, equal on
-# both boxes by construction, probed by the release train and read by
-# nothing else (#306). Absent on any build before it.
+# reported on /health as `tzdata_declared`. The batch adds no route.
+# On the image, zone resolution is unchanged for every key the system zone
+# database holds (zoneinfo searches TZPATH before the package); what does
+# change is build provenance: the image installs one more wheel, so the
+# build context and the wheel inventory move, and with them the
+# `build_manifest` word. That word cannot be predicted (it hashes a file
+# only the image build writes), so it cannot be a train expectation; this
+# constant is the discriminator whose expected value is known before the
+# build (learnings 780, 794). Equal on both boxes by construction, probed
+# by the release train and read by nothing else (#306). Absent on any
+# build before it.
 _TZDATA_DECLARED_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's

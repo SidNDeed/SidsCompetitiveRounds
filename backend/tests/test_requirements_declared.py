@@ -31,11 +31,12 @@ the check report exactly that module with its importing files, which is the
 directly leaves the check green.
 
 ZONE DATA, the dependency no import names (lesson 913). zoneinfo looks a key
-up in TZPATH first and in the tzdata package second. Windows Python has an
-empty TZPATH, so every ZoneInfo(key) there needs tzdata installed, UTC
-included (zoneinfo keeps no built-in zone); tournaments.py builds
-ZoneInfo("America/Los_Angeles") at import time, and the same 2026-10-17 laptop
-seat failed 20 database tests on it. So every file under backend/api or
+up in TZPATH first and in the tzdata package second. Windows Python's
+default TZPATH is empty, so unless PYTHONTZPATH names a zone database, every
+ZoneInfo(key) there needs tzdata installed, UTC included (zoneinfo keeps no
+built-in zone); tournaments.py builds ZoneInfo("America/Los_Angeles") at
+import time, and the same 2026-10-17 laptop seat had 2 failures and 18
+errors on it in its database test sets. So every file under backend/api or
 backend/tests that constructs a ZoneInfo (ZoneInfo(key) or
 ZoneInfo.no_cache(key), by any name zoneinfo was imported as, at import time
 or inside a function) needs tzdata declared: by backend/api/requirements.txt
