@@ -202,6 +202,7 @@
   "Detail: an ice cream cone tipped upside down, melting over your head. Equip in the Character editor.",
   "Detail: an orange and grey striped top hat with a grumpy face badge. Equip in the Character editor.",
   "Detail: certified angel. Equip in the Character editor.",
+  "Detail: community cosmetic. Equip in the Character editor.",
   "Detail: community cosmetic. Ships with the next mod update; equip in the Character editor.",
   "Detail: cozy star-studded earmuffs. Equip in the Character editor.",
   "Detail: green tear streaks running down both cheeks. Equip in the Character editor.",
@@ -286,6 +287,7 @@
   "Gold",
   "Gold Name",
   "Gold Rush",
+  "Gold headband",
   "Golden Eagle",
   "Goober",
   "Good Dog",
@@ -424,6 +426,7 @@
   "Orange Cursor",
   "Orange melting into pink. Golden hour, every round. Two-color gradient.",
   "Orange-to-yellow gradient that sears the arena.",
+  "Orbit",
   "Orchid Gradient",
   "Pacifist",
   "Pale icy blue, like a winter sky.",
@@ -480,6 +483,7 @@
   "Pronoun title.",
   "Prospector",
   "Prowler",
+  "Pumpking Hat",
   "Pup",
   "Pure aggression",
   "Pure greyscale — minimum visual distraction.",
@@ -511,6 +515,7 @@
   "Reborn after defeat",
   "Red Cursor",
   "Red Name",
+  "Red Scarf",
   "Reef Shark",
   "Refresh",
   "Regular",
@@ -726,6 +731,7 @@
   "Yellow Cursor",
   "Yin & Yang",
   "You show up.",
-  "Your name fades from warm amber into deep pink."
+  "Your name fades from warm amber into deep pink.",
+  "leafy mushroom"
  ]
 }

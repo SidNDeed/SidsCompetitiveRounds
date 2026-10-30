@@ -255,6 +255,17 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_eyes_the_cryptid",       DisplayName = "The Cryptid",      Slot = CharacterItemType.Eyes,   PngFile = "eyes_the_cryptid.png",       Scale = 1.45f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_detail_straw_hat",       DisplayName = "Straw Hat",        Slot = CharacterItemType.Detail, PngFile = "detail_straw_hat.png",       Scale = 1.75f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_detail_florabelle",      DisplayName = "FloraBelle",       Slot = CharacterItemType.Detail, PngFile = "detail_florabelle.png",      Scale = 1.6f,  Offset = Vector2.zero },
+            // v1.41.0 batch: five approved community faces (submissions 69-73,
+            // in submission order), values from the approved_* snapshot (#165):
+            // approved placement revision 1, offset (0,0), single frame each.
+            // Display names are the submissions' own spellings, verbatim.
+            // Migration 398 publishes them; its guard pins each sku's scale,
+            // offset, revision and frame count to these rows.
+            new CosmeticDef { Sku = "face_detail_gold_headband",   DisplayName = "Gold headband",    Slot = CharacterItemType.Detail, PngFile = "detail_gold_headband.png",   Scale = 1.45f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_orbit",           DisplayName = "Orbit",            Slot = CharacterItemType.Detail, PngFile = "detail_orbit.png",           Scale = 1.6f,  Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_pumpking_hat",    DisplayName = "Pumpking Hat",     Slot = CharacterItemType.Detail, PngFile = "detail_pumpking_hat.png",    Scale = 1.4f,  Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_leafy_mushroom",  DisplayName = "leafy mushroom",   Slot = CharacterItemType.Detail, PngFile = "detail_leafy_mushroom.png",  Scale = 1.3f,  Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_red_scarf",       DisplayName = "Red Scarf",        Slot = CharacterItemType.Detail, PngFile = "detail_red_scarf.png",       Scale = 1.6f,  Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();
