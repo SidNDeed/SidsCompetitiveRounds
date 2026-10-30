@@ -8404,6 +8404,19 @@ async def _check_fps_lag_flags(
 
 # ── Routes: Match Submission ───────────────────────────────────
 
+def _macro_evidence_answer(match_id) -> dict:
+    """The one answer every valid macro-evidence POST gets.
+
+    The evidence lands in one of four ways: merged into an unreviewed flag the
+    reporter's peer snapshot already opened, a new flag beside a reviewed one
+    (superseding it), a new flag, or nothing at all (a retry of an attach that
+    already happened). Which of those ran depends on the flag rows the caller
+    has, so it is recorded on the flag row and shown on the admin surfaces
+    only. The participant's answer is the same status and body in every case:
+    no flag id, no path word."""
+    return {"status": "recorded", "match_id": str(match_id)}
+
+
 @app.post("/api/v1/matches/macro-evidence", tags=["Matches"])
 async def submit_macro_evidence(
     request: Request,
@@ -8412,7 +8425,12 @@ async def submit_macro_evidence(
 ):
     """Attach a participant's exact local macro windows to its just-recorded
     1v1 match. Each client sends this independently, so the elected reporter
-    does not need to receive the final Photon property before game-over."""
+    does not need to receive the final Photon property before game-over.
+
+    Every accepted POST answers _macro_evidence_answer(match): the same status
+    and body whatever flag rows exist for the caller (pending, confirmed,
+    dismissed, legacy key, none). The flag state decides only what is written
+    to flagged_matches."""
     reporter_steam = str(payload.get("reporter_steam_id") or "")
     p1_steam = str(payload.get("p1_steam_id") or "")
     p2_steam = str(payload.get("p2_steam_id") or "")
@@ -8521,11 +8539,7 @@ async def submit_macro_evidence(
         "LIMIT 1"
     ), {"fingerprint": evidence_fingerprint})).mappings().first()
     if prior_attach is not None:
-        return {
-            "status": "already_recorded",
-            "match_id": str(prior_attach["match_id"]),
-            "flag_id": str(prior_attach["id"]),
-        }
+        return _macro_evidence_answer(prior_attach["match_id"])
 
     players = (await db.execute(
         select(Player).where(Player.steam_id.in_([p1_steam, p2_steam]))
@@ -8566,11 +8580,7 @@ async def submit_macro_evidence(
         "LIMIT 1"
     ), {"fingerprint": evidence_fingerprint})).mappings().first()
     if prior_attach is not None:
-        return {
-            "status": "already_recorded",
-            "match_id": str(prior_attach["match_id"]),
-            "flag_id": str(prior_attach["id"]),
-        }
+        return _macro_evidence_answer(prior_attach["match_id"])
 
     existing_flag = (await db.execute(text(
         "SELECT id FROM flagged_matches "
@@ -8637,11 +8647,7 @@ async def submit_macro_evidence(
             flag.flag_details = merged_details
             flag.discord_posted_at = None
             await db.commit()
-            return {
-                "status": "evidence_upgraded",
-                "match_id": str(match.id),
-                "flag_id": str(flag.id),
-            }
+            return _macro_evidence_answer(match.id)
         if flag is not None:
             # Preserve the completed audit decision and open a fresh review
             # item for materially stronger evidence that arrived afterward.
@@ -8656,11 +8662,7 @@ async def submit_macro_evidence(
     )
     db.add(flag)
     await db.commit()
-    return {
-        "status": "recorded",
-        "match_id": str(match.id),
-        "flag_id": str(flag.id),
-    }
+    return _macro_evidence_answer(match.id)
 
 
 async def _apply_series_rating_pass(db: AsyncSession, series, p1, p2) -> bool:
