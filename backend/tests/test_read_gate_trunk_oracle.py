@@ -90,9 +90,14 @@ NOISE = [
 # pruning had reclaimed, so trunk's own base and control disagreed at
 # /items/1 and /items/10 (/items/12 and /13 in another run) from the day the
 # pin landed. From that lane on, trunk answers ties in id order and this
-# settling is the identity on every side. Only ADJACENT runs are settled: the
-# owned achievement rows the route appends after the catalogue keep their
-# place, and a row moved to another price is still a difference.
+# settling is the identity on every side. Only ADJACENT runs are settled, and
+# EVERY adjacent run is: the owned achievement rows the route appends after
+# the catalogue are settled like the catalogue's, and a run is not split where
+# the catalogue ends, because no field of an answered row names its pool (the
+# rows carry id, sku, kind, name, price, owned, ...; catalogue rows can be
+# owned too). So an appended row whose price equals the last catalogue price
+# can be settled into the catalogue's run; an appended row at another price
+# keeps its place, and a row moved to another price is still a difference.
 TIES = [
     ("GET", "/api/v1/shop/items", "/items", "price", "id"),
 ]
@@ -556,10 +561,14 @@ def test_settle_control(monkeypatch):
                                     {"id": 3, "sku": "s3", "price": 100}, {"id": 7, "sku": "s7", "price": 200},
                                     {"id": 5, "sku": "s5", "price": 300}]}))
     assert compare(shop, [base], [changed], [ctl])[0]
-    # only ADJACENT equal prices form a run: an appended row keeps its place
+    # only ADJACENT equal prices form a run: an appended row at another price keeps its place
     tail = _shop((3, 100), (1, 100), (7, 200), (2, 100))
     assert compare(shop, [tail], [_shop((1, 100), (2, 100), (3, 100), (7, 200))], [tail])[0]
     assert not compare(shop, [tail], [_shop((1, 100), (3, 100), (7, 200), (2, 100))], [tail])[0]
+    # the limit, stated: a run is not split at the catalogue's end, so appended rows at the
+    # last catalogue price are settled into its run (no answered field names a row's pool)
+    joined = _shop((5, 300), (9, 300), (7, 300))
+    assert not compare(shop, [joined], [_shop((5, 300), (7, 300), (9, 300))], [joined])[0]
     # a body that does not round-trip is compared raw
     spaced = _r(b'{"items": [{"id": 3, "price": 100}, {"id": 1, "price": 100}]}')
     plain = _r(b'{"items": [{"id": 1, "price": 100}, {"id": 3, "price": 100}]}')
