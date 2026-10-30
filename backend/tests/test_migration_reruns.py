@@ -590,8 +590,11 @@ def test_391_refuses_a_same_named_column_of_another_type():
 # as it stays stopped. Both files therefore open with three timeouts and hold
 # exactly one statement between them and COMMIT. statement_timeout and
 # idle_in_transaction_session_timeout have separate budgets and PostgreSQL 16
-# has no transaction_timeout, so the HOLD BOUND IS THEIR SUM, held here to
-# _391_HOLD_BOUND_S.
+# has no transaction_timeout, so the hold up to COMMIT is bounded by THEIR
+# SUM, held here to _391_HOLD_BOUND_S. The COMMIT's own local completion (the
+# WAL flush and the transaction-status write) is outside every setting, for
+# this and every PostgreSQL transaction; the fourth line keeps it local (no
+# standby wait). The stated bound is 30 s plus that local completion.
 
 _391_FILES = {
     "migration": "391_dc_events_leave_anchor.sql",
@@ -608,8 +611,9 @@ _391_HOLD_BOUND_S = 30.0
 
 def _391_commit_waits_locally(stmts) -> bool:
     """True when exactly one SET LOCAL synchronous_commit line sets it to
-    `local`: the COMMIT (outside every timeout) then waits for the local WAL
-    flush only, never for a synchronous standby."""
+    `local`: the COMMIT (outside every timeout) then completes locally -- WAL
+    flush and transaction-status write, which no setting bounds -- and never
+    waits for a synchronous standby."""
     got = [s for s in stmts if s.startswith("SET LOCAL synchronous_commit")]
     return got == ["SET LOCAL synchronous_commit = local"]
 
@@ -695,9 +699,12 @@ def _top_level_statements(sql: str) -> list:
 
 @pytest.mark.parametrize("which", sorted(_391_FILES))
 def test_391_opens_with_three_timeouts_and_one_statement_before_commit(which):
-    """BEGIN, the three SET LOCAL lines, ONE statement (the DO block in the
+    """BEGIN, the four SET LOCAL lines, ONE statement (the DO block in the
     migration, the DROP in the rollback), COMMIT -- nothing else, in that
-    order."""
+    order. What this proves: everything before COMMIT is bounded (statement +
+    idle <= 30 s) and the COMMIT waits for no standby. What it cannot prove,
+    because no setting provides it: a bound on the COMMIT's local completion
+    (WAL flush, transaction-status write)."""
     stmts = [" ".join(s.split()) for s in _top_level_statements(
         (SQL_DIR / _391_FILES[which]).read_text(encoding="utf-8"))]
     assert stmts[0] == "BEGIN" and stmts[-1] == "COMMIT", stmts
@@ -714,8 +721,8 @@ def test_391_opens_with_three_timeouts_and_one_statement_before_commit(which):
     else:
         assert stmts[1 + n].startswith("ALTER TABLE dc_events DROP COLUMN"), stmts[1 + n]
     assert _391_commit_waits_locally(stmts), (
-        "%s: the COMMIT is outside every timeout; it must wait for the local "
-        "WAL flush only (SET LOCAL synchronous_commit = local)" % _391_FILES[which])
+        "%s: the COMMIT is outside every timeout; it must complete locally "
+        "and wait for no standby (SET LOCAL synchronous_commit = local)" % _391_FILES[which])
     bound = _391_hold_bound(stmts)
     assert bound <= _391_HOLD_BOUND_S, (
         "%s: statement_timeout + idle_in_transaction_session_timeout = %ss; the "

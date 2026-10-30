@@ -9,12 +9,16 @@
 -- The hold bound is statement plus idle (separate budgets; PostgreSQL 16 has
 -- no transaction_timeout): 25 s + 5 s = 30 s.
 -- THE COMMIT. PostgreSQL disables the statement timer before it commits, so
--- the COMMIT's own wait is outside every timeout above. synchronous_commit
--- = local makes that wait the local WAL flush only, never a standby's
+-- the COMMIT's own work is outside every timeout above. synchronous_commit
+-- = local keeps that work LOCAL: it never waits for a standby's
 -- confirmation, whatever synchronous_standby_names says now or later (read
--- on the primary 2026-10-30: empty, synchronous_commit on, server 16.15, so
--- today the wait is already the local flush; the line keeps it so). No
--- setting bounds the local WAL flush itself: the hold is 30 s plus that.
+-- on the primary 2026-10-30: empty, synchronous_commit on, server 16.15).
+-- BOUNDED: everything before COMMIT -- the wait for the lock (5 s, before
+-- the hold starts) and the hold up to COMMIT (statement 25 s + idle 5 s =
+-- 30 s). NOT BOUNDED: the COMMIT's local completion -- the WAL flush and the
+-- transaction-status (pg_xact) write, which can read an evicted page -- I/O
+-- that no PostgreSQL setting bounds, for this or any transaction. The hold
+-- is therefore 30 s plus the COMMIT's local completion.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
