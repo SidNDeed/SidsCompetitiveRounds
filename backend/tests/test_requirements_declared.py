@@ -29,6 +29,22 @@ Controls (#391): the scanner reports a bare import and skips a guarded one
 the check report exactly that module with its importing files, which is the
 2026-10-17 finding; taking out a declared distribution that nothing imports
 directly leaves the check green.
+
+ZONE DATA, the dependency no import names (lesson 913). zoneinfo looks a key
+up in TZPATH first and in the tzdata package second. Windows Python has an
+empty TZPATH, so every ZoneInfo(key) there needs tzdata installed, UTC
+included (zoneinfo keeps no built-in zone); tournaments.py builds
+ZoneInfo("America/Los_Angeles") at import time, and the same 2026-10-17 laptop
+seat failed 20 database tests on it. So every file under backend/api or
+backend/tests that constructs a ZoneInfo (ZoneInfo(key) or
+ZoneInfo.no_cache(key), by any name zoneinfo was imported as, at import time
+or inside a function) needs tzdata declared: by backend/api/requirements.txt
+for a file under backend/api (the api runs on every seat), by either file for
+a test. requirements.lock must carry the same version with one hash.
+datetime.timezone.utc needs no zone data and is not a site. Controls: the
+scanner on synthetic sources, the import-time site in tournaments.py found
+today, and tzdata taken out of the declared names reporting exactly that
+file.
 """
 
 import ast
@@ -230,9 +246,80 @@ def undeclared(found, declared):
     return missing
 
 
+API_LOCK = BACKEND / "api" / "requirements.lock"
+ZONE_DATA = "tzdata"
+
+
+def zone_sites(source):
+    """[(line, import_time)] for every ZoneInfo construction in `source`:
+    ZoneInfo(...) or ZoneInfo.no_cache(...), reached through any name the
+    file bound from `zoneinfo` (`from zoneinfo import ZoneInfo as Z`,
+    `import zoneinfo as z`). import_time: no enclosing def or lambda, so the
+    import of the module runs it. A name ZoneInfo that zoneinfo did not
+    provide is not a site."""
+    tree = ast.parse(source)
+    parent = _parents(tree)
+    classes, modules = set(), set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module == "zoneinfo":
+            classes.update(a.asname or a.name for a in n.names if a.name == "ZoneInfo")
+        elif isinstance(n, ast.Import):
+            modules.update(a.asname or a.name for a in n.names if a.name == "zoneinfo")
+
+    def is_class(node):
+        return ((isinstance(node, ast.Name) and node.id in classes)
+                or (isinstance(node, ast.Attribute) and node.attr == "ZoneInfo"
+                    and isinstance(node.value, ast.Name) and node.value.id in modules))
+
+    out = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        if not (is_class(f) or (isinstance(f, ast.Attribute) and f.attr == "no_cache"
+                                and is_class(f.value))):
+            continue
+        child, import_time = n, True
+        while child in parent:
+            child = parent[child]
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                import_time = False
+                break
+        out.append((n.lineno, import_time))
+    return sorted(out)
+
+
+def _zone_scan():
+    """{file under backend/: zone_sites(file)} for every scanned file with a site."""
+    out = {}
+    for top in SCANNED:
+        for root, dirs, files in os.walk(top):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for f in files:
+                if f.endswith(".py"):
+                    p = Path(root) / f
+                    sites = zone_sites(p.read_text(encoding="utf-8"))
+                    if sites:
+                        out[p.relative_to(BACKEND).as_posix()] = sites
+    return out
+
+
+def zone_data_missing(sites, api_declared, all_declared):
+    """{file: sites} for each file that constructs a ZoneInfo while the file
+    its code is installed from does not declare tzdata: the api file for
+    backend/api, either file for backend/tests."""
+    missing = {}
+    for rel, found in sorted(sites.items()):
+        need = api_declared if rel.startswith("api/") else all_declared
+        if ZONE_DATA not in need:
+            missing[rel] = found
+    return missing
+
+
 SCAN = _scan()
 FOUND = third_party(SCAN)
 DECLARED = _declared(API_REQ) | _declared(TEST_REQ)
+ZONE_SITES = _zone_scan()
 
 
 def test_the_test_file_takes_the_api_requirements_first():
@@ -334,6 +421,59 @@ def test_the_17_oct_finding_turns_the_check_red():
         missing = undeclared(FOUND, DECLARED - {dist})
         assert set(missing) == {mod}, (dist, missing)
         assert missing[mod] == FOUND[mod]
+
+
+def test_the_zone_scanner_finds_every_construction_form():
+    src = ("import datetime\n"
+           "from zoneinfo import ZoneInfo\n"
+           "from zoneinfo import ZoneInfo as Z\n"
+           "import zoneinfo as zi\n"
+           "A = ZoneInfo('America/Los_Angeles')\n"
+           "B = Z('UTC')\n"
+           "C = zi.ZoneInfo.no_cache('Europe/Paris')\n"
+           "U = datetime.timezone.utc\n"
+           "def f(k):\n    return zi.ZoneInfo(k)\n"
+           "g = lambda: ZoneInfo.no_cache('Asia/Tokyo')\n"
+           "class K:\n    tz = Z('Etc/GMT')\n")
+    assert zone_sites(src) == [(5, True), (6, True), (7, True), (10, False),
+                               (11, False), (13, True)], zone_sites(src)
+    # a ZoneInfo that zoneinfo did not provide, and zoneinfo.ZoneInfo.from_file
+    # (no key lookup), are not sites
+    other = ("from mytz import ZoneInfo\nX = ZoneInfo('UTC')\n"
+             "import zoneinfo\nY = zoneinfo.ZoneInfo.from_file(open('f', 'rb'))\n")
+    assert zone_sites(other) == [], zone_sites(other)
+
+
+def test_tournaments_builds_a_zone_at_import_today():
+    """The positive control: the site lesson 913 found is still found, at
+    import time, so a green census below is not a scanner that sees nothing."""
+    sites = ZONE_SITES.get("api/tournaments.py")
+    assert sites and any(t for _line, t in sites), ZONE_SITES
+
+
+def test_every_zone_construction_has_zone_data_declared():
+    assert zone_data_missing(ZONE_SITES, _declared(API_REQ), DECLARED) == {}
+
+
+def test_taking_tzdata_out_turns_the_zone_check_red():
+    api = _declared(API_REQ)
+    assert ZONE_DATA in api, sorted(api)
+    gone = zone_data_missing(ZONE_SITES, api - {ZONE_DATA}, DECLARED - {ZONE_DATA})
+    assert gone == {r: s for r, s in ZONE_SITES.items()}, gone
+    assert "api/tournaments.py" in gone
+    # declared by the test file only: an api file is still red (the image
+    # and a seat that installs the api file alone do not read the test file)
+    test_only = zone_data_missing(ZONE_SITES, api - {ZONE_DATA}, DECLARED | {ZONE_DATA})
+    assert "api/tournaments.py" in test_only, test_only
+
+
+def test_the_lock_carries_tzdata_at_the_declared_version_with_one_hash():
+    want = _pins(API_REQ.read_text(encoding="utf-8"))[ZONE_DATA]
+    text = API_LOCK.read_text(encoding="utf-8")
+    m = re.search(r"(?m)^tzdata==(\S+) \\\n((?:    --hash=sha256:[0-9a-f]{64}(?: \\)?\n)+)", text)
+    assert m, "requirements.lock has no tzdata entry"
+    assert m.group(1) == want, (m.group(1), want)
+    assert len(re.findall(r"--hash=sha256:", m.group(2))) == 1, m.group(2)
 
 
 def test_an_inert_removal_keeps_the_check_green():

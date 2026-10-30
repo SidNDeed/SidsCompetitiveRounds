@@ -18,3 +18,11 @@ pydantic==2.9.2
 pillow==11.3.0
 # UAX#29 grapheme clusters (\X) for the Player Cards face renderer (pc_face.py).
 regex==2026.9.3
+# IANA time zone data for zoneinfo. tournaments.py builds
+# ZoneInfo("America/Los_Angeles") at import time, and Windows Python has no
+# system zone database, so a seat built from these files alone could not
+# import the api without it. On the image it is not consulted for any zone
+# the system database has: zoneinfo searches TZPATH (/usr/share/zoneinfo,
+# filled by the base image's Debian tzdata package) before this package.
+# Pure Python, one py2.py3-none-any wheel.
+tzdata==2026.6
