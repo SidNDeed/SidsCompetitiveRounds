@@ -21,13 +21,21 @@ module; one match between two synthetic players is seeded once; every case
 starts with no flag row, files its own, and POSTs the same signed evidence
 through the route function itself (main.submit_macro_evidence) on a session
 whose search_path is that schema, then runs the background tasks the route
-added, as Starlette does after sending the response. The signature is the
-real HMAC over the route's canonical under a test secret; the Steam session
-check, which runs before anything here and reads no flag, is a no-op.
+added, as Starlette does once the response has been handed over for
+transmission. The signature is the real HMAC over the route's canonical
+under a test secret; the Steam session check, which runs before anything
+here and reads no flag, is a no-op.
+
+The background attach itself (Codex SMALL-ABC-R3): two attaches of one
+fingerprint, the second entering while the first holds the fingerprint's
+advisory lock, end with exactly one row; a deadlock (40P01) is retried
+through the ladder and, on every attempt, lands in the fallback row; a
+non-transient error goes straight to the fallback.
 
 Mutation controls (#391): the shipped route with the attach run on the
-request path and its outcome answered (the pre-fix shape) must turn the
-checks red, and an inert twin of the same edit must keep them green.
+request path and its outcome answered (the pre-fix shape), the attach
+without its fingerprint lock, and the round-2 ladder that retried only
+55P03 must each turn their check red; inert twins stay green.
 
 MACRO_EVIDENCE_TEST_PG_DSN names a throwaway database (postgresql:// or the
 postgresql+asyncpg:// form); unset, every executed case FAILS rather than
@@ -485,7 +493,8 @@ def test_the_background_effect_runs_after_the_response(rig):
 
 def test_a_row_held_through_every_attempt_still_records_the_evidence(rig):
     """NOWAIT never queues: a row held through every attempt ends in the
-    evidence recorded as its own new flag, the held row untouched."""
+    evidence recorded as its own new flag (marked with 55P03), the held row
+    untouched."""
     got = _held_row_answers(rig, main.submit_macro_evidence)
     try:
         started = time.monotonic()
@@ -497,6 +506,7 @@ def test_a_row_held_through_every_attempt_still_records_the_evidence(rig):
     assert took < LOCK_TIMEOUT_S, took
     new = [d for i, d in rows.items() if i != got["pending"]]
     assert len(new) == 1 and new[0].get("attach_lock_unavailable") is True, rows
+    assert new[0].get("attach_fallback_sqlstate") == "55P03", new[0]
     assert "evidence_fingerprint" not in rows[got["pending"]]
 
 
@@ -522,3 +532,228 @@ def test_the_request_path_attach_turns_the_checks_red_and_the_inert_twin_does_no
     # the request-path attach meets the held row: a refusal the unflagged
     # request never sees
     assert held["flagged"] != held["unflagged"], held
+
+
+# -- the background attach: one row per fingerprint (R3 H2) ------------------------
+
+def _function_variant(name, edit):
+    """main.<name> compiled from its shipped source after `edit(fn_node)`;
+    nothing else differs."""
+    src = textwrap.dedent(inspect.getsource(getattr(main, name)))
+    fn = ast.parse(src).body[0]
+    fn.decorator_list = []
+    edit(fn)
+    ast.fix_missing_locations(fn)
+    ns = dict(vars(main))
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<%s variant>" % name, "exec"), ns)
+    return ns[name]
+
+
+def _lock_statements(fn):
+    return [s for s in fn.body if isinstance(s, ast.Expr) and isinstance(s.value, ast.Await)
+            and isinstance(s.value.value, ast.Call)
+            and getattr(s.value.value.func, "id", None) == "_macro_evidence_fingerprint_lock"]
+
+
+def _without_the_lock(fn):
+    [stmt] = _lock_statements(fn)
+    fn.body[fn.body.index(stmt)] = ast.Pass()
+
+
+def _lock_taken_twice(fn):
+    [stmt] = _lock_statements(fn)
+    i = fn.body.index(stmt)
+    fn.body[i:i + 1] = [stmt, ast.parse(ast.unparse(stmt)).body[0]]
+
+
+ATTACH_ONCE_VARIANTS = {
+    "shipped": lambda: main._macro_evidence_attach_once,
+    "without the fingerprint lock": lambda: _function_variant(
+        "_macro_evidence_attach_once", _without_the_lock),
+    "inert twin (lock taken twice)": lambda: _function_variant(
+        "_macro_evidence_attach_once", _lock_taken_twice),
+}
+
+
+def _evidence(rig):
+    """The evidence dict the route hands its background task, captured from
+    a real POST (the task itself is not run)."""
+    rig.run(rig.file_case("none"))
+    answer, _s, tasks = rig.run(rig.post(main.submit_macro_evidence, _payload()))
+    assert answer == _expected(rig), answer
+    [task] = tasks.tasks
+    assert task.func is main._macro_evidence_attach
+    return task.args[1]
+
+
+async def _two_attaches(rig, attach_once, ev):
+    """Attach #1 takes the fingerprint lock, finds nothing, inserts and then
+    pauses before its COMMIT; attach #2 starts while #1 holds the lock; then
+    #1 commits. Both are fallback attaches (every NOWAIT attempt exhausted),
+    the Codex SMALL-ABC-R3 scenario. Returns both outcomes."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+    gate = asyncio.Event()
+
+    class Paused(AsyncSession):
+        async def commit(self):
+            await gate.wait()
+            await super().commit()
+
+    # the fallback's SQLSTATE argument only where the function takes one, so
+    # the red run against the round-2 attach fails on rows, not on arity
+    marker = ("55P03",) if len(inspect.signature(attach_once).parameters) > 3 else ()
+
+    async def one(cls):
+        async with cls(rig.sessions, expire_on_commit=False) as db:
+            return await attach_once(db, ev, False, *marker)
+
+    first = asyncio.ensure_future(one(Paused))
+    await asyncio.sleep(0.5)
+    assert not first.done()
+    second = asyncio.ensure_future(one(AsyncSession))
+    await asyncio.sleep(0.5)
+    gate.set()
+    return await asyncio.gather(first, second)
+
+
+@pytest.mark.parametrize("name", list(ATTACH_ONCE_VARIANTS))
+def test_two_attaches_of_one_fingerprint_make_one_row(rig, name):
+    ev = _evidence(rig)
+    rig.run(rig.file_case("none"))
+    outcomes = rig.run(_two_attaches(rig, ATTACH_ONCE_VARIANTS[name](), ev))
+    rows = rig.run(rig.flag_rows())
+    if name == "without the fingerprint lock":
+        assert len(rows) == 2 and sorted(outcomes) == ["recorded", "recorded"], (outcomes, rows)
+        return
+    assert sorted(outcomes) == ["already_recorded", "recorded"], outcomes
+    assert len(rows) == 1, rows
+
+
+def test_the_fingerprint_lock_comes_before_every_read_and_write():
+    """The lock is the attempt's first statement after its docstring, ahead
+    of the dedupe read and the insert, on both the NOWAIT and the fallback
+    path (one statement, no branch around it)."""
+    src = textwrap.dedent(inspect.getsource(main._macro_evidence_attach_once))
+    fn = ast.parse(src).body[0]
+    body = [s for s in fn.body if not (isinstance(s, ast.Expr)
+                                       and isinstance(s.value, ast.Constant))]
+    [lock] = _lock_statements(fn)
+    assert body.index(lock) == 1, [ast.unparse(s)[:60] for s in body[:3]]  # after `fingerprint = ...`
+    first_read = min(n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+                     and getattr(n.func, "id", None) == "attached_already")
+    first_add = min(n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "add")
+    assert lock.lineno < first_read < first_add
+
+
+# -- the background attach: the retry ladder by SQLSTATE class (R3 H3) -------------
+
+# The round-2 ladder, verbatim but for its name, with the single-code check it
+# used: the mutant the class fix must beat.
+OLD_LADDER = """
+def _is_lock_not_available(ex) -> bool:
+    seen, todo = set(), [ex]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if (getattr(e, "sqlstate", None) == "55P03"
+                or getattr(e, "pgcode", None) == "55P03"
+                or type(e).__name__ == "LockNotAvailableError"):
+            return True
+        todo.extend((getattr(e, "orig", None), e.__cause__, e.__context__))
+    return False
+
+
+async def _macro_evidence_attach(session_factory, ev: dict) -> str:
+    tag = str(ev.get("fingerprint", ""))[:12]
+    attempts = len(_MACRO_ATTACH_DELAYS) + 1
+    for attempt in range(attempts + 1):
+        may_lock = attempt < attempts
+        try:
+            async with session_factory() as db:
+                outcome = await _macro_evidence_attach_once(db, ev, may_lock)
+            print(f"[MACRO-EVIDENCE] {tag} {outcome} (attempt {attempt + 1})")
+            return outcome
+        except Exception as ex:
+            if not (may_lock and _is_lock_not_available(ex)):
+                print(f"[MACRO-EVIDENCE] {tag} NOT RECORDED: {type(ex).__name__}: {ex}")
+                return "failed"
+        if attempt < len(_MACRO_ATTACH_DELAYS):
+            await asyncio.sleep(_MACRO_ATTACH_DELAYS[attempt])
+    return "failed"
+"""
+
+
+def _old_ladder():
+    ns = dict(vars(main))
+    exec(compile(OLD_LADDER, "<round-2 ladder>", "exec"), ns)
+    return ns["_macro_evidence_attach"]
+
+
+def _raising_first(n, make_error, calls):
+    """main._macro_evidence_attach_once, except that its first `n` NOWAIT
+    attempts raise make_error() (as the driver would, mid-transaction)."""
+    real = main._macro_evidence_attach_once
+
+    async def wrapped(db, ev, may_lock, *rest):
+        calls.append(may_lock)
+        if may_lock and sum(calls) <= n:
+            raise make_error()
+        return await real(db, ev, may_lock, *rest)
+    return wrapped
+
+
+def _deadlock():
+    return asyncpg.exceptions.DeadlockDetectedError("deadlock detected")
+
+
+def _undefined_column():
+    return asyncpg.exceptions.UndefinedColumnError("column does not exist")
+
+
+LADDER_CASES = {
+    # case -> (failing NOWAIT attempts, error, NOWAIT attempts made,
+    #          fallback SQLSTATE on the row, None = no fallback)
+    "deadlock once": (1, _deadlock, 2, None),
+    "deadlock every attempt": (99, _deadlock, 3, "40P01"),   # 3 = the fixture's two delays + 1
+    "not transient": (1, _undefined_column, 1, "42703"),
+}
+
+
+@pytest.mark.parametrize("ladder", ["shipped", "round-2 single-code check"])
+@pytest.mark.parametrize("case", list(LADDER_CASES))
+def test_the_ladder_retries_by_sqlstate_class_and_never_loses_the_evidence(
+        rig, monkeypatch, case, ladder):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+    failing, make_error, nowait_attempts, fallback_state = LADDER_CASES[case]
+    ev = _evidence(rig)
+    rig.run(rig.file_case("none"))
+    calls = []
+    monkeypatch.setattr(main, "_macro_evidence_attach_once",
+                        _raising_first(failing, make_error, calls))
+    attach = main._macro_evidence_attach if ladder == "shipped" else _old_ladder()
+    factory = async_sessionmaker(rig.sessions, class_=AsyncSession, expire_on_commit=False)
+    outcome = rig.run(attach(factory, ev))
+    rows = list(rig.run(rig.flag_rows()).values())
+    if ladder != "shipped":
+        # the round-2 check took only 55P03 as retryable: the evidence is lost
+        assert outcome == "failed" and rows == [], (case, outcome, rows)
+        return
+    assert outcome == "recorded", (case, outcome)
+    assert calls.count(True) == nowait_attempts, (case, calls)
+    assert len(rows) == 1 and rows[0].get("evidence_fingerprint") == ev["fingerprint"], rows
+    assert rows[0].get("attach_fallback_sqlstate") == fallback_state, rows[0]
+    assert ("attach_lock_unavailable" in rows[0]) is False, rows[0]
+
+
+def test_the_transient_classes_are_the_documented_ones():
+    for state in ("40P01", "40001", "55P03", "57014", "08006", "08000", "53300", "53100"):
+        err = type("E", (Exception,), {"sqlstate": state})()
+        assert main._attach_error_is_transient(err), state
+    for state in ("23505", "42703", "22P02", "42P01", "XX000"):
+        err = type("E", (Exception,), {"sqlstate": state})()
+        assert not main._attach_error_is_transient(err), state
+    assert main._attach_error_is_transient(ConnectionResetError())
+    assert not main._attach_error_is_transient(ValueError())
