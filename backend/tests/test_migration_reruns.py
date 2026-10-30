@@ -584,7 +584,7 @@ def test_391_refuses_a_same_named_column_of_another_type():
     assert col["type"] == "text", col
 
 
-# How long 391 can hold its lock. lock_timeout bounds only the WAIT for the
+# How long 391 can hold its lock BEFORE COMMIT. lock_timeout bounds only the WAIT for the
 # table lock; a first run that has it keeps ACCESS EXCLUSIVE until COMMIT, so
 # a runner stopped between the DO and COMMIT would stop the table for as long
 # as it stays stopped. Both files therefore open with three timeouts and hold
@@ -642,9 +642,11 @@ def _pg_seconds(value: str) -> float:
 
 
 def _391_hold_bound(stmts) -> float:
-    """Seconds a run of these statements can HOLD a lock it took: its
-    statement_timeout plus its idle_in_transaction_session_timeout, each read
-    from its SET LOCAL line (missing = unbounded)."""
+    """Seconds a run of these statements can HOLD a lock it took BEFORE
+    COMMIT: its statement_timeout plus its idle_in_transaction_session_timeout,
+    each read from its SET LOCAL line (missing = unbounded). The COMMIT's
+    local completion (WAL flush, transaction-status write) is on top, as the
+    migration states; no setting bounds it."""
     def setting(name):
         got = [re.fullmatch(r"SET LOCAL %s = '([^']*)'" % name, s) for s in stmts]
         got = [g.group(1) for g in got if g]
@@ -655,7 +657,8 @@ def _391_hold_bound(stmts) -> float:
 
 def test_the_hold_bound_check_refuses_thirty_plus_five():
     """The negative control of the sum rule: the round-1 values (30 s
-    statement, 5 s idle) exceed the bound; each missing line is unbounded."""
+    statement, 5 s idle) exceed the before-COMMIT bound; each missing line is
+    unbounded."""
     head = ["BEGIN", "SET LOCAL lock_timeout = '5s'"]
     assert _391_hold_bound(head + ["SET LOCAL idle_in_transaction_session_timeout = '5s'",
                                    "SET LOCAL statement_timeout = '30s'"]) == 35.0
@@ -727,7 +730,8 @@ def test_391_opens_with_three_timeouts_and_one_statement_before_commit(which):
     assert bound <= _391_HOLD_BOUND_S, (
         "%s: statement_timeout + idle_in_transaction_session_timeout = %ss; the "
         "two budgets are separate (PostgreSQL 16 has no transaction_timeout), so "
-        "the lock can be held that long, over the %ss bound"
+        "the lock can be held that long before COMMIT, over the %ss before-COMMIT "
+        "bound (the COMMIT's local completion is on top)"
         % (_391_FILES[which], bound, _391_HOLD_BOUND_S))
 
 
