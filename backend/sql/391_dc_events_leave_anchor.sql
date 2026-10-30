@@ -35,18 +35,20 @@
 -- alone would accept. Explicit transaction (learning #340).
 --
 -- HOW LONG THE LOCK CAN LIVE. lock_timeout bounds only the WAIT to acquire
--- the table lock; once the first run holds ACCESS EXCLUSIVE it keeps it
--- until COMMIT. So the transaction is the three timeouts, ONE DO block and
--- COMMIT, nothing between: statement_timeout bounds the DO itself, and
--- idle_in_transaction_session_timeout ends the session (the server rolls
--- the transaction back and the lock goes with it) when the runner stops
--- between the DO and COMMIT. test_391_a_runner_stopped_before_commit_*
--- holds this file to that.
+-- the table lock (5 s, before the hold starts); once the first run holds
+-- ACCESS EXCLUSIVE it keeps it until COMMIT. So the transaction is the three
+-- timeouts, ONE DO block and COMMIT, nothing between: statement_timeout
+-- bounds the DO, and idle_in_transaction_session_timeout ends the session
+-- (the server rolls the transaction back and the lock goes with it) when the
+-- runner stops between the DO and COMMIT. The two have SEPARATE budgets and
+-- PostgreSQL 16 has no transaction_timeout, so the hold bound is statement
+-- plus idle: 25 s + 5 s = 30 s. test_391_opens_with_* holds the sum to 30 s,
+-- test_391_a_runner_stopped_before_commit_* the idle end.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL idle_in_transaction_session_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SET LOCAL statement_timeout = '25s';
 
 DO $m391$
 DECLARE

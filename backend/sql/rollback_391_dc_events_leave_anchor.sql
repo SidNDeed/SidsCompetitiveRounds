@@ -6,11 +6,13 @@
 -- lock_timeout bounds the wait for the lock, statement_timeout the DROP,
 -- idle_in_transaction_session_timeout how long a runner stopped before
 -- COMMIT can keep the table locked; one statement between them and COMMIT.
+-- The hold bound is statement plus idle (separate budgets; PostgreSQL 16 has
+-- no transaction_timeout): 25 s + 5 s = 30 s.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL idle_in_transaction_session_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SET LOCAL statement_timeout = '25s';
 
 ALTER TABLE dc_events
     DROP COLUMN IF EXISTS leave_anchor_at;

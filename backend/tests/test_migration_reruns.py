@@ -588,7 +588,10 @@ def test_391_refuses_a_same_named_column_of_another_type():
 # table lock; a first run that has it keeps ACCESS EXCLUSIVE until COMMIT, so
 # a runner stopped between the DO and COMMIT would stop the table for as long
 # as it stays stopped. Both files therefore open with three timeouts and hold
-# exactly one statement between them and COMMIT.
+# exactly one statement between them and COMMIT. statement_timeout and
+# idle_in_transaction_session_timeout have separate budgets and PostgreSQL 16
+# has no transaction_timeout, so the HOLD BOUND IS THEIR SUM, held here to
+# _391_HOLD_BOUND_S.
 
 _391_FILES = {
     "migration": "391_dc_events_leave_anchor.sql",
@@ -597,8 +600,42 @@ _391_FILES = {
 _391_TIMEOUTS = (
     "SET LOCAL lock_timeout = '5s'",
     "SET LOCAL idle_in_transaction_session_timeout = '5s'",
-    "SET LOCAL statement_timeout = '30s'",
+    "SET LOCAL statement_timeout = '25s'",
 )
+_391_HOLD_BOUND_S = 30.0
+_PG_UNITS = {"us": 1e-6, "ms": 1e-3, "s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
+
+
+def _pg_seconds(value: str) -> float:
+    """A PostgreSQL time setting in seconds; a bare number is milliseconds
+    (the unit of both timeouts). 0 means unbounded, returned as inf."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(us|ms|s|min|h|d)?\s*", value)
+    assert m, value
+    n = float(m.group(1)) * _PG_UNITS[m.group(2) or "ms"]
+    return float("inf") if n == 0 else n
+
+
+def _391_hold_bound(stmts) -> float:
+    """Seconds a run of these statements can HOLD a lock it took: its
+    statement_timeout plus its idle_in_transaction_session_timeout, each read
+    from its SET LOCAL line (missing = unbounded)."""
+    def setting(name):
+        got = [re.fullmatch(r"SET LOCAL %s = '([^']*)'" % name, s) for s in stmts]
+        got = [g.group(1) for g in got if g]
+        assert len(got) <= 1, (name, got)
+        return _pg_seconds(got[0]) if got else float("inf")
+    return setting("statement_timeout") + setting("idle_in_transaction_session_timeout")
+
+
+def test_the_hold_bound_check_refuses_thirty_plus_five():
+    """The negative control of the sum rule: the round-1 values (30 s
+    statement, 5 s idle) exceed the bound; each missing line is unbounded."""
+    head = ["BEGIN", "SET LOCAL lock_timeout = '5s'"]
+    assert _391_hold_bound(head + ["SET LOCAL idle_in_transaction_session_timeout = '5s'",
+                                   "SET LOCAL statement_timeout = '30s'"]) == 35.0
+    assert _391_hold_bound(head + ["SET LOCAL statement_timeout = '25s'"]) == float("inf")
+    assert _391_hold_bound(head + ["SET LOCAL idle_in_transaction_session_timeout = '5000'",
+                                   "SET LOCAL statement_timeout = '25s'"]) == 30.0
 
 
 def _top_level_statements(sql: str) -> list:
@@ -652,6 +689,12 @@ def test_391_opens_with_three_timeouts_and_one_statement_before_commit(which):
         assert stmts[4].startswith("DO $"), stmts[4]
     else:
         assert stmts[4].startswith("ALTER TABLE dc_events DROP COLUMN"), stmts[4]
+    bound = _391_hold_bound(stmts)
+    assert bound <= _391_HOLD_BOUND_S, (
+        "%s: statement_timeout + idle_in_transaction_session_timeout = %ss; the "
+        "two budgets are separate (PostgreSQL 16 has no transaction_timeout), so "
+        "the lock can be held that long, over the %ss bound"
+        % (_391_FILES[which], bound, _391_HOLD_BOUND_S))
 
 
 async def _391_stopped_before_commit(which, idle_for):
@@ -673,6 +716,12 @@ async def _391_stopped_before_commit(which, idle_for):
         await other.execute(PREREQ["391"])
         if which == "rollback":
             await other.execute(migration_text("391"))
+        # Unbounded session defaults, so only the file's own SET LOCAL lines
+        # can end the stopped runner (a database or role default would
+        # otherwise pass this test for a file without them).
+        for name in ("lock_timeout", "statement_timeout",
+                     "idle_in_transaction_session_timeout"):
+            await runner.execute("SET %s = 0" % name)
         for stmt in stmts[:-1]:
             await runner.execute(stmt)
         settings = {
@@ -725,7 +774,7 @@ def test_391_a_runner_stopped_before_commit_loses_its_lock(which):
         "its transaction" % _391_FILES[which])
     assert settings == {"lock_timeout": "5s",
                         "idle_in_transaction_session_timeout": "5s",
-                        "statement_timeout": "30s"}, settings
+                        "statement_timeout": "25s"}, settings
     if which == "migration":
         assert column is None, "the stopped first run's column survived its rollback: %r" % column
     else:
