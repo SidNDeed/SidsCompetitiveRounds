@@ -246,7 +246,9 @@ Standard ROUNDS scoring - first to {0} points takes the game.
 - Leaving mid-game is recorded. A leaver keeps their
   tallies and is placed and rated for the game they
   left - unless they left before the field had scored
-  2 half points while their own tally was still zero,
-  in which case that game does not rate them.", FfaTargetNow, FfaCapNow);
+  four half points in total, whether or not any became
+  a full point, in which case that game does not rate
+  them or pay them game Gold or XP. Achievements and
+  other earning ways are unaffected.", FfaTargetNow, FfaCapNow);
     }
 }
