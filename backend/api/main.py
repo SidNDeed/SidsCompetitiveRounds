@@ -15270,16 +15270,15 @@ async def get_similar_players(
     endpoint: one pool select, one batched DPS aggregate, one batched card
     aggregate — scoring happens in Python over <=201 vectors.
 
-    Macro suspects are EXCLUDED from the pool: any flagged_matches row with
-    flag_reason='suspected_macro' attributing the player
-    (flag_details->>'suspect_steam', with 'reporter_steam' as the legacy
-    attribution key) that an admin has not dismissed. Review-flow semantics
-    (read from the flag review endpoint, not guessed): reviewed_at IS NULL =
-    pending, review_action in ('confirmed_cheat','false_positive');
-    "dismissed" = 'false_positive', so the exclusion predicate is
-    review_action IS DISTINCT FROM 'false_positive' — pending and confirmed
-    flags both exclude. An input-rate profile built on macro'd inputs would
-    poison the neighbor list for everyone it matched."""
+    The answer does not depend on whether any player carries a review flag
+    (small docket item c): the pool reads no flagged_matches row, so a
+    flagged player is pooled, scored and listed exactly as an unflagged one
+    with the same record. The pool used to leave out every player with an
+    undismissed suspected_macro flag, which made this public list change
+    with a flag that is reviewed in private. A review outcome reaches the
+    answer only through what it changes in the record itself: an
+    invalidated match leaves the ranked match count, DPS and card
+    aggregates this route reads."""
     player = (await db.execute(
         select(Player).where(Player.steam_id == steam_id)
     )).scalar_one_or_none()
@@ -15307,12 +15306,6 @@ async def get_similar_players(
          WHERE p.deleted_at IS NULL
            AND p.id != :pid
            AND c.ranked_matches >= 10
-           AND NOT EXISTS (
-               SELECT 1 FROM flagged_matches fm
-                WHERE fm.flag_reason = 'suspected_macro'
-                  AND COALESCE(fm.flag_details->>'suspect_steam',
-                               fm.flag_details->>'reporter_steam') = p.steam_id
-                  AND fm.review_action IS DISTINCT FROM 'false_positive')
          ORDER BY c.ranked_matches DESC
          LIMIT 200
     """), {"pid": player.id})).mappings().all()
