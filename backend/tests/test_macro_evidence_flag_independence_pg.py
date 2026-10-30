@@ -26,11 +26,14 @@ transmission. The signature is the real HMAC over the route's canonical
 under a test secret; the Steam session check, which runs before anything
 here and reads no flag, is a no-op.
 
-The background attach itself (Codex SMALL-ABC-R3): two attaches of one
-fingerprint, the second entering while the first holds the fingerprint's
-advisory lock, end with exactly one row; a deadlock (40P01) is retried
-through the ladder and, on every attempt, lands in the fallback row; a
-non-transient error goes straight to the fallback.
+The background attach itself (Codex SMALL-ABC-R3/R4): two attaches for one
+match and reporter -- of one fingerprint, or of two -- the second entering
+while the first holds the (match, reporter) advisory lock, end with exactly
+one row; every database error but a certainly permanent one (class 22, 23,
+42, or a programming error) is retried through the ladder (a deadlock, a
+failover's 57P01, a connection refused arriving as InterfaceError), a
+permanent one goes to the fallback at once, and the fallback itself is
+retried.
 
 Mutation controls (#391): the shipped route with the attach run on the
 request path and its outcome answered (the pre-fix shape), the attach
@@ -552,7 +555,7 @@ def _function_variant(name, edit):
 def _lock_statements(fn):
     return [s for s in fn.body if isinstance(s, ast.Expr) and isinstance(s.value, ast.Await)
             and isinstance(s.value.value, ast.Call)
-            and getattr(s.value.value.func, "id", None) == "_macro_evidence_fingerprint_lock"]
+            and getattr(s.value.value.func, "id", None) == "_macro_evidence_merge_lock"]
 
 
 def _without_the_lock(fn):
@@ -568,7 +571,7 @@ def _lock_taken_twice(fn):
 
 ATTACH_ONCE_VARIANTS = {
     "shipped": lambda: main._macro_evidence_attach_once,
-    "without the fingerprint lock": lambda: _function_variant(
+    "without the merge lock": lambda: _function_variant(
         "_macro_evidence_attach_once", _without_the_lock),
     "inert twin (lock taken twice)": lambda: _function_variant(
         "_macro_evidence_attach_once", _lock_taken_twice),
@@ -586,11 +589,13 @@ def _evidence(rig):
     return task.args[1]
 
 
-async def _two_attaches(rig, attach_once, ev):
-    """Attach #1 takes the fingerprint lock, finds nothing, inserts and then
-    pauses before its COMMIT; attach #2 starts while #1 holds the lock; then
-    #1 commits. Both are fallback attaches (every NOWAIT attempt exhausted),
-    the Codex SMALL-ABC-R3 scenario. Returns both outcomes."""
+async def _two_attaches(rig, attach_once, ev, ev2=None, may_lock=False):
+    """Attach #1 (of `ev`) takes the merge lock, finds nothing, inserts and
+    then pauses before its COMMIT; attach #2 (of `ev2`, default the same
+    evidence) starts while #1 holds the lock; then #1 commits. With
+    may_lock False both are fallback attaches (every NOWAIT attempt
+    exhausted, the Codex SMALL-ABC-R3 scenario); with True both are first
+    attempts (R4: two fingerprints for one match). Returns both outcomes."""
     from sqlalchemy.ext.asyncio import AsyncSession
     gate = asyncio.Event()
 
@@ -601,16 +606,17 @@ async def _two_attaches(rig, attach_once, ev):
 
     # the fallback's SQLSTATE argument only where the function takes one, so
     # the red run against the round-2 attach fails on rows, not on arity
-    marker = ("55P03",) if len(inspect.signature(attach_once).parameters) > 3 else ()
+    marker = ("55P03",) if (not may_lock and
+                            len(inspect.signature(attach_once).parameters) > 3) else ()
 
-    async def one(cls):
+    async def one(cls, evidence):
         async with cls(rig.sessions, expire_on_commit=False) as db:
-            return await attach_once(db, ev, False, *marker)
+            return await attach_once(db, evidence, may_lock, *marker)
 
-    first = asyncio.ensure_future(one(Paused))
+    first = asyncio.ensure_future(one(Paused, ev))
     await asyncio.sleep(0.5)
     assert not first.done()
-    second = asyncio.ensure_future(one(AsyncSession))
+    second = asyncio.ensure_future(one(AsyncSession, ev2 or ev))
     await asyncio.sleep(0.5)
     gate.set()
     return await asyncio.gather(first, second)
@@ -622,14 +628,45 @@ def test_two_attaches_of_one_fingerprint_make_one_row(rig, name):
     rig.run(rig.file_case("none"))
     outcomes = rig.run(_two_attaches(rig, ATTACH_ONCE_VARIANTS[name](), ev))
     rows = rig.run(rig.flag_rows())
-    if name == "without the fingerprint lock":
+    if name == "without the merge lock":
         assert len(rows) == 2 and sorted(outcomes) == ["recorded", "recorded"], (outcomes, rows)
         return
     assert sorted(outcomes) == ["already_recorded", "recorded"], outcomes
     assert len(rows) == 1, rows
 
 
-def test_the_fingerprint_lock_comes_before_every_read_and_write():
+def _second_fingerprint(ev):
+    """The same match and reporter, different evidence: another fingerprint
+    and a stronger suspect-seconds count."""
+    other = ev["fingerprint"][::-1]
+    assert other != ev["fingerprint"]
+    return dict(ev, fingerprint=other,
+                details=dict(ev["details"], evidence_fingerprint=other,
+                             macro_suspect_seconds=25))
+
+
+@pytest.mark.parametrize("name", list(ATTACH_ONCE_VARIANTS))
+def test_two_fingerprints_for_one_match_merge_into_one_row(rig, name):
+    """The Codex SMALL-ABC-R4 scenario: two first attempts with DIFFERENT
+    fingerprints for one match and reporter. Under the (match, reporter)
+    lock the second waits, then finds the first's unreviewed row and merges
+    into it (the stronger count kept); without the lock both see no flag
+    and insert."""
+    ev = _evidence(rig)
+    ev2 = _second_fingerprint(ev)
+    rig.run(rig.file_case("none"))
+    outcomes = rig.run(_two_attaches(rig, ATTACH_ONCE_VARIANTS[name](), ev, ev2, True))
+    rows = list(rig.run(rig.flag_rows()).values())
+    if name == "without the merge lock":
+        assert len(rows) == 2 and sorted(outcomes) == ["recorded", "recorded"], (outcomes, rows)
+        return
+    assert sorted(outcomes) == ["evidence_upgraded", "recorded"], outcomes
+    assert len(rows) == 1, rows
+    assert rows[0]["evidence_fingerprint"] == ev2["fingerprint"], rows[0]
+    assert rows[0]["macro_suspect_seconds"] == 25, rows[0]
+
+
+def test_the_merge_lock_comes_before_every_read_and_write():
     """The lock is the attempt's first statement after its docstring, ahead
     of the dedupe read and the insert, on both the NOWAIT and the fallback
     path (one statement, no branch around it)."""
@@ -692,15 +729,75 @@ def _old_ladder():
     return ns["_macro_evidence_attach"]
 
 
-def _raising_first(n, make_error, calls):
-    """main._macro_evidence_attach_once, except that its first `n` NOWAIT
-    attempts raise make_error() (as the driver would, mid-transaction)."""
+# The round-3 ladder (5e2cb737), verbatim but for its names: retried only an
+# allow-list of SQLSTATEs, sent everything else to a fallback that was tried
+# once. The mutant the inverted ladder must beat.
+ROUND_3_LADDER = """
+_R3_TRANSIENT_STATES = {"40P01", "40001", "55P03", "57014"}
+_R3_TRANSIENT_CLASSES = {"08", "53"}
+
+
+def _r3_is_transient(ex) -> bool:
+    state = _attach_error_sqlstate(ex)
+    if state is not None:
+        return state in _R3_TRANSIENT_STATES or state[:2] in _R3_TRANSIENT_CLASSES
+    return isinstance(ex, (ConnectionError, TimeoutError, OSError))
+
+
+async def _macro_evidence_attach(session_factory, ev: dict) -> str:
+    tag = str(ev.get("fingerprint", ""))[:12]
+    last_state = None
+    for attempt in range(len(_MACRO_ATTACH_DELAYS) + 1):
+        try:
+            async with session_factory() as db:
+                outcome = await _macro_evidence_attach_once(db, ev, True)
+            return outcome
+        except Exception as ex:
+            last_state = _attach_error_sqlstate(ex)
+            if not _r3_is_transient(ex):
+                break
+        if attempt < len(_MACRO_ATTACH_DELAYS):
+            await asyncio.sleep(_MACRO_ATTACH_DELAYS[attempt])
+    try:
+        async with session_factory() as db:
+            outcome = await _macro_evidence_attach_once(db, ev, False, last_state)
+        return outcome
+    except Exception as ex:
+        print(f"[MACRO-EVIDENCE] {tag} NOT RECORDED: {type(ex).__name__}: {ex}")
+        return "failed"
+"""
+
+
+def _round_3_ladder():
+    ns = dict(vars(main))
+    exec(compile(ROUND_3_LADDER, "<round-3 ladder>", "exec"), ns)
+    return ns["_macro_evidence_attach"]
+
+
+class _Wrap(ast.NodeTransformer):
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if getattr(node.func, "id", None) == "_attach_error_is_permanent":
+            return ast.Call(func=ast.Name("bool", ast.Load()), args=[node], keywords=[])
+        return node
+
+
+def _ladder_inert_twin():
+    return _function_variant("_macro_evidence_attach", lambda fn: _Wrap().visit(fn))
+
+
+def _raising(nowait_n, make_error, calls, fallback_n=0, make_fallback_error=None):
+    """main._macro_evidence_attach_once, except that its first `nowait_n`
+    NOWAIT attempts raise make_error() and its first `fallback_n` fallback
+    attempts raise make_fallback_error() (as the driver would)."""
     real = main._macro_evidence_attach_once
 
     async def wrapped(db, ev, may_lock, *rest):
         calls.append(may_lock)
-        if may_lock and sum(calls) <= n:
+        if may_lock and calls.count(True) <= nowait_n:
             raise make_error()
+        if not may_lock and calls.count(False) <= fallback_n:
+            raise make_fallback_error()
         return await real(db, ev, may_lock, *rest)
     return wrapped
 
@@ -713,47 +810,98 @@ def _undefined_column():
     return asyncpg.exceptions.UndefinedColumnError("column does not exist")
 
 
+def _admin_shutdown():
+    return asyncpg.exceptions.AdminShutdownError("terminating connection due to administrator command")
+
+
+def _unique_violation():
+    return asyncpg.exceptions.UniqueViolationError("duplicate key value")
+
+
+def _connection_refused():
+    import sqlalchemy.exc
+    return sqlalchemy.exc.InterfaceError("connect", None, ConnectionRefusedError("connection refused"))
+
+
+# case -> (failing NOWAIT attempts, their error, failing fallback attempts,
+#          their error, NOWAIT attempts made, fallback attempts made,
+#          (SQLSTATE, error name) on the fallback row or None for no fallback)
 LADDER_CASES = {
-    # case -> (failing NOWAIT attempts, error, NOWAIT attempts made,
-    #          fallback SQLSTATE on the row, None = no fallback)
-    "deadlock once": (1, _deadlock, 2, None),
-    "deadlock every attempt": (99, _deadlock, 3, "40P01"),   # 3 = the fixture's two delays + 1
-    "not transient": (1, _undefined_column, 1, "42703"),
+    "deadlock once": (1, _deadlock, 0, None, 2, 0, None),
+    "deadlock every attempt": (99, _deadlock, 0, None, 3, 1, ("40P01", "DeadlockDetectedError")),
+    "42703 at once": (1, _undefined_column, 0, None, 1, 1, ("42703", "UndefinedColumnError")),
+    "57P01 once": (1, _admin_shutdown, 0, None, 2, 0, None),
+    "connection refused once": (1, _connection_refused, 0, None, 2, 0, None),
+    "23505 at once": (1, _unique_violation, 0, None, 1, 1, ("23505", "UniqueViolationError")),
+    "fallback retried": (99, _admin_shutdown, 1, _connection_refused, 3, 2,
+                         ("57P01", "AdminShutdownError")),
 }
+# the 3 = the fixture's two delays + 1
 
 
-@pytest.mark.parametrize("ladder", ["shipped", "round-2 single-code check"])
-@pytest.mark.parametrize("case", list(LADDER_CASES))
-def test_the_ladder_retries_by_sqlstate_class_and_never_loses_the_evidence(
-        rig, monkeypatch, case, ladder):
+def _run_ladder(rig, monkeypatch, case, attach):
     from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
-    failing, make_error, nowait_attempts, fallback_state = LADDER_CASES[case]
+    nowait_n, err, fallback_n, fallback_err = LADDER_CASES[case][:4]
     ev = _evidence(rig)
     rig.run(rig.file_case("none"))
     calls = []
     monkeypatch.setattr(main, "_macro_evidence_attach_once",
-                        _raising_first(failing, make_error, calls))
-    attach = main._macro_evidence_attach if ladder == "shipped" else _old_ladder()
+                        _raising(nowait_n, err, calls, fallback_n, fallback_err))
     factory = async_sessionmaker(rig.sessions, class_=AsyncSession, expire_on_commit=False)
-    outcome = rig.run(attach(factory, ev))
-    rows = list(rig.run(rig.flag_rows()).values())
-    if ladder != "shipped":
-        # the round-2 check took only 55P03 as retryable: the evidence is lost
-        assert outcome == "failed" and rows == [], (case, outcome, rows)
-        return
-    assert outcome == "recorded", (case, outcome)
-    assert calls.count(True) == nowait_attempts, (case, calls)
+    outcome = rig.run(attach()(factory, ev))
+    return ev, outcome, calls, list(rig.run(rig.flag_rows()).values())
+
+
+@pytest.mark.parametrize("ladder", ["shipped", "inert twin"])
+@pytest.mark.parametrize("case", list(LADDER_CASES))
+def test_the_ladder_retries_every_database_error_but_a_permanent_one(
+        rig, monkeypatch, case, ladder):
+    attach = (lambda: main._macro_evidence_attach) if ladder == "shipped" else _ladder_inert_twin
+    ev, outcome, calls, rows = _run_ladder(rig, monkeypatch, case, attach)
+    *_, nowait_made, fallback_made, fallback = LADDER_CASES[case]
+    assert outcome == "recorded", (case, outcome, calls)
+    assert (calls.count(True), calls.count(False)) == (nowait_made, fallback_made), (case, calls)
     assert len(rows) == 1 and rows[0].get("evidence_fingerprint") == ev["fingerprint"], rows
-    assert rows[0].get("attach_fallback_sqlstate") == fallback_state, rows[0]
+    if fallback is None:
+        assert "attach_fallback_sqlstate" not in rows[0], rows[0]
+    else:
+        got = (rows[0].get("attach_fallback_sqlstate"), rows[0].get("attach_fallback_error"))
+        assert got == fallback, (case, got)
     assert ("attach_lock_unavailable" in rows[0]) is False, rows[0]
 
 
-def test_the_transient_classes_are_the_documented_ones():
-    for state in ("40P01", "40001", "55P03", "57014", "08006", "08000", "53300", "53100"):
+@pytest.mark.parametrize("case", list(LADDER_CASES))
+def test_the_round_2_single_code_ladder_loses_the_evidence(rig, monkeypatch, case):
+    _ev, outcome, calls, rows = _run_ladder(rig, monkeypatch, case, _old_ladder)
+    assert outcome == "failed" and rows == [], (case, outcome, rows)
+
+
+@pytest.mark.parametrize("case", ["57P01 once", "connection refused once", "fallback retried"])
+def test_the_round_3_allow_list_ladder_misfiles_or_loses_a_failover(rig, monkeypatch, case):
+    """The R4 HIGH: a failover's errors skipped the delays and went to a
+    fallback tried once."""
+    ev, outcome, calls, rows = _run_ladder(rig, monkeypatch, case, _round_3_ladder)
+    if case == "fallback retried":
+        assert outcome == "failed" and rows == [], (outcome, rows)
+    else:
+        # no retry: one NOWAIT attempt, straight into the fallback
+        assert calls == [True, False], calls
+        assert len(rows) == 1 and "attach_fallback_sqlstate" in rows[0], rows
+
+
+def test_the_permanent_classes_are_the_documented_ones():
+    import sqlalchemy.exc
+    for state in ("22P02", "23505", "23503", "42703", "42P01"):
         err = type("E", (Exception,), {"sqlstate": state})()
-        assert main._attach_error_is_transient(err), state
-    for state in ("23505", "42703", "22P02", "42P01", "XX000"):
+        assert main._attach_error_is_permanent(err), state
+    for state in ("40P01", "40001", "55P03", "57014", "57P01", "57P03", "25006",
+                  "08006", "53300", "XX000"):
         err = type("E", (Exception,), {"sqlstate": state})()
-        assert not main._attach_error_is_transient(err), state
-    assert main._attach_error_is_transient(ConnectionResetError())
-    assert not main._attach_error_is_transient(ValueError())
+        assert not main._attach_error_is_permanent(err), state
+    assert not main._attach_error_is_permanent(_connection_refused())
+    assert not main._attach_error_is_permanent(ConnectionResetError())
+    assert not main._attach_error_is_permanent(
+        sqlalchemy.exc.OperationalError("select 1", None, Exception("server closed")))
+    # a programming error on our side is permanent
+    assert main._attach_error_is_permanent(KeyError("match_id"))
+    assert main._attach_error_is_permanent(TypeError("bad call"))

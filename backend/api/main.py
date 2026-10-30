@@ -8405,6 +8405,7 @@ async def _check_fps_lag_flags(
 # ── Routes: Match Submission ───────────────────────────────────
 
 from fastapi import BackgroundTasks  # noqa: E402
+from sqlalchemy import exc as _sa_exc  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
 
@@ -8417,15 +8418,15 @@ def _macro_evidence_answer(match_id) -> dict:
 # Waits between the background attach's attempts, seconds. After the last
 # one the evidence is recorded as its own new flag (the fallback).
 _MACRO_ATTACH_DELAYS = (0.5, 1.0, 2.0, 4.0)
-# lock_timeout inside an attempt (the fingerprint lock, the insert's key
-# lock) and inside the fallback, which waits longer for the fingerprint lock
-# because it is the last chance to record.
+# lock_timeout inside an attempt (the merge lock, the insert's key lock)
+# and inside the fallback, which waits longer for the merge lock because it
+# is the last chance to record.
 _MACRO_ATTACH_LOCK_TIMEOUT = "2s"
 _MACRO_FALLBACK_LOCK_TIMEOUT = "10s"
-# Transient SQLSTATEs: retried through the ladder. Whole classes by their
-# first two characters (08 connection exception, 53 insufficient resources).
-_MACRO_TRANSIENT_STATES = {"40P01", "40001", "55P03", "57014"}
-_MACRO_TRANSIENT_CLASSES = {"08", "53"}
+# The only SQLSTATE classes treated as certainly permanent: 22 data
+# exception, 23 integrity constraint violation, 42 syntax error or access
+# rule violation. Every other database error is retried.
+_MACRO_PERMANENT_CLASSES = {"22", "23", "42"}
 
 
 def _attach_error_sqlstate(ex):
@@ -8445,35 +8446,63 @@ def _attach_error_sqlstate(ex):
     return None
 
 
-def _attach_error_is_transient(ex) -> bool:
-    """A failure a later attempt can get past: deadlock, serialization
-    failure, a refused or timed-out lock, a cancelled statement, a connection
-    exception or exhausted resources (by SQLSTATE class, not one code), or a
-    driver-level connection error that carries no SQLSTATE."""
+def _attach_error_is_database(ex) -> bool:
+    """True when `ex`, or anything it wraps, is a database or connection
+    error: any SQLAlchemy DBAPIError (OperationalError, InterfaceError, ...),
+    a pool timeout or disconnect, an asyncpg error, or an OS-level
+    connection error (refused, reset, timed out)."""
+    seen, todo = set(), [ex]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, (_sa_exc.DBAPIError, _sa_exc.DisconnectionError,
+                          _sa_exc.TimeoutError, OSError, TimeoutError,
+                          asyncio.TimeoutError)):
+            return True
+        if type(e).__module__.split(".")[0] == "asyncpg":
+            return True
+        todo.extend((getattr(e, "orig", None), e.__cause__, e.__context__))
+    return False
+
+
+def _attach_error_is_permanent(ex) -> bool:
+    """Certainly permanent, so retrying cannot help: a SQLSTATE in class 22,
+    23 or 42, or an error that is no database or connection error at all (a
+    programming error on our side). Everything else -- a deadlock, a
+    failover's 57P01 / 57P03 / 25006, a connection refused or reset arriving
+    as InterfaceError with no SQLSTATE -- is retried through the delays."""
     state = _attach_error_sqlstate(ex)
     if state is not None:
-        return state in _MACRO_TRANSIENT_STATES or state[:2] in _MACRO_TRANSIENT_CLASSES
-    return isinstance(ex, (ConnectionError, TimeoutError, OSError))
+        return state[:2] in _MACRO_PERMANENT_CLASSES
+    return not _attach_error_is_database(ex)
 
 
-async def _macro_evidence_fingerprint_lock(db: AsyncSession, fingerprint: str,
-                                           lock_timeout: str) -> None:
-    """Take the transaction-scoped advisory lock keyed on this evidence's
-    fingerprint (a VALUE: the flag row it guards may not exist yet), under a
-    lock_timeout, so a wait ends in 55P03 and joins the retry ladder. Every
-    attach of a fingerprint holds it from its dedupe read to its commit, so
-    two deliveries of the same evidence can never both insert."""
+async def _macro_evidence_merge_lock(db: AsyncSession, match_id, reporter_steam: str,
+                                    lock_timeout: str) -> None:
+    """Take the transaction-scoped advisory lock keyed on (match, reporter):
+    'macro-evidence-match:<match id>:<reporter steam id>'. That pair is the
+    unit the merge is scoped to (the existing-flag lookup selects the
+    reporter's suspected_macro row on the match), and a fingerprint names
+    one match and one reporter, so every attach that could dedupe against,
+    merge into, supersede or insert beside the same flag row serialises
+    here, whatever its fingerprint. It is a lock on a VALUE because the flag
+    row may not exist yet. Taken under a lock_timeout, so a wait ends in
+    55P03 and joins the retry ladder. hashtext is 32-bit: a collision only
+    serialises two unrelated attaches, never merges them."""
     await db.execute(text("SELECT set_config('lock_timeout', :t, true)"),
                      {"t": lock_timeout})
     await db.execute(text(
-        "SELECT pg_advisory_xact_lock(hashtext('macro-evidence:' || CAST(:fp AS text)))"
-    ), {"fp": fingerprint})
+        "SELECT pg_advisory_xact_lock(hashtext("
+        "'macro-evidence-match:' || CAST(:mid AS text) || ':' || CAST(:sid AS text)))"
+    ), {"mid": str(match_id), "sid": reporter_steam})
 
 
 async def _macro_evidence_attach_once(db: AsyncSession, ev: dict, may_lock: bool,
-                                      fallback_sqlstate=None) -> str:
+                                      fallback_sqlstate=None, fallback_error=None) -> str:
     """One attempt at the flag-dependent half of a macro-evidence POST, in
-    its own transaction, under the fingerprint's advisory lock from the
+    its own transaction, under the (match, reporter) advisory lock from the
     dedupe read to the commit. Returns what happened: already_recorded (a
     delivery of this exact evidence is on a flag row), evidence_upgraded
     (merged into the caller's unreviewed flag), recorded (a new row,
@@ -8482,8 +8511,8 @@ async def _macro_evidence_attach_once(db: AsyncSession, ev: dict, may_lock: bool
     it (the fallback) no flag row is locked and the evidence becomes its own
     new row, marked with the SQLSTATE that sent it there."""
     fingerprint = ev["fingerprint"]
-    await _macro_evidence_fingerprint_lock(
-        db, fingerprint,
+    await _macro_evidence_merge_lock(
+        db, ev["match_id"], ev["reporter_steam"],
         _MACRO_ATTACH_LOCK_TIMEOUT if may_lock else _MACRO_FALLBACK_LOCK_TIMEOUT)
 
     async def attached_already() -> bool:
@@ -8570,6 +8599,7 @@ async def _macro_evidence_attach_once(db: AsyncSession, ev: dict, may_lock: bool
                 details["supersedes_reviewed_flag_id"] = str(flag.id)
     else:
         details["attach_fallback_sqlstate"] = fallback_sqlstate
+        details["attach_fallback_error"] = fallback_error
         if fallback_sqlstate == "55P03":
             details["attach_lock_unavailable"] = True
     db.add(FlaggedMatch(
@@ -8592,41 +8622,49 @@ async def _macro_evidence_attach(session_factory, ev: dict) -> str:
     path, so no flag row (held, missing, failing) can change the answer's
     status, body or latency.
 
-    A transient failure (_attach_error_is_transient: by SQLSTATE class) is
-    retried after each of _MACRO_ATTACH_DELAYS. When every attempt failed
-    transiently, or at once on a non-transient failure, the evidence is
-    recorded by the fallback as its own new flag under the fingerprint lock
-    (flag_details.attach_fallback_sqlstate names the SQLSTATE), so the
-    evidence is not lost to a held row, a deadlock or a dropped connection.
-    Only a fallback that itself fails logs NOT RECORDED with the evidence
+    Every failure is retried after each of _MACRO_ATTACH_DELAYS unless it is
+    certainly permanent (_attach_error_is_permanent: SQLSTATE class 22, 23
+    or 42, or a programming error on our side). After the last attempt, or at
+    once on a permanent failure, the fallback records the evidence as its own
+    new flag under the merge lock (flag_details.attach_fallback_sqlstate and
+    attach_fallback_error name what sent it there), and the fallback itself
+    is retried through the same delays. Only a fallback that fails
+    permanently, or on its last attempt, logs NOT RECORDED with the evidence
     fingerprint: the client has already had its 2xx and will not resend.
     Returns the outcome word."""
     tag = str(ev.get("fingerprint", ""))[:12]
-    last_state = None
-    for attempt in range(len(_MACRO_ATTACH_DELAYS) + 1):
+    delays = _MACRO_ATTACH_DELAYS
+    last_state = last_error = None
+    for attempt in range(len(delays) + 1):
         try:
             async with session_factory() as db:
                 outcome = await _macro_evidence_attach_once(db, ev, True)
             print(f"[MACRO-EVIDENCE] {tag} {outcome} (attempt {attempt + 1})")
             return outcome
         except Exception as ex:
-            last_state = _attach_error_sqlstate(ex)
-            transient = _attach_error_is_transient(ex)
+            last_state, last_error = _attach_error_sqlstate(ex), type(ex).__name__
+            permanent = _attach_error_is_permanent(ex)
             print(f"[MACRO-EVIDENCE] {tag} attempt {attempt + 1} failed "
-                  f"({'transient' if transient else 'not transient'} "
-                  f"{last_state or type(ex).__name__})")
-            if not transient:
+                  f"({'permanent' if permanent else 'retried'} "
+                  f"{last_state or last_error})")
+            if permanent:
                 break
-        if attempt < len(_MACRO_ATTACH_DELAYS):
-            await asyncio.sleep(_MACRO_ATTACH_DELAYS[attempt])
-    try:
-        async with session_factory() as db:
-            outcome = await _macro_evidence_attach_once(db, ev, False, last_state)
-        print(f"[MACRO-EVIDENCE] {tag} {outcome} (fallback after {last_state})")
-        return outcome
-    except Exception as ex:
-        print(f"[MACRO-EVIDENCE] {tag} NOT RECORDED: {type(ex).__name__}: {ex}")
-        return "failed"
+        if attempt < len(delays):
+            await asyncio.sleep(delays[attempt])
+    for attempt in range(len(delays) + 1):
+        try:
+            async with session_factory() as db:
+                outcome = await _macro_evidence_attach_once(
+                    db, ev, False, last_state, last_error)
+            print(f"[MACRO-EVIDENCE] {tag} {outcome} "
+                  f"(fallback attempt {attempt + 1} after {last_state or last_error})")
+            return outcome
+        except Exception as ex:
+            if _attach_error_is_permanent(ex) or attempt == len(delays):
+                print(f"[MACRO-EVIDENCE] {tag} NOT RECORDED: {type(ex).__name__}: {ex}")
+                return "failed"
+        await asyncio.sleep(delays[attempt])
+    return "failed"                                      # pragma: no cover
 
 
 @app.post("/api/v1/matches/macro-evidence", tags=["Matches"])
