@@ -3547,6 +3547,48 @@
       ]
     },
     {
+      "classification": "admin-authorized-consumer",
+      "reason": "Serves W1 columns only to an internal-key caller whose actor resolves to an admin; refusals carry no column.",
+      "routes": [
+        [
+          "/api/v1/internal/evidence-report/game/{code}",
+          [
+            "GET"
+          ],
+          "admin_evidence",
+          "evidence_report_game",
+          "8ce8884892650cf198a46dc9eb55ec367d242fff"
+        ],
+        [
+          "/api/v1/internal/evidence-report/series/{code}",
+          [
+            "GET"
+          ],
+          "admin_evidence",
+          "evidence_report_series",
+          "1edf21c9bccd9732c3bdb6f2ecb79c8ed2db781b"
+        ],
+        [
+          "/api/v1/internal/evidence-report/pair",
+          [
+            "GET"
+          ],
+          "admin_evidence",
+          "evidence_report_pair",
+          "6aba4ae1c303cafcffc7871fc286cbd9f98e47fc"
+        ],
+        [
+          "/api/v1/internal/evidence-report/player/{steam_id}",
+          [
+            "GET"
+          ],
+          "admin_evidence",
+          "evidence_report_player",
+          "af30b34ce8236998c67c648b28d80c21a3698d95"
+        ]
+      ]
+    },
+    {
       "classification": "statically-nonconsumer",
       "reason": "verified-reads control routes (backend/api/main.py): GET /api/v1/read-gate/probe answers a fixed body once the read gate admits it; the other five require an admin signature: the operator-key routes (list, issue, revoke) and the read-gate mode route respond from api_operator_keys and runtime_settings, the read-census route from the in-process census. No route here reads matches, so no W1 private Match column can reach its output.",
       "routes": [
@@ -3934,6 +3976,11 @@
   "entry_points": {
     "middleware": [
       [
+        "admin_evidence",
+        "evidence_key_gate",
+        "58b2afd5449c224b67c935dcddd7984c7eb98b97"
+      ],
+      [
         "main",
         "maintenance_gate",
         "c7617c3690f3ec286ebc1e1f5dad64aabef23c3d"
@@ -4006,6 +4053,10 @@
     "POST /api/v1/logs/auto -> auto_logs.upload_auto_log",
     "POST /api/v1/internal/logs/auto/prune -> auto_logs.run_auto_log_prune",
     "GET /api/v1/players/{steam_id}/title-ladders -> title_ladders.get_title_ladders",
+    "GET /api/v1/internal/evidence-report/game/{code} -> admin_evidence.evidence_report_game",
+    "GET /api/v1/internal/evidence-report/series/{code} -> admin_evidence.evidence_report_series",
+    "GET /api/v1/internal/evidence-report/pair -> admin_evidence.evidence_report_pair",
+    "GET /api/v1/internal/evidence-report/player/{steam_id} -> admin_evidence.evidence_report_player",
     "GET /api/v1/health -> main.health_check",
     "GET /api/v1/mod-version -> main.get_mod_version",
     "GET /api/v1/internal/janitor-selftest -> main.get_janitor_selftest",

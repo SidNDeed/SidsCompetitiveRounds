@@ -290,6 +290,13 @@ WRITE_REVIEWED: dict[str, tuple[frozenset, str]] = {
         "one batch in one statement, and the claim prevents a double hand-out "
         "(5c0f605a)"),
 }
+_R_EVIDENCE = ("one admin_actions audit row per served page, in its own short transaction; "
+               "no game, queue, lease or player state; " + _R_INTERNAL)
+for _p in ("/api/v1/internal/evidence-report/game/{code}",
+           "/api/v1/internal/evidence-report/series/{code}",
+           "/api/v1/internal/evidence-report/pair",
+           "/api/v1/internal/evidence-report/player/{steam_id}"):
+    WRITE_REVIEWED[_p] = (frozenset({"AUDIT_SQL", "_audit"}), _R_EVIDENCE)
 _R_PORTAL = ("the portal token's first-use address binding (_portal_auth), written only for "
              "a presented portal token; PORTAL: the gate refuses nothing")
 for _p in ("/api/v1/i18n/approved", "/api/v1/i18n/contributors", "/api/v1/i18n/grants/mine",
@@ -323,6 +330,13 @@ ADMIN_SIGNED: frozenset = frozenset({
     "/api/v1/chat/moderate/spam-patterns",
     "/api/v1/admin/operators",
     "/api/v1/admin/read-census",
+    # The four admin evidence views (admin evidence report re-land, 2026-10-29):
+    # each handler calls _require_admin with its own action word before any
+    # read, as the routes above do; until now they fell to the PLAYER class.
+    "/api/v1/admin/seat-evidence",
+    "/api/v1/admin/card-evidence",
+    "/api/v1/admin/combat-evidence",
+    "/api/v1/admin/identity-clock-evidence",
 })
 
 # Routes that already require the translation portal token (X-Portal-Token,

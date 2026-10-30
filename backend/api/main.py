@@ -6185,6 +6185,12 @@ app.include_router(auto_logs_internal_router)
 # each call's reference id, and exactly three calls in this file.
 import title_ladders
 app.include_router(title_ladders.router)
+# Admin evidence report (phase 1a): the four GET report routes under
+# /api/v1/internal/evidence-report/, read-only but for one admin_actions audit
+# row per served page. Their outermost gate, evidence_key_gate, is registered
+# after replica_write_gate below.
+import admin_evidence as _admin_evidence
+app.include_router(_admin_evidence.router)
 
 
 # ── Version gate ───────────────────────────────────────────────
@@ -6967,8 +6973,12 @@ async def replica_write_gate(request: Request, call_next):
     The honest answer then is a clean refusal naming the reason, rather than a
     500 surfacing from postgres several layers down, or a half-applied write.
 
-    Registered LAST, so it is the OUTERMOST middleware and refuses before any
-    other layer does work. Inert on the primary: one boolean per request.
+    Registered after every other gate but one, so it refuses before them. The
+    one layer outside it is `evidence_key_gate` (admin_evidence.py), registered
+    right after this function: for the evidence report paths only it requires
+    the internal key before anything else runs, in every server state, and
+    passes every other path untouched. Inert on the primary: one boolean per
+    request.
 
     WHAT IT DOES NOT COVER, stated because a gate is easy to over-read:
       * WRITE-ON-GET. This codebase's dominant write shape is a GET that writes
@@ -6996,6 +7006,14 @@ async def replica_write_gate(request: Request, call_next):
                                "standby that should not have."},
         )
     return await call_next(request)
+
+
+# The evidence report's key gate (admin_evidence.py, design 4.2 step 1).
+# Registered LAST, so it is the outermost http middleware: a request under
+# /api/v1/internal/evidence-report/ without the internal key is refused here
+# with the report's one refusal body before maintenance or any other layer
+# answers. Every other path passes through it untouched.
+app.middleware("http")(_admin_evidence.evidence_key_gate)
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -7625,6 +7643,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence_parked=_cev.parked(),
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               combat_evidence=_combat_evidence_health_word(),
+                              admin_evidence=_admin_evidence_health_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7678,6 +7697,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence_parked=_cev.parked(),
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               combat_evidence=_combat_evidence_health_word(),
+                              admin_evidence=_admin_evidence_health_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8913,10 +8933,15 @@ async def admin_seat_evidence(
     """The reviewer's view of one game's seat evidence: both records, the
     comparison computed now, the stored findings (rule id and revision) and
     the unavailable matrix when one seat sent nothing. Admin only."""
+    # The admin signature is the first decision (over match_id when given,
+    # else stable_game_key as given, "" when neither), as in the admin
+    # register handlers of this file; the one-of check follows it. Admin
+    # evidence report landing, 2026-10-29: the read gate's ADMIN_SIGNED class
+    # test exercises these four views unsigned and wrongly signed.
+    target = str(match_id) if match_id is not None else (stable_game_key or "")
+    await _require_admin(db, admin_steam_id, "seat_evidence", target, hmac_signature)
     if (match_id is None) == (stable_game_key is None):
         raise HTTPException(400, "Give exactly one of match_id or stable_game_key")
-    target = str(match_id) if match_id is not None else stable_game_key
-    await _require_admin(db, admin_steam_id, "seat_evidence", target, hmac_signature)
     return await _sev.admin_view(db, match_id=str(match_id) if match_id else None,
                                  stable_game_key=stable_game_key,
                                  rs=_review_rules.current_rules().ruleset)
@@ -8967,10 +8992,15 @@ async def admin_card_evidence(
     measures computed now, the stored hand and phase rows, contributions and
     findings, and the per-day count of records naming an unregistered census.
     Admin only."""
+    # The admin signature is the first decision (over match_id when given,
+    # else stable_game_key as given, "" when neither), as in the admin
+    # register handlers of this file; the one-of check follows it. Admin
+    # evidence report landing, 2026-10-29: the read gate's ADMIN_SIGNED class
+    # test exercises these four views unsigned and wrongly signed.
+    target = str(match_id) if match_id is not None else (stable_game_key or "")
+    await _require_admin(db, admin_steam_id, "card_evidence", target, hmac_signature)
     if (match_id is None) == (stable_game_key is None):
         raise HTTPException(400, "Give exactly one of match_id or stable_game_key")
-    target = str(match_id) if match_id is not None else stable_game_key
-    await _require_admin(db, admin_steam_id, "card_evidence", target, hmac_signature)
     return await _cev.admin_view(db, match_id=str(match_id) if match_id else None,
                                  stable_game_key=stable_game_key,
                                  rs=_review_rules.current_rules().ruleset)
@@ -9047,10 +9077,15 @@ async def admin_combat_evidence(
     findings, and the pair view computed now with each gun's display case
     (only the measuring record, only the owner's, both agree, both differ)
     and every missing, trimmed or incompatible input shown NOT-RUN. Admin only."""
+    # The admin signature is the first decision (over match_id when given,
+    # else stable_game_key as given, "" when neither), as in the admin
+    # register handlers of this file; the one-of check follows it. Admin
+    # evidence report landing, 2026-10-29: the read gate's ADMIN_SIGNED class
+    # test exercises these four views unsigned and wrongly signed.
+    target = str(match_id) if match_id is not None else (stable_game_key or "")
+    await _require_admin(db, admin_steam_id, "combat_evidence", target, hmac_signature)
     if (match_id is None) == (stable_game_key is None):
         raise HTTPException(400, "Give exactly one of match_id or stable_game_key")
-    target = str(match_id) if match_id is not None else stable_game_key
-    await _require_admin(db, admin_steam_id, "combat_evidence", target, hmac_signature)
     return await _cbev.admin_view(db, match_id=str(match_id) if match_id else None,
                                  stable_game_key=stable_game_key,
                                  rs=_review_rules.current_rules().ruleset)
@@ -9130,10 +9165,15 @@ async def admin_identity_clock_evidence(
     other: the census and check runs, the clock fits of both seats, the
     points of both seats side by side, the connection class words, the
     stored findings and the provenance labels. Admin only."""
+    # The admin signature is the first decision (over match_id when given,
+    # else stable_game_key as given, "" when neither), as in the admin
+    # register handlers of this file; the one-of check follows it. Admin
+    # evidence report landing, 2026-10-29: the read gate's ADMIN_SIGNED class
+    # test exercises these four views unsigned and wrongly signed.
+    target = str(match_id) if match_id is not None else (stable_game_key or "")
+    await _require_admin(db, admin_steam_id, "identity_clock_evidence", target, hmac_signature)
     if (match_id is None) == (stable_game_key is None):
         raise HTTPException(400, "Give exactly one of match_id or stable_game_key")
-    target = str(match_id) if match_id is not None else stable_game_key
-    await _require_admin(db, admin_steam_id, "identity_clock_evidence", target, hmac_signature)
     return await _ice.ice_admin_view(db, match_id=str(match_id) if match_id else None,
                                      stable_game_key=stable_game_key)
 
@@ -70911,6 +70951,23 @@ _COMBAT_EVIDENCE_ROUTES = (submit_combat_evidence, admin_combat_evidence)
 def _combat_evidence_health_word() -> int:
     registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
     return 1 if all(id(fn) in registered for fn in _COMBAT_EVIDENCE_ROUTES) else 0
+
+
+_ADMIN_EVIDENCE_ROUTES = (_admin_evidence.evidence_report_game,
+                          _admin_evidence.evidence_report_series,
+                          _admin_evidence.evidence_report_pair,
+                          _admin_evidence.evidence_report_player)
+
+
+def _admin_evidence_health_word() -> int:
+    """1 when all four admin evidence report routes (admin_evidence.router,
+    included above) are registered on the app, else 0; both health_check arms
+    call it on every request, as the combat word above. It is the release
+    train's build discriminator for the admin evidence report landing: the
+    report routes cannot be probed for presence, because the internal prefix
+    answers 403 before routing on every build (the internal key check)."""
+    registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
+    return 1 if all(id(fn) in registered for fn in _ADMIN_EVIDENCE_ROUTES) else 0
 
 
 def _pc_motion_health_word() -> int:
