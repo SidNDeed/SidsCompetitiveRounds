@@ -1078,7 +1078,7 @@
           ],
           "main",
           "get_similar_players",
-          "c3c71d9215187098e84b859bcc344cb7433ac4f9"
+          "254233085074d7a42e7c908bf7c5b61d33332bf5"
         ],
         [
           "/api/v1/players/{steam_id}/team-bets",
@@ -2578,7 +2578,7 @@
           ],
           "main",
           "report_disconnect",
-          "5344ef9ef090d1345ed1818a11817066fc923886"
+          "f91c3a43abc8f7e1160fc3d0f6ba3a7525c87d1e"
         ],
         [
           "/api/v1/settings/allow-spectators",
