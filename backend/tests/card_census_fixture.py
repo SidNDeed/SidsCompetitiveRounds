@@ -113,4 +113,7 @@ REFUSED = {
     "game_dll_upper_hex": (client_bytes(dump(game_dll=[GAME_SHA.upper(), "ok"])), (422, "game_dll")),
     "card_rarity_bool": (client_bytes(_bad_card(["Bool", True, 1, None, None, 0])), (422, "census_card")),
     "card_width_5": (client_bytes(_bad_card(["Short", 0, 1, None, None])), (422, "census_card")),
+    # census_text nested past the json module's recursion limit: check_census_text's json.loads raises
+    # RecursionError, which no handler on the route catches, so the route answers 500 and stores nothing
+    "census_text_deep_nesting": (client_bytes(dump(census_text="[" * 100000 + "]" * 100000)), (500, None)),
 }

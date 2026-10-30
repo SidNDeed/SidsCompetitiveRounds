@@ -774,13 +774,15 @@ def census_plan(path, expect_digest=None):
     try:
         doc = json.loads(body)
     except Exception:  # noqa: BLE001 - the route catches everything here too
-        raise Refused("the census dump is not JSON the route reads (it would answer 400 body)")
+        raise Refused("the census dump is not JSON the route reads (the route would answer 400 body)")
     if not isinstance(doc, dict):
         raise Refused("the census dump is not a JSON object (the route would answer 422 digest)")
     digest = doc.get("digest")
-    if not isinstance(digest, str) or len(digest) > CENSUS_DIGEST_MAX:
-        raise Refused("the census dump states no digest the route can be signed over "
-                      "(it would answer 422)")
+    if not isinstance(digest, str):
+        raise Refused("the census dump states no digest string to sign (the route would answer 422 digest)")
+    if len(digest) > CENSUS_DIGEST_MAX:
+        raise Refused("the census dump's digest is longer than the route's %d-character query cap "
+                      "(the route would answer 422)" % CENSUS_DIGEST_MAX)
     # card_evidence.register_census: census_from_dump, any Refusal answered 422 <field>; any other
     # exception is a 500, which registers nothing either.
     try:
@@ -789,16 +791,15 @@ def census_plan(path, expect_digest=None):
         raise Refused("the server's census check refuses the dump: %s (the route would answer 422 %s)"
                       % (r.field, r.field))
     except Exception as e:  # noqa: BLE001
-        raise Refused("the server's census check fails on the dump (%s; the route would answer 500)"
+        raise Refused("the server's census check fails on the dump with %s (the route would answer 500)"
                       % e.__class__.__name__)
     if expect_digest is not None and c.digest != expect_digest:
         raise Refused("the dump's census digest is %s, not --expect-digest %s" % (c.digest, expect_digest))
     # register_census's insert: (digest, CAST(dumps(doc) AS jsonb), count, slots, game sha).
+    # census_from_dump has held the digest and the game sha to 64 lowercase hex; the SQL writer
+    # re-checks every value it embeds.
     row = {"digest": c.digest, "census": cm.dumps(doc), "card_count": c.count, "slot_count": c.slots,
            "game_dll_sha256": c.game_sha}
-    if not (HEX64.fullmatch(row["digest"]) and HEX64.fullmatch(row["game_dll_sha256"])
-            and row["census"].isascii()):
-        raise Refused("a computed census row is outside the registry's rules")
     return body, row
 
 

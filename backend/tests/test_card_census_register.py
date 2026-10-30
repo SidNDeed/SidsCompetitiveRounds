@@ -197,6 +197,8 @@ def _server_field(data):
         cm.census_from_dump(doc)
     except cm.Refusal as r:
         return 422, r.field
+    except Exception:  # noqa: BLE001 - uncaught on the route: a 500
+        return 500, None
     return None, None
 
 
@@ -210,6 +212,7 @@ def test_k3_every_refused_dump_exits_3_and_sends_and_writes_nothing(tmp_path, na
         code, out = _run(_real(path, extra), ENV, rec)
         assert code == rrd.EXIT_REFUSED, (extra, out)
         assert out.startswith("REFUSED: ") and "Nothing registered." in out
+        assert out.count("(the route would answer %d%s)" % (answer[0], " " + answer[1] if answer[1] else "")) == 1, out
         if answer[1] not in (None, "body", "digest"):
             assert "refuses the dump: %s (the route would answer 422 %s)" % (answer[1], answer[1]) in out
     assert rec.calls == []
@@ -268,6 +271,8 @@ def test_k4_already_registered_is_success_and_says_what_to_check(tmp_path):
     (200, "WRONG_DIGEST"),
     (200, "WRONG_COUNT"),
     (200, "EXTRA_KEY"),
+    (200, "WRONG_STATUS"),
+    (500, "REGISTERED_BODY"),
 ])
 def test_k4_any_other_answer_exits_1(tmp_path, status, text):
     data = cf.VALID["client_file"]
@@ -275,7 +280,9 @@ def test_k4_any_other_answer_exits_1(tmp_path, status, text):
     row = _expected_row(data)
     text = {"WRONG_DIGEST": _answer(dict(row, digest="0" * 64)),
             "WRONG_COUNT": _answer(dict(row, card_count=row["card_count"] + 1)),
-            "EXTRA_KEY": _answer(row, more=1)}.get(text, text)
+            "EXTRA_KEY": _answer(row, more=1),
+            "WRONG_STATUS": _answer(row, "recorded"),
+            "REGISTERED_BODY": _answer(row)}.get(text, text)
     code, out = _run(_real(path), ENV, Recorder(status, text))
     assert code == rrd.EXIT_SERVER, out
     assert "FAILED   census" in out
@@ -381,6 +388,12 @@ def test_k6_the_sql_writer_refuses_values_outside_the_registry():
             rrd.census_migration_text("401_card_pool_census.sql", bad)
     with pytest.raises(ValueError):
         rrd.census_migration_text("401_x'y.sql", row)
+
+
+def test_k6_the_census_flag_in_its_equals_form_selects_the_census_mode(tmp_path):
+    path = _write(tmp_path, cf.VALID["client_file"])
+    code, out = _run(["--census=" + path, "--dry-run"])
+    assert code == rrd.EXIT_OK and "DRY RUN  1 row would be registered" in out, out
 
 
 def test_k6_the_release_mode_is_untouched_by_the_census_dispatch():

@@ -170,7 +170,8 @@ class Rig:
         import main
 
         async def go():
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),
+            # raise_app_exceptions=False: an exception no handler catches is answered 500, as uvicorn answers it
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app, raise_app_exceptions=False),
                                          base_url="http://t") as c:
                 r = await c.post(url, headers=headers, content=body)
             return r.status_code, r.text
