@@ -29,8 +29,20 @@
 -- no row. Both post-checks RAISE, and nothing is committed, unless all four keys are
 -- live with the expected metadata and all eight seed pairs are covered.
 -- Explicit transaction (#340). Run order: deploy API -> apply this file.
+-- BOUNDS, set before anything else runs (the same three lines 391 and 392 carry):
+-- lock_timeout ends any single lock WAIT at 5 s (it applies per acquisition,
+-- learning #689, so it bounds each wait, not their sum), statement_timeout ends any
+-- single statement at 30 s, and idle_in_transaction_session_timeout ends the session
+-- when the runner stops for 5 s between two statements, and the server then rolls the
+-- transaction back. So this file holds or waits on i18n locks for at most 30 s per
+-- statement plus 5 s per pause between statements, and any bound that fires aborts
+-- the whole file with nothing committed.
+-- ROLLBACK: rollback_393_i18n_tournament_fence_strings.sql.
 
 BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL idle_in_transaction_session_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
 
 INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, max_px, context, updated_at)
 SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.context, clock_timestamp()

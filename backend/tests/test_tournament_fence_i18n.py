@@ -23,11 +23,17 @@ What is pinned here:
     positive control (#680), and no superseded body key survives;
   * every new or changed catalogue entry passes main._i18n_validate, the
     server's submit/approve validator (with a negative control);
+  * 393 and rollback_393 set lock_timeout, idle_in_transaction_session_timeout
+    and statement_timeout as the three statements right after BEGIN, before
+    anything reads, locks or writes (FENCE-R1 H4);
   * on PostgreSQL (SCR_MIGRATION_TEST_PG_DSN, fail-not-skip like
     test_migration_reruns.py): 393 applied twice on the real i18n tables
     (181 + 212) writes no row on its second run, measured by value AND xmin,
     and each post-check RAISES with nothing committed when its condition
-    fails.
+    fails; a transaction holding one fence key row makes 393 fail with
+    lock_not_available at its 5 s bound instead of waiting for the holder;
+    rollback_393 retires the four keys, supersedes their pending proposals
+    and writes nothing on a second run.
 """
 import asyncio
 import hashlib
@@ -36,6 +42,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 
 import pytest
@@ -55,6 +62,7 @@ except ImportError:                                    # pragma: no cover
 
 SQL_DIR = os.path.join(REPO, "backend", "sql")
 M393 = os.path.join(SQL_DIR, "393_i18n_tournament_fence_strings.sql")
+R393 = os.path.join(SQL_DIR, "rollback_393_i18n_tournament_fence_strings.sql")
 M181 = os.path.join(SQL_DIR, "181_i18n_infrastructure.sql")
 M212 = os.path.join(SQL_DIR, "212_i18n_key_context.sql")
 CATALOGUE = os.path.join(REPO, "plugin", "I18nCatalogues.cs")
@@ -189,6 +197,26 @@ def test_393_is_one_transaction_with_single_line_literals():
         stripped = re.sub(_E, "", ln)
         stripped = re.sub(r"'[^'\n]*'", "", stripped)
         assert "'" not in stripped, ln[:120]
+
+
+BOUNDS = ("SET LOCAL lock_timeout = '5s';",
+          "SET LOCAL idle_in_transaction_session_timeout = '5s';",
+          "SET LOCAL statement_timeout = '30s';")
+
+
+@pytest.mark.parametrize("path", [M393, R393], ids=["393", "rollback_393"])
+def test_393_and_its_rollback_set_their_bounds_before_anything_runs(path):
+    """FENCE-R1 H4: the three bounds are the three statements right after
+    BEGIN, so no read, lock or write precedes them; each is set once and
+    nothing later names the same settings; the file is one transaction."""
+    body = [ln.strip() for ln in _read(path).splitlines()
+            if ln.strip() and not ln.lstrip().startswith("--")]
+    assert body[0] == "BEGIN;" and body[-1] == "COMMIT;", (body[0], body[-1])
+    assert body.count("BEGIN;") == 1 and body.count("COMMIT;") == 1
+    assert tuple(body[1:4]) == BOUNDS, body[1:4]
+    later = [ln for ln in body[4:] if re.search(
+        r"(?i)\b(lock_timeout|idle_in_transaction_session_timeout|statement_timeout)\b", ln)]
+    assert later == [], later
 
 
 def test_393_seeds_are_the_bundled_toast_drafts():
@@ -334,4 +362,115 @@ def test_393_applied_twice_writes_nothing_and_its_post_checks_raise(live_pg):
                 await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
             finally:
                 await conn.close()
+    _run(go())
+
+
+async def _fresh_i18n(dsn):
+    """A connection whose search_path is a new throwaway schema holding the
+    real i18n tables (181 + 212). Returns (conn, schema)."""
+    schema = "f393_" + uuid.uuid4().hex[:10]
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute('CREATE SCHEMA "%s"' % schema)
+        await conn.execute('SET search_path TO "%s"' % schema)
+        await conn.execute(_read(M181))
+        await conn.execute(_read(M212))
+    except BaseException:
+        await _drop(dsn, schema, conn)
+        raise
+    return conn, schema
+
+
+async def _drop(dsn, schema, *conns):
+    """Close every connection first (terminate: one may sit in an aborted
+    transaction that would block the DROP), then drop the schema from a fresh one."""
+    for c in conns:
+        if c is not None and not c.is_closed():
+            c.terminate()
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+    finally:
+        await conn.close()
+
+
+def test_393_gives_up_on_a_held_key_row_at_its_lock_bound(live_pg):
+    """FENCE-R1 H4, live: another transaction holds one fence key row FOR
+    UPDATE, so 393's key upsert has to wait for it. With the bounds the run
+    fails with lock_not_available (55P03, the lock_timeout's own SQLSTATE,
+    not statement_timeout's 57014) after about 5 s, and nothing is committed.
+    Without them it waits for as long as the holder holds, and this test's own
+    20 s cap fails it. This is one held row, so it proves the bound on a single
+    wait - the claim the file makes - not a bound on the sum of waits (#689)."""
+    leave = _fence_keys()["leave"]["key_id"]
+    sql = _read(M393)
+
+    async def go():
+        runner, schema = await _fresh_i18n(live_pg)
+        holder = None
+        try:
+            await runner.execute(sql)
+            # a run that got past the held row would re-seed these four
+            refresh = _fence_keys()["refresh"]["key_id"]
+            await runner.execute("DELETE FROM i18n_proposals WHERE key_id = $1", refresh)
+            holder = await asyncpg.connect(live_pg)
+            await holder.execute('SET search_path TO "%s"' % schema)
+            await holder.execute("BEGIN")
+            await holder.execute("SELECT 1 FROM i18n_keys WHERE key_id = $1 FOR UPDATE", leave)
+            t0 = time.monotonic()
+            with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
+                await asyncio.wait_for(runner.execute(sql), timeout=20)
+            waited = time.monotonic() - t0
+            assert 4.0 <= waited < 15.0, waited
+            await runner.execute("ROLLBACK")
+            await holder.execute("ROLLBACK")
+            assert await runner.fetchval(
+                "SELECT count(*) FROM i18n_proposals WHERE key_id = $1", refresh) == 0
+        finally:
+            await _drop(live_pg, schema, runner, holder)
+    _run(go())
+
+
+def test_rollback_393_retires_the_keys_supersedes_their_pending_and_reruns_clean(live_pg):
+    """rollback_393 retires exactly the four fence keys (never deletes them),
+    decides every pending proposal on them 'superseded', leaves an unrelated
+    key and its pending proposal alone, and writes no row on a second run."""
+    from test_migration_reruns import _changed, _fingerprint
+    keys = _fence_keys()
+    key_ids = sorted(r["key_id"] for r in keys.values())
+
+    async def go():
+        conn, schema = await _fresh_i18n(live_pg)
+        try:
+            await conn.execute(_read(M393))
+            other = "0123456789abcdef"
+            await conn.execute(
+                "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, updated_at)"
+                " VALUES ($1, 'client', 'An unrelated string', $2, FALSE, clock_timestamp())",
+                other, hashlib.sha1(b"An unrelated string").hexdigest())
+            await conn.execute(
+                "INSERT INTO i18n_proposals (key_id, language_code, source_hash, proposed_target,"
+                " proposer_steam_id, status) VALUES ($1, 'es', $2, 'Una cadena', 'reviewer-test', 'pending')",
+                other, hashlib.sha1(b"An unrelated string").hexdigest())
+            assert await conn.fetchval(
+                "SELECT count(*) FROM i18n_proposals WHERE key_id = ANY($1::text[]) AND status = 'pending'",
+                key_ids) == 8
+
+            await conn.execute(_read(R393))
+            rows = await conn.fetch("SELECT key_id, retired_at FROM i18n_keys ORDER BY key_id")
+            assert {r["key_id"] for r in rows} == set(key_ids) | {other}
+            assert all((r["retired_at"] is not None) == (r["key_id"] in key_ids) for r in rows)
+            assert await conn.fetchval(
+                "SELECT count(*) FROM i18n_proposals WHERE key_id = ANY($1::text[])"
+                "   AND status = 'superseded' AND review_note = 'key retired by rollback_393'",
+                key_ids) == 8
+            assert await conn.fetchval(
+                "SELECT status FROM i18n_proposals WHERE key_id = $1", other) == "pending"
+
+            first = await _fingerprint(conn, ("i18n_keys", "i18n_proposals"))
+            await conn.execute(_read(R393))
+            second = await _fingerprint(conn, ("i18n_keys", "i18n_proposals"))
+            assert _changed(first, second) == 0, "a second run of rollback_393 wrote a row"
+        finally:
+            await _drop(live_pg, schema, conn)
     _run(go())
