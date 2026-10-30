@@ -290,3 +290,25 @@ def test_p5_the_post_check_block_raises_when_its_rows_are_absent(rig, release, t
         rig.run(rig.script("BEGIN;\n" + block + "\nCOMMIT;\n", fresh))
     assert "did not land" in str(raised.value) and "1 release row(s) and 17 game-file row(s)" in str(raised.value)
     assert rig.registries(fresh) == ([], [])
+
+
+def test_p6_the_post_check_block_names_the_one_tuple_that_is_missing(rig, release, tmp_path):
+    """The whole file lands its rows (NOTICE); one game-file row is then deleted; the DO block alone must raise
+    naming 0 release rows and 1 game-file row, and leave the remaining rows as they were."""
+    argv, expected = release
+    path = tmp_path / "fixture_release_digests.sql"
+    code, out = _run(argv + ["--emit-sql", str(path)], {})
+    assert code == rrd.EXIT_OK, out
+    sql = path.read_text(encoding="ascii")
+    block = re.search(r"DO \$\$.*?END \$\$;", sql, re.S).group(0)
+    fresh = rig.run(rig.new_schema())
+    rig.run(rig.script(sql, fresh))
+    full = rig.registries(fresh)
+    assert len(full[0]) == 1 and len(full[1]) == 17
+    rig.run(rig.script("DELETE FROM game_file_digests WHERE file_id = (SELECT min(file_id) FROM game_file_digests);", fresh))
+    assert len(rig.registries(fresh)[1]) == 16
+    with pytest.raises(Exception) as raised:
+        rig.run(rig.script("BEGIN;\n" + block + "\nCOMMIT;\n", fresh))
+    assert "did not land" in str(raised.value) and "0 release row(s) and 1 game-file row(s)" in str(raised.value)
+    after = rig.registries(fresh)
+    assert after[0] == full[0] and len(after[1]) == 16
