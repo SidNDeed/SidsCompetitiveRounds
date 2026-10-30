@@ -327,12 +327,12 @@ namespace CompetitiveRounds
             // this game" (rated, even at zero score) from "absent ghost
             // carried for the roster check" (never rated).
             public int leftGameNumber;
-            // Points the WHOLE FIELD had scored when they left. Under the
-            // server's grace threshold (2, same as the bet cutoff and the
-            // bug-#114 fresh-game cancel below) nothing had been decided yet,
-            // so the server does not rate them for this game. Reported by US,
-            // a client still in the room — the leaver cannot vouch for their
-            // own grace.
+            // Half points the WHOLE FIELD had scored when they left. The server's
+            // grace: a seat that leaves before the field has scored four half
+            // points in total, whether or not any became a full point, is not rated
+            // for that game and earns no game gold or XP. The bet cutoff and the
+            // bug-#114 fresh-game cancel below are separate, lower counts. Reported
+            // by US, a client still in the room — the leaver cannot vouch for it.
             public int gamePointsAtLeave;
         }
 
