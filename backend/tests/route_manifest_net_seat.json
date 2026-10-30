@@ -133,7 +133,7 @@
           ],
           "main",
           "admin_cosmetic_review",
-          "dce91d332842c937976b346b1b56998499151225"
+          "d06c4c5073d94d92b676dd3c11cedeaad5c6c012"
         ],
         [
           "/api/v1/admin/cosmetic-submissions",
@@ -169,7 +169,7 @@
           ],
           "main",
           "admin_grant_achievement",
-          "87112f87510526fdee793cdc0cd5c4ed9ed18f0b"
+          "07aef402ba8c28f7dae7347b2d566a9e145cd484"
         ],
         [
           "/api/v1/admin/i18n/grants",
@@ -349,7 +349,7 @@
           ],
           "main",
           "admin_set_item_artist",
-          "485c23c8aba866b0c066e8abd3506afa280f93ba"
+          "d86521f13495671ee5b20168ec82db2afbe2ecec"
         ],
         [
           "/api/v1/admin/team/rebuild-glicko",
@@ -376,7 +376,7 @@
           ],
           "main",
           "admin_resolve_team_series",
-          "17e8453a486d275d03bee72d4a663ff6ace25836"
+          "2a800d4592df1d0fff458be04080fe44946d589d"
         ],
         [
           "/api/v1/admin/unban",
@@ -520,7 +520,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "821e5772cf2a4b4da08a14a5d847e9d2a6407bce"
+          "aa8c44384887bb8860c96ffa79ad479d1b046321"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -619,7 +619,7 @@
           ],
           "main",
           "submit_match",
-          "a978fbca5694e1ec09a6cf550a06bafcf719d47b"
+          "2b761e4371135fb6995b19de626350a2b28b127a"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "dc139c8c0ba0a72418ed9d0744d3cbe3cb30cdf0"
+          "0824af468b22d9d364aa46d4f820b10523bf61b1"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -835,7 +835,7 @@
           ],
           "main",
           "get_player_stats",
-          "797126c029f98e4df5e3270ceaf7def675e114d0"
+          "23c09359d259858eec6db6704b42e4c99d864af0"
         ],
         [
           "/api/v1/players/{steam_id}/active-color",
@@ -844,7 +844,7 @@
           ],
           "main",
           "set_active_color",
-          "94c41bdeedd34a20dd542d82368f65fe85299ee6"
+          "517b603e48f3382284a24a4cafe27070b7f1a377"
         ],
         [
           "/api/v1/players/{steam_id}/active-cursor-color",
@@ -853,7 +853,7 @@
           ],
           "main",
           "set_active_cursor_color",
-          "d9b678bcef72fc0da243bbe1c20630162b498b95"
+          "982ca845ef7c1294bdb1abd631b680786f9f5602"
         ],
         [
           "/api/v1/players/{steam_id}/active-player-color",
@@ -862,7 +862,7 @@
           ],
           "main",
           "set_active_player_color",
-          "edbeed57e179d9ccbe96b70ef631ec7c8ed8de7b"
+          "94f82b30016048734c2f531bf49ad7d06b6bf71d"
         ],
         [
           "/api/v1/players/{steam_id}/active-player-effect",
@@ -871,7 +871,7 @@
           ],
           "main",
           "set_active_player_effect",
-          "aee6077d6b000d70fe8ab4361062e65b9ad362b3"
+          "d3e7dc23800de5d2a24d34a731b828a8af77affe"
         ],
         [
           "/api/v1/players/{steam_id}/active-title",
@@ -880,7 +880,7 @@
           ],
           "main",
           "set_active_title",
-          "d4e9eee185013d2920a86d2d3653f64d7efa0a2f"
+          "2383b2e53ebd94368b6908712eaecfcb69682572"
         ],
         [
           "/api/v1/players/{steam_id}/active-trail",
@@ -889,7 +889,7 @@
           ],
           "main",
           "set_active_trail",
-          "cd413d0c3a41776eb1621a69984a06a2b2ac8012"
+          "a46810a3bb420d2fbe0ebad786f4f5722407952e"
         ],
         [
           "/api/v1/players/{steam_id}/appear-offline",
@@ -943,7 +943,7 @@
           ],
           "main",
           "toggle_color",
-          "d842110942cc0681c0ae49e47e041cd7da39f928"
+          "36db3437a642ef1774be39cbd4fc1dbb52b726a6"
         ],
         [
           "/api/v1/players/{steam_id}/data",
@@ -979,7 +979,7 @@
           ],
           "main",
           "set_hide_gold",
-          "e5dd0a1c4693bd48ffa7f2d9b99735aa965b012a"
+          "b3a4343642601e5a581840ada30826ff68f52a4d"
         ],
         [
           "/api/v1/players/{steam_id}/inventory",
@@ -988,7 +988,7 @@
           ],
           "main",
           "get_inventory",
-          "48242cbd1be14d2d599f338893fc986ea876c810"
+          "f9c0a2dc27dc161d579728676a2f7b098975351a"
         ],
         [
           "/api/v1/players/{steam_id}/matches",
@@ -1015,7 +1015,7 @@
           ],
           "main",
           "toggle_nametag_style",
-          "0b90c540708710173b3cafb3e74f7e08af14f17b"
+          "056776aabeffc70230af80a67c93bb93f974de75"
         ],
         [
           "/api/v1/players/{steam_id}/ovt-history",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "b944c5fa24930ac6a7c03bd45c839e067ed7c53c"
+          "5774e78a68c2f4cf6ddb0fd9697bc3cac05f7db2"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1249,7 +1249,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "ab35578d697efd6ac8bbf37bf765c181da60f6dd"
+          "1cb76254ecd0704b4e953089c6eabfa13af5894f"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1372,7 +1372,7 @@
           ],
           "main",
           "artist_gift",
-          "be71488728c910af717f25de2a8e20795ba60cbb"
+          "4225fec800be173a0deee9f55cff0e02228fa709"
         ],
         [
           "/api/v1/artist/my-submissions",
@@ -1390,7 +1390,7 @@
           ],
           "main",
           "artist_set_desc",
-          "93cb3fe9e4f71715f48025bbbfb6190eaf665168"
+          "7234d2859c14c318f891ebcad295256fb63f4c04"
         ],
         [
           "/api/v1/artist/set-name",
@@ -1399,7 +1399,7 @@
           ],
           "main",
           "artist_set_name",
-          "a6c5dd7a6f54484e3f5d9ad15bec17547f157db1"
+          "aec65884292be8df87b0c63467aef26b5dd21aae"
         ],
         [
           "/api/v1/artist/set-price",
@@ -1408,7 +1408,7 @@
           ],
           "main",
           "artist_set_price",
-          "05e114004c8af6ee5439081f06b236a5709e9f32"
+          "937dd7e9dec476ae304213b65bca39fdc118db5b"
         ],
         [
           "/api/v1/artist/set-stock",
@@ -1417,7 +1417,7 @@
           ],
           "main",
           "artist_set_stock",
-          "36e75766c004940a1b1b927af980fa206962da63"
+          "a295f7e783474489d5ae2eaaea66b9aabaca879a"
         ],
         [
           "/api/v1/artist/status/{steam_id}",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "52303f6f62e386971d738123df6a0e3b047108df"
+          "f3534903b2b42cb877252e8d0209b212f029d5b3"
         ],
         [
           "/api/v1/i18n/approved",
@@ -1984,7 +1984,7 @@
           ],
           "main",
           "i18n_review",
-          "f962b750e6da2c40473461f545955ed64191cd15"
+          "7fc301a97ca415cf47212ca06e8a42cee86e59e5"
         ],
         [
           "/api/v1/internal/booster-grant",
@@ -2596,7 +2596,7 @@
           ],
           "main",
           "list_shop_items",
-          "9ee3b67cbb4a10c71434fddd5aaa9dbef7aff035"
+          "e79eaf0f1c805022685d31e94b1fb9dc2a7ece11"
         ],
         [
           "/api/v1/shop/newest",
@@ -2605,7 +2605,7 @@
           ],
           "main",
           "newest_shop_items",
-          "44007519595ac6105531b5f8e5854ba1cbf7d1da"
+          "23233f17d4e6702be54a9c054e418849dfa74d41"
         ],
         [
           "/api/v1/shop/purchase",
@@ -2614,7 +2614,7 @@
           ],
           "main",
           "purchase_item",
-          "6268782b5c77f6b4c667920f2d6c21972b17aed3"
+          "aa98186024ace6f66b64501bdfc97842325e133f"
         ],
         [
           "/api/v1/shop/sales-board",
@@ -3296,7 +3296,7 @@
           ],
           "main",
           "pc_portrait_upload",
-          "303a57eba2fe23549bf557421b06b51d9ed39f26"
+          "1dc53c74121a6c74e620806297932e4daee0a3d6"
         ],
         [
           "/api/v1/pc/portrait/motion",
@@ -3542,7 +3542,7 @@
           ],
           "title_ladders",
           "get_title_ladders",
-          "634add09cf6a8ec4d1d11ed86cc022021ca71850"
+          "27d9c288b245bab2293841857f0467d2ab53c8fa"
         ]
       ]
     },
@@ -3869,7 +3869,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "675e4cd823173fdf1678dbee673813e76dc8908d"
+          "8dff9ff69a1234a75a3e1569c391b9985f05a2fd"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -4017,7 +4017,7 @@
       [
         "main",
         "lifespan",
-        "8ce219dca842762633d7d634bbb3d2d9c71a4d02"
+        "16de33d7f66b6299685683e592eca38278f8cb71"
       ]
     ]
   },

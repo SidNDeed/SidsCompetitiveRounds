@@ -595,6 +595,10 @@ class ShopItem(Base):
     # Community art stays unavailable until its PNG and append-only client
     # catalog entry have shipped. House/existing items default ready.
     catalog_ready = Column(Boolean, nullable=False, default=True)
+    # Migration 397: the first client version that can equip or render this
+    # item; NULL = any admitted client. Honoured by /shop/items, /shop/newest,
+    # /shop/purchase and /artist/gift through main._client_meets_item_floor.
+    min_client_version = Column(String(16), nullable=True)
 
 
 class PlayerItem(Base):
