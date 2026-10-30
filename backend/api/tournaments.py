@@ -52,7 +52,7 @@ from schemas import (
     TournamentTimeVoteRequest,
 )
 from tournament_bracket import SignupInput, build_bracket, build_double_elim_bracket
-from read_gate import ReadGateRoute
+from read_gate import ReadGateRoute, internal_key_valid
 
 # Verified reads: every GET route here carries the read gate (read_gate.py).
 router = APIRouter(prefix="/api/v1/tournaments", tags=["Tournaments"],
@@ -491,7 +491,9 @@ async def _player_id_banned(db: AsyncSession, player_id) -> bool:
 # the FAQ and the bot's availability-DM decision among them), the agreement
 # announcement, lock_tournament's signup gate, slot decision and post-kick
 # recheck, the push-back sentence, the availability-notice queue and the
-# notice feed's recheck (main.py). Round 3's tally also counted speculative
+# notice feed's recheck (main.py), and the force-start quorum
+# (_check_and_trigger_force_start) with the force_vote_count /current shows
+# beside it (fence r3 find 4, r4 find 7). Round 3's tally also counted speculative
 # entrants' votes while the lock's gate required confirmed ones, so a surface
 # could report a quorum the lock then refused. Recorded as the integrator's
 # default (2026-09-30): tournament rules are Sid's, and he may change it.
@@ -1099,11 +1101,19 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
             my_region = _effective_match_region(_live[0].m_region,
                                                 t.photon_region, t.kind)
 
-    # Force vote count
-    fvc = (await db.execute(
-        select(func.count()).select_from(TournamentForceVote).where(
-            TournamentForceVote.tournament_id == t.id)
-    )).scalar_one()
+    # Force vote count: the TRIGGER's numerator, not raw rows (fence r4
+    # find 7 + r5 find 4). A vote counts only when its voter is an eligible
+    # entrant (_ELIGIBLE_ENTRANT_SQL, the one domain
+    # _check_and_trigger_force_start judges its quorum on). Raw rows painted
+    # "8/8" (or "17/16" with a speculative voter) on a button the server
+    # refuses; a leave, a demotion or a ban now drops the vote from this
+    # count the same way the trigger ignores it.
+    fvc = (await db.execute(text(
+        "SELECT COUNT(*) FROM tournament_force_votes v"
+        "  JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id"
+        "                            AND ts.player_id = v.player_id"
+        f" WHERE v.tournament_id = :tid AND {_ELIGIBLE_ENTRANT_SQL}"),
+        {"tid": t.id})).scalar_one()
 
     # Prizes scale with player count (item 2): live confirmed count while
     # voting, the locked snapshot afterward. Flat fields — the mod parses
@@ -1137,7 +1147,7 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
 
 # ── Lifecycle ─────────────────────────────────────────────────────
 
-async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) -> None:
+async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) -> bool:
     """Transition voting -> locked. For sync tournaments the lock requires
     min_players votes agreeing on a SINGLE offered slot (item 3 — voting is
     mandatory at signup); that slot becomes scheduled_start_ts and signups
@@ -1148,6 +1158,20 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
     force=True (force-start path: every signup force-voted "start now")
     skips the agreement gate and the kick pass."""
     now = datetime.now(timezone.utc)
+
+    # Serialize with every writer of the signup set (signup, unsignup and its
+    # locked-phase bracket surgery, time-vote, force-vote) and with the other
+    # caller of this function (fence r1 find 2: the tick's due-time lock and
+    # a request's force lock), then re-read the status this transition
+    # assumes: `t` was loaded before the lock was held. Returns True only
+    # when THIS call performed the voting->locked flip, which is what lets
+    # the force trigger tell its own flip from one it merely observed.
+    # (The fence's original due-time re-check is not carried: it guarded a
+    # second box running the tick, and only the primary runs it.)
+    await _acquire_tournament_lifecycle_lock(db, t.id)
+    await db.refresh(t)
+    if t.status != "voting":
+        return False
 
     # Confirmed signups only (is_speculative=False).
     q = select(TournamentSignup).where(and_(
@@ -1343,14 +1367,17 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             # the deciding force-vote row, and if lock_at is still in the future
             # the tick does not revisit the tournament at all, so the promised
             # recomputation simply never happens (r4 finding). The force caller
-            # already refuses below min_players; it counts signups BEFORE the
-            # ban filter above, which is the one way it can still get here.
-            # Leaving the row untouched lets the tick handle it when due.
+            # judges its quorum on this same eligibility domain
+            # (_eligible_entrant_ids, under the lifecycle lock), so what is left
+            # to reach here is a ban committing between the trigger's count and
+            # the one above — bans do not take the lifecycle lock.
+            # Leaving the row untouched lets the tick handle it when due, and
+            # the False return tells the trigger it did not perform the flip.
             print(f"[TOURNAMENT] {t.id} force-lock declined ({pushback_reason}) — "
                   f"leaving the tournament untouched for the due-time tick")
-            return
+            return False
         await _push_back(pushback_reason)
-        return
+        return False
 
     # Item 3 (sync, non-force): lock in the agreed slot, then remove every
     # signup — confirmed AND speculative — that didn't vote for it. All
@@ -1429,7 +1456,7 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
                 f"not enough eligible players after lock filtering "
                 f"({len(signups)} of {t.min_players} required)",
                 f"fewer than {t.min_players} eligible players agreed on the start time")
-            return
+            return False
 
     # Prizes scale with the locked player count (item 2). prize_tier is kept
     # populated for legacy readers, but _pay_prizes and every display surface
@@ -1544,20 +1571,26 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         except Exception as e:
             print(f"[TOURNAMENT] vote-moved feed post failed: {e}")
 
-    # Snapshot Elo per signup.
+    # Snapshot Elo for EXACTLY the decided roster (fence r5 find 3,
+    # tightening round-19 find 1): this used to re-run the ban predicate as a
+    # second point read, and a ban or unban committing between the roster
+    # decision above and this read could shrink the bracket below the minimum
+    # the gate just approved (a 7-player bracket with 8-player prize math) or
+    # KeyError on an unbanned extra row. Selecting by the decided ids keeps
+    # the bracket inputs inside the roster `signups` holds; every writer of
+    # the signup set takes the lifecycle lock this function holds, so the
+    # two are equal unless a row is deleted by a path outside that lock.
     eq = text("""
         SELECT ts.id AS signup_id, ts.player_id,
                COALESCE(gr.rating, :default_rating) AS rating
         FROM tournament_signups ts
         LEFT JOIN glicko_ratings gr ON gr.player_id = ts.player_id
-        WHERE ts.tournament_id = :tid AND ts.is_speculative = FALSE
-          -- round-19 find 1: the bracket-input set must equal the filtered
-          -- roster, or signup_by_id KeyErrors on the banned extra row
-          AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                           JOIN players p ON p.steam_id = pb.steam_id
-                          WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
+        WHERE ts.id = ANY(CAST(:sids AS uuid[]))
     """)
-    erows = (await db.execute(eq, {"tid": t.id, "default_rating": GLICKO2_DEFAULT_RATING})).all()
+    erows = (await db.execute(eq, {
+        "sids": [s.id for s in signups],
+        "default_rating": GLICKO2_DEFAULT_RATING,
+    })).all()
     bracket_inputs = [SignupInput(
         signup_id=r.signup_id, player_id=r.player_id, elo=r.rating,
         penalty=0.0, signed_up_at=None,
@@ -1629,12 +1662,21 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         if cleared_rows:
             print(f"[TOURNAMENT] Auto-cleared {len(cleared_rows)} block(s) for "
                   f"tournament {t.id}: {cleared_rows}")
+    return True
 
 
 async def start_tournament(db: AsyncSession, t: Tournament) -> None:
     """Transition locked -> running. First-round matches (including those with
     pre-filled p1/p2 from bye propagation) become ready."""
     now = datetime.now(timezone.utc)
+    # Same serialization and status re-read as lock_tournament: a locked
+    # withdrawal in flight must commit its bracket surgery before the start
+    # flips matches ready (fence r1 find 2), and a start that finds the row
+    # no longer 'locked' does nothing.
+    await _acquire_tournament_lifecycle_lock(db, t.id)
+    await db.refresh(t)
+    if t.status != "locked":
+        return
     player_ids = (await db.execute(
         select(TournamentSignup.player_id).where(TournamentSignup.tournament_id == t.id)
     )).scalars().all()
@@ -1760,6 +1802,35 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
     allq = select(TournamentMatch).where(TournamentMatch.tournament_id == tournament_id)
     by_id = {m.id: m for m in (await db.execute(allq)).scalars().all()}
 
+    # Legacy-shape self-repair, BEFORE any resolution consumes it (r4
+    # find 1; same normalize-at-the-resolver pattern as the GF_RESET fix
+    # below): the pre-fence builder emitted a 15-player odd LB feeder as a
+    # ONE-prerequisite is_bye row, and lock persistence terminalized it
+    # winnerless. The terminal-aware prereq gate would treat that row as an
+    # empty terminal feeder and cut the missing WB loser after one loss —
+    # and a data-fix migration alone cannot make deploy order safe (this
+    # code could run first). Un-terminalizing here is complete: repair
+    # precedes every consumption, self-heals rows written by an old builder
+    # during a rolling deploy, and matches nothing current — new-builder LB
+    # rows and vacancy-propagated byes always carry TWO prerequisites. The
+    # repaired row resolves normally on the next pass once its feeder is
+    # terminal.
+    # ended_at is the ONE-SHOT discriminator (r5 find 2): lock persistence
+    # writes builder byes with ended_at NULL, while every runtime vacancy
+    # terminalization stamps it — without this term the repair re-opened a
+    # repaired row the vacancy branch had LEGITIMATELY terminalized (its
+    # feeder resolved with no loser), and with a dependent snapshotted
+    # ahead of the feeder the pair flapped forever.
+    for _lm in by_id.values():
+        if (_lm.bracket_side == "L" and _lm.status == "bye_auto"
+                and _lm.winner_signup_id is None
+                and _lm.ended_at is None
+                and len(list(_lm.prereq_match_ids or [])) == 1):
+            _lm.status = "pending"
+            _lm.is_bye = False
+            print(f"[TOURNAMENT] normalized legacy one-prereq LB bye {_lm.id} "
+                  f"(tournament {tournament_id})")
+
     def _loser_of(pre: TournamentMatch) -> Optional[uuid.UUID]:
         if pre.winner_signup_id is None:
             return None
@@ -1792,7 +1863,14 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         came_from_play = False
         if prereq_ids:
             prereqs = [by_id[pid] for pid in prereq_ids if pid in by_id]
-            if any(p.winner_signup_id is None for p in prereqs):
+            # Wait only on prereqs that can still PRODUCE someone. A terminal
+            # prereq without a winner (a fully-vacant propagated bye, below)
+            # resolves too — it just contributes nobody to every role. Same
+            # done-tuple idiom as the podium walk (a bye can never
+            # un-terminal even though the notice path excludes it).
+            _done = _MATCH_TERMINAL_STATES + ("bye_auto",)
+            if any(p.winner_signup_id is None
+                   and p.status not in _done for p in prereqs):
                 continue
             came_from_play = any(
                 p.status in ("completed", "forfeit", "double_forfeit") for p in prereqs)
@@ -1832,6 +1910,35 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             print(f"[TOURNAMENT] normalized legacy one-prereq GF_RESET {m.id}")
         m.p1_signup_id = resolved_p1
         m.p2_signup_id = resolved_p2
+        # Structural-vacancy propagation (fence r2 find 1). With every prereq
+        # terminal, a None seat here is not "still waiting" — it is a bye's
+        # missing loser (a bye has no loser to send down) or a vacant match's
+        # missing winner, and it will never fill. The old defensive
+        # `continue` below parked such a match forever: one locked-phase
+        # withdrawal with an empty speculative pool wedged its losers-bracket
+        # branch and the grand final behind it. The match becomes a bye for
+        # the present seat, exactly like a builder pre-fill; with BOTH seats
+        # vacant it goes terminal winnerless and the prereq gate above lets
+        # dependents resolve it as contributing nobody, cascading the
+        # vacancy. Deliberately NO _apply_terminal_transitions and NO
+        # completion notices: like builder byes these are silent bookkeeping,
+        # and keeping vacancy-decided outcomes out of the placement/reset/
+        # betting machinery is the pay-nothing-on-non-played principle
+        # (round-34 cut). GF_RESET is excluded — its rows exist only with
+        # both seats derivable from a DECIDED grand final, and the
+        # provenance machinery (rounds 35-36) owns every path that touches
+        # it.
+        if prereq_ids and m.bracket_side != "GF_RESET" \
+                and not (resolved_p1 and resolved_p2):
+            survivor = resolved_p1 or resolved_p2
+            m.is_bye = True
+            m.status = "bye_auto"
+            m.winner_signup_id = survivor
+            m.ended_at = now
+            print(f"[TOURNAMENT] vacancy propagation: match {m.id} "
+                  f"({m.bracket_side} r{m.round}) -> bye_auto, "
+                  f"survivor={survivor}")
+            continue
         # Round-18 find 2: a ban during the bracket phase becomes a FORFEIT
         # right here, before this match can mint a series/sct-* room — the
         # existing forfeit machinery then advances the opponent exactly as
@@ -2936,7 +3043,11 @@ async def _maybe_complete_tournament(db: AsyncSession, t: Tournament) -> None:
     Idempotent — short-circuits if status == 'completed'. (Review #3)"""
     if t.status == "completed":
         return
-    finished_states = ("completed", "forfeit", "double_forfeit")
+    # bye_auto included (fence r2 find 1): a final decided by vacancy
+    # propagation (cascaded withdrawals with an empty pool) must complete
+    # the tournament rather than park it. Such finals mint like other
+    # non-played terminals: null fields pay nothing and are logged below.
+    finished_states = _MATCH_TERMINAL_STATES + ("bye_auto",)
 
     if t.format == "double_elim_bo3":
         # If a GF_RESET exists and is not yet finished, wait for it.
@@ -3653,6 +3764,40 @@ async def _acquire_tournament_match_action_lock(
     ), {"mid": str(match_id)})
 
 
+async def _acquire_tournament_lifecycle_lock(db: AsyncSession, tournament_id) -> None:
+    """Serialize signup-set and bracket surgery with the lifecycle
+    transitions of one tournament (Aug 30 fence r1 find 2, widened in r2).
+    Scope: the PRE-PLAY planes. Every writer of the signup set and of the
+    votes the lock counts (signup, time-vote, force-vote, unsignup and its
+    locked-phase surgery) and the voting->locked / locked->running
+    transitions (lock_tournament, start_tournament) acquire it; a NEW such
+    writer must acquire it too. Deliberately NOT running->completed:
+    _maybe_complete_tournament runs under the match/provenance ordering and
+    its own CAS claim, and changes neither enrollment nor bracket seats (it
+    does stamp podium placed_rank on signup rows, bookkeeping on a roster
+    no longer mutable, r5 find 7); pulling it under this lock would add a
+    lock edge to the report-hook plane for nothing (r4 find 8).
+
+    What it rules out: an unsignup that read 'voting' deleting its signup
+    row AFTER the lock built the bracket from it (the FK's SET NULL empties
+    the seat with no backfill), two concurrent locked withdrawals promoting
+    the same speculative into two seats, and a locked withdrawal
+    interleaving with the locked->running flip.
+
+    Transaction-scoped like the per-match gate above. Ordering contract:
+    taken before the per-identity signup advisory, before any per-match
+    advisory, and before the players and tournament_matches row locks this
+    module takes under it, so it adds no ABBA pair to those planes. The
+    one write that may precede it is the session gate's own arming
+    backfill on the caller's players row (_check_steam_session, once per
+    account). The acquirer re-reads the tournament's status under the lock
+    before acting on it."""
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock("
+        "hashtext('tournament-lifecycle:' || CAST(:tid AS text)))"
+    ), {"tid": str(tournament_id)})
+
+
 async def _lock_tournament_match_for_action(
     db: AsyncSession,
     match_id: uuid.UUID,
@@ -4325,26 +4470,33 @@ async def _check_and_trigger_force_start(db: AsyncSession, t: Tournament) -> boo
     branch at 0<mins<=15, in-game countdown banner) fires naturally."""
     if t.status != "voting":
         return False
-    sq = select(TournamentSignup.player_id).where(
-        TournamentSignup.tournament_id == t.id,
-        TournamentSignup.is_speculative == False)  # noqa: E712
-    signup_player_ids = set(row[0] for row in (await db.execute(sq)).all())
-    if len(signup_player_ids) < t.min_players:
+    # Fence r3 find 4: judge the quorum on the SAME roster lock_tournament
+    # will bracket, the one eligibility domain (_eligible_entrant_ids:
+    # confirmed, no active ban). A banned signup neither counts toward
+    # min_players nor is required to vote; counting it let a field of 7
+    # eligible plus 1 banned reach force quorum, which the lock then
+    # declined as short.
+    eligible = await _eligible_entrant_ids(db, t.id)
+    if len(eligible) < t.min_players:
         return False
     fq = select(TournamentForceVote.player_id, TournamentForceVote.voted_at).where(
         TournamentForceVote.tournament_id == t.id)
     fv = {r.player_id: r.voted_at for r in (await db.execute(fq)).all()}
-    if not all(pid in fv for pid in signup_player_ids):
+    if not all(pid in fv for pid in eligible):
         return False
-    votes = [fv[pid] for pid in signup_player_ids]
+    votes = [fv[pid] for pid in eligible]
     if (max(votes) - min(votes)).total_seconds() > FORCE_START_WINDOW_MINUTES * 60:
         return False
     # Lock with 10 minutes of notice. force=True: everyone here force-voted
     # "start now", so the slot-agreement gate and kick pass don't apply.
-    await lock_tournament(db, t, force=True)
-    if t.status == "locked":
+    # Only the call that actually PERFORMED the flip may write the +10min
+    # schedule (fence r2 find 4): the old `t.status == "locked"` proxy
+    # claimed credit for a tick's concurrent lock too and overwrote the
+    # schedule that lock had decided.
+    performed = await lock_tournament(db, t, force=True)
+    if performed:
         t.scheduled_start_ts = datetime.now(timezone.utc) + timedelta(minutes=10)
-    return True
+    return performed
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -4415,8 +4567,24 @@ async def get_current(
 
 
 @router.post("/{tournament_id}/signup", response_model=TournamentCurrentResponse)
-async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: AsyncSession = Depends(get_db)):
+async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest,
+                 request: Request, db: AsyncSession = Depends(get_db)):
+    # Session gate (fence r5 find 1, forfeit_match's shape): the write is
+    # made for the steam_id in the body, so the caller's session must belong
+    # to that steam_id. Log-only until STEAM_AUTH_ENFORCE or per-account
+    # arming applies; the same gate runs on time-vote, force-start-vote,
+    # ready and play-now below, and on unsignup for every caller that does
+    # not carry the internal key.
+    from main import _check_steam_session
+    await _check_steam_session(request, req.steam_id, db)
     t = await _get_tournament(db, tournament_id)
+    # Lifecycle lock BEFORE the status read and the per-identity advisory
+    # below (fence r2 find 2): a 17th signup racing the lock could land its
+    # row and speculation recompute AFTER the bracket committed, flipping a
+    # BRACKETED incumbent speculative. Ordering is lifecycle -> identity
+    # everywhere; the reverse would deadlock against this endpoint itself.
+    await _acquire_tournament_lifecycle_lock(db, tournament_id)
+    await db.refresh(t)
     if t.status != "voting":
         raise HTTPException(status_code=400, detail=f"Tournament not accepting signups (status={t.status})")
     player = await _get_player_by_steam(db, req.steam_id)
@@ -4615,14 +4783,75 @@ async def _maybe_announce_sync_agreement(db: AsyncSession, t: Tournament) -> Non
 
 
 @router.post("/{tournament_id}/unsignup", response_model=TournamentCurrentResponse)
-async def unsignup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: AsyncSession = Depends(get_db)):
+async def unsignup(tournament_id: uuid.UUID, req: TournamentSignupRequest,
+                   request: Request, db: AsyncSession = Depends(get_db)):
+    # Two kinds of caller. The bot authenticates with the internal key
+    # (read_gate.internal_key_valid: constant-time, fails closed when
+    # API_SECRET_KEY is unset) and carries no player session, so the session
+    # gate would refuse its availability-check "No" as soon as enforcement
+    # arms for that player (fence r2 find 5). Every other caller takes the
+    # session gate, forfeit_match's shape: the session must belong to the
+    # claimed steam_id once STEAM_AUTH_ENFORCE or per-account arming applies.
+    _is_internal = internal_key_valid(request.headers.get("X-Internal-Key"))
+    if not _is_internal:
+        from main import _check_steam_session
+        await _check_steam_session(request, req.steam_id, db)
     t = await _get_tournament(db, tournament_id)
+    # Serialize with voting->locked / locked->running and with concurrent
+    # withdrawals (fence r1 find 2), THEN re-read the status the checks
+    # below judge: the fetch above ran before the lock was held.
+    await _acquire_tournament_lifecycle_lock(db, tournament_id)
+    await db.refresh(t)
     if t.status not in ("voting", "locked"):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot leave once the tournament starts playing (status={t.status}). "
                    f"Not showing up will forfeit and count toward your penalty %.")
+    if t.status == "locked":
+        # A locked withdrawal is bracket surgery that cannot be undone
+        # (speculative promotion, or bye_auto for the opponents when the pool
+        # is empty, learning #57) and re-signup after lock is refused, so the
+        # server requires it to be stated: confirm_locked_leave. The game
+        # client offers Leave only during voting and never sends the flag;
+        # its unconfirmed leaves reached this branch from a panel still
+        # showing 'voting' (a stale poll, or the sub-tab switch window), and
+        # they are refused here with 409.
+        if not req.confirm_locked_leave:
+            raise HTTPException(
+                status_code=409,
+                detail="Signups are locked and the bracket is set - leaving "
+                       "now would forfeit your bracket spot. Withdrawals "
+                       "after lock go through the bot's availability-check DM.")
+        # The flag states intent; it is not a credential. The one surface
+        # that offers a locked withdrawal is the bot's availability-check
+        # "No", so a confirmed locked withdrawal also requires the internal
+        # key, and any other caller is refused with 403 (fence r1 find 1).
+        if not _is_internal:
+            raise HTTPException(
+                status_code=403,
+                detail="Locked withdrawal is only available through the "
+                       "bot's availability-check DM.")
     player = await _get_player_by_steam(db, req.steam_id)
+    if _is_internal and (t.status == "locked" or req.discord_id):
+        # The withdrawal is bound to the player's CURRENT Discord link, read
+        # under the players row lock (fence r2 find 8, r3 find 5). The bot
+        # verifies the clicker in a separate request before this one; every
+        # link writer updates this players row, and the FOR UPDATE read
+        # orders this check after any relink in flight, so the discord_id
+        # the bot sends must match the link as it stands when the surgery
+        # below runs. Scope (fence r5 find 6): REQUIRED for a locked
+        # withdrawal; for a voting-phase internal withdrawal it is checked
+        # whenever the bot supplies it (this bot always does), and an absent
+        # one is accepted so a bot one release behind keeps its voting "No"
+        # working while the two deploy.
+        _live_did = (await db.execute(text(
+            "SELECT discord_id FROM players WHERE id = :pid FOR UPDATE"),
+            {"pid": str(player.id)})).scalar()
+        if not req.discord_id or str(_live_did or "") != str(req.discord_id):
+            raise HTTPException(
+                status_code=409,
+                detail="This withdrawal prompt no longer matches the "
+                       "account's Discord link.")
     existing = await _get_signup_for(db, tournament_id, player.id)
     if not existing:
         return await _build_current_response(db, t, player)
@@ -4671,23 +4900,17 @@ async def unsignup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: A
 
 
 async def _handle_leaving_signup(db: AsyncSession, tournament_id: uuid.UUID, leaving_signup_id: uuid.UUID) -> None:
-    """Leave-during-locked handler. Tries to promote a speculative signup
-    into the leaving player's bracket slot. If no speculative exists, collapses
-    the leaving player's matches into byes for their opponents so the bracket
-    still resolves. Deletes the leaving signup row at the end — the player
-    is fully out."""
+    """Leave-during-locked handler. A leaver holding NO bracket seat
+    (demoted or lock-excluded rows) is simply deleted. Otherwise: promote
+    the best non-banned speculative into the seat, or collapse the leaver's
+    matches into byes for their opponents — the activation resolver's
+    vacancy propagation carries those byes through the losers bracket so
+    the whole bracket still resolves. Deletes the leaving signup row at the
+    end — the player is fully out."""
     leaving = (await db.execute(select(TournamentSignup).where(
         TournamentSignup.id == leaving_signup_id))).scalar_one_or_none()
     if leaving is None:
         return
-
-    # Lowest-penalty speculative takes the seat.
-    spec_q = select(TournamentSignup).where(and_(
-        TournamentSignup.tournament_id == tournament_id,
-        TournamentSignup.is_speculative == True,  # noqa: E712
-    )).order_by(TournamentSignup.penalty_at_signup.asc(),
-                TournamentSignup.signed_up_at.asc())
-    spec = (await db.execute(spec_q)).scalars().first()
 
     matches_q = select(TournamentMatch).where(and_(
         TournamentMatch.tournament_id == tournament_id,
@@ -4695,6 +4918,52 @@ async def _handle_leaving_signup(db: AsyncSession, tournament_id: uuid.UUID, lea
             TournamentMatch.p2_signup_id == leaving_signup_id),
     ))
     matches = (await db.execute(matches_q)).scalars().all()
+
+    if not matches:
+        # No bracket seat references this signup: a demoted (speculative)
+        # row answering an old availability DM, or a confirmed row the lock
+        # excluded (ban filter) and left seatless. There is nothing to
+        # repair and no seat to promote INTO, so leaving is just deletion.
+        # Decided by ACTUAL matches, not is_speculative (r1 find 4 / r2
+        # findings 2+6): the flag can lie in both directions — a post-lock
+        # recompute could mark a SEATED row speculative, and a lock-excluded
+        # row stays confirmed while holding no seat — and promotion against
+        # a seatless leaver copies seed=None, rewrites zero matches, and
+        # strands the promoted row as an unattached confirmed entry.
+        await db.delete(leaving)
+        print(f"[TOURNAMENT] seatless leave: deleted signup "
+              f"{leaving_signup_id} (tournament {tournament_id}) with no "
+              f"bracket surgery")
+        return
+
+    # Lowest-penalty ELIGIBLE speculative takes the seat. Eligible means:
+    # not banned (the pool-side twin of lock_tournament's round-18 roster
+    # filter — promoting a banned player re-brackets them into new
+    # series/rooms), not the leaver itself, and holding NO seat already
+    # (r3 find 3: is_speculative can lie on corrupt rows — a flagged-but-
+    # seated candidate would be "promoted" into a SECOND seat, and the
+    # leaver-as-own-replacement degenerate deletes the row it just
+    # promoted, nulling the match FKs).
+    seated_ids = set()
+    for _p1, _p2 in (await db.execute(select(
+            TournamentMatch.p1_signup_id, TournamentMatch.p2_signup_id
+        ).where(TournamentMatch.tournament_id == tournament_id))).all():
+        if _p1:
+            seated_ids.add(_p1)
+        if _p2:
+            seated_ids.add(_p2)
+    spec_q = select(TournamentSignup).where(and_(
+        TournamentSignup.tournament_id == tournament_id,
+        TournamentSignup.is_speculative == True,  # noqa: E712
+    )).order_by(TournamentSignup.penalty_at_signup.asc(),
+                TournamentSignup.signed_up_at.asc())
+    spec = None
+    for _cand in (await db.execute(spec_q)).scalars().all():
+        if _cand.id == leaving_signup_id or _cand.id in seated_ids:
+            continue
+        if not await _player_id_banned(db, _cand.player_id):
+            spec = _cand
+            break
 
     if spec is not None:
         # Promote: inherit the SEED (bracket position), flip speculative off —
@@ -4741,8 +5010,17 @@ async def _handle_leaving_signup(db: AsyncSession, tournament_id: uuid.UUID, lea
 
 
 @router.post("/{tournament_id}/time-vote", response_model=TournamentCurrentResponse)
-async def time_vote(tournament_id: uuid.UUID, req: TournamentTimeVoteRequest, db: AsyncSession = Depends(get_db)):
+async def time_vote(tournament_id: uuid.UUID, req: TournamentTimeVoteRequest,
+                    request: Request, db: AsyncSession = Depends(get_db)):
+    # Session gate: see signup (fence r5 find 1).
+    from main import _check_steam_session
+    await _check_steam_session(request, req.steam_id, db)
     t = await _get_tournament(db, tournament_id)
+    # Same lifecycle-before-status ordering as signup (fence r2 find 2): a
+    # vote replacing the set mid-lock either lands before the lock counts
+    # votes or is refused, never interleaved.
+    await _acquire_tournament_lifecycle_lock(db, tournament_id)
+    await db.refresh(t)
     if t.status != "voting":
         raise HTTPException(status_code=400, detail="Voting closed")
     player = await _get_player_by_steam(db, req.steam_id)
@@ -4763,8 +5041,21 @@ async def time_vote(tournament_id: uuid.UUID, req: TournamentTimeVoteRequest, db
 
 
 @router.post("/{tournament_id}/force-start-vote", response_model=TournamentCurrentResponse)
-async def force_vote(tournament_id: uuid.UUID, req: TournamentForceVoteRequest, db: AsyncSession = Depends(get_db)):
+async def force_vote(tournament_id: uuid.UUID, req: TournamentForceVoteRequest,
+                     request: Request, db: AsyncSession = Depends(get_db)):
+    # Session gate: see signup (fence r5 find 1). A force vote can lock the
+    # tournament, so the vote must come from the session of the entrant it
+    # is recorded for once enforcement applies.
+    from main import _check_steam_session
+    await _check_steam_session(request, req.steam_id, db)
     t = await _get_tournament(db, tournament_id)
+    # Lifecycle lock BEFORE the force-vote row upsert (fence r2 find 4):
+    # unsignup holds the lifecycle lock and then deletes force-vote rows, so
+    # taking the vote row first here would pair the two into a deadlock; and
+    # the quorum _check_and_trigger_force_start counts is judged on a roster
+    # no other signup-set writer can change until this commits.
+    await _acquire_tournament_lifecycle_lock(db, tournament_id)
+    await db.refresh(t)
     if t.status != "voting":
         raise HTTPException(status_code=400, detail="Force-start only during voting")
     player = await _get_player_by_steam(db, req.steam_id)
@@ -4772,6 +5063,11 @@ async def force_vote(tournament_id: uuid.UUID, req: TournamentForceVoteRequest, 
         db, player_ids=[player.id], steam_ids=[req.steam_id])
     if not await _get_signup_for(db, tournament_id, player.id):
         raise HTTPException(status_code=400, detail="Must sign up to vote")
+    # Fence r3 find 4 sibling: a banned entrant is outside the quorum the
+    # trigger counts (_eligible_entrant_ids), so its force vote is refused
+    # rather than stored as a row nothing reads.
+    if await _player_id_banned(db, player.id):
+        raise HTTPException(status_code=409, detail="Banned players cannot vote")
     stmt = pg_insert(TournamentForceVote).values(
         tournament_id=tournament_id, player_id=player.id,
         voted_at=datetime.now(timezone.utc),
@@ -4787,7 +5083,11 @@ async def force_vote(tournament_id: uuid.UUID, req: TournamentForceVoteRequest, 
 
 
 @router.post("/{tournament_id}/ready", response_model=TournamentCurrentResponse)
-async def ready(tournament_id: uuid.UUID, req: TournamentReadyRequest, db: AsyncSession = Depends(get_db)):
+async def ready(tournament_id: uuid.UUID, req: TournamentReadyRequest,
+                request: Request, db: AsyncSession = Depends(get_db)):
+    # Session gate: see signup (fence r5 find 1).
+    from main import _check_steam_session
+    await _check_steam_session(request, req.steam_id, db)
     t = await _get_tournament(db, tournament_id)
     player = await _get_player_by_steam(db, req.steam_id)
     await _assert_tournament_service_policy(
@@ -4805,6 +5105,7 @@ async def play_now(
     tournament_id: uuid.UUID,
     match_id: uuid.UUID,
     req: TournamentReadyRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Skip the between-rounds break (item 2): a participant presses Play Now;
@@ -4812,6 +5113,9 @@ async def play_now(
     'ready' immediately. Idempotent — pressing again or after the flip is a
     no-op. Row-locked: two simultaneous presses must not lose an append
     (learning #78 family)."""
+    # Session gate: see signup (fence r5 find 1).
+    from main import _check_steam_session
+    await _check_steam_session(request, req.steam_id, db)
     t = await _get_tournament(db, tournament_id)
     player = await _get_player_by_steam(db, req.steam_id)
     await _assert_tournament_service_policy(

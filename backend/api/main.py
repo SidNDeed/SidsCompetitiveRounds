@@ -15840,8 +15840,12 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
     valid nor invalid, and is answered 503: it is not soft-failed, because
     that admits a write whose subject was never established, and it is not
     401'd, because no read supports calling the token invalid. Internal
-    callers (bot) send no X-Mod-Version, so enforce is always False for them;
-    `request` may be None on direct internal function calls
+    callers (bot) send no X-Mod-Version, so the VERSION trigger stays off
+    for them, but per-ACCOUNT arming below applies to any request that
+    carries a Request object (fence r3 find 9): an endpoint serving bot
+    traffic for an armed player must skip this helper on a verified internal
+    key (tournaments.unsignup does) rather than rely on the version
+    carve-out. `request` may be None on direct internal function calls
     (place_discord_bet → place_bet), and those never reach the SELECT because
     a request-less call carries no token."""
     # Record the verdict on the request so a caller can ask whether the

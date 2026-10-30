@@ -13812,14 +13812,17 @@ async def poll_tournaments():
             else:
                 print(f"[TOURNAMENT-POLL] {tid}: {_role_n} players (<16) — "
                       f"no trophy/participant roles for this bracket")
-            # Build podium announcement
+            # Build podium announcement: PRESENT ranks only (fence r3 find
+            # 8). A forfeit- or bye-decided final can complete with a partial
+            # or empty podium, and the server pays nothing for a missing
+            # rank, so "1st: ? · 2nd: ?" beside the prize text named awards
+            # nobody received.
             name_for = {s["signup_id"]: s["display_name"] for s in t.get("signups", [])}
-            winner = name_for.get(t.get("winner_signup_id"), "?")
-            runner = name_for.get(t.get("runner_up_signup_id"), "?")
-            third = name_for.get(t.get("third_place_signup_id"), "?")
             # Prize numbers come computed from the server (/internal/watch,
             # single source of truth — prizes scale with locked player count);
-            # legacy tier text only as a fallback for a stale API.
+            # a payload without prize arrays means a PRE-scaling API —
+            # quoting today's amounts would misstate what that server
+            # actually pays (Codex fix-batch find 6). Say so instead.
             pg = t.get("prize_gold") or []
             px = t.get("prize_xp") or []
             pp = t.get("prize_players") or 0
@@ -13827,22 +13830,31 @@ async def poll_tournaments():
             # (round-2 review F-low: an 8-player bracket's post said
             # "+ trophy roles" while the gate had just skipped them).
             _roles_txt = " + trophy roles" if _roles_granted else ""
-            if len(pg) == 3 and len(px) == 3:
-                prize_txt = (f"{pg[0]}g/{px[0]}xp · {pg[1]}g/{px[1]}xp · {pg[2]}g/{px[2]}xp "
-                             f"at {pp} players{_roles_txt}")
+            amounts_known = len(pg) == 3 and len(px) == 3
+            ranks = []
+            for i, (label, sid_key) in enumerate((
+                    ("1st", "winner_signup_id"),
+                    ("2nd", "runner_up_signup_id"),
+                    ("3rd", "third_place_signup_id"))):
+                sid = t.get(sid_key)
+                if not sid or sid not in name_for:
+                    continue
+                nm = _escape_md(name_for[sid])
+                amt = f" ({pg[i]}g/{px[i]}xp)" if amounts_known else ""
+                ranks.append(f"{label}: {'**' + nm + '**' if i == 0 else nm}{amt}")
+            if ranks:
+                tail = (f"  (at {pp} players{_roles_txt})" if amounts_known
+                        else f"  (prizes{_roles_txt}; amounts unavailable from this API version)")
+                await _announce_in_channel(
+                    "**Tournament complete.**  " + " · ".join(ranks) + tail)
             else:
-                # Fallback amounts refreshed Aug 23 (the old 500/300/60 tiers
-                # matched no live amount): base pool at 8 players, doubling
-                # by 16 — mirrors tournaments.py _prize_amounts.
-                tier = t.get("prize_tier") or "none"
-                # A payload without prize arrays means a PRE-scaling API —
-                # quoting today's amounts would misstate what that server
-                # actually pays (Codex fix-batch find 6). Say so instead.
-                prize_txt = ("(cancelled)" if tier == "none"
-                             else f"prizes{_roles_txt} (amounts unavailable from this API version)")
-            await _announce_in_channel(
-                f"**Tournament complete.**  1st: **{_escape_md(winner)}** · 2nd: {_escape_md(runner)} · 3rd: {_escape_md(third)}  ({prize_txt})"
-            )
+                # Neutral copy (fence r4 find 5): a null podium has several
+                # causes (withdrawal- or forfeit-decided finals, flagged
+                # seats, provenance vetoes) and this surface cannot tell them
+                # apart, so it names none of them.
+                await _announce_in_channel(
+                    "**Tournament complete.** No podium was awarded, so no "
+                    "prizes were paid.")
 
 
 def _dm_opponent_rate_ok(discord_id):
@@ -14658,6 +14670,13 @@ async def poll_tournament_notices():
                 await user.send(content=content, embed=embed, view=view,
                                 allowed_mentions=discord.AllowedMentions.none())
                 if ntype == "availability_check":
+                    # A FRESH prompt starts a fresh decision: a pushback
+                    # deletes + re-queues availability notices for the SAME
+                    # tournament id, and a player who withdrew, re-signed,
+                    # and gets re-asked must not have their new "Yes"
+                    # answered with last week's "already withdrawn"
+                    # (fence r4 find 4).
+                    _tavail_withdrawn.discard(f"{tid}:{steam}")
                     print(f"[TAVAIL] availability check ({kind}) → {user} for tournament {str(tid)[:8]}")
                 elif _is_deadline_checkin:
                     print(f"[TDLC] deadline check-in → {user} for match {str(match_id)[:8]}")
@@ -15074,16 +15093,42 @@ async def before_pending_dms():
     await bot.wait_until_ready()
 
 
-async def _tournament_unsignup(tournament_id, steam_id):
+# Per-prompt serialization + consumed-withdrawal memo for availability
+# buttons (fence r2 find 9): without it a concurrent Yes and No both pass
+# their checks and the slower Yes repaints "Confirmed" over a completed
+# withdrawal. In-memory only — after a bot restart the memo is empty, so a
+# Yes clicked after a pre-restart No can still repaint; the buttons
+# themselves are restart-safe by design and the server state is already
+# correct, so that residual is cosmetic.
+_tavail_locks: dict = {}
+_tavail_withdrawn: set = set()
+
+
+async def _tournament_unsignup(tournament_id, steam_id, discord_id):
     """POST the same public unsignup endpoint the game client uses
-    (tournaments.py:1289; TournamentSignupRequest = {steam_id}). JSON body —
-    api_post sends query params, wrong for this endpoint. Returns (ok, detail)."""
+    (TournamentSignupRequest = {steam_id, confirm_locked_leave, discord_id}).
+    JSON body — api_post sends query params, wrong for this endpoint.
+    Returns (ok, detail).
+
+    confirm_locked_leave is TRUE here: the availability prompt's "No" is the
+    player's own withdrawal decision, and it can land days after the DM —
+    including after lock, where the server refuses UNconfirmed leaves (409)
+    so a stale game client can't forfeit a bracket slot by accident. The
+    flag keeps this deliberate path feeding the locked-phase speculative
+    promotion (learning #57). discord_id is the CLICKER's id: the server
+    re-verifies it against the player's current Discord link inside the
+    withdrawal transaction (required for locked withdrawals, verified
+    whenever provided for voting-phase ones — this bot always provides it),
+    closing the verify-then-post relink window the bot-side check alone
+    leaves open (fence r2 find 8 / r5 find 6). Auth rides http_session's
+    default X-Internal-Key header."""
     if http_session is None:
         return False, "backend unreachable"
     try:
         async with http_session.post(
             f"{API_BASE_URL}/api/v1/tournaments/{tournament_id}/unsignup",
-            json={"steam_id": str(steam_id)},
+            json={"steam_id": str(steam_id), "confirm_locked_leave": True,
+                  "discord_id": str(discord_id)},
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             if resp.status == 200:
@@ -15293,25 +15338,59 @@ async def on_interaction(interaction: discord.Interaction):
             await interaction.response.send_message("⚠️ Unrecognized button.", ephemeral=True)
             return
         _, tournament_id, steam_id, answer = parts
-        if answer == "yes":
-            # Acknowledge within 3s by editing the prompt in place.
-            await interaction.response.edit_message(content="Confirmed — see you there! ✅", view=None)
-            print(f"[TAVAIL] {interaction.user} confirmed for tournament {tournament_id[:8]}")
-            return
-        # "no": the unsignup POST can take a moment — defer first (must ack
-        # the interaction within 3s), then edit/follow-up.
+        # Defer FIRST (3s ack window), then serialize per prompt: a second
+        # click acks immediately and waits its turn instead of racing the
+        # first one's HTTP round-trips (fence r2 find 9).
         await interaction.response.defer()
-        ok, detail = await _tournament_unsignup(tournament_id, steam_id)
-        if ok:
-            print(f"[TAVAIL] {interaction.user} withdrew from tournament {tournament_id[:8]}")
-            try:
-                await interaction.message.edit(content="You've been removed from the tournament. ✅", view=None)
-            except Exception:
-                await interaction.followup.send("You've been removed from the tournament. ✅")
-        else:
-            # e.g. tournament already running — leave the buttons so they can
-            # see the prompt; surface the server's reason.
-            await interaction.followup.send(f"❌ Couldn't remove you: {detail}")
+        _pkey = f"{tournament_id}:{steam_id}"
+        _plock = _tavail_locks.setdefault(_pkey, asyncio.Lock())
+        async with _plock:
+            # Both answers act as the CURRENT Discord<->Steam link's owner,
+            # not whoever held this Discord account when the DM was sent
+            # (r1 find 6: a delivered DM outlives an unlink/relink). This
+            # bot-side check is the fast, user-facing fail; the server
+            # re-verifies the same binding INSIDE the withdrawal
+            # transaction (r2 find 8), so a relink landing between the two
+            # requests is caught there too.
+            identity_ok, identity_detail = await _tdlc_verify_clicker(
+                interaction.user.id, steam_id,
+            )
+            if not identity_ok:
+                await interaction.followup.send(
+                    f"❌ Couldn't use this button: {identity_detail}.",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            if answer == "yes":
+                if _pkey in _tavail_withdrawn:
+                    # The No already went through — never repaint
+                    # "Confirmed" over a completed withdrawal.
+                    await interaction.followup.send(
+                        "You've already withdrawn from this tournament — the No was recorded.",
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    return
+                try:
+                    await interaction.message.edit(content="Confirmed — see you there! ✅", view=None)
+                except Exception:
+                    await interaction.followup.send("Confirmed — see you there! ✅")
+                print(f"[TAVAIL] {interaction.user} confirmed for tournament {tournament_id[:8]}")
+                return
+            ok, detail = await _tournament_unsignup(
+                tournament_id, steam_id, interaction.user.id)
+            if ok:
+                _tavail_withdrawn.add(_pkey)
+                print(f"[TAVAIL] {interaction.user} withdrew from tournament {tournament_id[:8]}")
+                try:
+                    await interaction.message.edit(content="You've been removed from the tournament. ✅", view=None)
+                except Exception:
+                    await interaction.followup.send("You've been removed from the tournament. ✅")
+            else:
+                # e.g. tournament already running — leave the buttons so they
+                # can see the prompt; surface the server's reason.
+                await interaction.followup.send(f"❌ Couldn't remove you: {detail}")
     except Exception as ex:
         print(f"[TOURNAMENT-INTERACTION] error: {ex}")
 
@@ -15373,6 +15452,12 @@ def _bracket_progress_lines(t, max_lines=28):
         p1 = _board_name(m.get("p1_name")) or "TBD"
         p2 = _board_name(m.get("p2_name")) or "TBD"
         st = m.get("status")
+        if st == "bye_auto" and not m.get("p1_name") and not m.get("p2_name"):
+            # Fully-vacant propagated bye (fence r4 find 6): bracket
+            # bookkeeping with no player in it — rendering "TBD vs TBD"
+            # burns board lines against real matches. One-seat byes still
+            # render (they say who advanced).
+            continue
         s1, s2 = m.get("p1_score"), m.get("p2_score")
         if st in ("completed", "forfeit", "double_forfeit", "bye_auto"):
             win_id = m.get("winner_signup_id")
