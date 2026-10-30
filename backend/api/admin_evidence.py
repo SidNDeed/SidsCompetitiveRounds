@@ -82,7 +82,7 @@ DISPLAY_DEFAULTS = {
     "own_games": 20,
     "pop_days": 30,
     "games": 10,
-    # D4's READY_LAG_S (review_measures.py AER_CONTRACT_BOUNDS["ready_lag_s"] at
+    # D4's READY_LAG_S (review_measures.py CONTRACT_BOUNDS["ready_lag_s"] at
     # the D4 round 15 pin); re-read at D4_TIP when the D4 files land.
     "lag_s": 120,
 }

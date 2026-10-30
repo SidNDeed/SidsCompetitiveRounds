@@ -311,16 +311,14 @@ async def _seed(conn):
         await conn.execute("VACUUM (ANALYZE) %s" % table)
     # The visibility map is this seed's postcondition (the gate reads
     # relallvisible == relpages). With autovacuum off on both tables, only
-    # another backend's snapshot can hold a page back; one bounded re-run
+    # another backend's snapshot can hold a page back; exactly one re-run
     # covers a transient one, and the gate still asserts.
     for table in s.loaded:
-        for _attempt in range(2):
-            row = await conn.fetchrow("""
-                SELECT c.relpages, c.relallvisible
-                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                 WHERE n.nspname = current_schema() AND c.relname = $1""", table)
-            if row["relallvisible"] == row["relpages"]:
-                break
+        row = await conn.fetchrow("""
+            SELECT c.relpages, c.relallvisible
+              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = current_schema() AND c.relname = $1""", table)
+        if row["relallvisible"] != row["relpages"]:
             await asyncio.sleep(1.0)
             await conn.execute("VACUUM (ANALYZE) %s" % table)
     s.stats_target = await conn.fetchval("SHOW default_statistics_target")
