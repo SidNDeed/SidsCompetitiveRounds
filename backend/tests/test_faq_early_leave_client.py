@@ -359,6 +359,26 @@ def test_396_registers_exactly_the_keys_the_next_sync_derives():
         assert sql.count("('%s', '%s', '%s', " % (key_id, source_hash, md5)) == 1, key_id
 
 
+def test_396_header_maps_each_new_key_to_the_386_key_of_its_site():
+    """396's header lists each new key with its site and the 386 key it
+    replaces. Each new id is the one derived from that site's English, and
+    each 386 id is the 386 key whose English is the closest of the four to
+    that site's (the earlier wording of the same string), one to one."""
+    import difflib
+    header = ladder._read(M396).split("BEGIN;")[0]
+    rows = re.findall(r"^--   ([0-9a-f]{16}) ([A-Za-z ]+?), replacing 386's ([0-9a-f]{16})[;.]$", header, re.M)
+    assert len(rows) == 4, rows
+    sources, old = site_sources(), m386_texts()
+    assert len({o for _n, _s, o in rows}) == 4 and {o for _n, _s, o in rows} == set(old), rows
+    for new_id, label, old_id in rows:
+        site = [s for s, (_p, decl, _r) in SITES.items() if " %s => " % label.split()[-1] in decl]
+        assert len(site) == 1, (label, site)
+        english = sources[site[0]]
+        assert new_id == _client_key_id(english), (label, new_id)
+        closest = max(old, key=lambda k: difflib.SequenceMatcher(None, old[k], english).ratio())
+        assert closest == old_id, (label, old_id, closest)
+
+
 def test_396_seeds_are_the_bundled_drafts():
     """The sixteen seeds are the four keys in es, ru, sv and uk, each at its
     key's source hash and each the text the bundled catalogue renders for
