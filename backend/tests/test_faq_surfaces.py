@@ -335,13 +335,15 @@ _ITEM_ANCHORS = ("backend/tests/test_faq_surfaces.py",
 # A COMMIT OF ANOTHER LANE THAT TOUCHES AN ANCHOR is named here, because the
 # path filter would count it as this item's. The FAQ early-leave lane's
 # migration 396 rewrites the early-leave bullet of the economy text that hold
-# 3 pins, so that lane's commit changed hold 3 in this module beside its own
+# 3 pins, so that lane's commits changed hold 3 in this module beside its own
 # files (396 and its rollback, the client texts with their catalogue rows and
-# key manifests, and its tests). Those are that lane's and ship under its
+# key manifests, and its tests): the first, and the FAQ-R6 fix that rewords
+# the bullet's last sentence. Those are that lane's and ship under its
 # review; they are not this item's to sweep or to hand back. A named commit
 # must be one the log lists, so the record cannot outlive the commit it names.
 _OTHER_LANE_COMMITS = (
     "f683d3440dc006981401d5637204767523f6809d",
+    "7675e46c7b78c207b72407c1310cb59d6ad908e7",
 )
 
 # A DRIVE-LETTER PATH, any of them and not only one under a home directory: a
