@@ -3760,7 +3760,8 @@ def _economy_equal(halves):
 # client's CURRENT economy English is the body 396 registers under its own key
 # (test_faq_early_leave_client.py holds 396 to it). 340 and 341 are left as
 # they are and keep the article as it stood before 396. These pairs, before ->
-# after, are the only differences between the two in each language: hold 3
+# after, with ECONOMY_FORFEIT_TERM's es pair below them, are the only
+# differences between the two in each language: hold 3
 # puts each one back before it holds 340 and 341 to the client, so what it
 # checks is "340/341 are the client's economy article up to 396", not a pin on
 # text the client no longer carries.
@@ -3823,6 +3824,10 @@ ECONOMY_LEAVE_GRACE = {
         "match utan rating ger inga framsteg på titelstegen."),
 }
 
+# 396 also words the es economy value's pointer to the forfeit section as the
+# term that covers both causes of a forfeit (absence and concession).
+ECONOMY_FORFEIT_TERM = {"es": ("Plazos e incomparecencias", "Plazos y forfaits")}
+
 
 def _economy_before_396(halves):
     """The economy halves with 396's early-leave bullet put back, in the
@@ -3838,6 +3843,10 @@ def _economy_before_396(halves):
         assert value.count(a) == 1 and b not in value, (
             "the bundled %s economy value does not carry 396's early-leave bullet exactly once" % L)
         reverted[L] = value.replace(a, b)
+    for L, (b, a) in ECONOMY_FORFEIT_TERM.items():
+        assert reverted[L].count(a) == 1 and b not in reverted[L], (
+            "the bundled %s economy value does not carry 396's forfeit term exactly once" % L)
+        reverted[L] = reverted[L].replace(a, b)
     return english.replace(after, before), reverted, row, seeds
 
 
