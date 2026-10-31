@@ -257,11 +257,11 @@ def _bare(stmt):
 #   write i18n_keys and i18n_proposals only, which neither this module nor
 #   a route it drives reads.
 # - 398 publishes the five community faces the v1.41.0 client bundles. It
-#   is a ship-time data migration (applied after that release exists), and
-#   its guard raises, changing nothing, when a cosmetic_submissions row it
-#   names (ids 69 to 73) is absent or no longer approved; on this fresh
-#   schema those rows never exist. It writes the shop_items rows of those
-#   five faces only, and nothing this module seeds or drives names them.
+#   is a ship-time data migration (applied after that release exists). Its
+#   guard raises when a cosmetic_submissions row it names (ids 69 to 73) is
+#   absent or no longer approved, and the raise aborts the one transaction
+#   the file runs in (BEGIN, a single DO block, COMMIT), so it changes
+#   nothing; on this fresh schema those rows never exist.
 HELD_OUT = frozenset({"366_title_refunds_voidshot_kingslayer.sql",
                       "376_i18n_337_demonic_proposals.sql",
                       "384_i18n_keys_stage2_hold.sql",
