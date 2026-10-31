@@ -68,6 +68,26 @@ Idempotent: a second run with the same digests inserts nothing and says so.
 of calling the api: the migration channel the house used for admin-signed
 writes from a seat whose environment does not carry the admin secret
 (learnings #421, #443). It needs no secret and sends nothing.
+
+--census FILE is a second mode with its own arguments: it registers one card
+pool census, the dump file a reference seat writes when its [Debug]
+CardPoolCensusDump setting is on (BepInEx/config/CompetitiveRounds.card-census.json,
+plugin/CardDrawEvidence.cs EnsureCensusDump), in card_pool_registry (migration
+370) through
+
+    POST /api/v1/admin/card-pool-census    admin action card_census over the digest
+
+whose body is the dump file. The file is judged by the server's own check,
+card_measures.census_from_dump, loaded from backend/api of this checkout (never
+a copy), after the route's own two steps before it (the body read as JSON, the
+signed digest equal to the dump's): a file the route would answer with anything
+but a registration is refused with exit 3 and nothing sent. --emit-sql writes
+the one row register_census inserts as a data-only migration. Same environment,
+--dry-run and exit codes as above; the api run also needs --mod-version, the
+X-Mod-Version header the server's floor admits.
+
+    python tools/register_release_digests.py --census <dump file>
+        --expect-digest <64 hex> --admin <admin steam64> --mod-version 1.41.0 --dry-run
 """
 
 from __future__ import annotations
@@ -76,6 +96,8 @@ import argparse
 import bisect
 import hashlib
 import hmac
+import importlib
+import json
 import os
 import re
 import stat
@@ -589,9 +611,9 @@ def request_url(base, admin, secret, row):
     return base.rstrip("/") + path + "?" + urllib.parse.urlencode(params)
 
 
-def urllib_post(url, headers, timeout=30):
-    """POST with an empty body: (status, body text)."""
-    request = urllib.request.Request(url, data=b"", headers=headers, method="POST")
+def urllib_post(url, headers, timeout=30, body=b""):
+    """POST with `body` (empty for the digest routes): (status, body text)."""
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
@@ -615,24 +637,54 @@ def _sql_text(value):
 
 
 _MIGRATION_NAME = re.compile(r"[A-Za-z0-9_]{1,80}\.sql")
+# The data-only landing (ai-collab/session-tools/land_data_migration.py) refuses these two tokens wherever
+# they appear, a comment or a literal included; both modes embed the migration name in the header comment
+# and the RAISE literals, so a name holding one is refused with the census text that holds one, and the
+# release writer refuses every value it embeds (the DLL's version and commit, the variant, the source, the
+# game-version label, the digests) when one holds a token (CENSUS-R2 V1). The api path has no such rule:
+# the server admits any value of its character set, so the refusal is the SQL channel's alone.
+_NAME_RESOLUTION = re.compile(r"search_path|set_config", re.I)
 
 
 def _sql_target(path):
     """argparse type for --emit-sql. The base name goes verbatim into the file's header comment and its
     RAISE literals, so it is restricted to letters, digits and underscores plus the .sql suffix: a
     quote in the name was an SQL injection and a percent sign a broken RAISE placeholder (DIGESTS-R2
-    H1). Refused before the DLL is read or anything is written."""
+    H1), and it may not hold search_path or set_config: the data-only landing refuses those two tokens
+    wherever they appear, the header comment and the RAISE literals included (CENSUS-R1 H1). Refused
+    before the DLL or the census is read or anything is written."""
     base = os.path.basename(path)
     if not _MIGRATION_NAME.fullmatch(base):
         raise argparse.ArgumentTypeError("the migration file name may use letters, digits and underscores "
                                          "and must end in .sql: %r" % base)
+    if _NAME_RESOLUTION.search(base):
+        raise argparse.ArgumentTypeError("the migration file name holds search_path or set_config, which the "
+                                         "data-only landing refuses wherever it appears: %r" % base)
     return path
 
 
+def _embedded_values(row):
+    """Every value of a row the migration text embeds: the header comment, the INSERT literals, the game-file
+    rows' trailing name comments and the DO block's VALUES draw from no other (file_id is an integer)."""
+    if row["kind"] == "release":
+        return [row["version"], row["variant"], row["commit"], row["source"], row["dll_sha256"]]
+    return [row["game_version"], row["sha256"], row["name"]]
+
+
 def migration_text(name, rows):
-    """The identical inserts as a data-only migration of the house shape."""
-    if not _MIGRATION_NAME.fullmatch(name):
+    """The identical inserts as a data-only migration of the house shape. Raises before a line is built when
+    the name cannot be embedded (ValueError) or a row holds a value the data-only landing would refuse
+    (Refused), so the emit path, which generates the text before opening the file, writes nothing."""
+    if not _MIGRATION_NAME.fullmatch(name) or _NAME_RESOLUTION.search(name):
         raise ValueError("migration name %r cannot be embedded in the migration text" % name)
+    for row in rows:
+        for value in _embedded_values(row):
+            if not BUILD_PART.fullmatch(value):
+                raise Refused("a value outside the registry's character set reached the SQL writer")
+            if _NAME_RESOLUTION.search(value):
+                raise Refused("the %s value %r names search_path or set_config, which the data-only landing "
+                              "refuses wherever it appears; register it through the api instead"
+                              % (row["kind"], value))
     rel = [r for r in rows if r["kind"] == "release"]
     games = [r for r in rows if r["kind"] == "game_file"]
     what = []
@@ -694,6 +746,277 @@ def migration_text(name, rows):
               % (name, len(rel), len(games)),
               "END $$;", "", "COMMIT;", ""]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# --census: one card pool census into card_pool_registry (migration 370).
+# ---------------------------------------------------------------------------
+
+CENSUS_ROUTE = "/api/v1/admin/card-pool-census"
+CENSUS_ACTION = "card_census"
+CENSUS_DIGEST_MAX = 64                  # main.admin_register_card_census: digest Query(..., max_length=64)
+CENSUS_STATUSES = ("registered", "already_registered")
+API_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend", "api"))
+
+
+def _same_file(got, want):
+    return bool(got) and os.path.normcase(os.path.abspath(got)) == os.path.normcase(os.path.abspath(want))
+
+
+def server_census_check():
+    """backend/api/card_measures.py of this checkout, the module whose
+    census_from_dump card_evidence.register_census applies, and its import
+    review_measures beside it. Raises Refused when either cannot be loaded or
+    a module of that name from anywhere else is the one loaded."""
+    want = os.path.join(API_DIR, "card_measures.py")
+    if not os.path.isfile(want):
+        raise Refused("the server's census check %s is not in this checkout" % want)
+    if not any(_same_file(p, API_DIR) for p in sys.path if p):
+        sys.path.append(API_DIR)
+    try:
+        cm = importlib.import_module("card_measures")
+    except Exception as e:  # noqa: BLE001 - any failure to load is a refusal
+        raise Refused("the server's census check cannot be loaded (%s)" % e.__class__.__name__)
+    rm = getattr(cm, "rm", None)
+    if not _same_file(getattr(cm, "__file__", None), want) or not _same_file(
+            getattr(rm, "__file__", None), os.path.join(API_DIR, "review_measures.py")):
+        raise Refused("the loaded census check is %s, not the server's %s"
+                      % (getattr(cm, "__file__", None), want))
+    return cm
+
+
+def census_plan(path, expect_digest=None):
+    """(the file's bytes, the one card_pool_registry row the census route would
+    insert for them). Raises Refused for any file the route would answer with
+    anything but a registration."""
+    cm = server_census_check()
+    try:
+        with open(path, "rb") as f:
+            body = f.read()
+    except OSError as e:
+        raise Refused("the census dump %s cannot be read (%s)" % (path, e.__class__.__name__))
+    # main.admin_register_card_census after its admin check: the raw body through json.loads
+    # (any failure: 400 "body"), then a dict whose "digest" equals the signed digest query value
+    # (else 422 "digest"), that query value being a string of at most 64 characters (FastAPI 422).
+    # This step signs and sends the file's own "digest", so the two agree exactly when it is such
+    # a string. The same json.loads is used here, over the same bytes.
+    try:
+        doc = json.loads(body)
+    except Exception:  # noqa: BLE001 - the route catches everything here too
+        raise Refused("the census dump is not JSON the route reads (the route would answer 400 body)")
+    if not isinstance(doc, dict):
+        raise Refused("the census dump is not a JSON object (the route would answer 422 digest)")
+    digest = doc.get("digest")
+    if not isinstance(digest, str):
+        raise Refused("the census dump states no digest string to sign (the route would answer 422 digest)")
+    if len(digest) > CENSUS_DIGEST_MAX:
+        raise Refused("the census dump's digest is longer than the route's %d-character query cap "
+                      "(the route would answer 422)" % CENSUS_DIGEST_MAX)
+    # card_evidence.register_census: census_from_dump, any Refusal answered 422 <field>; any other
+    # exception is a 500, which registers nothing either.
+    try:
+        c = cm.census_from_dump(doc)
+    except cm.Refusal as r:
+        raise Refused("the server's census check refuses the dump: %s (the route would answer 422 %s)"
+                      % (r.field, r.field))
+    except Exception as e:  # noqa: BLE001
+        raise Refused("the server's census check fails on the dump with %s (the route would answer 500)"
+                      % e.__class__.__name__)
+    if expect_digest is not None and c.digest != expect_digest:
+        raise Refused("the dump's census digest is %s, not --expect-digest %s" % (c.digest, expect_digest))
+    # register_census's insert: (digest, CAST(dumps(doc) AS jsonb), count, slots, game sha).
+    # census_from_dump has held the digest and the game sha to 64 lowercase hex; the SQL writer
+    # re-checks every value it embeds.
+    row = {"digest": c.digest, "census": cm.dumps(doc), "card_count": c.count, "slot_count": c.slots,
+           "game_dll_sha256": c.game_sha}
+    return body, row
+
+
+def _census_row_text(row):
+    return "census    digest=%s cards=%d slots=%d game_dll_sha256=%s" % (
+        row["digest"], row["card_count"], row["slot_count"], row["game_dll_sha256"])
+
+
+def _sql_int(v):
+    if not isinstance(v, int) or isinstance(v, bool):
+        raise Refused("a non-integer count reached the SQL writer")
+    return "%d" % v
+
+
+def census_migration_text(name, row):
+    """The one insert register_census performs, as a data-only migration of the house shape."""
+    if not _MIGRATION_NAME.fullmatch(name) or _NAME_RESOLUTION.search(name):
+        raise ValueError("migration name %r cannot be embedded in the migration text" % name)
+    d, g = row["digest"], row["game_dll_sha256"]
+    if not (HEX64.fullmatch(d) and HEX64.fullmatch(g)):
+        raise Refused("a value outside the registry's character set reached the SQL writer")
+    census = row["census"]
+    if not census.isascii() or any(ord(ch) < 32 or ord(ch) == 127 for ch in census):
+        raise Refused("the census text holds a byte the SQL writer does not embed")
+    if _NAME_RESOLUTION.search(census):
+        raise Refused("the census names search_path or set_config, which the data-only landing refuses "
+                      "wherever it appears; register it through the api instead")
+    n, s = _sql_int(row["card_count"]), _sql_int(row["slot_count"])
+    lines = [
+        "-- %s: card pool census registry row: digest %s, %s cards, %s slots, game dll %s." % (name, d, n, s, g),
+        "--",
+        "-- Generated by tools/register_release_digests.py --census from the census dump a",
+        "-- reference seat wrote (CompetitiveRounds.card-census.json); re-generate rather than",
+        "-- edit. POST /api/v1/admin/card-pool-census inserts this row ON CONFLICT (digest) DO",
+        "-- NOTHING (card_evidence.register_census); this file performs the identical insert",
+        "-- through the migration channel (learnings #421, #443). Data only: requires 370",
+        "-- (card_pool_registry) and writes no other table. A re-run inserts nothing",
+        "-- (INSERT 0 0). Explicit BEGIN/COMMIT (#340).",
+        "BEGIN;",
+        "",
+        "INSERT INTO card_pool_registry (digest, census, card_count, slot_count, game_dll_sha256) VALUES",
+        "    ('%s', CAST('%s' AS jsonb), %s, %s, '%s')" % (d, census.replace("'", "''"), n, s, g),
+        "ON CONFLICT (digest) DO NOTHING;",
+        "",
+        # The post-check: the digest is the primary key (370:88), so ON CONFLICT DO NOTHING keeps a row
+        # registered earlier from another dump of the same pool. The census text is fixed by the digest;
+        # the rest of the stored dump is the card count, the slot count and the game build, compared here.
+        # A row absent, or held for another game build, raises and nothing commits: records on this
+        # build match a census only when its game build is theirs (card_measures.RecFacts).
+        "DO $$",
+        "DECLARE",
+        "  missing integer := 0;",
+        "BEGIN",
+        "  SELECT count(*) INTO missing FROM (VALUES ('%s', %s, %s, '%s'))" % (d, n, s, g),
+        "    AS want(digest, card_count, slot_count, game_dll_sha256)",
+        "   WHERE NOT EXISTS (SELECT 1 FROM card_pool_registry p WHERE p.digest = want.digest",
+        "                     AND p.card_count = want.card_count AND p.slot_count = want.slot_count",
+        "                     AND p.game_dll_sha256 = want.game_dll_sha256);",
+        "  IF missing > 0 THEN",
+        "    RAISE EXCEPTION 'migration %s: the registry row for census %s is absent or holds another card count, "
+        "slot count or game build; nothing was committed';" % (name, d),
+        "  END IF;",
+        "  RAISE NOTICE 'migration %s: census %s present (%s cards, %s slots)';" % (name, d, n, s),
+        "END $$;",
+        "",
+        "COMMIT;",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def census_url(base, admin, secret, digest):
+    canonical = "admin:%s:%s:%s" % (admin, CENSUS_ACTION, digest)         # main._admin_canonical
+    signature = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    params = [("admin_steam_id", admin), ("hmac_signature", signature), ("digest", digest)]
+    return base.rstrip("/") + CENSUS_ROUTE + "?" + urllib.parse.urlencode(params)
+
+
+def _census_parser():
+    ap = argparse.ArgumentParser(description="Register one card pool census (the dump file a reference seat "
+                                             "wrote) in card_pool_registry.")
+    ap.add_argument("--census", required=True, metavar="FILE",
+                    help="the census dump, CompetitiveRounds.card-census.json from the seat's BepInEx/config")
+    ap.add_argument("--expect-digest", help="refuse unless the dump's census digest is this 64-hex value")
+    ap.add_argument("--admin", help="an admin_users steam id (the real api run)")
+    ap.add_argument("--mod-version", help="the X-Mod-Version header of the api run")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="print what would be registered; send nothing")
+    mode.add_argument("--emit-sql", metavar="FILE", type=_sql_target,
+                      help="write the insert as a data-only migration instead of calling the api")
+    return ap
+
+
+def census_main(argv, environ=None, transport=None):
+    args = _census_parser().parse_args(argv)
+    env = os.environ if environ is None else environ
+    post = urllib_post if transport is None else transport
+    if args.expect_digest is not None and not HEX64.fullmatch(args.expect_digest):
+        print("REFUSED: --expect-digest %r is not 64 lowercase hex. Nothing registered." % (args.expect_digest,))
+        return EXIT_REFUSED
+    try:
+        body, row = census_plan(args.census, args.expect_digest)
+    except Refused as r:
+        print("REFUSED: %s. Nothing registered." % r)
+        return EXIT_REFUSED
+    print("CENSUS   %s (%d bytes)" % (os.path.abspath(args.census), len(body)))
+    print("  check  card_measures.census_from_dump, the server's own, from %s" % API_DIR)
+    print("  row    " + _census_row_text(row))
+
+    if args.emit_sql:
+        path = args.emit_sql
+        if os.path.exists(path):
+            print("REFUSED: %s exists; the writer never replaces a file. Nothing written." % path)
+            return EXIT_REFUSED
+        try:
+            text = census_migration_text(os.path.basename(path), row)
+        except Refused as r:
+            print("REFUSED: %s. Nothing written." % r)
+            return EXIT_REFUSED
+        print("SQL      " + _census_row_text(row))
+        with open(path, "w", encoding="ascii", newline="\n") as f:
+            f.write(text)
+        print("WROTE    %s: 1 row, data only; apply it as a migration (a re-run inserts nothing)." % path)
+        return EXIT_OK
+
+    secret = env.get("ADMIN_HMAC_SECRET", "")
+    base = env.get("SCR_API_BASE", "")
+    missing = []
+    print("ENV      ADMIN_HMAC_SECRET is %s" % ("set (value not printed)" if secret else "NOT SET"))
+    if not secret:
+        missing.append("ADMIN_HMAC_SECRET")
+    if base:
+        print("ENV      API base %s" % base)
+    else:
+        print("ENV      SCR_API_BASE is NOT SET")
+        missing.append("SCR_API_BASE")
+    if not args.admin:
+        print("ARG      --admin is not given")
+        missing.append("--admin")
+    elif not re.fullmatch(r"[0-9]{17}", args.admin):
+        print("REFUSED: --admin %r is not a 17-digit steam id. Nothing registered." % (args.admin,))
+        return EXIT_REFUSED
+    if args.mod_version is None:
+        print("ARG      --mod-version is not given")
+        missing.append("--mod-version")
+    elif not (args.mod_version and _is_build_part(args.mod_version, 16)):
+        print("REFUSED: --mod-version %r is not a mod version. Nothing registered." % (args.mod_version,))
+        return EXIT_REFUSED
+
+    if args.dry_run:
+        print("WOULD    " + _census_row_text(row))
+        print("         signs target %s (action %s), body the %d bytes of the file" % (row["digest"], CENSUS_ACTION,
+                                                                                     len(body)))
+        print("DRY RUN  1 row would be registered; nothing was sent.%s"
+              % (" The real run also needs: " + ", ".join(missing) + "." if missing else ""))
+        return EXIT_OK
+    if missing:
+        print("NOT SENT %s missing; nothing was sent." % ", ".join(missing))
+        return EXIT_ENV
+
+    headers = {"X-Mod-Version": args.mod_version, "Accept": "application/json",
+               "Content-Type": "application/json"}
+    url = census_url(base, args.admin, secret, row["digest"])
+    try:
+        status, text = post(url, headers, body=body)
+    except Exception as e:  # noqa: BLE001 - reported, the run stops
+        print("FAILED   %s: %s. Nothing is known to be registered; a re-run is safe."
+              % (_census_row_text(row), e.__class__.__name__))
+        return EXIT_SERVER
+    answer = None
+    if status == 200:
+        try:
+            answer = json.loads(text)
+        except ValueError:
+            answer = None
+    want = {"digest": row["digest"], "card_count": row["card_count"], "slot_count": row["slot_count"]}
+    if not (isinstance(answer, dict) and answer.get("status") in CENSUS_STATUSES
+            and set(answer) == {"status"} | set(want) and all(answer[k] == v for k, v in want.items())):
+        print("FAILED   %s: HTTP %s %s. A re-run is safe." % (_census_row_text(row), status, text[:200]))
+        return EXIT_SERVER
+    if answer["status"] == "registered":
+        print("INSERTED " + _census_row_text(row))
+        print("DONE     1 row: 1 inserted.")
+    else:
+        print("HELD     " + _census_row_text(row) + " (already registered)")
+        print("DONE     1 row: nothing inserted; the registry already holds this digest. It keeps the first row "
+              "registered for a digest, so read its game_dll_sha256 back to confirm it is this game build.")
+    return EXIT_OK
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +1115,9 @@ def plan(args):
 
 
 def main(argv=None, environ=None, transport=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if any(a == "--census" or a.startswith("--census=") for a in argv):
+        return census_main(argv, environ, transport)
     args = _parser().parse_args(argv)
     env = os.environ if environ is None else environ
     post = urllib_post if transport is None else transport
@@ -821,10 +1147,15 @@ def main(argv=None, environ=None, transport=None):
         if os.path.exists(path):
             print("REFUSED: %s exists; the writer never replaces a file. Nothing written." % path)
             return EXIT_REFUSED
+        try:   # generated before the file is opened: a refusal leaves no empty file behind (CENSUS-R2 V1)
+            text = migration_text(os.path.basename(path), rows)
+        except Refused as r:
+            print("REFUSED: %s. Nothing written." % r)
+            return EXIT_REFUSED
         for r in rows:
             print("SQL      " + _row_text(r))
         with open(path, "w", encoding="ascii", newline="\n") as f:
-            f.write(migration_text(os.path.basename(path), rows))
+            f.write(text)
         print("WROTE    %s: %d rows, data only; apply it as a migration (a re-run inserts nothing)."
               % (path, len(rows)))
         return EXIT_OK

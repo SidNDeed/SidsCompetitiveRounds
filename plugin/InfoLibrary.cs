@@ -883,7 +883,7 @@ The spectator seat is an observer by construction, not by politeness:
 
 - Sync signups must mark at least one start time. Signing up again replaces your time votes.
 
-- You can un-sign during voting or after lock, but <color=#FF6666>not once the tournament is running</color> - from there, not showing up is a forfeit and counts on your no-show %.
+- You can un-sign freely during voting. After lock the in-game button closes - withdrawing then happens by answering <b>No</b> on the bot's availability-check DM. <color=#FF6666>Once the tournament is running you can't un-sign at all</color> - from there, not showing up is a forfeit and counts on your no-show %.
 
 - The field caps at 16. Signups past the cap become <color=#7FD4FF>speculative</color>: they don't play, but they are the backfill pool - if a confirmed player leaves before the start, the most reliable speculative inherits their seat. Ordering into the 16 (and out of the pool) goes by no-show % first, then signup time.
 
@@ -1023,7 +1023,7 @@ Only absent seats get the no-show mark (a banned seat forfeits regardless of pre
 
 - During voting: un-sign freely.
 
-- After lock, before the start: the backfill flow runs - the most reliable speculative signup takes your exact bracket slot (with their own rating); no speculative available means your would-be opponents get byes. Leaving this way carries no penalty.
+- After lock, before the start: answering <b>No</b> on the bot's availability-check DM withdraws you and runs the backfill flow - the most reliable speculative signup takes your exact bracket slot (with their own rating); no speculative available means your would-be opponents get byes. Leaving this way carries no penalty. If you have no answerable DM left, you're expected to show - a no-show forfeits and counts on your no-show %.
 
 - Once running: you can't un-sign. Not showing up forfeits your matches and counts on your no-show %.
 
