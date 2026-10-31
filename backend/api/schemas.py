@@ -1125,6 +1125,13 @@ class HealthResponse(BaseModel):
     # (#306); the release train's build discriminator for it. No default,
     # so building the answer without it raises.
     match_hold: int
+    # tournament_fence: the tournament fence lane's server half
+    # (main._TOURNAMENT_FENCE; 1 = this build: the double-elimination
+    # topology fix, the serialized tournament lifecycle and the locked-leave
+    # gate on unsignup). A marker read by nothing else (#306); the release
+    # train's build discriminator for it, since the lane adds no route. No
+    # default, so building the answer without it raises.
+    tournament_fence: int
     # auto_log: the automatic post-match log upload (main._auto_log_health_word).
     # auto_logs.AUTO_LOG_REVISION when POST /api/v1/logs/auto is MOUNTED on the
     # app that answers -- read from the routing table on every request, never
@@ -1527,6 +1534,25 @@ class TournamentSignupRequest(BaseModel):
     # recorded as the player's time votes in the same transaction. Ignored
     # for async tournaments and by unsignup (which shares this schema).
     slot_ts: list[datetime] = []
+    # Unsignup only (ignored by signup): leaving a LOCKED tournament rewrites
+    # the player's own bracket (speculative promotion or bye_auto) and
+    # re-signup after lock is refused, so unsignup answers 409 unless the
+    # caller states the decision with this flag. The flag is not a
+    # credential: a locked withdrawal also requires X-Internal-Key, so in
+    # practice it comes only from the bot's availability-check "No", whose
+    # clicker the bot verifies first. The game client never sends it; its
+    # Leave button is offered only during voting, so a locked leave from
+    # the client is a stale panel, not a decision.
+    confirm_locked_leave: bool = False
+    # The CLICKER's Discord id, sent by the bot with every availability-
+    # check withdrawal. Unsignup checks it against the player's CURRENT
+    # Discord link with a FOR UPDATE read inside the withdrawal transaction:
+    # REQUIRED for a locked withdrawal; for a voting-phase internal
+    # withdrawal it is checked whenever supplied, and an absent one is
+    # accepted so a bot one release behind keeps working while the two
+    # deploy. The bot's own clicker check is a separate, earlier request,
+    # and a relink can commit between the two.
+    discord_id: str | None = None
 
 
 class TournamentTimeVoteRequest(BaseModel):

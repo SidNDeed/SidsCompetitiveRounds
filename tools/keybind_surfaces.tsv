@@ -1023,6 +1023,7 @@ fd844b771d0a82bf	N	rule:N1	Couldn't join the FFA match — left the queue. Pleas
 2197066bc8988e55	N	rule:N1	Couldn't join the queue
 0e2c60155a4e9abf	N	rule:N1	Couldn't join the ranked match — please requeue.
 635b1327e4909407	N	rule:N1	Couldn't kick that player.
+0d891dd93ff117f9	N	rule:N1	Couldn't leave the tournament - it may have locked or started
 55b12af2f1fc5648	N	rule:N1	Couldn't reach the server - retrying in the background.
 fdf89f537d6eed53	N	rule:N1	Couldn't record the match
 7a62d6a8bd7e6b2e	N	rule:N1	Couldn't record the match — retrying in the background
@@ -1310,7 +1311,7 @@ e1ebe8c3f2f26102	N	rule:N1	FPS counter: <color=#FF9966>OFF</color>
 cc0a745dcfb4d3d6	N	rule:N1	FULL
 68ba0f7e976a1c57	N	rule:N1	Faced by
 c547d9751e2e1075	N	rule:N1	Fade Gradient
-09fef5d8d9a3c86b	N	rule:N1	Failed
+09fef5d8d9a3c86b	O	rule:O	Failed
 40fc0b8e623cda2a	N	rule:N1	Failed: {0}
 97cdbdc7feff827e	N	rule:N1	False
 fbb62b29a3ec00fa	N	rule:N1	Fast Forward
@@ -3015,10 +3016,11 @@ d7da73164c888a7d	N	rule:N1	Total time
 a2c06f13201a8b0d	N	rule:N1	Touch Grass
 03545bd7eb151a8d	N	rule:N1	Tournament Bets
 fb10fa9913c39f95	N	rule:N1	Tournament in progress - your next match will connect automatically. Keep ROUNDS open.
+e3303e8feef02cd0	N	rule:N1	Tournament info is refreshing - try again in a moment
 5fe5279bd7d72bd6	N	rev:59af835bda8f4f52 'tab' is a tab of the mod's menu; names no key	Tournament match can't auto-connect: the server has not set a region. Open the Tournaments tab.
 32879284bdafa598	N	rule:N1	Tournament match found - waiting for the server to pick a region...
 fee20df1963ec953	N	rev:7d227736558b38a0 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	Tournaments
-15506e4394620a3a	F	rev:b546e6a038a62f57 fixed:F5 F5 always opens the mod menu; no Controls row moves it	Tournaments are 8-16 player double-elimination brackets of best-of-3 series, run end to end by the m
+dde2afe15d21de6b	F	rev:b0ea720f848a698d fixed:F5 F5 always opens the mod menu; no Controls row moves it; its other input words name the mod's own tab and buttons (Force Start, Play Now, the in-game Leave Signup button) and the server binding a series to a pairing	Tournaments are 8-16 player double-elimination brackets of best-of-3 series, run end to end by the m
 a667fae512b63902	N	rule:N1	Toxic Cloud
 1660bad3f82d6d49	N	rule:N1	Toxic Spill
 c15771fc77a45dae	N	rule:N1	Tracker
@@ -3665,7 +3667,7 @@ eb2d72144a8eb560	N	rule:N1	Well Wraped Hat
 58361b407af345d5	N	rule:N1	Well played!
 dbfa8132673eda37	N	rule:N1	Wet teal-grey stone walls under an overcast slate sky, rain streaking down the backdrop.
 0dfd2c2a42475a10	F	rev:5881c0a340e8bcd5 fixed:Escape the dead-Escape vanilla bug the mod fixes; Escape is not rebindable	What each vanilla bug fix does and where it applies. Gating rules are in <color=#7FD4FF>Vanilla stay
-28b99c3f6732cdc8	N	rev:1d0341fa1e88395d rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	What happens when someone doesn't show up, quits, or leaves a tournament - and exactly how prizes ar
+3960e8a1336364cf	N	rev:fb2b9282ace84795 rules prose: its one input word is the T of the heading's DOESN'T; withdrawing after lock goes through the bot's availability-check DM, which names no input; it names no rebindable key	What happens when someone doesn't show up, quits, or leaves a tournament - and exactly how prizes ar
 667404cccb112645	F	rev:e0f2b2df112b4892 fixed:F5 F5 always opens the mod menu; 'T-chat' is the chat feature's name	What other players can and cannot see of your mod. The short version is a guarantee: <color=#7FE87F>
 bdc8edc8e6f87a74	N	rev:02a5d913a05e7c92 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	What unmodded players see
 82787788a58b2381	N	rev:c8c02f62ecb1d73c a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	When a game counts

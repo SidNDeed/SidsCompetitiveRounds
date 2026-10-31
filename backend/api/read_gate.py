@@ -212,7 +212,9 @@ _R_PODIUM = ("derived-state upkeep: the podium title holders are recomputed from
              "read and the match-submit path performs the same sync; a refused unverified "
              "read defers it to the next verified read and changes no outcome")
 _R_NAME = ("`ready` is a name in this handler that the closure walk also resolves to the "
-           "tournaments module's ready-check route; this GET never calls that route")
+           "tournaments module's ready-check route, and through it to that route's "
+           "player-session check (_check_steam_session, whose one-time arming stamp is "
+           "the write named here); this GET never calls that route")
 _R_TRADE_SQL = ("the trade claim and move statements are reached as DATA through "
                 "_PC_TRADE_DERIVED (the trading health word derives its answer from their "
                 "text); this GET executes neither")
@@ -242,8 +244,10 @@ WRITE_REVIEWED: dict[str, tuple[frozenset, str]] = {
     "/api/v1/team/all-series-paged": (_PODIUM, _R_PODIUM),
     "/api/v1/team/leaderboard": (_PODIUM, _R_PODIUM),
     "/api/v1/team/lobbies": (_PODIUM, _R_PODIUM),
-    "/api/v1/spectate/games": (_PODIUM | {"ready"}, _R_PODIUM + "; " + _R_NAME),
-    "/api/v1/tournaments/current": (_PODIUM | {"ready"}, _R_PODIUM + "; " + _R_NAME),
+    "/api/v1/spectate/games": (_PODIUM | {"ready", "_check_steam_session"},
+                               _R_PODIUM + "; " + _R_NAME),
+    "/api/v1/tournaments/current": (_PODIUM | {"ready", "_check_steam_session"},
+                                    _R_PODIUM + "; " + _R_NAME),
     "/api/v1/music/ratings": (frozenset({"_music_ratings_fold"}),
                               "derived-state upkeep: the fold publishes matured ratings, "
                               "which every read already computes exactly through the "

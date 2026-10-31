@@ -161,8 +161,16 @@ def build_double_elim_bracket(signups: List[SignupInput]) -> List[MatchRow]:
 
     Seeding: identical to single-elim (Elo desc, penalty/signup tiebreak).
     Byes: top seeds when n < slot_count, same as single-elim. Bye winners
-    auto-advance in WB; they never feed LB because a bye means no WB R1 match
-    actually happened for that seed pair.
+    auto-advance in WB. The LB is always built at FULL topology — every WB
+    R1 match (bye or not) feeds its LB R1 slot. A bye contributes no loser,
+    which the activation resolver's structural-vacancy propagation converts
+    into a runtime LB bye (fence r3 finds 1-2: the old builder PRUNED bye
+    feeders out of LB R1 and then halved the resulting sparse rounds, so
+    every 9-14 field crashed the build — the GF indexed an empty final LB
+    round — and a 15-player field emitted a TERMINAL LB bye whose feeder
+    had not resolved, silently cutting that feeder's loser after one loss.
+    Full topology + runtime vacancy resolution replaces the per-size
+    pruning arithmetic entirely).
 
     Note on LB pair ordering: we use straight sequential pairing of losers.
     This can produce occasional WB-rematches deeper in LB (loser of WB R1 M1
@@ -230,29 +238,27 @@ def build_double_elim_bracket(signups: List[SignupInput]) -> List[MatchRow]:
         is_minor = (lb_r % 2 == 1)
         cur: List[MatchRow] = []
         if lb_r == 1:
-            # Pair WB R1 losers. Bye matches in WB R1 have no loser to feed LB,
-            # so we skip them here — that reduces the LB R1 match count by the
-            # number of WB byes. This produces a smaller (but still valid) LB.
-            feeders = [m for m in wb_by_round[1] if not m.is_bye]
-            num_matches = (len(feeders) + 1) // 2
-            for j in range(num_matches):
-                fa = feeders[2 * j] if 2 * j < len(feeders) else None
-                fb = feeders[2 * j + 1] if 2 * j + 1 < len(feeders) else None
-                prereqs: List[uuid.UUID] = []
-                roles: List[str] = []
-                if fa is not None:
-                    prereqs.append(fa.id)
-                    roles.append("L")  # loser of WB R1 match
-                if fb is not None:
-                    prereqs.append(fb.id)
-                    roles.append("L")
-                # Odd count: one side gets a bye into LB R2.
-                is_bye = len(prereqs) == 1
+            # Pair the losers of ALL WB R1 matches — bye matches included.
+            # A bye feeder is terminal with a winner and no loser, so its
+            # L-role contribution is a structural vacancy; the activation
+            # resolver turns a one-vacancy match into a runtime bye for the
+            # real loser and cascades a two-vacancy match winnerless. Never
+            # emit is_bye here: a builder bye is pre-DECIDED (winner set at
+            # generation), and persistence terminalizes is_bye rows
+            # immediately — a "bye" that still waits on a feeder is exactly
+            # the row that cut a live player (r3 find 1). LB R1 width is
+            # always slot_count/4, so every later minor/major width — and
+            # the GF's final-LB-round index — is size-independent.
+            feeders = wb_by_round[1]
+            for j in range(len(feeders) // 2):
+                fa = feeders[2 * j]
+                fb = feeders[2 * j + 1]
                 row = MatchRow(
                     id=uuid.uuid4(), round=lb_r, bracket_side="L", slot_idx=j,
                     p1_signup_id=None, p2_signup_id=None,
-                    prereq_match_ids=prereqs, prereq_roles=roles,
-                    is_bye=is_bye, winner_signup_id=None,
+                    prereq_match_ids=[fa.id, fb.id],
+                    prereq_roles=["L", "L"],
+                    is_bye=False, winner_signup_id=None,
                 )
                 cur.append(row)
                 rows.append(row)
@@ -471,6 +477,34 @@ if __name__ == "__main__":
     assert len(lb) == 6, f"8p LB: expected 6, got {len(lb)}"
     assert len(gf) == 1
     print("8p double-elim: OK (7W + 6L + 1GF)")
+
+    # EVERY size 8-16 must build at full LB topology (r3 finds 1-2: the
+    # pruning builder crashed 9-14 — the GF indexed an empty final LB
+    # round — and gave 15 a terminal LB bye with an unresolved feeder).
+    # Invariants: size-independent LB widths; no is_bye row carries
+    # prereqs (a builder bye is pre-DECIDED — a "bye" still waiting on a
+    # feeder gets terminalized at persistence and cuts that feeder's
+    # loser); every WB R1 match feeds LB R1; full prereq connectivity.
+    from collections import Counter as _Counter
+    for _n in range(8, 17):
+        _rows = build_double_elim_bracket(_make(_n))
+        _wb1 = [r for r in _rows if r.bracket_side == "W" and r.round == 1]
+        _lb = [r for r in _rows if r.bracket_side == "L"]
+        _slot = 8 if _n <= 8 else 16
+        _widths = _Counter(r.round for r in _lb)
+        _expect = [_slot // 4, _slot // 4]
+        _w = _slot // 8
+        while _w >= 1:
+            _expect += [_w, _w]
+            _w //= 2
+        assert [_widths[i + 1] for i in range(len(_expect))] == _expect, \
+            (_n, dict(_widths))
+        assert not any(r.is_bye and r.prereq_match_ids for r in _rows), _n
+        _fed = {pid for r in _lb if r.round == 1 for pid in r.prereq_match_ids}
+        assert _fed == {r.id for r in _wb1}, _n
+        _ids = {r.id for r in _rows}
+        assert all(p in _ids for r in _rows for p in r.prereq_match_ids), _n
+    print("8-16p double-elim: OK (full LB topology at every size; no waiting byes)")
 
     # Bounds
     for bad_n in (0, 1, 3, 17):

@@ -153,6 +153,19 @@ SESSION_REVIEWED: dict[str, tuple[str, str]] = {
         "route table's endpoint to get_set_report by identity and never calls it; "
         "the closure walk expands every name inside a def, so the reference reads "
         "as a reach of get_set_report's session check"),
+    # The tournaments ready-check route takes the player-session check (the
+    # tournament fence re-author), and `ready` is also a name these two GETs
+    # reach; the closure walk resolves a name to every binding of it.
+    "/api/v1/spectate/games": (
+        read_gate.C_PUBLIC,
+        "`ready` is a local in spectate_games (the batched watchability verdict); the "
+        "closure walk also resolves it to the tournaments ready-check route, so the "
+        "route reads as reaching that route's session check; this GET never calls it"),
+    "/api/v1/tournaments/current": (
+        read_gate.C_PUBLIC,
+        "`ready` is a field of TournamentSignupEntry, which this route serialises; the "
+        "closure walk also resolves it to the tournaments ready-check route, so the "
+        "route reads as reaching that route's session check; this GET never calls it"),
 }
 
 
@@ -378,9 +391,11 @@ def writers_reached(seeds, index=None) -> dict:
     return out
 
 
-def check_write_on_get(routes, write_on_get=None, reviewed=None, index=None, seeds_of=None) -> list[str]:
+def check_write_on_get(routes, write_on_get=None, reviewed=None, index=None, seeds_of=None,
+                       session_reviewed=None) -> list[str]:
     write_on_get = read_gate.WRITE_ON_GET if write_on_get is None else write_on_get
     reviewed = read_gate.WRITE_REVIEWED if reviewed is None else reviewed
+    session_reviewed = SESSION_REVIEWED if session_reviewed is None else session_reviewed
     seeds_of = seeds_of or (lambda r: [M._binding_key(r.endpoint)])
     problems = []
     flagged = {}
@@ -404,9 +419,13 @@ def check_write_on_get(routes, write_on_get=None, reviewed=None, index=None, see
         reached = set(M._walk_bindings(seeds, index) if index is not None else M._reached(seeds))
         # Session-reached and a writer is WRITE_ON_GET. The two exceptions are
         # not writes BY this route: the session check's own arming stamp, and
-        # the trade statements reached as data.
-        if reached & SESSION_PRIMITIVES and set(w) - {SESSION_STAMP, "_PC_TRADE_CLAIM_SQL",
-                                                      "_PC_TRADE_MOVE_SQL"}:
+        # the trade statements reached as data. A session reach that
+        # SESSION_REVIEWED records under the route's own class is not a
+        # session this route requires (the rule check_classes applies to the
+        # same entry), so it does not make the route WRITE_ON_GET.
+        session = bool(reached & SESSION_PRIMITIVES) and (
+            session_reviewed.get(path, ("",))[0] != read_gate.route_class(path))
+        if session and set(w) - {SESSION_STAMP, "_PC_TRADE_CLAIM_SQL", "_PC_TRADE_MOVE_SQL"}:
             problems.append(f"{path} is session-reached and a writer but not WRITE_ON_GET")
     for path in sorted(set(write_on_get) | set(reviewed)):
         if path in by_path and path not in flagged:
@@ -466,6 +485,23 @@ def test_write_on_get_controls(tmp_path):
         app.routes, write_on_get={"/api/v1/zz/reader": "commits"}, index=index,
         seeds_of=lambda r: [("zz_writer_mod", "zz_reader_handler")])
     assert problems == []
+
+    # A session reach SESSION_REVIEWED records under the route's own class is
+    # what keeps a writer route out of WRITE_ON_GET, and only while it names
+    # that class: every entry that clears such a route, removed or given a
+    # wrong class, leaves the route flagged again.
+    _, flagged = check_write_on_get(main.app.routes)
+    exempt = {SESSION_STAMP, "_PC_TRADE_CLAIM_SQL", "_PC_TRADE_MOVE_SQL"}
+    cleared = sorted(p for p in SESSION_REVIEWED if set(flagged.get(p, ())) - exempt)
+    assert cleared, "no session review entry clears a writer route; nothing to control"
+    for path in cleared:
+        removed = {k: v for k, v in SESSION_REVIEWED.items() if k != path}
+        wrong = dict(SESSION_REVIEWED)
+        wrong[path] = (read_gate.C_PROBE, SESSION_REVIEWED[path][1])
+        for table in (removed, wrong):
+            problems, _ = check_write_on_get(main.app.routes, session_reviewed=table)
+            assert f"{path} is session-reached and a writer but not WRITE_ON_GET" in problems, (
+                path, problems)
 
 
 @pytest.mark.parametrize("source,expected", [
