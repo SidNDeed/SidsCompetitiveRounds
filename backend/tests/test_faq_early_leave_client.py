@@ -505,10 +505,13 @@ class _M396Parse:
         self.lists, self.spans = [], []
 
     def t(self, n):
-        return self.toks[n][1] if n < len(self.toks) else ""
+        return self.toks[n][1] if 0 <= n < len(self.toks) else ""
+
+    def k(self, n):
+        return self.toks[n][0] if 0 <= n < len(self.toks) else ""
 
     def at(self, n):
-        return _line(self.sql, self.toks[n][2] if n < len(self.toks) else len(self.sql))
+        return _line(self.sql, self.toks[n][2] if 0 <= n < len(self.toks) else len(self.sql))
 
     def expect(self, n, *texts):
         got = [self.t(k) for k in range(n, n + len(texts))]
@@ -516,20 +519,20 @@ class _M396Parse:
         return n + len(texts)
 
     def value(self, n):
-        assert self.toks[n][0] == "lit", "%s: a value opens with %r, not a literal" % (self.at(n), self.t(n))
+        assert self.k(n) == "lit", "%s: a value opens with %r, not a literal" % (self.at(n), self.t(n))
         n, kind = n + 1, "lit"
         while self.t(n) == "||":
             joins = 0
             while self.t(n) == "||" and [self.t(k) for k in range(n + 1, n + 5)] in _JOINS:
                 n, joins = n + 5, joins + 1
             assert joins, "%s: %r stands after || where chr(10) or chr(183) must" % (self.at(n + 1), self.t(n + 1))
-            assert self.t(n) == "||" and self.toks[n + 1][0] == "lit", (
+            assert self.t(n) == "||" and self.k(n + 1) == "lit", (
                 "%s: a composed value continues with %r, not || and a literal" % (self.at(n), self.t(n) + " " + self.t(n + 1)))
             n, kind = n + 2, "text"
         return kind, n
 
     def cell(self, n):
-        if self.toks[n][0] == "lit":
+        if self.k(n) == "lit":
             return self.value(n)
         if self.t(n) in ("TRUE", "FALSE"):
             return "bool", n + 1
@@ -541,7 +544,7 @@ class _M396Parse:
     def values(self, v):
         n, rows = v + 1, []
         while True:
-            start, n, cells = self.toks[n][2], self.expect(n, "("), []
+            row, n, cells = n, self.expect(n, "("), []
             while True:
                 kind, n = self.cell(n)
                 cells.append(kind)
@@ -550,7 +553,7 @@ class _M396Parse:
                 n += 1
             n = self.expect(n, ")")
             rows.append(cells)
-            self.spans.append((start, self.toks[n - 1][2] + 1))
+            self.spans.append((self.toks[row][2], self.toks[n - 1][2] + 1))
             if self.t(n) != ",":
                 break
             n += 1
@@ -559,13 +562,16 @@ class _M396Parse:
             alias, n = self.t(n), self.expect(n + 1, "(")
             cols = []
             while self.t(n) != ")":
+                assert n < len(self.toks), "%s: a VALUES alias's column list does not close" % self.at(n)
                 cols.append(self.t(n))
                 n += 2 if self.t(n + 1) == "," else 1
         else:
             self.expect(n, ";")
             close = v - 1
             assert self.t(close) == ")", "%s: VALUES follows %r" % (self.at(close), self.t(close))
-            opn = max(k for k in range(close) if self.t(k) == "(")
+            opens = [k for k in range(close) if self.t(k) == "("]
+            assert opens, "%s: no column list opens before VALUES" % self.at(close)
+            opn = opens[-1]
             assert [self.t(k) for k in range(opn - 3, opn)] == ["INSERT", "INTO", "_seed396"], (
                 "%s: a VALUES list follows a column list not of INSERT INTO _seed396" % self.at(opn))
             alias, cols = "_seed396", [self.t(k) for k in range(opn + 1, close, 2)]
