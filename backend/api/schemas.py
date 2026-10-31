@@ -1209,6 +1209,15 @@ class HealthResponse(BaseModel):
     # nothing else (#306). No default, as above. Absent on any build before
     # it.
     tzdata_declared: int
+    # ffa_leave_figure: release-train verification plumbing, not a design
+    # mechanism (main._FFA_LEAVE_FIGURE_BUILD; 1 = this build's FFA report
+    # route requires game_points_at_leave on a left_early entry that is not
+    # absent). A code constant, equal on both roles by construction, so the
+    # train can read it through the edge; the batch adds no route, and this is
+    # the key that tells a stale box from a refreshed one (learnings 780, 794).
+    # Probed by the release train and read by nothing else (#306). No default,
+    # as above. Absent on any build before it.
+    ffa_leave_figure: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not

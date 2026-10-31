@@ -7656,6 +7656,15 @@ _SHOP_FLOOR_BUILD = 1
 # by the release train and read by nothing else (#306). Absent on any
 # build before it.
 _TZDATA_DECLARED_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch whose report route requires game_points_at_leave on a
+# left_early entry that is not absent (_ffa_missing_leave_figure), reported
+# on /health as `ffa_leave_figure`. The batch adds no route, and the refusal
+# answers only a report the train never sends, so without it no phase of the
+# train could tell a box on the new build from a stale one (learnings 780,
+# 794). A code constant, equal on both boxes by construction, probed by the
+# release train and read by nothing else (#306). Absent on any build before it.
+_FFA_LEAVE_FIGURE_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
@@ -7729,6 +7738,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               leave_anchor=_LEAVE_ANCHOR_BUILD,
                               shop_floor=_SHOP_FLOOR_BUILD,
                               tzdata_declared=_TZDATA_DECLARED_BUILD,
+                              ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7787,6 +7797,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               leave_anchor=_LEAVE_ANCHOR_BUILD,
                               shop_floor=_SHOP_FLOOR_BUILD,
                               tzdata_declared=_TZDATA_DECLARED_BUILD,
+                              ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
