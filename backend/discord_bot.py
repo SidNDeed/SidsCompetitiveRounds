@@ -14478,29 +14478,25 @@ async def _tavail_still_live(nid):
     return any(isinstance(n, dict) and str(n.get("notice_id")) == str(nid) for n in data["notices"])
 
 
-async def _tavail_live_and_reset(nid, tid, steam):
-    """The availability check's pre-send step: `_tavail_still_live(nid)`,
-    and when it answers True, the reset of the prompt's withdrawal memo (a
-    fresh prompt starts a fresh decision: a pushback deletes and re-queues
+async def _tavail_reset_memo(tid, steam, t0):
+    """After an availability prompt was SENT, reset its withdrawal memo: a
+    fresh prompt starts a fresh decision (a pushback deletes and re-queues
     availability notices for the SAME tournament id, and a player who
     withdrew, re-signed and is asked again must not have the new Yes
     answered with "already withdrawn"; fence r4 find 4).
 
-    Both run under the prompt's own lock in `_tavail_locks`, the one the
-    Yes/No handler in on_interaction holds across its withdrawal and memo
-    add, so a No cannot fall between this live check and this reset: it
-    either returns before the check starts, and then the check answers
-    False unless the player has signed up again, or it starts after the
-    reset, and then its memo stands. The lock spans one API read (api_get,
-    8 s bound) and the set update; the DM is sent after this returns,
-    outside the lock, so a click never waits on the poll's Discord send.
-    Returns what `_tavail_still_live` returned."""
+    `t0` is the poll's time.monotonic() reading taken before its live check.
+    The memo is removed only when its stamp is strictly earlier than t0: a
+    No that returned before the check began is reflected in the check's
+    answer (False unless the player signed up again), while a No stamped at
+    or after t0 may have landed after the check read the server, and its
+    memo stands. The compare-and-pop runs under the prompt's lock in
+    `_tavail_locks`, the lock on_interaction holds across its withdrawal and
+    stamp; the lock is never held across the live check or the send."""
     key = f"{tid}:{steam}"
     async with _tavail_locks.setdefault(key, asyncio.Lock()):
-        live = await _tavail_still_live(nid)
-        if live is True:
-            _tavail_withdrawn.discard(key)
-        return live
+        if key in _tavail_withdrawn and _tavail_withdrawn[key] < t0:
+            del _tavail_withdrawn[key]
 
 
 @tasks.loop(seconds=30)
@@ -14683,9 +14679,10 @@ async def poll_tournament_notices():
                 # since; ask the server again as the LAST step before the
                 # send, so an entrant who left or was banned meanwhile gets no
                 # DM. A refused or unanswered check sends and acks nothing.
-                # A True answer also resets the prompt's withdrawal memo, in
-                # the same per-prompt critical section as the check.
-                live = await _tavail_live_and_reset(nid, tid, steam)
+                # t0 is read BEFORE the check: only a withdrawal memo stamped
+                # before it may be reset after a successful send.
+                t0 = time.monotonic()
+                live = await _tavail_still_live(nid)
                 if live is not True:
                     print(f"[TAVAIL] availability check {nid} not sent: "
                           + ("its entrant is no longer signed up and eligible" if live is False
@@ -14697,8 +14694,11 @@ async def poll_tournament_notices():
                 await user.send(content=content, embed=embed, view=view,
                                 allowed_mentions=discord.AllowedMentions.none())
                 if ntype == "availability_check":
-                    # The withdrawal memo was reset before the send, inside
-                    # _tavail_live_and_reset's per-prompt lock.
+                    # A FRESH prompt starts a fresh decision: reset the
+                    # withdrawal memo, but only one stamped before this
+                    # poll's live check began (_tavail_reset_memo). A failed
+                    # send resets nothing.
+                    await _tavail_reset_memo(tid, steam, t0)
                     print(f"[TAVAIL] availability check ({kind}) → {user} for tournament {str(tid)[:8]}")
                 elif _is_deadline_checkin:
                     print(f"[TDLC] deadline check-in → {user} for match {str(match_id)[:8]}")
@@ -15121,11 +15121,12 @@ async def before_pending_dms():
 # withdrawal. In-memory only — after a bot restart the memo is empty, so a
 # Yes clicked after a pre-restart No can still repaint; the buttons
 # themselves are restart-safe by design and the server state is already
-# correct, so that residual is cosmetic. The notice poll takes the same lock
-# for its pre-send live check and memo reset (_tavail_live_and_reset), so its
-# reset is ordered against a No's withdrawal and memo add.
+# correct, so that residual is cosmetic. The memo maps the prompt key to the
+# time.monotonic() stamp of the No that set it; the notice poll removes it
+# after a successful send only when the stamp is earlier than the poll's
+# pre-check reading (_tavail_reset_memo), under the same lock.
 _tavail_locks: dict = {}
-_tavail_withdrawn: set = set()
+_tavail_withdrawn: dict = {}
 
 
 async def _tournament_unsignup(tournament_id, steam_id, discord_id):
@@ -15427,7 +15428,7 @@ async def on_interaction(interaction: discord.Interaction):
             ok, detail = await _tournament_unsignup(
                 tournament_id, steam_id, interaction.user.id)
             if ok:
-                _tavail_withdrawn.add(_pkey)
+                _tavail_withdrawn[_pkey] = time.monotonic()
                 print(f"[TAVAIL] {interaction.user} withdrew from tournament {tournament_id[:8]}")
                 try:
                     await interaction.message.edit(content="You've been removed from the tournament. ✅", view=None)

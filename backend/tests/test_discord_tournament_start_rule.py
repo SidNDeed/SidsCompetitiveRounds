@@ -45,7 +45,7 @@ FUNCS = {
     "_tsync_signups_open_text", "poll_tournaments", "_tavail_embed", "_ack_tournament_notices",
     "poll_tournament_notices", "_build_tournament_board_embed", "_publish_tournament_board",
     "_adopt_tournament_board", "_own_embed_messages", "_delete_board_message",
-    "_faq_tournaments", "_faq_resolve_answer", "_tavail_still_live", "_tavail_live_and_reset",
+    "_faq_tournaments", "_faq_resolve_answer", "_tavail_still_live", "_tavail_reset_memo",
 }
 ASSIGNS = {
     "ASYNC_DEADLINE_DAYS", "_TSYNC_VOTE_HOW", "_tournament_state", "_notified_completed",

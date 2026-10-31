@@ -1,45 +1,95 @@
-"""The availability prompt's withdrawal memo is ordered against the notice
-poll's reset (FENCE-LAND-R6 H8).
+"""The availability prompt's withdrawal memo is reset only by a prompt that
+was sent, and only when the No that set it returned before the poll's live
+check began (FENCE-LAND-R6 H8; integrator ruling FENCE-H8.1, method c).
 
-`_tavail_withdrawn` has two writers: the No's add (on_interaction, after a
-withdrawal that went through) and the poll's reset (a fresh prompt starts a
-fresh decision). The poll's pre-send live check and its reset now run in
-`_tavail_live_and_reset` under the prompt's lock in `_tavail_locks`, the
-lock on_interaction holds across its withdrawal and memo add. Invariant: for
-one bot process and one prompt key, a memo set by a successful No is never
-cleared by a poll whose live check began before that No's withdrawal
-returned.
+`_tavail_withdrawn` maps a prompt key to the time.monotonic() stamp of the
+No that set it (on_interaction, under the prompt's lock, after the
+withdrawal returned). The notice poll reads t0 = time.monotonic() before
+its live check, checks, sends, and only after a SUCCESSFUL send calls
+`_tavail_reset_memo(tid, steam, t0)`, which under the same lock removes the
+memo only when its stamp is strictly earlier than t0. Invariant: for one bot
+process and one prompt key, a memo set by a successful No is never cleared
+by a poll whose live check began before that No returned; a failed send
+resets nothing.
 
-Driven through the lifted on_interaction and _tavail_live_and_reset over the
-harness's fake transport, with the server's live check stubbed and held on
-an asyncio event so the interleaving is deterministic:
+Driven through the lifted poll_tournament_notices, _tavail_still_live,
+_tavail_reset_memo and on_interaction (the start-rule suite's fake api and
+fake Discord client, extended with the link lookup and the withdrawal), on
+the harness clock, which moves only when this file or a modelled sleep moves
+it:
 
-  * the poll's live check starts (the player is still signed up), a No is
-    clicked while the check is held, the check is released, then a Yes is
-    clicked: the Yes reply is the already-withdrawn text;
-  * the same run over a copy of the helper without the lock replies
-    "Confirmed" (the control fails on the unfixed ordering);
-  * a No that completed before the poll, with the player signed up again,
-    is still reset by the poll (a fresh prompt, fence r4 find 4);
-  * a live check that answers False or no answer leaves the memo;
-  * the poll reaches the memo only through the helper.
+  * a No that lands inside the poll's live check (the check answers from
+    before the No) survives the reset, and a later Yes replies the
+    already-withdrawn text; so does a No stamped exactly at t0;
+  * a send that fails (transient, or DMs closed) resets nothing;
+  * a No that returned before the check, with the player signed up again,
+    is reset after a successful send and the Yes replies Confirmed;
+  * a check that answers not live sends nothing and keeps the memo;
+  * the poll's order (t0, check, send, reset) and the memo's writers.
 """
 import ast
 from types import SimpleNamespace
 
 import discord_collection_harness as H
+import test_discord_tournament_start_rule as R
 
-DID = 912345678901234567              # synthetic 18-digit Discord id
-TID = "6f1c2d3e-0000-4000-8000-000000000002"
-STEAM = H.steam_of(8)                 # synthetic, not an individual SteamID64
-NID = "notice-0001"
-KEY = "%s:%s" % (TID, STEAM)
-FUNCS = {"on_interaction", "_tdlc_verify_clicker", "_tournament_unsignup",
-         "_discord_tail", "_scrub_discord_id", "_tavail_live_and_reset"}
-ASSIGNS = {"_tavail_locks", "_tavail_withdrawn"}
+N = 7                                  # the harness's synthetic player offset
+NID = "a1"
+STEAM = H.steam_of(N)
+DID = int(H.discord_of(N))
+KEY = "%s:%s" % (R.TID, STEAM)
+FUNCS = (set(R.FUNCS) | {"on_interaction", "_tdlc_verify_clicker", "_tournament_unsignup",
+                         "_discord_tail", "_scrub_discord_id"})
 WITHDRAWN = "You've already withdrawn from this tournament"
 CONFIRMED = "Confirmed"
-LOCK_LINE = "async with _tavail_locks.setdefault(key, asyncio.Lock()):"
+ASKED = "Are you still in for the **Async tournament**?"
+
+
+class Api(R.Api):
+    """The start-rule api plus the link lookup and the withdrawal. The
+    pre-send read answers from the server state at the moment it is
+    received; `during_check` runs after that answer is fixed and before it
+    is returned, i.e. inside the poll's live check."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.signed_out = set()           # steam ids withdrawn and not signed up again
+        self.during_check = None
+
+    async def __call__(self, call):
+        if call.path.startswith("/players/by-discord/"):
+            return H.Reply(200, json={"steam_id": STEAM})
+        if call.method == "POST" and call.path == "/tournaments/%s/unsignup" % R.TID:
+            self.signed_out.add(call.payload["steam_id"])
+            return H.Reply(200, json={})
+        if call.method == "GET" and "notice_id=" in call.path:
+            saved = self.notices
+            self.notices = [n for n in saved if n["steam_id"] not in self.signed_out]
+            try:
+                reply = await super().__call__(call)
+            finally:
+                self.notices = saved
+            if self.during_check is not None:
+                hook, self.during_check = self.during_check, None
+                await hook()
+            return reply
+        return await super().__call__(call)
+
+
+class Client(R.Client):
+    def __init__(self, fail=None):
+        super().__init__()
+        self.fail = fail
+
+    def get_user(self, uid):
+        user = super().get_user(uid)
+        if self.fail is not None:
+            fail = self.fail
+
+            async def send(**kw):
+                raise fail
+            user.send = send
+        return user
 
 
 class _User:
@@ -50,38 +100,19 @@ class _User:
         return self.name
 
 
-class _Live:
-    """The server's pre-send live check, held until released."""
-
-    def __init__(self, answer, hold):
-        self.answer, self.hold = answer, hold
-        self.started = None
-        self.release = None
-        self.calls = []
-
-    async def __call__(self, nid):
-        self.calls.append(nid)
-        if self.hold:
-            self.started.set()
-            await self.release.wait()
-        return self.answer
-
-
-async def _server(call):
-    if call.path.startswith("/players/by-discord/"):
-        return H.Reply(200, json={"steam_id": STEAM})
-    if call.path == "/tournaments/%s/unsignup" % TID:
-        return H.Reply(200, json={})
-    raise AssertionError("unexpected request: %s %s" % (call.method, call.path))
-
-
-def _rig(live, source=None):
-    fake_discord = SimpleNamespace(
-        Interaction=object,
-        InteractionType=SimpleNamespace(component="component"),
-        AllowedMentions=SimpleNamespace(none=lambda: "none"))
-    return H.BotRig(_server, funcs=FUNCS, assigns=ASSIGNS, source=source,
-                    extra={"discord": fake_discord, "_tavail_still_live": live})
+def _rig(fail=None):
+    api = Api(notices=[R.notice(NID, N, kind="async")])
+    client = Client(fail)
+    fake_discord = SimpleNamespace(Embed=R.Embed, NotFound=R.NotFound, Forbidden=R.Forbidden,
+                                   HTTPException=Exception, Interaction=object,
+                                   InteractionType=SimpleNamespace(component="component"),
+                                   AllowedMentions=SimpleNamespace(none=lambda: "none"))
+    extra = {"discord": fake_discord, "bot": client, "urllib": R.urllib,
+             "TOURNAMENT_CHANNEL_ID": R.ANNOUNCE, "SCR_TOURNAMENTS_CHANNEL": R.BOARD,
+             "_tavail_view": lambda tid, steam: ("view", str(tid), str(steam))}
+    rig = H.BotRig(api, funcs=FUNCS, assigns=R.ASSIGNS, extra=extra)
+    rig.api, rig.client = api, client
+    return rig
 
 
 async def _click(rig, answer):
@@ -97,114 +128,132 @@ async def _click(rig, answer):
         sent.append(kw.get("content"))
 
     interaction = SimpleNamespace(
-        type="component", data={"custom_id": "tavail:%s:%s:%s" % (TID, STEAM, answer)},
-        user=_User(DID, "entrant8"),
+        type="component", data={"custom_id": "tavail:%s:%s:%s" % (R.TID, STEAM, answer)},
+        user=_User(DID, "entrant7"),
         response=SimpleNamespace(defer=defer), followup=SimpleNamespace(send=send),
         message=SimpleNamespace(edit=edit))
     await rig.ns["on_interaction"](interaction)
     return sent
 
 
-def _unsignups(rig):
-    return [c for c in rig.calls if c.path == "/tournaments/%s/unsignup" % TID]
+def _no(rig):
+    sent = H.run(_click(rig, "no"))
+    assert sent and "removed from the tournament" in sent[0], (sent, rig.logs)
 
 
-async def _race(rig, live):
-    """Poll check starts -> No clicked while the check is held -> check
-    released and the poll finishes -> Yes clicked. Returns the Yes reply."""
-    import asyncio
-    live.started, live.release = asyncio.Event(), asyncio.Event()
-    poll = asyncio.ensure_future(rig.ns["_tavail_live_and_reset"](NID, TID, STEAM))
-    await live.started.wait()
-    no = asyncio.ensure_future(_click(rig, "no"))
-    for _ in range(200):                # let the No run as far as it can
-        if no.done():
-            break
-        await asyncio.sleep(0)
-    no_done_while_held = no.done()
-    live.release.set()
-    assert await poll is True
-    no_sent = await no
-    assert no_sent and "removed from the tournament" in no_sent[0], no_sent
-    yes_sent = await _click(rig, "yes")
-    return no_done_while_held, yes_sent
+def _yes(rig):
+    sent = H.run(_click(rig, "yes"))
+    assert len(sent) == 1, sent
+    return sent[0]
 
 
-def test_a_no_inside_the_polls_check_survives_the_reset_and_the_yes_says_withdrawn():
-    live = _Live(True, hold=True)
-    rig = _rig(live)
-    no_done_while_held, yes_sent = H.run(_race(rig, live))
-    assert no_done_while_held is False          # the No waited for the poll's critical section
-    assert len(_unsignups(rig)) == 1
+def _no_inside_the_check(rig, before, after):
+    """Inside the poll's live check (its answer already fixed from before
+    the No): the clock moves `before`, the No runs to completion, the clock
+    moves `after`."""
+    async def hook():
+        rig.clock.advance(before)
+        sent = await _click(rig, "no")
+        assert sent and "removed from the tournament" in sent[0], (sent, rig.logs)
+        rig.clock.advance(after)
+    rig.api.during_check = hook
+
+
+def test_a_no_inside_the_live_check_survives_the_reset_and_the_yes_says_withdrawn():
+    rig = _rig()
+    _no_inside_the_check(rig, 1.0, 1.0)
+    H.run(rig.ns["poll_tournament_notices"]())
+    assert [d.content for d in rig.client.dms] == [ASKED]     # the check answered live: the prompt went out
+    assert rig.api.acked == [NID] and rig.api.rechecks == [NID]
     assert KEY in rig.ns["_tavail_withdrawn"]
-    assert len(yes_sent) == 1 and yes_sent[0].startswith(WITHDRAWN), yes_sent
-    assert live.calls == [NID]
+    assert _yes(rig).startswith(WITHDRAWN)
 
 
-def _unlocked_source():
-    """discord_bot.py with the helper's lock removed (the pre-fix ordering),
-    the change asserted to land once, inside the helper's own span."""
-    src = H.bot_source()
-    tree = ast.parse(src)
-    fns = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_tavail_live_and_reset"]
-    assert len(fns) == 1
-    seg = ast.get_source_segment(src, fns[0])
-    assert seg.count(LOCK_LINE) == 1 and src.count(seg) == 1
-    return src.replace(seg, seg.replace(LOCK_LINE, "if True:"))
+def test_a_no_stamped_exactly_at_t0_is_kept():
+    rig = _rig()
+    _no_inside_the_check(rig, 0.0, 0.0)                     # the clock does not move: stamp == t0
+    H.run(rig.ns["poll_tournament_notices"]())
+    assert rig.api.acked == [NID]
+    assert KEY in rig.ns["_tavail_withdrawn"]
+    assert _yes(rig).startswith(WITHDRAWN)
 
 
-def test_control_the_same_race_without_the_lock_replies_confirmed():
-    live = _Live(True, hold=True)
-    rig = _rig(live, source=_unlocked_source())
-    no_done_while_held, yes_sent = H.run(_race(rig, live))
-    assert no_done_while_held is True           # the No completed inside the poll's check
+def _no_then_signed_up_again(rig):
+    _no(rig)
+    stamp = rig.ns["_tavail_withdrawn"][KEY]
+    rig.clock.advance(5.0)
+    rig.api.signed_out.discard(STEAM)                      # the player signed up again
+    return stamp
+
+
+def test_a_failed_send_resets_nothing():
+    for fail, acked in ((RuntimeError("429 Too Many Requests"), []), (R.Forbidden("DMs closed"), [NID])):
+        rig = _rig(fail)
+        stamp = _no_then_signed_up_again(rig)
+        H.run(rig.ns["poll_tournament_notices"]())
+        assert rig.api.rechecks == [NID] and rig.client.dms == []
+        assert rig.api.acked == acked, (fail, rig.api.acked)
+        assert rig.ns["_tavail_withdrawn"].get(KEY) == stamp, fail
+        assert _yes(rig).startswith(WITHDRAWN), fail
+
+
+def test_a_no_before_the_check_with_the_player_signed_up_again_is_reset_after_the_send():
+    rig = _rig()
+    _no_then_signed_up_again(rig)
+    H.run(rig.ns["poll_tournament_notices"]())
+    assert [d.content for d in rig.client.dms] == [ASKED] and rig.api.acked == [NID]
     assert KEY not in rig.ns["_tavail_withdrawn"]
-    assert len(yes_sent) == 1 and yes_sent[0].startswith(CONFIRMED), yes_sent
+    assert _yes(rig).startswith(CONFIRMED)
 
 
-def test_a_no_before_the_poll_with_the_player_signed_up_again_is_reset():
-    async def go(rig):
-        no_sent = await _click(rig, "no")
-        assert "removed from the tournament" in no_sent[0], no_sent
-        assert KEY in rig.ns["_tavail_withdrawn"]
-        assert await rig.ns["_tavail_live_and_reset"](NID, TID, STEAM) is True
-        return await _click(rig, "yes")
-    live = _Live(True, hold=False)
-    rig = _rig(live)
-    yes_sent = H.run(go(rig))
-    assert KEY not in rig.ns["_tavail_withdrawn"]
-    assert len(yes_sent) == 1 and yes_sent[0].startswith(CONFIRMED), yes_sent
+def test_a_check_that_is_not_live_sends_nothing_and_keeps_the_memo():
+    rig = _rig()
+    _no(rig)
+    stamp = rig.ns["_tavail_withdrawn"][KEY]
+    rig.clock.advance(5.0)
+    H.run(rig.ns["poll_tournament_notices"]())
+    assert rig.api.rechecks == [NID] and rig.client.dms == [] and rig.api.acked == []
+    assert rig.ns["_tavail_withdrawn"].get(KEY) == stamp
+    assert _yes(rig).startswith(WITHDRAWN)
 
 
-def test_a_check_that_is_not_live_or_unanswered_leaves_the_memo():
-    for answer in (False, None):
-        async def go(rig):
-            await _click(rig, "no")
-            got = await rig.ns["_tavail_live_and_reset"](NID, TID, STEAM)
-            return got, await _click(rig, "yes")
-        live = _Live(answer, hold=False)
-        rig = _rig(live)
-        got, yes_sent = H.run(go(rig))
-        assert got is answer
-        assert KEY in rig.ns["_tavail_withdrawn"]
-        assert len(yes_sent) == 1 and yes_sent[0].startswith(WITHDRAWN), (answer, yes_sent)
-
-
-def _calls_in(fn, name):
-    return [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Name) and n.func.id == name]
-
-
-def test_the_poll_reaches_the_memo_only_through_the_helper():
+def test_the_polls_order_and_the_memos_writers():
     tree = ast.parse(H.bot_source())
     fns = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     poll = fns["poll_tournament_notices"]
-    assert len(_calls_in(poll, "_tavail_live_and_reset")) == 1
-    assert _calls_in(poll, "_tavail_still_live") == []
-    assert [n for n in ast.walk(poll) if isinstance(n, ast.Name) and n.id == "_tavail_withdrawn"] == []
-    # The memo's writers, file-wide: the helper's reset and on_interaction's add.
-    writers = sorted(
-        (f.name, n.func.attr) for f in fns.values() for n in ast.walk(f)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-        and isinstance(n.func.value, ast.Name) and n.func.value.id == "_tavail_withdrawn")
-    assert writers == [("_tavail_live_and_reset", "discard"), ("on_interaction", "add")], writers
+
+    def calls(fn, name):
+        return [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name) and n.func.id == name]
+    t0 = [n for n in ast.walk(poll) if isinstance(n, ast.Assign) and len(n.targets) == 1
+          and isinstance(n.targets[0], ast.Name) and n.targets[0].id == "t0"]
+    check = calls(poll, "_tavail_still_live")
+    reset = calls(poll, "_tavail_reset_memo")
+    sends = [n for n in ast.walk(poll) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "send" and isinstance(n.func.value, ast.Name) and n.func.value.id == "user"]
+    assert len(t0) == len(check) == len(reset) == len(sends) == 1
+    assert ast.unparse(t0[0].value) == "time.monotonic()"
+    assert t0[0].lineno < check[0].lineno < sends[0].lineno < reset[0].lineno
+    # the reset sits in the body of the innermost try that holds the send, never in its handlers
+    tries = [n for n in ast.walk(poll) if isinstance(n, ast.Try)
+             and any(s is sends[0] for b in n.body for s in ast.walk(b))]
+    inner = max(tries, key=lambda n: n.lineno)
+    assert any(r is reset[0] for b in inner.body for r in ast.walk(b))
+    assert not any(r is reset[0] for h in inner.handlers for r in ast.walk(h))
+    assert [ast.unparse(a) for a in reset[0].args] == ["tid", "steam", "t0"]
+    # the reset: the compare-and-pop, strictly earlier than t0, inside the prompt's lock
+    helper = fns["_tavail_reset_memo"]
+    withs = [n for n in ast.walk(helper) if isinstance(n, ast.AsyncWith)]
+    assert len(withs) == 1 and "_tavail_locks.setdefault(key" in ast.unparse(withs[0].items[0].context_expr)
+    dels = [n for n in ast.walk(withs[0]) if isinstance(n, ast.Delete)]
+    assert len(dels) == 1 and ast.unparse(dels[0]) == "del _tavail_withdrawn[key]"
+    # the memo's writers, file-wide: the helper's delete and on_interaction's stamp
+    writes = sorted({(f.name, type(n).__name__) for f in fns.values() for n in ast.walk(f)
+                     if (isinstance(n, ast.Delete) and "_tavail_withdrawn" in ast.unparse(n))
+                     or (isinstance(n, ast.Assign) and any("_tavail_withdrawn[" in ast.unparse(t) for t in n.targets))
+                     or (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                         and ast.unparse(n.func.value) == "_tavail_withdrawn")})
+    assert writes == [("_tavail_reset_memo", "Delete"), ("on_interaction", "Assign")], writes
+    stamp = [n for n in ast.walk(fns["on_interaction"]) if isinstance(n, ast.Assign)
+             and any("_tavail_withdrawn[" in ast.unparse(t) for t in n.targets)]
+    assert len(stamp) == 1 and ast.unparse(stamp[0].value) == "time.monotonic()"
