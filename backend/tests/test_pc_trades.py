@@ -256,12 +256,19 @@ def _bare(stmt):
 #   machine translations of 384's keys and refuses without them. Both
 #   write i18n_keys and i18n_proposals only, which neither this module nor
 #   a route it drives reads.
+# - 398 publishes the five community faces the v1.41.0 client bundles. It
+#   is a ship-time data migration (applied after that release exists). Its
+#   guard raises when a cosmetic_submissions row it names (ids 69 to 73) is
+#   absent or no longer approved, and the raise aborts the one transaction
+#   the file runs in (BEGIN, a single DO block, COMMIT), so it changes
+#   nothing; on this fresh schema those rows never exist.
 HELD_OUT = frozenset({"366_title_refunds_voidshot_kingslayer.sql",
                       "376_i18n_337_demonic_proposals.sql",
                       "384_i18n_keys_stage2_hold.sql",
                       "385_seed_machine_translations_stage2_hold.sql",
                       "387_ffa_rating_restore_2f60481d.sql",
-                      "388_ffa_rating_restore_2f60481d.sql"})
+                      "388_ffa_rating_restore_2f60481d.sql",
+                      "398_release_five_faces_v1410.sql"})
 
 
 def _numbered(upto=None, above=None):
