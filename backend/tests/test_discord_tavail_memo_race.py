@@ -6,11 +6,14 @@ check began (FENCE-LAND-R6 H8; integrator ruling FENCE-H8.1, method c).
 No that set it (on_interaction, under the prompt's lock, after the
 withdrawal returned). The notice poll reads t0 = time.monotonic() before
 its live check, checks, sends, and only after a SUCCESSFUL send calls
-`_tavail_reset_memo(tid, steam, t0)`, which under the same lock removes the
-memo only when its stamp is strictly earlier than t0. Invariant: for one bot
-process and one prompt key, a memo set by a successful No is never cleared
-by a poll whose live check began before that No returned; a failed send
-resets nothing.
+`_tavail_reset_memo(tid, steam, t0)`, a plain function whose
+compare-and-delete has no await (so it is atomic on the event loop and
+takes no lock; ruling FENCE-H8.2): it removes the memo only when its stamp
+is strictly earlier than t0. Invariant: for one bot process and one prompt
+key, a memo set by a successful No is never cleared by a poll whose live
+check began before that No returned; a failed send resets nothing. A Yes
+suspended in its identity check while a reset this rule allows runs replies
+Confirmed; with a No stamped at or after t0 it replies already-withdrawn.
 
 Driven through the lifted poll_tournament_notices, _tavail_still_live,
 _tavail_reset_memo and on_interaction (the start-rule suite's fake api and
@@ -25,8 +28,16 @@ it:
   * a No that returned before the check, with the player signed up again,
     is reset after a successful send and the Yes replies Confirmed;
   * a check that answers not live sends nothing and keeps the memo;
-  * the poll's order (t0, check, send, reset) and the memo's writers.
+  * a Yes suspended in its identity check does not hold up the poll: a
+    reset the rule allows lands meanwhile and the Yes replies Confirmed,
+    while the same straddle with a No stamped after t0 replies withdrawn;
+  * a No landing at the poll's first yield after the send keeps its memo
+    (no await between the reset's compare and its delete);
+  * the poll's order (t0, check, send, reset), the reset's atomicity (a
+    plain function with no await and no call, no lock) and the memo's
+    writers.
 """
+import asyncio
 import ast
 from types import SimpleNamespace
 
@@ -55,9 +66,15 @@ class Api(R.Api):
         super().__init__(**kw)
         self.signed_out = set()           # steam ids withdrawn and not signed up again
         self.during_check = None
+        self.verify_gate = None           # an asyncio.Event: identity checks wait on it while set here
+        self.verify_waiting = 0
 
     async def __call__(self, call):
         if call.path.startswith("/players/by-discord/"):
+            if self.verify_gate is not None:
+                gate = self.verify_gate
+                self.verify_waiting += 1
+                await gate.wait()
             return H.Reply(200, json={"steam_id": STEAM})
         if call.method == "POST" and call.path == "/tournaments/%s/unsignup" % R.TID:
             self.signed_out.add(call.payload["steam_id"])
@@ -217,6 +234,93 @@ def test_a_check_that_is_not_live_sends_nothing_and_keeps_the_memo():
     assert _yes(rig).startswith(WITHDRAWN)
 
 
+async def _until(pred, limit=200):
+    for _ in range(limit):
+        if pred():
+            return True
+        await asyncio.sleep(0)
+    return pred()
+
+
+async def _straddle(rig, late_no):
+    """A Yes is suspended in its identity check (holding the prompt's lock)
+    while one poll tick runs. late_no: a No lands inside the tick's live
+    check (stamped after t0) just before that Yes is clicked. Returns
+    (whether the tick finished while the Yes was still suspended, the Yes
+    reply)."""
+    gate = asyncio.Event()
+    box = {}
+
+    def start_yes():
+        rig.api.verify_gate = gate
+        box["yes"] = asyncio.ensure_future(_click(rig, "yes"))
+
+    if late_no:
+        async def hook():
+            rig.clock.advance(1.0)
+            sent = await _click(rig, "no")
+            assert sent and "removed from the tournament" in sent[0], (sent, rig.logs)
+            rig.clock.advance(1.0)
+            start_yes()
+            assert await _until(lambda: rig.api.verify_waiting == 1)
+        rig.api.during_check = hook
+    else:
+        start_yes()
+        assert await _until(lambda: rig.api.verify_waiting == 1)
+    tick = asyncio.ensure_future(rig.ns["poll_tournament_notices"]())
+    tick_done = await _until(tick.done)
+    gate.set()
+    rig.api.verify_gate = None
+    await tick
+    sent = await box["yes"]
+    assert len(sent) == 1, sent
+    return tick_done, sent[0]
+
+
+def test_a_yes_suspended_in_its_identity_check_straddling_a_reset_the_rule_allows_replies_confirmed():
+    rig = _rig()
+    _no_then_signed_up_again(rig)               # the No returned before t0; the player signed up again
+    tick_done, reply = H.run(_straddle(rig, late_no=False))
+    assert tick_done is True                    # the poll did not wait on the suspended Yes
+    assert [d.content for d in rig.client.dms] == [ASKED] and rig.api.acked == [NID]
+    assert KEY not in rig.ns["_tavail_withdrawn"]
+    assert reply.startswith(CONFIRMED), reply
+
+
+def test_the_same_straddle_with_a_no_stamped_after_t0_replies_withdrawn():
+    rig = _rig()
+    tick_done, reply = H.run(_straddle(rig, late_no=True))
+    assert tick_done is True
+    assert [d.content for d in rig.client.dms] == [ASKED] and rig.api.acked == [NID]
+    assert KEY in rig.ns["_tavail_withdrawn"]
+    assert reply.startswith(WITHDRAWN), reply
+
+
+def test_a_no_landing_at_the_polls_first_yield_after_the_send_keeps_its_memo():
+    """The reset's compare and delete have no await between them: a No that
+    lands at the first point the poll yields after its send (here its
+    inter-notice sleep) is stamped after the delete, and stands."""
+    rig = _rig()
+    _no_then_signed_up_again(rig)               # an older stamp, earlier than t0
+    fake = rig.ns["asyncio"]
+    real_sleep = fake.sleep
+    fired = []
+
+    async def sleep(s, *a, **k):
+        if not fired:
+            fired.append(rig.clock.now)
+            fired.append(len(rig.client.dms))   # the first yield came after the send
+            rig.clock.advance(1.0)
+            sent = await _click(rig, "no")
+            assert sent and "removed from the tournament" in sent[0], (sent, rig.logs)
+        await real_sleep(s, *a, **k)
+    fake.sleep = sleep
+    H.run(rig.ns["poll_tournament_notices"]())
+    assert fired[1:] == [1] and [d.content for d in rig.client.dms] == [ASKED] and rig.api.acked == [NID]
+    assert rig.ns["_tavail_withdrawn"].get(KEY, -1.0) > fired[0]
+    assert _yes(rig).startswith(WITHDRAWN)
+
+
 def test_the_polls_order_and_the_memos_writers():
     tree = ast.parse(H.bot_source())
     fns = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -241,12 +345,20 @@ def test_the_polls_order_and_the_memos_writers():
     assert any(r is reset[0] for b in inner.body for r in ast.walk(b))
     assert not any(r is reset[0] for h in inner.handlers for r in ast.walk(h))
     assert [ast.unparse(a) for a in reset[0].args] == ["tid", "steam", "t0"]
-    # the reset: the compare-and-pop, strictly earlier than t0, inside the prompt's lock
+    # the atomicity guard (ruling FENCE-H8.2): the reset is a plain function, called without
+    # await, whose compare-and-delete holds no Await, no async block and no call that could
+    # yield, and neither it nor the poll touches the handlers' lock
     helper = fns["_tavail_reset_memo"]
-    withs = [n for n in ast.walk(helper) if isinstance(n, ast.AsyncWith)]
-    assert len(withs) == 1 and "_tavail_locks.setdefault(key" in ast.unparse(withs[0].items[0].context_expr)
-    dels = [n for n in ast.walk(withs[0]) if isinstance(n, ast.Delete)]
-    assert len(dels) == 1 and ast.unparse(dels[0]) == "del _tavail_withdrawn[key]"
+    assert type(helper) is ast.FunctionDef
+    assert isinstance(reset[0], ast.Call) and not any(
+        isinstance(n, ast.Await) and n.value is reset[0] for n in ast.walk(poll))
+    assert [n for n in ast.walk(helper) if isinstance(n, (ast.Await, ast.AsyncWith, ast.AsyncFor,
+                                                          ast.Call, ast.Yield, ast.YieldFrom))] == []
+    for fn in (helper, poll):
+        assert [n for n in ast.walk(fn) if isinstance(n, ast.Name) and n.id == "_tavail_locks"] == []
+    ifs = [n for n in helper.body if isinstance(n, ast.If)]
+    assert len(ifs) == 1 and ast.unparse(ifs[0].test) == "key in _tavail_withdrawn and _tavail_withdrawn[key] < t0"
+    assert [ast.unparse(s) for s in ifs[0].body] == ["del _tavail_withdrawn[key]"]
     # the memo's writers, file-wide: the helper's delete and on_interaction's stamp
     writes = sorted({(f.name, type(n).__name__) for f in fns.values() for n in ast.walk(f)
                      if (isinstance(n, ast.Delete) and "_tavail_withdrawn" in ast.unparse(n))
