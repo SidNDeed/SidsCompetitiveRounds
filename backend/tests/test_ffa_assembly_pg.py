@@ -5150,11 +5150,13 @@ async def _grace_kill_awards(env, pid):
     return [r["achievement_key"] for r in keys], [tuple(r) for r in gold]
 
 
-async def _grace_kill_game(env, kills, *, unsigned=False):
+async def _grace_kill_game(env, kills, *, unsigned=False, setup=None):
     lob = await _s64_lobby(env)
     s, res = lob.sids, _s64_res(lob)
     res[s[5]] = res[s[6]] = (0, 0)
     await env.ready_all(lob, list(range(7)))
+    if setup is not None:
+        await setup(lob)
     if unsigned:
         await env.set_lobby(lob, kills_tiebreak=False)
         env.mp.setattr(main, "_verify_ffa_hmac", lambda report: "v1")
@@ -5202,6 +5204,61 @@ def test_early_leave_grace_keeps_ghosts_excluded_from_achievements(monkeypatch):
         assert await _econ(env, lob.pids[5]) == before[5]
         assert rows[5]["absent"] is True and rows[5]["rating_change"] is None
         assert rows[5]["xp_gained"] == 0 and rows[5]["gold_gained"] == 0
+    run_env(monkeypatch, body)
+
+
+async def _wear_gold_rush_one_short(env, pid):
+    """The player wears the gold ladder's tier-1 rung with its count one
+    Gold short of tier 2 (the ladder suite's own seeding, in SQL)."""
+    import title_ladders as tl
+    line = "gold_rush"
+    item = await env.conn.fetchval(
+        "SELECT id FROM shop_items WHERE sku = $1", tl.rungs_at_tier(line, 1)[0]["sku"])
+    assert item is not None
+    await env.conn.execute(
+        "INSERT INTO player_items (player_id, item_id, purchase_price) VALUES ($1, $2, 0)", pid, item)
+    await env.conn.execute("UPDATE players SET active_title_id = $1 WHERE id = $2", item, pid)
+    short = tl.next_rung(line, 1)["threshold"] - 1
+    await env.conn.execute(
+        "INSERT INTO title_ladder_progress (player_id, line, games, tier) VALUES ($1, $2, $3, 1)",
+        pid, line, short)
+    return line, short
+
+
+async def _ladder_state(env, pid, line):
+    credits = await env.conn.fetchval(
+        "SELECT count(*) FROM title_ladder_credits WHERE player_id = $1", pid)
+    progress = await env.conn.fetchrow(
+        "SELECT games, tier FROM title_ladder_progress WHERE player_id = $1 AND line = $2", pid, line)
+    return credits, (tuple(progress) if progress is not None else None)
+
+
+def test_early_leave_grace_earns_no_title_ladder_credit(monkeypatch):
+    """FAQ-R6 M1: a graced leaver whose achievement Gold would carry their
+    gold ladder past a threshold earns no title-ladder credit for the game:
+    the achievement and its Gold are paid, and no credit row is claimed, the
+    progress row is unchanged and no tier-2 rung is granted. A present seat
+    of the same ranked game is credited (the hook ran)."""
+    seeded = {}
+
+    async def body(env):
+        async def setup(lob):
+            seeded["line"], seeded["short"] = await _wear_gold_rush_one_short(env, lob.pids[6])
+
+        lob, before, rows = await _grace_kill_game(env, 51, setup=setup)
+        pid, line = lob.pids[6], seeded["line"]
+        gold = main._achievement_gold("ffa_kills_50")
+        assert gold >= 1
+        assert await _grace_kill_awards(env, pid) == (["ffa_kills_50"], [("ffa_kills_50", gold)])
+        assert rows[6]["rating_change"] is None and rows[6]["gold_gained"] == 0
+        assert await _ladder_state(env, pid, line) == (0, (seeded["short"], 1))
+        import title_ladders as tl
+        tier2 = await env.conn.fetchval(
+            "SELECT count(*) FROM player_items pi JOIN shop_items si ON si.id = pi.item_id"
+            " WHERE pi.player_id = $1 AND si.sku = $2", pid, tl.rungs_at_tier(line, 2)[0]["sku"])
+        assert tier2 == 0
+        assert rows[0]["rating_change"] is not None
+        assert (await _ladder_state(env, lob.pids[0], line))[0] == 1
     run_env(monkeypatch, body)
 
 

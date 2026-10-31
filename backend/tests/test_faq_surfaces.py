@@ -3772,8 +3772,9 @@ ECONOMY_LEAVE_GRACE = {
         "- Ghosts and graced early leavers are unrated and receive no game "
         "Gold or XP from that game: leaving before the field scored four "
         "half points in total, whether or not any became a full point, "
-        "takes you out of those results. The grace leaves achievements and "
-        "other earning ways unaffected."),
+        "takes you out of those results. A graced leaver can still earn "
+        "achievements, which pay as usual, but an unrated game earns no "
+        "title-ladder progress."),
     "es": (
         "- Los fantasmas y los que salieron pronto con gracia no cobran ni "
         "puntúan ese juego: irse antes de que el campo anotara 2 medios "
@@ -3782,8 +3783,9 @@ ECONOMY_LEAVE_GRACE = {
         "- Los fantasmas y los que salieron pronto con gracia no puntúan ni "
         "reciben oro ni XP de ese juego: irse antes de que el campo anotara "
         "cuatro medios puntos en total, se hayan convertido o no en un "
-        "punto completo, te saca de esos resultados. La gracia no afecta a "
-        "los logros ni a las demás formas de ganar."),
+        "punto completo, te saca de esos resultados. Quien sale con gracia "
+        "aún puede obtener logros, que pagan como siempre, pero un juego sin "
+        "rating no da progreso en la escalera de títulos."),
     "ru": (
         "- Призраки и прощённые ранние выходы за ту игру не оплачиваются и "
         "не рейтингуются: выход до 2 набранных полем полуочков при "
@@ -3792,8 +3794,9 @@ ECONOMY_LEAVE_GRACE = {
         "- Призраки и вышедшие рано по льготе за ту игру не рейтингуются и "
         "не получают ни игрового золота, ни XP: выход до того, как поле "
         "набрало в сумме четыре полуочка (ставшие полным очком или нет), "
-        "выводит из этих итогов. Льгота не затрагивает достижения и другие "
-        "способы заработка."),
+        "выводит из этих итогов. Вышедший по льготе по-прежнему может "
+        "получить достижения, и они платят как обычно, но нерейтинговая игра "
+        "не даёт прогресса на лестнице титулов."),
     "uk": (
         "- Привиди й ті, хто вийшов рано під пільгу, за ту гру не отримують "
         "ні оплати, ні рейтингу: вихід до 2 половинок очка в полі, поки ваш "
@@ -3802,8 +3805,9 @@ ECONOMY_LEAVE_GRACE = {
         "- Привиди й ті, хто вийшов рано під пільгу, за ту гру не отримують "
         "ні рейтингу, ні ігрового золота, ні XP: вихід до того, як поле "
         "набрало загалом чотири половинки очка (що стали повним очком чи "
-        "ні), виводить вас із цих підсумків. Пільга не зачіпає досягнення "
-        "та інші способи заробітку."),
+        "ні), виводить вас із цих підсумків. Той, хто вийшов під пільгу, й "
+        "надалі може отримати досягнення, і вони платять як зазвичай, але гра "
+        "без рейтингу не дає прогресу на драбині титулів."),
     "sv": (
         "- Spöken och tidiga avhoppare med respit får varken betalning "
         "eller rating för den matchen: att lämna innan fältet tagit 2 "
@@ -3812,8 +3816,9 @@ ECONOMY_LEAVE_GRACE = {
         "- Spöken och tidiga avhoppare med respit får varken rating, "
         "matchguld eller XP för den matchen: att lämna innan fältet tagit "
         "fyra halvpoäng sammanlagt, oavsett om någon blivit en hel poäng, "
-        "tar dig ur de resultaten. Respiten påverkar inte prestationer och "
-        "andra sätt att tjäna."),
+        "tar dig ur de resultaten. Den som hoppar av med respit kan "
+        "fortfarande tjäna in prestationer, som betalar som vanligt, men en "
+        "match utan rating ger inga framsteg på titelstegen."),
 }
 
 

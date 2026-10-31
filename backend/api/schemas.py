@@ -2090,11 +2090,11 @@ class FfaMatchResponse(BaseModel):
     # ── The lobby's authoritative progress (RJ-3 round 4) ─────────────────
     # Every answer given once the lobby row has been LOCKED carries these,
     # acceptances and refusals alike (a refusal carries them in its error body
-    # — see main.py's FfaReportRefusal). Three classes of answer are raised
-    # before there is a lobby row to read and therefore carry none: the
-    # integrity 400s (malformed roster, missing room id, bad signature), the
-    # 422 for an entry that left during the game without its
-    # game_points_at_leave, and the 404s (unknown player, lobby not found).
+    # — see main.py's FfaReportRefusal). An answer raised before there is a
+    # lobby row to read carries none; among those are the 422 for an entry
+    # that left during the game without its game_points_at_leave, the 403 for
+    # an invalid signature, the integrity 400s (malformed roster, missing room
+    # id) and the 404s (unknown player, lobby not found).
     # A consumer reads them when they
     # are present rather than assuming they always are.
     #

@@ -822,7 +822,7 @@ The base XP and gold numbers above are multiplied by a difficulty multiplier:
 
 - A leaver's points, half points and kills freeze at the moment they leave and still count for placement in every later report of the sitting.
 - If a leaver was one of the last two standing, the survivor takes the half point.
-- <color=#7FE87F>Early-leave grace:</color> leave a game before the field has scored four half points in total, whether or not any became a full point, and that game is unrated for you - no rating change, no game Gold or XP. Achievements and other earning ways are unaffected. Any later leave counts in full: leaving early doesn't dodge the loss.
+- <color=#7FE87F>Early-leave grace:</color> leave a game before the field has scored four half points in total, whether or not any became a full point, and that game is unrated for you - no rating change, no game Gold or XP. Achievements can still be earned and pay as usual, but an unrated game earns no title-ladder progress. Any later leave counts in full: leaving early doesn't dodge the loss.
 - Players who left in an EARLIER game ride along as absent ghosts - on the roster, excluded from rating and pay.
 - A game that drops under 3 players before 2 half points were scored is cancelled; dropping under 3 after a game over ends the sitting.");
 
@@ -1170,7 +1170,7 @@ FFA pays for FIGHTING, not for time in the lobby. The formula, in readable form:
 - A stronger field multiplies the pot: your opponents' average tier divided by 1.5, so a default 1500 field is exactly x1.0. Casual lobbies take the bottom factor (about x0.667) and never touch ratings.
 - The pool is a Gold amount. 55% pays directly as Placement Gold (minimum 1). The other 45% pays as XP at 100 XP per point of pool (minimum 50 XP), which drips back as Gold through the normal conversion.
 - Placement itself sorts by points, then all round wins earned (spent ones included), then kills where the lobby's kill tiebreak is active; remaining ties share a place.
-- Ghosts and graced early leavers are unrated and receive no game Gold or XP from that game: leaving before the field scored four half points in total, whether or not any became a full point, takes you out of those results. The grace leaves achievements and other earning ways unaffected.
+- Ghosts and graced early leavers are unrated and receive no game Gold or XP from that game: leaving before the field scored four half points in total, whether or not any became a full point, takes you out of those results. A graced leaver can still earn achievements, which pay as usual, but an unrated game earns no title-ladder progress.
 
 <color=#FFD94D><b>LEVELS AND THE XP-TO-GOLD DRIP</b></color>
 
@@ -1312,7 +1312,7 @@ A refund returns exactly your stake:
 - 2v2: a team DCs while the other team leads the series and the abandoned game had 2 or more points - the leading team takes the whole series, with full ratings and rewards.
 - Any other 2v2 DC - the series PAUSES for manual admin resolution instead of auto-deciding. If the same four re-queue within about 30 minutes, the matcher puts them back on the same series with the score kept.
 - FFA keeps playing when someone leaves, as long as 2 or more remain (a game that drops under 3 players before the field scored 2 half points is cancelled instead). The leaver's tallies are frozen, and they are still placed and rated for the game they left during - <color=#FF6666>leaving at 0 points does not dodge the loss</color>.
-- FFA early-leave grace: a leaver who left before the field had scored four half points in total, whether or not any became a full point, is unrated for that game and receives no game Gold or XP from it. Achievements and other earning ways are unaffected.
+- FFA early-leave grace: a leaver who left before the field had scored four half points in total, whether or not any became a full point, is unrated for that game and receives no game Gold or XP from it. Achievements can still be earned and pay as usual, but an unrated game earns no title-ladder progress.
 - An FFA player who left in an EARLIER game rides later reports as absent, excluded from those games' ratings and rewards.
 
 <color=#FFD94D><b>SERIES: RESUME, STALL, EXPIRE</b></color>

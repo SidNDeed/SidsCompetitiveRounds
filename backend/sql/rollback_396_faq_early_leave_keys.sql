@@ -22,18 +22,18 @@ DECLARE
 BEGIN
     -- The approved-entry refusal: lock, then read, then write.
     PERFORM 1 FROM i18n_keys
-     WHERE key_id IN ('0ab13f648dd0175b', '3988c8d80e42f69d', '3bb08fc59139b367', '439cd5d90ee1b6d3',
-                      '44732e465b16cee1', '6173541088dbb882', '79023ff50ab9d08e', '9d365a214640aebd')
+     WHERE key_id IN ('349d25e29566b115', '3988c8d80e42f69d', '3bb08fc59139b367', '439cd5d90ee1b6d3',
+                      '79023ff50ab9d08e', '892845f20501fbc0', '92e35d2e6c297c41', 'a1252ecd0e4537db')
      ORDER BY key_id
        FOR NO KEY UPDATE;
     PERFORM 1 FROM i18n_entries
-     WHERE key_id IN ('0ab13f648dd0175b', '3988c8d80e42f69d', '3bb08fc59139b367', '439cd5d90ee1b6d3',
-                      '44732e465b16cee1', '6173541088dbb882', '79023ff50ab9d08e', '9d365a214640aebd')
+     WHERE key_id IN ('349d25e29566b115', '3988c8d80e42f69d', '3bb08fc59139b367', '439cd5d90ee1b6d3',
+                      '79023ff50ab9d08e', '892845f20501fbc0', '92e35d2e6c297c41', 'a1252ecd0e4537db')
      ORDER BY key_id, language_code
        FOR NO KEY UPDATE;
     SELECT COUNT(*) INTO v_approved
       FROM i18n_entries e
-     WHERE e.key_id IN ('44732e465b16cee1', '6173541088dbb882', '9d365a214640aebd', '0ab13f648dd0175b')
+     WHERE e.key_id IN ('892845f20501fbc0', '349d25e29566b115', '92e35d2e6c297c41', 'a1252ecd0e4537db')
        AND e.state = 'approved';
     IF v_approved <> 0 THEN
         RAISE EXCEPTION 'rollback_396: % approved entr(ies) exist on the 396 FAQ early-leave keys - refusing to retire translator-approved work; nothing committed', v_approved;
@@ -42,7 +42,7 @@ BEGIN
     UPDATE i18n_keys
        SET retired_at = NOW(), updated_at = NOW()
      WHERE namespace = 'client'
-       AND key_id IN ('44732e465b16cee1', '6173541088dbb882', '9d365a214640aebd', '0ab13f648dd0175b')
+       AND key_id IN ('892845f20501fbc0', '349d25e29566b115', '92e35d2e6c297c41', 'a1252ecd0e4537db')
        AND retired_at IS NULL;
 
     UPDATE i18n_keys
@@ -54,7 +54,7 @@ BEGIN
     UPDATE i18n_proposals
        SET status = 'superseded', review_note = 'key retired by rollback_396',
            reviewed_at = NOW()
-     WHERE key_id IN ('44732e465b16cee1', '6173541088dbb882', '9d365a214640aebd', '0ab13f648dd0175b')
+     WHERE key_id IN ('892845f20501fbc0', '349d25e29566b115', '92e35d2e6c297c41', 'a1252ecd0e4537db')
        AND status = 'pending';
 END $r396$;
 

@@ -1894,7 +1894,7 @@ def test_396_rollback_takes_it_back_once_and_a_later_396_commits_nothing():
     again, decides the sixteen pending drafts 'superseded', and leaves the
     proposal 396 superseded on a 386 key, and every entry, as they were; a
     second rollback writes no row. Applying 396 again after the rollback is
-    refused at its coverage check, as both headers say, and stores nothing."""
+    refused at its coverage check, as 396's header says, and stores nothing."""
     sql = migration_text("396")
     rollback = (SQL_DIR / _396_ROLLBACK).read_text(encoding="utf-8")
 

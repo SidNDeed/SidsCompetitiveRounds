@@ -7,8 +7,8 @@ ahead of the session check, the settlement of other expired journal windows and
 the lobby lock. An absent ghost and a present seat need no figure.
 
 Each refusal case has a control that differs only in the field under test and
-reaches the next step of the route (a sentinel raised by the session check, or
-by the journal recheck on the settlement path), so a check that refused
+reaches the next step of the route (a sentinel raised by the session check, or,
+on the settlement path, by the HMAC verification _verify_ffa_hmac), so a check that refused
 everything, or nothing, is red here. The mutation control replaces the helper
 with one that finds nothing and shows the refusal disappears.
 
@@ -65,7 +65,8 @@ W, B, L = "76561190000000101", "76561190000000102", "76561190000000103"
 def _submit(monkeypatch, report, *, journal=False):
     """Run the route up to its first step after the check. Returns the
     HTTPException it raised, or the string "reached" when it got past the
-    check (the session check, or the journal recheck, raised _Reached)."""
+    check (the session check, or on the settlement path the HMAC verification
+    _verify_ffa_hmac, raised _Reached)."""
     async def session(*_a, **_k):
         raise _Reached()
 

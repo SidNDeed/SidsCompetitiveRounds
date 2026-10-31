@@ -65616,13 +65616,13 @@ async def _ffa_advance_lobby_slot(db: AsyncSession, lobby_uuid):
 # So every answer given ONCE THE LOBBY ROW HAS BEEN LOCKED carries the same
 # three fields, in the success body and in the refusal body alike -- success,
 # echo, refusal, the service-account 403, a failed INSERT and a database-level
-# refusal of it. Three classes carry none of them, and they are the three raised
-# BEFORE there is a locked lobby row to read: the integrity 400s (malformed
-# roster, missing room id, bad signature), the 422 for an entry that left
-# during the game without its game_points_at_leave, and the 404s (unknown
+# refusal of it. An answer raised BEFORE there is a locked lobby row to read
+# carries none of them; among those are the 422 for an entry that left during
+# the game without its game_points_at_leave, the 403 for an invalid signature,
+# the integrity 400s (malformed roster, missing room id) and the 404s (unknown
 # player, lobby not found). A consumer reads the fields WHEN PRESENT rather than assuming
 # they always are; saying "every answer" here would be a guarantee this
-# endpoint does not keep. The three, in the body as TOP-LEVEL integers:
+# endpoint does not keep. The three fields, in the body as TOP-LEVEL integers:
 #   games_played  — settled games of this sitting, including this one when this
 #                   answer settled it;
 #   expected_game — games_played + 1, the number the NEXT report must name;

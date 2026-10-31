@@ -60,24 +60,27 @@ SITES = {
                     "- <color=#7FE87F>Early-leave grace:</color> leave a game before the field has "
                     "scored four half points in total, whether or not any became a full point, and "
                     "that game is unrated for you - no rating change, no game Gold or XP. "
-                    "Achievements and other earning ways are unaffected. Any later leave counts in "
-                    "full: leaving early doesn't dodge the loss."),
+                    "Achievements can still be earned and pay as usual, but an unrated game earns no "
+                    "title-ladder progress. Any later leave counts in full: leaving early doesn't dodge "
+                    "the loss."),
     "economy article": (INFO, 'private static string Rewards => I18n.Tr(@"',
                         "- Ghosts and graced early leavers are unrated and receive no game Gold or XP "
                         "from that game: leaving before the field scored four half points in total, "
-                        "whether or not any became a full point, takes you out of those results. The "
-                        "grace leaves achievements and other earning ways unaffected."),
+                        "whether or not any became a full point, takes you out of those results. A "
+                        "graced leaver can still earn achievements, which pay as usual, but an unrated "
+                        "game earns no title-ladder progress."),
     "rule book": (INFO, 'private static string WhenCounts => I18n.Tr(@"',
                   "- FFA early-leave grace: a leaver who left before the field had scored four half "
                   "points in total, whether or not any became a full point, is unrated for that game "
-                  "and receives no game Gold or XP from it. Achievements and other earning ways are "
-                  "unaffected."),
+                  "and receives no game Gold or XP from it. Achievements can still be earned and pay "
+                  "as usual, but an unrated game earns no title-ladder progress."),
     "FFA mode text": (MODE, 'public static string Ffa => I18n.TrF(@"',
                       "  left - unless they left before the field had scored\n"
                       "  four half points in total, whether or not any became\n"
                       "  a full point, in which case that game does not rate\n"
-                      "  them or pay them game Gold or XP. Achievements and\n"
-                      "  other earning ways are unaffected."),
+                      "  them or pay them game Gold or XP. Achievements can\n"
+                      "  still be earned and pay as usual, but an unrated game\n"
+                      "  earns no title-ladder progress."),
 }
 WHOLE_LINE = ("FFA article", "economy article", "rule book")
 
@@ -233,7 +236,7 @@ def test_the_rule_the_sites_state_is_the_rule_the_server_applies():
     FfaMode.PointsToWinRound is the server's. A graced seat joins `unrated`,
     which the rating and the game XP and Gold read, while the achievement
     candidates are every reported seat outside `excluded`, which grace does
-    not enter: what "unaffected" says."""
+    not enter: what "can still be earned" says."""
     main = ladder._read(MAIN)
     full = re.findall(r"^FFA_LEAVE_GRACE_FULL_POINTS = (\d+)$", main, re.M)
     per = re.findall(r"^FFA_POINTS_TO_WIN_ROUND = (\d+)$", main, re.M)
@@ -254,7 +257,7 @@ def test_the_rule_the_sites_state_is_the_rule_the_server_applies():
 
 
 def test_the_grace_set_is_read_only_by_unrated_and_the_reasons():
-    """What "achievements and other earning ways are unaffected" rests on in
+    """What "achievements can still be earned and pay as usual" rests on in
     the route: inside submit_ffa_match the code lines naming `graced` are
     exactly three, the decision that returns it, the exclusion reasons that
     record it, and `unrated = excluded | graced`; no other line of the route
@@ -360,20 +363,26 @@ def test_396_registers_exactly_the_keys_the_next_sync_derives():
 
 
 def test_396_header_maps_each_new_key_to_the_386_key_of_its_site():
-    """396's header lists each new key with its site and the 386 key it
-    replaces. Each new id is the one derived from that site's English, and
-    each 386 id is the 386 key whose English is the closest of the four to
-    that site's (the earlier wording of the same string), one to one."""
+    """396's header lists each new key with its site, as "<file stem>
+    <member>" in full, and the 386 key it replaces. The four labels are
+    exactly the four sites' labels, each new id is the one derived from that
+    site's English, and each 386 id is the 386 key whose English is the
+    closest of the four to that site's (the earlier wording of the same
+    string), one to one."""
     import difflib
     header = ladder._read(M396).split("BEGIN;")[0]
     rows = re.findall(r"^--   ([0-9a-f]{16}) ([A-Za-z ]+?), replacing 386's ([0-9a-f]{16})[;.]$", header, re.M)
     assert len(rows) == 4, rows
+    labels = {}
+    for s, (path, decl, _r) in SITES.items():
+        member = re.findall(r" (\w+) => ", decl)
+        assert len(member) == 1, (s, decl)
+        labels["%s %s" % (Path(path).stem, member[0])] = s
+    assert len(labels) == 4 and sorted(label for _n, label, _o in rows) == sorted(labels), (rows, sorted(labels))
     sources, old = site_sources(), m386_texts()
     assert len({o for _n, _s, o in rows}) == 4 and {o for _n, _s, o in rows} == set(old), rows
     for new_id, label, old_id in rows:
-        site = [s for s, (_p, decl, _r) in SITES.items() if " %s => " % label.split()[-1] in decl]
-        assert len(site) == 1, (label, site)
-        english = sources[site[0]]
+        english = sources[labels[label]]
         assert new_id == _client_key_id(english), (label, new_id)
         closest = max(old, key=lambda k: difflib.SequenceMatcher(None, old[k], english).ratio())
         assert closest == old_id, (label, old_id, closest)

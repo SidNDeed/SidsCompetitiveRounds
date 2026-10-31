@@ -414,7 +414,7 @@ d3682704bbf56ff0	N	rev:5f7347da95a6e1f9 the match-found stuck overlay's own text
 c6ace38f182cbc9f	N	rule:N1	<color=#FFD94D>({0} of {1} left)</color>
 23fb496b3b1bbb25	O	rule:O	<color=#FFD94D><b>GETTING PACKS</b></color>\n\n- <b>One free pack a day</b> - press Claim on the Ope
 2c525b2f5f4332ea	N	rev:39cc48dc60ea23a0 rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	<color=#FFD94D><b>GETTING PACKS</b></color>\n\n- <b>One free pack a day</b> - press Claim on the Ope
-6524e0bf096ed57c	N	rev:9b906d844fb77681 info-library prose (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); the text names no key	<color=#FFD94D><b>HOW A PICK ACTUALLY LANDS</b></color>\n\n- Confirming a card applies nothing - not
+84324a21d4105a93	N	rev:e79856bc601ebbbf info-library prose (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); the text names no key	<color=#FFD94D><b>HOW A PICK ACTUALLY LANDS</b></color>\n\n- Confirming a card applies nothing - not
 9deba99e00d05dce	N	rev:32755eaf6bae58c1 info-library prose (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); the text names no key	<color=#FFD94D><b>HOW THE BALANCER RATES YOU</b></color>\n\n- The balancer uses your 2v2 rating once
 196139ffad4d0160	N	rev:9398c384f43ef84f info-library prose (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); the text names no key	<color=#FFD94D><b>SELF VS OPPONENT DAMAGE</b></color>\n\nFrom the table it is pretty clear that most
 b2548c95d5dfdc94	O	rule:O	<color=#FFD94D><b>SELF VS OPPONENT DAMAGE</b></color>\n\nFrom the table it is pretty clear that most
@@ -1247,7 +1247,7 @@ d764961a0190b30c	N	rule:N1	Equip
 929c06f48ce655fb	F	rev:778737adc05209eb fixed:Esc Escape cancels and closes; not rebindable	Esc cancels
 b4cfe1f435f06bea	K	rule:K	Escape
 747064df7c49f0b1	N	rule:N1	Evergreen forest at dusk.
-7593282edfd30f2f	N	rev:eaf86fcc65acb430 rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Every finished game pays XP, XP converts to Gold at 100 XP = 1 Gold, and ranked play multiplies the 
+24d45ca20cdf6517	N	rev:64fd1f617e92d41f rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Every finished game pays XP, XP converts to Gold at 100 XP = 1 Gold, and ranked play multiplies the 
 f9da8a515f187b04	N	rev:d92a0318bc62a1ea rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Every game you play with the mod runs the same pipeline: every modded client watches the match, one 
 ab92d11f5f3ed5e8	N	rule:N1	Every mark is one tick of damage. A well-timed block erases the 1-2 ticks inside its window.
 7092efd0e1c1a726	N	rev:f2f2bb9cce382c8c rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Every ranked mode scores you with Glicko-2: a rating, plus a measure of how sure the system is about
@@ -1364,7 +1364,7 @@ f14bfe467e47f12a	N	rule:N1	Frames per second, top-left corner. Handy for checkin
 20857a1450ee43d1	N	rule:N1	Free daily pack
 7c349cc8db0789b7	N	rule:N1	Free pack
 9d483832cb5867eb	O	rule:O	Free-for-all for 3-10 players. Every player is their own team.\nStandard ROUNDS scoring - first to {
-d051e33ca0935879	N	rev:fe60b148e9a4cd71 rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Free-for-all for 3-10 players. Every player is their own team.\nStandard ROUNDS scoring - first to {
+2f6ee754bd3e7ed0	N	rev:80eedb44fbfa3c58 rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Free-for-all for 3-10 players. Every player is their own team.\nStandard ROUNDS scoring - first to {
 7ea6168c9a6bbb3e	N	rule:N1	Friendly fire off
 cf9480db8e8c2876	N	rule:N1	Friendly fire: OFF
 95314bdacf481fc0	N	rule:N1	Friendly fire: ON
@@ -2912,7 +2912,7 @@ a9e422da77adf45b	N	rule:N1	The pack price changed - check the new price and try 
 5a09ef793c04d82a	N	rule:N1	The report details contain characters that are not allowed.
 54b495e75060e8c4	N	rule:N1	The report details repeat one character too many times.
 d2ba265f2e2a73f9	N	rule:N1	The report request could not be started
-d0ec9113911cb0e7	N	rev:36cd43b2f51b7b51 rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If
+64065114ecebfc53	N	rev:981029023ea95a3f rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If
 c56bfd5ef74259ff	O	rule:O	The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If
 8a37ccdd1183d3dc	N	rule:N1	The same actions in a different order
 599201187ca682b1	N	rule:N1	The seat was released before you returned

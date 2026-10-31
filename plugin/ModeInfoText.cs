@@ -248,7 +248,8 @@ Standard ROUNDS scoring - first to {0} points takes the game.
   left - unless they left before the field had scored
   four half points in total, whether or not any became
   a full point, in which case that game does not rate
-  them or pay them game Gold or XP. Achievements and
-  other earning ways are unaffected.", FfaTargetNow, FfaCapNow);
+  them or pay them game Gold or XP. Achievements can
+  still be earned and pay as usual, but an unrated game
+  earns no title-ladder progress.", FfaTargetNow, FfaCapNow);
     }
 }
