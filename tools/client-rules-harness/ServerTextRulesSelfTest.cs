@@ -83,6 +83,10 @@ namespace CompetitiveRounds
             return Regex.IsMatch(d, sb.ToString());
         }
 
+        // x placed inside an array inside an object beside a known detail: where
+        // the member readers only balance delimiters, so the validator alone refuses it.
+        private static string Nest(string x) { return "{\"detail\":\"Sold out\",\"ctx\":{\"a\":[0," + x + "]}}"; }
+
         // The round-3 reader: the member readers alone, with no validator before them.
         private static string R3DetailError(string body)
         {
@@ -272,22 +276,25 @@ namespace CompetitiveRounds
                 string esc = null;
                 foreach (string e in escapes)
                 {
-                    string body = "{\"detail\":\"Sold out" + e + "\"}";
-                    if ((JsonValid(body) || TrRefusal(Env(409, body)) != null) && esc == null) esc = e;
+                    string body = "{\"detail\":\"Sold out" + e + "\"}", nested = Nest("\"a" + e + "\"");
+                    if ((JsonValid(body) || TrRefusal(Env(409, body)) != null || JsonValid(nested)
+                         || TrRefusal(Env(409, nested)) != null) && esc == null) esc = e;
                 }
-                Check(r, "V2 every invalid escape makes the body unreadable", esc == null, esc ?? "ok");
+                Check(r, "V2 every invalid escape, in the detail or nested, makes the body unreadable", esc == null, esc ?? "ok");
                 string[] nums = { "01", "+1", "1.", ".5", "1e", "1e+", "-", "-01", "1.e5", "0x10", "1E", "--1", "Infinity", "NaN", "1_0" };
                 string num = null;
                 foreach (string n in nums)
                 {
-                    string body = "{\"detail\":\"Sold out\",\"n\":" + n + "}";
-                    if ((JsonValid(body) || TrRefusal(Env(409, body)) != null) && num == null) num = n;
+                    string body = "{\"detail\":\"Sold out\",\"n\":" + n + "}", nested = Nest(n);
+                    if ((JsonValid(body) || TrRefusal(Env(409, body)) != null || JsonValid(nested)
+                         || TrRefusal(Env(409, nested)) != null) && num == null) num = n;
                 }
-                Check(r, "V3 every bad number form makes the body unreadable", num == null, num ?? "ok");
+                Check(r, "V3 every bad number form, at the top level or nested, makes the body unreadable", num == null, num ?? "ok");
                 string[] okNums = { "0", "-0", "10", "1.5", "-0.25", "1e5", "1E-5", "2.5e+10" };
                 string okn = null;
                 foreach (string n in okNums)
-                    if (TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"n\":" + n + "}")) != "Sold out" && okn == null) okn = n;
+                    if ((TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"n\":" + n + "}")) != "Sold out"
+                         || TrRefusal(Env(409, Nest(n))) != "Sold out") && okn == null) okn = n;
                 Check(r, "V3p positive control: every grammatical number is accepted", okn == null, okn ?? "ok");
                 string[] tails = { " x", "{}", "]", ",", "\"\"", "0" };
                 string tail = null;
@@ -297,8 +304,9 @@ namespace CompetitiveRounds
                 string[] lits = { "tru", "True", "nul", "NULL", "falsey", "undefined" };
                 string lit = null;
                 foreach (string l in lits)
-                    if (TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + l + "}")) != null && lit == null) lit = l;
-                Check(r, "V5 only true, false and null are literals", lit == null, lit ?? "ok");
+                    if ((TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + l + "}")) != null
+                         || TrRefusal(Env(409, Nest(l))) != null) && lit == null) lit = l;
+                Check(r, "V5 only true, false and null are literals, at the top level or nested", lit == null, lit ?? "ok");
                 string[] shapes = { "[1,]", "[,1]", "{\"a\":1,}", "{\"a\"}", "{\"a\" 1}", "{a:1}", "[1 2]", "\"a\tb\"" };
                 string shape = null;
                 foreach (string sh in shapes)
@@ -336,8 +344,9 @@ namespace CompetitiveRounds
                 Check(r, "T2 every template rule maps its own detail unchanged in English", miss == null, miss ?? TEMPLATES.Length.ToString());
                 Check(r, "T3 every template rule, given that detail with a final LF, CRLF, space, tab or dot, or a leading space or LF, answers null or the input unchanged",
                       extra == null, extra ?? "ok");
-                string lf = TrRefusalDetail(400, "unreadable PNG: x\ny");
-                Check(r, "T4 a text hole does not take a line break", lf == null, lf);
+                string lf = TrRefusalDetail(400, "unreadable PNG: x\ny") ?? TrRefusalDetail(400, "unreadable PNG: x\ry")
+                            ?? TrRefusalDetail(400, "unreadable PNG: x\r") ?? TrRefusalDetail(400, "bad frame PNG: \r");
+                Check(r, "T4 a text hole takes no CR or LF", lf == null, lf);
             }
 
             // -- D: the Recent Series FFA labels ----------------------------------------
