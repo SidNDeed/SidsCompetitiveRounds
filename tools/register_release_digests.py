@@ -639,7 +639,10 @@ def _sql_text(value):
 _MIGRATION_NAME = re.compile(r"[A-Za-z0-9_]{1,80}\.sql")
 # The data-only landing (ai-collab/session-tools/land_data_migration.py) refuses these two tokens wherever
 # they appear, a comment or a literal included; both modes embed the migration name in the header comment
-# and the RAISE literals, so a name holding one is refused with the census text that holds one.
+# and the RAISE literals, so a name holding one is refused with the census text that holds one, and the
+# release writer refuses every value it embeds (the DLL's version and commit, the variant, the source, the
+# game-version label, the digests) when one holds a token (CENSUS-R2 V1). The api path has no such rule:
+# the server admits any value of its character set, so the refusal is the SQL channel's alone.
 _NAME_RESOLUTION = re.compile(r"search_path|set_config", re.I)
 
 
@@ -660,10 +663,28 @@ def _sql_target(path):
     return path
 
 
+def _embedded_values(row):
+    """Every value of a row the migration text embeds: the header comment, the INSERT literals, the game-file
+    rows' trailing name comments and the DO block's VALUES draw from no other (file_id is an integer)."""
+    if row["kind"] == "release":
+        return [row["version"], row["variant"], row["commit"], row["source"], row["dll_sha256"]]
+    return [row["game_version"], row["sha256"], row["name"]]
+
+
 def migration_text(name, rows):
-    """The identical inserts as a data-only migration of the house shape."""
+    """The identical inserts as a data-only migration of the house shape. Raises before a line is built when
+    the name cannot be embedded (ValueError) or a row holds a value the data-only landing would refuse
+    (Refused), so the emit path, which generates the text before opening the file, writes nothing."""
     if not _MIGRATION_NAME.fullmatch(name) or _NAME_RESOLUTION.search(name):
         raise ValueError("migration name %r cannot be embedded in the migration text" % name)
+    for row in rows:
+        for value in _embedded_values(row):
+            if not BUILD_PART.fullmatch(value):
+                raise Refused("a value outside the registry's character set reached the SQL writer")
+            if _NAME_RESOLUTION.search(value):
+                raise Refused("the %s value %r names search_path or set_config, which the data-only landing "
+                              "refuses wherever it appears; register it through the api instead"
+                              % (row["kind"], value))
     rel = [r for r in rows if r["kind"] == "release"]
     games = [r for r in rows if r["kind"] == "game_file"]
     what = []
@@ -1126,10 +1147,15 @@ def main(argv=None, environ=None, transport=None):
         if os.path.exists(path):
             print("REFUSED: %s exists; the writer never replaces a file. Nothing written." % path)
             return EXIT_REFUSED
+        try:   # generated before the file is opened: a refusal leaves no empty file behind (CENSUS-R2 V1)
+            text = migration_text(os.path.basename(path), rows)
+        except Refused as r:
+            print("REFUSED: %s. Nothing written." % r)
+            return EXIT_REFUSED
         for r in rows:
             print("SQL      " + _row_text(r))
         with open(path, "w", encoding="ascii", newline="\n") as f:
-            f.write(migration_text(os.path.basename(path), rows))
+            f.write(text)
         print("WROTE    %s: %d rows, data only; apply it as a migration (a re-run inserts nothing)."
               % (path, len(rows)))
         return EXIT_OK
