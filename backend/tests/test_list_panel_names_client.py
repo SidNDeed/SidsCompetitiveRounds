@@ -68,10 +68,41 @@ NAME_EXPR = r"[\w.\[\]?]*?(?:display_name|names?|Name|label|Fit)\b"
 RAW_TRUNC = re.compile(r"(?<![\w.])Trunc\(\s*(" + NAME_EXPR + r")(?:\s*\?\?\s*\"[^\"]*\")?\s*,")
 RAW_HOLE = re.compile(r"\{\s*(" + NAME_EXPR + r")\s*\}")
 WRAPPED_BY = ("Nm(", "FfaSafeRich(", "FitLabel(", "InactiveName(")
+TRF_CALL = re.compile(r"\bI18n\.TrF\(")
+
+
+def _trf_args(code: str):
+    """(start, text) of every argument after the key of every I18n.TrF call
+    in code (top-level commas only; strings and nested calls kept whole)."""
+    for m in TRF_CALL.finditer(code):
+        i, depth, quote, start, args = m.end(), 1, None, m.end(), []
+        while i < len(code) and depth:
+            c = code[i]
+            if quote:
+                if c == "\\":
+                    i += 1
+                elif c == quote:
+                    quote = None
+            elif c in "\"'":
+                quote = c
+            elif c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+                if depth == 0:
+                    args.append((start, code[start:i]))
+            elif c == "," and depth == 1:
+                args.append((start, code[start:i]))
+                start = i + 1
+            i += 1
+        for at, text in args[1:]:
+            yield at, text.strip()
 # Expressions the patterns match that are not player names, each with where it goes.
 # Each must still occur (a stale exemption is a finding, not a silent pass).
 NOT_PLAYER_NAMES = {
     ("FillOvtRoleBoard", "container.name"): "the pooled row's GameObject name (CreateText's first argument), never painted",
+    ("FillOvtRoleBoard", "label"): "the board's own title, I18n.Tr(\"Solo Leaderboard\") / (\"Duo Leaderboard\") at the two call sites",
+    ("RefreshLeaderboard", "ps.rank_name"): "the rank tier's name (a server tier label), not a player name",
 }
 
 
@@ -170,6 +201,13 @@ def findings(sources: dict) -> list:
                 if expr in ok_locals or _wrapped(code, m.start()) or (method, expr) in NOT_PLAYER_NAMES:
                     continue
                 out.append("B: %s paints %r raw (%s)" % (panel, m.group(0), sig.split("(")[0].split()[-1]))
+        # a name handed to I18n.TrF as an argument is painted by the key's hole
+        for at, arg in _trf_args(code):
+            if not re.fullmatch(NAME_EXPR, arg):
+                continue
+            if arg in ok_locals or (method, arg) in NOT_PLAYER_NAMES:
+                continue
+            out.append("B: %s hands %r raw to I18n.TrF (%s)" % (panel, arg, method))
     return out
 
 
@@ -192,7 +230,10 @@ MUTANTS = [
     ("multimode_labels_raw", NATIVE, "{Nm(leftFit)}", "{leftFit}", "B:"),
     ("leaderboard_row_raw", NATIVE, "InactiveName(Nm(e.display_name,20),e.inactive)",
      "(Trunc(e.display_name,20))", "B:"),
-    ("bets_ledger_raw", NATIVE, "on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - LOST", "on {b.bet_on_name} vs {b.vs_name} - LOST", "B:"),
+    ("bets_ledger_raw", NATIVE, "string sOnName = Nm(ServerTextRules.BetOnName(sArm, b.bet_on_name));",
+     "string sOnName = ServerTextRules.BetOnName(sArm, b.bet_on_name);", "B:"),
+    ("bets_ledger_arg_raw", NATIVE, '- LOST", b.amount.ToString("N0"), sOnName, sVsName)',
+     '- LOST", b.amount.ToString("N0"), b.bet_on_name, sVsName)', "B:"),
     ("compare_table_raw", NATIVE, '<b>{Nm(ps.display_name)}</b></color>  ");', '<b>{ps.display_name}</b></color>  ");', "B:"),
     ("ffa_rich_without_glyphs", NATIVE, "return UnicodeFallback.SafeGlyphs(sb.ToString())", "return (sb.ToString())", "A:"),
     ("nm_skips_the_sanitiser", NATIVE, "private static string Nm(string s,int max){return UnicodeFallback.SafeName(Trunc(s??\"\",max));}",

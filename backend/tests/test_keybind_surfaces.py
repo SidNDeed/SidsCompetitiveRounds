@@ -57,7 +57,8 @@ table regenerated from the fix-5 writer's output there; 1136 at the
 merged round 3 tree, with the RJ Stage 2 and readmission ends; 1137 at
 the round 3 refit tree, with the autolog fold's LogBundleCore.cs field end;
 1141 at the round 3 fold tree, with the net-stall lane's three
-using-directive ends and the stall detector's stream-snapshot field).
+using-directive ends and the stall detector's stream-snapshot field;
+1142 with the late i18n lane's ServerTextRules.cs using-directive end).
 """
 from __future__ import annotations
 
@@ -1918,7 +1919,7 @@ PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end
 def test_h1_fix5_the_end_table_is_every_unresolved_end_beyond_the_four(attach4):
     st, cman, att, aman = attach4
     names = [n for i, n, m in FIX5_ENDS]
-    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1141
+    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1142
     extra = set(att["unresolved"]) - set(names)
     assert len(extra) == 4 and RESET_MENU in extra, sorted(extra)
     assert set(names) <= set(att["unresolved"]), sorted(set(names) - set(att["unresolved"]))

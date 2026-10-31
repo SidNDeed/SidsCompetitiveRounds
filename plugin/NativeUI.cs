@@ -10197,8 +10197,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (ledgerLines >= LEDGER_MAX_LINES) { ledgerOverflow++; continue; }
                 ledgerLines++;
                 string arm = ServerTextRules.BetArm(b.bet_on_steam_id, b.series_score);
-                string onNm = Nm(ServerTextRules.BetOnName(arm, b.bet_on_name)), vsNm = Nm(ServerTextRules.BetVsName(arm, b.vs_name));
-                sb.Append($"<color=#FFD94D>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2}", b.amount.ToString("N0"), onNm, vsNm)}</color> <color=#AAA>{I18n.TrF("- in play, score {0}", ServerTextRules.BetScore(arm, b.series_score))}</color>\n");
+                string onName = Nm(ServerTextRules.BetOnName(arm, b.bet_on_name));
+                string vsName = Nm(ServerTextRules.BetVsName(arm, b.vs_name));
+                sb.Append($"<color=#FFD94D>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2}", b.amount.ToString("N0"), onName, vsName)}</color> <color=#AAA>{I18n.TrF("- in play, score {0}", ServerTextRules.BetScore(arm, b.series_score))}</color>\n");
             }
             foreach (var b in bets)
             {
@@ -10216,13 +10217,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (string.IsNullOrEmpty(st))
                     st = b.payout == b.amount ? "refunded" : b.payout > 0 ? "won" : "lost";
                 string sArm = ServerTextRules.BetArm(b.bet_on_steam_id, b.series_score);
-                string sOn = Nm(ServerTextRules.BetOnName(sArm, b.bet_on_name)), sVs = Nm(ServerTextRules.BetVsName(sArm, b.vs_name));
+                string sOnName = Nm(ServerTextRules.BetOnName(sArm, b.bet_on_name));
+                string sVsName = Nm(ServerTextRules.BetVsName(sArm, b.vs_name));
                 if (st == "refunded")
-                    sb.Append($"<color=#BBB>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - refunded, series never finished", b.amount.ToString("N0"), sOn, sVs)}</color>\n");
+                    sb.Append($"<color=#BBB>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - refunded, series never finished", b.amount.ToString("N0"), sOnName, sVsName)}</color>\n");
                 else if (st == "won")
-                    sb.Append($"<color=#66DD66>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - WON {3} gold", b.amount.ToString("N0"), sOn, sVs, Math.Max(0, b.payout - b.amount).ToString("N0"))}</color>\n");
+                    sb.Append($"<color=#66DD66>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - WON {3} gold", b.amount.ToString("N0"), sOnName, sVsName, Math.Max(0, b.payout - b.amount).ToString("N0"))}</color>\n");
                 else
-                    sb.Append($"<color=#DD7777>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - LOST", b.amount.ToString("N0"), sOn, sVs)}</color>\n");
+                    sb.Append($"<color=#DD7777>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - LOST", b.amount.ToString("N0"), sOnName, sVsName)}</color>\n");
             }
             if (ledgerOverflow > 0)
                 sb.Append($"<color=#888>{I18n.TrF("+{0} more bets", ledgerOverflow)}</color>\n");
