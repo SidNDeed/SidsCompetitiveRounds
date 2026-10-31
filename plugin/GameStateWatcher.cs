@@ -1057,6 +1057,8 @@ namespace CompetitiveRounds
             // banner rect (#199 — overflow paints over neighbors).
             string lbl = isTournament ? (label ?? "") : "";
             lbl = lbl.Replace('—', '-').Trim();
+            // Mapped to the catalogue here, once, before the length cap.
+            lbl = NativeUI.TrTournamentBanner(lbl);
             if (lbl.Length > 52) lbl = lbl.Substring(0, 52);
             tournamentLabel = lbl;
             // Log only the false->true edge — the preflight legitimately

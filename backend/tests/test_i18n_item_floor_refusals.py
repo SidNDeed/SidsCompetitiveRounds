@@ -84,7 +84,7 @@ def _member(src, signature):
 
 
 def _helper():
-    return _member(_read("plugin/NativeUI.cs"), "internal static string TrShopRefusal(string resp)")
+    return _member(_read("plugin/NativeUI.cs"), "internal static string TrRefusalDetail(int status, string d)")
 
 
 def test_server_still_sends_every_detail_as_409():
@@ -94,18 +94,17 @@ def test_server_still_sends_every_detail_as_409():
 
 
 def test_helper_matches_each_detail_and_returns_its_catalogue_row():
+    # Round 2 moved the six onto the full refusal map (status plus exact
+    # detail); test_i18n_late_label_coverage.py proves the map's coverage.
+    shop = _member(_read("plugin/NativeUI.cs"), "internal static string TrShopRefusal(string resp)")
+    assert "if (!RefusalStatus(resp, out status)) return null;" in shop
+    assert "return TrRefusalDetail(status, ExtractServerDetail(resp));" in shop
     body = _helper()
-    assert 'resp.StartsWith("HTTP 409", StringComparison.Ordinal)' in body
-    assert "string detail = ExtractServerDetail(resp);" in body
-    assert body.count("if (detail == ") == len(REFUSALS)
+    assert 'string k = status + "|" + d;' in body
     for s in REFUSALS:
         lit = '"%s"' % s
-        assert body.count('if (detail == %s)' % lit) == 1, s
+        assert body.count('if (k == "409|%s") return I18n.Tr(%s);' % (s, lit)) == 1, s
         assert body.count('return I18n.Tr(%s);' % lit) == 1, s
-        # the Tr follows its own comparison, not another one's
-        cmp_at = body.index('if (detail == %s)' % lit)
-        tr_at = body.index('return I18n.Tr(%s);' % lit)
-        assert 0 < tr_at - cmp_at < len(lit) + 40, s
 
 
 def test_every_purchase_gift_and_stock_failure_routes_through_the_helper():
@@ -219,7 +218,12 @@ RAW_TOURNAMENT_LITERALS = [
     '$"<i>Bracket revealed',
     '$"<color=#FFD94D>{completed}/',
     'TOURNAMENT GAME - vs {m.',
-    'status = "<color=',
+    'status = "<color=#FFD850>1st',
+    'status = "<color=#C0C0C0>2nd',
+    'status = "<color=#CD7F32>3rd',
+    'status = "<color=#FFD850>CHAMPION',
+    'status = "<color=#FF6060>FORFEIT',
+    'status = "<color=#60FF60>ready',
     ': "  <color=#888>(both press Play Now',
     '? "<color=#60FF80>both ready',
     ': "<color=#FFD94D>waiting on opponent',

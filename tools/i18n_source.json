@@ -93,6 +93,7 @@
   "30 FPS",
   "30-second previews - they stop on their own",
   "3rd Place",
+  "3rd place",
   "4 players",
   "4/4 ready! Joining 2v2...",
   "400 FPS",
@@ -191,6 +192,7 @@
   "<color=#667>click an achievement to see who earned it</color>",
   "<color=#66CCFF>Downloading...</color>",
   "<color=#66CCFF>Searching for {0}...</color>  <b>{1}/4</b>",
+  "<color=#66CCFF>searching</color>",
   "<color=#66DD66>APPROVED</color>",
   "<color=#66DD66>APPROVED</color> <color=#888>(rev {0} awaits a mod update)</color>",
   "<color=#66DD66>Game starting! Joining as player {0} of {1}...</color>",
@@ -288,6 +290,7 @@
   "<color=#88FF88>Ready! Waiting for the other 3...</color>",
   "<color=#88FF88>Sent! Thank you. Filed as <b>#{0}</b>.</color>",
   "<color=#88FF88>Sent! Thank you.</color>",
+  "<color=#88FF88>ready</color>",
   "<color=#88FF88>{0}/{1} active</color>",
   "<color=#8A8A93>Research and write-up by Spirit - 'On Damage Types and Buff Activation', University of Rounds. Reproduced for this library with light reformatting; the testing, the findings and the voice are all his.</color>\n\nVia thorough testing in the sandbox game mode with an additional controller player, I have catalogued which types of damage trigger which cards and buffs. The main cards in question are Scavenger, Refresh, Brawler, and Taste of Blood. Lifesteal as a character stat bestowed by numerous cards has also been considered. My results split damage into three main categories: opponent damage, self-damage, and Conditional damage. Damage to your opponent via nearly any means will trigger all cards and buffs, with the exception of specific types of Conditional damage. For various reasons, some Conditional damage, typically from block cards, will not consistently trigger Refresh but will still trigger all other buffs. Finally, any form of self-damage will always activate Scavenger, but nothing else. There are, of course, numerous oddities and exceptions.",
   "<color=#8FA3B8>finished in {0}</color>",
@@ -413,6 +416,7 @@
   "<color=#FFD94D>bets open</color>",
   "<color=#FFD94D>earned {0}g</color>",
   "<color=#FFD94D>in progress</color>",
+  "<color=#FFD94D>matched</color>",
   "<color=#FFD94D>pending initial review</color>",
   "<color=#FFD94D>waiting on opponent to ready</color>",
   "<color=#FFD94D>your bet: {0}g on {1}</color>",
@@ -511,6 +515,7 @@
   "Abyss",
   "Accept",
   "Account changed — message not sent.",
+  "Account deleted",
   "Achievement Grid",
   "Achievement Unlocked: {0}!",
   "Achievement comparison",
@@ -596,12 +601,14 @@
   "Arrow",
   "Artist",
   "Artist Studio",
+  "Artist-owned face cosmetic not found",
   "Ascendant",
   "Ash Gradient",
   "Ash walls with a dark crimson accent over a deep blood-red dark, red embers rising.",
   "Async (6-week)",
   "Async Champion",
   "Async Finalist",
+  "Async Tournament - {0}",
   "Attach game logs (recommended)",
   "Attack spd",
   "Auras",
@@ -761,6 +768,7 @@
   "CAPS",
   "CAPYBARA",
   "CASUAL, RECORDED",
+  "CHAMPION",
   "COM",
   "COM\u0004pc.band_short.common",
   "COMMON",
@@ -936,6 +944,7 @@
   "Coral Name",
   "Corner notices when your frames drop, your ping is high or the opponent's updates arrive late. 1v1 only.",
   "Cosmetic Reviews...",
+  "Cosmetic submission not found",
   "Cosmetic trails: <color=#88FF88>ON</color>",
   "Cosmetic trails: <color=#FF9966>OFF</color>",
   "Cosmetics",
@@ -1075,6 +1084,7 @@
   "Demolitionist",
   "Demon Wings",
   "Demonic",
+  "Denied artwork cannot be reopened by a placement change",
   "Despawn off-screen bullets — host clears bullets that exit the camera viewport.",
   "Detail: a shooting star circling overhead (animated). Equip in the Character editor.",
   "Detail: certified angel. Equip in the Character editor.",
@@ -1316,6 +1326,18 @@
   "GAME ENDS",
   "GAMEPLAY",
   "GET READY - fire and block unlock in a moment",
+  "GF Reset R{0}",
+  "GF R{0}",
+  "GIF decoded inconsistently ({0} of {1} frames) — re-export it and try again.",
+  "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at least {5} ms and re-export; the server will not change the speed for you.",
+  "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at most {5} ms and re-export; the server will not change the speed for you.",
+  "GIF frames are {0}x{1} — the limit is 2048x2048",
+  "GIF has more than {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).",
+  "GIF has no transparent background — export it with transparency, or the cosmetic renders as a solid square.",
+  "GIF has {0} frame(s) — an animation needs at least 2. Upload a PNG instead for static art.",
+  "GIF has {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).",
+  "GIF is missing",
+  "GIF is {0} KB — the limit is {1} KB. Reduce the frame size or the number of colours and re-export.",
   "GRAND FINAL",
   "Galaxy",
   "Galaxy Gradient",
@@ -1382,6 +1404,7 @@
   "Got 100 translations approved",
   "Got 1000 translations approved",
   "Grand Final",
+  "Grand Final Reset",
   "Grand Master",
   "Grandma",
   "Grant",
@@ -1513,12 +1536,16 @@
   "Insert",
   "Inside the 0.35 s window?",
   "Instinct",
+  "Insufficient gold",
+  "Insufficient gold: have {0}, need {1}",
   "Intermediate",
   "Into the Deep End",
+  "Invalid PNG data",
   "Iron",
   "Iron Bracket",
   "Is RefreshValid true?",
   "Italic",
+  "Item not found",
   "Ivory",
   "JUMP",
   "Jackalope",
@@ -1549,6 +1576,7 @@
   "Knockback",
   "Known vanilla bugs",
   "Kodiak",
+  "LB R{0}",
   "LEAVE MATCH",
   "LEFT",
   "LEG",
@@ -1660,6 +1688,7 @@
   "Longest point streak",
   "Lose a ranked FFA holding 10 or more half points that never became a point",
   "Losers",
+  "Losers R{0}",
   "Loss",
   "Lost",
   "Lowercase letters render as smaller capitals.",
@@ -1777,6 +1806,7 @@
   "Moves your character up. This is the game's own control - the mod rewrites the game's binding.",
   "Multiplayer",
   "Music",
+  "Music albums have no stock — they are unlimited by design",
   "Music credit toast: <color=#88FF88>ON</color>",
   "Music credit toast: <color=#FF9966>OFF</color>",
   "Music download failed - press Retry",
@@ -1806,6 +1836,7 @@
   "Nah",
   "Name",
   "Name Styles",
+  "Name can't be empty",
   "Name styling",
   "Nana",
   "Near-black blocks on a black background — max contrast.",
@@ -1872,11 +1903,13 @@
   "Noobie",
   "Northern Lights",
   "Not allowed.",
+  "Not an artist account",
   "Not armed",
   "Not enough gold",
   "Not enough gold for a pack",
   "Not enough players to continue the FFA - returning to menu.",
   "Not enough shards for a pack",
+  "Not for sale yet — the artist hasn't opened sales",
   "Not found - it may have been deleted.",
   "Not granted",
   "Not great. Not terrible.",
@@ -1888,6 +1921,7 @@
   "Not started",
   "Not started - buy {0} in the Shop to begin this ladder.",
   "Not started.",
+  "Not your item",
   "Nothing playing",
   "Nothing sent yet.",
   "Now Playing: {0} - {1}",
@@ -1971,10 +2005,17 @@
   "PLAY",
   "PLAYER 1",
   "PLAYER 2",
+  "PNG has an implausible number of chunks",
+  "PNG has no transparent background — export with an alpha layer",
+  "PNG has {0} stray byte(s) after IEND",
+  "PNG is too large once re-encoded — reduce its complexity",
+  "PNG missing or too large ({0} MB, 1,600,000 base64 characters max)",
+  "PNG payload is missing or too large",
   "POOL",
   "POOL\u0004pc.stat.pool",
   "PREVIEW · NOT A PRINT",
   "PREVIEW · NOT A PRINT\u0004pc.preview_footer",
+  "PRIVATE",
   "Pacifist",
   "Pack",
   "Pack opened - {0} new cards",
@@ -2054,6 +2095,7 @@
   "Pink Cursor",
   "Pink Name",
   "Place bet",
+  "Placement changed since this preview; reload it and try again",
   "Plague Doctor",
   "Platinum",
   "Play",
@@ -2069,6 +2111,8 @@
   "Player Cards are not open yet - no edition is running",
   "Player Cards need your Steam sign-in - try again in a moment",
   "Player Nemesis",
+  "Player not found",
+  "Player not found — they need to have used the mod once",
   "Player opted out",
   "Player removed from the lobby.",
   "Player totals",
@@ -2133,6 +2177,7 @@
   "Pronoun title.",
   "Prospector",
   "Prowler",
+  "Published cosmetic source must be a transparent 512x512 PNG ({0})",
   "Pumpking Hat",
   "Pup",
   "Pure aggression",
@@ -2575,6 +2620,7 @@
   "Soft shadow beams cast by map lighting. Off = no shadows (lighting stays on) for extra FPS.",
   "Sold",
   "Sold out",
+  "Sold out — raise the stock cap first",
   "Solo",
   "Solo -",
   "Solo Leaderboard",
@@ -2679,6 +2725,7 @@
   "Sync (weekly)",
   "Sync Champion",
   "Sync Finalist",
+  "Sync Tournament - {0}",
   "Synchronizing - viewing begins next battle",
   "Syncing...",
   "System notices cannot be reported.",
@@ -2689,11 +2736,15 @@
   "THE DUO",
   "THE ROAD TO LEVEL 100",
   "THE SOLO",
+  "TOURNAMENT",
+  "TOURNAMENT Async",
   "TOURNAMENT MATCH",
   "TOURNAMENT MATCH vs {0} - connecting automatically, hold tight...{1}",
   "TOURNAMENT MATCH vs {0} IS WAITING - LEAVE THIS GAME NOW!{1}",
   "TOURNAMENT STARTING - matches are being created, hold tight...",
   "TOURNAMENT STARTS IN {0} - stay in ROUNDS at the main menu!",
+  "TOURNAMENT Sync",
+  "TP R{0}",
   "Tab",
   "Tactical",
   "Tag Team Sweep",
@@ -2819,6 +2870,7 @@
   "The secure connection to {0} timed out after {1} s. The portal needs it; the game keeps working on the backup connection.",
   "The secure connection to {0} was refused. The portal needs it; the game keeps working on the backup connection.",
   "The selected cosmetic is still loading.",
+  "The server cannot do this right now ({0}). Try again in a few minutes.",
   "The server could not answer about your pack - checking again shortly",
   "The server could not read that trade request - update the mod or try again",
   "The server is busy with that trade - try again in a moment",
@@ -2826,6 +2878,7 @@
   "The server refused that - try again in a moment",
   "The server refused the title change.",
   "The server refused this request ({0}).",
+  "The server refused this request ({0}). Restart the game; if it keeps happening, send a bug report.",
   "The subject contains characters that are not allowed.",
   "The subject is too long ({0} characters max).",
   "The subject must be a single line.",
@@ -2842,14 +2895,17 @@
   "Thicker menu text. Uses the game's own font at a heavier weight - not a different typeface.",
   "Thicker menu text: <color=#88FF88>ON</color>",
   "Thicker menu text: <color=#FF9966>OFF</color>",
+  "Third-Place Match",
   "This account cannot send mail.",
   "This account cannot trade cards",
   "This account is not ready for mail yet - try again later.",
   "This account isn't registered as an artist.",
   "This account was deleted - there is no pack to recover",
   "This album requires a newer mod version",
+  "This artist has restricted you from buying their items",
   "This cosmetic has not shipped in the mod yet and cannot be gifted",
   "This cosmetic has not shipped in the mod yet; stock stays closed until it does",
+  "This cosmetic has not shipped yet; adjust its existing submission instead",
   "This cosmetic is approved but has not shipped in the mod yet",
   "This is so sad. Please give this man a break",
   "This is your only copy of this card",
@@ -2893,6 +2949,7 @@
   "To: {0} and {1} others",
   "Today's free pack is already claimed",
   "Too Good",
+  "Too many cosmetic changes are already awaiting review",
   "Too many messages - try again in {0} hours.",
   "Too many messages - try again in {0} minutes.",
   "Too many messages - try again in {0} seconds.",
@@ -2987,6 +3044,7 @@
   "Unknown\u0004card rarity",
   "Unknown player",
   "Unlock chat everywhere",
+  "Unlocked by achievement, not purchasable",
   "Unnamed player",
   "Unnamed player\u0004pc.unnamed",
   "Unranked",
@@ -3035,6 +3093,7 @@
   "W-L and WR count completed series. XP and Gold accrue per player slot; 1v1 rating never moves.",
   "WALL JUMP",
   "WATCH",
+  "WB R{0}",
   "WHAT EACH SEAT ACTUALLY SEES",
   "WHEN A GAME IS RECORDED AND RATED",
   "WHERE GOLD COMES FROM",
@@ -3142,6 +3201,7 @@
   "Windup",
   "Windup main",
   "Winners",
+  "Winners R{0}",
   "Wins",
   "Wins without firing",
   "Wise beyond your years.",
@@ -3239,6 +3299,7 @@
   "a pot scaled by lobby size, battles and opponent tier, split by placement",
   "a year ago",
   "absorbs everything",
+  "advanced",
   "after a handful of series",
   "also locks when any game is decided",
   "always earns x1.5 pay",
@@ -3252,6 +3313,7 @@
   "as DUO (w/ {0}) vs {1}",
   "as SOLO vs {0} + {1}",
   "assigned by the server",
+  "bad frame PNG: {0}",
   "base game",
   "before asking in Discord",
   "blocked senders never reach you anyway",
@@ -3279,7 +3341,9 @@
   "competitive clock: 120 FPS",
   "confirmed - admin tools: ban, reversal",
   "consent is the player's own decision, never bulk-written",
+  "converted frame {0} is {1} KB — the per-image limit is {2} KB. Simplify the art or reduce its colour count.",
   "cosmetic only",
+  "could not process GIF: {0}",
   "cursor color",
   "custom 2v2 lobby",
   "date ->",
@@ -3301,6 +3365,11 @@
   "earned - ranked win",
   "earned - sweep",
   "edge check: 0.1s; block window: 0.3s",
+  "eliminated GF Reset R{0}",
+  "eliminated GF R{0}",
+  "eliminated LB R{0}",
+  "eliminated TP R{0}",
+  "eliminated WB R{0}",
   "enabled?",
   "epic",
   "events and streamed state",
@@ -3316,6 +3385,7 @@
   "for streams and for spotting missed inputs",
   "forfeit",
   "fps",
+  "frame PNG missing or too large",
   "free daily pack",
   "game 1 starts",
   "game in last 45 min: wait",
@@ -3352,15 +3422,24 @@
   "longest",
   "lost {0} of {1}",
   "macro-pace input windows",
+  "malformed PNG (IHDR is not the first chunk)",
+  "malformed PNG (bad CRC on {0} chunk)",
+  "malformed PNG (chunk length runs past end of file)",
+  "malformed PNG (invalid chunk type)",
+  "malformed PNG (no IEND chunk)",
   "master gate; off disables all seven",
   "match data unavailable",
   "match goes live",
   "matches always use your picks regardless",
   "menu code cannot matter mid-match",
+  "missing frames: have {0} of {1}",
   "mod",
   "mod-issued",
   "mod-issued: queue / 2v2 / tournament / ranked FFA = ranked",
   "music album",
+  "must be exactly 512x512 (got {0}x{1})",
+  "mutual forfeit",
+  "name too short (letters/numbers/spaces only)",
   "nametag",
   "never active in a room or on match-found",
   "no - casual",
@@ -3378,6 +3457,8 @@
   "nobody - your screen only, never networked",
   "nobody yet",
   "none yet",
+  "not a GIF file",
+  "not a PNG file",
   "not blocking: 51 damage + return impulse",
   "not enough data (4+ picks)",
   "not recorded (older block format)",
@@ -3418,6 +3499,7 @@
   "otherwise: score / check-in / no-show tiebreak",
   "own bullets judge hits",
   "painted-in glow stays whatever you pick",
+  "placement is outside the character editor limit",
   "player color",
   "player effect",
   "point + release {0} to dance",
@@ -3439,6 +3521,7 @@
   "recorded once",
   "regular (converged)",
   "removes allocation stutter",
+  "render_scale must be between 0.50 and 2.25",
   "replica age est. n/a",
   "replica age est. {0} ms one-way (peer-reported input)",
   "report version {0} - some panels may be missing",
@@ -3458,10 +3541,14 @@
   "showing the newest {0} games of this sitting",
   "showing the newest {0} games of this sitting ({1} not shown)",
   "showing {0} of {1}",
+  "signed up",
   "solo {0}-{1} duo",
   "solo: the outer-left point",
   "stackable",
   "stops null-reference spam and changes nothing visible",
+  "submission is not accepting frames",
+  "submission is not finalizable",
+  "submission not found",
   "sudden death",
   "swallows the one null reference a destroyed bullet raises at a screen edge",
   "swallows the one null reference the hit sound raises when its parent is gone",
@@ -3492,6 +3579,7 @@
   "tracks the whole game",
   "trail",
   "triggers",
+  "truncated PNG (chunk header runs past end of file)",
   "turn it off on a weak GPU; nothing is hidden",
   "turning it off also removes spectators already watching",
   "two players, one side",
@@ -3500,6 +3588,7 @@
   "unknown",
   "unknown path",
   "unlimited",
+  "unreadable PNG: {0}",
   "update mod",
   "utility",
   "via Discord",
@@ -3518,6 +3607,7 @@
   "whenever you armed it by accident",
   "window over - cooldown keeps counting from the press",
   "with exact evidence",
+  "won by forfeit",
   "worth it while investigating one match; it is noisy, so turn it back off afterwards",
   "yes",
   "yesterday",
@@ -3600,6 +3690,7 @@
   "{0} series",
   "{0} series played",
   "{0} shards",
+  "{0} submissions already awaiting review — wait for those first",
   "{0} tiers - click to see them all",
   "{0} total",
   "{0} tracks",
@@ -4078,6 +4169,11 @@
   "3rd Place": {
    "surface": "NativeUI",
    "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
+  "3rd place": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
    "kind": "Tr"
   },
   "4 players": {
@@ -4570,6 +4666,11 @@
    "location": "RefreshTeamTab",
    "kind": "TrF"
   },
+  "<color=#66CCFF>searching</color>": {
+   "surface": "NativeUI",
+   "location": "RenderTeamQueueSection",
+   "kind": "Tr"
+  },
   "<color=#66DD66>APPROVED</color>": {
    "surface": "NativeUI",
    "location": "RefreshArtistTab",
@@ -5053,6 +5154,11 @@
   "<color=#88FF88>Sent! Thank you.</color>": {
    "surface": "CompetitiveUI",
    "location": "OnBugReportAnswer",
+   "kind": "Tr"
+  },
+  "<color=#88FF88>ready</color>": {
+   "surface": "NativeUI",
+   "location": "RenderTeamQueueSection",
    "kind": "Tr"
   },
   "<color=#88FF88>{0}/{1} active</color>": {
@@ -5680,6 +5786,11 @@
    "location": "BuildViewHistoryText",
    "kind": "Tr"
   },
+  "<color=#FFD94D>matched</color>": {
+   "surface": "NativeUI",
+   "location": "RenderTeamQueueSection",
+   "kind": "Tr"
+  },
   "<color=#FFD94D>pending initial review</color>": {
    "surface": "NativeUI",
    "location": "RefreshArtistTab",
@@ -6170,6 +6281,11 @@
    "location": "DropChatOnAccountChange",
    "kind": "Tr"
   },
+  "Account deleted": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Achievement Grid": {
    "surface": "NativeUI",
    "location": "TrMetric",
@@ -6595,6 +6711,11 @@
    "location": "BuildArtistTab",
    "kind": "CreateText"
   },
+  "Artist-owned face cosmetic not found": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Ascendant": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6624,6 +6745,11 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
+  },
+  "Async Tournament - {0}": {
+   "surface": "NativeUI",
+   "location": "TrTournamentBanner",
+   "kind": "TrF"
   },
   "Attach game logs (recommended)": {
    "surface": "CompetitiveUI",
@@ -7418,6 +7544,11 @@
   "CASUAL, RECORDED": {
    "surface": "InfoViz",
    "location": "BuildWhenCounts",
+   "kind": "Tr"
+  },
+  "CHAMPION": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
    "kind": "Tr"
   },
   "COM": {
@@ -8295,6 +8426,11 @@
    "location": "BuildAdminTab",
    "kind": "CreateButton"
   },
+  "Cosmetic submission not found": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Cosmetic trails: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
    "location": "PaintTrails",
@@ -8989,6 +9125,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Denied artwork cannot be reopened by a placement change": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Despawn off-screen bullets — host clears bullets that exit the camera viewport.": {
    "surface": "NativeUI",
@@ -10195,6 +10336,66 @@
    "location": "RefreshFfaPickBanner",
    "kind": "Tr"
   },
+  "GF Reset R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "GF R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "GIF decoded inconsistently ({0} of {1} frames) — re-export it and try again.": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at least {5} ms and re-export; the server will not change the speed for you.": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at most {5} ms and re-export; the server will not change the speed for you.": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF frames are {0}x{1} — the limit is 2048x2048": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF has more than {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF has no transparent background — export it with transparency, or the cosmetic renders as a solid square.": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "GIF has {0} frame(s) — an animation needs at least 2. Upload a PNG instead for static art.": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF has {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF is missing": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "GIF is {0} KB — the limit is {1} KB. Reduce the frame size or the number of colours and re-export.": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
   "GRAND FINAL": {
    "surface": "InfoViz",
    "location": "BuildBracketFlow",
@@ -10522,7 +10723,12 @@
   },
   "Grand Final": {
    "surface": "NativeUI",
-   "location": "RefreshTournaments",
+   "location": "RefreshTournaments, TrRoundLabel",
+   "kind": "Tr"
+  },
+  "Grand Final Reset": {
+   "surface": "NativeUI",
+   "location": "TrRoundLabel",
    "kind": "Tr"
   },
   "Grand Master": {
@@ -11180,6 +11386,16 @@
    "location": "AchievementDefs",
    "kind": "table"
   },
+  "Insufficient gold": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Insufficient gold: have {0}, need {1}": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
   "Intermediate": {
    "surface": "InfoViz",
    "location": "BuildRankLadder",
@@ -11189,6 +11405,11 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
+  },
+  "Invalid PNG data": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Iron": {
    "surface": "shop catalog",
@@ -11209,6 +11430,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Item not found": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Ivory": {
    "surface": "shop catalog",
@@ -11359,6 +11585,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "LB R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
   },
   "LEAVE MATCH": {
    "surface": "EscLeaveRow",
@@ -11914,6 +12145,11 @@
    "surface": "NativeUI",
    "location": "RefreshTournaments",
    "kind": "Tr"
+  },
+  "Losers R{0}": {
+   "surface": "NativeUI",
+   "location": "TrRoundLabel",
+   "kind": "TrF"
   },
   "Loss": {
    "surface": "ProfileCard",
@@ -12500,6 +12736,11 @@
    "location": "(file scope), BuildMusicTab, OpenUtilityPopup",
    "kind": "CreateText, Tr"
   },
+  "Music albums have no stock — they are unlimited by design": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Music credit toast: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
    "location": "PaintMusicCredit",
@@ -12643,6 +12884,11 @@
   "Name Styles": {
    "surface": "NativeUI",
    "location": "(file scope)",
+   "kind": "Tr"
+  },
+  "Name can't be empty": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "Name styling": {
@@ -12975,6 +13221,11 @@
    "location": "ErrorDetail",
    "kind": "Tr"
   },
+  "Not an artist account": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Not armed": {
    "surface": "NativeUI.Settings",
    "location": "SettingsPaintDeleteState, SettingsRenderDestructivePane",
@@ -12998,6 +13249,11 @@
   "Not enough shards for a pack": {
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
+   "kind": "Tr"
+  },
+  "Not for sale yet — the artist hasn't opened sales": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "Not found - it may have been deleted.": {
@@ -13053,6 +13309,11 @@
   "Not started.": {
    "surface": "TitleLaddersUI",
    "location": "ProgressText",
+   "kind": "Tr"
+  },
+  "Not your item": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "Nothing playing": {
@@ -13470,6 +13731,36 @@
    "location": "BuildNetcodeMap",
    "kind": "Tr"
   },
+  "PNG has an implausible number of chunks": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "PNG has no transparent background — export with an alpha layer": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "PNG has {0} stray byte(s) after IEND": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "PNG is too large once re-encoded — reduce its complexity": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "PNG missing or too large ({0} MB, 1,600,000 base64 characters max)": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "PNG payload is missing or too large": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "POOL": {
    "surface": "PcLabels",
    "location": "Tr",
@@ -13489,6 +13780,11 @@
    "surface": "PcLabels",
    "location": "Tr",
    "kind": "TrC:pc.preview_footer"
+  },
+  "PRIVATE": {
+   "surface": "NativeUI",
+   "location": "ApplyHeaderRow",
+   "kind": "Tr"
   },
   "Pacifist": {
    "surface": "ApiClient, shop catalog",
@@ -13885,6 +14181,11 @@
    "location": "DrawCustomBetPrompt",
    "kind": "Tr"
   },
+  "Placement changed since this preview; reload it and try again": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Plague Doctor": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -13958,6 +14259,16 @@
   "Player Nemesis": {
    "surface": "NativeUI",
    "location": "TrMetric",
+   "kind": "Tr"
+  },
+  "Player not found": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Player not found — they need to have used the mod once": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "Player opted out": {
@@ -14279,6 +14590,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Published cosmetic source must be a transparent 512x512 PNG ({0})": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
   },
   "Pumpking Hat": {
    "surface": "shop catalog",
@@ -16487,8 +16803,13 @@
   },
   "Sold out": {
    "surface": "NativeUI",
-   "location": "ApplyShopRow",
-   "kind": "SetText"
+   "location": "ApplyShopRow, TrRefusalDetail",
+   "kind": "SetText, Tr"
+  },
+  "Sold out — raise the stock cap first": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Solo": {
    "surface": "NativeUI",
@@ -17010,6 +17331,11 @@
    "location": "AchievementDefs",
    "kind": "table"
   },
+  "Sync Tournament - {0}": {
+   "surface": "NativeUI",
+   "location": "TrTournamentBanner",
+   "kind": "TrF"
+  },
   "Synchronizing - viewing begins next battle": {
    "surface": "SpectatorHud",
    "location": "ConnectStatusLine",
@@ -17060,6 +17386,16 @@
    "location": "BuildOvtFormat",
    "kind": "Tr"
   },
+  "TOURNAMENT": {
+   "surface": "NativeUI",
+   "location": "ApplyHeaderRow",
+   "kind": "Tr"
+  },
+  "TOURNAMENT Async": {
+   "surface": "NativeUI",
+   "location": "ApplyHeaderRow",
+   "kind": "Tr"
+  },
   "TOURNAMENT MATCH": {
    "surface": "CompetitiveUI",
    "location": "DrawMatchStatus",
@@ -17083,6 +17419,16 @@
   "TOURNAMENT STARTS IN {0} - stay in ROUNDS at the main menu!": {
    "surface": "CompetitiveUI",
    "location": "DrawTournamentBanner",
+   "kind": "TrF"
+  },
+  "TOURNAMENT Sync": {
+   "surface": "NativeUI",
+   "location": "ApplyHeaderRow",
+   "kind": "Tr"
+  },
+  "TP R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
    "kind": "TrF"
   },
   "Tab": {
@@ -17710,6 +18056,11 @@
    "location": "StartCosmeticPlacementAdjustment",
    "kind": "ShowNotification"
   },
+  "The server cannot do this right now ({0}). Try again in a few minutes.": {
+   "surface": "NativeUI",
+   "location": "Refused",
+   "kind": "TrF"
+  },
   "The server could not answer about your pack - checking again shortly": {
    "surface": "PlayerCardsUI",
    "location": "HandleAnswer",
@@ -17743,6 +18094,11 @@
   "The server refused this request ({0}).": {
    "surface": "MailClient",
    "location": "ErrorDetail",
+   "kind": "TrF"
+  },
+  "The server refused this request ({0}). Restart the game; if it keeps happening, send a bug report.": {
+   "surface": "NativeUI",
+   "location": "Refused",
    "kind": "TrF"
   },
   "The subject contains characters that are not allowed.": {
@@ -17825,6 +18181,11 @@
    "location": "PaintHeavyFont",
    "kind": "SetText"
   },
+  "Third-Place Match": {
+   "surface": "NativeUI",
+   "location": "TrRoundLabel",
+   "kind": "Tr"
+  },
   "This account cannot send mail.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
@@ -17852,22 +18213,32 @@
   },
   "This album requires a newer mod version": {
    "surface": "NativeUI",
-   "location": "TrShopRefusal",
+   "location": "TrRefusalDetail, TrShopRefusal",
+   "kind": "Tr"
+  },
+  "This artist has restricted you from buying their items": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "This cosmetic has not shipped in the mod yet and cannot be gifted": {
    "surface": "NativeUI",
-   "location": "TrShopRefusal",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "This cosmetic has not shipped in the mod yet; stock stays closed until it does": {
    "surface": "NativeUI",
-   "location": "TrShopRefusal",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "This cosmetic has not shipped yet; adjust its existing submission instead": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "This cosmetic is approved but has not shipped in the mod yet": {
    "surface": "NativeUI",
-   "location": "TrShopRefusal",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "This is so sad. Please give this man a break": {
@@ -17882,12 +18253,12 @@
   },
   "This item requires a newer mod version": {
    "surface": "NativeUI",
-   "location": "TrShopRefusal",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "This item requires a newer mod version than the recipient has used; they need to update the mod first": {
    "surface": "NativeUI",
-   "location": "TrShopRefusal",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "This lobby closed before the match started. Nothing was counted.": {
@@ -18079,6 +18450,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Too many cosmetic changes are already awaiting review": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Too many messages - try again in {0} hours.": {
    "surface": "MailClient",
@@ -18550,6 +18926,11 @@
    "location": "StartChatLockdownFlow",
    "kind": "Tr"
   },
+  "Unlocked by achievement, not purchasable": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Unnamed player": {
    "surface": "PcLabels, PlayerCardsUI",
    "location": "FillTradeRow, RecentLine, RefreshCompose +2",
@@ -18789,6 +19170,11 @@
    "surface": "NativeUI",
    "location": "AddSpectateButton, ApplySpectateLiveRow, CreateFfaBetLobbyRow +1",
    "kind": "Tr"
+  },
+  "WB R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
   },
   "WHAT EACH SEAT ACTUALLY SEES": {
    "surface": "InfoViz",
@@ -19325,6 +19711,11 @@
    "location": "RefreshTournaments",
    "kind": "Tr"
   },
+  "Winners R{0}": {
+   "surface": "NativeUI",
+   "location": "TrRoundLabel",
+   "kind": "TrF"
+  },
   "Wins": {
    "surface": "NativeUI",
    "location": "BuildCardStatsTab, BuildFfaTab, RefreshCardStats +1",
@@ -19810,6 +20201,11 @@
    "location": "BuildBlockWindow",
    "kind": "Tr"
   },
+  "advanced": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "Tr"
+  },
   "after a handful of series": {
    "surface": "InfoViz",
    "location": "BuildGlickoRd",
@@ -19874,6 +20270,11 @@
    "surface": "InfoViz",
    "location": "BuildOvtFormat",
    "kind": "Tr"
+  },
+  "bad frame PNG: {0}": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
   },
   "base game": {
    "surface": "InfoViz",
@@ -20010,10 +20411,20 @@
    "location": "ExclusionReasonTr",
    "kind": "Tr"
   },
+  "converted frame {0} is {1} KB — the per-image limit is {2} KB. Simplify the art or reduce its colour count.": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
   "cosmetic only": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
    "kind": "Tr"
+  },
+  "could not process GIF: {0}": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
   },
   "cursor color": {
    "surface": "NativeUI",
@@ -20120,6 +20531,31 @@
    "location": "BuildMovementWindow",
    "kind": "Tr"
   },
+  "eliminated GF Reset R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "eliminated GF R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "eliminated LB R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "eliminated TP R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "eliminated WB R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
   "enabled?": {
    "surface": "InfoViz",
    "location": "BuildWhenCounts",
@@ -20193,6 +20629,11 @@
   "fps": {
    "surface": "SessionReportModel",
    "location": "Build",
+   "kind": "Tr"
+  },
+  "frame PNG missing or too large": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "free daily pack": {
@@ -20375,6 +20816,31 @@
    "location": "BuildAnticheatPipeline",
    "kind": "Tr"
   },
+  "malformed PNG (IHDR is not the first chunk)": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "malformed PNG (bad CRC on {0} chunk)": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "malformed PNG (chunk length runs past end of file)": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "malformed PNG (invalid chunk type)": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "malformed PNG (no IEND chunk)": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "master gate; off disables all seven": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
@@ -20400,6 +20866,11 @@
    "location": "ReasonTr",
    "kind": "Tr"
   },
+  "missing frames: have {0} of {1}": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
   "mod": {
    "surface": "InfoViz",
    "location": "BuildKeyboard",
@@ -20418,6 +20889,21 @@
   "music album": {
    "surface": "NativeUI",
    "location": "TrKindWord",
+   "kind": "Tr"
+  },
+  "must be exactly 512x512 (got {0}x{1})": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "mutual forfeit": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "Tr"
+  },
+  "name too short (letters/numbers/spaces only)": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "nametag": {
@@ -20503,6 +20989,16 @@
   "none yet": {
    "surface": "NativeUI",
    "location": "RefreshRecentTournamentsPopup",
+   "kind": "Tr"
+  },
+  "not a GIF file": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "not a PNG file": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "not blocking: 51 damage + return impulse": {
@@ -20705,6 +21201,11 @@
    "location": "ReasonTr",
    "kind": "Tr"
   },
+  "placement is outside the character editor limit": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "player color": {
    "surface": "NativeUI",
    "location": "TrKindWord",
@@ -20810,6 +21311,11 @@
    "location": "ReasonTr",
    "kind": "Tr"
   },
+  "render_scale must be between 0.50 and 2.25": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "replica age est. n/a": {
    "surface": "CompetitiveUI",
    "location": "DrawFPS",
@@ -20905,6 +21411,11 @@
    "location": "BuildGraphPages, Compose2v2, ComposeFfa +3",
    "kind": "TrF"
   },
+  "signed up": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "Tr"
+  },
   "solo {0}-{1} duo": {
    "surface": "SessionReportModel",
    "location": "FinalScore",
@@ -20923,6 +21434,21 @@
   "stops null-reference spam and changes nothing visible": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "submission is not accepting frames": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "submission is not finalizable": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "submission not found": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "sudden death": {
@@ -21075,6 +21601,11 @@
    "location": "BuildDamageMatrix",
    "kind": "Tr"
   },
+  "truncated PNG (chunk header runs past end of file)": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "turn it off on a weak GPU; nothing is hidden": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
@@ -21114,6 +21645,11 @@
    "surface": "NativeUI",
    "location": "RefreshArtistTab",
    "kind": "Tr"
+  },
+  "unreadable PNG: {0}": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
   },
   "update mod": {
    "surface": "NativeUI",
@@ -21203,6 +21739,11 @@
   "with exact evidence": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
+   "kind": "Tr"
+  },
+  "won by forfeit": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
    "kind": "Tr"
   },
   "worth it while investigating one match; it is noisy, so turn it back off afterwards": {
@@ -21613,6 +22154,11 @@
   "{0} shards": {
    "surface": "PlayerCardsUI",
    "location": "Refresh",
+   "kind": "TrF"
+  },
+  "{0} submissions already awaiting review — wait for those first": {
+   "surface": "NativeUI",
+   "location": "TrRefusalDetail",
    "kind": "TrF"
   },
   "{0} tiers - click to see them all": {
