@@ -766,8 +766,11 @@ def test_the_bets_ledger_maps_each_arms_labels_before_markup():
     arm = _member(rules, "internal static string BetArm(string betOnSteamId, string seriesScore)")
     assert 'if (string.IsNullOrEmpty(betOnSteamId)) return "team";' in arm
     assert 'seriesScore.StartsWith("game ", StringComparison.Ordinal)' in arm and 'return "ffa";' in arm
-    assert 'return I18n.TrF("Team {0}", n);' in _member(rules, "internal static string BetOnName(string arm, string name)")
-    assert 'return I18n.TrF("game {0}", n);' in _member(rules, "internal static string BetScore(string arm, string score)")
+    on = _member(rules, "internal static string BetOnName(string arm, string name)")
+    sc = _member(rules, "internal static string BetScore(string arm, string score)")
+    # each value is mapped in its own arm only; a name in another arm is shown as sent
+    assert 'if (arm == "team" && name != null' in on and 'return I18n.TrF("Team {0}", n);' in on and "return name;" in on
+    assert 'if (arm == "ffa" && score != null' in sc and 'return I18n.TrF("game {0}", n);' in sc and "return score;" in sc
     assert 'SeriesRightLabel(arm == "ffa" ? "ffa" : null, name)' in rules
     ui = _read("plugin/NativeUI.cs")
     assert "Bet {b.amount:N0} gold on" not in ui
