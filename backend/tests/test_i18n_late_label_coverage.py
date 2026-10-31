@@ -607,6 +607,7 @@ COMPOSED = {
     ('main.py', 'sql', 'mail'): 'a SQL advisory-lock key, never shown',
     ('main.py', 'sql', 'mrq'): 'a SQL advisory-lock key, never shown',
     ('tournaments.py', 'sql', 'tournament match'): 'a SQL advisory-lock key, never shown',
+    ('tournaments.py', 'sql', 'tournament lifecycle'): 'a SQL advisory-lock key, never shown',
     ('main.py', 'sql', 'sct'): 'an internal cache, limit or room key, never shown',
     ('main.py', 'sql', 'Edition'):
         'pc_editions.name, which no route selects; never sent to the client',
@@ -1046,6 +1047,20 @@ FORFEIT_FIXES = [
     ('ES', 'What happens when someone does',
      'sin dar nunca por incomparecencia desbloquea',
      'sin perder nunca por forfait desbloquea'),
+    # The fence lane rewrote these two pages (English and ES); its new ES
+    # text carries four more uses of the narrowing word.
+    ('ES', 'Tournaments are 8-16 player do',
+     'le da la partida por incomparecencia si no aparece',
+     'le da la partida por forfait si no aparece'),
+    ('ES', 'What happens when someone does',
+     'el ausente pierde por incomparecencia',
+     'el ausente pierde por forfait'),
+    ('ES', 'What happens when someone does',
+     'no presentarse es incomparecencia y cuenta',
+     'no presentarse es un forfait y cuenta'),
+    ('ES', 'What happens when someone does',
+     'No presentarse da tus partidas por incomparecencia',
+     'No presentarse te hace perder tus partidas por forfait'),
     ('ES', '<b><color=#FFD94D>HOW IT WORKS (Async)</',
      'pierdes esa partida por incomparecencia',
      'pierdes esa partida por forfait'),

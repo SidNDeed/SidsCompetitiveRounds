@@ -51,6 +51,7 @@ ASSIGNS = {
     "ASYNC_DEADLINE_DAYS", "_TSYNC_VOTE_HOW", "_tournament_state", "_notified_completed",
     "_notified_prestart", "_watch_cache", "_tavail_seen_notice_ids", "_tavail_held",
     "_TMATCH_NOTICE_KINDS", "_TOURNEY_HOW_IT_WORKS", "_tournament_board_ids", "_tb_swept",
+    "_tavail_withdrawn",
 }
 
 TID = "5a5a5a5a-0000-4000-8000-000000000032"

@@ -27286,13 +27286,30 @@ namespace CompetitiveRounds
 
         public static void TournamentUnsignup(string tournamentId, string steamId)
         {
+            // No confirm_locked_leave here, deliberately: the in-game Leave
+            // button is only ever offered during voting, so a locked leave
+            // from this client is always a stale snapshot, not a decision —
+            // the server's 409 is the correct outcome. The bot's
+            // availability-check "No" is the deliberate locked-leave path.
             string body = $"{{\"steam_id\":\"{Escape(steamId)}\"}}";
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/tournaments/{tournamentId}/unsignup", body,
                 (s, r) =>
                 {
                     if (s) { FetchTournamentCurrent(steamId, force: true); CompetitiveUI.ShowNotification("Left tournament signup", new Color(0.9f, 0.9f, 0.4f)); }
-                    else { CompetitiveUI.ShowNotification(ExtractErrorDetail(r) ?? "Failed", new Color(1f, 0.4f, 0.4f)); }
+                    else
+                    {
+                        // Catalogued generic, not the server detail (b4
+                        // find 1 shape: the detail is English-only and would
+                        // render raw on localized clients); the detail goes
+                        // to the log. Refetch even on failure — the main
+                        // refusal is the tournament having locked/started
+                        // under a stale panel, and the panel must snap to
+                        // the real state to explain the refusal.
+                        Plugin.Log.LogInfo($"[TOURNAMENT] unsignup refused: {ExtractErrorDetail(r) ?? (r ?? "(no body)")}");
+                        CompetitiveUI.ShowNotification("Couldn't leave the tournament - it may have locked or started", new Color(1f, 0.4f, 0.4f));
+                        FetchTournamentCurrent(steamId, force: true);
+                    }
                 }));
         }
 
