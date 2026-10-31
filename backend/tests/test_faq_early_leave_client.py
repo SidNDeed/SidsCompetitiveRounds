@@ -643,8 +643,10 @@ def test_396_rows_parse_by_the_productions_and_the_text_outside_them_is_the_revi
 
 def _g14_cases(sql):
     """(name, text, line): 396 with one planted change, and the line of the
-    token, byte or literal it plants, which parse() must name; then 396 cut
-    at offsets across the file, whose line is that of the literal the cut
+    token, byte or literal it plants, which parse() must name; 396 cut inside
+    a column list, and a two-line fragment whose VALUES follows a ")" with no
+    "(" before it, each with the line of the token that breaks it; then 396
+    cut at offsets across the file, whose line is that of the literal the cut
     opens (when it falls inside one) or of the cut itself."""
     lines = sql.split("\n")
 
@@ -673,6 +675,8 @@ def _g14_cases(sql):
         ("insert header", plant(seed, "INSERT INTO _seed396 ", "INSERT INTO _seedx "), seed),
         ("values follows", plant(seed, ") VALUES", ") x VALUES"), seed),
         ("cast value", plant(71, "CAST('InfoLibrary ' || chr(183)", "CAST(x || chr(183)"), 71),
+        ("columns open", sql[:sql.index("AS x(key_id, source_hash)") + len("AS x(key_id,")], 61),
+        ("no column list", "x)\nVALUES ('a');", 1),
     ]
     spans = [(o, o + len(x)) for k, x, o in _tokens(sql) if k == "lit"]
     for cut in range(2500, len(sql), 1700):
