@@ -253,6 +253,25 @@ def test_the_rule_the_sites_state_is_the_rule_the_server_applies():
                           r"if p\.steam_id not in excluded\)", main)) == 1
 
 
+def test_the_grace_set_is_read_only_by_unrated_and_the_reasons():
+    """What "achievements and other earning ways are unaffected" rests on in
+    the route: inside submit_ffa_match the code lines naming `graced` are
+    exactly three, the decision that returns it, the exclusion reasons that
+    record it, and `unrated = excluded | graced`; no other line of the route
+    reads it."""
+    src = ladder._read(MAIN)
+    start = src.index("async def submit_ffa_match(")
+    nxt = re.compile(r"^(?:@|async def |def |class )", re.M).search(src, start + 10)
+    body = src[start:nxt.start()]
+    lines = [line.strip() for line in body.split("\n")
+             if re.search(r"\bgraced\b", line) and not line.strip().startswith("#")]
+    assert lines == [
+        "ghosts, graced, _leave_log = _ffa_leave_decision(",
+        '| ({"grace"} if p.steam_id in graced else set())',
+        "unrated = excluded | graced",
+    ], lines
+
+
 def test_each_site_states_the_rule_exactly_once():
     """Each site carries its sentence once: the three articles as one whole
     line, the mode text as its wrapped lines."""
