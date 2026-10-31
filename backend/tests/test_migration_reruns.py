@@ -2039,17 +2039,19 @@ def test_396_seed_check_refuses_a_literal_that_a_crlf_checkout_reached():
 
     def attempt(text):
         async def steps(conn):
+            before = await _396_state(conn)
             verdict = await _396_attempt(conn, text)
-            return verdict, await _396_state(conn)
+            return verdict, before, await _396_state(conn)
         return _run(_396_in_schema("m396c", steps))
 
-    control, state = attempt(spread)
+    control, _before, state = attempt(spread)
     assert control is None and sum(
         p["proposer_steam_id"] == "claude-mt" for p in state["proposals"]) == 16, control
-    verdict, state = attempt(spread.replace("\n", "\r\n"))
+    verdict, before, state = attempt(spread.replace("\n", "\r\n"))
     assert verdict and "15 of 16 seed texts carry their expected md5" in verdict, verdict
     assert len(state["keys"]) == 4 and not any(
         p["proposer_steam_id"] == "claude-mt" for p in state["proposals"]), state
+    assert state == before, "the refused 396 left a row of the three i18n tables changed"
 
 
 # One statement inside the timeouts, the same bound as 392's on the release
