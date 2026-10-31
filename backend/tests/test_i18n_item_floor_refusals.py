@@ -6,8 +6,9 @@ code: the per-item client floor (migration 397) from the shop purchase route
 and the artist gift route, the music album floor and the approved-but-not-
 shipped cosmetic from the purchase route, and the not-yet-shipped cosmetic
 from the artist gift and set-stock routes. The client recognises each by its
-status and exact words in NativeUI.TrShopRefusal, the same way it recognises
-the price_changed 409, and shows the catalogue row instead of the raw body.
+status and exact detail in ServerTextRules (NativeUI.TrShopRefusal calls it),
+reading the body structurally, and shows the catalogue row instead of the raw
+body.
 
 The same lane routes the tournament bracket's "BYE" / "TBD" labels, the time
 slot's "(TBD)", and the tournament page's status, deadline, countdown, room
@@ -84,7 +85,7 @@ def _member(src, signature):
 
 
 def _helper():
-    return _member(_read("plugin/NativeUI.cs"), "internal static string TrRefusalDetail(int status, string d)")
+    return _member(_read("plugin/ServerTextRules.cs"), "private static string TrRefusalDetail(int status, string d)")
 
 
 def test_server_still_sends_every_detail_as_409():
@@ -95,10 +96,12 @@ def test_server_still_sends_every_detail_as_409():
 
 def test_helper_matches_each_detail_and_returns_its_catalogue_row():
     # Round 2 moved the six onto the full refusal map (status plus exact
-    # detail); test_i18n_late_label_coverage.py proves the map's coverage.
-    shop = _member(_read("plugin/NativeUI.cs"), "internal static string TrShopRefusal(string resp)")
-    assert "if (!RefusalStatus(resp, out status)) return null;" in shop
-    assert "return TrRefusalDetail(status, ExtractServerDetail(resp));" in shop
+    # detail), round 3 into ServerTextRules with a structural read of the
+    # body; test_i18n_late_label_coverage.py proves the map's coverage.
+    assert ("internal static string TrShopRefusal(string resp) => ServerTextRules.TrRefusal(resp);"
+            in _read("plugin/NativeUI.cs"))
+    tr = _member(_read("plugin/ServerTextRules.cs"), "internal static string TrRefusal(string resp)")
+    assert "if (r.Detail != null) return TrRefusalDetail(r.Status, r.Detail);" in tr
     body = _helper()
     assert 'string k = status + "|" + d;' in body
     for s in REFUSALS:

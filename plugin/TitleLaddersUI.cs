@@ -505,7 +505,7 @@ namespace CompetitiveRounds
             {
                 buyInFlight = false;
                 Plugin.Log.LogInfo($"[LADDER] purchase complete ok={ok}");
-                if (!ok && resp != null && resp.Contains("price_changed"))
+                if (!ok && resp == ApiClient.PriceChangedSentinel)
                     SetMsgRaw(I18n.Tr("<color=#FF8888>The price changed - check the new price and buy again.</color>"));
                 else
                     SetMsgRaw(ok

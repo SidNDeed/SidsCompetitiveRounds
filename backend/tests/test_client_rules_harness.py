@@ -1097,7 +1097,7 @@ def test_the_harness_compiles_only_the_rule_files():
                       "plugin/NameGlyphs.cs",
                       "plugin/SessionReportRules.cs", "plugin/ShowcaseRules.cs",
                       "plugin/DamageNumberRules.cs",
-                      "plugin/KeybindRules.cs"):
+                      "plugin/KeybindRules.cs", "plugin/ServerTextRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -1519,6 +1519,39 @@ def test_each_avatar_claim_has_its_mutation_and_its_control(harness_run, cid):
         assert l.startswith("[avatardefaults] PASS"), l
         assert " | got=" in l and not l.rstrip().endswith("| got="), (
             "the case printed no measurement: " + l)
+
+
+# -- server text: refusals read structurally, the FFA series labels ----------
+
+def test_the_server_text_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "servertext" in suites, "the ServerTextRules suite did not report"
+    run, fail, verdict = suites["servertext"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[servertext\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # 39 cases on the commit that added the suite (#342).
+    assert run >= 43, "the ServerTextRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("cid", ["B1n", "B2n", "B3n", "B7n"])
+def test_each_server_text_negative_control_shows_the_old_rule_said_yes(harness_run, cid):
+    hits = [l for l in harness_run.stdout.splitlines()
+            if l.startswith("[servertext] ") and (" | case=" + cid + " negative control: ") in l]
+    assert len(hits) == 1, "expected one %r control, found %d" % (cid, len(hits))
+    assert hits[0].startswith("[servertext] PASS"), hits[0]
+
+
+def test_the_server_text_cases_are_never_shipped():
+    included = re.findall(r'<Compile Include="([^"]+)"', HARNESS.read_text(encoding="utf-8"))
+    assert "ServerTextRulesSelfTest.cs" in included
+    assert not (REPO / "plugin" / "ServerTextRulesSelfTest.cs").exists()
+    rules = (REPO / "plugin" / "ServerTextRules.cs").read_text(encoding="utf-8")
+    usings = re.findall(r"^using ([\w.]+);", rules, re.M)
+    assert usings and all(u == "System" or u.startswith("System.") for u in usings), usings
+    for ref in ("NativeUI.", "Plugin.", "ApiClient.", "CompetitiveUI."):
+        assert ref not in rules, ref
 
 
 # -- verified reads: the client half (requirements 30-35) --------------------

@@ -125,6 +125,15 @@
                         rule functions one at a time against copies of these
                         files and checks each control's FAIL set.
 
+      ServerTextRules.cs    server text on the shop, ladder, artist and Recent
+                        Series surfaces (v1.41.0 late i18n): a refusal is read
+                        as "HTTP status: body", its body parsed as one JSON
+                        object, and a code recognised only by equality with
+                        detail, detail.error or the middleware's error; the
+                        two FFA labels are mapped for mode "ffa" only. Its
+                        cases live in the harness-only ServerTextRulesSelfTest.cs
+                        and look the rows up in the shipped catalogues.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -174,6 +183,8 @@
     <Compile Include="../../plugin/DamageNumberRules.cs" />
     <Compile Include="../../plugin/AvatarDefaultRules.cs" />
     <Compile Include="AvatarDefaultRulesSelfTest.cs" />
+    <Compile Include="../../plugin/ServerTextRules.cs" />
+    <Compile Include="ServerTextRulesSelfTest.cs" />
     <Compile Include="KeybindFix2Controls.cs" />
     <Compile Include="KeybindFix3Controls.cs" />
     <Compile Include="KeybindFix4Controls.cs" />

@@ -9548,220 +9548,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             dirty = true;
         }
 
-        // Every refusal the shop purchase route and the artist routes can
-        // send (backend/api/main.py: purchase_item, the artist_* routes and
-        // the helpers they call, including the ValueError messages the upload
-        // routes forward). TrShopRefusal reads the status ApiClient prefixed
-        // to the answer ("HTTP <status>: <body>") and the detail, and
-        // TrRefusalDetail maps the pair: a fixed detail to its own catalogue
-        // row, a composed detail through a template whose holes are parsed
-        // narrowly, a protocol answer (a field the mod itself signs or sends,
-        // or a service the server lacks) to one generic sentence that keeps
-        // the code. The album floor's object-shaped 426 is mapped here; the
-        // object-shaped price_changed 409 is answered by both purchase
-        // callbacks before they call this. Any other answer returns null and
-        // the caller keeps its raw text.
-        // backend/tests/test_i18n_late_label_coverage.py enumerates the
-        // server's details and fails when one is not mapped here, or when a
-        // mapping here is no longer sent.
-        internal static string TrShopRefusal(string resp)
-        {
-            int status;
-            if (!RefusalStatus(resp, out status)) return null;
-            if (status == 426 && resp.Contains("\"music_purchase_requires_update\""))
-                return I18n.Tr("This album requires a newer mod version");
-            return TrRefusalDetail(status, ExtractServerDetail(resp));
-        }
-
-        // The status of an "HTTP <status>: ..." answer, 400 or above.
-        private static bool RefusalStatus(string resp, out int status)
-        {
-            status = 0;
-            if (string.IsNullOrEmpty(resp) || resp.Length < 9 || !resp.StartsWith("HTTP ", StringComparison.Ordinal)
-                || resp[8] != ':') return false;
-            return int.TryParse(resp.Substring(5, 3), System.Globalization.NumberStyles.None,
-                       System.Globalization.CultureInfo.InvariantCulture, out status) && status >= 400;
-        }
-
-        internal static string TrRefusalDetail(int status, string d)
-        {
-            if (string.IsNullOrEmpty(d)) return null;
-            string k = status + "|" + d;
-            // the shop purchase route
-            if (k == "404|Player not found") return I18n.Tr("Player not found");
-            if (k == "410|Account deleted") return I18n.Tr("Account deleted");
-            if (k == "404|Item not found") return I18n.Tr("Item not found");
-            if (k == "409|This cosmetic is approved but has not shipped in the mod yet") return I18n.Tr("This cosmetic is approved but has not shipped in the mod yet");
-            if (k == "409|This album requires a newer mod version") return I18n.Tr("This album requires a newer mod version");
-            if (k == "409|This item requires a newer mod version") return I18n.Tr("This item requires a newer mod version");
-            if (k == "403|Unlocked by achievement, not purchasable") return I18n.Tr("Unlocked by achievement, not purchasable");
-            if (k == "403|This artist has restricted you from buying their items") return I18n.Tr("This artist has restricted you from buying their items");
-            if (k == "409|Not for sale yet — the artist hasn't opened sales") return I18n.Tr("Not for sale yet — the artist hasn't opened sales");
-            if (k == "409|Sold out") return I18n.Tr("Sold out");
-            if (k == "402|Insufficient gold") return I18n.Tr("Insufficient gold");
-            // the artist routes
-            if (k == "403|Not an artist account") return I18n.Tr("Not an artist account");
-            if (k == "403|Not your item") return I18n.Tr("Not your item");
-            if (k == "400|Name can't be empty") return I18n.Tr("Name can't be empty");
-            if (k == "400|render_scale must be between 0.50 and 2.25") return I18n.Tr("render_scale must be between 0.50 and 2.25");
-            if (k == "400|placement is outside the character editor limit") return I18n.Tr("placement is outside the character editor limit");
-            if (k == "400|name too short (letters/numbers/spaces only)") return I18n.Tr("name too short (letters/numbers/spaces only)");
-            if (k == "400|frame PNG missing or too large") return I18n.Tr("frame PNG missing or too large");
-            if (k == "404|submission not found") return I18n.Tr("submission not found");
-            if (k == "409|submission is not accepting frames") return I18n.Tr("submission is not accepting frames");
-            if (k == "409|submission is not finalizable") return I18n.Tr("submission is not finalizable");
-            if (k == "400|GIF is missing") return I18n.Tr("GIF is missing");
-            if (k == "400|not a GIF file") return I18n.Tr("not a GIF file");
-            if (k == "400|GIF has no transparent background — export it with transparency, or the cosmetic renders as a solid square.") return I18n.Tr("GIF has no transparent background — export it with transparency, or the cosmetic renders as a solid square.");
-            if (k == "404|Cosmetic submission not found") return I18n.Tr("Cosmetic submission not found");
-            if (k == "409|Denied artwork cannot be reopened by a placement change") return I18n.Tr("Denied artwork cannot be reopened by a placement change");
-            if (k == "409|Placement changed since this preview; reload it and try again") return I18n.Tr("Placement changed since this preview; reload it and try again");
-            if (k == "429|Too many cosmetic changes are already awaiting review") return I18n.Tr("Too many cosmetic changes are already awaiting review");
-            if (k == "400|PNG payload is missing or too large") return I18n.Tr("PNG payload is missing or too large");
-            if (k == "400|Invalid PNG data") return I18n.Tr("Invalid PNG data");
-            if (k == "404|Artist-owned face cosmetic not found") return I18n.Tr("Artist-owned face cosmetic not found");
-            if (k == "409|This cosmetic has not shipped yet; adjust its existing submission instead") return I18n.Tr("This cosmetic has not shipped yet; adjust its existing submission instead");
-            if (k == "409|Music albums have no stock — they are unlimited by design") return I18n.Tr("Music albums have no stock — they are unlimited by design");
-            if (k == "409|This cosmetic has not shipped in the mod yet; stock stays closed until it does") return I18n.Tr("This cosmetic has not shipped in the mod yet; stock stays closed until it does");
-            if (k == "409|This cosmetic has not shipped in the mod yet and cannot be gifted") return I18n.Tr("This cosmetic has not shipped in the mod yet and cannot be gifted");
-            if (k == "404|Player not found — they need to have used the mod once") return I18n.Tr("Player not found — they need to have used the mod once");
-            if (k == "409|This item requires a newer mod version than the recipient has used; they need to update the mod first") return I18n.Tr("This item requires a newer mod version than the recipient has used; they need to update the mod first");
-            if (k == "409|Sold out — raise the stock cap first") return I18n.Tr("Sold out — raise the stock cap first");
-            // the PNG checks the upload routes forward (a ValueError's text)
-            if (k == "400|not a PNG file") return I18n.Tr("not a PNG file");
-            if (k == "400|PNG has no transparent background — export with an alpha layer") return I18n.Tr("PNG has no transparent background — export with an alpha layer");
-            if (k == "400|PNG is too large once re-encoded — reduce its complexity") return I18n.Tr("PNG is too large once re-encoded — reduce its complexity");
-            if (k == "400|PNG has an implausible number of chunks") return I18n.Tr("PNG has an implausible number of chunks");
-            if (k == "400|truncated PNG (chunk header runs past end of file)") return I18n.Tr("truncated PNG (chunk header runs past end of file)");
-            if (k == "400|malformed PNG (invalid chunk type)") return I18n.Tr("malformed PNG (invalid chunk type)");
-            if (k == "400|malformed PNG (chunk length runs past end of file)") return I18n.Tr("malformed PNG (chunk length runs past end of file)");
-            if (k == "400|malformed PNG (IHDR is not the first chunk)") return I18n.Tr("malformed PNG (IHDR is not the first chunk)");
-            if (k == "400|malformed PNG (no IEND chunk)") return I18n.Tr("malformed PNG (no IEND chunk)");
-            // protocol answers (ProtocolAnswers, below)
-            if (Array.IndexOf(ProtocolAnswers, k) >= 0) return Refused(status, d);
-            string[] a;
-            if (status == 402 && RefusalTemplate(d, "Insufficient gold: have {0}, need {1}", false, out a))
-                return I18n.TrF("Insufficient gold: have {0}, need {1}", a);
-            if (status == 429 && RefusalTemplate(d, "{0} submissions already awaiting review — wait for those first", false, out a))
-                return I18n.TrF("{0} submissions already awaiting review — wait for those first", a);
-            if (status == 400 && RefusalTemplate(d, "PNG missing or too large ({0} MB, 1,600,000 base64 characters max)", false, out a))
-                return I18n.TrF("PNG missing or too large ({0} MB, 1,600,000 base64 characters max)", a);
-            if (status == 409 && RefusalTemplate(d, "missing frames: have {0} of {1}", false, out a))
-                return I18n.TrF("missing frames: have {0} of {1}", a);
-            if (status == 400 && RefusalTemplate(d, "GIF is {0} KB — the limit is {1} KB. Reduce the frame size or the number of colours and re-export.", false, out a))
-                return I18n.TrF("GIF is {0} KB — the limit is {1} KB. Reduce the frame size or the number of colours and re-export.", a);
-            if (status == 400 && RefusalTemplate(d, "GIF frames are {0}x{1} — the limit is 2048x2048", false, out a))
-                return I18n.TrF("GIF frames are {0}x{1} — the limit is 2048x2048", a);
-            if (status == 400 && RefusalTemplate(d, "GIF has {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).", false, out a))
-                return I18n.TrF("GIF has {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).", a);
-            if (status == 400 && RefusalTemplate(d, "GIF has more than {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).", false, out a))
-                return I18n.TrF("GIF has more than {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).", a);
-            if (status == 400 && RefusalTemplate(d, "GIF has {0} frame(s) — an animation needs at least 2. Upload a PNG instead for static art.", false, out a))
-                return I18n.TrF("GIF has {0} frame(s) — an animation needs at least 2. Upload a PNG instead for static art.", a);
-            if (status == 400 && RefusalTemplate(d, "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at least {5} ms and re-export; the server will not change the speed for you.", false, out a))
-                return I18n.TrF("GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at least {5} ms and re-export; the server will not change the speed for you.", a);
-            if (status == 400 && RefusalTemplate(d, "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at most {5} ms and re-export; the server will not change the speed for you.", false, out a))
-                return I18n.TrF("GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at most {5} ms and re-export; the server will not change the speed for you.", a);
-            if (status == 400 && RefusalTemplate(d, "converted frame {0} is {1} KB — the per-image limit is {2} KB. Simplify the art or reduce its colour count.", false, out a))
-                return I18n.TrF("converted frame {0} is {1} KB — the per-image limit is {2} KB. Simplify the art or reduce its colour count.", a);
-            if (status == 400 && RefusalTemplate(d, "GIF decoded inconsistently ({0} of {1} frames) — re-export it and try again.", false, out a))
-                return I18n.TrF("GIF decoded inconsistently ({0} of {1} frames) — re-export it and try again.", a);
-            if (status == 400 && RefusalTemplate(d, "must be exactly 512x512 (got {0}x{1})", false, out a))
-                return I18n.TrF("must be exactly 512x512 (got {0}x{1})", a);
-            if (status == 400 && RefusalTemplate(d, "PNG has {0} stray byte(s) after IEND", false, out a))
-                return I18n.TrF("PNG has {0} stray byte(s) after IEND", a);
-            // text holes: a forwarded PNG check (translated in turn), a chunk
-            // type, or a library's exception text (shown as sent)
-            if (status == 400 && RefusalTemplate(d, "bad frame PNG: {0}", true, out a))
-                return I18n.TrF("bad frame PNG: {0}", TrRefusalDetail(status, a[0]) ?? a[0]);
-            if (status == 400 && RefusalTemplate(d, "Published cosmetic source must be a transparent 512x512 PNG ({0})", true, out a))
-                return I18n.TrF("Published cosmetic source must be a transparent 512x512 PNG ({0})", TrRefusalDetail(status, a[0]) ?? a[0]);
-            if (status == 400 && RefusalTemplate(d, "malformed PNG (bad CRC on {0} chunk)", true, out a))
-                return I18n.TrF("malformed PNG (bad CRC on {0} chunk)", a);
-            if (status == 400 && RefusalTemplate(d, "unreadable PNG: {0}", true, out a))
-                return I18n.TrF("unreadable PNG: {0}", a);
-            if (status == 400 && RefusalTemplate(d, "could not process GIF: {0}", true, out a))
-                return I18n.TrF("could not process GIF: {0}", a);
-            // protocol templates
-            if (status == 400 && RefusalTemplate(d, "frame_count must be 2-{0}", false, out a))
-                return Refused(status, d);
-            if (status == 400 && RefusalTemplate(d, "frame_no must be 2-{0}", false, out a))
-                return Refused(status, d);
-            return null;
-        }
-
-        // Protocol answers: a field the mod signs or sends itself, or a
-        // service the server lacks. Each is shown through Refused, which
-        // keeps the code for a bug report.
-        private static readonly string[] ProtocolAnswers =
-        {
-            "401|session_required",
-            "403|Invalid signature",
-            "403|service_account_forbidden",
-            "400|expected_price_required",
-            "400|scale and offsets must be numbers",
-            "400|scale and offsets must be finite",
-            "400|Invalid signature version",
-            "400|Unsupported signature version",
-            "400|Signed placement integers are required",
-            "400|Valid upload_request_id is required",
-            "400|Signed animation fields are required",
-            "400|anim_fps must be 0.5-15",
-            "400|frames_hash must be sha256 hex",
-            "400|slot must be eyes, mouth or detail",
-            "400|png_base64 is not valid base64",
-            "400|submission_id and frame_no are required",
-            "400|frame png_base64 is not valid base64",
-            "400|submission_id is required",
-            "400|gif_base64 is not valid base64",
-            "400|Invalid placement request",
-            "400|Invalid placement revision",
-            "400|Invalid catalog placement request",
-            "400|Cosmetic slot does not match its catalog SKU",
-            "400|PNG hash does not match the payload",
-            "503|HMAC not configured",
-            "503|session_check_unavailable",
-            "503|service_policy_unavailable",
-            "503|image_processing_unavailable",
-            "503|gif_processing_unavailable",
-        };
-
-        private static string Refused(int status, string d)
-        {
-            return status == 503
-                ? I18n.TrF("The server cannot do this right now ({0}). Try again in a few minutes.", d)
-                : I18n.TrF("The server refused this request ({0}). Restart the game; if it keeps happening, send a bug report.", d);
-        }
-
-        // Matches d against an English template whose holes are {0}..{9} in
-        // ascending order. A numeric hole accepts a signed decimal number
-        // only; with textHoles every hole accepts any non-empty text. The
-        // literal parts must match exactly, so a reworded server detail stops
-        // matching instead of being half translated.
-        private static bool RefusalTemplate(string d, string template, bool textHoles, out string[] args)
-        {
-            args = null;
-            var sb = new StringBuilder("^");
-            int holes = 0;
-            for (int i = 0; i < template.Length; i++)
-            {
-                char c = template[i];
-                if (c == '{' && i + 2 < template.Length && template[i + 2] == '}' && template[i + 1] >= '0' && template[i + 1] <= '9')
-                {
-                    sb.Append(textHoles ? "(.+?)" : "(-?[0-9]+(?:\\.[0-9]+)?)");
-                    holes++;
-                    i += 2;
-                    continue;
-                }
-                sb.Append(System.Text.RegularExpressions.Regex.Escape(c.ToString()));
-            }
-            sb.Append('$');
-            var m = System.Text.RegularExpressions.Regex.Match(d, sb.ToString());
-            if (!m.Success) return false;
-            args = new string[holes];
-            for (int k = 0; k < holes; k++) args[k] = m.Groups[k + 1].Value;
-            return true;
-        }
+        // The shop, ladder and artist refusals are read and mapped in
+        // ServerTextRules (Unity-free, executed by the client rules harness);
+        // this is the name the purchase and artist callbacks call.
+        internal static string TrShopRefusal(string resp) => ServerTextRules.TrRefusal(resp);
 
         // Server errors arrive as {"detail":"..."} — surface just the message.
         // Tournament progress and result labels (the signup list's status
@@ -10406,7 +10196,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (b.settled) continue;
                 if (ledgerLines >= LEDGER_MAX_LINES) { ledgerOverflow++; continue; }
                 ledgerLines++;
-                sb.Append($"<color=#FFD94D>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)}</color> <color=#AAA>- in play, score {b.series_score}</color>\n");
+                string arm = ServerTextRules.BetArm(b.bet_on_steam_id, b.series_score);
+                string onNm = Nm(ServerTextRules.BetOnName(arm, b.bet_on_name)), vsNm = Nm(ServerTextRules.BetVsName(arm, b.vs_name));
+                sb.Append($"<color=#FFD94D>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2}", b.amount.ToString("N0"), onNm, vsNm)}</color> <color=#AAA>{I18n.TrF("- in play, score {0}", ServerTextRules.BetScore(arm, b.series_score))}</color>\n");
             }
             foreach (var b in bets)
             {
@@ -10423,12 +10215,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 string st = b.state;
                 if (string.IsNullOrEmpty(st))
                     st = b.payout == b.amount ? "refunded" : b.payout > 0 ? "won" : "lost";
+                string sArm = ServerTextRules.BetArm(b.bet_on_steam_id, b.series_score);
+                string sOn = Nm(ServerTextRules.BetOnName(sArm, b.bet_on_name)), sVs = Nm(ServerTextRules.BetVsName(sArm, b.vs_name));
                 if (st == "refunded")
-                    sb.Append($"<color=#BBB>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - refunded, series never finished</color>\n");
+                    sb.Append($"<color=#BBB>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - refunded, series never finished", b.amount.ToString("N0"), sOn, sVs)}</color>\n");
                 else if (st == "won")
-                    sb.Append($"<color=#66DD66>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - WON {Math.Max(0, b.payout - b.amount):N0} gold</color>\n");
+                    sb.Append($"<color=#66DD66>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - WON {3} gold", b.amount.ToString("N0"), sOn, sVs, Math.Max(0, b.payout - b.amount).ToString("N0"))}</color>\n");
                 else
-                    sb.Append($"<color=#DD7777>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - LOST</color>\n");
+                    sb.Append($"<color=#DD7777>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - LOST", b.amount.ToString("N0"), sOn, sVs)}</color>\n");
             }
             if (ledgerOverflow > 0)
                 sb.Append($"<color=#888>{I18n.TrF("+{0} more bets", ledgerOverflow)}</color>\n");
@@ -10581,7 +10375,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 string tagText = s.tournament_kind == "async" ? I18n.Tr("TOURNAMENT Async")
                                : s.tournament_kind == "sync" ? I18n.Tr("TOURNAMENT Sync")
-                               : I18n.Tr("TOURNAMENT");
+                               : string.IsNullOrEmpty(s.tournament_kind) ? I18n.Tr("TOURNAMENT")
+                               // a kind the server may add later: shown as sent, as before
+                               : I18n.TrF("TOURNAMENT {0}", char.ToUpper(s.tournament_kind[0]) + s.tournament_kind.Substring(1));
                 tag = $"<color=#FFD94D><b>[{tagText}]</b></color>  ";
             }
             else if (s.is_private)
@@ -11690,7 +11486,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             // is PurchaseItem's own job (ApiClient side), and a
                             // NEW click at the repainted price is required;
                             // never auto-retry at the new price.
-                            if (!ok && resp != null && resp.Contains("price_changed"))
+                            if (!ok && resp == ApiClient.PriceChangedSentinel)
                                 UIFactory.SetTextRaw(txtShopStatus,
                                     I18n.Tr("<color=#FF8888>The price changed - check the new price and buy again.</color>"));
                             else
@@ -15888,9 +15684,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // unrated modes carry no elo tails, so they get that space back.
             int budget=(wElo.Length==0&&lElo.Length==0)?44:36;
             string leftFit,rightFit;
-            FitLabelPair(m.left_label??"?",m.right_label??"?",budget,out leftFit,out rightFit);
+            FitLabelPair(m.left_label??"?",ServerTextRules.SeriesRightLabel(m.mode,m.right_label)??"?",budget,out leftFit,out rightFit);
             string line=$"<color=#8899AA>{tag}</color> <color=#FFFFFF>{Nm(leftFit)}</color>{wElo}"
-                      +$"  <b>{m.score}</b>  <color=#AAAAAA>{Nm(rightFit)}</color>{lElo}"
+                      +$"  <b>{ServerTextRules.SeriesScore(m.mode,m.score)}</b>  <color=#AAAAAA>{Nm(rightFit)}</color>{lElo}"
                       +(m.mode=="ffa"?FfaSettingsSummary(m.ffa_settings):RulesTag(m.has_rules,m.rules_ff,m.rules_sc,m.mode=="1v2"?(bool?)m.rules_xp:null))+"\n";
             if(m.bets!=null)
             {

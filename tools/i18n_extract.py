@@ -165,6 +165,10 @@ FILES = [
     # returner's offer, buttons and outcome lines, all I18n.Tr/TrF sites.
     # The other TeamHold*.cs files hold no display text.
     "TeamHoldBanner.cs", "TeamHoldReturn.cs",
+    # v1.41.0 late i18n round 3: the shop, ladder and artist refusals and the
+    # Recent Series FFA labels, all I18n.Tr/TrF sites in a Unity-free rules
+    # file the client rules harness executes.
+    "ServerTextRules.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
@@ -239,6 +243,28 @@ SHORT_WHOLE_LINES = frozenset({
     "<color=#FFD850>1st</color>",
     "<color=#C0C0C0>2nd</color>",
     "<color=#CD7F32>3rd</color>",
+    # v1.41.0 late i18n round 3: refusal codes the server sends as the whole
+    # detail or error (main.py, its middleware, read_gate.py). The code is the
+    # English line (ServerTextRules shows it as sent); the key lets another
+    # language name it beside the code. The identity-token rule refuses them
+    # for their underscores, so they are asserted here.
+    "session_required",
+    "service_account_forbidden",
+    "expected_price_required",
+    "session_check_unavailable",
+    "service_policy_unavailable",
+    "image_processing_unavailable",
+    "gif_processing_unavailable",
+    "read_gate_unavailable",
+    "rate_limited",
+    "session_replication_pending",
+    "player_session_required",
+    "operator_key_invalid",
+    "read_credential_required",
+    "internal_key_required",
+    "payload_too_large",
+    # the Recent Series FFA score cell ("#1 of 6"), the whole cell
+    "#1 of {0}",
 })
 
 

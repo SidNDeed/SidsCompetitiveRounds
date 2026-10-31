@@ -4124,11 +4124,12 @@ namespace CompetitiveRounds
                     // above; the callback gets a machine-readable sentinel
                     // (same pattern as "no-consent"/"outdated") — the UI owns
                     // the Tr'd player-facing message.
-                    bool priceChanged = !ok && resp != null
-                        && resp.StartsWith("HTTP 409", StringComparison.Ordinal)
-                        && resp.IndexOf("price_changed", StringComparison.OrdinalIgnoreCase) >= 0;
+                    // Read structurally: a 409 whose detail is an object with
+                    // error == "price_changed" (main.py purchase_item), never the
+                    // code found anywhere in the answer.
+                    bool priceChanged = !ok && ServerTextRules.IsDetailError(resp, 409, "price_changed");
                     if (priceChanged) FetchShopItems(steamId);
-                    try { callback?.Invoke(ok, priceChanged ? "price_changed" : resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[SHOP] callback threw: {cex.Message}"); }
+                    try { callback?.Invoke(ok, priceChanged ? PriceChangedSentinel : resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[SHOP] callback threw: {cex.Message}"); }
                     if (ok)
                     {
                         FetchPlayerStats(steamId);
@@ -8121,8 +8122,12 @@ namespace CompetitiveRounds
                     catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] preview parse: {ex.Message}"); ok = false; }
                 }
                 callback?.Invoke(ok && sub != null && sub.id > 0, sub, resp);
-            }, sessionAware: true));
+            }, detailedErrors: true, sessionAware: true));   // the refusal body reaches ShowArtistResult
         }
+
+        /// <summary>What PurchaseItem hands its callback in place of a price_changed
+        /// refusal; both purchase callbacks compare it whole.</summary>
+        internal const string PriceChangedSentinel = "price_changed";
 
         public static void ArtistUpdateCosmeticPlacement(string steamId, int submissionId,
             int expectedRevision, float renderScale, float renderOffsetX, float renderOffsetY,

@@ -1546,6 +1546,7 @@ FIX5_ENDS = [
     ('field-SeatEvidence.cs-_sw', 'field:SeatEvidence.cs:_sw', 'FfaNumberingRules.cs:StartNew'),
     ('field-SeatEvidenceCore.cs', 'field:SeatEvidenceCore.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-SecureRouteRules.cs', 'field:SecureRouteRules.cs:?', 'PortraitRenderDance.cs:Free'),
+    ('field-ServerTextRules.cs', 'field:ServerTextRules.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-SessionReportModel.cs', 'field:SessionReportModel.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-SessionReportRules.cs', 'field:SessionReportRules.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-SettingsModel.cs', 'field:SettingsModel.cs:?', 'DamageNumberRules.cs:Text#1'),
