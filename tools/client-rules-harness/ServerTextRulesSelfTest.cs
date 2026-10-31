@@ -283,8 +283,10 @@ namespace CompetitiveRounds
                 Check(r, "V2 every invalid escape, in the detail or nested, makes the body unreadable", esc == null, esc ?? "ok");
                 // A backslash before the closing quote escapes it: the string never ends.
                 string unterminated = "{\"detail\":\"Sold out\\\"}";
-                Check(r, "V2u an unterminated string (the closing quote escaped) makes the body unreadable",
-                      !JsonValid(unterminated) && TrRefusal(Env(409, unterminated)) == null, "");
+                // Inside an object the missing brace refuses it anyway; the bare string isolates JString.
+                string bareUnterminated = "\"Sold out\\\"";
+                Check(r, "V2u an unterminated string (the closing quote escaped) makes the body unreadable, bare or in an object",
+                      !JsonValid(unterminated) && TrRefusal(Env(409, unterminated)) == null && !JsonValid(bareUnterminated), "");
                 // A backslash as the very last byte: the escape has no second character.
                 string dangling = "{\"detail\":\"Sold out\",\"v\":\"a\\", danglingGot;
                 try { danglingGot = JsonValid(dangling) ? "accepted" : null; }
