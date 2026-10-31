@@ -1190,6 +1190,18 @@ class HealthResponse(BaseModel):
     # (learnings 780, 794). Probed by the release train and read by nothing
     # else (#306). No default, as above. Absent on any build before it.
     shop_floor: int
+    # tzdata_declared: release-train verification plumbing, not a design
+    # mechanism (main._TZDATA_DECLARED_BUILD; 1 = this build's requirements
+    # declare tzdata). A code constant, equal on both roles by construction,
+    # so the train can read it through the edge. The batch adds no route;
+    # `build_manifest` below also changes with it (one more wheel in the
+    # image, so the build context and the wheel inventory move), but that
+    # value cannot be predicted (it hashes a file only the image build
+    # writes). This is the key whose expected value is known before the
+    # build (learnings 780, 794). Probed by the release train and read by
+    # nothing else (#306). No default, as above. Absent on any build before
+    # it.
+    tzdata_declared: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not
