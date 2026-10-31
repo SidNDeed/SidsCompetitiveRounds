@@ -179,6 +179,7 @@
     <Compile Include="KeybindFix4Controls.cs" />
     <Compile Include="../../plugin/ReadGateRules.cs" />
     <Compile Include="ReadGateRulesSelfTest.cs" />
+    <Compile Include="FfaLeaveFigureRefusalCases.cs" />
   </ItemGroup>
 
 </Project>

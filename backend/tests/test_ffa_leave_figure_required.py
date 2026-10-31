@@ -14,11 +14,12 @@ everything, or nothing, is red here. The mutation control replaces the helper
 with one that finds nothing and shows the refusal disappears.
 
 The 422 is chosen from the client's outbox handling (plugin/ApiClient.cs): a
-422 is not a terminal FFA refusal (FfaReportRules.IsTerminalRefusal is 409 and
-403 only), so the report goes to the outbox, whose first retry drops any
-"HTTP 4xx" answer other than 401 and 429 as permanent. The last test pins that
-reading of the client source, so a client change that would make a 422 retry
-forever reddens it.
+422 is not a terminal FFA refusal (FfaReportRules.IsTerminalRefusal, both
+overloads, is 409 and 403 only), so the report goes to the outbox, which drops
+any "HTTP 4xx" answer other than 401 and 429 as permanent. The overloads are
+EXECUTED by the client rules harness (its ffaleavefigure suite, with a mutant
+per overload that makes 422 terminal and must be caught); OutboxPass needs
+Unity and is pinned as source.
 """
 
 from __future__ import annotations
@@ -152,15 +153,42 @@ def _block(src, start_pat):
     raise AssertionError("unbalanced block after " + start_pat)
 
 
-def test_the_client_drops_a_422_from_its_outbox_rather_than_retrying_it():
-    """The reading the 422 rests on. FfaReportRules.IsTerminalRefusal names 409
-    and 403 only, so a 422 is queued (the FFA send's else branch); OutboxPass
-    treats every "HTTP 4" answer as permanent except 401 and 429, and drops it."""
-    rules = (REPO / "plugin" / "FfaReportRules.cs").read_text(encoding="utf-8")
-    terminal = _block(rules, r"internal static bool IsTerminalRefusal\(long statusCode\)")
-    assert "SettledRefusalStatus" in terminal and "QuarantinedRefusalStatus" in terminal
-    assert re.search(r"QuarantinedRefusalStatus\s*=\s*403\b", rules)
-    assert re.search(r"SettledRefusalStatus\s*=\s*409\b", rules)
+from test_client_rules_harness import _suites, harness_run  # noqa: E402,F401  (the module fixture)
+
+LEAVE_FIGURE_CASES = (
+    "real: code 422 is not terminal",
+    "real: text 422 is not terminal",
+    "real: text 422 is the HTTP <code>: <body> form",
+    "real: code 409 is terminal",
+    "real: text 409 is terminal",
+    "real: code 403 is terminal",
+    "real: text 403 is terminal",
+    "real: code 400 is not terminal",
+    "real: text 400 is not terminal",
+    "mutant (code overload makes 422 terminal) is caught by its own case",
+    "mutant (text overload makes 422 terminal) is caught by its own case",
+)
+
+
+def test_both_terminal_refusal_overloads_leave_a_422_to_the_outbox(harness_run):
+    """FfaReportRules.IsTerminalRefusal(long) and (string), run on 422 (the
+    leave-figure refusal, as the client's own RequestErrorText formats it) and
+    on the real terminals 409 and 403; a mutant of either overload that makes
+    422 terminal fails exactly its own case. Each named case printed PASS, and
+    the suite ran exactly these."""
+    suites = _suites(harness_run)
+    assert "ffaleavefigure" in suites, harness_run.stdout[-4000:]
+    run, fail, verdict = suites["ffaleavefigure"]
+    assert (run, fail, verdict) == (len(LEAVE_FIGURE_CASES), 0, "PASS"), harness_run.stdout[-4000:]
+    printed = re.findall(r"^\[ffaleavefigure\] (PASS|FAIL) \| case=([^|]+?) \|", harness_run.stdout, re.M)
+    assert sorted(name for _, name in printed) == sorted(LEAVE_FIGURE_CASES), printed
+    assert {v for v, _ in printed} == {"PASS"}, printed
+
+
+def test_the_client_outbox_drops_a_4xx_other_than_401_and_429():
+    """The outbox half, as source (OutboxPass needs Unity): every "HTTP 4"
+    answer is permanent except 401 and 429, and a permanent answer removes the
+    report. A 422 is therefore dropped, not retried without bound."""
     client = (REPO / "plugin" / "ApiClient.cs").read_text(encoding="utf-8")
     outbox = _block(client, r"private static IEnumerator OutboxPass\(\)")
     code = "\n".join(line for line in outbox.splitlines() if not line.lstrip().startswith("//"))
@@ -169,4 +197,3 @@ def test_the_client_drops_a_422_from_its_outbox_rather_than_retrying_it():
     assert "_pendingReports.Remove(p)" in code.split("if (permanent || p.attempts >= OUTBOX_MAX_ATTEMPTS)")[1]
     transient = code.split("bool retryableTransient")[1].split(";")[0]
     assert re.findall(r"HTTP(?:/1\.1)? (\d{3})", transient) == ["429", "429", "401", "401"], transient
-    assert "422" not in code

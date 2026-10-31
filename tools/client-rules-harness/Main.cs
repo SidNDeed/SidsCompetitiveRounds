@@ -209,6 +209,16 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            // FAQ-R2 M2: the leave-figure 422 is non-terminal in both
+            // IsTerminalRefusal overloads, with a mutant per overload.
+            if (!RunSuite("ffaleavefigure", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = FfaLeaveFigureRefusalCases.Run();
+                              return new Suite(r.Run, r.Fail, r.Report.ToString());
+                          }))
+                return 2;
+
             string verdict = suites > 0 && totalRun > 0 && totalFail == 0 ? "PASS" : "FAIL";
             Console.WriteLine("client-rules-harness suites=" + suites
                               + " run=" + totalRun + " fail=" + totalFail
