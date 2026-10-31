@@ -637,23 +637,32 @@ def _sql_text(value):
 
 
 _MIGRATION_NAME = re.compile(r"[A-Za-z0-9_]{1,80}\.sql")
+# The data-only landing (ai-collab/session-tools/land_data_migration.py) refuses these two tokens wherever
+# they appear, a comment or a literal included; both modes embed the migration name in the header comment
+# and the RAISE literals, so a name holding one is refused with the census text that holds one.
+_NAME_RESOLUTION = re.compile(r"search_path|set_config", re.I)
 
 
 def _sql_target(path):
     """argparse type for --emit-sql. The base name goes verbatim into the file's header comment and its
     RAISE literals, so it is restricted to letters, digits and underscores plus the .sql suffix: a
     quote in the name was an SQL injection and a percent sign a broken RAISE placeholder (DIGESTS-R2
-    H1). Refused before the DLL is read or anything is written."""
+    H1), and it may not hold search_path or set_config: the data-only landing refuses those two tokens
+    wherever they appear, the header comment and the RAISE literals included (CENSUS-R1 H1). Refused
+    before the DLL or the census is read or anything is written."""
     base = os.path.basename(path)
     if not _MIGRATION_NAME.fullmatch(base):
         raise argparse.ArgumentTypeError("the migration file name may use letters, digits and underscores "
                                          "and must end in .sql: %r" % base)
+    if _NAME_RESOLUTION.search(base):
+        raise argparse.ArgumentTypeError("the migration file name holds search_path or set_config, which the "
+                                         "data-only landing refuses wherever it appears: %r" % base)
     return path
 
 
 def migration_text(name, rows):
     """The identical inserts as a data-only migration of the house shape."""
-    if not _MIGRATION_NAME.fullmatch(name):
+    if not _MIGRATION_NAME.fullmatch(name) or _NAME_RESOLUTION.search(name):
         raise ValueError("migration name %r cannot be embedded in the migration text" % name)
     rel = [r for r in rows if r["kind"] == "release"]
     games = [r for r in rows if r["kind"] == "game_file"]
@@ -727,7 +736,6 @@ CENSUS_ACTION = "card_census"
 CENSUS_DIGEST_MAX = 64                  # main.admin_register_card_census: digest Query(..., max_length=64)
 CENSUS_STATUSES = ("registered", "already_registered")
 API_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend", "api"))
-_NAME_RESOLUTION = re.compile(r"search_path|set_config", re.I)
 
 
 def _same_file(got, want):
@@ -816,7 +824,7 @@ def _sql_int(v):
 
 def census_migration_text(name, row):
     """The one insert register_census performs, as a data-only migration of the house shape."""
-    if not _MIGRATION_NAME.fullmatch(name):
+    if not _MIGRATION_NAME.fullmatch(name) or _NAME_RESOLUTION.search(name):
         raise ValueError("migration name %r cannot be embedded in the migration text" % name)
     d, g = row["digest"], row["game_dll_sha256"]
     if not (HEX64.fullmatch(d) and HEX64.fullmatch(g)):

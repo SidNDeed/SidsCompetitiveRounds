@@ -109,6 +109,21 @@ def test_k1_a_checkout_without_the_server_module_is_refused(tmp_path, monkeypatc
     assert code == rrd.EXIT_REFUSED and "is not in this checkout" in out
 
 
+def test_k1_the_server_module_absent_from_its_own_checkout_is_refused(tmp_path, monkeypatch):
+    # API_DIR and the cached module stay the server's own, so the loaded-module path check would pass;
+    # only the file is absent. The refusal must come from the existence guard itself, so that removing
+    # the guard lets the run through (CENSUS-R1 M1: mutant M25 was killed by wording alone before).
+    want = os.path.join(rrd.API_DIR, "card_measures.py")
+    real_isfile = os.path.isfile
+    monkeypatch.setattr(rrd.os.path, "isfile", lambda p: False if rrd._same_file(p, want) else real_isfile(p))
+    with pytest.raises(rrd.Refused, match="is not in this checkout"):
+        rrd.server_census_check()
+    code, out = _run(["--census", _write(tmp_path, cf.VALID["client_file"]), "--dry-run"])
+    assert code == rrd.EXIT_REFUSED and "is not in this checkout" in out
+    monkeypatch.undo()
+    assert rrd.server_census_check() is cm
+
+
 def _function_source(path, head):
     with open(path, encoding="utf-8") as f:
         text = f.read()
@@ -367,6 +382,25 @@ def test_k6_the_writer_never_replaces_a_file_and_takes_only_a_plain_name(tmp_pat
     with pytest.raises(SystemExit) as e:
         _run(["--census", path, "--emit-sql", str(tmp_path / "401_x'y.sql")])
     assert e.value.code == 2
+
+
+@pytest.mark.parametrize("name", ["401_search_path.sql", "401_SET_CONFIG.sql"])
+def test_k6_a_name_the_landing_refuses_is_refused_before_anything_is_written(tmp_path, capsys, name):
+    # The name goes into the header comment and the RAISE literals, and the data-only landing refuses
+    # search_path and set_config wherever they appear (CENSUS-R1 H1), so the writer never produces the file.
+    path = _write(tmp_path, cf.VALID["client_file"])
+    target = tmp_path / name
+    with pytest.raises(SystemExit) as e:
+        _run(["--census", path, "--emit-sql", str(target)])
+    assert e.value.code == 2 and "search_path or set_config" in capsys.readouterr().err
+    assert not target.exists()
+    with pytest.raises(ValueError):
+        rrd.census_migration_text(name, _expected_row(cf.VALID["client_file"]))
+    # the release mode shares the argparse type, so the same name is refused there before any DLL is read
+    with pytest.raises(SystemExit) as e:
+        rrd.main(["--version", "1.41.0", "--skip-game-files", "--emit-sql", str(target)])
+    assert e.value.code == 2 and "search_path or set_config" in capsys.readouterr().err
+    assert not target.exists()
 
 
 def test_k6_a_census_naming_search_path_is_refused_for_sql_only(tmp_path):

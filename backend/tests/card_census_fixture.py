@@ -30,13 +30,16 @@ def dumps(obj):
 def cards(extra=()):
     """A pool as the client reads it: GameObject names, rarity 0..2, allowMultiple,
     category names or null, blacklisted category names or null, the gun lock;
-    a null card slot is the empty name. `extra` appends entries."""
+    a null card slot is the empty name with an unset CensusCard's defaults, rarity 0,
+    allowMultiple 0, null arrays, lock 0 (CardDrawEvidence.cs:661 adds
+    `new K.CensusCard { Name = "" }`; CardDrawEvidenceCore.cs:97-106 serialises
+    `(long)c.Rarity`, so 0, never -1). `extra` appends entries."""
     out = [
         ["BombsAway", 1, 1, ["CardCategory_Bombs"], None, 0],
         ["Leach", 0, 1, None, None, 0],
         ["Huge", 0, 1, ["CardCategory_Size"], ["CardCategory_Size"], 0],
         ["Shotgun", 1, 0, ["CardCategory_Gun", "CardCategory_Spread"], ["CardCategory_Gun"], 1],
-        ["", -1, 0, None, None, 0],
+        ["", 0, 0, None, None, 0],
         ["Rock'n'Roll", 2, 0, [], None, 0],
         ['Quote"Card', 2, 1, None, [], 0],
     ]
