@@ -1838,6 +1838,48 @@ def test_396_retires_the_386_keys_and_seeds_sixteen_drafts_once():
         "a CRLF copy of 396 stored different text or wrote a row: %r -> %r" % (first, crlf))
 
 
+def test_396_stores_the_texts_its_values_read_and_the_client_bundles():
+    """What 396 STORES, executed: applied to its prerequisite, each of the
+    four new keys holds, byte for byte, as msgctxt the client's English for
+    its site and the text the file's key row reads as, and as context that
+    row's context; each of the sixteen claude-mt drafts holds, byte for
+    byte, the bundled catalogue's text for its key's English in its
+    language and the text the file's seed row reads as. The static reading
+    is test_faq_early_leave_client.py's (m396_rows over the rows its
+    productions admit); this test is the check that the stored values are
+    that reading, whatever SQL composes them."""
+    import test_faq_early_leave_client as client
+    sources = client.site_sources()
+    keys, _sensitive, seeds = client.m396_rows()
+    cats = client.ladder.catalogues()
+    sql = migration_text("396")
+
+    async def steps(conn):
+        await conn.execute(sql)
+        stored_keys = await conn.fetch(
+            "SELECT key_id, msgctxt, context FROM i18n_keys WHERE key_id = ANY($1::text[]) ORDER BY key_id",
+            sorted(keys))
+        stored_seeds = await conn.fetch(
+            "SELECT key_id, language_code, proposed_target FROM i18n_proposals "
+            "WHERE proposer_steam_id = 'claude-mt' ORDER BY key_id, language_code")
+        return stored_keys, stored_seeds
+
+    stored_keys, stored_seeds = _run(_396_in_schema("m396s", steps))
+    assert sorted(r["key_id"] for r in stored_keys) == sorted(keys), stored_keys
+    assert sorted(r["msgctxt"] for r in stored_keys) == sorted(sources.values()), (
+        "396 stored a key text that is not a site's English")
+    for r in stored_keys:
+        _ns, english, _hash, context = keys[r["key_id"]]
+        assert r["msgctxt"] == english, "the stored text of %s is not its row's" % r["key_id"]
+        assert r["context"] == context, (r["key_id"], r["context"], context)
+    got = {(r["key_id"], r["language_code"]): r["proposed_target"] for r in stored_seeds}
+    assert sorted(got) == sorted(seeds), sorted(got)
+    for (key_id, lang), target in got.items():
+        assert target == seeds[(key_id, lang)][1], "the stored %s draft of %s is not its row's" % (lang, key_id)
+        assert target == cats[lang.upper()][0][keys[key_id][1]], (
+            "the stored %s draft of %s is not the bundled %s text" % (lang, key_id, lang.upper()))
+
+
 def test_396_refuses_to_retire_a_386_key_with_an_approved_entry():
     """340's guard, with its control. With the machine entry on a 386 key
     approved, 396 refuses and stores nothing: the 386 keys stay live, the

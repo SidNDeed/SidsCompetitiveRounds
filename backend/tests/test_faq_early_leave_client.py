@@ -439,6 +439,18 @@ _TOKEN = re.compile(r"""
 # The functions 396 calls, and no other: a name followed by "(" must be one of these.
 _CALLS = {"AND", "CAST", "CONFLICT", "COUNT", "EXISTS", "FROM", "IN", "JOIN", "NOW", "VALUES", "VARCHAR",
           "_seed396", "chr", "i18n_keys", "i18n_proposals", "md5", "string_agg", "v", "x"}
+# The five VALUES lists of 396, by the alias (or table) and the columns that name them, and the production each
+# column's cell takes: "lit" a plain literal; "text" a value (a literal or a composed value); "bool" TRUE or FALSE;
+# "cast" the context cast. No column 396 writes from a VALUES row is an integer.
+_VALUES_SHAPES = {
+    ("x", ("key_id", "source_hash")): ("lit", "lit"),
+    ("v", ("key_id", "namespace", "msgctxt", "source_hash", "sensitive", "context")):
+        ("lit", "lit", "text", "lit", "bool", "cast"),
+    ("x", ("key_id", "source_hash", "text_md5", "sensitive", "context")): ("lit", "lit", "lit", "bool", "text"),
+    ("_seed396", ("key_id", "lang", "source_hash", "target")): ("lit", "lit", "lit", "text"),
+    ("x", ("key_id", "lang", "text_md5")): ("lit", "lit", "lit"),
+}
+_JOINS = (["chr", "(", "10", ")"], ["chr", "(", "183", ")"])
 
 
 def _tokens(sql):
@@ -448,7 +460,7 @@ def _tokens(sql):
     admits fails. A literal must open after whitespace, "(" or "," (so no E,
     U&, N, B or X prefix), its only escape is the doubled quote, and it holds
     no backslash and no character below U+0020 (so it ends on its own line).
-    Returns the (kind, text) tokens other than whitespace and comments."""
+    Returns the (kind, text, offset) tokens other than whitespace and comments."""
     out, i = [], 0
     while i < len(sql):
         m = _TOKEN.match(sql, i)
@@ -459,44 +471,180 @@ def _tokens(sql):
             body = text[1:-1]
             assert all(ch >= " " and ch != "\\" for ch in body), "a literal holds a control character or a backslash: %r" % text[:60]
         if kind not in ("ws", "comment"):
-            out.append((kind, text))
+            out.append((kind, text, i))
         i = m.end()
     return out
 
 
-def test_396_source_is_a_closed_token_grammar_with_breaks_only_as_chr_joins():
-    """The header's format statement: every literal is one line and a line
-    break in a composed value is joined in as chr(10). The stored values
-    would be the same with another literal form (an escape string, a Unicode
-    escape, a dollar quote, a raw control character, a break built by
-    another function), so this reads the WHOLE file, every byte and every
-    line, against a closed grammar (_tokens) instead of a list of forms or a
-    selection of lines: the two $m396$ tags are the only dollar signs, no
-    UESCAPE word stands anywhere, a name followed by "(" is one of the
-    functions the file calls (_CALLS), and every chr() call stands exactly
-    as `|| chr(10) ||` or `|| chr(183) ||` between two concatenations."""
+class _M396Parse:
+    """396's tokens (_tokens) and its five VALUES lists parsed by explicit
+    productions:
+        value    := literal | composed
+        composed := literal ( "||" join ( "||" join )* "||" literal )+
+        join     := chr "(" ( 10 | 183 ) ")"
+        cast     := CAST "(" value AS VARCHAR "(" 160 ")" ")"
+        row      := "(" cell ( "," cell )* ")"   each cell the production its column takes (_VALUES_SHAPES)
+    Every other arrangement fails with its line: a nested cast, a cast of
+    another form, an integer or a call in a value position, two literals
+    joined without a join, a value that ends on a join."""
+
+    def __init__(self, sql):
+        self.sql, self.toks = sql, _tokens(sql)
+        self.inside = [False] * len(self.toks)
+        self.lists = []
+
+    def t(self, n):
+        return self.toks[n][1] if n < len(self.toks) else ""
+
+    def at(self, n):
+        pos = self.toks[n][2] if n < len(self.toks) else len(self.sql)
+        return "396 line %d" % (self.sql.count("\n", 0, pos) + 1)
+
+    def expect(self, n, *texts):
+        got = [self.t(k) for k in range(n, n + len(texts))]
+        assert got == list(texts), "%s: %r stands where %r must" % (self.at(n), got, list(texts))
+        return n + len(texts)
+
+    def value(self, n):
+        assert self.toks[n][0] == "lit", "%s: a value opens with %r, not a literal" % (self.at(n), self.t(n))
+        n, kind = n + 1, "lit"
+        while self.t(n) == "||":
+            joins = 0
+            while self.t(n) == "||" and [self.t(k) for k in range(n + 1, n + 5)] in _JOINS:
+                n, joins = n + 5, joins + 1
+            assert joins, "%s: %r stands after || where chr(10) or chr(183) must" % (self.at(n + 1), self.t(n + 1))
+            assert self.t(n) == "||" and self.toks[n + 1][0] == "lit", (
+                "%s: a composed value continues with %r, not || and a literal" % (self.at(n), self.t(n) + " " + self.t(n + 1)))
+            n, kind = n + 2, "text"
+        return kind, n
+
+    def cell(self, n):
+        if self.toks[n][0] == "lit":
+            return self.value(n)
+        if self.t(n) in ("TRUE", "FALSE"):
+            return "bool", n + 1
+        if self.t(n) == "CAST":
+            _kind, n = self.value(self.expect(n, "CAST", "("))
+            return "cast", self.expect(n, "AS", "VARCHAR", "(", "160", ")", ")")
+        raise AssertionError("%s: %r stands where a value, TRUE, FALSE or the context cast must" % (self.at(n), self.t(n)))
+
+    def values(self, v):
+        """The VALUES list at token v: its rows' cell kinds, checked against
+        the shape its alias and columns name."""
+        n, rows = v + 1, []
+        while True:
+            n, cells = self.expect(n, "("), []
+            while True:
+                kind, n = self.cell(n)
+                cells.append(kind)
+                if self.t(n) != ",":
+                    break
+                n += 1
+            n = self.expect(n, ")")
+            rows.append((cells, v))
+            if self.t(n) != ",":
+                break
+            n += 1
+        end = n
+        if self.t(v - 1) == "(":
+            n = self.expect(n, ")", "AS")
+            alias, n = self.t(n), self.expect(n + 1, "(")
+            cols = []
+            while self.t(n) != ")":
+                cols.append(self.t(n))
+                n += 2 if self.t(n + 1) == "," else 1
+        else:
+            self.expect(n, ";")
+            close = v - 1
+            assert self.t(close) == ")", "%s: VALUES follows %r" % (self.at(close), self.t(close))
+            opn = max(k for k in range(close) if self.t(k) == "(")
+            assert [self.t(k) for k in range(opn - 3, opn)] == ["INSERT", "INTO", "_seed396"], self.at(opn)
+            alias, cols = "_seed396", [self.t(k) for k in range(opn + 1, close, 2)]
+        key = (alias, tuple(cols))
+        assert key in _VALUES_SHAPES, "%s: a VALUES list no shape names: %r" % (self.at(v), key)
+        shape = _VALUES_SHAPES[key]
+        for cells, _v in rows:
+            assert len(cells) == len(shape), "%s: a row of %d cells under %r" % (self.at(v), len(cells), key)
+            for col, want, got in zip(cols, shape, cells):
+                assert got == want or (want == "text" and got == "lit"), (
+                    "%s: column %s of %r takes %s, not %s" % (self.at(v), col, key, want, got))
+        for k in range(v, end):
+            self.inside[k] = True
+        self.lists.append((key, len(rows)))
+
+    def parse(self):
+        for n in range(len(self.toks)):
+            if self.t(n) == "VALUES":
+                self.values(n)
+        return self
+
+
+def _m396_parse():
     sql = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
-    toks = _tokens(sql)
-    assert [t for k, t in toks if k == "tag"] == ["$m396$", "$m396$"]
-    assert not [t for k, t in toks if k == "ident" and t.lower() == "uescape"]
-    chr_calls = 0
-    for n, (kind, text) in enumerate(toks):
-        if kind == "ident" and n + 1 < len(toks) and toks[n + 1][1] == "(":
-            assert text in _CALLS, "a call no rule admits: %s(" % text
-        if kind == "ident" and text == "chr":
-            chr_calls += 1
-            window = [t for _k, t in toks[n - 1:n + 6]]
-            assert window[:5] in (["||", "chr", "(", "10", ")"], ["||", "chr", "(", "183", ")"]), window
-            assert window[5] == "||", window
-    assert chr_calls > 0
+    return _M396Parse(sql).parse()
+
+
+def test_396_source_lexes_closed_and_its_values_parse_by_the_productions():
+    """The header's format statement, as the file's form: the whole file,
+    every byte and every line, lexes against a closed token set (_tokens),
+    and its five VALUES lists parse by explicit productions (_M396Parse):
+    each cell is the production its column takes, a value is a literal or
+    literals joined only by chr(10) or chr(183), and the one cast is
+    CAST(value AS VARCHAR(160)) around the context. Outside those rows:
+    chr stands nowhere; the one cast is CAST(NULL AS TIMESTAMPTZ); || stands
+    only inside string_agg's argument (the two refusal messages); an integer
+    stands only after <> (an IF comparing a count), after PERFORM, after
+    EXISTS (SELECT, after LIMIT, or as a VARCHAR length in _seed396's
+    declaration; a name followed by "(" is one of _CALLS; the two $m396$
+    tags are the only dollar signs and no UESCAPE word stands. So a line
+    break or a middle dot reaches a value of the file only as a chr(10) or
+    chr(183) join in a VALUES row. What 396 stores from those values when
+    it runs is the executed test's
+    (test_migration_reruns.py::test_396_stores_the_texts_its_values_read_and_the_client_bundles)."""
+    p = _m396_parse()
+    assert sorted(key for key, _rows in p.lists) == sorted(_VALUES_SHAPES), p.lists
+    toks, t = p.toks, p.t
+    assert [x for k, x, _o in toks if k == "tag"] == ["$m396$", "$m396$"]
+    assert not [x for k, x, _o in toks if k == "ident" and x.lower() == "uescape"]
+    agg = [False] * len(toks)
+    for n in range(len(toks)):
+        if t(n) == "string_agg" and t(n + 1) == "(":
+            k, depth = n + 1, 0
+            while True:
+                depth += {"(": 1, ")": -1}.get(t(k), 0)
+                agg[k] = True
+                if depth == 0:
+                    break
+                k += 1
+    seed_decl = p.expect(next(n for n in range(len(toks)) if t(n) == "TEMP"), "TEMP", "TABLE", "_seed396", "(")
+    seed_end = next(n for n in range(seed_decl, len(toks)) if t(n) == "ON")
+    casts = 0
+    for n, (kind, text, _o) in enumerate(toks):
+        if kind == "ident" and t(n + 1) == "(":
+            assert text in _CALLS, "%s: a call no rule admits: %s(" % (p.at(n), text)
+        if p.inside[n]:
+            continue
+        assert text != "chr", "%s: chr outside a VALUES row" % p.at(n)
+        if text == "CAST":
+            p.expect(n, "CAST", "(", "NULL", "AS", "TIMESTAMPTZ", ")")
+            casts += 1
+        assert text != "||" or agg[n], "%s: || outside a VALUES row and outside string_agg" % p.at(n)
+        if text == "VARCHAR":
+            assert seed_decl <= n < seed_end, "%s: VARCHAR outside _seed396's declaration and the context cast" % p.at(n)
+        if kind == "int":
+            assert (t(n - 1) in ("<>", "PERFORM", "LIMIT")
+                    or [t(n - 3), t(n - 2), t(n - 1)] == ["EXISTS", "(", "SELECT"]
+                    or (t(n - 2) == "VARCHAR" and t(n - 1) == "(" and seed_decl <= n < seed_end)), (
+                "%s: the integer %s in a position no rule names" % (p.at(n), text))
+    assert casts == 1, casts
 
 
 def test_396_writes_no_middle_dot_and_eight_chr_183_joins():
     """The header's dot statement: no middle dot character is in the file,
     and a middle dot is joined in as chr(183), eight times, the dotted
-    contexts. A literal holding the dot itself is a plain literal the token
-    grammar admits, so this test, not the grammar, is the check for it."""
+    contexts. A literal holding the dot itself is a plain literal the
+    productions admit, so this test, not the productions, is the check for it."""
     sql = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
     assert "·" not in sql
-    toks = [t for k, t in _tokens(sql)]
+    toks = [x for _k, x, _o in _tokens(sql)]
     assert sum(1 for n in range(len(toks) - 3) if toks[n:n + 4] == ["chr", "(", "183", ")"]) == 8
