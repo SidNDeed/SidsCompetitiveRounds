@@ -1712,7 +1712,7 @@ def test_332_states_its_own_bound_correctly():
 #
 # 396 registers the four client keys whose English now states the FFA
 # early-leave grace as the server applies it, retires the four keys 386
-# registered for the same four strings (no client ever carried their English),
+# registered for the same four strings in an earlier wording,
 # decides the pending proposals on those 'superseded', and seeds sixteen
 # pending claude-mt drafts. Rows are told apart here by role, never by a
 # copied id: the 386 keys are the ones PREREQ["396"] leaves, the 396 keys the

@@ -290,8 +290,8 @@ def test_no_predecessor_survives_in_any_artifact_the_game_renders_from():
     key or its value. The catalogue also keeps entries under English no
     source passes to I18n any more (earlier revisions of articles, among
     them the rule book's 304838dece8548b7, which still carries the old
-    rule); the game never looks those up, so they are outside what it
-    renders from, and the check says so by reading registered keys only."""
+    rule); those sit under no registered key, and the check reads
+    registered keys only, so it leaves them out."""
     plugin = {p.name: ladder._read(p) for p in sorted(PLUGIN.glob("*.cs"))
               if p.name != ladder.CATS.name}
     assert len(plugin) > 50, sorted(plugin)
