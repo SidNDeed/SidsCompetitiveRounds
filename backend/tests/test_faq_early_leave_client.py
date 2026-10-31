@@ -514,8 +514,8 @@ class _M396Parse:
         return _line(self.sql, self.toks[n][2] if 0 <= n < len(self.toks) else len(self.sql))
 
     def expect(self, n, *texts):
-        got = [self.t(k) for k in range(n, n + len(texts))]
-        assert got == list(texts), "%s: %r stands where %r must" % (self.at(n), got, list(texts))
+        bad = [k for k, want in enumerate(texts) if self.t(n + k) != want]
+        assert not bad, "%s: %r stands where %r must" % (self.at(n + bad[0]), self.t(n + bad[0]), texts[bad[0]])
         return n + len(texts)
 
     def value(self, n):
@@ -526,8 +526,9 @@ class _M396Parse:
             while self.t(n) == "||" and [self.t(k) for k in range(n + 1, n + 5)] in _JOINS:
                 n, joins = n + 5, joins + 1
             assert joins, "%s: %r stands after || where chr(10) or chr(183) must" % (self.at(n + 1), self.t(n + 1))
+            bad = n if self.t(n) != "||" else n + 1
             assert self.t(n) == "||" and self.k(n + 1) == "lit", (
-                "%s: a composed value continues with %r, not || and a literal" % (self.at(n), self.t(n) + " " + self.t(n + 1)))
+                "%s: a composed value continues with %r, not || and a literal" % (self.at(bad), self.t(bad)))
             n, kind = n + 2, "text"
         return kind, n
 
@@ -541,30 +542,46 @@ class _M396Parse:
             return "cast", self.expect(n, "AS", "VARCHAR", "(", "160", ")", ")")
         raise AssertionError("%s: %r stands where a value, TRUE, FALSE or the context cast must" % (self.at(n), self.t(n)))
 
+    def header(self, alias_at, col_at, close_at):
+        """The shape the list header names (the alias token, the column tokens, the token closing the column list).
+        Fails at the first header token no _VALUES_SHAPES key admits: the alias, the first column no named list has
+        at that place, a column beyond every named list's last, or the closing parenthesis where a column is missing."""
+        alias, cols = self.t(alias_at), [self.t(k) for k in col_at]
+        keys = [key for key in _VALUES_SHAPES if key[0] == alias]
+        assert keys, "%s: %r is the alias of no named VALUES list" % (self.at(alias_at), alias)
+        for i, col in enumerate(cols):
+            keys = [key for key in keys if len(key[1]) > i and key[1][i] == col]
+            assert keys, "%s: column %r stands where no named %s list has it" % (self.at(col_at[i]), col, alias)
+        keys = [key for key in keys if len(key[1]) == len(cols)]
+        assert keys, "%s: the %s column list closes before its last column" % (self.at(close_at), alias)
+        return keys[0], _VALUES_SHAPES[keys[0]]
+
     def values(self, v):
         n, rows = v + 1, []
         while True:
             row, n, cells = n, self.expect(n, "("), []
             while True:
+                at = n
                 kind, n = self.cell(n)
-                cells.append(kind)
+                cells.append((kind, at))
                 if self.t(n) != ",":
                     break
                 n += 1
             n = self.expect(n, ")")
-            rows.append(cells)
+            rows.append((cells, n - 1))
             self.spans.append((self.toks[row][2], self.toks[n - 1][2] + 1))
             if self.t(n) != ",":
                 break
             n += 1
         if self.t(v - 1) == "(":
             n = self.expect(n, ")", "AS")
-            alias, n = self.t(n), self.expect(n + 1, "(")
-            cols = []
+            alias_at, n = n, self.expect(n + 1, "(")
+            col_at = []
             while self.t(n) != ")":
                 assert n < len(self.toks), "%s: a VALUES alias's column list does not close" % self.at(n)
-                cols.append(self.t(n))
+                col_at.append(n)
                 n += 2 if self.t(n + 1) == "," else 1
+            close_at = n
         else:
             self.expect(n, ";")
             close = v - 1
@@ -572,17 +589,19 @@ class _M396Parse:
             opens = [k for k in range(close) if self.t(k) == "("]
             assert opens, "%s: no column list opens before VALUES" % self.at(close)
             opn = opens[-1]
-            assert [self.t(k) for k in range(opn - 3, opn)] == ["INSERT", "INTO", "_seed396"], (
-                "%s: a VALUES list follows a column list not of INSERT INTO _seed396" % self.at(opn))
-            alias, cols = "_seed396", [self.t(k) for k in range(opn + 1, close, 2)]
-        key = (alias, tuple(cols))
-        assert key in _VALUES_SHAPES, "%s: a VALUES list no shape names: %r" % (self.at(v), key)
-        shape = _VALUES_SHAPES[key]
-        for cells in rows:
-            assert len(cells) == len(shape), "%s: a row of %d cells under %r" % (self.at(v), len(cells), key)
-            for col, want, got in zip(cols, shape, cells):
+            want = ["INSERT", "INTO", "_seed396"]
+            bad = [k for k in range(3) if self.t(opn - 3 + k) != want[k]]
+            assert not bad, "%s: %r stands where INSERT INTO _seed396 must open the column list" % (
+                self.at(opn - 3 + bad[0]), self.t(opn - 3 + bad[0]))
+            alias_at, col_at, close_at = opn - 1, list(range(opn + 1, close, 2)), close
+        key, shape = self.header(alias_at, col_at, close_at)
+        for cells, close_row in rows:
+            for i, (got, at) in enumerate(cells[:len(shape)]):
+                want = shape[i]
                 assert got == want or (want == "text" and got == "lit"), (
-                    "%s: column %s of %r takes %s, not %s" % (self.at(v), col, key, want, got))
+                    "%s: column %s of %r takes %s, not %s" % (self.at(at), key[1][i], key, want, got))
+            assert len(cells) <= len(shape), "%s: a cell beyond the %d of %r" % (self.at(cells[len(shape)][1]), len(shape), key)
+            assert len(cells) == len(shape), "%s: a row of %d cells closes under %r" % (self.at(close_row), len(cells), key)
         self.lists.append((key, len(rows)))
 
     def parse(self):
@@ -620,6 +639,64 @@ def test_396_rows_parse_by_the_productions_and_the_text_outside_them_is_the_revi
     outside = _outside_rows(p)
     assert (hashlib.sha256(outside.encode("utf-8")).hexdigest(), outside.count("\n") + 1) == (
         _OUTSIDE_SHA256, _OUTSIDE_LINES), "396 changed outside its VALUES rows"
+
+
+def _g14_cases(sql):
+    """(name, text, line): 396 with one planted change, and the line of the
+    token, byte or literal it plants, which parse() must name; then 396 cut
+    at offsets across the file, whose line is that of the literal the cut
+    opens (when it falls inside one) or of the cut itself."""
+    lines = sql.split("\n")
+
+    def plant(line, old, new):
+        assert lines[line - 1].count(old) == 1, (line, old)
+        out = list(lines)
+        out[line - 1] = out[line - 1].replace(old, new)
+        return "\n".join(out)
+
+    seed = [i + 1 for i, l in enumerate(lines) if re.match(r"\s+INSERT INTO _seed396 ", l)][0]
+    k71 = "' || chr(10) || chr(10) || '- Confirming"
+    cases = [
+        ("byte", plant(71, k71, "' || chr(10) || chr(10) ` || '- Confirming"), 71),
+        ("literal prefix", plant(71, k71, "' || E'x' || '- Confirming"), 71),
+        ("literal control", plant(71, k71, "\n\n- Confirming"), 71),
+        ("cell kind", plant(57, "('892845f20501fbc0',", "(x,"), 57),
+        ("join", plant(71, k71, "' || repeat('-', 2) || '- Confirming"), 71),
+        ("composed continues", plant(71, k71, "' || chr(10) || chr(10) ||\nCAST '- Confirming"), 72),
+        ("cell", plant(57, "'84324a21d4105a936ec63ce3a5d72bdf7e5986b8'", "TRUE"), 57),
+        ("cast split", plant(71, "AS VARCHAR(160))", "AS VARCHAR(\n161))"), 72),
+        ("cell beyond", plant(57, "'84324a21d4105a936ec63ce3a5d72bdf7e5986b8')", "'84324a21d4105a936ec63ce3a5d72bdf7e5986b8', 'x')"), 57),
+        ("cell missing", plant(57, ", '84324a21d4105a936ec63ce3a5d72bdf7e5986b8')", "\n)"), 58),
+        ("alias", plant(61, "AS x(key_id, source_hash)", "AS y(key_id, source_hash)"), 61),
+        ("column", plant(61, "AS x(key_id, source_hash)", "AS x(key_id,\nhash)"), 62),
+        ("columns close", plant(61, "AS x(key_id, source_hash)", "AS x(key_id\n)"), 62),
+        ("insert header", plant(seed, "INSERT INTO _seed396 ", "INSERT INTO _seedx "), seed),
+        ("values follows", plant(seed, ") VALUES", ") x VALUES"), seed),
+        ("cast value", plant(71, "CAST('InfoLibrary ' || chr(183)", "CAST(x || chr(183)"), 71),
+    ]
+    spans = [(o, o + len(x)) for k, x, o in _tokens(sql) if k == "lit"]
+    for cut in range(2500, len(sql), 1700):
+        inside = [o for o, e in spans if o < cut < e]
+        cases.append(("cut %d" % cut, sql[:cut], sql.count("\n", 0, inside[0] if inside else cut) + 1))
+    return cases
+
+
+def test_396_parse_failures_name_the_planted_line():
+    """G14's enforcement: for each _g14_cases case, parse() either fails
+    with an AssertionError whose message opens with "396 line N: ", N the
+    case's line, or (a cut only, past the last VALUES list or before the
+    first one, and not inside a literal) passes. Every planted case fails."""
+    sql = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
+    bad = []
+    for name, text, line in _g14_cases(sql):
+        try:
+            _M396Parse(text).parse()
+            if not name.startswith("cut "):
+                bad.append((name, "passed"))
+        except AssertionError as e:
+            if not str(e).startswith("396 line %d: " % line):
+                bad.append((name, line, str(e)[:80]))
+    assert not bad, bad
 
 
 def test_396_writes_no_middle_dot_and_eight_chr_183_joins():
