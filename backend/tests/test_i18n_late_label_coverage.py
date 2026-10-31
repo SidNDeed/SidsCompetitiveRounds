@@ -991,13 +991,13 @@ def test_outcome_words_are_cause_neutral_in_every_locale():
 # disconnect. Each fixed phrase: (locale, English key start, the narrowing
 # phrase that must be gone, the neutral phrase now there). The words swept
 # per locale are listed in the lane's notes.
+# The ES Rewards row ("Every finished game pays XP...") and the ES rule-book
+# row whose English the FAQ lane rewrites stay at main's text here: the FAQ
+# lane owns both rows and its version replaces them.
 FORFEIT_FIXES = [
     ('ES', '<color=#FFD94D><b>HOW THE BALA',
      'Rendición con ventaja:',
      'Forfait por ventaja:'),
-    ('ES', 'Every finished game pays XP, X',
-     'Plazos e incomparecencias',
-     'Plazos y forfaits'),
     ('ES', 'Every tournament runs through ',
      'Plazos e incomparecencias',
      'Plazos y forfaits'),
@@ -1008,9 +1008,6 @@ FORFEIT_FIXES = [
      'Una incomparecencia nunca se disfraza',
      'Un forfait nunca se disfraza'),
     ('ES', 'The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If a result looks missing, the reason is almost always on this page.\\n\\n<color=#FFD94D><b>NEVER RECORDED AT ALL</b></color>\\n\\n- Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.\\n- Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.\\n- Spectator seats tr',
-     'decidida por incomparecencia no puede apostarse',
-     'decidida por forfait no puede apostarse'),
-    ('ES', 'The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If a result looks missing, the reason is almost always on this page.\\n\\n<color=#FFD94D><b>NEVER RECORDED AT ALL</b></color>\\n\\n- Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.\\n- Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.\\n- Spectator seats su',
      'decidida por incomparecencia no puede apostarse',
      'decidida por forfait no puede apostarse'),
     ('ES', 'Tournaments are 8-16 player do',
