@@ -42,6 +42,8 @@ import subprocess
 
 import pytest
 
+from _dotnet_opt_in import require_dotnet_opt_in
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 PLUGIN = os.path.join(ROOT, "plugin")
 PROJ_DIR = os.path.join(ROOT, "tools", "tests", "title-ladders-compat")
@@ -212,6 +214,7 @@ def _variants():
 
 @pytest.fixture(scope="module")
 def run(tmp_path_factory):
+    require_dotnet_opt_in()
     if shutil.which("dotnet") is None:
         pytest.fail("dotnet is not on PATH: the compat program cannot be built")
     work = tmp_path_factory.mktemp("tlc")

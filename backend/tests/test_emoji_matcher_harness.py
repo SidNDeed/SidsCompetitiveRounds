@@ -23,12 +23,15 @@ import sys
 
 import pytest
 
+from _dotnet_opt_in import SKIP_REASON, dotnet_opt_in
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CS_PATH = os.path.join(REPO, "plugin", "EmojiSprites.cs")
 TOOL_PATH = os.path.join(REPO, "tools", "emoji_atlas.py")
 ZWJ = chr(0x200D)           # zero-width joiner
 
-pytestmark = pytest.mark.skipif(shutil.which("dotnet") is None, reason="no dotnet SDK on this seat")
+pytestmark = [pytest.mark.skipif(dotnet_opt_in() is None, reason=SKIP_REASON),
+              pytest.mark.skipif(shutil.which("dotnet") is None, reason="no dotnet SDK on this seat")]
 
 
 def _tool():
