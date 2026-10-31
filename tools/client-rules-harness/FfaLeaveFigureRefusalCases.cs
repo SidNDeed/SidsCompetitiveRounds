@@ -10,7 +10,11 @@ namespace CompetitiveRounds
     /// entry and no game_points_at_leave with 422. The FFA send gives up at once
     /// only on a TERMINAL refusal (FfaReportRules.IsTerminalRefusal, one overload
     /// on the status code and one on the formatted response text); anything else
-    /// goes to the outbox, whose retry drops a 4xx as permanent. So a 422 must
+    /// goes to the outbox. There a retry that carried the session token and
+    /// was answered with a 4xx other than 401 and 429 drops the body; a retry
+    /// without the token is given back, and a token-carrying 401, 429, 5xx or
+    /// transport failure stays queued until the launch's attempts run out.
+    /// So a 422 must
     /// be non-terminal in BOTH overloads, and 409 and 403 must stay terminal in
     /// both. The response text is built by the client's own rule
     /// (SecureRouteRules.RequestErrorText), with a body whose steam ids carry
