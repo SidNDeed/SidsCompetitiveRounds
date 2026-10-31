@@ -5248,6 +5248,15 @@ def test_early_leave_grace_keeps_assembly_overlap_excluded(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def _trust_note(src):
+    """The TRUST note in submit_ffa_match: the run of comment lines from
+    "# TRUST:" to the first line that is not a comment."""
+    lines = src[src.index("# TRUST:"):].splitlines()
+    end = next(i for i, line in enumerate(lines) if not line.lstrip().startswith("#"))
+    assert end >= 10, "the TRUST note shrank to %d lines" % end
+    return "\n".join(lines[:end])
+
+
 def test_early_leave_grace_achievement_exclusions_are_independent():
     """S1: ghost/assembly exclusions feed both achievement filters; grace does not."""
     import ast
@@ -5314,7 +5323,7 @@ def test_early_leave_grace_achievement_exclusions_are_independent():
                 and node.func.attr == "difference":
             assert not any(isinstance(n, ast.Name) and n.id == "graced"
                            for arg in node.args for n in ast.walk(arg))
-    trust = raw[raw.index("# TRUST:"):raw.index("# Old clients")]
+    trust = _trust_note(raw)
     flat = " ".join(line.lstrip().lstrip("#").strip() for line in trust.splitlines())
     assert ("Achievements are unaffected by the grace: their predicates read the "
             "ghost and assembly exclusions, not the grace.") in flat

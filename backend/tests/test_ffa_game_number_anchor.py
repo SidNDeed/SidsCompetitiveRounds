@@ -1207,9 +1207,18 @@ def test_differing_winners_are_a_contradiction_in_both_orders():
     assert main._ffa_report_contradiction(S1, _vec(ROW_B), _report(ROW_A, S3), False) is not None
 
 
+def _trust_note(src):
+    """The TRUST note in submit_ffa_match: the run of comment lines from
+    "# TRUST:" to the first line that is not a comment."""
+    lines = src[src.index("# TRUST:"):].splitlines()
+    end = next(i for i, line in enumerate(lines) if not line.lstrip().startswith("#"))
+    assert end >= 10, "the TRUST note shrank to %d lines" % end
+    return "\n".join(lines[:end])
+
+
 def test_the_reporter_incentive_comment_states_the_bounded_truth():
     src = _endpoint_src()
-    block = src[src.index("# TRUST:"):src.index("# Old clients")]
+    block = _trust_note(src)
     flat = " ".join(line.lstrip().lstrip("#").strip()
                     for line in block.splitlines())
     assert (
