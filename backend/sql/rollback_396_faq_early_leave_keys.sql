@@ -9,10 +9,19 @@
 -- 'superseded' on the 386 keys stay superseded: a translator re-proposes through the
 -- portal if that text is wanted again. Keys before proposals, the order the key sync and
 -- the review endpoint take. Approved entries on either side are never written.
+-- APPROVED WORK IS NEVER RETIRED: the file REFUSES, and commits nothing, while any of
+-- the four 396 keys carries an approved entry (a translation a portal reviewer
+-- approved), the refusal 396 applies to approved entries on the 386 keys. Retiring
+-- such a key would keep the entry but drop it from every served pack (the pack
+-- endpoint serves live keys only). Before any write it locks the eight key rows (396's
+-- four and 386's four) FOR NO KEY UPDATE in key order, then their entries in (key,
+-- language) order, the order 396 and the review endpoint take, and reads the approved
+-- count under those locks, so an approval in flight is serialized against it.
 -- NOT a release-train migration. Re-runnable: with the 396 keys retired, the 386 keys
 -- live and nothing pending on the 396 keys, it writes no row.
 -- DEPLOY ORDER: only while no shipped client carries the four new strings, or with that
--- client's rollback. A client that already shows them keeps its bundled drafts, and the
+-- client's rollback; and only while no translation on the four 396 keys is approved
+-- (otherwise it refuses, above). A client that already shows them keeps its bundled drafts, and the
 -- next key sync from such a client makes the keys live again and retires the 386 keys.
 -- It makes the 386 keys live whoever retired them, so run it only to take 396 back.
 -- 396 never re-proposes a claude-mt draft of a text it already proposed, and this file
@@ -24,8 +33,8 @@
 -- wait, 25 s on each top-level statement, 5 s on a pause between statements, and
 -- synchronous_commit = local. The statement and idle budgets are separate (PostgreSQL 16
 -- has no transaction_timeout), so the longest this file can hold locks before its COMMIT
--- is their SUM, 30 s, and that holds because all three UPDATEs run inside ONE statement,
--- a DO block whose inner statements share its 25 s.
+-- is their SUM, 30 s, and that holds because the locks, the approved check and all three
+-- UPDATEs run inside ONE statement, a DO block whose inner statements share its 25 s.
 -- THE COMMIT. PostgreSQL disables the statement timer before it commits, so the COMMIT's
 -- own work is outside every timeout above, and the locks are held until it ends.
 -- synchronous_commit = local keeps that work LOCAL: it never waits for a standby's
@@ -44,7 +53,28 @@ SET LOCAL statement_timeout = '25s';
 SET LOCAL synchronous_commit = local;
 
 DO $r396$
+DECLARE
+    v_approved INT;
 BEGIN
+    -- Approved work is never retired (see the header): lock, then read, then write.
+    PERFORM 1 FROM i18n_keys
+     WHERE key_id IN ('0ab13f648dd0175b', '3988c8d80e42f69d', '3bb08fc59139b367', '439cd5d90ee1b6d3',
+                      '44732e465b16cee1', '6173541088dbb882', '79023ff50ab9d08e', '9d365a214640aebd')
+     ORDER BY key_id
+       FOR NO KEY UPDATE;
+    PERFORM 1 FROM i18n_entries
+     WHERE key_id IN ('0ab13f648dd0175b', '3988c8d80e42f69d', '3bb08fc59139b367', '439cd5d90ee1b6d3',
+                      '44732e465b16cee1', '6173541088dbb882', '79023ff50ab9d08e', '9d365a214640aebd')
+     ORDER BY key_id, language_code
+       FOR NO KEY UPDATE;
+    SELECT COUNT(*) INTO v_approved
+      FROM i18n_entries e
+     WHERE e.key_id IN ('44732e465b16cee1', '6173541088dbb882', '9d365a214640aebd', '0ab13f648dd0175b')
+       AND e.state = 'approved';
+    IF v_approved <> 0 THEN
+        RAISE EXCEPTION 'rollback_396: % approved entr(ies) exist on the 396 FAQ early-leave keys - refusing to retire translator-approved work; nothing committed', v_approved;
+    END IF;
+
     UPDATE i18n_keys
        SET retired_at = NOW(), updated_at = NOW()
      WHERE namespace = 'client'

@@ -1933,6 +1933,51 @@ def test_396_rollback_takes_it_back_once_and_a_later_396_commits_nothing():
         % (rolled, after))
 
 
+def test_396_rollback_refuses_while_a_396_key_has_an_approved_translation():
+    """FAQ-R1 F4. A portal reviewer approves a translation on one of 396's
+    keys after 396 is applied: the rollback then refuses and commits
+    nothing, so the four 396 keys stay live, the four 386 keys stay retired,
+    the sixteen drafts stay pending and the approved entry is untouched
+    (version included). The control is the same database without the
+    approval, where the rollback commits and retires the four 396 keys, so
+    the refusal is what the approval reached and not a file that cannot
+    apply."""
+    sql = migration_text("396")
+    rollback = (SQL_DIR / _396_ROLLBACK).read_text(encoding="utf-8")
+
+    def attempt(approve):
+        async def steps(conn):
+            old = set((await _396_state(conn))["keys"])
+            await conn.execute(sql)
+            new = sorted(set((await _396_state(conn))["keys"]) - old)
+            if approve:
+                await conn.execute(
+                    "INSERT INTO i18n_entries (key_id, language_code, target, state,"
+                    "                          approved_source_hash, approved_by_steam_id)"
+                    " SELECT key_id, 'es', 'una traduccion aprobada', 'approved',"
+                    "        source_hash, '76561190000000003'"
+                    "   FROM i18n_keys WHERE key_id = $1", new[0])
+            before = await _396_state(conn)
+            verdict = await _396_attempt(conn, rollback)
+            return old, new, before, verdict, await _396_state(conn)
+        return _run(_396_in_schema("m396v", steps))
+
+    old, new, before, control, rolled = attempt(False)
+    assert len(old) == 4 and len(new) == 4, (sorted(old), new)
+    assert control is None, control
+    assert not any(rolled["keys"][k]["live"] for k in new), rolled["keys"]
+    assert all(rolled["keys"][k]["live"] for k in old), rolled["keys"]
+
+    old, new, before, verdict, after = attempt(True)
+    assert [(e["key_id"], e["state"]) for e in before["entries"]
+            if e["key_id"] in new] == [(new[0], "approved")], before["entries"]
+    assert all(before["keys"][k]["live"] for k in new), before["keys"]
+    assert verdict and ("1 approved entr(ies) exist on the 396 FAQ early-leave keys"
+                        in verdict), verdict
+    assert after == before, (
+        "a refused rollback_396 stored something: %r -> %r" % (before, after))
+
+
 def test_396_seed_check_refuses_a_literal_that_a_crlf_checkout_reached():
     """The control for the CRLF arm above. Every literal in 396 is one line,
     which is what keeps a CRLF checkout away from the text. The same file
