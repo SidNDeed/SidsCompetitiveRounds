@@ -427,73 +427,76 @@ def test_396_and_its_rollback_retire_and_revive_exactly_386s_keys():
     assert revive_old and _ids_in(revive_old.group(1)) == set(old), revive_old
 
 
-_ROW_GAP = re.compile(r"\s*(?:,\s*(?:(?:TRUE|FALSE)\s*,\s*(?:CAST\(\s*)?)?|\|\|(?:\s*chr\((?:10|183)\)\s*\|\|)*)\s*")
-_ROW_END = re.compile(r"\s*(?:AS VARCHAR\(160\)\)\s*)?\)\s*,?\s*")
+_TOKEN = re.compile(r"""
+    (?P<ws>[ \t\n]+)
+  | (?P<comment>--[^\n]*)
+  | (?P<lit>'(?:''|[^'])*')
+  | (?P<tag>\$m396\$)
+  | (?P<ident>[A-Za-z_][A-Za-z0-9_]*)
+  | (?P<int>[0-9]+)
+  | (?P<op>\|\||<>|>=|<=|[=<>*.,;()])
+""", re.X)
+# The functions 396 calls, and no other: a name followed by "(" must be one of these.
+_CALLS = {"AND", "CAST", "CONFLICT", "COUNT", "EXISTS", "FROM", "IN", "JOIN", "NOW", "VALUES", "VARCHAR",
+          "_seed396", "chr", "i18n_keys", "i18n_proposals", "md5", "string_agg", "v", "x"}
 
 
-def _plain_literals(sql):
-    """Scan SQL text outside `--` comments. Returns the literal spans and the
-    text outside every literal. A literal must be a plain single-quoted one:
-    it opens after whitespace or "(" (so no E, U&, N, B or X prefix), its only
-    escape is the doubled quote, and it holds no backslash and no character
-    below U+0020 (so it ends on its own line)."""
-    spans, outside, i, n = [], [], 0, len(sql)
-    while i < n:
-        if sql.startswith("--", i):
-            j = sql.find("\n", i)
-            i = n if j < 0 else j
-            continue
-        if sql[i] != "'":
-            outside.append(sql[i])
-            i += 1
-            continue
-        assert i > 0 and sql[i - 1] in " \t\n(", "a literal opens after %r: %r" % (sql[i - 1], sql[i - 20:i + 20])
-        j = i + 1
-        while True:
-            assert j < n, "an unterminated literal: %r" % sql[i:i + 40]
-            if sql[j] == "'":
-                if sql.startswith("''", j):
-                    j += 2
-                    continue
-                break
-            assert sql[j] >= " " and sql[j] != "\\", "a literal holds %r: %r" % (sql[j], sql[i:j + 1][-40:])
-            j += 1
-        spans.append((i, j + 1))
-        outside.append(" ")
-        i = j + 1
-    return spans, "".join(outside)
+def _tokens(sql):
+    """Lex the WHOLE file, every byte, against a closed token set: whitespace,
+    `--` comments, plain single-quoted literals, the $m396$ tag, identifiers,
+    integers, and the operators and punctuation the file uses. A byte no rule
+    admits fails. A literal must open after whitespace, "(" or "," (so no E,
+    U&, N, B or X prefix), its only escape is the doubled quote, and it holds
+    no backslash and no character below U+0020 (so it ends on its own line).
+    Returns the (kind, text) tokens other than whitespace and comments."""
+    out, i = [], 0
+    while i < len(sql):
+        m = _TOKEN.match(sql, i)
+        assert m, "a byte no token rule admits at %d: %r" % (i, sql[max(0, i - 20):i + 20])
+        kind, text = m.lastgroup, m.group()
+        if kind == "lit":
+            assert i > 0 and sql[i - 1] in " \t\n(,", "a literal opens after %r: %r" % (sql[i - 1], sql[i - 20:i + 20])
+            body = text[1:-1]
+            assert all(ch >= " " and ch != "\\" for ch in body), "a literal holds a control character or a backslash: %r" % text[:60]
+        if kind not in ("ws", "comment"):
+            out.append((kind, text))
+        i = m.end()
+    return out
 
 
-def test_396_writes_each_literal_on_one_line_with_its_breaks_and_dots_as_chr():
-    """The header's format statement: every literal is one line, a line break
-    is joined in as chr(10) and a middle dot as chr(183). The stored values
+def test_396_source_is_a_closed_token_grammar_with_breaks_only_as_chr_joins():
+    """The header's format statement: every literal is one line and a line
+    break in a composed value is joined in as chr(10). The stored values
     would be the same with another literal form (an escape string, a Unicode
-    escape, a dollar quote, a raw control character), so this reads the
-    source against a closed grammar instead of a list of forms: outside the
-    DO block's two $m396$ tags every literal is a plain single-quoted one
-    (_plain_literals), no dollar sign or UESCAPE stands outside a literal,
-    chr() is called with 10 or 183 only, and each VALUES row is literals
-    joined only by a comma (with TRUE or FALSE and CAST( between some), or
-    by || with chr(10) and chr(183) joins: so a line break in a composed
-    value can only come from a chr(10) join. No middle dot character is in
-    the file, and the eight chr(183) joins are the dotted contexts."""
-    raw = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
-    assert "·" not in raw
-    assert raw.count("$m396$") == 2
-    sql = raw.replace("$m396$", "")
-    spans, outside = _plain_literals(sql)
-    assert "$" not in outside
-    assert "uescape" not in outside.lower()
-    assert set(re.findall(r"chr\(([^)]*)\)", outside)) == {"10", "183"}
-    assert outside.count("chr(183)") == 8
-    rows = 0
-    for line in sql.split("\n"):
-        if not line.lstrip().startswith("('"):
-            continue
-        rows += 1
-        lits = [m.span() for m in re.finditer(r"'(?:[^']|'')*'", line)]
-        assert line[:lits[0][0]].strip() == "(", line[:60]
-        assert _ROW_END.fullmatch(line[lits[-1][1]:]), line[-60:]
-        for (_a, b), (c, _d) in zip(lits, lits[1:]):
-            assert _ROW_GAP.fullmatch(line[b:c]), "a VALUES row joins literals with %r" % line[b:c]
-    assert rows == 44, rows
+    escape, a dollar quote, a raw control character, a break built by
+    another function), so this reads the WHOLE file, every byte and every
+    line, against a closed grammar (_tokens) instead of a list of forms or a
+    selection of lines: the two $m396$ tags are the only dollar signs, no
+    UESCAPE word stands anywhere, a name followed by "(" is one of the
+    functions the file calls (_CALLS), and every chr() call stands exactly
+    as `|| chr(10) ||` or `|| chr(183) ||` between two concatenations."""
+    sql = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
+    toks = _tokens(sql)
+    assert [t for k, t in toks if k == "tag"] == ["$m396$", "$m396$"]
+    assert not [t for k, t in toks if k == "ident" and t.lower() == "uescape"]
+    chr_calls = 0
+    for n, (kind, text) in enumerate(toks):
+        if kind == "ident" and n + 1 < len(toks) and toks[n + 1][1] == "(":
+            assert text in _CALLS, "a call no rule admits: %s(" % text
+        if kind == "ident" and text == "chr":
+            chr_calls += 1
+            window = [t for _k, t in toks[n - 1:n + 6]]
+            assert window[:5] in (["||", "chr", "(", "10", ")"], ["||", "chr", "(", "183", ")"]), window
+            assert window[5] == "||", window
+    assert chr_calls > 0
+
+
+def test_396_writes_no_middle_dot_and_eight_chr_183_joins():
+    """The header's dot statement: no middle dot character is in the file,
+    and a middle dot is joined in as chr(183), eight times, the dotted
+    contexts. A literal holding the dot itself is a plain literal the token
+    grammar admits, so this test, not the grammar, is the check for it."""
+    sql = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
+    assert "·" not in sql
+    toks = [t for k, t in _tokens(sql)]
+    assert sum(1 for n in range(len(toks) - 3) if toks[n:n + 4] == ["chr", "(", "183", ")"]) == 8
