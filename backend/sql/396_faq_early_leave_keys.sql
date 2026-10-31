@@ -47,8 +47,8 @@ DECLARE
     uncovered    INT;
     sample       TEXT;
 BEGIN
-    -- 1. Key hash guard (see the header): before any write, refuse an existing row at
-    --    one of the four new ids whose source_hash is not the one this file writes.
+    -- 1. Key hash guard, ahead of step 2's INSERT: refuse an existing row at one of the
+    --    four new ids whose source_hash is not the one this file writes.
     SELECT string_agg(k.key_id || CASE WHEN k.retired_at IS NULL THEN ' (live)' ELSE ' (retired)' END,
                       ', ' ORDER BY k.key_id)
       INTO clash
@@ -77,7 +77,7 @@ BEGIN
        SET namespace = EXCLUDED.namespace, msgctxt = EXCLUDED.msgctxt,
            sensitive = EXCLUDED.sensitive, max_px = EXCLUDED.max_px,
            context = EXCLUDED.context, retired_at = NULL, updated_at = NOW()
-     -- never a different-hash row (the key hash guard): it stays as found and fails the post-check
+     -- a same-hash row only (the key hash guard): a different-hash row stays as found and fails the post-check
      WHERE i18n_keys.source_hash = EXCLUDED.source_hash
        AND (i18n_keys.namespace, i18n_keys.msgctxt, i18n_keys.sensitive,
             i18n_keys.max_px, i18n_keys.context, i18n_keys.retired_at)
@@ -192,8 +192,8 @@ BEGIN
     GET DIAGNOSTICS v_seeded = ROW_COUNT;
 
     -- 5. Closing post-checks (enforcing).
-    -- The seed texts are the ones written above (md5 of each), so a damaged literal
-    -- cannot pass as a draft.
+    -- The seed texts are the ones written above (md5 of each): a damaged literal fails
+    -- this check.
     SELECT COUNT(*) INTO v_ok
       FROM _seed396 v
       JOIN (VALUES

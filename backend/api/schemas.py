@@ -2016,10 +2016,8 @@ class FfaPlayerEntry(BaseModel):
     # half-point threshold, leaves the seat unrated for this game.
     # None = not reported: a present player or a carried roster ghost. On a
     # left_early entry that is not absent it is REQUIRED: submit_ffa_match
-    # refuses the report with 422 before any write (clients before v1.39.1
-    # never send it, so their reports with such a leaver are not recorded,
-    # and neither is a later game of that sitting: the lobby's game count
-    # did not move, so the next report's game number is refused).
+    # refuses the report with 422 as its first statement
+    # (backend/tests/test_ffa_leave_figure_required.py).
     # Also OUTSIDE the frozen ffa:
     # HMAC canonical, like absent and damage_dealt; submit_ffa_match refutes
     # contradictions in the signed points and rounds. Bounded so a crafted
