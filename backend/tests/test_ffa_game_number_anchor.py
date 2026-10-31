@@ -2057,6 +2057,10 @@ def test_no_terminal_refusal_on_the_ffa_report_path_is_answered_over_nothing():
         '"photon_room_id is required"': "malformed room id",
         '"One or more players not registered"': "unknown player",
         '"Lobby not found"': "no row to bind to",
+        # FAQ-R1 F1: the leave figure missing on a left_early, non-absent entry.
+        # Raised by the endpoint's first statement, before the session check and
+        # the signature, so the payload is unauthenticated when it is refused.
+        '"game_points_at_leave is required on every left_early entry "': "malformed entry",
     }
     unbound = {
         '"Report must cover exactly the lobby roster"': "roster binding",
