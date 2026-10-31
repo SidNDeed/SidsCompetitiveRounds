@@ -1531,9 +1531,10 @@ def test_the_server_text_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[servertext\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # 57 cases: 41 measured on seat-3 at 85a77442 with the bets cases E1-E4
-    # (#342), and the round-4 validator (V1-V7) and anchoring (T1-T4) cases.
-    assert run >= 57, "the ServerTextRules suite shrank to %d cases" % run
+    # 60 cases: 41 measured on seat-3 at 85a77442 with the bets cases E1-E4
+    # (#342), the round-4 validator (V1-V7) and anchoring (T1-T4) cases, and
+    # the round-5 V2u, V2d and V7b.
+    assert run >= 60, "the ServerTextRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("cid", ["B1n", "B2n", "B3n", "B7n", "V1n", "T1n"])

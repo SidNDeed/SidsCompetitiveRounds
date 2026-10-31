@@ -272,7 +272,7 @@ namespace CompetitiveRounds
                 string good = Env(409, "{\"detail\":{\"error\":\"price_changed\",\"context\":{\"ok\":[1,-2.5e+3,true,false,null,\"\\u00e9\\n\"]}}}");
                 Check(r, "V1p positive control: the valid price_changed body is still the price-change answer",
                       IsDetailError(good, 409, "price_changed"), good);
-                string[] escapes = { "\\x", "\\u12G4", "\\u12", "\\'", "\\U0041", "\\" };
+                string[] escapes = { "\\x", "\\u12G4", "\\u12", "\\'", "\\U0041" };
                 string esc = null;
                 foreach (string e in escapes)
                 {
@@ -281,6 +281,15 @@ namespace CompetitiveRounds
                          || TrRefusal(Env(409, nested)) != null) && esc == null) esc = e;
                 }
                 Check(r, "V2 every invalid escape, in the detail or nested, makes the body unreadable", esc == null, esc ?? "ok");
+                // A backslash before the closing quote escapes it: the string never ends.
+                string unterminated = "{\"detail\":\"Sold out\\\"}";
+                Check(r, "V2u an unterminated string (the closing quote escaped) makes the body unreadable",
+                      !JsonValid(unterminated) && TrRefusal(Env(409, unterminated)) == null, "");
+                // A backslash as the very last byte: the escape has no second character.
+                string dangling = "{\"detail\":\"Sold out\",\"v\":\"a\\", danglingGot;
+                try { danglingGot = JsonValid(dangling) ? "accepted" : null; }
+                catch (Exception ex) { danglingGot = ex.GetType().Name; }
+                Check(r, "V2d a backslash as the last byte is refused, without an exception", danglingGot == null, danglingGot);
                 string[] nums = { "01", "+1", "1.", ".5", "1e", "1e+", "-", "-01", "1.e5", "0x10", "1E", "--1", "Infinity", "NaN", "1_0" };
                 string num = null;
                 foreach (string n in nums)
@@ -307,15 +316,16 @@ namespace CompetitiveRounds
                     if ((TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + l + "}")) != null
                          || TrRefusal(Env(409, Nest(l))) != null) && lit == null) lit = l;
                 Check(r, "V5 only true, false and null are literals, at the top level or nested", lit == null, lit ?? "ok");
-                string[] shapes = { "[1,]", "[,1]", "{\"a\":1,}", "{\"a\"}", "{\"a\" 1}", "{a:1}", "[1 2]", "\"a\tb\"" };
+                string[] shapes = { "[1,]", "[,1]", "{\"a\":1,}", "{\"a\"}", "{\"a\" 1}", "{a:1}", "[1 2]", "\"a\tb\"", "{\"a\":1 \"b\":2}" };
                 string shape = null;
                 foreach (string sh in shapes)
                     if (TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + sh + "}")) != null && shape == null) shape = sh;
                 Check(r, "V6 a malformed nested array, object or string makes the body unreadable", shape == null, shape ?? "ok");
-                string deep = new string('[', 65) + new string(']', 65), deepOk = new string('[', 60) + new string(']', 60);
-                Check(r, "V7 nesting deeper than 64 is refused and 60 is accepted",
-                      TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + deep + "}")) == null
-                      && TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + deepOk + "}")) == "Sold out", "");
+                // Total depth counts the top object: the object and 63 arrays is 64, and 64 arrays is 65.
+                string d64 = "{\"detail\":\"Sold out\",\"v\":" + new string('[', 63) + new string(']', 63) + "}";
+                string d65 = "{\"detail\":\"Sold out\",\"v\":" + new string('[', 64) + new string(']', 64) + "}";
+                Check(r, "V7 total nesting depth 64 is accepted", JsonValid(d64) && TrRefusal(Env(409, d64)) == "Sold out", TrRefusal(Env(409, d64)));
+                Check(r, "V7b total nesting depth 65 is refused", !JsonValid(d65) && TrRefusal(Env(409, d65)) == null, TrRefusal(Env(409, d65)));
             }
 
             // -- T: a template matches the whole detail or nothing ---------------------
