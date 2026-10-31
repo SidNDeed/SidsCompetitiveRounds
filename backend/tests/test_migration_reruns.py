@@ -1840,11 +1840,12 @@ def test_396_retires_the_386_keys_and_seeds_sixteen_drafts_once():
 
 def test_396_stores_the_texts_its_values_read_and_the_client_bundles():
     """The third of 396's format guarantees: applied to its prerequisite,
-    396 stores, byte for byte, as each new key's msgctxt the client's
-    English for its site and the text the file's key row reads as
-    (m396_rows), as its context the row's context, and as each of the
-    sixteen claude-mt drafts the bundled catalogue's text for its key's
-    English in its language and the text the file's seed row reads as."""
+    396 stores, byte for byte, as the four new keys' msgctxt the four
+    sites' English (as a set) and, key by key, the text the file's key row
+    reads as (m396_rows) with that row's context; and as the sixteen
+    claude-mt drafts, pair by pair, the text the file's seed row reads as
+    and the bundled catalogue's text for its key's English in its
+    language."""
     import test_faq_early_leave_client as client
     sources = client.site_sources()
     keys, _sensitive, seeds = client.m396_rows()

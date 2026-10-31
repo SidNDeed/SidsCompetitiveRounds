@@ -484,10 +484,11 @@ class _M396Parse:
         join     := chr "(" ( 10 | 183 ) ")"
         cast     := CAST "(" value AS VARCHAR "(" 160 ")" ")"
         row      := "(" cell ( "," cell )* ")"   each cell the production its column takes (_VALUES_SHAPES)
-    parse() fails, naming the line, on a cell no production admits, on a
-    list whose alias and columns _VALUES_SHAPES does not name, and on a row
-    whose cells do not match that shape. `spans` holds each row's offsets,
-    from its opening to its closing parenthesis."""
+    parse() fails on a cell no production admits (naming its line, or, for
+    a literal _tokens refuses, quoting the literal), on a list whose alias
+    and columns _VALUES_SHAPES does not name, and on a row whose cells do
+    not match that shape. `spans` holds each row's offsets, from its
+    opening to its closing parenthesis."""
 
     def __init__(self, sql):
         self.sql, self.toks = sql, _tokens(sql)
@@ -607,8 +608,7 @@ def test_396_rows_parse_by_the_productions_and_the_text_outside_them_is_the_revi
 
 def test_396_writes_no_middle_dot_and_eight_chr_183_joins():
     """No middle-dot character is in 396, and its tokens hold exactly eight
-    chr(183) joins. (A literal holding the dot itself is a literal the
-    productions admit; this test is the check for it.)"""
+    runs of chr ( 183 )."""
     sql = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
     assert "·" not in sql
     toks = [x for _k, x, _o in _tokens(sql)]
