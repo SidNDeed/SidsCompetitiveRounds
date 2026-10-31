@@ -10055,6 +10055,49 @@ class _Held:
         return done
 
 
+def _shrink_ceiling(monkeypatch, name, value, *, spare):
+    """`auto_logs.<name>` set to `value` for the hop a test HOLDS, and the
+    hops it does NOT hold left at the constant's production value.
+
+    THE CLASS THIS CLOSES. A ceiling constant bounds every hop that spells it,
+    not only the one a test holds: the orphan sweep's walk AND its
+    resolution, the scrub's two passes, the upload's directory hop AND the
+    hop the test stalls. Shrinking the constant so that the HELD hop expires
+    also put every un-held hop of the same pass under a fraction of a second,
+    and the un-held hop is real work on a real volume -- the resolution is an
+    unlink and a directory flush, which a loaded test seat does not always
+    finish in 0.2 s. The orphan sweep's control (the held walk's ceiling
+    lifted, so it waits the hold out) then read red with no defect in the
+    code: the resolution expired instead, after 3.2 s, which is the 3.0 s
+    hold plus the 0.2 s ceiling.
+
+    So a hop whose function is named in `spare` is waited for at the
+    constant's PRODUCTION value (or its own budget, if that is longer), and
+    every other hop keeps the budget its site passes -- the shrunk value, a
+    mutant's lifted ceiling, or the twin's `float(...)`. A held function is
+    a `_Held`, which has no `__name__`, so it is never spared.
+
+    Answers a dict counting the spared hops per name, so a test shows that
+    the spare was reached rather than assuming it."""
+    production = getattr(auto_logs, name)
+    assert value < production, (
+        "%s is %r, not above the shrunk %r: nothing here is a shrink"
+        % (name, production, value))
+    monkeypatch.setattr(auto_logs, name, value)
+    spared = dict.fromkeys(spare, 0)
+    real_hop = auto_logs._hop
+
+    async def hop(pool, budget, fn, *args):
+        fname = getattr(fn, "__name__", None)
+        if fname in spared:
+            spared[fname] += 1
+            budget = max(budget, production)
+        return await real_hop(pool, budget, fn, *args)
+
+    monkeypatch.setattr(auto_logs, "_hop", hop)
+    return spared
+
+
 def _main_mutant(name, pairs):
     """`main.<name>` with every (anchor, replacement) applied, compiled
     WITHOUT its route decorator -- executing it would register a second copy
@@ -10428,7 +10471,8 @@ def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
     the `if _running:` deferral removed -- and it is gone while the store is
     still held. TWIN: the same test spelled `len(...) > 0`.
     """
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_VOLUME_WAIT_S", 0.2,
+                             spare=("_bug_report_log_path",))
     monkeypatch.setattr(main, "_is_admin", _no_admin)
     monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
     held = _Held(auto_logs._stamp_marker)
@@ -10474,6 +10518,7 @@ def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
         "            if _running:\n", "            if len(_running) > 0:\n")))
     assert registered is True and drained and released, (
         registered, drained, released)
+    assert spared["_bug_report_log_path"] == 3, spared
 
 
 def test_a_player_attachment_whose_directory_does_not_resolve_is_filed_as_lost(
@@ -10750,7 +10795,8 @@ def test_the_admin_log_scrub_holds_no_connection_and_answers_past_its_ceiling(
                 "    body = await _auto_logs._hop(\n")
     pass_two = ("        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,\n"
                 "        _scrub_pass_two, body, purged, counts)\n")
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_CPU_WAIT_S", CEILING)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_CPU_WAIT_S", CEILING,
+                             spare=("_scrub_pass_one",))
     # The probe only asks the database when it has something to hash with;
     # the log names the synthetic account so it has an id to ask about.
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "a-test-secret")
@@ -10856,6 +10902,7 @@ def test_the_admin_log_scrub_holds_no_connection_and_answers_past_its_ceiling(
     assert (d_out, p_out) == (0, 0), (d_out, p_out)
     assert isinstance(got, HTTPException) and got.status_code == 503, got
     assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+    assert spared["_scrub_pass_one"] > 0, spared
 
 
 def test_the_admin_log_scrub_answers_when_its_first_pass_does_not_finish(
@@ -10876,7 +10923,8 @@ def test_the_admin_log_scrub_answers_when_its_first_pass_does_not_finish(
     HOLD, CEILING = 1.0, 0.2
     pass_one = ("        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,\n"
                 "        _scrub_pass_one, body)\n")
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_CPU_WAIT_S", CEILING)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_CPU_WAIT_S", CEILING,
+                             spare=("_scrub_pass_two",))
     name = "%s.log.gz" % (RID,)
     (logdir / name).write_bytes(gzip.compress(b"a stored log line"))
     held = _Held(main._scrub_pass_one)
@@ -10964,6 +11012,7 @@ def test_the_admin_log_scrub_answers_when_its_first_pass_does_not_finish(
     assert (d_out, p_out) == (0, 0), (d_out, p_out)
     assert isinstance(got, HTTPException) and got.status_code == 503, got
     assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+    assert spared["_scrub_pass_two"] > 0, spared
 
 
 def test_an_insert_whose_cleanup_barrier_refuses_still_answers_503(
@@ -11062,7 +11111,8 @@ def test_an_insert_whose_cleanup_barrier_refuses_still_answers_503(
 
     # PART TWO: the cleanup's wait passes its ceiling.
     monkeypatch.setattr(auto_logs, "_fsync_dir", real_flush)
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_VOLUME_WAIT_S", 0.2,
+                             spare=("_bug_report_log_path",))
     held = _Held(auto_logs._release_marked_blob)
     monkeypatch.setattr(auto_logs, "_release_marked_blob", held)
 
@@ -11087,6 +11137,7 @@ def test_an_insert_whose_cleanup_barrier_refuses_still_answers_503(
     assert _blobs(logdir) == [] and _markers(logdir) == [], (
         "the cleanup that outlived its wait did not finish its work: %r %r"
         % (_blobs(logdir), _markers(logdir)))
+    assert spared["_bug_report_log_path"] > 0, spared
 
 
 def test_a_cleanup_past_its_ceiling_hands_the_volume_on_only_when_it_ends(
@@ -11110,7 +11161,8 @@ def test_a_cleanup_past_its_ceiling_hands_the_volume_on_only_when_it_ends(
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", lock)
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_VOLUME_WAIT_S", 0.2,
+                             spare=("_bug_report_log_path",))
 
     def refused_write(own, data):
         raise OSError("the volume refused the write")
@@ -11163,6 +11215,7 @@ def test_a_cleanup_past_its_ceiling_hands_the_volume_on_only_when_it_ends(
         "own, then=(_hand_on))\n")))
     assert locked_at_answer is True and drained and freed, (
         locked_at_answer, drained, freed)
+    assert spared["_bug_report_log_path"] > 0, spared
 
 
 def test_a_count_that_reached_the_cap_before_the_insert_refuses_and_discards(
@@ -11244,7 +11297,8 @@ def test_a_marker_clear_that_does_not_return_in_time_leaves_the_upload_accepted(
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_VOLUME_WAIT_S", 0.2,
+                             spare=("_bug_report_log_path",))
     held = _Held(auto_logs._clear_marker)
     monkeypatch.setattr(auto_logs, "_clear_marker", held)
     site = ("                await _hop_through(_VOLUME_POOL, "
@@ -11279,6 +11333,7 @@ def test_a_marker_clear_that_does_not_return_in_time_leaves_the_upload_accepted(
         site, "                await _hop_through(_VOLUME_POOL, "
               "float(AUTO_LOG_VOLUME_WAIT_S),\n")])))
     assert out["log_persisted"] is True and took < HOLD, (out, took)
+    assert spared["_bug_report_log_path"] == 3, spared
 
 
 def test_a_retention_unlink_pass_that_does_not_return_in_time_deletes_no_row(
@@ -11384,7 +11439,10 @@ def test_an_orphan_sweep_hop_that_does_not_return_in_time_removes_nothing(
                        "AUTO_LOG_SWEEP_HOP_WAIT_S,\n"}[hop]
     line = {"walk": "the directory walk did not return within %ss",
             "resolve": "unreferenced, did not return within %ss"}[hop]
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2)
+    other = {"walk": "_resolve_marker_candidates",
+             "resolve": "_marker_candidates"}[hop]
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2,
+                             spare=(other,))
     held = _Held(getattr(auto_logs, target))
     monkeypatch.setattr(auto_logs, target, held)
     name = "88888888-0000-4000-8000-0000000000b1.log.gz"
@@ -11427,6 +11485,9 @@ def test_an_orphan_sweep_hop_that_does_not_return_in_time_removes_nothing(
         site.replace("AUTO_LOG_SWEEP_HOP_WAIT_S",
                      "float(AUTO_LOG_SWEEP_HOP_WAIT_S)"))))
     assert out["unlinked"] == 0 and took < HOLD, (out, took)
+    # The walk reaches the resolution only in the control; the resolve
+    # case walks in all three drives.
+    assert spared[other] == {"walk": 1, "resolve": 3}[hop], spared
 
 
 # ── round 9: thirty operator calls behind a stalled volume (R8-M1) ──────────
