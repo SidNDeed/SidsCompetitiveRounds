@@ -486,6 +486,35 @@ def test_d7_emit_sql_shape_and_no_overwrite(tmp_path, install):
     assert refused.value.code == 2 and not (tmp_path / "x.txt").exists()
 
 
+@pytest.mark.parametrize("label", ["search_path", "SET_CONFIG", "x.set_config"])
+def test_d7_a_value_the_landing_refuses_is_refused_before_anything_is_written(tmp_path, install, label):
+    """A --game-version label (or any value the text embeds) holding search_path or set_config, in any case,
+    is inside the registry's character set, but the data-only landing refuses the file wherever the token
+    appears (CENSUS-R2 V1): the SQL path refuses it before the file is opened, prints no SQL line and leaves
+    no file; the api path accepts what the server accepts, so a dry run with the same label passes."""
+    root, _expected = install
+    dll, _data = _dll(tmp_path)
+    target = tmp_path / "401_safe.sql"
+    before = sorted(p.name for p in tmp_path.iterdir())
+    code, out = _run(_argv(dll, "1.41.0", root, "--game-version", label, "--emit-sql", str(target)), {}, _Recorder())
+    assert code == rrd.EXIT_REFUSED and "Nothing written" in out, out
+    assert "names search_path or set_config" in out and "game_file value %r" % label in out
+    assert not target.exists() and sorted(p.name for p in tmp_path.iterdir()) == before
+    assert "WROTE" not in out and "SQL      " not in out
+    code, out = _run(_argv(dll, "1.41.0", root, "--game-version", label, "--dry-run"))
+    assert code == rrd.EXIT_OK and "DRY RUN  18 rows would be registered" in out, out
+    game = {"kind": "game_file", "file_id": 0, "game_version": label, "sha256": "a" * 64, "name": "x.dll", "size": 1}
+    release = {"kind": "release", "version": label, "variant": "standalone", "commit": "0" * 12,
+               "source": "release", "dll_sha256": "b" * 64}
+    for rows in ([game], [release], [release, game]):
+        with pytest.raises(rrd.Refused, match="names search_path or set_config"):
+            rrd.migration_text("401_safe.sql", rows)
+    with pytest.raises(rrd.Refused, match="names search_path or set_config"):   # the trailing name comment too
+        rrd.migration_text("401_safe.sql", [dict(game, game_version="steam.1", name="set_config.dll")])
+    legal = rrd.migration_text("401_safe.sql", [dict(game, game_version="steam.1")])   # the same row, a legal label
+    assert "(0, 'steam.1', '%s')  -- x.dll" % ("a" * 64) in legal
+
+
 # -- a real Roslyn image, when one is named ----------------------------------------------------
 
 def test_real_dll_when_named():
