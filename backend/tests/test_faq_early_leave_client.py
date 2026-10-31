@@ -436,12 +436,9 @@ _TOKEN = re.compile(r"""
   | (?P<int>[0-9]+)
   | (?P<op>\|\||<>|>=|<=|[=<>*.,;()])
 """, re.X)
-# The functions 396 calls, and no other: a name followed by "(" must be one of these.
-_CALLS = {"AND", "CAST", "CONFLICT", "COUNT", "EXISTS", "FROM", "IN", "JOIN", "NOW", "VALUES", "VARCHAR",
-          "_seed396", "chr", "i18n_keys", "i18n_proposals", "md5", "string_agg", "v", "x"}
 # The five VALUES lists of 396, by the alias (or table) and the columns that name them, and the production each
 # column's cell takes: "lit" a plain literal; "text" a value (a literal or a composed value); "bool" TRUE or FALSE;
-# "cast" the context cast. No column 396 writes from a VALUES row is an integer.
+# "cast" the context cast.
 _VALUES_SHAPES = {
     ("x", ("key_id", "source_hash")): ("lit", "lit"),
     ("v", ("key_id", "namespace", "msgctxt", "source_hash", "sensitive", "context")):
@@ -451,16 +448,18 @@ _VALUES_SHAPES = {
     ("x", ("key_id", "lang", "text_md5")): ("lit", "lit", "lit"),
 }
 _JOINS = (["chr", "(", "10", ")"], ["chr", "(", "183", ")"])
+# The reviewed text of 396 outside its VALUES rows: the file with line ends normalised to LF and each row, from its
+# opening to its closing parenthesis, replaced by "(ROW)" (_outside_rows). Reviewed in FAQ-R13.
+_OUTSIDE_SHA256 = "582c3991e3dfb30d31a11843c6d23f3052f4f33551c214aa8ebee7d5460a4421"
+_OUTSIDE_LINES = 272
 
 
 def _tokens(sql):
-    """Lex the WHOLE file, every byte, against a closed token set: whitespace,
-    `--` comments, plain single-quoted literals, the $m396$ tag, identifiers,
-    integers, and the operators and punctuation the file uses. A byte no rule
-    admits fails. A literal must open after whitespace, "(" or "," (so no E,
-    U&, N, B or X prefix), its only escape is the doubled quote, and it holds
-    no backslash and no character below U+0020 (so it ends on its own line).
-    Returns the (kind, text, offset) tokens other than whitespace and comments."""
+    """The (kind, text, offset) tokens of `sql` other than whitespace and
+    comments. Fails on a byte that no _TOKEN rule admits, on a literal that
+    opens after anything but whitespace, "(" or "," (so a literal carries no
+    E, U&, N, B or X prefix), and on a literal holding a backslash or a
+    character below U+0020."""
     out, i = [], 0
     while i < len(sql):
         m = _TOKEN.match(sql, i)
@@ -477,21 +476,22 @@ def _tokens(sql):
 
 
 class _M396Parse:
-    """396's tokens (_tokens) and its five VALUES lists parsed by explicit
-    productions:
+    """396's VALUES lists parsed by these productions:
+        literal  := a _tokens literal (plain, single-quoted, the doubled quote its only escape, no backslash and no
+                    character below U+0020)
         value    := literal | composed
         composed := literal ( "||" join ( "||" join )* "||" literal )+
         join     := chr "(" ( 10 | 183 ) ")"
         cast     := CAST "(" value AS VARCHAR "(" 160 ")" ")"
         row      := "(" cell ( "," cell )* ")"   each cell the production its column takes (_VALUES_SHAPES)
-    Every other arrangement fails with its line: a nested cast, a cast of
-    another form, an integer or a call in a value position, two literals
-    joined without a join, a value that ends on a join."""
+    parse() fails, naming the line, on a cell no production admits, on a
+    list whose alias and columns _VALUES_SHAPES does not name, and on a row
+    whose cells do not match that shape. `spans` holds each row's offsets,
+    from its opening to its closing parenthesis."""
 
     def __init__(self, sql):
         self.sql, self.toks = sql, _tokens(sql)
-        self.inside = [False] * len(self.toks)
-        self.lists = []
+        self.lists, self.spans = [], []
 
     def t(self, n):
         return self.toks[n][1] if n < len(self.toks) else ""
@@ -529,11 +529,9 @@ class _M396Parse:
         raise AssertionError("%s: %r stands where a value, TRUE, FALSE or the context cast must" % (self.at(n), self.t(n)))
 
     def values(self, v):
-        """The VALUES list at token v: its rows' cell kinds, checked against
-        the shape its alias and columns name."""
         n, rows = v + 1, []
         while True:
-            n, cells = self.expect(n, "("), []
+            start, n, cells = self.toks[n][2], self.expect(n, "("), []
             while True:
                 kind, n = self.cell(n)
                 cells.append(kind)
@@ -541,11 +539,11 @@ class _M396Parse:
                     break
                 n += 1
             n = self.expect(n, ")")
-            rows.append((cells, v))
+            rows.append(cells)
+            self.spans.append((start, self.toks[n - 1][2] + 1))
             if self.t(n) != ",":
                 break
             n += 1
-        end = n
         if self.t(v - 1) == "(":
             n = self.expect(n, ")", "AS")
             alias, n = self.t(n), self.expect(n + 1, "(")
@@ -563,13 +561,11 @@ class _M396Parse:
         key = (alias, tuple(cols))
         assert key in _VALUES_SHAPES, "%s: a VALUES list no shape names: %r" % (self.at(v), key)
         shape = _VALUES_SHAPES[key]
-        for cells, _v in rows:
+        for cells in rows:
             assert len(cells) == len(shape), "%s: a row of %d cells under %r" % (self.at(v), len(cells), key)
             for col, want, got in zip(cols, shape, cells):
                 assert got == want or (want == "text" and got == "lit"), (
                     "%s: column %s of %r takes %s, not %s" % (self.at(v), col, key, want, got))
-        for k in range(v, end):
-            self.inside[k] = True
         self.lists.append((key, len(rows)))
 
     def parse(self):
@@ -584,66 +580,35 @@ def _m396_parse():
     return _M396Parse(sql).parse()
 
 
-def test_396_source_lexes_closed_and_its_values_parse_by_the_productions():
-    """The header's format statement, as the file's form: the whole file,
-    every byte and every line, lexes against a closed token set (_tokens),
-    and its five VALUES lists parse by explicit productions (_M396Parse):
-    each cell is the production its column takes, a value is a literal or
-    literals joined only by chr(10) or chr(183), and the one cast is
-    CAST(value AS VARCHAR(160)) around the context. Outside those rows:
-    chr stands nowhere; the one cast is CAST(NULL AS TIMESTAMPTZ); || stands
-    only inside string_agg's argument (the two refusal messages); an integer
-    stands only after <> (an IF comparing a count), after PERFORM, after
-    EXISTS (SELECT, after LIMIT, or as a VARCHAR length in _seed396's
-    declaration; a name followed by "(" is one of _CALLS; the two $m396$
-    tags are the only dollar signs and no UESCAPE word stands. So a line
-    break or a middle dot reaches a value of the file only as a chr(10) or
-    chr(183) join in a VALUES row. What 396 stores from those values when
-    it runs is the executed test's
-    (test_migration_reruns.py::test_396_stores_the_texts_its_values_read_and_the_client_bundles)."""
+def _outside_rows(p):
+    """396's text with each VALUES row (p.spans) replaced by "(ROW)"."""
+    out, at = [], 0
+    for a, b in p.spans:
+        out.append(p.sql[at:a])
+        out.append("(ROW)")
+        at = b
+    out.append(p.sql[at:])
+    return "".join(out)
+
+
+def test_396_rows_parse_by_the_productions_and_the_text_outside_them_is_the_reviewed_text():
+    """Two of 396's format guarantees. (1) Each of its five VALUES lists
+    parses by the productions of _M396Parse. (2) Its text outside the VALUES
+    rows, line ends normalised, is the reviewed text: its sha256 and line
+    count equal the pins above, so a change outside the rows fails this
+    test. The third, what 396 stores, is
+    test_migration_reruns.py::test_396_stores_the_texts_its_values_read_and_the_client_bundles."""
     p = _m396_parse()
     assert sorted(key for key, _rows in p.lists) == sorted(_VALUES_SHAPES), p.lists
-    toks, t = p.toks, p.t
-    assert [x for k, x, _o in toks if k == "tag"] == ["$m396$", "$m396$"]
-    assert not [x for k, x, _o in toks if k == "ident" and x.lower() == "uescape"]
-    agg = [False] * len(toks)
-    for n in range(len(toks)):
-        if t(n) == "string_agg" and t(n + 1) == "(":
-            k, depth = n + 1, 0
-            while True:
-                depth += {"(": 1, ")": -1}.get(t(k), 0)
-                agg[k] = True
-                if depth == 0:
-                    break
-                k += 1
-    seed_decl = p.expect(next(n for n in range(len(toks)) if t(n) == "TEMP"), "TEMP", "TABLE", "_seed396", "(")
-    seed_end = next(n for n in range(seed_decl, len(toks)) if t(n) == "ON")
-    casts = 0
-    for n, (kind, text, _o) in enumerate(toks):
-        if kind == "ident" and t(n + 1) == "(":
-            assert text in _CALLS, "%s: a call no rule admits: %s(" % (p.at(n), text)
-        if p.inside[n]:
-            continue
-        assert text != "chr", "%s: chr outside a VALUES row" % p.at(n)
-        if text == "CAST":
-            p.expect(n, "CAST", "(", "NULL", "AS", "TIMESTAMPTZ", ")")
-            casts += 1
-        assert text != "||" or agg[n], "%s: || outside a VALUES row and outside string_agg" % p.at(n)
-        if text == "VARCHAR":
-            assert seed_decl <= n < seed_end, "%s: VARCHAR outside _seed396's declaration and the context cast" % p.at(n)
-        if kind == "int":
-            assert (t(n - 1) in ("<>", "PERFORM", "LIMIT")
-                    or [t(n - 3), t(n - 2), t(n - 1)] == ["EXISTS", "(", "SELECT"]
-                    or (t(n - 2) == "VARCHAR" and t(n - 1) == "(" and seed_decl <= n < seed_end)), (
-                "%s: the integer %s in a position no rule names" % (p.at(n), text))
-    assert casts == 1, casts
+    outside = _outside_rows(p)
+    assert (hashlib.sha256(outside.encode("utf-8")).hexdigest(), outside.count("\n") + 1) == (
+        _OUTSIDE_SHA256, _OUTSIDE_LINES), "396 changed outside its VALUES rows"
 
 
 def test_396_writes_no_middle_dot_and_eight_chr_183_joins():
-    """The header's dot statement: no middle dot character is in the file,
-    and a middle dot is joined in as chr(183), eight times, the dotted
-    contexts. A literal holding the dot itself is a plain literal the
-    productions admit, so this test, not the productions, is the check for it."""
+    """No middle-dot character is in 396, and its tokens hold exactly eight
+    chr(183) joins. (A literal holding the dot itself is a literal the
+    productions admit; this test is the check for it.)"""
     sql = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
     assert "·" not in sql
     toks = [x for _k, x, _o in _tokens(sql)]
