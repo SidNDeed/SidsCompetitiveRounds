@@ -495,8 +495,14 @@ class _M396Parse:
     parse() fails on a cell no production admits, on a list whose alias
     and columns _VALUES_SHAPES does not name, and on a row whose cells do
     not match that shape. Every failure of parse() and of the _tokens call
-    it makes opens with "396 line N: ", N the 1-based line of the failing
-    token, byte or literal; a literal _tokens refuses is also quoted.
+    it makes opens with "396 line N: " (asserted for each case of
+    test_396_parse_failures_name_the_planted_line). N is the 1-based line
+    of the offset the firing assertion holds: for the lexer the failing
+    byte or literal; for a parser check the token at which it runs, which
+    for a check over several tokens (a join's four, a run expect() reads, a
+    list header, a row) may precede the first mismatching token. That test
+    lists, case by case, the line each planted failure reports. A literal
+    _tokens refuses is also quoted.
     `spans` holds each row's offsets, from its opening to its closing
     parenthesis."""
 
@@ -642,8 +648,10 @@ def test_396_rows_parse_by_the_productions_and_the_text_outside_them_is_the_revi
 
 
 def _g14_cases(sql):
-    """(name, text, line): 396 with one planted change, and the line of the
-    token, byte or literal it plants, which parse() must name; 396 cut inside
+    """(name, text, line): 396 with one planted change, and the line
+    parse() reports for it: the line of the token, byte or literal it
+    plants, except "join split", whose line is that of the join's first
+    token (the join check reads its four tokens as one window); 396 cut inside
     a column list, and a two-line fragment whose VALUES follows a ")" with no
     "(" before it, each with the line of the token that breaks it; then 396
     cut at offsets across the file, whose line is that of the literal the cut
@@ -664,6 +672,7 @@ def _g14_cases(sql):
         ("literal control", plant(71, k71, "\n\n- Confirming"), 71),
         ("cell kind", plant(57, "('892845f20501fbc0',", "(x,"), 57),
         ("join", plant(71, k71, "' || repeat('-', 2) || '- Confirming"), 71),
+        ("join split", plant(71, k71, "' || chr(\n11) || chr(10) || '- Confirming"), 71),
         ("composed continues", plant(71, k71, "' || chr(10) || chr(10) ||\nCAST '- Confirming"), 72),
         ("cell", plant(57, "'84324a21d4105a936ec63ce3a5d72bdf7e5986b8'", "TRUE"), 57),
         ("cast split", plant(71, "AS VARCHAR(160))", "AS VARCHAR(\n161))"), 72),
@@ -686,10 +695,13 @@ def _g14_cases(sql):
 
 
 def test_396_parse_failures_name_the_planted_line():
-    """G14's enforcement: for each _g14_cases case, parse() fails with an
-    AssertionError whose message opens with "396 line N: ", N the case's
-    line; a cut may instead pass (one that leaves each VALUES list it
-    reaches whole), a planted case may not."""
+    """A finite list of planted failures (_g14_cases) and the line each
+    reports, not a proof over all inputs: for each case parse() fails with
+    an AssertionError whose message opens with "396 line N: ", N the
+    case's line; a cut may instead pass (one that leaves each VALUES list
+    it reaches whole), no other case may. The case "join split" (chr( on
+    line 71, 11) on line 72) expects line 71: the join check reads its four
+    tokens as one window and names the window's first."""
     sql = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
     bad = []
     for name, text, line in _g14_cases(sql):
