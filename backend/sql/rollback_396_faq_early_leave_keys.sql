@@ -5,7 +5,8 @@
 -- 396 retired are live again; and every PENDING proposal on the four 396 keys (its
 -- sixteen machine seeds, plus anything proposed on them since) is decided 'superseded'
 -- (the review endpoints refuse to approve or reject a proposal on a retired key, so one
--- left pending would sit in the queue for good). The proposals 396 decided
+-- left pending would sit in the queue, undecidable, until a key sync made its key
+-- live again). The proposals 396 decided
 -- 'superseded' on the 386 keys stay superseded: a translator re-proposes through the
 -- portal if that text is wanted again. Keys before proposals, the order the key sync and
 -- the review endpoint take. Approved entries on either side are never written.
