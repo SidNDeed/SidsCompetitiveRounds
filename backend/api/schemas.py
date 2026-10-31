@@ -2017,7 +2017,9 @@ class FfaPlayerEntry(BaseModel):
     # None = not reported: a present player or a carried roster ghost. On a
     # left_early entry that is not absent it is REQUIRED: submit_ffa_match
     # refuses the report with 422 before any write (clients before v1.39.1
-    # never send it, so their reports with such a leaver are not recorded).
+    # never send it, so their reports with such a leaver are not recorded,
+    # and neither is a later game of that sitting: the lobby's game count
+    # did not move, so the next report's game number is refused).
     # Also OUTSIDE the frozen ffa:
     # HMAC canonical, like absent and damage_dealt; submit_ffa_match refutes
     # contradictions in the signed points and rounds. Bounded so a crafted
@@ -2090,7 +2092,7 @@ class FfaMatchResponse(BaseModel):
     # ── The lobby's authoritative progress (RJ-3 round 4) ─────────────────
     # Every answer given once the lobby row has been LOCKED carries these,
     # acceptances and refusals alike (a refusal carries them in its error body
-    # — see main.py's FfaReportRefusal). Two classes of answer are raised
+    # — see main.py's FfaReportRefusal). Three classes of answer are raised
     # before there is a lobby row to read and therefore carry none: the
     # integrity 400s (malformed roster, missing room id, bad signature), the
     # 422 for an entry that left during the game without its

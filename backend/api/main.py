@@ -66531,10 +66531,14 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     (left_early, not absent) and no game_points_at_leave is refused with 422
     before anything else runs, so before any write: the session check, the
     settlement of other expired journal windows and the lobby lock all come
-    after it. The client sends 422 to its outbox, whose first retry drops a
-    4xx as permanent (plugin/ApiClient.cs OutboxPass), so the refusal cannot
-    hold the queue. On the journal path the settler marks a 4xx-refused
-    payload superseded (_ffa_settle_window)."""
+    after it. The current client queues a 422 in its outbox and drops it as
+    permanent on the first retry the server answers with a 4xx other than
+    401 and 429 (plugin/ApiClient.cs OutboxPass); the attempts are bounded
+    either way (OUTBOX_MAX_ATTEMPTS). On the journal path the settler marks a
+    4xx-refused payload superseded (_ffa_settle_window). A refused report is
+    not recorded, and the lobby's game count does not move, so a later report
+    of the same sitting that names the next game number is refused by the
+    game-number check below; nothing here recovers that sitting."""
     _missing_figure = _ffa_missing_leave_figure(report)
     if _missing_figure:
         print(f"[FFA] report of room {report.photon_room_id} refused: "
@@ -67072,9 +67076,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # The figure is REQUIRED on every left_early entry that is not absent:
     # submit_ffa_match refuses a report without it (422, before any write;
     # _ffa_missing_leave_figure), so an omission voids the report rather than
-    # rating the leaver. None still reaches the decision below for an absent
-    # ghost and a present seat, and for a payload stored before the rule
-    # (quarantine triage reads stored bodies); there it means no grace.
+    # rating the leaver. Here None reaches the decision below only for an
+    # absent ghost and a present seat. The quarantine triage view also calls
+    # _ffa_leave_decision, on payloads stored before the rule, where None
+    # means no grace; that view stores nothing.
     #
     # Readmission lobbies (V3): the client's absent claims are not read, and
     # not read in the decision itself (read_absent) rather than discarded

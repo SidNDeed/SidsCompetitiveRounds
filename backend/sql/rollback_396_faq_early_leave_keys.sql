@@ -15,8 +15,16 @@
 -- such a key would keep the entry but drop it from every served pack (the pack
 -- endpoint serves live keys only). Before any write it locks the eight key rows (396's
 -- four and 386's four) FOR NO KEY UPDATE in key order, then their entries in (key,
--- language) order, the order 396 and the review endpoint take, and reads the approved
--- count under those locks, so an approval in flight is serialized against it.
+-- language) order, and reads the approved count under those locks. The locks are there
+-- for the portal's approval write (main.py i18n_review): in one transaction it locks ONE
+-- key row FOR NO KEY UPDATE, before anything else, then that proposal, then writes one
+-- entry row. It holds no other key row and no entry row while it waits for that key
+-- row, so it and this file cannot wait on each other in a cycle; whichever takes the
+-- shared key row first goes first. An approval that commits first is counted (each
+-- statement here reads what has committed when it runs); one that waits behind this
+-- file finds the key retired and is refused with 409. This file and 396 are never
+-- concurrent: migrations run one at a time, under the landing lease and the release
+-- train, so no lock order between the two files is relied on, and none is claimed.
 -- NOT a release-train migration. Re-runnable: with the 396 keys retired, the 386 keys
 -- live and nothing pending on the 396 keys, it writes no row.
 -- DEPLOY ORDER: only while no shipped client carries the four new strings, or with that
