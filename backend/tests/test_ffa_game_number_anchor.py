@@ -1207,13 +1207,39 @@ def test_differing_winners_are_a_contradiction_in_both_orders():
     assert main._ffa_report_contradiction(S1, _vec(ROW_B), _report(ROW_A, S3), False) is not None
 
 
+# The TRUST note's own last line, and the statement it stands above.
+_TRUST_TAIL = "# a claimed early leaver was rated and paid (the re-land's Codex round, F1)."
+_TRUST_NEXT = "ghosts, graced, _leave_log = _ffa_leave_decision("
+
+
 def _trust_note(src):
     """The TRUST note in submit_ffa_match: the run of comment lines from
-    "# TRUST:" to the first line that is not a comment."""
+    "# TRUST:" to the first line that is not a comment. The run must end on
+    the note's own last sentence and stand directly above the leave decision,
+    so a note cut short in the middle is refused even when the sentences a
+    test asserts survive the cut."""
     lines = src[src.index("# TRUST:"):].splitlines()
     end = next(i for i, line in enumerate(lines) if not line.lstrip().startswith("#"))
     assert end >= 10, "the TRUST note shrank to %d lines" % end
+    assert lines[end - 1].strip() == _TRUST_TAIL, "the TRUST note does not end on its last sentence"
+    assert lines[end].lstrip().startswith(_TRUST_NEXT), "the TRUST note is not above the leave decision"
     return "\n".join(lines[:end])
+
+
+def test_the_trust_note_reader_refuses_a_truncated_note():
+    """FAQ-R3 M4 control: the note cut to its first fifteen lines, which keep
+    both sentences the tests assert, is refused; the whole note is read."""
+    src = inspect.getsource(main.submit_ffa_match)
+    lines = src[src.index("# TRUST:"):].splitlines()
+    end = next(i for i, line in enumerate(lines) if not line.lstrip().startswith("#"))
+    assert end > 15, end
+    truncated = "\n".join(lines[:15] + lines[end:])
+    flat = " ".join(line.lstrip().lstrip("#").strip() for line in lines[:15])
+    assert "Achievements are unaffected by the grace" in flat
+    assert "the departed seat gains none of those." in flat
+    with pytest.raises(AssertionError, match="does not end on its last sentence"):
+        _trust_note(truncated)
+    assert _trust_note(src).splitlines()[-1].strip() == _TRUST_TAIL
 
 
 def test_the_reporter_incentive_comment_states_the_bounded_truth():

@@ -16,7 +16,9 @@ with one that finds nothing and shows the refusal disappears.
 The 422 is chosen from the client's outbox handling (plugin/ApiClient.cs): a
 422 is not a terminal FFA refusal (FfaReportRules.IsTerminalRefusal, both
 overloads, is 409 and 403 only), so the report goes to the outbox, which drops
-any "HTTP 4xx" answer other than 401 and 429 as permanent. The overloads are
+it as permanent on the first retry that carried the session token and was
+answered with a 4xx other than 401 and 429 (a retry without the token is given
+back before its status is read). The overloads are
 EXECUTED by the client rules harness (its ffaleavefigure suite, with a mutant
 per overload that makes 422 terminal and must be caught); OutboxPass needs
 Unity and is pinned as source.
@@ -186,9 +188,11 @@ def test_both_terminal_refusal_overloads_leave_a_422_to_the_outbox(harness_run):
 
 
 def test_the_client_outbox_drops_a_4xx_other_than_401_and_429():
-    """The outbox half, as source (OutboxPass needs Unity): every "HTTP 4"
-    answer is permanent except 401 and 429, and a permanent answer removes the
-    report. A 422 is therefore dropped, not retried without bound."""
+    """The outbox half, as source (OutboxPass needs Unity). A retry that did
+    not carry the session token is given back (its attempt returned, the body
+    kept) before its status is read; on one that carried it, every "HTTP 4"
+    answer except 401 and 429 is permanent and removes the report, so a 422 is
+    dropped there. OUTBOX_MAX_ATTEMPTS counts within one launch."""
     client = (REPO / "plugin" / "ApiClient.cs").read_text(encoding="utf-8")
     outbox = _block(client, r"private static IEnumerator OutboxPass\(\)")
     code = "\n".join(line for line in outbox.splitlines() if not line.lstrip().startswith("//"))
@@ -197,3 +201,8 @@ def test_the_client_outbox_drops_a_4xx_other_than_401_and_429():
     assert "_pendingReports.Remove(p)" in code.split("if (permanent || p.attempts >= OUTBOX_MAX_ATTEMPTS)")[1]
     transient = code.split("bool retryableTransient")[1].split(";")[0]
     assert re.findall(r"HTTP(?:/1\.1)? (\d{3})", transient) == ["429", "429", "401", "401"], transient
+    # The give-back is decided from what the request carried, before the status.
+    give_back = code.index("if (answer == SecureRouteRules.OutboxAnswer.GiveBack)")
+    assert code.index("SecureRouteRules.OutboxAnswerFor(ok, carried)") < give_back
+    assert "p.attempts--;" in code[give_back:code.index("bool permanent")]
+    assert give_back < code.index("bool permanent")

@@ -66531,10 +66531,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     (left_early, not absent) and no game_points_at_leave is refused with 422
     before anything else runs, so before any write: the session check, the
     settlement of other expired journal windows and the lobby lock all come
-    after it. The current client queues a 422 in its outbox and drops it as
-    permanent on the first retry the server answers with a 4xx other than
-    401 and 429 (plugin/ApiClient.cs OutboxPass); the attempts are bounded
-    either way (OUTBOX_MAX_ATTEMPTS). On the journal path the settler marks a
+    after it. The current client puts a 422 in its outbox (plugin/ApiClient.cs).
+    OutboxPass drops it as permanent on the first retry that carried the
+    session token and was answered with a 4xx other than 401 and 429; a retry
+    sent without the token is given back before its status is read, and the
+    body stays queued (SecureRouteRules.OutboxAnswerFor). OUTBOX_MAX_ATTEMPTS
+    counts within one launch: a persisted body reloads with zero attempts.
+    On the journal path the settler marks a
     4xx-refused payload superseded (_ffa_settle_window). A refused report is
     not recorded, and the lobby's game count does not move, so a later report
     of the same sitting that names the next game number is refused by the
