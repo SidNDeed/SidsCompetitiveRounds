@@ -16092,7 +16092,6 @@ hop	I18n.cs:Tr	0e0947aa5dab087c	SettingsDescriptors.g.cs:ReasonTr	dispatch[case 
 hop	I18n.cs:Tr	0e1d622f5e2a153e	TabStatsOverlay.cs:EnsureLocaleStrings	entry[[5]]>TabStatsOverlay.cs:EnsureLocaleStrings
 hop	I18n.cs:Tr	0e30ecadfee8f5c5	InfoViz.cs:TextFallback	dispatch[case "damage-matrix"/.Append(#0)]{damage-matrix}>InfoViz.cs:TextFallback
 hop	I18n.cs:Tr	0e83fb6a30593466	ApiClient.cs:HandleState	ref[CompetitiveUI.ShowNotification(#0)]>ApiClient.cs:HandleState
-hop	I18n.cs:Tr	0efc99fbbec229e5	InfoLibrary.cs:WhenCounts	ref>InfoLibrary.cs:WhenCounts
 hop	I18n.cs:Tr	0f4f5147fcb515a3	NativeUI.cs:TAB_NAMES	entry[[5]]>NativeUI.cs:TAB_NAMES
 hop	I18n.cs:Tr	0f5c2d3b1ae40d38	PlayerCardsUI.cs:ReasonText	dispatch[case "trading_off"]{trading_off}>PlayerCardsUI.cs:ReasonText
 hop	I18n.cs:Tr	0f60fef840774be4	NativeUI.Keybinds.cs:KeybindRowRecommended	ref[case KeybindRules.Jump]>NativeUI.Keybinds.cs:KeybindRowRecommended
@@ -16576,8 +16575,8 @@ hop	I18n.cs:Tr	6d88c669724ad0ab	NativeUI.cs:BuildLeaderboardTab	entry[[4]]>Nativ
 hop	I18n.cs:Tr	6d9a22f4d3afa781	NativeUI.Keybinds.cs:KeybindRowHelp	ref[case KeybindRules.ChatOverlayMode]>NativeUI.Keybinds.cs:KeybindRowHelp
 hop	I18n.cs:Tr	6d9e2267a9c5403d	CompetitiveUI.cs:ChannelDisplayLabel	dispatch[case "global"]{global}>CompetitiveUI.cs:ChannelDisplayLabel
 hop	I18n.cs:Tr	6da350ecadc29884	NativeUI.Keybinds.cs:KeybindKeyName	dispatch[case "Numlock"]{Numlock}>NativeUI.Keybinds.cs:KeybindKeyName
+hop	I18n.cs:Tr	6de48df12a6ee2dd	InfoLibrary.cs:ModeFfaExt	ref>InfoLibrary.cs:ModeFfaExt
 hop	I18n.cs:Tr	6df61392175bc569	NativeUI.cs:SHOP_TAB_NAMES	entry[[11]]>NativeUI.cs:SHOP_TAB_NAMES
-hop	I18n.cs:Tr	6e883e9f0d182324	InfoLibrary.cs:Rewards	ref>InfoLibrary.cs:Rewards
 hop	I18n.cs:Tr	6ecf748108872c82	NativeUI.cs:RefreshHomeTab	ref[sb.Append(#0)]>NativeUI.cs:RefreshHomeTab
 hop	I18n.cs:Tr	6edbc3850bcaba6f	InfoViz.cs:BuildTeamFormat	ref[Lbl(#1)]>InfoViz.cs:BuildTeamFormat
 hop	I18n.cs:Tr	6f28083cd35f3c5d	NativeUI.cs:PaintConsent	ref[UIFactory.SetTextRaw(#1)]>NativeUI.cs:PaintConsent
@@ -16685,6 +16684,7 @@ hop	I18n.cs:Tr	81f18b5b625b0ce0	NativeUI.cs:OpenChatTypingPicker	entry[Competiti
 hop	I18n.cs:Tr	82003a16cc8932e5	NativeUI.cs:StartChatMuteFlow	delegate[CompetitiveUI.OpenPlayerSearch(#1=>)/=>{}/CompetitiveUI.OpenArtistPicker(#4)]>NativeUI.cs:StartChatMuteFlow
 hop	I18n.cs:Tr	821887fc9f987ba6	SettingsDescriptors.g.cs:ReasonTr	dispatch[case "SShowDc"]{SShowDc}>SettingsDescriptors.g.cs:ReasonTr
 hop	I18n.cs:Tr	82380190606b3cac	NativeUI.cs:CreateFfaBrowserRow	delegate[UIFactory.CreateButton(#6=>)/=>{}/CompetitiveUI.OpenArtistInput(#0)]>NativeUI.cs:CreateFfaBrowserRow
+hop	I18n.cs:Tr	82d9369e299e9515	InfoLibrary.cs:WhenCounts	ref>InfoLibrary.cs:WhenCounts
 hop	I18n.cs:Tr	82eb3bed723a26e0	InfoViz.cs:BuildDamageMatrix	ref[Lbl(#1)]>InfoViz.cs:BuildDamageMatrix
 hop	I18n.cs:Tr	8304b1d1cb691ff6	PlayerCardsUI.cs:SortLabel	ref[case Sort.Position]>PlayerCardsUI.cs:SortLabel
 hop	I18n.cs:Tr	8359c87890d62401	NativeUI.cs:BuildSettingsTab	ref[SettingsAction(#2)]>NativeUI.cs:BuildSettingsTab
@@ -16706,7 +16706,6 @@ hop	I18n.cs:Tr	85c3256ae8723f94	PostSessionReport.cs:PartialTag	ref>PostSessionR
 hop	I18n.cs:Tr	861c4b0848bebc9d	NativeUI.cs:ShowTournamentBetsPopup	ref[UIFactory.CreateButton(#2)]>NativeUI.cs:ShowTournamentBetsPopup
 hop	I18n.cs:Tr	86598905db635b33	SpectatorSync.cs:OnJoinedSpectatorRoom	ref[CompetitiveUI.ShowNotificationCritical(#0)]>SpectatorSync.cs:OnJoinedSpectatorRoom
 hop	I18n.cs:Tr	867886357fd50f09	InfoLibrary.cs:Categories	entry[[8]/Category.Articles/Article{cards-pictures}.Title=>]>InfoLibrary.cs:Categories
-hop	I18n.cs:Tr	86af3eb48582e308	InfoLibrary.cs:ModeFfaExt	ref>InfoLibrary.cs:ModeFfaExt
 hop	I18n.cs:Tr	86cf5d90be3d882d	NativeUI.Keybinds.cs:KeybindRowHelp	ref[case KeybindRules.Fire]>NativeUI.Keybinds.cs:KeybindRowHelp
 hop	I18n.cs:Tr	87155894d0b93430	InfoViz.cs:BuildVisibilitySeats	entry[[3]]>InfoViz.cs:BuildVisibilitySeats
 hop	I18n.cs:Tr	87937eb1797fc1b7	NativeUI.cs:BuildOvtRecentRowText	ref>NativeUI.cs:BuildOvtRecentRowText
@@ -17214,6 +17213,7 @@ hop	I18n.cs:Tr	e8cbad1a28ef73e7	InfoViz.cs:BuildGrowCurve	ref[Header(#2)]>InfoVi
 hop	I18n.cs:Tr	e8f1cd3fad08db52	MailUI.cs:PaintMailFrom	dispatch[case "played"]{played}>MailUI.cs:PaintMailFrom
 hop	I18n.cs:Tr	e8f65eb3467089c9	NativeUI.cs:OpenChatDeletePicker	ref[ShowPicker(#0)]>NativeUI.cs:OpenChatDeletePicker
 hop	I18n.cs:Tr	e8f9317f6c59d551	NativeUI.cs:RenderFfaLobbySection	ref[UIFactory.SetTextRaw(#1)]>NativeUI.cs:RenderFfaLobbySection
+hop	I18n.cs:Tr	e8fed965410cc334	InfoLibrary.cs:Rewards	ref>InfoLibrary.cs:Rewards
 hop	I18n.cs:Tr	e900ccb66759cabe	RatingGraphAxis.cs:Caption	ref[case default]>RatingGraphAxis.cs:Caption
 hop	I18n.cs:Tr	e9284137d1b0c3b1	TabStatsOverlay.cs:EnsureLocaleStrings	entry[[11]]>TabStatsOverlay.cs:EnsureLocaleStrings
 hop	I18n.cs:Tr	e98274bc1cd8cbe1	InfoLibrary.cs:DamageBuffsP2a	ref>InfoLibrary.cs:DamageBuffsP2a
@@ -17452,7 +17452,6 @@ hop	I18n.cs:TrF	227365cfeded900c	NativeUI.cs:CreateShopRow	delegate[UIFactory.Cr
 hop	I18n.cs:TrF	22fe32981c4d4d65	PlayerCardsUI.cs:RefreshBinder	ref>PlayerCardsUI.cs:RefreshBinder
 hop	I18n.cs:TrF	2408f316ce989e91	FfaLateEntry.cs:AfterPair	ref[CompetitiveUI.ShowNotification(#0)]>FfaLateEntry.cs:AfterPair
 hop	I18n.cs:TrF	2501785b2c868b9c	NativeUI.cs:BuildCompareMetricTable	ref[UIFactory.SetTextRaw(#1)]>NativeUI.cs:BuildCompareMetricTable
-hop	I18n.cs:TrF	25fbaef753bb5b35	ModeInfoText.cs:Ffa	ref>ModeInfoText.cs:Ffa
 hop	I18n.cs:TrF	290456481fbf7288	ApiClient.cs:TryFormatStanding	ref>ApiClient.cs:TryFormatStanding
 hop	I18n.cs:TrF	29d7a07c269e6268	PostSessionReport.cs:FavCardLine	ref>PostSessionReport.cs:FavCardLine
 hop	I18n.cs:TrF	2ad2c3ce330082f3	ApiClient.cs:RequestSpectateGrantCore	ref[CompetitiveUI.ShowNotification(#0)]>ApiClient.cs:RequestSpectateGrantCore
@@ -17640,6 +17639,7 @@ hop	I18n.cs:TrF	a34d246e071e9fec	TeamHoldBanner.cs:Line	ref[case 'c'|'b']>TeamHo
 hop	I18n.cs:TrF	a4054303852a9a6e	PlayerCardsUI.cs:OnShardDupesClick	ref[Say(#0)]>PlayerCardsUI.cs:OnShardDupesClick
 hop	I18n.cs:TrF	a41e4ec7bc09b451	NativeUI.cs:BuildComparePlayerNemesisPanel	ref[sb.Append(#0)]>NativeUI.cs:BuildComparePlayerNemesisPanel
 hop	I18n.cs:TrF	a4d38cc68ab88944	TitleLaddersUI.cs:PaintEntry	ref>TitleLaddersUI.cs:PaintEntry
+hop	I18n.cs:TrF	a52210f9946b0528	ModeInfoText.cs:Ffa	ref>ModeInfoText.cs:Ffa
 hop	I18n.cs:TrF	a5475c5051802816	InfoLibrary.cs:StartHere	ref>InfoLibrary.cs:StartHere
 hop	I18n.cs:TrF	a5d49801df546aab	ProfileCard.cs:Ago	ref>ProfileCard.cs:Ago
 hop	I18n.cs:TrF	a61c20f2255b3d2f	PlayerCardsUI.cs:OnShardPackClick	ref[Say(#0)]>PlayerCardsUI.cs:OnShardPackClick
@@ -59857,7 +59857,6 @@ cycle	I18n.cs:Tr	0ad7ef5809ced388	NativeUI.Keybinds.cs:KeybindKeyName
 cycle	I18n.cs:Tr	0bcfcaceb103408a	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:Tr	0c4e7ed318ea6abc	InfoLibrary.cs:Categories
 cycle	I18n.cs:Tr	0da1bd6e221f5faa	InfoLibrary.cs:VanillaSafety
-cycle	I18n.cs:Tr	0efc99fbbec229e5	InfoLibrary.cs:WhenCounts
 cycle	I18n.cs:Tr	0f5c2d3b1ae40d38	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:Tr	101204cfb41c597a	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:Tr	107088508f4d13db	ApiClient.cs:EnrollResult
@@ -59937,7 +59936,7 @@ cycle	I18n.cs:Tr	693a4ddc4d64db87	NativeUI.Keybinds.cs:KeybindKeyName
 cycle	I18n.cs:Tr	69f1ad045a2508aa	InfoLibrary.cs:Titles
 cycle	I18n.cs:Tr	6b69bff022e732cc	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:Tr	6da350ecadc29884	NativeUI.Keybinds.cs:KeybindKeyName
-cycle	I18n.cs:Tr	6e883e9f0d182324	InfoLibrary.cs:Rewards
+cycle	I18n.cs:Tr	6de48df12a6ee2dd	InfoLibrary.cs:ModeFfaExt
 cycle	I18n.cs:Tr	70497792fd39cfe7	InfoLibrary.cs:Mode1v2Ext
 cycle	I18n.cs:Tr	71a8f8df2b24e48e	NativeUI.Keybinds.cs:KeybindKeyName
 cycle	I18n.cs:Tr	726ddbab34f76e04	InfoLibrary.cs:CardsIntro
@@ -59952,10 +59951,10 @@ cycle	I18n.cs:Tr	7cc1032dabdbae04	NativeUI.Keybinds.cs:KeybindKeyName
 cycle	I18n.cs:Tr	7d30743fe8eba166	InfoLibrary.cs:DamageBuffsP1a
 cycle	I18n.cs:Tr	7d89bb201dc70d54	NativeUI.Keybinds.cs:KeybindKeyName
 cycle	I18n.cs:Tr	7fea0801adf7c1e1	NativeUI.Keybinds.cs:KeybindKeyName
+cycle	I18n.cs:Tr	82d9369e299e9515	InfoLibrary.cs:WhenCounts
 cycle	I18n.cs:Tr	849507ee472e083c	NativeUI.Keybinds.cs:KeybindKeyName
 cycle	I18n.cs:Tr	84df96b87b745063	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:Tr	867886357fd50f09	InfoLibrary.cs:Categories
-cycle	I18n.cs:Tr	86af3eb48582e308	InfoLibrary.cs:ModeFfaExt
 cycle	I18n.cs:Tr	88c6f0a8cbf72a2b	InfoLibrary.cs:Categories
 cycle	I18n.cs:Tr	88d81f071eb22f22	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:Tr	89e23a293cc3481d	PlayerCardsUI.cs:ReasonText
@@ -60036,6 +60035,7 @@ cycle	I18n.cs:Tr	e452d0d82e4bb9c9	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:Tr	e55fbb99d295c5f8	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:Tr	e7c8b79cfeaeeaad	InfoLibrary.cs:Categories
 cycle	I18n.cs:Tr	e8aa412ecc9b2a51	InfoLibrary.cs:TournBot
+cycle	I18n.cs:Tr	e8fed965410cc334	InfoLibrary.cs:Rewards
 cycle	I18n.cs:Tr	e98274bc1cd8cbe1	InfoLibrary.cs:DamageBuffsP2a
 cycle	I18n.cs:Tr	ea00265b94fca6ea	NativeUI.Keybinds.cs:KeybindKeyName
 cycle	I18n.cs:Tr	ea567f2284e6e830	NativeUI.Keybinds.cs:KeybindKeyName
@@ -60068,13 +60068,13 @@ cycle	I18n.cs:Tr	fe074081ff8cdd7a	NativeUI.Keybinds.cs:KeybindKeyName
 cycle	I18n.cs:Tr	fe2ff06d848097f6	PlayerCardsUI.cs:PaintCollectionTabLabel
 cycle	I18n.cs:Tr	fe35fa23dd3dc4bd	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:TrF	0cc3e74104d6a79c	ApiClient.cs:EnrollResult
-cycle	I18n.cs:TrF	25fbaef753bb5b35	ModeInfoText.cs:Ffa
 cycle	I18n.cs:TrF	3a1929d518f37dd2	InfoLibrary.cs:Cosmetics
 cycle	I18n.cs:TrF	3f0dd41a6c9320ae	ApiClient.cs:ActionPreflight
 cycle	I18n.cs:TrF	491508bbdfee3731	MailUI.cs:TabLabel
 cycle	I18n.cs:TrF	4a347352008d2a4d	InfoLibrary.cs:Spectating
 cycle	I18n.cs:TrF	780d82f35353d438	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:TrF	994ea38b3169af30	PlayerCardsUI.cs:HandleAnswer
+cycle	I18n.cs:TrF	a52210f9946b0528	ModeInfoText.cs:Ffa
 cycle	I18n.cs:TrF	a5475c5051802816	InfoLibrary.cs:StartHere
 cycle	I18n.cs:TrF	beeb8ed3200177d6	InfoLibrary.cs:VanillaBugs
 cycle	I18n.cs:TrF	d581abd4e2743f9a	ApiClient.cs:LeaveLobby
@@ -66060,13 +66060,13 @@ member	InfoLibrary.cs:GettingBetter	c6f409b7ff29d8e9
 member	InfoLibrary.cs:Grow	875e20965e25b275
 member	InfoLibrary.cs:Mode1v2Ext	14073f25816a2fad
 member	InfoLibrary.cs:Mode2v2Ext	57d6b01961c54011
-member	InfoLibrary.cs:ModeFfaExt	463e28b939b37ba3
+member	InfoLibrary.cs:ModeFfaExt	962b85d20f7ba913
 member	InfoLibrary.cs:MovementTech	780b04f13055449b
 member	InfoLibrary.cs:Netcode	fb51c14534a6f3d4
 member	InfoLibrary.cs:Poison	93946d723b3879a1
 member	InfoLibrary.cs:Ranked1v1	354a29c2973bb67a
 member	InfoLibrary.cs:Rating	63f17ddf935cd157
-member	InfoLibrary.cs:Rewards	9b4551baaa5fb7d4
+member	InfoLibrary.cs:Rewards	43abdf8d4a6877ed
 member	InfoLibrary.cs:Spectating	a4acac209e6cef5a
 member	InfoLibrary.cs:StartHere	12f2c0f967861134
 member	InfoLibrary.cs:TeamColors	7093ca8a7e31fc8e
@@ -66080,7 +66080,7 @@ member	InfoLibrary.cs:VanillaFixesP1	68590bb25c155048
 member	InfoLibrary.cs:VanillaFixesP2	c28b783f75ad6dc1
 member	InfoLibrary.cs:VanillaSafety	298aa2f2a61b8133
 member	InfoLibrary.cs:Visibility	afee988c67b676a6
-member	InfoLibrary.cs:WhenCounts	77d8bfa335f9a9df
+member	InfoLibrary.cs:WhenCounts	fa1c7dc6a1dd18a5
 member	InfoViz.cs:ActionLabel	e9fd222c7a40ae52
 member	InfoViz.cs:Build	ebed51fdd7c946d0
 member	InfoViz.cs:BuildAchievementTiers	d250b9142dcae325
@@ -66424,7 +66424,7 @@ member	MapSkinEffects.cs:OnAnimatedCosmeticsToggled	dc28e285e4fd44d4
 member	MapSkinEffects.cs:ReportLive	2d03891cdb60e146
 member	MapSkinEffects.cs:StreakTexture	c20b61df358f212a
 member	MapSkinEffects.cs:ViewHalfExtents	ab3cbd6038eedb1a
-member	ModeInfoText.cs:Ffa	001ba54e82a2762b
+member	ModeInfoText.cs:Ffa	482567c39c61f1db
 member	ModeInfoText.cs:FfaTitle	bb55a8aaf6c10b1c
 member	ModeInfoText.cs:Ovt	72c07e40bf03db44
 member	ModeInfoText.cs:OvtTitle	f4b630b38ecdbd93
@@ -69604,12 +69604,12 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	5412be93d9435cb0	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	5895	57285	531251244bb3b6b1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	5895	57285	531251244bb3b6b1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	5895	57285	531251244bb3b6b1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	5895	57285	531251244bb3b6b1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	5895	57285	531251244bb3b6b1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	5895	57285	531251244bb3b6b1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	5895	57285	090a89d6a8bf0489	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	5895	57285	090a89d6a8bf0489	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	5895	57285	090a89d6a8bf0489	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	5895	57285	090a89d6a8bf0489	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	5895	57285	090a89d6a8bf0489	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	5895	57285	090a89d6a8bf0489	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:OnRoundStart	9	9	fc1f4abd24c0772a	attached	GameStateWatcher.cs:PollMatchState

@@ -332,6 +332,20 @@ _BRANCH_POINT = "0266237"
 _ITEM_ANCHORS = ("backend/tests/test_faq_surfaces.py",
                  "backend/tests/fixtures/faq_claims.json")
 
+# A COMMIT OF ANOTHER LANE THAT TOUCHES AN ANCHOR is named here, because the
+# path filter would count it as this item's. The FAQ early-leave lane's
+# migration 396 rewrites the early-leave bullet of the economy text that hold
+# 3 pins, so that lane's commits changed hold 3 in this module beside its own
+# files (396 and its rollback, the client texts with their catalogue rows and
+# key manifests, and its tests): the first, and the FAQ-R6 fix that rewords
+# the bullet's last sentence. Those are that lane's and ship under its
+# review; they are not this item's to sweep or to hand back. A named commit
+# must be one the log lists, so the record cannot outlive the commit it names.
+_OTHER_LANE_COMMITS = (
+    "f683d3440dc006981401d5637204767523f6809d",
+    "7675e46c7b78c207b72407c1310cb59d6ad908e7",
+)
+
 # A DRIVE-LETTER PATH, any of them and not only one under a home directory: a
 # path that resolves on one seat is wrong on every other (round 4's psql
 # default was one, and a fresh checkout with only the DSN set selected a client
@@ -546,15 +560,23 @@ def test_the_hygiene_scope_is_every_file_this_item_touches():
     work. A file one of those commits touched is either swept or handed back,
     so the scope cannot silently miss one; and a recorded file is one a commit
     of the item touched, so the scope cannot be padded with files it does not
-    own. A clone without the branch point skips this half and says why; the
-    sweep itself needs no history."""
+    own. A commit _OTHER_LANE_COMMITS names is another lane's that had to
+    touch an anchor: it is left out, and it must be one the log lists. A
+    clone without the branch point skips this half and says why; the sweep
+    itself needs no history."""
     if _git("rev-parse", "--verify", _BRANCH_POINT + "^{commit}").returncode != 0:
         pytest.skip("the branch point %s is not in this clone, so this item's "
                     "commits cannot be listed" % _BRANCH_POINT)
     proc = _git("log", "--no-merges", "--format=%H",
                 _BRANCH_POINT + "..HEAD", "--", *_ITEM_ANCHORS)
     assert proc.returncode == 0, proc.stderr or proc.stdout
-    commits = proc.stdout.split()
+    listed = proc.stdout.split()
+    stale = sorted(set(_OTHER_LANE_COMMITS) - set(listed))
+    assert not stale, (
+        "_OTHER_LANE_COMMITS names %s, which the log of this item's anchors "
+        "does not list: the record outlives the commit it names (a rebase or "
+        "a squash gives a commit a new id)" % stale)
+    commits = [sha for sha in listed if sha not in _OTHER_LANE_COMMITS]
     # Seven commits of this item precede round 5. Fewer means the log read
     # the wrong range, and both assertions below would hold vacuously (#304).
     assert len(commits) >= 7, (
@@ -3351,6 +3373,8 @@ ECONOMY_LADDER = [
 # re-derived from the CURRENT client English (340 and 341 are applied nowhere:
 # the read-only query in the hold-3 notes found none of the three keys on the
 # primary, so both are edited in place). That replacement is the third edit.
+# 396 later replaced the same article's early-leave bullet; hold 3 puts that
+# back first (ECONOMY_LEAVE_GRACE, beside it).
 ECONOMY_SENTENCE = [
     ("one 5-0 win in a 5-player lobby pays",
      "one 5-0 win with 5 players finishing pays")]
@@ -3731,31 +3755,140 @@ def _economy_equal(halves):
             and all(seeds[L] == (kid, sh, cat[L]) for L in cat))
 
 
+# 396 (the FAQ early-leave correction) replaced the economy article's
+# early-leave bullet in the client English and in every bundled locale, so the
+# client's CURRENT economy English is the body 396 registers under its own key
+# (test_faq_early_leave_client.py holds 396 to it). 340 and 341 are left as
+# they are and keep the article as it stood before 396. These pairs, before ->
+# after, with ECONOMY_FORFEIT_TERM's es pair below them, are the only
+# differences between the two in each language: hold 3
+# puts each one back before it holds 340 and 341 to the client, so what it
+# checks is "340/341 are the client's economy article up to 396", not a pin on
+# text the client no longer carries.
+MIG_396 = os.path.join(REPO, "backend", "sql", "396_faq_early_leave_keys.sql")
+ECONOMY_LEAVE_GRACE = {
+    "en": (
+        "- Ghosts and graced early leavers are unpaid and unrated for that "
+        "game: leaving before the field scored 2 half points, while your "
+        "own tally (points, half points, kills) is still zero, takes you "
+        "out of it entirely.",
+        "- Ghosts and graced early leavers are unrated and receive no game "
+        "Gold or XP from that game: leaving before the field scored four "
+        "half points in total, whether or not any became a full point, "
+        "takes you out of those results. A graced leaver can still earn "
+        "achievements, which pay as usual, but an unrated game earns no "
+        "title-ladder progress."),
+    "es": (
+        "- Los fantasmas y los que salieron pronto con gracia no cobran ni "
+        "puntúan ese juego: irse antes de que el campo anotara 2 medios "
+        "puntos, con tu propio recuento (puntos, medios puntos, kills) aún "
+        "a cero, te saca de él por completo.",
+        "- Los fantasmas y los que salieron pronto con gracia no puntúan ni "
+        "reciben oro ni XP de ese juego: irse antes de que el campo anotara "
+        "cuatro medios puntos en total, se hayan convertido o no en un "
+        "punto completo, te saca de esos resultados. Quien sale con gracia "
+        "aún puede obtener logros, que pagan como siempre, pero un juego sin "
+        "rating no da progreso en la escalera de títulos."),
+    "ru": (
+        "- Призраки и прощённые ранние выходы за ту игру не оплачиваются и "
+        "не рейтингуются: выход до 2 набранных полем полуочков при "
+        "собственном нулевом счёте (очки, полуочки, убийства) выводит из "
+        "неё полностью.",
+        "- Призраки и вышедшие рано по льготе за ту игру не рейтингуются и "
+        "не получают ни игрового золота, ни XP: выход до того, как поле "
+        "набрало в сумме четыре полуочка (ставшие полным очком или нет), "
+        "выводит из этих итогов. Вышедший по льготе по-прежнему может "
+        "получить достижения, и они платят как обычно, но нерейтинговая игра "
+        "не даёт прогресса на лестнице титулов."),
+    "uk": (
+        "- Привиди й ті, хто вийшов рано під пільгу, за ту гру не отримують "
+        "ні оплати, ні рейтингу: вихід до 2 половинок очка в полі, поки ваш "
+        "власний рахунок (очки, половинки, вбивства) ще нульовий, повністю "
+        "виводить вас із неї.",
+        "- Привиди й ті, хто вийшов рано під пільгу, за ту гру не отримують "
+        "ні рейтингу, ні ігрового золота, ні XP: вихід до того, як поле "
+        "набрало загалом чотири половинки очка (що стали повним очком чи "
+        "ні), виводить вас із цих підсумків. Той, хто вийшов під пільгу, й "
+        "надалі може отримати досягнення, і вони платять як зазвичай, але гра "
+        "без рейтингу не дає прогресу на драбині титулів."),
+    "sv": (
+        "- Spöken och tidiga avhoppare med respit får varken betalning "
+        "eller rating för den matchen: att lämna innan fältet tagit 2 "
+        "halvpoäng, medan din egen räkning (poäng, halvpoäng, kills) "
+        "fortfarande är noll, tar dig helt ur den.",
+        "- Spöken och tidiga avhoppare med respit får varken rating, "
+        "matchguld eller XP för den matchen: att lämna innan fältet tagit "
+        "fyra halvpoäng sammanlagt, oavsett om någon blivit en hel poäng, "
+        "tar dig ur de resultaten. Den som hoppar av med respit kan "
+        "fortfarande tjäna in prestationer, som betalar som vanligt, men en "
+        "match utan rating ger inga framsteg på titelstegen."),
+}
+
+# 396 also words the es economy value's pointer to the forfeit section as the
+# term that covers both causes of a forfeit (absence and concession).
+ECONOMY_FORFEIT_TERM = {"es": ("Plazos e incomparecencias", "Plazos y forfaits")}
+
+
+def _economy_before_396(halves):
+    """The economy halves with 396's early-leave bullet put back, in the
+    client English and in each bundled locale value; the 340 row and the 341
+    seeds pass through as read."""
+    english, cat, row, seeds = halves
+    before, after = ECONOMY_LEAVE_GRACE["en"]
+    assert english.count(after) == 1 and before not in english, (
+        "the client's economy article does not carry 396's early-leave bullet exactly once")
+    reverted = {}
+    for L, value in cat.items():
+        b, a = ECONOMY_LEAVE_GRACE[L]
+        assert value.count(a) == 1 and b not in value, (
+            "the bundled %s economy value does not carry 396's early-leave bullet exactly once" % L)
+        reverted[L] = value.replace(a, b)
+    for L, (b, a) in ECONOMY_FORFEIT_TERM.items():
+        assert reverted[L].count(a) == 1 and b not in reverted[L], (
+            "the bundled %s economy value does not carry 396's forfeit term exactly once" % L)
+        reverted[L] = reverted[L].replace(a, b)
+    return english.replace(after, before), reverted, row, seeds
+
+
 def test_hold3_the_economy_successor_is_the_client_english_and_its_seeds_the_catalogues():
     info, cat = _read(_INFO_LIBRARY), _read(os.path.join(REPO, "plugin", "I18nCatalogues.cs"))
     sql340, sql341 = _read(MIG_340), _read(MIG_341)
-    halves = _economy_halves(info, cat, sql340, sql341)
+
+    def halves_of(s340, s341):
+        return _economy_before_396(_economy_halves(info, cat, s340, s341))
+
+    current = _economy_halves(info, cat, sql340, sql341)
+    halves = halves_of(sql340, sql341)
     english, catv, (kid, sh, body), seeds = halves
     assert ECONOMY_SENTENCE[0][1] in english and ECONOMY_SENTENCE[0][0] not in english, (
         "the client's economy article no longer carries the replacement shutout sentence")
-    assert body == english, "340's economy successor is not the client's current English"
+    assert body == english, "340's economy successor is not the client's English up to 396"
     assert kid == _client_key_id(english), "340's economy key is not the client English's key"
     assert sorted(catv) == ["es", "ru", "sv", "uk"], "the bundled catalogues lack a locale: %s" % sorted(catv)
     for L in ("es", "ru", "uk", "sv"):
         assert L in seeds, "341 seeds no %s row for the economy key %s" % (L, kid)
         assert seeds[L][:2] == (kid, sh), "341's %s row names another key or hash" % L
-        assert seeds[L][2] == catv[L], "341's %s seed is not the bundled %s value byte for byte" % (L, L)
+        assert seeds[L][2] == catv[L], "341's %s seed is not the bundled %s value up to 396 byte for byte" % (L, L)
     assert _economy_equal(halves)
+    # The client's CURRENT economy English is 396's, not 340's, and 396 is the
+    # migration that registers its key and hash.
+    now = current[0]
+    assert not _economy_equal(current), "340 still equals the current client English"
+    assert "('%s', '%s')" % (_client_key_id(now), hashlib.sha1(now.encode("utf-8")).hexdigest()) in _read(MIG_396), (
+        "396 does not register the client's current economy English")
     # NEGATIVE CONTROLS: the round-1 state (340 and 341 derived from the
-    # predecessor sentence) fails, and so does one locale's seed alone reverted.
+    # predecessor sentence) fails, so does one locale's seed alone reverted,
+    # and so does one locale value whose 396 bullet is not put back.
     before, after = ECONOMY_SENTENCE[0]
     old340 = sql340.replace(after, before)
     old340 = old340.replace(kid, _client_key_id(english.replace(after, before)))
-    assert not _economy_equal(_economy_halves(info, cat, old340, sql341)), "the predecessor sentence passes"
+    assert not _economy_equal(halves_of(old340, sql341)), "the predecessor sentence passes"
     sv_new = "en 5-0-vinst med 5 spelare som spelar klart betalar"
     assert sql341.count(sv_new) == 1
     reverted = sql341.replace(sv_new, "en 5-0-vinst i en 5-spelarlobby betalar")
-    assert not _economy_equal(_economy_halves(info, cat, sql340, reverted)), "a reverted Swedish seed passes"
+    assert not _economy_equal(halves_of(sql340, reverted)), "a reverted Swedish seed passes"
+    unreverted = (english, dict(catv, sv=current[1]["sv"]), (kid, sh, body), seeds)
+    assert not _economy_equal(unreverted), "a Swedish value still carrying 396's bullet passes"
 
 
 _I18N_SCHEMA = [

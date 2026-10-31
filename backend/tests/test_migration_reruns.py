@@ -215,6 +215,22 @@ PREREQ = {
              VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid()),
                     (gen_random_uuid(), gen_random_uuid(), gen_random_uuid());
     """,
+    # 396 writes the three i18n tables, built here by 181's and 212's own
+    # files; 386 itself (its column comment needs ffa_match_players, which is
+    # all of that table 386 reads); then a translator's pending proposal on
+    # one 386 key, which 396 supersedes, and a machine entry on another, which
+    # 396 locks and must leave exactly as it found it.
+    "396": ((SQL_DIR / "181_i18n_infrastructure.sql").read_text(encoding="utf-8") + "\n"
+            + (SQL_DIR / "212_i18n_key_context.sql").read_text(encoding="utf-8") + """
+        CREATE TABLE ffa_match_players (game_points_at_leave INTEGER);
+    """ + (SQL_DIR / "386_ffa_leave_grace_texts.sql").read_text(encoding="utf-8") + """
+        INSERT INTO i18n_proposals
+               (key_id, language_code, source_hash, proposed_target, proposer_steam_id)
+        SELECT key_id, 'es', source_hash, 'una propuesta pendiente', '76561190000000002'
+          FROM i18n_keys WHERE key_id = '79023ff50ab9d08e';
+        INSERT INTO i18n_entries (key_id, language_code, target, state)
+        VALUES ('3bb08fc59139b367', 'ru', 'a machine entry', 'machine');
+    """),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -231,6 +247,7 @@ TABLES = {
     "337": ("shop_items",),
     "377": ("matches",),
     "391": ("dc_events",),
+    "396": ("i18n_keys", "i18n_entries", "i18n_proposals"),
 }
 
 MIGRATION_FILES = {
@@ -243,6 +260,7 @@ MIGRATION_FILES = {
     "366": "366_title_refunds_voidshot_kingslayer.sql",
     "377": "377_admin_evidence_indexes.sql",
     "391": "391_dc_events_leave_anchor.sql",
+    "396": "396_faq_early_leave_keys.sql",
 }
 
 
@@ -407,7 +425,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -419,7 +437,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -432,7 +450,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -451,7 +469,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -935,7 +953,7 @@ _HOLDERS = {
 }
 
 _LOCK_CASES = [(number, table, who)
-               for number in ("331", "332", "333", "336", "377", "391")
+               for number in ("331", "332", "333", "336", "377", "391", "396")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 
@@ -1688,3 +1706,482 @@ def test_332_states_its_own_bound_correctly():
         "the file does not state the span of the series as %d months, which "
         "is where generate_series(0, %d) in four-month steps ends"
         % (4 * bound, bound))
+
+
+# ── 396: the FAQ's FFA early-leave keys ─────────────────────────────────────
+#
+# 396 registers the four client keys whose English now states the FFA
+# early-leave grace as the server applies it, retires the four keys 386
+# registered for the same four strings in an earlier wording,
+# decides the pending proposals on those 'superseded', and seeds sixteen
+# pending claude-mt drafts. Rows are told apart here by role, never by a
+# copied id: the 386 keys are the ones PREREQ["396"] leaves, the 396 keys the
+# ones the file adds. The ids themselves are bound to the client's English,
+# and 386's ids to 386's own text, in test_faq_early_leave_client.py.
+
+_396_ROLLBACK = "rollback_396_faq_early_leave_keys.sql"
+_396_LANGS = ("es", "ru", "sv", "uk")
+_396_TRANSLATOR = "76561190000000002"
+
+
+def _396_prereq_without_386():
+    """The i18n tables alone: a database 386 never reached."""
+    return "\n".join((SQL_DIR / name).read_text(encoding="utf-8")
+                     for name in ("181_i18n_infrastructure.sql", "212_i18n_key_context.sql"))
+
+
+async def _396_state(conn):
+    """Every row of the three i18n tables in key order: the values asserted
+    here, the md5 of each text, where a proposal's first carriage return
+    sits (0 for none), and the row version."""
+    keys = await conn.fetch("""
+        SELECT key_id, namespace, retired_at IS NULL AS live, source_hash,
+               sensitive, max_px, context, md5(msgctxt) AS text_md5,
+               xmin::text AS version
+          FROM i18n_keys ORDER BY key_id""")
+    proposals = await conn.fetch("""
+        SELECT key_id, language_code, source_hash, proposer_steam_id, status,
+               review_note, license_assent, license_terms_rev,
+               md5(proposed_target) AS text_md5,
+               position(chr(13) IN proposed_target) AS cr_at, xmin::text AS version
+          FROM i18n_proposals ORDER BY key_id, language_code, id""")
+    entries = await conn.fetch("""
+        SELECT key_id, language_code, state, md5(target) AS text_md5,
+               approved_source_hash, xmin::text AS version
+          FROM i18n_entries ORDER BY key_id, language_code""")
+    return {"keys": {r["key_id"]: dict(r) for r in keys},
+            "proposals": [dict(r) for r in proposals],
+            "entries": [dict(r) for r in entries]}
+
+
+async def _396_in_schema(prefix, steps, prereq=None):
+    """Run `steps(conn)` in a throwaway schema holding 396's prerequisite
+    (or `prereq`)."""
+    schema = "%s_%s" % (prefix, uuid.uuid4().hex[:10])
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute('CREATE SCHEMA "%s"' % schema)
+        await conn.execute('SET search_path TO "%s"' % schema)
+        await conn.execute(PREREQ["396"] if prereq is None else prereq)
+        return await steps(conn)
+    finally:
+        try:
+            await conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        try:
+            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await conn.close()
+
+
+async def _396_attempt(conn, sql):
+    """Apply `sql`: None when it commits, else the error, after rolling back
+    the transaction the file's own BEGIN left open and aborted."""
+    try:
+        await conn.execute(sql)
+        return None
+    except Exception as ex:
+        await conn.execute("ROLLBACK")
+        return "%s: %s" % (type(ex).__name__, ex)
+
+
+def test_396_retires_the_386_keys_and_seeds_sixteen_drafts_once():
+    """The first run: the four 386 keys retired with their text unchanged,
+    the translator's pending proposal on one of them decided 'superseded' by
+    this file, the machine entry on another left exactly as it was (version
+    included), and four new live client keys, each with one pending
+    claude-mt draft in es, ru, sv and uk at its own source hash, under the
+    machine-v1 terms, with no carriage return in any text. The second run,
+    and then a CRLF copy of the file (what a core.autocrlf checkout holds),
+    change no row, version included."""
+    sql = migration_text("396")
+
+    async def steps(conn):
+        before = await _396_state(conn)
+        await conn.execute(sql)
+        first = await _396_state(conn)
+        await conn.execute(sql)
+        second = await _396_state(conn)
+        await conn.execute(sql.replace("\n", "\r\n"))
+        crlf = await _396_state(conn)
+        return before, first, second, crlf
+
+    before, first, second, crlf = _run(_396_in_schema("m396f", steps))
+    old = set(before["keys"])
+    assert len(old) == 4 and all(k["live"] for k in before["keys"].values()), before["keys"]
+    new = set(first["keys"]) - old
+    assert len(new) == 4 and set(first["keys"]) == old | new, sorted(first["keys"])
+    for key_id in sorted(old):
+        was, now = before["keys"][key_id], first["keys"][key_id]
+        assert not now["live"], "the 386 key %s is still live after 396" % key_id
+        assert (now["source_hash"], now["text_md5"]) == (was["source_hash"], was["text_md5"]), (
+            "396 changed the text of the 386 key %s" % key_id)
+    for key_id in sorted(new):
+        k = first["keys"][key_id]
+        assert k["live"] and k["namespace"] == "client" and k["max_px"] is None, k
+    translator = [p for p in first["proposals"] if p["proposer_steam_id"] == _396_TRANSLATOR]
+    assert [(p["key_id"] in old, p["status"], p["review_note"]) for p in translator] == [
+        (True, "superseded", "key retired by migration 396")], translator
+    assert first["entries"] == before["entries"], (
+        "396 wrote an entry: %r -> %r" % (before["entries"], first["entries"]))
+    seeds = [p for p in first["proposals"] if p["proposer_steam_id"] == "claude-mt"]
+    assert sorted((p["key_id"], p["language_code"]) for p in seeds) == sorted(
+        (k, lang) for k in new for lang in _396_LANGS), seeds
+    for p in seeds:
+        assert (p["status"], p["review_note"]) == ("pending", None), p
+        assert p["source_hash"] == first["keys"][p["key_id"]]["source_hash"], p
+        assert (p["license_assent"], p["license_terms_rev"]) == (True, "machine-v1"), p
+        assert p["cr_at"] == 0, p
+    assert second == first, "396's second run wrote a row: %r -> %r" % (first, second)
+    assert crlf == first, (
+        "a CRLF copy of 396 stored different text or wrote a row: %r -> %r" % (first, crlf))
+
+
+def test_396_stores_the_texts_its_values_read_and_the_client_bundles():
+    """The third of 396's format guarantees: applied to its prerequisite,
+    396 stores, byte for byte, as the four new keys' msgctxt the four
+    sites' English (as a set) and, key by key, the text the file's key row
+    reads as (m396_rows) with that row's context; and as the sixteen
+    claude-mt drafts, pair by pair, the text the file's seed row reads as
+    and the bundled catalogue's text for its key's English in its
+    language."""
+    import test_faq_early_leave_client as client
+    sources = client.site_sources()
+    keys, _sensitive, seeds = client.m396_rows()
+    cats = client.ladder.catalogues()
+    sql = migration_text("396")
+
+    async def steps(conn):
+        await conn.execute(sql)
+        stored_keys = await conn.fetch(
+            "SELECT key_id, msgctxt, context FROM i18n_keys WHERE key_id = ANY($1::text[]) ORDER BY key_id",
+            sorted(keys))
+        stored_seeds = await conn.fetch(
+            "SELECT key_id, language_code, proposed_target FROM i18n_proposals "
+            "WHERE proposer_steam_id = 'claude-mt' ORDER BY key_id, language_code")
+        return stored_keys, stored_seeds
+
+    stored_keys, stored_seeds = _run(_396_in_schema("m396s", steps))
+    assert sorted(r["key_id"] for r in stored_keys) == sorted(keys), stored_keys
+    assert sorted(r["msgctxt"] for r in stored_keys) == sorted(sources.values()), (
+        "396 stored a key text that is not a site's English")
+    for r in stored_keys:
+        _ns, english, _hash, context = keys[r["key_id"]]
+        assert r["msgctxt"] == english, "the stored text of %s is not its row's" % r["key_id"]
+        assert r["context"] == context, (r["key_id"], r["context"], context)
+    assert len(stored_seeds) == 16 and sorted((r["key_id"], r["language_code"]) for r in stored_seeds) == sorted(
+        seeds), ("396 did not store each of the sixteen seed pairs once", [
+            (r["key_id"], r["language_code"]) for r in stored_seeds])
+    got = {(r["key_id"], r["language_code"]): r["proposed_target"] for r in stored_seeds}
+    assert sorted(got) == sorted(seeds), sorted(got)
+    for (key_id, lang), target in got.items():
+        assert target == seeds[(key_id, lang)][1], "the stored %s draft of %s is not its row's" % (lang, key_id)
+        assert target == cats[lang.upper()][0][keys[key_id][1]], (
+            "the stored %s draft of %s is not the bundled %s text" % (lang, key_id, lang.upper()))
+
+
+def test_396_refuses_to_retire_a_386_key_with_an_approved_entry():
+    """340's guard, with its control. With the machine entry on a 386 key
+    approved, 396 refuses and stores nothing: the 386 keys stay live, the
+    translator's proposal stays pending and no 396 key exists. The control
+    is the same prerequisite without the approval, which 396 applies."""
+    sql = migration_text("396")
+    approve = """
+        UPDATE i18n_entries e
+           SET state = 'approved', approved_source_hash = k.source_hash,
+               approved_by_steam_id = '76561190000000003'
+          FROM i18n_keys k
+         WHERE k.key_id = e.key_id AND e.state = 'machine';"""
+
+    def attempt(extra):
+        async def steps(conn):
+            if extra:
+                await conn.execute(extra)
+            before = await _396_state(conn)
+            verdict = await _396_attempt(conn, sql)
+            return before, verdict, await _396_state(conn)
+        return _run(_396_in_schema("m396a", steps))
+
+    _before, control, after = attempt("")
+    assert control is None and len(after["keys"]) == 8, (control, sorted(after["keys"]))
+    before, verdict, after = attempt(approve)
+    assert [e["state"] for e in before["entries"]] == ["approved"], before["entries"]
+    assert verdict and "approved entr(ies) exist on the 386 FFA grace keys" in verdict, verdict
+    assert after == before, "a refused 396 stored something: %r -> %r" % (before, after)
+
+
+def test_396_applies_where_386_never_ran():
+    """A database 386 never reached: 396 registers its four keys and
+    sixteen drafts, retires and supersedes nothing, and a second run writes
+    no row."""
+    sql = migration_text("396")
+
+    async def steps(conn):
+        await conn.execute(sql)
+        first = await _396_state(conn)
+        await conn.execute(sql)
+        return first, await _396_state(conn)
+
+    first, second = _run(_396_in_schema("m396n", steps, _396_prereq_without_386()))
+    assert len(first["keys"]) == 4 and all(k["live"] for k in first["keys"].values()), first["keys"]
+    assert len(first["proposals"]) == 16 and all(
+        (p["status"], p["proposer_steam_id"]) == ("pending", "claude-mt")
+        for p in first["proposals"]), first["proposals"]
+    assert first["entries"] == [], first["entries"]
+    assert second == first, "396's second run wrote a row: %r -> %r" % (first, second)
+
+
+def test_396_rollback_takes_it_back_once_and_a_later_396_commits_nothing():
+    """The rollback retires the four 396 keys, makes the four 386 keys live
+    again, decides the sixteen pending drafts 'superseded', and leaves the
+    proposal 396 superseded on a 386 key, and every entry, as they were; a
+    second rollback writes no row. Applying 396 again after the rollback is
+    refused at its coverage check, as 396's header says, and stores nothing."""
+    sql = migration_text("396")
+    rollback = (SQL_DIR / _396_ROLLBACK).read_text(encoding="utf-8")
+
+    async def steps(conn):
+        before = await _396_state(conn)
+        await conn.execute(sql)
+        applied = await _396_state(conn)
+        await conn.execute(rollback)
+        rolled = await _396_state(conn)
+        await conn.execute(rollback)
+        rolled_twice = await _396_state(conn)
+        verdict = await _396_attempt(conn, sql)
+        return before, applied, rolled, rolled_twice, verdict, await _396_state(conn)
+
+    before, applied, rolled, rolled_twice, verdict, after = _run(
+        _396_in_schema("m396r", steps))
+    old = set(before["keys"])
+    new = set(applied["keys"]) - old
+    assert len(old) == 4 and len(new) == 4, (sorted(old), sorted(new))
+    assert all(rolled["keys"][k]["live"] for k in old), rolled["keys"]
+    assert not any(rolled["keys"][k]["live"] for k in new), rolled["keys"]
+    seeds = [p for p in rolled["proposals"] if p["proposer_steam_id"] == "claude-mt"]
+    assert len(seeds) == 16 and all(
+        (p["status"], p["review_note"]) == ("superseded", "key retired by rollback_396")
+        for p in seeds), seeds
+    translator = [p for p in rolled["proposals"] if p["proposer_steam_id"] == _396_TRANSLATOR]
+    assert [(p["status"], p["review_note"]) for p in translator] == [
+        ("superseded", "key retired by migration 396")], translator
+    assert rolled["entries"] == before["entries"], rolled["entries"]
+    assert rolled_twice == rolled, (
+        "a second rollback wrote a row: %r -> %r" % (rolled, rolled_twice))
+    assert verdict and ("16 of 16 seed pairs have neither a pending proposal nor an "
+                        "approved translation of the current source text") in verdict, verdict
+    assert after == rolled, (
+        "396 after its rollback was refused and still stored something: %r -> %r"
+        % (rolled, after))
+
+
+def test_396_rollback_refuses_while_a_396_key_has_an_approved_translation():
+    """FAQ-R1 F4. A portal reviewer approves a translation on one of 396's
+    keys after 396 is applied: the rollback then refuses and commits
+    nothing, so the four 396 keys stay live, the four 386 keys stay retired,
+    the sixteen drafts stay pending and the approved entry is untouched
+    (version included). The control is the same database without the
+    approval, where the rollback commits and retires the four 396 keys, so
+    the refusal is what the approval reached and not a file that cannot
+    apply."""
+    sql = migration_text("396")
+    rollback = (SQL_DIR / _396_ROLLBACK).read_text(encoding="utf-8")
+
+    def attempt(approve):
+        async def steps(conn):
+            old = set((await _396_state(conn))["keys"])
+            await conn.execute(sql)
+            new = sorted(set((await _396_state(conn))["keys"]) - old)
+            if approve:
+                await conn.execute(
+                    "INSERT INTO i18n_entries (key_id, language_code, target, state,"
+                    "                          approved_source_hash, approved_by_steam_id)"
+                    " SELECT key_id, 'es', 'una traduccion aprobada', 'approved',"
+                    "        source_hash, '76561190000000003'"
+                    "   FROM i18n_keys WHERE key_id = $1", new[0])
+            before = await _396_state(conn)
+            verdict = await _396_attempt(conn, rollback)
+            return old, new, before, verdict, await _396_state(conn)
+        return _run(_396_in_schema("m396v", steps))
+
+    old, new, before, control, rolled = attempt(False)
+    assert len(old) == 4 and len(new) == 4, (sorted(old), new)
+    assert control is None, control
+    assert not any(rolled["keys"][k]["live"] for k in new), rolled["keys"]
+    assert all(rolled["keys"][k]["live"] for k in old), rolled["keys"]
+
+    old, new, before, verdict, after = attempt(True)
+    assert [(e["key_id"], e["state"]) for e in before["entries"]
+            if e["key_id"] in new] == [(new[0], "approved")], before["entries"]
+    assert all(before["keys"][k]["live"] for k in new), before["keys"]
+    assert verdict and ("1 approved entr(ies) exist on the 396 FAQ early-leave keys"
+                        in verdict), verdict
+    assert after == before, (
+        "a refused rollback_396 stored something: %r -> %r" % (before, after))
+
+
+def test_396_seed_check_refuses_a_literal_that_a_crlf_checkout_reached():
+    """The control for the CRLF arm above. Every literal in 396 is one line,
+    which is what keeps a CRLF checkout away from the text. The same file
+    with one seed's || chr(10) || joins written as real line breaks inside
+    one literal still applies from an LF copy (the control: the bytes are the
+    same), and from a CRLF copy that seed carries carriage returns, which its
+    md5 post-check refuses, with nothing stored."""
+    sql = migration_text("396")
+    lines = sql.split("\n")
+    rows = [i for i, line in enumerate(lines)
+            if re.match(r"\('[0-9a-f]{16}', 'es', '[0-9a-f]{40}', '", line.lstrip())]
+    assert len(rows) == 4, rows
+    seed = lines[rows[0]]
+    spread_seed, joins = re.subn(r"' \|\| ((?:chr\(10\) \|\| )+)'",
+                                 lambda m: "\n" * m.group(1).count("chr(10)"), seed)
+    assert joins > 0 and "chr(" not in spread_seed, "no line break joined in to spread"
+    lines[rows[0]] = spread_seed
+    spread = "\n".join(lines)
+
+    def attempt(text):
+        async def steps(conn):
+            before = await _396_state(conn)
+            verdict = await _396_attempt(conn, text)
+            return verdict, before, await _396_state(conn)
+        return _run(_396_in_schema("m396c", steps))
+
+    control, _before, state = attempt(spread)
+    assert control is None and sum(
+        p["proposer_steam_id"] == "claude-mt" for p in state["proposals"]) == 16, control
+    verdict, before, state = attempt(spread.replace("\n", "\r\n"))
+    assert verdict and "15 of 16 seed texts carry their expected md5" in verdict, verdict
+    assert len(state["keys"]) == 4 and not any(
+        p["proposer_steam_id"] == "claude-mt" for p in state["proposals"]), state
+    assert state == before, "the refused 396 left a row of the three i18n tables changed"
+
+
+# One statement inside the timeouts, the same bound as 392's on the release
+# notes branch: statement_timeout bounds each statement and
+# idle_in_transaction_session_timeout each pause between statements, on
+# separate budgets, and PostgreSQL 16 has no transaction_timeout, so their
+# sum bounds how long a lock is held before COMMIT only when a single
+# statement runs between the SET LOCAL lines and COMMIT: the DO block in 396
+# and the DO block in its rollback. COMMIT adds its own local completion (the
+# WAL flush and the transaction-status write), which no setting bounds;
+# synchronous_commit = local keeps it from also waiting for a synchronous
+# standby's reply.
+
+_396_SET_LOCALS = ("SET LOCAL lock_timeout = '5s';",
+                   "SET LOCAL idle_in_transaction_session_timeout = '5s';",
+                   "SET LOCAL statement_timeout = '25s';",
+                   "SET LOCAL synchronous_commit = local;")
+_396_TIMEOUT_SUM_S = 30.0
+_396_FILES = {"396": "396_faq_early_leave_keys.sql", "its rollback": _396_ROLLBACK}
+_396_ONE_STATEMENT = {"396": "DO $m396$", "its rollback": "DO $r396$"}
+_396_DOLLAR_TAG = re.compile(r"\$[A-Za-z0-9_]*\$")
+
+
+def _396_statements(sql):
+    """The file's top-level statements in order, comment lines dropped and
+    whitespace flattened. A semicolon inside a dollar-quoted body (the DO
+    block and every literal inside it) does not end a statement."""
+    text = "\n".join(line for line in sql.replace("\r\n", "\n").split("\n")
+                     if not line.lstrip().startswith("--"))
+    out, cur, i, tag = [], [], 0, None
+    while i < len(text):
+        if tag is None:
+            m = _396_DOLLAR_TAG.match(text, i)
+            if m:
+                tag = m.group(0)
+                cur.append(tag)
+                i = m.end()
+            elif text[i] == ";":
+                out.append(" ".join("".join(cur).split()))
+                cur, i = [], i + 1
+            else:
+                cur.append(text[i])
+                i += 1
+        else:
+            j = text.find(tag, i)
+            assert j >= 0, "unterminated %s" % tag
+            cur.append(text[i:j + len(tag)])
+            i, tag = j + len(tag), None
+    assert not "".join(cur).strip(), "text after the last semicolon"
+    return [s for s in out if s]
+
+
+def _396_seconds(value):
+    """A PostgreSQL time setting in seconds (a bare number is milliseconds);
+    0 means no limit and is returned as inf."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)(us|ms|s|min|h|d)?", value.strip())
+    assert m, value
+    n = float(m.group(1)) * {"us": 1e-6, "ms": 1e-3, "s": 1.0, "min": 60.0,
+                             "h": 3600.0, "d": 86400.0}[m.group(2) or "ms"]
+    return float("inf") if n == 0 else n
+
+
+def _396_hold_problems(sql, one):
+    """What keeps `sql` from holding a lock for at most _396_TIMEOUT_SUM_S
+    plus COMMIT's local completion: [] when it is BEGIN, the four SET LOCAL
+    lines of _396_SET_LOCALS in that order (synchronous_commit = local by its
+    exact text), ONE statement starting with `one`, COMMIT, and its
+    statement and idle timeouts sum to at most _396_TIMEOUT_SUM_S (a timeout
+    that is missing or set twice counts as no limit). The local completion
+    is not measured here: no setting bounds it."""
+    stmts = _396_statements(sql)
+    problems = []
+    if stmts[:1] != ["BEGIN"] or stmts[-1:] != ["COMMIT"]:
+        problems.append("not BEGIN ... COMMIT: %r ... %r" % (stmts[:1], stmts[-1:]))
+    sets = [s for s in stmts if s.startswith("SET ")]
+    if tuple(s + ";" for s in sets) != _396_SET_LOCALS or stmts[1:1 + len(sets)] != sets:
+        problems.append("the SET lines after BEGIN are %r" % (sets,))
+    inside = stmts[1 + len(sets):-1]
+    if len(inside) != 1 or not inside[0].startswith(one):
+        problems.append("%d statements between the SET lines and COMMIT: %r"
+                        % (len(inside), [s[:40] for s in inside]))
+
+    def setting(name):
+        got = [re.fullmatch(r"SET LOCAL %s = '([^']*)'" % name, s) for s in stmts]
+        got = [_396_seconds(g.group(1)) for g in got if g]
+        return got[0] if len(got) == 1 else float("inf")
+    bound = setting("statement_timeout") + setting("idle_in_transaction_session_timeout")
+    if bound > _396_TIMEOUT_SUM_S:
+        problems.append("statement plus idle timeout is %ss, over %ss"
+                        % (bound, _396_TIMEOUT_SUM_S))
+    return problems
+
+
+@pytest.mark.parametrize("which", sorted(_396_FILES))
+def test_396_and_its_rollback_run_one_statement_inside_30_s_of_timeouts_and_commit_locally(which):
+    """BEGIN, the three SET LOCAL timeouts and SET LOCAL synchronous_commit =
+    local, ONE statement (each file's DO block), COMMIT, and
+    statement_timeout plus idle_in_transaction_session_timeout at most 30 s
+    (25 s + 5 s): a lock is held for at most that plus COMMIT's local
+    completion (the WAL flush and the transaction-status write)."""
+    sql = (SQL_DIR / _396_FILES[which]).read_text(encoding="utf-8")
+    one = _396_ONE_STATEMENT[which]
+    assert _396_hold_problems(sql, one) == [], (which, _396_hold_problems(sql, one))
+
+
+def test_396_hold_check_refuses_a_second_statement_thirty_plus_five_and_a_commit_level_other_than_local():
+    """The control for the test above, on 396 itself: one more statement
+    before COMMIT, a 30 s statement_timeout, a missing idle timeout, a
+    missing synchronous_commit line and synchronous_commit = on are each
+    refused, each for its own reason."""
+    sql = migration_text("396")
+    one = _396_ONE_STATEMENT["396"]
+    assert len(_396_statements(sql)) == 7, len(_396_statements(sql))
+    assert sql.count("\nCOMMIT;\n") == 1
+    got = _396_hold_problems(sql.replace("\nCOMMIT;\n", "\nSELECT 1;\nCOMMIT;\n"), one)
+    assert len(got) == 1 and got[0].startswith("2 statements"), got
+    stmt = "SET LOCAL statement_timeout = '25s';"
+    assert sql.count(stmt) == 1
+    got = _396_hold_problems(sql.replace(stmt, "SET LOCAL statement_timeout = '30s';"), one)
+    assert len(got) == 2 and "35.0s" in got[1], got
+    idle = "SET LOCAL idle_in_transaction_session_timeout = '5s';\n"
+    assert sql.count(idle) == 1
+    got = _396_hold_problems(sql.replace(idle, ""), one)
+    assert got and "infs" in got[-1], got
+    sync = _396_SET_LOCALS[3] + "\n"
+    assert sql.count(sync) == 1
+    got = _396_hold_problems(sql.replace(sync, ""), one)
+    assert len(got) == 1 and got[0].startswith("the SET lines after BEGIN"), got
+    got = _396_hold_problems(sql.replace(sync, "SET LOCAL synchronous_commit = on;\n"), one)
+    assert len(got) == 1 and "synchronous_commit = on" in got[0], got

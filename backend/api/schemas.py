@@ -1209,6 +1209,15 @@ class HealthResponse(BaseModel):
     # nothing else (#306). No default, as above. Absent on any build before
     # it.
     tzdata_declared: int
+    # ffa_leave_figure: release-train verification plumbing, not a design
+    # mechanism (main._FFA_LEAVE_FIGURE_BUILD; 1 = this build's FFA report
+    # route requires game_points_at_leave on a left_early entry that is not
+    # absent). A code constant, equal on both roles by construction, so the
+    # train can read it through the edge; the batch adds no route, and this is
+    # the key that tells a stale box from a refreshed one (learnings 780, 794).
+    # Probed by the release train and read by nothing else (#306). No default,
+    # as above. Absent on any build before it.
+    ffa_leave_figure: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not
@@ -2040,8 +2049,11 @@ class FfaPlayerEntry(BaseModel):
     # set only on left_early entries by a client still in the room. A field
     # total below two full points, measured against the helper-derived
     # half-point threshold, leaves the seat unrated for this game.
-    # None = not reported: a pre-v1.39 client, a present player, or a carried
-    # roster ghost; all keep pre-grace behaviour. Also OUTSIDE the frozen ffa:
+    # None = not reported: a present player or a carried roster ghost. On a
+    # left_early entry that is not absent it is REQUIRED: submit_ffa_match
+    # refuses the report with 422 as its first statement
+    # (backend/tests/test_ffa_leave_figure_required.py).
+    # Also OUTSIDE the frozen ffa:
     # HMAC canonical, like absent and damage_dealt; submit_ffa_match refutes
     # contradictions in the signed points and rounds. Bounded so a crafted
     # value cannot overflow the SMALLINT column.
@@ -2113,10 +2125,12 @@ class FfaMatchResponse(BaseModel):
     # ── The lobby's authoritative progress (RJ-3 round 4) ─────────────────
     # Every answer given once the lobby row has been LOCKED carries these,
     # acceptances and refusals alike (a refusal carries them in its error body
-    # — see main.py's FfaReportRefusal). Two classes of answer are raised
-    # before there is a lobby row to read and therefore carry none: the
-    # integrity 400s (malformed roster, missing room id, bad signature) and the
-    # 404s (unknown player, lobby not found). A consumer reads them when they
+    # — see main.py's FfaReportRefusal). An answer raised before there is a
+    # lobby row to read carries none; among those are the 422 for an entry
+    # that left during the game without its game_points_at_leave, the 403 for
+    # an invalid signature, the integrity 400s (malformed roster, missing room
+    # id) and the 404s (unknown player, lobby not found).
+    # A consumer reads them when they
     # are present rather than assuming they always are.
     #
     # They exist because the game number a report names comes from the seats'

@@ -7817,12 +7817,12 @@ namespace CompetitiveRounds
                     // RJ-DRIFT N10 (change 17): the stamp against the local
                     // game sequence.
                     absent = !FfaNumberingRules.LeftInGame(kv.Value.leftGameNumber, FfaMode.LocalGameSeq),
-                    // Field point total when they left — drives the server's
-                    // early-leave grace (under 2 = nothing was decided yet, so
-                    // no rating for them this game). Only meaningful for a
-                    // leave from THIS game: a carried ghost's figure belongs to
-                    // a game that already ended, so send -1 and let the server
-                    // read it as "not reported".
+                    // Field half points when they left — drive the server's early-leave
+                    // grace: a seat that leaves before the field has scored four half
+                    // points in total, whether or not any became a full point, is not
+                    // rated for that game and earns no game gold or XP. Only meaningful
+                    // for a leave from THIS game: a carried ghost's figure belongs to a
+                    // game that already ended: send -1, which reads as "not reported".
                     gamePointsAtLeave = (FfaNumberingRules.LeftInGame(kv.Value.leftGameNumber, FfaMode.LocalGameSeq)
                                          ? kv.Value.gamePointsAtLeave : -1),
                     cards = FfaMode.PickHistoryFor(kv.Value.slot),
