@@ -1870,6 +1870,9 @@ def test_396_stores_the_texts_its_values_read_and_the_client_bundles():
         _ns, english, _hash, context = keys[r["key_id"]]
         assert r["msgctxt"] == english, "the stored text of %s is not its row's" % r["key_id"]
         assert r["context"] == context, (r["key_id"], r["context"], context)
+    assert len(stored_seeds) == 16 and sorted((r["key_id"], r["language_code"]) for r in stored_seeds) == sorted(
+        seeds), ("396 did not store each of the sixteen seed pairs once", [
+            (r["key_id"], r["language_code"]) for r in stored_seeds])
     got = {(r["key_id"], r["language_code"]): r["proposed_target"] for r in stored_seeds}
     assert sorted(got) == sorted(seeds), sorted(got)
     for (key_id, lang), target in got.items():

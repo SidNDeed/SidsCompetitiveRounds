@@ -454,21 +454,29 @@ _OUTSIDE_SHA256 = "582c3991e3dfb30d31a11843c6d23f3052f4f33551c214aa8ebee7d5460a4
 _OUTSIDE_LINES = 272
 
 
+def _line(sql, pos):
+    """'396 line N', N the 1-based line of 396 that holds offset `pos`."""
+    return "396 line %d" % (sql.count("\n", 0, pos) + 1)
+
+
 def _tokens(sql):
-    """The (kind, text, offset) tokens of `sql` other than whitespace and
-    comments. Fails on a byte that no _TOKEN rule admits, on a literal that
-    opens after anything but whitespace, "(" or "," (so a literal carries no
-    E, U&, N, B or X prefix), and on a literal holding a backslash or a
-    character below U+0020."""
+    """The (kind, text, offset) tokens of `sql` (396) other than whitespace
+    and comments. Fails on a byte that no _TOKEN rule admits, on a literal
+    that opens after anything but whitespace, "(" or "," (so a literal
+    carries no E, U&, N, B or X prefix), and on a literal holding a
+    backslash or a character below U+0020; each message opens with
+    "396 line N: ", N the line of the failing byte or literal (_line), and
+    the two literal failures also quote the literal."""
     out, i = [], 0
     while i < len(sql):
         m = _TOKEN.match(sql, i)
-        assert m, "a byte no token rule admits at %d: %r" % (i, sql[max(0, i - 20):i + 20])
+        assert m, "%s: a byte no token rule admits: %r" % (_line(sql, i), sql[max(0, i - 20):i + 20])
         kind, text = m.lastgroup, m.group()
         if kind == "lit":
-            assert i > 0 and sql[i - 1] in " \t\n(,", "a literal opens after %r: %r" % (sql[i - 1], sql[i - 20:i + 20])
+            assert i > 0 and sql[i - 1] in " \t\n(,", "%s: a literal opens after %r: %r" % (_line(sql, i), sql[i - 1], text[:60])
             body = text[1:-1]
-            assert all(ch >= " " and ch != "\\" for ch in body), "a literal holds a control character or a backslash: %r" % text[:60]
+            assert all(ch >= " " and ch != "\\" for ch in body), (
+                "%s: a literal holds a control character or a backslash: %r" % (_line(sql, i), text[:60]))
         if kind not in ("ws", "comment"):
             out.append((kind, text, i))
         i = m.end()
@@ -484,11 +492,13 @@ class _M396Parse:
         join     := chr "(" ( 10 | 183 ) ")"
         cast     := CAST "(" value AS VARCHAR "(" 160 ")" ")"
         row      := "(" cell ( "," cell )* ")"   each cell the production its column takes (_VALUES_SHAPES)
-    parse() fails on a cell no production admits (naming its line, or, for
-    a literal _tokens refuses, quoting the literal), on a list whose alias
+    parse() fails on a cell no production admits, on a list whose alias
     and columns _VALUES_SHAPES does not name, and on a row whose cells do
-    not match that shape. `spans` holds each row's offsets, from its
-    opening to its closing parenthesis."""
+    not match that shape. Every failure of parse() and of the _tokens call
+    it makes opens with "396 line N: ", N the 1-based line of the failing
+    token, byte or literal; a literal _tokens refuses is also quoted.
+    `spans` holds each row's offsets, from its opening to its closing
+    parenthesis."""
 
     def __init__(self, sql):
         self.sql, self.toks = sql, _tokens(sql)
@@ -498,8 +508,7 @@ class _M396Parse:
         return self.toks[n][1] if n < len(self.toks) else ""
 
     def at(self, n):
-        pos = self.toks[n][2] if n < len(self.toks) else len(self.sql)
-        return "396 line %d" % (self.sql.count("\n", 0, pos) + 1)
+        return _line(self.sql, self.toks[n][2] if n < len(self.toks) else len(self.sql))
 
     def expect(self, n, *texts):
         got = [self.t(k) for k in range(n, n + len(texts))]
@@ -557,7 +566,8 @@ class _M396Parse:
             close = v - 1
             assert self.t(close) == ")", "%s: VALUES follows %r" % (self.at(close), self.t(close))
             opn = max(k for k in range(close) if self.t(k) == "(")
-            assert [self.t(k) for k in range(opn - 3, opn)] == ["INSERT", "INTO", "_seed396"], self.at(opn)
+            assert [self.t(k) for k in range(opn - 3, opn)] == ["INSERT", "INTO", "_seed396"], (
+                "%s: a VALUES list follows a column list not of INSERT INTO _seed396" % self.at(opn))
             alias, cols = "_seed396", [self.t(k) for k in range(opn + 1, close, 2)]
         key = (alias, tuple(cols))
         assert key in _VALUES_SHAPES, "%s: a VALUES list no shape names: %r" % (self.at(v), key)
