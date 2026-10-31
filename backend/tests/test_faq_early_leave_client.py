@@ -425,3 +425,18 @@ def test_396_and_its_rollback_retire_and_revive_exactly_386s_keys():
                            r"WHERE namespace = 'client'\s+AND key_id IN \(([^)]*)\)", rollback)
     assert retire_new and _ids_in(retire_new.group(1)) == new, retire_new
     assert revive_old and _ids_in(revive_old.group(1)) == set(old), revive_old
+
+
+def test_396_writes_each_literal_on_one_line_with_its_breaks_and_dots_as_chr():
+    """The header's format statement: every literal is one line, a line break
+    is joined in as chr(10) and a middle dot as chr(183). The stored values
+    would be the same with a literal middle dot or a literal running across
+    lines, so this reads the source: no middle dot character anywhere in the
+    file, the chr(183) joins on the code lines that carry the dotted contexts,
+    and no code line leaves a literal open."""
+    raw = M396.read_bytes().decode("utf-8")
+    assert "\u00b7" not in raw
+    code = [ln for ln in raw.splitlines() if not ln.lstrip().startswith("--")]
+    assert sum(ln.count("' || chr(183) || '") for ln in code) == 8
+    open_lines = [ln[:60] for ln in code if ln.replace("''", "").count("'") % 2]
+    assert open_lines == [], open_lines
