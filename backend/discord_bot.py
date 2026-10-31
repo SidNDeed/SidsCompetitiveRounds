@@ -14478,6 +14478,31 @@ async def _tavail_still_live(nid):
     return any(isinstance(n, dict) and str(n.get("notice_id")) == str(nid) for n in data["notices"])
 
 
+async def _tavail_live_and_reset(nid, tid, steam):
+    """The availability check's pre-send step: `_tavail_still_live(nid)`,
+    and when it answers True, the reset of the prompt's withdrawal memo (a
+    fresh prompt starts a fresh decision: a pushback deletes and re-queues
+    availability notices for the SAME tournament id, and a player who
+    withdrew, re-signed and is asked again must not have the new Yes
+    answered with "already withdrawn"; fence r4 find 4).
+
+    Both run under the prompt's own lock in `_tavail_locks`, the one the
+    Yes/No handler in on_interaction holds across its withdrawal and memo
+    add, so a No cannot fall between this live check and this reset: it
+    either returns before the check starts, and then the check answers
+    False unless the player has signed up again, or it starts after the
+    reset, and then its memo stands. The lock spans one API read (api_get,
+    8 s bound) and the set update; the DM is sent after this returns,
+    outside the lock, so a click never waits on the poll's Discord send.
+    Returns what `_tavail_still_live` returned."""
+    key = f"{tid}:{steam}"
+    async with _tavail_locks.setdefault(key, asyncio.Lock()):
+        live = await _tavail_still_live(nid)
+        if live is True:
+            _tavail_withdrawn.discard(key)
+        return live
+
+
 @tasks.loop(seconds=30)
 async def poll_tournament_notices():
     """Own fully-guarded loop (learning #129 — never chained onto
@@ -14658,7 +14683,9 @@ async def poll_tournament_notices():
                 # since; ask the server again as the LAST step before the
                 # send, so an entrant who left or was banned meanwhile gets no
                 # DM. A refused or unanswered check sends and acks nothing.
-                live = await _tavail_still_live(nid)
+                # A True answer also resets the prompt's withdrawal memo, in
+                # the same per-prompt critical section as the check.
+                live = await _tavail_live_and_reset(nid, tid, steam)
                 if live is not True:
                     print(f"[TAVAIL] availability check {nid} not sent: "
                           + ("its entrant is no longer signed up and eligible" if live is False
@@ -14670,13 +14697,8 @@ async def poll_tournament_notices():
                 await user.send(content=content, embed=embed, view=view,
                                 allowed_mentions=discord.AllowedMentions.none())
                 if ntype == "availability_check":
-                    # A FRESH prompt starts a fresh decision: a pushback
-                    # deletes + re-queues availability notices for the SAME
-                    # tournament id, and a player who withdrew, re-signed,
-                    # and gets re-asked must not have their new "Yes"
-                    # answered with last week's "already withdrawn"
-                    # (fence r4 find 4).
-                    _tavail_withdrawn.discard(f"{tid}:{steam}")
+                    # The withdrawal memo was reset before the send, inside
+                    # _tavail_live_and_reset's per-prompt lock.
                     print(f"[TAVAIL] availability check ({kind}) → {user} for tournament {str(tid)[:8]}")
                 elif _is_deadline_checkin:
                     print(f"[TDLC] deadline check-in → {user} for match {str(match_id)[:8]}")
@@ -15099,7 +15121,9 @@ async def before_pending_dms():
 # withdrawal. In-memory only — after a bot restart the memo is empty, so a
 # Yes clicked after a pre-restart No can still repaint; the buttons
 # themselves are restart-safe by design and the server state is already
-# correct, so that residual is cosmetic.
+# correct, so that residual is cosmetic. The notice poll takes the same lock
+# for its pre-send live check and memo reset (_tavail_live_and_reset), so its
+# reset is ordered against a No's withdrawal and memo add.
 _tavail_locks: dict = {}
 _tavail_withdrawn: set = set()
 
