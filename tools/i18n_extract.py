@@ -233,6 +233,12 @@ SHORT_WHOLE_LINES = frozenset({
     # HUD. It is the whole string on its key, never glue; two letters is
     # below the floor, so the line is asserted here.
     "UP",
+    # v1.41.0 late i18n: the tournament signup list's placement column. Each
+    # is the whole status cell (NativeUI RefreshTournaments), never glue; the
+    # digit makes the identity-token rule refuse them, so they are asserted.
+    "<color=#FFD850>1st</color>",
+    "<color=#C0C0C0>2nd</color>",
+    "<color=#CD7F32>3rd</color>",
 })
 
 

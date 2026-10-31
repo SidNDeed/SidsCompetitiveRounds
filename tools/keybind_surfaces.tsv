@@ -8,6 +8,8 @@
 62bc9bd22039bdff	N	rule:N1	  ({0} in queue)
 e4f560bd5c376f04	N	rev:3dc606f07eba039f {n:F0} / {n:F1} is a .NET number format, not a function key	  <color=#66AACC>{0:F1}% of players have this</color>
 b6de50bf861dc881	N	rule:N1	  <color=#7FDBFF>|</color>  <color=#AAAAAA>{0} online</color>
+4f9cee4c4c73d547	N	rule:N1	  <color=#7FE8C3>(Play Now sent - waiting on opponent)</color>
+c44d1e007980b0c4	N	rev:6bdfc2227002e66d a click or press on one of the mod's own buttons, rows, tiles or links; names no key	  <color=#888>(both press Play Now to skip the break)</color>
 e8118b29fc17abd4	N	rule:N1	  <color=#888>(no cards recorded)</color>
 53b74b7f2271d94b	N	rule:N1	  <color=#888>(page {0}/{1}, {2} total)</color>
 491a2892516650e2	N	rule:N1	  <color={0}>Game streak: {1}L</color>
@@ -32,6 +34,7 @@ df993b1068f9d239	N	rule:N1	 3rd Place
 3f5ef6394e8e0608	N	rule:N1	 <color=#888888>(disconnected)</color>
 e0aa04851ac53a1b	N	rule:N1	 <color=#888888>(left)</color>
 2446ef58482e3824	N	rule:N1	 at x{0}
+0391c94e6c6e8d39	N	rule:N1	 starts in <color=#FFDE88>{0}:{1:00}</color>
 bc253868db188d01	N	rule:N1	(AoE)
 5c57672a980af63e	N	rule:N1	(TBD)
 bb30f7c5455dcb90	O	rule:O	(click / use < >)
@@ -182,6 +185,8 @@ d8a969615148d5bc	N	rule:N1	<color=#44AA44>Up to date</color>
 5591a9faf2a27584	N	rule:N1	<color=#44FF44>Close ROUNDS to apply update</color>
 247cd5176a08b0fe	N	rule:N1	<color=#556270>(hover for build)</color>
 67096273a37ebf05	N	rule:N1	<color=#556270>(hover for builds)</color>
+2bbc859c18b7e60e	N	rule:N1	<color=#60FF60>ready</color>
+8d611692d8b52d83	N	rule:N1	<color=#60FF80>both ready - connecting...</color>
 6d963ba9ef802936	N	rule:N1	<color=#664444>-> {0} bet {1}g on {2} - lost</color>
 185f137dbfc62107	N	rev:a04845dc1b1acebb a click or press on one of the mod's own buttons, rows, tiles or links; names no key	<color=#666>(click to copy)</color>
 50d89b28cdcc4768	N	rule:N1	<color=#666><i>Hide yourself here: Settings -> Privacy & account -> Appear offline.</i></color>
@@ -337,6 +342,7 @@ cdedff3bd7819855	N	rule:N1	<color=#AAAAAA>Reports go to the mod team. Be specifi
 215a414b3ec2e0a6	O	rule:O	<color=#AABBEE>{0}</color>  Winner: <color=#FFE580>{1}</color>  <color=#888>({2}p)</color>
 f51730ea676e6268	N	rule:N1	<color=#B0FFB0>=  MAP COLORS  =</color>
 26bd357c92455bef	N	rule:N1	<color=#BBB>{0} players</color>
+b468a5e23643ed93	N	rule:N1	<color=#C0C0C0>2nd</color>
 eacf603f30c34bd7	N	rule:N1	<color=#C48CFF>FFA:</color> -
 70ae4797d016b4c6	N	rev:038f2f57ac60cdee W and L are the win and loss counts of a record, not keys	<color=#C48CFF>FFA:</color> {0}W / {1}L ({2:F0}% win)
 51932d71c2a90560	N	rule:N1	<color=#C8A0FF>=  PLAYER EFFECTS  =</color>
@@ -361,6 +367,7 @@ b9e3805cbd8a09cb	N	rule:N1	<color=#CCCCCC>Latency (ms) over the match</color>  <
 7d30cf4fe7e8dc4b	N	rev:2f096ff895e26cc8 names the Jump action the other player has not taken; the key reaches the player through the overlay's producer-fed template; this text names no key	<color=#CCCCCC>Players in: <b>{0}</b>. Your player is in, but the other player has not pressed Jump 
 1a2d6cafc8df6926	N	rule:N1	<color=#CCCCCC>Scoring history</color>  <color=#66DD66>you</color> <color=#888>vs</color> <color=#DD
 9aa5d08a389c60c5	N	rule:N1	<color=#CCCCCC>Scoring history</color>  <color=#66DD66>{0}</color> <color=#888>vs</color> <color=#DD
+612a11b6c5251810	N	rule:N1	<color=#CD7F32>3rd</color>
 2fa2251cb22a70a5	N	rule:N1	<color=#D8A7FF>FFA History</color>
 d9e3fd10875116ad	N	rev:f9ddc0419c1a23d3 W and L are the win and loss counts of a record, not keys	<color=#D8A7FF>FFA:</color> {0}W-{1}L
 77768f2cddef5881	N	rule:N1	<color=#DDDDDD>{0}</color> <color=#777>-</color> {1} players <color=#777>-</color> <color=#8FA3B8>{2
@@ -370,6 +377,7 @@ e45c22cefdaf5543	O	rule:O	<color=#E69988>{0} keys/s</color>
 102200e3e75f1f63	N	rule:N1	<color=#EEEEEE>solid = {0}</color>   <color=#888888>dim = {1}</color>
 6720d32ca22f9757	N	rule:N1	<color=#FF4040>deadline passed</color>
 7438392c1065e86e	N	rule:N1	<color=#FF4444>UPDATE REQUIRED</color>
+ea6603a84a55d925	N	rule:N1	<color=#FF6060>FORFEIT</color>
 1ec060bd46f6c33d	N	rule:N1	<color=#FF6060>deadline: {0}h {1}m left</color>
 503a6feddafea172	N	rule:N1	<color=#FF6666>(OUT OF STOCK - artist hasn't opened sales yet)</color>
 3459beeb88871e1e	N	rule:N1	<color=#FF6666>(SOLD OUT)</color>
@@ -384,6 +392,7 @@ f28720141e74a4c0	N	rule:N1	<color=#FF6688>* Live Ranked Series</color>
 6aa9d58290a51803	O	rule:O	<color=#FF8888>Failed: {0}</color>
 5382a6697adcab52	N	rule:N1	<color=#FF8888>Purchase failed: {0}</color>
 9deec55bcab0c911	N	rule:N1	<color=#FF8888>The price changed - check the new price and buy again.</color>
+526be647c886a89d	N	rev:75dc9c5ac34bcd15 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	<color=#FF9060>press Ready Up</color>
 bb8114dd2fbea5b0	N	rule:N1	<color=#FF9966>MASTER OFF</color>
 f2c531693552d14d	N	rule:N1	<color=#FF9966>PLACEMENT CHANGE REJECTED</color>
 56b2f8794b6c6e5b	N	rule:N1	<color=#FF9988>Blocked buyers</color>  <color=#888>(can't purchase your items; gifts still work)</co
@@ -412,7 +421,10 @@ a3fd02a92f217c87	N	rule:N1	<color=#FFCC44>Searching…</color> {0} in lobby <col
 5c1fa7d0cda455f7	N	rule:N1	<color=#FFCC44>You are the host.</color> Waiting for players - {0}/{1} needed to start.
 1a7f980a682a95d6	N	rev:e6bdf35ff4a4857c the match-found stuck overlay's own text (DrawMatchFoundStuckOverlay is binding-dependent: it names the Jump key through KeybindRowFace); names no key	<color=#FFD080>Match-found screen might be stuck</color>
 d3682704bbf56ff0	N	rev:5f7347da95a6e1f9 the match-found stuck overlay's own text (DrawMatchFoundStuckOverlay is binding-dependent: it names the Jump key through KeybindRowFace); names no key	<color=#FFD080>The other player has not joined the game yet</color>
+5b830264085b78b4	N	rule:N1	<color=#FFD850>1st</color>
+3e5918ce46a2c482	N	rule:N1	<color=#FFD850>CHAMPION</color>
 c6ace38f182cbc9f	N	rule:N1	<color=#FFD94D>({0} of {1} left)</color>
+6539b230a37ed662	N	rule:N1	<color=#FFD94D>* {0} TOURNAMENT GAME - vs {1}  (results auto-recorded)</color>
 23fb496b3b1bbb25	O	rule:O	<color=#FFD94D><b>GETTING PACKS</b></color>\n\n- <b>One free pack a day</b> - press Claim on the Ope
 2c525b2f5f4332ea	N	rev:39cc48dc60ea23a0 rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	<color=#FFD94D><b>GETTING PACKS</b></color>\n\n- <b>One free pack a day</b> - press Claim on the Ope
 a2a07fe57be14e98	N	rev:392dd715457d92d4 info-library prose (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); the text names no key	<color=#FFD94D><b>HOW A PICK ACTUALLY LANDS</b></color>\n\n- Confirming a card applies nothing - not
@@ -453,7 +465,9 @@ d53c35475cec1d74	O	rule:O	<color=#FFD94D>Upcoming Match Bets</color>
 447bf00a8adf3e15	N	rule:N1	<color=#FFD94D>earned {0}g</color>
 4aa5a0655e06b7f2	N	rule:N1	<color=#FFD94D>in progress</color>
 4a8962e2f2c84e3d	N	rule:N1	<color=#FFD94D>pending initial review</color>
+3cffeddae82eed3b	N	rule:N1	<color=#FFD94D>waiting on opponent to ready</color>
 3742df76f32ab0da	N	rule:N1	<color=#FFD94D>your bet: {0}g on {1}</color>
+8b2254a1486ea8c6	N	rule:N1	<color=#FFD94D>{0}/{1}</color> <color=#888>({2} live)</color>
 a172d0583ec19986	O	rule:O	<color=#FFD94D>{0}g</color> <color=#AAA>earned across</color> <color=#FFD94D>{1}</color> <color=#AAA
 b1a9647bbf64260e	N	rule:N1	<color=#FFD94D>{0}g</color> <color=#AAA>paid to</color> <color=#FFD94D>{1}</color> <color=#AAA>artis
 7e01cae4dee9862c	N	rule:N1	<color=#FFE580>1stx{0}</color>  <color=#C8C8C8>2ndx{1}</color>  <color=#D4894A>3rdx{2}</color>  <col
@@ -467,6 +481,7 @@ f474f703aeed6b41	N	rule:N1	<color={0}>*</color> <color=#FF6688>Live Ranked Games
 77e0830c9bc8e1fc	N	rule:N1	<color={0}>damage taken</color> <color=#888>·</color> <color={1}>successful blocks</color>
 e82e104b11bebbce	N	rule:N1	<color={0}>shots fired</color> <color=#888>·</color> <color={1}>shots hit</color>
 b25566068f7a1de5	N	rule:N1	<color={1}>{0}</color> <color=#888>— match telemetry</color>
+f65e022050c1a88f	N	rule:N1	<i>Bracket revealed when the tournament starts ({0}).</i>
 d0667f54a4ee675f	N	rule:N1	<i>Loading...</i>
 6b744a30866dcf35	N	rule:N1	<i>No completed tournaments yet.</i>
 cc431e8b80c8979c	N	rule:N1	<i>The bracket appears once players sign up.</i>
@@ -540,6 +555,7 @@ dfca1636d7309654	N	rule:N1	A winners-bracket loss drops to the lower lane; lose 
 baf48506da4f8fcb	N	rule:N1	ALL CAPS
 a85e90f9835e6411	N	rev:7ed5dd6029749942 a keyboard-guide label at a fixed physical cap, or the guide's heading and legend; the Fill producer colours each cap from the bindings, the label names the cap itself	ALT
 9c4cc5ddd54ef465	N	rule:N1	ARTIST STUDIO
+ff88c6a1299ead41	N	rule:N1	ASYNC
 7c4bd3155e01af46	N	rule:N1	ASYNC (6-week)
 246386952c55f6e0	N	rule:N1	ASYNC MATCH DEADLINE
 d8796d7466c24ad7	N	rule:N1	AUTO-BALANCE
@@ -915,6 +931,7 @@ b59d2949c1166ebc	N	rule:N1	Chromatic aberration: <color=#88FF88>ON</color>
 758100f62e1872b1	N	rule:N1	Claimed for today
 6c6d1ba3c3f1f06c	N	rule:N1	Claiming...
 568dba56e5fadf7f	N	rule:N1	Clamp ObjectPool init-spawn to 4 in-match — reduces frame stutter from new pool allocation.
+c725f01d52c785df	N	rule:N1	Clavar la Bala
 7889f8417d64298a	N	rule:N1	Clean House
 a3b330fc7dec25ff	N	rule:N1	Clean Trail
 b9a010b399b7896b	N	rule:N1	Clean white body color.
@@ -1911,6 +1928,7 @@ dde6927c02b8a2d7	N	rule:N1	New trade
 2ee61b35c40fa92c	N	rev:3e5977e229731102 a Home-tab label (NativeUI.BuildHomeTab is binding-dependent: it names a key through KeybindRowFace); names no key	Newest Cosmetics
 bc981983e7f547dc	N	rule:N1	Next
 f80fd0c9d9fb230f	N	rule:N1	Next >
+e1362e238732d8cb	N	rule:N1	Next match (R{0}{1}): vs <color=#FFDE88>{2}</color> -{3}{4}
 91b9cebbb5dac71f	N	rule:N1	Next tier
 31d4e7e7f8198ecf	N	rule:N1	Next tournament match vs {0} in {1}{2}
 ac0a3ea3db64d301	N	rule:N1	Next tournament match vs {0} soon{1}
@@ -2362,12 +2380,14 @@ e9953ed2c5dca519	N	rev:1b72372a70c4548e Controls-page text (a row's help, a refu
 94d6b0146666d0f3	N	rule:N1	Recommended: {0}
 398370590a079a88	N	rule:N1	Reconnect suppressed (broadcast identity)
 8386805ac1a37288	N	rule:N1	Reconnect to Match
+2fda990236b5d4a1	N	rule:N1	Reconnecting to {0} (region {1})
 706ccbdd719188f9	N	rule:N1	Record removal failed: {0}
 ef916cd7f6aaa4e1	N	rule:N1	Record removed.
 e51c55255be9007d	N	rule:N1	Records
 8944bac56fb71a84	N	rule:N1	Red Cursor
 126a8e3bc4cc743f	N	rule:N1	Red Name
 347e5e3118d0a520	N	rule:N1	Red Scarf
+00d06d25c7a22bc5	N	rule:N1	Red mouth
 272e33806900fb11	N	rule:N1	Red ring: this preset has items an unmodded player cannot see, so it cannot be your vanilla default
 17cf3ff04e9a66a2	N	rule:N1	Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.
 653b3acdfbacbb68	N	rule:N1	Reduced keeps the hit feedback without the camera motion
@@ -2449,6 +2469,7 @@ c3916b69a2b9f6d2	N	rev:bed7ddda8f1df9bd a single capital that is a possessive or
 b1f400711752a533	N	rule:N1	Rolling DPS (15 s window)
 9c7dd1d11383f735	N	rule:N1	Rolling block % (15 s window)
 0c9e1f450655084f	N	rule:N1	Rolling hit % (15 s window)
+08ce8ad5d440205c	N	rule:N1	Room code: <color=#C0E0FF>{0}</color>{1}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>
 14d5d902774479f1	N	rule:N1	Room rule: same cards for everyone
 6998e9a3275acd08	N	rule:N1	Room rule: same cards is off this game
 be7d3fea97c7cc3d	N	rule:N1	Room rules: friendly fire OFF
@@ -2482,6 +2503,7 @@ ec50a3dea046319d	N	rule:N1	SIGNEDpc.signed
 6a395052c9ebc423	N	rev:642be1ba489094d1 a keyboard-guide label at a fixed physical cap, or the guide's heading and legend; the Fill producer colours each cap from the bindings, the label names the cap itself	SPACE
 a93910c41c841b78	N	rule:N1	SPECTATING
 589d489cd61eb2b3	N	rule:N1	SPECTATOR
+2f8d236566d2393c	N	rule:N1	SYNC
 c4477dfa9e0ef6b9	N	rule:N1	SYNC (weekly)
 0a65a2c2435ad717	N	rule:N1	Sabertooth
 2df908378d5e5235	N	rule:N1	Sadness
@@ -2669,6 +2691,7 @@ a3ad936a7ceda444	N	rule:N1	Sniper Medal
 6af055dbcaca305f	N	rule:N1	So close!
 f9d59a6ea8c75683	N	rule:N1	Soda Helm
 ce8d0da33206ab07	N	rule:N1	Soft Slate
+4bab4ddcd9dcef26	N	rule:N1	Soft eyes
 2394bba21d20d3da	N	rule:N1	Soft pastel lavender — minimum contrast.
 1b7253a3591f76e4	N	rule:N1	Soft pastel violet body color.
 f7bce6256e4c4cbf	N	rule:N1	Soft pink body color.
@@ -2957,6 +2980,10 @@ e2c34a89258190d3	N	rule:N1	Thicker menu text. Uses the game's own font at a heav
 0bf3d6b67e43f2f4	N	rule:N1	This account is not ready for mail yet - try again later.
 8d3f894fef9a0d61	N	rule:N1	This account isn't registered as an artist.
 04d45c0b9eb0bed3	N	rule:N1	This account was deleted - there is no pack to recover
+7b7e7647c4513701	N	rule:N1	This album requires a newer mod version
+eed2a5ec4901e253	N	rule:N1	This cosmetic has not shipped in the mod yet and cannot be gifted
+4ff7d5fcbf5b0a58	N	rule:N1	This cosmetic has not shipped in the mod yet; stock stays closed until it does
+f208ca70007f5b0e	N	rule:N1	This cosmetic is approved but has not shipped in the mod yet
 439df3824c961ecc	N	rule:N1	This is so sad. Please give this man a break
 b8e8e823660003eb	N	rule:N1	This is your only copy of this card
 985b07e43a526732	N	rule:N1	This item requires a newer mod version
@@ -3024,6 +3051,7 @@ a2c06f13201a8b0d	N	rule:N1	Touch Grass
 fb10fa9913c39f95	N	rule:N1	Tournament in progress - your next match will connect automatically. Keep ROUNDS open.
 5fe5279bd7d72bd6	N	rev:59af835bda8f4f52 'tab' is a tab of the mod's menu; names no key	Tournament match can't auto-connect: the server has not set a region. Open the Tournaments tab.
 32879284bdafa598	N	rule:N1	Tournament match found - waiting for the server to pick a region...
+88c2dc058427a985	N	rule:N1	Tournament match starting vs {0}
 fee20df1963ec953	N	rev:7d227736558b38a0 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	Tournaments
 15506e4394620a3a	F	rev:b546e6a038a62f57 fixed:F5 F5 always opens the mod menu; no Controls row moves it	Tournaments are 8-16 player double-elimination brackets of best-of-3 series, run end to end by the m
 a667fae512b63902	N	rule:N1	Toxic Cloud
@@ -3881,6 +3909,7 @@ e6661c75c7cd3bbc	N	rule:N1	cosmetic only
 d317f861f54f6c4a	N	rule:N1	custom 2v2 lobby
 bbe8e50ce0d4d8b4	N	rule:N1	date ->
 141d8664db867feb	N	rule:N1	days since first rating update ->
+7505d64a54e061b7	N	rule:N1	default
 a7eaf6bc6f5bfd2e	N	rule:N1	default orange / blue
 38238831b07e80bc	N	rule:N1	dimmed: rolled out of the build
 c25b5ae851ef94a7	N	rule:N1	discarding...
@@ -3888,6 +3917,7 @@ c25b5ae851ef94a7	N	rule:N1	discarding...
 7ff9ab96af63157f	N	rule:N1	dmg
 28ac0476b5890ad8	N	rule:N1	dmg/s
 fdeeaaea73befff1	N	rule:N1	does not trigger
+eb73bf2d20362f84	N	rule:N1	double forfeit
 ee58b8dc38927ddd	N	rev:1c1dac38b11d01b4 the chat box's own status text (DrawChatInput and RefreshChatLog are binding-dependent: they name the chat keys through KeybindRowFace); names no key	draft restored
 29799778c7169970	N	rule:N1	drafts are machine-translated until reviewed, and English is always complete
 16ef1d431149d2a0	N	rule:N1	duo
@@ -3909,6 +3939,7 @@ f48902bd433ae6ef	N	rule:N1	first team to 2 games
 3a47aeacaf0654f2	N	rule:N1	first to {0}
 2f08586943029465	N	rule:N1	follows the character you actually play
 16f5a1fcc18ac388	N	rule:N1	for streams and for spotting missed inputs
+db2c164b2807ad45	N	rule:N1	forfeit
 ee4c907f5db26515	N	rule:N1	fps
 8ad878e07d7aa5a9	N	rule:N1	free daily pack
 3eaf750e8d8107db	N	rule:N1	game 1 starts
