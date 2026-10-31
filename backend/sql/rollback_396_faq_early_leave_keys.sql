@@ -1,8 +1,8 @@
 -- rollback_396_faq_early_leave_keys.sql
 -- Takes back 396_faq_early_leave_keys.sql on the review surfaces: the four client keys
--- 396 registers are RETIRED (their rows, entries and proposal history kept), every
--- PENDING proposal on them is decided 'superseded', and the existing retired rows of the
--- four client keys migration 386 registered for the same strings are made live again.
+-- 396 registers are RETIRED, every PENDING proposal on them is decided 'superseded',
+-- and the existing retired rows of the four client keys migration 386 registered for
+-- the same strings are made live again; the entries on the 386 keys are left as they are.
 -- The proposals 396 decided 'superseded' on the 386 keys stay superseded.
 -- The file RAISES, and commits nothing, while an entry on one of the four 396 keys is
 -- approved.
