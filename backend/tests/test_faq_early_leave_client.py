@@ -427,23 +427,73 @@ def test_396_and_its_rollback_retire_and_revive_exactly_386s_keys():
     assert revive_old and _ids_in(revive_old.group(1)) == set(old), revive_old
 
 
+_ROW_GAP = re.compile(r"\s*(?:,\s*(?:(?:TRUE|FALSE)\s*,\s*(?:CAST\(\s*)?)?|\|\|(?:\s*chr\((?:10|183)\)\s*\|\|)*)\s*")
+_ROW_END = re.compile(r"\s*(?:AS VARCHAR\(160\)\)\s*)?\)\s*,?\s*")
+
+
+def _plain_literals(sql):
+    """Scan SQL text outside `--` comments. Returns the literal spans and the
+    text outside every literal. A literal must be a plain single-quoted one:
+    it opens after whitespace or "(" (so no E, U&, N, B or X prefix), its only
+    escape is the doubled quote, and it holds no backslash and no character
+    below U+0020 (so it ends on its own line)."""
+    spans, outside, i, n = [], [], 0, len(sql)
+    while i < n:
+        if sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if sql[i] != "'":
+            outside.append(sql[i])
+            i += 1
+            continue
+        assert i > 0 and sql[i - 1] in " \t\n(", "a literal opens after %r: %r" % (sql[i - 1], sql[i - 20:i + 20])
+        j = i + 1
+        while True:
+            assert j < n, "an unterminated literal: %r" % sql[i:i + 40]
+            if sql[j] == "'":
+                if sql.startswith("''", j):
+                    j += 2
+                    continue
+                break
+            assert sql[j] >= " " and sql[j] != "\\", "a literal holds %r: %r" % (sql[j], sql[i:j + 1][-40:])
+            j += 1
+        spans.append((i, j + 1))
+        outside.append(" ")
+        i = j + 1
+    return spans, "".join(outside)
+
+
 def test_396_writes_each_literal_on_one_line_with_its_breaks_and_dots_as_chr():
     """The header's format statement: every literal is one line, a line break
     is joined in as chr(10) and a middle dot as chr(183). The stored values
-    would be the same with a literal middle dot, a literal running across
-    lines, or a line break written as an escape sequence (an E-string), so this
-    reads the source: no middle dot character anywhere in the file, the
-    chr(183) joins on the code lines that carry the dotted contexts, no code
-    line leaving a literal open, and no escape-string literal or backslash in
-    any literal of a code line, so a line break can only be a chr(10) join."""
-    raw = M396.read_bytes().decode("utf-8")
-    assert "\u00b7" not in raw
-    code = [ln for ln in raw.splitlines() if not ln.lstrip().startswith("--")]
-    assert sum(ln.count("' || chr(183) || '") for ln in code) == 8
-    open_lines = [ln[:60] for ln in code if ln.replace("''", "").count("'") % 2]
-    assert open_lines == [], open_lines
-    escape_strings = [ln[:60] for ln in code if re.search(r"(?<![\w'])[eE]'", ln)]
-    assert escape_strings == [], escape_strings
-    literals = [m.group(1) for ln in code for m in re.finditer(r"'((?:[^']|'')*)'", ln)]
-    assert [s[:40] for s in literals if "\\" in s] == []
-    assert sum(ln.count("chr(10)") for ln in code) > 0
+    would be the same with another literal form (an escape string, a Unicode
+    escape, a dollar quote, a raw control character), so this reads the
+    source against a closed grammar instead of a list of forms: outside the
+    DO block's two $m396$ tags every literal is a plain single-quoted one
+    (_plain_literals), no dollar sign or UESCAPE stands outside a literal,
+    chr() is called with 10 or 183 only, and each VALUES row is literals
+    joined only by a comma (with TRUE or FALSE and CAST( between some), or
+    by || with chr(10) and chr(183) joins: so a line break in a composed
+    value can only come from a chr(10) join. No middle dot character is in
+    the file, and the eight chr(183) joins are the dotted contexts."""
+    raw = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
+    assert "·" not in raw
+    assert raw.count("$m396$") == 2
+    sql = raw.replace("$m396$", "")
+    spans, outside = _plain_literals(sql)
+    assert "$" not in outside
+    assert "uescape" not in outside.lower()
+    assert set(re.findall(r"chr\(([^)]*)\)", outside)) == {"10", "183"}
+    assert outside.count("chr(183)") == 8
+    rows = 0
+    for line in sql.split("\n"):
+        if not line.lstrip().startswith("('"):
+            continue
+        rows += 1
+        lits = [m.span() for m in re.finditer(r"'(?:[^']|'')*'", line)]
+        assert line[:lits[0][0]].strip() == "(", line[:60]
+        assert _ROW_END.fullmatch(line[lits[-1][1]:]), line[-60:]
+        for (_a, b), (c, _d) in zip(lits, lits[1:]):
+            assert _ROW_GAP.fullmatch(line[b:c]), "a VALUES row joins literals with %r" % line[b:c]
+    assert rows == 44, rows
