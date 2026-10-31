@@ -520,7 +520,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "06379b2eff65a04091827f75353fbba68e65560f"
+          "17052fa0c6c2eb64384187fe5fa520607fa615f8"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -4017,7 +4017,7 @@
       [
         "main",
         "lifespan",
-        "a85fd84b8d7ca393a45240587dc64709ce4cdf02"
+        "fc864b78e11c5aff36d9f1416011f350a4d525d4"
       ]
     ]
   },
