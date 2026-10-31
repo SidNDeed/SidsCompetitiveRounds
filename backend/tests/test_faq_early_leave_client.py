@@ -682,10 +682,10 @@ def _g14_cases(sql):
 
 
 def test_396_parse_failures_name_the_planted_line():
-    """G14's enforcement: for each _g14_cases case, parse() either fails
-    with an AssertionError whose message opens with "396 line N: ", N the
-    case's line, or (a cut only, past the last VALUES list or before the
-    first one, and not inside a literal) passes. Every planted case fails."""
+    """G14's enforcement: for each _g14_cases case, parse() fails with an
+    AssertionError whose message opens with "396 line N: ", N the case's
+    line; a cut may instead pass (one that leaves each VALUES list it
+    reaches whole), a planted case may not."""
     sql = M396.read_bytes().decode("utf-8").replace("\r\n", "\n")
     bad = []
     for name, text, line in _g14_cases(sql):
