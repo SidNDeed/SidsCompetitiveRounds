@@ -42,8 +42,30 @@ def _dotnet():
     return str(candidate) if candidate.exists() else None
 
 
+# `dotnet run` builds the harness project, so it runs only where building is
+# opted into: SCR_CLIENT_HARNESS_RUN=1 on any machine, or the LXC seat's gate
+# runner, recognised by the staged decompiled tree it sets on every pytest run
+# (SCR_DECOMPILED_DIR under /seat/). The VM seat sets neither and never builds;
+# there every harness test skips and says why.
+HARNESS_OPT_IN = "SCR_CLIENT_HARNESS_RUN"
+
+
+def _harness_opt_in(env=None):
+    """Why this run may build the harness, or None when it may not."""
+    env = os.environ if env is None else env
+    if env.get(HARNESS_OPT_IN) == "1":
+        return HARNESS_OPT_IN + "=1"
+    staged = env.get("SCR_DECOMPILED_DIR", "")
+    if staged.startswith("/seat/"):
+        return "the seat gate runner (SCR_DECOMPILED_DIR=%s)" % staged
+    return None
+
+
 @pytest.fixture(scope="module")
 def harness_run():
+    if _harness_opt_in() is None:
+        pytest.skip("client-rules-harness is built only on an LXC seat or with %s=1; "
+                    "this run would build it with dotnet here" % HARNESS_OPT_IN)
     dotnet = _dotnet()
     if dotnet is None:
         pytest.skip("dotnet CLI not on this machine")
@@ -52,6 +74,18 @@ def harness_run():
         cwd=str(REPO), capture_output=True, text=True, timeout=900,
     )
     return proc
+
+
+def test_the_harness_builds_only_where_opted_in():
+    assert _harness_opt_in({}) is None
+    assert _harness_opt_in({"SCR_DECOMPILED_DIR": "C:/Users/x/decompiled"}) is None
+    assert _harness_opt_in({HARNESS_OPT_IN: "0"}) is None
+    assert _harness_opt_in({HARNESS_OPT_IN: "1"})
+    assert _harness_opt_in({"SCR_DECOMPILED_DIR": "/seat/stage/decompiled"})
+    # the fixture asks before it looks for dotnet or runs anything
+    src = (REPO / "backend" / "tests" / "test_client_rules_harness.py").read_text(encoding="utf-8")
+    body = src[src.index("def harness_run():"):src.index("def _suites(proc):")]
+    assert body.index("_harness_opt_in()") < body.index("_dotnet()") < body.index("subprocess.run(")
 
 
 def _suites(proc):
