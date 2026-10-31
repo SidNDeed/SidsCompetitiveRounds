@@ -66505,10 +66505,10 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
 def _ffa_missing_leave_figure(report) -> list[str]:
     """The steam ids of the entries that left DURING this game (left_early and
     not absent) and carry no game_points_at_leave. The early-leave grace is
-    decided from that figure (_ffa_leave_decision), so an entry without it
-    cannot be graded under the rule: submit_ffa_match refuses such a report
-    whole, before anything is written. An absent ghost (left in an earlier
-    game of the sitting) and a present seat need no figure."""
+    decided from that figure (_ffa_leave_decision); submit_ffa_match refuses
+    a report naming any such entry with 422, ahead of its session check. An
+    absent ghost (left in an earlier game of the sitting) and a present seat
+    need no figure."""
     return [p.steam_id for p in report.players
             if p.left_early and not p.absent
             and getattr(p, "game_points_at_leave", None) is None]
@@ -66529,19 +66529,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
 
     THE LEAVE FIGURE. A report with an entry that left during this game
     (left_early, not absent) and no game_points_at_leave is refused with 422
-    before anything else runs, so before any write: the session check, the
-    settlement of other expired journal windows and the lobby lock all come
-    after it. The current client puts a 422 in its outbox (plugin/ApiClient.cs).
-    OutboxPass drops it as permanent on the first retry that carried the
-    session token and was answered with a 4xx other than 401 and 429; a retry
-    sent without the token is given back before its status is read, and the
-    body stays queued (SecureRouteRules.OutboxAnswerFor). OUTBOX_MAX_ATTEMPTS
-    counts within one launch: a persisted body reloads with zero attempts.
-    On the journal path the settler marks a
-    4xx-refused payload superseded (_ffa_settle_window). A refused report is
-    not recorded, and the lobby's game count does not move, so a later report
-    of the same sitting that names the next game number is refused by the
-    game-number check below; nothing here recovers that sitting."""
+    by the first statement of this body, ahead of the session check, the
+    settlement of other expired journal windows and the lobby lock
+    (backend/tests/test_ffa_leave_figure_required.py). What the client's
+    outbox and the journal settler do with a 422 is their own code's
+    (plugin/ApiClient.cs OutboxPass; _ffa_settle_window)."""
     _missing_figure = _ffa_missing_leave_figure(report)
     if _missing_figure:
         print(f"[FFA] report of room {report.photon_room_id} refused: "
@@ -67077,12 +67069,9 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     #       Achievements are unaffected by the grace: their predicates read the
     #       ghost and assembly exclusions, not the grace.
     # The figure is REQUIRED on every left_early entry that is not absent:
-    # submit_ffa_match refuses a report without it (422, before any write;
-    # _ffa_missing_leave_figure), so an omission voids the report rather than
-    # rating the leaver. Here None reaches the decision below only for an
-    # absent ghost and a present seat. The quarantine triage view also calls
-    # _ffa_leave_decision, on payloads stored before the rule, where None
-    # means no grace; that view stores nothing.
+    # submit_ffa_match refuses a report without it (422, its first statement;
+    # _ffa_missing_leave_figure). The quarantine triage view also calls
+    # _ffa_leave_decision, on payloads stored before the rule.
     #
     # Readmission lobbies (V3): the client's absent claims are not read, and
     # not read in the decision itself (read_absent) rather than discarded

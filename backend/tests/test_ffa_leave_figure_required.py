@@ -3,9 +3,8 @@
 The grace (main.py _ffa_leave_decision) is decided from game_points_at_leave. A
 report whose entry left DURING the game (left_early and not absent) without that
 figure cannot be graded under the rule, so submit_ffa_match refuses it with 422
-before anything runs: before the session check, before the settlement of other
-expired journal windows, before the lobby lock, so before any write. An absent
-ghost and a present seat need no figure.
+ahead of the session check, the settlement of other expired journal windows and
+the lobby lock. An absent ghost and a present seat need no figure.
 
 Each refusal case has a control that differs only in the field under test and
 reaches the next step of the route (a sentinel raised by the session check, or
@@ -13,15 +12,12 @@ by the journal recheck on the settlement path), so a check that refused
 everything, or nothing, is red here. The mutation control replaces the helper
 with one that finds nothing and shows the refusal disappears.
 
-The 422 is chosen from the client's outbox handling (plugin/ApiClient.cs): a
-422 is not a terminal FFA refusal (FfaReportRules.IsTerminalRefusal, both
-overloads, is 409 and 403 only), so the report goes to the outbox, which drops
-it as permanent on the first retry that carried the session token and was
-answered with a 4xx other than 401 and 429 (a retry without the token is given
-back before its status is read). The overloads are
-EXECUTED by the client rules harness (its ffaleavefigure suite, with a mutant
-per overload that makes 422 terminal and must be caught); OutboxPass needs
-Unity and is pinned as source.
+On the client a 422 is not a terminal FFA refusal: FfaReportRules.IsTerminalRefusal,
+both overloads, is false for 422 and 400 and true for 409 and 403, EXECUTED by
+the client rules harness (its ffaleavefigure suite, with a mutant per overload
+that makes 422 terminal and must be caught). OutboxPass needs Unity; the lines
+of it this lane reads are pinned as source by the last test here, which states
+what it asserts and no more.
 """
 
 from __future__ import annotations
@@ -187,12 +183,14 @@ def test_both_terminal_refusal_overloads_leave_a_422_to_the_outbox(harness_run):
     assert {v for v, _ in printed} == {"PASS"}, printed
 
 
-def test_the_client_outbox_drops_a_4xx_other_than_401_and_429():
-    """The outbox half, as source (OutboxPass needs Unity). A retry that did
-    not carry the session token is given back (its attempt returned, the body
-    kept) before its status is read; on one that carried it, every "HTTP 4"
-    answer except 401 and 429 is permanent and removes the report, so a 422 is
-    dropped there. OUTBOX_MAX_ATTEMPTS counts within one launch."""
+def test_the_outbox_permanent_predicate_reads_http_4_and_spares_401_and_429():
+    """A source pin (OutboxPass needs Unity), on OutboxPass's code lines: the
+    permanent predicate reads the "HTTP 4" prefix; the retryable transients
+    name 429 and 401, each in both text forms; a permanent or exhausted body
+    is removed (_pendingReports.Remove); and the give-back answer is computed
+    from what the request carried (OutboxAnswerFor) before the permanent
+    predicate, with the attempt handed back. The predicate's other terms are
+    not pinned here."""
     client = (REPO / "plugin" / "ApiClient.cs").read_text(encoding="utf-8")
     outbox = _block(client, r"private static IEnumerator OutboxPass\(\)")
     code = "\n".join(line for line in outbox.splitlines() if not line.lstrip().startswith("//"))

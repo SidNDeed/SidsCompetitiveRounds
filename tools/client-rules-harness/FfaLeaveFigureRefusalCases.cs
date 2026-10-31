@@ -7,25 +7,18 @@ namespace CompetitiveRounds
     /// <summary>
     /// FAQ-R2 M2: the client's reading of the server's leave-figure refusal,
     /// EXECUTED. submit_ffa_match answers a report with a left_early, non-absent
-    /// entry and no game_points_at_leave with 422. The FFA send gives up at once
-    /// only on a TERMINAL refusal (FfaReportRules.IsTerminalRefusal, one overload
-    /// on the status code and one on the formatted response text); anything else
-    /// goes to the outbox. There a retry that carried the session token and
-    /// was answered with a 4xx other than 401 and 429 drops the body; a retry
-    /// without the token is given back, and a token-carrying 401, 429, 5xx or
-    /// transport failure stays queued until the launch's attempts run out.
-    /// So a 422 must
-    /// be non-terminal in BOTH overloads, and 409 and 403 must stay terminal in
-    /// both. The response text is built by the client's own rule
+    /// entry and no game_points_at_leave with 422. The cases run on both
+    /// overloads of FfaReportRules.IsTerminalRefusal (the status code; the
+    /// formatted response text) and assert: 422 is not terminal, 409 and 403
+    /// are terminal, 400 is not terminal, and the 422 text has the
+    /// "HTTP 422: " form. The response text is built by the client's own rule
     /// (SecureRouteRules.RequestErrorText), with a body whose steam ids carry
-    /// the digits 409 and 403, so a text match on a substring would show here.
+    /// the digits 409 and 403.
     ///
     /// The cases are written against a pair of functions, so the same cases run
     /// on the real overloads and on two mutants: one that makes 422 terminal in
     /// the code overload and one that does it in the text overload. Each mutant
-    /// must fail at least one case, and the case it fails must be its own
-    /// overload's 422 case; a case set that let either mutant through could not
-    /// fail on the change it exists for.
+    /// must fail exactly one case, its own overload's 422 case.
     /// </summary>
     internal static class FfaLeaveFigureRefusalCases
     {

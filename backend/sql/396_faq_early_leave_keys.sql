@@ -1,94 +1,30 @@
--- 396: the FAQ's FFA early-leave entry - client keys, the inert 386 rows, and
+-- 396: the FAQ's FFA early-leave entry - client keys, the 386 rows, and
 -- machine-translation seeds.
--- Four client strings now state the FFA early-leave grace as the server applies it
--- (backend/api/main.py _ffa_leave_decision with _ffa_leave_grace_half_points: a seat
--- that leaves before the field has scored four half points in total, whether or not any
--- became a full point, is unrated for that game, with no game Gold or XP from it):
---   * InfoLibrary ModeFfaExt (the FFA article): new key 44732e465b16cee1,
---     replacing the inert 386 key 79023ff50ab9d08e;
---   * InfoLibrary Rewards (the economy article): new key 6173541088dbb882,
---     replacing the inert 386 key 3bb08fc59139b367;
---   * InfoLibrary WhenCounts (the rule book): new key 9d365a214640aebd,
---     replacing the inert 386 key 439cd5d90ee1b6d3;
---   * ModeInfoText Ffa (the FFA mode text): new key 0ab13f648dd0175b,
---     replacing the inert 386 key 3988c8d80e42f69d.
--- A client key_id is derived from its English, so each edited string arrives under a
--- new key_id.
--- KEYS: the additive half of what POST /admin/i18n/sync-keys does, written through the
--- migration channel (learning #443). Same contract as 379, 384 and 393: key_id =
--- sha1("client\0" + English)[:16], source_hash = sha1(English), sensitive and context
--- exactly as tools/i18n_sync_keys.build_client_keys derives them from the regenerated
--- tools/i18n_source.json, so this file and the next sync write the same row.
--- KEY HASH GUARD (393's). An existing row at one of the four new ids whose source_hash is
--- not the one written here cannot be a re-key of this text: it is a damaged row or an
--- id collision. The guard RAISES on such a row, live or retired, before any write, and
--- the key arm's ON CONFLICT updates only a row whose source_hash already matches.
--- THE 386 ROWS. Migration 386 registered four client keys for these same four strings
--- with the grace worded as "two full points"; no client build carries that English, so
--- no game screen looks those rows up. This file retires them and decides their pending
--- proposals 'superseded' (the two writes the key sync makes when it retires a key), under
--- 340's guard: the four key rows are locked FOR NO KEY UPDATE in key order (the first
--- lock the review endpoint takes, so a review in flight is serialized against this
--- file), then their entries, and the file RAISES if any entry on them is approved: a
--- translator's finished work is never retired silently (#168). The post-check reads
--- that count again after the writes (fail closed). Entries and proposal history on the
--- 386 keys are kept; nothing is deleted. 386's comment on
--- ffa_match_players.game_points_at_leave is left as it is: it describes the same
--- threshold in half points.
--- The keys the shipped client still shows (the previous English of these four strings)
--- are NOT retired here: retirement by absence belongs to the key sync that ships with the
--- client (learning #1032), and the shipped client still shows them.
--- SEEDS: PENDING proposals for the four keys in es, ru, uk and sv (16 pairs), same
--- contract as 341 and 393: sentinel proposer 'claude-mt', license_assent TRUE at the
--- machine-v1 terms revision; the same text as the bundled plugin/I18nCatalogues.cs
--- drafts, for native review in the portal after the build.
--- Every literal is a single-line plain string: a line break is joined in as || chr(10) ||
--- and a middle dot as || chr(183) ||, so no checkout's line endings reach the stored text.
--- IDEMPOTENT: the key arm updates a row only WHERE it differs from the value written
--- here (IS DISTINCT FROM over every column the arm sets, retired_at included); the
--- retirement and the supersede are predicated on the state they leave (retired_at IS
--- NULL, status = 'pending'); and a seed pair is skipped while any pending proposal exists
--- for it, while a claude-mt draft of the same text exists in any status, and while a
--- CURRENT approved translation exists (approved against this source_hash: approving a
--- machine draft queued over it would overwrite it). So a second run writes no row. The
--- post-checks RAISE, and nothing is committed, unless all four keys are live with the
--- expected source text, hash, sensitivity and context; no 386 key is live, has a pending
--- proposal or has an approved entry; and all sixteen seed pairs are covered by a pending
--- proposal or an approved translation of the CURRENT source text. A pair whose claude-mt
--- draft of this text was rejected, or whose only pending proposal is of another text,
--- therefore stops the file: it does not re-propose a rejected machine text, and it does
--- not commit an uncovered pair. The same check stops a run after rollback_396, which
--- decides the sixteen drafts 'superseded': applying this file again after that rollback
--- commits nothing unless every pair is covered some other way (a pending proposal, or a
--- translation approved against the current text), so taking these keys forward again
--- after it is a new migration.
--- Explicit transaction (#340).
--- DEPLOY ORDER: data only. No api or bot code names these keys or their proposals: both
--- read them through the generic i18n routes, so the file may land before, with or after
--- the client that carries the four strings.
--- BOUNDS, set right after BEGIN: lock_timeout ends any single lock WAIT at 5 s (it
--- applies per acquisition, learning #689, so it bounds each wait, not their sum);
--- statement_timeout gives EACH top-level statement its own 25 s; and
--- idle_in_transaction_session_timeout ends the session, and the server rolls the
--- transaction back, when the runner stops for 5 s between statements. The statement and
--- idle budgets are separate and PostgreSQL 16 has no transaction_timeout, so the longest
--- this file can hold i18n locks before its COMMIT is their SUM: up to 25 s in the
--- statement that takes them plus up to 5 s waiting for COMMIT, 30 s in all. The sum holds
--- only because ALL the work below is ONE statement, a single DO block whose inner
--- statements share its 25 s: every further top-level statement would bring a 25 s budget
--- of its own. Any timeout that fires aborts the whole file with nothing committed.
--- THE COMMIT. PostgreSQL disables the statement timer before it commits, so the COMMIT's
--- own work is outside every timeout above, and the locks are held until it ends. The
--- fourth line, synchronous_commit = local, keeps that work LOCAL: it never waits for a
--- standby's confirmation, whatever synchronous_standby_names says now or later.
--- BOUNDED: everything before COMMIT -- each lock wait (5 s, and every one sits inside the
--- DO block's 25 s) and the hold up to COMMIT (statement 25 s + idle 5 s = 30 s).
--- NOT BOUNDED: the COMMIT's local completion -- the WAL flush and the transaction-status
--- (pg_xact) write, which can read an evicted page -- I/O that no PostgreSQL setting
--- bounds, for this or any transaction. The hold is therefore 30 s plus the COMMIT's local
--- completion.
+-- KEYS: four client keys for the four strings that state the FFA early-leave grace
+-- (InfoLibrary ModeFfaExt, Rewards and WhenCounts; ModeInfoText Ffa), each row as
+-- tools/i18n_sync_keys.build_client_keys derives it from tools/i18n_source.json
+-- (key_id = sha1("client\0" + English)[:16], source_hash, sensitive, context):
+--   44732e465b16cee1 ModeFfaExt, replacing 386's 79023ff50ab9d08e;
+--   6173541088dbb882 Rewards, replacing 386's 3bb08fc59139b367;
+--   9d365a214640aebd WhenCounts, replacing 386's 439cd5d90ee1b6d3;
+--   0ab13f648dd0175b ModeInfoText Ffa, replacing 386's 3988c8d80e42f69d.
+-- THE 386 ROWS: the rows that exist for the four client keys migration 386 registered
+-- for these strings (the grace in an earlier wording) are retired, and their pending
+-- proposals decided 'superseded'; their entries and proposal history are kept. The
+-- file RAISES, and commits nothing, if an entry on them is approved.
+-- SEEDS: sixteen PENDING claude-mt proposals (es, ru, uk and sv for each key), the text
+-- of the bundled plugin/I18nCatalogues.cs drafts. Every literal is one line (a line
+-- break is joined in as || chr(10) || and a middle dot as || chr(183) ||), and the file
+-- RAISES, and commits nothing, when a seed text does not carry its expected md5.
+-- A second run writes no row.
+-- After rollback_396_faq_early_leave_keys.sql, with no other pending proposal or
+-- approved translation covering the sixteen pairs, applying this file again commits
+-- nothing.
+-- Explicit transaction (#340): four SET LOCAL lines (lock_timeout 5s,
+-- idle_in_transaction_session_timeout 5s, statement_timeout 25s, synchronous_commit
+-- local), then one top-level statement, a DO block.
+-- DEPLOY ORDER: this file first; the batch's api deploy follows it.
 -- ROLLBACK: rollback_396_faq_early_leave_keys.sql.
-
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL idle_in_transaction_session_timeout = '5s';

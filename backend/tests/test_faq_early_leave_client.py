@@ -24,8 +24,8 @@ bundled locales; each locale's text to its own words for the threshold; and
 migration 396 to the same strings: its key rows to what
 tools/i18n_sync_keys.build_client_keys derives from the registry, its seeds to
 the bundled catalogue values, and the four keys it retires to the ones 386
-registered, derived from 386's own text. 386's English never reached a client
-(it said "two full points"), so those rows were inert. Source-reading only:
+registered, derived from 386's own text (an earlier wording of the grace, as
+"two full points"). Source-reading only:
 no database, no game, no dotnet; test_migration_reruns.py runs 396.
 """
 import hashlib
@@ -272,9 +272,7 @@ def test_no_predecessor_survives_in_any_artifact_the_game_renders_from():
     source passes to I18n any more (earlier revisions of articles, among
     them the rule book's 304838dece8548b7, which still carries the old
     rule); the game never looks those up, so they are outside what it
-    renders from, and the check says so by reading registered keys only.
-    386's English (the threshold as "two full points") reached no client
-    artifact either, which is why its four rows were inert."""
+    renders from, and the check says so by reading registered keys only."""
     plugin = {p.name: ladder._read(p) for p in sorted(PLUGIN.glob("*.cs"))
               if p.name != ladder.CATS.name}
     assert len(plugin) > 50, sorted(plugin)
