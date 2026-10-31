@@ -494,7 +494,9 @@ def test_template_holes_are_numeric_unless_they_carry_text():
     assert client["templates"][(402, "Insufficient gold: have {0}, need {1}")] is False
     tmpl = _member(_read(RULES), "private static bool RefusalTemplate(string d, string template, bool textHoles, out string[] args)")
     assert '"(-?[0-9]+(?:\\\\.[0-9]+)?)"' in tmpl
-    assert '"(.+?)"' in tmpl and "Regex.Escape" in tmpl and "sb.Append('$');" in tmpl
+    assert '"([^\\\\r\\\\n]+?)"' in tmpl and "Regex.Escape" in tmpl
+    assert 'new StringBuilder("\\\\A")' in tmpl and 'sb.Append("\\\\z");' in tmpl
+    assert "m.Index != 0 || m.Length != d.Length" in tmpl
 
 
 def test_text_holes_that_carry_a_forwarded_refusal_translate_it_too():

@@ -45,8 +45,9 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The refusal in an "HTTP status: body" answer, or null when
-        /// the answer is not one. A body that is not one well-formed JSON
-        /// object yields the status alone.</summary>
+        /// the answer is not one. A body that is not one valid JSON object
+        /// (JsonValid over the whole body) yields the status alone, so every
+        /// map below answers null and the caller keeps its raw text.</summary>
         internal static Refusal Read(string resp)
         {
             if (string.IsNullOrEmpty(resp) || resp.Length < 10 || !resp.StartsWith("HTTP ", StringComparison.Ordinal)
@@ -60,6 +61,7 @@ namespace CompetitiveRounds
             int ra = body.LastIndexOf("\nRetry-After: ", StringComparison.Ordinal);
             if (ra >= 0) body = body.Substring(0, ra);
             var r = new Refusal { Status = status };
+            if (!JsonValid(body)) return r;
             Dictionary<string, string> top;
             if (!Members(body, out top)) return r;
             string raw, s;
@@ -270,29 +272,32 @@ namespace CompetitiveRounds
 
         // Matches d against an English template whose holes are {0}..{9} in
         // ascending order. A numeric hole accepts a signed decimal number
-        // only; with textHoles every hole accepts any non-empty text. The
-        // literal parts must match exactly, so a reworded server detail stops
-        // matching instead of being half translated.
+        // only; with textHoles every hole accepts any non-empty text without
+        // a line break. The match is anchored at the absolute start and end
+        // (\A, \z: never ^ or $, which also match before a final line feed)
+        // and must cover the whole detail, so a detail with anything before
+        // or after the template, a trailing line feed included, stops
+        // matching and the caller keeps the server's text.
         private static bool RefusalTemplate(string d, string template, bool textHoles, out string[] args)
         {
             args = null;
-            var sb = new StringBuilder("^");
+            var sb = new StringBuilder("\\A");
             int holes = 0;
             for (int i = 0; i < template.Length; i++)
             {
                 char c = template[i];
                 if (c == '{' && i + 2 < template.Length && template[i + 2] == '}' && template[i + 1] >= '0' && template[i + 1] <= '9')
                 {
-                    sb.Append(textHoles ? "(.+?)" : "(-?[0-9]+(?:\\.[0-9]+)?)");
+                    sb.Append(textHoles ? "([^\\r\\n]+?)" : "(-?[0-9]+(?:\\.[0-9]+)?)");
                     holes++;
                     i += 2;
                     continue;
                 }
                 sb.Append(Regex.Escape(c.ToString()));
             }
-            sb.Append('$');
-            var m = Regex.Match(d, sb.ToString());
-            if (!m.Success) return false;
+            sb.Append("\\z");
+            var m = Regex.Match(d, sb.ToString(), RegexOptions.CultureInvariant);
+            if (!m.Success || m.Index != 0 || m.Length != d.Length) return false;
             args = new string[holes];
             for (int k = 0; k < holes; k++) args[k] = m.Groups[k + 1].Value;
             return true;
@@ -373,7 +378,130 @@ namespace CompetitiveRounds
             return int.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, out n);
         }
 
-        // ---- a strict JSON reader for one object's top level ----
+        // ---- a strict JSON validator (RFC 8259) over the whole body ----
+
+        /// <summary>True when s is exactly one JSON value with only whitespace
+        /// around it: objects, arrays, strings whose every escape is one of
+        /// \" \\ \/ \b \f \n \r \t or \u and four hex digits, numbers by the
+        /// JSON grammar (no leading zero, no plus sign, no bare dot or
+        /// exponent), the literals true, false and null; nesting at most 64
+        /// deep. The member readers below run only on a body this accepted.</summary>
+        internal static bool JsonValid(string s)
+        {
+            if (s == null) return false;
+            int i = Ws(s, 0);
+            if (!JValue(s, ref i, 0)) return false;
+            return Ws(s, i) == s.Length;
+        }
+
+        private static bool JValue(string s, ref int i, int depth)
+        {
+            if (i >= s.Length) return false;
+            char c = s[i];
+            if (c == '{') return JObject(s, ref i, depth + 1);
+            if (c == '[') return JArray(s, ref i, depth + 1);
+            if (c == '"') return JString(s, ref i);
+            if (c == '-' || (c >= '0' && c <= '9')) return JNumber(s, ref i);
+            return JLiteral(s, ref i, "true") || JLiteral(s, ref i, "false") || JLiteral(s, ref i, "null");
+        }
+
+        private static bool JObject(string s, ref int i, int depth)
+        {
+            if (depth > 64) return false;
+            i = Ws(s, i + 1);
+            if (i < s.Length && s[i] == '}') { i++; return true; }
+            while (true)
+            {
+                if (i >= s.Length || s[i] != '"' || !JString(s, ref i)) return false;
+                i = Ws(s, i);
+                if (i >= s.Length || s[i] != ':') return false;
+                i = Ws(s, i + 1);
+                if (!JValue(s, ref i, depth)) return false;
+                i = Ws(s, i);
+                if (i < s.Length && s[i] == ',') { i = Ws(s, i + 1); continue; }
+                if (i < s.Length && s[i] == '}') { i++; return true; }
+                return false;
+            }
+        }
+
+        private static bool JArray(string s, ref int i, int depth)
+        {
+            if (depth > 64) return false;
+            i = Ws(s, i + 1);
+            if (i < s.Length && s[i] == ']') { i++; return true; }
+            while (true)
+            {
+                if (!JValue(s, ref i, depth)) return false;
+                i = Ws(s, i);
+                if (i < s.Length && s[i] == ',') { i = Ws(s, i + 1); continue; }
+                if (i < s.Length && s[i] == ']') { i++; return true; }
+                return false;
+            }
+        }
+
+        // s[i] is the opening quote; i moves past the closing one.
+        private static bool JString(string s, ref int i)
+        {
+            for (int j = i + 1; j < s.Length; j++)
+            {
+                char c = s[j];
+                if (c == '"') { i = j + 1; return true; }
+                if (c < ' ') return false;
+                if (c != '\\') continue;
+                if (++j >= s.Length) return false;
+                char e = s[j];
+                if (e == 'u')
+                {
+                    if (j + 4 >= s.Length) return false;
+                    for (int k = 1; k <= 4; k++)
+                        if (!IsHex(s[j + k])) return false;
+                    j += 4;
+                }
+                else if ("\"\\/bfnrt".IndexOf(e) < 0) return false;
+            }
+            return false;
+        }
+
+        private static bool IsHex(char c)
+        {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        }
+
+        // -? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?
+        private static bool JNumber(string s, ref int i)
+        {
+            int j = i;
+            if (s[j] == '-') j++;
+            if (j >= s.Length) return false;
+            if (s[j] == '0') j++;
+            else if (s[j] >= '1' && s[j] <= '9') { while (j < s.Length && s[j] >= '0' && s[j] <= '9') j++; }
+            else return false;
+            if (j < s.Length && s[j] == '.')
+            {
+                int d = ++j;
+                while (j < s.Length && s[j] >= '0' && s[j] <= '9') j++;
+                if (j == d) return false;
+            }
+            if (j < s.Length && (s[j] == 'e' || s[j] == 'E'))
+            {
+                j++;
+                if (j < s.Length && (s[j] == '+' || s[j] == '-')) j++;
+                int d = j;
+                while (j < s.Length && s[j] >= '0' && s[j] <= '9') j++;
+                if (j == d) return false;
+            }
+            i = j;
+            return true;
+        }
+
+        private static bool JLiteral(string s, ref int i, string lit)
+        {
+            if (i + lit.Length > s.Length || string.CompareOrdinal(s, i, lit, 0, lit.Length) != 0) return false;
+            i += lit.Length;
+            return true;
+        }
+
+        // ---- the top-level member reader (on a validated body only) ----
 
         /// <summary>Every member of ONE JSON object, key to its raw value span;
         /// false on a duplicate key, junk between members, an unbalanced

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace CompetitiveRounds
 {
@@ -28,6 +29,68 @@ namespace CompetitiveRounds
         private static string Env(int status, string body) { return "HTTP " + status + ": " + body; }
         private static string Q(string s) { return "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""; }
         private static string DetailBody(string d) { return "{\"detail\":" + Q(d) + "}"; }
+
+        // Every RefusalTemplate rule in ServerTextRules.cs as "status|N or T|template"
+        // (N: numeric holes, T: text holes); the coverage test checks this table
+        // against the calls in the source.
+        private static readonly string[] TEMPLATES = {
+            "402|N|" + "Insufficient gold: have {0}, need {1}",
+            "429|N|" + "{0} submissions already awaiting review — wait for those first",
+            "400|N|" + "PNG missing or too large ({0} MB, 1,600,000 base64 characters max)",
+            "409|N|" + "missing frames: have {0} of {1}",
+            "400|N|" + "GIF is {0} KB — the limit is {1} KB. Reduce the frame size or the number of colours and re-export.",
+            "400|N|" + "GIF frames are {0}x{1} — the limit is 2048x2048",
+            "400|N|" + "GIF has {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).",
+            "400|N|" + "GIF has more than {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).",
+            "400|N|" + "GIF has {0} frame(s) — an animation needs at least 2. Upload a PNG instead for static art.",
+            "400|N|" + "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at least {5} ms and re-export; the server will not change the speed for you.",
+            "400|N|" + "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at most {5} ms and re-export; the server will not change the speed for you.",
+            "400|N|" + "converted frame {0} is {1} KB — the per-image limit is {2} KB. Simplify the art or reduce its colour count.",
+            "400|N|" + "GIF decoded inconsistently ({0} of {1} frames) — re-export it and try again.",
+            "400|N|" + "must be exactly 512x512 (got {0}x{1})",
+            "400|N|" + "PNG has {0} stray byte(s) after IEND",
+            "400|T|" + "bad frame PNG: {0}",
+            "400|T|" + "Published cosmetic source must be a transparent 512x512 PNG ({0})",
+            "400|T|" + "malformed PNG (bad CRC on {0} chunk)",
+            "400|T|" + "unreadable PNG: {0}",
+            "400|T|" + "could not process GIF: {0}",
+            "400|N|" + "frame_count must be 2-{0}",
+            "400|N|" + "frame_no must be 2-{0}",
+        };
+
+        // A detail that fills every hole of a template: 1 for a number, x for text.
+        private static string Fill(string template, bool text)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < template.Length; i++)
+            {
+                if (template[i] == '{' && i + 2 < template.Length && template[i + 2] == '}') { sb.Append(text ? "x" : "1"); i += 2; continue; }
+                sb.Append(template[i]);
+            }
+            return sb.ToString();
+        }
+
+        // The round-3 template match (^ and $), kept only as the T negative control's witness.
+        private static bool R3Template(string d, string template, bool text)
+        {
+            var sb = new StringBuilder("^");
+            for (int i = 0; i < template.Length; i++)
+            {
+                if (template[i] == '{' && i + 2 < template.Length && template[i + 2] == '}') { sb.Append(text ? "(.+?)" : "(-?[0-9]+(?:\\.[0-9]+)?)"); i += 2; continue; }
+                sb.Append(Regex.Escape(template[i].ToString()));
+            }
+            sb.Append('$');
+            return Regex.IsMatch(d, sb.ToString());
+        }
+
+        // The round-3 reader: the member readers alone, with no validator before them.
+        private static string R3DetailError(string body)
+        {
+            Dictionary<string, string> top, inner;
+            string raw, s;
+            if (!Members(body, out top) || !top.TryGetValue("detail", out raw)) return null;
+            return Members(raw, out inner) && inner.TryGetValue("error", out raw) && JsonString(raw, out s) ? s : null;
+        }
 
         // The round-2 rules, kept here only as the negative controls' witness.
         private static bool R2Album(string resp)
@@ -192,6 +255,89 @@ namespace CompetitiveRounds
                 string alb = TrRefusal(Env(426, "{\"detail\":{\"error\":\"music_purchase_requires_update\"}}"));
                 Check(r, "C6 es: the album refusal reaches its row", alb != null && alb != "This album requires a newer mod version", alb);
                 I18n.HarnessLocale = "en";
+            }
+
+            // -- V: the whole body is one valid JSON value before any member is read --
+            {
+                string bad = Env(409, "{\"detail\":{\"error\":\"price_changed\",\"context\":{\"bad\":}}}");
+                Check(r, "V1 the invalid body with price_changed inside is unreadable, not the price-change answer",
+                      !IsDetailError(bad, 409, "price_changed") && TrRefusal(bad) == null, TrRefusal(bad));
+                string badBody = bad.Substring(10);
+                Check(r, "V1n negative control: removal, the member readers alone (round 3) read price_changed from that body",
+                      R3DetailError(badBody) == "price_changed" && !JsonValid(badBody), R3DetailError(badBody));
+                string good = Env(409, "{\"detail\":{\"error\":\"price_changed\",\"context\":{\"ok\":[1,-2.5e+3,true,false,null,\"\\u00e9\\n\"]}}}");
+                Check(r, "V1p positive control: the valid price_changed body is still the price-change answer",
+                      IsDetailError(good, 409, "price_changed"), good);
+                string[] escapes = { "\\x", "\\u12G4", "\\u12", "\\'", "\\U0041", "\\" };
+                string esc = null;
+                foreach (string e in escapes)
+                {
+                    string body = "{\"detail\":\"Sold out" + e + "\"}";
+                    if ((JsonValid(body) || TrRefusal(Env(409, body)) != null) && esc == null) esc = e;
+                }
+                Check(r, "V2 every invalid escape makes the body unreadable", esc == null, esc ?? "ok");
+                string[] nums = { "01", "+1", "1.", ".5", "1e", "1e+", "-", "-01", "1.e5", "0x10", "1E", "--1", "Infinity", "NaN", "1_0" };
+                string num = null;
+                foreach (string n in nums)
+                {
+                    string body = "{\"detail\":\"Sold out\",\"n\":" + n + "}";
+                    if ((JsonValid(body) || TrRefusal(Env(409, body)) != null) && num == null) num = n;
+                }
+                Check(r, "V3 every bad number form makes the body unreadable", num == null, num ?? "ok");
+                string[] okNums = { "0", "-0", "10", "1.5", "-0.25", "1e5", "1E-5", "2.5e+10" };
+                string okn = null;
+                foreach (string n in okNums)
+                    if (TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"n\":" + n + "}")) != "Sold out" && okn == null) okn = n;
+                Check(r, "V3p positive control: every grammatical number is accepted", okn == null, okn ?? "ok");
+                string[] tails = { " x", "{}", "]", ",", "\"\"", "0" };
+                string tail = null;
+                foreach (string t in tails)
+                    if (TrRefusal(Env(409, "{\"detail\":\"Sold out\"}" + t)) != null && tail == null) tail = t;
+                Check(r, "V4 anything after the top value makes the body unreadable", tail == null, tail ?? "ok");
+                string[] lits = { "tru", "True", "nul", "NULL", "falsey", "undefined" };
+                string lit = null;
+                foreach (string l in lits)
+                    if (TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + l + "}")) != null && lit == null) lit = l;
+                Check(r, "V5 only true, false and null are literals", lit == null, lit ?? "ok");
+                string[] shapes = { "[1,]", "[,1]", "{\"a\":1,}", "{\"a\"}", "{\"a\" 1}", "{a:1}", "[1 2]", "\"a\tb\"" };
+                string shape = null;
+                foreach (string sh in shapes)
+                    if (TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + sh + "}")) != null && shape == null) shape = sh;
+                Check(r, "V6 a malformed nested array, object or string makes the body unreadable", shape == null, shape ?? "ok");
+                string deep = new string('[', 65) + new string(']', 65), deepOk = new string('[', 60) + new string(']', 60);
+                Check(r, "V7 nesting deeper than 64 is refused and 60 is accepted",
+                      TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + deep + "}")) == null
+                      && TrRefusal(Env(409, "{\"detail\":\"Sold out\",\"v\":" + deepOk + "}")) == "Sold out", "");
+            }
+
+            // -- T: a template matches the whole detail or nothing ---------------------
+            {
+                string gold = Env(402, "{\"detail\":\"Insufficient gold: have 1, need 2\\n\"}");
+                Check(r, "T1 a detail with a final line feed is not the gold sentence: the caller keeps the server's text",
+                      TrRefusal(gold) == null, TrRefusal(gold));
+                Check(r, "T1n negative control: removal, the round-3 match (^ and $) took that detail for the gold sentence",
+                      R3Template("Insufficient gold: have 1, need 2\n", "Insufficient gold: have {0}, need {1}", false), "");
+                Check(r, "T1p positive control: the exact gold detail still maps",
+                      TrRefusal(Env(402, DetailBody("Insufficient gold: have 1, need 2"))) == "Insufficient gold: have 1, need 2", "");
+                string miss = null, extra = null;
+                foreach (string row in TEMPLATES)
+                {
+                    int b1 = row.IndexOf('|'), b2 = row.IndexOf('|', b1 + 1);
+                    int st = int.Parse(row.Substring(0, b1));
+                    bool text = row[b1 + 1] == 'T';
+                    string tpl = row.Substring(b2 + 1), d = Fill(tpl, text);
+                    if (TrRefusalDetail(st, d) != d && miss == null) miss = row;
+                    foreach (string v in new[] { d + "\n", d + "\r\n", d + " ", " " + d, "\n" + d, d + ".", d + "\t" })
+                    {
+                        string got = TrRefusalDetail(st, v);
+                        if (got != null && got != v && extra == null) extra = row + " <- " + v.Replace("\n", "\\n");
+                    }
+                }
+                Check(r, "T2 every template rule maps its own detail unchanged in English", miss == null, miss ?? TEMPLATES.Length.ToString());
+                Check(r, "T3 every template rule, given that detail with a final LF, CRLF, space, tab or dot, or a leading space or LF, answers null or the input unchanged",
+                      extra == null, extra ?? "ok");
+                string lf = TrRefusalDetail(400, "unreadable PNG: x\ny");
+                Check(r, "T4 a text hole does not take a line break", lf == null, lf);
             }
 
             // -- D: the Recent Series FFA labels ----------------------------------------
