@@ -318,6 +318,27 @@ def test_the_refusal_helpers_are_wired():
     assert _read("plugin/TitleLaddersUI.cs").count('if (!ok && resp != null && resp.Contains("price_changed"))') == 1
 
 
+REFUSED_RE = re.compile(
+    r'return status == 503\s*\?\s*I18n\.TrF\("The server cannot do this right now \(\{0\}\)\. '
+    r'Try again in a few minutes\.", d\)\s*:\s*I18n\.TrF\("The server refused this request \(\{0\}\)\. '
+    r'Restart the game; if it keeps happening, send a bug report\.", d\);')
+
+
+def test_only_the_servers_503_answers_get_the_try_again_sentence():
+    native = _read("plugin/NativeUI.cs")
+    refused = _member(native, "private static string Refused(int status, string d)")
+    assert REFUSED_RE.search(refused), refused
+    # every 503 protocol answer the client holds is one of the server's 503 refusals, and
+    # the table holds answers at other statuses too, so the branch decides between the two sentences
+    proto = client_refusals(native)["protocol"]
+    server = {(st, d) for st, k, d in server_refusals() if k == "exact"}
+    at503 = {(int(st), d) for st, d in proto if st == 503}
+    assert at503 and at503 <= server, sorted(at503 - server)
+    assert {d for st, d in proto if st != 503}, "no protocol answer outside 503"
+    # planted: the branch keyed on anything but 503 does not match
+    assert not REFUSED_RE.search(refused.replace("status == 503", "status != 0"))
+
+
 # -- tournament labels --------------------------------------------------------
 
 def _bracket_tags(funcs):
