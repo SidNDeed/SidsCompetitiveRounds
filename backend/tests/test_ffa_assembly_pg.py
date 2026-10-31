@@ -5443,7 +5443,11 @@ def test_fix2_f3_changed_ghost_claim_is_refused(monkeypatch, route):
         _fix2_assert_snapshot(rows)
         assert rows[6]["exclusion_reasons"] == ["ghost"]
         counts = await _report_counts(env, lob)
-        answer = await _fix2_replay(env, lob, 1, res, route, left={s[6]})
+        # The replay says s[6] played: it left during the game at a field total
+        # at the grace threshold, so it is rated (a figure is required on such an
+        # entry since FAQ-R1 F1; without one the report is refused before this).
+        answer = await _fix2_replay(env, lob, 1, res, route, left={s[6]},
+                                    gp_leave={s[6]: main._ffa_leave_grace_half_points()})
         assert answer.status == 409, answer
         reasons = await env.conn.fetch(
             "SELECT reason FROM match_report_quarantine WHERE group_id = $1", lob.lid)

@@ -65616,10 +65616,11 @@ async def _ffa_advance_lobby_slot(db: AsyncSession, lobby_uuid):
 # So every answer given ONCE THE LOBBY ROW HAS BEEN LOCKED carries the same
 # three fields, in the success body and in the refusal body alike -- success,
 # echo, refusal, the service-account 403, a failed INSERT and a database-level
-# refusal of it. Two classes carry none of them, and they are the two raised
+# refusal of it. Three classes carry none of them, and they are the three raised
 # BEFORE there is a locked lobby row to read: the integrity 400s (malformed
-# roster, missing room id, bad signature) and the 404s (unknown player, lobby
-# not found). A consumer reads the fields WHEN PRESENT rather than assuming
+# roster, missing room id, bad signature), the 422 for an entry that left
+# during the game without its game_points_at_leave, and the 404s (unknown
+# player, lobby not found). A consumer reads the fields WHEN PRESENT rather than assuming
 # they always are; saying "every answer" here would be a guarantee this
 # endpoint does not keep. The three, in the body as TOP-LEVEL integers:
 #   games_played  — settled games of this sitting, including this one when this
@@ -66501,6 +66502,18 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     raise FfaReportRefusal(status, detail, progress)
 
 
+def _ffa_missing_leave_figure(report) -> list[str]:
+    """The steam ids of the entries that left DURING this game (left_early and
+    not absent) and carry no game_points_at_leave. The early-leave grace is
+    decided from that figure (_ffa_leave_decision), so an entry without it
+    cannot be graded under the rule: submit_ffa_match refuses such a report
+    whole, before anything is written. An absent ghost (left in an earlier
+    game of the sitting) and a present seat need no figure."""
+    return [p.steam_id for p in report.players
+            if p.left_early and not p.absent
+            and getattr(p, "game_points_at_leave", None) is None]
+
+
 @app.post("/api/v1/ffa/matches", response_model=FfaMatchResponse, tags=["FFA Matches"])
 async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """Record one FFA game and apply pairwise Glicko + XP/gold inline (an FFA
@@ -66512,7 +66525,23 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     settles before this report, and a report the server does not settle at
     once is journaled (202). A journaled payload settles through this same
     body with no request (_ffa_settle_report); every check below re-runs on
-    it."""
+    it.
+
+    THE LEAVE FIGURE. A report with an entry that left during this game
+    (left_early, not absent) and no game_points_at_leave is refused with 422
+    before anything else runs, so before any write: the session check, the
+    settlement of other expired journal windows and the lobby lock all come
+    after it. The client sends 422 to its outbox, whose first retry drops a
+    4xx as permanent (plugin/ApiClient.cs OutboxPass), so the refusal cannot
+    hold the queue. On the journal path the settler marks a 4xx-refused
+    payload superseded (_ffa_settle_window)."""
+    _missing_figure = _ffa_missing_leave_figure(report)
+    if _missing_figure:
+        print(f"[FFA] report of room {report.photon_room_id} refused: "
+              f"game_points_at_leave missing for {', '.join(_missing_figure)} "
+              f"(reporter {report.reported_by_steam_id})")
+        raise HTTPException(422, "game_points_at_leave is required on every left_early entry "
+                                 "that is not absent; missing for " + ", ".join(_missing_figure))
     _rdm_journal = _RDM_JOURNAL_MODE.get()
     if _rdm_journal is None:
         await _check_steam_session(request, report.reported_by_steam_id, db)
@@ -67040,7 +67069,12 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     #       gives a seat placed below the leaver; the departed seat gains none of those.
     #       Achievements are unaffected by the grace: their predicates read the
     #       ghost and assembly exclusions, not the grace.
-    # Old clients omit the field entirely -> no grace, pre-fix behaviour.
+    # The figure is REQUIRED on every left_early entry that is not absent:
+    # submit_ffa_match refuses a report without it (422, before any write;
+    # _ffa_missing_leave_figure), so an omission voids the report rather than
+    # rating the leaver. None still reaches the decision below for an absent
+    # ghost and a present seat, and for a payload stored before the rule
+    # (quarantine triage reads stored bodies); there it means no grace.
     #
     # Readmission lobbies (V3): the client's absent claims are not read, and
     # not read in the decision itself (read_absent) rather than discarded
