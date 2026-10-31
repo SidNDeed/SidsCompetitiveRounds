@@ -45,13 +45,13 @@ FUNCS = {
     "_tsync_signups_open_text", "poll_tournaments", "_tavail_embed", "_ack_tournament_notices",
     "poll_tournament_notices", "_build_tournament_board_embed", "_publish_tournament_board",
     "_adopt_tournament_board", "_own_embed_messages", "_delete_board_message",
-    "_faq_tournaments", "_faq_resolve_answer", "_tavail_still_live",
+    "_faq_tournaments", "_faq_resolve_answer", "_tavail_still_live", "_tavail_reset_memo",
 }
 ASSIGNS = {
     "ASYNC_DEADLINE_DAYS", "_TSYNC_VOTE_HOW", "_tournament_state", "_notified_completed",
     "_notified_prestart", "_watch_cache", "_tavail_seen_notice_ids", "_tavail_held",
     "_TMATCH_NOTICE_KINDS", "_TOURNEY_HOW_IT_WORKS", "_tournament_board_ids", "_tb_swept",
-    "_tavail_withdrawn",
+    "_tavail_withdrawn", "_tavail_locks",
 }
 
 TID = "5a5a5a5a-0000-4000-8000-000000000032"
