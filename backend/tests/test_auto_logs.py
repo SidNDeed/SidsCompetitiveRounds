@@ -4584,7 +4584,7 @@ class _SlowCommit(_Stalls, Scripted):
         self.rolled_back += 1
 
 
-def _stage_span_prerequisites(monkeypatch, logdir, *, write):
+def _stage_span_prerequisites(monkeypatch, logdir, *, write, flush_in_span=False):
     """THE MARKED SPAN'S PREREQUISITE VOLUME WORK, RUN BEFORE THE SPAN OPENS.
 
     Review AUTOLOG-HOP-R2 M1. A case that lowers
@@ -4610,7 +4610,37 @@ def _stage_span_prerequisites(monkeypatch, logdir, *, write):
     same one; the work it bounds before the stalled step now takes no
     wall-clock time. Answers the list of staged paths, so a case shows the
     staging was reached.
+
+    `flush_in_span` (review AUTOLOG-HOP-R3 M1) is for the case whose held
+    step is the blob's own flush. `_write_blob` opens, writes, flushes,
+    closes and flushes the directory in ONE hop, so holding its `os.fsync`
+    still left the open and the write -- un-held filesystem work -- under
+    the lowered T ahead of the hold. With it, the blob is opened (through
+    `auto_logs.os`, so a case's proxy sees the descriptor) and written in
+    the blob-directory hop, before the span, and the span's write hop
+    performs exactly `_write_blob`'s barriers on that descriptor, in its
+    order: `os.fsync(fd)`, `os.close(fd)`, `_fsync_dir(parent)`. The first
+    thing the span's write hop does on the volume is the flush.
     """
+    assert write or not flush_in_span, "flush_in_span stages the blob's write"
+    if flush_in_span:
+        # The split below copies `_write_blob`'s tail; if the function's
+        # order changes, this staging no longer models it.
+        # The docstring names the barriers too, so the search starts at the
+        # code's open and each step is looked for after the previous one.
+        body = inspect.getsource(auto_logs._write_blob)
+        order = ["fd = os.open(str(path),", "_write_all(fd, data)", "os.fsync(fd)",
+                 "os.close(fd)", "_fsync_dir(pathlib.Path(path).parent)"]
+        at, pos = [], 0
+        for step in order:
+            pos = body.find(step, pos)
+            at.append(pos)
+            if pos < 0:
+                break
+        assert len(at) == len(order) and min(at) >= 0, (
+            "`_write_blob` no longer opens, writes, flushes, closes and flushes "
+            "its directory in that order: %r" % (list(zip(order, at)),))
+    fds = {}
     free = auto_logs._free_bytes(logdir)
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: free)
     produced, staged = [], []
@@ -4624,7 +4654,14 @@ def _stage_span_prerequisites(monkeypatch, logdir, *, write):
     def _bug_report_log_path(report_id):
         path = real_path(report_id)
         auto_logs._stamp_marker(path)
-        if write:
+        if write and flush_in_span:
+            fd = auto_logs.os.open(
+                str(path),
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+                0o666)
+            auto_logs._write_all(fd, produced[-1])
+            fds[str(path)] = fd
+        elif write:
             auto_logs._write_blob(path, produced[-1])
         staged.append(path)
         return path
@@ -4642,6 +4679,13 @@ def _stage_span_prerequisites(monkeypatch, logdir, *, write):
                 "a cleanup ran before the write, so the staged blob outlives it "
                 "and this case no longer models the path")
             assert data == produced[-1], "the span writes bytes the staging did not"
+            if flush_in_span:
+                fd = fds.pop(str(own.path))
+                try:
+                    auto_logs.os.fsync(fd)
+                finally:
+                    auto_logs.os.close(fd)
+                auto_logs._fsync_dir(pathlib.Path(own.path).parent)
             own.written = True
 
     monkeypatch.setattr(auto_logs, "_compress_blob", _compress_blob)
@@ -7655,12 +7699,15 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
     """
     T, stall = 3.0, 10.0   # was 1.0, 4.0
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
-    # The free-space reading and the marker's stamp run before the span
-    # opens (`_stage_span_prerequisites`); the blob's write is NOT staged:
-    # its hop is the one this case holds, and its flush's charge to the
-    # span is the subject. The hops are all still made, so the structural
-    # count below is unaffected.
-    staged = _stage_span_prerequisites(monkeypatch, logdir, write=False)
+    # The free-space reading, the marker's stamp, and the blob's open and
+    # write run before the span opens (`_stage_span_prerequisites`); the
+    # span's write hop performs only the blob's two barriers, the first of
+    # them the flush this case holds, so nothing un-held runs on the volume
+    # under T ahead of it (review AUTOLOG-HOP-R3 M1). The flush's charge to
+    # the span is still the subject. The hops are all still made, so the
+    # structural count below is unaffected.
+    staged = _stage_span_prerequisites(monkeypatch, logdir, write=True,
+                                       flush_in_span=True)
 
     # STRUCTURAL FIRST: the two barriers on the write path are reached only
     # through the section's own budgeted hops. A flush performed anywhere else
