@@ -53,6 +53,15 @@ import auto_logs  # noqa: E402
 import main  # noqa: E402
 import schemas  # noqa: E402
 
+#: Every ceiling constant the auto-log path waits under, at its PRODUCTION
+#: value: read at import, before any test lowers one, so a test can give
+#: the work it does NOT hold the real ceiling (`_shrink_ceiling`, the
+#: retention gate's passes B and C).
+_PRODUCTION_CEILINGS = {name: getattr(auto_logs, name) for name in (
+    "AUTO_LOG_SWEEP_HOP_WAIT_S", "AUTO_LOG_VOLUME_WAIT_S",
+    "AUTO_LOG_CPU_WAIT_S", "AUTO_LOG_ACCOUNT_WAIT_S",
+    "_BLOB_RESERVE_LOCK_WAIT_S", "AUTO_LOG_MARKED_SPAN_DEADLINE_S")}
+
 # SYNTHETIC ACCOUNT IDS, and the fixture needs them to be.
 #
 # These two were the maintainer's own real test accounts. Nothing here reads
@@ -4509,7 +4518,37 @@ def _handler_mutant(pairs):
     return namespace["upload_auto_log"]
 
 
-class _SlowInsert(Scripted):
+class _Stalls:
+    """When the stalled statement began, and when the handler's wait on it
+    ENDED -- cancelled by the deadline, or the stall run out.
+
+    The span cases time THAT wait, not the request. The request's own work
+    before the span (the directory, the scrub, the gzip, the prerequisites
+    `_stage_span_prerequisites` runs there) and its cleanup after the
+    refusal take wall-clock time that no deadline in these cases bounds;
+    timing the request counted it against `stall / 2` (review round 4).
+    What the bound is for is whether the deadline ended the wait on the
+    statement before the statement answered.
+    """
+
+    stalled_at = ended_at = None
+
+    async def _stall(self):
+        self.stalled_at = time.monotonic()
+        try:
+            await asyncio.sleep(self.stall)
+        finally:
+            self.ended_at = time.monotonic()
+
+    def waited(self):
+        """Seconds the handler waited on the stalled statement, or None if it
+        never reached it."""
+        if self.stalled_at is None:
+            return None
+        return self.ended_at - self.stalled_at
+
+
+class _SlowInsert(_Stalls, Scripted):
     """A session whose INSERT does not answer inside the span's deadline."""
 
     def __init__(self, stall, **kw):
@@ -4518,11 +4557,11 @@ class _SlowInsert(Scripted):
 
     async def execute(self, statement, params=None):
         if "INSERT INTO bug_reports" in " ".join(str(statement).split()):
-            await asyncio.sleep(self.stall)
+            await self._stall()
         return await super().execute(statement, params)
 
 
-class _SlowCommit(Scripted):
+class _SlowCommit(_Stalls, Scripted):
     """A session whose COMMIT does not answer inside the span's deadline.
 
     The state it models is the one the bound exists for: the bytes are on the
@@ -4537,12 +4576,124 @@ class _SlowCommit(Scripted):
         self.name_held_during_rollback = None
 
     async def commit(self):
-        await asyncio.sleep(self.stall)
+        await self._stall()
         self.committed += 1
 
     async def rollback(self):
         self.name_held_during_rollback = set(auto_logs._MARKERS_IN_FLIGHT)
         self.rolled_back += 1
+
+
+def _stage_span_prerequisites(monkeypatch, logdir, *, write, flush_in_span=False):
+    """THE MARKED SPAN'S PREREQUISITE VOLUME WORK, RUN BEFORE THE SPAN OPENS.
+
+    Review AUTOLOG-HOP-R2 M1. A case that lowers
+    `AUTO_LOG_MARKED_SPAN_DEADLINE_S` to seconds ran the reserve section's
+    un-held volume work under that T before it reached the statement or the
+    flush it stalls: the free-space reading (`shutil.disk_usage`), the
+    marker's stamp, the blob's write, each with its flushes. A slow volume
+    there expired T first, and the case read red with no defect in the code.
+    Sparing those hops cannot help: the section's own wait takes its budget
+    when the span opens, before any of them has run, so no time can be added
+    back to it afterwards (tried in round 4: every slowed control stayed red).
+
+    So the work runs BEFORE the deadline starts:
+    - the free space is read here, and `_free_bytes` hands that figure back;
+    - the marker -- and, with `write`, the blob, with the bytes the upload's
+      own gzip produced -- is created inside the blob-directory hop, which
+      runs before the span opens, under its own production ceiling;
+    - inside the span `_guarded_stamp`, and with `write` `_guarded_write`,
+      keep their lock and their `discarded` check (and the write its
+      `written`) and touch no volume.
+    Every hop the span makes is still made and still spends
+    `_span_budget(span_deadline)`, so the shared deadline under test is the
+    same one; the work it bounds before the stalled step now takes no
+    wall-clock time. Answers the list of staged paths, so a case shows the
+    staging was reached.
+
+    `flush_in_span` (review AUTOLOG-HOP-R3 M1) is for the case whose held
+    step is the blob's own flush. `_write_blob` opens, writes, flushes,
+    closes and flushes the directory in ONE hop, so holding its `os.fsync`
+    still left the open and the write -- un-held filesystem work -- under
+    the lowered T ahead of the hold. With it, the blob is opened (through
+    `auto_logs.os`, so a case's proxy sees the descriptor) and written in
+    the blob-directory hop, before the span, and the span's write hop
+    performs exactly `_write_blob`'s barriers on that descriptor, in its
+    order: `os.fsync(fd)`, `os.close(fd)`, `_fsync_dir(parent)`. The first
+    thing the span's write hop does on the volume is the flush.
+    """
+    assert write or not flush_in_span, "flush_in_span stages the blob's write"
+    if flush_in_span:
+        # The split below copies `_write_blob`'s tail; if the function's
+        # order changes, this staging no longer models it.
+        # The docstring names the barriers too, so the search starts at the
+        # code's open and each step is looked for after the previous one.
+        body = inspect.getsource(auto_logs._write_blob)
+        order = ["fd = os.open(str(path),", "_write_all(fd, data)", "os.fsync(fd)",
+                 "os.close(fd)", "_fsync_dir(pathlib.Path(path).parent)"]
+        at, pos = [], 0
+        for step in order:
+            pos = body.find(step, pos)
+            at.append(pos)
+            if pos < 0:
+                break
+        assert len(at) == len(order) and min(at) >= 0, (
+            "`_write_blob` no longer opens, writes, flushes, closes and flushes "
+            "its directory in that order: %r" % (list(zip(order, at)),))
+    fds = {}
+    free = auto_logs._free_bytes(logdir)
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: free)
+    produced, staged = [], []
+    real_compress = auto_logs._compress_blob
+    real_path = main._bug_report_log_path
+
+    def _compress_blob(scrubbed):
+        produced.append(real_compress(scrubbed))
+        return produced[-1]
+
+    def _bug_report_log_path(report_id):
+        path = real_path(report_id)
+        auto_logs._stamp_marker(path)
+        if write and flush_in_span:
+            fd = auto_logs.os.open(
+                str(path),
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+                0o666)
+            auto_logs._write_all(fd, produced[-1])
+            fds[str(path)] = fd
+        elif write:
+            auto_logs._write_blob(path, produced[-1])
+        staged.append(path)
+        return path
+
+    def _guarded_stamp(own):
+        with own.lock:
+            assert not own.discarded, (
+                "a cleanup ran before the stamp, so the staged marker outlives "
+                "it and this case no longer models the path")
+            assert own.path == staged[-1], (own.path, staged)
+
+    def _guarded_write(own, data):
+        with own.lock:
+            assert not own.discarded, (
+                "a cleanup ran before the write, so the staged blob outlives it "
+                "and this case no longer models the path")
+            assert data == produced[-1], "the span writes bytes the staging did not"
+            if flush_in_span:
+                fd = fds.pop(str(own.path))
+                try:
+                    auto_logs.os.fsync(fd)
+                finally:
+                    auto_logs.os.close(fd)
+                auto_logs._fsync_dir(pathlib.Path(own.path).parent)
+            own.written = True
+
+    monkeypatch.setattr(auto_logs, "_compress_blob", _compress_blob)
+    monkeypatch.setattr(main, "_bug_report_log_path", _bug_report_log_path)
+    monkeypatch.setattr(auto_logs, "_guarded_stamp", _guarded_stamp)
+    if write:
+        monkeypatch.setattr(auto_logs, "_guarded_write", _guarded_write)
+    return staged
 
 
 def _slow_insert_db(stall):
@@ -4579,24 +4730,24 @@ def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
     become visible, so its blob goes; a cancelled COMMIT may have landed, so
     its blob and marker STAY for the sweep to resolve against the database.
     """
-    # T HAS HEADROOM OVER THE BARRIERS THE SPAN NOW PAYS FOR. The stamp and
-    # the blob write each fsync the file and then its directory entry, and on
-    # this seat a single flush of a temporary volume is 60-200 ms; those are
-    # charged to the same deadline (R3-M2), which is the point. A quarter of
-    # a second left the barriers themselves expiring the span, so this case
-    # would have measured the flush rather than the stalled statement it is
-    # about. `test_the_durability_barrier_is_charged_to_the_marked_span` is
-    # where the barrier's own cost is the subject.
-    T = 4.0   # 1.5 until the relaunch hold: a loaded seat spent it on the section alone
+    # The stamp's and the write's hops spend the same deadline as the
+    # statements (R3-M2); their volume work runs before the span opens
+    # (`_stage_span_prerequisites`), so what T bounds before the stalled
+    # statement takes no wall-clock time.
+    # `test_the_durability_barrier_is_charged_to_the_marked_span` is where a
+    # flush's own charge to the span is the subject.
+    T = 4.0
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
     stall = 12.0
+    staged = _stage_span_prerequisites(monkeypatch, logdir, write=True)
 
     # ── the INSERT half ──────────────────────────────────────────────────
-    started = time.monotonic()
+    db = _slow_insert_db(stall)
     with pytest.raises(HTTPException) as e:
-        _run(auto_logs.upload_auto_log(_request(), _slow_insert_db(stall)))
-    took = time.monotonic() - started
+        _run(auto_logs.upload_auto_log(_request(), db))
+    took = db.waited()
     assert e.value.status_code == 503, e.value.status_code
+    assert took is not None, "the stalled INSERT was never reached"
     assert took < stall / 2.0, (
         "the handler waited %.2fs on an INSERT that never answered; the span's "
         "deadline is %.2fs, so the INSERT is outside the bound" % (took, T))
@@ -4608,11 +4759,11 @@ def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
 
     # ── the COMMIT half ──────────────────────────────────────────────────
     db = _slow_commit_db(stall)
-    started = time.monotonic()
     with pytest.raises(HTTPException) as e:
         _run(auto_logs.upload_auto_log(_request(), db))
-    took = time.monotonic() - started
+    took = db.waited()
     assert e.value.status_code == 503, e.value.status_code
+    assert took is not None, "the stalled COMMIT was never reached"
     assert took < stall / 2.0, (
         "the handler waited %.2fs on a commit that never answered; the span's "
         "deadline is %.2fs, so the commit is outside the bound" % (took, T))
@@ -4634,6 +4785,8 @@ def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
     assert db.name_held_during_rollback == set(), (
         "the request still owned its marker while its rollback was in flight: "
         "%r" % (db.name_held_during_rollback,))
+    assert len(staged) == 2, staged
+
 
 
 def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
@@ -4646,12 +4799,12 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     each twin must leave the case GREEN -- otherwise the control is reacting
     to the site being touched rather than to the bound going away (#342/#431).
     """
-    # Same headroom as the case above, and for the same reason: the span now
-    # pays for four fsyncs, so a T below them would be expired by the
-    # barriers rather than by the site each mutant unwraps.
-    T = 4.0   # as above: 1.5 was spent by the section alone on a loaded seat
+    # The span's prerequisite volume work runs before the span opens, as in
+    # the case above, so each mutant is judged on the site it unwraps.
+    T = 4.0
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
     stall = 12.0
+    staged = _stage_span_prerequisites(monkeypatch, logdir, write=True)
 
     COMMIT_SITE = ("                left = _span_budget(span_deadline)\n"
                    "                await asyncio.wait_for(db.commit(), left)\n")
@@ -4660,14 +4813,15 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     INSERT_TAIL = "                ), left)).mappings().first()\n"
 
     def _refuses_in_time(handler, db):
-        """Whether `handler` refused, and inside the deadline."""
-        started = time.monotonic()
+        """Whether `handler` refused, having stopped waiting on the stalled
+        statement inside the deadline (`_Stalls`)."""
         try:
             _run(handler(_request(), db))
             refused = False
         except HTTPException:
             refused = True
-        return refused and (time.monotonic() - started) < stall / 2.0
+        waited = db.waited()
+        return refused and waited is not None and waited < stall / 2.0
 
     # MUTANT 1: the commit is awaited with no ceiling.
     assert not _refuses_in_time(
@@ -4728,6 +4882,8 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
                             _slow_commit_db(stall)), (
         "the inert twin reds, so the control above is reacting to the site "
         "being edited rather than to the budget")
+    assert len(staged) == 6, staged
+
 
 
 def test_cancelling_the_section_task_cannot_leave_a_blob_with_no_marker(
@@ -5053,8 +5209,9 @@ async def _a_pass_past_its_ceiling(logdir, held):
     while that work runs; pass C once it has ended.
 
     ONE CALL IS ONE ARM, and every arm's pass A runs under the caller's SHORT
-    ceiling: pass C's long ceiling is put back in a `finally`, so no later
-    arm inherits it. An inherited 30 s ceiling equals `_Held`'s own 30 s
+    ceiling: passes B and C run at the production ceiling, and the short one
+    is put back in a `finally`, so no later arm inherits a long one. An
+    inherited ceiling of 30 s or more reaches `_Held`'s own 30 s
     self-release, and pass A could then end by the hold letting go instead of
     by its ceiling -- B would be judged after A's work had finished, and the
     overlap this case exists to see would be gone. So the arm also RECORDS
@@ -5070,28 +5227,33 @@ async def _a_pass_past_its_ceiling(logdir, held):
     except auto_logs.RetentionPassTimedOut:
         seen["a"] = "timed out"
     seen["a_s"] = time.monotonic() - t0
-    try:
-        out = await auto_logs.prune_auto_logs(_retention_db([(R2, "b.log.gz")]))
-        seen["b"] = "ran: %r" % (out,)
-    except auto_logs.RetentionPassBusy:
-        seen["b"] = "busy"
-    except auto_logs.RetentionPassTimedOut:
-        seen["b"] = "ran: timed out"
-    seen["a_open_at_b"] = held.entered - held.finished
-    await held.drained()
-    await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
-    # Pass C does REAL work (one unlink and the directory flush) -- the hold
-    # is on pass A's only -- so it gets a ceiling that a loaded seat's flush
-    # cannot reach: the 0.2 s that times pass A out reds pass C under a whole
-    # suite (2026-10-07, half A3), which measures the volume, not the gate.
-    # The 30 s is pass C's ALONE: the short ceiling is restored after it.
+    # ONLY PASS A RUNS UNDER THE SHORT CEILING. Pass B (when an arm admits
+    # it) and pass C do REAL work -- an unlink and the directory flush, the
+    # hold is on pass A's call only -- and under the 0.2 s that times pass A
+    # out, a loaded seat's flush reds them (2026-10-07, half A3), which
+    # measures the volume, not the gate. So both run at the PRODUCTION
+    # ceiling, and the short one is restored after them, so no later arm
+    # inherits a long one (see above).
     short = auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S
-    auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S = 30.0
+    auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S = \
+        _PRODUCTION_CEILINGS["AUTO_LOG_SWEEP_HOP_WAIT_S"]
     try:
-        seen["c"] = await auto_logs.prune_auto_logs(
-            _retention_db([(R2, "b.log.gz")]))
-    except auto_logs.RetentionPassBusy:
-        seen["c"] = "busy"
+        try:
+            out = await auto_logs.prune_auto_logs(
+                _retention_db([(R2, "b.log.gz")]))
+            seen["b"] = "ran: %r" % (out,)
+        except auto_logs.RetentionPassBusy:
+            seen["b"] = "busy"
+        except auto_logs.RetentionPassTimedOut:
+            seen["b"] = "ran: timed out"
+        seen["a_open_at_b"] = held.entered - held.finished
+        await held.drained()
+        await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
+        try:
+            seen["c"] = await auto_logs.prune_auto_logs(
+                _retention_db([(R2, "b.log.gz")]))
+        except auto_logs.RetentionPassBusy:
+            seen["c"] = "busy"
     finally:
         auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S = short
     return seen
@@ -5130,8 +5292,8 @@ def test_a_pass_past_its_ceiling_stays_the_running_pass_until_its_unlinks_end(
 
     MUTANT: the work's hold not taken (`_start_unlink_pass`). TWIN: the same
     call spelled through a parenthesised name. Every arm -- the real one, the
-    mutant and the twin -- runs its pass A under the 0.2 s ceiling (pass C's
-    30 s is restored in the helper) and is judged only while pass A's work is
+    mutant and the twin -- runs its pass A under the 0.2 s ceiling (passes B and
+    C run at the production ceiling, and the short one is restored in the helper) and is judged only while pass A's work is
     DEMONSTRABLY unfinished (`_pass_a_was_unfinished`), so the twin's green
     is the gate's answer and not the hold letting go.
     """
@@ -5167,6 +5329,11 @@ def test_a_pass_past_its_ceiling_stays_the_running_pass_until_its_unlinks_end(
         assert seen["b"].startswith("ran") is admitted, (
             "with %r at the work's hold the second pass was %s"
             % (replacement.strip(), seen["b"]))
+        # An admitted pass B does real work (its own unlink, held by
+        # nothing) at the production ceiling, so it must have FINISHED it.
+        assert not admitted or seen["b"] != "ran: timed out", (
+            "the admitted second pass did not finish its own unlink: %r"
+            % (seen,))
     monkeypatch.setattr(auto_logs, "_start_unlink_pass", real)
 
 
@@ -7530,8 +7697,17 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
     REFUSE 503 inside T and commit nothing. The mutant takes the ceiling off
     the await that covers the barrier, and the request outlives T instead.
     """
-    T, stall = 3.0, 10.0   # was 1.0, 4.0: the same headroom as the span cases
+    T, stall = 3.0, 10.0   # was 1.0, 4.0
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
+    # The free-space reading, the marker's stamp, and the blob's open and
+    # write run before the span opens (`_stage_span_prerequisites`); the
+    # span's write hop performs only the blob's two barriers, the first of
+    # them the flush this case holds, so nothing un-held runs on the volume
+    # under T ahead of it (review AUTOLOG-HOP-R3 M1). The flush's charge to
+    # the span is still the subject. The hops are all still made, so the
+    # structural count below is unaffected.
+    staged = _stage_span_prerequisites(monkeypatch, logdir, write=True,
+                                       flush_in_span=True)
 
     # STRUCTURAL FIRST: the two barriers on the write path are reached only
     # through the section's own budgeted hops. A flush performed anywhere else
@@ -7557,6 +7733,7 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
 
     opened = {}
     stalled = []
+    flush_began = []
 
     def rec_open(path, flags, mode=0o666):
         fd = os.open(str(path), flags, mode)
@@ -7577,6 +7754,7 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         """
         if opened.get(fd, "").endswith(".log.gz"):
             stalled.append(opened[fd])
+            flush_began.append(time.monotonic())
             time.sleep(stall)
 
     def _attempt(db, handler=None):
@@ -7589,13 +7767,18 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         run measured that teardown and reported a deadline as missed on a
         request that met it; since round 8 they run on the module's volume
         pool, which the loop does not wait for, and the timing rule is kept
-        anyway. The clock starts and stops inside the loop, around the
-        handler's own await, so what it reads is the request's answer and
-        nothing else.
+        anyway. The clock stops inside the loop at the handler's answer, so
+        what it reads is the request's answer and nothing else. It STARTS
+        when the stalled flush began (or at the handler's call if no flush
+        was reached): the request's work before the span -- the directory,
+        the scrub, the gzip, the staged prerequisites -- takes wall-clock
+        time no deadline in this case bounds, and is not timed against
+        `stall / 2` (review round 4).
         """
         monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
         auto_logs._BLOB_WRITE_STARTED[0] = 0.0
         opened.clear()
+        flush_began.clear()
         seen = {}
 
         async def call():
@@ -7605,7 +7788,8 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
                 seen["refused"] = False
             except HTTPException:
                 seen["refused"] = True
-            seen["took"] = time.monotonic() - started
+            seen["took"] = time.monotonic() - (
+                flush_began[-1] if flush_began else started)
 
         real_os = auto_logs.os
         auto_logs.os = _OsProxy(open=rec_open, fsync=slow_fsync)
@@ -7656,6 +7840,8 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         "reacting to the site being edited rather than to the ceiling"
         % (took,))
     auto_logs._MARKERS_IN_FLIGHT.clear()
+    assert len(staged) == 3, staged
+
 
 
 def test_a_cancelled_sections_cleanup_does_not_block_the_event_loop(
@@ -10055,6 +10241,85 @@ class _Held:
         return done
 
 
+def _shrink_ceiling(monkeypatch, name, value, *, spare,
+                    deadline_excludes_spared=False):
+    """`auto_logs.<name>` set to `value` for the hop a test HOLDS, and the
+    hops it does NOT hold left at the constant's production value.
+
+    THE CLASS THIS CLOSES. A ceiling constant bounds every hop that spells it,
+    not only the one a test holds: the orphan sweep's walk AND its
+    resolution, the scrub's two passes, the upload's directory hop AND the
+    hop the test stalls. Shrinking the constant so that the HELD hop expires
+    also put every un-held hop of the same pass under a fraction of a second,
+    and the un-held hop is real work on a real volume -- the resolution is an
+    unlink and a directory flush, which a loaded test seat does not always
+    finish in 0.2 s. The orphan sweep's control (the held walk's ceiling
+    lifted, so it waits the hold out) then read red with no defect in the
+    code: the resolution expired instead, after 3.2 s, which is the 3.0 s
+    hold plus the 0.2 s ceiling.
+
+    So a hop whose function is named in `spare` is waited for at the
+    constant's PRODUCTION value (or its own budget, if that is longer), and
+    every other hop keeps the budget its site passes -- the shrunk value, a
+    mutant's lifted ceiling, or the twin's `float(...)`. A held function is
+    a `_Held`, which has no `__name__`, so it is never spared. Both hop
+    forms are covered: `_hop`, and `_hop_through` (a marker's clear, which
+    runs whether or not anybody still waits for it).
+
+    A SHARED DEADLINE IS THE OTHER HALF. Where a path builds one deadline
+    from the constant and spends it across several hops (`_span_budget`),
+    sparing a hop is not enough: its time is still charged to the deadline
+    the HELD hop waits on afterwards, so a slow spared hop expires the held
+    wait before it starts (the player attachment's `attach_deadline`: the
+    directory, then the held store). With `deadline_excludes_spared`, every
+    `_span_budget(deadline)` adds back the time of the spared hops that
+    started after that deadline was opened (`deadline - value`), so the
+    held hop gets its whole shrunk budget from when it starts. It is a
+    flag, not the default, because it is only right where the deadline was
+    built from the shrunk constant itself.
+
+    Answers a dict counting the spared hops per name, so a test shows that
+    the spare was reached rather than assuming it."""
+    production = _PRODUCTION_CEILINGS[name]
+    assert getattr(auto_logs, name) == production, (
+        "%s was already changed before this shrink" % name)
+    assert value < production, (
+        "%s is %r, not above the shrunk %r: nothing here is a shrink"
+        % (name, production, value))
+    monkeypatch.setattr(auto_logs, name, value)
+    spared = dict.fromkeys(spare, 0)
+
+    spent = []   # (start, end) of every spared hop, on the monotonic clock
+
+    def sparing(real_hop):
+        async def hop(pool, budget, fn, *args):
+            fname = getattr(fn, "__name__", None)
+            if fname not in spared:
+                return await real_hop(pool, budget, fn, *args)
+            spared[fname] += 1
+            started = time.monotonic()
+            try:
+                return await real_hop(pool, max(budget, production), fn,
+                                      *args)
+            finally:
+                spent.append((started, time.monotonic()))
+        return hop
+
+    monkeypatch.setattr(auto_logs, "_hop", sparing(auto_logs._hop))
+    monkeypatch.setattr(auto_logs, "_hop_through",
+                        sparing(auto_logs._hop_through))
+    if deadline_excludes_spared:
+        real_span_budget = auto_logs._span_budget
+
+        def span_budget(deadline):
+            opened = deadline - value
+            return real_span_budget(deadline + sum(
+                end - start for start, end in spent if start >= opened))
+
+        monkeypatch.setattr(auto_logs, "_span_budget", span_budget)
+    return spared
+
+
 def _main_mutant(name, pairs):
     """`main.<name>` with every (anchor, replacement) applied, compiled
     WITHOUT its route decorator -- executing it would register a second copy
@@ -10361,7 +10626,16 @@ def test_an_automatic_upload_refuses_503_when_a_hop_before_its_span_does_not_ret
     owner_name, attr, ceiling, site, lifted, twin, line = _AUTO_PRE_SPAN_HOPS[hop]
     owner = main if owner_name == "main" else auto_logs
     HOLD, CEILING = 1.0, 0.2
-    monkeypatch.setattr(auto_logs, ceiling, CEILING)
+    # The scrub and the gzip both spell AUTO_LOG_CPU_WAIT_S, so the one not
+    # held is spared at the production ceiling (`_shrink_ceiling`). The
+    # directory is the only hop under AUTO_LOG_VOLUME_WAIT_S that the
+    # control needs to finish: the post-commit clear spells it too, and a
+    # clear past its ceiling leaves the upload accepted (the marker-clear
+    # case), so nothing is spared there.
+    spared = _shrink_ceiling(
+        monkeypatch, ceiling, CEILING,
+        spare={"scrub": ("_compress_blob",), "gzip": ("_scrub_pass_one",),
+               "directory": ("_clear_marker",)}[hop])
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
     held = _Held(getattr(owner, attr))
@@ -10402,10 +10676,21 @@ def test_an_automatic_upload_refuses_503_when_a_hop_before_its_span_does_not_ret
         "land; it answered %r, so the refusal above is not about the ceiling"
         % (hop, out))
     assert took >= HOLD - 0.05, took
+    # The control LANDS, so its marker's clear runs: un-held volume work,
+    # spared on the directory route, whose outcome is read here.
+    printed = capsys.readouterr().out
+    assert "was not cleared" not in printed and _markers(logdir) == [], (
+        "the landed upload's marker clear did not finish: %r %r"
+        % (_markers(logdir), printed))
 
     out, took, db = _run(drive(_handler_mutant([(site, twin)])))
     assert isinstance(out, HTTPException) and out.status_code == 503, out
     assert took < HOLD, took
+    # The gzip follows the scrub, so it is reached only in the control that
+    # lifts the scrub's ceiling; the scrub precedes the gzip in all three.
+    assert spared == {"scrub": {"_compress_blob": 1},
+                      "gzip": {"_scrub_pass_one": 3},
+                      "directory": {"_clear_marker": 1}}[hop], spared
 
 
 def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
@@ -10428,7 +10713,12 @@ def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
     the `if _running:` deferral removed -- and it is gone while the store is
     still held. TWIN: the same test spelled `len(...) > 0`.
     """
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    # The directory and the held store share ONE deadline built from the
+    # constant (`attach_deadline`), so the directory is spared AND its time
+    # is kept off that deadline: the store's wait gets the whole 0.2 s.
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_VOLUME_WAIT_S", 0.2,
+                             spare=("_bug_report_log_path",),
+                             deadline_excludes_spared=True)
     monkeypatch.setattr(main, "_is_admin", _no_admin)
     monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
     held = _Held(auto_logs._stamp_marker)
@@ -10460,6 +10750,10 @@ def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
     assert _blobs(logdir) == [] and _markers(logdir) == [], (
         _blobs(logdir), _markers(logdir))
     printed = capsys.readouterr().out
+    # The store failed on ITS OWN ceiling (TimeoutError), never on a
+    # deadline the directory had already spent (`_SpanExpired`).
+    assert re.search(r"log persistence FAILED for \S+: TimeoutError ",
+                     printed), printed
     assert ("did not finish within %ss" % 0.2) in printed, printed
     assert "was not cleared (TimeoutError)" in printed, printed
 
@@ -10474,6 +10768,7 @@ def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
         "            if _running:\n", "            if len(_running) > 0:\n")))
     assert registered is True and drained and released, (
         registered, drained, released)
+    assert spared["_bug_report_log_path"] == 3, spared
 
 
 def test_a_player_attachment_whose_directory_does_not_resolve_is_filed_as_lost(
@@ -10520,10 +10815,24 @@ def test_a_player_attachment_whose_directory_does_not_resolve_is_filed_as_lost(
     assert _blobs(logdir) == [] and _markers(logdir) == []
     assert "log persistence FAILED" in capsys.readouterr().out
 
-    out, report, took = _run(drive(_report_mutant(
-        site, "                attach_deadline = (time.monotonic()\n"
-              "                                   + 10 ** 6)\n")))
+    # THE CONTROL LANDS, so its marker's clear runs: un-held volume work
+    # whose wait spells the same constant. In this arm that wait is given
+    # the production ceiling beside the lifted deadline, and its outcome
+    # is read: no "was not cleared" line and no marker left.
+    clear_site = ("                    await asyncio.wait_for("
+                  "asyncio.shield(hops[-1]),\n"
+                  "                                           "
+                  "_auto_logs.AUTO_LOG_VOLUME_WAIT_S)\n")
+    out, report, took = _run(drive(_report_mutant_pairs([
+        (site, "                attach_deadline = (time.monotonic()\n"
+               "                                   + 10 ** 6)\n"),
+        (clear_site, clear_site.replace(
+            "_auto_logs.AUTO_LOG_VOLUME_WAIT_S",
+            repr(_PRODUCTION_CEILINGS["AUTO_LOG_VOLUME_WAIT_S"])))])))
     assert out["log_persisted"] is True and took >= HOLD - 0.05, (out, took)
+    printed = capsys.readouterr().out
+    assert "was not cleared" not in printed and _markers(logdir) == [], (
+        _markers(logdir), printed)
 
     out, report, took = _run(drive(_report_mutant(
         site, "                attach_deadline = (time.monotonic()\n"
@@ -10649,7 +10958,7 @@ def test_the_admin_log_readers_answer_when_the_volume_does_not(logdir, admin,
     async def drive(download, detail):
         held.reset()
         loop = asyncio.get_running_loop()
-        loop.call_later(HOLD, held.release)
+        release = loop.call_later(HOLD, held.release)
         ddb = Scripted({row_key: [[{"id": RID, "bug_number": 41,
                                     "log_filename": name, "log_bytes": 10,
                                     "created_at": when}]]})
@@ -10660,14 +10969,20 @@ def test_the_admin_log_readers_answer_when_the_volume_does_not(logdir, admin,
         except HTTPException as ex:
             got = ex
         d_took = time.monotonic() - at
+        # THE HOLD ENDS WITH ITS READER. Both readers run on one loop, so a
+        # timer left armed would release the NEXT reader's hold early -- and
+        # inside its ceiling whenever that reader's un-held work runs long
+        # (the scrub tests' slowed-hop control showed it).
+        release.cancel()
         await held.drained()
         held.reset()
-        loop.call_later(HOLD, held.release)
+        release = loop.call_later(HOLD, held.release)
         pdb = Scripted({DETAIL_KEY: [[detail_row]], EVENTS_KEY: [[]]})
         at = time.monotonic()
         pane = await detail(report_id=str(RID), admin_steam_id=STEAM,
                             hmac_signature="s", include_log=True, db=pdb)
         p_took = time.monotonic() - at
+        release.cancel()
         await held.drained()
         return got, d_took, ddb, pane, p_took, pdb
 
@@ -10750,7 +11065,8 @@ def test_the_admin_log_scrub_holds_no_connection_and_answers_past_its_ceiling(
                 "    body = await _auto_logs._hop(\n")
     pass_two = ("        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,\n"
                 "        _scrub_pass_two, body, purged, counts)\n")
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_CPU_WAIT_S", CEILING)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_CPU_WAIT_S", CEILING,
+                             spare=("_scrub_pass_one",))
     # The probe only asks the database when it has something to hash with;
     # the log names the synthetic account so it has an id to ask about.
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "a-test-secret")
@@ -10791,12 +11107,18 @@ def test_the_admin_log_scrub_holds_no_connection_and_answers_past_its_ceiling(
         at = time.monotonic()
         entered = await _until(lambda: held.entered == 1, 5.0)
         out_at_pass_two = pool.out
-        asyncio.get_running_loop().call_later(HOLD, held.release)
+        release = asyncio.get_running_loop().call_later(HOLD, held.release)
         try:
             got = await task
         except HTTPException as ex:
             got = ex
         took = time.monotonic() - at
+        # THE HOLD ENDS WITH ITS READER. Both readers run on one loop, so a
+        # timer left armed would release the NEXT reader's hold early -- and
+        # inside its ceiling whenever that reader's un-held work runs long
+        # (pass one slowed to 0.6 s: the download's timer freed the pane's
+        # held pass two inside its 0.2 s ceiling, and the pane served the log).
+        release.cancel()
         await held.drained()
         await db.close()
         return entered, out_at_pass_two, got, took
@@ -10856,6 +11178,7 @@ def test_the_admin_log_scrub_holds_no_connection_and_answers_past_its_ceiling(
     assert (d_out, p_out) == (0, 0), (d_out, p_out)
     assert isinstance(got, HTTPException) and got.status_code == 503, got
     assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+    assert spared["_scrub_pass_one"] > 0, spared
 
 
 def test_the_admin_log_scrub_answers_when_its_first_pass_does_not_finish(
@@ -10876,7 +11199,8 @@ def test_the_admin_log_scrub_answers_when_its_first_pass_does_not_finish(
     HOLD, CEILING = 1.0, 0.2
     pass_one = ("        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,\n"
                 "        _scrub_pass_one, body)\n")
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_CPU_WAIT_S", CEILING)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_CPU_WAIT_S", CEILING,
+                             spare=("_scrub_pass_two",))
     name = "%s.log.gz" % (RID,)
     (logdir / name).write_bytes(gzip.compress(b"a stored log line"))
     held = _Held(main._scrub_pass_one)
@@ -10912,12 +11236,18 @@ def test_the_admin_log_scrub_answers_when_its_first_pass_does_not_finish(
         at = time.monotonic()
         entered = await _until(lambda: held.entered == 1, 5.0)
         out_at_pass_one = pool.out
-        asyncio.get_running_loop().call_later(HOLD, held.release)
+        release = asyncio.get_running_loop().call_later(HOLD, held.release)
         try:
             got = await task
         except HTTPException as ex:
             got = ex
         took = time.monotonic() - at
+        # THE HOLD ENDS WITH ITS READER. Both readers run on one loop, so a
+        # timer left armed would release the NEXT reader's hold early -- and
+        # inside its ceiling whenever that reader's un-held work runs long
+        # (in the pass-two test above, pass one slowed to 0.6 s let the
+        # download's timer free the pane's held pass two inside its ceiling).
+        release.cancel()
         await held.drained()
         await db.close()
         return entered, out_at_pass_one, got, took
@@ -10964,6 +11294,7 @@ def test_the_admin_log_scrub_answers_when_its_first_pass_does_not_finish(
     assert (d_out, p_out) == (0, 0), (d_out, p_out)
     assert isinstance(got, HTTPException) and got.status_code == 503, got
     assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+    assert spared["_scrub_pass_two"] > 0, spared
 
 
 def test_an_insert_whose_cleanup_barrier_refuses_still_answers_503(
@@ -11062,7 +11393,8 @@ def test_an_insert_whose_cleanup_barrier_refuses_still_answers_503(
 
     # PART TWO: the cleanup's wait passes its ceiling.
     monkeypatch.setattr(auto_logs, "_fsync_dir", real_flush)
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_VOLUME_WAIT_S", 0.2,
+                             spare=("_bug_report_log_path",))
     held = _Held(auto_logs._release_marked_blob)
     monkeypatch.setattr(auto_logs, "_release_marked_blob", held)
 
@@ -11087,6 +11419,7 @@ def test_an_insert_whose_cleanup_barrier_refuses_still_answers_503(
     assert _blobs(logdir) == [] and _markers(logdir) == [], (
         "the cleanup that outlived its wait did not finish its work: %r %r"
         % (_blobs(logdir), _markers(logdir)))
+    assert spared["_bug_report_log_path"] > 0, spared
 
 
 def test_a_cleanup_past_its_ceiling_hands_the_volume_on_only_when_it_ends(
@@ -11110,7 +11443,8 @@ def test_a_cleanup_past_its_ceiling_hands_the_volume_on_only_when_it_ends(
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", lock)
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_VOLUME_WAIT_S", 0.2,
+                             spare=("_bug_report_log_path",))
 
     def refused_write(own, data):
         raise OSError("the volume refused the write")
@@ -11163,6 +11497,7 @@ def test_a_cleanup_past_its_ceiling_hands_the_volume_on_only_when_it_ends(
         "own, then=(_hand_on))\n")))
     assert locked_at_answer is True and drained and freed, (
         locked_at_answer, drained, freed)
+    assert spared["_bug_report_log_path"] > 0, spared
 
 
 def test_a_count_that_reached_the_cap_before_the_insert_refuses_and_discards(
@@ -11244,7 +11579,8 @@ def test_a_marker_clear_that_does_not_return_in_time_leaves_the_upload_accepted(
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_VOLUME_WAIT_S", 0.2,
+                             spare=("_bug_report_log_path",))
     held = _Held(auto_logs._clear_marker)
     monkeypatch.setattr(auto_logs, "_clear_marker", held)
     site = ("                await _hop_through(_VOLUME_POOL, "
@@ -11279,6 +11615,7 @@ def test_a_marker_clear_that_does_not_return_in_time_leaves_the_upload_accepted(
         site, "                await _hop_through(_VOLUME_POOL, "
               "float(AUTO_LOG_VOLUME_WAIT_S),\n")])))
     assert out["log_persisted"] is True and took < HOLD, (out, took)
+    assert spared["_bug_report_log_path"] == 3, spared
 
 
 def test_a_retention_unlink_pass_that_does_not_return_in_time_deletes_no_row(
@@ -11384,7 +11721,10 @@ def test_an_orphan_sweep_hop_that_does_not_return_in_time_removes_nothing(
                        "AUTO_LOG_SWEEP_HOP_WAIT_S,\n"}[hop]
     line = {"walk": "the directory walk did not return within %ss",
             "resolve": "unreferenced, did not return within %ss"}[hop]
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2)
+    other = {"walk": "_resolve_marker_candidates",
+             "resolve": "_marker_candidates"}[hop]
+    spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2,
+                             spare=(other,))
     held = _Held(getattr(auto_logs, target))
     monkeypatch.setattr(auto_logs, target, held)
     name = "88888888-0000-4000-8000-0000000000b1.log.gz"
@@ -11427,6 +11767,9 @@ def test_an_orphan_sweep_hop_that_does_not_return_in_time_removes_nothing(
         site.replace("AUTO_LOG_SWEEP_HOP_WAIT_S",
                      "float(AUTO_LOG_SWEEP_HOP_WAIT_S)"))))
     assert out["unlinked"] == 0 and took < HOLD, (out, took)
+    # The walk reaches the resolution only in the control; the resolve
+    # case walks in all three drives.
+    assert spared[other] == {"walk": 1, "resolve": 3}[hop], spared
 
 
 # ── round 9: thirty operator calls behind a stalled volume (R8-M1) ──────────
