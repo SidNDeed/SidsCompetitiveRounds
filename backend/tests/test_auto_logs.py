@@ -10404,7 +10404,16 @@ def test_an_automatic_upload_refuses_503_when_a_hop_before_its_span_does_not_ret
     owner_name, attr, ceiling, site, lifted, twin, line = _AUTO_PRE_SPAN_HOPS[hop]
     owner = main if owner_name == "main" else auto_logs
     HOLD, CEILING = 1.0, 0.2
-    monkeypatch.setattr(auto_logs, ceiling, CEILING)
+    # The scrub and the gzip both spell AUTO_LOG_CPU_WAIT_S, so the one not
+    # held is spared at the production ceiling (`_shrink_ceiling`). The
+    # directory is the only hop under AUTO_LOG_VOLUME_WAIT_S that the
+    # control needs to finish: the post-commit clear spells it too, and a
+    # clear past its ceiling leaves the upload accepted (the marker-clear
+    # case), so nothing is spared there.
+    spared = _shrink_ceiling(
+        monkeypatch, ceiling, CEILING,
+        spare={"scrub": ("_compress_blob",), "gzip": ("_scrub_pass_one",),
+               "directory": ()}[hop])
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
     held = _Held(getattr(owner, attr))
@@ -10449,6 +10458,11 @@ def test_an_automatic_upload_refuses_503_when_a_hop_before_its_span_does_not_ret
     out, took, db = _run(drive(_handler_mutant([(site, twin)])))
     assert isinstance(out, HTTPException) and out.status_code == 503, out
     assert took < HOLD, took
+    # The gzip follows the scrub, so it is reached only in the control that
+    # lifts the scrub's ceiling; the scrub precedes the gzip in all three.
+    assert spared == {"scrub": {"_compress_blob": 1},
+                      "gzip": {"_scrub_pass_one": 3},
+                      "directory": {}}[hop], spared
 
 
 def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
