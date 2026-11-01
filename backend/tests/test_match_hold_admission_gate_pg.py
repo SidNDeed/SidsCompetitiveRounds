@@ -139,6 +139,17 @@ def _awaits_or_ends(node):
                for n in ast.walk(node))
 
 
+def _returns_other_mode(stmt):
+    """Whether `stmt` is `return <refusal>(..., "other_mode")`, awaited or
+    not."""
+    value = stmt.value if isinstance(stmt, ast.Return) else None
+    if isinstance(value, ast.Await):
+        value = value.value
+    return (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and bool(value.args) and isinstance(value.args[-1], ast.Constant)
+            and value.args[-1].value == "other_mode")
+
+
 def refusal_branch_violation(fn, call, form):
     """None when the admission call `call` in function `fn` is answered by its
     own refusal branch in the shape `form` requires, else why not. The branch
@@ -159,7 +170,11 @@ def refusal_branch_violation(fn, call, form):
       acquirer  the two acquirers: the same gate form, refused at once by
                 `return False` (the caller rolls back);
       hold      match_hold open and claim: the same gate form, refused at
-                once by `await db.rollback()`."""
+                once by `await db.rollback()`, and the branch ends by
+                returning its "other_mode" refusal, so it never falls
+                through into the action; what lies between is the
+                refusal's own fresh transaction (the timeouts rearmed,
+                the audit row written)."""
     stmt = _statement_of(fn, call)
     if form == "shared":
         test = getattr(stmt, "test", None)
@@ -195,6 +210,9 @@ def refusal_branch_violation(fn, call, form):
     if form == "hold":
         if not _is_db_rollback(first):
             return "the refusal branch does not open with await db.rollback()"
+        if not _returns_other_mode(branch.body[-1]):
+            return ('the refusal branch does not end by returning its '
+                    '"other_mode" refusal')
         return None
     if form == "acquirer":
         if not (isinstance(first, ast.Return)
@@ -298,9 +316,15 @@ def test_h3_refusal_branch_oracle_can_fail():
     assert why([gate, "if not admitted:", rdm], GATE, "direct") is None
     assert why([gate, "if not admitted:", "    return False"],
                GATE, "acquirer") is None
-    assert why(["admitted, now = await _lease_admission_gate(db, [pid], 'ffa', None)",
-                "if not admitted:", "    await db.rollback()",
-                "    await _install_database_timeouts(db)"], GATE, "hold") is None
+    hold = "admitted, now = await _lease_admission_gate(db, [pid], 'ffa', None)"
+    assert why([hold, "if not admitted:", "    await db.rollback()",
+                "    await _install_database_timeouts(db)",
+                '    return _refused("other_mode")'], GATE, "hold") is None
+    assert why([hold, "if not admitted:", "    await db.rollback()",
+                "    if (await held(db)) is None:",
+                '        raise HTTPException(404, "no such hold")',
+                '    return await _refuse_attempt(db, 1, "claim", n, "other_mode")'],
+               GATE, "hold") is None
 
     planted = [
         # finding 7 (M1a): the refusal commits; a later rollback answers
@@ -336,7 +360,15 @@ def test_h3_refusal_branch_oracle_can_fail():
          [gate, "if not admitted:", "    pass", "return False"]),
         ("does not open with await db.rollback()", GATE, "hold",
          [gate, "if not admitted:", "    await _install_database_timeouts(db)",
-          "    await db.rollback()"]),
+          "    await db.rollback()", '    return _refused("other_mode")']),
+        # a hold refusal that rolls back and then falls through into the
+        # action, or answers another reason
+        ('does not end by returning its "other_mode" refusal', GATE, "hold",
+         [gate, "if not admitted:", "    await db.rollback()",
+          "    await _install_database_timeouts(db)", "    await db.commit()"]),
+        ('does not end by returning its "other_mode" refusal', GATE, "hold",
+         [gate, "if not admitted:", "    await db.rollback()",
+          '    return _refused("lobby_closed")']),
     ]
     for expected, callee, form, lines in planted:
         got = why(lines, callee, form)
