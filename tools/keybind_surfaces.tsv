@@ -1166,11 +1166,25 @@ a957d1b7bc867ae0	N	rule:N1	Demon Wings
 16cca68667b94710	N	rule:N1	Denied artwork cannot be reopened by a placement change
 f37ae864ff0537bb	O	rule:O	Deny failed: 
 a1b943b041c4467f	N	rule:N1	Despawn off-screen bullets — host clears bullets that exit the camera viewport.
+1efa525d77812314	N	rule:N1	Detail: a blue top hat with a red band and a star wand, held up by two white gloves (animated). Equip in the Character editor.
+45622d80b42d25a4	N	rule:N1	Detail: a candy cane that looks stuck right through your head. Equip in the Character editor.
+0e3d86208a93b2e5	N	rule:N1	Detail: a gold medal with a crosshair, hung on a red ribbon. Equip in the Character editor.
+fc041c1d7fea61ef	N	rule:N1	Detail: a green coiled spring dressed as a festive tree, with baubles and a gold star on top (animated). Equip in the Character editor.
+4b6d898d13711b18	N	rule:N1	Detail: a green vine crown with white daisies. Equip in the Character editor.
+5deec6aa9eca170c	N	rule:N1	Detail: a headband of grinning pumpkins and a little ghost bobbing on springs. Equip in the Character editor.
+afd5cf37a25b0889	N	rule:N1	Detail: a headband with two fizzy soda cans and a long drinking straw. Equip in the Character editor.
+a0e76ad6ffc1e05c	N	rule:N1	Detail: a pink headband with round ears, puffy ear pads and a unicorn horn. Equip in the Character editor.
 55a2bf4d07dee237	N	rule:N1	Detail: a shooting star circling overhead (animated). Equip in the Character editor.
+3163bdef48fa56ff	N	rule:N1	Detail: a small round pink buddy with a surprised face. Equip in the Character editor.
+37aa2dbb4485cbd4	N	rule:N1	Detail: a top hat wrapped like a present, with an orange ribbon and bow. Equip in the Character editor.
+3298ad795507acaa	N	rule:N1	Detail: a wide woven straw hat with a red band. Equip in the Character editor.
+6178c64befec1eb7	N	rule:N1	Detail: an ice cream cone tipped upside down, melting over your head. Equip in the Character editor.
+2a9689063a6ec318	N	rule:N1	Detail: an orange and grey striped top hat with a grumpy face badge. Equip in the Character editor.
 b76e06ba2922bd53	N	rule:N1	Detail: certified angel. Equip in the Character editor.
 5886a70067e8a23c	N	rule:N1	Detail: community cosmetic. Equip in the Character editor.
 91e791312991c216	N	rule:N1	Detail: community cosmetic. Ships with the next mod update; equip in the Character editor.
 3606ab5ea0cab3d5	N	rule:N1	Detail: cozy star-studded earmuffs. Equip in the Character editor.
+e4c85cd992a342d9	N	rule:N1	Detail: green tear streaks running down both cheeks. Equip in the Character editor.
 d35ece05488a58ed	N	rule:N1	Detail: heavy is the head. Equip in the Character editor.
 dc3decbb93847518	N	rule:N1	Details
 138a572192dc8587	N	rule:N1	Details (optional)
@@ -1303,9 +1317,12 @@ d7a501f83242fd94	N	rule:N1	Expert
 16b52078a6f08d64	N	rule:N1	Eye-watering hot-pink body color.
 2bc4f5879207567e	N	rule:N1	Eyes for those who are burning for a true battle
 5c143e75d051c385	N	rule:N1	Eyes for those who feel fiendish
+fbe1ede71827fb41	N	rule:N1	Eyes: big round eyes with lashes and a bright shine. Equip in the Character editor.
 42004fbbdfdd9e28	N	rule:N1	Eyes: community cosmetic. Ships with the next mod update; equip in the Character editor.
 0ac81439129159c9	N	rule:N1	Eyes: golden stars. Equip in the Character editor.
 2684f8c6647a0ec5	N	rule:N1	Eyes: lovestruck hearts. Equip in the Character editor.
+8cd24e52796e469a	N	rule:N1	Eyes: red and yellow goggles marked with the radiation symbol. Equip in the Character editor.
+8b337be2a4359861	N	rule:N1	Eyes: two green curves for calm, closed eyes. Equip in the Character editor.
 1a2139886b9f4ea1	F	rev:eb7810a3cb854bb5 fixed:F5 F5 always opens the mod menu; no Controls row moves it	F5 stays on the menu control.
 90ce5340a6531dab	N	rev:5f606b65f39cd1fb a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	FFA
 87f5c954be7baafd	N	rule:N1	FFA (placed above / below)
@@ -1902,6 +1919,8 @@ a57757f0acf6fb80	K	rule:K	Mouse {0}
 9cf80338abce8b56	N	rev:d818b72cf36b377f a mouse-cursor cosmetic; names the pointer, not a binding	Mouse-cursor color tint (local-only). Pick the cursor SHAPE — arrow, dot, crosshair, circle — in Set
 3d934064bc875a99	N	rule:N1	Moustache
 7f2f10fba7859343	N	rule:N1	Mouth: a distinguished handlebar. Equip in the Character editor.
+019ff8bec41646d3	N	rule:N1	Mouth: a small green frown. Equip in the Character editor.
+52df6322d2477863	N	rule:N1	Mouth: a wide open grin with a red tongue. Equip in the Character editor.
 9b4279e882d9e4eb	N	rule:N1	Mouth: community cosmetic. Ships with the next mod update; equip in the Character editor.
 1e7a29d5061a52a7	N	rule:N1	Mouth: sewn shut. Equip in the Character editor.
 260ff8ae7182fc85	N	rule:N1	Move down

@@ -262,13 +262,21 @@ def _bare(stmt):
 #   absent or no longer approved, and the raise aborts the one transaction
 #   the file runs in (BEGIN, a single DO block, COMMIT), so it changes
 #   nothing; on this fresh schema those rows never exist.
+# - 399 replaces the approval placeholder description on 19 published
+#   community faces, each pinned by shop id and sku. It is a ship-time data
+#   migration (applied after the client carrying its translations ships),
+#   and its guard raises, changing nothing, when a pinned id is absent or
+#   holds another sku or kind; on this fresh schema those ids hold other
+#   items (id 250 is mapcolor_forest_fire). It writes shop_items.description
+#   of those 19 rows only, which nothing this module seeds or drives reads.
 HELD_OUT = frozenset({"366_title_refunds_voidshot_kingslayer.sql",
                       "376_i18n_337_demonic_proposals.sql",
                       "384_i18n_keys_stage2_hold.sql",
                       "385_seed_machine_translations_stage2_hold.sql",
                       "387_ffa_rating_restore_2f60481d.sql",
                       "388_ffa_rating_restore_2f60481d.sql",
-                      "398_release_five_faces_v1410.sql"})
+                      "398_release_five_faces_v1410.sql",
+                      "399_shop_face_descriptions.sql"})
 
 
 def _numbered(upto=None, above=None):
