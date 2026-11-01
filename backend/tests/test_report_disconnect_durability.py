@@ -38,6 +38,7 @@ import re
 from pathlib import Path
 
 from _cs_structure import method_spans, strip_comments_only
+from changelog_release import one_bullet
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -1736,10 +1737,16 @@ def test_the_changelog_states_the_retry_budget():
     assert "retried until the server takes it" not in changelog, (
         "the unbounded promise is back"
     )
-    assert "six hours" in changelog, "the bound has to be stated in the bullet"
     assert "twenty attempts" not in changelog, (
         "a bullet still claims the old seventy-five-minute budget"
     )
+    # The bound is read from the v1.40.2 bullet that states it, not from the
+    # whole file, where "six hours" is met by any release's prose
+    # (REHEARSAL-FOUR round 1, finding 4's class). The two absences above stay
+    # whole-file: no release may make those claims.
+    bullet = one_bullet(
+        "1.40.2", "When an opponent leaves a ranked series part-way through", changelog)
+    assert "six hours" in bullet, "the bound has to be stated in the bullet"
     attempts = int(_api_client_const("OUTBOX_MAX_ATTEMPTS", "int"))
     interval = _api_client_const("OUTBOX_RETRY_SECONDS", "float")
     cap = _api_client_const("OUTBOX_RETRY_MAX_MULTIPLIER", "float")

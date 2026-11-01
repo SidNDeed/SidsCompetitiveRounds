@@ -71,6 +71,7 @@ from pathlib import Path
 import pytest
 
 import main
+from changelog_release import one_bullet, release_section
 
 
 MAIN_PY = Path(__file__).resolve().parents[1] / "api" / "main.py"
@@ -504,11 +505,13 @@ def test_the_changelog_does_not_claim_the_fixed_order_is_gone():
     pick made on a map that is empty. The sentence has to describe the code's
     actual fallback, because a player reading it would otherwise be told a
     guarantee the server does not make."""
-    changelog = (Path(__file__).parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
-    start = changelog.index("The region a ranked room is created in")
-    # Line wraps are a property of the file, not of the claim: flatten first so
-    # a phrase split across two lines still reads as the phrase.
-    bullet = " ".join(changelog[start:start + 700].split())
+    # The v1.40.2 bullet, not the first sentence in the file that starts this
+    # way: the CHANGELOG adds each release above the last, so a first-occurrence
+    # reader takes any newer release that repeats the sentence and never sees a
+    # regressed v1.40.2 bullet (REHEARSAL-FOUR round 1, finding 4). The whole
+    # bullet is read, not a fixed 700 characters, and line wraps are flattened,
+    # so a phrase split across two lines still reads as the phrase.
+    bullet = one_bullet("1.40.2", "The region a ranked room is created in")
     assert "came first alphabetically" not in bullet, (
         "the removed-alphabetical claim is back, and min(a, b) still decides a tie"
     )
@@ -933,6 +936,11 @@ def test_the_pickers_comment_names_the_real_and_only_sighting_source():
     )
 
 
+def _bold_numbers(text):
+    """The bold numbers of a CHANGELOG list (`**292**`), in the order written."""
+    return re.findall(r"\*\*([0-9]+)\*\*", text)
+
+
 def test_the_deploy_block_orders_every_migration_it_names():
     """Each table this release adds is SELECTed by the new API, so an API
     deployed ahead of one fails those requests with undefined_table -- and 294
@@ -954,25 +962,31 @@ def test_the_deploy_block_orders_every_migration_it_names():
     the migrations added since v1.40.3 and names none of these, above this
     one, and the gate read that block instead.
     """
-    changelog = (Path(__file__).resolve().parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
-    section_at = changelog.index("\n## v1.40.2 ")
-    section = changelog[section_at:changelog.index("\n## ", section_at + 1)]
-    assert section.count("**Schema changes:**") == 1, (
+    changelog = release_section("1.40.2")
+    assert changelog.count("**Schema changes:**") == 1, (
         "v1.40.2 no longer has exactly one schema block, so the block this "
         "gate checks cannot be identified")
-    changelog = section
     start = changelog.index("**Schema changes:**")
     # Whitespace-normalised: the CHANGELOG is hard-wrapped, so any phrase long
     # enough to be worth asserting is liable to straddle a line break and a raw
     # substring test would be asserting about where the wrap happens to fall.
     block = " ".join(changelog[start:][:2400].split())
 
-    # BEFORE the API: the tables its own statements read.
-    before = block[:block.index("After it")] if "After it" in block else block
-    for early, why in (("292", "the match-report path SELECTs issued_room_regions"),
-                       ("293", "every path that seats a pair writes series_dc_grants"),
-                       ("295", "the leave-report predicate SELECTs series_progress")):
-        assert early in before, f"migration {early} is not ordered before the API — {why}"
+    # BEFORE the API: the tables its own statements read. Both lists are read
+    # as the bold migration numbers they are written as, in the order written,
+    # never as substrings: a bare number can sit in any explanatory clause
+    # (294's own entry mentions 293), and a substring test cannot see order.
+    assert "After it" in block, (
+        "the deploy block no longer separates what runs after the API")
+    before = block[:block.index("After it")]
+    early = _bold_numbers(before)
+    for number, why in (("292", "the match-report path SELECTs issued_room_regions"),
+                        ("293", "every path that seats a pair writes series_dc_grants"),
+                        ("295", "the leave-report predicate SELECTs series_progress")):
+        assert number in early, f"migration {number} is not ordered before the API — {why}"
+    assert sorted(early) == ["292", "293", "295"], (
+        f"the list of what runs BEFORE the API reads {early}; only the tables "
+        "the new code reads belong there")
     assert "BEFORE the API deploy" in block, "nothing is ordered before the API at all"
 
     # AFTER it: seeds the client already carries, and the backfill.
@@ -988,14 +1002,14 @@ def test_the_deploy_block_orders_every_migration_it_names():
         "expects, so the list cannot be isolated from the prose explaining it"
     )
     after = block[block.index("After it"):block.index(tail_marker)]
-    for late in ("288", "289", "290", "291", "294"):
-        assert late in after, (
-            f"migration {late} dropped from the list of what runs AFTER the API"
-        )
-        assert late not in before, (
-            f"migration {late} is ordered before the API deploy; only the tables "
-            "the new code reads belong there"
-        )
+    # The block documents numeric order with 294 last, so the parsed list is
+    # compared whole: membership alone passed with 294 moved to the front
+    # (REHEARSAL-FOUR round 1, finding 3).
+    late = _bold_numbers(after)
+    assert late == ["288", "289", "290", "291", "294"], (
+        f"the list of what runs AFTER the API reads {late}; the block documents "
+        "288, 289, 290 and 291 in numeric order, then 294 last"
+    )
     assert "294 goes LAST" in block, (
         "294 backfills sittings only the new API keeps current — run before the "
         "deploy it leaves out exactly the pairs who were mid-series in the gap"
