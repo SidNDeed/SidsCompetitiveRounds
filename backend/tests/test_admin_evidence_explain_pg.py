@@ -564,7 +564,7 @@ def _say(name, lines):
 def test_fixture_statistics_are_those_of_a_maintained_table(db):
     """Ruling 1: every loaded table carries fresh statistics and a set
     visibility map before any plan is read: reltuples equals the row count
-    (a VACUUM sets it exactly), every heap page is all-visible, and pg_stats
+    (ANALYZE reads every page), every heap page is all-visible, and pg_stats
     holds the seat, time and series columns. The fixture produces all of it
     itself (`_maintain`), whatever other sessions hold; the test after this
     one proves that half under a snapshot older than the load."""
