@@ -4554,6 +4554,74 @@ class _SlowCommit(Scripted):
         self.rolled_back += 1
 
 
+def _stage_span_prerequisites(monkeypatch, logdir, *, write):
+    """THE MARKED SPAN'S PREREQUISITE VOLUME WORK, RUN BEFORE THE SPAN OPENS.
+
+    Review AUTOLOG-HOP-R2 M1. A case that lowers
+    `AUTO_LOG_MARKED_SPAN_DEADLINE_S` to seconds ran the reserve section's
+    un-held volume work under that T before it reached the statement or the
+    flush it stalls: the free-space reading (`shutil.disk_usage`), the
+    marker's stamp, the blob's write, each with its flushes. A slow volume
+    there expired T first, and the case read red with no defect in the code.
+    Sparing those hops cannot help: the section's own wait takes its budget
+    when the span opens, before any of them has run, so no time can be added
+    back to it afterwards (tried in round 4: every slowed control stayed red).
+
+    So the work runs BEFORE the deadline starts:
+    - the free space is read here, and `_free_bytes` hands that figure back;
+    - the marker -- and, with `write`, the blob, with the bytes the upload's
+      own gzip produced -- is created inside the blob-directory hop, which
+      runs before the span opens, under its own production ceiling;
+    - inside the span `_guarded_stamp`, and with `write` `_guarded_write`,
+      keep their lock and their `discarded` check (and the write its
+      `written`) and touch no volume.
+    Every hop the span makes is still made and still spends
+    `_span_budget(span_deadline)`, so the shared deadline under test is the
+    same one; the work it bounds before the stalled step now takes no
+    wall-clock time. Answers the list of staged paths, so a case shows the
+    staging was reached.
+    """
+    free = auto_logs._free_bytes(logdir)
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: free)
+    produced, staged = [], []
+    real_compress = auto_logs._compress_blob
+    real_path = main._bug_report_log_path
+
+    def _compress_blob(scrubbed):
+        produced.append(real_compress(scrubbed))
+        return produced[-1]
+
+    def _bug_report_log_path(report_id):
+        path = real_path(report_id)
+        auto_logs._stamp_marker(path)
+        if write:
+            auto_logs._write_blob(path, produced[-1])
+        staged.append(path)
+        return path
+
+    def _guarded_stamp(own):
+        with own.lock:
+            assert not own.discarded, (
+                "a cleanup ran before the stamp, so the staged marker outlives "
+                "it and this case no longer models the path")
+            assert own.path == staged[-1], (own.path, staged)
+
+    def _guarded_write(own, data):
+        with own.lock:
+            assert not own.discarded, (
+                "a cleanup ran before the write, so the staged blob outlives it "
+                "and this case no longer models the path")
+            assert data == produced[-1], "the span writes bytes the staging did not"
+            own.written = True
+
+    monkeypatch.setattr(auto_logs, "_compress_blob", _compress_blob)
+    monkeypatch.setattr(main, "_bug_report_log_path", _bug_report_log_path)
+    monkeypatch.setattr(auto_logs, "_guarded_stamp", _guarded_stamp)
+    if write:
+        monkeypatch.setattr(auto_logs, "_guarded_write", _guarded_write)
+    return staged
+
+
 def _slow_insert_db(stall):
     return _SlowInsert(stall, script={
         COUNT_KEY: [[_bucket(0)]],
@@ -4588,17 +4656,16 @@ def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
     become visible, so its blob goes; a cancelled COMMIT may have landed, so
     its blob and marker STAY for the sweep to resolve against the database.
     """
-    # T HAS HEADROOM OVER THE BARRIERS THE SPAN NOW PAYS FOR. The stamp and
-    # the blob write each fsync the file and then its directory entry, and on
-    # this seat a single flush of a temporary volume is 60-200 ms; those are
-    # charged to the same deadline (R3-M2), which is the point. A quarter of
-    # a second left the barriers themselves expiring the span, so this case
-    # would have measured the flush rather than the stalled statement it is
-    # about. `test_the_durability_barrier_is_charged_to_the_marked_span` is
-    # where the barrier's own cost is the subject.
-    T = 4.0   # 1.5 until the relaunch hold: a loaded seat spent it on the section alone
+    # The stamp's and the write's hops spend the same deadline as the
+    # statements (R3-M2); their volume work runs before the span opens
+    # (`_stage_span_prerequisites`), so what T bounds before the stalled
+    # statement takes no wall-clock time.
+    # `test_the_durability_barrier_is_charged_to_the_marked_span` is where a
+    # flush's own charge to the span is the subject.
+    T = 4.0
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
     stall = 12.0
+    staged = _stage_span_prerequisites(monkeypatch, logdir, write=True)
 
     # ── the INSERT half ──────────────────────────────────────────────────
     started = time.monotonic()
@@ -4643,6 +4710,8 @@ def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
     assert db.name_held_during_rollback == set(), (
         "the request still owned its marker while its rollback was in flight: "
         "%r" % (db.name_held_during_rollback,))
+    assert len(staged) == 2, staged
+
 
 
 def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
@@ -4655,12 +4724,12 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     each twin must leave the case GREEN -- otherwise the control is reacting
     to the site being touched rather than to the bound going away (#342/#431).
     """
-    # Same headroom as the case above, and for the same reason: the span now
-    # pays for four fsyncs, so a T below them would be expired by the
-    # barriers rather than by the site each mutant unwraps.
-    T = 4.0   # as above: 1.5 was spent by the section alone on a loaded seat
+    # The span's prerequisite volume work runs before the span opens, as in
+    # the case above, so each mutant is judged on the site it unwraps.
+    T = 4.0
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
     stall = 12.0
+    staged = _stage_span_prerequisites(monkeypatch, logdir, write=True)
 
     COMMIT_SITE = ("                left = _span_budget(span_deadline)\n"
                    "                await asyncio.wait_for(db.commit(), left)\n")
@@ -4737,6 +4806,8 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
                             _slow_commit_db(stall)), (
         "the inert twin reds, so the control above is reacting to the site "
         "being edited rather than to the budget")
+    assert len(staged) == 6, staged
+
 
 
 def test_cancelling_the_section_task_cannot_leave_a_blob_with_no_marker(
@@ -7545,8 +7616,14 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
     REFUSE 503 inside T and commit nothing. The mutant takes the ceiling off
     the await that covers the barrier, and the request outlives T instead.
     """
-    T, stall = 3.0, 10.0   # was 1.0, 4.0: the same headroom as the span cases
+    T, stall = 3.0, 10.0   # was 1.0, 4.0
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
+    # The free-space reading and the marker's stamp run before the span
+    # opens (`_stage_span_prerequisites`); the blob's write is NOT staged:
+    # its hop is the one this case holds, and its flush's charge to the
+    # span is the subject. The hops are all still made, so the structural
+    # count below is unaffected.
+    staged = _stage_span_prerequisites(monkeypatch, logdir, write=False)
 
     # STRUCTURAL FIRST: the two barriers on the write path are reached only
     # through the section's own budgeted hops. A flush performed anywhere else
@@ -7671,6 +7748,8 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         "reacting to the site being edited rather than to the ceiling"
         % (took,))
     auto_logs._MARKERS_IN_FLIGHT.clear()
+    assert len(staged) == 3, staged
+
 
 
 def test_a_cancelled_sections_cleanup_does_not_block_the_event_loop(
