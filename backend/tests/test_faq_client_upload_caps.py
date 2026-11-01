@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from _dotnet_opt_in import require_dotnet_opt_in
+
 ROOT = Path(__file__).resolve().parents[2]
 NATIVE_UI = ROOT / "plugin" / "NativeUI.cs"
 
@@ -135,6 +137,7 @@ _PROJECT = """<Project Sdk="Microsoft.NET.Sdk">
 
 
 def test_the_stated_cap_is_the_exact_byte_count_under_any_culture(tmp_path):
+    require_dotnet_opt_in()
     dotnet = _dotnet()
     if dotnet is None:
         pytest.skip("dotnet CLI not on this machine")

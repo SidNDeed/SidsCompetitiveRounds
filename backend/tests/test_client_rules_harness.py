@@ -25,6 +25,9 @@ from pathlib import Path
 
 import pytest
 
+from _dotnet_opt_in import (HARNESS_OPT_IN, dotnet_opt_in,
+                            require_dotnet_opt_in)
+
 REPO = Path(__file__).resolve().parents[2]
 HARNESS = REPO / "tools" / "client-rules-harness" / "client-rules-harness.csproj"
 MAIN_CS = REPO / "tools" / "client-rules-harness" / "Main.cs"
@@ -42,8 +45,12 @@ def _dotnet():
     return str(candidate) if candidate.exists() else None
 
 
+# `dotnet run` builds the harness project, so it runs only where building is
+# opted into (_dotnet_opt_in.py says where); elsewhere every harness test skips
+# and says why.
 @pytest.fixture(scope="module")
 def harness_run():
+    require_dotnet_opt_in()
     dotnet = _dotnet()
     if dotnet is None:
         pytest.skip("dotnet CLI not on this machine")
@@ -52,6 +59,18 @@ def harness_run():
         cwd=str(REPO), capture_output=True, text=True, timeout=900,
     )
     return proc
+
+
+def test_the_harness_builds_only_where_opted_in():
+    assert dotnet_opt_in({}) is None
+    assert dotnet_opt_in({"SCR_DECOMPILED_DIR": "C:/Users/x/decompiled"}) is None
+    assert dotnet_opt_in({HARNESS_OPT_IN: "0"}) is None
+    assert dotnet_opt_in({HARNESS_OPT_IN: "1"})
+    assert dotnet_opt_in({"SCR_DECOMPILED_DIR": "/seat/stage/decompiled"})
+    # the fixture asks before it looks for dotnet or runs anything
+    src = (REPO / "backend" / "tests" / "test_client_rules_harness.py").read_text(encoding="utf-8")
+    body = src[src.index("def harness_run():"):src.index("def _suites(proc):")]
+    assert body.index("require_dotnet_opt_in()") < body.index("_dotnet()") < body.index("subprocess.run(")
 
 
 def _suites(proc):
@@ -1097,7 +1116,7 @@ def test_the_harness_compiles_only_the_rule_files():
                       "plugin/NameGlyphs.cs",
                       "plugin/SessionReportRules.cs", "plugin/ShowcaseRules.cs",
                       "plugin/DamageNumberRules.cs",
-                      "plugin/KeybindRules.cs"):
+                      "plugin/KeybindRules.cs", "plugin/ServerTextRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -1519,6 +1538,92 @@ def test_each_avatar_claim_has_its_mutation_and_its_control(harness_run, cid):
         assert l.startswith("[avatardefaults] PASS"), l
         assert " | got=" in l and not l.rstrip().endswith("| got="), (
             "the case printed no measurement: " + l)
+
+
+# -- server text: refusals read structurally, the FFA series labels ----------
+
+def test_the_server_text_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "servertext" in suites, "the ServerTextRules suite did not report"
+    run, fail, verdict = suites["servertext"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[servertext\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # 60 cases: 41 measured on seat-3 at 85a77442 with the bets cases E1-E4
+    # (#342), the round-4 validator (V1-V7) and anchoring (T1-T4) cases, and
+    # the round-5 V2u, V2d and V7b.
+    assert run >= 60, "the ServerTextRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("cid", ["B1n", "B2n", "B3n", "B7n", "V1n", "T1n"])
+def test_each_server_text_negative_control_shows_the_old_rule_said_yes(harness_run, cid):
+    hits = [l for l in harness_run.stdout.splitlines()
+            if l.startswith("[servertext] ") and (" | case=" + cid + " negative control: ") in l]
+    assert len(hits) == 1, "expected one %r control, found %d" % (cid, len(hits))
+    assert hits[0].startswith("[servertext] PASS"), hits[0]
+
+
+def test_the_server_text_cases_are_never_shipped():
+    included = re.findall(r'<Compile Include="([^"]+)"', HARNESS.read_text(encoding="utf-8"))
+    assert "ServerTextRulesSelfTest.cs" in included
+    assert not (REPO / "plugin" / "ServerTextRulesSelfTest.cs").exists()
+    rules = (REPO / "plugin" / "ServerTextRules.cs").read_text(encoding="utf-8")
+    usings = re.findall(r"^using ([\w.]+);", rules, re.M)
+    assert usings and all(u == "System" or u.startswith("System.") for u in usings), usings
+    for ref in ("NativeUI.", "Plugin.", "ApiClient.", "CompetitiveUI."):
+        assert ref not in rules, ref
+
+
+# The R4 reader: JsonValid runs over the whole body before Members, and no
+# template rule is anchored with ^ or $ (which also match before a final LF).
+def _member_span(src, sig):
+    a = src.index(sig)
+    b = src.index("\n        }\n", a)
+    return src[a:b]
+
+
+def test_the_server_text_reader_validates_the_whole_body_before_any_member():
+    rules = (REPO / "plugin" / "ServerTextRules.cs").read_text(encoding="utf-8").replace("\r\n", "\n")
+    read = _member_span(rules, "internal static Refusal Read(string resp)")
+    assert read.count("JsonValid(body)") == 1, read
+    assert read.index("if (!JsonValid(body)) return r;") < read.index("Members(body, out top)")
+    valid = _member_span(rules, "internal static bool JsonValid(string s)")
+    assert "return Ws(s, i) == s.Length;" in valid
+
+
+def _anchor_problems(tpl):
+    out = []
+    if 'new StringBuilder("\\\\A")' not in tpl or 'sb.Append("\\\\z")' not in tpl:
+        out.append("not anchored with \\A and \\z")
+    if "m.Index != 0 || m.Length != d.Length" not in tpl:
+        out.append("the whole-detail check is gone")
+    if "Append('$')" in tpl or 'StringBuilder("^")' in tpl or "Multiline" in tpl:
+        out.append("^, $ or Multiline")
+    return out
+
+
+def test_no_server_text_rule_is_anchored_with_caret_dollar_or_multiline():
+    rules = (REPO / "plugin" / "ServerTextRules.cs").read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert "Multiline" not in rules
+    # The only regex in the file is the template matcher (Escape for its
+    # literal parts, Match for the whole detail); a new one is reviewed here.
+    assert len(re.findall(r"\bRegex\.", rules)) == 2, re.findall(r"\bRegex\.\w+", rules)
+    tpl = _member_span(rules, "private static bool RefusalTemplate(")
+    assert _anchor_problems(tpl) == [], tpl
+    # Controls: the round-3 forms are refused.
+    r3 = tpl.replace('"\\\\A"', '"^"').replace('sb.Append("\\\\z")', "sb.Append('$')")
+    assert "^, $ or Multiline" in _anchor_problems(r3)
+    assert _anchor_problems(tpl.replace("m.Index != 0 || m.Length != d.Length", "false"))
+
+
+def test_the_harness_template_table_is_every_template_rule_in_the_source():
+    rules = (REPO / "plugin" / "ServerTextRules.cs").read_text(encoding="utf-8")
+    calls = re.findall(r'if \(status == (\d{3}) && RefusalTemplate\(d, ("(?:[^"\\]|\\.)*"), (true|false), out a\)\)', rules)
+    st = (HARNESS.parent / "ServerTextRulesSelfTest.cs").read_text(encoding="utf-8")
+    table = re.findall(r'^\s+"(\d{3})\|([NT])\|" \+ ("(?:[^"\\]|\\.)*"),\s*$', st, re.M)
+    assert len(calls) == 22, len(calls)
+    assert [(s, "T" if t == "true" else "N", l) for s, l, t in calls] == [(s, k, l) for s, k, l in table]
 
 
 # -- verified reads: the client half (requirements 30-35) --------------------

@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from _cs_structure import CsParseError, mask_code, method_spans, strip_comments_only
+from _dotnet_opt_in import require_dotnet_opt_in
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -1389,6 +1390,7 @@ def _dotnet():
 def prodprobe(tmp_path_factory):
     import shutil
     import subprocess
+    require_dotnet_opt_in()
     dotnet = _dotnet()
     if dotnet is None:
         pytest.skip("dotnet CLI not on this machine")

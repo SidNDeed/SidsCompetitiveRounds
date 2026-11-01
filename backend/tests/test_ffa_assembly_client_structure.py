@@ -32,6 +32,7 @@ import pytest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import _cs_structure as cs  # noqa: E402
+from _dotnet_opt_in import require_dotnet_opt_in  # noqa: E402
 
 ROOT = HERE.parents[1]
 PLUGIN = ROOT / "plugin"
@@ -2074,6 +2075,7 @@ def test_k45_harness_and_boundary_model():
     """K45: the late-rules harness passes its baseline, every mutant turns its
     named fixture red and every twin stays inert; its N9 enumeration reads
     I7 = I8 = 0; the boundary model reports 0 failures."""
+    require_dotnet_opt_in()
     exe = dotnet()
     if exe is None:
         pytest.skip("no dotnet on this seat")
@@ -2438,6 +2440,7 @@ def test_wp7_chain_vectors():
     ns = {}
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "main.py", "exec"), ns)  # noqa: S102
     server = [ns["_ffa_epoch_chain"](p, l8, n, s, a) for p, l8, n, s, a, _ in WP7_VECTORS]
+    require_dotnet_opt_in()
     exe = dotnet()
     if exe is None:
         pytest.skip("no dotnet on this seat")

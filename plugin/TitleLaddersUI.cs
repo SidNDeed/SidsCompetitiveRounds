@@ -505,12 +505,12 @@ namespace CompetitiveRounds
             {
                 buyInFlight = false;
                 Plugin.Log.LogInfo($"[LADDER] purchase complete ok={ok}");
-                if (!ok && resp != null && resp.Contains("price_changed"))
+                if (!ok && resp == ApiClient.PriceChangedSentinel)
                     SetMsgRaw(I18n.Tr("<color=#FF8888>The price changed - check the new price and buy again.</color>"));
                 else
                     SetMsgRaw(ok
                         ? I18n.Tr("<color=#88FF88>Purchased!</color>")
-                        : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", resp));
+                        : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", NativeUI.TrShopRefusal(resp) ?? resp));
                 if (ok)
                 {
                     var who = LocalId;

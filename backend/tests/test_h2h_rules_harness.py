@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from _dotnet_opt_in import require_dotnet_opt_in
+
 
 REPO = Path(__file__).resolve().parents[2]
 HARNESS = REPO / "tools" / "h2h-harness" / "h2h-harness.csproj"
@@ -41,6 +43,8 @@ def _dotnet():
 
 @pytest.fixture(scope="module")
 def harness_run():
+    require_dotnet_opt_in()
+    require_dotnet_opt_in()
     dotnet = _dotnet()
     if dotnet is None:
         pytest.skip("dotnet CLI not on this machine")
@@ -84,6 +88,7 @@ def test_the_sequence_cases_are_present_and_executed(harness_run):
     A count alone cannot tell whether the ordering cases specifically survived
     an edit, and they are the ones r14 LOW 1 is about.
     """
+    require_dotnet_opt_in()
     dotnet = _dotnet()
     proc = subprocess.run(
         [dotnet, "run", "--project", str(HARNESS), "-c", "Release"],
@@ -125,6 +130,7 @@ def test_the_harness_target_framework_is_installed():
     """net8.0 BUILDS on this seat and then fails to launch, because only the
     10.x runtime is installed. Assert the TFM against the installed runtimes so
     an SDK rotation fails with a message naming the cause, not a launch error."""
+    require_dotnet_opt_in()
     dotnet = _dotnet()
     if dotnet is None:
         pytest.skip("dotnet CLI not on this machine")
