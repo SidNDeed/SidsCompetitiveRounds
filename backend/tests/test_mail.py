@@ -37,6 +37,7 @@ from sqlalchemy.sql.elements import TextClause
 
 import main
 import models
+from migration_table_ddl import table_ddl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DIR = os.path.join(HERE, "..", "..", "plugin")
@@ -2341,13 +2342,133 @@ def test_report_reason_bound_matches_the_client():
     assert (exc.status_code, exc.detail) == (400, "reason_too_long") and not db3.cases
 
 
+_TABLE_CONSTRAINT_HEADS = ("CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "EXCLUDE")
+_DDL_ON_MAIL_INBOX_REV = re.compile(
+    r"\b(?:CREATE|ALTER|DROP)\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?"
+    r"(?:ONLY\s+)?(?:public\.)?mail_inbox_rev\b", re.IGNORECASE)
+
+
+def _split_top_level(text):
+    """(top-level words, elements): text cut at commas outside parentheses and
+    standard string literals, and the words that stand outside both. A
+    doubled quote ('') inside a literal closes and reopens it, which leaves
+    the literal's extent unchanged."""
+    elements, buf, words, depth, quote = [], [], [], 0, False
+    for ch in text:
+        if quote:
+            buf.append(ch)
+            quote = ch != "'"
+            continue
+        if ch == "'":
+            quote = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                raise AssertionError("a closing parenthesis with no opening one")
+        elif ch == "," and depth == 0:
+            elements.append("".join(buf))
+            buf = []
+            continue
+        if depth == 0 and not quote and ch not in "()":
+            words.append(ch)
+        else:
+            words.append(" ")
+        buf.append(ch)
+    if quote or depth:
+        raise AssertionError("an unclosed string literal or parenthesis")
+    elements.append("".join(buf))
+    return "".join(words).split(), elements
+
+
+def _create_table_columns(stmt):
+    """{column name: nullable} of one CREATE TABLE statement, read from its
+    column list.
+
+    The statement comes from migration_table_ddl.table_ddl (one top-level
+    statement, comments blanked). Its outer parentheses are split at
+    top-level commas. An element whose first word is a table-constraint
+    keyword is a constraint (a PRIMARY KEY one makes its columns NOT NULL);
+    any other element is a column named by its first word (folded to lower
+    case, as PostgreSQL folds an unquoted name) and nullable unless NOT NULL
+    or PRIMARY KEY stands among its top-level words. A form this reader does
+    not handle raises instead of being skipped: a quoted name, an escape
+    string (E'...'), dollar quoting, LIKE, a repeated column, an empty
+    element, and any text after the column list (INHERITS, PARTITION BY,
+    WITH, TABLESPACE)."""
+    if '"' in stmt or "$" in stmt or re.search(r"(?<![A-Za-z0-9_])[Ee]'", stmt):
+        raise AssertionError("a quoted name, an escape string or dollar quoting: not read here")
+    open_at = stmt.index("(")
+    depth, quote, close_at = 0, False, None
+    for i in range(open_at, len(stmt)):
+        ch = stmt[i]
+        if quote:
+            quote = ch != "'"
+        elif ch == "'":
+            quote = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                close_at = i
+                break
+    if close_at is None:
+        raise AssertionError("the column list does not close")
+    if stmt[close_at + 1:].strip().rstrip(";").strip():
+        raise AssertionError("text after the column list: not read here")
+    _words, elements = _split_top_level(stmt[open_at + 1:close_at])
+    columns, primary = {}, []
+    for element in elements:
+        words, _parts = _split_top_level(element)
+        if not words:
+            raise AssertionError("an empty element in the column list")
+        upper = [w.upper() for w in words]
+        pairs = list(zip(upper, upper[1:]))
+        if upper[0] == "LIKE":
+            raise AssertionError("LIKE copies another table's columns: not read here")
+        if upper[0] in _TABLE_CONSTRAINT_HEADS:
+            if ("PRIMARY", "KEY") in pairs:
+                flat = " ".join(element.split())
+                inner = flat[flat.upper().index("PRIMARY KEY"):]
+                inner = inner[inner.index("(") + 1:inner.index(")")]
+                primary += [n.strip().lower() for n in inner.split(",")]
+            continue
+        name = words[0].lower()
+        if name in columns:
+            raise AssertionError("column %s is defined twice" % name)
+        columns[name] = ("NOT", "NULL") not in pairs and ("PRIMARY", "KEY") not in pairs
+    for name in primary:
+        if name not in columns:
+            raise AssertionError("PRIMARY KEY names %s, which is not a column" % name)
+        columns[name] = False
+    return columns
+
+
 def test_migration_300_matches_the_orm_and_the_readers():
     with open(os.path.join(SQL_DIR, "300_mail_inbox_rev.sql"), encoding="utf-8") as f:
         sql = f.read()
     assert "CREATE TABLE IF NOT EXISTS mail_inbox_rev" in sql and "ON CONFLICT (recipient_id) DO NOTHING" in sql
     assert sql.count("BEGIN;") == 1 and sql.count("COMMIT;") == 1
-    cols = {c.name for c in models.MailInboxRev.__table__.columns}
-    assert cols == {"recipient_id", "rev", "updated_at"} and all(c in sql for c in cols)
+    # The table 300 creates, compared column by column (name and nullability)
+    # with the model, read from its CREATE TABLE statement: a name test over the
+    # whole file passed with rev or updated_at deleted from the table, because
+    # both names also occur in 300's INSERT and UPDATE text (REHEARSAL-FOUR
+    # round 1, finding 5). The deletion controls are the next test.
+    model = {c.name: c.nullable for c in models.MailInboxRev.__table__.columns}
+    assert model == {"recipient_id": False, "rev": False, "updated_at": False}, model
+    table = _create_table_columns(table_ddl("300_mail_inbox_rev.sql", "mail_inbox_rev")[0])
+    assert table == model, ("300's mail_inbox_rev against the model", table, model)
+    # 300's statement is the table's whole definition: no other migration
+    # creates, alters or drops it (one that did would have to be read too).
+    others = []
+    for name in sorted(os.listdir(SQL_DIR)):
+        if name.endswith(".sql") and name != "300_mail_inbox_rev.sql":
+            with open(os.path.join(SQL_DIR, name), encoding="utf-8") as other:
+                if _DDL_ON_MAIL_INBOX_REV.search(other.read()):
+                    others.append(name)
+    assert others == [], others
     assert models.MailInboxRev.__tablename__ == "mail_inbox_rev"
     assert "INSERT INTO mail_inbox_rev" in main._MAIL_REV_BUMP_SQL
     assert "FROM mail_inbox_rev" in inspect.getsource(main.mail_status)
@@ -2381,6 +2502,49 @@ def test_migration_300_matches_the_orm_and_the_readers():
     assert "recipient_count" in {c.name for c in models.MailMessage.__table__.columns}
     assert "recipient_count" in inspect.getsource(main._mail_prior_send)
     assert "UPDATE mail_messages SET recipient_count" in inspect.getsource(main.admin_mail_broadcast)
+
+
+def test_the_mail_inbox_rev_comparison_sees_a_deleted_column():
+    """Deletion controls for the comparison above (REHEARSAL-FOUR round 1,
+    finding 5): 300's own statement with any one column deleted reads that
+    column short, so it no longer equals the model; the guard over the other
+    migrations matches each DDL form and nothing else; and forms the reader
+    does not handle raise."""
+    stmt = table_ddl("300_mail_inbox_rev.sql", "mail_inbox_rev")[0]
+    full = _create_table_columns(stmt)
+    model = {c.name: c.nullable for c in models.MailInboxRev.__table__.columns}
+    assert full == model
+    lines = stmt.split("\n")
+    assert lines[-1] == ")", lines[-1]
+    for name in sorted(full):
+        kept = [line for line in lines if line.split()[:1] != [name]]
+        assert len(kept) == len(lines) - 1, name
+        if kept[-2].rstrip().endswith(","):
+            kept[-2] = kept[-2].rstrip()[:-1]
+        short = _create_table_columns("\n".join(kept))
+        assert set(short) == set(full) - {name}, (name, short)
+        assert short != model, name
+    for text in ("ALTER TABLE mail_inbox_rev ADD COLUMN x INT;",
+                 "alter table if exists only mail_inbox_rev drop column rev;",
+                 "DROP TABLE IF EXISTS public.mail_inbox_rev;",
+                 "CREATE UNLOGGED TABLE mail_inbox_rev (a int);"):
+        assert _DDL_ON_MAIL_INBOX_REV.search(text), text
+    for text in ("INSERT INTO mail_inbox_rev (recipient_id, rev) VALUES (1, 0);",
+                 "ALTER TABLE mail_inbox_revs ADD COLUMN x INT;",
+                 "ALTER TABLE mail_messages ADD COLUMN mail_inbox_rev INT;"):
+        assert not _DDL_ON_MAIL_INBOX_REV.search(text), text
+    for bad in ('CREATE TABLE t ("Rev" INT)',
+                "CREATE TABLE t (LIKE mail_inbox_rev)",
+                "CREATE TABLE t (a INT) INHERITS (u)",
+                "CREATE TABLE t (a TEXT DEFAULT E'x', b INT)",
+                "CREATE TABLE t (a INT, a INT)",
+                "CREATE TABLE t (a INT,)",
+                "CREATE TABLE t (a INT"):
+        with pytest.raises(AssertionError):
+            _create_table_columns(bad)
+    assert _create_table_columns(
+        "CREATE TABLE t (a INT, b TEXT DEFAULT 'x, (y', CONSTRAINT p PRIMARY KEY (a, b))"
+    ) == {"a": False, "b": False}
 
 
 # ── review r2 pins ────────────────────────────────────────────────────────
