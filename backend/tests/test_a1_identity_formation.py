@@ -691,8 +691,10 @@ def _team_formation_loops(fn_src, tree):
     counter) across exactly two `while <counter> > 0:` loops, each spending
     it as its first statement, with the counter stored nowhere else but its
     opening and the fresh phase's floor of one attempt (`<counter> =
-    max(<counter>, 1)`). Returns (loops, None), or ([], (line, why)) for any
-    other shape."""
+    max(<counter>, 1)`), and every _identity_lock_many call in the poll one
+    of the loops' barriers, one statement in each loop's body, so no
+    formation is left outside the walk. Returns (loops, None), or ([],
+    (line, why)) for any other shape."""
     openings, counters, _whiles = _attempt_budgets(fn_src)
     if len(openings) != 1 or len(counters) != 1:
         return [], (0, f"{len(openings)} attempt budget openings over "
@@ -724,6 +726,15 @@ def _team_formation_loops(fn_src, tree):
                 and isinstance(n.ctx, _ast.Store) and id(n) not in stores):
             return [], (n.lineno, "an assignment to the attempt budget this "
                                   "walk does not read")
+    barriers = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call)
+                and isinstance(n.func, _ast.Name)
+                and n.func.id == "_identity_lock_many"]
+    held = [st for n in loops for st in n.body if any(
+        c is b for c in _ast.walk(st) for b in barriers)]
+    if len(barriers) != 2 or len(held) != 2 or any(
+            sum(st in held for st in n.body) != 1 for n in loops):
+        return [], (0, f"{len(barriers)} identity barriers; the team form "
+                       "reads one in each of its two loops and none elsewhere")
     return loops, None
 
 
@@ -1615,7 +1626,8 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src):
     ("relocked", r) in exactly one place, with r bound in the statement
     before it to the answer of the relock helper (`relock_src`), whose one
     commit is its last await, right before its one return, the matched
-    answer, and whose one rollback is followed by a raise. Every other
+    answer, and whose one rollback is followed by a raise; the resolver
+    calls that helper only there. Every other
     answer of the resolver is a constant 'defer' or 'fresh', or the first
     answer of the family pick (`pick_src`), which answers only 'fresh',
     'defer' or 'picked'; neither the resolver nor the pick ends the
@@ -1653,6 +1665,12 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src):
                   or (isinstance(first, _ast.Name) and first.id in picked)):
             out.append(f"{resolve.name} line {st.lineno}: an answer this read "
                        "does not place")
+    relocks = [n for n in _ast.walk(resolve) if isinstance(n, _ast.Call)
+               and isinstance(n.func, _ast.Name) and n.func.id == relock.name]
+    if len(relocks) != 1:
+        out.append(f"{resolve.name} calls {relock.name} {len(relocks)} "
+                   "times; the read takes the one its 'relocked' answer "
+                   "carries")
     if len(relocked) != 1:
         out.append(f"{resolve.name} answers 'relocked' in {len(relocked)} "
                    "places; the read takes one")
@@ -1959,6 +1977,9 @@ def test_the_gather_exit_oracle_can_fail():
             resume, fresh, team_after, floor="_form_left = 3")),
         ("3 loops over the attempt budget", team(resume, fresh, [
             "while _form_left > 0:", "    _form_left -= 1"] + team_after)),
+        # a barrier outside the two loops: a formation the walk would not read
+        ("3 identity barriers", team(resume, fresh, [
+            "await _identity_lock_many(db, others)"] + team_after)),
     ]
     for why, src in team_planted:
         bad = team_bad(src)
@@ -1996,6 +2017,10 @@ def test_the_gather_exit_oracle_can_fail():
         ("answer is not relock's", resolve_src.replace(
             "resp = await relock(db, row)", "resp = await other(db, row)"),
          pick_src, relock_src),
+        # the relock's commit taken on the way to another answer
+        ("calls relock 2 times", resolve_src.replace(
+            "    if await leased(db):", "    await relock(db, row)" + NL
+            + "    if await leased(db):"), pick_src, relock_src),
         ("an answer this read does not place", resolve_src.replace(
             '("defer", None)', '(state, None)'), pick_src, relock_src),
         ("pick ends the transaction itself", resolve_src, pick_src.replace(
