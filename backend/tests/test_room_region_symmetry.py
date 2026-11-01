@@ -946,8 +946,21 @@ def test_the_deploy_block_orders_every_migration_it_names():
     gate raised ValueError instead of checking anything. A gate keyed to prose
     that is expected to change is a gate that breaks on every legitimate edit
     (#441), which is how gates come to be deleted.
+
+    Read from the release that ships these migrations, v1.40.2, not from the
+    first `**Schema changes:**` in the file. The CHANGELOG adds each release
+    ABOVE the last, so a first-occurrence anchor moves to whichever release
+    is newest: the v1.41.0 entry (c4b45bd8) put its own block, which lists
+    the migrations added since v1.40.3 and names none of these, above this
+    one, and the gate read that block instead.
     """
     changelog = (Path(__file__).resolve().parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+    section_at = changelog.index("\n## v1.40.2 ")
+    section = changelog[section_at:changelog.index("\n## ", section_at + 1)]
+    assert section.count("**Schema changes:**") == 1, (
+        "v1.40.2 no longer has exactly one schema block, so the block this "
+        "gate checks cannot be identified")
+    changelog = section
     start = changelog.index("**Schema changes:**")
     # Whitespace-normalised: the CHANGELOG is hard-wrapped, so any phrase long
     # enough to be worth asserting is liable to straddle a line break and a raw
