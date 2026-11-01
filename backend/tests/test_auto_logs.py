@@ -4518,7 +4518,37 @@ def _handler_mutant(pairs):
     return namespace["upload_auto_log"]
 
 
-class _SlowInsert(Scripted):
+class _Stalls:
+    """When the stalled statement began, and when the handler's wait on it
+    ENDED -- cancelled by the deadline, or the stall run out.
+
+    The span cases time THAT wait, not the request. The request's own work
+    before the span (the directory, the scrub, the gzip, the prerequisites
+    `_stage_span_prerequisites` runs there) and its cleanup after the
+    refusal take wall-clock time that no deadline in these cases bounds;
+    timing the request counted it against `stall / 2` (review round 4).
+    What the bound is for is whether the deadline ended the wait on the
+    statement before the statement answered.
+    """
+
+    stalled_at = ended_at = None
+
+    async def _stall(self):
+        self.stalled_at = time.monotonic()
+        try:
+            await asyncio.sleep(self.stall)
+        finally:
+            self.ended_at = time.monotonic()
+
+    def waited(self):
+        """Seconds the handler waited on the stalled statement, or None if it
+        never reached it."""
+        if self.stalled_at is None:
+            return None
+        return self.ended_at - self.stalled_at
+
+
+class _SlowInsert(_Stalls, Scripted):
     """A session whose INSERT does not answer inside the span's deadline."""
 
     def __init__(self, stall, **kw):
@@ -4527,11 +4557,11 @@ class _SlowInsert(Scripted):
 
     async def execute(self, statement, params=None):
         if "INSERT INTO bug_reports" in " ".join(str(statement).split()):
-            await asyncio.sleep(self.stall)
+            await self._stall()
         return await super().execute(statement, params)
 
 
-class _SlowCommit(Scripted):
+class _SlowCommit(_Stalls, Scripted):
     """A session whose COMMIT does not answer inside the span's deadline.
 
     The state it models is the one the bound exists for: the bytes are on the
@@ -4546,7 +4576,7 @@ class _SlowCommit(Scripted):
         self.name_held_during_rollback = None
 
     async def commit(self):
-        await asyncio.sleep(self.stall)
+        await self._stall()
         self.committed += 1
 
     async def rollback(self):
@@ -4668,11 +4698,12 @@ def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
     staged = _stage_span_prerequisites(monkeypatch, logdir, write=True)
 
     # ── the INSERT half ──────────────────────────────────────────────────
-    started = time.monotonic()
+    db = _slow_insert_db(stall)
     with pytest.raises(HTTPException) as e:
-        _run(auto_logs.upload_auto_log(_request(), _slow_insert_db(stall)))
-    took = time.monotonic() - started
+        _run(auto_logs.upload_auto_log(_request(), db))
+    took = db.waited()
     assert e.value.status_code == 503, e.value.status_code
+    assert took is not None, "the stalled INSERT was never reached"
     assert took < stall / 2.0, (
         "the handler waited %.2fs on an INSERT that never answered; the span's "
         "deadline is %.2fs, so the INSERT is outside the bound" % (took, T))
@@ -4684,11 +4715,11 @@ def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
 
     # ── the COMMIT half ──────────────────────────────────────────────────
     db = _slow_commit_db(stall)
-    started = time.monotonic()
     with pytest.raises(HTTPException) as e:
         _run(auto_logs.upload_auto_log(_request(), db))
-    took = time.monotonic() - started
+    took = db.waited()
     assert e.value.status_code == 503, e.value.status_code
+    assert took is not None, "the stalled COMMIT was never reached"
     assert took < stall / 2.0, (
         "the handler waited %.2fs on a commit that never answered; the span's "
         "deadline is %.2fs, so the commit is outside the bound" % (took, T))
@@ -4738,14 +4769,15 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     INSERT_TAIL = "                ), left)).mappings().first()\n"
 
     def _refuses_in_time(handler, db):
-        """Whether `handler` refused, and inside the deadline."""
-        started = time.monotonic()
+        """Whether `handler` refused, having stopped waiting on the stalled
+        statement inside the deadline (`_Stalls`)."""
         try:
             _run(handler(_request(), db))
             refused = False
         except HTTPException:
             refused = True
-        return refused and (time.monotonic() - started) < stall / 2.0
+        waited = db.waited()
+        return refused and waited is not None and waited < stall / 2.0
 
     # MUTANT 1: the commit is awaited with no ceiling.
     assert not _refuses_in_time(
@@ -7654,6 +7686,7 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
 
     opened = {}
     stalled = []
+    flush_began = []
 
     def rec_open(path, flags, mode=0o666):
         fd = os.open(str(path), flags, mode)
@@ -7674,6 +7707,7 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         """
         if opened.get(fd, "").endswith(".log.gz"):
             stalled.append(opened[fd])
+            flush_began.append(time.monotonic())
             time.sleep(stall)
 
     def _attempt(db, handler=None):
@@ -7686,13 +7720,18 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         run measured that teardown and reported a deadline as missed on a
         request that met it; since round 8 they run on the module's volume
         pool, which the loop does not wait for, and the timing rule is kept
-        anyway. The clock starts and stops inside the loop, around the
-        handler's own await, so what it reads is the request's answer and
-        nothing else.
+        anyway. The clock stops inside the loop at the handler's answer, so
+        what it reads is the request's answer and nothing else. It STARTS
+        when the stalled flush began (or at the handler's call if no flush
+        was reached): the request's work before the span -- the directory,
+        the scrub, the gzip, the staged prerequisites -- takes wall-clock
+        time no deadline in this case bounds, and is not timed against
+        `stall / 2` (review round 4).
         """
         monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
         auto_logs._BLOB_WRITE_STARTED[0] = 0.0
         opened.clear()
+        flush_began.clear()
         seen = {}
 
         async def call():
@@ -7702,7 +7741,8 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
                 seen["refused"] = False
             except HTTPException:
                 seen["refused"] = True
-            seen["took"] = time.monotonic() - started
+            seen["took"] = time.monotonic() - (
+                flush_began[-1] if flush_began else started)
 
         real_os = auto_logs.os
         auto_logs.os = _OsProxy(open=rec_open, fsync=slow_fsync)
