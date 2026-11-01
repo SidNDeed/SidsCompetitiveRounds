@@ -32,8 +32,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import main
+from migration_table_ddl import table_ddl
 
 DSN = os.environ.get("A1_TEST_PG_DSN")
 pytestmark = pytest.mark.skipif(
@@ -52,6 +54,17 @@ DROP TABLE IF EXISTS player_bans;
 DROP TABLE IF EXISTS player_blocks;
 DROP TABLE IF EXISTS queue_blocks;
 DROP TABLE IF EXISTS queue_leases;
+DROP TABLE IF EXISTS match_seat_holds;
+DROP TABLE IF EXISTS match_games;
+DROP TABLE IF EXISTS players;
+
+-- The FK target of match_seat_holds (below), in the shape
+-- test_a1_formation_concurrency.py gives it: the two files share one
+-- database, and each drops and recreates it.
+CREATE TABLE players (
+    id UUID PRIMARY KEY,
+    steam_id TEXT UNIQUE NOT NULL
+);
 
 CREATE TABLE ovt_queue (
     player_id UUID PRIMARY KEY,
@@ -132,6 +145,14 @@ CREATE TABLE queue_leases (
 );
 """
 
+# The tables main.py reads on this file's path that the hand-built SCHEMA above
+# does not carry, created from the migration that defines each one (never a
+# hand copy, which drifts): the live-hold clause of the OVT and team
+# predicates reads match_seat_holds since the readmission landing 1eb1aac6,
+# and match_seat_holds references match_games and players.
+DERIVED = (table_ddl("383_match_hold_stage2.sql", "match_games")
+           + table_ddl("383_match_hold_stage2.sql", "match_seat_holds"))
+
 TABLES = ("ovt_queue", "ffa_queue", "team_queue", "ranked_queue")
 
 
@@ -144,6 +165,8 @@ async def _setup():
     sm = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
         for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
+            await conn.execute(text(stmt))
+        for stmt in DERIVED:
             await conn.execute(text(stmt))
     pids = [uuid.uuid4() for _ in SIDS]
     async with sm() as db:
