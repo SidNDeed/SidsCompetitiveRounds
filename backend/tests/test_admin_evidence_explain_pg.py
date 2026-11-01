@@ -22,8 +22,8 @@ ruling 3; the lane notes carry it as a deviation from the certified wording)
     the index (so a fast plan returning the wrong rows is red too).
 
 STATISTICS are part of the fixture: after the load every loaded table is
-reloaded with its rows frozen (COPY FREEZE), packed (VACUUM FULL) and then
-given `VACUUM (ANALYZE)` (outside any open transaction), so the planner reads
+reloaded with its rows frozen (COPY FREEZE) and then given
+`VACUUM (ANALYZE)` (outside any open transaction), so the planner reads
 the statistics and visibility a maintained production table has, and the
 visibility map does not depend on any other session's snapshot (`_maintain`;
 rehearsal ruling REHEARSAL-R7 E); the
@@ -334,11 +334,9 @@ async def _maintain(conn, tables):
     copied out and back in with COPY FREEZE, in the transaction that
     truncates the table. A frozen row is visible to every snapshot, so a
     VACUUM marks every page that holds only frozen rows all-visible, whatever
-    any other session holds. VACUUM FULL packs the rows first, because a
-    bulk-extending COPY can leave empty pages at the end of the table and a
-    VACUUM never marks an empty, never-initialised page all-visible. Then
-    VACUUM (ANALYZE) reads every page (an exact reltuples), sets the
-    visibility map and builds the statistics, including the mcv list of the
+    any other session holds. VACUUM (ANALYZE) also counts every row (an
+    exact reltuples: ANALYZE reads every page of a table smaller than its
+    block sample) and builds the statistics, including the mcv list of the
     migration's statistics object.
     """
     dumps = []
@@ -354,7 +352,6 @@ async def _maintain(conn, tables):
                                      freeze=True)
     # One statement per call: no VACUUM may run inside a transaction block.
     for table in tables:
-        await conn.execute("VACUUM FULL %s" % table)
         await conn.execute("VACUUM (ANALYZE) %s" % table)
 
 
