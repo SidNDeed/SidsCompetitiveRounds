@@ -21,9 +21,12 @@ ruling 3; the lane notes carry it as a deviation from the certified wording)
   * the same ids, in the same order, as a reference query with no LIMIT under
     the index (so a fast plan returning the wrong rows is red too).
 
-STATISTICS are part of the fixture: after the load every loaded table gets
-`VACUUM (ANALYZE)` (outside any open transaction), so the planner reads the
-statistics and visibility a maintained production table has; the
+STATISTICS are part of the fixture: after the load every loaded table is
+reloaded with its rows frozen (COPY FREEZE), packed (VACUUM FULL) and then
+given `VACUUM (ANALYZE)` (outside any open transaction), so the planner reads
+the statistics and visibility a maintained production table has, and the
+visibility map does not depend on any other session's snapshot (`_maintain`;
+rehearsal ruling REHEARSAL-R7 E); the
 `default_statistics_target` in force is printed. The migration's statistics
 object on the seat pair (`stx_matches_pair`, kind mcv; integrator pass 3
 ruling 5) is built by that analysis too, and the fixture gate requires its
@@ -62,6 +65,7 @@ there). Unset, the module FAILS rather than skips; an affirmative
 """
 
 import asyncio
+import io
 import json
 import os
 import pathlib
@@ -303,26 +307,55 @@ async def _seed(conn):
                CASE WHEN i % 2 = 0 THEN gen_random_uuid() ELSE $1::uuid END,
                $2::timestamptz
           FROM generate_series(1, 10000) AS i""", s.E, _ts(TE))
-    # Statistics are part of the fixture (integrator pass 2 ruling 1): each
-    # loaded table is vacuumed and analysed, one statement per call so no
-    # VACUUM runs inside an implicit transaction block.
-    s.loaded = ("matches", "ranked_series")
-    for table in s.loaded:
-        await conn.execute("VACUUM (ANALYZE) %s" % table)
-    # The visibility map is this seed's postcondition (the gate reads
-    # relallvisible == relpages). With autovacuum off on both tables, only
-    # another backend's snapshot can hold a page back; exactly one re-run
-    # covers a transient one, and the gate still asserts.
-    for table in s.loaded:
-        row = await conn.fetchrow("""
-            SELECT c.relpages, c.relallvisible
-              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE n.nspname = current_schema() AND c.relname = $1""", table)
-        if row["relallvisible"] != row["relpages"]:
-            await asyncio.sleep(1.0)
-            await conn.execute("VACUUM (ANALYZE) %s" % table)
+    # Statistics are part of the fixture (integrator pass 2 ruling 1), and so
+    # is the visibility map the gate reads (relallvisible == relpages).
+    s.loaded = LOADED
+    await _maintain(conn, LOADED)
     s.stats_target = await conn.fetchval("SHOW default_statistics_target")
+    s.server_version = await conn.fetchval("SHOW server_version")
     return s
+
+
+# Load order: a referenced table before the tables that reference it.
+LOADED = ("ranked_series", "matches")
+
+
+async def _maintain(conn, tables):
+    """Turn a loaded table into the table a maintained production table is:
+    every row frozen, every page all-visible, statistics fresh. No step here
+    depends on what any other session is doing.
+
+    That is the point of the frozen reload. A VACUUM marks a page all-visible
+    only when every row on it is older than the oldest snapshot held by any
+    session of the same database, and on a shared seat some other session's
+    snapshot can be older than the load: rehearsal round 6 read 611 of 742
+    matches pages all-visible after this fixture's VACUUM, with autovacuum
+    already off on both tables. So the rows are frozen as they are written:
+    copied out and back in with COPY FREEZE, in the transaction that
+    truncates the table. A frozen row is visible to every snapshot, so a
+    VACUUM marks every page that holds only frozen rows all-visible, whatever
+    any other session holds. VACUUM FULL packs the rows first, because a
+    bulk-extending COPY can leave empty pages at the end of the table and a
+    VACUUM never marks an empty, never-initialised page all-visible. Then
+    VACUUM (ANALYZE) reads every page (an exact reltuples), sets the
+    visibility map and builds the statistics, including the mcv list of the
+    migration's statistics object.
+    """
+    dumps = []
+    for table in tables:
+        buf = io.BytesIO()
+        await conn.copy_from_table(table, output=buf, format="binary")
+        buf.seek(0)
+        dumps.append((table, buf))
+    async with conn.transaction():
+        await conn.execute("TRUNCATE %s" % ", ".join(tables))
+        for table, buf in dumps:
+            await conn.copy_to_table(table, source=buf, format="binary",
+                                     freeze=True)
+    # One statement per call: no VACUUM may run inside a transaction block.
+    for table in tables:
+        await conn.execute("VACUUM FULL %s" % table)
+        await conn.execute("VACUUM (ANALYZE) %s" % table)
 
 
 def _ts(text):
@@ -535,8 +568,11 @@ def test_fixture_statistics_are_those_of_a_maintained_table(db):
     """Ruling 1: every loaded table carries fresh statistics and a set
     visibility map before any plan is read: reltuples equals the row count
     (a VACUUM sets it exactly), every heap page is all-visible, and pg_stats
-    holds the seat, time and series columns."""
-    lines = ["default_statistics_target=%s" % db.seed.stats_target]
+    holds the seat, time and series columns. The fixture produces all of it
+    itself (`_maintain`), whatever other sessions hold; the test after this
+    one proves that half under a snapshot older than the load."""
+    lines = ["server_version=%s" % db.seed.server_version,
+             "default_statistics_target=%s" % db.seed.stats_target]
     for table in db.seed.loaded:
         row = db.run(db.conn.fetchrow("""
             SELECT c.reltuples::bigint AS reltuples, c.relpages, c.relallvisible
@@ -571,6 +607,78 @@ def test_fixture_statistics_are_those_of_a_maintained_table(db):
     lines.append("pg_stats_ext stx_matches_pair kinds=%s attnames=%s mcv_items=%d"
                  % (ext["kinds"], ext["attnames"], ext["items"]))
     _say("fixture statistics", lines)
+
+
+def test_the_maintenance_sets_the_visibility_map_under_an_older_snapshot():
+    """REHEARSAL-R7 E: the fixture's visibility map must not depend on other
+    sessions. `_maintain` runs here on a small load while ANOTHER session of
+    the same database holds a snapshot older than every row of it, the state
+    that held 131 of 742 matches pages back in rehearsal round 6, and every
+    page must come out all-visible anyway. A plain INSERT then VACUUM leaves
+    every page of that load not all-visible under such a snapshot: that is
+    this test's red control (the mutant that drops the frozen reload)."""
+    require_pg()
+
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        other = await asyncpg.connect(DSN)
+        schema = "ae_vis_%s" % uuid.uuid4().hex[:10]
+        hold = other.transaction(isolation="repeatable_read")
+        try:
+            await conn.execute('CREATE SCHEMA "%s"' % schema)
+            await conn.execute('SET search_path TO "%s"' % schema)
+            await conn.execute(PREREQ)
+            for table in LOADED:
+                await conn.execute(
+                    "ALTER TABLE %s SET (autovacuum_enabled = false)" % table)
+            await hold.start()
+            await other.fetchval("SELECT 1")    # the snapshot is taken here
+            await conn.execute("""
+                INSERT INTO ranked_series (id)
+                SELECT gen_random_uuid() FROM generate_series(1, 2000)""")
+            await conn.execute("""
+                INSERT INTO matches (player1_id, player2_id, series_id, ended_at)
+                SELECT gen_random_uuid(), gen_random_uuid(), r.id, now()
+                  FROM ranked_series r, generate_series(1, 3)""")
+            # The control measures something only if the held snapshot is at
+            # least as old as the oldest row: then no plain VACUUM may treat
+            # any of these rows as visible to every snapshot.
+            older = await conn.fetchval("""
+                SELECT age(a.backend_xmin) >= (SELECT max(age(m.xmin)) FROM matches m)
+                  FROM pg_stat_activity a WHERE a.pid = $1""",
+                                        other.get_server_pid())
+            await _maintain(conn, LOADED)
+            held = await conn.fetchval(
+                "SELECT backend_xmin IS NOT NULL FROM pg_stat_activity "
+                " WHERE pid = $1", other.get_server_pid())
+            vis = [tuple(r) for r in await conn.fetch("""
+                SELECT c.relname::text, c.relpages, c.relallvisible
+                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = current_schema()
+                   AND c.relname = ANY($1::text[])
+                 ORDER BY 1""", list(LOADED))]
+            return older, held, vis
+        finally:
+            try:
+                await hold.rollback()
+            except Exception:
+                pass
+            await other.close()
+            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            await conn.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        older, held, vis = loop.run_until_complete(go())
+    finally:
+        loop.close()
+    assert older is True, "the other session's snapshot is not older than the load"
+    assert held is True, "the other session's snapshot ended before the maintenance did"
+    assert [name for name, _, _ in vis] == sorted(LOADED), vis
+    for name, pages, allvisible in vis:
+        assert pages > 0 and allvisible == pages, (name, pages, allvisible)
+    _say("visibility under an older snapshot",
+         ["%s relpages=%d relallvisible=%d" % row for row in vis])
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -747,6 +855,13 @@ async def _cycle(prepare=""):
         await conn.execute('CREATE SCHEMA "%s"' % schema)
         await conn.execute('SET search_path TO "%s"' % schema)
         await conn.execute(PREREQ)
+        # The file's own ANALYZE is what the mcv gate below attributes the
+        # list to, so no automatic analysis may build it first (REHEARSAL-R7
+        # E sweep): with autovacuum off on the cycle's tables, only the file
+        # can.
+        for table in LOADED:
+            await conn.execute(
+                "ALTER TABLE %s SET (autovacuum_enabled = false)" % table)
         if prepare:
             await conn.execute(prepare)
         sql = MIGRATION.read_text(encoding="utf-8")
