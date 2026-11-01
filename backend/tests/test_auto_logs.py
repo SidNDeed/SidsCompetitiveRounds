@@ -5253,6 +5253,11 @@ def test_a_pass_past_its_ceiling_stays_the_running_pass_until_its_unlinks_end(
         assert seen["b"].startswith("ran") is admitted, (
             "with %r at the work's hold the second pass was %s"
             % (replacement.strip(), seen["b"]))
+        # An admitted pass B does real work (its own unlink, held by
+        # nothing) at the production ceiling, so it must have FINISHED it.
+        assert not admitted or seen["b"] != "ran: timed out", (
+            "the admitted second pass did not finish its own unlink: %r"
+            % (seen,))
     monkeypatch.setattr(auto_logs, "_start_unlink_pass", real)
 
 
@@ -10170,7 +10175,9 @@ def _shrink_ceiling(monkeypatch, name, value, *, spare,
     constant's PRODUCTION value (or its own budget, if that is longer), and
     every other hop keeps the budget its site passes -- the shrunk value, a
     mutant's lifted ceiling, or the twin's `float(...)`. A held function is
-    a `_Held`, which has no `__name__`, so it is never spared.
+    a `_Held`, which has no `__name__`, so it is never spared. Both hop
+    forms are covered: `_hop`, and `_hop_through` (a marker's clear, which
+    runs whether or not anybody still waits for it).
 
     A SHARED DEADLINE IS THE OTHER HALF. Where a path builds one deadline
     from the constant and spends it across several hops (`_span_budget`),
@@ -10194,22 +10201,26 @@ def _shrink_ceiling(monkeypatch, name, value, *, spare,
         % (name, production, value))
     monkeypatch.setattr(auto_logs, name, value)
     spared = dict.fromkeys(spare, 0)
-    real_hop = auto_logs._hop
 
     spent = []   # (start, end) of every spared hop, on the monotonic clock
 
-    async def hop(pool, budget, fn, *args):
-        fname = getattr(fn, "__name__", None)
-        if fname not in spared:
-            return await real_hop(pool, budget, fn, *args)
-        spared[fname] += 1
-        started = time.monotonic()
-        try:
-            return await real_hop(pool, max(budget, production), fn, *args)
-        finally:
-            spent.append((started, time.monotonic()))
+    def sparing(real_hop):
+        async def hop(pool, budget, fn, *args):
+            fname = getattr(fn, "__name__", None)
+            if fname not in spared:
+                return await real_hop(pool, budget, fn, *args)
+            spared[fname] += 1
+            started = time.monotonic()
+            try:
+                return await real_hop(pool, max(budget, production), fn,
+                                      *args)
+            finally:
+                spent.append((started, time.monotonic()))
+        return hop
 
-    monkeypatch.setattr(auto_logs, "_hop", hop)
+    monkeypatch.setattr(auto_logs, "_hop", sparing(auto_logs._hop))
+    monkeypatch.setattr(auto_logs, "_hop_through",
+                        sparing(auto_logs._hop_through))
     if deadline_excludes_spared:
         real_span_budget = auto_logs._span_budget
 
@@ -10537,7 +10548,7 @@ def test_an_automatic_upload_refuses_503_when_a_hop_before_its_span_does_not_ret
     spared = _shrink_ceiling(
         monkeypatch, ceiling, CEILING,
         spare={"scrub": ("_compress_blob",), "gzip": ("_scrub_pass_one",),
-               "directory": ()}[hop])
+               "directory": ("_clear_marker",)}[hop])
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
     held = _Held(getattr(owner, attr))
@@ -10578,6 +10589,12 @@ def test_an_automatic_upload_refuses_503_when_a_hop_before_its_span_does_not_ret
         "land; it answered %r, so the refusal above is not about the ceiling"
         % (hop, out))
     assert took >= HOLD - 0.05, took
+    # The control LANDS, so its marker's clear runs: un-held volume work,
+    # spared on the directory route, whose outcome is read here.
+    printed = capsys.readouterr().out
+    assert "was not cleared" not in printed and _markers(logdir) == [], (
+        "the landed upload's marker clear did not finish: %r %r"
+        % (_markers(logdir), printed))
 
     out, took, db = _run(drive(_handler_mutant([(site, twin)])))
     assert isinstance(out, HTTPException) and out.status_code == 503, out
@@ -10586,7 +10603,7 @@ def test_an_automatic_upload_refuses_503_when_a_hop_before_its_span_does_not_ret
     # lifts the scrub's ceiling; the scrub precedes the gzip in all three.
     assert spared == {"scrub": {"_compress_blob": 1},
                       "gzip": {"_scrub_pass_one": 3},
-                      "directory": {}}[hop], spared
+                      "directory": {"_clear_marker": 1}}[hop], spared
 
 
 def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
@@ -10711,10 +10728,24 @@ def test_a_player_attachment_whose_directory_does_not_resolve_is_filed_as_lost(
     assert _blobs(logdir) == [] and _markers(logdir) == []
     assert "log persistence FAILED" in capsys.readouterr().out
 
-    out, report, took = _run(drive(_report_mutant(
-        site, "                attach_deadline = (time.monotonic()\n"
-              "                                   + 10 ** 6)\n")))
+    # THE CONTROL LANDS, so its marker's clear runs: un-held volume work
+    # whose wait spells the same constant. In this arm that wait is given
+    # the production ceiling beside the lifted deadline, and its outcome
+    # is read: no "was not cleared" line and no marker left.
+    clear_site = ("                    await asyncio.wait_for("
+                  "asyncio.shield(hops[-1]),\n"
+                  "                                           "
+                  "_auto_logs.AUTO_LOG_VOLUME_WAIT_S)\n")
+    out, report, took = _run(drive(_report_mutant_pairs([
+        (site, "                attach_deadline = (time.monotonic()\n"
+               "                                   + 10 ** 6)\n"),
+        (clear_site, clear_site.replace(
+            "_auto_logs.AUTO_LOG_VOLUME_WAIT_S",
+            repr(_PRODUCTION_CEILINGS["AUTO_LOG_VOLUME_WAIT_S"])))])))
     assert out["log_persisted"] is True and took >= HOLD - 0.05, (out, took)
+    printed = capsys.readouterr().out
+    assert "was not cleared" not in printed and _markers(logdir) == [], (
+        _markers(logdir), printed)
 
     out, report, took = _run(drive(_report_mutant(
         site, "                attach_deadline = (time.monotonic()\n"
