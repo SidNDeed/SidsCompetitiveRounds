@@ -53,6 +53,15 @@ import auto_logs  # noqa: E402
 import main  # noqa: E402
 import schemas  # noqa: E402
 
+#: Every ceiling constant the auto-log path waits under, at its PRODUCTION
+#: value: read at import, before any test lowers one, so a test can give
+#: the work it does NOT hold the real ceiling (`_shrink_ceiling`, the
+#: retention gate's passes B and C).
+_PRODUCTION_CEILINGS = {name: getattr(auto_logs, name) for name in (
+    "AUTO_LOG_SWEEP_HOP_WAIT_S", "AUTO_LOG_VOLUME_WAIT_S",
+    "AUTO_LOG_CPU_WAIT_S", "AUTO_LOG_ACCOUNT_WAIT_S",
+    "_BLOB_RESERVE_LOCK_WAIT_S", "AUTO_LOG_MARKED_SPAN_DEADLINE_S")}
+
 # SYNTHETIC ACCOUNT IDS, and the fixture needs them to be.
 #
 # These two were the maintainer's own real test accounts. Nothing here reads
@@ -5053,8 +5062,9 @@ async def _a_pass_past_its_ceiling(logdir, held):
     while that work runs; pass C once it has ended.
 
     ONE CALL IS ONE ARM, and every arm's pass A runs under the caller's SHORT
-    ceiling: pass C's long ceiling is put back in a `finally`, so no later
-    arm inherits it. An inherited 30 s ceiling equals `_Held`'s own 30 s
+    ceiling: passes B and C run at the production ceiling, and the short one
+    is put back in a `finally`, so no later arm inherits a long one. An
+    inherited ceiling of 30 s or more reaches `_Held`'s own 30 s
     self-release, and pass A could then end by the hold letting go instead of
     by its ceiling -- B would be judged after A's work had finished, and the
     overlap this case exists to see would be gone. So the arm also RECORDS
@@ -5070,28 +5080,33 @@ async def _a_pass_past_its_ceiling(logdir, held):
     except auto_logs.RetentionPassTimedOut:
         seen["a"] = "timed out"
     seen["a_s"] = time.monotonic() - t0
-    try:
-        out = await auto_logs.prune_auto_logs(_retention_db([(R2, "b.log.gz")]))
-        seen["b"] = "ran: %r" % (out,)
-    except auto_logs.RetentionPassBusy:
-        seen["b"] = "busy"
-    except auto_logs.RetentionPassTimedOut:
-        seen["b"] = "ran: timed out"
-    seen["a_open_at_b"] = held.entered - held.finished
-    await held.drained()
-    await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
-    # Pass C does REAL work (one unlink and the directory flush) -- the hold
-    # is on pass A's only -- so it gets a ceiling that a loaded seat's flush
-    # cannot reach: the 0.2 s that times pass A out reds pass C under a whole
-    # suite (2026-10-07, half A3), which measures the volume, not the gate.
-    # The 30 s is pass C's ALONE: the short ceiling is restored after it.
+    # ONLY PASS A RUNS UNDER THE SHORT CEILING. Pass B (when an arm admits
+    # it) and pass C do REAL work -- an unlink and the directory flush, the
+    # hold is on pass A's call only -- and under the 0.2 s that times pass A
+    # out, a loaded seat's flush reds them (2026-10-07, half A3), which
+    # measures the volume, not the gate. So both run at the PRODUCTION
+    # ceiling, and the short one is restored after them, so no later arm
+    # inherits a long one (see above).
     short = auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S
-    auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S = 30.0
+    auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S = \
+        _PRODUCTION_CEILINGS["AUTO_LOG_SWEEP_HOP_WAIT_S"]
     try:
-        seen["c"] = await auto_logs.prune_auto_logs(
-            _retention_db([(R2, "b.log.gz")]))
-    except auto_logs.RetentionPassBusy:
-        seen["c"] = "busy"
+        try:
+            out = await auto_logs.prune_auto_logs(
+                _retention_db([(R2, "b.log.gz")]))
+            seen["b"] = "ran: %r" % (out,)
+        except auto_logs.RetentionPassBusy:
+            seen["b"] = "busy"
+        except auto_logs.RetentionPassTimedOut:
+            seen["b"] = "ran: timed out"
+        seen["a_open_at_b"] = held.entered - held.finished
+        await held.drained()
+        await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
+        try:
+            seen["c"] = await auto_logs.prune_auto_logs(
+                _retention_db([(R2, "b.log.gz")]))
+        except auto_logs.RetentionPassBusy:
+            seen["c"] = "busy"
     finally:
         auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S = short
     return seen
@@ -5130,8 +5145,8 @@ def test_a_pass_past_its_ceiling_stays_the_running_pass_until_its_unlinks_end(
 
     MUTANT: the work's hold not taken (`_start_unlink_pass`). TWIN: the same
     call spelled through a parenthesised name. Every arm -- the real one, the
-    mutant and the twin -- runs its pass A under the 0.2 s ceiling (pass C's
-    30 s is restored in the helper) and is judged only while pass A's work is
+    mutant and the twin -- runs its pass A under the 0.2 s ceiling (passes B and
+    C run at the production ceiling, and the short one is restored in the helper) and is judged only while pass A's work is
     DEMONSTRABLY unfinished (`_pass_a_was_unfinished`), so the twin's green
     is the gate's answer and not the hold letting go.
     """
@@ -10092,7 +10107,9 @@ def _shrink_ceiling(monkeypatch, name, value, *, spare,
 
     Answers a dict counting the spared hops per name, so a test shows that
     the spare was reached rather than assuming it."""
-    production = getattr(auto_logs, name)
+    production = _PRODUCTION_CEILINGS[name]
+    assert getattr(auto_logs, name) == production, (
+        "%s was already changed before this shrink" % name)
     assert value < production, (
         "%s is %r, not above the shrunk %r: nothing here is a shrink"
         % (name, production, value))
