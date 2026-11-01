@@ -10,6 +10,8 @@
   "  ({0} in queue)",
   "  <color=#66AACC>{0:F1}% of players have this</color>",
   "  <color=#7FDBFF>|</color>  <color=#AAAAAA>{0} online</color>",
+  "  <color=#7FE8C3>(Play Now sent - waiting on opponent)</color>",
+  "  <color=#888>(both press Play Now to skip the break)</color>",
   "  <color=#888>(no cards recorded)</color>",
   "  <color=#888>(page {0}/{1}, {2} total)</color>",
   "  <color={0}>Game streak: {1}L</color>",
@@ -34,7 +36,10 @@
   " <color=#888888>(disconnected)</color>",
   " <color=#888888>(left)</color>",
   " at x{0}",
+  " starts in <color=#FFDE88>{0}:{1:00}</color>",
+  "#1 of {0}",
   "(AoE)",
+  "(TBD)",
   "(click to change)",
   "(loading...)",
   "(menu only)",
@@ -57,6 +62,7 @@
   "- Buy one for {0} gold or {1} shards. No daily limit on this account.",
   "- One free pack every day (resets at midnight UTC). Claim it on the Open Packs page or with /daily in Discord.",
   "- Ranked wins: winning a ranked series - or a ranked FFA match - rolls a 20% chance of a pack. The same chance in every mode, whatever the score line. Earned packs wait here until you open them.",
+  "- in play, score {0}",
   "0 in queue",
   "100g each - the hardest pay 300g, 500g or 1000g",
   "1V1 BETTING WINDOW",
@@ -89,6 +95,7 @@
   "30 FPS",
   "30-second previews - they stop on their own",
   "3rd Place",
+  "3rd place",
   "4 players",
   "4/4 ready! Joining 2v2...",
   "400 FPS",
@@ -170,6 +177,8 @@
   "<color=#44FF44>Close ROUNDS to apply update</color>",
   "<color=#556270>(hover for build)</color>",
   "<color=#556270>(hover for builds)</color>",
+  "<color=#60FF60>ready</color>",
+  "<color=#60FF80>both ready - connecting...</color>",
   "<color=#664444>-> {0} bet {1}g on {2} - lost</color>",
   "<color=#666>(click to copy)</color>",
   "<color=#666><i>Hide yourself here: Settings -> Privacy & account -> Appear offline.</i></color>",
@@ -185,6 +194,7 @@
   "<color=#667>click an achievement to see who earned it</color>",
   "<color=#66CCFF>Downloading...</color>",
   "<color=#66CCFF>Searching for {0}...</color>  <b>{1}/4</b>",
+  "<color=#66CCFF>searching</color>",
   "<color=#66DD66>APPROVED</color>",
   "<color=#66DD66>APPROVED</color> <color=#888>(rev {0} awaits a mod update)</color>",
   "<color=#66DD66>Game starting! Joining as player {0} of {1}...</color>",
@@ -282,6 +292,7 @@
   "<color=#88FF88>Ready! Waiting for the other 3...</color>",
   "<color=#88FF88>Sent! Thank you. Filed as <b>#{0}</b>.</color>",
   "<color=#88FF88>Sent! Thank you.</color>",
+  "<color=#88FF88>ready</color>",
   "<color=#88FF88>{0}/{1} active</color>",
   "<color=#8A8A93>Research and write-up by Spirit - 'On Damage Types and Buff Activation', University of Rounds. Reproduced for this library with light reformatting; the testing, the findings and the voice are all his.</color>\n\nVia thorough testing in the sandbox game mode with an additional controller player, I have catalogued which types of damage trigger which cards and buffs. The main cards in question are Scavenger, Refresh, Brawler, and Taste of Blood. Lifesteal as a character stat bestowed by numerous cards has also been considered. My results split damage into three main categories: opponent damage, self-damage, and Conditional damage. Damage to your opponent via nearly any means will trigger all cards and buffs, with the exception of specific types of Conditional damage. For various reasons, some Conditional damage, typically from block cards, will not consistently trigger Refresh but will still trigger all other buffs. Finally, any form of self-damage will always activate Scavenger, but nothing else. There are, of course, numerous oddities and exceptions.",
   "<color=#8FA3B8>finished in {0}</color>",
@@ -304,6 +315,7 @@
   "<color=#AABBEE>Recent Tournaments</color>",
   "<color=#B0FFB0>=  MAP COLORS  =</color>",
   "<color=#BBB>{0} players</color>",
+  "<color=#C0C0C0>2nd</color>",
   "<color=#C48CFF>FFA:</color> -",
   "<color=#C48CFF>FFA:</color> {0}W / {1}L ({2:F0}% win)",
   "<color=#C8A0FF>=  PLAYER EFFECTS  =</color>",
@@ -322,6 +334,7 @@
   "<color=#CCCCCC>Players in: <b>{0}</b>. Your player is in, but the other player has not pressed Jump to join — their game may be unfocused or stuck on its ready prompt. Leaving here costs nothing: no match has started.</color>",
   "<color=#CCCCCC>Scoring history</color>  <color=#66DD66>you</color> <color=#888>vs</color> <color=#DD7777>opponent</color>",
   "<color=#CCCCCC>Scoring history</color>  <color=#66DD66>{0}</color> <color=#888>vs</color> <color=#DD7777>opponent</color>",
+  "<color=#CD7F32>3rd</color>",
   "<color=#D8A7FF>FFA History</color>",
   "<color=#D8A7FF>FFA:</color> {0}W-{1}L",
   "<color=#DDDDDD>{0}</color> <color=#777>-</color> {1} players <color=#777>-</color> <color=#8FA3B8>{2}</color> <color=#777>-</color> {3}",
@@ -329,6 +342,7 @@
   "<color=#EEEEEE>solid = {0}</color>   <color=#888888>dim = {1}</color>",
   "<color=#FF4040>deadline passed</color>",
   "<color=#FF4444>UPDATE REQUIRED</color>",
+  "<color=#FF6060>FORFEIT</color>",
   "<color=#FF6060>deadline: {0}h {1}m left</color>",
   "<color=#FF6666>(OUT OF STOCK - artist hasn't opened sales yet)</color>",
   "<color=#FF6666>(SOLD OUT)</color>",
@@ -341,6 +355,7 @@
   "<color=#FF6688>* Live Ranked Series</color>",
   "<color=#FF8888>Purchase failed: {0}</color>",
   "<color=#FF8888>The price changed - check the new price and buy again.</color>",
+  "<color=#FF9060>press Ready Up</color>",
   "<color=#FF9966>MASTER OFF</color>",
   "<color=#FF9966>PLACEMENT CHANGE REJECTED</color>",
   "<color=#FF9988>Blocked buyers</color>  <color=#888>(can't purchase your items; gifts still work)</color>",
@@ -367,7 +382,10 @@
   "<color=#FFCC44>You are the host.</color> Waiting for players - {0}/{1} needed to start.",
   "<color=#FFD080>Match-found screen might be stuck</color>",
   "<color=#FFD080>The other player has not joined the game yet</color>",
+  "<color=#FFD850>1st</color>",
+  "<color=#FFD850>CHAMPION</color>",
   "<color=#FFD94D>({0} of {1} left)</color>",
+  "<color=#FFD94D>* {0} TOURNAMENT GAME - vs {1}  (results auto-recorded)</color>",
   "<color=#FFD94D><b>GETTING PACKS</b></color>\n\n- <b>One free pack a day</b> - press Claim on the Open Packs tab or use /daily in Discord. The day resets at midnight UTC.\n- <b>Paid packs</b> cost 100 Gold or 100 shards and hold 5 cards. Up to 5 paid packs a day for most accounts; the Get packs tab says what applies to yours.\n- <b>Earned packs</b>: winning a ranked series, or a ranked FFA match, grants a pack one time in five - the same chance in 1v1, 2v2, 1v2 and FFA alike, and the score line makes no difference. Earned and claimed packs wait under <b>Packs waiting</b> until you open them, as long as you like.\n\n<color=#FFD94D><b>WHAT IS IN A PACK</b></color>\n\n- Each card rolls its band on its own: <color=#8085A0>Common 60%</color>, <color=#4DB861>Uncommon 25%</color>, <color=#408CFA>Rare 11%</color>, <color=#9E52EB>Epic 3.5%</color>, <color=#FFB82E>Legendary 0.5%</color>.\n- The band decides WHO you get: the pool is ordered (players who have played a ranked series first, then by rating), and pool positions #1-2 are the two Legendary cards, #3-10 are Epic, #11-20 Rare, #21-40 Uncommon, and everyone past that is Common.\n- Independently of the band, any card can come out <b>Foil</b> (1 in 200) or <b>Signed</b> (1 in 2,000) - a foil shimmers, a signed card carries the player's autograph.\n- The strip under the buttons shows your last pack, and the Older / Newer buttons page back through every pack you have opened. A card you discarded stays in its pack, stamped DISCARDED.\n\n<color=#FFD94D><b>DUPLICATES AND SHARDS</b></color>\n\n- A card you already own is marked DUPLICATE when it lands (+1, +2 ... for how many copies you held before it).\n- <b>Discard</b> turns a card into shards: <color=#8085A0>Common 5</color>, <color=#4DB861>Uncommon 15</color>, <color=#408CFA>Rare 40</color>, <color=#9E52EB>Epic 150</color>, <color=#FFB82E>Legendary 600</color>. It asks you to click twice. <b>Dupes</b> discards every copy except one in a single go.\n- Shards buy packs at the same price as Gold - 100 for a pack.\n\n<color=#FFD94D><b>DISCORD</b></color>\n\n- /daily claims the free pack, /collection shows a binder, /card shows one card - all with a linked Discord account.\n- A pull that is Epic or better is announced in the Discord gambler chat, and so is a pull of your own card, a Foil or a Signed print at any rarity - but only when BOTH you and the player on the card have <b>Announce my pulls</b> on (see Card pictures & settings). A Rare or lower pull that is none of those is not announced.",
   "<color=#FFD94D><b>HOW A PICK ACTUALLY LANDS</b></color>\n\n- Confirming a card applies nothing - not even on your own screen. Every picker publishes their choice, the room master collects them and publishes one accepted list, and every client applies exactly that list in the same order. That is why all 3-10 screens always agree on who got what.\n- The numbers: 45 seconds base, plus 20 more each time a pick lands near the end, capped at 90.\n- The on-screen 0 is exactly the auto-confirm moment - the client confirms slightly early, so a slow connection can't eat your pick.\n- <color=#FF6666>Two rare cases still yield no card:</color> a pick published in the final instant can miss the cutoff (you get a toast saying so), and a crashed seat is finalized without one.\n\n<color=#FFD94D><b>WHAT REPLACING A CARD REALLY DOES</b></color>\n\n- ROUNDS has no way to subtract one card's stats. When your oldest card rolls off, the mod fully resets your character and silently replays your surviving cards in their original order. A toast on every screen names what you lost.\n\n<color=#FFD94D><b>MAP SCALING</b></color>\n\n- With 5 or more players the map grows 6 percent per player above 4, capped at x1.40: five players play at x1.06, ten at x1.36. 3-4 player games are unscaled.\n- The camera, the kill boundary and spawn positions all scale with it.\n- Vanilla maps ship only four spawn points, so on scaled maps the mod scans the freshly loaded map for solid static ground and gives players 5-10 their own spawns instead of shared coordinates.\n\n<color=#FFD94D><b>TEN PLAYERS, FOUR COLORS</b></color>\n\n- ROUNDS ships exactly four body colors, so colors repeat every 4 players. Nametags keep duplicates apart, and equipped body-color cosmetics still show.\n- To help you find yourself, the screen dims around your own player for the first second after each spawn - the same second in which nobody can fire or block (<color=#7FD4FF>spawn grace</color>).\n\n<color=#FFD94D><b>DOUBLE KO</b></color>\n\n- If the last players alive kill each other in one exchange, nobody scores and the round just ends - announced on every screen.\n- The winner is decided at the very end of the frame, so a mutual kill can't hand the round to whoever died a split second later.\n\n<color=#FFD94D><b>LEAVERS, PRECISELY</b></color>\n\n- A leaver's points, half points and kills freeze at the moment they leave and still count for placement in every later report of the sitting.\n- If a leaver was one of the last two standing, the survivor takes the half point.\n- <color=#7FE87F>Early-leave grace:</color> leave a game before the field has scored four half points in total, whether or not any became a full point, and that game is unrated for you - no rating change, no game Gold or XP. Achievements can still be earned and pay as usual, but an unrated game earns no title-ladder progress. Any later leave counts in full: leaving early doesn't dodge the loss.\n- Players who left in an EARLIER game ride along as absent ghosts - on the roster, excluded from rating and pay.\n- A game that drops under 3 players before 2 half points were scored is cancelled; dropping under 3 after a game over ends the sitting.",
   "<color=#FFD94D><b>HOW THE BALANCER RATES YOU</b></color>\n\n- The balancer uses your 2v2 rating once it is trustworthy: 10 or more completed series, or earlier once the rating has settled (its uncertainty has dropped enough). Until then, your 1v1 rating stands in.\n- Ratings are snapshotted when you join the queue - the balancer works from those values.\n- The server tries all three ways to split the four of you into pairs and keeps the split with the smallest difference in total team rating.\n\n<color=#FFD94D><b>THE MID-SERIES SWAP, PRECISELY</b></color>\n\n- It only fires in auto-balanced series - manual lobbies never swap.\n- The design: after a game with a point margin of 3 or more, the weakest winner trades places with the strongest loser for the next game, under the same 2v2-if-trusted, else-1v1 rating rule as above.\n- <color=#FF6666>Not live yet:</color> the in-game team switch is still shipping, so for now the balancer only logs the swap it would have made and teams stay locked for the whole series.\n\n<color=#FFD94D><b>WHO IS ORANGE, WHO IS BLUE</b></color>\n\n- Team 1 is the in-game orange team; Team 2 is blue. Within a team, the lower Steam ID takes the first slot.\n- In a manual lobby you can claim Team 1 or Team 2 before the lock. The auto queue always runs the balancer and ignores preferences.\n- A team can also carry a member's equipped body color as its display identity, decided once when the series is created: a sole color holder names the team, two holders is a coin flip, none means vanilla. In a mirror match, Team 2 falls back to its other member's color. <color=#8A8A93>Display only - nobody's actual body color is changed.</color>\n\n<color=#FFD94D><b>DISCONNECTS</b></color>\n\n- <color=#FF6666>Lead forfeit:</color> if the other team DCs out of a game that had 2 or more total points while YOUR team is already up a series game, the whole series completes to you on the spot, with full rating and gold. You can't leave a 2v2 to dodge a loss once you're down a game.\n- Any other DC carries NO automatic penalty: the series is set aside for manual admin resolution, and every game already reported stands.\n- <color=#7FE87F>Sticky resume:</color> if the same four players re-queue within about 30 minutes, the matcher relocks you onto that series - original teams, score kept.\n\n<color=#FFD94D><b>REWARDS, PER SLOT</b></color>\n\n- XP and gold accrue per player slot inside the series, so the panel shows each player's own +g and +xp, and the lifetime Gold/XP columns count 2v2 play only.\n- The tier multiplier uses the AVERAGE of the two opposing players' 2v2 ratings; a player with no 2v2 rating yet counts as 1500 - and 1500 already sits in the x1.5 Intermediate tier, so a fresh lobby pays above base.",
@@ -400,8 +418,11 @@
   "<color=#FFD94D>bets open</color>",
   "<color=#FFD94D>earned {0}g</color>",
   "<color=#FFD94D>in progress</color>",
+  "<color=#FFD94D>matched</color>",
   "<color=#FFD94D>pending initial review</color>",
+  "<color=#FFD94D>waiting on opponent to ready</color>",
   "<color=#FFD94D>your bet: {0}g on {1}</color>",
+  "<color=#FFD94D>{0}/{1}</color> <color=#888>({2} live)</color>",
   "<color=#FFD94D>{0}g</color> <color=#AAA>paid to</color> <color=#FFD94D>{1}</color> <color=#AAA>artists - {2} copies sold, {3}g gross</color>",
   "<color=#FFE580>1stx{0}</color>  <color=#C8C8C8>2ndx{1}</color>  <color=#D4894A>3rdx{2}</color>  <color=#888>(played {3})</color>",
   "<color=#FFE580>Report a Bug</color>",
@@ -414,6 +435,7 @@
   "<color={0}>damage taken</color> <color=#888>·</color> <color={1}>successful blocks</color>",
   "<color={0}>shots fired</color> <color=#888>·</color> <color={1}>shots hit</color>",
   "<color={1}>{0}</color> <color=#888>— match telemetry</color>",
+  "<i>Bracket revealed when the tournament starts ({0}).</i>",
   "<i>Loading...</i>",
   "<i>No completed tournaments yet.</i>",
   "<i>The bracket appears once players sign up.</i>",
@@ -486,6 +508,7 @@
   "ALL CAPS",
   "ALT",
   "ARTIST STUDIO",
+  "ASYNC",
   "ASYNC (6-week)",
   "ASYNC MATCH DEADLINE",
   "AUTO-BALANCE",
@@ -494,6 +517,7 @@
   "Abyss",
   "Accept",
   "Account changed — message not sent.",
+  "Account deleted",
   "Achievement Grid",
   "Achievement Unlocked: {0}!",
   "Achievement comparison",
@@ -579,12 +603,14 @@
   "Arrow",
   "Artist",
   "Artist Studio",
+  "Artist-owned face cosmetic not found",
   "Ascendant",
   "Ash Gradient",
   "Ash walls with a dark crimson accent over a deep blood-red dark, red embers rising.",
   "Async (6-week)",
   "Async Champion",
   "Async Finalist",
+  "Async Tournament - {0}",
   "Attach game logs (recommended)",
   "Attack spd",
   "Auras",
@@ -612,6 +638,7 @@
   "BLOCK",
   "BOARD",
   "BOARD\u0004pc.stat.board",
+  "BYE",
   "Babel",
   "Baby Mouse",
   "Back",
@@ -651,6 +678,10 @@
   "Bet placed: {0}g on Team {1}",
   "Bet placed: {0}g on {1}. {2}",
   "Bet placed: {0}g{1}{2}",
+  "Bet {0} gold on {1} vs {2}",
+  "Bet {0} gold on {1} vs {2} - LOST",
+  "Bet {0} gold on {1} vs {2} - WON {3} gold",
+  "Bet {0} gold on {1} vs {2} - refunded, series never finished",
   "Beta",
   "Bets Won / Lost",
   "Betting",
@@ -743,6 +774,7 @@
   "CAPS",
   "CAPYBARA",
   "CASUAL, RECORDED",
+  "CHAMPION",
   "COM",
   "COM\u0004pc.band_short.common",
   "COMMON",
@@ -847,6 +879,7 @@
   "Claimed for today",
   "Claiming...",
   "Clamp ObjectPool init-spawn to 4 in-match — reduces frame stutter from new pool allocation.",
+  "Clavar la Bala",
   "Clean House",
   "Clean Trail",
   "Clean white body color.",
@@ -917,6 +950,8 @@
   "Coral Name",
   "Corner notices when your frames drop, your ping is high or the opponent's updates arrive late. 1v1 only.",
   "Cosmetic Reviews...",
+  "Cosmetic slot does not match its catalog SKU",
+  "Cosmetic submission not found",
   "Cosmetic trails: <color=#88FF88>ON</color>",
   "Cosmetic trails: <color=#FF9966>OFF</color>",
   "Cosmetics",
@@ -1057,6 +1092,7 @@
   "Demolitionist",
   "Demon Wings",
   "Demonic",
+  "Denied artwork cannot be reopened by a placement change",
   "Despawn off-screen bullets — host clears bullets that exit the camera viewport.",
   "Detail: a shooting star circling overhead (animated). Equip in the Character editor.",
   "Detail: certified angel. Equip in the Character editor.",
@@ -1263,6 +1299,7 @@
   "Floating Name",
   "Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room.",
   "Floating pink hearts rise from your body.",
+  "FloraBelle",
   "Follow my character",
   "For sale",
   "For the silly ones. Takes up the mouth slot",
@@ -1296,6 +1333,18 @@
   "GAME ENDS",
   "GAMEPLAY",
   "GET READY - fire and block unlock in a moment",
+  "GF Reset R{0}",
+  "GF R{0}",
+  "GIF decoded inconsistently ({0} of {1} frames) — re-export it and try again.",
+  "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at least {5} ms and re-export; the server will not change the speed for you.",
+  "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at most {5} ms and re-export; the server will not change the speed for you.",
+  "GIF frames are {0}x{1} — the limit is 2048x2048",
+  "GIF has more than {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).",
+  "GIF has no transparent background — export it with transparency, or the cosmetic renders as a solid square.",
+  "GIF has {0} frame(s) — an animation needs at least 2. Upload a PNG instead for static art.",
+  "GIF has {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).",
+  "GIF is missing",
+  "GIF is {0} KB — the limit is {1} KB. Reduce the frame size or the number of colours and re-export.",
   "GRAND FINAL",
   "Galaxy",
   "Galaxy Gradient",
@@ -1362,6 +1411,7 @@
   "Got 100 translations approved",
   "Got 1000 translations approved",
   "Grand Final",
+  "Grand Final Reset",
   "Grand Master",
   "Grandma",
   "Grant",
@@ -1385,6 +1435,7 @@
   "Guides to every mechanic: blocking, poison, netcode, modes, ratings, rewards, tournaments, anti-cheat, and what the mod does (and deliberately doesn't) change.",
   "H2H {0}-{1} · Ranked series {2}",
   "HIGH",
+  "HMAC not configured",
   "HOST",
   "HOW A COSMETIC REACHES YOUR BODY",
   "HOW SURE THE SYSTEM IS",
@@ -1493,12 +1544,21 @@
   "Insert",
   "Inside the 0.35 s window?",
   "Instinct",
+  "Insufficient gold",
+  "Insufficient gold: have {0}, need {1}",
   "Intermediate",
   "Into the Deep End",
+  "Invalid PNG data",
+  "Invalid catalog placement request",
+  "Invalid placement request",
+  "Invalid placement revision",
+  "Invalid signature",
+  "Invalid signature version",
   "Iron",
   "Iron Bracket",
   "Is RefreshValid true?",
   "Italic",
+  "Item not found",
   "Ivory",
   "JUMP",
   "Jackalope",
@@ -1529,6 +1589,7 @@
   "Knockback",
   "Known vanilla bugs",
   "Kodiak",
+  "LB R{0}",
   "LEAVE MATCH",
   "LEFT",
   "LEG",
@@ -1640,6 +1701,7 @@
   "Longest point streak",
   "Lose a ranked FFA holding 10 or more half points that never became a point",
   "Losers",
+  "Losers R{0}",
   "Loss",
   "Lost",
   "Lowercase letters render as smaller capitals.",
@@ -1757,6 +1819,7 @@
   "Moves your character up. This is the game's own control - the mod rewrites the game's binding.",
   "Multiplayer",
   "Music",
+  "Music albums have no stock — they are unlimited by design",
   "Music credit toast: <color=#88FF88>ON</color>",
   "Music credit toast: <color=#FF9966>OFF</color>",
   "Music download failed - press Retry",
@@ -1786,6 +1849,7 @@
   "Nah",
   "Name",
   "Name Styles",
+  "Name can't be empty",
   "Name styling",
   "Nana",
   "Near-black blocks on a black background — max contrast.",
@@ -1811,6 +1875,7 @@
   "Newest Cosmetics",
   "Next",
   "Next >",
+  "Next match (R{0}{1}): vs <color=#FFDE88>{2}</color> -{3}{4}",
   "Next tier",
   "Next tournament match vs {0} in {1}{2}",
   "Next tournament match vs {0} soon{1}",
@@ -1851,11 +1916,13 @@
   "Noobie",
   "Northern Lights",
   "Not allowed.",
+  "Not an artist account",
   "Not armed",
   "Not enough gold",
   "Not enough gold for a pack",
   "Not enough players to continue the FFA - returning to menu.",
   "Not enough shards for a pack",
+  "Not for sale yet — the artist hasn't opened sales",
   "Not found - it may have been deleted.",
   "Not granted",
   "Not great. Not terrible.",
@@ -1867,6 +1934,7 @@
   "Not started",
   "Not started - buy {0} in the Shop to begin this ladder.",
   "Not started.",
+  "Not your item",
   "Nothing playing",
   "Nothing sent yet.",
   "Now Playing: {0} - {1}",
@@ -1950,10 +2018,18 @@
   "PLAY",
   "PLAYER 1",
   "PLAYER 2",
+  "PNG has an implausible number of chunks",
+  "PNG has no transparent background — export with an alpha layer",
+  "PNG has {0} stray byte(s) after IEND",
+  "PNG hash does not match the payload",
+  "PNG is too large once re-encoded — reduce its complexity",
+  "PNG missing or too large ({0} MB, 1,600,000 base64 characters max)",
+  "PNG payload is missing or too large",
   "POOL",
   "POOL\u0004pc.stat.pool",
   "PREVIEW · NOT A PRINT",
   "PREVIEW · NOT A PRINT\u0004pc.preview_footer",
+  "PRIVATE",
   "Pacifist",
   "Pack",
   "Pack opened - {0} new cards",
@@ -2033,6 +2109,7 @@
   "Pink Cursor",
   "Pink Name",
   "Place bet",
+  "Placement changed since this preview; reload it and try again",
   "Plague Doctor",
   "Platinum",
   "Play",
@@ -2048,6 +2125,8 @@
   "Player Cards are not open yet - no edition is running",
   "Player Cards need your Steam sign-in - try again in a moment",
   "Player Nemesis",
+  "Player not found",
+  "Player not found — they need to have used the mod once",
   "Player opted out",
   "Player removed from the lobby.",
   "Player totals",
@@ -2112,6 +2191,7 @@
   "Pronoun title.",
   "Prospector",
   "Prowler",
+  "Published cosmetic source must be a transparent 512x512 PNG ({0})",
   "Pumpking Hat",
   "Pup",
   "Pure aggression",
@@ -2247,12 +2327,14 @@
   "Recommended: {0}",
   "Reconnect suppressed (broadcast identity)",
   "Reconnect to Match",
+  "Reconnecting to {0} (region {1})",
   "Record removal failed: {0}",
   "Record removed.",
   "Records",
   "Red Cursor",
   "Red Name",
   "Red Scarf",
+  "Red mouth",
   "Red ring: this preset has items an unmodded player cannot see, so it cannot be your vanilla default",
   "Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.",
   "Reduced keeps the hit feedback without the camera motion",
@@ -2329,6 +2411,7 @@
   "Rolling DPS (15 s window)",
   "Rolling block % (15 s window)",
   "Rolling hit % (15 s window)",
+  "Room code: <color=#C0E0FF>{0}</color>{1}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>",
   "Room rule: same cards for everyone",
   "Room rule: same cards is off this game",
   "Room rules: friendly fire OFF",
@@ -2362,6 +2445,7 @@
   "SPACE",
   "SPECTATING",
   "SPECTATOR",
+  "SYNC",
   "SYNC (weekly)",
   "Sabertooth",
   "Sadness",
@@ -2514,6 +2598,8 @@
   "Sign up to unlock force-start",
   "Sign-in is not ready yet - try again in a moment.",
   "Sign-in still pending - try again in a moment.",
+  "Signed animation fields are required",
+  "Signed placement integers are required",
   "Signed up for tournament",
   "Signup failed",
   "Signups",
@@ -2542,6 +2628,7 @@
   "So close!",
   "Soda Helm",
   "Soft Slate",
+  "Soft eyes",
   "Soft pastel lavender — minimum contrast.",
   "Soft pastel violet body color.",
   "Soft pink body color.",
@@ -2549,6 +2636,7 @@
   "Soft shadow beams cast by map lighting. Off = no shadows (lighting stays on) for extra FPS.",
   "Sold",
   "Sold out",
+  "Sold out — raise the stock cap first",
   "Solo",
   "Solo -",
   "Solo Leaderboard",
@@ -2622,6 +2710,7 @@
   "Stop spectating?",
   "Stopped searching",
   "Storm Halo",
+  "Straw Hat",
   "Stray",
   "Strike",
   "Strike through your name. Stackable with other name styles.",
@@ -2652,20 +2741,27 @@
   "Sync (weekly)",
   "Sync Champion",
   "Sync Finalist",
+  "Sync Tournament - {0}",
   "Synchronizing - viewing begins next battle",
   "Syncing...",
   "System notices cannot be reported.",
   "TAB",
   "TABLE OF DAMAGE INTERACTIONS",
+  "TBD",
   "THE 0.3 SECOND WINDOW",
   "THE DUO",
   "THE ROAD TO LEVEL 100",
   "THE SOLO",
+  "TOURNAMENT",
+  "TOURNAMENT Async",
   "TOURNAMENT MATCH",
   "TOURNAMENT MATCH vs {0} - connecting automatically, hold tight...{1}",
   "TOURNAMENT MATCH vs {0} IS WAITING - LEAVE THIS GAME NOW!{1}",
   "TOURNAMENT STARTING - matches are being created, hold tight...",
   "TOURNAMENT STARTS IN {0} - stay in ROUNDS at the main menu!",
+  "TOURNAMENT Sync",
+  "TOURNAMENT {0}",
+  "TP R{0}",
   "Tab",
   "Tactical",
   "Tag Team Sweep",
@@ -2814,17 +2910,27 @@
   "Thicker menu text. Uses the game's own font at a heavier weight - not a different typeface.",
   "Thicker menu text: <color=#88FF88>ON</color>",
   "Thicker menu text: <color=#FF9966>OFF</color>",
+  "Third-Place Match",
   "This account cannot send mail.",
   "This account cannot trade cards",
   "This account is not ready for mail yet - try again later.",
   "This account isn't registered as an artist.",
   "This account was deleted - there is no pack to recover",
+  "This album requires a newer mod version",
+  "This artist has restricted you from buying their items",
+  "This cosmetic has not shipped in the mod yet and cannot be gifted",
+  "This cosmetic has not shipped in the mod yet; stock stays closed until it does",
+  "This cosmetic has not shipped yet; adjust its existing submission instead",
+  "This cosmetic is approved but has not shipped in the mod yet",
   "This is so sad. Please give this man a break",
   "This is your only copy of this card",
+  "This item requires a newer mod version",
+  "This item requires a newer mod version than the recipient has used; they need to update the mod first",
   "This lobby closed before the match started. Nothing was counted.",
   "This lobby is no longer open - the setting was not changed.",
   "This lobby uses settings your mod version can't play - update the mod.",
   "This mod sends data to a private server run by the mod author to power the leaderboard and ranked matchmaking.\n\nWhat gets recorded if you allow:\n  • Your Steam ID and in-game display name\n  • Your Discord ID and username, ONLY if you link your Discord via the in-game link code\n  • Each match you play: rounds won, points, duration, cards picked, cards offered, opponent\n  • Your Glicko-2 rating history\n\nWhat you can do later:\n  • Revoke consent anytime with the Data & Privacy switch (F5 → Settings → Privacy & account). Reporting stops.\n  • Delete your data with the Delete My Data button (F5 → Settings → Privacy & account). Steam ID, display name, and Discord link are scrubbed. Matches stay so other players' ratings and histories aren't disturbed. Deletion is IRREVERSIBLE — you cannot re-register this Steam ID later.\n\nChoose Allow to use the leaderboard. Choose Decline to run the mod fully offline.",
+  "This node serves reads only; writes are handled by the primary. Seeing this means a request reached the standby that should not have.",
   "This release only ships a zip — opening the releases page to update manually",
   "This report is not available",
   "This rung has no shop row on the server, so it cannot be worn.",
@@ -2859,6 +2965,7 @@
   "To: {0} and {1} others",
   "Today's free pack is already claimed",
   "Too Good",
+  "Too many cosmetic changes are already awaiting review",
   "Too many messages - try again in {0} hours.",
   "Too many messages - try again in {0} minutes.",
   "Too many messages - try again in {0} seconds.",
@@ -2883,6 +2990,7 @@
   "Tournament info is refreshing - try again in a moment",
   "Tournament match can't auto-connect: the server has not set a region. Open the Tournaments tab.",
   "Tournament match found - waiting for the server to pick a region...",
+  "Tournament match starting vs {0}",
   "Tournaments",
   "Tournaments are 8-16 player double-elimination brackets of best-of-3 series, run end to end by the mod and the bot. There are two kinds: <color=#7FD4FF>Sync</color> (the whole bracket plays out in one sitting) and <color=#7FD4FF>Async</color> (each match has a week to happen). Both are ranked - every game moves your normal 1v1 rating.\n\n<color=#FFD94D><b>THE TWO KINDS</b></color>\n\n<color=#7FD4FF>Sync</color> - weekly. The default start is Saturday at noon Pacific time, but the field votes on the real time: signing up includes marking which start times you can make, from 8 slots at 6-hour steps around the default. The tournament locks 48 hours before the DEFAULT start - the voted time can sit up to a day to either side of it.\n\n<color=#7FD4FF>Async</color> - a new one opens 2 days after the previous one finishes. Signups run for 7 days, then it locks and starts immediately. Every match has a 7-day deadline (check-ins can add a day), so a full bracket takes roughly 6-9 weeks depending on how fast people play.\n\n<color=#FFD94D><b>SIGNING UP</b></color>\n\n- Sign up on the F5 Tournaments tab. A linked Discord account is required - the bot runs everything by DM (see <color=#7FD4FF>The bot & check-ins</color>).\n\n- Sync signups must mark at least one start time. Signing up again replaces your time votes.\n\n- You can un-sign freely during voting. After lock the in-game button closes - withdrawing then happens by answering <b>No</b> on the bot's availability-check DM. <color=#FF6666>Once the tournament is running you can't un-sign at all</color> - from there, not showing up is a forfeit and counts on your no-show %.\n\n- The field caps at 16. Signups past the cap become <color=#7FD4FF>speculative</color>: they don't play, but they are the backfill pool - if a confirmed player leaves before the start, the most reliable speculative inherits their seat. Ordering into the 16 (and out of the pool) goes by no-show % first, then signup time.\n\n- Your <color=#7FD4FF>no-show %</color> is a rolling 90-day measure of tournaments you signed up for and then missed. Old misses fade out over the 90 days.\n\n<color=#FFD94D><b>HOW THE LOCK WORKS</b></color>\n\n- Sync locks 48 hours before the default start. It needs at least 8 confirmed players AND one time slot at least 8 signups (speculatives included) can make; otherwise the whole tournament pushes back one week and your votes carry forward.\n\n- The winning slot becomes the start time. <color=#FF6666>If you didn't mark the winning slot, your signup is removed</color> - no penalty, and the bot DMs you why. Speculatives promote into the freed seats.\n\n- Sync can also start early: once at least 8 players are in, every confirmed player pressing <color=#7FD4FF>Force Start</color> on the tab within 10 minutes of each other starts the tournament 10 minutes later.\n\n- Async has no time vote - after the 7-day signup window it locks on player count alone and starts right away.\n\n- Locking snapshots the prize pool at the confirmed player count and clears any ranked blocks between participants - signing up opts you in to playing whoever else signed up.\n\n<color=#FFD94D><b>SEEDING AND THE BRACKET</b></color>\n\n- Your seed is your 1v1 rating snapshotted at lock; the highest rating is seed 1. Pairing is standard bracket placement, with seeds 1 and 2 starting in opposite halves. Seed numbers stay hidden until the tournament starts, so nobody can work out their round-1 opponent in advance.\n\n- With 9 to 15 players the bracket is built for 16 and the top seeds get round-1 byes to fill the gap.\n\n- Double elimination in plain terms: lose a winners-bracket match and you drop into the losers bracket; lose there and you're out. The losers-bracket champion meets the winners-bracket champion in the grand final - and if the losers-bracket champion wins it, one extra deciding match is played, because the winners-bracket champion hadn't lost a series yet.\n\n- Every match is a best-of-3, played as a normal ranked series.\n\n<color=#FFD94D><b>SYNC PLAY DAY</b></color>\n\nThe whole contract is: <color=#7FE87F>have ROUNDS open at the start time - sitting at the main menu is fine.</color> The mod does everything else.\n\n- While ROUNDS runs, the mod pings the server every 20 seconds; you count as present while your last ping is under 2 minutes old. The F5 menu never needs to be open.\n\n- From 15 minutes out you get a reminder DM and an in-game countdown banner; every match-ready moment gets its own DM too (see <color=#7FD4FF>The bot & check-ins</color>).\n\n- When your match is ready and both players are present, the mod connects you automatically - green banner, match-found sound, taskbar flash. If you're mid-casual-game you get a red banner instead, and the mod pulls you out of that room with no disconnect penalty.\n\n- Matches give a 10-minute show-up grace. If your opponent never joins your room, the mod warns you at 90 seconds and returns you to the menu after 6 minutes - you stay ready, and the server forfeits the match to you if they don't show.\n\n- Between your matches there's a 7-minute breather with the next room already prepared. Both players pressing <color=#7FD4FF>Play Now</color> on the Tournaments tab starts it early.\n\n- The server picks each match's connection region for both players, so you always land in the same room whatever your menu region is set to.\n\n<color=#FFD94D><b>PLAYING AN ASYNC MATCH</b></color>\n\n- When your match goes live the bot DMs both of you with the deadline. There's no start instant, no auto-connect, and no room code from the bracket.\n\n- Agree a time with your opponent (use /dm-opponent in Discord, or just message them), then play a normal private lobby: main menu, Online, Host Room, and one of you sends the other the 6-character code.\n\n- The result records automatically as long as you both have the mod running with <color=#7FD4FF>Ranked enabled</color> - the server binds the series to your bracket pairing from any room. The mod turns Ranked on for you when a tournament match is live (see <color=#7FD4FF>Deadlines & forfeits</color>).\n\n- In the final 24 hours before the deadline the bot sends a check-in DM; answering that you plan to play today extends the deadline 24 hours, once per opponent.",
   "Toxic Cloud",
@@ -2953,12 +3061,14 @@
   "Unknown\u0004card rarity",
   "Unknown player",
   "Unlock chat everywhere",
+  "Unlocked by achievement, not purchasable",
   "Unnamed player",
   "Unnamed player\u0004pc.unnamed",
   "Unranked",
   "Unranked\u0004pc.unranked",
   "Unranked | {0}W {1}L",
   "Unstoppable",
+  "Unsupported signature version",
   "Untouchable",
   "Up Arrow",
   "Update",
@@ -2985,6 +3095,7 @@
   "Utility unlocks (e.g. hide your gold total on the leaderboard).",
   "VANILLA GROW: FRAME RATE CHANGES DAMAGE",
   "VOTING / SIGNUPS OPEN",
+  "Valid upload_request_id is required",
   "Vanilla avatar",
   "Vanilla avatar: <color=#88CCFF>{0}</color>",
   "Vanilla stays vanilla",
@@ -3001,6 +3112,7 @@
   "W-L and WR count completed series. XP and Gold accrue per player slot; 1v1 rating never moves.",
   "WALL JUMP",
   "WATCH",
+  "WB R{0}",
   "WHAT EACH SEAT ACTUALLY SEES",
   "WHEN A GAME IS RECORDED AND RATED",
   "WHERE GOLD COMES FROM",
@@ -3108,6 +3220,7 @@
   "Windup",
   "Windup main",
   "Winners",
+  "Winners R{0}",
   "Wins",
   "Wins without firing",
   "Wise beyond your years.",
@@ -3205,10 +3318,12 @@
   "a pot scaled by lobby size, battles and opponent tier, split by placement",
   "a year ago",
   "absorbs everything",
+  "advanced",
   "after a handful of series",
   "also locks when any game is decided",
   "always earns x1.5 pay",
   "an empty slot - no crash, no fallback",
+  "anim_fps must be 0.5-15",
   "any moment now",
   "any preset; this is the one you wear everywhere else",
   "applies only when everyone in the room agrees",
@@ -3218,6 +3333,7 @@
   "as DUO (w/ {0}) vs {1}",
   "as SOLO vs {0} + {1}",
   "assigned by the server",
+  "bad frame PNG: {0}",
   "base game",
   "before asking in Discord",
   "blocked senders never reach you anyway",
@@ -3245,11 +3361,14 @@
   "competitive clock: 120 FPS",
   "confirmed - admin tools: ban, reversal",
   "consent is the player's own decision, never bulk-written",
+  "converted frame {0} is {1} KB — the per-image limit is {2} KB. Simplify the art or reduce its colour count.",
   "cosmetic only",
+  "could not process GIF: {0}",
   "cursor color",
   "custom 2v2 lobby",
   "date ->",
   "days since first rating update ->",
+  "default",
   "default orange / blue",
   "dimmed: rolled out of the build",
   "discarding...",
@@ -3257,6 +3376,7 @@
   "dmg",
   "dmg/s",
   "does not trigger",
+  "double forfeit",
   "draft restored",
   "drafts are machine-translated until reviewed, and English is always complete",
   "duo",
@@ -3265,11 +3385,17 @@
   "earned - ranked win",
   "earned - sweep",
   "edge check: 0.1s; block window: 0.3s",
+  "eliminated GF Reset R{0}",
+  "eliminated GF R{0}",
+  "eliminated LB R{0}",
+  "eliminated TP R{0}",
+  "eliminated WB R{0}",
   "enabled?",
   "epic",
   "events and streamed state",
   "every 5 levels: 100g, then 500g past level 50",
   "everything, glow and typeface included",
+  "expected_price_required",
   "expired",
   "face",
   "final 24h check-in",
@@ -3278,15 +3404,26 @@
   "first to {0}",
   "follows the character you actually play",
   "for streams and for spotting missed inputs",
+  "forbidden",
+  "forfeit",
   "fps",
+  "frame PNG missing or too large",
+  "frame png_base64 is not valid base64",
+  "frame_count must be 2-{0}",
+  "frame_no must be 2-{0}",
+  "frames_hash must be sha256 hex",
   "free daily pack",
   "game 1 starts",
   "game in last 45 min: wait",
   "game server relay",
   "game {0}",
+  "gif_base64 is not valid base64",
+  "gif_processing_unavailable",
   "gold",
   "host-only, and it despawns real bullets",
+  "image_processing_unavailable",
   "impossibly fast series",
+  "internal_key_required",
   "invalidated outright, gold and XP reversed",
   "is elected reporter",
   "it combines with an equipped cursor colour",
@@ -3315,15 +3452,25 @@
   "longest",
   "lost {0} of {1}",
   "macro-pace input windows",
+  "maintenance",
+  "malformed PNG (IHDR is not the first chunk)",
+  "malformed PNG (bad CRC on {0} chunk)",
+  "malformed PNG (chunk length runs past end of file)",
+  "malformed PNG (invalid chunk type)",
+  "malformed PNG (no IEND chunk)",
   "master gate; off disables all seven",
   "match data unavailable",
   "match goes live",
   "matches always use your picks regardless",
   "menu code cannot matter mid-match",
+  "missing frames: have {0} of {1}",
   "mod",
   "mod-issued",
   "mod-issued: queue / 2v2 / tournament / ranked FFA = ranked",
   "music album",
+  "must be exactly 512x512 (got {0}x{1})",
+  "mutual forfeit",
+  "name too short (letters/numbers/spaces only)",
   "nametag",
   "never active in a room or on match-found",
   "no - casual",
@@ -3341,6 +3488,8 @@
   "nobody - your screen only, never networked",
   "nobody yet",
   "none yet",
+  "not a GIF file",
+  "not a PNG file",
   "not blocking: 51 damage + return impulse",
   "not enough data (4+ picks)",
   "not recorded (older block format)",
@@ -3373,6 +3522,7 @@
   "only presets an unmodded opponent's own loader can resolve are visible to them",
   "only rare pulls, and only in one channel",
   "only to leave for good",
+  "operator_key_invalid",
   "opp n/a",
   "opponent",
   "opponent has run",
@@ -3381,8 +3531,12 @@
   "otherwise: score / check-in / no-show tiebreak",
   "own bullets judge hits",
   "painted-in glow stays whatever you pick",
+  "payload_too_large",
+  "placement is outside the character editor limit",
   "player color",
   "player effect",
+  "player_session_required",
+  "png_base64 is not valid base64",
   "point + release {0} to dance",
   "point + release {0} to send",
   "point lost",
@@ -3395,13 +3549,17 @@
   "ranked is disabled until you grant it; revoking it again turns ranked back off",
   "ranked or casual",
   "rare",
+  "rate_limited",
   "rating updates ->",
+  "read_credential_required",
+  "read_gate_unavailable",
   "recent: worst frame {0} ms  resends {1}  discards {2}",
   "recently online",
   "recordable setting?",
   "recorded once",
   "regular (converged)",
   "removes allocation stutter",
+  "render_scale must be between 0.50 and 2.25",
   "replica age est. n/a",
   "replica age est. {0} ms one-way (peer-reported input)",
   "report version {0} - some panels may be missing",
@@ -3410,21 +3568,35 @@
   "room type?",
   "rounds",
   "same-card",
+  "scale and offsets must be finite",
+  "scale and offsets must be numbers",
   "scrmod.com",
   "sending your logs automatically is your own decision, never bulk-written",
   "sends the same logs the report form sends without you filing one; worth turning on if you have ever filed a report",
   "series created",
   "series ends",
+  "service_account_forbidden",
+  "service_policy_unavailable",
+  "session_check_unavailable",
+  "session_replication_pending",
+  "session_required",
   "sharding...",
   "short-match farming pattern",
   "shortest",
   "showing the newest {0} games of this sitting",
   "showing the newest {0} games of this sitting ({1} not shown)",
   "showing {0} of {1}",
+  "signed up",
+  "slot must be eyes, mouth or detail",
   "solo {0}-{1} duo",
   "solo: the outer-left point",
   "stackable",
   "stops null-reference spam and changes nothing visible",
+  "submission is not accepting frames",
+  "submission is not finalizable",
+  "submission not found",
+  "submission_id and frame_no are required",
+  "submission_id is required",
   "sudden death",
   "swallows the one null reference a destroyed bullet raises at a screen edge",
   "swallows the one null reference the hit sound raises when its parent is gone",
@@ -3455,6 +3627,7 @@
   "tracks the whole game",
   "trail",
   "triggers",
+  "truncated PNG (chunk header runs past end of file)",
   "turn it off on a weak GPU; nothing is hidden",
   "turning it off also removes spectators already watching",
   "two players, one side",
@@ -3463,6 +3636,7 @@
   "unknown",
   "unknown path",
   "unlimited",
+  "unreadable PNG: {0}",
   "update mod",
   "utility",
   "via Discord",
@@ -3481,6 +3655,7 @@
   "whenever you armed it by accident",
   "window over - cooldown keeps counting from the press",
   "with exact evidence",
+  "won by forfeit",
   "worth it while investigating one match; it is noisy, so turn it back off afterwards",
   "yes",
   "yesterday",
@@ -3563,6 +3738,7 @@
   "{0} series",
   "{0} series played",
   "{0} shards",
+  "{0} submissions already awaiting review — wait for those first",
   "{0} tiers - click to see them all",
   "{0} total",
   "{0} tracks",
@@ -3576,6 +3752,7 @@
   "{0} years ago",
   "{0}'s binder is private - they can still propose a trade to you",
   "{0}-card draw",
+  "{0}-player FFA",
   "{0}-player FFA starting in 5 seconds!",
   "{0}: <color=#888>(not bound)</color>",
   "{0}: <color=#FF9966>OFF</color>",
@@ -3627,6 +3804,16 @@
    "surface": "NativeUI",
    "location": "OnlineSuffix",
    "kind": "TrF"
+  },
+  "  <color=#7FE8C3>(Play Now sent - waiting on opponent)</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
+  "  <color=#888>(both press Play Now to skip the break)</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
   },
   "  <color=#888>(no cards recorded)</color>": {
    "surface": "NativeUI",
@@ -3748,9 +3935,24 @@
    "location": "SubmitCustomBet",
    "kind": "TrF"
   },
+  " starts in <color=#FFDE88>{0}:{1:00}</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "TrF"
+  },
+  "#1 of {0}": {
+   "surface": "ServerTextRules",
+   "location": "SeriesScore",
+   "kind": "TrF"
+  },
   "(AoE)": {
    "surface": "InfoViz",
    "location": "MatrixRowLabel",
+   "kind": "Tr"
+  },
+  "(TBD)": {
+   "surface": "NativeUI",
+   "location": "_FmtSlot",
    "kind": "Tr"
   },
   "(click to change)": {
@@ -3862,6 +4064,11 @@
    "surface": "PlayerCardsUI",
    "location": "RefreshInfo",
    "kind": "Tr"
+  },
+  "- in play, score {0}": {
+   "surface": "NativeUI",
+   "location": "RefreshMyBetsLedger",
+   "kind": "TrF"
   },
   "0 in queue": {
    "surface": "NativeUI",
@@ -4021,6 +4228,11 @@
   "3rd Place": {
    "surface": "NativeUI",
    "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
+  "3rd place": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
    "kind": "Tr"
   },
   "4 players": {
@@ -4428,6 +4640,16 @@
    "location": "BuildOvtRecentRowText",
    "kind": "Tr"
   },
+  "<color=#60FF60>ready</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
+  "<color=#60FF80>both ready - connecting...</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
   "<color=#664444>-> {0} bet {1}g on {2} - lost</color>": {
    "surface": "NativeUI",
    "location": "BuildMultimodeSeriesLine",
@@ -4502,6 +4724,11 @@
    "surface": "NativeUI",
    "location": "RefreshTeamTab",
    "kind": "TrF"
+  },
+  "<color=#66CCFF>searching</color>": {
+   "surface": "NativeUI",
+   "location": "RenderTeamQueueSection",
+   "kind": "Tr"
   },
   "<color=#66DD66>APPROVED</color>": {
    "surface": "NativeUI",
@@ -4988,6 +5215,11 @@
    "location": "OnBugReportAnswer",
    "kind": "Tr"
   },
+  "<color=#88FF88>ready</color>": {
+   "surface": "NativeUI",
+   "location": "RenderTeamQueueSection",
+   "kind": "Tr"
+  },
   "<color=#88FF88>{0}/{1} active</color>": {
    "surface": "NativeUI",
    "location": "PaintPerfHeader",
@@ -5098,6 +5330,11 @@
    "location": "RefreshRecentTournamentsPopup",
    "kind": "TrF"
   },
+  "<color=#C0C0C0>2nd</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
   "<color=#C48CFF>FFA:</color> -": {
    "surface": "NativeUI",
    "location": "RefreshMyStats",
@@ -5188,6 +5425,11 @@
    "location": "PaintScoreGraph",
    "kind": "TrF"
   },
+  "<color=#CD7F32>3rd</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
   "<color=#D8A7FF>FFA History</color>": {
    "surface": "NativeUI",
    "location": "BuildPlayerModeHistoryText",
@@ -5215,7 +5457,7 @@
   },
   "<color=#FF4040>deadline passed</color>": {
    "surface": "NativeUI",
-   "location": "AsyncDeadlineTail",
+   "location": "AsyncDeadlineTail, RefreshTournaments",
    "kind": "Tr"
   },
   "<color=#FF4444>UPDATE REQUIRED</color>": {
@@ -5223,9 +5465,14 @@
    "location": "RefreshVersionStatus",
    "kind": "SetText"
   },
+  "<color=#FF6060>FORFEIT</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
   "<color=#FF6060>deadline: {0}h {1}m left</color>": {
    "surface": "NativeUI",
-   "location": "AsyncDeadlineTail",
+   "location": "AsyncDeadlineTail, RefreshTournaments",
    "kind": "TrF"
   },
   "<color=#FF6666>(OUT OF STOCK - artist hasn't opened sales yet)</color>": {
@@ -5283,6 +5530,11 @@
    "location": "CreateShopRow, OnActionClicked",
    "kind": "Tr"
   },
+  "<color=#FF9060>press Ready Up</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
   "<color=#FF9966>MASTER OFF</color>": {
    "surface": "NativeUI",
    "location": "PaintPerfHeader",
@@ -5330,7 +5582,7 @@
   },
   "<color=#FFAA44>deadline: {0}d {1}h left</color>": {
    "surface": "NativeUI",
-   "location": "AsyncDeadlineTail",
+   "location": "AsyncDeadlineTail, RefreshTournaments",
    "kind": "TrF"
   },
   "<color=#FFAA55>Lobby browser unavailable right now — the server may be updating.</color>": {
@@ -5413,9 +5665,24 @@
    "location": "DrawMatchFoundStuckOverlay",
    "kind": "Tr"
   },
+  "<color=#FFD850>1st</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
+  "<color=#FFD850>CHAMPION</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
   "<color=#FFD94D>({0} of {1} left)</color>": {
    "surface": "NativeUI",
    "location": "ApplyShopRow",
+   "kind": "TrF"
+  },
+  "<color=#FFD94D>* {0} TOURNAMENT GAME - vs {1}  (results auto-recorded)</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournamentGameIndicator",
    "kind": "TrF"
   },
   "<color=#FFD94D><b>GETTING PACKS</b></color>\n\n- <b>One free pack a day</b> - press Claim on the Open Packs tab or use /daily in Discord. The day resets at midnight UTC.\n- <b>Paid packs</b> cost 100 Gold or 100 shards and hold 5 cards. Up to 5 paid packs a day for most accounts; the Get packs tab says what applies to yours.\n- <b>Earned packs</b>: winning a ranked series, or a ranked FFA match, grants a pack one time in five - the same chance in 1v1, 2v2, 1v2 and FFA alike, and the score line makes no difference. Earned and claimed packs wait under <b>Packs waiting</b> until you open them, as long as you like.\n\n<color=#FFD94D><b>WHAT IS IN A PACK</b></color>\n\n- Each card rolls its band on its own: <color=#8085A0>Common 60%</color>, <color=#4DB861>Uncommon 25%</color>, <color=#408CFA>Rare 11%</color>, <color=#9E52EB>Epic 3.5%</color>, <color=#FFB82E>Legendary 0.5%</color>.\n- The band decides WHO you get: the pool is ordered (players who have played a ranked series first, then by rating), and pool positions #1-2 are the two Legendary cards, #3-10 are Epic, #11-20 Rare, #21-40 Uncommon, and everyone past that is Common.\n- Independently of the band, any card can come out <b>Foil</b> (1 in 200) or <b>Signed</b> (1 in 2,000) - a foil shimmers, a signed card carries the player's autograph.\n- The strip under the buttons shows your last pack, and the Older / Newer buttons page back through every pack you have opened. A card you discarded stays in its pack, stamped DISCARDED.\n\n<color=#FFD94D><b>DUPLICATES AND SHARDS</b></color>\n\n- A card you already own is marked DUPLICATE when it lands (+1, +2 ... for how many copies you held before it).\n- <b>Discard</b> turns a card into shards: <color=#8085A0>Common 5</color>, <color=#4DB861>Uncommon 15</color>, <color=#408CFA>Rare 40</color>, <color=#9E52EB>Epic 150</color>, <color=#FFB82E>Legendary 600</color>. It asks you to click twice. <b>Dupes</b> discards every copy except one in a single go.\n- Shards buy packs at the same price as Gold - 100 for a pack.\n\n<color=#FFD94D><b>DISCORD</b></color>\n\n- /daily claims the free pack, /collection shows a binder, /card shows one card - all with a linked Discord account.\n- A pull that is Epic or better is announced in the Discord gambler chat, and so is a pull of your own card, a Foil or a Signed print at any rarity - but only when BOTH you and the player on the card have <b>Announce my pulls</b> on (see Card pictures & settings). A Rare or lower pull that is none of those is not announced.": {
@@ -5578,14 +5845,29 @@
    "location": "BuildViewHistoryText",
    "kind": "Tr"
   },
+  "<color=#FFD94D>matched</color>": {
+   "surface": "NativeUI",
+   "location": "RenderTeamQueueSection",
+   "kind": "Tr"
+  },
   "<color=#FFD94D>pending initial review</color>": {
    "surface": "NativeUI",
    "location": "RefreshArtistTab",
    "kind": "Tr"
   },
+  "<color=#FFD94D>waiting on opponent to ready</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
   "<color=#FFD94D>your bet: {0}g on {1}</color>": {
    "surface": "NativeUI",
    "location": "RenderFfaLobbySection, RenderHostLobbySection",
+   "kind": "TrF"
+  },
+  "<color=#FFD94D>{0}/{1}</color> <color=#888>({2} live)</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
    "kind": "TrF"
   },
   "<color=#FFD94D>{0}g</color> <color=#AAA>paid to</color> <color=#FFD94D>{1}</color> <color=#AAA>artists - {2} copies sold, {3}g gross</color>": {
@@ -5646,6 +5928,11 @@
   "<color={1}>{0}</color> <color=#888>— match telemetry</color>": {
    "surface": "CompetitiveUI",
    "location": "DrawPlayerComboGraph",
+   "kind": "TrF"
+  },
+  "<i>Bracket revealed when the tournament starts ({0}).</i>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
    "kind": "TrF"
   },
   "<i>Loading...</i>": {
@@ -6008,6 +6295,11 @@
    "location": "BuildCosmeticsFlow",
    "kind": "Tr"
   },
+  "ASYNC": {
+   "surface": "NativeUI",
+   "location": "RefreshTournamentGameIndicator",
+   "kind": "Tr"
+  },
   "ASYNC (6-week)": {
    "surface": "NativeUI",
    "location": "BuildTournamentsTab",
@@ -6046,6 +6338,11 @@
   "Account changed — message not sent.": {
    "surface": "CompetitiveUI",
    "location": "DropChatOnAccountChange",
+   "kind": "Tr"
+  },
+  "Account deleted": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "Achievement Grid": {
@@ -6473,6 +6770,11 @@
    "location": "BuildArtistTab",
    "kind": "CreateText"
   },
+  "Artist-owned face cosmetic not found": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Ascendant": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6502,6 +6804,11 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
+  },
+  "Async Tournament - {0}": {
+   "surface": "NativeUI",
+   "location": "TrTournamentBanner",
+   "kind": "TrF"
   },
   "Attach game logs (recommended)": {
    "surface": "CompetitiveUI",
@@ -6637,6 +6944,11 @@
    "surface": "PcLabels",
    "location": "Tr",
    "kind": "TrC:pc.stat.board"
+  },
+  "BYE": {
+   "surface": "NativeUI",
+   "location": "CreateBracketCell, RefreshTournaments",
+   "kind": "Tr"
   },
   "Babel": {
    "surface": "ApiClient, shop catalog",
@@ -6831,6 +7143,26 @@
   "Bet placed: {0}g{1}{2}": {
    "surface": "NativeUI",
    "location": "SubmitCustomBet",
+   "kind": "TrF"
+  },
+  "Bet {0} gold on {1} vs {2}": {
+   "surface": "NativeUI",
+   "location": "RefreshMyBetsLedger",
+   "kind": "TrF"
+  },
+  "Bet {0} gold on {1} vs {2} - LOST": {
+   "surface": "NativeUI",
+   "location": "RefreshMyBetsLedger",
+   "kind": "TrF"
+  },
+  "Bet {0} gold on {1} vs {2} - WON {3} gold": {
+   "surface": "NativeUI",
+   "location": "RefreshMyBetsLedger",
+   "kind": "TrF"
+  },
+  "Bet {0} gold on {1} vs {2} - refunded, series never finished": {
+   "surface": "NativeUI",
+   "location": "RefreshMyBetsLedger",
    "kind": "TrF"
   },
   "Beta": {
@@ -7291,6 +7623,11 @@
   "CASUAL, RECORDED": {
    "surface": "InfoViz",
    "location": "BuildWhenCounts",
+   "kind": "Tr"
+  },
+  "CHAMPION": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
    "kind": "Tr"
   },
   "COM": {
@@ -7813,6 +8150,11 @@
    "location": "BuildSettingsTab",
    "kind": "Tr"
   },
+  "Clavar la Bala": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Clean House": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
@@ -8162,6 +8504,16 @@
    "surface": "NativeUI",
    "location": "BuildAdminTab",
    "kind": "CreateButton"
+  },
+  "Cosmetic slot does not match its catalog SKU": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Cosmetic submission not found": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Cosmetic trails: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
@@ -8862,6 +9214,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Denied artwork cannot be reopened by a placement change": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Despawn off-screen bullets — host clears bullets that exit the camera viewport.": {
    "surface": "NativeUI",
@@ -9740,7 +10097,7 @@
   },
   "Failed: {0}": {
    "surface": "CompetitiveUI, NativeUI",
-   "location": "BugReportFailureStatus, CreateShopRow",
+   "location": "BugReportFailureStatus, CreateShopRow, ShowArtistResult",
    "kind": "TrF"
   },
   "False": {
@@ -9889,6 +10246,11 @@
    "kind": "Tr"
   },
   "Floating pink hearts rise from your body.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "FloraBelle": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -10057,6 +10419,66 @@
    "surface": "CompetitiveUI",
    "location": "RefreshFfaPickBanner",
    "kind": "Tr"
+  },
+  "GF Reset R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "GF R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "GIF decoded inconsistently ({0} of {1} frames) — re-export it and try again.": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at least {5} ms and re-export; the server will not change the speed for you.": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF frame rate is {0} fps ({1} frames, ~{2} ms each) — supported range is {3}-{4} fps. Set the frame delay to at most {5} ms and re-export; the server will not change the speed for you.": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF frames are {0}x{1} — the limit is 2048x2048": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF has more than {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF has no transparent background — export it with transparency, or the cosmetic renders as a solid square.": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "GIF has {0} frame(s) — an animation needs at least 2. Upload a PNG instead for static art.": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF has {0} frames — the limit is {1}. Reduce the frame count in your editor; the server will not resample it for you (that would change the timing).": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "GIF is missing": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "GIF is {0} KB — the limit is {1} KB. Reduce the frame size or the number of colours and re-export.": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
   },
   "GRAND FINAL": {
    "surface": "InfoViz",
@@ -10385,7 +10807,12 @@
   },
   "Grand Final": {
    "surface": "NativeUI",
-   "location": "RefreshTournaments",
+   "location": "RefreshTournaments, TrRoundLabel",
+   "kind": "Tr"
+  },
+  "Grand Final Reset": {
+   "surface": "NativeUI",
+   "location": "TrRoundLabel",
    "kind": "Tr"
   },
   "Grand Master": {
@@ -10501,6 +10928,11 @@
   "HIGH": {
    "surface": "CompetitiveUI",
    "location": "BugChoiceLabel",
+   "kind": "Tr"
+  },
+  "HMAC not configured": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "HOST": {
@@ -11043,6 +11475,16 @@
    "location": "AchievementDefs",
    "kind": "table"
   },
+  "Insufficient gold": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Insufficient gold: have {0}, need {1}": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
   "Intermediate": {
    "surface": "InfoViz",
    "location": "BuildRankLadder",
@@ -11052,6 +11494,36 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
+  },
+  "Invalid PNG data": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Invalid catalog placement request": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Invalid placement request": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Invalid placement revision": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Invalid signature": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Invalid signature version": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Iron": {
    "surface": "shop catalog",
@@ -11072,6 +11544,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Item not found": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Ivory": {
    "surface": "shop catalog",
@@ -11222,6 +11699,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "LB R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
   },
   "LEAVE MATCH": {
    "surface": "EscLeaveRow",
@@ -11777,6 +12259,11 @@
    "surface": "NativeUI",
    "location": "RefreshTournaments",
    "kind": "Tr"
+  },
+  "Losers R{0}": {
+   "surface": "NativeUI",
+   "location": "TrRoundLabel",
+   "kind": "TrF"
   },
   "Loss": {
    "surface": "ProfileCard",
@@ -12363,6 +12850,11 @@
    "location": "(file scope), BuildMusicTab, OpenUtilityPopup",
    "kind": "CreateText, Tr"
   },
+  "Music albums have no stock — they are unlimited by design": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Music credit toast: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
    "location": "PaintMusicCredit",
@@ -12508,6 +13000,11 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "Name can't be empty": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Name styling": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
@@ -12632,6 +13129,11 @@
    "surface": "NativeUI, SessionReportView",
    "location": "BuildAchievementsTab, BuildLeaderboardTab, BuildMyStatsTab +1",
    "kind": "CreateButton, Tr"
+  },
+  "Next match (R{0}{1}): vs <color=#FFDE88>{2}</color> -{3}{4}": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "TrF"
   },
   "Next tier": {
    "surface": "TitleLaddersUI",
@@ -12833,6 +13335,11 @@
    "location": "ErrorDetail",
    "kind": "Tr"
   },
+  "Not an artist account": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Not armed": {
    "surface": "NativeUI.Settings",
    "location": "SettingsPaintDeleteState, SettingsRenderDestructivePane",
@@ -12856,6 +13363,11 @@
   "Not enough shards for a pack": {
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
+   "kind": "Tr"
+  },
+  "Not for sale yet — the artist hasn't opened sales": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "Not found - it may have been deleted.": {
@@ -12911,6 +13423,11 @@
   "Not started.": {
    "surface": "TitleLaddersUI",
    "location": "ProgressText",
+   "kind": "Tr"
+  },
+  "Not your item": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "Nothing playing": {
@@ -13328,6 +13845,41 @@
    "location": "BuildNetcodeMap",
    "kind": "Tr"
   },
+  "PNG has an implausible number of chunks": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "PNG has no transparent background — export with an alpha layer": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "PNG has {0} stray byte(s) after IEND": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "PNG hash does not match the payload": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "PNG is too large once re-encoded — reduce its complexity": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "PNG missing or too large ({0} MB, 1,600,000 base64 characters max)": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "PNG payload is missing or too large": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "POOL": {
    "surface": "PcLabels",
    "location": "Tr",
@@ -13347,6 +13899,11 @@
    "surface": "PcLabels",
    "location": "Tr",
    "kind": "TrC:pc.preview_footer"
+  },
+  "PRIVATE": {
+   "surface": "NativeUI",
+   "location": "ApplyHeaderRow",
+   "kind": "Tr"
   },
   "Pacifist": {
    "surface": "ApiClient, shop catalog",
@@ -13743,6 +14300,11 @@
    "location": "DrawCustomBetPrompt",
    "kind": "Tr"
   },
+  "Placement changed since this preview; reload it and try again": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Plague Doctor": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -13816,6 +14378,16 @@
   "Player Nemesis": {
    "surface": "NativeUI",
    "location": "TrMetric",
+   "kind": "Tr"
+  },
+  "Player not found": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Player not found — they need to have used the mod once": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "Player opted out": {
@@ -14137,6 +14709,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Published cosmetic source must be a transparent 512x512 PNG ({0})": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
   },
   "Pumpking Hat": {
    "surface": "shop catalog",
@@ -14813,6 +15390,11 @@
    "location": "BuildTournamentsTab",
    "kind": "CreateButton"
   },
+  "Reconnecting to {0} (region {1})": {
+   "surface": "NativeUI",
+   "location": "BuildTournamentsTab",
+   "kind": "TrF"
+  },
   "Record removal failed: {0}": {
    "surface": "NativeUI",
    "location": "BuildCompareRecordsPanel",
@@ -14839,6 +15421,11 @@
    "kind": "shop"
   },
   "Red Scarf": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Red mouth": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -15223,6 +15810,11 @@
    "location": "Build",
    "kind": "Tr"
   },
+  "Room code: <color=#C0E0FF>{0}</color>{1}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "TrF"
+  },
   "Room rule: same cards for everyone": {
    "surface": "CompetitiveUI",
    "location": "DrawRoomRulesBanner",
@@ -15386,6 +15978,11 @@
   "SPECTATOR": {
    "surface": "SpectatorHud",
    "location": "ComposeBarLine, ComposeCompact, DrawBlackout",
+   "kind": "Tr"
+  },
+  "SYNC": {
+   "surface": "NativeUI",
+   "location": "RefreshTournamentGameIndicator",
    "kind": "Tr"
   },
   "SYNC (weekly)": {
@@ -16148,6 +16745,16 @@
    "location": "RequestSpectateGrantCore",
    "kind": "Tr"
   },
+  "Signed animation fields are required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "Signed placement integers are required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Signed up for tournament": {
    "surface": "ApiClient",
    "location": "TournamentSignup",
@@ -16288,6 +16895,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Soft eyes": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Soft pastel lavender — minimum contrast.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -16319,9 +16931,14 @@
    "kind": "Tr"
   },
   "Sold out": {
-   "surface": "NativeUI",
-   "location": "ApplyShopRow",
-   "kind": "SetText"
+   "surface": "NativeUI, ServerTextRules",
+   "location": "ApplyShopRow, TrRefusalDetail",
+   "kind": "SetText, Tr"
+  },
+  "Sold out — raise the stock cap first": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Solo": {
    "surface": "NativeUI",
@@ -16688,6 +17305,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Straw Hat": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Stray": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -16838,6 +17460,11 @@
    "location": "AchievementDefs",
    "kind": "table"
   },
+  "Sync Tournament - {0}": {
+   "surface": "NativeUI",
+   "location": "TrTournamentBanner",
+   "kind": "TrF"
+  },
   "Synchronizing - viewing begins next battle": {
    "surface": "SpectatorHud",
    "location": "ConnectStatusLine",
@@ -16863,6 +17490,11 @@
    "location": "BuildDamageMatrix, TextFallback",
    "kind": "Tr"
   },
+  "TBD": {
+   "surface": "NativeUI",
+   "location": "CreateBracketCell, RefreshTournaments",
+   "kind": "Tr"
+  },
   "THE 0.3 SECOND WINDOW": {
    "surface": "InfoViz",
    "location": "BuildBlockWindow",
@@ -16881,6 +17513,16 @@
   "THE SOLO": {
    "surface": "InfoViz",
    "location": "BuildOvtFormat",
+   "kind": "Tr"
+  },
+  "TOURNAMENT": {
+   "surface": "NativeUI",
+   "location": "ApplyHeaderRow",
+   "kind": "Tr"
+  },
+  "TOURNAMENT Async": {
+   "surface": "NativeUI",
+   "location": "ApplyHeaderRow",
    "kind": "Tr"
   },
   "TOURNAMENT MATCH": {
@@ -16906,6 +17548,21 @@
   "TOURNAMENT STARTS IN {0} - stay in ROUNDS at the main menu!": {
    "surface": "CompetitiveUI",
    "location": "DrawTournamentBanner",
+   "kind": "TrF"
+  },
+  "TOURNAMENT Sync": {
+   "surface": "NativeUI",
+   "location": "ApplyHeaderRow",
+   "kind": "Tr"
+  },
+  "TOURNAMENT {0}": {
+   "surface": "NativeUI",
+   "location": "ApplyHeaderRow",
+   "kind": "TrF"
+  },
+  "TP R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
    "kind": "TrF"
   },
   "Tab": {
@@ -17009,8 +17666,8 @@
    "kind": "Tr"
   },
   "Team {0}": {
-   "surface": "NativeUI",
-   "location": "ApplyTeamBetRow, RefreshTeamTab",
+   "surface": "NativeUI, ServerTextRules",
+   "location": "ApplyTeamBetRow, BetOnName, RefreshTeamTab",
    "kind": "TrF"
   },
   "Team: <color=#88AAFF>2</color>": {
@@ -17648,6 +18305,11 @@
    "location": "PaintHeavyFont",
    "kind": "SetText"
   },
+  "Third-Place Match": {
+   "surface": "NativeUI",
+   "location": "TrRoundLabel",
+   "kind": "Tr"
+  },
   "This account cannot send mail.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
@@ -17673,6 +18335,36 @@
    "location": "HandleAnswer",
    "kind": "Tr"
   },
+  "This album requires a newer mod version": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail, TrRefusalObject",
+   "kind": "Tr"
+  },
+  "This artist has restricted you from buying their items": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "This cosmetic has not shipped in the mod yet and cannot be gifted": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "This cosmetic has not shipped in the mod yet; stock stays closed until it does": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "This cosmetic has not shipped yet; adjust its existing submission instead": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "This cosmetic is approved but has not shipped in the mod yet": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "This is so sad. Please give this man a break": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -17681,6 +18373,16 @@
   "This is your only copy of this card": {
    "surface": "PlayerCardsUI",
    "location": "RefreshCompose",
+   "kind": "Tr"
+  },
+  "This item requires a newer mod version": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "This item requires a newer mod version than the recipient has used; they need to update the mod first": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "This lobby closed before the match started. Nothing was counted.": {
@@ -17701,6 +18403,11 @@
   "This mod sends data to a private server run by the mod author to power the leaderboard and ranked matchmaking.\n\nWhat gets recorded if you allow:\n  • Your Steam ID and in-game display name\n  • Your Discord ID and username, ONLY if you link your Discord via the in-game link code\n  • Each match you play: rounds won, points, duration, cards picked, cards offered, opponent\n  • Your Glicko-2 rating history\n\nWhat you can do later:\n  • Revoke consent anytime with the Data & Privacy switch (F5 → Settings → Privacy & account). Reporting stops.\n  • Delete your data with the Delete My Data button (F5 → Settings → Privacy & account). Steam ID, display name, and Discord link are scrubbed. Matches stay so other players' ratings and histories aren't disturbed. Deletion is IRREVERSIBLE — you cannot re-register this Steam ID later.\n\nChoose Allow to use the leaderboard. Choose Decline to run the mod fully offline.": {
    "surface": "CompetitiveUI",
    "location": "DrawConsentModal",
+   "kind": "Tr"
+  },
+  "This node serves reads only; writes are handled by the primary. Seeing this means a request reached the standby that should not have.": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "This release only ships a zip — opening the releases page to update manually": {
@@ -17873,6 +18580,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Too many cosmetic changes are already awaiting review": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Too many messages - try again in {0} hours.": {
    "surface": "MailClient",
    "location": "RateLimitText",
@@ -17992,6 +18704,11 @@
    "surface": "Plugin",
    "location": "GateTournamentRegion",
    "kind": "ShowNotification"
+  },
+  "Tournament match starting vs {0}": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "TrF"
   },
   "Tournaments": {
    "surface": "InfoLibrary, NativeUI",
@@ -18343,6 +19060,11 @@
    "location": "StartChatLockdownFlow",
    "kind": "Tr"
   },
+  "Unlocked by achievement, not purchasable": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Unnamed player": {
    "surface": "PcLabels, PlayerCardsUI",
    "location": "FillTradeRow, RecentLine, RefreshCompose +2",
@@ -18372,6 +19094,11 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
+  },
+  "Unsupported signature version": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "Untouchable": {
    "surface": "ApiClient, shop catalog",
@@ -18503,6 +19230,11 @@
    "location": "RefreshTournaments",
    "kind": "Tr"
   },
+  "Valid upload_request_id is required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "Vanilla avatar": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
@@ -18582,6 +19314,11 @@
    "surface": "NativeUI",
    "location": "AddSpectateButton, ApplySpectateLiveRow, CreateFfaBetLobbyRow +1",
    "kind": "Tr"
+  },
+  "WB R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
   },
   "WHAT EACH SEAT ACTUALLY SEES": {
    "surface": "InfoViz",
@@ -19118,6 +19855,11 @@
    "location": "RefreshTournaments",
    "kind": "Tr"
   },
+  "Winners R{0}": {
+   "surface": "NativeUI",
+   "location": "TrRoundLabel",
+   "kind": "TrF"
+  },
   "Wins": {
    "surface": "NativeUI",
    "location": "BuildCardStatsTab, BuildFfaTab, RefreshCardStats +1",
@@ -19603,6 +20345,11 @@
    "location": "BuildBlockWindow",
    "kind": "Tr"
   },
+  "advanced": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "Tr"
+  },
   "after a handful of series": {
    "surface": "InfoViz",
    "location": "BuildGlickoRd",
@@ -19621,6 +20368,11 @@
   "an empty slot - no crash, no fallback": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
+   "kind": "Tr"
+  },
+  "anim_fps must be 0.5-15": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "any moment now": {
@@ -19667,6 +20419,11 @@
    "surface": "InfoViz",
    "location": "BuildOvtFormat",
    "kind": "Tr"
+  },
+  "bad frame PNG: {0}": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
   },
   "base game": {
    "surface": "InfoViz",
@@ -19803,10 +20560,20 @@
    "location": "ExclusionReasonTr",
    "kind": "Tr"
   },
+  "converted frame {0} is {1} KB — the per-image limit is {2} KB. Simplify the art or reduce its colour count.": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
   "cosmetic only": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
    "kind": "Tr"
+  },
+  "could not process GIF: {0}": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
   },
   "cursor color": {
    "surface": "NativeUI",
@@ -19827,6 +20594,11 @@
    "surface": "RatingGraphAxis",
    "location": "Caption",
    "kind": "Tr"
+  },
+  "default": {
+   "surface": "NativeUI",
+   "location": "BuildTournamentsTab",
+   "kind": "ShowNotification, Tr"
   },
   "default orange / blue": {
    "surface": "InfoViz",
@@ -19861,6 +20633,11 @@
   "does not trigger": {
    "surface": "InfoViz",
    "location": "BuildDamageMatrix",
+   "kind": "Tr"
+  },
+  "double forfeit": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
    "kind": "Tr"
   },
   "draft restored": {
@@ -19903,6 +20680,31 @@
    "location": "BuildMovementWindow",
    "kind": "Tr"
   },
+  "eliminated GF Reset R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "eliminated GF R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "eliminated LB R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "eliminated TP R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
+  "eliminated WB R{0}": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "TrF"
+  },
   "enabled?": {
    "surface": "InfoViz",
    "location": "BuildWhenCounts",
@@ -19926,6 +20728,11 @@
   "everything, glow and typeface included": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
+   "kind": "Tr"
+  },
+  "expected_price_required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "expired": {
@@ -19968,9 +20775,44 @@
    "location": "ReasonTr",
    "kind": "Tr"
   },
+  "forbidden": {
+   "surface": "ServerTextRules",
+   "location": "TrMiddleware",
+   "kind": "Tr"
+  },
+  "forfeit": {
+   "surface": "NativeUI",
+   "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
   "fps": {
    "surface": "SessionReportModel",
    "location": "Build",
+   "kind": "Tr"
+  },
+  "frame PNG missing or too large": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "frame png_base64 is not valid base64": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "frame_count must be 2-{0}": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "frame_no must be 2-{0}": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "frames_hash must be sha256 hex": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "free daily pack": {
@@ -19994,9 +20836,19 @@
    "kind": "Tr"
   },
   "game {0}": {
-   "surface": "SessionReportModel",
-   "location": "BuildTotalsPages",
+   "surface": "ServerTextRules, SessionReportModel",
+   "location": "BetScore, BuildTotalsPages",
    "kind": "TrF"
+  },
+  "gif_base64 is not valid base64": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "gif_processing_unavailable": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
   },
   "gold": {
    "surface": "SessionReportModel",
@@ -20008,9 +20860,19 @@
    "location": "ReasonTr",
    "kind": "Tr"
   },
+  "image_processing_unavailable": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "impossibly fast series": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
+   "kind": "Tr"
+  },
+  "internal_key_required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "invalidated outright, gold and XP reversed": {
@@ -20153,6 +21015,36 @@
    "location": "BuildAnticheatPipeline",
    "kind": "Tr"
   },
+  "maintenance": {
+   "surface": "ServerTextRules",
+   "location": "TrMiddleware",
+   "kind": "Tr"
+  },
+  "malformed PNG (IHDR is not the first chunk)": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "malformed PNG (bad CRC on {0} chunk)": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "malformed PNG (chunk length runs past end of file)": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "malformed PNG (invalid chunk type)": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "malformed PNG (no IEND chunk)": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "master gate; off disables all seven": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
@@ -20178,6 +21070,11 @@
    "location": "ReasonTr",
    "kind": "Tr"
   },
+  "missing frames: have {0} of {1}": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
   "mod": {
    "surface": "InfoViz",
    "location": "BuildKeyboard",
@@ -20196,6 +21093,21 @@
   "music album": {
    "surface": "NativeUI",
    "location": "TrKindWord",
+   "kind": "Tr"
+  },
+  "must be exactly 512x512 (got {0}x{1})": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
+  "mutual forfeit": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "Tr"
+  },
+  "name too short (letters/numbers/spaces only)": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "nametag": {
@@ -20281,6 +21193,16 @@
   "none yet": {
    "surface": "NativeUI",
    "location": "RefreshRecentTournamentsPopup",
+   "kind": "Tr"
+  },
+  "not a GIF file": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "not a PNG file": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "not blocking: 51 damage + return impulse": {
@@ -20443,6 +21365,11 @@
    "location": "WhenToPressTr",
    "kind": "Tr"
   },
+  "operator_key_invalid": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "opp n/a": {
    "surface": "CompetitiveUI",
    "location": "DrawFPS",
@@ -20450,8 +21377,8 @@
   },
   "opponent": {
    "surface": "CompetitiveUI, NativeUI",
-   "location": "DrawTournamentBanner, FillRow",
-   "kind": "Tr"
+   "location": "DrawTournamentBanner, FillRow, RefreshTournamentGameIndicator",
+   "kind": "SetText, Tr"
   },
   "opponent has run": {
    "surface": "InfoViz",
@@ -20483,6 +21410,16 @@
    "location": "ReasonTr",
    "kind": "Tr"
   },
+  "payload_too_large": {
+   "surface": "ServerTextRules",
+   "location": "TrMiddleware",
+   "kind": "Tr"
+  },
+  "placement is outside the character editor limit": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "player color": {
    "surface": "NativeUI",
    "location": "TrKindWord",
@@ -20491,6 +21428,16 @@
   "player effect": {
    "surface": "NativeUI",
    "location": "TrKindWord",
+   "kind": "Tr"
+  },
+  "player_session_required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "png_base64 is not valid base64": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "point + release {0} to dance": {
@@ -20553,9 +21500,24 @@
    "location": "TrRarity",
    "kind": "Tr"
   },
+  "rate_limited": {
+   "surface": "ServerTextRules",
+   "location": "TrMiddleware, TrRefusalDetail",
+   "kind": "Tr"
+  },
   "rating updates ->": {
    "surface": "RatingGraphAxis",
    "location": "Caption",
+   "kind": "Tr"
+  },
+  "read_credential_required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "read_gate_unavailable": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "recent: worst frame {0} ms  resends {1}  discards {2}": {
@@ -20586,6 +21548,11 @@
   "removes allocation stutter": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "render_scale must be between 0.50 and 2.25": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "replica age est. n/a": {
@@ -20628,6 +21595,16 @@
    "location": "FfaSettingsSummaryBits",
    "kind": "Tr"
   },
+  "scale and offsets must be finite": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "scale and offsets must be numbers": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "scrmod.com": {
    "surface": "NativeUI",
    "location": "BuildPage",
@@ -20651,6 +21628,31 @@
   "series ends": {
    "surface": "InfoViz",
    "location": "BuildBetWindow",
+   "kind": "Tr"
+  },
+  "service_account_forbidden": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "service_policy_unavailable": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "session_check_unavailable": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "session_replication_pending": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "session_required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "sharding...": {
@@ -20683,6 +21685,16 @@
    "location": "BuildGraphPages, Compose2v2, ComposeFfa +3",
    "kind": "TrF"
   },
+  "signed up": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
+   "kind": "Tr"
+  },
+  "slot must be eyes, mouth or detail": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "solo {0}-{1} duo": {
    "surface": "SessionReportModel",
    "location": "FinalScore",
@@ -20701,6 +21713,31 @@
   "stops null-reference spam and changes nothing visible": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "submission is not accepting frames": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "submission is not finalizable": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "submission not found": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "submission_id and frame_no are required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
+  "submission_id is required": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
    "kind": "Tr"
   },
   "sudden death": {
@@ -20853,6 +21890,11 @@
    "location": "BuildDamageMatrix",
    "kind": "Tr"
   },
+  "truncated PNG (chunk header runs past end of file)": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "Tr"
+  },
   "turn it off on a weak GPU; nothing is hidden": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
@@ -20893,6 +21935,11 @@
    "location": "RefreshArtistTab",
    "kind": "Tr"
   },
+  "unreadable PNG: {0}": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
   "update mod": {
    "surface": "NativeUI",
    "location": "RenderHostLobbySection",
@@ -20910,7 +21957,7 @@
   },
   "vs {0}": {
    "surface": "CompetitiveUI, H2HSummary, NativeUI",
-   "location": "BuildLine, FillRow, RefreshMatchStatusCache",
+   "location": "BuildLine, FillRow, RefreshMatchStatusCache +1",
    "kind": "TrF"
   },
   "vs {0}: first game this session": {
@@ -20981,6 +22028,11 @@
   "with exact evidence": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
+   "kind": "Tr"
+  },
+  "won by forfeit": {
+   "surface": "NativeUI",
+   "location": "TrBracketProgress",
    "kind": "Tr"
   },
   "worth it while investigating one match; it is noisy, so turn it back off afterwards": {
@@ -21393,6 +22445,11 @@
    "location": "Refresh",
    "kind": "TrF"
   },
+  "{0} submissions already awaiting review — wait for those first": {
+   "surface": "ServerTextRules",
+   "location": "TrRefusalDetail",
+   "kind": "TrF"
+  },
   "{0} tiers - click to see them all": {
    "surface": "TitleLaddersUI",
    "location": "PaintEntry",
@@ -21456,6 +22513,11 @@
   "{0}-card draw": {
    "surface": "NativeUI",
    "location": "FfaSettingsSummaryBits",
+   "kind": "TrF"
+  },
+  "{0}-player FFA": {
+   "surface": "ServerTextRules",
+   "location": "SeriesRightLabel",
    "kind": "TrF"
   },
   "{0}-player FFA starting in 5 seconds!": {

@@ -8591,7 +8591,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             string lc = p.result_label == "CHAMPION" ? "#FFE580"
                                       : p.result_label.StartsWith("eliminated") ? "#B08585"
                                       : "#8FA3B8";
-                            label = $"   <color={lc}>{p.result_label}</color>";
+                            label = $"   <color={lc}>{TrBracketProgress(p.result_label)}</color>";
                         }
                         string ff = p.forfeited ? "  <color=#FF6666>[FF]</color>" : "";
                         AddRecentTournRow($"   {medal}  <b>{nm}</b>{elo}{seed}{wl}{label}{ff}", 14f, 22);
@@ -9540,13 +9540,87 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
         private static void ShowArtistResult(bool ok, string msg)
         {
+            string known = ok ? null : TrShopRefusal(msg);
             CompetitiveUI.ShowNotification(ok ? (string.IsNullOrEmpty(msg) ? "Done." : msg)
+                                              : known != null ? I18n.TrF("Failed: {0}", known)
                                               : $"Failed: {ExtractServerDetail(msg)}",
                 ok ? new Color(0.4f, 0.9f, 0.5f) : new Color(1f, 0.45f, 0.4f));
             dirty = true;
         }
 
+        // The shop, ladder and artist refusals are read and mapped in
+        // ServerTextRules (Unity-free, executed by the client rules harness);
+        // this is the name the purchase and artist callbacks call.
+        internal static string TrShopRefusal(string resp) => ServerTextRules.TrRefusal(resp);
+
         // Server errors arrive as {"detail":"..."} — surface just the message.
+        // Tournament progress and result labels (the signup list's status
+        // cell, the recent-tournaments popup). backend/api/tournaments.py
+        // composes them: _compute_progress_labels' fixed words, the history
+        // route's "CHAMPION" / "3rd place" overrides, and "<tag> R<n>" /
+        // "eliminated <tag> R<n>" over _bracket_tag's five tags. Each maps
+        // to a catalogue key here, before any markup is composed; an unknown
+        // label returns unchanged. backend/tests/test_i18n_late_label_coverage.py
+        // derives the server's set and fails when one is not mapped here.
+        internal static string TrBracketProgress(string label)
+        {
+            if (string.IsNullOrEmpty(label)) return label;
+            if (label == "signed up") return I18n.Tr("signed up");
+            if (label == "mutual forfeit") return I18n.Tr("mutual forfeit");
+            if (label == "CHAMPION") return I18n.Tr("CHAMPION");
+            if (label == "won by forfeit") return I18n.Tr("won by forfeit");
+            if (label == "advanced") return I18n.Tr("advanced");
+            if (label == "3rd place") return I18n.Tr("3rd place");
+            int n;
+            if (LabelRound(label, "eliminated WB R", out n)) return I18n.TrF("eliminated WB R{0}", n);
+            if (LabelRound(label, "eliminated LB R", out n)) return I18n.TrF("eliminated LB R{0}", n);
+            if (LabelRound(label, "eliminated GF R", out n)) return I18n.TrF("eliminated GF R{0}", n);
+            if (LabelRound(label, "eliminated GF Reset R", out n)) return I18n.TrF("eliminated GF Reset R{0}", n);
+            if (LabelRound(label, "eliminated TP R", out n)) return I18n.TrF("eliminated TP R{0}", n);
+            if (LabelRound(label, "WB R", out n)) return I18n.TrF("WB R{0}", n);
+            if (LabelRound(label, "LB R", out n)) return I18n.TrF("LB R{0}", n);
+            if (LabelRound(label, "GF R", out n)) return I18n.TrF("GF R{0}", n);
+            if (LabelRound(label, "GF Reset R", out n)) return I18n.TrF("GF Reset R{0}", n);
+            if (LabelRound(label, "TP R", out n)) return I18n.TrF("TP R{0}", n);
+            return label;
+        }
+
+        // The in-game tournament banner: main.py composes it as
+        // ("Async" | "Sync") + " Tournament - " + tournaments._round_label.
+        // GameStateWatcher.SetTournamentContext maps it once at store time.
+        internal static string TrTournamentBanner(string label)
+        {
+            if (string.IsNullOrEmpty(label)) return label;
+            bool isAsync = label.StartsWith("Async Tournament - ", StringComparison.Ordinal);
+            if (!isAsync && !label.StartsWith("Sync Tournament - ", StringComparison.Ordinal)) return label;
+            string round = TrRoundLabel(label.Substring(isAsync ? "Async Tournament - ".Length : "Sync Tournament - ".Length));
+            if (round == null) return label;
+            return isAsync ? I18n.TrF("Async Tournament - {0}", round) : I18n.TrF("Sync Tournament - {0}", round);
+        }
+
+        private static string TrRoundLabel(string r)
+        {
+            if (r == "Grand Final") return I18n.Tr("Grand Final");
+            if (r == "Grand Final Reset") return I18n.Tr("Grand Final Reset");
+            if (r == "Third-Place Match") return I18n.Tr("Third-Place Match");
+            int n;
+            if (LabelRound(r, "Winners R", out n)) return I18n.TrF("Winners R{0}", n);
+            if (LabelRound(r, "Losers R", out n)) return I18n.TrF("Losers R{0}", n);
+            return null;
+        }
+
+        // True when label is prefix followed by a round number and nothing else.
+        private static bool LabelRound(string label, string prefix, out int n)
+        {
+            n = 0;
+            if (!label.StartsWith(prefix, StringComparison.Ordinal)) return false;
+            string rest = label.Substring(prefix.Length);
+            if (rest.Length == 0 || rest.Length > 3) return false;
+            foreach (char c in rest) if (c < '0' || c > '9') return false;
+            n = int.Parse(rest, System.Globalization.CultureInfo.InvariantCulture);
+            return true;
+        }
+
         private static string ExtractServerDetail(string resp)
         {
             if (string.IsNullOrEmpty(resp)) return "no response";
@@ -9893,9 +9967,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 if (m.opponent_steam_id == oppSid)
                 {
-                    string kindTag = (m.kind ?? "").ToUpper();
+                    string kindTag = m.kind == "sync" ? I18n.Tr("SYNC")
+                                   : m.kind == "async" ? I18n.Tr("ASYNC")
+                                   : (m.kind ?? "").ToUpper();
                     UIFactory.SetText(txtTournamentGame,
-                        $"<color=#FFD94D>* {kindTag} TOURNAMENT GAME - vs {m.opponent_display_name ?? "opponent"}  (results auto-recorded)</color>");
+                        I18n.TrF("<color=#FFD94D>* {0} TOURNAMENT GAME - vs {1}  (results auto-recorded)</color>",
+                                 kindTag, m.opponent_display_name ?? I18n.Tr("opponent")));
                     tournamentIndRow.SetActive(true);
                     return;
                 }
@@ -10119,7 +10196,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (b.settled) continue;
                 if (ledgerLines >= LEDGER_MAX_LINES) { ledgerOverflow++; continue; }
                 ledgerLines++;
-                sb.Append($"<color=#FFD94D>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)}</color> <color=#AAA>- in play, score {b.series_score}</color>\n");
+                string arm = ServerTextRules.BetArm(b.bet_on_steam_id, b.series_score);
+                string onName = Nm(ServerTextRules.BetOnName(arm, b.bet_on_name));
+                string vsName = Nm(ServerTextRules.BetVsName(arm, b.vs_name));
+                sb.Append($"<color=#FFD94D>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2}", b.amount.ToString("N0"), onName, vsName)}</color> <color=#AAA>{I18n.TrF("- in play, score {0}", ServerTextRules.BetScore(arm, b.series_score))}</color>\n");
             }
             foreach (var b in bets)
             {
@@ -10136,12 +10216,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 string st = b.state;
                 if (string.IsNullOrEmpty(st))
                     st = b.payout == b.amount ? "refunded" : b.payout > 0 ? "won" : "lost";
+                string sArm = ServerTextRules.BetArm(b.bet_on_steam_id, b.series_score);
+                string sOnName = Nm(ServerTextRules.BetOnName(sArm, b.bet_on_name));
+                string sVsName = Nm(ServerTextRules.BetVsName(sArm, b.vs_name));
                 if (st == "refunded")
-                    sb.Append($"<color=#BBB>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - refunded, series never finished</color>\n");
+                    sb.Append($"<color=#BBB>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - refunded, series never finished", b.amount.ToString("N0"), sOnName, sVsName)}</color>\n");
                 else if (st == "won")
-                    sb.Append($"<color=#66DD66>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - WON {Math.Max(0, b.payout - b.amount):N0} gold</color>\n");
+                    sb.Append($"<color=#66DD66>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - WON {3} gold", b.amount.ToString("N0"), sOnName, sVsName, Math.Max(0, b.payout - b.amount).ToString("N0"))}</color>\n");
                 else
-                    sb.Append($"<color=#DD7777>{BetDate(b)}  Bet {b.amount:N0} gold on {Nm(b.bet_on_name)} vs {Nm(b.vs_name)} - LOST</color>\n");
+                    sb.Append($"<color=#DD7777>{BetDate(b)}  {I18n.TrF("Bet {0} gold on {1} vs {2} - LOST", b.amount.ToString("N0"), sOnName, sVsName)}</color>\n");
             }
             if (ledgerOverflow > 0)
                 sb.Append($"<color=#888>{I18n.TrF("+{0} more bets", ledgerOverflow)}</color>\n");
@@ -10292,14 +10375,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             string tag = "";
             if (s.is_tournament)
             {
-                string kindSuffix = string.IsNullOrEmpty(s.tournament_kind)
-                    ? ""
-                    : $" {char.ToUpper(s.tournament_kind[0]) + s.tournament_kind.Substring(1)}";
-                tag = $"<color=#FFD94D><b>[TOURNAMENT{kindSuffix}]</b></color>  ";
+                string tagText = s.tournament_kind == "async" ? I18n.Tr("TOURNAMENT Async")
+                               : s.tournament_kind == "sync" ? I18n.Tr("TOURNAMENT Sync")
+                               : string.IsNullOrEmpty(s.tournament_kind) ? I18n.Tr("TOURNAMENT")
+                               // a kind the server may add later: shown as sent, as before
+                               : I18n.TrF("TOURNAMENT {0}", char.ToUpper(s.tournament_kind[0]) + s.tournament_kind.Substring(1));
+                tag = $"<color=#FFD94D><b>[{tagText}]</b></color>  ";
             }
             else if (s.is_private)
             {
-                tag = "<color=#888><b>[PRIVATE]</b></color>  ";
+                tag = $"<color=#888><b>[{I18n.Tr("PRIVATE")}]</b></color>  ";
             }
             string line = tag +
                           $"<color=#AAF>{Nm(s.p1_name, 12)}</color> ({s.p1_rating})  " +
@@ -11403,13 +11488,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             // is PurchaseItem's own job (ApiClient side), and a
                             // NEW click at the repainted price is required;
                             // never auto-retry at the new price.
-                            if (!ok && resp != null && resp.Contains("price_changed"))
+                            if (!ok && resp == ApiClient.PriceChangedSentinel)
                                 UIFactory.SetTextRaw(txtShopStatus,
                                     I18n.Tr("<color=#FF8888>The price changed - check the new price and buy again.</color>"));
                             else
                                 UIFactory.SetTextRaw(txtShopStatus, ok
                                     ? I18n.Tr("<color=#88FF88>Purchased!</color>")
-                                    : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", resp));
+                                    : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", TrShopRefusal(resp) ?? resp));
                             dirty = true;
                         };
                         if (r.kind == "music_album")
@@ -15601,9 +15686,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // unrated modes carry no elo tails, so they get that space back.
             int budget=(wElo.Length==0&&lElo.Length==0)?44:36;
             string leftFit,rightFit;
-            FitLabelPair(m.left_label??"?",m.right_label??"?",budget,out leftFit,out rightFit);
+            FitLabelPair(m.left_label??"?",ServerTextRules.SeriesRightLabel(m.mode,m.right_label)??"?",budget,out leftFit,out rightFit);
             string line=$"<color=#8899AA>{tag}</color> <color=#FFFFFF>{Nm(leftFit)}</color>{wElo}"
-                      +$"  <b>{m.score}</b>  <color=#AAAAAA>{Nm(rightFit)}</color>{lElo}"
+                      +$"  <b>{ServerTextRules.SeriesScore(m.mode,m.score)}</b>  <color=#AAAAAA>{Nm(rightFit)}</color>{lElo}"
                       +(m.mode=="ffa"?FfaSettingsSummary(m.ffa_settings):RulesTag(m.has_rules,m.rules_ff,m.rules_sc,m.mode=="1v2"?(bool?)m.rules_xp:null))+"\n";
             if(m.bets!=null)
             {
@@ -25211,7 +25296,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         // dispatch on that identity.
                         CompetitiveUI.ShowNotification(BroadcastMode.IsBroadcastIdentity
                             ? "Reconnect suppressed (broadcast identity)"
-                            : $"Reconnecting to {roomName} (region {t.photon_region ?? "default"})", new Color(0.5f, 0.8f, 1f));
+                            : I18n.TrF("Reconnecting to {0} (region {1})", roomName, t.photon_region ?? I18n.Tr("default")), new Color(0.5f, 0.8f, 1f));
                         break;
                     }
                 }
@@ -25521,7 +25606,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static readonly System.Globalization.CultureInfo _INV = System.Globalization.CultureInfo.InvariantCulture;
         private static string _FmtSlot(string iso, bool includeTz = true)
         {
-            if (string.IsNullOrEmpty(iso)) return "(TBD)";
+            if (string.IsNullOrEmpty(iso)) return I18n.Tr("(TBD)");
             try
             {
                 var utc = DateTime.Parse(iso, _INV, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
@@ -25790,8 +25875,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             bool vacantBye = m.status == "bye_auto"
                 && string.IsNullOrEmpty(m.p1_display_name)
                 && string.IsNullOrEmpty(m.p2_display_name);
-            string p1Name = blankNames ? "?" : (m.p1_display_name ?? (vacantBye ? "-" : (m.is_bye ? "BYE" : "TBD")));
-            string p2Name = blankNames ? "?" : (m.p2_display_name ?? (vacantBye ? "-" : (m.is_bye ? "BYE" : "TBD")));
+            string p1Name = blankNames ? "?" : (m.p1_display_name ?? (vacantBye ? "-" : (m.is_bye ? I18n.Tr("BYE") : I18n.Tr("TBD"))));
+            string p2Name = blankNames ? "?" : (m.p2_display_name ?? (vacantBye ? "-" : (m.is_bye ? I18n.Tr("BYE") : I18n.Tr("TBD"))));
             string p1Score = "", p2Score = "";
             if (m.status == "completed")
             {
@@ -26399,14 +26484,16 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                                 {
                                     float left = am.scheduled_seconds_left - (Time.realtimeSinceStartup - am.fetched_at_realtime);
                                     if (left < 0) left = 0;
-                                    cdown = $" starts in <color=#FFDE88>{(int)(left / 60)}:{(int)(left % 60):00}</color>";
+                                    cdown = I18n.TrF(" starts in <color=#FFDE88>{0}:{1:00}</color>", (int)(left / 60), (int)(left % 60));
                                 }
                                 break;
                             }
                     string earlyState = iPressed
-                        ? (oppPressed ? "" : "  <color=#7FE8C3>(Play Now sent - waiting on opponent)</color>")
-                        : "  <color=#888>(both press Play Now to skip the break)</color>";
-                    myMatchLine = $"Next match (R{m.round}{(m.bracket_side == "TP" ? " 3rd Place" : "")}): vs <color=#FFDE88>{opp2 ?? "?"}</color> -{cdown}{earlyState}";
+                        ? (oppPressed ? "" : I18n.Tr("  <color=#7FE8C3>(Play Now sent - waiting on opponent)</color>"))
+                        : I18n.Tr("  <color=#888>(both press Play Now to skip the break)</color>");
+                    myMatchLine = I18n.TrF("Next match (R{0}{1}): vs <color=#FFDE88>{2}</color> -{3}{4}",
+                                      m.round, m.bracket_side == "TP" ? I18n.Tr(" 3rd Place") : "",
+                                      opp2 ?? "?", cdown, earlyState);
                     showMyMatch = true;
                     inBreak = true;
                     showPlayNow = !iPressed;
@@ -26457,10 +26544,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     else
                     {
                         string readyState = t.my_ready
-                            ? (oppReady ? "<color=#60FF80>both ready - connecting...</color>"
-                                        : "<color=#FFD94D>waiting on opponent to ready</color>")
-                            : "<color=#FF9060>press Ready Up</color>";
-                        myMatchLine = $"Your match (R{m.round}{(m.bracket_side == "TP" ? " 3rd Place" : "")}): vs <color=#FFDE88>{opp ?? "?"}</color>  -  {readyState}";
+                            ? (oppReady ? I18n.Tr("<color=#60FF80>both ready - connecting...</color>")
+                                        : I18n.Tr("<color=#FFD94D>waiting on opponent to ready</color>"))
+                            : I18n.Tr("<color=#FF9060>press Ready Up</color>");
+                        myMatchLine = I18n.TrF("Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>",
+                                          m.round, m.bracket_side == "TP" ? I18n.Tr(" 3rd Place") : "",
+                                          opp ?? "?")
+                                    + "  -  " + readyState;
                     }
                     showMyMatch = true;
 
@@ -26485,7 +26575,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                             Plugin.Log.LogInfo(BroadcastMode.IsBroadcastIdentity
                                 ? $"[TOURNAMENT] Auto-connect suppressed for match {m.match_id} (broadcast identity)"
                                 : $"[TOURNAMENT] Auto-connecting to {roomName} in region '{t.photon_region ?? "(client default)"}' for match {m.match_id}");
-                            CompetitiveUI.ShowNotification($"Tournament match starting vs {opp}", new Color(0.5f, 1f, 0.5f));
+                            CompetitiveUI.ShowNotification(I18n.TrF("Tournament match starting vs {0}", opp), new Color(0.5f, 1f, 0.5f));
                         }
                     }
                     break;
@@ -26527,7 +26617,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 : $"  <color=#AABBEE>[{t.photon_region.ToUpper()}]</color>";
             UIFactory.SetText(txtTRoomCode,
                 (string.IsNullOrEmpty(myRoomCode) || BroadcastMode.IsBroadcastIdentity) ? ""
-                : $"Room code: <color=#C0E0FF>{myRoomCode}</color>{regionBadge}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>");
+                : I18n.TrF("Room code: <color=#C0E0FF>{0}</color>{1}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>", myRoomCode, regionBadge));
             // Ready Up / Reconnect are sync-only from here on. Both exist to
             // get two players into ONE server-issued room at the same moment;
             // async has no such moment, so on that tab they were buttons that
@@ -26616,22 +26706,22 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     }
                     // Priority: placement > bracket progress > ready/forfeit/penalty.
                     string status;
-                    if (s.placed_rank == 1) status = "<color=#FFD850>1st</color>";
-                    else if (s.placed_rank == 2) status = "<color=#C0C0C0>2nd</color>";
-                    else if (s.placed_rank == 3) status = "<color=#CD7F32>3rd</color>";
+                    if (s.placed_rank == 1) status = I18n.Tr("<color=#FFD850>1st</color>");
+                    else if (s.placed_rank == 2) status = I18n.Tr("<color=#C0C0C0>2nd</color>");
+                    else if (s.placed_rank == 3) status = I18n.Tr("<color=#CD7F32>3rd</color>");
                     else if (!string.IsNullOrEmpty(s.progress_label))
                     {
                         // Color code by state: in-bracket = white, eliminated = dim red,
                         // champion = gold (already handled above).
                         if (s.progress_label.StartsWith("eliminated"))
-                            status = $"<color=#A86060>{s.progress_label}</color>";
+                            status = "<color=#A86060>" + TrBracketProgress(s.progress_label) + "</color>";
                         else if (s.progress_label == "CHAMPION")
-                            status = "<color=#FFD850>CHAMPION</color>";
+                            status = I18n.Tr("<color=#FFD850>CHAMPION</color>");
                         else
-                            status = $"<color=#AACCFF>{s.progress_label}</color>";
+                            status = "<color=#AACCFF>" + TrBracketProgress(s.progress_label) + "</color>";
                     }
-                    else if (s.forfeited) status = "<color=#FF6060>FORFEIT</color>";
-                    else if (s.ready) status = "<color=#60FF60>ready</color>";
+                    else if (s.forfeited) status = I18n.Tr("<color=#FF6060>FORFEIT</color>");
+                    else if (s.ready) status = I18n.Tr("<color=#60FF60>ready</color>");
                     else status = I18n.TrF("<color=#888>{0}% pen</color>", (s.penalty_at_signup * 100f).ToString("0", _INV));
                     UIFactory.SetText(texts[0], seed);
                     // Raw (find 15): a bare user-authored name must never
@@ -26707,7 +26797,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 {
                     UIFactory.SetColor(tBracketRowTexts[brkIdx], C_DIM);
                     UIFactory.SetText(tBracketRowTexts[brkIdx],
-                        $"<i>Bracket revealed when the tournament starts ({_FmtSlot(t.scheduled_start_ts)}).</i>");
+                        I18n.TrF("<i>Bracket revealed when the tournament starts ({0}).</i>", _FmtSlot(t.scheduled_start_ts)));
                     tBracketRowPool[brkIdx].SetActive(true);
                     brkIdx++;
                 }
@@ -26802,7 +26892,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         g.sideLabel == "TP" ? I18n.Tr("3rd Place") : g.sideLabel;
                     string roundSuffix = (g.sideLabel == "W" || g.sideLabel == "L") ? $" R{g.round}" : "";
                     string progress = ready > 0
-                        ? $"<color=#FFD94D>{completed}/{matches.Count}</color> <color=#888>({ready} live)</color>"
+                        ? I18n.TrF("<color=#FFD94D>{0}/{1}</color> <color=#888>({2} live)</color>", completed, matches.Count, ready)
                         : $"<color=#888>{completed}/{matches.Count}</color>";
                     UIFactory.SetColor(tBracketRowTexts[brkIdx], new Color(1f, 0.85f, 0.3f));
                     UIFactory.SetText(tBracketRowTexts[brkIdx],
@@ -26818,11 +26908,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         if (brkIdx >= tBracketRowPool.Count) break;
                         var row = tBracketRowPool[brkIdx];
                         var txt = tBracketRowTexts[brkIdx];
-                        string p1 = m.p1_display_name ?? (m.is_bye ? "BYE" : "TBD");
-                        string p2 = m.p2_display_name ?? (m.is_bye ? "BYE" : "TBD");
+                        string p1 = m.p1_display_name ?? (m.is_bye ? I18n.Tr("BYE") : I18n.Tr("TBD"));
+                        string p2 = m.p2_display_name ?? (m.is_bye ? I18n.Tr("BYE") : I18n.Tr("TBD"));
                         string scoreLine = "";
                         if (m.status == "completed" || m.status == "forfeit" || m.status == "double_forfeit")
-                            scoreLine = (m.status == "completed") ? $" ({m.p1_series_wins}-{m.p2_series_wins})" : $" ({m.status.Replace('_', ' ')})";
+                            scoreLine = (m.status == "completed") ? $" ({m.p1_series_wins}-{m.p2_series_wins})" : " (" + (m.status == "forfeit" ? I18n.Tr("forfeit")
+                                       : m.status == "double_forfeit" ? I18n.Tr("double forfeit")
+                                       : m.status.Replace('_', ' ')) + ")";
                         Color rowColor = m.status == "completed" ? new Color(0.75f, 0.9f, 1f)
                             : m.status == "ready" ? new Color(1f, 0.9f, 0.4f)
                             : m.status == "active" ? new Color(0.8f, 1f, 0.4f)
@@ -26837,15 +26929,16 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                                 var remaining = dl - DateTime.UtcNow;
                                 if (remaining.TotalSeconds > 0)
                                 {
+                                    // The same catalogue keys AsyncDeadlineTail uses.
                                     deadlineLine = remaining.TotalDays >= 1
-                                        ? $"   <color=#FFAA44>deadline: {(int)remaining.TotalDays}d {remaining.Hours}h left</color>"
-                                        : $"   <color=#FF6060>deadline: {remaining.Hours}h {remaining.Minutes}m left</color>";
+                                        ? "   " + I18n.TrF("<color=#FFAA44>deadline: {0}d {1}h left</color>", (int)remaining.TotalDays, remaining.Hours)
+                                        : "   " + I18n.TrF("<color=#FF6060>deadline: {0}h {1}m left</color>", remaining.Hours, remaining.Minutes);
                                 }
-                                else deadlineLine = "   <color=#FF4040>deadline passed</color>";
+                                else deadlineLine = "   " + I18n.Tr("<color=#FF4040>deadline passed</color>");
                             }
                             catch { }
                         }
-                        UIFactory.SetText(txt, $"        {p1}  vs  {p2}{scoreLine}{deadlineLine}");
+                        UIFactory.SetText(txt, "        " + p1 + "  " + I18n.TrF("vs {0}", p2) + scoreLine + deadlineLine);
                         row.SetActive(true);
                         _tBracketRowPurposes.Add(new BracketRowPurpose { isHeader = false, groupKey = g.key });
                         brkIdx++;
@@ -28794,9 +28887,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     string ratingDisplay = q.using_fallback_rating
                         ? $"<color=#FFB347>{q.balance_rating}</color> <color=#888>1v1</color>"
                         : $"<color=#FFFFFF>{q.rating}</color>";
-                    string statusTag = q.status == "searching"
-                        ? $"<color=#66CCFF>searching</color>"
-                        : q.status == "matched" ? $"<color=#FFD94D>matched</color>" : $"<color=#88FF88>{q.status}</color>";
+                    string statusTag = q.status == "searching" ? I18n.Tr("<color=#66CCFF>searching</color>")
+                        : q.status == "matched" ? I18n.Tr("<color=#FFD94D>matched</color>")
+                        : q.status == "ready" ? I18n.Tr("<color=#88FF88>ready</color>")
+                        : $"<color=#88FF88>{q.status}</color>";
                     int waitMin = q.wait_seconds / 60;
                     int waitSec = q.wait_seconds % 60;
                     string waitStr = waitMin > 0 ? $"{waitMin}m{waitSec:D2}s" : $"{waitSec}s";
