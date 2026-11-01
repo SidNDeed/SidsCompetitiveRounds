@@ -10694,7 +10694,7 @@ def test_the_admin_log_readers_answer_when_the_volume_does_not(logdir, admin,
     async def drive(download, detail):
         held.reset()
         loop = asyncio.get_running_loop()
-        loop.call_later(HOLD, held.release)
+        release = loop.call_later(HOLD, held.release)
         ddb = Scripted({row_key: [[{"id": RID, "bug_number": 41,
                                     "log_filename": name, "log_bytes": 10,
                                     "created_at": when}]]})
@@ -10705,14 +10705,20 @@ def test_the_admin_log_readers_answer_when_the_volume_does_not(logdir, admin,
         except HTTPException as ex:
             got = ex
         d_took = time.monotonic() - at
+        # THE HOLD ENDS WITH ITS READER. Both readers run on one loop, so a
+        # timer left armed would release the NEXT reader's hold early -- and
+        # inside its ceiling whenever that reader's un-held work runs long
+        # (the scrub tests' slowed-hop control showed it).
+        release.cancel()
         await held.drained()
         held.reset()
-        loop.call_later(HOLD, held.release)
+        release = loop.call_later(HOLD, held.release)
         pdb = Scripted({DETAIL_KEY: [[detail_row]], EVENTS_KEY: [[]]})
         at = time.monotonic()
         pane = await detail(report_id=str(RID), admin_steam_id=STEAM,
                             hmac_signature="s", include_log=True, db=pdb)
         p_took = time.monotonic() - at
+        release.cancel()
         await held.drained()
         return got, d_took, ddb, pane, p_took, pdb
 
@@ -10837,12 +10843,18 @@ def test_the_admin_log_scrub_holds_no_connection_and_answers_past_its_ceiling(
         at = time.monotonic()
         entered = await _until(lambda: held.entered == 1, 5.0)
         out_at_pass_two = pool.out
-        asyncio.get_running_loop().call_later(HOLD, held.release)
+        release = asyncio.get_running_loop().call_later(HOLD, held.release)
         try:
             got = await task
         except HTTPException as ex:
             got = ex
         took = time.monotonic() - at
+        # THE HOLD ENDS WITH ITS READER. Both readers run on one loop, so a
+        # timer left armed would release the NEXT reader's hold early -- and
+        # inside its ceiling whenever that reader's un-held work runs long
+        # (pass one slowed to 0.6 s: the download's timer freed the pane's
+        # held pass two inside its 0.2 s ceiling, and the pane served the log).
+        release.cancel()
         await held.drained()
         await db.close()
         return entered, out_at_pass_two, got, took
@@ -10960,12 +10972,18 @@ def test_the_admin_log_scrub_answers_when_its_first_pass_does_not_finish(
         at = time.monotonic()
         entered = await _until(lambda: held.entered == 1, 5.0)
         out_at_pass_one = pool.out
-        asyncio.get_running_loop().call_later(HOLD, held.release)
+        release = asyncio.get_running_loop().call_later(HOLD, held.release)
         try:
             got = await task
         except HTTPException as ex:
             got = ex
         took = time.monotonic() - at
+        # THE HOLD ENDS WITH ITS READER. Both readers run on one loop, so a
+        # timer left armed would release the NEXT reader's hold early -- and
+        # inside its ceiling whenever that reader's un-held work runs long
+        # (in the pass-two test above, pass one slowed to 0.6 s let the
+        # download's timer free the pane's held pass two inside its ceiling).
+        release.cancel()
         await held.drained()
         await db.close()
         return entered, out_at_pass_one, got, took
