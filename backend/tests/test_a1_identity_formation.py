@@ -525,23 +525,133 @@ def _awaits(node):
     return any(isinstance(n, _ast.Await) for n in _ast.walk(node))
 
 
-def formation_loop_exits(fn_src):
-    """Every exit of the handler's one `for _form_attempt` loop taken after
-    the loop body's identity barrier, path by path, with the transaction end
-    its path passed last. The loop's `else:` (attempts exhausted) is walked as
-    a path of its own.
+def _ends_inside(node):
+    """Whether `node` names a transaction end in any spelling. The walk
+    places only the plain statements `await db.commit()` and
+    `await db.rollback()` on a path, so any other `.commit` or `.rollback` in
+    its span is one it cannot place, and is reported rather than skipped."""
+    return any(isinstance(n, _ast.Attribute) and n.attr in ("commit", "rollback")
+               for n in _ast.walk(node))
 
-    Returns (exits, n_body, rollbacks, problems):
+
+def _outer_jumps(node):
+    """The `continue` and `break` statements inside `node` that leave it for a
+    loop around it. A loop's own body captures its jumps; its `else:` does
+    not, so a `continue` there restarts the formation loop (rehearsal-four
+    round 1, finding 2). A nested def, lambda or class is a scope no jump
+    leaves."""
+    out = []
+
+    def visit(n, captured):
+        if isinstance(n, (_ast.Continue, _ast.Break)):
+            if not captured:
+                out.append(n)
+        elif isinstance(n, (_ast.For, _ast.AsyncFor, _ast.While)):
+            for c in n.body:
+                visit(c, True)
+            for c in n.orelse:
+                visit(c, captured)
+        elif not isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                _ast.Lambda, _ast.ClassDef)):
+            for c in _ast.iter_child_nodes(n):
+                visit(c, captured)
+
+    visit(node, False)
+    return out
+
+
+# A read that takes a row or advisory lock, or a statement that writes.
+_LOCKING_OR_WRITING_SQL = _re.compile(
+    r"\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b|\bFOR\s+(?:KEY\s+)?SHARE\b|\bLOCK\b"
+    r"|\bpg_(?:try_)?advisory|\b(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE)\b",
+    _re.IGNORECASE)
+
+
+def _plain_read(call):
+    """Whether `call` is `db.execute(text(<sql>), ...)` with <sql> a string
+    constant, or a module-level name of main.py holding one, that starts with
+    SELECT or WITH and has no locking clause, lock function or writing
+    statement."""
+    if not (isinstance(call, _ast.Call) and isinstance(call.func, _ast.Attribute)
+            and isinstance(call.func.value, _ast.Name)
+            and call.func.value.id == "db" and call.func.attr == "execute"
+            and call.args and isinstance(call.args[0], _ast.Call)
+            and isinstance(call.args[0].func, _ast.Name)
+            and call.args[0].func.id == "text"
+            and len(call.args[0].args) == 1):
+        return False
+    arg = call.args[0].args[0]
+    if isinstance(arg, _ast.Constant):
+        sql = arg.value
+    elif isinstance(arg, _ast.Name):
+        sql = getattr(main, arg.id, None)
+    else:
+        return False
+    return (isinstance(sql, str)
+            and sql.lstrip().upper().startswith(("SELECT", "WITH"))
+            and not _LOCKING_OR_WRITING_SQL.search(sql))
+
+
+def _only_plain_reads(node):
+    """Every await in `node` is a plain read (_plain_read). That is what a
+    gather site may run after its rollback: the rediscovery
+    _ffa_queue_poll_inner makes there ("The rollback above is what makes the
+    rediscovery legal"), and the searching counts its no-match exits answer
+    with. It takes no lock and writes nothing, so the next attempt's barrier
+    still runs with no row held."""
+    return all(_plain_read(n.value) for n in _ast.walk(node)
+               if isinstance(n, _ast.Await))
+
+
+def _block_holding(tree, node):
+    """The statement list that holds `node`, and its index there."""
+    for parent in _ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(parent, field, None)
+            if isinstance(block, list):
+                for i, st in enumerate(block):
+                    if st is node:
+                        return block, i
+    return None, None
+
+
+def formation_loop_exits(fn_src, form="return"):
+    """Every exit of the handler's one `for _form_attempt` loop taken after
+    the loop body's identity barrier, path by path, with the transaction ends
+    its path passed, in order. The loop's `else:` (attempts exhausted) is
+    walked as a path of its own.
+
+    form "return" (queue_poll): the success exit commits and returns inside
+    the loop, and nothing may await on a path after it ended the transaction.
+    form "gather" (ovt_queue_poll, _ffa_queue_poll_inner): the success exit
+    is a `break` that carries the open transaction, barrier held, to the
+    formation writes after the loop, so the statements after the loop are
+    walked from that state through the one that holds the _lease_acquire_many
+    call; and since a gather site rediscovers after its rollback, a plain
+    read (_only_plain_reads) may follow a rollback there. Nothing may await
+    after a commit in either form.
+
+    Returns (exits, n_body, n_loop, (rollbacks, passed), problems):
       exits      [(line, kind, end, node)]: kind continue, break, raise or
-                 return; end 'rollback', 'commit' or None. exits[:n_body]
-                 are the loop body's, the rest the else's;
-      rollbacks  (the line of every `await db.rollback()` in that span, the
-                 lines some exit's path passed last);
-      problems   [(line, why)]: a statement that awaits after its path ended
-                 the transaction (the barrier went with it), a branch that
-                 ends the transaction and falls through, an end or an exit
-                 inside a construct this walk does not model, an attempt that
-                 runs off the loop body without a rollback.
+                 return; end the transaction ends the path passed, in order
+                 ('rollback', 'commit', 'commit, rollback', ...), or None.
+                 exits[:n_body] are the loop body's, exits[n_body:n_loop] the
+                 else's, exits[n_loop:] the gather form's after the loop;
+      rollbacks  (the line of every `await db.rollback()` in the walked span,
+                 the lines of the rollbacks that ended an exit's path);
+      problems   [(line, why)]: a second transaction end on one path (finding
+                 1 of rehearsal-four round 1: a commit before the rollback
+                 must not hide behind it); a statement that awaits after its
+                 path ended the transaction (the barrier went with it),
+                 except a gather site's plain read after its rollback; a
+                 branch that ends the transaction and falls through; a
+                 `continue` or `break` for the formation loop inside a nested
+                 construct (finding 2: a nested loop's `else: continue`), and
+                 any other end or exit inside a construct this walk does not
+                 model, or a transaction end in a spelling it does not read;
+                 an attempt that runs off the loop body without a rollback;
+                 a gather formation that passes its lease acquisition after a
+                 transaction end, or has none.
     Lines are handler-relative.
     """
     tree = _ast.parse(fn_src)
@@ -549,75 +659,118 @@ def formation_loop_exits(fn_src):
              and isinstance(n.target, _ast.Name)
              and n.target.id == "_form_attempt"]
     if len(loops) != 1:
-        return [], 0, (set(), set()), [(0, f"{len(loops)} formation loops")]
+        return [], 0, 0, (set(), set()), [(0, f"{len(loops)} formation loops")]
     loop = loops[0]
     barrier = [i for i, st in enumerate(loop.body) if any(
         isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
         and c.func.id == "_identity_lock_many" for c in _ast.walk(st))]
     if not barrier:
-        return [], 0, (set(), set()), [(loop.lineno, "no identity barrier")]
+        return [], 0, 0, (set(), set()), [(loop.lineno, "no identity barrier")]
+    gather = form == "gather"
     exits, problems, passed = [], [], set()
 
-    def walk(stmts, end, last):
-        # (end, last) for the path that falls off `stmts`; None when every
-        # path through them exits
+    def ended(state):
+        return ", ".join(kind for kind, _ln in state) or None
+
+    def may_await(node, state):
+        if not state:
+            return True
+        if gather and ended(state) == "rollback":
+            return _only_plain_reads(node)
+        return not _awaits(node)
+
+    def walk(stmts, state):
+        # `state`: the transaction ends this path passed, in order, as
+        # (kind, line). Returns the state of the path that falls off
+        # `stmts`; None when every path through them exits.
         for st in stmts:
             kind = _txn_end(st)
             if kind is not None:
-                end, last = kind, st.lineno
+                if state:
+                    problems.append((st.lineno, f"{kind} after {ended(state)}"))
+                state = state + ((kind, st.lineno),)
                 continue
             if isinstance(st, (_ast.Continue, _ast.Break, _ast.Raise,
                                _ast.Return)):
-                if end is not None and _awaits(st):
-                    problems.append((st.lineno, f"awaits after {end}"))
+                if _ends_inside(st):
+                    problems.append((st.lineno, "a transaction end in a "
+                                     "spelling this walk does not read"))
+                if not may_await(st, state):
+                    problems.append((st.lineno, f"awaits after {ended(state)}"))
+                end = ended(state)
                 exits.append((st.lineno, type(st).__name__.lower(), end, st))
                 if end == "rollback":
-                    passed.add(last)
+                    passed.add(state[-1][1])
                 return None
             if isinstance(st, _ast.If):
-                if end is not None and _awaits(st.test):
-                    problems.append((st.lineno, f"awaits after {end}"))
-                live = [r for r in (walk(st.body, end, last),
-                                    walk(st.orelse, end, last))
+                if _ends_inside(st.test):
+                    problems.append((st.lineno, "a transaction end in a "
+                                     "spelling this walk does not read"))
+                if not may_await(st.test, state):
+                    problems.append((st.lineno, f"awaits after {ended(state)}"))
+                live = [r for r in (walk(st.body, state),
+                                    walk(st.orelse, state))
                         if r is not None]
                 if not live:
                     return None
-                if any(r != (end, last) for r in live):
+                if any(r != state for r in live):
                     problems.append((st.lineno, "a branch ends the "
                                      "transaction and falls through"))
-                end, last = live[0]
+                state = live[0]
                 continue
-            # Anything else is one plain step. A loop's own continue/break
-            # stay inside it; any other end or exit in here is a shape the
-            # walk does not follow, so it is reported rather than skipped.
-            loop_like = isinstance(st, (_ast.For, _ast.AsyncFor, _ast.While))
-            if any(_txn_end(n) or isinstance(n, (_ast.Raise, _ast.Return))
-                   or (not loop_like
-                       and isinstance(n, (_ast.Continue, _ast.Break)))
-                   for n in list(_ast.walk(st))[1:]):
+            # Anything else is one plain step. A jump in it that leaves for
+            # the formation loop, or an end or an exit anywhere in it, is a
+            # shape this walk does not follow, so it is reported rather than
+            # skipped.
+            if _outer_jumps(st):
+                problems.append((st.lineno, "a continue or break for the "
+                                 "formation loop inside a nested construct"))
+            if _ends_inside(st) or any(isinstance(n, (_ast.Raise, _ast.Return))
+                                       for n in _ast.walk(st)):
                 problems.append((st.lineno, "an end or an exit inside a "
                                  "construct this walk does not model"))
-            if end is not None and _awaits(st):
-                problems.append((st.lineno, f"awaits after {end}"))
-        return end, last
+            if not may_await(st, state):
+                problems.append((st.lineno, f"awaits after {ended(state)}"))
+        return state
 
-    off = walk(loop.body[barrier[0] + 1:], None, None)
+    off = walk(loop.body[barrier[0] + 1:], ())
     if off is not None:
-        if off[0] == "rollback":          # an implicit continue
+        if ended(off) == "rollback":          # an implicit continue
             exits.append((loop.body[-1].lineno, "continue", "rollback", None))
-            passed.add(off[1])
+            passed.add(off[-1][1])
         else:
             problems.append((loop.body[-1].lineno, "the attempt runs off the "
-                             f"loop body after {off[0] or 'no transaction end'}"))
+                             f"loop body after {ended(off) or 'no transaction end'}"))
     n_body = len(exits)
     if not loop.orelse:
         problems.append((loop.lineno, "no exhausted-attempts exit"))
-    elif walk(loop.orelse, None, None) is not None:
+    elif walk(loop.orelse, ()) is not None:
         problems.append((loop.orelse[0].lineno,
                          "the exhausted-attempts path does not exit"))
-    rollbacks = {n.lineno for st in loop.body[barrier[0] + 1:] + loop.orelse
-                 for n in _ast.walk(st) if _txn_end(n) == "rollback"}
-    return exits, n_body, (rollbacks, passed), problems
+    n_loop = len(exits)
+    span = loop.body[barrier[0] + 1:] + loop.orelse
+    if gather:
+        block, at = _block_holding(tree, loop)
+        after = block[at + 1:]
+        acquire = [i for i, st in enumerate(after) if any(
+            isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+            and c.func.id == "_lease_acquire_many" for c in _ast.walk(st))]
+        if not acquire:
+            problems.append((loop.lineno, "no _lease_acquire_many after the "
+                             "formation loop"))
+        else:
+            post = after[:acquire[0] + 1]
+            span = span + post
+            out = walk(post, ())
+            if out is None:
+                problems.append((post[-1].lineno, "no path after the loop "
+                                 "reaches the formation writes"))
+            elif out:
+                problems.append((post[-1].lineno, "the formation passes its "
+                                 f"lease acquisition after {ended(out)}"))
+    rollbacks = {n.lineno for st in span for n in _ast.walk(st)
+                 if _txn_end(n) == "rollback"}
+    return exits, n_body, n_loop, (rollbacks, passed), problems
 
 
 def _is_matched_answer(node):
@@ -629,19 +782,40 @@ def _is_matched_answer(node):
                     and k.value.value == "matched" for k in value.keywords))
 
 
-def formation_exit_violations(fn_src):
+def _raises_detail(node, detail):
+    """Whether `node` is `raise HTTPException(..., detail=<detail>)`."""
+    exc = getattr(node, "exc", None)
+    return isinstance(node, _ast.Raise) and any(
+        k.arg == "detail" and isinstance(k.value, _ast.Constant)
+        and k.value.value == detail for k in getattr(exc, "keywords", ()))
+
+
+def formation_exit_violations(fn_src, form="return"):
     """The A1 rule over every exit formation_loop_exits derives, as sentences
-    (empty when the loop keeps it): each exit after the barrier rolls back,
-    except ONE, the success exit, which commits and returns the matched
-    answer; and every rollback in that span lies on some exit's path, so the
-    rollbacks are counted against the exits rather than against a number."""
-    exits, _n_body, (rollbacks, passed), problems = formation_loop_exits(fn_src)
+    (empty when the handler keeps it): each exit after the barrier has
+    rolled back, once, with no other transaction end on its path, except ONE
+    success exit -- form "return": the exit that commits once and returns
+    the matched answer; form "gather": the loop's `break` that ends nothing
+    and carries the barrier to the formation writes -- and every rollback in
+    the walked span lies on some exit's path, so the rollbacks are counted
+    against the exits rather than against a number."""
+    exits, n_body, _n_loop, (rollbacks, passed), problems = (
+        formation_loop_exits(fn_src, form))
     out = [f"line {ln}: {why}" for ln, why in problems]
-    commits = [e for e in exits if e[2] == "commit"]
+    if form == "gather":
+        success = [n for _ln, k, e, n in exits[:n_body]
+                   if k == "break" and e is None]
+        if len(success) != 1:
+            out.append(f"{len(success)} success exits (a break that ends "
+                       "nothing); the gather form has exactly one")
+            success = []
+    else:
+        commits = [n for _ln, _k, e, n in exits if e == "commit"]
+        success = [n for n in commits if _is_matched_answer(n)]
+        if len(commits) != 1:
+            success = []
     for ln, kind, end, node in exits:
-        if end == "rollback":
-            continue
-        if end == "commit" and len(commits) == 1 and _is_matched_answer(node):
+        if end == "rollback" or (success and node is success[0]):
             continue
         out.append(f"line {ln}: {kind} after {end or 'no transaction end'}")
     if rollbacks != passed:
@@ -666,7 +840,11 @@ def test_the_formation_loop_is_bounded_and_rolls_back_rather_than_commits():
     count reads 3 again, and passes, when that exit's rollback becomes a
     commit or the drift exit loses its rollback -- a number correlated with
     the rule, not the rule (#732). So each exit is derived and held to the
-    rule, and the rollbacks are counted against the exits."""
+    rule, and the rollbacks are counted against the exits. Rehearsal-four
+    round 1: a path keeps every transaction end it passes, so a commit
+    placed before the drift exit's rollback is refused (finding 1), and a
+    `continue` that leaves a nested loop's `else:` for the formation loop is
+    refused as a shape the walk does not follow (finding 2)."""
     src = _inspect.getsource(main.queue_poll)
     assert "for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):" in src
     assert 'raise HTTPException(status_code=503, detail="queue_contended")' in src
@@ -674,26 +852,25 @@ def test_the_formation_loop_is_bounded_and_rolls_back_rather_than_commits():
     assert bad == [], (
         "queue_poll's formation loop leaves its transaction other than by a "
         "rollback or the one success commit:\n  " + "\n  ".join(bad))
-    exits, n_body, (rollbacks, passed), _problems = formation_loop_exits(src)
+    exits, n_body, n_loop, (rollbacks, passed), _problems = (
+        formation_loop_exits(src))
     # Not vacuous: the drift restart and the exhausted-attempts exit the
     # design names are among the derived exits, each after a rollback; the
     # one commit is the success return; every rollback is an exit's.
     kinds = [(k, e) for _ln, k, e, _n in exits]
+    assert n_loop == len(exits), kinds
     assert ("continue", "rollback") in kinds[:n_body], kinds
     assert kinds[n_body:] == [("raise", "rollback")], kinds
-    exhausted = exits[n_body][3].exc
-    assert any(k.arg == "detail" and isinstance(k.value, _ast.Constant)
-               and k.value.value == "queue_contended"
-               for k in getattr(exhausted, "keywords", ())), (
+    assert _raises_detail(exits[n_body][3], "queue_contended"), (
         _ast.unparse(exits[n_body][3]))
     assert [k for k, e in kinds if e == "commit"] == ["return"], kinds
-    assert rollbacks and len(rollbacks) == len(passed), (
+    assert rollbacks and rollbacks == passed, (
         sorted(rollbacks), sorted(passed))
 
 
 def test_the_formation_exit_oracle_can_fail():
     """Negative control (#391): one planted loop per way the rule can break,
-    beside the shape that keeps it, each refused for its own reason."""
+    beside the shapes that keep it, each refused for its own reason."""
     NL = chr(10)
 
     def handler(body, orelse=("await db.rollback()",
@@ -714,12 +891,44 @@ def test_the_formation_exit_oracle_can_fail():
     win = ["await db.commit()", 'return QueuePollResponse(status="matched")']
     drift = ["if await drifted(db):", "    await db.rollback()", "    continue"]
     assert formation_exit_violations(handler(drift + refuse + win)) == []
+    # A nested loop's own break and continue stay inside it.
+    own_jumps = ["for r in cand:", "    if r is None:", "        break",
+                 "    if r:", "        continue"]
+    assert formation_exit_violations(
+        handler(own_jumps + drift + refuse + win)) == []
 
     planted = [
         # a drift exit that commits: publishes the half-formation
         ("continue after commit", handler(
             ["if await drifted(db):", "    await db.commit()", "    continue"]
             + refuse + win)),
+        # finding 1: a commit placed immediately before the drift exit's
+        # rollback; the rollback after it ends an empty transaction
+        ("rollback after commit", handler(
+            ["if await drifted(db):", "    await db.commit()",
+             "    await db.rollback()", "    continue"] + refuse + win)),
+        ("continue after commit, rollback", handler(
+            ["if await drifted(db):", "    await db.commit()",
+             "    await db.rollback()", "    continue"] + refuse + win)),
+        # finding 2: the drift exit leaves through a nested loop's else,
+        # with no rollback
+        ("a continue or break for the formation loop inside a nested "
+         "construct", handler(
+             ["if await drifted(db):", "    for _never in ():",
+              "        pass", "    else:", "        continue"]
+             + refuse + win)),
+        # the same through a while's else, and through a try
+        ("a continue or break for the formation loop inside a nested "
+         "construct", handler(
+             ["while await pending(db):", "    await settle(db)",
+              "else:", "    break"] + drift + refuse + win)),
+        ("a continue or break for the formation loop inside a nested "
+         "construct", handler(
+             ["try:", "    if await drifted(db):", "        continue",
+              "finally:", "    pass"] + refuse + win)),
+        # a transaction end in a spelling the walk does not read
+        ("an end or an exit inside a construct this walk does not model",
+         handler(["_ = await db.commit()"] + drift + refuse + win)),
         # a refusal that leaves with nothing ended: the writes stay pending
         ("raise after no transaction end", handler(
             drift + [refuse[0], refuse[2]] + win)),
@@ -1160,18 +1369,140 @@ def test_gather_loops_are_bounded_and_end_in_a_refusal(site):
 
 @pytest.mark.parametrize("site", ["ovt_queue_poll", "_ffa_queue_poll_inner"])
 def test_gather_drift_rolls_back_and_never_commits(site):
-    """A commit inside the formation loop would publish a half-formation AND
-    release the barrier -- option (a)'s failure, reached from inside the retry
-    instead of from a helper."""
+    """A1-BRIEF.md, 'Drift restarts are bounded': every drift does
+    rollback(), never commit(); after the third, rollback and 503
+    queue_contended. A commit inside the formation loop would publish a
+    half-formation AND release the barrier -- option (a)'s failure, reached
+    from inside the retry instead of from a helper.
+
+    Derived per exit since rehearsal-four round 1 (finding 6). The test
+    counted `await db.rollback()` >= 3 between the loop header and the lease
+    acquisition, a slice that also holds the no-match exits' rollbacks, so
+    with ovt_queue_poll's drift rollback deleted it read 4 and passed. Now
+    the gather form of the exit walk holds each exit to the rule: every exit
+    after the barrier rolls back, with no other transaction end on its path;
+    the one success `break` ends nothing and carries the barrier through the
+    formation writes to the lease acquisition, every exit on that way rolls
+    back, and nothing ends the transaction before the acquisition. A gather
+    site rediscovers after its rollback (_ffa_queue_poll_inner: "The
+    rollback above is what makes the rediscovery legal"), so a plain read
+    may follow a rollback there, and nothing else may."""
     src = _inspect.getsource(getattr(main, site))
-    loop = src[src.index("for _form_attempt"):]
-    loop = loop[:loop.index("await _lease_acquire_many(")]
-    assert "await db.commit()" not in loop, (
-        f"{site}: the formation loop commits somewhere between the barrier and "
-        f"the lease acquisition")
-    assert loop.count("await db.rollback()") >= 3, (
-        f"{site}: the drift exit, the lease-conflict exit and the exhausted "
-        f"-attempts exit must all roll back")
+    bad = formation_exit_violations(src, "gather")
+    assert bad == [], (
+        f"{site}'s formation leaves its transaction other than by a rollback "
+        "or carries it past a transaction end:\n  " + "\n  ".join(bad))
+    exits, n_body, n_loop, (rollbacks, passed), _problems = (
+        formation_loop_exits(src, "gather"))
+    kinds = [(k, e) for _ln, k, e, _n in exits]
+    # Not vacuous: a drift restart after a rollback, the one success break,
+    # the exhausted-attempts raise after a rollback, and exits after the loop
+    # that end with the acquisition's own refusal, each after a rollback; and
+    # every rollback in the span is an exit's.
+    assert ("continue", "rollback") in kinds[:n_body], kinds
+    assert kinds[:n_body].count(("break", None)) == 1, kinds
+    assert kinds[n_body:n_loop] == [("raise", "rollback")], kinds
+    assert _raises_detail(exits[n_body][3], "queue_contended"), (
+        _ast.unparse(exits[n_body][3]))
+    assert kinds[n_loop:] and kinds[-1] == ("raise", "rollback"), kinds
+    assert _raises_detail(exits[-1][3], "admission_contended"), (
+        _ast.unparse(exits[-1][3]))
+    assert rollbacks and rollbacks == passed, (
+        sorted(rollbacks), sorted(passed))
+
+
+def test_the_gather_exit_oracle_can_fail():
+    """Negative control (#391) for the gather form: one planted handler per
+    way the rule can break, beside the shapes that keep it, each refused for
+    its own reason."""
+    NL = chr(10)
+
+    def gather(body, after, orelse=("await db.rollback()",
+                                    'raise HTTPException(status_code=503, '
+                                    'detail="queue_contended")')):
+        return NL.join(
+            ["async def ovt_queue_poll(db):",
+             "    _formed = False",
+             "    for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):",
+             "        rows = await discover(db)",
+             "        await _identity_lock_many(db, rows)"]
+            + ["        " + ln for ln in body]
+            + ["    else:"] + ["        " + ln for ln in orelse]
+            + ["    " + ln for ln in after])
+
+    def bad_of(src):
+        return formation_exit_violations(src, "gather")
+
+    drift = ["if await drifted(db):", "    await db.rollback()", "    continue"]
+    rediscover = ["if await drifted(db):", "    await db.rollback()",
+                  '    rows = (await db.execute(text("SELECT id FROM q"))).all()',
+                  "    if not rows:", "        break", "    continue"]
+    win = ["_formed = True", "break"]
+    acquire = ["if (await _lease_acquire_many(db, rows)) is False:",
+               "    await db.rollback()",
+               '    raise HTTPException(status_code=503, '
+               'detail="admission_contended")']
+    after = (["if not _formed:", "    await db.rollback()",
+              '    n = (await db.execute(text("SELECT COUNT(*) FROM q"))).scalar()',
+              "    return n",
+              'await db.execute(text("INSERT INTO s VALUES (1)"))']
+             + acquire)
+    assert bad_of(gather(drift + win, after)) == []
+    assert bad_of(gather(rediscover + win, after)) == []
+
+    planted = [
+        # finding 6: the drift rollback deleted
+        ("continue after no transaction end", gather(
+            ["if await drifted(db):", "    continue"] + win, after)),
+        # a commit placed before the drift rollback
+        ("rollback after commit", gather(
+            ["if await drifted(db):", "    await db.commit()",
+             "    await db.rollback()", "    continue"] + win, after)),
+        # a write, a locking read, or a lock after the drift rollback
+        ("awaits after rollback", gather(
+            ["if await drifted(db):", "    await db.rollback()",
+             '    await db.execute(text("UPDATE q SET x = 1"))',
+             "    continue"] + win, after)),
+        ("awaits after rollback", gather(
+            ["if await drifted(db):", "    await db.rollback()",
+             '    await db.execute(text("SELECT id FROM q FOR UPDATE"))',
+             "    continue"] + win, after)),
+        ("awaits after rollback", gather(
+            ["if await drifted(db):", "    await db.rollback()",
+             "    await _identity_lock_many(db, rows)", "    continue"]
+            + win, after)),
+        # the drift exit through a nested loop's else
+        ("a continue or break for the formation loop inside a nested "
+         "construct", gather(
+             ["if await drifted(db):", "    for _never in ():",
+              "        pass", "    else:", "        continue"] + win, after)),
+        # two success breaks, and none
+        ("2 success exits", gather(
+            ["if await early(db):", "    _formed = True", "    break"]
+            + drift + win, after)),
+        ("0 success exits", gather(
+            drift + ["await db.rollback()", "_formed = True", "break"],
+            after)),
+        # an exhausted-attempts exit with no rollback
+        ("raise after no transaction end", gather(
+            drift + win, after, orelse=[
+                'raise HTTPException(status_code=503, '
+                'detail="queue_contended")'])),
+        # after the loop: a no-match exit with no rollback, a commit before
+        # the acquisition, an acquisition refusal that commits, and none
+        ("return after no transaction end", gather(
+            drift + win, ["if not _formed:", "    return 0"] + acquire)),
+        ("awaits after commit", gather(
+            drift + win, ["await db.commit()"] + after)),
+        ("raise after commit", gather(
+            drift + win, after[:-2] + ["    await db.commit()",
+                                       after[-1]])),
+        ("no _lease_acquire_many after the formation loop", gather(
+            drift + win, ["return 1"])),
+    ]
+    for why, src in planted:
+        bad = bad_of(src)
+        assert any(why in b for b in bad), (why, bad)
 
 
 def _gate_calls_inside_a_swallowing_scope(src):
