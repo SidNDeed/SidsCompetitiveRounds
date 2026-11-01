@@ -10055,7 +10055,8 @@ class _Held:
         return done
 
 
-def _shrink_ceiling(monkeypatch, name, value, *, spare):
+def _shrink_ceiling(monkeypatch, name, value, *, spare,
+                    deadline_excludes_spared=False):
     """`auto_logs.<name>` set to `value` for the hop a test HOLDS, and the
     hops it does NOT hold left at the constant's production value.
 
@@ -10077,6 +10078,18 @@ def _shrink_ceiling(monkeypatch, name, value, *, spare):
     mutant's lifted ceiling, or the twin's `float(...)`. A held function is
     a `_Held`, which has no `__name__`, so it is never spared.
 
+    A SHARED DEADLINE IS THE OTHER HALF. Where a path builds one deadline
+    from the constant and spends it across several hops (`_span_budget`),
+    sparing a hop is not enough: its time is still charged to the deadline
+    the HELD hop waits on afterwards, so a slow spared hop expires the held
+    wait before it starts (the player attachment's `attach_deadline`: the
+    directory, then the held store). With `deadline_excludes_spared`, every
+    `_span_budget(deadline)` adds back the time of the spared hops that
+    started after that deadline was opened (`deadline - value`), so the
+    held hop gets its whole shrunk budget from when it starts. It is a
+    flag, not the default, because it is only right where the deadline was
+    built from the shrunk constant itself.
+
     Answers a dict counting the spared hops per name, so a test shows that
     the spare was reached rather than assuming it."""
     production = getattr(auto_logs, name)
@@ -10087,14 +10100,29 @@ def _shrink_ceiling(monkeypatch, name, value, *, spare):
     spared = dict.fromkeys(spare, 0)
     real_hop = auto_logs._hop
 
+    spent = []   # (start, end) of every spared hop, on the monotonic clock
+
     async def hop(pool, budget, fn, *args):
         fname = getattr(fn, "__name__", None)
-        if fname in spared:
-            spared[fname] += 1
-            budget = max(budget, production)
-        return await real_hop(pool, budget, fn, *args)
+        if fname not in spared:
+            return await real_hop(pool, budget, fn, *args)
+        spared[fname] += 1
+        started = time.monotonic()
+        try:
+            return await real_hop(pool, max(budget, production), fn, *args)
+        finally:
+            spent.append((started, time.monotonic()))
 
     monkeypatch.setattr(auto_logs, "_hop", hop)
+    if deadline_excludes_spared:
+        real_span_budget = auto_logs._span_budget
+
+        def span_budget(deadline):
+            opened = deadline - value
+            return real_span_budget(deadline + sum(
+                end - start for start, end in spent if start >= opened))
+
+        monkeypatch.setattr(auto_logs, "_span_budget", span_budget)
     return spared
 
 
@@ -10485,8 +10513,12 @@ def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
     the `if _running:` deferral removed -- and it is gone while the store is
     still held. TWIN: the same test spelled `len(...) > 0`.
     """
+    # The directory and the held store share ONE deadline built from the
+    # constant (`attach_deadline`), so the directory is spared AND its time
+    # is kept off that deadline: the store's wait gets the whole 0.2 s.
     spared = _shrink_ceiling(monkeypatch, "AUTO_LOG_VOLUME_WAIT_S", 0.2,
-                             spare=("_bug_report_log_path",))
+                             spare=("_bug_report_log_path",),
+                             deadline_excludes_spared=True)
     monkeypatch.setattr(main, "_is_admin", _no_admin)
     monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
     held = _Held(auto_logs._stamp_marker)
@@ -10518,6 +10550,10 @@ def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
     assert _blobs(logdir) == [] and _markers(logdir) == [], (
         _blobs(logdir), _markers(logdir))
     printed = capsys.readouterr().out
+    # The store failed on ITS OWN ceiling (TimeoutError), never on a
+    # deadline the directory had already spent (`_SpanExpired`).
+    assert re.search(r"log persistence FAILED for \S+: TimeoutError ",
+                     printed), printed
     assert ("did not finish within %ss" % 0.2) in printed, printed
     assert "was not cleared (TimeoutError)" in printed, printed
 
