@@ -7517,6 +7517,133 @@ def test_every_inert_twin_is_labelled_as_the_kind_the_runner_holds():
     assert labelled >= 10, labelled
 
 
+# The wrapper's refusal reasons, pinned here word for word. They are the
+# strings `derive_trailer` in backend/tests/evidence/repin-last.py returns, and
+# the two files are tested together: a change to a reason there reds the live
+# sweep below until this copy is changed with it, which is the point -- a
+# refusal is accepted only when it says what the log shows, so what it is
+# allowed to say is written down where the test can compare it.
+_REPIN_REFUSED_NEWEST_BARE = (
+    "the most recent commit carries no Co-Authored-By trailer, so there is no "
+    "current form to derive")
+_REPIN_REFUSED_DISAGREE = (
+    "the two most recent commits that carry a trailer disagree: %r and %r")
+_REPIN_REFUSED_SHORTFALL = (
+    "only %d of the most recent commits carries a trailer, and %d have to "
+    "agree")
+
+
+def _trailer_read_here(body):
+    """The Co-Authored-By line one message ends its trailers with, read here.
+
+    INDEPENDENT of the wrapper's `trailer_of`: a plain prefix test on the
+    stripped lines rather than the wrapper's pattern, so a reader that went
+    blind or read the wrong line there is compared with something that did
+    not go blind with it."""
+    for line in reversed(body.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("Co-Authored-By:"):
+            return line
+    return None
+
+
+def _expected_derivation(reading, agree):
+    """(form, condition) the agreement rule gives on this test's own reading.
+
+    `reading` is `_trailer_read_here` per message, newest first. The condition
+    is None when a form derives, else one of ("newest-bare",),
+    ("disagree", newest, other) or ("shortfall", agreeing)."""
+    if reading[0] is None:
+        return None, ("newest-bare",)
+    newest = reading[0]
+    agreeing = 1
+    for other in [t for t in reading[1:] if t is not None]:
+        if other != newest:
+            return None, ("disagree", newest, other)
+        agreeing += 1
+        if agreeing >= agree:
+            break
+    if agreeing < agree:
+        return None, ("shortfall", agreeing)
+    return newest, None
+
+
+def _sweep_live_trailer(repin, bodies, stale):
+    """The live-branch half of the repin-trailer control, on `bodies`.
+
+    Returns "derived" or "refused", naming the path that ran. EITHER outcome
+    of `derive_trailer` is accepted, and each only when proven:
+
+      * the log has to carry at least one line containing the literal
+        "Co-Authored-By:" (a plain substring test), AND the wrapper's own
+        reader has to find at least one trailer in it -- a blind reader would
+        otherwise refuse "none carries one" and agree with itself;
+      * a DERIVED form has to be the form this test's independent reading
+        gives, be carried by a message, and is then swept exactly as before:
+        the window of messages under it carries no other attribution, and the
+        window is bounded by the trailer rather than by the log's length;
+      * a REFUSAL has to be truthful against the same independent reading:
+        a bare newest message is named as that, a disagreement quotes both
+        lines the log carries, anything else states the shortfall -- each in
+        the wrapper's exact wording, pinned above.
+
+    An integration branch interleaves two sittings' attributions (a merge by
+    one over commits by another), so the wrapper refuses there by design; that
+    refusal is the expected outcome on such a branch, not a finding."""
+    literal = [ln.strip() for b in bodies for ln in b.splitlines()
+               if "Co-Authored-By:" in ln]
+    assert literal, (
+        "the log carries no Co-Authored-By: line at all, so nothing here can "
+        "be judged against it")
+    by_wrapper = [repin.trailer_of(b) for b in bodies]
+    assert any(t is not None for t in by_wrapper), (
+        "the wrapper's reader finds no trailer in a log that carries %d "
+        "Co-Authored-By: lines: %r" % (len(literal), literal))
+
+    reading = [_trailer_read_here(b) for b in bodies]
+    expected, condition = _expected_derivation(reading, repin.TRAILER_AGREE)
+    live, why = repin.derive_trailer(bodies)
+
+    if live is None:
+        assert why, "the wrapper refused without a reason"
+        assert expected is None, (
+            "the wrapper refused where these bodies state the form %r: %s"
+            % (expected, why))
+        if condition[0] == "newest-bare":
+            truthful = _REPIN_REFUSED_NEWEST_BARE
+        elif condition[0] == "disagree":
+            _kind, newest, other = condition
+            assert newest in literal and other in literal, condition
+            truthful = _REPIN_REFUSED_DISAGREE % (newest, other)
+        else:
+            truthful = _REPIN_REFUSED_SHORTFALL % (condition[1],
+                                                   repin.TRAILER_AGREE)
+        assert why == truthful, (
+            "the wrapper's refusal does not state what these bodies show: "
+            "it says %r and the log shows %r" % (why, truthful))
+        return "refused"
+
+    assert live == expected, (
+        "the wrapper derived a form these bodies do not state: %r, where "
+        "this test reads %r (%r)" % (live, expected, condition))
+    assert live in literal, "the derived form %r is carried by no body" % live
+    # The WINDOW is where the form changes, derived rather than counted. An
+    # earlier sitting of this branch committed under a different attribution,
+    # and that history is not a finding -- what the sweep is about is the tip
+    # this round leaves.
+    window = repin.tip_messages(bodies, live)
+    assert window, "the derived form is carried by no commit, which cannot be"
+    for number, text_of in enumerate(window):
+        assert repin.foreign_attributions(text_of, live) == [], (
+            "HEAD~%d carries an attribution that is not the branch's derived "
+            "trailer: %r" % (number,
+                             repin.foreign_attributions(text_of, live)))
+    # ...and the window really is bounded by the trailer rather than by the
+    # length of the log: a form no commit carries selects nothing.
+    assert repin.tip_messages(bodies, stale) == []
+    return "derived"
+
+
 def test_the_repin_trailer_is_derived_and_the_sweep_exempts_only_it():
     """Control: repin-types-its-commit-trailer (r13).
 
@@ -7603,6 +7730,85 @@ def test_the_repin_trailer_is_derived_and_the_sweep_exempts_only_it():
     got, why = repin.derive_trailer([])
     assert got is None and why, (got, why)
 
+    # ── THE LIVE SWEEP'S OWN CONTROLS, both ways, executed here ─────────
+    # The live branch below may DERIVE a form or be REFUSED one, depending on
+    # whether its newest commits come from one sitting or interleave two, and
+    # `_sweep_live_trailer` accepts either only when proven. Each path is run
+    # here on fabricated logs, and each way the helper must refuse is run too,
+    # so neither the acceptance nor the rejection is taken on trust (#391).
+    def _msg(trailer_line=None):
+        return body + ("\n" + trailer_line + "\n" if trailer_line else "")
+
+    integration = [_msg(good), _msg(stale), _msg(stale)]
+    single = [_msg(good)] * 3
+
+    # (c1) The INTEGRATION shape: a newest commit by one sitting over two by
+    # another. The real wrapper refuses, quoting both lines, and the helper
+    # accepts that refusal through the refusal path.
+    got, why = repin.derive_trailer(integration)
+    assert got is None and good in why and stale in why, (got, why)
+    assert _sweep_live_trailer(repin, integration, stale) == "refused"
+    # ...and the other two refusal conditions are accepted when truthful.
+    assert _sweep_live_trailer(
+        repin, [_msg()] + single, stale) == "refused"
+    assert _sweep_live_trailer(
+        repin, [_msg(good), _msg(), _msg()], stale) == "refused"
+
+    # (c4) The SINGLE-SITTING shape derives and is swept as before.
+    assert _sweep_live_trailer(repin, single, stale) == "derived"
+
+    elsewhere = "Co-Authored-By: Somebody Else <elsewhere@example.invalid>"
+    nobody = "Co-Authored-By: Nobody Here <nobody@example.invalid>"
+    # (c2) A REFUSAL THAT LIES -> the helper raises. It names forms the
+    # bodies do not carry; it names the wrong condition; it refuses where the
+    # bodies state a form.
+    lying = (None, _REPIN_REFUSED_DISAGREE % (elsewhere, nobody))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(repin, "derive_trailer", lambda _b: lying)
+        with pytest.raises(AssertionError,
+                           match="refusal does not state what these bodies"):
+            _sweep_live_trailer(repin, integration, stale)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(repin, "derive_trailer",
+                   lambda _b: (None, _REPIN_REFUSED_NEWEST_BARE))
+        with pytest.raises(AssertionError,
+                           match="refusal does not state what these bodies"):
+            _sweep_live_trailer(repin, integration, stale)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(repin, "derive_trailer",
+                   lambda _b: (None, _REPIN_REFUSED_DISAGREE % (good, stale)))
+        with pytest.raises(AssertionError,
+                           match="refused where these bodies state the form"):
+            _sweep_live_trailer(repin, single, stale)
+
+    # (c3) A DERIVED FORM NO BODY CARRIES -> the helper raises; and a form a
+    # body carries but the log does not state as current raises the same way.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(repin, "derive_trailer", lambda _b: (nobody, None))
+        with pytest.raises(AssertionError,
+                           match="derived a form these bodies do not state"):
+            _sweep_live_trailer(repin, single, stale)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(repin, "derive_trailer", lambda _b: (stale, None))
+        with pytest.raises(AssertionError,
+                           match="derived a form these bodies do not state"):
+            _sweep_live_trailer(repin, integration, stale)
+
+    # (c5) A LOG WITH NO "Co-Authored-By:" AT ALL -> the helper raises, though
+    # the real wrapper's refusal ("none ... carries") would be true of it: a
+    # live log that carries nothing cannot prove either path.
+    with pytest.raises(AssertionError, match="carries no Co-Authored-By: line"):
+        _sweep_live_trailer(repin, [_msg()] * 3, stale)
+    # ...and a BLIND wrapper reader on a log that does carry trailers raises
+    # rather than agreeing with itself.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(repin, "trailer_of", lambda _b: None)
+        with pytest.raises(AssertionError,
+                           match="the wrapper's reader finds no trailer"):
+            _sweep_live_trailer(repin, single, stale)
+    # The patches are undone: the real functions answer as they did above.
+    assert repin.derive_trailer(single) == (good, None)
+
     # ── THE LIVE BRANCH, swept at the tip it is at now ──────────────────
     root = pathlib.Path(__file__).resolve().parent.parent.parent
     shown = subprocess.run(["git", "log", "-n", "8", "--format=%B%x00"],
@@ -7611,24 +7817,10 @@ def test_the_repin_trailer_is_derived_and_the_sweep_exempts_only_it():
     assert shown.returncode == 0, shown.stderr
     live_bodies = [b for b in shown.stdout.split("\0") if b.strip()]
     assert live_bodies, "git log printed no commit message"
-    live, why = repin.derive_trailer(live_bodies)
-    assert live is not None, (
-        "this branch states no current attribution form, so the wrapper would "
-        "refuse rather than type one: %s" % why)
-    # The WINDOW is where the form changes, derived rather than counted. An
-    # earlier sitting of this branch committed under a different attribution,
-    # and that history is not a finding -- what the sweep is about is the tip
-    # this round leaves.
-    window = repin.tip_messages(live_bodies, live)
-    assert window, "the derived form is carried by no commit, which cannot be"
-    for number, text_of in enumerate(window):
-        assert repin.foreign_attributions(text_of, live) == [], (
-            "HEAD~%d carries an attribution that is not the branch's derived "
-            "trailer: %r" % (number,
-                             repin.foreign_attributions(text_of, live)))
-    # ...and the window really is bounded by the trailer rather than by the
-    # length of the log: a form no commit carries selects nothing.
-    assert repin.tip_messages(live_bodies, stale) == []
+    # Either outcome, proven: a derived form is swept exactly as it was, and a
+    # refusal (the shape every integration merge leaves) must be truthful.
+    path = _sweep_live_trailer(repin, live_bodies, stale)
+    assert path in ("derived", "refused"), path
 
 
 def test_the_repin_record_carries_the_untracked_contract_by_digest(tmp_path):
