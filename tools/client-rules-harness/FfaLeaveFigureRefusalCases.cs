@@ -12,8 +12,12 @@ namespace CompetitiveRounds
     /// formatted response text) and assert: 422 is not terminal, 409 and 403
     /// are terminal, 400 is not terminal, and the 422 text has the
     /// "HTTP 422: " form. The response text is built by the client's own rule
-    /// (SecureRouteRules.RequestErrorText), with a body whose steam ids carry
-    /// the digits 409 and 403.
+    /// (SecureRouteRules.RequestErrorText), with a body in the server's form
+    /// whose two ids carry the digits 409 and 403. The ids are placeholders
+    /// outside the SteamID64 shape: the text overload reads the code only from
+    /// an "HTTP &lt;code&gt;:" prefix or an "HTTP/1.1 &lt;code&gt; " status line,
+    /// so a placeholder reads as a real id would, and an id in SteamID64 shape
+    /// must be on the accepted list in backend/tests/test_music_probe_gate.py.
     ///
     /// The cases are written against a pair of functions, so the same cases run
     /// on the real overloads and on two mutants: one that makes 422 terminal in
@@ -30,7 +34,7 @@ namespace CompetitiveRounds
 
         private const string Body =
             "{\"detail\":\"game_points_at_leave is required on every left_early entry that is not absent; "
-            + "missing for 76561198040940903, 76561198403409403\"}";
+            + "missing for 00000000000000409, 00000000000000403\"}";
 
         private static string Text(long code, string body)
         {
