@@ -681,7 +681,11 @@ def test_the_formation_loop_is_bounded_and_rolls_back_rather_than_commits():
     kinds = [(k, e) for _ln, k, e, _n in exits]
     assert ("continue", "rollback") in kinds[:n_body], kinds
     assert kinds[n_body:] == [("raise", "rollback")], kinds
-    assert 'detail="queue_contended"' in _ast.unparse(exits[n_body][3])
+    exhausted = exits[n_body][3].exc
+    assert any(k.arg == "detail" and isinstance(k.value, _ast.Constant)
+               and k.value.value == "queue_contended"
+               for k in getattr(exhausted, "keywords", ())), (
+        _ast.unparse(exits[n_body][3]))
     assert [k for k, e in kinds if e == "commit"] == ["return"], kinds
     assert rollbacks and len(rollbacks) == len(passed), (
         sorted(rollbacks), sorted(passed))
