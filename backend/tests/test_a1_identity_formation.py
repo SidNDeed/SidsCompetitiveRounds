@@ -615,6 +615,118 @@ def _block_holding(tree, node):
     return None, None
 
 
+TEAM_RESOLVER = "_team_resolve_live_family"
+
+
+def _calls_named(node, name):
+    """Whether `node` holds a call of the plain name `name`."""
+    return any(isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
+               and n.func.id == name for n in _ast.walk(node))
+
+
+def _is_team_answer(node, status):
+    """Whether `node` is `return TeamQueuePollResponse(status=<status>, ...)`."""
+    value = getattr(node, "value", None)
+    return (isinstance(node, _ast.Return) and isinstance(value, _ast.Call)
+            and isinstance(value.func, _ast.Name)
+            and value.func.id == "TeamQueuePollResponse"
+            and any(k.arg == "status" and isinstance(k.value, _ast.Constant)
+                    and k.value.value == status for k in value.keywords))
+
+
+def _resolver_dispatch(stmts, i):
+    """The team resolver's outcome dispatch at stmts[i:i + 3], exactly as
+    team_queue_poll states it, as (the 'relocked' return, the 'defer'
+    branch); None for any other shape:
+
+        <o>, <r> = await _team_resolve_live_family(...)
+        if <o> == "relocked":
+            return <r>
+        if <o> == "defer":
+            await db.commit()
+            return TeamQueuePollResponse(status="searching", ...)
+
+    What follows it is the 'fresh' outcome. The resolver's docstring:
+    "Returns ('relocked', TeamQueuePollResponse) / ('fresh', None) /
+    ('defer', None)"."""
+    if i + 3 > len(stmts):
+        return None
+    st, rel, dfr = stmts[i:i + 3]
+    target = (st.targets[0] if isinstance(st, _ast.Assign)
+              and len(st.targets) == 1 else None)
+    call = getattr(getattr(st, "value", None), "value", None)
+    if not (isinstance(target, _ast.Tuple) and len(target.elts) == 2
+            and all(isinstance(e, _ast.Name) for e in target.elts)
+            and isinstance(st.value, _ast.Await)
+            and isinstance(call, _ast.Call)
+            and isinstance(call.func, _ast.Name)
+            and call.func.id == TEAM_RESOLVER):
+        return None
+    outcome, answer = (e.id for e in target.elts)
+
+    def branch(node, word, size):
+        test = getattr(node, "test", None)
+        return (isinstance(node, _ast.If) and not node.orelse
+                and len(node.body) == size
+                and isinstance(test, _ast.Compare)
+                and isinstance(test.left, _ast.Name)
+                and test.left.id == outcome and len(test.ops) == 1
+                and isinstance(test.ops[0], _ast.Eq)
+                and isinstance(test.comparators[0], _ast.Constant)
+                and test.comparators[0].value == word)
+
+    ret = rel.body[0] if branch(rel, "relocked", 1) else None
+    if not (isinstance(ret, _ast.Return) and isinstance(ret.value, _ast.Name)
+            and ret.value.id == answer):
+        return None
+    if not (branch(dfr, "defer", 2) and _txn_end(dfr.body[0]) == "commit"
+            and _is_team_answer(dfr.body[1], "searching")):
+        return None
+    return ret, dfr
+
+
+def _team_formation_loops(fn_src, tree):
+    """team_queue_poll's two formation loops, resume then fresh, read as the
+    poll spends them: ONE attempt budget (_attempt_budgets: one opening, one
+    counter) across exactly two `while <counter> > 0:` loops, each spending
+    it as its first statement, with the counter stored nowhere else but its
+    opening and the fresh phase's floor of one attempt (`<counter> =
+    max(<counter>, 1)`). Returns (loops, None), or ([], (line, why)) for any
+    other shape."""
+    openings, counters, _whiles = _attempt_budgets(fn_src)
+    if len(openings) != 1 or len(counters) != 1:
+        return [], (0, f"{len(openings)} attempt budget openings over "
+                       f"{sorted(counters)}; the team form spends one")
+    (counter,) = counters
+    loops = sorted((n for n in _ast.walk(tree) if isinstance(n, _ast.While)
+                    and any(isinstance(x, _ast.Name) and x.id == counter
+                            for x in _ast.walk(n.test))),
+                   key=lambda n: n.lineno)
+    if len(loops) != 2:
+        return [], (0, f"{len(loops)} loops over the attempt budget; the "
+                       "team form has two")
+    stores = set()
+    for n in loops:
+        if not (_ast.unparse(n.test) == f"{counter} > 0"
+                and _ast.unparse(n.body[0]) == f"{counter} -= 1"):
+            return [], (n.lineno, "a loop over the attempt budget that is not "
+                                  f"`while {counter} > 0:` spending it first")
+        stores.add(id(n.body[0].target))
+    for n in _ast.walk(tree):
+        if (isinstance(n, _ast.Assign) and len(n.targets) == 1
+                and isinstance(n.targets[0], _ast.Name)
+                and n.targets[0].id == counter
+                and _ast.unparse(n.value) in ("FORMATION_MAX_ATTEMPTS",
+                                              f"max({counter}, 1)")):
+            stores.add(id(n.targets[0]))
+    for n in _ast.walk(tree):
+        if (isinstance(n, _ast.Name) and n.id == counter
+                and isinstance(n.ctx, _ast.Store) and id(n) not in stores):
+            return [], (n.lineno, "an assignment to the attempt budget this "
+                                  "walk does not read")
+    return loops, None
+
+
 def formation_loop_exits(fn_src, form="return"):
     """Every exit of the handler's one `for _form_attempt` loop taken after
     the loop body's identity barrier, path by path, with the transaction ends
@@ -629,11 +741,30 @@ def formation_loop_exits(fn_src, form="return"):
     walked from that state through the one that holds the _lease_acquire_many
     call; and since a gather site rediscovers after its rollback, a plain
     read (_only_plain_reads) may follow a rollback there. Nothing may await
-    after a commit in either form.
+    after a commit in any form.
+
+    forms "team-resume" and "team-fresh" (the two phases of team_queue_poll,
+    which spend ONE attempt budget across two `while` loops, found by
+    _team_formation_loops; rehearsal-four round 1, item T): each phase's
+    loop is walked like the gather form's, from its own barrier, with no
+    read allowed after a rollback, and with the team resolver's outcome
+    dispatch read where it stands (_resolver_dispatch): 'relocked' is an
+    exit whose transaction end is the resolver's relock commit (read there
+    by _relock_outcome_problems), 'defer' an exit that commits once and
+    answers searching, and 'fresh' carries on with the transaction open. A
+    resolver call in any other shape is refused. The resume phase's success
+    exit is its 'fresh' break: the statements after its loop are walked from
+    it and must fall through to fresh formation after exactly one commit,
+    awaiting nothing else, so a rollback-ended break that reaches the same
+    commit publishes nothing of the attempt it rolled back. The fresh
+    phase's statements after its loop are walked like the gather form's,
+    through the one that holds the _lease_acquire_many call.
 
     Returns (exits, n_body, n_loop, (rollbacks, passed), problems):
       exits      [(line, kind, end, node)]: kind continue, break, raise or
-                 return; end the transaction ends the path passed, in order
+                 return, or in the team forms the resolver's outcomes
+                 relocked (end 'relock') and defer; end the transaction
+                 ends the path passed, in order
                  ('rollback', 'commit', 'commit, rollback', ...), or None.
                  exits[:n_body] are the loop body's, exits[n_body:n_loop] the
                  else's, exits[n_loop:] the gather form's after the loop;
@@ -655,12 +786,19 @@ def formation_loop_exits(fn_src, form="return"):
     Lines are handler-relative.
     """
     tree = _ast.parse(fn_src)
-    loops = [n for n in _ast.walk(tree) if isinstance(n, _ast.For)
-             and isinstance(n.target, _ast.Name)
-             and n.target.id == "_form_attempt"]
-    if len(loops) != 1:
-        return [], 0, 0, (set(), set()), [(0, f"{len(loops)} formation loops")]
-    loop = loops[0]
+    team = form in ("team-resume", "team-fresh")
+    if team:
+        loops, why = _team_formation_loops(fn_src, tree)
+        if why is not None:
+            return [], 0, 0, (set(), set()), [why]
+        loop = loops[1] if form == "team-fresh" else loops[0]
+    else:
+        loops = [n for n in _ast.walk(tree) if isinstance(n, _ast.For)
+                 and isinstance(n.target, _ast.Name)
+                 and n.target.id == "_form_attempt"]
+        if len(loops) != 1:
+            return [], 0, 0, (set(), set()), [(0, f"{len(loops)} formation loops")]
+        loop = loops[0]
     barrier = [i for i, st in enumerate(loop.body) if any(
         isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
         and c.func.id == "_identity_lock_many" for c in _ast.walk(st))]
@@ -683,7 +821,40 @@ def formation_loop_exits(fn_src, form="return"):
         # `state`: the transaction ends this path passed, in order, as
         # (kind, line). Returns the state of the path that falls off
         # `stmts`; None when every path through them exits.
-        for st in stmts:
+        skip = 0
+        for i, st in enumerate(stmts):
+            if skip:
+                skip -= 1
+                continue
+            if team and _calls_named(st.test if isinstance(st, _ast.If)
+                                     else st, TEAM_RESOLVER):
+                shape = _resolver_dispatch(stmts, i)
+                if shape is None:
+                    problems.append((st.lineno, "a resolver call this walk "
+                                     "does not read"))
+                else:
+                    # The resolver's outcomes as the dispatch states them:
+                    # 'relocked' returns the answer of the resolver's own
+                    # relock, whose commit ends that path (read there by
+                    # _relock_outcome_problems); 'defer' commits the
+                    # resolver's bookkeeping and answers searching; 'fresh'
+                    # carries on below, the transaction still open.
+                    ret, dfr = shape
+                    if not may_await(st, state):
+                        problems.append((st.lineno,
+                                         f"awaits after {ended(state)}"))
+                    exits.append((ret.lineno, "relocked",
+                                  ended(state + (("relock", ret.lineno),)),
+                                  ret))
+                    if state:
+                        problems.append((dfr.body[0].lineno,
+                                         f"commit after {ended(state)}"))
+                    exits.append((dfr.body[1].lineno, "defer",
+                                  ended(state + (("commit",
+                                                  dfr.body[0].lineno),)),
+                                  dfr.body[1]))
+                    skip = 2
+                    continue
             kind = _txn_end(st)
             if kind is not None:
                 if state:
@@ -749,7 +920,22 @@ def formation_loop_exits(fn_src, form="return"):
                          "the exhausted-attempts path does not exit"))
     n_loop = len(exits)
     span = loop.body[barrier[0] + 1:] + loop.orelse
-    if gather:
+    if form == "team-resume":
+        # "Falling through to fresh formation COMMITS rather than rolls back:
+        # the resolver may have superseded zero-game husks on its way to
+        # 'fresh', and that bookkeeping is real work." A rollback-ended
+        # break reaches the same commit, so nothing on the way may await.
+        block, at = _block_holding(tree, loop)
+        after = block[at + 1:]
+        span = span + after
+        out = walk(after, ())
+        if out is None or [kind for kind, _ln in out] != ["commit"]:
+            problems.append((loop.lineno, "the resume does not fall through "
+                             "to fresh formation after exactly one commit"))
+        problems.extend((st.lineno, "awaits between the resume loop and its "
+                         "fall-through commit") for st in after
+                        if _txn_end(st) is None and _awaits(st))
+    if gather or form == "team-fresh":
         block, at = _block_holding(tree, loop)
         after = block[at + 1:]
         acquire = [i for i, st in enumerate(after) if any(
@@ -798,16 +984,25 @@ def formation_exit_violations(fn_src, form="return"):
     the matched answer; form "gather": the loop's `break` that ends nothing
     and carries the barrier to the formation writes -- and every rollback in
     the walked span lies on some exit's path, so the rollbacks are counted
-    against the exits rather than against a number."""
+    against the exits rather than against a number.
+
+    Form "team" is team_queue_poll's two phases, "team-resume" and
+    "team-fresh", each held to the gather form's rule, with the team
+    resolver's two other designed outcomes accepted where the walk read
+    them: 'relocked' (ended by the resolver's relock commit) and 'defer'
+    (one commit, then the searching answer)."""
+    if form == "team":
+        return (formation_exit_violations(fn_src, "team-resume")
+                + formation_exit_violations(fn_src, "team-fresh"))
     exits, n_body, _n_loop, (rollbacks, passed), problems = (
         formation_loop_exits(fn_src, form))
     out = [f"line {ln}: {why}" for ln, why in problems]
-    if form == "gather":
+    if form in ("gather", "team-resume", "team-fresh"):
         success = [n for _ln, k, e, n in exits[:n_body]
                    if k == "break" and e is None]
         if len(success) != 1:
             out.append(f"{len(success)} success exits (a break that ends "
-                       "nothing); the gather form has exactly one")
+                       f"nothing); the {form} form has exactly one")
             success = []
     else:
         commits = [n for _ln, _k, e, n in exits if e == "commit"]
@@ -817,6 +1012,8 @@ def formation_exit_violations(fn_src, form="return"):
     for ln, kind, end, node in exits:
         if end == "rollback" or (success and node is success[0]):
             continue
+        if (kind, end) in (("relocked", "relock"), ("defer", "commit")):
+            continue                    # the resolver's, read by the walk
         out.append(f"line {ln}: {kind} after {end or 'no transaction end'}")
     if rollbacks != passed:
         out.append("rollback(s) on no exit path at line(s) "
@@ -1411,6 +1608,151 @@ def test_gather_drift_rolls_back_and_never_commits(site):
         sorted(rollbacks), sorted(passed))
 
 
+def _relock_outcome_problems(resolve_src, pick_src, relock_src):
+    """The team forms accept the resolver's 'relocked' answer as an exit
+    whose transaction end is not in the poll, so that end is read where it
+    is rather than assumed. The resolver (`resolve_src`) answers
+    ("relocked", r) in exactly one place, with r bound in the statement
+    before it to the answer of the relock helper (`relock_src`), whose one
+    commit is its last await, right before its one return, the matched
+    answer, and whose one rollback is followed by a raise. Every other
+    answer of the resolver is a constant 'defer' or 'fresh', or the first
+    answer of the family pick (`pick_src`), which answers only 'fresh',
+    'defer' or 'picked'; neither the resolver nor the pick ends the
+    transaction, so on 'fresh' and 'defer' the poll is what ends it. Returns
+    problems as sentences, empty when the shape holds."""
+    resolve, pick, relock = (_ast.parse(s).body[0]
+                             for s in (resolve_src, pick_src, relock_src))
+    out = [f"{fn.name} ends the transaction itself"
+           for fn in (resolve, pick) if _ends_inside(fn)]
+    for st in _ast.walk(pick):
+        value = getattr(st, "value", None)
+        if isinstance(st, _ast.Return) and not (
+                isinstance(value, _ast.Tuple) and len(value.elts) == 2
+                and isinstance(value.elts[0], _ast.Constant)
+                and value.elts[0].value in ("fresh", "defer", "picked")):
+            out.append(f"{pick.name} line {st.lineno}: an answer this read "
+                       "does not place")
+    picked = {st.targets[0].elts[0].id for st in _ast.walk(resolve)
+              if isinstance(st, _ast.Assign) and len(st.targets) == 1
+              and isinstance(st.targets[0], _ast.Tuple)
+              and isinstance(st.targets[0].elts[0], _ast.Name)
+              and isinstance(st.value, _ast.Await)
+              and _calls_named(st.value, pick.name)}
+    relocked = []
+    for st in _ast.walk(resolve):
+        if not isinstance(st, _ast.Return):
+            continue
+        value = st.value
+        first = (value.elts[0] if isinstance(value, _ast.Tuple)
+                 and len(value.elts) == 2 else None)
+        if isinstance(first, _ast.Constant) and first.value == "relocked":
+            relocked.append(st)
+        elif not ((isinstance(first, _ast.Constant)
+                   and first.value in ("defer", "fresh"))
+                  or (isinstance(first, _ast.Name) and first.id in picked)):
+            out.append(f"{resolve.name} line {st.lineno}: an answer this read "
+                       "does not place")
+    if len(relocked) != 1:
+        out.append(f"{resolve.name} answers 'relocked' in {len(relocked)} "
+                   "places; the read takes one")
+    else:
+        ret = relocked[0]
+        block, at = _block_holding(resolve, ret)
+        prev = block[at - 1] if block and at else None
+        name = ret.value.elts[1]
+        call = getattr(getattr(prev, "value", None), "value", None)
+        if not (isinstance(name, _ast.Name) and isinstance(prev, _ast.Assign)
+                and len(prev.targets) == 1
+                and isinstance(prev.targets[0], _ast.Name)
+                and prev.targets[0].id == name.id
+                and isinstance(prev.value, _ast.Await)
+                and isinstance(call, _ast.Call)
+                and isinstance(call.func, _ast.Name)
+                and call.func.id == relock.name):
+            out.append(f"{resolve.name}'s 'relocked' answer is not "
+                       f"{relock.name}'s, bound in the statement before it")
+    body = [st for st in relock.body if not (
+        isinstance(st, _ast.Expr) and isinstance(st.value, _ast.Constant))]
+    spellings = [n for n in _ast.walk(relock) if isinstance(n, _ast.Attribute)
+                 and n.attr in ("commit", "rollback")]
+    commits = [i for i, st in enumerate(body) if _txn_end(st) == "commit"]
+    rollbacks = [n for n in _ast.walk(relock) if _txn_end(n) == "rollback"]
+    returns = [n for n in _ast.walk(relock) if isinstance(n, _ast.Return)]
+    if len(spellings) != 2 or len(commits) != 1 or len(rollbacks) != 1:
+        out.append(f"{relock.name}: not one commit in its body and one "
+                   "rollback, each a statement")
+    else:
+        tail = body[commits[0] + 1:]
+        if not (tail and len(returns) == 1 and returns[0] is tail[-1]
+                and _is_team_answer(tail[-1], "matched")
+                and not any(_awaits(st) for st in tail)):
+            out.append(f"{relock.name}: its commit is not its last await "
+                       "before its one return, the matched answer")
+        block, at = _block_holding(relock, rollbacks[0])
+        if not (block and at + 1 < len(block)
+                and isinstance(block[at + 1], _ast.Raise)):
+            out.append(f"{relock.name}: its rollback is not followed by a "
+                       "raise")
+    return out
+
+
+def test_team_formation_exits_roll_back_and_never_commit():
+    """A1-BRIEF.md, 'Drift restarts are bounded', for team_queue_poll: every
+    drift does rollback(), never commit(); after the budget is spent,
+    rollback and 503 queue_contended.
+
+    Per exit since rehearsal-four round 1 (item T). Its drift exits (at
+    73a158b2, :49958 rollback then break, and :49962 rollback then continue)
+    had no per-exit check: the walk read only `for _form_attempt` loops, and
+    the budget test reads only the bound. The team form reads the poll's
+    own shape (formation_loop_exits): two `while` loops spending one budget,
+    each walked from its identity barrier; every exit after a barrier rolls
+    back once with no other end on its path, except the designed outcomes:
+    the resolver's 'relocked' and 'defer', the resume loop's 'fresh' break,
+    which falls through to fresh formation after one commit, and the fresh
+    loop's one success break, which carries the barrier through the
+    resolver's outcomes and the formation writes to the lease acquisition.
+    A shape the walk does not read is refused, never skipped."""
+    src = _inspect.getsource(main.team_queue_poll)
+    bad = formation_exit_violations(src, "team")
+    assert bad == [], (
+        "team_queue_poll's formation leaves its transaction other than by a "
+        "rollback or a designed outcome:\n  " + "\n  ".join(bad))
+    phases = {}
+    for phase in ("team-resume", "team-fresh"):
+        exits, n_body, n_loop, (rollbacks, passed), _problems = (
+            formation_loop_exits(src, phase))
+        kinds = [(k, e) for _ln, k, e, _n in exits]
+        phases[phase] = (kinds[:n_body], kinds[n_body:n_loop], kinds[n_loop:])
+        assert rollbacks and rollbacks == passed, (
+            phase, sorted(rollbacks), sorted(passed))
+    # Not vacuous. The resume: the consent re-read's restart and the
+    # committed peer's break, each after a rollback; the resolver's three
+    # outcomes; the exhausted-attempts raise after a rollback.
+    body, spent, _after = phases["team-resume"]
+    assert ("continue", "rollback") in body and ("break", "rollback") in body, body
+    assert ("relocked", "relock") in body and ("defer", "commit") in body, body
+    assert body.count(("break", None)) == 1, body
+    assert spent == [("raise", "rollback")], spent
+    # The fresh phase: the predicate drift's break and the roster drift's
+    # restart, each after a rollback, and its one success break; after the
+    # loop, the no-match answer after a rollback, the resolver's outcomes,
+    # and the acquisition's refusal after a rollback.
+    body, spent, after = phases["team-fresh"]
+    assert ("break", "rollback") in body and ("continue", "rollback") in body, body
+    assert body.count(("break", None)) == 1, body
+    assert spent == [("raise", "rollback")], spent
+    assert ("return", "rollback") in after, after
+    assert ("relocked", "relock") in after and ("defer", "commit") in after, after
+    assert after and after[-1] == ("raise", "rollback"), after
+    problems = _relock_outcome_problems(*(
+        _inspect.getsource(getattr(main, name)) for name in (
+            "_team_resolve_live_family", "_team_lock_family_pick",
+            "_team_relock_existing_series")))
+    assert problems == [], problems
+
+
 def test_the_gather_exit_oracle_can_fail():
     """Negative control (#391) for the gather form: one planted handler per
     way the rule can break, beside the shapes that keep it, each refused for
@@ -1503,6 +1845,176 @@ def test_the_gather_exit_oracle_can_fail():
     for why, src in planted:
         bad = bad_of(src)
         assert any(why in b for b in bad), (why, bad)
+
+    # A team-shaped sample (rehearsal-four round 1, item T): two `while`
+    # loops spending one budget, the resolver's outcomes dispatched in the
+    # resume loop and after the fresh one, beside one planted handler per
+    # way the team form breaks, each refused for its own reason.
+    def team(resume, fresh, after, fall=("await db.commit()",),
+             spent=("await db.rollback()", 'raise HTTPException('
+                    'status_code=503, detail="queue_contended")'),
+             floor="_form_left = max(_form_left, 1)"):
+        return NL.join(
+            ["async def team_queue_poll(db):",
+             "    _form_left = FORMATION_MAX_ATTEMPTS",
+             "    if dc_row is not None:",
+             "        while _form_left > 0:",
+             "            _form_left -= 1",
+             "            present = await consent(db)",
+             "            if len(present) < 3:",
+             "                break",
+             "            await _identity_lock_many(db, present)"]
+            + ["            " + ln for ln in resume]
+            + ["        else:"] + ["            " + ln for ln in spent]
+            + ["        " + ln for ln in fall]
+            + ["    others = None",
+               "    " + floor,
+               "    while _form_left > 0:",
+               "        _form_left -= 1",
+               "        cands = await discover(db)",
+               "        if len(cands) < 3:",
+               "            others = cands",
+               "            break",
+               "        await _identity_lock_many(db, cands)"]
+            + ["        " + ln for ln in fresh]
+            + ["    else:"] + ["        " + ln for ln in spent]
+            + ["    " + ln for ln in after])
+
+    def team_bad(src):
+        return formation_exit_violations(src, "team")
+
+    consent = ["still = await consent(db)",
+               "if len(still) != len(present):", "    await db.rollback()",
+               "    continue"]
+    peer = ["if await leased(db):", "    await db.rollback()", "    break"]
+    relocked = ['if outcome == "relocked":', "    return resp"]
+    defer = ['if outcome == "defer":', "    await db.commit()",
+             '    return TeamQueuePollResponse(status="searching")']
+    resolve = "outcome, resp = await _team_resolve_live_family(db, present)"
+    resume = consent + peer + [resolve] + relocked + defer + ["break"]
+    pred = ["if drifted(_mine):", "    await db.rollback()", "    others = []",
+            "    break"]
+    size = ["if len(still) != 3:", "    await db.rollback()", "    continue"]
+    head = ["_mine = await mine(db)", "still = await recheck(db)"]
+    fresh = head + pred + size + ["others = still", "break"]
+    team_after = (["if len(others) < 3:", "    await db.rollback()",
+                   '    return TeamQueuePollResponse(status="searching")',
+                   "fam, fam_resp = await _team_resolve_live_family(db, others)",
+                   'if fam == "relocked":', "    return fam_resp",
+                   'if fam == "defer":', "    await db.commit()",
+                   '    return TeamQueuePollResponse(status="searching")',
+                   'await db.execute(text("INSERT INTO s VALUES (1)"))']
+                  + acquire)
+    assert team_bad(team(resume, fresh, team_after)) == []
+
+    team_planted = [
+        # item T's mutants: the predicate drift's rollback deleted (t1), the
+        # roster drift's rollback deleted (t2), a commit placed before it (t3)
+        ("2 success exits", team(resume, head + [
+            "if drifted(_mine):", "    others = []", "    break"]
+            + size + ["others = still", "break"], team_after)),
+        ("continue after no transaction end", team(resume, head + pred + [
+            "if len(still) != 3:", "    continue", "others = still",
+            "break"], team_after)),
+        ("rollback after commit", team(resume, head + pred + [
+            "if len(still) != 3:", "    await db.commit()",
+            "    await db.rollback()", "    continue", "others = still",
+            "break"], team_after)),
+        # the resume loop's drift restart and committed-peer break without
+        # their rollbacks, and its exhausted-attempts exit without one
+        ("continue after no transaction end", team(
+            ["still = await consent(db)", "if len(still) != len(present):",
+             "    continue"] + peer + [resolve] + relocked + defer + ["break"],
+            fresh, team_after)),
+        ("2 success exits", team(
+            consent + ["if await leased(db):", "    break", resolve]
+            + relocked + defer + ["break"], fresh, team_after)),
+        ("raise after no transaction end", team(resume, fresh, team_after,
+            spent=('raise HTTPException(status_code=503, '
+                   'detail="queue_contended")',))),
+        # the fall-through without its commit, and with work before it
+        ("the resume does not fall through to fresh formation after exactly "
+         "one commit", team(resume, fresh, team_after, fall=("pass",))),
+        ("awaits between the resume loop and its fall-through commit", team(
+            resume, fresh, team_after,
+            fall=("await write(db)", "await db.commit()"))),
+        # outcomes the walk does not read: a relocked answer that commits
+        # again, a defer that rolls back, an answer left unread
+        ("a resolver call this walk does not read", team(
+            consent + peer + [resolve, 'if outcome == "relocked":',
+                              "    await db.commit()", "    return resp"]
+            + defer + ["break"], fresh, team_after)),
+        ("a resolver call this walk does not read", team(
+            consent + peer + [resolve] + relocked
+            + ['if outcome == "defer":', "    await db.rollback()",
+               '    return TeamQueuePollResponse(status="searching")', "break"],
+            fresh, team_after)),
+        ("a resolver call this walk does not read", team(resume, fresh, [
+            "await _team_resolve_live_family(db, others)"] + team_after)),
+        # the budget: a second opening, a store the walk does not read, a
+        # third loop over it
+        ("attempt budget openings", team(resume, fresh, team_after,
+                                         floor="_form_left = FORMATION_MAX_ATTEMPTS")),
+        ("an assignment to the attempt budget this walk does not read", team(
+            resume, fresh, team_after, floor="_form_left = 3")),
+        ("3 loops over the attempt budget", team(resume, fresh, [
+            "while _form_left > 0:", "    _form_left -= 1"] + team_after)),
+    ]
+    for why, src in team_planted:
+        bad = team_bad(src)
+        assert any(why in b for b in bad), (why, bad)
+
+    # The 'relocked' end, read in the resolver (_relock_outcome_problems).
+    resolve_src = NL.join([
+        "async def resolve(db):",
+        "    outcome, row = await pick(db)",
+        '    if outcome != "picked":',
+        "        return (outcome, None)",
+        "    if await leased(db):",
+        '        return ("defer", None)',
+        "    resp = await relock(db, row)",
+        '    return ("relocked", resp)'])
+    pick_src = NL.join([
+        "async def pick(db):",
+        "    if await none(db):",
+        '        return ("fresh", None)',
+        '    await db.execute(text("UPDATE team_series SET status = 1"))',
+        '    return ("picked", 1)'])
+    relock_src = NL.join([
+        "async def relock(db, row):",
+        "    if (await _lease_acquire_many(db, row)) is False:",
+        "        await db.rollback()",
+        '        raise HTTPException(status_code=503, detail="admission_contended")',
+        '    await db.execute(text("UPDATE team_queue SET status = 1"))',
+        "    await db.commit()",
+        "    team = 1",
+        '    return TeamQueuePollResponse(status="matched")'])
+    assert _relock_outcome_problems(resolve_src, pick_src, relock_src) == []
+    relock_planted = [
+        ("answers 'relocked' in 0 places", resolve_src.replace(
+            '("relocked", resp)', '("defer", resp)'), pick_src, relock_src),
+        ("answer is not relock's", resolve_src.replace(
+            "resp = await relock(db, row)", "resp = await other(db, row)"),
+         pick_src, relock_src),
+        ("an answer this read does not place", resolve_src.replace(
+            '("defer", None)', '(state, None)'), pick_src, relock_src),
+        ("pick ends the transaction itself", resolve_src, pick_src.replace(
+            '    return ("picked", 1)', '    await db.commit()' + NL
+            + '    return ("picked", 1)'), relock_src),
+        ("pick line 5: an answer this read does not place", resolve_src,
+         pick_src.replace('("picked", 1)', '("relocked", 1)'), relock_src),
+        ("its commit is not its last await", resolve_src, pick_src,
+         relock_src.replace("    team = 1", "    await write(db)")),
+        ("not one commit in its body and one rollback", resolve_src,
+         pick_src, relock_src.replace("    await db.commit()" + NL, "")),
+        ("its rollback is not followed by a raise", resolve_src, pick_src,
+         relock_src.replace('        raise HTTPException(status_code=503, '
+                            'detail="admission_contended")',
+                            "        return None")),
+    ]
+    for why, *srcs in relock_planted:
+        got = _relock_outcome_problems(*srcs)
+        assert any(why in p for p in got), (why, got)
 
 
 def _gate_calls_inside_a_swallowing_scope(src):
