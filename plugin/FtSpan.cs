@@ -1,6 +1,7 @@
 #if SCR_FRAMETIME
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace CompetitiveRounds
 {
@@ -12,6 +13,8 @@ namespace CompetitiveRounds
     /// both arms, F13) and REPLAY (F18 reading A, reported separately). Stated as elapsed
     /// time inside the spans: an upper bound on their own CPU time, used for the census,
     /// absorption (VR9) and placement (B3), never as the B1 estimate.
+    /// Main thread only: the depth counter is one thread's, so a call from any other thread opens
+    /// nothing, leaves the depth alone and is counted in OffThread (the offthread line).
     /// Use: bool s = FtSpan.Open(FtSpan.Combat, FtSpan.Gated); try { body } finally { FtSpan.Close(s); }</summary>
     internal static class FtSpan
     {
@@ -38,6 +41,10 @@ namespace CompetitiveRounds
         internal static readonly long[] Ticks = new long[Components * Moments * Phases * Kinds];
         internal static readonly long[] Calls = new long[Components * Moments * Phases * Kinds];
 
+        /// <summary>Set by FtClock.Install (Plugin.Awake, the main thread) before anything else.</summary>
+        internal static int MainThread = -1;
+        internal static long OffThread;
+
         private static int _depth;
         private static int _component;
         private static int _kind;
@@ -51,6 +58,7 @@ namespace CompetitiveRounds
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool Open(int component, int kind)
         {
+            if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref OffThread); return false; }
             if (_depth++ != 0) return false;
             _component = component;
             _kind = kind;
@@ -61,6 +69,7 @@ namespace CompetitiveRounds
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static void Close(bool opened)
         {
+            if (Thread.CurrentThread.ManagedThreadId != MainThread) return;
             _depth--;
             if (!opened) return;
             long dt = Stopwatch.GetTimestamp() - _t0;

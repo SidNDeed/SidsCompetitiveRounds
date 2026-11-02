@@ -87,6 +87,12 @@ namespace CompetitiveRounds
         /// the game is allocated here, before combat.</summary>
         internal static void BeginGame(bool oneVOne)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 _open = false; _frozen = false; _g = null;
@@ -104,6 +110,10 @@ namespace CompetitiveRounds
                 _open = true;
             }
             catch { _open = false; _g = null; }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static void ResolvePlayers()
@@ -118,6 +128,12 @@ namespace CompetitiveRounds
         /// is frozen as it stands, for a dispatch of the same room to take.</summary>
         internal static void RoomExit()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (_open)
@@ -127,6 +143,10 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         // -- per-game collectors -------------------------------------------------------------------
@@ -1819,6 +1839,12 @@ namespace CompetitiveRounds
         /// volley still queued (the whole ring: no combat frame pays for it).</summary>
         private static void PointEnd(Game g, int now)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Upkeep);
+            try
+            {
+#endif
             g.PointLive = false;
             g.Points++;
             g.RxRowS = -1; g.RxRowO = -1;
@@ -1832,6 +1858,10 @@ namespace CompetitiveRounds
             DrainVolleys(g, g.Own, RING_CAP); DrainVolleys(g, g.Opp, RING_CAP);
             PointClose(g, g.Own, g.IvlS, now);
             PointClose(g, g.Opp, g.IvlO, now);
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static void PointReset(GunState s, int pt)
@@ -2310,6 +2340,12 @@ namespace CompetitiveRounds
         /// tick's (or the quitting path's).</summary>
         internal static void Dispatch(string seat, string other, string attach, bool rankedNow)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 bool live = _open;
@@ -2335,6 +2371,10 @@ namespace CompetitiveRounds
                 _nextCaptureTryMs = 0;
             }
             catch { _note = " no record: the capture failed"; }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static void DrainNotes()
@@ -2495,6 +2535,9 @@ namespace CompetitiveRounds
 
         private static void BuildCaptures(bool quitting)
         {
+#if SCR_FRAMETIME
+            FtHeavy.Mark(FtHeavy.CeBuild);
+#endif
             if (_captures.Count == 0) return;
             if (!quitting && SwMs < _nextCaptureTryMs) return;
             bool ready = false;
@@ -2565,7 +2608,17 @@ namespace CompetitiveRounds
         /// <summary>Application.quitting, after the seat evidence quit flush.</summary>
         internal static void FlushOnQuit()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { DrainNotes(); BuildCaptures(true); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         // -- the boot census (L1) ---------------------------------------------------------------------
@@ -2617,6 +2670,12 @@ namespace CompetitiveRounds
         /// capability bits a record may state).</summary>
         internal static void BootLine()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 var have = new HashSet<string>();
@@ -2646,6 +2705,10 @@ namespace CompetitiveRounds
                 Producers = 0;
                 try { Plugin.Log.LogWarning(TAG + " boot line failed: " + ex.GetType().Name); } catch { }
             }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static void Note(HashSet<string> have, HarmonyLib.Patch p, string target, string part)

@@ -54,6 +54,7 @@ namespace CompetitiveRounds
         /// <summary>Inserts FT_Start and FT_End. Called once from Plugin.Awake.</summary>
         internal static void Install()
         {
+            FtSpan.MainThread = System.Threading.Thread.CurrentThread.ManagedThreadId;
             if (Installed) return;
             var loop = UnityEngine.LowLevel.PlayerLoop.GetCurrentPlayerLoop();
             var start = new UnityEngine.LowLevel.PlayerLoopSystem { type = typeof(FtStart), updateDelegate = OnStart };

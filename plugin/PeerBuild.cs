@@ -32,6 +32,12 @@ namespace CompetitiveRounds
         /// the assembly's informational version ("nosha" when there is none).</summary>
         internal static string BuildValue()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.PeerBuild, FtSpan.Upkeep);
+            try
+            {
+#endif
             string variant =
 #if THUNDERSTORE
                 "thunderstore";
@@ -55,6 +61,10 @@ namespace CompetitiveRounds
             }
             catch { }
             return Plugin.ModVersion + "|" + variant + "|" + sha;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>Stage this seat's cr_build once, pre-join, the way the

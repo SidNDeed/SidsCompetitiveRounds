@@ -69,6 +69,12 @@ namespace CompetitiveRounds
         /// fighters (GameStateWatcher's start block); everything below resets.</summary>
         internal static void BeginGame(bool oneVOne, bool rankedAtStart)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 ResetGame();
@@ -83,6 +89,10 @@ namespace CompetitiveRounds
                 _clockAnchored = _server0 != 0;
             }
             catch { _open = false; }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>Room exit: the window stops collecting and is frozen as it
@@ -93,30 +103,60 @@ namespace CompetitiveRounds
         /// a dispatch for another room, never becomes a record.</summary>
         internal static void RoomExit()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (_open) { _open = false; _frozen = true; _frozenAtMs = SwMs; }
                 _ctxDepth = 0;
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>How the game ended as this seat observed it (C.END_KINDS).
         /// The first kind noted for the game is kept.</summary>
         internal static void NoteEnd(string kind)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if ((_open || _frozen) && _end == null && C.IsEndKind(kind)) _end = kind;
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>The noted end no longer holds (the other seat came back to
         /// the room); the game continues as if none was noted.</summary>
         internal static void ClearEnd()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { if (_open) _end = null; } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static void ResolveOpponent()
@@ -846,6 +886,12 @@ namespace CompetitiveRounds
         /// to ok or read_failed. Nothing on the game's thread waits for it.</summary>
         internal static void StartHashing()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (_hashStarted) return;
@@ -857,11 +903,18 @@ namespace CompetitiveRounds
                 if (_gamePath == null) { _gameSha = ""; _gameState = "read_failed"; }
                 else if (_gamePath.Length == 0) { _gameSha = ""; _gameState = "no_location"; }
                 if (IdentityReady) return;
+#if SCR_FRAMETIME
+                FtHeavy.Mark(FtHeavy.HashStart);
+#endif
                 var t = new Thread(HashPending);
                 t.IsBackground = true;
                 t.Start();
             }
             catch { FailPending(); }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>The assembly's location: "" when it has none, null when
@@ -873,6 +926,9 @@ namespace CompetitiveRounds
 
         private static void HashPending()
         {
+#if SCR_FRAMETIME
+            FtHeavy.HashBegin();
+#endif
             try
             {
                 string s, st;
@@ -880,6 +936,9 @@ namespace CompetitiveRounds
                 if (_gameState == ID_PENDING) { Hash(_gamePath, out s, out st); _gameSha = s; _gameState = st; }
             }
             catch { FailPending(); }
+#if SCR_FRAMETIME
+            FtHeavy.HashDone();
+#endif
         }
 
         private static void FailPending()
@@ -893,7 +952,20 @@ namespace CompetitiveRounds
         /// value from the same file.</summary>
         internal static void CompleteIdentityNow()
         {
+#if SCR_FRAMETIME
+            FtHeavy.Mark(FtHeavy.HashNow);
+#endif
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { StartHashing(); HashPending(); } catch { FailPending(); }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static void Hash(string path, out string sha, out string state)
@@ -911,6 +983,12 @@ namespace CompetitiveRounds
         /// finding / not_run also queue the compat outcome (contract 5.1).</summary>
         internal static void NoteCompat(string outcome, IList<string> guids)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 _compat = outcome == "pass" ? "pass" : "not_run";
@@ -921,6 +999,10 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static string _compatOutcome;
@@ -1137,6 +1219,12 @@ namespace CompetitiveRounds
         /// over.</summary>
         internal static void Dispatch(string seat, string other, string attach, int roundsSelf, int roundsOther, bool rankedNow)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 bool live = _open;
@@ -1185,6 +1273,10 @@ namespace CompetitiveRounds
             {
                 Note(" no record: the capture failed");
             }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>The build's first step, on the tick (F4): the game key and
@@ -1223,6 +1315,9 @@ namespace CompetitiveRounds
         /// first load, outside combat, moves into the queue.</summary>
         private static void BuildCaptures(bool quitting)
         {
+#if SCR_FRAMETIME
+            FtHeavy.Mark(FtHeavy.SeBuild);
+#endif
             DrainNotes();
             if (_captures.Count == 0) return;
             if (!quitting && SwMs < _nextCaptureTryMs) return;
@@ -1295,18 +1390,38 @@ namespace CompetitiveRounds
         /// The next launch's first queue load moves it into the queue.</summary>
         internal static void FlushOnQuit()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { BuildCaptures(true); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>The stable game key: the attach key without its "_r" + 1-2
         /// digit suffix, or null when it does not have that shape.</summary>
         internal static string StableOf(string attach)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             if (attach == null) return null;
             int i = attach.LastIndexOf("_r", StringComparison.Ordinal);
             if (i <= 0) return null;
             string stable = attach.Substring(0, i);
             return C.IsAttachKey(stable, attach) ? stable : null;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         // -- the queue (its own persisted file; see the build notes for why) ------------------
@@ -1513,6 +1628,15 @@ namespace CompetitiveRounds
         /// launch's first load admits it (PromoteSpool). False: not written.</summary>
         internal static bool SpoolClosing(string route, string body)
         {
+#if SCR_FRAMETIME
+            FtHeavy.Mark(FtHeavy.Spool);
+#endif
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (body == null || (route != "e" && route != "k" && route != "c" && route != "x" && route != "i")) return false;
@@ -1528,6 +1652,10 @@ namespace CompetitiveRounds
                 return true;
             }
             catch { return false; }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static C.QueueCopy ReadCopy(string path, bool primary)
@@ -1587,7 +1715,17 @@ namespace CompetitiveRounds
         /// persisted, the caller keeps it.</summary>
         internal static bool EnqueueCard(string body)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             return Enqueue("k", body);
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>A combat evidence envelope (route "x"), persisted like the
@@ -1595,7 +1733,17 @@ namespace CompetitiveRounds
         /// persisted, the caller keeps it.</summary>
         internal static bool EnqueueCombat(string body)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             return Enqueue("x", body);
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>Adds a frozen body; every retry sends these exact bytes. It
@@ -1606,6 +1754,9 @@ namespace CompetitiveRounds
         /// added twice.</summary>
         private static bool Enqueue(string route, string body)
         {
+#if SCR_FRAMETIME
+            FtHeavy.Mark(FtHeavy.Enqueue);
+#endif
             if (!Load()) return false;
             var next = new List<C.Pending>(_queue);
             bool evicted = false;
@@ -1628,7 +1779,17 @@ namespace CompetitiveRounds
         /// header stamped at each send. False: not persisted, the caller keeps it.</summary>
         internal static bool EnqueueIdentity(string body)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Upkeep);
+            try
+            {
+#endif
             return Enqueue("i", body);
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static string RouteOf(string route)
@@ -1667,6 +1828,9 @@ namespace CompetitiveRounds
         /// only stores the answer; TakeAnswer acts on it on a later tick.</summary>
         private static void Pump(long nowMs)
         {
+#if SCR_FRAMETIME
+            FtHeavy.Mark(FtHeavy.Pump);
+#endif
             if (_inFlight || nowMs < _nextPumpMs) return;
             if (!Plugin.DataConsentGranted || !ApiClient.SeatEvidenceReady) return;
             _nextPumpMs = nowMs + 5000;
@@ -1796,6 +1960,9 @@ namespace CompetitiveRounds
 
         private static void Answer(string route, string bodyKey, bool ok, string text, bool carried)
         {
+#if SCR_FRAMETIME
+            FtHeavy.Mark(FtHeavy.Answer);
+#endif
             // a copy that cannot be read is never written over: the request
             // keeps the next-eligible time its transmission persisted
             if (!Load()) return;

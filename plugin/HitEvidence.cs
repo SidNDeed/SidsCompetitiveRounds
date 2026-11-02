@@ -242,6 +242,12 @@ namespace CompetitiveRounds
         /// captures only.</summary>
         internal static void PointEnd(int point)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (AnyPoint()) HoldPoint(point);
@@ -249,6 +255,10 @@ namespace CompetitiveRounds
             }
             catch { }
             _blockedThisPoint = false;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>At game over, at the next game's start and at room exit
@@ -256,6 +266,12 @@ namespace CompetitiveRounds
         /// Captures only.</summary>
         internal static void GameEnd(int point)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (AnyPoint()) HoldPoint(point);
@@ -264,6 +280,10 @@ namespace CompetitiveRounds
             catch { }
             _refusedPoint += _point.TakeRefused(); _refusedGame += _game.TakeRefused();
             _point.Clear(); _game.Clear(); _projAmmo.Clear(); _blockedThisPoint = false;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
 #if SCR_FRAMETIME
@@ -359,6 +379,12 @@ namespace CompetitiveRounds
         /// open), then the window freezes.</summary>
         internal static void ResetForRoomExit(int point)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Upkeep);
+            try
+            {
+#endif
             GameEnd(point);
             try { Drain(); } catch { }
             _games = 0;
@@ -366,6 +392,10 @@ namespace CompetitiveRounds
             try { SeatEvidence.RoomExit(); } catch { }
             try { CardDrawEvidence.RoomExit(); } catch { }
             try { CombatEvidence.RoomExit(); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -680,8 +710,18 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(Exception __exception)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { HitEvidence.GameEnd(PointEvidence.Point); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -700,8 +740,18 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(Exception __exception)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { if (FfaMode.EngineActive()) HitEvidence.GameEnd(PointEvidence.Point); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 }

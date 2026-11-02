@@ -101,6 +101,7 @@ namespace CompetitiveRounds
             FtSpan.Moment = FtSpan.Between;
             FtCensus.Reset();
             FtSpan.Reset();
+            FtHeavy.Reset();
             FtCalib.Run("game" + Game);
             FtCalib.Settled(Game, FtPlant.Us);
         }
@@ -110,6 +111,7 @@ namespace CompetitiveRounds
         {
             FtSpan.Moment = FtSpan.GameOver;
             FtCensus.LogGame(Game);
+            FtHeavy.LogGame(Game);
         }
 
         /// <summary>SplitMix64 over five integers and a stream constant (the plant's slot draw).</summary>

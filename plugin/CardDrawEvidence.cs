@@ -544,12 +544,22 @@ namespace CompetitiveRounds
         /// short by a leave or a drop); otherwise it never becomes a record.</summary>
         internal static void RoomExit()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (_hookOpen && !_hookExited) { _hookExited = true; _hookExitedAtMs = _sw.ElapsedMilliseconds; }
                 else if (_hookExited) _hookOpen = false;
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>From Plugin's two room-reset sites, immediately BEFORE
@@ -559,6 +569,12 @@ namespace CompetitiveRounds
         /// a second reset reads values the first already cleared.</summary>
         internal static void FreezeRoomFacts()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (!_hookOpen || _hookTaken || (_frzValid && _frzRoom == _hookRoom)) return;
@@ -574,6 +590,10 @@ namespace CompetitiveRounds
                 try { _frzProp = RoomRules.LatchedProp; } catch { _frzProp = null; }
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static string _noRecordNote;
@@ -590,6 +610,12 @@ namespace CompetitiveRounds
         /// budget, the signature and the queue are the tick's.</summary>
         internal static void Dispatch(string seat, string other, string attach, bool rankedNow)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (!_hookOpen || _hookTaken) return;
@@ -624,6 +650,10 @@ namespace CompetitiveRounds
             {
                 _noRecordNote = " no record: the capture failed";
             }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         // ===================================================================================
@@ -909,7 +939,17 @@ namespace CompetitiveRounds
         /// (F3); the next launch's first queue load moves it in.</summary>
         internal static void FlushOnQuit()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { DrainNotes(); DrainEvents(); BuildPending(true); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>Whether the game DLL identity is complete (F7). Not yet:
@@ -940,6 +980,9 @@ namespace CompetitiveRounds
         /// goes to its own closing file (F3).</summary>
         private static void BuildPending(bool now)
         {
+#if SCR_FRAMETIME
+            FtHeavy.Mark(FtHeavy.CdBuild);
+#endif
             if (_pending.Count == 0) return;
             if (!now && _sw.ElapsedMilliseconds < _nextBuildMs) return;
             if (!IdentityReadyOrStart(now)) return;
@@ -1031,6 +1074,12 @@ namespace CompetitiveRounds
         /// attached (an Error line names any that is not).</summary>
         internal static void BootLine()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 var types = new Dictionary<string, Type>
@@ -1063,6 +1112,10 @@ namespace CompetitiveRounds
             {
                 try { Plugin.Log.LogWarning(TAG + " boot line failed: " + ex.GetType().Name); } catch { }
             }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         // -- the census dump lever (menu only, cfg-gated, off by default) ----------------------------
@@ -1179,7 +1232,17 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void Postfix(CardChoice __instance)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { CardDrawEvidence.PhaseStarted(__instance); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -1191,7 +1254,17 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void Postfix(CardInfo __instance)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { CardDrawEvidence.CardAwake(__instance); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -1202,7 +1275,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(int[] __0, int __1, int __2, int __3)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { CardDrawEvidence.EndPick(__0, __1, __2, __3); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -1213,7 +1296,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { CardDrawEvidence.DonePicking(); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -1229,14 +1322,34 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void Postfix(ApplyCardStats __instance, int[] __0, bool __runOriginal)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { CardDrawEvidence.PickApplied(__instance, __0, __runOriginal ? CardDrawEvidenceCore.APPLY_DONE : CardDrawEvidenceCore.APPLY_SKIPPED); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(ApplyCardStats __instance, int[] __0, Exception __exception)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { if (__exception != null) CardDrawEvidence.PickApplied(__instance, __0, CardDrawEvidenceCore.APPLY_FAULTED); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -1249,14 +1362,34 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void Postfix(ApplyCardStats __instance, Player[] __0, bool __runOriginal)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { CardDrawEvidence.OfflinePickApplied(__instance, __0, __runOriginal ? CardDrawEvidenceCore.APPLY_DONE : CardDrawEvidenceCore.APPLY_SKIPPED); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(ApplyCardStats __instance, Player[] __0, Exception __exception)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { if (__exception != null) CardDrawEvidence.OfflinePickApplied(__instance, __0, CardDrawEvidenceCore.APPLY_FAULTED); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 }

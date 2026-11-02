@@ -104,6 +104,12 @@ namespace CompetitiveRounds
         /// only; the gate's own behaviour is unchanged.</summary>
         internal static void BootCheck(string outcome, IList<string> guids)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Upkeep);
+            try
+            {
+#endif
             long t0 = SwUs;
             try
             {
@@ -112,6 +118,10 @@ namespace CompetitiveRounds
             }
             catch { _cost[BOOT].Fault(); }
             _cost[BOOT].Add(SwUs - t0);
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         // -- the game window ------------------------------------------------------------------
@@ -137,6 +147,12 @@ namespace CompetitiveRounds
         /// <summary>From GameStateWatcher, where the seat lane opens its window.</summary>
         internal static void BeginGame(bool oneVOne, bool ranked)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Upkeep);
+            try
+            {
+#endif
             long t0 = SwUs;
             try
             {
@@ -150,6 +166,10 @@ namespace CompetitiveRounds
             }
             catch { _cost[K7X].Fault(); }
             _cost[K7X].Add(SwUs - t0);
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         // -- the census (moments 1-3; C1) -------------------------------------------------------
@@ -648,6 +668,12 @@ namespace CompetitiveRounds
         /// the budget, the signature and the queue are the tick's, outside combat.</summary>
         internal static void Dispatch(string seat, string other, string attach, bool rankedNow)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Upkeep);
+            try
+            {
+#endif
             long t0 = SwUs;
             try
             {
@@ -664,6 +690,10 @@ namespace CompetitiveRounds
             }
             catch { _cost[G1].Fault(); }
             _cost[G1].Add(SwUs - t0);
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static long _nextBuildTryMs;
@@ -720,12 +750,22 @@ namespace CompetitiveRounds
         /// there is no record) and every quit one summary line.</summary>
         internal static void FlushOnQuit()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 I.FlushCaptures(_captures, CAPTURE_CAP, BuildAtQuit, env => SeatEvidence.SpoolClosing("i", env), RecordLine,
                                 s => Plugin.Log.LogInfo(TAG + s), s => Plugin.Log.LogWarning(TAG + s), () => _cost[G1].Fault());
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>One capture at quit: the game-over census if the tick had
@@ -745,6 +785,9 @@ namespace CompetitiveRounds
         /// key, seat ids or envelope are outside the contract.</summary>
         private static string BuildEnv(Capture c, out string text)
         {
+#if SCR_FRAMETIME
+            FtHeavy.Mark(FtHeavy.IcBuild);
+#endif
             text = null;
             {
                 string stable;
@@ -779,11 +822,21 @@ namespace CompetitiveRounds
         /// before SendWebRequest on route "i").</summary>
         internal static string ClockHeaderNow()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 return I.ClockHeader(Proc.ProcId, SwMs, (long)(Time.unscaledTime * 1000.0), PhotonNetwork.ServerTimestamp);
             }
             catch { return null; }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>Once after patching: one line naming each patch class that
@@ -791,6 +844,12 @@ namespace CompetitiveRounds
         /// naming any class it does not report.</summary>
         internal static void BootLine()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 var seen = new HashSet<string>();
@@ -816,6 +875,10 @@ namespace CompetitiveRounds
             {
                 try { Plugin.Log.LogWarning(TAG + " boot line failed: " + ex.GetType().Name); } catch { }
             }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -874,7 +937,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { IdentityClockEvidence.PointStart(); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -885,7 +958,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(SpawnPoint[] __0)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Upkeep);
+            try
+            {
+#endif
             try { IdentityClockEvidence.MovePlayers(__0); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 

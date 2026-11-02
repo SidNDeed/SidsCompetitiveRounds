@@ -32,7 +32,8 @@ namespace CompetitiveRounds
     /// span_g/span_gn the gated spans' ticks and calls, span_u/span_un the upkeep spans',
     /// on_calls the census calls with the gate clear and guarded the guarded returns. At a
     /// gated point span_g, span_gn and on_calls are 0 by construction (VR5). zs and zl are
-    /// the point's zero-state result (FtZero).</summary>
+    /// the point's zero-state result (FtZero); t0 and t1 the Stopwatch ticks at the point's
+    /// first live frame boundary and at its end (B3: the hashing job's interval against them).</summary>
     internal static class FtFrames
     {
         internal const int W = 120;
@@ -69,6 +70,8 @@ namespace CompetitiveRounds
             if (_wn == W) FlushWindow(false);
         }
 
+        private static long _t0;   // Stopwatch ticks at the point's first live frame boundary (B3's interval)
+
         internal static void StartPoint()
         {
             _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0;
@@ -81,6 +84,7 @@ namespace CompetitiveRounds
             _on0 = FtCensus.SumOn();
             _guard0 = FtCensus.SumGuarded();
             _windows = 0;
+            _t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         }
 
         internal static void EndPoint()
@@ -97,7 +101,8 @@ namespace CompetitiveRounds
                 + " span_u=" + (FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Upkeep) - _u0)
                 + " span_un=" + (FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Upkeep) - _un0)
                 + " on_calls=" + (FtCensus.SumOn() - _on0) + " guarded=" + (FtCensus.SumGuarded() - _guard0)
-                + " zs=" + FtZero.Mask + " zl=" + FtZero.LateSeen);
+                + " zs=" + FtZero.Mask + " zl=" + FtZero.LateSeen
+                + " t0=" + _t0 + " t1=" + System.Diagnostics.Stopwatch.GetTimestamp());
             if (FtPlant.Us < 0 && !FtSchedule.ArmOn && _pn >= W)
                 FtPlant.Fix((long)Math.Round(0.03 * _pF * 1000000.0 / ((double)_pn * System.Diagnostics.Stopwatch.Frequency)),
                     FtSchedule.Label());

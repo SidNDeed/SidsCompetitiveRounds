@@ -3150,9 +3150,19 @@ namespace CompetitiveRounds
 
         internal static void ResetForRoomExit()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Point, FtSpan.Upkeep);
+            try
+            {
+#endif
             Drain();                                // what the hooks captured, while the window is open
             HitEvidence.ResetForRoomExit(_point);   // item D: a game cut short still reports what arrived
             _sawLost.Clear(); _before.Clear(); _sawFrames = 0; _point = 0;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>Item D's per-game flush when this point decided the game:
@@ -3160,6 +3170,12 @@ namespace CompetitiveRounds
         /// round counts (HitEvidenceCore.GameDecided, merge pass 6, G1-L2).</summary>
         internal static void GameOverCheck(GM_ArmsRace gm)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Point, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 if (gm != null && HitEvidenceCore.GameDecided(FfaMode.EngineActive(), FfaMode.GameOverFiredForEvidence,
@@ -3167,6 +3183,10 @@ namespace CompetitiveRounds
                     HitEvidence.GameEnd(_point);
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         internal static void SawBefore()
@@ -3240,6 +3260,12 @@ namespace CompetitiveRounds
         /// <summary>The point-decided hook: captures only.</summary>
         internal static void PointEnd()
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Point, FtSpan.Upkeep);
+            try
+            {
+#endif
             try
             {
                 _point++;
@@ -3271,6 +3297,10 @@ namespace CompetitiveRounds
                 PoisonSync.ReportUnansweredSilences();
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
 #if SCR_FRAMETIME
@@ -3402,15 +3432,31 @@ namespace CompetitiveRounds
         [HarmonyPriority(Priority.First + 1)]
         private static void Snap(GM_ArmsRace __instance, out Before __state)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Point, FtSpan.Upkeep);
+            try
+            {
+#endif
             __state = default(Before);
             try { __state.Transitioning = __instance.isTransitioning; } catch { }
             try { __state.Observed = PointEvidence.ObservedRounds; } catch { }
             try { __state.FfaTaken = FfaMode.NextRoundsTaken; } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyPostfix]
         private static void After(GM_ArmsRace __instance, Before __state, bool __runOriginal)
         {
+#if SCR_FRAMETIME
+            // boundary or not-live entry: spanned, never gated (upkeep.py)
+            bool ftSpan = FtSpan.Open(FtSpan.Point, FtSpan.Upkeep);
+            try
+            {
+#endif
             bool taken = false;
             try
             {
@@ -3422,6 +3468,10 @@ namespace CompetitiveRounds
             if (!taken) return;
             try { PointEvidence.PointEnd(); } catch { }
             try { PointEvidence.GameOverCheck(__instance); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
