@@ -36,15 +36,22 @@ namespace CompetitiveRounds
             return Game + "." + Round + "." + PointInRound;
         }
 
-        /// <summary>Frame boundary: decide the state of the frame that starts now.</summary>
-        internal static void Boundary()
+        /// <summary>The live state of the frame that starts now, read once by FT_Start before the closed frame is
+        /// accumulated (FtClock), so a point's closing frame is known before it is counted.</summary>
+        internal static bool ReadLive()
+        {
+            return SeatEvidence.CombatLive();
+        }
+
+        /// <summary>Frame boundary: decide the state of the frame that starts now (live: ReadLive's value).</summary>
+        internal static void Boundary(bool live)
         {
             FtArm.Evaluate();
+            if (_flushAt > 0 && System.Diagnostics.Stopwatch.GetTimestamp() >= _flushAt) FlushGame("settle");
             FtRematch.Poll();
             FtDrive.JoinTick();
             if (!FtArm.Armed && FtGate.Off) FtGate.Off = false;   // a disarm opens the gate at this boundary
             if (FtMenu.Boundary()) return;   // the menu self-check owns this frame (menu=1, no room)
-            bool live = SeatEvidence.CombatLive();
             if (live && !Live) StartPoint();
             else if (!live && Live) EndPoint();
             Live = live;
@@ -52,7 +59,8 @@ namespace CompetitiveRounds
             {
                 LiveFrame++;
                 FtSpan.Moment = FtSpan.Live;
-                FtPlant.Now = !ArmOn && LiveFrame >= 2 && FtPlant.Us > 0
+                // round-1 MEDIUM (FtSchedule.cs:55): only a point the armed build actually gated is planted
+                FtPlant.Now = GateThisPoint && FtArm.Armed && FtGate.Off && LiveFrame >= 2 && FtPlant.Us > 0
                     && FtPlant.Planted(FtConfig.Seed, Game, Round, PointInRound, (LiveFrame - 2) / FtFrames.W);
                 return;
             }
@@ -86,6 +94,7 @@ namespace CompetitiveRounds
             bool off = FtConfig.Force == "OFF" || (FtConfig.Force == "none" && !ArmOn);
             GateThisPoint = FtArm.Armed && off;
             FtGate.Off = GateThisPoint;
+            FtA3.PointStart();
             FtFrames.StartPoint();
         }
 
@@ -96,9 +105,12 @@ namespace CompetitiveRounds
             PrevArm = ArmOn ? 1 : 0;
         }
 
-        /// <summary>GameStateWatcher.OnMatchStarted: a game starts (outside live combat).</summary>
+        /// <summary>GameStateWatcher.OnMatchStarted: a game starts (outside live combat). The previous game's
+        /// accounting is finalised first, after all of its game-over work (round-1 MEDIUM, GameStateWatcher.cs:6079).</summary>
         internal static void GameStart()
         {
+            FlushGame("next_game");
+            FtFrames.GameBoundary();
             Game++;
             Round = 0;
             PointInRound = 0;
@@ -108,20 +120,52 @@ namespace CompetitiveRounds
             FtCensus.Reset();
             FtSpan.Reset();
             FtHeavy.Reset();
+            FtA3.Reset();
             FtArm.ReadFixture();
             FtCalib.Run("game" + Game);
             FtCalib.Settled(Game, FtPlant.Us);
         }
 
-        /// <summary>GameStateWatcher.OnGameOver: the census line for the game.</summary>
+        /// <summary>GameStateWatcher.OnGameOver, at its start: the game-over moment begins. The game's census,
+        /// heavy and refusal lines are NOT written here: OnGameOver's own work (the collectors' Dispatch, builds,
+        /// queue writes) runs after this call, and the work it defers runs in the frames that follow, so the
+        /// lines are written by FlushGame once that work is in the sums (round-1 MEDIUM, GameStateWatcher.cs:6079):
+        /// at the next game's start, at quit, or for the sitting's last game SETTLE_S seconds after it ends.</summary>
         internal static void GameOver()
         {
             FtSpan.Moment = FtSpan.GameOver;
+            FtFrames.GameBoundary();
             FtReplay.Run(Game);
-            FtCensus.LogGame(Game);
-            FtHeavy.LogGame(Game);
-            FtUpload.LogCounts("game" + Game);
+            _owed = Game;
             FtDrive.GameOver(Game);
+            if (FtDrive.Complete && _flushAt == 0)
+                _flushAt = System.Diagnostics.Stopwatch.GetTimestamp() + SETTLE_S * System.Diagnostics.Stopwatch.Frequency;
+        }
+
+        private const long SETTLE_S = 20;
+        private static int _owed = -1;
+        private static long _flushAt;
+
+        /// <summary>The ended game's lines, once, after its game-over work: census, heavy, refusals.</summary>
+        internal static void FlushGame(string why)
+        {
+            if (_owed < 0) return;
+            int g = _owed;
+            _owed = -1;
+            _flushAt = -1;
+            FtCensus.LogGame(g);
+            FtHeavy.LogGame(g);
+            FtA3.LogGame(g);
+            FtUpload.LogCounts("game" + g);
+            Plugin.Log.LogInfo("[FRAME-TIME] flushed g=" + g + " why=" + why);
+        }
+
+        /// <summary>After the three collectors' BeginGame calls (GameStateWatcher.OnMatchStarted): whether each
+        /// opened this game's collection (V4 3.7 VR5's first requirement).</summary>
+        internal static void Opened()
+        {
+            Plugin.Log.LogInfo("[FRAME-TIME] opened g=" + Game + " se=" + (SeatEvidence.FtOpen ? 1 : 0)
+                + " ce=" + (CombatEvidence.FtOpen ? 1 : 0) + " ic=" + (IdentityClockEvidence.FtOpen ? 1 : 0));
         }
 
         /// <summary>SplitMix64 over five integers and a stream constant (the plant's slot draw).</summary>

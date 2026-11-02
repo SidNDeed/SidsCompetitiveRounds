@@ -108,8 +108,12 @@ namespace CompetitiveRounds
         {
             get
             {
+#if SCR_FRAMETIME
+                return false;   // the FrameTime build never runs the director, whatever the identity or config
+#else
                 try { return IsBroadcastIdentity && Plugin.BroadcastEnabled != null && Plugin.BroadcastEnabled.Value; }
                 catch { return false; }
+#endif
             }
         }
 

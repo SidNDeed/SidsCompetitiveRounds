@@ -5878,6 +5878,9 @@ namespace CompetitiveRounds
             try { CombatEvidence.BeginGame(oneVOneMatchAtStart); } catch { }
             // Identity-clock evidence: its window, moment 1. Contained.
             try { IdentityClockEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
+#if SCR_FRAMETIME
+            try { FtSchedule.Opened(); } catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] opened line failed: " + ex.Message); }
+#endif
 
             // Spawn the cosmetic trail for this match (if the player owns one).
             TrailCosmetic.OnMatchStart();

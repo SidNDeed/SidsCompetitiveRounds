@@ -6,16 +6,20 @@ namespace CompetitiveRounds
 {
     internal static partial class FtClock
     {
-        static partial void OnFrameClosed(long f, long s, ulong c, bool ended)
+        static partial void OnFrameClosed(long f, long s, ulong c, ulong p, int gc0, int gc1, bool ended, bool closing)
         {
-            FtFrames.Frame(f, s, c, ended);
+            FtFrames.Frame(f, s, c, p, gc0, gc1, ended, closing);
         }
     }
 
     /// <summary>FrameTime M2 and M7 (METHOD-V4.md 3.1), first form: per-point and
     /// per-window integer sums of the measured live frames. A point's measured frames
     /// start at its second live frame (the first carries the arm switch and the zero-state
-    /// check) and end at its last full live frame. Every 120 measured frames a window line;
+    /// check) and end at its last full live frame: the frame in which combat ended is excluded
+    /// and counted (excl on the point line). sP and psP are the process's cycles over all threads
+    /// (unplanted and planted frames). At the next point's start in the same game a between line
+    /// gives the between-point spans' ticks and calls since this point ended, with this point's arm
+    /// (V4 3.9: between-point costs are reported from transitions after ON points). Every 120 measured frames a window line;
     /// at each point end a point line. A full window also carries medF, the lower median of
     /// its frames 3 to 120, and for H = 4, 8 and 16 ms the run-count bounds k_min,k_max
     /// (METHOD-V4.md 3.8, F07): a frame is long when F - medF >= H + 2 ticks, short when
@@ -44,7 +48,11 @@ namespace CompetitiveRounds
         private static int _wn;
         private static long _wF, _wS, _wMaxF;
         private static ulong _wC;
-        private static int _wGc;
+        private static int _wGc0, _wGc1;
+        private static ulong _wP, _pP, _qP;   // process cycles, all threads: window, unplanted and planted point sums
+        private static long _excl;            // a point's closing (partial) live frames, excluded
+        private static long _btT0 = -1, _btC0;    // between-point span sums at the last point end (-1: none owed)
+        private static string _btArm = "";
         private static int _windows;
         private static bool _wPlant;
         private static long _qn, _qF, _qS, _plantMixed;
@@ -56,28 +64,49 @@ namespace CompetitiveRounds
         private static ulong _pC;
 
         /// <summary>Frame f closed; FtSchedule still holds frame f's state.</summary>
-        internal static void Frame(long f, long s, ulong c, bool ended)
+        internal static void Frame(long f, long s, ulong c, ulong p, int gc0, int gc1, bool ended, bool closing)
         {
             if (!FtSchedule.Live || FtSchedule.LiveFrame < 2) return;
+            if (closing) { _excl++; return; }   // combat ended inside this frame: partial, never measured
             if (!ended) _pMissingEnd++;
-            if (_wn == 0) { _wGc = GC.CollectionCount(0); _wPlant = FtPlant.Now; }
+            if (_wn == 0) { _wGc0 = gc0; _wPlant = FtPlant.Now; }
             else if (FtPlant.Now != _wPlant) _plantMixed++;
+            _wGc1 = gc1;
             WinF[_wn++] = f;
-            _wF += f; _wS += s; _wC += c;
+            _wF += f; _wS += s; _wC += c; _wP += p;
             if (f > _wMaxF) _wMaxF = f;
-            if (_wPlant) { _qn++; _qF += f; _qS += s; _qC += c; }
-            else { _pn++; _pF += f; _pS += s; _pC += c; }
+            if (_wPlant) { _qn++; _qF += f; _qS += s; _qC += c; _qP += p; }
+            else { _pn++; _pF += f; _pS += s; _pC += c; _pP += p; }
             if (f > _pMaxF) _pMaxF = f;
             if (_wn == W) FlushWindow(false);
         }
 
         private static long _t0;   // Stopwatch ticks at the point's first live frame boundary (B3's interval)
 
+        private static long BetweenTicks()
+        {
+            return FtSpan.Sum(FtSpan.Ticks, FtSpan.Between, FtSpan.Gated) + FtSpan.Sum(FtSpan.Ticks, FtSpan.Between, FtSpan.Upkeep)
+                + FtSpan.Sum(FtSpan.Ticks, FtSpan.Pick, FtSpan.Gated) + FtSpan.Sum(FtSpan.Ticks, FtSpan.Pick, FtSpan.Upkeep);
+        }
+
+        private static long BetweenCalls()
+        {
+            return FtSpan.Sum(FtSpan.Calls, FtSpan.Between, FtSpan.Gated) + FtSpan.Sum(FtSpan.Calls, FtSpan.Between, FtSpan.Upkeep)
+                + FtSpan.Sum(FtSpan.Calls, FtSpan.Pick, FtSpan.Gated) + FtSpan.Sum(FtSpan.Calls, FtSpan.Pick, FtSpan.Upkeep);
+        }
+
+        /// <summary>A game ends (the owed between line is dropped: game-over work is the game's, not a transition's).</summary>
+        internal static void GameBoundary() { _btT0 = -1; }
+
         internal static void StartPoint()
         {
-            _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0;
-            _pn = 0; _pF = 0; _pS = 0; _pC = 0; _pMaxF = 0; _pMissingEnd = 0;
-            _qn = 0; _qF = 0; _qS = 0; _qC = 0; _plantMixed = 0;
+            if (_btT0 >= 0)
+                Plugin.Log.LogInfo("[FRAME-TIME] between g=" + FtSchedule.Game + " after=" + _btArm + " ticks=" + (BetweenTicks() - _btT0)
+                    + " calls=" + (BetweenCalls() - _btC0));
+            _btT0 = -1;
+            _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0; _wP = 0;
+            _pn = 0; _pF = 0; _pS = 0; _pC = 0; _pMaxF = 0; _pMissingEnd = 0; _pP = 0; _excl = 0;
+            _qn = 0; _qF = 0; _qS = 0; _qC = 0; _plantMixed = 0; _qP = 0;
             _g0 = FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Gated);
             _gn0 = FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Gated);
             _u0 = FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Upkeep);
@@ -95,7 +124,8 @@ namespace CompetitiveRounds
                 + " gate=" + (FtSchedule.GateThisPoint ? 1 : 0)
                 + " pred=" + (FtSchedule.PrevArm < 0 ? "none" : FtSchedule.PrevArm == 1 ? "ON" : "OFF")
                 + " n=" + _pn + " sF=" + _pF + " sS=" + _pS + " sC=" + _pC + " maxF=" + _pMaxF
-                + " pn=" + _qn + " psF=" + _qF + " psS=" + _qS + " psC=" + _qC + " plant_mixed=" + _plantMixed
+                + " pn=" + _qn + " psF=" + _qF + " psS=" + _qS + " psC=" + _qC + " sP=" + _pP + " psP=" + _qP
+                + " excl=" + _excl + " plant_mixed=" + _plantMixed
                 + " windows=" + _windows + " live_frames=" + FtSchedule.LiveFrame + " missing_end=" + _pMissingEnd
                 + " span_g=" + (FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Gated) - _g0)
                 + " span_gn=" + (FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Gated) - _gn0)
@@ -106,6 +136,9 @@ namespace CompetitiveRounds
                 + " t0=" + _t0 + " t1=" + System.Diagnostics.Stopwatch.GetTimestamp() + " answer=" + FtReplay.AnswerField);
             LastN = _pn;
             LastSF = _pF;
+            _btT0 = BetweenTicks();
+            _btC0 = BetweenCalls();
+            _btArm = FtSchedule.ArmOn ? "ON" : "OFF";
             if (FtPlant.Us < 0 && FtSchedule.Game >= 0 && !FtSchedule.ArmOn && _pn >= W)
                 FtPlant.Fix((long)Math.Round(0.03 * _pF * 1000000.0 / ((double)_pn * System.Diagnostics.Stopwatch.Frequency)),
                     FtSchedule.Label());
@@ -117,7 +150,7 @@ namespace CompetitiveRounds
             var sb = new StringBuilder(160);
             sb.Append("[FRAME-TIME] w pt=").Append(FtSchedule.Label()).Append(" arm=").Append(FtSchedule.ArmOn ? "ON" : "OFF")
               .Append(" plant=").Append(_wPlant ? 1 : 0).Append(" partial=").Append(partial ? 1 : 0).Append(" n=").Append(_wn).Append(" sF=").Append(_wF)
-              .Append(" sS=").Append(_wS).Append(" sC=").Append(_wC).Append(" maxF=").Append(_wMaxF);
+              .Append(" sS=").Append(_wS).Append(" sC=").Append(_wC).Append(" sP=").Append(_wP).Append(" maxF=").Append(_wMaxF);
             if (!partial)
             {
                 long med = LowerMedian();
@@ -130,9 +163,9 @@ namespace CompetitiveRounds
                     sb.Append(" e").Append(HMs[h]).Append('=').Append(kmin).Append(',').Append(kmax);
                 }
             }
-            sb.Append(" gc=").Append(GC.CollectionCount(0) - _wGc);
+            sb.Append(" gc=").Append(_wGc1 - _wGc0);   // first measured frame's start to the last one's end
             Plugin.Log.LogInfo(sb.ToString());
-            _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0;
+            _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0; _wP = 0;
         }
 
         /// <summary>The lower median of frames 3 to 120 of a full window: s[(n + 1) / 2 - 1], n = 118.</summary>

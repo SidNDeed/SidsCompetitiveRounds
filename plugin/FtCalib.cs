@@ -1,7 +1,9 @@
 #if SCR_FRAMETIME
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using System.Text;
 using HarmonyLib;
@@ -13,14 +15,22 @@ namespace CompetitiveRounds
     /// integer (ticks or cycles), converted once in analysis.
     /// (a) f_hat: the largest of five cycles-per-second ratios over 50 ms spins
     ///     (preemption lowers a ratio, never raises it).
-    /// (b) Dispatch: for each patch shape, 20 batches of 100,000 calls of a NoInlining
-    ///     dummy unpatched, then the same patched in that shape by this calibration's own
-    ///     Harmony id, then unpatched again; and a direct call whose body opens with the census
-    ///     check. Every patch body is the closed path a gated entry runs at an OFF point, run
-    ///     with the gate set, so the difference is what the OFF arm cannot remove. Each
-    ///     run is one unit of V4 section 3.6's allowance D_j. The census (part 2) maps
-    ///     every gated entry to one of these shapes; VR2 requires a calibration line for
-    ///     every mapped shape at every game start.
+    /// (b) Dispatch, one run PER PATCHED ENTRY (round-1 MEDIUM, FtCalib.cs:163: one dummy shape
+    ///     cannot stand for targets whose argument lists, return types and patch sets differ).
+    ///     For each census entry that is a Harmony patch, the calibration builds a dummy with the
+    ///     real target's exact signature (static or instance, every parameter type and name, the
+    ///     return type) in a dynamic assembly, and patches it, under this calibration's own Harmony
+    ///     id, with that entry's REAL patch methods (its patch class, FtE.PatchType, generated from
+    ///     the source by gen_entries.py; the class's target is read back from Harmony's own patch
+    ///     table). 20 batches of 25,000 calls unpatched, then the same patched, with the gate set,
+    ///     so every patch body runs the closed path a gated entry runs at an OFF point and the
+    ///     difference is what the OFF arm cannot remove for that entry. The census counter the
+    ///     closed path increments is restored afterwards. The line's shape is the entry's census
+    ///     id, and the census maps every patched entry to itself, so D_up prices each entry with
+    ///     its own run (V4 3.6). A direct-call entry uses "call": a call whose body opens with the
+    ///     census check, against the empty loop. Before the plugin's patches are applied (the
+    ///     process-start run) there is nothing to read back and no entry run is made; VR2 requires
+    ///     every entry's run at every game start, so a failed entry run (logged) fails VR2.
     /// (c) The span's own cost: an outermost span around an empty body (x++), against the
     ///     body alone, in the calibration's own span slot (FtSpan.Cal).
     /// The settled line (M8) is written once per game and once at process start.</summary>
@@ -28,47 +38,16 @@ namespace CompetitiveRounds
     {
         private const int Batches = 20;
         private const int Calls = 100000;
+        private const int EntryCalls = 25000;
         private const int Spins = 5;
         internal const string HarmonyId = "competitiverounds.frametime.calibration";
 
         internal static long FHat;
         private static int _runs;
         private static int _sink;
-        private static readonly Dummy TheDummy = new Dummy();
 
-        internal sealed class Dummy
+        internal static class Dummy
         {
-            internal int V;
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            internal static void S0() { _sink++; }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            internal static int S1(int a) { return a + 1; }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            internal void I0() { V++; }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            internal static void S2(ref int a, object b) { a++; }
-
-            // Targets of the census shapes: instance void, object and bool with two arguments; static void with
-            // three and with two; and a direct call whose body opens with the census check.
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            internal void I1(int a, float b) { V += a; }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            internal object IR(int a, float b) { V += a; return this; }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            internal bool IB(int a, float b) { V += a; return (a & 1) == 0; }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            internal static void T3(object a, string b, int c) { _sink += c; }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            internal static void T2(object a, object b) { _sink++; }
-
             [MethodImpl(MethodImplOptions.NoInlining)]
             internal static void CallGated()
             {
@@ -77,97 +56,38 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>The census slot the calibration's closed paths count in: never registered, so no census
+        /// <summary>The census slot the direct-call closed path counts in: never registered, so no census
         /// line and no sum includes it.</summary>
         internal const int CalEntry = 255;
 
-        private static class Patches
-        {
-            internal static void Post() { }
-            internal static bool Pre() { return true; }
-            internal static void PostResult(ref int __result) { }
-            internal static void PostInstance(Dummy __instance) { }
-            internal static Exception Fin(Exception __exception) { return __exception; }
-
-            // The closed paths, one per census shape (INVENTORY.md "Patch shapes").
-            internal static void S1Pre(Dummy __instance, int a) { if (FtCensus.Skip(CalEntry)) return; _sink++; }
-            internal static void S2Post(Dummy __instance, int a) { if (FtCensus.Skip(CalEntry)) return; _sink++; }
-            internal static void S3Post(object __0, string __1, int __2) { if (FtCensus.Skip(CalEntry)) return; _sink++; }
-            internal static void S4Post(Dummy __instance, int a, object __result) { if (FtCensus.Skip(CalEntry)) return; _sink++; }
-            internal static Exception S5Fin(Dummy __instance, Exception __exception)
-            {
-                if (FtCensus.Skip(CalEntry)) return __exception;
-                _sink++;
-                return __exception;
-            }
-            internal static void S6Pre(Dummy __instance, int a, out long __state)
-            {
-                if (FtCensus.Skip(CalEntry)) { __state = 0; return; }
-                __state = 1;
-            }
-            internal static Exception S6Fin(Dummy __instance, long __state, Exception __exception)
-            {
-                if (FtGate.Off) return __exception;
-                _sink++;
-                return __exception;
-            }
-            internal static void S7Pre(object __0, object __1, out long __state)
-            {
-                if (FtCensus.Skip(CalEntry)) { __state = 0; return; }
-                __state = 1;
-            }
-            internal static Exception S7Fin(long __state, Exception __exception)
-            {
-                if (FtGate.Off) return __exception;
-                _sink++;
-                return __exception;
-            }
-            internal static void S8Pre(Dummy __instance, out long __state)
-            {
-                if (FtCensus.Skip(CalEntry)) { __state = 0; return; }
-                __state = 1;
-            }
-            internal static void S8Post(Dummy __instance, long __state) { if (FtGate.Off) return; _sink++; }
-            internal static void S9Post(Dummy __instance, bool __result, long __state) { if (FtGate.Off) return; _sink++; }
-            internal static void S11Pre() { if (FtCensus.Skip(CalEntry)) return; _sink++; }
-            internal static Exception S11Fin(Exception __exception)
-            {
-                if (FtGate.Off) return __exception;
-                _sink++;
-                return __exception;
-            }
-        }
-
-        /// <summary>A patch shape: the loop that calls its target, the target, and its patches.</summary>
+        /// <summary>A loop shape that needs no patch: "call" and the span's own cost.</summary>
         private struct Shape
         {
             internal string Name;
             internal int Loop;
             internal int Baseline;
-            internal string Target;
-            internal string Prefix;
-            internal string Postfix;
-            internal string Finalizer;
         }
 
         private static readonly Shape[] Shapes =
         {
-            // The census shapes (INVENTORY.md "Patch shapes"; FtEntries.cs names each entry's), each patched
-            // with its closed path; "call" is a direct call whose body opens with the census check, against
-            // the empty loop. S10, S12 to S14 belong to no gated entry.
-            new Shape { Name = "S1", Loop = 10, Baseline = 10, Target = "I1", Prefix = "S1Pre" },
-            new Shape { Name = "S2", Loop = 10, Baseline = 10, Target = "I1", Postfix = "S2Post" },
-            new Shape { Name = "S3", Loop = 13, Baseline = 13, Target = "T3", Postfix = "S3Post" },
-            new Shape { Name = "S4", Loop = 11, Baseline = 11, Target = "IR", Postfix = "S4Post" },
-            new Shape { Name = "S5", Loop = 10, Baseline = 10, Target = "I1", Finalizer = "S5Fin" },
-            new Shape { Name = "S6", Loop = 10, Baseline = 10, Target = "I1", Prefix = "S6Pre", Finalizer = "S6Fin" },
-            new Shape { Name = "S7", Loop = 14, Baseline = 14, Target = "T2", Prefix = "S7Pre", Finalizer = "S7Fin" },
-            new Shape { Name = "S8", Loop = 10, Baseline = 10, Target = "I1", Prefix = "S8Pre", Postfix = "S8Post" },
-            new Shape { Name = "S9", Loop = 12, Baseline = 12, Target = "IB", Prefix = "S8Pre", Postfix = "S9Post" },
-            new Shape { Name = "S11", Loop = 2, Baseline = 2, Target = "I0", Prefix = "S11Pre", Finalizer = "S11Fin" },
-            new Shape { Name = "call", Loop = 15, Baseline = 6, Target = null },
-            new Shape { Name = "span.empty", Loop = 5, Baseline = 6, Target = null },
+            new Shape { Name = "call", Loop = 15, Baseline = 6 },
+            new Shape { Name = "span.empty", Loop = 5, Baseline = 6 },
         };
+
+        /// <summary>One patched entry's calibration: the dummy with the target's signature, its call loop,
+        /// and the entry's own patch methods.</summary>
+        private sealed class EntryCal
+        {
+            internal int Entry;
+            internal string Name;
+            internal MethodInfo Dummy;
+            internal Action<int> Loop;
+            internal HarmonyMethod Pre, Post, Fin;
+            internal string Error;
+        }
+
+        private static EntryCal[] _cals;
+        private static ModuleBuilder _module;
 
         /// <summary>One calibration run; why names the moment (start, or game g).</summary>
         internal static void Run(string why)
@@ -177,6 +97,10 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] cal i=" + i + " kind=fhat failed: " + ex.Message); }
             try { RunDispatch(i, why); }
             catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] cal i=" + i + " kind=disp failed: " + ex.Message); }
+            try { FtA3.Calibrate(i, why); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] cal i=" + i + " kind=a3 failed: " + ex.Message); }
+            try { RunEntries(i, why); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] cal i=" + i + " kind=disp entries failed: " + ex.Message); }
         }
 
         private static void RunFHat(int i, string why)
@@ -204,24 +128,12 @@ namespace CompetitiveRounds
 
         private static long Loop(int loop, int n)
         {
-            Dummy d = TheDummy;
-            object o = d;
             int x = 0;
             long t0 = Stopwatch.GetTimestamp();
             switch (loop)
             {
-                case 0: for (int j = 0; j < n; j++) Dummy.S0(); break;
-                case 1: for (int j = 0; j < n; j++) x = Dummy.S1(x); break;
-                case 2: for (int j = 0; j < n; j++) d.I0(); break;
-                case 3: for (int j = 0; j < n; j++) Dummy.S2(ref x, o); break;
-                case 4: for (int j = 0; j < n; j++) { if (!FtGate.Off) Dummy.S0(); } break;
                 case 5: for (int j = 0; j < n; j++) { bool sp = FtSpan.Open(FtSpan.Cal, FtSpan.Gated); x++; FtSpan.Close(sp); } break;
                 case 6: for (int j = 0; j < n; j++) { x++; } break;
-                case 10: for (int j = 0; j < n; j++) d.I1(j, 1f); break;
-                case 11: for (int j = 0; j < n; j++) { if (d.IR(j, 1f) == null) x++; } break;
-                case 12: for (int j = 0; j < n; j++) { if (d.IB(j, 1f)) x++; } break;
-                case 13: for (int j = 0; j < n; j++) Dummy.T3(o, "m", j); break;
-                case 14: for (int j = 0; j < n; j++) Dummy.T2(o, o); break;
                 case 15: for (int j = 0; j < n; j++) { Dummy.CallGated(); x++; } break;
             }
             long t = Stopwatch.GetTimestamp() - t0;
@@ -229,25 +141,19 @@ namespace CompetitiveRounds
             return t;
         }
 
-        private static HarmonyMethod Hm(string name)
-        {
-            return name == null ? null : new HarmonyMethod(AccessTools.Method(typeof(Patches), name));
-        }
-
         private static void RunDispatch(int i, string why)
         {
-            var harmony = new Harmony(HarmonyId);
             foreach (Shape s in Shapes)
             {
                 var u = new long[Batches];
                 var p = new long[Batches];
                 Loop(s.Baseline, 1000);
                 for (int b = 0; b < Batches; b++) u[b] = Loop(s.Baseline, Calls);
-                MethodInfo target = s.Target == null ? null : AccessTools.Method(typeof(Dummy), s.Target);
-                if (target != null) harmony.Patch(target, Hm(s.Prefix), Hm(s.Postfix), null, Hm(s.Finalizer), null);
-                // The closed paths need the gate set: the one write of FtGate.Off outside FtSchedule.Boundary,
-                // inside this calibration, with nothing else running on the main thread, restored after.
+                // The closed path needs the gate set: a write of FtGate.Off outside FtSchedule.Boundary, inside
+                // this calibration, with nothing else running on the main thread, restored after; the census
+                // counter it increments is restored too.
                 bool gate = FtGate.Off;
+                long guarded = FtCensus.Guarded[CalEntry];
                 bool span = s.Name.StartsWith("span.");
                 if (!span) FtGate.Off = true;
                 try
@@ -258,11 +164,179 @@ namespace CompetitiveRounds
                 finally
                 {
                     FtGate.Off = gate;
-                    if (target != null) harmony.Unpatch(target, HarmonyPatchType.All, HarmonyId);
+                    FtCensus.Guarded[CalEntry] = guarded;
                 }
-                Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=" + (s.Name.StartsWith("span.") ? "span" : "disp") + " shape=" + s.Name + " n=" + Calls
+                Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=" + (span ? "span" : "disp") + " shape=" + s.Name + " n=" + Calls
                     + " u=" + string.Join(",", u) + " p=" + string.Join(",", p));
             }
+        }
+
+        private static long Time(Action<int> loop, int n)
+        {
+            long t0 = Stopwatch.GetTimestamp();
+            loop(n);
+            return Stopwatch.GetTimestamp() - t0;
+        }
+
+        private static void RunEntries(int i, string why)
+        {
+            EntryCal[] cals = Cals();
+            if (cals.Length == 0) return;   // before the plugin's patches exist (the process-start run)
+            var harmony = new Harmony(HarmonyId);
+            foreach (EntryCal c in cals)
+            {
+                if (c.Error != null)
+                {
+                    Plugin.Log.LogWarning("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=disp shape=" + c.Name + " failed: " + c.Error);
+                    continue;
+                }
+                var u = new long[Batches];
+                var p = new long[Batches];
+                bool gate = FtGate.Off;
+                long guarded = FtCensus.Guarded[c.Entry];
+                bool patched = false;
+                string failed = null;
+                FtGate.Off = true;
+                try
+                {
+                    c.Loop(1000);
+                    for (int b = 0; b < Batches; b++) u[b] = Time(c.Loop, EntryCalls);
+                    harmony.Patch(c.Dummy, c.Pre, c.Post, null, c.Fin, null);
+                    patched = true;
+                    c.Loop(1000);
+                    for (int b = 0; b < Batches; b++) p[b] = Time(c.Loop, EntryCalls);
+                }
+                catch (Exception ex) { failed = ex.GetType().Name + ": " + ex.Message; }
+                finally
+                {
+                    FtGate.Off = gate;
+                    FtCensus.Guarded[c.Entry] = guarded;
+                    if (patched)
+                    {
+                        try { harmony.Unpatch(c.Dummy, HarmonyPatchType.All, HarmonyId); }
+                        catch (Exception ex) { failed = (failed ?? "") + " unpatch: " + ex.Message; }
+                    }
+                }
+                if (failed != null)
+                {
+                    Plugin.Log.LogWarning("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=disp shape=" + c.Name + " failed: " + failed);
+                    continue;
+                }
+                Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=disp shape=" + c.Name + " n=" + EntryCalls
+                    + " u=" + string.Join(",", u) + " p=" + string.Join(",", p));
+            }
+        }
+
+        /// <summary>Every patched entry's calibration, built once after the plugin's patches exist.</summary>
+        private static EntryCal[] Cals()
+        {
+            if (_cals != null) return _cals;
+            Dictionary<Type, MethodBase> targets = PatchedTargets();
+            if (targets.Count == 0) return new EntryCal[0];
+            var list = new List<EntryCal>();
+            for (int e = 0; e < FtE.Count; e++)
+            {
+                Type pt = FtE.PatchType(e);
+                if (pt == null) continue;
+                var c = new EntryCal { Entry = e, Name = FtCensus.ShapeOf[e] ?? ("entry" + e) };
+                try { Build(c, pt, targets); }
+                catch (Exception ex) { c.Error = ex.GetType().Name + ": " + ex.Message; }
+                list.Add(c);
+            }
+            _cals = list.ToArray();
+            return _cals;
+        }
+
+        /// <summary>Harmony's own table: each patch class (not this calibration's) and the one target it patches
+        /// (null when a class patches more than one).</summary>
+        private static Dictionary<Type, MethodBase> PatchedTargets()
+        {
+            var map = new Dictionary<Type, MethodBase>();
+            foreach (MethodBase m in Harmony.GetAllPatchedMethods())
+            {
+                HarmonyLib.Patches info = Harmony.GetPatchInfo(m);
+                if (info == null) continue;
+                foreach (var group in new[] { info.Prefixes, info.Postfixes, info.Finalizers, info.Transpilers })
+                    foreach (Patch q in group)
+                    {
+                        if (q.owner == HarmonyId || q.PatchMethod == null) continue;
+                        Type t = q.PatchMethod.DeclaringType;
+                        MethodBase prev;
+                        if (map.TryGetValue(t, out prev)) { if (prev != m) map[t] = null; }
+                        else map[t] = m;
+                    }
+            }
+            return map;
+        }
+
+        private static bool Has(MethodInfo m, Type attr) { return m.GetCustomAttributes(attr, false).Length > 0; }
+
+        private static HarmonyMethod One(HarmonyMethod have, MethodInfo m)
+        {
+            if (have != null) throw new InvalidOperationException("two patch methods of one kind in " + m.DeclaringType.Name);
+            return new HarmonyMethod(m);
+        }
+
+        private static void Build(EntryCal c, Type pt, Dictionary<Type, MethodBase> targets)
+        {
+            MethodBase target;
+            if (!targets.TryGetValue(pt, out target)) throw new InvalidOperationException("no patched target for " + pt.Name);
+            if (target == null) throw new InvalidOperationException(pt.Name + " patches more than one target");
+            var mi = target as MethodInfo;
+            if (mi == null) throw new InvalidOperationException(pt.Name + " patches a constructor");
+            if (mi.IsGenericMethod || mi.DeclaringType.IsGenericType) throw new InvalidOperationException(pt.Name + " patches a generic method");
+            foreach (MethodInfo m in pt.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            {
+                if (Has(m, typeof(HarmonyTranspiler)) || m.Name == "Transpiler") throw new InvalidOperationException(pt.Name + " has a transpiler");
+                if (Has(m, typeof(HarmonyPrefix)) || m.Name == "Prefix") c.Pre = One(c.Pre, m);
+                else if (Has(m, typeof(HarmonyPostfix)) || m.Name == "Postfix") c.Post = One(c.Post, m);
+                else if (Has(m, typeof(HarmonyFinalizer)) || m.Name == "Finalizer") c.Fin = One(c.Fin, m);
+            }
+            if (c.Pre == null && c.Post == null && c.Fin == null) throw new InvalidOperationException(pt.Name + " has no patch method");
+
+            ParameterInfo[] ps = mi.GetParameters();
+            var types = new Type[ps.Length];
+            for (int k = 0; k < ps.Length; k++) types[k] = ps[k].ParameterType;
+            if (_module == null)
+                _module = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("FtCalibDummies"), AssemblyBuilderAccess.Run)
+                    .DefineDynamicModule("FtCalibDummies");
+            TypeBuilder tb = _module.DefineType("FtCal_" + c.Name, TypeAttributes.Public | TypeAttributes.Sealed | TypeAttributes.Class);
+            FieldBuilder fb = tb.DefineField("N", typeof(int), FieldAttributes.Public | FieldAttributes.Static);
+            MethodBuilder mb = tb.DefineMethod(mi.Name, MethodAttributes.Public | MethodAttributes.HideBySig
+                | (mi.IsStatic ? MethodAttributes.Static : 0), mi.ReturnType, types);
+            mb.SetImplementationFlags(MethodImplAttributes.IL | MethodImplAttributes.Managed | MethodImplAttributes.NoInlining);
+            for (int k = 0; k < ps.Length; k++) mb.DefineParameter(k + 1, ps[k].Attributes, ps[k].Name);
+            // A body that never reads its arguments or `this` (the loop passes null and zeroes), long enough to
+            // carry a detour: four increments of a static, then the return type's zero.
+            ILGenerator il = mb.GetILGenerator();
+            for (int k = 0; k < 4; k++)
+            {
+                il.Emit(OpCodes.Ldsfld, fb); il.Emit(OpCodes.Ldc_I4_1); il.Emit(OpCodes.Add); il.Emit(OpCodes.Stsfld, fb);
+            }
+            if (mi.ReturnType != typeof(void)) il.Emit(OpCodes.Ldloc, il.DeclareLocal(mi.ReturnType));
+            il.Emit(OpCodes.Ret);
+            Type dt = tb.CreateType();
+            c.Dummy = dt.GetMethod(mi.Name, BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            if (c.Dummy == null) throw new InvalidOperationException("dummy for " + pt.Name + " not found");
+
+            // The loop: n calls with a null instance and zero arguments (by-ref arguments point at zeroed locals).
+            var dm = new DynamicMethod("FtCalLoop_" + c.Name, typeof(void), new[] { typeof(int) }, typeof(FtCalib).Module, true);
+            ILGenerator g = dm.GetILGenerator();
+            LocalBuilder iv = g.DeclareLocal(typeof(int));
+            var args = new LocalBuilder[ps.Length];
+            for (int k = 0; k < ps.Length; k++) args[k] = g.DeclareLocal(types[k].IsByRef ? types[k].GetElementType() : types[k]);
+            Label body = g.DefineLabel(), cond = g.DefineLabel();
+            g.Emit(OpCodes.Br, cond);
+            g.MarkLabel(body);
+            if (!mi.IsStatic) g.Emit(OpCodes.Ldnull);
+            for (int k = 0; k < ps.Length; k++) g.Emit(types[k].IsByRef ? OpCodes.Ldloca : OpCodes.Ldloc, args[k]);
+            g.Emit(OpCodes.Call, c.Dummy);
+            if (mi.ReturnType != typeof(void)) g.Emit(OpCodes.Pop);
+            g.Emit(OpCodes.Ldloc, iv); g.Emit(OpCodes.Ldc_I4_1); g.Emit(OpCodes.Add); g.Emit(OpCodes.Stloc, iv);
+            g.MarkLabel(cond);
+            g.Emit(OpCodes.Ldloc, iv); g.Emit(OpCodes.Ldarg_0); g.Emit(OpCodes.Blt, body);
+            g.Emit(OpCodes.Ret);
+            c.Loop = (Action<int>)dm.CreateDelegate(typeof(Action<int>));
         }
 
         /// <summary>M8, the settled line: once per game (game >= 0) and once at process

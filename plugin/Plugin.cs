@@ -530,7 +530,13 @@ namespace CompetitiveRounds
                     try
                     {
 #if SCR_FRAMETIME
-                        if (FtUpload.Closed) { FtUpload.Refuse("log", "prev-copy"); FtUpload.LogCounts("quit"); return; }
+                        if (FtUpload.Closed)
+                        {
+                            FtUpload.Refuse("log", "prev-copy");
+                            try { FtSchedule.FlushGame("quit"); } catch { }
+                            FtUpload.LogCounts("quit");
+                            return;
+                        }
 #endif
                         string src = CompetitiveUI.BepInExLogPathPublic();
                         string dst = CompetitiveUI.BepInExLogPreviousPath();

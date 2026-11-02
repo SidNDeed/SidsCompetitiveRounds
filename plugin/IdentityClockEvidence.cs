@@ -139,6 +139,10 @@ namespace CompetitiveRounds
         }
 
         private static Game _g;
+#if SCR_FRAMETIME
+        /// <summary>FrameTime VR5: whether this game's collection opened (FtSchedule.Opened).</summary>
+        internal static bool FtOpen => _g != null;
+#endif
         private static long _gen;
         private static bool _wasPicking, _wasPlaying, _anyDead, _haveOwn;
         private static long _lastTickUs;

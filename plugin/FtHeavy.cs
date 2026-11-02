@@ -10,9 +10,11 @@ namespace CompetitiveRounds
     /// (CombatEvidence.BuildCaptures, SeatEvidence.BuildCaptures, CardDrawEvidence.BuildPending,
     /// IdentityClockEvidence.BuildEnv), queue writes (SeatEvidence.Enqueue for every route, and
     /// SpoolClosing on the closing path), the upload pump, answers, the start of the hashing thread
-    /// and a hash completed on the main thread. In a live frame the call also reads CombatLive
-    /// itself: at_call counts calls with combat still live (what B3 judges), edge counts calls in a
-    /// frame that started live and whose combat ended before the call (reported, not judged). The
+    /// and a hash completed on the main thread. Every main-thread call also reads CombatLive itself,
+    /// whatever the frame's moment says (a stale non-live moment cannot hide a live call): at_call
+    /// counts calls with combat live at the call; edge counts calls in a frame that started live and
+    /// whose combat ended before the call. V4 3.9's rule is that no heavy work runs in a live-combat
+    /// frame, so B3 judges both (round-1 MEDIUM, FtHeavy.cs:39). The
     /// hashing thread's run is stamped (Stopwatch ticks) so the parser can test its interval against
     /// every point's live interval. Main thread only; a call from another thread is counted as off.</summary>
     internal static class FtHeavy
@@ -36,11 +38,10 @@ namespace CompetitiveRounds
             if (Thread.CurrentThread.ManagedThreadId != FtSpan.MainThread) { Interlocked.Increment(ref _off[op]); return; }
             int m = FtSpan.Moment;
             _byMoment[op * FtSpan.Moments + m]++;
-            if (m != FtSpan.Live) return;
             bool live = true;
             try { live = SeatEvidence.CombatLive(); } catch { }
             if (live) _atCall[op]++;
-            else _edge[op]++;
+            else if (m == FtSpan.Live) _edge[op]++;
         }
 
         internal static void HashBegin() { Interlocked.Exchange(ref HashT0, Stopwatch.GetTimestamp()); }

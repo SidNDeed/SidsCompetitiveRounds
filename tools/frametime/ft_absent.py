@@ -9,7 +9,7 @@ Exit 0 when the expectation holds, 1 otherwise."""
 import sys
 
 STRINGS = ["[FRAME-TIME]", "SCR_BUILD_VARIANT=FRAMETIME", "frametime: refused"]     # user strings: UTF-16LE
-TYPES = ["FtSchedule", "FtMenu", "FtRoute_SendPatch", "FtUpload", "FtArm", "FtDrive", "FtRematch", "FtReplay"]
+TYPES = ["FtSchedule", "FtMenu", "FtRoute_SendPatch", "FtUpload", "FtArm", "FtDrive", "FtRematch", "FtReplay", "FtA3"]
 
 
 def main():

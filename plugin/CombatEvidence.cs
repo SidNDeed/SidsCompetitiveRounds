@@ -69,6 +69,10 @@ namespace CompetitiveRounds
         // -- the game window -----------------------------------------------------------------------
 
         private static bool _open, _frozen;
+#if SCR_FRAMETIME
+        /// <summary>FrameTime VR5: whether this game's collection opened (FtSchedule.Opened).</summary>
+        internal static bool FtOpen => _open;
+#endif
         private static long _frozenAtMs;
         private static string _room = "";
         private static int _oppActor, _localActor;
@@ -1866,10 +1870,14 @@ namespace CompetitiveRounds
 
         private static void PointReset(GunState s, int pt)
         {
+#if SCR_FRAMETIME
+            int ftWinN = s.WinN, ftWinHead = s.WinHead;
+#endif
             s.Gmin = -1; s.Vmax = 0; s.Refreshes = 0; s.HasVolley = false; s.WinN = 0; s.WinHead = 0;
 #if SCR_FRAMETIME
-            // FrameTime game-0 zero-state mutant (FtZero): one volley-window entry survives every reset.
-            if (FtZero.MutantNow && s.WinN == 0) { s.Win[0] = 0; s.WinHead = 0; s.WinN = 1; }
+            // FrameTime game-0 zero-state mutant (FtZero, ZERO-STATE.md): the reset of the volley window is undone,
+            // so the entries the ended point left survive into the next one; nothing is fabricated.
+            if (FtZero.MutantNow) { s.WinN = ftWinN; s.WinHead = ftWinHead; }
 #endif
             s.CexpMin = -1; ReadCexp(s);
             s.Acct.Point = pt;
@@ -2250,6 +2258,9 @@ namespace CompetitiveRounds
                 e[0] = pid; e[1] = stamp; e[2] = E.Clamp(res[0], 0, 9999999); e[3] = E.Clamp(res[1], -9999999, 9999999); e[4] = E.Clamp(res[2], 0, 3142);
                 e[5] = E.Clamp((long)Math.Round(Math.Abs(dTms)), 0, 600000); e[6] = E.Clamp(speed, 0, 999999); e[7] = unknown ? E.MASK_UNKNOWN : mask;
                 g.P3topSeen++;
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_Top); FtA3.Wrote(FtA3.CE_Top);
+#endif
                 TopInsert(g.Top, ref g.TopN, TOP_CAP, 8, e, 2);
             }
         }
@@ -2303,6 +2314,9 @@ namespace CompetitiveRounds
 
         private static void HtUpsert(Game g, int pid, int sInit, long ratio, long n)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_Ht); FtA3.Wrote(FtA3.CE_Ht);
+#endif
             for (int i = 0; i < g.HtN && i < HT_CAP; i++)
             {
                 if (g.Ht[i * 4] != pid) continue;
@@ -2316,6 +2330,45 @@ namespace CompetitiveRounds
             e[0] = pid; e[1] = sInit; e[2] = E.Clamp(ratio, 0, 99999); e[3] = E.Clamp(n, 0, 99999);
             TopInsert(g.Ht, ref g.HtN, HT_CAP, 4, e, 2);
         }
+
+#if SCR_FRAMETIME
+        // FrameTime A3 (FtA3, SURVIVORS.md): the calibrations of the two content-dependent reads above, on scratch
+        // copies, never on a live game's state. EMPTY: no rows. CAPACITY in its costliest content: every row held and
+        // the new row ranking first, so TopInsert shifts every held row (and HtUpsert first finds the pid at row 0,
+        // shifting the rest down, then reinserts it first). Both halves make the same scratch copy per call.
+        private static readonly long[] _ftTopFull = new long[TOP_CAP * 8], _ftTopWork = new long[TOP_CAP * 8], _ftTopE = new long[8];
+        private static Game _ftHtGame;
+        private static readonly long[] _ftHtFull = new long[HT_CAP * 4];
+
+        internal static long FtCalTop(bool full, int n)
+        {
+            for (int i = 0; i < TOP_CAP; i++) _ftTopFull[i * 8 + 2] = 1000000 - i;
+            _ftTopE[2] = 2000000;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                Array.Copy(_ftTopFull, _ftTopWork, _ftTopFull.Length);
+                int cnt = full ? TOP_CAP : 0;
+                TopInsert(_ftTopWork, ref cnt, TOP_CAP, 8, _ftTopE, 2);
+            }
+            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+        }
+
+        internal static long FtCalHt(bool full, int n)
+        {
+            if (_ftHtGame == null) _ftHtGame = new Game();
+            var g = _ftHtGame;
+            for (int i = 0; i < HT_CAP; i++) { _ftHtFull[i * 4] = 7 + i; _ftHtFull[i * 4 + 2] = 90000 - i; }
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                Array.Copy(_ftHtFull, g.Ht, _ftHtFull.Length);
+                g.HtN = full ? HT_CAP : 0;
+                HtUpsert(g, 7, 1, 99999, 5);
+            }
+            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+        }
+#endif
 
         // -- the game-over capture and the build ----------------------------------------------------
 

@@ -12,7 +12,10 @@ namespace CompetitiveRounds
     /// (ON, OFF or none: the menu self-check), f18 (A or B: section 5 of the build brief;
     /// A when absent), plant_us, menu (1: the menu self-check, FtMenu) and menu_segments; the
     /// controls' keys (zs_mutant, ranked_hook, rematch_mutant, join) are read where they act.
-    /// The file's presence is also the arming input of part b.</summary>
+    /// The file's presence is also the arming input of part b: Refresh, from every frame boundary,
+    /// re-reads the file's existence, write time and length at most four times a second, so a removed
+    /// or changed sentinel disarms the build within a quarter second (round-1 MEDIUM, FtArm.cs:116);
+    /// a removal is never undone in the process.</summary>
     internal static class FtConfig
     {
         internal static string Dir => Path.Combine(BepInEx.Paths.BepInExRootPath, "frametime");
@@ -26,6 +29,11 @@ namespace CompetitiveRounds
         internal static bool Menu;            // menu=1: the menu self-check (FtMenu); the sitting never arms
         internal static int MenuSegments = 64;   // menu_segments: even, 4 to 400
         internal static string Problems = "";
+        internal static bool Changed;         // the sentinel's write time or length changed after Load
+
+        private static DateTime _mtime;
+        private static long _len = -1;
+        private static long _next;
 
         private static readonly Dictionary<string, string> Kv = new Dictionary<string, string>(StringComparer.Ordinal);
 
@@ -36,6 +44,8 @@ namespace CompetitiveRounds
             Present = File.Exists(ArmPath);
             if (Present)
             {
+                try { var fi = new FileInfo(ArmPath); _mtime = fi.LastWriteTimeUtc; _len = fi.Length; }
+                catch { Problems += " stat"; }
                 foreach (string raw in File.ReadAllLines(ArmPath))
                 {
                     string ln = raw.Trim();
@@ -64,6 +74,22 @@ namespace CompetitiveRounds
                 MenuSegments = 64;
                 Problems += " bad-menu_segments";
             }
+        }
+
+        /// <summary>At every frame boundary (FtArm.Evaluate); a file stat at most every 250 ms of Stopwatch time.</summary>
+        internal static void Refresh()
+        {
+            if (!Present) return;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (now < _next) return;
+            _next = now + System.Diagnostics.Stopwatch.Frequency / 4;
+            try
+            {
+                var fi = new FileInfo(ArmPath);
+                if (!fi.Exists) { Present = false; return; }
+                if (fi.LastWriteTimeUtc != _mtime || fi.Length != _len) Changed = true;
+            }
+            catch { Present = false; }
         }
 
         internal static string Get(string key, string fallback)

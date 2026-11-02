@@ -82,6 +82,7 @@ namespace CompetitiveRounds
 
         internal static void Evaluate()
         {
+            FtConfig.Refresh();
             string why = Latched ? Why : Check();
             if (FenceExemptCurrent())
             {
@@ -93,7 +94,10 @@ namespace CompetitiveRounds
             if (Armed && !armed && !Latched)
             {
                 Latched = true;
-                Plugin.Log.LogWarning("[FRAME-TIME] disarmed input=" + why + " pt=" + FtSchedule.Label());
+                // the completed sitting's own end is not a disarm (it leaves the room after game 16); every other
+                // input, escape and a rematch timeout included (round-1 MEDIUM, FtDrive.cs:60), is
+                if (why == "complete") Plugin.Log.LogInfo("[FRAME-TIME] ended why=complete pt=" + FtSchedule.Label());
+                else Plugin.Log.LogWarning("[FRAME-TIME] disarmed input=" + why + " pt=" + FtSchedule.Label());
             }
             else if (armed && !Armed)
                 Plugin.Log.LogInfo("[FRAME-TIME] armed room=" + PhotonNetwork.CurrentRoom.Name + " region=" + Region());
@@ -114,6 +118,7 @@ namespace CompetitiveRounds
         private static string Common()
         {
             if (!FtConfig.Present) return "sentinel";
+            if (FtConfig.Changed) return "sentinel_changed";
             if (FtConfig.Problems.Length > 0) return "sentinel_problems";
             if (!FtClock.Installed) return "clock";
             string probe = CombatEvidencePerf.Mode;
@@ -141,6 +146,9 @@ namespace CompetitiveRounds
         {
             try
             {
+                if (FtDrive.Complete) return "complete";
+                if (FtDrive.Escaped) return "escape";
+                if (FtRematch.TimedOut) return "rematch_timeout";
                 string c = Common();
                 if (c != null) return c;
                 if (FtConfig.Menu) return "menu_mode";   // a menu self-check process never arms the sitting

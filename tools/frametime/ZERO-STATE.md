@@ -55,7 +55,9 @@ MovePlayers, :4103-4130). Only active objects return, so switched-off pooled car
 keeps its bullets alive (VanillaFixes.cs:4065-4069), so a mixed room can fail it (format M's room is two format M
 seats).
 
-**Game-0 mutant.** CE `GunState.Win` (row 2): under the mutant switch, PointReset skips `s.WinN = 0; s.WinHead = 0;`
+**Game-0 mutant.** CE `GunState.Win` (row 2): under the mutant switch, PointReset restores the WinN and WinHead its
+unchanged reset line cleared, which is skipping `s.WinN = 0; s.WinHead = 0;` (round 1 found the earlier form fabricated
+an entry after the reset instead of preserving one)
 (CombatEvidence.cs:1802). DrainVolleys keeps the newest stamp in the window, so after any point with a volley WinN
 stays >= 1 and the check must void every later round of game 0; it also corrupts the next point's Vmax (:1930), so
 the check catches a real evidence error.

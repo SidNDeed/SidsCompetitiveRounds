@@ -49,6 +49,10 @@ namespace CompetitiveRounds
         // -- the game window ------------------------------------------------------------
 
         private static bool _open;
+#if SCR_FRAMETIME
+        /// <summary>FrameTime VR5: whether this game's collection opened (FtSchedule.Opened).</summary>
+        internal static bool FtOpen => _open;
+#endif
         private static int _oppActor;
         private static int _localActor;
         private static bool _masterAtStart, _rankedAtStart;
