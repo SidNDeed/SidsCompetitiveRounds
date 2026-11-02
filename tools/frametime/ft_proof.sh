@@ -85,6 +85,7 @@ pair() {
 build "$A" Release base-A-release
 build "$B" Release base-B-release
 pair base-A-release base-B-release || fail "step 2: main's Release DLL differs between the two paths (dump in the log)"
+say "BASELINE EQUAL"
 say "step 2 PASS: main's Release DLL equal at both paths"
 
 # 3. the pairs
@@ -93,9 +94,11 @@ git -C "$B" checkout -q --detach "$LANE" || fail "could not move proofB to the l
 [ "$(git -C "$B" rev-parse HEAD)" = "$LANE" ] || fail "proofB is not at the lane"
 build "$B" Release lane-release
 pair base-A-release lane-release || fail "step 3: Release DLLs differ between main and the lane (dump in the log)"
+say "PAIR Release EQUAL"
 build "$A" Thunderstore base-thunderstore
 build "$B" Thunderstore lane-thunderstore
 pair base-thunderstore lane-thunderstore || fail "step 3: Thunderstore DLLs differ between main and the lane (dump in the log)"
+say "PAIR Thunderstore EQUAL"
 say "step 3 PASS: Release and Thunderstore DLLs equal between main and the lane"
 
 # 4. the source check, with each configuration's own /define list

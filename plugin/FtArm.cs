@@ -62,10 +62,10 @@ namespace CompetitiveRounds
             catch { return false; }
         }
 
-        /// <summary>The unmasked joined line, for the ft_ room only (both seats' lines must agree, F12).</summary>
+        /// <summary>The unmasked room line, for the ft_ room only (both seats' lines must agree, F12).</summary>
         internal static void LogJoined()
         {
-            Plugin.Log.LogInfo("[FRAME-TIME] joined room=" + PhotonNetwork.CurrentRoom.Name + " region=" + Region()
+            Plugin.Log.LogInfo("[FRAME-TIME] room name=" + PhotonNetwork.CurrentRoom.Name + " region=" + Region()
                 + " cloud_region=" + (PhotonNetwork.CloudRegion ?? ""));
         }
 
