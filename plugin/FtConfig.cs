@@ -20,6 +20,7 @@ namespace CompetitiveRounds
         internal static int Seed;
         internal static string Force = "none";
         internal static string F18 = "A";
+        internal static int PlantUs = -1;     // plant_us: c_plant fixed by the sentinel (M5); -1 = derived
         internal static string Problems = "";
 
         private static readonly Dictionary<string, string> Kv = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -48,6 +49,8 @@ namespace CompetitiveRounds
             string r = Get("f18", "A");
             F18 = r == "B" ? "B" : "A";
             if (r != "A" && r != "B") Problems += " bad-f18";
+            string pu = Get("plant_us", "-1");
+            if (!int.TryParse(pu, out PlantUs) || PlantUs < -1) { PlantUs = -1; Problems += " bad-plant_us"; }
         }
 
         internal static string Get(string key, string fallback)

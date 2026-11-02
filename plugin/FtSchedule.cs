@@ -41,9 +41,12 @@ namespace CompetitiveRounds
             {
                 LiveFrame++;
                 FtSpan.Moment = FtSpan.Live;
+                FtPlant.Now = !ArmOn && LiveFrame >= 2 && FtPlant.Us > 0
+                    && FtPlant.Planted(FtConfig.Seed, Game, Round, PointInRound, (LiveFrame - 2) / FtFrames.W);
                 return;
             }
             LiveFrame = 0;
+            FtPlant.Now = false;
             bool picking = false;
             try { picking = CardChoice.instance != null && CardChoice.instance.IsPicking; } catch { }
             if (picking)
@@ -94,7 +97,7 @@ namespace CompetitiveRounds
             FtCensus.Reset();
             FtSpan.Reset();
             FtCalib.Run("game" + Game);
-            FtCalib.Settled(Game, FtFrames.CPlant);
+            FtCalib.Settled(Game, FtPlant.Us);
         }
 
         /// <summary>GameStateWatcher.OnGameOver: the census line for the game.</summary>
@@ -103,6 +106,17 @@ namespace CompetitiveRounds
             FtGate.Off = false;
             FtSpan.Moment = FtSpan.GameOver;
             FtCensus.LogGame(Game);
+        }
+
+        /// <summary>SplitMix64 over five integers and a stream constant (the plant's slot draw).</summary>
+        internal static ulong Mix(int seed, int game, int round, int point, long block, ulong stream)
+        {
+            ulong z = unchecked((ulong)(uint)seed * 0x9E3779B97F4A7C15UL + (ulong)(uint)game * 0xBF58476D1CE4E5B9UL
+                                + (ulong)(uint)round * 0x94D049BB133111EBUL + (ulong)(uint)point * 0xD6E8FEB86659FD93UL
+                                + (ulong)block * 0xA0761D6478BD642FUL + stream);
+            z = unchecked((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL);
+            z = unchecked((z ^ (z >> 27)) * 0x94D049BB133111EBUL);
+            return z ^ (z >> 31);
         }
 
         /// <summary>The seeded coin for a round's first arm: SplitMix64 over (seed, game, round).</summary>

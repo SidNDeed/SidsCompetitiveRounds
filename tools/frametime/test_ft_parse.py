@@ -132,3 +132,69 @@ def test_vr2_flags_missing_end_and_missing_settled():
 def test_vr3_lag1():
     assert P.lag1([1, -1] * 8) < -0.9
     assert P.lag1(list(range(16))) > 0.8
+
+
+# ------------------------------------------------------------------ the plant (M5): e_C, VR7, planted windows kept out
+
+def test_batch_interval_port_matches_control():
+    es = [0.95 + 0.01 * ((i * 7) % 5) - 0.004 * (i % 3) for i in range(16)]
+    est, hw, df = P.batch_interval(es)
+    assert est == pytest.approx(0.965, abs=1e-12)
+    assert hw == pytest.approx(0.009371237028935563, abs=1e-12)
+    assert df == 15
+
+
+def _plant_log(ks, c_plant=80, fhat=3000000000):
+    recs = [{"kind": "plant", "c_plant": c_plant}]
+    for g, k in enumerate(ks, 1):
+        recs.append({"kind": "settled", "g": g, "f_hat": fhat})
+        unit = c_plant * fhat // 1000000
+        for pt in (1, 2):
+            recs.append({"kind": "p", "game": g, "round": 1, "point": pt, "arm": "OFF", "n": 900,
+                         "sC": 900 * 7000000, "pn": 300, "psC": 300 * (7000000 + int(k * unit))})
+        recs.append({"kind": "p", "game": g, "round": 1, "point": 3, "arm": "ON", "n": 900, "sC": 1, "pn": 0, "psC": 0})
+    return recs
+
+
+def test_e_c_reads_the_plant():
+    ks = [0.98 + 0.002 * (i % 4) for i in range(16)]
+    m, hw, df, lo, ng, miss = P.e_c(_plant_log(ks))
+    assert m == pytest.approx(sum(ks) / 16, abs=1e-6)
+    assert lo == pytest.approx(m - hw) and hw > 0 and ng == 16 and miss == []
+
+
+def test_e_c_refuses_without_a_plant_line():
+    recs = [r for r in _plant_log([1.0] * 16) if r["kind"] != "plant"]
+    with pytest.raises(P.Refused):
+        P.e_c(recs)
+
+
+def _with_planted(recs, events, games=16, per=70):
+    for g in range(1, games + 1):
+        for w in range(per):
+            k = events(g, w)
+            recs.append({"kind": "w", "game": g, "arm": "OFF", "plant": 1, "partial": 0, "n": 120,
+                         "e4": (k, k), "e8": (0, 0), "e16": (0, 0)})
+    return recs
+
+
+def test_hitch_leaves_planted_windows_out():
+    base = P.hitch(_windows(lambda g, w: 0, lambda g, w: 0))
+    mixed = P.hitch(_with_planted(_windows(lambda g, w: 0, lambda g, w: 0), lambda g, w: 1))
+    assert mixed[4]["ub_per_frame"] == base[4]["ub_per_frame"]
+
+
+def test_mutant_hitch_counting_planted_windows_differs():
+    recs = _with_planted(_windows(lambda g, w: 0, lambda g, w: 0), lambda g, w: 1)
+    with_planted = P.hitch(recs, side=lambda r: r["arm"])
+    assert with_planted[4]["ub_per_frame"] != P.hitch(recs)[4]["ub_per_frame"]
+
+
+def test_vr7_constant_plant_passes():
+    ok, bad = P.vr7(_with_planted(_windows(lambda g, w: 0, lambda g, w: 0), lambda g, w: 0))
+    assert ok and bad == []
+
+
+def test_vr7_stalls_in_planted_windows_fail():
+    ok, bad = P.vr7(_with_planted(_windows(lambda g, w: 0, lambda g, w: 0), lambda g, w: 1 if w % 5 == 0 else 0))
+    assert not ok and "H=4 ms FAIL" in bad

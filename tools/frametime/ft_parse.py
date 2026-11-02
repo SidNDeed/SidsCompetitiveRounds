@@ -6,14 +6,16 @@ dither_control v5 (md5 894b010c), whose claims C10 to C21 they reproduce. test_f
 port against values computed with the control.
 
 Lines read (all values integers; a value with a decimal point is refused, HIGH 5):
-  w        window:   pt=g.r.p arm=ON|OFF partial=0|1 n sF sS sC maxF [medF e4=kmin,kmax e8=.. e16=..] gc
-  p        point:    pt arm gate pred n sF sS sC maxF windows live_frames missing_end
+  w        window:   pt=g.r.p arm=ON|OFF plant=0|1 partial=0|1 n sF sS sC maxF [medF e4=kmin,kmax e8=.. e16=..] gc
+  p        point:    pt arm gate pred n sF sS sC maxF pn psF psS psC plant_mixed windows live_frames missing_end
+                     (n and the s sums are the unplanted frames, pn and the ps sums the planted ones)
+  plant    once:     c_plant (us) ticks from=g.r.p|sentinel
   settled  per game: g seed c_plant W vsync target freq hires f_hat gc_incremental gc_slice_ns f18 ... missing_end
   cal      per run:  i why kind=fhat|disp|span ...
   census   per entry per game: g entry comp shape on guarded outside
 
-Part 3 of the build brief adds the plant (M5, e_C_lo), D_up (V4 3.6) and K_up (UPKEEP spans). Until those
-lines exist, report() states U as not computable rather than computing it without them.
+The plant gives e_C_lo (V4 3.5) and VR7. Part 3's remainder adds D_up (V4 3.6) and K_up (UPKEEP spans); until
+those lines exist, report() states U as not computable rather than computing it without them.
 
 Usage: python -I -B ft_parse.py <LogOutput.log> [<second seat's log>]
 """
@@ -180,6 +182,23 @@ def fw_interval(dw, z=Z_END):
     return best
 
 
+def batch_interval(ds, z=Z_END):
+    """The control's interval over games for a per-game mean (e_C): one-game and two-game batch means, the wider
+    one-sided half-width wins. Returns (est, hw, df)."""
+    k = len(ds)
+    est = sum(ds) / k
+    best = None
+    for b in (1, 2):
+        bm = [sum(ds[i:i + b]) / b for i in range(0, k - k % b, b)]
+        kb = len(bm)
+        mb = sum(bm) / kb
+        se = math.sqrt(sum((v - mb) ** 2 for v in bm) / (kb - 1) / kb)
+        hw = t_q(z, kb - 1) * se
+        if best is None or hw > best[1]:
+            best = (est, hw, kb - 1)
+    return best
+
+
 def lag1(xs):
     m = sum(xs) / len(xs)
     den = sum((x - m) ** 2 for x in xs)
@@ -198,7 +217,8 @@ def _int(key, v):
 
 INT_KEYS = {"n", "sF", "sS", "sC", "maxF", "medF", "gc", "gate", "windows", "live_frames", "missing_end", "partial",
             "g", "seed", "c_plant", "W", "vsync", "target", "freq", "hires", "f_hat", "frames", "cycle_failures",
-            "span_depth_violations", "on", "guarded", "outside", "i"}
+            "span_depth_violations", "on", "guarded", "outside", "i", "plant", "pn", "psF", "psS", "psC",
+            "plant_mixed", "ticks"}
 
 
 def parse_line(line):
@@ -260,21 +280,39 @@ def dC(recs, z=Z_END):
     return est, hw, df, lag1([d for d, w in dw])
 
 
-def hitch(recs, freq_unused=None, first_game=1):
+def _side_plain(r):
+    """B2's sides: the window's arm; planted windows take no side (M5: exposure and VR7 only)."""
+    return r["arm"] if r.get("plant", 0) == 0 else None
+
+
+def _side_vr7(r):
+    """VR7's sides, OFF windows only: planted windows stand in the ON place, unplanted in the OFF place."""
+    if r["arm"] != "OFF":
+        return None
+    return "ON" if r.get("plant", 0) else "OFF"
+
+
+def hitch(recs, first_game=1, side=_side_plain):
     """B2 (V4 3.8): per H, the FAIL test on K_ON_min against K_OFF_max and the upper bound UB on K_ON_max against
-    K_OFF_min, per frame, with each arm's dispersion bound over its per-game counts. Full windows only."""
+    K_OFF_min, per frame, with each arm's dispersion bound over its per-game counts. Full windows only; games
+    with full windows on both sides only."""
     per = {}
     for r in recs:
         if r["kind"] != "w" or r.get("partial", 1) != 0 or r["game"] < first_game:
             continue
-        key = (r["arm"], r["game"])
+        arm = side(r)
+        if arm is None:
+            continue
+        key = (arm, r["game"])
         a = per.setdefault(key, {"n": 0, "k": {h: [0, 0] for h in H_MS}})
         a["n"] += r["n"] - 2
         for h in H_MS:
             kmin, kmax = r["e%d" % h]
             a["k"][h][0] += kmin
             a["k"][h][1] += kmax
-    games = sorted(set(g for arm, g in per))
+    games = sorted(g for g in set(g for arm, g in per) if ("ON", g) in per and ("OFF", g) in per)
+    if len(games) < 2:
+        raise Refused("fewer than two games with full windows on both sides")
     out = {}
     for h in H_MS:
         n_on = [per[("ON", g)]["n"] for g in games]
@@ -287,6 +325,41 @@ def hitch(recs, freq_unused=None, first_game=1):
         ub = rate_ub(on_max, n_on) - rate_lb(off_min, n_off)
         out[h] = {"fail": fail, "ub_per_frame": ub, "ub_per_1000": ub * 1000.0}
     return out
+
+
+def vr7(recs, first_game=1):
+    """VR7, the hitch control: B2's test on planted against unplanted OFF windows (a constant planted cost, no
+    stall) must not FAIL at any H."""
+    out = hitch(recs, first_game, _side_vr7)
+    bad = ["H=%d ms FAIL" % h for h in H_MS if out[h]["fail"]]
+    return not bad, bad
+
+
+def e_c(recs, z=Z_END, first_game=1):
+    """V4 3.5: C's response to the plant at OFF points, as the control's v4_reading reads it. Per OFF point with
+    planted and unplanted frames, (planted mean C - unplanted mean C) / c_plant in cycles (c_plant us x the game's
+    f_hat / 10^6); per game the mean over those points; over games batch_interval at z. Returns (mean, hw, df,
+    e_lo, games used, games without a planted OFF point)."""
+    cp = [r["c_plant"] for r in recs if r["kind"] == "plant"]
+    if len(cp) != 1 or cp[0] <= 0:
+        raise Refused("e_C needs exactly one plant line with c_plant > 0 (got %s)" % cp)
+    fh = {r["g"]: r["f_hat"] for r in recs if r["kind"] == "settled"}
+    games = games_of(recs, first_game)
+    es, missing = [], []
+    for g in sorted(games):
+        if g not in fh or fh[g] <= 0:
+            raise Refused("no f_hat for game %d" % g)
+        unit = cp[0] * fh[g] / 1e6
+        v = [(q["psC"] / q["pn"] - q["sC"] / q["n"]) / unit for q in games[g]
+             if q["arm"] == "OFF" and q.get("pn", 0) > 0 and q["n"] > 0]
+        if v:
+            es.append(sum(v) / len(v))
+        else:
+            missing.append(g)
+    if len(es) < 3:
+        raise Refused("e_C needs planted OFF points in at least three games (got %d)" % len(es))
+    m, hw, df = batch_interval(es, z)
+    return m, hw, df, m - hw, len(es), missing
 
 
 def vr5(recs):
@@ -328,9 +401,21 @@ def report(text):
     try:
         for h, v in hitch(recs).items():
             out.append("B2 H=%d ms %s UB %.4f per 1000 frames" % (h, "FAIL" if v["fail"] else "pass", v["ub_per_1000"]))
-    except (KeyError, ZeroDivisionError, ValueError) as e:
+    except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("B2 not computable: %s" % e)
-    out.append("U not computable yet: the plant (e_C_lo), D_up and K_up lines are part 3's remainder")
+    try:
+        ok7, why7 = vr7(recs)
+        out.append("VR7 %s %s" % ("PASS" if ok7 else "FAIL", "; ".join(why7)))
+    except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
+        out.append("VR7 not computable: %s" % e)
+    try:
+        m, hw, df, lo, ng, miss = e_c(recs)
+        out.append("e_C %.4f, lower end %.4f at z %.4f, df %d, %d games%s" % (m, lo, Z_END, df, ng,
+                   "; no planted OFF point in games %s" % miss if miss else ""))
+        out.append("VR2 e_C_lo %s (>= 0.5)" % ("PASS" if lo >= 0.5 else "FAIL"))
+    except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
+        out.append("e_C not computable: %s" % e)
+    out.append("U not computable yet: D_up and K_up lines are part 3's remainder")
     return "\n".join(out)
 
 

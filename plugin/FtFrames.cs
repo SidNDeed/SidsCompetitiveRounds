@@ -22,13 +22,17 @@ namespace CompetitiveRounds
     /// F - medF < H - 2, uncertain otherwise; an event is a run of long frames inside the
     /// window; a two-state pass gives the least and greatest run count over every
     /// assignment of the uncertain frames, the frame before frame 3 counting as short. A
-    /// partial window is logged and kept in the sums, not in the event counts. Still to
-    /// come in part 3: the plant (M5) with its planted sums, the zero-state result and the
-    /// census and span totals on the point line.</summary>
+    /// partial window is logged and kept in the sums, not in the event counts. A window is
+    /// wholly planted or not (FtPlant, M5): its line says plant=0|1, and the point line
+    /// carries the unplanted sums (n, sF, sS, sC) and the planted ones (pn, psF, psS, psC)
+    /// apart, with plant_mixed counting frames whose plant state differs from their
+    /// window's first frame (0 by construction; VR2). At the end of the session's first
+    /// OFF point with a full unplanted window, c_plant is fixed at round(0.03 x its mean F).
+    /// Still to come in part 3: the zero-state result and the census and span totals on
+    /// the point line.</summary>
     internal static class FtFrames
     {
         internal const int W = 120;
-        internal static long CPlant = -1;
 
         private static readonly long[] WinF = new long[W];
         private static readonly long[] Sorted = new long[W - 2];
@@ -38,6 +42,9 @@ namespace CompetitiveRounds
         private static ulong _wC;
         private static int _wGc;
         private static int _windows;
+        private static bool _wPlant;
+        private static long _qn, _qF, _qS, _plantMixed;
+        private static ulong _qC;
 
         private static long _pn, _pF, _pS, _pMaxF, _pMissingEnd;
         private static ulong _pC;
@@ -47,11 +54,13 @@ namespace CompetitiveRounds
         {
             if (!FtSchedule.Live || FtSchedule.LiveFrame < 2) return;
             if (!ended) _pMissingEnd++;
-            if (_wn == 0) _wGc = GC.CollectionCount(0);
+            if (_wn == 0) { _wGc = GC.CollectionCount(0); _wPlant = FtPlant.Now; }
+            else if (FtPlant.Now != _wPlant) _plantMixed++;
             WinF[_wn++] = f;
             _wF += f; _wS += s; _wC += c;
             if (f > _wMaxF) _wMaxF = f;
-            _pn++; _pF += f; _pS += s; _pC += c;
+            if (_wPlant) { _qn++; _qF += f; _qS += s; _qC += c; }
+            else { _pn++; _pF += f; _pS += s; _pC += c; }
             if (f > _pMaxF) _pMaxF = f;
             if (_wn == W) FlushWindow(false);
         }
@@ -60,6 +69,7 @@ namespace CompetitiveRounds
         {
             _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0;
             _pn = 0; _pF = 0; _pS = 0; _pC = 0; _pMaxF = 0; _pMissingEnd = 0;
+            _qn = 0; _qF = 0; _qS = 0; _qC = 0; _plantMixed = 0;
             _windows = 0;
         }
 
@@ -70,7 +80,11 @@ namespace CompetitiveRounds
                 + " gate=" + (FtSchedule.GateThisPoint ? 1 : 0)
                 + " pred=" + (FtSchedule.PrevArm < 0 ? "none" : FtSchedule.PrevArm == 1 ? "ON" : "OFF")
                 + " n=" + _pn + " sF=" + _pF + " sS=" + _pS + " sC=" + _pC + " maxF=" + _pMaxF
+                + " pn=" + _qn + " psF=" + _qF + " psS=" + _qS + " psC=" + _qC + " plant_mixed=" + _plantMixed
                 + " windows=" + _windows + " live_frames=" + FtSchedule.LiveFrame + " missing_end=" + _pMissingEnd);
+            if (FtPlant.Us < 0 && !FtSchedule.ArmOn && _pn >= W)
+                FtPlant.Fix((long)Math.Round(0.03 * _pF * 1000000.0 / ((double)_pn * System.Diagnostics.Stopwatch.Frequency)),
+                    FtSchedule.Label());
         }
 
         private static void FlushWindow(bool partial)
@@ -78,7 +92,7 @@ namespace CompetitiveRounds
             _windows++;
             var sb = new StringBuilder(160);
             sb.Append("[FRAME-TIME] w pt=").Append(FtSchedule.Label()).Append(" arm=").Append(FtSchedule.ArmOn ? "ON" : "OFF")
-              .Append(" partial=").Append(partial ? 1 : 0).Append(" n=").Append(_wn).Append(" sF=").Append(_wF)
+              .Append(" plant=").Append(_wPlant ? 1 : 0).Append(" partial=").Append(partial ? 1 : 0).Append(" n=").Append(_wn).Append(" sF=").Append(_wF)
               .Append(" sS=").Append(_wS).Append(" sC=").Append(_wC).Append(" maxF=").Append(_wMaxF);
             if (!partial)
             {

@@ -26,6 +26,7 @@ namespace CompetitiveRounds
 
         private struct FtStart { }
         private struct FtEnd { }
+        private struct FtPlantTick { }
 
         private static readonly IntPtr Self = GetCurrentThread();
 
@@ -59,13 +60,17 @@ namespace CompetitiveRounds
             var end = new UnityEngine.LowLevel.PlayerLoopSystem { type = typeof(FtEnd), updateDelegate = OnEnd };
             bool a = Insert(ref loop, typeof(UnityEngine.PlayerLoop.EarlyUpdate), start, true);
             bool b = Insert(ref loop, typeof(UnityEngine.PlayerLoop.PreLateUpdate), end, false);
-            if (!a || !b)
+            var plant = new UnityEngine.LowLevel.PlayerLoopSystem { type = typeof(FtPlantTick), updateDelegate = FtPlant.OnUpdate };
+            bool c = Insert(ref loop, typeof(UnityEngine.PlayerLoop.Update), plant, true);
+            if (!a || !b || !c)
             {
-                Plugin.Log.LogWarning("[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate " + a + ", PreLateUpdate " + b + ")");
+                Plugin.Log.LogWarning("[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate " + a + ", PreLateUpdate " + b
+                    + ", Update " + c + ")");
                 return;
             }
             UnityEngine.LowLevel.PlayerLoop.SetPlayerLoop(loop);
             Installed = true;
+            FtPlant.Init();
             ulong probe = Cycles();
             Plugin.Log.LogInfo("[FRAME-TIME] clock installed freq=" + Stopwatch.Frequency + " hires=" + (Stopwatch.IsHighResolution ? 1 : 0)
                 + " cycles=" + (probe != 0 ? 1 : 0));
