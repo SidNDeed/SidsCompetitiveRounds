@@ -36,7 +36,9 @@
 # void.
 
 param(
-    [Parameter(Mandatory = $true)][string]$Dll
+    [Parameter(Mandatory = $true)][string]$Dll,
+    # FrameTime: the format M lane's DLL (FORMAT-M-PLAN.md part d) - FRAMETIME present, STANDALONE absent
+    [ValidateSet('Standalone', 'FrameTime')][string]$Build = 'Standalone'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -69,8 +71,10 @@ $utf8 = [System.Text.Encoding]::UTF8
 # its release URLs, so there it is the plugin source folder under it.
 $treeName = Split-Path -Leaf (Split-Path -Parent $PSScriptRoot)
 if ($treeName -eq 'SidsCompetitiveRounds') { $treeName += '\plugin' }
+$isFt = $Build -eq 'FrameTime'   # not $Variant: the scan loops use $variant, and names are case-insensitive
 $needles = @(
-    @{ Text = 'SCR_BUILD_VARIANT=STANDALONE';    Utf16 = 'present'; Utf8 = 'any';    Why = 'build gate: this is the standalone variant' },
+    @{ Text = 'SCR_BUILD_VARIANT=STANDALONE';    Utf16 = $(if ($isFt) { 'absent' } else { 'present' }); Utf8 = $(if ($isFt) { 'absent' } else { 'any' }); Why = $(if ($isFt) { 'build gate: the FrameTime variant must not carry the standalone marker' } else { 'build gate: this is the standalone variant' }) },
+    @{ Text = 'SCR_BUILD_VARIANT=FRAMETIME';     Utf16 = $(if ($isFt) { 'present' } else { 'absent' }); Utf8 = $(if ($isFt) { 'any' } else { 'absent' }); Why = $(if ($isFt) { 'build gate: this is the FrameTime variant' } else { 'build gate: the FrameTime variant must not be in this build' }) },
     @{ Text = 'SCR_BUILD_VARIANT=THUNDERSTORE';  Utf16 = 'absent';  Utf8 = 'absent'; Why = 'build gate: the Thunderstore variant must not be in this build' },
     @{ Text = 'C:\Users';                        Utf16 = 'absent';  Utf8 = 'absent'; Why = 'privacy: local user directory, backslash spelling' },
     @{ Text = 'C:/Users';                        Utf16 = 'absent';  Utf8 = 'absent'; Why = 'privacy: local user directory, forward-slash spelling' },

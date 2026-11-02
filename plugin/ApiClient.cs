@@ -2746,6 +2746,8 @@ namespace CompetitiveRounds
         internal const string BuildVariantMarker =
 #if THUNDERSTORE
             "SCR_BUILD_VARIANT=THUNDERSTORE";
+#elif SCR_FRAMETIME
+            "SCR_BUILD_VARIANT=FRAMETIME";
 #elif SCR_G3
             "SCR_BUILD_VARIANT=G3";
 #else
@@ -2757,6 +2759,12 @@ namespace CompetitiveRounds
 #if THUNDERSTORE
             Plugin.Log.LogInfo("[UPDATE] Thunderstore build — auto-update disabled, use mod manager");
             CompetitiveUI.ShowNotification("Update available — update through your mod manager", Color.cyan, 6f);
+            IsUpdating = false;
+            NativeUI.MarkDirty();
+            yield break;
+#elif SCR_FRAMETIME
+            Plugin.Log.LogInfo("[UPDATE] FrameTime build - auto-update disabled");
+            CompetitiveUI.ShowNotification("FrameTime build - auto-update disabled", Color.cyan, 6f);
             IsUpdating = false;
             NativeUI.MarkDirty();
             yield break;
