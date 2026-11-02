@@ -380,7 +380,11 @@ namespace CompetitiveRounds
             // hosted-lobby start) funnels through here, so the discard is
             // structural — QueueRoomJoiner never sees a pending room, and the
             // raw room/region below are never stored or logged on this seat.
+#if SCR_FRAMETIME
+            if (!FtArm.FenceExempt(roomName) && BroadcastMode.FenceBlocksFighterPath("pending-fighter-room")) return;
+#else
             if (BroadcastMode.FenceBlocksFighterPath("pending-fighter-room")) return;
+#endif
             pendingRankedRoom = roomName;
             pendingRankedRegion = region;
             QueueRoomJoiner.JoinGate = false;
@@ -509,7 +513,7 @@ namespace CompetitiveRounds
 #if SCR_FRAMETIME
             // FrameTime (B11 format M): settings from BepInEx/frametime/arm, the per-frame
             // clock (M1), the process-start calibration (M6) and settled line (M8).
-            try { FtConfig.Load(); FtClock.Install(); FtCalib.Run("start"); FtCalib.Settled(-1, -1); }
+            try { FtConfig.Load(); FtArm.ReadFixture(); FtClock.Install(); FtCalib.Run("start"); FtCalib.Settled(-1, -1); }
             catch (Exception ex) { Log.LogWarning("[FRAME-TIME] start failed: " + ex.Message); }
 #endif
 

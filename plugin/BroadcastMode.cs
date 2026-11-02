@@ -364,6 +364,9 @@ namespace CompetitiveRounds
                 if (!IsBroadcastIdentity) return false;
                 if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return false;
                 if (SpectatorSession.IsLocalSpectator) return false;
+#if SCR_FRAMETIME
+                if (FtArm.FenceExemptCurrent()) return false;
+#endif
                 Plugin.Log?.LogWarning($"[BROADCAST] §2c fence: joined {SafeRoomDesc()} without a spectator session — aborting before fighter setup");
                 try { NetworkConnectionHandler.instance?.NetworkRestart(); } catch { }
                 return true;
@@ -378,6 +381,9 @@ namespace CompetitiveRounds
                 if (Time.realtimeSinceStartup < _nextFenceKickAt) return;
                 if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
                 if (SpectatorSession.IsLocalSpectator) return;
+#if SCR_FRAMETIME
+                if (FtArm.FenceExemptCurrent()) return;
+#endif
                 _nextFenceKickAt = Time.realtimeSinceStartup + 5f;
                 // §2c: the broadcast identity holds an online room WITHOUT an
                 // active spectator session — leave before any fighter setup

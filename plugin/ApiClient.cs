@@ -9543,6 +9543,10 @@ namespace CompetitiveRounds
 
         public static void CheckOpponentRanked(string steamId, Action<bool> callback)
         {
+#if SCR_FRAMETIME
+            if (FtArm.InFtRoom()) { Plugin.Log.LogInfo("[FRAME-TIME] ranked-check skipped"); callback(false); return; }
+            if (FtConfig.Get("ranked_hook", "0") == "1") { Plugin.Log.LogInfo("[FRAME-TIME] ranked-check test hook answered true"); callback(true); return; }
+#endif
             if (string.IsNullOrEmpty(steamId) || steamId.StartsWith("photon_") || steamId == "unknown")
             {
                 callback(false);

@@ -38,6 +38,8 @@ namespace CompetitiveRounds
         /// <summary>Frame boundary: decide the state of the frame that starts now.</summary>
         internal static void Boundary()
         {
+            FtArm.Evaluate();
+            if (!FtArm.Armed && FtGate.Off) FtGate.Off = false;   // a disarm opens the gate at this boundary
             bool live = SeatEvidence.CombatLive();
             if (live && !Live) StartPoint();
             else if (!live && Live) EndPoint();
@@ -102,6 +104,7 @@ namespace CompetitiveRounds
             FtCensus.Reset();
             FtSpan.Reset();
             FtHeavy.Reset();
+            FtArm.ReadFixture();
             FtCalib.Run("game" + Game);
             FtCalib.Settled(Game, FtPlant.Us);
         }
@@ -142,9 +145,5 @@ namespace CompetitiveRounds
     /// the ft_ room, FT_REGION, exactly two fighters, the arm file present), evaluated on
     /// every frame the drive runs. Part 4 of the build brief implements it; until then the
     /// build never arms, so the gate never sets.</summary>
-    internal static class FtArm
-    {
-        internal static bool Armed => false;
-    }
 }
 #endif
