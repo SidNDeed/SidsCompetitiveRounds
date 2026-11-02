@@ -914,7 +914,7 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
                 # The rollback released this request id and a concurrent use
                 # of it recorded first: answer that record, act on nothing.
                 return await _open_replay(db, req, room, held, opener)
-            await db.commit()
+            await _commit_fresh(db)
             return _refused("other_mode")
         await _close_due_room_hold(db, room, now)
         existing = (await db.execute(text(
@@ -1141,9 +1141,16 @@ async def _attempt(db: AsyncSession, hold_id, kind: str, now, outcome: str,
          "reason": reason})
 
 
+async def _commit_fresh(db):
+    """Commit the transaction holding a refusal's audit row: the fresh one a
+    gate loser opens after its rollback (match_hold_open's and
+    match_hold_claim's other_mode refusals), and every _refuse_attempt's."""
+    await db.commit()
+
+
 async def _refuse_attempt(db, hold_id, kind, now, reason):
     await _attempt(db, hold_id, kind, now, "refused", reason)
-    await db.commit()
+    await _commit_fresh(db)
     return _refused(reason)
 
 

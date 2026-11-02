@@ -542,22 +542,20 @@ def _helper_block(w, stmts, wrote, state, top=False):
 def _hold_block(w, stmts):
     """The hold refusal after its rollback: the refusal's own fresh
     transaction.  Shapes: an awaited call of a named helper with plain
-    arguments (as a statement or assigned to a local), the commit of that
-    transaction, an if walked into, and exits: a return of a verified
-    refusal (_hold_refusal_problem), or a raise of HTTPException with plain
-    arguments.  The helpers' own bodies are the fresh transaction's writes,
-    which the design allows after the rollback; their arguments and the
-    if tests are read by the shared visitor."""
+    arguments (as a statement or assigned to a local), an if walked into,
+    and exits: a return of a verified refusal (_hold_refusal_problem), or a
+    raise of HTTPException with plain arguments.  The helpers' own bodies
+    are the fresh transaction's writes and its commit (match_hold.
+    _commit_fresh), which the design allows after the rollback; their
+    arguments and the if tests are read by the shared visitor.  Round 8: no
+    session method is whitelisted here; a commit by one is refused by the
+    grammar (grammar_shapes_gate.NARROWED, finding gate:136)."""
     for i, st in enumerate(stmts):
         value = getattr(st, "value", None)
         named = _awaited_name_call(value, w.b)
         if isinstance(st, ast.Expr) and named is not None:
             w.shape("hold: awaited helper call")
             _plain_args(w, named, f"the arguments of {named.func.id}")
-        elif (isinstance(st, ast.Expr) and isinstance(value, ast.Await)
-              and _cw.is_db_call(value.value, "commit", _SESSIONS)
-              and not value.value.args and not value.value.keywords):
-            w.shape("hold: commit of the refusal's own transaction")
         elif (isinstance(st, ast.Assign) and len(st.targets) == 1
               and isinstance(st.targets[0], ast.Name) and named is not None):
             w.shape("hold: assign a helper's answer to a local")
@@ -648,7 +646,8 @@ def _refusal_answer_problem(fn, call, seen, b):
     the statements of the refusal's own fresh transaction, as _hold_block
     reads them (an awaited call of a function of its module with plain
     arguments, a session among them only as that function's same-named
-    parameter, or the awaited commit); and a return of either the literal
+    parameter; round 8: no session method, the commit included, is taken
+    here); and a return of either the literal
     `{"status": "refused", "reason": reason, ...}`, its other values plain,
     or the answer of such a refusal of its own module called with `reason`
     (awaited exactly when that refusal is a coroutine function), read the
@@ -703,10 +702,6 @@ def _answer_block(w, stmts, seen, top=False):
         value = getattr(st, "value", None)
         call = value.value if isinstance(value, ast.Await) else None
         if isinstance(st, ast.Expr) and isinstance(call, ast.Call):
-            if (_cw.is_db_call(call, "commit", _SESSIONS)
-                    and not call.args and not call.keywords):
-                w.b.session_root_ok(call.func.value, st.lineno)
-                continue
             fn = (_resolve(w, call.func) if isinstance(call.func, ast.Name)
                   else None)
             if fn is None or not inspect.iscoroutinefunction(fn):
@@ -1041,12 +1036,24 @@ def _scope_of_lines(lines, consts=None):
 # plan)"); the route's lock phase before it may still expire admissions
 # (_ffa_expire_admissions), and that expiry commits with any answer, by design.
 
+# Round 8 (finding gate:1140): while "sink" is a list, _calls appends every
+# node it reads as (file, line, col, node type), "file" the walked source's.
+_INSPECTED = {"sink": None, "file": None}
+
+
 def _calls(node, stop, b):
     """Whether `node` holds a call of `stop`, the module's (read through
     `b`, the walked function's Bindings: a function that rebinds it is
-    refused, finding gate:1155)."""
-    return any(isinstance(n, ast.Call) and b.named(n.func, (stop,)) is not None
-               for n in ast.walk(node))
+    refused, finding gate:1155). Every node of `node` is read, none skipped
+    after a match, so the prefix walk can compare what it read with what the
+    grammar admitted (claim_prefix_violations)."""
+    found = False
+    for n in ast.walk(node):
+        if _INSPECTED["sink"] is not None:
+            _INSPECTED["sink"].append(_gg.node_key(_INSPECTED["file"], n))
+        if isinstance(n, ast.Call) and b.named(n.func, (stop,)) is not None:
+            found = True
+    return found
 
 
 def _prefix_effects(w, st, effects):
@@ -1136,11 +1143,16 @@ def _prefix_block(w, stmts, stop, top=False):
             _prefix_target(w, st, stop)
             # One statement of a block reaches the target; a later one would
             # reach it after a prefix this walk does not read (the "none of
-            # them" class, finding gate:1251).
-            for rest in stmts[i + 1:]:
-                if _calls(rest, stop, w.b):
-                    w.fail(rest, f"a second statement reaching {stop}, after "
-                                 "a prefix this walk does not read")
+            # them" class, finding gate:1251). Only an if target can be passed
+            # without its call, so only then is every later statement read
+            # (and admitted by the grammar first: prefix_span, finding
+            # gate:1140); a call that is a statement of its own runs on every
+            # path through that statement.
+            if isinstance(st, ast.If):
+                for rest in stmts[i + 1:]:
+                    if _calls(rest, stop, w.b):
+                        w.fail(rest, f"a second statement reaching {stop}, after "
+                                     "a prefix this walk does not read")
             return True
         if top and i == 0 and _is_docstring(st):
             w.shape("docstring")
@@ -1208,21 +1220,51 @@ def claim_prefix_violations(fn, stop, scope, where="prefix", at=("<site>", 0)):
 
     Round 7: `fn` is the function whose body is walked, `at` (file, line
     offset) its source; the grammar checks the span (grammar_shapes_gate.
-    prefix_span: the statements up to the first that calls `stop`, each
-    whole) and the binding rule fn whole, before the walk."""
+    prefix_span: the statements up to the first that calls `stop`, and every
+    later one when that statement is an if, each whole) and the binding rule
+    fn whole, before the walk.
+
+    Round 8 (finding gate:1140): the nodes the grammar admitted and the
+    nodes _calls read are both recorded, and any difference between the two
+    sets is a problem of the walk (_PREFIX_NODES keeps the last counts)."""
     stmts = fn.body
+    admitted, inspected = [], []
     try:
         with _grammar_walk():
-            _check_site(fn, _gg.prefix_span(fn, stop), at)
+            _gg.ADMITTED["sink"] = admitted
+            try:
+                _check_site(fn, _gg.prefix_span(fn, stop), at)
+            finally:
+                _gg.ADMITTED["sink"] = None
             w = _Walk(scope, where, stmts=stmts)
+            _INSPECTED.update(sink=inspected, file=at[0])
             try:
                 if not _prefix_block(w, stmts, stop, top=True):
                     w.problems.append(f"no statement calls {stop}")
             except Unclassified as e:
                 w.problems.append(f"line {e.args[0][0]}: {e.args[0][1]}")
+            finally:
+                _INSPECTED["sink"] = None
     except _gg.Refusal as e:
         return [e.args[0]], []
+    w.problems.extend(_node_set_problems(set(inspected), set(admitted)))
     return w.problems, w.seen
+
+
+_PREFIX_NODES = {"last": None}
+
+
+def _node_set_problems(inspected, admitted):
+    """The M6 assertion: a sentence for each node set difference between
+    what the prefix walk read and what the grammar admitted (none when
+    equal); the two counts kept in _PREFIX_NODES."""
+    _PREFIX_NODES["last"] = (len(inspected), len(admitted))
+    out = []
+    for what, got in (("inspected but not admitted", inspected - admitted),
+                      ("admitted but not inspected", admitted - inspected)):
+        if got:
+            out.append(f"{len(got)} nodes {what}, the first {min(got, key=str)}")
+    return out
 
 _MAIN_DEFS = {}
 
@@ -1266,7 +1308,9 @@ def test_h3_direct_refusal_is_the_claims_first_write():
 def test_h3_real_hold_replay_is_read_and_classified():
     """The hold refusal's replay shape is met by the real open path and
     read by the shared visitor: match_hold._open_replay reads and rolls
-    back only, and a copy of it that commits is refused."""
+    back only, and a copy of it that commits is refused (round 8: by the
+    grammar's shape, grammar_shapes_gate.NARROWED, before the visitor's
+    "ends the transaction")."""
     w = _Walk(match_hold, "replay probe")
     assert _hold_replay_problem(w, match_hold._open_replay) is None
     src = textwrap.dedent(inspect.getsource(match_hold._open_replay))
@@ -1278,7 +1322,8 @@ def test_h3_real_hold_replay_is_read_and_classified():
                  "_ctx_now", "_state_payload", "_HOLD_COLS"):
         setattr(scope, name, getattr(match_hold, name))
     got = _hold_replay_problem(_Walk(scope, "replay probe"), scope._open_replay)
-    assert got is not None and "ends the transaction (.commit)" in got, got
+    assert got is not None and got.endswith(
+        ":8: Call.func>Attribute(value=Name,attr='commit',ctx=Load)"), got
 
 
 def test_h3_hold_open_and_claim_reject_another_live_commitment(monkeypatch):
@@ -1501,6 +1546,15 @@ _LAPSE = '''        await _rdm_end_hold(ctx, me, "lapsed", depart=True)
 _ROW_DEF = "async def _rdm_row(ctx, pid, n):" + chr(10)
 
 
+# Finding gate:1140's program (round 7 report): a statement after the claim
+# target that reaches _rdm_claim through a computed callee, which _calls reads
+# (it is a statement after an if target) and which the round-7 span never
+# admitted.
+_R8_SUFFIX_LABEL = "a later dispatch branch reaching _rdm_claim through a computed callee"
+_R8_SUFFIX = ('    if req.step == "x":' + chr(10)
+              + '        return await (lambda: _rdm_claim)()(ctx, pid, me, req)')
+
+
 def _hold_returns(expr):
     """The hold branch's refusal replaced by `return <expr>`."""
     return [(_H_REFUSE, f"        return {expr}" + chr(10)
@@ -1518,7 +1572,7 @@ R7_CONTROLS = [
     # round 1
     ("r1 gate:136", "a committing refusal (M1a)", SHARED,
      [(_S_RB, _S_RB.replace("db.rollback()", "db.commit()"))], (), (),
-     "the refusal branch does not open with await db.rollback()"),
+     "grammar <planted _lobby_enroll_caller>:148: Call.func>Attribute(value=Name,attr='commit',ctx=Load)"),
     # round 2
     ("r2 gate:498", "an UPDATE before _rdm_claim in its dispatch branch",
      PREFIX_WORK, [(_W_TARGET, _W_TARGET.replace(
@@ -1660,7 +1714,18 @@ R7_CONTROLS = [
     ("r6 gate:1251", "a second statement reaching _rdm_claim after an UPDATE",
      PREFIX_WORK, [(_W_TARGET, _W_TARGET + chr(10) + "    " + _UPDATE + chr(10)
                     + "    return await _rdm_claim(ctx, pid, me, req)")],
-     (), (), "a second statement reaching _rdm_claim"),
+     (), (), 'grammar <planted _asm_readmit_work>:11: <root>>Expr(value=Await)'),
+    # round 7 (codex-rehearsal-four-r7.out M6, finding gate:1140): a statement
+    # after an if target is read for a second call of the target; round 8
+    # admits each such statement first (grammar_shapes_gate.prefix_span), and
+    # the walk asserts that the nodes it read are the nodes admitted.
+    ("r7 gate:1140", _R8_SUFFIX_LABEL, PREFIX_WORK,
+     [(_W_TARGET, _W_TARGET + chr(10) + _R8_SUFFIX)], (), (),
+     "grammar <planted _asm_readmit_work>:12: Await.value>Call(func=Call,args=[Name],keywords=[])"),
+    ("r7 gate:1140", "an UPDATE in a later dispatch branch, then a computed reach",
+     PREFIX_WORK, [(_W_TARGET, _W_TARGET + chr(10) + _R8_SUFFIX.replace(
+         "        return", "        " + _UPDATE + chr(10) + "        return"))],
+     (), (), "grammar <planted _asm_readmit_work>:11: <root>>If(test=Compare,body=[Expr|Return],orelse=[])"),
     # another child's (the database bound): whether the grammar refuses its shape
     ("r4 gate:245", "a session effect in _rdm_claim's arguments", PREFIX_WORK,
      [(_W_TARGET, _W_TARGET.replace("(ctx, pid,", "(ctx, ctx.db.add(pid),"))],
@@ -1799,3 +1864,125 @@ def test_r7_grammar_covers_every_walked_span_and_body():
     print(f"r7 grammar: {len(trace)} checks, {len(bodies)} bodies, "
           f"{len(sites)} site functions, {checked} nodes checked, "
           f"{len(_gg.SHAPES)} shapes, {len(_gg.ANCESTORS)} ancestor shapes")
+
+
+def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
+    """Finding gate:1140 (round 7 M6): the set of nodes the prefix walk
+    reads (_calls, every node of every statement it is given) equals the set
+    of nodes the grammar admitted (grammar_shapes_gate.nodes over
+    prefix_span), compared as (file, line, col, node type), on both real
+    prefix walks and on every prefix control the grammar admits; and a
+    control where the two differ (the round-7 span, to the first target
+    only, on the report's program) is a problem of the walk."""
+    counts = {}
+    for name, stop in (("_asm_readmit_work", "_rdm_claim"), ("_rdm_claim", GATE)):
+        problems, _ = claim_prefix_violations(
+            _main_def(name), stop, main, name, _source_at(getattr(main, name)))
+        assert problems == [], (name, problems)
+        counts[name] = _PREFIX_NODES["last"]
+        assert counts[name][0] == counts[name][1] > 0, counts
+    compared = 0
+    for row in R7_KEPT + R7_CONTROLS:
+        modname, name, entry, target = row[2]
+        if entry != "prefix":
+            continue
+        fn, scope, at = _planted(_R7_MODULES[modname], name, row[3], row[4], row[5])
+        _PREFIX_NODES["last"] = None
+        got = claim_prefix_violations(fn, target, scope, name, at)[0]
+        if _PREFIX_NODES["last"] is None:
+            assert got and got[0].startswith("grammar "), (row[1], got)
+            continue
+        compared += 1
+        assert not [p for p in got if " nodes inspected but not admitted" in p
+                    or " nodes admitted but not inspected" in p], (row[1], got)
+    assert compared >= 4, compared
+
+    def round7_span(fn, stop):
+        out = []
+        for st in fn.body:
+            out.append(st)
+            if stop in _gg.callees([st]):
+                break
+        return out
+
+    row = next(r for r in R7_CONTROLS if r[1] == _R8_SUFFIX_LABEL)
+    fn, scope, at = _planted(main, "_asm_readmit_work", row[3])
+    monkeypatch.setattr(_gg, "prefix_span", round7_span)
+    problems, _ = claim_prefix_violations(fn, "_rdm_claim", scope,
+                                          "_asm_readmit_work", at)
+    assert problems and all(" nodes inspected but not admitted" in p
+                            for p in problems), problems
+    print(f"r8 M6 inspected/admitted: {counts}, prefix controls compared {compared}; "
+          f"round-7 span on the report's program: {problems[0]}")
+
+
+def test_r8_refusal_commit_is_the_modules_fresh_commit(monkeypatch):
+    """Production conformation (round 8, M3 finding gate:136): the refusal
+    audit row's transaction is committed by match_hold._commit_fresh (a
+    commit, nothing else), and _refuse_attempt writes its row, commits, and
+    answers the refusal, in that order. The live effect (the committed row,
+    read by a separate connection) is test_h3_hold_open_and_claim_reject_
+    another_live_commitment's."""
+    calls = []
+
+    class Db:
+        async def commit(self):
+            calls.append("commit")
+
+        async def rollback(self):
+            calls.append("rollback")
+
+        async def flush(self):
+            calls.append("flush")
+
+    async def attempt(db, hold_id, kind, now, outcome, reason=None):
+        calls.append(("attempt", hold_id, kind, now, outcome, reason))
+
+    monkeypatch.setattr(match_hold, "_attempt", attempt)
+    assert asyncio.run(match_hold._commit_fresh(Db())) is None
+    assert calls == ["commit"], calls
+    calls.clear()
+    got = asyncio.run(match_hold._refuse_attempt(Db(), "h", "claim", "t", "other_mode"))
+    assert got == {"status": "refused", "reason": "other_mode"}, got
+    assert calls == [("attempt", "h", "claim", "t", "refused", "other_mode"),
+                     "commit"], calls
+
+
+def test_r8_readmit_work_dispatches_every_step(monkeypatch):
+    """Production conformation (round 8, M6; patch RF/r8/gg/main-asm-readmit-
+    work.patch): _asm_readmit_work's last step reads `if req.step ==
+    "entered":` (a root-level return is outside the frozen gate grammar);
+    the route admits only _RDM_STEPS, and each of them still reaches its own
+    step function with the same arguments and answers its answer."""
+    seen = []
+
+    def step(name):
+        async def run(ctx, pid, me, req):
+            seen.append((name, pid, me, req.step))
+            return {"step": name}
+        return run
+
+    async def readmit_on(db, lobby):
+        return True
+
+    for name in ("_rdm_claim", "_rdm_bind", "_rdm_decline", "_rdm_entered"):
+        monkeypatch.setattr(main, name, step(name))
+    monkeypatch.setattr(main, "_asm_readmit_on", readmit_on)
+
+    class Ctx:
+        db, lobby = object(), {}
+
+        def seat_of(self, pid):
+            return ("seat", pid)
+
+    class Req:
+        n = 1
+
+    assert main._RDM_STEPS == frozenset({"claim", "bind", "decline", "entered"})
+    for st in sorted(main._RDM_STEPS):
+        req = Req()
+        req.step = st
+        seen.clear()
+        got = asyncio.run(main._asm_readmit_work(Ctx(), "p", req))
+        assert got == {"step": "_rdm_" + st}, (st, got)
+        assert seen == [("_rdm_" + st, "p", ("seat", "p"), st)], (st, seen)
