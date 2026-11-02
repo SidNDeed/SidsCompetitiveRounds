@@ -10,11 +10,14 @@ Lines read (all values integers; a value with a decimal point is refused, HIGH 5
   p        point:    pt arm gate pred n sF sS sC maxF pn psF psS psC plant_mixed windows live_frames missing_end
                      span_g span_gn span_u span_un on_calls guarded (census and span totals, live moment)
                      zs zl (zero-state failing rows, late rows read; ZERO-STATE.md)
+                     t0 t1 (Stopwatch ticks at the first live frame boundary and at the end; B3)
                      (n and the s sums are the unplanted frames, pn and the ps sums the planted ones)
   plant    once:     c_plant (us) ticks from=g.r.p|sentinel
   settled  per game: g seed c_plant W vsync target freq hires f_hat gc_incremental gc_slice_ns f18 ... missing_end
   cal      per run:  i why kind=fhat|disp|span ...
   census   per entry per game: g entry comp shape on guarded outside
+  heavy    per operation per game: g op live between pick over menu at_call edge off (B3)
+  offthread per game: g span_off hash_t0 hash_t1 (B3)
 
 The plant gives e_C_lo (V4 3.5) and VR7. Part 3's remainder adds D_up (V4 3.6) and K_up (UPKEEP spans); until
 those lines exist, report() states U as not computable rather than computing it without them.
@@ -220,7 +223,9 @@ def _int(key, v):
 INT_KEYS = {"n", "sF", "sS", "sC", "maxF", "medF", "gc", "gate", "windows", "live_frames", "missing_end", "partial",
             "g", "seed", "c_plant", "W", "vsync", "target", "freq", "hires", "f_hat", "frames", "cycle_failures",
             "span_depth_violations", "on", "guarded", "outside", "i", "plant", "pn", "psF", "psS", "psC",
-            "plant_mixed", "ticks", "span_g", "span_gn", "span_u", "span_un", "on_calls", "zs", "zl"}
+            "plant_mixed", "ticks", "span_g", "span_gn", "span_u", "span_un", "on_calls", "zs", "zl",
+            "t0", "t1", "live", "between", "pick", "over", "menu", "at_call", "edge", "off", "span_off",
+            "hash_t0", "hash_t1"}
 
 
 def parse_line(line):
@@ -446,6 +451,34 @@ def vr9(recs, bound_us, first_game=1):
     return est - hw <= bound_us, est - hw
 
 
+def b3(recs):
+    """B3 (V4 3.9), placement: no heavy operation (record builds, queue writes, the pump, answers, the hashing
+    thread's start, a hash completed on the main thread) ran with CombatLive true at its call in a live frame
+    (at_call), and the hashing job's interval [hash_t0, hash_t1] lies clear of every point's live interval
+    [t0, t1]. Edge calls (a live frame whose combat ended before the call) and off-thread calls are reported,
+    not judged. Returns (ok, reasons, {op: (at_call, edge, off, live-moment calls)})."""
+    hv = [r for r in recs if r["kind"] == "heavy"]
+    if not hv:
+        raise Refused("B3 needs heavy lines (one per operation per game)")
+    ops = {}
+    for r in hv:
+        a, e, o, lv = ops.get(r["op"], (0, 0, 0, 0))
+        ops[r["op"]] = (a + r["at_call"], e + r["edge"], o + r["off"], lv + r["live"])
+    bad = ["%s ran %d times with combat live" % (op, v[0]) for op, v in sorted(ops.items()) if v[0] > 0]
+    pts = [(q["t0"], q["t1"], q["pt"]) for q in recs if q["kind"] == "p" and "t0" in q]
+    if not pts:
+        raise Refused("B3 needs point lines carrying t0 and t1")
+    jobs = set((r["hash_t0"], r["hash_t1"]) for r in recs if r["kind"] == "offthread" and r["hash_t0"] > 0)
+    for a, b in sorted(jobs):
+        if b < a:
+            bad.append("the hashing job started at %d had not ended at a game over" % a)
+            b = max(q[1] for q in pts)
+        hit = [q[2] for q in pts if a < q[1] and q[0] < b]
+        if hit:
+            bad.append("the hashing job [%d, %d] overlaps live points %s" % (a, b, ", ".join(hit[:5])))
+    return not bad, bad, ops
+
+
 def _side_plain(r):
     """B2's sides: the window's arm; planted windows take no side (M5: exposure and VR7 only)."""
     return r["arm"] if r.get("plant", 0) == 0 else None
@@ -660,6 +693,16 @@ def report(text):
         out.append("VR9 %s: gated span time per ON live frame, lower end %.2f us" % ("PASS" if ok9 else "FAIL", lo9))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("VR1/VR4/VR8/VR9 not computable: %s" % e)
+    okb3 = None
+    try:
+        okb3, whyb3, ops = b3(recs)
+        edge = sum(v[1] for v in ops.values())
+        off = sum(v[2] for v in ops.values())
+        so = max([r["span_off"] for r in recs if r["kind"] == "offthread"] or [0])
+        out.append("B3 %s%s; edge calls %d, off-thread heavy calls %d, off-thread span calls %d (reported)"
+                   % ("PASS" if okb3 else "FAIL: ", "; ".join(whyb3), edge, off, so))
+    except (Refused, KeyError) as e:
+        out.append("B3 not computable: %s" % e)
     joined = "\n".join(out)
     vr["VR2"] = ok2 and "VR2 e_C_lo PASS" in joined
     vr["VR3"] = "VR3 PASS" in joined
@@ -672,6 +715,12 @@ def report(text):
         out.append("VERDICT B1 INVALID: %s failed" % ", ".join(failed))
     else:
         out.append("VERDICT B1: see U against the bar above; conditional on VR6 from frame_time_seat.ps1's report")
+    if okb3 is None:
+        out.append("VERDICT B3 withheld: not computable")
+    elif not vr["VR5"]:
+        out.append("VERDICT B3 INVALID: VR5 failed")
+    else:
+        out.append("VERDICT B3 %s; conditional on VR6 from frame_time_seat.ps1's report" % ("PASS" if okb3 else "FAIL"))
     return "\n".join(out)
 
 

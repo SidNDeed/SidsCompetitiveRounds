@@ -328,11 +328,12 @@ def test_vr4_bar():
 FREQ, FHAT = 10000000, 3000000000
 
 
-def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7):
+def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10, 20)):
     """A synthetic sitting, every line as FtFrames, FtCalib and FtCensus write it. Point costs: ON adds cost_us of C
     per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor case)."""
     import random
     rng = random.Random(seed)
+    clock = [10 ** 6]
     L = ["[FRAME-TIME] settled g=-1 seed=1 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d" % (FREQ, FHAT),
          "[FRAME-TIME] plant c_plant=80 ticks=800 from=0.1.2"]
     for g in range(games):
@@ -366,12 +367,15 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7):
                 gq = 0 if on else 3 * lf
                 guarded += gq
                 offl += 0 if on else lf
+                t0 = clock[0]
+                t1 = t0 + int(lf * c_us * FREQ / 1e6)
+                clock[0] = t1 + FREQ // 2
                 L.append("[FRAME-TIME] p pt=%d.%d.%d arm=%s gate=%d pred=%s n=%d sF=%d sS=%d sC=%d maxF=%d pn=%d psF=%d "
                          "psS=0 psC=%d plant_mixed=0 windows=%d live_frames=%d missing_end=0 span_g=%d span_gn=%d "
-                         "span_u=%d span_un=%d on_calls=%d guarded=%d zs=%d zl=1"
+                         "span_u=%d span_un=%d on_calls=%d guarded=%d zs=%d zl=1 t0=%d t1=%d"
                          % (g, rnd, pt, "ON" if on else "OFF", 0 if on else 1, pred, n, sf, sf // 2, sc, sf // n * 3,
                             pn, int(pn * f_us * FREQ / 1e6), psc, (n + pn) // 120, lf, spg, lf if on else 0, spu, lf,
-                            3 * lf if on else 0, gq, zs))
+                            3 * lf if on else 0, gq, zs, t0, t1))
                 for w in range((n + pn) // 120):
                     plant = 1 if (not on and w % 4 == 0) else 0
                     k = 1 if rng.random() < 0.01 else 0
@@ -380,6 +384,11 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7):
                 pred = "ON" if on else "OFF"
         L.append("[FRAME-TIME] census g=%d entry=CE-p6 comp=CombatEvidence shape=S6 on=%d guarded=%d outside=0"
                  % (g, guarded, guarded))
+        for op in ("ce_build", "se_build", "enqueue", "pump"):
+            k = heavy_live if op == "pump" else 0
+            L.append("[FRAME-TIME] heavy g=%d op=%s live=%d between=7 pick=1 over=1 menu=0 at_call=%d edge=0 off=0"
+                     % (g, op, k, k))
+        L.append("[FRAME-TIME] offthread g=%d span_off=0 hash_t0=%d hash_t1=%d" % (g, hash_at[0], hash_at[1]))
     return "\n".join("[Info   :CompetitiveRounds] " + x for x in L)
 
 
@@ -388,6 +397,7 @@ def test_report_end_to_end_reaches_a_verdict():
     assert "not computable" not in out, out
     assert "VR8 zero-state PASS: game 0 (mutant) 7 of 7 rounds void" in out
     assert "VERDICT B1:" in out and "INVALID" not in out, out
+    assert "VERDICT B3 PASS" in out, out
 
 
 def test_predecessor_flags_a_carryover():
@@ -400,3 +410,30 @@ def test_vr9_bounds_span_time_by_dc():
     recs = P.read(_log())
     assert P.vr9(recs, 80.0)[0]
     assert not P.vr9(recs, 10.0)[0]
+
+
+def test_b3_passes_with_heavy_work_between_points():
+    ok, why, ops = P.b3(P.read(_log()))
+    assert ok, why
+    assert ops["pump"] == (0, 0, 0, 0)
+
+
+def test_b3_flags_heavy_work_with_combat_live():
+    ok, why, _ = P.b3(P.read(_log(heavy_live=2)))
+    assert not ok and any("pump ran" in w for w in why), why
+
+
+def test_b3_flags_a_hashing_job_overlapping_a_point():
+    ok, why, _ = P.b3(P.read(_log(hash_at=(10 ** 6 + 5, 10 ** 6 + 10))))
+    assert not ok and any("overlaps live points 0.1.1" in w for w in why), why
+
+
+def test_b3_flags_a_hashing_job_never_ended():
+    ok, why, _ = P.b3(P.read(_log(hash_at=(10, 0))))
+    assert not ok and any("had not ended" in w for w in why), why
+
+
+def test_b3_refuses_without_heavy_lines():
+    recs = [r for r in P.read(_log()) if r["kind"] != "heavy"]
+    with pytest.raises(P.Refused):
+        P.b3(recs)

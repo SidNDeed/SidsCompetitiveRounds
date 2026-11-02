@@ -8,6 +8,10 @@ import sys
 W, OUT = sys.argv[1], sys.argv[2]
 src = os.path.join(W, "tools", "frametime")
 MUTS = [
+    ("B3 ignores heavy calls with combat live", 'ops[r["op"]] = (a + r["at_call"], e + r["edge"], o + r["off"], lv + r["live"])',
+     'ops[r["op"]] = (a, e + r["edge"], o + r["off"], lv + r["live"])'),
+    ("B3 overlap test inverted", 'hit = [q[2] for q in pts if a < q[1] and q[0] < b]',
+     'hit = [q[2] for q in pts if a > q[1] or q[0] > b]'),
     ("dispersion floor dropped", "return max(1.0, nu * phi_hat(ks, ns) / chi2_quantile(CHI_Q, nu))",
      "return nu * phi_hat(ks, ns) / chi2_quantile(CHI_Q, nu)"),
     ("FAIL on K_ON_max", "fail = rate_lb(on_min, n_on) - rate_ub(off_max, n_off) > 0",
