@@ -576,6 +576,29 @@ TXN_ATTRS = frozenset({"commit", "rollback", "begin", "begin_nested", "close",
                        "flush", "invalidate", "connection"})
 
 
+_ACCEPT_TOKEN = object()
+
+
+class Accepted:
+    """The one acceptance outcome of the closed walk: `node` (an expression,
+    or a helper definition's body) walked whole by the shared visitor, with
+    the (shape, effect) list it gave. Only Visitor.accept constructs one
+    (ruling REHEARSAL-FOUR-R4 item 1; test_closed_walk_acceptance_bound
+    enumerates every construction site by AST); every other module can only
+    pass one on or refuse."""
+
+    __slots__ = ("node", "effects")
+
+    def __init__(self, token, node, effects):
+        if token is not _ACCEPT_TOKEN:
+            raise TypeError("Accepted is constructed only by Visitor.accept")
+        object.__setattr__(self, "node", node)
+        object.__setattr__(self, "effects", tuple(effects))
+
+    def __setattr__(self, name, value):
+        raise TypeError("an Accepted outcome is not changed after the walk")
+
+
 class Policy:
     """What one test file lets the visitor accept, all positive and named:
     the plain calls and methods that touch no session, the awaited library
@@ -633,6 +656,37 @@ class Visitor:
         self.opaque = frozenset(opaque)
         self.local_defs = set()
         self.effects = []
+        # Every node this visitor walked or read as a callee's spelling;
+        # accept refuses an expression with a node outside it.
+        self._walked_nodes = set()
+
+    def _spelled(self, node):
+        """`node`, a callee's spelling read whole by name (a resolved
+        function, a session method, a listed call): none of it evaluates
+        anything the walk has not classified."""
+        self._walked_nodes.update(id(x) for x in _ast.walk(node))
+
+    def accept(self, node, block=None):
+        """The one constructor of Accepted. Walks `node` (an expression), or,
+        with `block`, the helper definition `node` by calling block() (which
+        walks its body through this visitor); then refuses if any expression
+        inside it (for a definition: inside its body and its parameter
+        defaults) was not walked."""
+        start = len(self.effects)
+        if block is None:
+            self.visit(node)
+            parts = [node]
+        else:
+            block()
+            parts = list(node.body) + list(node.args.defaults) + [
+                x for x in node.args.kw_defaults if x is not None]
+        for part in parts:
+            for x in _ast.walk(part):
+                if isinstance(x, _ast.expr) and id(x) not in self._walked_nodes:
+                    self.fail(x, f"an expression the walk did not classify: "
+                                 f"{_ast.unparse(x)[:60]}")
+        self.p.met["accepted"] += 1
+        return Accepted(_ACCEPT_TOKEN, node, self.effects[start:])
 
     def fail(self, node, what):
         if self.helper is not None and not what.startswith(self.helper.__name__):
@@ -642,6 +696,7 @@ class Visitor:
 
     def visit(self, n):
         rule = _rule(n)
+        self._walked_nodes.add(id(n))
         self.p.met["node " + type(n).__name__] += 1
         if rule == "leaf":
             return
@@ -685,6 +740,8 @@ class Visitor:
     def call(self, n):
         name = _ast.unparse(n.func)
         args = call_arguments(n)
+        # the argument nodes as written (a `*x` visits its Starred node)
+        written = list(n.args) + [k.value for k in n.keywords]
         if isinstance(n.func, _ast.Name) and n.func.id in self.local_defs:
             # A plain function the helper defines: its defaults and body were
             # walked at its definition, through the same table.
@@ -692,13 +749,15 @@ class Visitor:
                 if kind in ("star", "double-star"):
                     self.fail(n, f"a call of {name} with unpacked arguments")
                 self.visit(a)
+            self._spelled(n.func)
             self.p.met["local function call"] += 1
             self.effects.append(("call", "pure"))
             return
         if isinstance(n.func, _ast.Name):
             if name in self.p.pure_calls:
                 self.p.met["call " + name] += 1
-                for _kind, a in args:
+                self._spelled(n.func)
+                for a in written:
                     self.visit(a)
                 self.effects.append(("call", "pure"))
                 return
@@ -714,17 +773,20 @@ class Visitor:
                     "begin_nested") for x in _ast.walk(_ast.parse(
                         _textwrap.dedent(_inspect.getsource(fn))))):
                 self.fail(n, f"a plain call of {name}, which touches a session")
+            self._spelled(n.func)
             self.p.met["plain function " + name] += 1
             self.effects.append(("call", "pure"))
             return
         if isinstance(n.func, _ast.Attribute):
             if name in self.p.pure_calls:
                 self.p.met["call " + name] += 1
-                for _kind, a in args:
+                self._spelled(n.func)
+                for a in written:
                     self.visit(a)
                 self.effects.append(("call", "pure"))
                 return
             if is_session(n.func.value, self.p.session):
+                self._spelled(n.func)
                 if n.func.attr == "expire":
                     # Marks loaded rows stale; their next read is a SELECT.
                     for kind, a in args:
@@ -747,8 +809,9 @@ class Visitor:
             if n.func.attr not in self.p.pure_methods:
                 self.fail(n, f"a method call this walk does not classify: {name}")
             self.p.met["method ." + n.func.attr] += 1
+            self._walked_nodes.add(id(n.func))
             self.visit(n.func.value)
-            for _kind, a in args:
+            for a in written:
                 self.visit(a)
             self.effects.append(("call", "pure"))
             return
@@ -758,6 +821,15 @@ class Visitor:
         call = n.value
         if not isinstance(call, _ast.Call):
             self.fail(n, "an await of a non-call")
+        if not isinstance(call.func, (_ast.Name, _ast.Attribute)):
+            self.fail(n, f"an await of a computed callee: "
+                         f"{_ast.unparse(call.func)}")
+        # Every branch below reads the callee by its spelling (a session
+        # method, a listed await, a parameter, a resolved helper) or refuses;
+        # an attribute callee whose value is not a plain name chain does not
+        # resolve and is refused there.
+        self._walked_nodes.add(id(call))
+        self._spelled(call.func)
         s = self.p.session
         for end in ("commit", "rollback"):
             if is_db_call(call, end, s):
@@ -829,12 +901,11 @@ class Visitor:
                              else "read" if "read" in kinds else "pure"))
 
 
-def expr_effects(node, policy, local=None, guarded=frozenset()):
+def expr_effects(node, policy, local=None, guarded=frozenset(),
+                 opaque=frozenset()):
     """The (shape, effect) list of evaluating `node` (Visitor); raises
     Unclassified naming the construct and its line."""
-    v = Visitor(policy, local, guarded)
-    v.visit(node)
-    return v.effects
+    return list(Visitor(policy, local, guarded, opaque=opaque).accept(node).effects)
 
 
 def checked_callbacks(call, fn, effects, line):
@@ -887,7 +958,8 @@ def helper_effects(fn, policy, stack=()):
     return out
 
 
-def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False):
+def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
+                ends=frozenset()):
     """The effects of an awaited helper, read from its own body statement by
     statement through the table: a frozenset drawn from 'read', 'lock',
     'write', 'await', 'savepoint', 'rollback-then-raise' and
@@ -929,20 +1001,34 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False):
     if rollbacks:
         permitted.update(id(n) for n in _ast.walk(d) if isinstance(n, _ast.Await)
                          and is_db_call(n.value, "rollback", s))
+    # Awaited commits and rollbacks the caller names by its own structural
+    # read (a1's relock helper: its one commit, and its one rollback followed
+    # by a raise): permitted here, read as 'commit' and 'rollback-then-raise'.
+    named_ends = frozenset(id(n) for n in _ast.walk(d) if id(n) in ends
+                           and isinstance(n, _ast.Await)
+                           and (is_db_call(n.value, "commit", s)
+                                or is_db_call(n.value, "rollback", s)))
+    if len(named_ends) != len(ends):
+        raise Unclassified((0, f"{fn.__name__}: a named end that is not an "
+                               "awaited commit or rollback of its body"))
+    permitted.update(named_ends)
     v = Visitor(sub, local, guarded, imports, params, frozenset(permitted), fn,
                 opaque)
     effects = set()
-    # The defaults of its parameters are evaluated at definition time; a
-    # callback parameter may default only to None.
-    for dft in d.args.defaults + [x for x in d.args.kw_defaults if x]:
-        v.visit(dft)
     named = d.args.posonlyargs + d.args.args
     defaults = dict(zip([a.arg for a in named[len(named) - len(d.args.defaults):]],
                         d.args.defaults))
     defaults.update({a.arg: x for a, x in zip(d.args.kwonlyargs, d.args.kw_defaults)
                      if x is not None})
-    _helper_block(v, d.body, effects)
-    for sh, e in v.effects:
+
+    def block():
+        # The defaults of its parameters are evaluated at definition time; a
+        # callback parameter may default only to None.
+        for dft in d.args.defaults + [x for x in d.args.kw_defaults if x]:
+            v.visit(dft)
+        _helper_block(v, d.body, effects)
+
+    for sh, e in v.accept(d, block).effects:
         if sh == "sql":
             effects.add(e)
         elif sh.startswith("helper:"):
@@ -959,6 +1045,10 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False):
             effects.add(sh)
         elif sh == "end:rollback":
             effects.add("rollback" if rollbacks else "rollback-then-raise")
+        elif sh == "end:commit":
+            effects.add("commit")
+        elif sh == "savepoint":
+            effects.add("savepoint")
     return frozenset(effects)
 
 
@@ -1016,7 +1106,8 @@ def _helper_block(v, stmts, effects):
                     and not ctx.keywords and items[0].optional_vars is None):
                 v.fail(st, f"{v.helper.__name__}: an async with this walk does "
                            "not classify")
-            effects.add("savepoint")
+            v._spelled(ctx)
+            v.effects.append(("savepoint", "pure"))
             v.p.met["helper savepoint block"] += 1
             _helper_block(v, st.body, effects)
         elif isinstance(st, _ast.Raise):
@@ -1035,6 +1126,11 @@ def _helper_block(v, stmts, effects):
                            "does not classify")
             for dft in st.args.defaults + [x for x in st.args.kw_defaults if x]:
                 v.visit(dft)
+            for a in (st.args.posonlyargs + st.args.args + st.args.kwonlyargs):
+                if a.annotation is not None:
+                    v.visit(a.annotation)
+            if st.returns is not None:
+                v.visit(st.returns)
             if any(isinstance(x, (_ast.Await, _ast.Yield, _ast.YieldFrom))
                    for x in _ast.walk(st)):
                 v.fail(st, f"{v.helper.__name__}: a local function that awaits "

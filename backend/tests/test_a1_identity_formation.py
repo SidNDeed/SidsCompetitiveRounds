@@ -658,11 +658,11 @@ def _helper_effects(fn, scope=None):
     return _cw.helper_effects(fn, _policy(scope))
 
 
-def expr_effects(node, scope=None, local_sql=None):
+def expr_effects(node, scope=None, local_sql=None, opaque=frozenset()):
     """closed_walk.expr_effects under the a1 policy: the (shape, effect) list
     of evaluating `node`; raises Unclassified naming the construct and its
     line."""
-    return _cw.expr_effects(node, _policy(scope), local_sql)
+    return _cw.expr_effects(node, _policy(scope), local_sql, opaque=opaque)
 
 
 def _plain_read(call):
@@ -950,12 +950,12 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
 
     local_sql = _local_sql(tree, scope)
 
-    def effects_of(node, line):
+    def effects_of(node, line, opaque=frozenset()):
         # An unclassified construct is reported where it stands; if it
         # awaits, it also counts as an await on the path, so a path that
         # ended the transaction still reports it.
         try:
-            return expr_effects(node, scope, local_sql)
+            return expr_effects(node, scope, local_sql, opaque)
         except Unclassified as e:
             problems.append((e.args[0][0] or line, e.args[0][1]))
             return [("unclassified", "await")] if _awaits(node) else []
@@ -1116,10 +1116,13 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
                 # bookkeeping and answers searching; 'fresh' carries on
                 # below, the transaction still open.
                 ret, dfr = shape
-                eff = effects_of(_ast.Tuple(elts=list(st.value.value.args)
-                                            + [k.value for k in
-                                               st.value.value.keywords],
-                                            ctx=_ast.Load()), st.lineno)
+                # The resolver call itself through the shared visitor, its
+                # body opaque here (read by _relock_outcome_problems): an
+                # unpacked argument is refused there, never collected into a
+                # tuple of values (finding a1:1119).
+                eff = [e for e in effects_of(st.value, st.lineno,
+                                             frozenset({TEAM_RESOLVER}))
+                       if e != (f"helper:{TEAM_RESOLVER}", "opaque")]
                 shapes["resolver dispatch"] += 1
                 if state:
                     problems.append((st.lineno, f"awaits after {ended(state)}"))
@@ -2114,6 +2117,24 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
                 and isinstance(block[at + 1], _ast.Raise)):
             out.append(f"{relock.name}: its rollback is not followed by a "
                        "raise")
+        # Its body through the shared visitor (finding a1:2095: it was
+        # opaque at its call and read here only by structure): every
+        # construct classified, and the one commit and the one rollback read
+        # above are the only transaction ends it takes (a savepoint block
+        # ends none). Its writes are the relock itself (the series and its
+        # rows re-formed).
+        try:
+            eff = _cw.def_effects(relock, main if scope is None else scope,
+                                  _policy(scope), relock.name,
+                                  ends=frozenset({id(body[commits[0]].value),
+                                                  id(rollbacks[0].value)}))
+        except Unclassified as e:
+            out.append(f"{relock.name}: {e.args[0][1]} (line {e.args[0][0]})")
+        else:
+            other = sorted(eff - {"read", "lock", "write", "await", "commit",
+                                  "rollback-then-raise", "savepoint"})
+            if other:
+                out.append(f"{relock.name} takes {', '.join(other)}")
     return out
 
 
@@ -3598,3 +3619,116 @@ def test_the_resolver_walk_reads_an_awaited_committing_helper():
         mutated[k] = _ast.unparse(tree)
         got = _relock_outcome_problems(*mutated, scope=_SAMPLE)
         assert any("ends the transaction" in g for g in got), (names[k], got)
+
+
+# --- ruling REHEARSAL-FOUR-R4 item 1: the acceptance bound ----------------
+
+# The names of the bound, spelled by joining so this test's own source is not
+# a reference it then counts.
+_ACC = "".join(["Accep", "ted"])
+_TOKEN = "".join(["_ACCEPT", "_TOKEN"])
+_SEEN = "".join(["_walked", "_nodes"])
+
+
+def acceptance_sites(sources):
+    """Every place in `sources` ({module name: source text}) that can bring
+    an acceptance outcome into being, by AST: a reference, in any spelling,
+    to closed_walk's acceptance class or its token (a bare name in
+    closed_walk, a name imported from it under any alias, an attribute of
+    the closed_walk module under any alias, or a string constant naming
+    one, as a getattr would), and any reference to the visitor's record of
+    walked nodes outside closed_walk. Each site is (module, the qualified
+    name of the function holding it, what it references, line). The class
+    definition itself is not a site."""
+    out = []
+    for mod, text in sources.items():
+        tree = _ast.parse(text)
+        own = mod == "closed_walk"
+        names = {_ACC: _ACC, _TOKEN: _TOKEN} if own else {}
+        modules = set()
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.ImportFrom) and n.module == "closed_walk":
+                for a in n.names:
+                    if a.name in (_ACC, _TOKEN, "*"):
+                        names[a.asname or a.name] = a.name
+            elif isinstance(n, _ast.Import):
+                for a in n.names:
+                    if a.name == "closed_walk":
+                        modules.add(a.asname or a.name)
+
+        def visit(node, where):
+            for c in _ast.iter_child_nodes(node):
+                inner = where
+                if isinstance(c, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                  _ast.ClassDef)):
+                    inner = f"{where}.{c.name}" if where else c.name
+                    if own and isinstance(c, _ast.ClassDef) and c.name == _ACC:
+                        # the definition: its own token check is a site
+                        visit(c, inner)
+                        continue
+                ref = None
+                if (own and not where and isinstance(c, _ast.Name)
+                        and c.id == _TOKEN and isinstance(c.ctx, _ast.Store)):
+                    pass        # the token's one module-level definition
+                elif isinstance(c, _ast.Name) and c.id in names:
+                    ref = names[c.id]
+                elif (isinstance(c, _ast.Attribute) and c.attr in (_ACC, _TOKEN)
+                      and isinstance(c.value, _ast.Name) and c.value.id in modules):
+                    ref = c.attr
+                elif isinstance(c, _ast.Attribute) and c.attr == _SEEN and not own:
+                    ref = _SEEN
+                elif (isinstance(c, _ast.Constant) and isinstance(c.value, str)
+                      and c.value in (_ACC, _TOKEN, _SEEN)):
+                    ref = f"the string {c.value!r}"
+                if ref is not None:
+                    out.append((mod, where, ref, getattr(c, "lineno", 0)))
+                visit(c, inner)
+
+        visit(tree, "")
+    return out
+
+
+def _lane_sources():
+    """Every Python module of the backend's api and tests directories."""
+    import pathlib
+    here = pathlib.Path(__file__).resolve().parent
+    out = {}
+    for d in (here, here.parent / "api"):
+        for p in sorted(d.glob("*.py")):
+            out[p.stem] = p.read_text(encoding="utf-8")
+    return out
+
+
+def test_closed_walk_acceptance_bound():
+    """Ruling REHEARSAL-FOUR-R4 item 1. An acceptance outcome of the closed
+    walk (closed_walk's acceptance class) is constructed in exactly one
+    function, Visitor.accept, which walks the expression (or the helper
+    body) and refuses any expression inside it that the walk did not
+    classify; every other module can only pass one on or refuse. Every
+    reference to the class or its token, in any spelling, across the api
+    and tests modules is enumerated by AST and must be exactly: the token
+    check in the class's own constructor, and the one construction in
+    Visitor.accept. A negative control plants a construction in the gate
+    file's source and in a1's and must be found."""
+    sources = _lane_sources()
+    sites = sorted(acceptance_sites(sources))
+    expected = [("closed_walk", f"{_ACC}.__init__", _TOKEN),
+                ("closed_walk", "Visitor.accept", _ACC),
+                ("closed_walk", "Visitor.accept", _TOKEN)]
+    assert [(m, w, r) for m, w, r, _ln in sites] == sorted(expected), sites
+    # The runtime check behind it: a construction outside accept refuses.
+    with pytest.raises(TypeError):
+        getattr(_cw, _ACC)(object(), _ast.Constant(1), ())
+    # Negative controls: one construction planted per spelling.
+    planted = {
+        "test_match_hold_admission_gate_pg":
+            f"\ndef _x(node):\n    return _cw.{_ACC}(_cw.{_TOKEN}, node, [])\n",
+        "test_a1_identity_formation":
+            f"\nfrom closed_walk import {_ACC} as A\nA(None, None, ())\n",
+        "test_mail": f"\nimport closed_walk\ngetattr(closed_walk, '{_ACC}')\n",
+        "migration_table_ddl": "\ndef _y(v):\n    v." + _SEEN + ".add(1)\n",
+    }
+    for mod, extra in planted.items():
+        # sites are found module by module: the planted module alone
+        got = acceptance_sites({mod: sources[mod] + extra})
+        assert len(got) > sum(m == mod for m, *_r in sites), (mod, got)

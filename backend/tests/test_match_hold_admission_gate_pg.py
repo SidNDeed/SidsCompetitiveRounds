@@ -257,7 +257,7 @@ def _effects(w, node, plain_only=False, what="an expression"):
                           or _cw.is_db_call(n.value, "rollback", s)))
     v = _cw.Visitor(w.policy, permitted=ends)
     try:
-        v.visit(node)
+        accepted = v.accept(node)
     except Unclassified as e:
         line, msg = e.args[0]
         w.fail_at(line or getattr(node, "lineno", "?"), f"{msg} (in {what})")
@@ -265,9 +265,14 @@ def _effects(w, node, plain_only=False, what="an expression"):
     if plain_only and any(isinstance(n, ast.Await) for n in ast.walk(node)):
         w.fail(node, f"an await inside {what}")
         return []
+    # A plain value touches no session: an un-awaited session call (an ORM
+    # add, an expire) is a session effect too (finding gate:245).
+    if plain_only and any(shape != "call" for shape, _e in accepted.effects):
+        w.fail(node, f"a session effect inside {what}")
+        return []
     line = getattr(node, "lineno", "?")
     out = []
-    for shape, eff in v.effects:
+    for shape, eff in accepted.effects:
         if shape == "sql":
             w.shape(f"execute {eff}")
             out.append((eff, line, eff))
@@ -538,6 +543,23 @@ def _refusal_answer_problem(fn, call, seen):
     d = _cw._helper_tree(fn)
     if not d.body or not isinstance(d.body[-1], ast.Return):
         return f"{fn.__name__} can fall off its end"
+    # Finding gate:541: the returns were read alone, so a body that rebinds
+    # `reason` before returning it, or answers through a match, a lambda or
+    # a local definition, passed. Every node of the body is read: `reason`
+    # is never stored or deleted, and none of these constructs appears.
+    for n in ast.walk(d):
+        if n is d:
+            continue
+        if isinstance(n, (ast.Match, ast.Lambda, ast.FunctionDef,
+                          ast.AsyncFunctionDef, ast.ClassDef, ast.Global,
+                          ast.Nonlocal, ast.NamedExpr, ast.Yield,
+                          ast.YieldFrom, ast.Import, ast.ImportFrom)):
+            return (f"{fn.__name__} line {n.lineno}: a {type(n).__name__} in "
+                    "a refusal answer")
+        if ((isinstance(n, ast.Name) and n.id == "reason"
+             and not isinstance(n.ctx, ast.Load))
+                or (isinstance(n, ast.ExceptHandler) and n.name == "reason")):
+            return f"{fn.__name__} line {n.lineno}: rebinds reason"
     for r in (n for n in ast.walk(d) if isinstance(n, ast.Return)):
         v = r.value
         if isinstance(v, ast.Dict):
@@ -571,15 +593,44 @@ def _raise_problem(w, st):
     _plain_args(w, exc, "the raised refusal")
 
 
-def _returns_other_mode(stmt):
-    """Whether `stmt` is `return <refusal>(..., "other_mode")`, awaited or
-    not."""
+def _reason_argument(call, scope):
+    """The argument `call` binds to its callee's `reason` parameter: the
+    callee a function of `scope` named by a plain name, called with every
+    argument positional, nothing unpacked, no keyword, `reason` among the
+    bound and every unbound parameter defaulted; else None (finding gate:535: the last argument was read instead)."""
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
+        return None
+    fn = _cw.resolve_callee(call.func, scope)
+    if fn is None:
+        return None
+    sig = inspect.signature(fn).parameters
+    params = list(sig)
+    if ("reason" not in params or call.keywords
+            or any(isinstance(a, ast.Starred) for a in call.args)
+            or any(p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+                   for p in sig.values())
+            or len(call.args) > len(params)
+            or params.index("reason") >= len(call.args)
+            or any(sig[p].default is sig[p].empty
+                   for p in params[len(call.args):])):
+        return None
+    return call.args[params.index("reason")]
+
+
+def _is_other_mode(call, scope):
+    """Whether `call` binds its callee's `reason` to the literal
+    "other_mode"."""
+    arg = _reason_argument(call, scope)
+    return isinstance(arg, ast.Constant) and arg.value == "other_mode"
+
+
+def _returns_other_mode(stmt, scope):
+    """Whether `stmt` is `return <refusal>(...)`, awaited or not, whose
+    `reason` is "other_mode"."""
     value = stmt.value if isinstance(stmt, ast.Return) else None
     if isinstance(value, ast.Await):
         value = value.value
-    return (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
-            and bool(value.args) and isinstance(value.args[-1], ast.Constant)
-            and value.args[-1].value == "other_mode")
+    return _is_other_mode(value, scope)
 
 
 def refusal_branch_violation(fn, call, form, scope=None):
@@ -644,7 +695,8 @@ def refusal_branch_violation(fn, call, form, scope=None):
         w.shape("shared: exit, raise")
         _raise_problem(w, body[-1])
         return w.problems[0] if w.problems else None
-    target = stmt.targets[0] if isinstance(stmt, ast.Assign) else None
+    target = (stmt.targets[0] if isinstance(stmt, ast.Assign)
+              and len(stmt.targets) == 1 else None)
     value = getattr(stmt, "value", None)
     if not (isinstance(value, ast.Await) and value.value is call
             and isinstance(target, ast.Tuple) and target.elts
@@ -661,7 +713,7 @@ def refusal_branch_violation(fn, call, form, scope=None):
     if form == "hold":
         if not _is_db_rollback(first):
             return "the refusal branch does not open with await db.rollback()"
-        if not _returns_other_mode(branch.body[-1]):
+        if not _returns_other_mode(branch.body[-1], w.scope):
             return ('the refusal branch does not end by returning its '
                     '"other_mode" refusal')
         w.shape("hold: await db.rollback()")
@@ -675,14 +727,16 @@ def refusal_branch_violation(fn, call, form, scope=None):
         w.shape("acquirer: exit, return False")
         return _after_exit(branch)
     refused = _is_refusal_exit(first)
-    if not (refused is not None and refused.args
-            and isinstance(refused.args[-1], ast.Constant)
-            and refused.args[-1].value == "other_mode"):
+    if refused is not None:
+        # its arguments read first, so an unpacked one is named as such
+        _refusal_exit_problem(w, first, refused)
+        if w.problems:
+            return w.problems[0]
+    if not (refused is not None and _is_other_mode(refused, w.scope)):
         return ('the refusal branch does not open with '
                 'return await _rdm_refuse(..., "other_mode")')
     w.shape("direct: exit, return await _rdm_refuse(...)")
-    _refusal_exit_problem(w, first, refused)
-    return w.problems[0] if w.problems else _after_exit(branch)
+    return _after_exit(branch)
 
 
 def _after_exit(branch):
@@ -759,18 +813,18 @@ def test_h3_every_admission_site_uses_shared_gate_recheck_and_rollback():
 R2_HELPER_LINES = [
     "async def _rdm_attempt(db, lid, pid, n, kind, at, outcome, reason=None):",
     "    await db.execute(text(_RDM_ATTEMPT_SQL), {'lid': lid})",
-    "async def _rdm_refuse(ctx, pid, reason, me=None, step=None, n=None, last=None):",
+    "async def _rdm_refuse(ctx, pid, me, step, n, reason):",
     "    await _rdm_attempt(ctx.db, ctx.lid, pid, 1, 'claim', ctx.now, 'refused', reason)",
     "    return {'readmit': {'status': 'refused', 'reason': reason}}",
     "async def _rdm_end_hold(ctx, pid):",
     "    await ctx.db.execute(text('UPDATE ffa_assembly_seats SET hold_n = NULL'), {})",
     "async def lapse_then_none(ctx, pid):",
     "    if ctx.closed:",
-    "        return await _rdm_refuse(ctx, pid, 'lobby_closed')",
+    "        return await _rdm_refuse(ctx, pid, me, 'claim', n, 'lobby_closed')",
     "    if ctx.late:",
     "        await _rdm_end_hold(ctx, pid)",
     "        return None",
-    "        return await _rdm_refuse(ctx, pid, 'hold_lapsed')",
+    "        return await _rdm_refuse(ctx, pid, me, 'claim', n, 'hold_lapsed')",
     "    return None",
     "async def row_of(ctx, pid):",
     "    return (await ctx.db.execute(text('SELECT * FROM t WHERE id = :p'), {})).first()",
@@ -778,9 +832,9 @@ R2_HELPER_LINES = [
 R2_CONSTS = {"_RDM_ATTEMPT_SQL": "INSERT INTO ffa_readmit_attempts (n) SELECT 1",
              "_QUOTED_FN_SQL": 'SELECT "lo_create"(0)'}
 _R2_GATE = "admitted, _ = await _lease_admission_gate(ctx.db, [pid], 'ffa', ctx.lid)"
-_R2_REFUSE = ["if not admitted:", "    return await _rdm_refuse(ctx, pid, 'other_mode')"]
+_R2_REFUSE = ["if not admitted:", "    return await _rdm_refuse(ctx, pid, me, 'claim', n, 'other_mode')"]
 _R2_ROW = ["row = await row_of(ctx, pid)", "if row is None:",
-           "    return await _rdm_refuse(ctx, pid, 'not_held')"]
+           "    return await _rdm_refuse(ctx, pid, me, 'claim', n, 'not_held')"]
 # (label, expected problem, the call the walk stops at, lines)
 R2_PREFIX_PROGRAMS = [
     ("F6 an UPDATE before _rdm_claim in its dispatch branch",
@@ -1063,9 +1117,9 @@ def _prefix_exit(w, st):
 
 
 def _prefix_target(w, st, stop):
-    """The statement that holds the call of `stop`: an if or with walked into
-    (its test or items classified, then the statements before the call inside
-    the containing branch), or the call as a statement of its own (an
+    """The statement that holds the call of `stop`: an if walked into (its
+    test classified, then the statements before the call inside the
+    containing branch), or the call as a statement of its own (an
     assignment to names, an expression or a return) with plain arguments."""
     if isinstance(st, ast.If) and not _calls(st.test, stop):
         w.shape("if around the target, walked into")
@@ -1073,12 +1127,6 @@ def _prefix_target(w, st, stop):
             w.fail(st, "the answer of a refusing helper is not refused at once")
         branch = st.body if any(_calls(s, stop) for s in st.body) else st.orelse
         _prefix_block(w, branch, stop)
-        return
-    if isinstance(st, ast.With):
-        w.shape("with around the target, walked into")
-        for item in st.items:
-            _effects(w, item.context_expr, plain_only=True, what="a with item")
-        _prefix_block(w, st.body, stop)
         return
     if isinstance(st, (ast.Assign, ast.Expr, ast.Return)):
         value = st.value.value if isinstance(st.value, ast.Await) else st.value
@@ -1227,15 +1275,15 @@ def test_h3_claim_prefix_oracle_can_fail():
         "    return bool(lobby)",
         "async def live_or_lapse(ctx, pid):",
         "    if ctx.closed:",
-        "        return await _rdm_refuse(ctx, pid, 'lobby_closed')",
+        "        return await _rdm_refuse(ctx, pid, me, 'claim', n, 'lobby_closed')",
         "    if ctx.late:",
         "        await ctx.db.execute(text('UPDATE seats SET lapsed = true'), {})",
-        "        return await _rdm_refuse(ctx, pid, 'hold_lapsed')",
+        "        return await _rdm_refuse(ctx, pid, me, 'claim', n, 'hold_lapsed')",
         "    return None",
         "async def leaky(ctx, pid):",
         "    await ctx.db.execute(text('UPDATE seats SET lapsed = true'), {})",
         "    if ctx.late:",
-        "        return await _rdm_refuse(ctx, pid, 'hold_lapsed')",
+        "        return await _rdm_refuse(ctx, pid, me, 'claim', n, 'hold_lapsed')",
         "    return None",
     ] + R2_HELPER_LINES
     scope = _scope_of_lines(helper_lines, {
@@ -1248,12 +1296,12 @@ def test_h3_claim_prefix_oracle_can_fail():
         return claim_prefix_violations(fn.body, stop, scope)[0]
 
     gate = "admitted, _ = await _lease_admission_gate(ctx.db, [pid], 'ffa', ctx.lid)"
-    refuse = ["if not admitted:", "    return await _rdm_refuse(ctx, pid, 'other_mode')"]
+    refuse = ["if not admitted:", "    return await _rdm_refuse(ctx, pid, me, 'claim', n, 'other_mode')"]
     good = ["refused = await live_or_lapse(ctx, pid)",
             "if refused is not None:", "    return refused",
             "if not await flag(ctx.lobby):", "    return {'status': 'refused'}",
             "row = await reader(ctx, pid)",
-            "if row is None:", "    return await _rdm_refuse(ctx, pid, 'not_held')",
+            "if row is None:", "    return await _rdm_refuse(ctx, pid, me, 'claim', n, 'not_held')",
             "q = (await ctx.db.execute(text(_READ_SQL), {})).first()"]
     assert why(good + [gate] + refuse) == []
 
@@ -1311,11 +1359,11 @@ R3_HELPER_LINES = [
     "        case _:",
     "            pass",
     "    await ctx.db.execute(text('UPDATE t SET x = 1'), {})",
-    "    return await _rdm_refuse(ctx, pid, 'x')",
+    "    return await _rdm_refuse(ctx, pid, me, 'claim', n, 'x')",
     "async def outer(ctx, pid):",
     "    if ctx.late:",
     "        await matcher(ctx, pid)",
-    "        return await _rdm_refuse(ctx, pid, 'hold_lapsed')",
+    "        return await _rdm_refuse(ctx, pid, me, 'claim', n, 'hold_lapsed')",
     "    return None",
     "async def comp(ctx):",
     "    return [await ctx.db.commit() for _ in ctx.ids]",
@@ -1381,7 +1429,9 @@ R3_BRANCH_PROGRAMS = [
      _R3_HOLD + ["    return [_refused][0]('other_mode')"]),
     ("a hold replay that writes",
      "the hold replay _open_replay is not classified (it takes write)", GATE,
-     "hold", _R3_HOLD + ["    return await _open_replay(db, n, me, pid, 'other_mode')"]),
+     "hold", _R3_HOLD + ["    if n:",
+                         "        return await _open_replay(db, n, me, pid, 'other_mode')",
+                         "    return _refused('other_mode')"]),
     ("a computed callee in the hold refusal's test",
      "a call of a computed callee", GATE, "hold",
      _R3_HOLD + ["    if [held][0](db):", "        pass",
