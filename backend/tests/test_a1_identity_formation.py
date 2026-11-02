@@ -3777,6 +3777,28 @@ _R4_CW_SRC = "\n".join([
     "    def inner(x: db.add(row)):",
     "        return x",
     "    inner(1)",
+    "async def inner_ends(db):",
+    "    try:",
+    "        await db.execute(text('SELECT 1'), {})",
+    "    except Exception:",
+    "        await db.rollback()",
+    "        raise",
+    "async def outer_catches(db):",
+    "    try:",
+    "        await inner_ends(db)",
+    "    except Exception:",
+    "        pass",
+    "async def nested_handler_caught(db):",
+    "    try:",
+    "        try:",
+    "            await db.execute(text('SELECT 1'), {})",
+    "        except Exception:",
+    "            await db.rollback()",
+    "            raise",
+    "    except Exception:",
+    "        pass",
+    "async def outer_propagates(db):",
+    "    await inner_ends(db)",
     ""])
 
 
@@ -3805,6 +3827,12 @@ _R4_CW_CONTROLS = [
     ("plain_helper_writes", "a plain call of plain_add, which takes write"),
     ("plain_helper_reads_nothing", set()),
     ("annotation_writes", {"write"}),
+    # finding closed_walk:825 (class C): a rollback-then-raise propagates to
+    # the helper that awaits it, and none is caught inside the walked helper
+    ("outer_catches", "awaited inside a try that catches"),
+    ("nested_handler_caught", "ends the transaction (.rollback)"),
+    ("outer_propagates", {"read", "await", "rollback-then-raise"}),
+    ("inner_ends", {"read", "rollback-then-raise"}),
 ]
 
 
@@ -3816,7 +3844,9 @@ def test_r4_closed_walk_names_resolve_through_the_function(helper, want):
     reached only as a callee), :322 (a local SQL binding before the module
     constant), :345 (a guard proves a name only over the statements it
     dominates, up to a store of the name), :712 (a plain callee's body is
-    walked) and :1036 (a local function's annotations are walked). Each
+    walked), :1036 (a local function's annotations are walked) and :825 (a
+    rollback-then-raise propagates to its caller, and is never caught
+    inside the walked helper). Each
     program is read by the shared visitor under a1's policy; the refusals
     name their reason, and the two kept shapes (a guard inside a loop, a
     plain callee that touches nothing) still read."""

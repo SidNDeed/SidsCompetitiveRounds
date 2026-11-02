@@ -792,6 +792,10 @@ class Visitor:
         self.opaque = frozenset(opaque)
         self.local_defs = set()
         self.effects = []
+        # ids of the nodes inside a try body that has handlers, in the
+        # function def_effects walks: a rollback-then-raise there is caught
+        # (finding closed_walk:825).
+        self.caught = frozenset()
         # Every node this visitor walked or read as a callee's spelling;
         # accept refuses an expression with a node outside it.
         self._walked_nodes = set()
@@ -1087,6 +1091,15 @@ class Visitor:
             self.effects.append((f"helper:{fn.__name__}", self.p.helper_hook(fn)))
             return
         eff = checked_callbacks(call, fn, helper_effects(fn, self.p), n.lineno)
+        ends = eff & {"rollback-then-raise", "rollback"}
+        if ends and id(n) in self.caught:
+            self.fail(n, f"a helper that ends the transaction and raises "
+                         f"({fn.__name__}), awaited inside a try that catches")
+        if ends:
+            # Propagated (finding closed_walk:825): the caller's effects carry
+            # the end its helper takes.
+            self.effects.append((f"helper-end:{fn.__name__}",
+                                 sorted(ends)[0]))
         kinds = eff & {"read", "lock", "write"}
         self.effects.append((f"helper:{fn.__name__}",
                              "write" if "write" in kinds else "lock" if "lock" in kinds
@@ -1184,7 +1197,13 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
     local = local_sql(d, scope)
     permitted = set()
     s = policy.session
+    caught = frozenset(id(x) for t in _ast.walk(d)
+                       if isinstance(t, _ast.Try) and t.handlers
+                       for st in t.body for x in _ast.walk(st))
     for n in _ast.walk(d):
+        if isinstance(n, _ast.ExceptHandler) and n.body and id(n) in caught:
+            # its raise is caught by an enclosing try of the same function
+            continue
         if isinstance(n, _ast.ExceptHandler) and n.body:
             first = n.body[0]
             aw = first.value if isinstance(first, _ast.Expr) else None
@@ -1207,6 +1226,7 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
     permitted.update(named_ends)
     v = Visitor(sub, local, guarded, imports, params, frozenset(permitted), fn,
                 opaque, bound_names(d) - set(imports))
+    v.caught = caught
     effects = set()
     named = d.args.posonlyargs + d.args.args
     defaults = dict(zip([a.arg for a in named[len(named) - len(d.args.defaults):]],
@@ -1240,6 +1260,8 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
             effects.add("rollback" if rollbacks else "rollback-then-raise")
         elif sh == "end:commit":
             effects.add("commit")
+        elif sh.startswith("helper-end:"):
+            effects.add(e)
         elif sh == "savepoint":
             effects.add("savepoint")
     return frozenset(effects)

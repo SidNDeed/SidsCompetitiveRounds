@@ -1609,3 +1609,79 @@ def test_h3_common_gate_serializes_every_mode_in_both_target_orders(mode, first)
             assert all(row["mode"] == mode and row["group_id"] == winner for row in rows)
 
     asyncio.run(inside())
+
+
+# Rehearsal-four round 4 (ruling REHEARSAL-FOUR-R4): one program per gate
+# finding, each refused for its own reason. R4_HELPER_LINES are the refusal
+# answers two of them return.
+R4_HELPER_LINES = [
+    "def _refused_reason_first(reason, extra):",
+    "    return {'status': 'refused', 'reason': reason}",
+    "def _refused_rebinds(reason):",
+    "    reason = 'other_mode'",
+    "    return {'status': 'refused', 'reason': reason}",
+    "def _refused_by_match(reason):",
+    "    match reason:",
+    "        case _:",
+    "            pass",
+    "    return {'status': 'refused', 'reason': reason}",
+]
+# (label, expected problem, the admission call, form, lines)
+R4_BRANCH_PROGRAMS = [
+    ("gate:245 a session effect in a plain argument",
+     "a session effect inside", GATE, "direct",
+     ["admitted, _ = await _lease_admission_gate(db, [db.add(pid)], 'ffa', None)",
+      "if not admitted:", _R3_REFUSE_CALL.format("pid", "")]),
+    ("gate:535 other_mode bound to another parameter",
+     'does not end by returning its "other_mode" refusal', GATE, "hold",
+     _R3_HOLD + ["    return _refused_reason_first('hold_lapsed', 'other_mode')"]),
+    ("gate:541 a refusal answer that rebinds reason",
+     "rebinds reason", GATE, "hold",
+     _R3_HOLD + ["    return _refused_rebinds('other_mode')"]),
+    ("gate:541 a refusal answer through a match",
+     "a Match in a refusal answer", GATE, "hold",
+     _R3_HOLD + ["    return _refused_by_match('other_mode')"]),
+    ("gate:647 a second assignment target",
+     "the gate's answer is not unpacked into a name", GATE, "direct",
+     ["admitted, _ = ctx.answer = await _lease_admission_gate(db, [pid], 'ffa', None)",
+      "if not admitted:", _R3_REFUSE_CALL.format("pid", "")]),
+]
+# (label, expected problem, the call the walk stops at, lines)
+R4_PREFIX_PROGRAMS = [
+    ("gate:1080 a with around the target",
+     "With around the call of _lease_admission_gate is not a shape", GATE,
+     _R2_ROW + ["with ctx.get(db.add(pid)):", "    " + _R2_GATE] + _R2_REFUSE),
+]
+
+
+def test_h3_round_4s_gate_programs_are_refused():
+    """Rehearsal-four round 4 (ruling REHEARSAL-FOUR-R4, findings gate:245,
+    gate:535, gate:541, gate:647, gate:1080): each program is refused for
+    its own reason, beside the round's kept forms."""
+    NL = chr(10)
+    scope = _scope_of_lines(R4_HELPER_LINES + R3_HELPER_LINES
+                            + _ORACLE_HELPER_LINES + R2_HELPER_LINES, R2_CONSTS)
+
+    def site(lines):
+        return ast.parse(NL.join(["async def site(db, ctx, pid, me, n, ids):"]
+                                 + ["    " + ln for ln in lines])).body[0]
+
+    def branch(lines, callee, form):
+        fn = site(lines)
+        call = next(node for node in ast.walk(fn) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == callee)
+        return refusal_branch_violation(fn, call, form, scope)
+
+    def prefix(lines, stop):
+        return claim_prefix_violations(site(lines).body, stop, scope)[0]
+
+    assert branch([_R2_DIRECT, "if not admitted:",
+                   _R3_REFUSE_CALL.format("pid", "")], GATE, "direct") is None
+    assert branch(_R3_HOLD + ["    return _refused('other_mode')"], GATE, "hold") is None
+    assert prefix(_R2_ROW + [_R2_GATE] + _R2_REFUSE, GATE) == []
+    for label, expected, callee, form, lines in R4_BRANCH_PROGRAMS:
+        got = branch(lines, callee, form)
+        assert got is not None and expected in got, (label, expected, got)
+    for label, expected, stop, lines in R4_PREFIX_PROGRAMS:
+        got = prefix(lines, stop)
+        assert any(expected in p for p in got), (label, expected, got)
