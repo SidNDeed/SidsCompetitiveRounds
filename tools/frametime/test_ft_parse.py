@@ -265,20 +265,20 @@ def _dup_log(costs_by_cal, guarded=3000, off_frames=1000, freq=10000000):
     return recs
 
 
-def test_d_up_is_rate_times_cost_with_the_largest_as_floor():
+def test_d_up_dispatch_is_rate_times_cost_with_the_largest_as_floor():
     du, ds, rate = P.d_up(_dup_log([2, 2, 2, 2]))
     assert rate == {"S6": 3.0}
     assert ds == [pytest.approx(0.6)] * 4         # 3 calls per frame x 0.2 us
     assert du == pytest.approx(0.6)
 
 
-def test_d_up_never_below_its_largest_calibration():
+def test_d_up_dispatch_never_below_its_largest_calibration():
     # sixteen calibrations at 0.3 us and one at 0.9: mean + t SE is about 0.42, so the largest value binds
     du, ds, rate = P.d_up(_dup_log([1] * 16 + [3]))
     assert du == pytest.approx(0.9)
 
 
-def test_d_up_refuses_a_missing_shape():
+def test_d_up_dispatch_refuses_a_missing_shape():
     recs = _dup_log([2, 2])
     recs.append({"kind": "census", "g": 1, "shape": "S1", "guarded": 5})
     with pytest.raises(P.Refused):
@@ -454,13 +454,13 @@ def _vr6_log(extra=()):
     return "\n".join("[Info   :CompetitiveRounds] " + x for x in base)
 
 
-def test_vr6_build_reads_the_quit_counts():
+def test_vr6_routes_read_the_quit_counts():
     ok, why, pairs, dis = P.vr6_build(P.read(_vr6_log()))
     assert ok, why
     assert pairs["route:GET_10.0.0.1/api/v1/queue/poll/{n}"] == 9 and pairs["closing:x"] == 1 and not dis
 
 
-def test_vr6_build_fails_a_route_refused_and_sent():
+def test_vr6_routes_fail_a_route_refused_and_sent():
     log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=2 route:GET_h/api/v1/x=1 sent:GET_h/api/v1/x=1"])
     ok, why, _, _ = P.vr6_build(P.read(log))
     assert not ok and any("both refused and sent" in w for w in why), why
@@ -604,3 +604,21 @@ def test_menu_check_refuses_without_its_lines():
         P.menu_check(P.read(_menu_log(segs=6)))
     rep = P.report("\n".join(ln for ln in log.splitlines() if "kind=fhat" not in ln))
     assert rep.endswith("MENU not computable: no menu calibration line"), rep
+
+
+def test_vr2_flags_span_depth_and_cycle_failures():
+    # HIGH 1's mutant no_cycle_counter: a frame whose cycle read failed must fail VR2, as must a span left open
+    recs = [{"kind": "p", "game": 1},
+            {"kind": "settled", "g": 1, "missing_end": 0, "cycle_failures": 4, "span_depth_violations": 2}]
+    ok, bad = P.vr2(recs)
+    assert not ok and bad == ["settled g=1 cycle_failures=4", "settled g=1 span_depth_violations=2"], bad
+
+
+def test_tb_tot_from_retained_point_rows():
+    # LOW 1 (METHOD-V4.md 3.10): tb_tot is computed when the record is built, from the rows the record retains
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin", "CombatEvidence.cs"),
+               encoding="utf-8").read()
+    i = src.find("var tb = g.Tb.Rows();")
+    j = src.find('r["tb_tot"] = E.TbTot(tb, g.BaseChanges, g.Points)')
+    assert src.count("var tb = g.Tb.Rows();") == 1 and src.count("E.TbTot(") == 1, "the tb_tot anchors moved"
+    assert 0 <= i < j and src[i:j].count("\n") <= 2, "tb_tot is not built from the retained rows"

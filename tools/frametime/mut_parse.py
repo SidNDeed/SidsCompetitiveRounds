@@ -34,6 +34,9 @@ MUTS = [
     ("menu A/A one-sided", "aa_ok = est - hw <= 0 <= est + hw", "aa_ok = est - hw <= 0"),
     ("menu e_C without f_hat", 'ec = (p["psC"] / p["pn"] - p["sC"] / p["n"]) / (cp * m["f_hat"] / 1e6)',
      'ec = (p["psC"] / p["pn"] - p["sC"] / p["n"]) / cp'),
+    ("no_cycle_counter: VR2 ignores cycle failures",
+     'for k in ("missing_end", "cycle_failures", "span_depth_violations"):\n            if r.get(k, 0) != 0:',
+     'for k in ("missing_end", "span_depth_violations"):\n            if r.get(k, 0) != 0:'),
     ("menu run completion ignored", 'if d.get("why") != "complete" or d.get("segs") != d.get("of"):', 'if False:'),
 ]
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
