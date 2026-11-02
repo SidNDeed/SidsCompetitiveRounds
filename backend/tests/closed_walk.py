@@ -421,7 +421,11 @@ def returned_sql(fn, scope):
         return [None]
     tree = _ast.parse(_textwrap.dedent(_inspect.getsource(fn)))
     rets = [n.value for n in _ast.walk(tree) if isinstance(n, _ast.Return)]
-    out = [sql_text(r, scope) if r is not None else None for r in rets] or [None]
+    # its own bindings first (the class of finding closed_walk:322)
+    fb = bound_names(tree.body[0]) if tree.body and isinstance(
+        tree.body[0], (_ast.FunctionDef, _ast.AsyncFunctionDef)) else frozenset()
+    out = [sql_text(r, scope, bound=fb) if r is not None else None
+           for r in rets] or [None]
     if None not in out:
         return out
     params = list(_inspect.signature(fn).parameters)
@@ -540,6 +544,9 @@ def local_sql(tree, scope):
                 v = n.value
                 tmpl = (getattr(scope, v.func.value.id, None)
                         if isinstance(v, _ast.Call)
+                        and isinstance(v.func, _ast.Attribute)
+                        and isinstance(v.func.value, _ast.Name)
+                        and v.func.value.id not in bound
                         and isinstance(v.func, _ast.Attribute)
                         and v.func.attr == "format"
                         and isinstance(v.func.value, _ast.Name) else None)

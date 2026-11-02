@@ -3739,7 +3739,17 @@ def test_closed_walk_acceptance_bound():
 _R4_CW_SRC = "\n".join([
     "from sqlalchemy import text",
     "Q = 'SELECT 1'",
+    "T = 'SELECT 1 {c}'",
     "ALLOWED = ('t', 'u')",
+    "def builder():",
+    "    Q = 'UPDATE t SET x = 1'",
+    "    return Q",
+    "async def builder_masked(db):",
+    "    await db.execute(text(builder()), {})",
+    "async def template_masked(db):",
+    "    T = 'UPDATE t SET x = 1 {c}'",
+    "    sql = T.format(c='')",
+    "    await db.execute(text(sql), {})",
     "def plain_add(db, row):",
     "    db.add(row)",
     "def plain_ok(row):",
@@ -3827,6 +3837,10 @@ _R4_CW_CONTROLS = [
     ("plain_helper_writes", "a plain call of plain_add, which takes write"),
     ("plain_helper_reads_nothing", set()),
     ("annotation_writes", {"write"}),
+    # the 322 class swept (grep getattr(scope, ...)): a SQL builder's return
+    # and a SQL template read through their own function's bindings
+    ("builder_masked", "an execute whose SQL the walk cannot read"),
+    ("template_masked", "an execute whose SQL the walk cannot read"),
     # finding closed_walk:825 (class C): a rollback-then-raise propagates to
     # the helper that awaits it, and none is caught inside the walked helper
     ("outer_catches", "awaited inside a try that catches"),
@@ -3852,8 +3866,9 @@ def test_r4_closed_walk_names_resolve_through_the_function(helper, want):
     plain callee that touches nothing) still read."""
     scope = _r4_cw_scope()
     fn = getattr(scope, helper)
-    policy = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS,
-                        _SQL_LISTS)
+    # .format added for the template program, so it reaches the SQL read
+    policy = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS | {"format"},
+                        _PURE_AWAITS, _SQL_LISTS)
     if isinstance(want, str):
         with pytest.raises(Unclassified) as e:
             _cw.helper_effects(fn, policy)
