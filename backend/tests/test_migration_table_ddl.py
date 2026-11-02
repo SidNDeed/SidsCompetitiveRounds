@@ -380,3 +380,87 @@ def test_r4_privilege_and_trigger_execute_are_not_commands(sql):
             "CREATE TRIGGER g AFTER INSERT ON y FOR EACH ROW EXECUTE FUNCTION f(); "
             "CREATE TRIGGER h AFTER INSERT ON y FOR EACH ROW EXECUTE PROCEDURE f(); END $$;\n")
     assert naming(text) == []
+
+
+# REHEARSAL-FOUR-R5, findings 14 and 15 (Codex round 5): controls written
+# before any fix (fix 0). Each red case is the reviewer's program stated as
+# the required behaviour; each kept case is a form the fix must keep reading.
+
+R5_DOLLAR_LANGUAGE = [
+    "DO LANGUAGE $lang$plpgsql$lang$ $body$ BEGIN ALTER TABLE mail_inbox_rev "
+    "ADD COLUMN x int; END $body$;\n",
+    "DO LANGUAGE $$plpgsql$$ $body$ BEGIN ALTER TABLE mail_inbox_rev "
+    "ADD COLUMN x int; END $body$;\n",
+]
+
+
+@pytest.mark.parametrize("text", R5_DOLLAR_LANGUAGE)
+def test_r5_a_dollar_quoted_language_name_does_not_hide_the_do_body(text):
+    """14: DO LANGUAGE $lang$plpgsql$lang$ $body$...$body$ runs its body. The
+    body is either read (its ALTER of the guarded table found) or the form is
+    refused; it is never silently treated as data."""
+    try:
+        out = naming(text)
+    except mtd.MigrationDdlError:
+        return
+    assert out == ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"], out
+
+
+def test_r5_a_dollar_quoted_language_name_does_not_hide_ddl_from_table_ddl(sql):
+    """14, table_ddl side: an index on the table inside such a body refuses."""
+    with pytest.raises(mtd.MigrationDdlError):
+        sql("CREATE TABLE t (a int);\nDO LANGUAGE $l$plpgsql$l$ $b$ BEGIN "
+            "CREATE INDEX i ON t (a); END $b$;\n")
+
+
+def test_r5_kept_language_forms_still_lead_to_the_do_body(sql):
+    """14, kept: the forms backend/sql uses (DO $tag$...$tag$, with LANGUAGE
+    after the body) and a plain LANGUAGE name before it are walked."""
+    want = ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
+    body = "$body$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $body$"
+    assert naming("DO LANGUAGE plpgsql %s;\n" % body) == want
+    assert naming("DO %s LANGUAGE plpgsql;\n" % body) == want
+    assert naming("DO %s;\n" % body) == want
+    with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
+        sql("CREATE TABLE t (a int);\nDO LANGUAGE plpgsql $b$ BEGIN "
+            "CREATE INDEX i ON t (a); END $b$;\n")
+
+
+R5_FAKE_TRIGGER_EXECUTE = [
+    "DO $$ DECLARE function text := 'ALTER TABLE mail_inbox_rev ADD x int'; "
+    "BEGIN EXECUTE function COLLATE \"C\"; END $$;\n",
+    "DO $$ DECLARE procedure text := 'ALTER TABLE mail_inbox_rev ADD x int'; "
+    "BEGIN EXECUTE procedure COLLATE \"C\"; END $$;\n",
+    "DO $$ DECLARE function text := 'ALTER TABLE mail_inbox_rev ADD x int'; r int; "
+    "BEGIN EXECUTE function INTO r; END $$;\n",
+    "DO $$ DECLARE function text := 'ALTER TABLE mail_inbox_rev ADD x int'; "
+    "BEGIN EXECUTE function USING 1; END $$;\n",
+]
+
+
+@pytest.mark.parametrize("text", R5_FAKE_TRIGGER_EXECUTE)
+def test_r5_execute_of_a_variable_named_function_is_a_dynamic_command(text):
+    """15: outside a CREATE TRIGGER, EXECUTE function <ident> is a dynamic
+    EXECUTE of the variable `function`: it is not read, so it raises, or,
+    with a list passed, is reported there."""
+    with pytest.raises(mtd.MigrationDdlError, match="is not read"):
+        naming(text)
+    found = []
+    assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == []
+    assert len(found) == 1 and found[0][2].startswith("EXECUTE"), found
+
+
+def test_r5_kept_trigger_declarations_are_not_commands():
+    """15, kept: EXECUTE FUNCTION|PROCEDURE inside the trigger declarations
+    backend/sql uses (CREATE TRIGGER, CREATE OR REPLACE TRIGGER, CREATE
+    CONSTRAINT TRIGGER) is not a dynamic command, inside a body too."""
+    text = ("DO $$ BEGIN "
+            "CREATE TRIGGER g AFTER INSERT ON y FOR EACH ROW EXECUTE FUNCTION f(); "
+            "CREATE OR REPLACE TRIGGER h BEFORE UPDATE ON y FOR EACH ROW EXECUTE PROCEDURE f(); "
+            "CREATE CONSTRAINT TRIGGER c AFTER INSERT OR UPDATE ON y DEFERRABLE INITIALLY "
+            "DEFERRED FOR EACH ROW EXECUTE FUNCTION f(); "
+            "CREATE TRIGGER s AFTER INSERT ON y REFERENCING NEW TABLE AS inserted "
+            "FOR EACH STATEMENT EXECUTE FUNCTION f(); END $$;\n")
+    found = []
+    assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == [] and found == []
+    assert naming(text) == []

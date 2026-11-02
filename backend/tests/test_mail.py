@@ -3168,3 +3168,92 @@ def test_a_case_ban_whose_subject_was_scrubbed_under_the_lock_is_refused_before_
     assert case["status"] == "open" and case["resolved_by"] is None
     act = inspect.getsource(main._moderation_case_act)
     assert 'optional = {actor_steam_id} | ({subject_sid_pre} if action == "dismiss" else set())' in act
+
+
+
+# REHEARSAL-FOUR-R5, findings 16 and 17 (Codex round 5): controls written
+# before any fix (fix 0).
+
+def _r5_with_element(stmt, element, first=True):
+    """300's statement with one more element in its column list, first or last."""
+    if first:
+        at = stmt.index("(") + 1
+        return stmt[:at] + "\n    " + element + "," + stmt[at:]
+    at = stmt.rindex(")")
+    return stmt[:at].rstrip() + ",\n    " + element + "\n" + stmt[at:]
+
+
+def test_r5_a_column_named_exclude_is_a_column():
+    """16: EXCLUDE is an unreserved keyword, so `exclude INTEGER` is a column
+    and must take part in the comparison with the model."""
+    stmt = table_ddl("300_mail_inbox_rev.sql", "mail_inbox_rev")[0]
+    full = _create_table_columns(stmt)
+    model = {c.name: c.nullable for c in models.MailInboxRev.__table__.columns}
+    assert full == model
+    for element, nullable in (("exclude INTEGER", True), ("exclude INTEGER NOT NULL", False),
+                              ("EXCLUDE int", True)):
+        for first in (True, False):
+            got = _create_table_columns(_r5_with_element(stmt, element, first))
+            assert got == dict(full, exclude=nullable), (element, first, got)
+            assert got != model, element
+
+
+def test_r5_kept_exclusion_constraints_are_constraints():
+    """16, kept: a table EXCLUDE constraint (bare or named, with USING) adds
+    no column."""
+    stmt = table_ddl("300_mail_inbox_rev.sql", "mail_inbox_rev")[0]
+    full = _create_table_columns(stmt)
+    for element in ("EXCLUDE USING gist (rev WITH =)",
+                    "EXCLUDE (recipient_id WITH =)",
+                    "CONSTRAINT no_twin EXCLUDE USING btree (recipient_id WITH =)"):
+        assert _create_table_columns(_r5_with_element(stmt, element, False)) == full, element
+
+
+def _r5_guard_over(tmp_path, monkeypatch, edit=None):
+    """Run test_migration_300's guard over a copy of backend/sql in which
+    373 has had edit (old, new) applied once."""
+    import shutil
+    import sys as _sys
+    import migration_table_ddl as _mtd
+    copy = tmp_path / "sql"
+    shutil.copytree(SQL_DIR, str(copy))
+    if edit is not None:
+        path = copy / "373_bug_reports_auto_number.sql"
+        with open(str(path), encoding="utf-8", newline="") as fh:
+            src = fh.read()
+        old, new = edit
+        assert src.count(old) == 1, old
+        with open(str(path), "w", encoding="utf-8", newline="") as fh:
+            fh.write(src.replace(old, new))
+    monkeypatch.setattr(_sys.modules[__name__], "SQL_DIR", str(copy))
+    monkeypatch.setattr(_mtd, "SQL_DIR", str(copy))
+    test_migration_300_matches_the_orm_and_the_readers()
+
+
+R5_373_EDITS = [
+    # the template: Codex's program, an ALTER of the guarded table prefixed
+    ("c_accounted_sql CONSTANT text := 'SELECT ",
+     "c_accounted_sql CONSTANT text := 'ALTER TABLE mail_inbox_rev DROP COLUMN rev; SELECT "),
+    # its binding: the setting the unresolved EXECUTE reads, set to other text
+    ("PERFORM set_config('m373.accounted_sql', c_accounted_sql, true);",
+     "PERFORM set_config('m373.accounted_sql', 'ALTER TABLE mail_inbox_rev DROP COLUMN rev', true);"),
+]
+
+
+@pytest.mark.parametrize("edit", R5_373_EDITS, ids=["template", "binding"])
+def test_r5_the_guard_sees_a_change_to_373s_unresolved_template(tmp_path, monkeypatch, edit):
+    """17: 373's format(current_setting('m373.accounted_sql')) EXECUTE is on
+    the hand-read list; a change to the template or to its binding must turn
+    the guard red."""
+    with pytest.raises(AssertionError) as exc:
+        _r5_guard_over(tmp_path, monkeypatch, edit)
+    assert "373" in str(exc.value), str(exc.value)[:500]
+
+
+def test_r5_kept_the_guard_passes_over_an_unchanged_copy(tmp_path, monkeypatch):
+    """17, kept: the copied tree passes as is, and an edit to a comment in 373
+    that changes no command passes too."""
+    _r5_guard_over(tmp_path, monkeypatch)
+    (tmp_path / "c").mkdir()
+    _r5_guard_over(tmp_path / "c", monkeypatch,
+                   ("-- ONE POLICY, ONE COPY.", "-- ONE POLICY, ONE COPY, reworded."))
