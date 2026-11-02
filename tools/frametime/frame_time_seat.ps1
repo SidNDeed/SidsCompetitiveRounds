@@ -22,7 +22,7 @@ script refuses when that file is missing or names another digest. Six steps:
 -SelfTest runs steps 1, 4 and 5 against a scratch folder of fixtures (no launch, no game file touched), once clean and
 once for each of two mutants (keep_prev_copy: the sitting writes LogOutput-prev.log; closing_file: the sitting writes
 a closing file); it prints SELFTEST PASS only when the clean run passes and each mutant fails.
-Exit codes: 0 pass, 2 refused before the launch, 3 the sitting did not complete, 4 VR6 failed, 5 a restore mismatch,
+Exit codes: 0 pass, 2 refused before the launch (a step-1 error included), 3 the sitting did not complete, 4 VR6 failed, 5 a restore mismatch,
 6 the self-test failed.
 #>
 [CmdletBinding()]
@@ -259,12 +259,13 @@ $C = NewCtx $GameRoot $SeatRoot $LocalLow
 $run = NewRun $SeatRoot
 $own = Sha $PSCommandPath
 $want = Join-Path $SeatRoot 'runner\frame_time_seat.sha256'
-$rec = if (Test-Path -LiteralPath $want) { ([regex]::Match((Get-Content -LiteralPath $want -TotalCount 1), '^[0-9a-fA-F]{64}')).Value.ToLowerInvariant() } else { 'absent' }
+$rec = if (Test-Path -LiteralPath $want) { ([regex]::Match([string](Get-Content -LiteralPath $want -TotalCount 1), '(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])')).Value.ToLowerInvariant() } else { 'absent' }
 Say ("script sha256 {0}; recorded at staging {1}" -f $own, $rec)
 if ($rec -ne $own) { Say 'REFUSED: the script is not the staged one (step 0)'; exit 2 }
 if (@(Get-Process -Name 'Rounds' -ErrorAction SilentlyContinue).Count) { Say 'REFUSED: ROUNDS is running'; exit 2 }
 if (Test-Path -LiteralPath $C.Arm) { Say 'REFUSED: a sentinel is already present'; exit 2 }
-$p = Step1 $C $run
+try { $p = Step1 $C $run }
+catch { Say ('REFUSED: step 1 failed: ' + $_.Exception.Message); exit 2 }
 if (-not $p.LaneOk) { Say 'REFUSED: the installed DLL is no staged FrameTime lane (push the lane first)'; exit 2 }
 $code = 0
 $proc = $null
