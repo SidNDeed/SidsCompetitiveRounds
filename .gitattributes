@@ -12,3 +12,5 @@ backend/tests/fixtures/card_evidence/** -text
 backend/tests/fixtures/combat_evidence/** -text
 # The FrameTime lane scripts run under bash on the Windows seats: always LF.
 tools/frametime/*.sh text eol=lf
+# The seat runner is staged by sha256: the same bytes on every checkout.
+tools/frametime/frame_time_seat.ps1 text eol=crlf
