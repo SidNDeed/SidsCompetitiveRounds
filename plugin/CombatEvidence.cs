@@ -2369,7 +2369,6 @@ namespace CompetitiveRounds
             return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
         }
 #endif
-
         // -- the game-over capture and the build ----------------------------------------------------
 
         private sealed class Capture
