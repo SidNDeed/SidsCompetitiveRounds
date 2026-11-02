@@ -263,7 +263,14 @@ KILLS = {
 }
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]
-FAILED = re.compile(r"^FAILED \S+::(\w+)(?: - (.*))?$")
+# a parametrised test's id ([...]) is part of its FAILED line: read past it, or its failures are never seen
+FAILED = re.compile(r"^FAILED \S+::(\w+)(?:\[[^\]]*\])?(?: - (.*))?$")
+for _ln, _want in (("FAILED test_ft_parse.py::test_x - AssertionError: y", "test_x"),
+                   ("FAILED test_ft_parse.py::test_each[flushed-kw0] - AssertionError: y", "test_each"),
+                   ("FAILED test_ft_parse.py::test_each[heavy-kw4]", "test_each")):
+    _m = FAILED.match(_ln)
+    if not _m or _m.group(1) != _want:
+        sys.exit("REFUSED: the FAILED reader does not read %r" % _ln)
 UNRELATED = ("FileNotFoundError", "ModuleNotFoundError", "ImportError", "No such file")
 
 
