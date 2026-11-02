@@ -40,6 +40,7 @@ namespace CompetitiveRounds
         {
             FtArm.Evaluate();
             FtRematch.Poll();
+            FtDrive.JoinTick();
             if (!FtArm.Armed && FtGate.Off) FtGate.Off = false;   // a disarm opens the gate at this boundary
             bool live = SeatEvidence.CombatLive();
             if (live && !Live) StartPoint();

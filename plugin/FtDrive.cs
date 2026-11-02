@@ -65,6 +65,30 @@ namespace CompetitiveRounds
             _wasActive = a;
         }
 
+        private static double _nextJoinS;
+
+        /// <summary>The self-drive's first act: outside any room, stage this build's own ft_ room through the
+        /// existing named-room join with FT_REGION (part b), at most every 30 s, never over a staged pending room.
+        /// The sentinel key join=0 suppresses it (the menu self-check runs with no second seat).</summary>
+        internal static void JoinTick()
+        {
+            if (!FtConfig.Present || Escaped || Complete || FtRematch.TimedOut) return;
+            double now = Now;
+            if (now < _nextJoinS) return;
+            _nextJoinS = now + 30.0;
+            if (FtConfig.Get("join", "1") == "0") return;
+            try
+            {
+                if (Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.OfflineMode) return;
+                if (!string.IsNullOrEmpty(Plugin.PendingRankedRoom)) return;
+                string room = FtArm.ExpectedRoom();
+                if (room == null) return;
+                Plugin.Log.LogInfo("[FRAME-TIME] self-drive join room=" + room + " region=" + FtArm.FT_REGION);
+                Plugin.SetPendingRoom(room, FtArm.FT_REGION);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] self-drive join failed: " + ex.Message); }
+        }
+
         /// <summary>FtSchedule.GameOver: after the last measured game the sitting ends.</summary>
         internal static void GameOver(int game)
         {
