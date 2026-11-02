@@ -278,7 +278,11 @@ namespace CompetitiveRounds
         {
             private uint _s;
             internal Rng(uint seed) { _s = seed == 0 ? 2463534242u : seed; }
+#if SCR_FRAMETIME
+            internal uint Next() { FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars); uint x = _s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; _s = x; return x; }
+#else
             internal uint Next() { uint x = _s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; _s = x; return x; }
+#endif
         }
 
         /// <summary>Uniform reservoir (algorithm R) of at most Cap samples, with
@@ -543,9 +547,17 @@ namespace CompetitiveRounds
                 _d = new Dictionary<TKey, TValue>(Cap);
             }
 
+#if SCR_FRAMETIME
+            internal int Count { get { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); return _d.Count; } }
+#else
             internal int Count { get { return _d.Count; } }
+#endif
 
+#if SCR_FRAMETIME
+            internal bool TryGetValue(TKey key, out TValue value) { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); return _d.TryGetValue(key, out value); }
+#else
             internal bool TryGetValue(TKey key, out TValue value) { return _d.TryGetValue(key, out value); }
+#endif
 
             internal bool ContainsKey(TKey key) { return _d.ContainsKey(key); }
 
@@ -553,6 +565,10 @@ namespace CompetitiveRounds
             /// cap. A new key at the cap is counted as refused.</summary>
             internal bool Admit(TKey key)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map);
+                FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map);
+#endif
                 if (_d.Count < Cap || _d.ContainsKey(key)) return true;
                 Refused++;
                 return false;
@@ -562,17 +578,33 @@ namespace CompetitiveRounds
             /// new key at the cap is refused (counted) and false returned.</summary>
             internal bool Set(TKey key, TValue value)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map);
+                FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map);
+#endif
                 if (_d.Count >= Cap && !_d.ContainsKey(key)) { Refused++; return false; }
                 _d[key] = value;
                 return true;
             }
 
+#if SCR_FRAMETIME
+            internal bool Remove(TKey key) { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map); return _d.Remove(key); }
+#else
             internal bool Remove(TKey key) { return _d.Remove(key); }
+#endif
 
+#if SCR_FRAMETIME
+            internal void Clear() { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map); if (_d.Count > 0) _d.Clear(); }
+#else
             internal void Clear() { if (_d.Count > 0) _d.Clear(); }
+#endif
 
             /// <summary>The refusals since the last call, then zero.</summary>
+#if SCR_FRAMETIME
+            internal int TakeRefused() { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map); int r = Refused; Refused = 0; return r; }
+#else
             internal int TakeRefused() { int r = Refused; Refused = 0; return r; }
+#endif
 
             public Dictionary<TKey, TValue>.Enumerator GetEnumerator() { return _d.GetEnumerator(); }
         }
@@ -592,6 +624,9 @@ namespace CompetitiveRounds
             private int _head;
             internal int Next(long a, long b, long c)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.SE_ordinals); FtA3.Wrote(FtA3.SE_ordinals);
+#endif
                 string k = a.ToString(CultureInfo.InvariantCulture) + ":" + b.ToString(CultureInfo.InvariantCulture)
                            + ":" + c.ToString(CultureInfo.InvariantCulture);
                 int n;

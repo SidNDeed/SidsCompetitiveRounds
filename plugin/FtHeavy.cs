@@ -13,7 +13,8 @@ namespace CompetitiveRounds
     /// and a hash completed on the main thread. Every main-thread call also reads CombatLive itself,
     /// whatever the frame's moment says (a stale non-live moment cannot hide a live call): at_call
     /// counts calls with combat live at the call; edge counts calls in a frame that started live and
-    /// whose combat ended before the call. V4 3.9's rule is that no heavy work runs in a live-combat
+    /// whose combat ended before the call, read from FtSchedule.FrameLive (set at the frame's boundary and never
+    /// rewritten inside it: GameOver sets Moment before its own heavy calls, round-2 MEDIUM, FtHeavy.cs:44). V4 3.9's rule is that no heavy work runs in a live-combat
     /// frame, so B3 judges both (round-1 MEDIUM, FtHeavy.cs:39). The
     /// hashing thread's run is stamped (Stopwatch ticks) so the parser can test its interval against
     /// every point's live interval. Main thread only; a call from another thread is counted as off.</summary>
@@ -41,7 +42,7 @@ namespace CompetitiveRounds
             bool live = true;
             try { live = SeatEvidence.CombatLive(); } catch { }
             if (live) _atCall[op]++;
-            else if (m == FtSpan.Live) _edge[op]++;
+            else if (FtSchedule.FrameLive) _edge[op]++;   // the frame-start flag, not the Moment GameOver rewrites
         }
 
         internal static void HashBegin() { Interlocked.Exchange(ref HashT0, Stopwatch.GetTimestamp()); }

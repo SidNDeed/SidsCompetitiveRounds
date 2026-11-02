@@ -43,9 +43,23 @@ namespace CompetitiveRounds
             return SeatEvidence.CombatLive();
         }
 
+        /// <summary>The frame now closing was a combat point's closing frame (it started live, combat ended inside
+        /// it): left out of the point's frames. Never in the menu self-check, whose segments set Live without combat
+        /// (round-2 MEDIUM, FtClock.cs:144: every menu frame was excluded); FtClock calls this before Boundary.</summary>
+        internal static bool ClosingFrame(bool live)
+        {
+            return Live && !live && !FtMenu.Active;
+        }
+
+        /// <summary>Whether the current frame started with combat live, set once at its boundary and never changed
+        /// inside the frame: GameOver's Moment write cannot hide a closing frame's heavy work from FtHeavy (round-2
+        /// MEDIUM, FtHeavy.cs:44).</summary>
+        internal static bool FrameLive;
+
         /// <summary>Frame boundary: decide the state of the frame that starts now (live: ReadLive's value).</summary>
         internal static void Boundary(bool live)
         {
+            FrameLive = live;
             FtArm.Evaluate();
             if (_flushAt > 0 && System.Diagnostics.Stopwatch.GetTimestamp() >= _flushAt) FlushGame("settle");
             FtRematch.Poll();
@@ -152,7 +166,9 @@ namespace CompetitiveRounds
             if (_owed < 0) return;
             int g = _owed;
             _owed = -1;
-            _flushAt = -1;
+            // 0, not -1: GameOver arms the settle flush only from 0, so a -1 left by game 0's flush made the last
+            // game's settle flush unreachable (round-2 MEDIUM, FtSchedule.cs:141)
+            _flushAt = 0;
             FtCensus.LogGame(g);
             FtHeavy.LogGame(g);
             FtA3.LogGame(g);

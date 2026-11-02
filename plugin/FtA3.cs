@@ -11,9 +11,12 @@ namespace CompetitiveRounds
     /// whole-entry gate leaves (tools/frametime/SURVIVORS.md; tools/frametime/gate_specs/a3.py lists the rows with the
     /// same names). Two kinds of row register here, each once, from its component's own FtA3Rows:
     ///
-    /// DEPENDENT (Set): a survivor whose live read costs more or less with its content. Its writers call Wrote and its
-    /// content-dependent live readers call Read, inside #if SCR_FRAMETIME at the component's own sites; only main-thread
-    /// calls in the live frames of a point the gate leaves open (an ON point) count. A row with a steady state (steady
+    /// DEPENDENT (Set): every survivor that is neither proven zero by the survivor sweep (no write of its fields
+    /// reachable live) nor probed drained (ruling FRAME-TIME-ROUND-R2 (1), default-deny). Its live writers call Wrote and
+    /// EVERY live reader member calls Read (survivor_sweep.py lists the readers from the sweep and fails when one lacks
+    /// it, or when a Read sits anywhere else), inside #if SCR_FRAMETIME at the component's own sites; only main-thread
+    /// calls in the live frames of a point the gate leaves open (an ON point) count. A reader that is cheap whatever the
+    /// content is still counted: its row's calibration bounds the costliest read, so the count can only overstate. A row with a steady state (steady
     /// true) holds only the current point's content once `refill` writes have happened since the point's first live
     /// frame; reads_win counts its reads before that. A row without one (steady false: it accumulates over the game)
     /// counts every read in reads_win. The row's calibration (FtCalib.Run, every game start) runs the read on a scratch
@@ -30,7 +33,7 @@ namespace CompetitiveRounds
     /// without each dependent row.</summary>
     internal static class FtA3
     {
-        internal const int Capacity = 32;
+        internal const int Capacity = 48;
         private const int Batches = 20;
 
         // The rows (gate_specs/a3.py, same names). Dependent:
@@ -38,7 +41,14 @@ namespace CompetitiveRounds
         internal const int SE_Hw = 6, SE_Logs = 7, IC_Rpc = 8, IC_Clock = 9;
         // Drained:
         internal const int CE_Wait = 10, CE_Rings = 11, CE_Gun = 12, HE_Flush = 13, PE_Rec = 14;
-        internal const int Rows = 15;
+        // Dependent by default-deny (ruling FRAME-TIME-ROUND-R2 (1): the 21 former zero rows, whose fields the sweep
+        // finds written live) and round-2 HIGH 3's HashSet growth (HE_hitset, split from HE_game):
+        internal const int CE_lhat_cache = 15, CE_anchor = 16, CE_counters = 17, CE_scratch = 18, CE_gun_scalars = 19;
+        internal const int CE_gun_account = 20, CE_aimset = 21, CE_capture = 22, CE_perf_probe = 23;
+        internal const int SE_ordinals = 24, SE_frames = 25, SE_scalars = 26;
+        internal const int HE_game = 27, HE_point = 28, HE_sender = 29, PE_map = 30;
+        internal const int IC_scalars = 31, IC_point = 32, IC_game = 33, CD_notes = 34, PB_printed = 35, HE_hitset = 36;
+        internal const int Rows = 37;
 
         private static bool _registered;
 
@@ -52,6 +62,8 @@ namespace CompetitiveRounds
             IdentityClockEvidence.FtA3Rows();
             HitEvidence.FtA3Rows();
             PointEvidence.FtA3Rows();
+            CardDrawEvidence.FtA3Rows();
+            PeerBuild.FtA3Rows();
             int missing = 0;
             for (int k = 0; k < Rows; k++) if (Names[k] == null) missing++;
             Plugin.Log.LogInfo("[FRAME-TIME] a3rows registered=" + Count + " expected=" + Rows + " missing=" + missing
@@ -148,6 +160,18 @@ namespace CompetitiveRounds
             if (!OnLive()) return;
             _readsOn[k]++;
             if (!_steady[k] || _writesPt[k] < _refill[k]) _readsWin[k]++;
+        }
+
+        /// <summary>A growth row's read (HE_hitset; SE_Logs keeps its own SeatEvidenceCore.FtLogRead): ONCE per
+        /// instance per game. The instance keeps the Serial it last counted in, stored only when this call counts (an
+        /// ON live frame on the main thread), so an instance first touched outside one is still counted at its first
+        /// touch inside one. The row's calibration is the instance's whole growth sequence to its cap.</summary>
+        internal static void ReadOnce(int k, ref int serial)
+        {
+            if (serial == Serial) return;
+            if (!OnLive()) return;
+            Read(k);
+            serial = Serial;
         }
 
         /// <summary>FtSchedule.GameStart: the game's counts restart.</summary>

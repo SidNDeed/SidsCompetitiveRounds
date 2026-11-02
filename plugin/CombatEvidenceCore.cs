@@ -467,6 +467,9 @@ namespace CompetitiveRounds
 
         private static int Count(Rec r, string k)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_B5c); FtA3.Read(FtA3.CE_aimset);
+#endif
             object v = r[k];
             var l = v as List<long[]>;
             return l != null ? l.Count : ((List<Group>)v).Count;
@@ -874,6 +877,9 @@ namespace CompetitiveRounds
         /// <summary>Residual into a caller's preallocated three-element row (the tick's path: no allocation).</summary>
         internal static void ResidualInto(St pred, St actual, long[] o)
         {
+#if SCR_FRAMETIME
+            FtA3.Wrote(FtA3.CE_scratch);
+#endif
             double dx = (double)actual.X - pred.X, dy = (double)actual.Y - pred.Y;
             double speed = Hypot(pred.VX, pred.VY);
             double along, perp;
@@ -1045,6 +1051,9 @@ namespace CompetitiveRounds
             internal long Count, NoSight; internal double Sum, Sq;
             internal void Add(long signedMrad, bool noSight)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_aimset); FtA3.Wrote(FtA3.CE_aimset);
+#endif
                 long a = signedMrad < 0 ? -signedMrad : signedMrad;
                 Hist[Bin(AIM_EDGES, a)]++;
                 Count++; Sum += signedMrad; Sq += (double)signedMrad * signedMrad;
@@ -1109,7 +1118,11 @@ namespace CompetitiveRounds
                 Tot[TotIx("gap_minus_rexp_min")] = W.GAP_NONE;
             }
 
+#if SCR_FRAMETIME
+            internal bool Open { get { FtA3.Read(FtA3.CE_gun_account); return _open; } }
+#else
             internal bool Open { get { return _open; } }
+#endif
             internal long OpenUnits { get { return _open ? _n : 0; } }
             internal int GroupCount { get { return _nGroups; } }
             internal int CxCount { get { return _nCx; } }
@@ -1118,6 +1131,9 @@ namespace CompetitiveRounds
             /// carries rep >= 0 (own gun) or am >= 0 (the copy).</summary>
             internal void AddShot(long pid, long stamp, long ammoBefore, bool reloading, long counterMs, long rep, long since, long fl, long am)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
+#endif
                 if (!_open) Start(pid, stamp);
                 long j = _n;
                 _n++;
@@ -1173,6 +1189,9 @@ namespace CompetitiveRounds
             /// <summary>A regeneration of `amt` units seen on this copy (applied before the next shot).</summary>
             internal void AddRegen(long amt, long st, long gapG, long gapS, long gapR)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
+#endif
                 if (!_open || amt <= 0) return;
                 amt = Clamp(amt, 1, 999);
                 _count += amt; _regen += amt; _nrg++;
@@ -1189,12 +1208,18 @@ namespace CompetitiveRounds
             /// a gate call; copy: an attack message).</summary>
             internal void AddNoInit()
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
+#endif
                 Tot[TotIx("atk_noinit")]++;
                 if (Own) Tot[TotIx("gate")]++; else Tot[TotIx("atk_msg")]++;
             }
 
             internal void AddKind(bool noAmmo)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
+#endif
                 Tot[TotIx(noAmmo ? "noammo" : "separate")]++;
             }
 
@@ -1202,6 +1227,9 @@ namespace CompetitiveRounds
             /// with no open cycle is counted (rf_idle).</summary>
             internal void CloseCycle(long end, long src, long amt, long stEnd, long rlG, long rlS, long rlR)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
+#endif
                 if (!_open)
                 {
                     if (end != W.END_POINT) Tot[TotIx("rf_idle")]++;
@@ -1264,6 +1292,9 @@ namespace CompetitiveRounds
 
             private void Start(long pid, long stamp)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
+#endif
                 _open = true;
                 _listed = _nGroups < _groupCap;
                 _gi = _nGroups;
@@ -1331,11 +1362,18 @@ namespace CompetitiveRounds
             /// <summary>The slot the next row is written to, or -1 when full (counted).</summary>
             internal int NextSlot()
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_B5c); FtA3.Wrote(FtA3.CE_B5c);
+#endif
                 Total++;
                 if (Count >= Cap) { Omitted++; return -1; }
                 return (Count++) * Width;
             }
+#if SCR_FRAMETIME
+            internal long[] Raw { get { FtA3.Read(FtA3.CE_B5c); return _a; } }
+#else
             internal long[] Raw { get { return _a; } }
+#endif
             internal void Add(params long[] row)
             {
                 int o = NextSlot();

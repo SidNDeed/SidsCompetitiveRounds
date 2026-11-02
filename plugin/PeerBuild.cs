@@ -74,6 +74,9 @@ namespace CompetitiveRounds
         internal static void StageBuildProp(string source)
         {
 #if SCR_FRAMETIME
+            FtA3.Read(FtA3.PB_printed);
+#endif
+#if SCR_FRAMETIME
             if (FtCensus.Skip(FtE.PB_c2)) return;
             bool ftSpan = FtSpan.Open(FtSpan.PeerBuild, FtSpan.Gated);
             try
@@ -121,6 +124,9 @@ namespace CompetitiveRounds
         internal static void Tick()
         {
 #if SCR_FRAMETIME
+            FtA3.Read(FtA3.PB_printed); FtA3.Wrote(FtA3.PB_printed);
+#endif
+#if SCR_FRAMETIME
             if (FtCensus.Skip(FtE.PB_c3)) return;
             bool ftSpan = FtSpan.Open(FtSpan.PeerBuild, FtSpan.Gated);
             try
@@ -165,5 +171,51 @@ namespace CompetitiveRounds
             finally { FtSpan.Close(ftSpan); }
 #endif
         }
+#if SCR_FRAMETIME
+
+        // -- FrameTime A3 (FtA3; SURVIVORS.md S36) ------------------------------------------------
+
+        /// <summary>FtA3.RegisterAll: PB_printed (S36), the printed-peer table and the scan scalars, dependent by
+        /// default-deny (ruling FRAME-TIME-ROUND-R2 (1)): Tick writes them, so it is counted at every live reader call
+        /// (Tick, StageBuildProp), steady false. No code constant sizes _printed (the room's actors bound it); 1 is
+        /// passed and unused.</summary>
+        internal static void FtA3Rows()
+        {
+            FtA3.Set(FtA3.PB_printed, "PB_printed", 1, false, FtCalPrinted, 2000);
+        }
+
+        private const int FT_PEERS = 32;
+        private static Dictionary<int, string> _ftPrinted;
+        private static string _ftValues;
+        private static long _ftSink;
+
+        /// <summary>S36 (PB_printed): Tick's per-player probe of _printed and its string compare, on a scratch table.
+        /// FULL: FT_PEERS actors printed (above any ROUNDS room), each with a 256-character values string equal to the
+        /// probe's but for its last character, so the compare runs nearly whole. EMPTY: the table empty, every probe
+        /// misses.</summary>
+        internal static long FtCalPrinted(bool full, int n)
+        {
+            if (_ftPrinted == null)
+            {
+                _ftPrinted = new Dictionary<int, string>();
+                _ftValues = new string('v', 255) + "b";
+            }
+            _ftPrinted.Clear();
+            string held = new string('v', 255) + "a";
+            if (full) for (int i = 0; i < FT_PEERS; i++) _ftPrinted[i] = held;
+            long s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                string last;
+                if (_ftPrinted.TryGetValue(j % FT_PEERS, out last) && last == _ftValues) continue;
+                s++;
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftPrinted.Clear();
+            _ftSink += s;
+            return t;
+        }
+#endif
     }
 }

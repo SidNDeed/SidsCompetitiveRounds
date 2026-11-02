@@ -345,15 +345,18 @@ FREQ, FHAT = 10000000, 3000000000
 
 ENTRIES = P.expected_entries()
 SHAPES = sorted(set(s for e, s in ENTRIES))
-A3_DEP = [n for n, sid, kind, why in P.a3_spec() if kind == "dependent"]
-A3_DRAIN = [n for n, sid, kind, why in P.a3_spec() if kind == "drained"]
+A3_DEP = [r[0] for r in P.a3_spec() if r[2] == "dependent"]
+A3_DRAIN = [r[0] for r in P.a3_spec() if r[2] == "drained"]
 # the plugin files holding the FtA3 registrations (mut_parse copies each)
-A3_SITES = ["CombatEvidence.cs", "SeatEvidence.cs", "IdentityClockEvidence.cs", "HitEvidence.cs", "PoisonSync.cs"]
+A3_SITES = ["CombatEvidence.cs", "SeatEvidence.cs", "IdentityClockEvidence.cs", "HitEvidence.cs", "PoisonSync.cs",
+            "CardDrawEvidence.cs", "PeerBuild.cs"]
 
 
 def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10, 20), f18="A", replay="settled", heavy_edge=0,
          drop_cal=(), drop_disp=(), drop_opened=(), shut_ic=(), drop_census=(), complete=True, routes="",
-         drop_a3=(), drop_a3cal=(), a3_peak=None, drop_a3drain=(), a3_dirty=None):
+         drop_a3=(), drop_a3cal=(), a3_peak=None, drop_a3drain=(), a3_dirty=None, drop_heavy=(), drop_offthread=(),
+         drop_flushed=(), drop_between=(), drop_w=(), refusals_why=("game", "quit"), a3_starts=None, a3_cal_p=None,
+         drop_p=()):
     """A synthetic sitting, every line as FtFrames, FtCalib, FtCensus and FtDrive write it. Point costs: ON adds
     cost_us of C per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor
     case). The drop_* and shut_ic arguments remove or spoil records for the completeness controls."""
@@ -378,8 +381,9 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                      " p=150000,150000" % (g + 1, g))
             for k in A3_DEP:
                 if (g, k) not in drop_a3cal:
-                    L.append("[FRAME-TIME] cal i=%d why=game%d kind=a3 k=%s n=1000 u=100000,100000 p=130000,130000"
-                             % (g + 1, g, k))
+                    ap = (a3_cal_p or {}).get(g, 130000)
+                    L.append("[FRAME-TIME] cal i=%d why=game%d kind=a3 k=%s n=1000 u=100000,100000 p=%d,%d"
+                             % (g + 1, g, k, ap, ap))
         if g not in drop_opened:
             L.append("[FRAME-TIME] opened g=%d se=1 ce=1 %s" % (g, "ic=0" if g in shut_ic else "ic=1"))
         base = 2600.0 * (1 + 0.05 * rng.random())
@@ -411,7 +415,8 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                 t1 = t0 + int(lf * c_us * FREQ / 1e6)
                 clock[0] = t1 + FREQ // 2
                 onlf += lf if on else 0
-                L.append("[FRAME-TIME] p pt=%d.%d.%d arm=%s gate=%d pred=%s n=%d sF=%d sS=%d sC=%d maxF=%d pn=%d psF=%d "
+                if (g, rnd, pt) not in drop_p:
+                    L.append("[FRAME-TIME] p pt=%d.%d.%d arm=%s gate=%d pred=%s n=%d sF=%d sS=%d sC=%d maxF=%d pn=%d psF=%d "
                          "psS=%d psC=%d sP=%d psP=%d excl=1 plant_mixed=0 windows=%d live_frames=%d missing_end=0 "
                          "span_g=%d span_gn=%d span_u=%d span_un=%d on_calls=%d guarded=%d zs=%d zl=1 t0=%d t1=%d "
                          "answer=%s"
@@ -419,9 +424,12 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                             pn, int(pn * f_us * FREQ / 1e6), int(pn * (f_us / 2 + 80.0) * FREQ / 1e6), psc,
                             int(sc * 1.1), int(psc * 1.1), (n + pn) // 120, lf, spg, lf if on else 0, spu, lf,
                             3 * lf if on else 0, gq, zs, t0, t1, "replay" if f18 == "A" else "unmeasured"))
-                if g >= 1:
-                    L.append("[FRAME-TIME] between g=%d after=%s ticks=%d calls=4" % (g, "ON" if on else "OFF", 2000))
+                # FtFrames writes a between line at every point start after the game's first point
+                if not (rnd == 1 and pt == 1) and (g, rnd, pt) not in drop_between:
+                    L.append("[FRAME-TIME] between g=%d after=%s ticks=%d calls=4" % (g, pred, 2000))
                 for w in range((n + pn) // 120):
+                    if w == 0 and (g, rnd, pt) in drop_w:
+                        continue
                     plant = 1 if (not on and w % 4 == 0) else 0
                     k = 1 if rng.random() < 0.01 else 0
                     L.append("[FRAME-TIME] w pt=%d.%d.%d arm=%s plant=%d partial=0 n=120 sF=1 sS=1 sC=1 maxF=1 medF=1 "
@@ -433,24 +441,34 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
             on_n = 3 * onlf if k == 0 else 0
             L.append("[FRAME-TIME] census g=%d entry=%s comp=X shape=%s on=%d guarded=%d outside=0"
                      % (g, e, s, on_n, guarded if k == 0 else 0))
-        for op in ("ce_build", "se_build", "enqueue", "pump"):
+        for op in P.HEAVY_OPS:
+            if (g, op) in drop_heavy:
+                continue
             k = heavy_live if op == "pump" else 0
             ke = heavy_edge if op == "enqueue" else 0
             L.append("[FRAME-TIME] heavy g=%d op=%s live=%d between=7 pick=1 over=1 menu=0 at_call=%d edge=%d off=0"
                      % (g, op, k + ke, k, ke))
-        L.append("[FRAME-TIME] offthread g=%d span_off=0 hash_t0=%d hash_t1=%d" % (g, hash_at[0], hash_at[1]))
+        if g not in drop_offthread:
+            L.append("[FRAME-TIME] offthread g=%d span_off=0 hash_t0=%d hash_t1=%d" % (g, hash_at[0], hash_at[1]))
         for k in A3_DEP:
             if (g, k) not in drop_a3:
                 L.append("[FRAME-TIME] a3 g=%d k=%s cap=32 steady=1 reads_on=%d reads_win=%d writes_on=%d"
                          % (g, k, 2 * onlf, (3 * onlf if a3_peak == (g, k) else onlf // 4), 3 * onlf))
         for k in A3_DRAIN:
             if (g, k) not in drop_a3drain:
+                st = a3_starts[2] if a3_starts and a3_starts[:2] == (g, k) else 14     # 7 rounds of 2 points
                 L.append("[FRAME-TIME] a3drain g=%d k=%s starts=%d nonempty=%d faults=0"
-                         % (g, k, 12, 1 if a3_dirty == (g, k) else 0))
+                         % (g, k, st, 1 if a3_dirty == (g, k) else 0))
+        if "game" in refusals_why:
+            L.append("[FRAME-TIME] refusals why=%s pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
+             "dispatched:GET_h/api/v1/mod-version=1" % ("game%d" % g) + routes)
+        if g not in drop_flushed:
+            L.append("[FRAME-TIME] flushed g=%d why=%s" % (g, "next_game" if g < games - 1 else "settle"))
     if complete:
         L.append("[FRAME-TIME] sitting complete g=%d" % (games - 1))
-    L.append("[FRAME-TIME] refusals why=quit pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
-             "dispatched:GET_h/api/v1/mod-version=1" + routes)
+    if "quit" in refusals_why:
+        L.append("[FRAME-TIME] refusals why=%s pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
+             "dispatched:GET_h/api/v1/mod-version=1" % "quit" + routes)
     return "\n".join("[Info   :CompetitiveRounds] " + x for x in L)
 
 
@@ -547,16 +565,18 @@ def test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row
     # register fails, a capacity typed instead of taken from the code constant fails
     spec = P.a3_spec()
     ids, dep = _survivor_ids()
-    sids = [sid for n, sid, kind, why in spec]
+    sids = [r[1] for r in spec]
     assert len(ids) >= 36 and sorted(sids) == sorted(ids) and len(set(sids)) == len(sids), (sids, ids)
-    kinds = dict((sid, kind) for n, sid, kind, why in spec)
+    kinds = dict((r[1], r[2]) for r in spec)
     for sid in dep:
-        assert kinds[sid] in ("dependent", "drained") or sid == "S18", (sid, kinds[sid])
-    assert kinds["S18"] == "zero"
+        assert kinds[sid] in ("dependent", "drained"), (sid, kinds[sid])
+    # default-deny (ruling FRAME-TIME-ROUND-R2 (1)): a zero row only with its proof; S18 is dependent since round 3
+    for r in spec:
+        assert r[2] != "zero" or r[4].startswith(("sweep:", "probe:")), r
     plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
     ft = open(os.path.join(plug, "FtA3.cs"), encoding="utf-8-sig").read()
     src = "".join(open(os.path.join(plug, f), encoding="utf-8-sig").read() for f in A3_SITES)
-    live = [(n, kind) for n, sid, kind, why in spec if kind != "zero"]
+    live = [(r[0], r[2]) for r in spec if r[2] != "zero"]
     m = re.search(r"internal const int Rows = (\d+);", ft)
     assert m and int(m.group(1)) == len(live), "FtA3.Rows differs from the inventory's registered rows"
     for n, kind in live:
@@ -574,8 +594,139 @@ def test_a3_rows_need_a_kind_and_a_zero_row_its_reason():
     with pytest.raises(P.Refused, match="names no structure"):
         P.a3(recs, spec=[])
     with pytest.raises(P.Refused, match="needs a reason"):
-        P.a3(recs, spec=[("X", "S99", "zero", " ")])
-    assert P.a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins")])[0] == 0.0
+        P.a3(recs, spec=[("X", "S99", "zero", " ", "sweep:no-live-write")])
+    assert P.a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins", "sweep:no-live-write")])[0] == 0.0
+
+
+def test_a3_zero_row_without_its_proof_reference_fails_the_parse():
+    # ruling FRAME-TIME-ROUND-R2 (1), default-deny: a zero row carries its proof (sweep:... or probe:...), a drained
+    # row its probe (probe:a3drain), and a row of the old four-field shape is refused
+    recs = P.read(_log())
+    for proof in ("", " ", "sweep:", "because", "probe"):
+        with pytest.raises(P.Refused, match="proof reference"):
+            P.a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins", proof)])
+    with pytest.raises(P.Refused, match="probe:a3drain"):
+        P.a3(recs, spec=[("X", "S99", "drained", "emptied between points", "sweep:no-live-write")])
+    with pytest.raises(P.Refused, match="name, survivor id, kind, reason, proof"):
+        P.a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins")])
+    assert P.a3(recs, spec=[("X", "S99", "zero", "r", "probe:a3zero")])[0] == 0.0
+    # the shipped inventory: every zero row names its proof, every drained row its probe
+    for r in P.a3_spec():
+        assert len(r) == 5, r
+        if r[2] == "zero":
+            assert re.fullmatch(r"(sweep|probe):\S+", r[4]), r
+        if r[2] == "drained":
+            assert r[4] == "probe:a3drain", r
+    P.a3(recs, last_game=P.LAST_GAME)
+
+
+def test_a3_every_games_calibration_is_required_and_a_dropped_one_never_passes():
+    # round-2 HIGH (ft_parse.py:495), Codex's own control: game 8's A3 calibration costs most, so A_8 decides A3 and
+    # B1 is FAIL; dropping game 8's family used to shrink J and turn FAIL into PASS. Now it withholds the verdict.
+    big = {8: 100000 + 2000000}
+    out = P.report(_log(a3_cal_p=big))
+    assert "VERDICT B1 FAIL" in out, out
+    for drop in ({(8, k) for k in A3_DEP}, {(8, A3_DEP[0])}):
+        out2 = P.report(_log(a3_cal_p=big, drop_a3cal=drop))
+        assert "VERDICT B1 withheld" in out2, out2
+        assert not re.search(r"^VERDICT B1 (PASS|SID)", out2, re.M), out2
+    with pytest.raises(P.Refused, match="game 8"):
+        P.a3(P.read(_log(a3_cal_p=big, drop_a3cal={(8, k) for k in A3_DEP})), last_game=P.LAST_GAME)
+    with pytest.raises(P.Refused, match="game 8 has 0 start calibrations"):
+        P.a3(P.read(_log(drop_cal={8})), last_game=P.LAST_GAME)
+    # the default reads the sitting's games too: no caller can skip the per-game rule by omitting last_game
+    with pytest.raises(P.Refused, match="game 8"):
+        P.a3(P.read(_log(a3_cal_p=big, drop_a3cal={(8, k) for k in A3_DEP})))
+
+
+def test_a3_drained_starts_equal_the_games_point_count():
+    # round-2 MEDIUM: a drained row's probe ran at every point start of the game, no fewer and no more
+    k = A3_DRAIN[0]
+    for st in (13, 15, 1):
+        with pytest.raises(P.Refused, match="point starts"):
+            P.a3(P.read(_log(a3_starts=(4, k, st))), last_game=P.LAST_GAME)
+    P.a3(P.read(_log(a3_starts=(4, k, 14))), last_game=P.LAST_GAME)
+
+
+# the absent-record sweep (ruling FRAME-TIME-ROUND-R2): each record's absence fails the run
+ABSENT = (
+    ("flushed", dict(drop_flushed={16})),
+    ("flushed", dict(drop_flushed={3})),
+    ("between", dict(drop_between={(5, 3, 2)})),
+    ("between", dict(drop_between={(0, 1, 2)})),
+    ("heavy", dict(drop_heavy={(7, "spool")})),
+    ("heavy", dict(drop_heavy={(0, "hash_now")})),
+    ("offthread", dict(drop_offthread={9})),
+    ("window", dict(drop_w={(2, 4, 1)})),
+    ("refusals", dict(refusals_why=())),
+    ("between", dict(drop_p={(6, 2, 1)})),
+)
+
+
+@pytest.mark.parametrize("what,kw", ABSENT)
+def test_each_absent_record_fails_the_run(what, kw):
+    recs = P.read(_log(**kw))
+    miss = P.complete(recs)
+    assert any(what in m for m in miss), (what, miss)
+    out = P.report(_log(**kw))
+    for c in ("B1", "B2", "B3"):
+        assert "VERDICT %s withheld: sitting incomplete" % c in out, (what, out)
+
+
+def test_records_table_names_every_kind_the_parser_reads():
+    # the sweep's own control: a line kind the parser consumes without a row in RECORDS fails here
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, "ft_parse.py"), encoding="utf-8").read()
+    used = set(re.findall(r'\["kind"\] [!=]= "(\w+)"', src))
+    assert {"heavy", "flushed", "between", "a3drain", "refusals", "w"} <= used, used
+    assert used <= set(P.RECORDS), sorted(used - set(P.RECORDS))
+    assert P.complete(P.read(_log())) == []
+    assert P.complete(P.read(_log(refusals_why=("game",)))) == []
+    assert P.complete(P.read(_log(refusals_why=("quit",)))) == []
+
+
+def test_b3_requires_complete_records():
+    # round-2 MEDIUM (ft_parse.py:611): B3 never passes on absent heavy or offthread lines
+    with pytest.raises(P.Refused, match="heavy lines for spool"):
+        P.b3(P.read(_log(drop_heavy={(5, "spool")})))
+    with pytest.raises(P.Refused, match="offthread"):
+        P.b3(P.read(_log(drop_offthread={5})))
+    ok, why, ops = P.b3(P.read(_log()))
+    assert ok and set(ops) == set(P.HEAVY_OPS), (why, ops)
+
+
+def test_menu_check_fails_a_segment_whose_menu_line_is_absent():
+    # the absent-record sweep: a dropped menu line fails the check instead of leaving its segment unjudged
+    for s in (1, 9, 34):
+        ok, lines, bad = P.menu_check(P.read(_menu_log(drop_menu_seg=s)))
+        assert not ok and any("menu_done counts 34" in b for b in bad) and any("no menu line" in b for b in bad), (s, bad)
+
+
+def test_menu_check_fails_an_excluded_or_empty_segment():
+    # round-2 MEDIUM (FtClock.cs:144): menu frames are measured, never excluded as a combat point's closing frame
+    for kw in (dict(excl_seg=5), dict(empty_seg=6)):
+        ok, lines, bad = P.menu_check(P.read(_menu_log(**kw)))
+        assert not ok and any("a menu segment measures every frame" in b for b in bad), (kw, bad)
+
+
+def test_report_items_per_minute_longest_frames_and_dc_minus_ds():
+    # round-1 MEDIUM 16 and round 2: B2 per minute at T_ref, the longest ON and OFF frames, dC minus dS
+    assert abs(P.b2_per_minute(0.001, 2500.0) - 24.0) < 1e-12
+    with pytest.raises(P.Refused):
+        P.b2_per_minute(0.001, 0)
+    recs = P.read(_log())
+    lf = P.longest_frames(recs)
+    for arm in ("ON", "OFF"):
+        mx = max(q["maxF"] for q in recs if q["kind"] == "p" and q["game"] >= 1 and q["arm"] == arm)
+        assert abs(lf[arm] - mx * 1000.0 / FREQ) < 1e-12 and lf[arm] > 0
+    assert abs(P.dc_minus_ds(recs) - (P.dC_us(recs)[0] - P.d_key_us(recs, "sS", "ticks")[0])) < 1e-9
+    out = P.report(_log())
+    tr = P.t_ref(recs)
+    b2 = P.hitch(recs)
+    for h, v in b2.items():
+        assert ("B2 H=%d ms" % h) in out and ("%.4f per minute of live combat at T_ref" % (v["ub_per_frame"] * 60e6 / tr)) in out, out
+    assert "longest live frame: ON %.2f ms, OFF %.2f ms" % (lf["ON"], lf["OFF"]) in out, out
+    assert "dC minus dS %.2f us per live frame" % P.dc_minus_ds(recs) in out, out
 
 
 def test_report_adds_a3_to_u():
@@ -762,7 +913,7 @@ FHAT = 3000000000        # cycles per second: 3000 per us
 
 
 def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing_seg=None, why="complete",
-              gate_flip=None):
+              gate_flip=None, excl_seg=None, empty_seg=None, drop_menu_seg=None):
     """A menu run as FtMenu writes it: pair 0 unplanted, then the four levels in turn, base 2500 us per frame."""
     ec = ec or {}
     out = ["[Info   :CompetitiveRounds] [FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d"
@@ -790,14 +941,17 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
         gate = 1 if force == "OFF" or (force == "none" and arm == "OFF") else 0
         if gate_flip == s:
             gate = 1 - gate
-        out.append("[FRAME-TIME] menu seg=%d pair=%d arm=%s gate=%d level=%s c_plant=%d base_us=%d"
-                   % (s, pair, arm, gate, level, cp, base if pair > 0 else -1))
+        if drop_menu_seg != s:
+            out.append("[FRAME-TIME] menu seg=%d pair=%d arm=%s gate=%d level=%s c_plant=%d base_us=%d"
+                       % (s, pair, arm, gate, level, cp, base if pair > 0 else -1))
         common = ((pair * 3) % 7 - 3) * 0.3        # us per frame, both arms of the pair
         j = ((pair * 7) % 5 - 2) * 0.5             # the pair's own A/A noise, mean 0 over five pairs
         f_us = base + common + (j / 2 + aa_us if arm == "ON" else -j / 2)
         n, pn = 4000, 0
         if arm == "OFF" and cp > 0:
             n, pn = 3000, 1000
+        if empty_seg == s:
+            n, pn = 0, 0
         e = ec.get(level, 1.0) * (1 + ((s * 13) % 5 - 2) * 0.01)
         sF = int(round(n * f_us * 10))
         sS = int(round(n * 900 * 10))
@@ -806,9 +960,10 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
         psS = int(round(pn * (900 + cp) * 10))
         psC = int(round(pn * (f_us + cp * e) * 3000))
         out.append("[FRAME-TIME] p pt=-1.%d.1 arm=%s gate=%d pred=none n=%d sF=%d sS=%d sC=%d maxF=30000 pn=%d psF=%d"
-                   " psS=%d psC=%d plant_mixed=0 windows=34 live_frames=4001 missing_end=%d span_g=0 span_gn=0"
-                   " span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=0 t0=1 t1=2 answer=none"
-                   % (s, arm, gate, n, sF, sS, sC, pn, psF, psS, psC, 1 if missing_seg == s else 0))
+                   " psS=%d psC=%d excl=%d plant_mixed=0 windows=34 live_frames=4001 missing_end=%d span_g=0"
+                   " span_gn=0 span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=0 t0=1 t1=2 answer=none"
+                   % (s, arm, gate, n, sF, sS, sC, pn, psF, psS, psC, 1 if excl_seg == s else 0,
+                      1 if missing_seg == s else 0))
     out.append("[FRAME-TIME] menu_done why=%s segs=%d of=%d base_us=%d cycles=%d" % (why, segs, segs, base, cycles))
     out.append("[FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
                " force=%s clock=1 frames=99999 missing_end=0 cycle_failures=0 span_depth_violations=0"

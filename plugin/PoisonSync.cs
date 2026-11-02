@@ -3251,8 +3251,41 @@ namespace CompetitiveRounds
         private static int _recCount, _recDropped;
 #if SCR_FRAMETIME
         /// <summary>FtA3.RegisterAll: SURVIVORS.md S28, the point-end records, a drained row (emptied by the first
-        /// tick after the point end).</summary>
-        internal static void FtA3Rows() { FtA3.SetDrained(FtA3.PE_Rec, "PE_Rec", () => _recCount); }
+        /// tick after the point end); S29 PE_map, the two CappedMaps, dependent by default-deny (ruling
+        /// FRAME-TIME-ROUND-R2 (1)), counted at every live reader call (the CappedMap members), steady false.</summary>
+        internal static void FtA3Rows()
+        {
+            FtA3.SetDrained(FtA3.PE_Rec, "PE_Rec", () => _recCount);
+            FtA3.Set(FtA3.PE_map, "PE_map", PLAYER_SCAN_CAP, false, FtCalMap, 5000);
+        }
+
+        private static SeatEvidenceCore.CappedMap<int, float> _ftMap;
+        private static double _ftSink;
+
+        /// <summary>S29 (PE_map): the real CappedMap TryGetValue then Set on a scratch map of the larger cap
+        /// (PLAYER_SCAN_CAP, _before's). EMPTY: the map empty, every probe misses and the Set admits a key (cleared
+        /// again outside the clock between batches only). FULL: PLAYER_SCAN_CAP keys held, every probe hits and the
+        /// Set overwrites.</summary>
+        internal static long FtCalMap(bool full, int n)
+        {
+            if (_ftMap == null) _ftMap = new SeatEvidenceCore.CappedMap<int, float>(PLAYER_SCAN_CAP);
+            var m = _ftMap;
+            m.Clear();
+            if (full) for (int i = 0; i < PLAYER_SCAN_CAP; i++) m.Set(i, i);
+            double s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                int k = j % PLAYER_SCAN_CAP;
+                float v;
+                if (m.TryGetValue(k, out v)) s += v;
+                m.Set(k, j);
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            m.Clear();
+            _ftSink += s;
+            return t;
+        }
 #endif
 
         private static Rec[] NewRecs()

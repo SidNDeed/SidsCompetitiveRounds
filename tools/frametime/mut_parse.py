@@ -16,7 +16,7 @@ src = os.path.join(W, "tools", "frametime")
 FIXTURES = ["tools/frametime/ft_parse.py", "tools/frametime/test_ft_parse.py", "tools/frametime/gate_specs/entries.py",
             "tools/frametime/gate_specs/a3.py", "tools/frametime/SURVIVORS.md", "plugin/FtA3.cs",
             "plugin/CombatEvidence.cs", "plugin/SeatEvidence.cs", "plugin/IdentityClockEvidence.cs",
-            "plugin/HitEvidence.cs", "plugin/PoisonSync.cs"]
+            "plugin/HitEvidence.cs", "plugin/PoisonSync.cs", "plugin/CardDrawEvidence.cs", "plugin/PeerBuild.cs"]
 # A mutant row is (name, anchor, replacement) on ft_parse.py, or (name, anchor, replacement, fixture) on that fixture
 # (its repo-relative path, one of FIXTURES): the inventory controls of ruling FRAME-TIME-ROUND-R1-A1 part 3.
 MUTS = [
@@ -81,14 +81,45 @@ MUTS = [
     ("A3 drained nonempty passes",
      'if r.get("starts", 0) <= 0 or r.get("nonempty", -1) != 0 or r.get("faults", -1) != 0:',
      'if r.get("starts", 0) <= 0 or r.get("faults", -1) != 0:'),
-    ("A3 inventory row removed", '    ("CE_Recent", "S06", "dependent", ""),\n', '',
+    ("A3 inventory row removed", '    ("CE_Recent", "S06", "dependent", "", ""),\n', '',
      "tools/frametime/gate_specs/a3.py"),
-    ("A3 dependent row demoted to zero", '    ("CE_Pos", "S05", "dependent", ""),',
-     '    ("CE_Pos", "S05", "zero", "demoted"),', "tools/frametime/gate_specs/a3.py"),
+    ("A3 dependent row demoted to zero", '    ("CE_Pos", "S05", "dependent", "", ""),',
+     '    ("CE_Pos", "S05", "zero", "demoted", "sweep:no-live-write"),', "tools/frametime/gate_specs/a3.py"),
+    ("A3 zero row with its proof reference removed", '    ("CE_Pos", "S05", "dependent", "", ""),',
+     '    ("CE_Pos", "S05", "zero", "demoted", ""),', "tools/frametime/gate_specs/a3.py"),
     ("A3 capacity typed", 'FtA3.Set(FtA3.CE_Ping, "CE_Ping", PING_BIN_CAP,', 'FtA3.Set(FtA3.CE_Ping, "CE_Ping", 2000,',
      "plugin/CombatEvidence.cs"),
     ("A3 row not registered", 'FtA3.SetDrained(FtA3.PE_Rec, "PE_Rec", () => _recCount);', '',
      "plugin/PoisonSync.cs"),
+    # ruling FRAME-TIME-ROUND-R2: the kind rule, H4 and its absent-record class, the MEDIUMs' parser halves
+    ("A3 per-game calibration rule removed (the old acceptance)", "    if dep:\n        cal_games = {}",
+     "    if False:\n        cal_games = {}"),
+    ("A3 zero row without its proof passes", r'if kind == "zero" and not re.fullmatch(r"(sweep|probe):\S+", proof):',
+     "if False:"),
+    ("A3 drained row without its probe passes", 'if kind == "drained" and proof != "probe:a3drain":', "if False:"),
+    ("A3 drained starts not matched to the points", 'if r.get("starts", -1) != npts:', "if False:"),
+    ("absent-record sweep left out of complete()", "    miss += records_missing(recs, last_game)", "    pass"),
+    ("absent flushed line passes", 'miss.append("game %d: %d flushed lines (needs 1)" % (g, n))', "pass"),
+    ("absent between line passes",
+     'miss.append("game %d: %d between lines for %d points (needs %d)" % (g, n, len(pts), len(pts) - 1))', "pass"),
+    ("absent heavy line passes the sweep", 'miss.append("game %d: %d heavy lines for %s (needs 1)" % (g, n, op))', "pass"),
+    ("absent offthread line passes the sweep", 'miss.append("game %d: %d offthread lines (needs 1)" % (g, n))', "pass"),
+    ("absent window line passes",
+     'miss.append("point %s: %d window lines, the point line counts %s" % (q["pt"], n, q.get("windows")))', "pass"),
+    ("absent refusals line passes",
+     'miss.append("no refusals line after game %d (why=game%d or why=quit)" % (last_game, last_game))', "pass"),
+    ("B3 passes on an absent heavy line", 'raise Refused("B3: game %d has %d heavy lines for %s (needs 1)" % (g, n, op))',
+     "pass"),
+    ("B3 passes on an absent offthread line", 'raise Refused("B3: game %d has %d offthread lines (needs 1)" % (g, n))',
+     "pass"),
+    ("records table row removed", '    "flushed": "records_missing(): one per game",\n', ""),
+    ("menu segment excluded or empty passes", 'if p.get("excl", 0) != 0 or p["n"] <= 0:', "if False:"),
+    ("B2 per minute not scaled by T_ref", "return ub_per_frame * 60e6 / tr", "return ub_per_frame * 1000.0"),
+    ("longest frame is the last, not the largest", 'out[r["arm"]] = max(out.get(r["arm"], 0), r["maxF"])',
+     'out[r["arm"]] = r["maxF"]'),
+    ("dC minus dS drops dS", 'return dC_us(recs)[0] - d_key_us(recs, "sS", "ticks")[0]', "return dC_us(recs)[0]"),
+    ("menu segment without its menu line passes", "if sorted(seg) != want_segs:", "if False:"),
+    ("menu point line without its menu line passes", "    if orphan:\n        bad.append(", "    if False:\n        bad.append("),
 ]
 # the tests each mutant must turn red (taken from a --discover run on a green baseline, then pinned)
 KILLS = {
@@ -187,6 +218,48 @@ KILLS = {
         ['test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row'],
     'A3 row not registered':
         ['test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row'],
+    'A3 zero row with its proof reference removed':
+        ['test_a3_zero_row_without_its_proof_reference_fails_the_parse'],
+    'A3 per-game calibration rule removed (the old acceptance)':
+        ['test_a3_every_games_calibration_is_required_and_a_dropped_one_never_passes'],
+    'A3 zero row without its proof passes':
+        ['test_a3_zero_row_without_its_proof_reference_fails_the_parse'],
+    'A3 drained row without its probe passes':
+        ['test_a3_zero_row_without_its_proof_reference_fails_the_parse'],
+    'A3 drained starts not matched to the points':
+        ['test_a3_drained_starts_equal_the_games_point_count'],
+    'absent-record sweep left out of complete()':
+        ['test_each_absent_record_fails_the_run'],
+    'absent flushed line passes':
+        ['test_each_absent_record_fails_the_run'],
+    'absent between line passes':
+        ['test_each_absent_record_fails_the_run'],
+    'absent heavy line passes the sweep':
+        ['test_each_absent_record_fails_the_run'],
+    'absent offthread line passes the sweep':
+        ['test_each_absent_record_fails_the_run'],
+    'absent window line passes':
+        ['test_each_absent_record_fails_the_run'],
+    'absent refusals line passes':
+        ['test_each_absent_record_fails_the_run'],
+    'B3 passes on an absent heavy line':
+        ['test_b3_requires_complete_records'],
+    'B3 passes on an absent offthread line':
+        ['test_b3_requires_complete_records'],
+    'records table row removed':
+        ['test_records_table_names_every_kind_the_parser_reads'],
+    'menu segment excluded or empty passes':
+        ['test_menu_check_fails_an_excluded_or_empty_segment'],
+    'B2 per minute not scaled by T_ref':
+        ['test_report_items_per_minute_longest_frames_and_dc_minus_ds'],
+    'longest frame is the last, not the largest':
+        ['test_report_items_per_minute_longest_frames_and_dc_minus_ds'],
+    'dC minus dS drops dS':
+        ['test_report_items_per_minute_longest_frames_and_dc_minus_ds'],
+    'menu segment without its menu line passes':
+        ['test_menu_check_fails_a_segment_whose_menu_line_is_absent'],
+    'menu point line without its menu line passes':
+        ['test_menu_check_fails_a_segment_whose_menu_line_is_absent'],
 }
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]

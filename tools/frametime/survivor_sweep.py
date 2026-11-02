@@ -14,6 +14,12 @@ Then it parses SURVIVORS.md and fails (exit 1) when the table disagrees with the
   python -I -B survivor_sweep.py             sweep + table check; prints SURVIVOR SWEEP PASS on agreement
   python -I -B survivor_sweep.py --detail    also prints every survivor with its write and live-read sites
   python -I -B survivor_sweep.py --selftest  negative controls on in-memory copies of the table
+  python -I -B survivor_sweep.py --write-md  regenerate the sweep's own text in SURVIVORS.md (blanked-line counts,
+                                             counts table, declared / writers / live-readers columns, capacity lines)
+
+It also checks gate_specs/a3.py against the table (ruling FRAME-TIME-ROUND-R2): every row's kind and proof, a zero
+row only where no write of its fields is reachable live, and every live reader of a dependent row counting it with
+FtA3.Read in its FrameTime text (`--detail` lists the readers per row).
 """
 import bisect
 import os
@@ -261,17 +267,21 @@ def blank_comments_strings(src):
     return "".join(out)
 
 
-def eval_cond(expr):
-    """True/False when the #if condition is decidable from UNDEFINED alone, else None (keep all branches)."""
+def eval_cond(expr, defined=()):
+    """True/False when the #if condition is decidable from UNDEFINED (and `defined`, the FrameTime view's DEFINED
+    symbols) alone, else None (keep all branches)."""
     e = expr.strip()
     m = re.fullmatch(r"(!?)\s*(\w+)", e)
+    if m and m.group(2) in defined:
+        return not m.group(1)
     if m and m.group(2) in UNDEFINED:
         return bool(m.group(1))
     return None
 
 
-def apply_preprocessor(text, stats):
-    """Blank directive lines and the branches excluded under UNDEFINED. stats counts blanked code lines."""
+def apply_preprocessor(text, stats, defined=()):
+    """Blank directive lines and the branches excluded under UNDEFINED (and `defined`). stats counts blanked code
+    lines."""
     lines = text.split("\n")
     stack = []  # (decidable, active_parent, branch_taken, current_active)
     active = True
@@ -281,7 +291,7 @@ def apply_preprocessor(text, stats):
         if m:
             kw, rest = m.group(1), m.group(2)
             if kw == "if":
-                v = eval_cond(rest)
+                v = eval_cond(rest, defined)
                 if v is None:
                     stack.append((False, active, True, active))
                 else:
@@ -290,7 +300,7 @@ def apply_preprocessor(text, stats):
             elif kw == "elif" and stack:
                 dec, par, taken, cur = stack[-1]
                 if dec:
-                    v = eval_cond(rest)
+                    v = eval_cond(rest, defined)
                     if v is None:
                         stack[-1] = (False, par, True, par)
                         active = par
@@ -1563,6 +1573,454 @@ def const_value(uni, name, depth=0):
     return None, None
 
 
+# ----------------------------------------------------------------------------------------------- A3 rows
+# Ruling FRAME-TIME-ROUND-R2: (1) a row's kind is DEFAULT-DENY: "zero" only when this sweep proves that no write site of
+# any of the row's fields is reachable in the measured span (no write inside a live member, before its cut); every other
+# row the build cannot prove drained is DEPENDENT. H1: every live reader member of a dependent row counts its reads:
+# its FrameTime text (SCR_FRAMETIME defined) carries FtA3.Read(FtA3.<row>), directly or through a FrameTime-only helper
+# that does; and no FtA3.Read of a row sits anywhere but in that row's live readers (or a helper only they call).
+A3_PATH = os.path.join(HERE, "gate_specs", "a3.py")
+FT_DEFINED = {"SCR_FRAMETIME"}
+# FtA3.Read(FtA3.<row>) and FtA3.ReadOnce(FtA3.<row>, ref serial) (a growth row, once per instance per game)
+READ_CALL = re.compile(r"\bFtA3\s*\.\s*Read(?:Once)?\s*\(\s*FtA3\s*\.\s*(\w+)\s*[,)]")
+ZERO_PROOFS = ("sweep:no-live-write",)
+
+# COVERED: a live reader member whose reads of one dependent row are counted by the callers that hand it that row's
+# structure. (row, Class, Member, covering callers, reason). The check: every covering caller is a live reader of the
+# row carrying its FtA3.Read and calls the member; every live caller of the member is a covering caller of some
+# COVERED entry for that member (so no call reaches it uncounted); the member is not a live root.
+COVERED = [
+    ("CE_Top", "CombatEvidence", "TopInsert", ("DrainResiduals",),
+     "DrainResiduals counts FtA3.Read(CE_Top) right before its TopInsert(g.Top, ...) call; HtUpsert's call hands it "
+     "g.Ht, which CE_Ht counts"),
+    ("CE_Ht", "CombatEvidence", "TopInsert", ("HtUpsert",),
+     "HtUpsert counts FtA3.Read(CE_Ht) on entry, before its TopInsert(g.Ht, ...) call; DrainResiduals's call hands it "
+     "g.Top, which CE_Top counts"),
+    ("IC_Clock", "ClockBook", "Median", ("FlushBucket",),
+     "the two Medians over _gapHist and _tdHist run inside FlushBucket, which counts FtA3.Read(IC_Clock) on entry and "
+     "whose calibration (FtCalClock) runs both Medians at their costliest content"),
+]
+
+
+def load_a3():
+    import runpy
+    return runpy.run_path(A3_PATH)["A3"]
+
+
+class FtView:
+    """The FrameTime text of one source: comments and strings blanked, SCR_FRAMETIME DEFINED (its #if branches kept,
+    its #else branches blanked), the component slice as in Src. Every offset equals Src's (blanking keeps them)."""
+    line = Src.line
+
+    def __init__(self, s):
+        self.name, self.raw, self.slice, self.stats = s.name, s.raw, s.slice, {}
+        code = apply_preprocessor(blank_comments_strings(s.raw), {}, defined=FT_DEFINED)
+        if s.slice:
+            ls = code.split("\n")
+            for i in range(len(ls)):
+                if i < s.slice[0] - 1 or i >= s.slice[1]:
+                    ls[i] = " " * len(ls[i])
+            code = "\n".join(ls)
+        self.code = code
+        self.nl = [i for i, c in enumerate(code) if c == "\n"]
+
+
+class A3Index:
+    """The FtA3.Read sites of the FrameTime text, per member. A FrameTime member with a release twin (same type path
+    and name; the same body when the #if sits inside it, else the nearest by position: an #if/#else pair of whole
+    members) stands for that twin; one without is a FrameTime-only HELPER, reached through calls by name."""
+
+    def __init__(self, uni, drop=None, plant=None):
+        self.uni = uni
+        self.reads = []          # (view, pos, const, ft member)
+        self.twin = {}           # id(ft member) -> release member
+        self.helpers = {}        # name -> [ft member]
+        self.direct = {}         # id(ft member) -> {const}
+        self.ft_of = {}          # release member -> [ft member]
+        self.outside = []        # (file, line, const): a Read outside any component member
+        for key in sorted(uni.srcs):
+            s = uni.srcs[key]
+            v = FtView(s)
+            _types, mems = parse_structure(v)
+            rel = uni.mem_index.get(id(s), [])
+            by_name = {}
+            for m in rel:
+                by_name.setdefault((m.owner.path, m.name), []).append(m)
+            mems.sort(key=lambda m: m.start)
+            for fm in mems:
+                cands = by_name.get((fm.owner.path, fm.name), [])
+                tw = next((m for m in cands if m.body_start == fm.body_start), None)
+                if tw is None and cands:
+                    tw = min(cands, key=lambda m: abs(m.start - fm.start))
+                if tw is not None:
+                    self.twin[id(fm)] = tw
+                    self.ft_of.setdefault(tw, []).append(fm)
+                else:
+                    self.helpers.setdefault(fm.name, []).append(fm)
+            for mt in READ_CALL.finditer(v.code):
+                p, const = mt.start(), mt.group(1)
+                if drop is not None and (s.name, v.line(p)) == drop:
+                    continue
+                fm = None
+                for m in mems:
+                    if m.start <= p <= m.end:
+                        if fm is None or m.start > fm.start:
+                            fm = m
+                if fm is None:
+                    self.outside.append((s.name, v.line(p), const))
+                    continue
+                self.reads.append((v, p, const, fm))
+                self.direct.setdefault(id(fm), set()).add(const)
+        if plant is not None:
+            # selftest: count one FtA3.Read of `const` inside release member `m` (a planted site)
+            const, m = plant
+            fm = self.ft_of[m][0]
+            self.reads.append((None, m.body_start, const, fm))
+            self.direct.setdefault(id(fm), set()).add(const)
+        # FtA3.Read in a plugin file outside every component source (FtA3.cs itself defines Read, not FtA3.Read)
+        comp_files = {s.name for s in uni.srcs.values() if not s.slice}
+        sliced = [s for s in uni.srcs.values() if s.slice]
+        for f in sorted(os.listdir(PLUGIN)):
+            if not f.endswith(".cs") or f in comp_files:
+                continue
+            raw = uni.all_plugin.raw(f) if hasattr(uni.all_plugin, "raw") else None
+            if raw is None:
+                continue
+            code = blank_comments_strings(raw)
+            for mt in READ_CALL.finditer(code):
+                ln = code.count("\n", 0, mt.start()) + 1
+                if any(s.name == f and s.slice[0] <= ln <= s.slice[1] for s in sliced):
+                    continue
+                self.outside.append((f, ln, mt.group(1)))
+
+    def calls_in(self, fm):
+        code = fm.src.code[fm.body_start:fm.end]
+        return {n for n in re.findall(r"\b([A-Za-z_]\w*)\s*\(", code) if n in self.helpers}
+
+    def helper_rows(self, name, depth=0, seen=None):
+        seen = set() if seen is None else seen
+        if name in seen or depth > 3:
+            return set()
+        seen.add(name)
+        rows = set()
+        for h in self.helpers.get(name, []):
+            rows |= self.direct.get(id(h), set())
+            for c in self.calls_in(h):
+                rows |= self.helper_rows(c, depth + 1, seen)
+        return rows
+
+    def effective(self, m):
+        """{const: "direct" | "helper:<name>"} counted inside release member m."""
+        out = {}
+        for fm in self.ft_of.get(m, []):
+            for c in self.direct.get(id(fm), set()):
+                out[c] = "direct"
+            for h in sorted(self.calls_in(fm)):
+                for c in self.helper_rows(h):
+                    out.setdefault(c, "helper:" + h)
+        return out
+
+    def callers_of_helper(self, name):
+        out = []
+        for key, fms in self.ft_of.items():
+            for fm in fms:
+                if name in self.calls_in(fm):
+                    out.append(("release", key))
+        for hn, hs in self.helpers.items():
+            for h in hs:
+                if name in self.calls_in(h) and hn != name:
+                    out.append(("helper", hn))
+        return out
+
+
+def a3_rows_of_md(text):
+    """{survivor id: (component, [Class.Field])} from SURVIVORS.md's rows."""
+    rows, _c, _o, _e = parse_md(text)
+    return {r[0]: (r[1], re.findall(r"`(\w+\.\w+)`", r[2])) for r in rows}
+
+
+def live_callers(uni, sw):
+    """{callee: {live caller}} over the live call graph (cuts and guards applied)."""
+    if getattr(sw, "_live_callers", None) is None:
+        out = {}
+        for c in sw.live:
+            for e in edges(uni, c, sw.cuts.get(c), sw.guards.get(c, ())):
+                out.setdefault(e, set()).add(c)
+        sw._live_callers = out
+    return sw._live_callers
+
+
+def a3_check(uni, sw, text, fields_out, spec=None, drop=None, plant=None):
+    """The A3 checks: (i) a3.py names every SURVIVORS.md row once, as a 5-tuple with a known kind; (ii) every zero row
+    carries a sweep proof this function re-derives (no live write of any of its fields); (iii) every live reader member
+    of every dependent row counts it (FtA3.Read, direct, through a helper, or COVERED by its callers), and every
+    FtA3.Read sits in a live reader of its row. Returns (fails, report) where report is per row."""
+    fails = []
+    spec = load_a3() if spec is None else spec
+    md = a3_rows_of_md(text)
+    names = {}
+    for row in spec:
+        if len(row) != 5:
+            fails.append("a3.py row %r: needs (name, survivor id, kind, reason, proof)" % (row,))
+            continue
+        n, sid, kind, why, proof = row
+        if sid in names.values():
+            fails.append("a3.py: %s named twice" % sid)
+        names[n] = sid
+        if sid not in md:
+            fails.append("a3.py row %s names %s, which SURVIVORS.md does not list" % (n, sid))
+        if kind not in ("dependent", "drained", "zero"):
+            fails.append("a3.py row %s: kind %r" % (n, kind))
+        if kind == "drained" and proof != "probe:a3drain":
+            fails.append("a3.py row %s: drained needs proof probe:a3drain, got %r" % (n, proof))
+        if kind == "zero" and proof not in ZERO_PROOFS:
+            fails.append("a3.py row %s: zero needs a sweep proof this sweep checks (%s), got %r"
+                         % (n, "|".join(ZERO_PROOFS), proof))
+        if kind == "dependent" and proof:
+            fails.append("a3.py row %s: a dependent row carries no proof, got %r" % (n, proof))
+    for sid in md:
+        if sid not in names.values():
+            fails.append("SURVIVORS.md row %s has no a3.py row" % sid)
+    idx = A3Index(uni, drop=drop, plant=plant)
+    callers = live_callers(uni, sw)
+    report = []
+    readers_of = {}
+    for row in spec:
+        if len(row) != 5 or row[1] not in md:
+            continue
+        n, sid, kind, why, proof = row
+        comp, quals = md[sid]
+        lw, lr = {}, {}
+        for q in quals:
+            st = fields_out.get((comp, q))
+            if st is None:
+                continue
+            for (s, p, wk, m) in st[2]:
+                if m is not None and m in sw.live and p < sw.cuts.get(m, m.end + 1):
+                    lw.setdefault(m, []).append("%s:%d" % (s.name, s.line(p)))
+            for r in st[3]:
+                if sw.is_live_read(r):
+                    lr.setdefault(r[2], []).append("%s:%d" % (r[0].name, r[0].line(r[1])))
+        readers_of[n] = set(lr)
+        ent = dict(name=n, sid=sid, kind=kind, proof=proof, writers=lw, readers={}, covered={})
+        if kind == "zero":
+            if lw:
+                fails.append("a3.py row %s (%s) is zero (%s) but the sweep finds live writes: %s" % (
+                    n, sid, proof, "; ".join("%s %s" % (m.key, ",".join(v[:3])) for m, v in
+                                             sorted(lw.items(), key=lambda kv: kv[0].key))))
+        if kind == "dependent":
+            for m in sorted(lr, key=lambda m: m.key):
+                eff = idx.effective(m)
+                if n in eff:
+                    ent["readers"][m] = eff[n]
+                    continue
+                cov = [c for c in COVERED if c[0] == n and c[2] == m.name and m.owner.name == c[1]]
+                if cov:
+                    ent["covered"][m] = cov[0]
+                    continue
+                fails.append("a3 row %s (%s): live reader %s (reads at %s) carries no FtA3.Read(FtA3.%s)" % (
+                    n, sid, m.key, ",".join(lr[m][:3]), n))
+        report.append(ent)
+    # COVERED entries: covering callers read and call; every live caller of the member covers it
+    for ent in report:
+        for m, cov in ent["covered"].items():
+            n, _cls, _mn, by, why = cov
+            if m in sw.live_roots:
+                fails.append("COVERED %s %s: a live root has no caller to count it" % (n, m.key))
+            union = set()
+            for c in COVERED:
+                if c[2] == m.name and c[1] == m.owner.name:
+                    union |= set(c[3])
+            for c in sorted(callers.get(m, set()), key=lambda c: c.key):
+                if c.name not in union:
+                    fails.append("COVERED %s %s: live caller %s is no covering caller" % (n, m.key, c.key))
+            for cn in by:
+                cs = [c for c in callers.get(m, set()) if c.name == cn]
+                if not cs:
+                    fails.append("COVERED %s %s: covering caller %s does not call it live" % (n, m.key, cn))
+                for c in cs:
+                    if c not in readers_of.get(n, set()) or n not in idx.effective(c):
+                        fails.append("COVERED %s %s: covering caller %s is not a counting reader of %s" % (
+                            n, m.key, c.key, n))
+    for c in COVERED:
+        if not any(c[0] == e["name"] and any(v is c for v in e["covered"].values()) for e in report):
+            fails.append("COVERED %s %s.%s matches no uncounted live reader" % (c[0], c[1], c[2]))
+    # every FtA3.Read sits in a live reader of its row (or a helper only such readers reach)
+    dep = {row[0] for row in spec if len(row) == 5 and row[2] == "dependent"}
+
+    def helper_ok(name, const, depth=0):
+        cl = idx.callers_of_helper(name)
+        if not cl:
+            return ["helper %s is never called" % name]
+        bad = []
+        for kind, x in cl:
+            if kind == "release":
+                if x not in readers_of.get(const, set()):
+                    bad.append("helper %s is called from %s, no live reader of %s" % (name, x.key, const))
+            elif depth < 3:
+                bad += helper_ok(x, const, depth + 1)
+            else:
+                bad.append("helper chain too deep at %s" % x)
+        return bad
+
+    nsites = 0
+    for (v, p, const, fm) in idx.reads:
+        nsites += 1
+        where = "%s:%d" % (v.name, v.line(p)) if v is not None else "a planted site in %s" % idx.twin.get(id(fm), fm).key
+        if const not in dep:
+            fails.append("FtA3.Read(FtA3.%s) at %s: %s is no dependent a3 row" % (const, where, const))
+            continue
+        tw = idx.twin.get(id(fm))
+        if tw is not None:
+            if tw not in readers_of.get(const, set()):
+                fails.append("FtA3.Read(FtA3.%s) at %s sits in %s, which is no live reader of %s" % (
+                    const, where, tw.key, const))
+        else:
+            for b in helper_ok(fm.name, const):
+                fails.append("FtA3.Read(FtA3.%s) at %s: %s" % (const, where, b))
+    for f, ln, const in idx.outside:
+        fails.append("FtA3.Read(FtA3.%s) at %s:%d sits outside every component member" % (const, f, ln))
+    return fails, dict(rows=report, sites=nsites)
+
+
+def a3_summary(rep):
+    dep = [e for e in rep["rows"] if e["kind"] == "dependent"]
+    nr = sum(len(e["readers"]) for e in dep)
+    nd = sum(1 for e in dep for v in e["readers"].values() if v == "direct")
+    nh = nr - nd
+    nc = sum(len(e["covered"]) for e in dep)
+    z = [e for e in rep["rows"] if e["kind"] == "zero"]
+    dr = [e for e in rep["rows"] if e["kind"] == "drained"]
+    return ("A3 rows: %d dependent, %d drained, %d zero (proof re-derived: no live write); dependent live readers %d, "
+            "every one counted: %d carry FtA3.Read directly, %d through a FrameTime helper, %d covered by their callers; "
+            "%d FtA3.Read sites, each in a live reader of its row" % (len(dep), len(dr), len(z), nr + nc, nd, nh, nc,
+                                                                      rep["sites"]))
+
+
+def print_a3_detail(rep):
+    for e in rep["rows"]:
+        print("A3 %-15s %s %-9s proof=%s live writers %d, live readers %d" % (
+            e["name"], e["sid"], e["kind"], e["proof"] or "-", len(e["writers"]),
+            len(e["readers"]) + len(e["covered"])))
+        for m, how in sorted(e["readers"].items(), key=lambda kv: kv[0].key):
+            print("      R %s %s" % (m.key, how))
+        for m, cov in sorted(e["covered"].items(), key=lambda kv: kv[0].key):
+            print("      R %s covered by %s" % (m.key, ",".join(cov[3])))
+        if e["kind"] == "zero":
+            print("      live write sites: %d" % sum(len(v) for v in e["writers"].values()))
+
+
+# ----------------------------------------------------------------------------------------------- generated text
+BLANK_LEAD = "The script prints the blanked line count per file ("
+
+
+def blanked_counts(uni):
+    return [(key, uni.srcs[key].stats.get("blanked", 0)) for key in sorted(uni.srcs)]
+
+
+def blanked_text(uni):
+    return ", ".join("%s %d" % kv for kv in blanked_counts(uni))
+
+
+def check_blanked(uni, text):
+    i = text.find(BLANK_LEAD)
+    if i < 0:
+        return ["SURVIVORS.md Method: no '%s...)' sentence" % BLANK_LEAD]
+    j = text.find(")", i + len(BLANK_LEAD))
+    got = re.findall(r"([\w.#]+)\s+(\d+)", text[i + len(BLANK_LEAD):j])
+    want = [(k, str(v)) for k, v in blanked_counts(uni)]
+    if got != want:
+        diff = sorted(set(got) ^ set(want))
+        return ["SURVIVORS.md blanked-line counts differ from the sweep: md %s, sweep %s (differing items %s)" % (
+            ", ".join("%s %s" % g for g in got), ", ".join("%s %s" % w for w in want), diff)]
+    return []
+
+
+def site_text(entries):
+    by = {}
+    for (s, p, m) in entries:
+        by.setdefault(m.name if m is not None else "?", set()).add("%s:%d" % (s.name, s.line(p)))
+    parts = []
+    for name in sorted(by):
+        locs = sorted(by[name], key=lambda x: (x.split(":")[0], int(x.split(":")[1])))
+        parts.append("%s %s" % (name, locs[0] + (" +%d" % (len(locs) - 1) if len(locs) > 1 else "")))
+    return "; ".join(parts[:8]) + ("; +%d more members" % (len(parts) - 8) if len(parts) > 8 else "")
+
+
+def row_sites(sw, fields_out, comp, quals):
+    """(declared, writers, live readers) as the sweep writes them for one row."""
+    fds, w, r = [], [], []
+    for q in quals:
+        st = fields_out.get((comp, q))
+        if st is None:
+            return None
+        fds.append(st[1])
+        w += [(s, p, m) for (s, p, wk, m) in st[2]]
+        r += [(s, p, m) for (s, p, m, fl) in st[3] if sw.is_live_read((s, p, m, fl))]
+    first = min(fds, key=lambda f: (f.src.name, f.pos))
+    return first.decl, site_text(w), site_text(r)
+
+
+def check_sites(sw, fields_out, text):
+    fails = []
+    rows, _c, _o, _e = parse_md(text)
+    for r in rows:
+        quals = re.findall(r"`(\w+\.\w+)`", r[2])
+        got = row_sites(sw, fields_out, r[1], quals)
+        if got is None:
+            continue
+        for col, name, want in ((3, "declared", got[0]), (5, "writers", got[1]), (6, "live readers", got[2])):
+            if r[col] != want:
+                fails.append("row %s: %s column is %r, the sweep writes %r" % (r[0], name, r[col][:120], want[:120]))
+    return fails
+
+
+def write_md(uni, sw, text, fields_out, stats, rows_per):
+    """Regenerate the sweep's own text in SURVIVORS.md: the blanked-line counts, the counts table, and per row the
+    declared / writers / live-readers columns and the line of every cited capacity constant."""
+    i = text.find(BLANK_LEAD)
+    if i < 0:
+        raise SystemExit("--write-md: SURVIVORS.md has no '%s...)' sentence; nothing written" % BLANK_LEAD)
+    j = text.find(")", i + len(BLANK_LEAD))
+    words = blanked_text(uni).split(" ")
+    lines, cur = [], ""
+    width = 105 - (i + len(BLANK_LEAD) - (text.rfind("\n", 0, i) + 1))
+    for wd in words:
+        if len(cur) + len(wd) + 1 > width and cur:
+            lines.append(cur)
+            cur = "   " + wd
+            width = 105
+        else:
+            cur = (cur + " " + wd) if cur else wd
+    lines.append(cur)
+    text = text[:i + len(BLANK_LEAD)] + "\n".join(lines) + text[j:]
+    out = []
+    for ln in text.split("\n"):
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")] if ln.startswith("|") else None
+        if cells and re.fullmatch(r"S\d{2,3}", cells[0]) and len(cells) >= 9:
+            quals = re.findall(r"`(\w+\.\w+)`", cells[2])
+            got = row_sites(sw, fields_out, cells[1], quals)
+            if got is not None:
+                cells[3], cells[5], cells[6] = got
+
+                def repin(mt):
+                    nm, val, f, l = mt.group(1), mt.group(2), mt.group(3), int(mt.group(4))
+                    s = uni.all_plugin.get(f)
+                    cands = [k + 1 for k, cl in enumerate(s.code.split("\n")) if re.search(CONST_RE % re.escape(nm), cl)]
+                    if cands:
+                        l = min(cands, key=lambda c: abs(c - l))
+                    return "%s = %s (%s:%d)" % (nm, val, f, l)
+                cells[4] = re.sub(CAP_ITEM, repin, cells[4])
+                ln = "| " + " | ".join(cells) + " |"
+        elif cells and cells[0] in COMP_NAMES and len(cells) >= 9 and re.fullmatch(r"\d+", cells[1] or "x"):
+            st = stats[cells[0]]
+            ln = "| %s | %d | %d | %d | %d | %d | %d | %d | %d |" % (
+                cells[0], st["declared"], st["written"], st["write_sites"], st["construction"],
+                st["reset"] + st["reclassified"], st["survivors"], st["live"], rows_per.get(cells[0], 0))
+        out.append(ln)
+    return "\n".join(out)
+
+
 def check_table(uni, sw, text, quiet=False):
     rows, counts, overrides, errs = parse_md(text)
     fails = list(errs)
@@ -1619,6 +2077,8 @@ def check_table(uni, sw, text, quiet=False):
         if (comp, q) not in named:
             fails.append("survivor read live with no row: %s %s (declared %s)" % (comp, q, v[1].decl))
     rows_per = {c: len({named[k] for k in named if k[0] == c}) for c in COMP_NAMES}
+    fails += check_blanked(uni, text)
+    fails += check_sites(sw, fields_out, text)
     for comp in COMP_NAMES:
         st = stats[comp]
         got = [st["declared"], st["written"], st["write_sites"], st["construction"], st["reset"] + st["reclassified"],
@@ -1700,6 +2160,110 @@ def selftest(uni, sw, text):
     print("  (b) one capacity changed by 1: %s" % ("FAILS as required (%s)" % next(x for x in fb if "capacity" in x)
                                                    if b_ok else "did NOT fail on the capacity"))
     ok &= b_ok
+    ok &= selftest_a3(uni, sw, text)
+    return ok
+
+
+def selftest_a3(uni, sw, text):
+    """Controls of the round-2 checks (ruling FRAME-TIME-ROUND-R2): each mutation must fail for its own reason."""
+    ok = True
+    _f, _s, fields_out, _r = check_table(uni, sw, text, quiet=True)
+    spec = load_a3()
+    f0, rep = a3_check(uni, sw, text, fields_out, spec=spec)
+    c_ok = not f0
+    print("  (c2) unchanged a3.py and FrameTime text: %s" % ("PASS" if c_ok else "FAIL (%s)" % f0[:3]))
+    ok &= c_ok
+    # (d) one FtA3.Read site removed: a live reader whose only count of its row was that site
+    idx = A3Index(uni)
+    readers = {e["name"]: e["readers"] for e in rep["rows"]}
+    pick = None
+    for (v, p, const, fm) in idx.reads:
+        tw = idx.twin.get(id(fm))
+        if tw is None or readers.get(const, {}).get(tw) != "direct":
+            continue
+        same = [r for r in idx.reads if r[3] is fm and r[2] == const]
+        line_reads = [r for r in idx.reads if r[0] is v and v.line(r[1]) == v.line(p)]
+        if len(same) == 1 and len(line_reads) == 1 and not any(const in idx.helper_rows(h) for h in idx.calls_in(fm)):
+            pick = (v.name, v.line(p), const, tw)
+            break
+    if pick is None:
+        print("  (d) no single-site FtA3.Read to remove")
+        return False
+    fd, _ = a3_check(uni, sw, text, fields_out, spec=spec, drop=(pick[0], pick[1]))
+    d_ok = any("carries no FtA3.Read(FtA3.%s)" % pick[2] in x and pick[3].key in x for x in fd)
+    print("  (d) FtA3.Read(FtA3.%s) at %s:%d removed: %s" % (pick[2], pick[0], pick[1], "FAILS as required (%s)" % next(
+        x for x in fd if "carries no" in x) if d_ok else "did NOT fail on the uncounted reader (%s)" % fd[:2]))
+    ok &= d_ok
+    # (d2) an FtA3.Read planted in a live member that reads nothing of that row
+    dep = [e for e in rep["rows"] if e["kind"] == "dependent"]
+    row = dep[0]
+    others = sorted((m for m in idx.ft_of if m in sw.live and m not in row["readers"] and m not in row["covered"]),
+                    key=lambda m: m.key)
+    fp, _ = a3_check(uni, sw, text, fields_out, spec=spec, plant=(row["name"], others[0]))
+    p_ok = any("is no live reader of %s" % row["name"] in x for x in fp)
+    print("  (d2) FtA3.Read(FtA3.%s) planted in %s: %s" % (row["name"], others[0].key, "FAILS as required (%s)" % next(
+        x for x in fp if "no live reader" in x) if p_ok else "did NOT fail on the misplaced read (%s)" % fp[:2]))
+    ok &= p_ok
+    # (e) a dependent row with live writes declared zero by sweep proof
+    flip = next(e for e in dep if e["writers"])
+    spec_e = [(n, sid, "zero", "control", "sweep:no-live-write") if n == flip["name"] else (n, sid, k, w, pf)
+              for (n, sid, k, w, pf) in spec]
+    fe, _ = a3_check(uni, sw, text, fields_out, spec=spec_e)
+    e_ok = any("is zero" in x and flip["name"] in x and "live writes" in x for x in fe)
+    print("  (e) %s declared zero (sweep:no-live-write): %s" % (flip["name"], "FAILS as required (%s)" % next(
+        x for x in fe if "is zero" in x)[:160] if e_ok else "did NOT fail on the unproven zero row"))
+    ok &= e_ok
+    # (e+) the proof can pass: a survivor read live whose writes are all outside the live members, as a zero row
+    md = a3_rows_of_md(text)
+    quiet = None
+    for (comp, q), (c, fd_, writes, reads) in sorted(fields_out.items(), key=lambda kv: (kv[0][0], kv[1][1].src.name,
+                                                                                         kv[1][1].pos)):
+        if c == "survives_live" and not any(m is not None and m in sw.live and p < sw.cuts.get(m, m.end + 1)
+                                            for (s, p, wk, m) in writes):
+            quiet = (comp, q)
+            break
+    if quiet is None:
+        print("  (e+) no survivor read live without live writes: the positive control has no subject")
+        return False
+    sid = next(k for k, (comp, quals) in md.items() if comp == quiet[0] and quiet[1] in quals)
+    lines = []
+    for ln in text.split("\n"):
+        if re.match(r"\|\s*%s\s*\|" % sid, ln):
+            cells = ln.split("|")
+            cells[3] = " `%s` " % quiet[1]
+            ln = "|".join(cells)
+        lines.append(ln)
+    spec_p = [(n, s_, "zero", "control", "sweep:no-live-write") if s_ == sid else (n, s_, k, w, pf)
+              for (n, s_, k, w, pf) in spec]
+    fpz, _ = a3_check(uni, sw, "\n".join(lines), fields_out, spec=spec_p)
+    pz_ok = not any("is zero" in x for x in fpz)
+    print("  (e+) %s %s alone as a zero row: %s" % (sid, quiet[1], "the proof PASSES (no live write)" if pz_ok else
+                                                   "the proof did NOT pass (%s)" % [x for x in fpz if "is zero" in x][:1]))
+    ok &= pz_ok
+    # (f) one blanked-line count in the Method text changed by 1
+    i = text.find(BLANK_LEAD)
+    m = re.compile(r"([\w.#]+)\s+(\d+)").search(text, i + len(BLANK_LEAD))
+    f_text = text[:m.start(2)] + str(int(m.group(2)) + 1) + text[m.end(2):]
+    ff = check_blanked(uni, f_text)
+    f_ok = bool(ff)
+    print("  (f) blanked-line count of %s changed by 1: %s" % (m.group(1), "FAILS as required" if f_ok else
+                                                                "did NOT fail on the stale count"))
+    ok &= f_ok
+    # (g) one writer pin changed by 1
+    g_lines, done = [], False
+    for ln in text.split("\n"):
+        if not done and re.match(r"\|\s*S\d+\s*\|", ln):
+            cells = ln.split("|")
+            mm = re.search(r"\.cs:(\d+)", cells[6])
+            if mm:
+                cells[6] = cells[6][:mm.start(1)] + str(int(mm.group(1)) + 1) + cells[6][mm.end(1):]
+                ln = "|".join(cells)
+                done = True
+        g_lines.append(ln)
+    fg = check_sites(sw, fields_out, "\n".join(g_lines))
+    g_ok = any("writers column" in x for x in fg)
+    print("  (g) one writer pin changed by 1: %s" % ("FAILS as required" if g_ok else "did NOT fail on the stale pin"))
+    ok &= g_ok
     return ok
 
 
@@ -1715,10 +2279,23 @@ def main(argv):
         ok = selftest(uni, sw, text)
         print("SELFTEST PASS" if ok else "SELFTEST FAIL")
         return 0 if ok else 1
+    if "--write-md" in argv:
+        _f, stats, fields_out, rows_per = check_table(uni, sw, text, quiet=True)
+        new = write_md(uni, sw, text, fields_out, stats, rows_per)
+        with open(MD_PATH, "rb") as f:
+            crlf = b"\r\n" in f.read()
+        with open(MD_PATH, "w", encoding="utf-8", newline="") as f:
+            f.write(new.replace("\n", "\r\n") if crlf else new)
+        print("SURVIVORS.md regenerated (%s); run the sweep to check it" % ("changed" if new != text else "unchanged"))
+        return 0
     fails, stats, fields_out, rows_per = check_table(uni, sw, text)
+    afails, arep = a3_check(uni, sw, text, fields_out)
+    fails += afails
     print_stats(uni, sw, stats, rows_per)
+    print(a3_summary(arep))
     if "--detail" in argv:
         print_detail(sw, fields_out, {"survives_live"})
+        print_a3_detail(arep)
     if "--detail-all" in argv:
         print_detail(sw, fields_out, {"survives", "survives_live", "reset", "reclassified", "construction"})
     if "--live" in argv:

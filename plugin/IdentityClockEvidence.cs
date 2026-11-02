@@ -356,6 +356,10 @@ namespace CompetitiveRounds
 
         internal static int EnterRpc(ExitGames.Client.Photon.Hashtable data, Photon.Realtime.Player sender)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.IC_scalars); FtA3.Read(FtA3.IC_game); FtA3.Wrote(FtA3.IC_scalars);
+            FtA3.Wrote(FtA3.IC_game);
+#endif
             int before = _depth;
             long t0 = SwUs;
             try
@@ -397,7 +401,11 @@ namespace CompetitiveRounds
             return before;
         }
 
+#if SCR_FRAMETIME
+        internal static void ExitRpc(int before) { FtA3.Wrote(FtA3.IC_game); if (before >= 0) _depth = before; }
+#else
         internal static void ExitRpc(int before) { if (before >= 0) _depth = before; }
+#endif
 
         // -- N7, N8: point start and spawn targets --------------------------------------------
 
@@ -445,6 +453,9 @@ namespace CompetitiveRounds
 
         internal static void Package(SyncPlayerMovement spm, int stamp)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.IC_game);
+#endif
             long t0 = SwUs;
             try
             {
@@ -499,6 +510,9 @@ namespace CompetitiveRounds
         internal static void Tick()
         {
 #if SCR_FRAMETIME
+            FtA3.Read(FtA3.IC_game); FtA3.Wrote(FtA3.IC_game);
+#endif
+#if SCR_FRAMETIME
             if (FtCensus.Skip(FtE.IC_c6)) return;
             bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Gated);
             try
@@ -538,6 +552,9 @@ namespace CompetitiveRounds
 
         private static void Slice(long frameUs, bool combat)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.IC_game); FtA3.Wrote(FtA3.IC_game);
+#endif
             var g = _g;
             if (g == null) return;
             // moment 2: rising edge of the pick (outside combat by the game's own sequence)
@@ -892,16 +909,23 @@ namespace CompetitiveRounds
         /// IC_Rpc (S30): RpcNames, read at every IndexOf in RpcNames.Add (EnterRpc, every opponent RPC), written at
         /// every append. steady false: the list is the game's distinct names in first-seen order, never refilled;
         /// KEEP is passed as the code constant and is unused (steady false).
-        /// IC_Clock (S31): ClockBook's cadence bucket, read and written at every FlushBucket of an open bucket
-        /// (from Cadence on a bucket change, in Package). steady true, refill 1: the bucket that is open at the
-        /// point's first live frame is the only one that can hold an earlier point's samples, and the point's first
-        /// flush closes it and empties both histograms; every bucket flushed after that opened inside this point.
-        /// So one write (that flush) is the refill: 1, not a capacity constant, because a bucket is replaced whole,
-        /// never entry by entry.</summary>
+        /// IC_Clock (S31): ClockBook's cadence bucket and CadB, read at every live reader call (FlushBucket on
+        /// entry, Cadence per package; Median inside FlushBucket is covered by FlushBucket's count, survivor_sweep.py
+        /// COVERED). steady false (round-2 HIGH 2): the flush empties the two histograms but CadB, which every flush
+        /// appends to, survives it, so no count of writes makes a later flush cost what it costs in any other point.
+        /// CadB's dependence is calibrated AS PART OF IC_Clock, not as its own row: FtCalClock's full half appends to a
+        /// CadB at its last doubling below its cap (an append that copies the whole list, the costliest CadB content)
+        /// together with both Medians at their costliest content, so one counted read covers both. The 1 passed as the
+        /// capacity is unused (steady false).
+        /// IC_scalars (S32), IC_point (S33), IC_game (S34): dependent by default-deny (ruling FRAME-TIME-ROUND-R2
+        /// (1)), counted at every live reader call, steady false.</summary>
         internal static void FtA3Rows()
         {
             FtA3.Set(FtA3.IC_Rpc, "IC_Rpc", I.RpcNames.KEEP, false, FtCalRpc, 500);
-            FtA3.Set(FtA3.IC_Clock, "IC_Clock", 1, true, FtCalClock, 500);
+            FtA3.Set(FtA3.IC_Clock, "IC_Clock", 1, false, FtCalClock, 500);
+            FtA3.Set(FtA3.IC_scalars, "IC_scalars", 1, false, FtCalIcScalars, 5000);
+            FtA3.Set(FtA3.IC_point, "IC_point", 1, false, FtCalIcPoint, 5000);
+            FtA3.Set(FtA3.IC_game, "IC_game", 1, false, FtCalIcGame, 5000);
         }
 
         private static long _ftSink;
@@ -968,6 +992,58 @@ namespace CompetitiveRounds
             _ftSink += sink;
             return t;
         }
+
+        private static I.Cost _ftCost;
+
+        /// <summary>S32 (IC_scalars): the real Cost.Add (three capped counter updates) on a scratch Cost. EMPTY: a new
+        /// Cost (counters 0). FULL: every counter at COUNT_MAX (the capped branches).</summary>
+        internal static long FtCalIcScalars(bool full, int n)
+        {
+            if (_ftCost == null) _ftCost = new I.Cost(0);
+            var c = _ftCost;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                if ((j & 63) == 0) { long v = full ? I.COUNT_MAX : 0; c.Calls = v; c.UsTotal = v; c.UsMax = v; }
+                c.Add(j & 255);
+            }
+            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+        }
+
+        private static I.PointS _ftPointS;
+
+        /// <summary>S33 (IC_point): the real PointS.MoveFrame on a scratch PointS (the tick's per-frame call). EMPTY:
+        /// a new PointS (no move started: MoveFrame returns at its test). FULL: a move started and not released, so
+        /// every call counts the frame and compares its maximum.</summary>
+        internal static long FtCalIcPoint(bool full, int n)
+        {
+            var p = _ftPointS = new I.PointS();
+            if (full) { p.MoveStartSw = 1; p.ReleaseSw = -1; }
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++) p.MoveFrame(j & 1023);
+            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+        }
+
+        private static bool _ftIcFlag;
+        private static long _ftIcTick;
+
+        /// <summary>S34 (IC_game): the per-game scalars' test-and-store (Tick's `_lastTickUs`, Slice's `_wasPicking`)
+        /// on scratch scalars. EMPTY: unset (0, false). FULL: set (a large tick, true).</summary>
+        internal static long FtCalIcGame(bool full, int n)
+        {
+            _ftIcTick = full ? long.MaxValue / 4 : 0; _ftIcFlag = full;
+            long s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                long dt = _ftIcTick > 0 ? j - _ftIcTick : 0;
+                if (_ftIcFlag != ((j & 1) == 0)) _ftIcFlag = !_ftIcFlag;
+                s += dt;
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += s;
+            return t;
+        }
 #endif
     }
 
@@ -978,6 +1054,9 @@ namespace CompetitiveRounds
     {
         private static MethodBase TargetMethod()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.IC_scalars);
+#endif
             var m = AccessTools.Method(typeof(PhotonNetwork), "ExecuteRpc",
                 new[] { typeof(ExitGames.Client.Photon.Hashtable), typeof(Photon.Realtime.Player) });
             if (m == null) throw new Exception("PhotonNetwork.ExecuteRpc(Hashtable, Player) not found");

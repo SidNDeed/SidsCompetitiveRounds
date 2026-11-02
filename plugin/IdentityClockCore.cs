@@ -643,6 +643,9 @@ namespace CompetitiveRounds
             /// counts it). Returns units done.</summary>
             internal int Step(int combatState, long budgetUs, Func<long> clockUs)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.IC_scalars); FtA3.Wrote(FtA3.IC_scalars);
+#endif
                 if (combatState == C.CombatRead.UNKNOWN) UnknownSkips++;
                 if (C.CombatRead.Live(combatState)) { CombatSkips++; return 0; }
                 if (_job == null) return 0;
@@ -1134,6 +1137,9 @@ namespace CompetitiveRounds
             /// RPCA_Init) as received: sender stamp and own arrival estimate.</summary>
             internal void OtherShot(int stamp, int arrServer)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.IC_point); FtA3.Wrote(FtA3.IC_point);
+#endif
                 var o = CurO;
                 if (o == null || o.ShotFirst >= 0) return;
                 int d = WrapDiff(stamp, o.Ps);
@@ -1145,6 +1151,9 @@ namespace CompetitiveRounds
             /// <summary>One package of the other seat's player view. O(1).</summary>
             internal void Package(Pkg p)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.IC_scalars); FtA3.Wrote(FtA3.IC_scalars);
+#endif
                 Cadence(p);
                 if (_have)
                 {
@@ -1170,6 +1179,9 @@ namespace CompetitiveRounds
 
             private void Cadence(Pkg p)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.IC_Clock); FtA3.Read(FtA3.IC_scalars); FtA3.Wrote(FtA3.IC_Clock);
+#endif
                 int b = FloorDiv(WrapDiff(p.ArrServer, T0), BUCKET_MS);
                 if (b < 0 || b > BUCKET_MAX) return;
                 if (b != _bucket)
@@ -1233,6 +1245,9 @@ namespace CompetitiveRounds
 
             private void PointPkg(Pkg p)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.IC_point); FtA3.Wrote(FtA3.IC_point);
+#endif
                 var o = CurO;
                 if (o == null) return;
                 int rel = WrapDiff(p.Stamp, o.Ps);
@@ -1345,6 +1360,9 @@ namespace CompetitiveRounds
             /// <summary>The tick: own isPlaying falling edge (the move starts).</summary>
             internal void MoveStart(long sw, int curveMs)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.IC_point); FtA3.Wrote(FtA3.IC_point);
+#endif
                 if (Closed || MoveStartSw >= 0) return;
                 MoveStartSw = sw; MapWait = (int)Clamp(sw - ExecSw, -1, MS_POINT_MAX);
                 MvT = curveMs < 0 ? -1 : (int)Clamp(curveMs, 0, MS_POINT_MAX);
@@ -1354,6 +1372,9 @@ namespace CompetitiveRounds
             /// <summary>The tick, between move start and release: one frame of `frameUs`.</summary>
             internal void MoveFrame(long frameUs)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.IC_point); FtA3.Wrote(FtA3.IC_point);
+#endif
                 if (Closed || MoveStartSw < 0 || ReleaseSw >= 0) return;
                 _frames++; if (frameUs > _ftMax) _ftMax = frameUs;
             }
@@ -1361,16 +1382,31 @@ namespace CompetitiveRounds
             /// <summary>The tick: own isPlaying rising edge (release).</summary>
             internal void Release(long sw)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.IC_point); FtA3.Wrote(FtA3.IC_point);
+#endif
                 if (Closed || ReleaseSw >= 0) return;
                 ReleaseSw = sw; Rel = (int)Clamp(sw - ExecSw, -1, MS_POINT_MAX);
                 if (MoveStartSw >= 0) { MvFrames = (int)Clamp(_frames, 0, FRAMES_MAX); MvFtMaxUs = (int)Clamp(_ftMax, 0, US_MAX); }
                 ThMs = 0;
             }
 
+#if SCR_FRAMETIME
+            internal void GameTime(double dtMs) { FtA3.Read(FtA3.IC_point); FtA3.Wrote(FtA3.IC_point); if (!Closed && ReleaseSw >= 0) ThMs += dtMs; }
+#else
             internal void GameTime(double dtMs) { if (!Closed && ReleaseSw >= 0) ThMs += dtMs; }
+#endif
 
+#if SCR_FRAMETIME
+            internal void OwnInput(long sw) { FtA3.Read(FtA3.IC_point); FtA3.Wrote(FtA3.IC_point); if (!Closed && InFirst < 0) InFirst = (int)Clamp(sw - ExecSw, 0, MS_POINT_MAX); }
+#else
             internal void OwnInput(long sw) { if (!Closed && InFirst < 0) InFirst = (int)Clamp(sw - ExecSw, 0, MS_POINT_MAX); }
+#endif
+#if SCR_FRAMETIME
+            internal void OwnShot(long sw) { FtA3.Read(FtA3.IC_point); FtA3.Wrote(FtA3.IC_point); if (!Closed && ShotFirst < 0) ShotFirst = (int)Clamp(sw - ExecSw, 0, MS_POINT_MAX); }
+#else
             internal void OwnShot(long sw) { if (!Closed && ShotFirst < 0) ShotFirst = (int)Clamp(sw - ExecSw, 0, MS_POINT_MAX); }
+#endif
 
             internal void Close(long sw)
             {
@@ -1428,8 +1464,16 @@ namespace CompetitiveRounds
         {
             internal readonly int Id; internal long Calls, Faults, UsTotal, UsMax;
             internal Cost(int id) { Id = id; }
+#if SCR_FRAMETIME
+            internal void Add(long us) { FtA3.Read(FtA3.IC_scalars); FtA3.Wrote(FtA3.IC_scalars); if (Calls < COUNT_MAX) Calls++; if (us < 0) us = 0; UsTotal = Math.Min(UsTotal + us, COUNT_MAX); if (us > UsMax) UsMax = Math.Min(us, COUNT_MAX); }
+#else
             internal void Add(long us) { if (Calls < COUNT_MAX) Calls++; if (us < 0) us = 0; UsTotal = Math.Min(UsTotal + us, COUNT_MAX); if (us > UsMax) UsMax = Math.Min(us, COUNT_MAX); }
+#endif
+#if SCR_FRAMETIME
+            internal void Fault() { FtA3.Read(FtA3.IC_scalars); FtA3.Wrote(FtA3.IC_scalars); if (Faults < COUNT_MAX) Faults++; }
+#else
             internal void Fault() { if (Faults < COUNT_MAX) Faults++; }
+#endif
             internal List<object> Entry() { return L((long)Id, Calls, Math.Min(Faults, Calls), UsTotal, UsMax); }
         }
 

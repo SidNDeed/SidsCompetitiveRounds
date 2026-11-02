@@ -40,6 +40,9 @@ namespace CompetitiveRounds
 
         private static void Bind()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
+#endif
             _bound = true;
             try
             {
@@ -56,6 +59,9 @@ namespace CompetitiveRounds
         /// <summary>Once per frame from CombatEvidence.Tick (outside every collector).</summary>
         internal static void Frame()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_perf_probe);
+#endif
             if (!_bound) Bind();
             if (!_on || _done) return;
             long us = (long)(Time.unscaledDeltaTime * 1e6);
@@ -65,6 +71,9 @@ namespace CompetitiveRounds
 
         private static void Add(long us)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
+#endif
             if (us < 0) us = 0;
             _bins[(int)Math.Min(us / BIN_US, BIN_CAP - 1)]++;
             _frames++;
@@ -73,6 +82,9 @@ namespace CompetitiveRounds
 
         private static long Quantile(double q)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_perf_probe);
+#endif
             if (_frames == 0) return 0;
             long rank = (long)Math.Ceiling(q * _frames), acc = 0;
             if (rank < 1) rank = 1;
@@ -82,6 +94,9 @@ namespace CompetitiveRounds
 
         private static void Close(string label)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
+#endif
             if (_window < WINDOWS_CAP)
             {
                 _label[_window] = label; _p50[_window] = Quantile(0.5); _p99[_window] = Quantile(0.99); _max[_window] = _maxUs;
@@ -107,6 +122,9 @@ namespace CompetitiveRounds
 
         private static void MenuFrame(long us)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
+#endif
             bool inRoom = false;
             try { inRoom = Photon.Pun.PhotonNetwork.InRoom; } catch { }
             if (inRoom) return;
@@ -119,6 +137,9 @@ namespace CompetitiveRounds
 
         private static void MenuReport()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_perf_probe);
+#endif
             long aaP50 = Math.Abs(_p50[1] - _p50[0]), aaP99 = Math.Abs(_p99[1] - _p99[0]);
             long plantP50 = _p50[2] - Math.Max(_p50[0], _p50[1]);
             long plantUs = (long)(PLANT_MS * 1000);
@@ -138,6 +159,10 @@ namespace CompetitiveRounds
 
         private static void MatchFrame(long us)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_capture); FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_capture);
+            FtA3.Wrote(FtA3.CE_perf_probe);
+#endif
             bool live = false;
             try { live = CombatEvidence.Open && SeatEvidence.CombatLive(); } catch { }
             if (!live)
@@ -157,6 +182,9 @@ namespace CompetitiveRounds
 
         private static void MatchReport()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
+#endif
             long a50 = 0, a99 = 0, b50 = 0, b99 = 0, amax = 0, bmax = 0; int na = 0, nb = 0;
             int n = Math.Min(_window, WINDOWS_CAP);
             for (int i = 0; i < n && i < WINDOWS_CAP; i++)

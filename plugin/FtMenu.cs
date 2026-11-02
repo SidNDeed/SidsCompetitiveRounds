@@ -24,6 +24,10 @@ namespace CompetitiveRounds
         private static readonly double[] LevelPct = { 0.5, 1.5, 3.0, 5.0 };
 
         private static bool _done, _active;
+
+        /// <summary>A menu self-check segment owns the frames (FtSchedule.Live is the segment's, not combat's): no
+        /// menu frame is a combat point's closing frame (round-2 MEDIUM, FtClock.cs:144; FtSchedule.ClosingFrame).</summary>
+        internal static bool Active => _active;
         private static string _why = "";
         private static long _armedAt, _segStart;
         private static int _seg, _levelPairs, _cycles;

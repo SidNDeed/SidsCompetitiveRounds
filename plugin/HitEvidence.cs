@@ -51,6 +51,9 @@ namespace CompetitiveRounds
         /// <summary>The executing RPC came from another seat.</summary>
         private static bool RemoteSender(out int actor)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_sender);
+#endif
             actor = RpcSender;
             return actor != 0 && actor != LocalActor();
         }
@@ -75,6 +78,9 @@ namespace CompetitiveRounds
 
         private static HitEvidenceCore.GameTally G(int actor)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_game);
+#endif
             HitEvidenceCore.GameTally t;
             if (_game.TryGetValue(actor, out t)) return t;
             if (!_game.Admit(actor)) return null;
@@ -87,6 +93,9 @@ namespace CompetitiveRounds
 
         internal static void NoteDamage(HealthHandler hh, Vector2 damage)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.HE_point); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.HE_point);
+#endif
             try
             {
                 int actor;
@@ -152,6 +161,9 @@ namespace CompetitiveRounds
 
         internal static void NoteSpawn(Component init, int kind)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_game); FtA3.Wrote(FtA3.HE_game);
+#endif
             try
             {
                 int actor;
@@ -203,8 +215,118 @@ namespace CompetitiveRounds
         private static int _fCount, _fDropped;
 #if SCR_FRAMETIME
         /// <summary>FtA3.RegisterAll: SURVIVORS.md S24, the flush queue, a drained row (held at the point end,
-        /// emptied by the next Drain).</summary>
-        internal static void FtA3Rows() { FtA3.SetDrained(FtA3.HE_Flush, "HE_Flush", () => _fCount); }
+        /// emptied by the next Drain); S25 HE_game, S26 HE_point and S27 HE_sender, dependent by default-deny (ruling
+        /// FRAME-TIME-ROUND-R2 (1)), counted at every live reader call; S37 HE_hitset (round-2 HIGH 3), the GameTally
+        /// Hit set's growth, counted once per tally per game (FtA3.ReadOnce in GameTally.AddImpact). Every one steady
+        /// false; capacities are the code constants (1 for the RPC-scoped scalar).</summary>
+        internal static void FtA3Rows()
+        {
+            FtA3.SetDrained(FtA3.HE_Flush, "HE_Flush", () => _fCount);
+            FtA3.Set(FtA3.HE_game, "HE_game", ACTOR_KEY_CAP, false, FtCalGame, 2000);
+            FtA3.Set(FtA3.HE_point, "HE_point", HitEvidenceCore.TIMES_CAP, false, FtCalPoint, 20);
+            FtA3.Set(FtA3.HE_sender, "HE_sender", 1, false, FtCalSender, 5000);
+            FtA3.Set(FtA3.HE_hitset, "HE_hitset", HitEvidenceCore.PROJ_CAP, false, FtCalHitset, 4);
+        }
+
+        private static long _ftSink;
+        private static SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally> _ftGame;
+
+        /// <summary>S25 (HE_game): G()'s real CappedMap probe on a scratch map, then one tally increment. EMPTY: the
+        /// map empty, every probe misses. FULL: ACTOR_KEY_CAP tallies held, every probe hits.</summary>
+        internal static long FtCalGame(bool full, int n)
+        {
+            if (_ftGame == null) _ftGame = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>(ACTOR_KEY_CAP);
+            var m = _ftGame;
+            m.Clear();
+            if (full) for (int i = 0; i < ACTOR_KEY_CAP; i++) m.Set(i + 1, new HitEvidenceCore.GameTally());
+            long s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                HitEvidenceCore.GameTally t;
+                if (m.TryGetValue(j % ACTOR_KEY_CAP + 1, out t)) { t.SpawnAmmo++; s += t.Impacts; }
+                else s++;
+            }
+            long tt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            m.Clear();
+            _ftSink += s;
+            return tt;
+        }
+
+        private static List<float> _ftPd, _ftPf, _ftPe;
+
+        /// <summary>S26 (HE_point): the costliest live reader, the real HitEvidenceCore.Pair (both Ascending checks and
+        /// the merge) over a damage and a force time list. FULL: both lists at TIMES_CAP ascending times, interleaved
+        /// one unit apart against a half-unit window, so nothing pairs and the merge walks both lists whole. EMPTY:
+        /// both lists empty. The O(1) readers (AddDirect, AddForce, AddDot, NoteDamage) count under the same row, so
+        /// this unit bounds them too.</summary>
+        internal static long FtCalPoint(bool full, int n)
+        {
+            if (_ftPd == null)
+            {
+                var d0 = new List<float>(HitEvidenceCore.TIMES_CAP); var f0 = new List<float>(HitEvidenceCore.TIMES_CAP);
+                for (int i = 0; i < HitEvidenceCore.TIMES_CAP; i++) { d0.Add(i * 2f); f0.Add(i * 2f + 1f); }
+                _ftPe = new List<float>();
+                _ftPd = d0; _ftPf = f0;
+            }
+            var d = full ? _ftPd : _ftPe;
+            var f = full ? _ftPf : _ftPe;
+            long s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                int a, b, c;
+                HitEvidenceCore.Pair(d, f, 0.5f, out a, out b, out c);
+                s += a + b + c;
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += s;
+            return t;
+        }
+
+        private static int _ftSender;
+
+        /// <summary>S27 (HE_sender): RemoteSender's one int read, on a scratch scalar. EMPTY: no sender (-1). FULL: an
+        /// actor number.</summary>
+        internal static long FtCalSender(bool full, int n)
+        {
+            _ftSender = full ? 1001 : -1;
+            long s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++) s += _ftSender >= 0 ? _ftSender : 0;
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += s;
+            return t;
+        }
+
+        private static HashSet<int> _ftHitPresized;
+
+        /// <summary>S37 (HE_hitset, round-2 HIGH 3): one read = one GameTally Hit set's whole growth sequence, as
+        /// SeatEvidence.FtCalLogs calibrates SE_Logs. FULL: PROJ_CAP distinct Contains + Add pairs into a new HashSet,
+        /// so every rehash happens. EMPTY: the same pairs into a set already grown to PROJ_CAP and cleared (no rehash).
+        /// The difference is the growth work a set filled by earlier points can move into a later point.</summary>
+        internal static long FtCalHitset(bool full, int n)
+        {
+            if (_ftHitPresized == null)
+            {
+                var s0 = new HashSet<int>();
+                for (int i = 0; i < HitEvidenceCore.PROJ_CAP; i++) s0.Add(i);
+                s0.Clear();
+                _ftHitPresized = s0;
+            }
+            long sink = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                var hs = full ? new HashSet<int>() : _ftHitPresized;
+                for (int i = 0; i < HitEvidenceCore.PROJ_CAP; i++) if (!hs.Contains(i)) hs.Add(i);
+                sink += hs.Count;
+                hs.Clear();
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += sink;
+            return t;
+        }
 #endif
         private static readonly Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>> _spareP = new Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>>(FLUSH_CAP + 1);
         private static readonly Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>> _spareG = new Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>>(FLUSH_CAP + 1);
@@ -308,6 +430,9 @@ namespace CompetitiveRounds
         /// evidence's push counts for every captured flush, in capture order.</summary>
         internal static void Drain()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_game);
+#endif
 #if SCR_FRAMETIME
             if (FtGate.Off) return;   // nested: live only through PT-c5, PointEvidence.Drain (no census row)
             bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
@@ -425,6 +550,9 @@ namespace CompetitiveRounds
         private static void Prefix(ExitGames.Client.Photon.Hashtable __0, Photon.Realtime.Player __1, out long __state)
         {
 #if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_sender); FtA3.Wrote(FtA3.HE_sender);
+#endif
+#if SCR_FRAMETIME
             if (FtCensus.Skip(FtE.HE_p1)) { __state = (long)(uint)HitEvidence.RpcSender | ((long)-1 << 32); return; }
             bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
             try
@@ -444,6 +572,9 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(long __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            FtA3.Wrote(FtA3.HE_sender);
+#endif
 #if SCR_FRAMETIME
             if (FtGate.Off) return __exception;
             bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);

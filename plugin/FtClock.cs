@@ -141,7 +141,7 @@ namespace CompetitiveRounds
             {
                 Frames++;
                 if (!_ended) MissingEnd++;
-                OnFrameClosed(t - _t0, _ended ? _s : 0, k - _k0, pk - _p0, _gc0, gc, _ended, FtSchedule.Live && !live);
+                OnFrameClosed(t - _t0, _ended ? _s : 0, k - _k0, pk - _p0, _gc0, gc, _ended, FtSchedule.ClosingFrame(live));
             }
             _t0 = t;
             _k0 = k;

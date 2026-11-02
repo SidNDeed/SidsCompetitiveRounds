@@ -55,6 +55,9 @@ namespace CompetitiveRounds
         internal static void Pair(IList<float> damage, IList<float> force, float window,
                                   out int paired, out int damageAlone, out int forceAlone)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_point);
+#endif
             if (damage == null || force == null) throw new ArgumentNullException();
             if (!(window >= 0f)) throw new ArgumentException("window");
             Ascending(damage, "damage"); Ascending(force, "force");
@@ -73,6 +76,9 @@ namespace CompetitiveRounds
 
         private static void Ascending(IList<float> t, string name)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_point);
+#endif
             for (int k = 0; k < t.Count; k++)
             {
                 if (float.IsNaN(t[k])) throw new ArgumentException(name + " has NaN");
@@ -97,17 +103,27 @@ namespace CompetitiveRounds
 
             internal void AddDirect(float t, float mag, bool converted)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.HE_point); FtA3.Wrote(FtA3.HE_point);
+#endif
                 Direct++; DirectSum += mag; if (converted) Converted++;
                 if (DirectT.Count < TIMES_CAP) DirectT.Add(t); else Unchecked++;
             }
 
             internal void AddForce(float t, float mag, bool inert)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.HE_point); FtA3.Wrote(FtA3.HE_point);
+#endif
                 Force++; ForceSum += mag; if (inert) ForceInert++;
                 if (ForceT.Count < TIMES_CAP) ForceT.Add(t); else Unchecked++;
             }
 
+#if SCR_FRAMETIME
+            internal void AddDot(float mag) { FtA3.Read(FtA3.HE_point); FtA3.Wrote(FtA3.HE_point); Dot++; DotSum += mag; }
+#else
             internal void AddDot(float mag) { Dot++; DotSum += mag; }
+#endif
 
             internal bool Any { get { return Direct + Force + Dot > 0; } }
         }
@@ -126,15 +142,26 @@ namespace CompetitiveRounds
             internal readonly int[] Buckets = new int[4];
             internal readonly HashSet<int> Hit = new HashSet<int>();
             internal int HitOverflow;
+#if SCR_FRAMETIME
+            /// <summary>FrameTime A3 row HE_hitset (SURVIVORS.md S37, round-2 HIGH 3): the FtA3.Serial this tally's
+            /// Hit set was last counted in (FtA3.ReadOnce: once per instance per game).</summary>
+            internal int FtSerial = -1;
+#endif
 
             /// <summary>First unblocked impact of a projectile counts once
             /// (a bouncing bullet hitting twice is one projectile).</summary>
             internal void AddImpact(int projectile, bool blocked, bool ammo)
             {
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.HE_game); FtA3.Wrote(FtA3.HE_game);
+#endif
                 if (blocked) { ImpactsBlocked++; return; }
                 Impacts++;
                 if (Hit.Contains(projectile)) return;
                 if (Hit.Count >= PROJ_CAP) { HitOverflow++; return; }
+#if SCR_FRAMETIME
+                FtA3.ReadOnce(FtA3.HE_hitset, ref FtSerial);
+#endif
                 Hit.Add(projectile);
                 if (ammo) DistinctAmmo++; else DistinctOther++;
             }
@@ -151,6 +178,9 @@ namespace CompetitiveRounds
         /// never an account identity.</summary>
         internal static string HitRecvLine(int point, int actor, PointTally t)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_point);
+#endif
             int paired, dAlone, fAlone;
             Pair(t.DirectT, t.ForceT, PAIR_WINDOW_S, out paired, out dAlone, out fAlone);
             var sb = new StringBuilder("[HIT-RECV] point=");
@@ -169,6 +199,9 @@ namespace CompetitiveRounds
         /// <summary>D2.</summary>
         internal static string ShotObsLine(int game, int actor, GameTally g)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_game);
+#endif
             var sb = new StringBuilder("[SHOT-OBS] game=");
             sb.Append(game).Append(" from=a").Append(actor)
               .Append(" spawned_ammo=").Append(g.SpawnAmmo).Append(" spawned_noammo=").Append(g.SpawnNoAmmo)
@@ -184,6 +217,9 @@ namespace CompetitiveRounds
         /// <summary>D3.</summary>
         internal static string BlockMissLine(int game, int actor, GameTally g)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.HE_game);
+#endif
             var sb = new StringBuilder("[BLOCK-MISS] game=");
             sb.Append(game).Append(" from=a").Append(actor)
               .Append(" dmg_msgs_any_source=").Append(g.Direct)

@@ -259,6 +259,9 @@ namespace CompetitiveRounds
         /// the table) and returns the depth to restore.</summary>
         internal static int EnterRpc(ExitGames.Client.Photon.Hashtable data, Photon.Realtime.Player sender)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
+#endif
             int before = _ctxDepth;
             try
             {
@@ -296,6 +299,9 @@ namespace CompetitiveRounds
 #endif
         internal static void ExitRpc(int before)
         {
+#if SCR_FRAMETIME
+            FtA3.Wrote(FtA3.SE_frames);
+#endif
             if (before >= 0) _ctxDepth = before;
         }
 
@@ -303,6 +309,9 @@ namespace CompetitiveRounds
         /// it (read-only; nothing is taken or changed). False: none, or no stamp.</summary>
         internal static bool RpcTop(out int stamp, out int sender, out int viewId, out string method)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames);
+#endif
             stamp = 0; sender = 0; viewId = 0; method = null;
             int top = _ctxDepth - 1;
             if (top < 0 || top >= CTX_CAP || !_ctx[top].HasStamp) return false;
@@ -314,6 +323,9 @@ namespace CompetitiveRounds
         /// and is not yet taken by an earlier hook of this RPC.</summary>
         private static bool TopFrame(string a, string b, int viewId, bool take, out Ctx c)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Wrote(FtA3.SE_frames);
+#endif
             c = default(Ctx);
             int top = _ctxDepth - 1;
             if (top < 0 || top >= CTX_CAP) return false;
@@ -325,6 +337,9 @@ namespace CompetitiveRounds
 
         private static void NoteRemoteRpc(Ctx c)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars);
+#endif
             int now = ServerNow();
             int age = C.WrapDiff(now, c.Stamp);
             _ageRpc.Add(age);
@@ -338,6 +353,9 @@ namespace CompetitiveRounds
         /// <summary>One player-stream batch from `actor` stamped `stamp` by its sender.</summary>
         internal static void NoteView(int actor, int stamp)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_scalars);
+#endif
 #if SCR_FRAMETIME
             if (FtCensus.Skip(FtE.SE_c50)) return;
             bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Gated);
@@ -365,6 +383,9 @@ namespace CompetitiveRounds
 
         private static bool CopyOf(Component c, out bool mine, out bool opp, out CharacterData data)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_scalars);
+#endif
             mine = opp = false; data = null;
             if (c == null) return false;
             data = c.GetComponent<CharacterData>();
@@ -385,6 +406,10 @@ namespace CompetitiveRounds
         /// unkeyed) and returns a frame for the finalizer, or -1.</summary>
         internal static int BlockEnter(Block b, bool firstBlock, BlockTrigger.BlockTriggerType trig, bool onlyEffects)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
+            FtA3.Wrote(FtA3.SE_scalars);
+#endif
             try
             {
                 if (!_open || b == null) return -1;
@@ -436,6 +461,10 @@ namespace CompetitiveRounds
         /// copy's sinceBlock reset ran in the synchronous part (B7).</summary>
         internal static void BlockExit(int idx)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
+            FtA3.Wrote(FtA3.SE_scalars);
+#endif
             try
             {
                 if (idx < 0 || idx >= BF_CAP) return;
@@ -465,6 +494,10 @@ namespace CompetitiveRounds
         /// filled (PhotonNetwork.rpcEvent, B5), never from a separate clock read.</summary>
         internal static void BlockSent(PhotonView view, string method, RpcTarget target)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
+            FtA3.Wrote(FtA3.SE_scalars);
+#endif
             try
             {
                 if (!_open || !_ownOpenPending || method != "RPCAO_DoBlock" || target != RpcTarget.Others || view == null || !view.IsMine) return;
@@ -488,6 +521,9 @@ namespace CompetitiveRounds
         /// copy's last reset is now UNKEYED (B7 reset 2: since_ms counts from it, last_* [0,-1,0]).</summary>
         internal static void UnkeyedReset(Block b)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
+#endif
             try
             {
                 if (!_open || b == null || b.sinceBlock != 0f) return;
@@ -525,6 +561,10 @@ namespace CompetitiveRounds
         /// partner went missing; the path field itself is the label.</summary>
         internal static int HitEnter(ProjectileHit ph, int pid, int viewID, bool wasBlocked)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
+            FtA3.Wrote(FtA3.SE_scalars);
+#endif
             try
             {
                 if (!_open || ph == null || viewID == -1) return -1;
@@ -574,6 +614,10 @@ namespace CompetitiveRounds
 
         internal static void HitExit(int idx)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
+            FtA3.Wrote(FtA3.SE_scalars);
+#endif
             try
             {
                 if (idx < 0 || idx >= HF_CAP) return;
@@ -614,6 +658,10 @@ namespace CompetitiveRounds
         /// stamp.</summary>
         internal static void DamageArrived(HealthHandler hh, bool gate, bool completed)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
+            FtA3.Wrote(FtA3.SE_scalars);
+#endif
             try
             {
                 if (!_open || hh == null) return;
@@ -647,6 +695,9 @@ namespace CompetitiveRounds
         /// it (usedCooldown / attackSpeedMultiplier). A count, nothing more.</summary>
         internal static void ShotArrived(Component init, int kind)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
+#endif
             try
             {
                 if (!_open || init == null) return;
@@ -678,6 +729,9 @@ namespace CompetitiveRounds
         /// damage and knockback messages the other seat sent this seat.</summary>
         internal static void AddPush(int actor, int dmg, int force, int paired, int dmgAlone, int forceAlone, int inert, int dot)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
+#endif
             try
             {
                 if (!_open || actor == 0 || actor != _oppActor) return;
@@ -701,6 +755,9 @@ namespace CompetitiveRounds
         /// and one send.</summary>
         internal static void Tick()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
+#endif
 #if SCR_FRAMETIME
             if (FtCensus.Skip(FtE.SE_c53)) return;
             bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Gated);
@@ -756,6 +813,9 @@ namespace CompetitiveRounds
 
         private static void ReadOffset()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
+#endif
             if (_offUnreadable) return;
             try
             {
@@ -784,6 +844,9 @@ namespace CompetitiveRounds
         /// <summary>The 3 s round-trip sample: one call, taken in combat too.</summary>
         private static void SamplePing()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
+#endif
             try
             {
                 int ping = PhotonNetwork.GetPing();
@@ -2093,7 +2156,9 @@ namespace CompetitiveRounds
         /// count of them guarantees both (PENDING_CAP + RECENT_CAP offers with no block leave RecentBlocks an earlier
         /// point's): every read counts. PENDING_CAP is passed as the code constant; FtA3 does not use it when steady
         /// is false.
-        /// SE_Logs (S20, and S23's _impDistinct): List and HashSet growth only. steady false; a read is one List
+        /// SE_ordinals (S21, round-2 HIGH 3), SE_frames (S22), SE_scalars (S23, with the seat Rng): dependent by
+        /// default-deny (ruling FRAME-TIME-ROUND-R2 (1)), counted at every live reader call, steady false.
+        /// SE_Logs (S20, with _impDistinct, moved from S23 in round 2): List and HashSet growth only. steady false; a read is one List
         /// (or the HashSet) instance that receives an Add on a counted frame, once per instance per game
         /// (SeatEvidenceCore.FtLogRead; FtImpRead); no writes are counted. SampleLog.CAP is passed as the code
         /// constant and is unused (steady false).</summary>
@@ -2101,6 +2166,9 @@ namespace CompetitiveRounds
         {
             FtA3.Set(FtA3.SE_Hw, "SE_Hw", C.HitWindow.PENDING_CAP, false, FtCalHw, 500);
             FtA3.Set(FtA3.SE_Logs, "SE_Logs", C.SampleLog.CAP, false, FtCalLogs, 4);
+            FtA3.Set(FtA3.SE_ordinals, "SE_ordinals", C.Ordinals.KEEP, false, FtCalOrdinals, 500);
+            FtA3.Set(FtA3.SE_frames, "SE_frames", CTX_CAP, false, FtCalFrames, 5000);
+            FtA3.Set(FtA3.SE_scalars, "SE_scalars", 1, false, FtCalSeScalars, 5000);
         }
 
         private static HashSet<int> _ftImpSet;
@@ -2196,6 +2264,72 @@ namespace CompetitiveRounds
             _ftSink += sink;
             return t;
         }
+
+        private static C.Ordinals _ftOrd;
+        private static int _ftOrdKey;
+
+        /// <summary>S21 (SE_ordinals, round-2 HIGH 3): the real Ordinals.Next on a scratch table, every measured key
+        /// new. FULL: the table holds KEEP prefixes (filled before the clock starts), so every measured Next misses,
+        /// evicts the oldest prefix (the Dictionary Remove) and inserts its own. EMPTY: the table cleared before the
+        /// clock starts, so the n measured Nexts insert below KEEP and never evict. n must stay below KEEP (refused
+        /// otherwise: the empty half would start evicting).</summary>
+        internal static long FtCalOrdinals(bool full, int n)
+        {
+            if (n >= C.Ordinals.KEEP) throw new ArgumentOutOfRangeException("n");
+            if (_ftOrd == null) _ftOrd = new C.Ordinals();
+            var o = _ftOrd;
+            o.Clear();
+            if (full) for (int i = 0; i < C.Ordinals.KEEP; i++) o.Next(1, i, 0);
+            long s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++) s += o.Next(2, ++_ftOrdKey, 0);
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            o.Clear();
+            _ftSink += s;
+            return t;
+        }
+
+        private static readonly Ctx[] _ftCtx = new Ctx[CTX_CAP];
+        private static int _ftCtxDepth;
+
+        /// <summary>S22 (SE_frames): a live reader's frame access on a scratch Ctx stack: a push, the top-of-stack read
+        /// of TopFrame / RpcTop, a pop. EMPTY: depth 0. FULL: CTX_CAP - 1 frames held.</summary>
+        internal static long FtCalFrames(bool full, int n)
+        {
+            for (int i = 0; i < CTX_CAP; i++) { _ftCtx[i].Stamp = i; _ftCtx[i].ViewId = i; _ftCtx[i].Method = "RPCA_Fire"; _ftCtx[i].HasStamp = true; }
+            int depth0 = full ? CTX_CAP - 1 : 0;
+            long s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                _ftCtxDepth = depth0;
+                if (_ftCtxDepth < CTX_CAP) { _ftCtx[_ftCtxDepth].Stamp = j; _ftCtx[_ftCtxDepth].Consumed = false; _ftCtxDepth++; }
+                int d = _ftCtxDepth - 1;
+                if (d >= 0 && _ftCtx[d].HasStamp && !_ftCtx[d].Consumed) s += _ftCtx[d].Stamp + _ftCtx[d].ViewId;
+                _ftCtxDepth--;
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += s;
+            return t;
+        }
+
+        private static C.Rng _ftRng;
+        private static readonly long[] _ftSeScal = new long[8];
+
+        /// <summary>S23 (SE_scalars): the real Rng.Next on a scratch generator, then a hook's scalar test-and-increment
+        /// on scratch counters. EMPTY: counters 0. FULL: counters at 1e12 (the generator's state is a value: its
+        /// xorshift costs the same at any state).</summary>
+        internal static long FtCalSeScalars(bool full, int n)
+        {
+            if (_ftRng == null) _ftRng = new C.Rng(12345);
+            for (int i = 0; i < _ftSeScal.Length; i++) _ftSeScal[i] = full ? 1000000000000L : 0;
+            long s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++) { s += _ftRng.Next(); if (_ftSeScal[0] >= 0) _ftSeScal[j & 7]++; }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += s;
+            return t;
+        }
 #endif
     }
 
@@ -2206,6 +2340,9 @@ namespace CompetitiveRounds
     {
         private static MethodBase TargetMethod()
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.SE_frames);
+#endif
             var m = AccessTools.Method(typeof(PhotonNetwork), "RPC",
                 new[] { typeof(PhotonView), typeof(string), typeof(RpcTarget), typeof(Photon.Realtime.Player), typeof(bool), typeof(object[]) });
             if (m == null) throw new Exception("PhotonNetwork.RPC(PhotonView, string, RpcTarget, Player, bool, object[]) not found - no block send stamp");

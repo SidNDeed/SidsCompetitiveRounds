@@ -305,7 +305,10 @@ def expected_entries():
     return [(n.replace(" ", ":"), s) for c, n, k, s in rows]
 
 
-OPENED = ("se", "ce", "ic")     # V4 3.7 VR5: SeatEvidence, CombatEvidence and IdentityClockEvidence's BeginGame
+OPENED = ("se", "ce", "ic")
+# FtHeavy.Names, in order (plugin/FtHeavy.cs): B3 requires one heavy line per operation per game
+HEAVY_OPS = ("ce_build", "se_build", "cd_build", "ic_build", "enqueue", "spool", "pump", "answer", "hash_start",
+             "hash_now")     # V4 3.7 VR5: SeatEvidence, CombatEvidence and IdentityClockEvidence's BeginGame
 
 
 def complete(recs, last_game=LAST_GAME):
@@ -329,7 +332,70 @@ def complete(recs, last_game=LAST_GAME):
     done = [r for r in recs if r["kind"] == "sitting" and r.get("g") == last_game]
     if len(done) != 1:
         miss.append("%d 'sitting complete g=%d' lines (needs exactly 1)" % (len(done), last_game))
+    miss += records_missing(recs, last_game)
     return miss
+
+
+def records_missing(recs, last_game=LAST_GAME):
+    """The absent-record sweep (ruling FRAME-TIME-ROUND-R2, round-2 HIGH ft_parse.py:495 and its class): every
+    per-game and per-point record the parser reads, required where the build always writes it, so a missing line
+    withholds the verdict instead of shrinking what is judged. RECORDS below lists each kind with its rule; the
+    kinds required elsewhere (settled, census, opened, cal, a3, a3drain, answer_replay, plant, refusals, sitting)
+    are named there with the function that requires them. Returns the list of what is missing."""
+    miss = []
+    for g in range(0, last_game + 1):
+        pts = [r for r in recs if r["kind"] == "p" and r["game"] == g]
+        # flushed: FtSchedule.FlushGame writes one per game (next_game, settle or quit)
+        n = sum(1 for r in recs if r["kind"] == "flushed" and r.get("g") == g)
+        if n != 1:
+            miss.append("game %d: %d flushed lines (needs 1)" % (g, n))
+        # between: FtFrames writes one at every point start after the game's first point
+        n = sum(1 for r in recs if r["kind"] == "between" and r.get("g") == g)
+        if pts and n != len(pts) - 1:
+            miss.append("game %d: %d between lines for %d points (needs %d)" % (g, n, len(pts), len(pts) - 1))
+        # heavy and offthread: one per operation per game, one per game (B3 also refuses on them)
+        for op in HEAVY_OPS:
+            n = sum(1 for r in recs if r["kind"] == "heavy" and r.get("g") == g and r.get("op") == op)
+            if n != 1:
+                miss.append("game %d: %d heavy lines for %s (needs 1)" % (g, n, op))
+        n = sum(1 for r in recs if r["kind"] == "offthread" and r.get("g") == g)
+        if n != 1:
+            miss.append("game %d: %d offthread lines (needs 1)" % (g, n))
+        # w: every point's windows, as many as its point line counts
+        for q in pts:
+            n = sum(1 for r in recs if r["kind"] == "w" and r.get("pt") == q["pt"])
+            if n != q.get("windows", -1):
+                miss.append("point %s: %d window lines, the point line counts %s" % (q["pt"], n, q.get("windows")))
+                break
+    # refusals: VR6 reads the cumulative counts of the line written after the last game (its flush or the quit)
+    if not any(r["kind"] == "refusals" and r.get("why") in ("quit", "game%d" % last_game) for r in recs):
+        miss.append("no refusals line after game %d (why=game%d or why=quit)" % (last_game, last_game))
+    return miss
+
+
+# The absent-record table (ruling FRAME-TIME-ROUND-R2): kind -> where its absence fails. "event" kinds are lines
+# whose absence is the normal case, judged only on a complete log (complete() above), with the reason stated.
+RECORDS = {
+    "settled": "complete() and vr2: one per game",
+    "p": "complete(): point lines per game; a3(): a drained row's probe count equals the game's point lines",
+    "w": "records_missing(): per point, as many as the point line's windows",
+    "cal": "complete() and vr2: one game-start run per game with fhat, span and every disp shape; a3(): its a3 family",
+    "census": "complete() and vr5_records: one per registered entry per game",
+    "opened": "vr5_records: one per game",
+    "heavy": "records_missing() and b3(): one per operation per game",
+    "offthread": "records_missing() and b3(): one per game",
+    "a3": "a3(): one per dependent row per measured game",
+    "a3drain": "a3(): one per drained row per measured game, starts equal to the game's points",
+    "answer_replay": "f18() under reading A: one settled replay per measured game (reading B: none)",
+    "between": "records_missing(): one per point after the game's first",
+    "flushed": "records_missing(): one per game",
+    "plant": "e_c(): exactly one",
+    "refusals": "records_missing(): one after the last game; vr6_build reads it",
+    "sitting": "complete(): exactly one for the last game",
+    "menu": "menu_check(): one per segment 1..of, and no menu point line without one (menu runs only)",
+    "menu_done": "menu_check(): exactly one (menu runs only)",
+    "disarmed": "event: its presence fails VR6; its absence is normal and is judged on a complete log",
+}
 
 
 def zero_state(recs):
@@ -435,13 +501,15 @@ def d_up(recs, z=Z_END, first_game=1):
 
 def a3_spec():
     """The A3 inventory (gate_specs/a3.py, from SURVIVORS.md): [(name, survivor id, "dependent" | "drained" | "zero",
-    reason)]. A "zero" row is a structure whose live reads cost the same whatever its content (its reason says why);
-    a "drained" row is one the build checks empty at every point's first live frame (FtA3.PointStart)."""
+    reason, proof)]. Kinds are default-deny (ruling FRAME-TIME-ROUND-R2 (1)): "zero" only with a proof reference,
+    sweep:... (survivor_sweep.py proves no write site reachable in the measured span) or probe:... (an executed
+    probe); "drained" only by its executed probe (probe:a3drain, FtA3.PointStart at every point's first live frame);
+    every other row is "dependent", counted and calibrated."""
     here = os.path.dirname(os.path.abspath(__file__))
     return runpy.run_path(os.path.join(here, "gate_specs", "a3.py"))["A3"]
 
 
-def a3(recs, z=Z_END, first_game=1, last_game=None, spec=None):
+def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None):
     """A3 (ruling FRAME-TIME-ROUND-R1-A1, route D; METHOD-V4.1 section 0), the fifth term of U: a deterministic
     bound on the class (iii) carryover the whole-entry gate leaves. Per content-dependent survivor k, the build
     counts, in every ON point's live frames, the live reads of k whose work can differ from an always-ON game's:
@@ -459,11 +527,21 @@ def a3(recs, z=Z_END, first_game=1, last_game=None, spec=None):
     spec = a3_spec() if spec is None else spec
     if not spec:
         raise Refused("the A3 inventory names no structure")
-    dep = [n for n, sid, kind, why in spec if kind == "dependent"]
-    drained = [n for n, sid, kind, why in spec if kind == "drained"]
-    for n, sid, kind, why in spec:
+    for row in spec:
+        if len(row) != 5:
+            raise Refused("A3 row %r: needs (name, survivor id, kind, reason, proof)" % (row,))
+    dep = [n for n, sid, kind, why, proof in spec if kind == "dependent"]
+    drained = [n for n, sid, kind, why, proof in spec if kind == "drained"]
+    for n, sid, kind, why, proof in spec:
         if kind not in ("dependent", "drained", "zero") or (kind != "dependent" and not why.strip()):
             raise Refused("A3 row %s (%s): kind %r needs a reason when zero or drained" % (n, sid, kind))
+        # ruling FRAME-TIME-ROUND-R2 (1), default-deny: zero only with a proof the sweep checks (sweep:...) or an
+        # executed probe (probe:...); drained only by its executed probe (FtA3.PointStart's a3drain lines)
+        if kind == "zero" and not re.fullmatch(r"(sweep|probe):\S+", proof):
+            raise Refused("A3 row %s (%s): a zero row needs its proof reference (sweep:... or probe:...), got %r"
+                          % (n, sid, proof))
+        if kind == "drained" and proof != "probe:a3drain":
+            raise Refused("A3 row %s (%s): a drained row's proof is its probe (probe:a3drain), got %r" % (n, sid, proof))
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("A3 needs one Stopwatch frequency (got %s)" % sorted(freq))
@@ -489,12 +567,16 @@ def a3(recs, z=Z_END, first_game=1, last_game=None, spec=None):
             if len(rows) != 1:
                 raise Refused("A3 drained structure %s: game %d has %d a3drain lines (needs 1)" % (k, g, len(rows)))
             r = rows[0]
+            npts = sum(1 for q in recs if q["kind"] == "p" and q["game"] == g)
+            if r.get("starts", -1) != npts:
+                raise Refused("A3 drained structure %s: game %d probed at %s point starts, the game has %d points"
+                              % (k, g, r.get("starts"), npts))
             if r.get("starts", 0) <= 0 or r.get("nonempty", -1) != 0 or r.get("faults", -1) != 0:
                 raise Refused("A3 drained structure %s: game %d starts=%s nonempty=%s faults=%s (needs starts > 0, "
                               "nonempty 0, faults 0)" % (k, g, r.get("starts"), r.get("nonempty"), r.get("faults")))
     cals = {}
     for r in recs:
-        if r["kind"] == "cal" and r.get("why", "").startswith("game") and r.get("ckind") == "a3":
+        if r["kind"] == "cal" and re.fullmatch(r"game\d+", str(r.get("why", ""))) and r.get("ckind") == "a3":
             u = [int(x) for x in r["u"].split(",")]
             pp = [int(x) for x in r["p"].split(",")]
             if len(u) != len(pp) or not u:
@@ -502,6 +584,20 @@ def a3(recs, z=Z_END, first_game=1, last_game=None, spec=None):
             cals.setdefault(r["i"], {})[r["k"]] = abs(sum(b - a for a, b in zip(u, pp)) / len(u)) / r["n"] * 1e6 / f
     if dep and len(cals) < 2:
         raise Refused("A3 needs at least two game-start calibrations (got %d)" % len(cals))
+    # round-2 HIGH (ft_parse.py:495): every game's start calibration carries the A3 family; one game's family
+    # dropped must withhold the verdict, never shrink J
+    if dep:
+        cal_games = {}
+        for r in recs:
+            if r["kind"] == "cal" and re.fullmatch(r"game\d+", str(r.get("why", ""))):
+                cal_games.setdefault(int(r["why"][4:]), set()).add(r["i"])
+        for g in range(0, last_game + 1):
+            runs = cal_games.get(g, set())
+            if len(runs) != 1:
+                raise Refused("A3: game %d has %d start calibrations (needs 1)" % (g, len(runs)))
+            i = next(iter(runs))
+            if i not in cals:
+                raise Refused("calibration %d (game %d) has no a3 line for %s" % (i, g, sorted(dep)))
     ds, dk = [], {}
     for i in sorted(cals):
         miss = sorted(k for k in dep if k not in cals[i])
@@ -611,6 +707,19 @@ def b3(recs):
     hv = [r for r in recs if r["kind"] == "heavy"]
     if not hv:
         raise Refused("B3 needs heavy lines (one per operation per game)")
+    # round-2 MEDIUM (ft_parse.py:611): complete records, never a pass by absence: every game with point lines
+    # has exactly one heavy line per operation of FtHeavy.Names and exactly one offthread line
+    for g in sorted(set(q["game"] for q in recs if q["kind"] == "p" and q["game"] >= 0)):
+        for op in HEAVY_OPS:
+            n = sum(1 for r in hv if r.get("g") == g and r.get("op") == op)
+            if n != 1:
+                raise Refused("B3: game %d has %d heavy lines for %s (needs 1)" % (g, n, op))
+        alien = sorted(set(r.get("op") for r in hv if r.get("g") == g) - set(HEAVY_OPS))
+        if alien:
+            raise Refused("B3: game %d has heavy lines for unknown operations %s" % (g, alien))
+        n = sum(1 for r in recs if r["kind"] == "offthread" and r.get("g") == g)
+        if n != 1:
+            raise Refused("B3: game %d has %d offthread lines (needs 1)" % (g, n))
     ops = {}
     for r in hv:
         a, e, o, lv = ops.get(r["op"], (0, 0, 0, 0))
@@ -710,6 +819,36 @@ def _side_vr7(r):
     if r["arm"] != "OFF":
         return None
     return "ON" if r.get("plant", 0) else "OFF"
+
+
+def b2_per_minute(ub_per_frame, tr):
+    """B2's bound per minute of live combat at T_ref (METHOD-V4.md section 3.8's report; round-1 MEDIUM 16):
+    the per-frame bound times the frames a minute holds at T_ref microseconds per frame."""
+    if tr <= 0:
+        raise Refused("T_ref must be positive (got %r)" % tr)
+    return ub_per_frame * 60e6 / tr
+
+
+def longest_frames(recs, first_game=1):
+    """The longest ON and the longest OFF live frame of the measured games, in ms by the settled Stopwatch
+    frequency (the point lines' maxF; reported, round-1 MEDIUM 16)."""
+    freq = set(r["freq"] for r in recs if r["kind"] == "settled")
+    if len(freq) != 1:
+        raise Refused("longest frames need one Stopwatch frequency (got %s)" % sorted(freq))
+    f = freq.pop()
+    out = {}
+    for r in recs:
+        if r["kind"] == "p" and r["game"] >= first_game:
+            out[r["arm"]] = max(out.get(r["arm"], 0), r["maxF"])
+    if "ON" not in out or "OFF" not in out:
+        raise Refused("longest frames need point lines of both arms (got %s)" % sorted(out))
+    return {a: v * 1000.0 / f for a, v in out.items()}
+
+
+def dc_minus_ds(recs):
+    """dC minus dS, us per live frame (reported, round-1 MEDIUM 16): the cycle estimate in us less the
+    wall-clock-on-thread estimate, both the point-level contrasts the report prints."""
+    return dC_us(recs)[0] - d_key_us(recs, "sS", "ticks")[0]
 
 
 def hitch(recs, first_game=1, side=_side_plain):
@@ -944,6 +1083,14 @@ def menu_check(recs, z=Z_END):
             seg[r["round"]]["p"] = r
     if not fhs:
         raise Refused("no menu calibration line")
+    # the absent-record sweep (ruling FRAME-TIME-ROUND-R2): every segment FtMenu counted has its menu line, and every
+    # menu point line its segment; a dropped menu line must not leave its segment out of the judgement
+    want_segs = list(range(1, (d.get("of") or 0) + 1))
+    if sorted(seg) != want_segs:
+        bad.append("menu lines for segments %s, menu_done counts %s" % (sorted(seg), d.get("of")))
+    orphan = sorted(r["round"] for r in recs if r["kind"] == "p" and r["game"] == -1 and r["round"] not in seg)
+    if orphan:
+        bad.append("menu point lines with no menu line: segments %s" % orphan)
     pairs, lv = {}, {}
     for s in sorted(seg):
         m = seg[s]
@@ -957,6 +1104,10 @@ def menu_check(recs, z=Z_END):
                                                                               want))
         if p.get("missing_end", 0):
             bad.append("segment %d: missing_end=%d" % (s, p["missing_end"]))
+        # round-2 MEDIUM (FtClock.cs:144): menu frames are never a combat point's closing frame; a segment with an
+        # excluded frame or no measured frame is a defect, not a smaller sample
+        if p.get("excl", 0) != 0 or p["n"] <= 0:
+            bad.append("segment %d: excl=%d n=%d (a menu segment measures every frame)" % (s, p.get("excl", 0), p["n"]))
         if p["n"] > 0:
             pairs.setdefault(m["pair"], {})[m["arm"]] = p
         if m["arm"] == "OFF" and m.get("c_plant", 0) > 0 and p.get("pn", 0) > 0 and p["n"] > 0:
@@ -1171,8 +1322,14 @@ def report(text):
     b2 = None
     try:
         b2 = hitch(recs)
+        try:
+            trb = t_ref(recs)
+        except (Refused, KeyError, ZeroDivisionError, ValueError):
+            trb = None
         for h, v in b2.items():
-            out.append("B2 H=%d ms %s UB %.4f per 1000 frames" % (h, "FAIL" if v["fail"] else "pass", v["ub_per_1000"]))
+            out.append("B2 H=%d ms %s UB %.4f per 1000 frames, %s per minute of live combat at T_ref"
+                       % (h, "FAIL" if v["fail"] else "pass", v["ub_per_1000"],
+                          "%.4f" % b2_per_minute(v["ub_per_frame"], trb) if trb else "not computable"))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("B2 not computable: %s" % e)
     try:
@@ -1231,6 +1388,15 @@ def report(text):
             out.append("%s %.2f us per live frame, one-sided half-width %.2f, df %d (reported)" % (name, e_, h_, df_))
         except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
             out.append("%s not computable: %s" % (name, e))
+    try:
+        out.append("dC minus dS %.2f us per live frame (reported)" % dc_minus_ds(recs))
+    except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
+        out.append("dC minus dS not computable: %s" % e)
+    try:
+        lf = longest_frames(recs)
+        out.append("longest live frame: ON %.2f ms, OFF %.2f ms (reported)" % (lf["ON"], lf["OFF"]))
+    except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
+        out.append("longest frames not computable: %s" % e)
     for name, key in (("e_F", "sF"), ("e_S", "sS")):
         try:
             e_, h_, df_ = e_key(recs, key)
