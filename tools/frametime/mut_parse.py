@@ -8,6 +8,8 @@ import sys
 W, OUT = sys.argv[1], sys.argv[2]
 src = os.path.join(W, "tools", "frametime")
 MUTS = [
+    ("VR6 ignores a disarm", 'bad.append("disarmed: " + "; ".join(dis))', 'pass'),
+    ("VR6 refused-and-sent check dropped", 'for r in sorted(refused_routes & sent_routes):', 'for r in []:'),
     ("B3 ignores heavy calls with combat live", 'ops[r["op"]] = (a + r["at_call"], e + r["edge"], o + r["off"], lv + r["live"])',
      'ops[r["op"]] = (a, e + r["edge"], o + r["off"], lv + r["live"])'),
     ("B3 overlap test inverted", 'hit = [q[2] for q in pts if a < q[1] and q[0] < b]',

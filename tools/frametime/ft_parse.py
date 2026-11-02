@@ -18,6 +18,8 @@ Lines read (all values integers; a value with a decimal point is refused, HIGH 5
   census   per entry per game: g entry comp shape on guarded outside
   heavy    per operation per game: g op live between pick over menu at_call edge off (B3)
   offthread per game: g span_off hash_t0 hash_t1 (B3)
+  refusals at game over and quit: why pairs what:route=count ... (VR6's build half)
+  disarmed once, if FtArm's predicate fails after arming: input pt (the sitting is INVALID)
 
 The plant gives e_C_lo (V4 3.5) and VR7. Part 3's remainder adds D_up (V4 3.6) and K_up (UPKEEP spans); until
 those lines exist, report() states U as not computable rather than computing it without them.
@@ -234,6 +236,17 @@ def parse_line(line):
         return None
     kind, rest = m.group(1), m.group(2)
     rec = {"kind": kind}
+    if kind == "refusals":
+        # what:route=count tokens; route names hold ':' and '/', so split each token at its last '='
+        kv = {}
+        for tok in rest.split():
+            k, _, v = tok.rpartition("=")
+            if k in ("why", "pairs"):
+                rec[k] = v if k == "why" else _int(k, v)
+            elif k:
+                kv[k] = _int(k, v)
+        rec["pairs_kv"] = kv
+        return rec
     for k, v in _KV.findall(rest):
         if k == "kind":
             k = "ckind"      # a cal line's kind=fhat|disp|span must not overwrite the line kind
@@ -479,6 +492,28 @@ def b3(recs):
     return not bad, bad, ops
 
 
+def vr6_build(recs):
+    """VR6's build half (FORMAT-M-PLAN.md V2 part b): the latest refusals line (why=quit when present, else the
+    last game over) gives every refused what:route pair's count and every allowed route's send count; a route that
+    was both refused and sent fails, and any disarmed line makes the sitting INVALID. The file listings before and
+    after are the runner's half. Returns (ok, reasons, {pair: count}, [disarm inputs])."""
+    lines = [r for r in recs if r["kind"] == "refusals"]
+    dis = ["%s at %s" % (r.get("input", "?"), r.get("pt", "?")) for r in recs if r["kind"] == "disarmed"]
+    if not lines:
+        raise Refused("VR6 needs a refusals line (game over or quit)")
+    quit_ = [r for r in lines if r.get("why") == "quit"]
+    last = (quit_ or lines)[-1]
+    pairs = last["pairs_kv"]
+    bad = []
+    refused_routes = set(k.split(":", 1)[1] for k in pairs if k.startswith("route:"))
+    sent_routes = set(k.split(":", 1)[1] for k in pairs if k.startswith("sent:"))
+    for r in sorted(refused_routes & sent_routes):
+        bad.append("route %s both refused and sent" % r)
+    if dis:
+        bad.append("disarmed: " + "; ".join(dis))
+    return not bad, bad, pairs, dis
+
+
 def _side_plain(r):
     """B2's sides: the window's arm; planted windows take no side (M5: exposure and VR7 only)."""
     return r["arm"] if r.get("plant", 0) == 0 else None
@@ -715,6 +750,14 @@ def report(text):
         out.append("VERDICT B1 INVALID: %s failed" % ", ".join(failed))
     else:
         out.append("VERDICT B1: see U against the bar above; conditional on VR6 from frame_time_seat.ps1's report")
+    try:
+        ok6, why6, pairs, dis = vr6_build(recs)
+        out.append("VR6 build half %s%s; %d refused or sent pairs (file listings: the runner's report)"
+                   % ("PASS" if ok6 else "FAIL: ", "; ".join(why6), len(pairs)))
+        if dis:
+            out.append("VERDICT INVALID: the build disarmed (%s)" % "; ".join(dis))
+    except Refused as e:
+        out.append("VR6 build half not computable: %s" % e)
     if okb3 is None:
         out.append("VERDICT B3 withheld: not computable")
     elif not vr["VR5"]:

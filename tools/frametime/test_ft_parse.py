@@ -389,6 +389,7 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
             L.append("[FRAME-TIME] heavy g=%d op=%s live=%d between=7 pick=1 over=1 menu=0 at_call=%d edge=0 off=0"
                      % (g, op, k, k))
         L.append("[FRAME-TIME] offthread g=%d span_off=0 hash_t0=%d hash_t1=%d" % (g, hash_at[0], hash_at[1]))
+    L.append("[FRAME-TIME] refusals why=quit pairs=2 queue:e=3 sent:GET_h/api/v1/mod-version=1")
     return "\n".join("[Info   :CompetitiveRounds] " + x for x in L)
 
 
@@ -437,3 +438,36 @@ def test_b3_refuses_without_heavy_lines():
     recs = [r for r in P.read(_log()) if r["kind"] != "heavy"]
     with pytest.raises(P.Refused):
         P.b3(recs)
+
+
+def _vr6_log(extra=()):
+    base = [
+        "[FRAME-TIME] refused what=queue route=e n=1",
+        "[FRAME-TIME] refusals why=game1 pairs=3 queue:e=1 route:GET_10.0.0.1/api/v1/queue/poll/{n}=4 "
+        "sent:GET_10.0.0.1/api/v1/mod-version=2",
+        "[FRAME-TIME] refusals why=quit pairs=4 queue:e=2 closing:x=1 route:GET_10.0.0.1/api/v1/queue/poll/{n}=9 "
+        "sent:GET_10.0.0.1/api/v1/mod-version=2",
+    ] + list(extra)
+    return "\n".join("[Info   :CompetitiveRounds] " + x for x in base)
+
+
+def test_vr6_build_reads_the_quit_counts():
+    ok, why, pairs, dis = P.vr6_build(P.read(_vr6_log()))
+    assert ok, why
+    assert pairs["route:GET_10.0.0.1/api/v1/queue/poll/{n}"] == 9 and pairs["closing:x"] == 1 and not dis
+
+
+def test_vr6_build_fails_a_route_refused_and_sent():
+    log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=2 route:GET_h/api/v1/x=1 sent:GET_h/api/v1/x=1"])
+    ok, why, _, _ = P.vr6_build(P.read(log))
+    assert not ok and any("both refused and sent" in w for w in why), why
+
+
+def test_vr6_build_fails_on_a_disarm():
+    ok, why, _, dis = P.vr6_build(P.read(_vr6_log(["[FRAME-TIME] disarmed input=fighters pt=3.2.1"])))
+    assert not ok and dis == ["fighters at 3.2.1"], why
+
+
+def test_vr6_build_refuses_without_a_refusals_line():
+    with pytest.raises(P.Refused):
+        P.vr6_build(P.read("[Info   :CompetitiveRounds] [FRAME-TIME] refused what=queue route=e n=1"))
