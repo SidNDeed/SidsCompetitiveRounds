@@ -6,7 +6,7 @@
     <RootNamespace>CompetitiveRounds</RootNamespace>
     <LangVersion>latest</LangVersion>
     <NoWarn>$(NoWarn);CS1701;CS1702;CS0169;CS0649</NoWarn>
-    <Configurations>Debug;Release;Thunderstore;G3</Configurations>
+    <Configurations>Debug;Release;Thunderstore;G3;FrameTime</Configurations>
     <!-- Deterministic, symbol-free output: BepInEx stack traces report IL
          offsets regardless (the pdb is never loaded at runtime), so shipped
          builds carry no debug artifacts. Do not change. -->
@@ -39,6 +39,16 @@
        release deletes this group, the marker branch and the exclusion. -->
   <PropertyGroup Condition="'$(Configuration)' == 'G3'">
     <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'FrameTime'">
+    <!-- FrameTime (B11 format M): the development-only measurement build. Defines
+         SCR_FRAMETIME; optimized as Release, so the measured code runs as shipped.
+         Never installed by a build (the CopyToPlugins condition below) and never
+         published; its blocks compile to nothing in Release or Thunderstore, which
+         tools/frametime/hunk_check.py checks over both symbol sets. -->
+    <DefineConstants>$(DefineConstants);SCR_FRAMETIME</DefineConstants>
     <Optimize>true</Optimize>
   </PropertyGroup>
 
@@ -280,7 +290,7 @@
          searches. MSBuild property functions parse it straight from source. -->
     <MusicAssetRevision>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\MusicAssets.cs')), 'ASSET_REVISION\s*=\s*&quot;([a-z0-9]+)&quot;').Groups[1].Value)</MusicAssetRevision>
   </PropertyGroup>
-  <Target Name="CopyToPlugins" AfterTargets="Build" Condition="'$(SkipCopyToPlugins)' != 'true' and '$(Configuration)' != 'G3'">
+  <Target Name="CopyToPlugins" AfterTargets="Build" Condition="'$(SkipCopyToPlugins)' != 'true' and '$(Configuration)' != 'G3' and '$(Configuration)' != 'FrameTime'">
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds" />
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cards" />
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cosmetics" />
