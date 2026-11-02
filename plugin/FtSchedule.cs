@@ -14,6 +14,9 @@ namespace CompetitiveRounds
     /// FT_Start after the previous frame closed, so frame f's sums carry frame f's state.</summary>
     internal static class FtSchedule
     {
+        // The gate (FtGate.Off) is written only by StartPoint and EndPoint, both reached only from Boundary at
+        // FT_Start, so it is constant within a frame: a patch's prefix and finalizer in one frame always decide
+        // alike (an RPC cannot span a frame boundary). GameStart and GameOver may run mid-frame and never touch it.
         internal static int Game = -1;
         internal static int Round;
         internal static int PointInRound;
@@ -92,7 +95,6 @@ namespace CompetitiveRounds
             PointInRound = 0;
             RoundOver = true;
             PrevArm = -1;
-            FtGate.Off = false;
             FtSpan.Moment = FtSpan.Between;
             FtCensus.Reset();
             FtSpan.Reset();
@@ -103,7 +105,6 @@ namespace CompetitiveRounds
         /// <summary>GameStateWatcher.OnGameOver: the census line for the game.</summary>
         internal static void GameOver()
         {
-            FtGate.Off = false;
             FtSpan.Moment = FtSpan.GameOver;
             FtCensus.LogGame(Game);
         }

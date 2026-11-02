@@ -31,13 +31,15 @@ namespace CompetitiveRounds
             return id;
         }
 
-        /// <summary>True when the entry must return its closed value now (the gate is set).</summary>
+        /// <summary>True when the entry must return its closed value now (the gate is set). The gate is read
+        /// first and only the gate decides: it is constant within a frame (FtSchedule), while Moment may change
+        /// mid-frame and only sorts the counts.</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool Skip(int entry)
         {
-            if (FtSpan.Moment != FtSpan.Live) { Outside[entry]++; return false; }
             if (FtGate.Off) { Guarded[entry]++; return true; }
-            OnLive[entry]++;
+            if (FtSpan.Moment == FtSpan.Live) OnLive[entry]++;
+            else Outside[entry]++;
             return false;
         }
 
