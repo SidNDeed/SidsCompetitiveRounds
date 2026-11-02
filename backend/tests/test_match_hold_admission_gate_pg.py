@@ -192,6 +192,8 @@ def _sql_shape(sql):
     body = clean.strip().rstrip(";").strip()
     if ";" in body:
         return None, "more than one statement"
+    if re.search(r'""\s*\(', body):
+        return None, "a quoted function name"
     head = (re.match(r"[A-Za-z]+", body) or [""])[0].upper()
     if head in _SQL_TXN_HEADS:
         return "ends", head
@@ -773,7 +775,8 @@ R2_HELPER_LINES = [
     "async def row_of(ctx, pid):",
     "    return (await ctx.db.execute(text('SELECT * FROM t WHERE id = :p'), {})).first()",
 ]
-R2_CONSTS = {"_RDM_ATTEMPT_SQL": "INSERT INTO ffa_readmit_attempts (n) SELECT 1"}
+R2_CONSTS = {"_RDM_ATTEMPT_SQL": "INSERT INTO ffa_readmit_attempts (n) SELECT 1",
+             "_QUOTED_FN_SQL": 'SELECT "lo_create"(0)'}
 _R2_GATE = "admitted, _ = await _lease_admission_gate(ctx.db, [pid], 'ffa', ctx.lid)"
 _R2_REFUSE = ["if not admitted:", "    return await _rdm_refuse(ctx, pid, 'other_mode')"]
 _R2_ROW = ["row = await row_of(ctx, pid)", "if row is None:",
@@ -799,7 +802,7 @@ R2_PREFIX_PROGRAMS = [
      "a non-refusing exit after a write", "_lease_admission_gate",
      ["refused = await lapse_then_none(ctx, pid)", "if refused is not None:",
       "    return refused", _R2_GATE] + _R2_REFUSE),
-    ("F9 a commit inside _rdm_refuse's arguments (an exit before the gate)",
+    ("also: a commit inside _rdm_refuse's arguments at an exit before the gate",
      "an await inside the refusal's arguments", "_lease_admission_gate",
      ["row = await row_of(ctx, pid)", "if row is None:",
       "    return await _rdm_refuse(ctx, await ctx.db.commit(), 'not_held')",
@@ -807,6 +810,10 @@ R2_PREFIX_PROGRAMS = [
     ("ruling: SELECT lo_create(0) is not a read",
      "the function lo_create is not on the read-only list", "_lease_admission_gate",
      _R2_ROW + ["await ctx.db.execute(text('SELECT lo_create(0)'), {})", _R2_GATE]
+     + _R2_REFUSE),
+    ("also: a quoted function name is not a read",
+     "a quoted function name", "_lease_admission_gate",
+     _R2_ROW + ["await ctx.db.execute(text(_QUOTED_FN_SQL), {})", _R2_GATE]
      + _R2_REFUSE),
     ("generic: a lambda call", "Lambda inside", "_lease_admission_gate",
      _R2_ROW + ["x = (lambda: 1)()", _R2_GATE] + _R2_REFUSE),
