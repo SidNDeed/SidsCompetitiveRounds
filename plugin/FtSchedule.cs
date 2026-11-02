@@ -117,6 +117,7 @@ namespace CompetitiveRounds
             FtCensus.LogGame(Game);
             FtHeavy.LogGame(Game);
             FtUpload.LogCounts("game" + Game);
+            FtDrive.GameOver(Game);
         }
 
         /// <summary>SplitMix64 over five integers and a stream constant (the plant's slot draw).</summary>

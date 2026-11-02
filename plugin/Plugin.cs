@@ -3990,6 +3990,9 @@ namespace CompetitiveRounds
         {
             if (!initialized || Plugin.modDisabled) return;
             CompetitiveUI.DrawUI();
+#if SCR_FRAMETIME
+            try { FtDrive.Banner(); } catch { }
+#endif
             // RJ Stage 2 (S2): the non-modal hold banner; draws nothing
             // unless this client holds or just ended a hold.
             try { TeamHoldBanner.Draw(); } catch { }
