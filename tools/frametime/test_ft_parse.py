@@ -309,3 +309,94 @@ def test_game0_mutant_must_void_every_round():
 def test_zero_state_reports_a_game_with_no_valid_round():
     out = P.zero_state([_zp(0, 1, 1, "ON", 4), _zp(1, 1, 1, "ON", 1), _zp(2, 1, 1, "ON", 0)])
     assert out[3] == [(1, 1)] and out[4] == [1]
+
+
+# ------------------------------------------------------------------ VR1, VR4, VR8 predecessor, VR9, and report() end to end
+
+def test_vr1_flags_a_cap():
+    recs = [{"kind": "settled", "g": 1, "vsync": 0, "target": -1}]
+    assert P.vr1(recs, "", 2650.0)[0]
+    assert not P.vr1(recs, "", 1e6 / 144)[0]                       # T_ref sits on 144 FPS
+    assert not P.vr1([{"kind": "settled", "g": 1, "vsync": 1, "target": -1}], "", 2650.0)[0]
+    assert not P.vr1(recs, "[FPSCAP] on", 2650.0)[0]
+
+
+def test_vr4_bar():
+    assert P.vr4(30.0, 2650.0) and not P.vr4(40.0, 2650.0)
+
+
+FREQ, FHAT = 10000000, 3000000000
+
+
+def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7):
+    """A synthetic sitting, every line as FtFrames, FtCalib and FtCensus write it. Point costs: ON adds cost_us of C
+    per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor case)."""
+    import random
+    rng = random.Random(seed)
+    L = ["[FRAME-TIME] settled g=-1 seed=1 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d" % (FREQ, FHAT),
+         "[FRAME-TIME] plant c_plant=80 ticks=800 from=0.1.2"]
+    for g in range(games):
+        L.append("[FRAME-TIME] settled g=%d seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
+                 % (g, FREQ, FHAT))
+        L.append("[FRAME-TIME] cal i=%d why=game%d kind=disp shape=S6 n=100000 u=1000000,1000000 p=1300000,1300000"
+                 % (g + 1, g))
+        L.append("[FRAME-TIME] cal i=%d why=game%d kind=disp shape=S1 n=100000 u=1000000,1000000 p=1200000,1200000"
+                 % (g + 1, g))
+        base = 2600.0 * (1 + 0.05 * rng.random())
+        pred = "none"
+        guarded = 0
+        offl = 0
+        for rnd in range(1, 8):
+            first_on = rng.random() < 0.5
+            for pt in (1, 2):
+                on = first_on if pt == 1 else not first_on
+                n = 2000 + rng.randrange(800)
+                c_us = base + rng.gauss(0, 8) + (cost_us if on else 0.0)
+                if on and pt == 1 and pred == "ON":
+                    c_us += carry_us
+                sc = int(n * c_us * FHAT / 1e6)
+                f_us = c_us
+                sf = int(n * f_us * FREQ / 1e6)
+                pn = n // 4 if not on else 0
+                psc = int(pn * (c_us + 80.0) * FHAT / 1e6) if pn else 0
+                lf = n + pn + 1
+                spg = int(lf * 20.0 * FREQ / 1e6) if on else 0
+                spu = int(lf * 1.0 * FREQ / 1e6)
+                zs = 4 if g == 0 and on else 0
+                gq = 0 if on else 3 * lf
+                guarded += gq
+                offl += 0 if on else lf
+                L.append("[FRAME-TIME] p pt=%d.%d.%d arm=%s gate=%d pred=%s n=%d sF=%d sS=%d sC=%d maxF=%d pn=%d psF=%d "
+                         "psS=0 psC=%d plant_mixed=0 windows=%d live_frames=%d missing_end=0 span_g=%d span_gn=%d "
+                         "span_u=%d span_un=%d on_calls=%d guarded=%d zs=%d zl=1"
+                         % (g, rnd, pt, "ON" if on else "OFF", 0 if on else 1, pred, n, sf, sf // 2, sc, sf // n * 3,
+                            pn, int(pn * f_us * FREQ / 1e6), psc, (n + pn) // 120, lf, spg, lf if on else 0, spu, lf,
+                            3 * lf if on else 0, gq, zs))
+                for w in range((n + pn) // 120):
+                    plant = 1 if (not on and w % 4 == 0) else 0
+                    k = 1 if rng.random() < 0.01 else 0
+                    L.append("[FRAME-TIME] w pt=%d.%d.%d arm=%s plant=%d partial=0 n=120 sF=1 sS=1 sC=1 maxF=1 medF=1 "
+                             "e4=%d,%d e8=0,0 e16=0,0 gc=0" % (g, rnd, pt, "ON" if on else "OFF", plant, k, k))
+                pred = "ON" if on else "OFF"
+        L.append("[FRAME-TIME] census g=%d entry=CE-p6 comp=CombatEvidence shape=S6 on=%d guarded=%d outside=0"
+                 % (g, guarded, guarded))
+    return "\n".join("[Info   :CompetitiveRounds] " + x for x in L)
+
+
+def test_report_end_to_end_reaches_a_verdict():
+    out = P.report(_log())
+    assert "not computable" not in out, out
+    assert "VR8 zero-state PASS: game 0 (mutant) 7 of 7 rounds void" in out
+    assert "VERDICT B1:" in out and "INVALID" not in out, out
+
+
+def test_predecessor_flags_a_carryover():
+    recs = P.read(_log(carry_us=200.0, games=33))
+    assert P.predecessor(recs)[0]
+    assert not P.predecessor(P.read(_log(carry_us=0.0, games=33)))[0]
+
+
+def test_vr9_bounds_span_time_by_dc():
+    recs = P.read(_log())
+    assert P.vr9(recs, 80.0)[0]
+    assert not P.vr9(recs, 10.0)[0]

@@ -375,6 +375,77 @@ def t_ref(recs, first_game=1):
     return sum(q["sF"] for q in pts) * 1e6 / freq.pop() / n
 
 
+def vr1(recs, text, tref):
+    """VR1, no cap: no [FPSCAP] line; every settled line vsync 0 and target -1 or above 1000; T_ref not within 2
+    percent of 1e6 / k for k in 60, 75, 120, 144, 165, 240."""
+    bad = []
+    if "[FPSCAP]" in text:
+        bad.append("an [FPSCAP] line is present")
+    for r in recs:
+        if r["kind"] == "settled" and r["g"] >= 0:
+            if r.get("vsync", 0) != 0:
+                bad.append("settled g=%d vsync=%d" % (r["g"], r["vsync"]))
+            tg = r.get("target", -1)
+            if not (tg == -1 or tg > 1000):
+                bad.append("settled g=%d target=%d" % (r["g"], tg))
+    for k in (60, 75, 120, 144, 165, 240):
+        if abs(tref - 1e6 / k) <= 0.02 * (1e6 / k):
+            bad.append("T_ref %.1f us within 2 percent of 1e6/%d" % (tref, k))
+    return not bad, bad
+
+
+def vr4(hw_us, tref):
+    """VR4, resolution: dC's one-sided half-width at 0.9875 at most 1.5 percent of T_ref."""
+    return hw_us <= 0.015 * tref
+
+
+def predecessor(recs, first_game=1):
+    """VR8's predecessor check (V4 3.3): each first-in-round ON point's mean C (us, by its game's f_hat) minus its
+    round's OFF mean, grouped by the arm of the previous round's last point (the point line's pred; first rounds
+    have pred none and drop out); FLAG when (after-ON mean - after-OFF mean) - 1.96 x Welch SE > 0.
+    Returns (flag, after-ON values, after-OFF values)."""
+    fh = _fhat(recs)
+    g = games_of(recs, first_game)
+    groups = {"ON": [], "OFF": []}
+    for k in sorted(g):
+        rounds = {}
+        for q in g[k]:
+            rounds.setdefault(q["round"], []).append(q)
+        for pts in rounds.values():
+            first = [q for q in pts if q["point"] == 1 and q["arm"] == "ON" and q.get("pred") in ("ON", "OFF")]
+            off = [q for q in pts if q["arm"] == "OFF" and q["n"] > 0]
+            if not first or not off or first[0]["n"] <= 0:
+                continue
+            x = first[0]["sC"] / first[0]["n"] - sum(q["sC"] for q in off) / sum(q["n"] for q in off)
+            groups[first[0]["pred"]].append(x * 1e6 / fh[k])
+    a, b = groups["ON"], groups["OFF"]
+    if len(a) < 2 or len(b) < 2:
+        raise Refused("predecessor check needs two rounds in each group (got %d and %d)" % (len(a), len(b)))
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    va = sum((v - ma) ** 2 for v in a) / (len(a) - 1)
+    vb = sum((v - mb) ** 2 for v in b) / (len(b) - 1)
+    return (ma - mb) - 1.96 * math.sqrt(va / len(a) + vb / len(b)) > 0, a, b
+
+
+def vr9(recs, bound_us, first_game=1):
+    """VR9, absorption: the gated spans' ON live time per live frame (span_g over live_frames at ON points, us by
+    the settled frequency), frame-weighted over games, at its lower 97.5 percent end, at most the bound
+    max(0, dC_up) / min(1, e_C_lo). Returns (ok, lower end)."""
+    freq = set(r["freq"] for r in recs if r["kind"] == "settled")
+    if len(freq) != 1:
+        raise Refused("VR9 needs one Stopwatch frequency (got %s)" % sorted(freq))
+    f = freq.pop()
+    g = games_of(recs, first_game)
+    sw = []
+    for k in sorted(g):
+        on = [q for q in g[k] if q["arm"] == "ON"]
+        lf = sum(q["live_frames"] for q in on)
+        if lf > 0:
+            sw.append((sum(q["span_g"] for q in on) * 1e6 / f / lf, sum(q["n"] for q in on)))
+    est, hw, _ = fw_interval(sw, _ND.inv_cdf(0.975))
+    return est - hw <= bound_us, est - hw
+
+
 def _side_plain(r):
     """B2's sides: the window's arm; planted windows take no side (M5: exposure and VR7 only)."""
     return r["arm"] if r.get("plant", 0) == 0 else None
@@ -567,7 +638,40 @@ def report(text):
                       50000 / u if u > 0 else float("inf")))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("U not computable: %s" % e)
-    out.append("VERDICT withheld: VR1, VR4, VR6, VR9 and VR8's predecessor check are not yet computed by this parser")
+    vr = {}
+    try:
+        tr = t_ref(recs)
+        de, dh, _, _ = dC_us(recs)
+        _, _, _, elo, _, _ = e_c(recs)
+        ok1, why1 = vr1(recs, text, tr)
+        vr["VR1"] = ok1
+        out.append("VR1 %s %s" % ("PASS" if ok1 else "FAIL", "; ".join(why1)))
+        vr["VR4"] = vr4(dh, tr)
+        out.append("VR4 %s half-width %.2f us against 1.5 percent of T_ref = %.2f us"
+                   % ("PASS" if vr["VR4"] else "FAIL", dh, 0.015 * tr))
+        nr = len(set((q["game"], q["round"]) for q in recs if q["kind"] == "p" and q["game"] >= 1))
+        vfrac = len(meas) / nr if nr else 1.0
+        flag, a, b = predecessor(recs)
+        vr["VR8"] = vfrac <= 0.10 and not flag and zok
+        out.append("VR8 %s: %.1f percent of measured rounds void (max 10); predecessor %s (after ON %d, after OFF %d)"
+                   % ("PASS" if vr["VR8"] else "FAIL", 100 * vfrac, "FLAG" if flag else "no flag", len(a), len(b)))
+        ok9, lo9 = vr9(recs, max(0.0, de + dh) / min(1.0, max(elo, 1e-9)))
+        vr["VR9"] = ok9
+        out.append("VR9 %s: gated span time per ON live frame, lower end %.2f us" % ("PASS" if ok9 else "FAIL", lo9))
+    except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
+        out.append("VR1/VR4/VR8/VR9 not computable: %s" % e)
+    joined = "\n".join(out)
+    vr["VR2"] = ok2 and "VR2 e_C_lo PASS" in joined
+    vr["VR3"] = "VR3 PASS" in joined
+    vr["VR5"] = ok5
+    missing = [k for k in ("VR1", "VR4", "VR8", "VR9") if k not in vr]
+    failed = [k for k, v in sorted(vr.items()) if not v]
+    if missing:
+        out.append("VERDICT withheld: %s not computable" % ", ".join(missing))
+    elif failed:
+        out.append("VERDICT B1 INVALID: %s failed" % ", ".join(failed))
+    else:
+        out.append("VERDICT B1: see U against the bar above; conditional on VR6 from frame_time_seat.ps1's report")
     return "\n".join(out)
 
 
