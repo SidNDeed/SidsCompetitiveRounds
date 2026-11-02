@@ -171,10 +171,114 @@ def test_body_ddl_ends_at_the_lexer_semicolon(sql):
                ) == ["CREATE TABLE t (a int)"]
 
 
-def test_a_body_that_does_not_lex_and_names_the_table_raises(sql):
-    with pytest.raises(mtd.MigrationDdlError, match="does not lex"):
+def test_an_executable_body_that_does_not_lex_raises_whatever_it_names(sql):
+    # R3-A1: no mention gate; the body below names nothing and still refuses
+    for body in ("$$ x = 'open t $$", "$$ x = 'open $$"):
+        with pytest.raises(mtd.MigrationDdlError, match="does not lex"):
+            sql("CREATE TABLE t (a int);\n"
+                "CREATE FUNCTION f() RETURNS int LANGUAGE plpython3u AS %s;\n" % body)
+
+
+# REHEARSAL-FOUR round 3, item (d) as amended by R3-A1: executable positions
+# (a DO body, a CREATE FUNCTION or PROCEDURE AS body, and the commands of an
+# EXECUTE inside such a body) are read by the lexer with nothing decoded.
+# A form the lexer does not read refuses, for table_ddl and ddl_naming_table
+# alike, whatever name it carries. Each case below was accepted at 52ed4ee8.
+
+def naming(text, table="mail_inbox_rev"):
+    return mtd.ddl_naming_table(text, table)
+
+
+REFUSED = [
+    # (form, text for table t, message)
+    ("DO body in a standard string",
+     "DO 'BEGIN CREATE INDEX i ON t (a); END';\n", "DO body .* not dollar-quoted"),
+    ("DO LANGUAGE body in a standard string",
+     "DO LANGUAGE plpgsql 'BEGIN CREATE INDEX i ON t (a); END';\n",
+     "DO body .* not dollar-quoted"),
+    ("AS body in a standard string",
+     "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS "
+     "'BEGIN CREATE INDEX i ON t (a); END';\n", "AS body .* not dollar-quoted"),
+    ("E'' string in an EXECUTE",
+     "DO $$ BEGIN EXECUTE E'CREATE INDEX i ON t (a)'; END $$;\n", "E'' string constant"),
+    ("backslash in an EXECUTE string",
+     "DO $$ BEGIN EXECUTE 'CREATE INDEX i ON \\t (a)'; END $$;\n", "backslash"),
+    ("U&'' string in an EXECUTE",
+     "DO $$ BEGIN EXECUTE U&'CREATE INDEX i ON \\0074 (a)'; END $$;\n", "U&'' string"),
+    ("U& identifier in a body",
+     "DO $$ BEGIN CREATE INDEX i ON U&\"\\0074\" (a); END $$;\n", "U& identifier"),
+    ("U& identifier at the top level",
+     "CREATE INDEX i ON U&\"\\0074\" (a);\n", "U& identifier"),
+    ("two literals on one line in an EXECUTE",
+     "DO $$ BEGIN EXECUTE 'CREATE INDEX i ON ' 't (a)'; END $$;\n", "does not lex"),
+    ("an executable body that does not lex",
+     "CREATE FUNCTION f() RETURNS int LANGUAGE plpython3u AS $$ x = 'open $$;\n",
+     "does not lex"),
+]
+
+
+@pytest.mark.parametrize("form,text,message", REFUSED, ids=[r[0] for r in REFUSED])
+def test_unreadable_executable_forms_refuse(sql, form, text, message):
+    with pytest.raises(mtd.MigrationDdlError, match=message):
+        sql("CREATE TABLE t (a int);\n" + text)
+    # ddl_naming_table refuses the same text, whatever table it is asked for
+    with pytest.raises(mtd.MigrationDdlError, match=message):
+        naming(text.replace(" t (a)", " mail_inbox_rev (a)"))
+    with pytest.raises(mtd.MigrationDdlError, match=message):
+        naming(text, table="unrelated")
+
+
+def test_round3_reviewer_programs_refuse():
+    # :322 a DO body in a standard string; :326 an escaped name in an E''
+    # EXECUTE string; :374 an index on U&"\0074" in a dollar body
+    for text in ("DO 'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+                 "DO $$ BEGIN EXECUTE E'ALTER TABLE mail\\u005finbox_rev ADD COLUMN x int'; "
+                 "END $$;\n",
+                 "DO $$ BEGIN ALTER TABLE U&\"mail\\005finbox_rev\" ADD COLUMN x int; END $$;\n"):
+        with pytest.raises(mtd.MigrationDdlError):
+            naming(text)
+
+
+def test_a_name_split_across_a_newline_continuation_is_found(sql):
+    split = "DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_'\n  'rev ADD COLUMN x int'; END $$;\n"
+    assert naming(split) == ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
+    # a line comment may stand in the gap
+    commented = ("DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_' -- gap\n"
+                 "  'rev ADD COLUMN x int'; END $$;\n")
+    assert naming(commented) == ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
+    with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
         sql("CREATE TABLE t (a int);\n"
-            "CREATE FUNCTION f() RETURNS int LANGUAGE plpython3u AS $$ x = 'open t $$;\n")
-    assert sql("CREATE TABLE t (a int);\n"
-               "CREATE FUNCTION f() RETURNS int LANGUAGE plpython3u AS $$ x = 'open $$;\n"
-               ) == ["CREATE TABLE t (a int)"]
+            "DO $$ BEGIN EXECUTE 'CREATE INDEX i ON '\n't (a)'; END $$;\n")
+
+
+def test_the_same_literals_on_one_line_refuse(sql):
+    one_line = "DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_' 'rev ADD COLUMN x int'; END $$;\n"
+    with pytest.raises(mtd.MigrationDdlError, match="no newline between them"):
+        naming(one_line)
+    # a block comment is not a continuation gap, even with a newline in it
+    with pytest.raises(mtd.MigrationDdlError, match="no newline between them"):
+        naming("SELECT 'a' /* x\n */ 'b';\n")
+    with pytest.raises(mtd.MigrationDdlError, match="no newline between them"):
+        sql("CREATE TABLE t (a int);\nSELECT 'a' 'b';\n")
+
+
+def test_a_doubled_quote_next_to_a_name_neither_adds_nor_hides_one():
+    # the name inside a doubled-quote string is a string, not a statement
+    assert naming("DO $$ BEGIN EXECUTE 'SELECT ''mail_inbox_rev'''; END $$;\n") == []
+    # a string where a TABLE statement's name stands is not a name: refused
+    with pytest.raises(mtd.MigrationDdlError, match="cannot parse the table name"):
+        naming("DO $$ BEGIN EXECUTE 'ALTER TABLE ''mail_inbox_rev'' ADD x int'; END $$;\n")
+    # a statement after a doubled-quote string is still read
+    found = naming("DO $$ BEGIN EXECUTE 'SELECT ''x'';ALTER TABLE mail_inbox_rev "
+                   "ADD c text DEFAULT ''mail_inbox_rev'''; END $$;\n")
+    assert found == ["ALTER TABLE mail_inbox_rev ADD c text DEFAULT 'mail_inbox_rev'"]
+
+
+def test_data_strings_and_bodies_are_not_executable(sql):
+    # E'' and U&'' constants and dollar bodies as data are not refused
+    text = ("CREATE TABLE t (a int);\n"
+            "UPDATE x SET v = REPLACE(v, U&'\\25BC', 'v') WHERE w = E'\\n';\n"
+            "DO $$ BEGIN RAISE NOTICE E'it\\'s %', 'it''s'; "
+            "INSERT INTO y VALUES ($m$it's$m$); END $$;\n")
+    assert sql(text) == ["CREATE TABLE t (a int)"]
+    assert naming(text) == []

@@ -18,8 +18,9 @@ A hand-copied CREATE TABLE drifts from the migration it copied; this module
 reads the statement out of the migration file instead.
 
 ddl_naming_table(text, table) returns every CREATE, ALTER or DROP TABLE
-statement in text that creates, alters or drops the table, read with the
-same lexer (test_mail.py's guard that no other migration changes
+statement in text, at the top level and in every executable position, that
+creates, alters or drops the table, read with the same lexer and the same
+refusals (test_mail.py's guard that no other migration changes
 mail_inbox_rev).
 
 table_ddl(migration, table) returns [the CREATE TABLE statement, then every
@@ -33,9 +34,11 @@ silently left out. Concretely:
   * Lexing follows PostgreSQL 16's lexical structure: line comments, NESTED
     block comments, standard strings ('' doubles a quote; a backslash is an
     ordinary character), escape strings E'...' (a backslash escapes the next
-    character; a segment continued after whitespace holding a newline, with
-    line comments allowed in that gap, stays an escape string, as scan.l
-    continues it), dollar-quoted bodies (tags of PostgreSQL's identifier
+    character), the continuation rule (two string constants separated by
+    whitespace holding a newline, line comments allowed in that gap, are ONE
+    constant of the first one's kind, as scan.l continues it; the same two
+    with no newline between them are a lexical error and raise),
+    dollar-quoted bodies (tags of PostgreSQL's identifier
     alphabet: letters including every non-ASCII character, digits not first,
     underscores), and quoted identifiers ("" doubles a quote). Text inside
     any of them is never taken for a statement.
@@ -51,12 +54,19 @@ silently left out. Concretely:
     table [USING method] ( ... ) [anything else] ; -- the index name and the
     table name may be quoted, the name may be absent -- and is returned
     whole. Parentheses that do not balance before the semicolon raise.
-  * A CREATE TABLE or CREATE INDEX mentioning the table inside a
-    dollar-quoted body (a DO block or a function) raises: whether and when it
-    runs cannot be read from the file. Each body, each body nested in it and
-    each string inside a body is lexed as SQL, and a CREATE statement there
-    runs to the lexer's ';', so a ';' in a comment, string or quoted name
-    does not end it. A body that does not lex and mentions the table raises.
+  * Executable positions are the dollar-quoted body of a DO and of a CREATE
+    FUNCTION or PROCEDURE ... AS, and, inside such a body, the dollar bodies
+    and string constants of a PL/pgSQL EXECUTE command (up to its INTO, USING
+    or ';'); recursively. Each is lexed as SQL by the same lexer. Nothing is
+    decoded: in an executable position a DO or AS body that is not
+    dollar-quoted, an E'', U&'', B'' or X'' constant, a backslash in a
+    string, a U& identifier, and a unit that does not lex to its end raise,
+    whatever they name. A doubled quote and a newline continuation are
+    lexing and are read. Dollar bodies and strings elsewhere are data.
+  * A CREATE TABLE or CREATE INDEX naming the table in an executable
+    position raises: whether and when it runs cannot be read from the file.
+    A CREATE statement there runs to the lexer's ';', so a ';' in a comment,
+    string or quoted name does not end it.
   * Any CREATE ... TABLE or CREATE ... INDEX head this grammar cannot parse
     raises, whatever table it names, because it might name this one.
   * A missing file, an unterminated comment, string, identifier or dollar
@@ -82,6 +92,12 @@ _DOLLAR_TAG = re.compile(
 _QUOTE_CONTINUE = re.compile(
     r"(?:[ \t\f\v]|--[^\n\r]*)*[\n\r](?:[ \t\n\r\f\v]|--[^\n\r]*[\n\r])*'")
 _LINE_COMMENT = re.compile(r"--[^\n\r]*")
+# A closing quote followed by another bare quote through whitespace and
+# comments that did not form a quotecontinue (tried first): no newline in
+# the gap, or a block comment in it. One character or one whole comment per
+# repetition, so no nested quantifier can backtrack.
+_ADJACENT_QUOTE = re.compile(
+    r"(?:[ \t\n\r\f\v]|--[^\n\r]*|/\*(?:(?!\*/).)*\*/)*'", re.S)
 _IDENT_START = re.compile(r"[A-Za-z_\u0080-￿]")
 _IDENT = re.compile(r"[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*")
 _TABLE_MODIFIERS = {"global", "local", "temporary", "temp", "unlogged", "foreign"}
@@ -152,11 +168,12 @@ def _views(src):
                     if src.startswith("''", j):
                         j += 2
                         continue
-                    # An escape string continued after a newline stays an
-                    # escape string (scan.l returns to the state it left), so
-                    # a backslash in the continued segment still escapes.
-                    # Only the gap's line comments are blanked in code.
-                    cont = _QUOTE_CONTINUE.match(src, j + 1) if escape else None
+                    # Two constants separated by whitespace holding a newline
+                    # are ONE constant (scan.l quotecontinue). The continued
+                    # segment keeps the first one's kind: an escape string
+                    # stays an escape string, so a backslash in it still
+                    # escapes. Only the gap's line comments are blanked in code.
+                    cont = _QUOTE_CONTINUE.match(src, j + 1)
                     if cont:
                         for m in _LINE_COMMENT.finditer(src, j + 1, cont.end() - 1):
                             blank(code, m.start(), m.end())
@@ -164,6 +181,11 @@ def _views(src):
                         continue
                     break
                 j += 1
+            # The same two constants with no newline between them are a
+            # lexical error in PostgreSQL; the lexer refuses them.
+            if _ADJACENT_QUOTE.match(src, j + 1):
+                raise MigrationDdlError(
+                    "two string constants with no newline between them at offset %d" % (j + 1))
             blank(mask, i + 1, j)
             i = j + 1
         elif c == '"':
@@ -285,49 +307,129 @@ def _statement_end(toks, k, migration, label):
     raise MigrationDdlError("%s: %s has no terminating semicolon" % (migration, label))
 
 
-def _mention(table):
-    """The table's name anywhere in raw text, any case, quoted or not: the
-    conservative test for text that cannot be lexed."""
-    return re.compile(r"(?<![\w$])" + re.escape(table) + r"(?![\w$])", re.I)
-
-
 def _is_name(tok, table):
     """tok is a name that PostgreSQL resolves to table."""
     return tok[0] in ("ident", "qident") and tok[1] == table
 
 
-def _units(src, mention, include_top=False):
-    """Yield (text, (code, toks), origin) for every dollar-quoted body in src, every
-    body nested in one, and the content of every string literal inside a body
-    (the text an EXECUTE runs), each lexed as SQL; src itself first when
-    include_top. src must lex. A nested unit that does not lex yields
-    (text, None, origin) when mention finds the table's name in it (or a
-    U& name), and nothing otherwise (text that does not contain the name
-    cannot name the table). origin is the offset in src of the outermost
-    dollar body holding the unit (None for src itself)."""
-    def walk(text, nested, origin):
+def _adjacent(left, right):
+    return left is not None and left[3] == right[2]
+
+
+def _string_content(code, toks, p, where):
+    """The content of the standard string constant toks[p], read by the
+    lexer's own rules: '' is one quote character, and segments joined by a
+    newline continuation are one constant. Nothing is decoded: an E'' string
+    (any backslash escape), a U& string, a B'' or X'' constant, and a
+    backslash anywhere in the text refuse."""
+    t = toks[p]
+    prev = toks[p - 1] if p else None
+    if _adjacent(prev, t) and prev[0] == "ident" and prev[1] in ("e", "b", "x"):
+        raise MigrationDdlError("an %s'' string constant in %s at offset %d is not read"
+                                % (prev[1].upper(), where, prev[2]))
+    if _adjacent(prev, t) and prev[:2] == ("punct", "&"):
+        raise MigrationDdlError("a U&'' string constant in %s at offset %d is not read"
+                                % (where, prev[2]))
+    out, j = [], t[2] + 1
+    while True:
+        ch = code[j]
+        if ch == "'":
+            if code.startswith("''", j):
+                out.append("'")
+                j += 2
+                continue
+            cont = _QUOTE_CONTINUE.match(code, j + 1)
+            if cont and cont.end() < t[3]:
+                j = cont.end()
+                continue
+            break
+        if ch == "\\":
+            raise MigrationDdlError("a backslash in a string constant in %s at offset %d "
+                                    "is not read" % (where, j))
+        out.append(ch)
+        j += 1
+    if j != t[3] - 1:
+        raise MigrationDdlError("the string constant in %s at offset %d is not read to its end"
+                                % (where, t[2]))
+    return "".join(out)
+
+
+def _exec_kind(toks, p, top, execute_at):
+    """Whether toks[p] (a 'dollar' or 'string' token) sits in an executable
+    position: 'do' (the body of DO [LANGUAGE name]), 'as' (the AS body of a
+    CREATE FUNCTION or PROCEDURE), 'execute' (inside the command of a
+    PL/pgSQL EXECUTE, in a body: from EXECUTE to its INTO, USING or ';'), or
+    None (data)."""
+    prev = toks[p - 1] if p else None
+    if _kw(prev, "do") or (p >= 3 and _kw(toks[p - 3], "do") and _kw(toks[p - 2], "language")):
+        return "do"
+    if _kw(prev, "as"):
+        b = p - 2
+        while b >= 0 and toks[b][:2] != ("punct", ";"):
+            if toks[b][0] == "ident" and toks[b][1] in ("function", "procedure"):
+                return "as"
+            b -= 1
+    if not top and p in execute_at:
+        return "execute"
+    return None
+
+
+def _units(src):
+    """Yield (code, toks, origin) for src and every executable unit inside it,
+    each lexed as SQL: the dollar-quoted body of a DO or of a CREATE FUNCTION
+    or PROCEDURE ... AS, and, inside such a body, the dollar bodies and string
+    constants of an EXECUTE command; recursively. origin is the offset in src
+    of the outermost body (None for src itself).
+
+    Refused unconditionally, whatever the text names: a DO or AS body that is
+    not dollar-quoted; an executable string that is an E'', U&'', B'' or X''
+    constant or holds a backslash; a U& identifier in any unit; and a unit
+    that does not lex to its end. Doubled quotes and newline continuations
+    are lexing and are read. Dollar bodies and strings in any other position
+    are data and are not walked."""
+    def walk(text, origin, top):
         try:
-            code, mask, bodies = _views(text)
-        except MigrationDdlError:
-            if not nested:
+            code, mask, _bodies = _views(text)
+            toks = _tokens(code, mask)
+        except MigrationDdlError as exc:
+            if top:
                 raise
-            if mention.search(text) or re.search(r"[Uu]&", text):
-                yield text, None, origin
-            return
-        toks = _tokens(code, mask)
-        if nested or include_top:
-            yield text, (code, toks), origin
-        for a, b in bodies:
-            yield from walk(text[a:b], True, a if origin is None else origin)
-        if nested:
-            for t in toks:
-                if t[0] != "string":
-                    continue
-                inner = code[t[2] + 1:t[3] - 1]
-                if t[2] > 0 and code[t[2] - 1] in "Ee":
-                    inner = inner.replace("\\\\", "\0").replace("\\'", "'").replace("\0", "\\")
-                yield from walk(inner.replace("''", "'"), True, origin)
-    yield from walk(src, False, None)
+            raise MigrationDdlError("the executable body at offset %d does not lex to its "
+                                    "end: %s" % (origin, exc))
+        where = "the file" if top else "the executable body at offset %d" % origin
+        for k in range(len(toks) - 2):
+            if (toks[k][:2] == ("ident", "u") and toks[k + 1][:2] == ("punct", "&")
+                    and _adjacent(toks[k], toks[k + 1])
+                    and _adjacent(toks[k + 1], toks[k + 2]) and toks[k + 2][0] == "qident"):
+                raise MigrationDdlError("a U& identifier in %s at offset %d is not read"
+                                        % (where, toks[k][2]))
+        yield code, toks, origin
+        execute_at = set()
+        if not top:
+            for k, t in enumerate(toks):
+                if _kw(t, "execute"):
+                    e = k + 1
+                    while (e < len(toks) and toks[e][:2] != ("punct", ";")
+                           and not _kw(toks[e], "into") and not _kw(toks[e], "using")):
+                        execute_at.add(e)
+                        e += 1
+        for p, t in enumerate(toks):
+            if t[0] not in ("dollar", "string"):
+                continue
+            kind = _exec_kind(toks, p, top, execute_at)
+            if kind is None:
+                continue
+            if t[0] == "dollar":
+                tag = _DOLLAR_TAG.match(code, t[2]).group(0)
+                a = t[2] + len(tag)
+                yield from walk(text[a:t[3] - len(tag)], a if top else origin, False)
+            elif kind in ("do", "as"):
+                raise MigrationDdlError("a %s body in %s at offset %d is not dollar-quoted"
+                                        % (kind.upper(), where, t[2]))
+            else:
+                inner = _string_content(code, toks, p, where)
+                yield from walk(inner, t[2] if top else origin, False)
+    yield from walk(src, None, True)
 
 
 def _spans(toks, heads):
@@ -357,17 +459,13 @@ def table_ddl(migration, table):
     src = _read(migration)
     code, mask, bodies = _views(src)
 
-    # DDL naming this table inside a dollar-quoted body cannot be placed.
-    # Each body (and each string inside one, the text an EXECUTE runs) is
-    # lexed like the file, so its statements end at a lexer ';' and never at
-    # a ';' inside a comment, a string or a quoted name.
-    for _text, lexed, origin in _units(src, mention=_mention(table)):
-        if lexed is None:
-            raise MigrationDdlError(
-                "%s: a dollar-quoted body at offset %d does not lex as SQL and mentions "
-                "%s; whether it creates it cannot be read from the file"
-                % (migration, origin, table))
-        _code, utoks = lexed
+    # DDL naming this table inside an executable body cannot be placed.
+    # Each executable unit (_units) is lexed like the file, so its statements
+    # end at a lexer ';' and never at a ';' inside a comment, a string or a
+    # quoted name; a unit that cannot be read refuses, whatever it names.
+    for _code, utoks, origin in _units(src):
+        if origin is None:
+            continue
         for k, e in _spans(utoks, ("create",)):
             kinds = [m for m in range(k + 1, e) if utoks[m][0] == "ident"
                      and utoks[m][1] in ("table", "index")]
@@ -518,30 +616,19 @@ def ddl_naming_table(text, table):
     including) its lexer ';', comments blanked; [] when there is none.
 
     The statements are found by the same lexer as table_ddl, at the top level
-    and inside every dollar-quoted body and every string inside one, so a
-    quoted name, a comment between TABLE and the name, or a statement inside
-    a DO block is read the way PostgreSQL reads it, and a column or string
-    that merely spells the name is not a statement on it. Raises
-    MigrationDdlError when text does not lex, when a body that does not lex
-    mentions the table, and when a TABLE statement's name does not parse in
-    a unit that mentions the table or holds a Unicode-escaped name."""
+    and in every executable unit (_units: DO and AS bodies, and the commands
+    of EXECUTE inside them), so a quoted name, a comment between TABLE and
+    the name, a name split across a newline continuation, or a statement
+    inside a DO block is read the way PostgreSQL reads it, and a column or
+    string that merely spells the name is not a statement on it. Raises
+    MigrationDdlError when any unit cannot be read (see _units) and when a
+    TABLE statement's name does not parse, whatever it names."""
     if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
         raise MigrationDdlError("not a plain table name: %r" % (table,))
-    mention = _mention(table)
     out = []
-    for unit, lexed, _origin in _units(text, mention, include_top=True):
-        if lexed is None:
-            raise MigrationDdlError(
-                "a dollar-quoted body or string that does not lex as SQL mentions %s"
-                % (table,))
-        code, toks = lexed
+    for code, toks, _origin in _units(text):
         for k, e in _spans(toks, ("create", "alter", "drop")):
-            try:
-                names = _table_statement_names(toks, k, e, "a TABLE statement")
-            except MigrationDdlError:
-                if mention.search(unit) or re.search(r"[Uu]&", unit):
-                    raise
-                continue
+            names = _table_statement_names(toks, k, e, "a TABLE statement")
             if any(rel == table for _schema, rel in names):
                 end = toks[e][2] if e < len(toks) else len(code)
                 out.append(code[toks[k][2]:end])

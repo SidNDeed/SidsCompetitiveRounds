@@ -37,7 +37,7 @@ from sqlalchemy.sql.elements import TextClause
 
 import main
 import models
-from migration_table_ddl import ddl_naming_table, table_ddl
+from migration_table_ddl import MigrationDdlError, ddl_naming_table, table_ddl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DIR = os.path.join(HERE, "..", "..", "plugin")
@@ -2349,7 +2349,9 @@ def _ddl_on_mail_inbox_rev(text):
     and statement grammar, never by matching raw text: a quoted name, a
     comment between TABLE and the name, a list in DROP TABLE, a RENAME TO and
     a statement inside a DO block are all seen (REHEARSAL-FOUR round 2,
-    finding 11)."""
+    finding 11), and so is a name split across a newline continuation; a
+    form the lexer does not read in an executable position refuses
+    (MigrationDdlError) whatever it names (round 3, ruling R3-A1)."""
     return ddl_naming_table(text, "mail_inbox_rev")
 
 
@@ -2546,8 +2548,19 @@ def test_the_mail_inbox_rev_comparison_sees_a_deleted_column():
                  "DROP TABLE other, mail_inbox_rev;",
                  "ALTER TABLE mail_inbox_rev_old RENAME TO mail_inbox_rev;",
                  "DO $$ BEGIN ALTER TABLE \"mail_inbox_rev\" DROP COLUMN rev; END $$;",
-                 "DO $é$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_rev DROP COLUMN rev'; END $é$;"):
+                 "DO $é$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_rev DROP COLUMN rev'; END $é$;",
+                 # round 3: a name split across a newline continuation is one constant
+                 "DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_'\n 'rev DROP COLUMN rev'; END $$;"):
         assert _ddl_on_mail_inbox_rev(text), text
+    # round 3 (ruling R3-A1): forms the lexer does not read refuse, whatever
+    # they name -- a DO body that is not dollar-quoted, an E'' EXECUTE string,
+    # a U& identifier, two literals with no newline between them
+    for text in ("DO 'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';",
+                 "DO $$ BEGIN EXECUTE E'ALTER TABLE mail\\u005finbox_rev ADD x int'; END $$;",
+                 'ALTER TABLE U&"mail\\005finbox_rev" ADD COLUMN x INT;',
+                 "DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_' 'rev ADD x int'; END $$;"):
+        with pytest.raises(MigrationDdlError):
+            _ddl_on_mail_inbox_rev(text)
     for text in ("INSERT INTO mail_inbox_rev (recipient_id, rev) VALUES (1, 0);",
                  "ALTER TABLE mail_inbox_revs ADD COLUMN x INT;",
                  "ALTER TABLE mail_messages ADD COLUMN mail_inbox_rev INT;",
