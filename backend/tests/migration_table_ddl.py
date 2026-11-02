@@ -10,35 +10,40 @@ Users:
     match_seat_holds to the discovery predicates and the four queue tables
     plus match_seat_holds to the shared admission gate), the fixture creates
     that table from this module's output.
-  - test_mail.py, which reads mail_inbox_rev's CREATE TABLE through table_ddl
-    to compare the table's actual columns with the model's.
+  - closed_walk.py, which classifies SQL text from this module's lexer
+    (MigrationDdlError, _views, _tokens).
   - test_migration_table_ddl.py, this module's own lexical and grammar cases.
 
 A hand-copied CREATE TABLE drifts from the migration it copied; this module
 reads the statement out of the migration file instead.
 
-ddl_naming_table(text, table) returns every CREATE, ALTER or DROP TABLE
-statement in text, at the top level and in every executable position, that
-creates, alters or drops the table, read with the same lexer and the same
-refusals (test_mail.py's guard that no other migration changes
-mail_inbox_rev).
-
 table_ddl(migration, table) returns [the CREATE TABLE statement, then every
-CREATE INDEX on that table in the same file], in file order, each cut from
-its CREATE keyword to (not including) its terminating semicolon, with SQL
-comments blanked.
+top-level CREATE INDEX on that table in the same file], in file order, each
+cut from its CREATE keyword to (not including) its terminating semicolon,
+with SQL comments blanked.
 
-The rule is: a form is parsed, or MigrationDdlError is raised. Nothing is
-silently left out. Concretely:
+What DDL a migration PERFORMS is not read here. Ruling REHEARSAL-FOUR-R6
+(1)(a): it is an effect, measured at the database by
+test_r7_catalog_diff_pg.py (catalog_diff.py): every migration is applied and
+the catalog is diffed before and after. That file also shows that table_ddl's
+statements reproduce, column for column, the relation each migration the a1
+fixtures name produced. The text readers that tried to work out such effects
+from the source are deleted, with no replacement: the DO-body grammar, the
+executable-position walk, EXECUTE composition and its trigger exemption,
+ddl_naming_table and code_md5. That includes any DDL a body, an EXECUTE or
+another language runs.
 
-  * Lexing follows PostgreSQL 16's lexical structure: line comments, NESTED
-    block comments, standard strings ('' doubles a quote; a backslash is an
-    ordinary character), escape strings E'...' (a backslash escapes the next
-    character), the continuation rule (two string constants separated by
-    whitespace holding a newline, line comments allowed in that gap, are ONE
-    constant of the first one's kind, as scan.l continues it; the same two
-    with no newline between them are a lexical error and raise),
-    dollar-quoted bodies (tags of PostgreSQL's identifier
+The rule for what remains is: a form is parsed, or MigrationDdlError is
+raised. Nothing is silently left out. Concretely:
+
+  * Lexing follows PostgreSQL 16's lexical structure: line comments (ended
+    by CR or LF), NESTED block comments, standard strings ('' doubles a
+    quote; a backslash is an ordinary character), escape strings E'...' (a
+    backslash escapes the next character), the continuation rule (two string
+    constants separated by whitespace holding a newline, line comments
+    allowed in that gap, are ONE constant of the first one's kind, as scan.l
+    continues it; the same two with no newline between them are a lexical
+    error and raise), dollar-quoted bodies (tags of PostgreSQL's identifier
     alphabet: letters including every non-ASCII character, digits not first,
     underscores), and quoted identifiers ("" doubles a quote). Text inside
     any of them is never taken for a statement.
@@ -48,41 +53,18 @@ silently left out. Concretely:
     build into their own search_path and cannot honour either.
   * A CREATE TABLE of the table must be `name ( ... )` up to its semicolon,
     with balanced parentheses; AS, OF and PARTITION OF raise. Exactly one
-    such statement may exist.
+    such statement may exist at the top level.
   * A CREATE INDEX on the table is parsed as
     CREATE [UNIQUE] INDEX [CONCURRENTLY] [[IF NOT EXISTS] name] ON [ONLY]
     table [USING method] ( ... ) [anything else] ; -- the index name and the
     table name may be quoted, the name may be absent -- and is returned
     whole. Parentheses that do not balance before the semicolon raise.
-  * A line comment ends at CR or at LF (scan.l's non_newline excludes both).
-  * Executable positions are the dollar-quoted body of a DO (read only as
-    DO body, DO LANGUAGE name body or DO body LANGUAGE name, name one
-    unquoted identifier; any other DO shape raises) and of a CREATE
-    FUNCTION or PROCEDURE ... AS, and, inside such a body, the command of a
-    PL/pgSQL EXECUTE (every EXECUTE except the privilege inside a GRANT or
-    REVOKE and the function of a CREATE [OR REPLACE] [CONSTRAINT] TRIGGER,
-    each judged by the statement's head; up to its INTO, USING or ';') when it is one constant
-    or a '||' concatenation of constants, read whole as the joined text;
-    recursively. Each is lexed as SQL by the same lexer. Nothing is
-    decoded: in an executable position a DO or AS body that is not
-    dollar-quoted (a prefixed E'', U&'', B'', X'' or N'' body included), an
-    E'', U&'', B'' or X'' constant, a backslash in a string, a U&
-    identifier, an EXECUTE command that is any other expression (format(),
-    a variable; ddl_naming_table can report these to a caller instead), and
-    a unit that does not lex to its end raise, whatever they name. A
-    doubled quote and a newline continuation are lexing and are read.
-    Dollar bodies and strings elsewhere are data.
-  * A CREATE TABLE or CREATE INDEX naming the table in an executable
-    position raises: whether and when it runs cannot be read from the file.
-    A CREATE statement there runs to the lexer's ';', so a ';' in a comment,
-    string or quoted name does not end it.
   * Any CREATE ... TABLE or CREATE ... INDEX head this grammar cannot parse
     raises, whatever table it names, because it might name this one.
   * A missing file, an unterminated comment, string, identifier or dollar
     body, and a statement with no terminating semicolon raise.
 """
 
-import hashlib
 import os
 import re
 
@@ -103,9 +85,6 @@ _QUOTE_CONTINUE = re.compile(
     r"(?:[ \t\f\v]|--[^\n\r]*)*[\n\r](?:[ \t\n\r\f\v]|--[^\n\r]*[\n\r])*'")
 _LINE_COMMENT = re.compile(r"--[^\n\r]*")
 _NEWLINE = re.compile(r"[\n\r]")
-# The one-letter prefixes of a string constant (E'', B'', X'', N''); U&'' is
-# the other prefixed form, read as the tokens u, & and the string.
-_LITERAL_PREFIXES = ("e", "b", "x", "n")
 # A closing quote followed by another bare quote through whitespace and
 # comments that did not form a quotecontinue (tried first): no newline in
 # the gap, or a block comment in it. One character or one whole comment per
@@ -323,334 +302,6 @@ def _statement_end(toks, k, migration, label):
     raise MigrationDdlError("%s: %s has no terminating semicolon" % (migration, label))
 
 
-def _is_name(tok, table):
-    """tok is a name that PostgreSQL resolves to table."""
-    return tok[0] in ("ident", "qident") and tok[1] == table
-
-
-def _adjacent(left, right):
-    return left is not None and left[3] == right[2]
-
-
-def _string_content(code, toks, p, where):
-    """The content of the standard string constant toks[p], read by the
-    lexer's own rules: '' is one quote character, and segments joined by a
-    newline continuation are one constant. Nothing is decoded: an E'' string
-    (any backslash escape), a U& string, a B'' or X'' constant, and a
-    backslash anywhere in the text refuse."""
-    t = toks[p]
-    prev = toks[p - 1] if p else None
-    if _adjacent(prev, t) and prev[0] == "ident" and prev[1] in ("e", "b", "x"):
-        raise MigrationDdlError("an %s'' string constant in %s at offset %d is not read"
-                                % (prev[1].upper(), where, prev[2]))
-    if _adjacent(prev, t) and prev[:2] == ("punct", "&"):
-        raise MigrationDdlError("a U&'' string constant in %s at offset %d is not read"
-                                % (where, prev[2]))
-    out, j = [], t[2] + 1
-    while True:
-        ch = code[j]
-        if ch == "'":
-            if code.startswith("''", j):
-                out.append("'")
-                j += 2
-                continue
-            cont = _QUOTE_CONTINUE.match(code, j + 1)
-            if cont and cont.end() < t[3]:
-                j = cont.end()
-                continue
-            break
-        if ch == "\\":
-            raise MigrationDdlError("a backslash in a string constant in %s at offset %d "
-                                    "is not read" % (where, j))
-        out.append(ch)
-        j += 1
-    if j != t[3] - 1:
-        raise MigrationDdlError("the string constant in %s at offset %d is not read to its end"
-                                % (where, t[2]))
-    return "".join(out)
-
-
-def _literal_start(toks, p):
-    """Index of the first token of the constant toks[p]: the prefix of a
-    prefixed string constant (E'', B'', X'', N'' are the ident and the
-    string, U&'' is u, & and the string, each adjacent), else p."""
-    t = toks[p]
-    prev = toks[p - 1] if p else None
-    if t[0] != "string" or not _adjacent(prev, t):
-        return p
-    if prev[0] == "ident" and prev[1] in _LITERAL_PREFIXES:
-        return p - 1
-    if (prev[:2] == ("punct", "&") and p >= 2 and toks[p - 2][:2] == ("ident", "u")
-            and _adjacent(toks[p - 2], prev)):
-        return p - 2
-    return p
-
-
-def _constant_at(toks, j):
-    """(index of the string or dollar token, index after it) when toks[j]
-    begins one constant: a dollar-quoted string, a standard string, or a
-    prefixed string constant (E'', B'', X'', N'' as the ident and the string,
-    U&'' as u, & and the string, each adjacent); None otherwise."""
-    t = _at(toks, j)
-    if t is None:
-        return None
-    if t[0] in ("dollar", "string"):
-        return j, j + 1
-    nxt = _at(toks, j + 1)
-    if (t[0] == "ident" and t[1] in _LITERAL_PREFIXES and nxt is not None
-            and nxt[0] == "string" and _adjacent(t, nxt)):
-        return j + 1, j + 2
-    lit = _at(toks, j + 2)
-    if (t[:2] == ("ident", "u") and (nxt or ())[:2] == ("punct", "&") and lit is not None
-            and lit[0] == "string" and _adjacent(t, nxt) and _adjacent(nxt, lit)):
-        return j + 2, j + 3
-    return None
-
-
-def _do_bodies(toks, where):
-    """The index of the body token of every DO statement in toks.
-
-    A DO statement is read in exactly these shapes (REHEARSAL-FOUR-R5
-    finding 14; backend/sql uses only the first):
-        DO body
-        DO LANGUAGE name body
-        DO body LANGUAGE name
-    each followed by ';' or the end of the unit, where body is one constant
-    (a dollar-quoted body, or a string constant that the walk then refuses as
-    not dollar-quoted) and name is one unquoted identifier that does not
-    begin a constant. DO followed by NOTHING or UPDATE is the action of an
-    ON CONFLICT clause, not a statement. Every other shape after DO raises,
-    whatever its body holds: a LANGUAGE name that is a string, a prefixed
-    string, a dollar-quoted string or a quoted identifier, a second body or
-    LANGUAGE clause, and anything else before the ';'."""
-    out = []
-    for k, t in enumerate(toks):
-        if not _kw(t, "do"):
-            continue
-        nxt = _at(toks, k + 1)
-        if _kw(nxt, "nothing") or _kw(nxt, "update"):
-            continue
-        j, body, language = k + 1, None, False
-        while True:
-            t2 = _at(toks, j)
-            if t2 is None or t2[:2] == ("punct", ";"):
-                break
-            if _kw(t2, "language") and not language:
-                name = _at(toks, j + 1)
-                if name is None or name[0] != "ident" or _constant_at(toks, j + 1) is not None:
-                    raise MigrationDdlError(
-                        "the DO in %s at offset %d has a LANGUAGE name that is not one "
-                        "unquoted identifier; the DO is not read" % (where, t[2]))
-                language = True
-                j += 2
-                continue
-            if body is None:
-                found = _constant_at(toks, j)
-                if found is not None:
-                    body, j = found
-                    continue
-            raise MigrationDdlError(
-                "the DO in %s at offset %d is not DO [LANGUAGE name] body or DO body "
-                "[LANGUAGE name]; it is not read" % (where, t[2]))
-        if body is None:
-            raise MigrationDdlError("the DO in %s at offset %d has no body; it is not read"
-                                    % (where, t[2]))
-        out.append(body)
-    return out
-
-
-def _exec_kind(toks, p, top, execute_at):
-    """Whether toks[p] (a 'dollar' or 'string' token) sits in an executable
-    position other than a DO body (DO bodies are found by _do_bodies): 'as'
-    (the AS body of a CREATE FUNCTION or PROCEDURE), 'execute' (p in
-    execute_at, in a body), or None (data). A prefixed string constant (E'',
-    U&'', B'', X'', N'') is located from its prefix, so such a body is found
-    and refused like any other body that is not dollar-quoted
-    (REHEARSAL-FOUR-R4 item 2.2)."""
-    s = _literal_start(toks, p)
-    prev = toks[s - 1] if s else None
-    if _kw(prev, "as"):
-        b = s - 2
-        while b >= 0 and toks[b][:2] != ("punct", ";"):
-            if toks[b][0] == "ident" and toks[b][1] in ("function", "procedure"):
-                return "as"
-            b -= 1
-    if not top and p in execute_at:
-        return "execute"
-    return None
-
-
-# The PL/pgSQL keywords after which a statement begins inside a block, besides
-# ';' and the start of the unit: BEGIN, and THEN (IF/ELSIF/CASE/EXCEPTION ...
-# THEN; backend/sql's one trigger inside a body follows THEN). Only these
-# two: a keyword left out (ELSE, LOOP) only lengthens a statement back to an
-# earlier start, which can make an EXECUTE dynamic, never exempt it.
-_BLOCK_KEYWORDS = ("begin", "then")
-
-
-def _statement_start(toks, k):
-    """Index of the first token of the statement holding toks[k]: the nearest
-    token at or before k that follows ';', a block keyword, or the start of
-    the unit."""
-    b = k
-    while b > 0:
-        prev = toks[b - 1]
-        if prev[:2] == ("punct", ";") or (prev[0] == "ident" and prev[1] in _BLOCK_KEYWORDS):
-            break
-        b -= 1
-    return b
-
-
-def _is_dynamic_execute(toks, k):
-    """toks[k] is EXECUTE: whether it is a PL/pgSQL dynamic command. Only two
-    statement contexts make it something else (REHEARSAL-FOUR-R5 finding 15:
-    the context is the statement's head, never the neighbouring tokens):
-      GRANT|REVOKE ... EXECUTE ON|,     the privilege
-      CREATE [OR REPLACE] [CONSTRAINT] TRIGGER ... EXECUTE FUNCTION|PROCEDURE
-          name                          the trigger's function, the only
-                                        EXECUTE in that statement
-    Every other EXECUTE, a variable named function included, is dynamic."""
-    nxt = _at(toks, k + 1)
-    h = _statement_start(toks, k)
-    head = toks[h]
-    if _kw(head, "grant") or _kw(head, "revoke"):
-        return not (_kw(nxt, "on") or (nxt or ())[:2] == ("punct", ","))
-    if not _kw(head, "create"):
-        return True
-    j = h + 1
-    if _kw(_at(toks, j), "or") and _kw(_at(toks, j + 1), "replace"):
-        j += 2
-    if _kw(_at(toks, j), "constraint"):
-        j += 1
-    if not _kw(_at(toks, j), "trigger"):
-        return True
-    if any(_kw(toks[m], "execute") for m in range(j + 1, k)):
-        return True
-    if ((_kw(nxt, "function") or _kw(nxt, "procedure"))
-            and (_at(toks, k + 2) or ("",))[0] in ("ident", "qident")):
-        return False
-    return True
-
-
-def _execute_command(code, toks, a, e, where):
-    """The text of the EXECUTE command toks[a:e] when it is one constant or a
-    '||' concatenation of constants (standard strings, read by
-    _string_content, and dollar bodies), joined as PostgreSQL joins them;
-    None for any other expression (a variable, a function call such as
-    format(), a cast, parentheses). A prefixed string constant in the chain
-    refuses through _string_content (REHEARSAL-FOUR-R4 item 2.3)."""
-    parts, q = [], a
-    while True:
-        if q >= e:
-            return None
-        lit = q
-        if (toks[q][0] == "ident" and toks[q][1] in _LITERAL_PREFIXES and q + 1 < e
-                and toks[q + 1][0] == "string" and _adjacent(toks[q], toks[q + 1])):
-            lit = q + 1
-        elif (toks[q][:2] == ("ident", "u") and q + 2 < e
-              and toks[q + 1][:2] == ("punct", "&") and toks[q + 2][0] == "string"
-              and _adjacent(toks[q], toks[q + 1]) and _adjacent(toks[q + 1], toks[q + 2])):
-            lit = q + 2
-        t = toks[lit]
-        if t[0] == "string":
-            parts.append(_string_content(code, toks, lit, where))
-        elif t[0] == "dollar":
-            tag = _DOLLAR_TAG.match(code, t[2]).group(0)
-            parts.append(code[t[2] + len(tag):t[3] - len(tag)])
-        else:
-            return None
-        q = lit + 1
-        if q == e:
-            return "".join(parts)
-        if not (toks[q][:2] == ("punct", "|") and q + 1 < e
-                and toks[q + 1][:2] == ("punct", "|") and _adjacent(toks[q], toks[q + 1])):
-            return None
-        q += 2
-
-
-def _units(src, unresolved=None):
-    """Yield (code, toks, origin) for src and every executable unit inside it,
-    each lexed as SQL: the dollar-quoted body of a DO or of a CREATE FUNCTION
-    or PROCEDURE ... AS, and, inside such a body, the command of a dynamic
-    EXECUTE (up to its INTO, USING or ';') when that command is one constant
-    or a '||' concatenation of constants, read whole as the joined text;
-    recursively. origin is the offset in src of the outermost body (None for
-    src itself).
-
-    Refused unconditionally, whatever the text names: a DO or AS body that is
-    not dollar-quoted (prefixed string bodies included); an executable string
-    that is an E'', U&'', B'' or X'' constant or holds a backslash; a U&
-    identifier in any unit; and a unit that does not lex to its end. Doubled
-    quotes and newline continuations are lexing and are read. An EXECUTE
-    command that is any other expression (format(), a variable, a cast)
-    cannot be read: it raises, or, when the caller passes a list as
-    unresolved, is appended to it as (where, offset, command text with
-    whitespace collapsed) for the caller to account for. Dollar bodies and
-    strings in any other position are data and are not walked."""
-    def walk(text, origin, top):
-        try:
-            code, mask, _bodies = _views(text)
-            toks = _tokens(code, mask)
-        except MigrationDdlError as exc:
-            if top:
-                raise
-            raise MigrationDdlError("the executable body at offset %d does not lex to its "
-                                    "end: %s" % (origin, exc))
-        where = "the file" if top else "the executable body at offset %d" % origin
-        for k in range(len(toks) - 2):
-            if (toks[k][:2] == ("ident", "u") and toks[k + 1][:2] == ("punct", "&")
-                    and _adjacent(toks[k], toks[k + 1])
-                    and _adjacent(toks[k + 1], toks[k + 2]) and toks[k + 2][0] == "qident"):
-                raise MigrationDdlError("a U& identifier in %s at offset %d is not read"
-                                        % (where, toks[k][2]))
-        yield code, toks, origin
-        if not top:
-            for k, t in enumerate(toks):
-                if not _kw(t, "execute") or not _is_dynamic_execute(toks, k):
-                    continue
-                e = k + 1
-                while (e < len(toks) and toks[e][:2] != ("punct", ";")
-                       and not _kw(toks[e], "into") and not _kw(toks[e], "using")):
-                    e += 1
-                command = _execute_command(code, toks, k + 1, e, where)
-                if command is None:
-                    end = toks[e][2] if e < len(toks) else len(code)
-                    if unresolved is None:
-                        raise MigrationDdlError(
-                            "the EXECUTE in %s at offset %d runs a command that is not one "
-                            "constant or a || concatenation of constants; it is not read"
-                            % (where, t[2]))
-                    unresolved.append((where, t[2], " ".join(code[t[2]:end].split())))
-                    continue
-                yield from walk(command, origin, False)
-        do_at = set(_do_bodies(toks, where))
-        for p, t in enumerate(toks):
-            if t[0] not in ("dollar", "string"):
-                continue
-            kind = "do" if p in do_at else _exec_kind(toks, p, top, ())
-            if kind is None:
-                continue
-            if t[0] == "dollar":
-                tag = _DOLLAR_TAG.match(code, t[2]).group(0)
-                a = t[2] + len(tag)
-                yield from walk(text[a:t[3] - len(tag)], a if top else origin, False)
-            else:
-                raise MigrationDdlError("a %s body in %s at offset %d is not dollar-quoted"
-                                        % (kind.upper(), where, t[2]))
-    yield from walk(src, None, True)
-
-
-def _spans(toks, heads):
-    """(k, e) for every token k that is one of the head keywords: the run
-    from it to the next lexer ';' (e is that ';', or len(toks))."""
-    for k, t in enumerate(toks):
-        if t[0] == "ident" and t[1] in heads:
-            e = k + 1
-            while e < len(toks) and toks[e][:2] != ("punct", ";"):
-                e += 1
-            yield k, e
-
-
 def _read(migration):
     path = os.path.join(SQL_DIR, migration)
     if not os.path.isfile(path):
@@ -665,24 +316,7 @@ def table_ddl(migration, table):
     if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
         raise MigrationDdlError("not a plain table name: %r" % (table,))
     src = _read(migration)
-    code, mask, bodies = _views(src)
-
-    # DDL naming this table inside an executable body cannot be placed.
-    # Each executable unit (_units) is lexed like the file, so its statements
-    # end at a lexer ';' and never at a ';' inside a comment, a string or a
-    # quoted name; a unit that cannot be read refuses, whatever it names.
-    for _code, utoks, origin in _units(src):
-        if origin is None:
-            continue
-        for k, e in _spans(utoks, ("create",)):
-            kinds = [m for m in range(k + 1, e) if utoks[m][0] == "ident"
-                     and utoks[m][1] in ("table", "index")]
-            if kinds and any(_is_name(utoks[m], table) for m in range(kinds[0] + 1, e)):
-                raise MigrationDdlError(
-                    "%s: a CREATE TABLE or CREATE INDEX naming %s sits inside a dollar-quoted "
-                    "body at offset %d; whether it runs cannot be read from the file"
-                    % (migration, table, origin))
-
+    code, mask, _bodies = _views(src)
     toks = _tokens(code, mask)
     tables, indexes = [], []
     k = 0
@@ -762,106 +396,3 @@ def table_ddl(migration, table):
             "%s holds %d top-level CREATE TABLE statements for %s; exactly one "
             "is required" % (migration, len(tables), table))
     return [code[a:b] for a, b in tables + indexes]
-
-
-def _table_statement_names(toks, k, e, label):
-    """The relations a CREATE, ALTER or DROP statement at toks[k:e] creates,
-    alters or drops, as (schema, rel) pairs; [] when it is not a TABLE
-    statement. Forms read:
-      CREATE [GLOBAL|LOCAL] [TEMP|TEMPORARY|UNLOGGED|FOREIGN] TABLE
-             [IF NOT EXISTS] name
-      ALTER [FOREIGN] TABLE [IF EXISTS] [ONLY] name ... plus the target of
-             every RENAME TO, ATTACH PARTITION and DETACH PARTITION in it
-      ALTER TABLE ALL IN TABLESPACE ... (names no relation)
-      DROP [FOREIGN] TABLE [IF EXISTS] name [, name ...]
-    A name that does not parse raises (MigrationDdlError from _name)."""
-    head = toks[k][1]
-    j = k + 1
-    if head == "create":
-        while (_at(toks, j) or ("",))[0] == "ident" and toks[j][1] in _TABLE_MODIFIERS:
-            j += 1
-    elif _kw(_at(toks, j), "foreign"):
-        j += 1
-    if j >= e or not _kw(toks[j], "table"):
-        return []
-    j += 1
-    names = []
-    if head == "create":
-        if _if_not_exists(toks, j):
-            j += 3
-        schema, rel, j = _name(toks, j, label, "table")
-        names.append((schema, rel))
-    elif head == "alter":
-        if _kw(_at(toks, j), "all") and _kw(_at(toks, j + 1), "in"):
-            return []
-        if _kw(_at(toks, j), "if") and _kw(_at(toks, j + 1), "exists"):
-            j += 2
-        if _kw(_at(toks, j), "only"):
-            j += 1
-        schema, rel, j = _name(toks, j, label, "table")
-        names.append((schema, rel))
-        for m in range(j, e - 1):
-            if ((_kw(toks[m], "to") and _kw(toks[m - 1], "rename"))
-                    or (_kw(toks[m], "partition")
-                        and (_kw(toks[m - 1], "attach") or _kw(toks[m - 1], "detach")))):
-                schema, rel, _j = _name(toks, m + 1, label, "table")
-                names.append((schema, rel))
-    else:
-        if _kw(_at(toks, j), "if") and _kw(_at(toks, j + 1), "exists"):
-            j += 2
-        while True:
-            schema, rel, j = _name(toks, j, label, "table")
-            names.append((schema, rel))
-            if (_at(toks, j) or ())[:2] != ("punct", ","):
-                break
-            j += 1
-    return names
-
-
-def ddl_naming_table(text, table, unresolved=None):
-    """Every CREATE, ALTER or DROP TABLE statement in SQL text that creates,
-    alters or drops table (in any schema), cut from its head keyword to (not
-    including) its lexer ';', comments blanked; [] when there is none.
-
-    The statements are found by the same lexer as table_ddl, at the top level
-    and in every executable unit (_units: DO and AS bodies, and the commands
-    of EXECUTE inside them), so a quoted name, a comment between TABLE and
-    the name, a name split across a newline continuation, or a statement
-    inside a DO block is read the way PostgreSQL reads it, and a column or
-    string that merely spells the name is not a statement on it. Raises
-    MigrationDdlError when any unit cannot be read (see _units) and when a
-    TABLE statement's name does not parse, whatever it names. An EXECUTE
-    whose command is not one constant or a || concatenation of constants
-    raises too, unless unresolved is a list: then it is appended there (see
-    _units) and the caller must account for every entry."""
-    if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
-        raise MigrationDdlError("not a plain table name: %r" % (table,))
-    out = []
-    for code, toks, _origin in _units(text, unresolved):
-        for k, e in _spans(toks, ("create", "alter", "drop")):
-            names = _table_statement_names(toks, k, e, "a TABLE statement")
-            if any(rel == table for _schema, rel in names):
-                end = toks[e][2] if e < len(toks) else len(code)
-                out.append(code[toks[k][2]:end])
-    return out
-
-
-def code_md5(src):
-    """md5 of src's code as this module reads it: for every unit _units walks
-    (the file, each executable DO or AS body, each EXECUTE command it reads),
-    its tokens' text joined by single spaces, an executable DO or AS body
-    token written as its kind only (the body is a unit of its own, read in
-    turn). Comments and whitespace do not count; any other change does.
-    test_mail.py pins with it every migration whose EXECUTEs it accounts for
-    by hand (REHEARSAL-FOUR-R5 finding 17). An EXECUTE whose command cannot
-    be read stays in its unit's tokens and does not refuse here."""
-    h = hashlib.md5()
-    for code, toks, origin in _units(src, []):
-        top = origin is None
-        executable = set(_do_bodies(toks, "a unit"))
-        executable |= {p for p, t in enumerate(toks) if t[0] in ("dollar", "string")
-                       and _exec_kind(toks, p, top, ()) is not None}
-        words = [("<%s>" % t[0]) if p in executable else code[t[2]:t[3]]
-                 for p, t in enumerate(toks)]
-        h.update((" ".join(words) + "\n").encode("utf-8"))
-    return h.hexdigest()

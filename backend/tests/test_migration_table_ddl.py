@@ -94,13 +94,6 @@ def test_unclosed_index_parentheses_raise(sql):
         sql("CREATE TABLE t (a int);\nCREATE INDEX t_a ON t ((lower(a));\n")
 
 
-def test_ddl_inside_a_dollar_body_raises(sql):
-    text = ("CREATE TABLE t (a int);\n"
-            "DO $$ BEGIN CREATE INDEX t_b ON t (a); END $$;\n")
-    with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
-        sql(text)
-
-
 def test_real_027_gin_index_is_returned():
     """The one current migration with an index form the first extractor left
     out: 027's third flagged_matches index is USING GIN."""
@@ -110,10 +103,10 @@ def test_real_027_gin_index_is_returned():
                       " ON flagged_matches USING GIN(player_steam_ids)")
 
 
-# REHEARSAL-FOUR round 2, LOW findings L1 to L3. Each case below returned the
-# wrong answer from the extractor at aeef9c20 (a statement inside a string or
-# a body returned as top-level DDL, or an index in a body silently left out)
-# and raises or returns the right answer now.
+# REHEARSAL-FOUR round 2, LOW findings L1 and L2. Each case below returned a
+# statement inside a string or a body as top-level DDL at aeef9c20 and raises
+# or returns the right answer now. What a body performs is not table_ddl's
+# question since REHEARSAL-FOUR-R6: test_r7_catalog_diff_pg.py measures it.
 
 ESC_CONTINUED = "SELECT E'x'\n'\\'; CREATE TABLE t (a int); --';\n"
 
@@ -138,153 +131,47 @@ def test_continued_standard_string_stays_a_standard_string(sql):
 
 
 def test_dollar_tags_use_the_identifier_alphabet(sql):
-    # L2: $é$ is a dollar quote in PostgreSQL; the index inside it is body text
+    # L2: $é$ is a dollar quote in PostgreSQL; the index inside it is body
+    # text, never a top-level statement of the file
     for tag in ("$é$", "$ü_9$", "$_é1$", "$Ω$"):
         text = ("CREATE TABLE t (a int);\n"
                 "DO %s BEGIN CREATE INDEX t_b ON t (a); END %s;\n" % (tag, tag))
-        with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
-            sql(text)
+        assert sql(text) == ["CREATE TABLE t (a int)"]
         # a ';' inside such a body does not end the statement holding it
         stmt = "CREATE TABLE t (a int, b text DEFAULT %s;%s)" % (tag, tag)
         assert sql(stmt + ";\n") == [stmt]
 
 
-def test_body_ddl_ends_at_the_lexer_semicolon(sql):
-    # L3: a ';' inside a comment, a quoted index name or a string between INDEX
-    # and the table name does not end the statement
-    for head in ("CREATE INDEX /* ; */ t_b ON t (a)",
-                 "CREATE INDEX -- ;\n t_b ON t (a)",
-                 'CREATE INDEX "semi;colon" ON t (a)',
-                 "CREATE TABLE IF NOT EXISTS /* ; */ t (a int)"):
-        text = "CREATE TABLE t (a int);\nDO $$ BEGIN %s; END $$;\n" % head
-        with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
-            sql(text)
-    # the text an EXECUTE runs, and a body nested in a body, are read too
-    for body in ("DO $$ BEGIN EXECUTE 'CREATE INDEX i ON t (a)'; END $$;\n",
-                 "DO $$ BEGIN EXECUTE $q$CREATE INDEX /* ; */ i ON t (a)$q$; END $$;\n"):
-        with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
-            sql("CREATE TABLE t (a int);\n" + body)
-    # a body statement on another table is not the table's, even when a later
-    # statement in the same body reads the table
-    assert sql("CREATE TABLE t (a int);\n"
-               "DO $$ BEGIN CREATE INDEX i ON other (a); PERFORM 1 FROM t; END $$;\n"
-               ) == ["CREATE TABLE t (a int)"]
-
-
-def test_an_executable_body_that_does_not_lex_raises_whatever_it_names(sql):
-    # R3-A1: no mention gate; the body below names nothing and still refuses
-    for body in ("$$ x = 'open t $$", "$$ x = 'open $$"):
-        with pytest.raises(mtd.MigrationDdlError, match="does not lex"):
-            sql("CREATE TABLE t (a int);\n"
-                "CREATE FUNCTION f() RETURNS int LANGUAGE plpython3u AS %s;\n" % body)
-
-
-# REHEARSAL-FOUR round 3, item (d) as amended by R3-A1: executable positions
-# (a DO body, a CREATE FUNCTION or PROCEDURE AS body, and the commands of an
-# EXECUTE inside such a body) are read by the lexer with nothing decoded.
-# A form the lexer does not read refuses, for table_ddl and ddl_naming_table
-# alike, whatever name it carries. Each case below was accepted at 52ed4ee8.
-
-def naming(text, table="mail_inbox_rev"):
-    return mtd.ddl_naming_table(text, table)
-
-
-REFUSED = [
-    # (form, text for table t, message)
-    ("DO body in a standard string",
-     "DO 'BEGIN CREATE INDEX i ON t (a); END';\n", "DO body .* not dollar-quoted"),
-    ("DO LANGUAGE body in a standard string",
-     "DO LANGUAGE plpgsql 'BEGIN CREATE INDEX i ON t (a); END';\n",
-     "DO body .* not dollar-quoted"),
-    ("AS body in a standard string",
-     "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS "
-     "'BEGIN CREATE INDEX i ON t (a); END';\n", "AS body .* not dollar-quoted"),
-    ("E'' string in an EXECUTE",
-     "DO $$ BEGIN EXECUTE E'CREATE INDEX i ON t (a)'; END $$;\n", "E'' string constant"),
-    ("backslash in an EXECUTE string",
-     "DO $$ BEGIN EXECUTE 'CREATE INDEX i ON \\t (a)'; END $$;\n", "backslash"),
-    ("U&'' string in an EXECUTE",
-     "DO $$ BEGIN EXECUTE U&'CREATE INDEX i ON \\0074 (a)'; END $$;\n", "U&'' string"),
-    ("U& identifier in a body",
-     "DO $$ BEGIN CREATE INDEX i ON U&\"\\0074\" (a); END $$;\n", "U& identifier"),
-    ("U& identifier at the top level",
-     "CREATE INDEX i ON U&\"\\0074\" (a);\n", "U& identifier"),
-    ("two literals on one line in an EXECUTE",
-     "DO $$ BEGIN EXECUTE 'CREATE INDEX i ON ' 't (a)'; END $$;\n", "does not lex"),
-    ("an executable body that does not lex",
-     "CREATE FUNCTION f() RETURNS int LANGUAGE plpython3u AS $$ x = 'open $$;\n",
-     "does not lex"),
-]
-
-
-@pytest.mark.parametrize("form,text,message", REFUSED, ids=[r[0] for r in REFUSED])
-def test_unreadable_executable_forms_refuse(sql, form, text, message):
-    with pytest.raises(mtd.MigrationDdlError, match=message):
-        sql("CREATE TABLE t (a int);\n" + text)
-    # ddl_naming_table refuses the same text, whatever table it is asked for
-    with pytest.raises(mtd.MigrationDdlError, match=message):
-        naming(text.replace(" t (a)", " mail_inbox_rev (a)"))
-    with pytest.raises(mtd.MigrationDdlError, match=message):
-        naming(text, table="unrelated")
-
-
-def test_round3_reviewer_programs_refuse():
-    # :322 a DO body in a standard string; :326 an escaped name in an E''
-    # EXECUTE string; :374 an index on U&"\0074" in a dollar body
-    for text in ("DO 'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-                 "DO $$ BEGIN EXECUTE E'ALTER TABLE mail\\u005finbox_rev ADD COLUMN x int'; "
-                 "END $$;\n",
-                 "DO $$ BEGIN ALTER TABLE U&\"mail\\005finbox_rev\" ADD COLUMN x int; END $$;\n"):
-        with pytest.raises(mtd.MigrationDdlError):
-            naming(text)
-
-
-def test_a_name_split_across_a_newline_continuation_is_found(sql):
-    split = "DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_'\n  'rev ADD COLUMN x int'; END $$;\n"
-    assert naming(split) == ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
-    # a line comment may stand in the gap
-    commented = ("DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_' -- gap\n"
-                 "  'rev ADD COLUMN x int'; END $$;\n")
-    assert naming(commented) == ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
-    with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
-        sql("CREATE TABLE t (a int);\n"
-            "DO $$ BEGIN EXECUTE 'CREATE INDEX i ON '\n't (a)'; END $$;\n")
+def test_a_body_is_never_a_top_level_statement(sql):
+    """REHEARSAL-FOUR-R6 (1)(a): what a DO, a function body, an EXECUTE or
+    another language performs is measured at the database
+    (test_r7_catalog_diff_pg.py), not read here. To table_ddl a body is the
+    text of one constant: nothing in it is returned, and nothing in it
+    refuses."""
+    for body in ("DO $$ BEGIN CREATE INDEX i ON t (a); END $$;\n",
+                 "DO $$ BEGIN EXECUTE 'CREATE INDEX i ON t (a)'; END $$;\n",
+                 "DO 'BEGIN CREATE INDEX i ON t (a); END';\n",
+                 "CREATE FUNCTION f() RETURNS int LANGUAGE plpython3u AS $$ x = 'open t $$;\n",
+                 "DO $$ BEGIN CREATE TABLE t (b int); END $$;\n"):
+        assert sql("CREATE TABLE t (a int);\n" + body) == ["CREATE TABLE t (a int)"], body
 
 
 def test_the_same_literals_on_one_line_refuse(sql):
-    one_line = "DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_' 'rev ADD COLUMN x int'; END $$;\n"
-    with pytest.raises(mtd.MigrationDdlError, match="no newline between them"):
-        naming(one_line)
     # a block comment is not a continuation gap, even with a newline in it
     with pytest.raises(mtd.MigrationDdlError, match="no newline between them"):
-        naming("SELECT 'a' /* x\n */ 'b';\n")
+        mtd._views("SELECT 'a' /* x\n */ 'b';\n")
     with pytest.raises(mtd.MigrationDdlError, match="no newline between them"):
         sql("CREATE TABLE t (a int);\nSELECT 'a' 'b';\n")
 
 
-def test_a_doubled_quote_next_to_a_name_neither_adds_nor_hides_one():
-    # the name inside a doubled-quote string is a string, not a statement
-    assert naming("DO $$ BEGIN EXECUTE 'SELECT ''mail_inbox_rev'''; END $$;\n") == []
-    # a string where a TABLE statement's name stands is not a name: refused
-    with pytest.raises(mtd.MigrationDdlError, match="cannot parse the table name"):
-        naming("DO $$ BEGIN EXECUTE 'ALTER TABLE ''mail_inbox_rev'' ADD x int'; END $$;\n")
-    # a statement after a doubled-quote string is still read
-    found = naming("DO $$ BEGIN EXECUTE 'SELECT ''x'';ALTER TABLE mail_inbox_rev "
-                   "ADD c text DEFAULT ''mail_inbox_rev'''; END $$;\n")
-    assert found == ["ALTER TABLE mail_inbox_rev ADD c text DEFAULT 'mail_inbox_rev'"]
-
-
-def test_data_strings_and_bodies_are_not_executable(sql):
+def test_data_strings_and_bodies_are_not_statements(sql):
     # E'' and U&'' constants and dollar bodies as data are not refused
     text = ("CREATE TABLE t (a int);\n"
             "UPDATE x SET v = REPLACE(v, U&'\\25BC', 'v') WHERE w = E'\\n';\n"
             "DO $$ BEGIN RAISE NOTICE E'it\\'s %', 'it''s'; "
             "INSERT INTO y VALUES ($m$it's$m$); END $$;\n")
     assert sql(text) == ["CREATE TABLE t (a int)"]
-    assert naming(text) == []
 
-
-# ── REHEARSAL-FOUR-R4 item 2 (class D) ───────────────────────────────────
 
 def test_r4_line_comment_ends_at_cr(sql):
     """2.1: a -- comment ends at CR as well as LF (scan.l non_newline is
@@ -292,240 +179,11 @@ def test_r4_line_comment_ends_at_cr(sql):
     code, mask, _bodies = mtd._views("SELECT 1 -- comment\r, lo_create(0)")
     assert "lo_create(0)" in code
     assert ("ident", "lo_create") in [t[:2] for t in mtd._tokens(code, mask)]
-    assert naming("SELECT 1 -- c\rALTER TABLE mail_inbox_rev ADD COLUMN x int;\n") == [
-        "ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
     assert sql("-- c\rCREATE TABLE t (a int);\n") == ["CREATE TABLE t (a int)"]
-    # LF and CRLF endings unchanged
-    assert naming("SELECT 1 -- c\r\nALTER TABLE mail_inbox_rev ADD x int;\n") == [
-        "ALTER TABLE mail_inbox_rev ADD x int"]
+    assert sql("-- c\r\nCREATE TABLE t (a int);\n") == ["CREATE TABLE t (a int)"]
 
 
-R4_PREFIXED_BODIES = [
-    "DO E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "DO U&'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "DO B'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "DO X'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "DO N'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "DO LANGUAGE plpgsql e'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "DO $$ BEGIN END $$ LANGUAGE plpgsql;\nDO LANGUAGE plpgsql "
-    "E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    # DO LANGUAGE 'plpgsql' E'...' moved to R5_LANGUAGE_NAMES_REFUSED: since
-    # round 5 a string LANGUAGE name refuses before the body is reached
-    "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS "
-    "E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "CREATE PROCEDURE p() LANGUAGE plpgsql AS "
-    "U&'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "DO $$ BEGIN EXECUTE 'DO E''BEGIN ALTER TABLE mail_inbox_rev ADD x int; END'''; END $$;\n",
-]
-
-
-@pytest.mark.parametrize("text", R4_PREFIXED_BODIES)
-def test_r4_prefixed_string_bodies_refuse(text):
-    """2.2: a DO or AS body in a prefixed string constant is located from its
-    prefix and refused like any body that is not dollar-quoted."""
-    with pytest.raises(mtd.MigrationDdlError, match="not dollar-quoted"):
-        naming(text)
-
-
-def test_r4_a_prefixed_language_name_refuses(sql):
-    """2.2 sibling, revised by REHEARSAL-FOUR-R5 finding 14: round 4 read
-    DO LANGUAGE <prefixed string> $$...$$ as a DO body; the DO grammar now
-    reads only an unquoted identifier as the LANGUAGE name (backend/sql
-    names none), so a prefixed-string name refuses, in both readers."""
-    with pytest.raises(mtd.MigrationDdlError, match="has a LANGUAGE name that is not"):
-        naming("DO LANGUAGE E'plpgsql' $$ BEGIN ALTER TABLE mail_inbox_rev "
-               "ADD COLUMN x int; END $$;\n")
-    with pytest.raises(mtd.MigrationDdlError, match="has a LANGUAGE name that is not"):
-        sql("CREATE TABLE t (a int);\nDO LANGUAGE U&'plpgsql' $$ BEGIN "
-            "CREATE INDEX i ON t (a); END $$;\n")
-
-
-def test_r4_execute_concatenation_is_read_whole(sql):
-    """2.3: an EXECUTE command that is a || chain of constants is read as the
-    joined text, so a name split across the pieces is found."""
-    want = ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
-    assert naming("DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_' || 'rev ADD COLUMN x int'; "
-                  "END $$;\n") == want
-    assert naming("DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_'||$q$rev ADD COLUMN x int$q$ "
-                  "INTO v; END $$;\n") == want
-    assert naming("DO $$ BEGIN EXECUTE 'ALTER TABLE mail_' || 'inbox_' || 'rev ADD COLUMN x int' "
-                  "USING 1; END $$;\n") == want
-    with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
-        sql("CREATE TABLE t (a int);\n"
-            "DO $$ BEGIN EXECUTE 'CREATE INDEX i ' || 'ON t (a)'; END $$;\n")
-    # a prefixed constant in the chain still refuses
-    with pytest.raises(mtd.MigrationDdlError, match="E'' string"):
-        naming("DO $$ BEGIN EXECUTE 'SELECT 1' || E'x'; END $$;\n")
-
-
-R4_UNRESOLVED = [
-    "DO $$ BEGIN EXECUTE format('ALTER TABLE %I ADD x int', 'mail_inbox_rev'); END $$;\n",
-    "DO $$ DECLARE s text := 'ALTER TABLE mail_inbox_rev ADD x int'; BEGIN EXECUTE s; END $$;\n",
-    "DO $$ BEGIN EXECUTE 'ALTER TABLE ' || tbl || ' ADD x int'; END $$;\n",
-    "DO $$ BEGIN EXECUTE ('ALTER TABLE mail_inbox_' || 'rev ADD x int'); END $$;\n",
-    "DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_' || 'rev ADD x int'::text; END $$;\n",
-    "DO $$ BEGIN EXECUTE; END $$;\n",
-]
-
-
-@pytest.mark.parametrize("text", R4_UNRESOLVED)
-def test_r4_an_unresolved_execute_refuses_or_is_reported(text):
-    """2.3: any other EXECUTE command expression is not read: it raises, or,
-    with a list passed, is appended there for the caller to account for."""
-    with pytest.raises(mtd.MigrationDdlError, match="is not read"):
-        naming(text)
-    found = []
-    assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == []
-    assert len(found) == 1 and found[0][2].startswith("EXECUTE"), found
-
-
-def test_r4_privilege_and_trigger_execute_are_not_commands(sql):
-    """2.3 sibling: GRANT/REVOKE EXECUTE and a trigger's EXECUTE FUNCTION are
-    not dynamic commands and are not refused."""
-    text = ("DO $$ BEGIN GRANT EXECUTE ON FUNCTION f() TO r; "
-            "REVOKE EXECUTE ON FUNCTION f() FROM r; GRANT USAGE, EXECUTE ON FUNCTION f() TO r; "
-            "CREATE TRIGGER g AFTER INSERT ON y FOR EACH ROW EXECUTE FUNCTION f(); "
-            "CREATE TRIGGER h AFTER INSERT ON y FOR EACH ROW EXECUTE PROCEDURE f(); END $$;\n")
-    assert naming(text) == []
-
-
-# REHEARSAL-FOUR-R5, findings 14 and 15 (Codex round 5): controls written
-# before any fix (fix 0). Each red case is the reviewer's program stated as
-# the required behaviour; each kept case is a form the fix must keep reading.
-
-R5_DOLLAR_LANGUAGE = [
-    "DO LANGUAGE $lang$plpgsql$lang$ $body$ BEGIN ALTER TABLE mail_inbox_rev "
-    "ADD COLUMN x int; END $body$;\n",
-    "DO LANGUAGE $$plpgsql$$ $body$ BEGIN ALTER TABLE mail_inbox_rev "
-    "ADD COLUMN x int; END $body$;\n",
-]
-
-
-@pytest.mark.parametrize("text", R5_DOLLAR_LANGUAGE)
-def test_r5_a_dollar_quoted_language_name_does_not_hide_the_do_body(text):
-    """14: DO LANGUAGE $lang$plpgsql$lang$ $body$...$body$ runs its body. The
-    body is either read (its ALTER of the guarded table found) or the form is
-    refused; it is never silently treated as data."""
-    try:
-        out = naming(text)
-    except mtd.MigrationDdlError:
-        return
-    assert out == ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"], out
-
-
-def test_r5_a_dollar_quoted_language_name_does_not_hide_ddl_from_table_ddl(sql):
-    """14, table_ddl side: an index on the table inside such a body refuses."""
-    with pytest.raises(mtd.MigrationDdlError):
-        sql("CREATE TABLE t (a int);\nDO LANGUAGE $l$plpgsql$l$ $b$ BEGIN "
-            "CREATE INDEX i ON t (a); END $b$;\n")
-
-
-def test_r5_kept_language_forms_still_lead_to_the_do_body(sql):
-    """14, kept: the forms backend/sql uses (DO $tag$...$tag$, with LANGUAGE
-    after the body) and a plain LANGUAGE name before it are walked."""
-    want = ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
-    body = "$body$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $body$"
-    assert naming("DO LANGUAGE plpgsql %s;\n" % body) == want
-    assert naming("DO %s LANGUAGE plpgsql;\n" % body) == want
-    assert naming("DO %s;\n" % body) == want
-    with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
-        sql("CREATE TABLE t (a int);\nDO LANGUAGE plpgsql $b$ BEGIN "
-            "CREATE INDEX i ON t (a); END $b$;\n")
-
-
-R5_FAKE_TRIGGER_EXECUTE = [
-    "DO $$ DECLARE function text := 'ALTER TABLE mail_inbox_rev ADD x int'; "
-    "BEGIN EXECUTE function COLLATE \"C\"; END $$;\n",
-    "DO $$ DECLARE procedure text := 'ALTER TABLE mail_inbox_rev ADD x int'; "
-    "BEGIN EXECUTE procedure COLLATE \"C\"; END $$;\n",
-    "DO $$ DECLARE function text := 'ALTER TABLE mail_inbox_rev ADD x int'; r int; "
-    "BEGIN EXECUTE function INTO r; END $$;\n",
-    "DO $$ DECLARE function text := 'ALTER TABLE mail_inbox_rev ADD x int'; "
-    "BEGIN EXECUTE function USING 1; END $$;\n",
-]
-
-
-@pytest.mark.parametrize("text", R5_FAKE_TRIGGER_EXECUTE)
-def test_r5_execute_of_a_variable_named_function_is_a_dynamic_command(text):
-    """15: outside a CREATE TRIGGER, EXECUTE function <ident> is a dynamic
-    EXECUTE of the variable `function`: it is not read, so it raises, or,
-    with a list passed, is reported there."""
-    with pytest.raises(mtd.MigrationDdlError, match="is not read"):
-        naming(text)
-    found = []
-    assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == []
-    assert len(found) == 1 and found[0][2].startswith("EXECUTE"), found
-
-
-def test_r5_kept_trigger_declarations_are_not_commands():
-    """15, kept: EXECUTE FUNCTION|PROCEDURE inside the trigger declarations
-    backend/sql uses (CREATE TRIGGER, CREATE OR REPLACE TRIGGER, CREATE
-    CONSTRAINT TRIGGER) is not a dynamic command, inside a body too."""
-    text = ("DO $$ BEGIN "
-            "CREATE TRIGGER g AFTER INSERT ON y FOR EACH ROW EXECUTE FUNCTION f(); "
-            "CREATE OR REPLACE TRIGGER h BEFORE UPDATE ON y FOR EACH ROW EXECUTE PROCEDURE f(); "
-            "CREATE CONSTRAINT TRIGGER c AFTER INSERT OR UPDATE ON y DEFERRABLE INITIALLY "
-            "DEFERRED FOR EACH ROW EXECUTE FUNCTION f(); "
-            "CREATE TRIGGER s AFTER INSERT ON y REFERENCING NEW TABLE AS inserted "
-            "FOR EACH STATEMENT EXECUTE FUNCTION f(); END $$;\n")
-    found = []
-    assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == [] and found == []
-    assert naming(text) == []
-
-
-R5_DO_SHAPES_REFUSED = [
-    "DO LANGUAGE 'plpgsql' E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "DO LANGUAGE 'plpgsql' $b$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $b$;\n",
-    "DO LANGUAGE \"plpgsql\" $b$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $b$;\n",
-    "DO $b$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $b$ LANGUAGE $l$plpgsql$l$;\n",
-    "DO $b$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $b$ LANGUAGE 'plpgsql';\n",
-    "DO LANGUAGE plpgsql LANGUAGE plpgsql $b$ BEGIN END $b$;\n",
-    "DO $b$ BEGIN END $b$ $c$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $c$;\n",
-    "DO $b$ BEGIN END $b$ plpgsql;\n",
-    "DO;\n",
-    "DO $$ BEGIN EXECUTE 'DO LANGUAGE $l$plpgsql$l$ $b$ BEGIN END $b$'; END $$;\n",
-]
-
-
-@pytest.mark.parametrize("text", R5_DO_SHAPES_REFUSED)
-def test_r5_do_shapes_outside_the_grammar_refuse(text):
-    """14: a DO is read only as DO body, DO LANGUAGE name body or DO body
-    LANGUAGE name (name one unquoted identifier); every other shape refuses,
-    in the file and inside an executed command."""
-    with pytest.raises(mtd.MigrationDdlError, match="the DO in"):
-        naming(text)
-
-
-def test_r5_on_conflict_do_is_not_a_do_statement(sql):
-    """14, kept: DO NOTHING and DO UPDATE after ON CONFLICT (the only other
-    DO in backend/sql) are not DO statements, at the top level and in a body."""
+def test_on_conflict_do_is_not_a_statement(sql):
     text = ("INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING;\n"
-            "INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 2;\n"
-            "DO $$ BEGIN INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING; END $$;\n")
-    assert naming(text) == []
+            "INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 2;\n")
     assert sql("CREATE TABLE t (a int);\n" + text) == ["CREATE TABLE t (a int)"]
-
-
-def test_r5_execute_judged_by_its_statement_head():
-    """15: a privilege EXECUTE counts only inside GRANT or REVOKE, a trigger's
-    only inside CREATE [OR REPLACE] [CONSTRAINT] TRIGGER, whatever the
-    neighbouring tokens are."""
-    for text in ("DO $$ DECLARE on_ text; BEGIN PERFORM 1; EXECUTE s; END $$;\n",
-                 "DO $$ BEGIN IF true THEN EXECUTE function COLLATE \"C\"; END IF; END $$;\n",
-                 "DO $$ BEGIN PERFORM grant_x(); EXECUTE procedure INTO r; END $$;\n",
-                 # inside GRANT, only EXECUTE ON|, is the privilege
-                 "DO $$ BEGIN GRANT EXECUTE function COLLATE \"C\"; END $$;\n",
-                 # an event trigger is not a CREATE [OR REPLACE] [CONSTRAINT] TRIGGER
-                 # (none in backend/sql): its EXECUTE is collected, not exempted
-                 "DO $$ BEGIN CREATE EVENT TRIGGER e ON ddl_command_start "
-                 "EXECUTE FUNCTION f(); END $$;\n",
-                 # a second EXECUTE in a trigger's statement is not the trigger's
-                 "DO $$ BEGIN CREATE TRIGGER g AFTER INSERT ON y FOR EACH ROW "
-                 "EXECUTE FUNCTION f() EXECUTE function COLLATE \"C\"; END $$;\n"):
-        found = []
-        assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == []
-        assert len(found) == 1 and found[0][2].startswith("EXECUTE"), (text, found)
-    found = []
-    text = ("DO $$ BEGIN IF NOT EXISTS (SELECT 1) THEN CREATE TRIGGER g AFTER INSERT ON y "
-            "FOR EACH ROW EXECUTE FUNCTION f(); END IF; END $$;\n")
-    assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == [] and found == []
