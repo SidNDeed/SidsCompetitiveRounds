@@ -969,6 +969,8 @@ def test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev(chain):
     mail_inbox_rev. Their own refusals are recorded."""
     _numbered, aux = _files()
     assert aux, "no rollback or resume files found"
+    # newest first, as rollbacks are undone (rollback_399 before rollback_398 ...)
+    aux = sorted(aux, key=lambda n: (re.sub(r"\D", "", n.split("_")[1]) or "0", n), reverse=True)
     copy = (chain.db + "_aux")[:63]
     asyncio.run(_admin('CREATE DATABASE "%s" TEMPLATE "%s"' % (copy, chain.db)))
     dsn = _dsn(copy)
