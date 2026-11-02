@@ -17,6 +17,8 @@ namespace CompetitiveRounds
         // The gate (FtGate.Off) is written only by StartPoint and EndPoint, both reached only from Boundary at
         // FT_Start, so it is constant within a frame: a patch's prefix and finalizer in one frame always decide
         // alike (an RPC cannot span a frame boundary). GameStart and GameOver may run mid-frame and never touch it.
+        // The one other writer is FtCalib's dispatch calibration, which sets it around its own patched loops (nothing
+        // else runs meanwhile) and restores the value it found.
         internal static int Game = -1;
         internal static int Round;
         internal static int PointInRound;

@@ -15,7 +15,9 @@ namespace CompetitiveRounds
     ///     (preemption lowers a ratio, never raises it).
     /// (b) Dispatch: for each patch shape, 20 batches of 100,000 calls of a NoInlining
     ///     dummy unpatched, then the same patched in that shape by this calibration's own
-    ///     Harmony id, then unpatched again; and a direct call behind the gate read. Each
+    ///     Harmony id, then unpatched again; and a direct call whose body opens with the census
+    ///     check. Every patch body is the closed path a gated entry runs at an OFF point, run
+    ///     with the gate set, so the difference is what the OFF arm cannot remove. Each
     ///     run is one unit of V4 section 3.6's allowance D_j. The census (part 2) maps
     ///     every gated entry to one of these shapes; VR2 requires a calibration line for
     ///     every mapped shape at every game start.
@@ -49,7 +51,35 @@ namespace CompetitiveRounds
 
             [MethodImpl(MethodImplOptions.NoInlining)]
             internal static void S2(ref int a, object b) { a++; }
+
+            // Targets of the census shapes: instance void, object and bool with two arguments; static void with
+            // three and with two; and a direct call whose body opens with the census check.
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            internal void I1(int a, float b) { V += a; }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            internal object IR(int a, float b) { V += a; return this; }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            internal bool IB(int a, float b) { V += a; return (a & 1) == 0; }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            internal static void T3(object a, string b, int c) { _sink += c; }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            internal static void T2(object a, object b) { _sink++; }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            internal static void CallGated()
+            {
+                if (FtCensus.Skip(CalEntry)) return;
+                _sink++;
+            }
         }
+
+        /// <summary>The census slot the calibration's closed paths count in: never registered, so no census
+        /// line and no sum includes it.</summary>
+        internal const int CalEntry = 255;
 
         private static class Patches
         {
@@ -58,6 +88,54 @@ namespace CompetitiveRounds
             internal static void PostResult(ref int __result) { }
             internal static void PostInstance(Dummy __instance) { }
             internal static Exception Fin(Exception __exception) { return __exception; }
+
+            // The closed paths, one per census shape (INVENTORY.md "Patch shapes").
+            internal static void S1Pre(Dummy __instance, int a) { if (FtCensus.Skip(CalEntry)) return; _sink++; }
+            internal static void S2Post(Dummy __instance, int a) { if (FtCensus.Skip(CalEntry)) return; _sink++; }
+            internal static void S3Post(object __0, string __1, int __2) { if (FtCensus.Skip(CalEntry)) return; _sink++; }
+            internal static void S4Post(Dummy __instance, int a, object __result) { if (FtCensus.Skip(CalEntry)) return; _sink++; }
+            internal static Exception S5Fin(Dummy __instance, Exception __exception)
+            {
+                if (FtCensus.Skip(CalEntry)) return __exception;
+                _sink++;
+                return __exception;
+            }
+            internal static void S6Pre(Dummy __instance, int a, out long __state)
+            {
+                if (FtCensus.Skip(CalEntry)) { __state = 0; return; }
+                __state = 1;
+            }
+            internal static Exception S6Fin(Dummy __instance, long __state, Exception __exception)
+            {
+                if (FtGate.Off) return __exception;
+                _sink++;
+                return __exception;
+            }
+            internal static void S7Pre(object __0, object __1, out long __state)
+            {
+                if (FtCensus.Skip(CalEntry)) { __state = 0; return; }
+                __state = 1;
+            }
+            internal static Exception S7Fin(long __state, Exception __exception)
+            {
+                if (FtGate.Off) return __exception;
+                _sink++;
+                return __exception;
+            }
+            internal static void S8Pre(Dummy __instance, out long __state)
+            {
+                if (FtCensus.Skip(CalEntry)) { __state = 0; return; }
+                __state = 1;
+            }
+            internal static void S8Post(Dummy __instance, long __state) { if (FtGate.Off) return; _sink++; }
+            internal static void S9Post(Dummy __instance, bool __result, long __state) { if (FtGate.Off) return; _sink++; }
+            internal static void S11Pre() { if (FtCensus.Skip(CalEntry)) return; _sink++; }
+            internal static Exception S11Fin(Exception __exception)
+            {
+                if (FtGate.Off) return __exception;
+                _sink++;
+                return __exception;
+            }
         }
 
         /// <summary>A patch shape: the loop that calls its target, the target, and its patches.</summary>
@@ -74,14 +152,20 @@ namespace CompetitiveRounds
 
         private static readonly Shape[] Shapes =
         {
-            new Shape { Name = "static0.post", Loop = 0, Baseline = 0, Target = "S0", Postfix = "Post" },
-            new Shape { Name = "static0.pre", Loop = 0, Baseline = 0, Target = "S0", Prefix = "Pre" },
-            new Shape { Name = "static0.prepost", Loop = 0, Baseline = 0, Target = "S0", Prefix = "Pre", Postfix = "Post" },
-            new Shape { Name = "static0.fin", Loop = 0, Baseline = 0, Target = "S0", Finalizer = "Fin" },
-            new Shape { Name = "static1.result.post", Loop = 1, Baseline = 1, Target = "S1", Postfix = "PostResult" },
-            new Shape { Name = "inst0.instance.post", Loop = 2, Baseline = 2, Target = "I0", Postfix = "PostInstance" },
-            new Shape { Name = "static2.ref.post", Loop = 3, Baseline = 3, Target = "S2", Postfix = "Post" },
-            new Shape { Name = "gate.direct", Loop = 4, Baseline = 0, Target = null },
+            // The census shapes (INVENTORY.md "Patch shapes"; FtEntries.cs names each entry's), each patched
+            // with its closed path; "call" is a direct call whose body opens with the census check, against
+            // the empty loop. S10, S12 to S14 belong to no gated entry.
+            new Shape { Name = "S1", Loop = 10, Baseline = 10, Target = "I1", Prefix = "S1Pre" },
+            new Shape { Name = "S2", Loop = 10, Baseline = 10, Target = "I1", Postfix = "S2Post" },
+            new Shape { Name = "S3", Loop = 13, Baseline = 13, Target = "T3", Postfix = "S3Post" },
+            new Shape { Name = "S4", Loop = 11, Baseline = 11, Target = "IR", Postfix = "S4Post" },
+            new Shape { Name = "S5", Loop = 10, Baseline = 10, Target = "I1", Finalizer = "S5Fin" },
+            new Shape { Name = "S6", Loop = 10, Baseline = 10, Target = "I1", Prefix = "S6Pre", Finalizer = "S6Fin" },
+            new Shape { Name = "S7", Loop = 14, Baseline = 14, Target = "T2", Prefix = "S7Pre", Finalizer = "S7Fin" },
+            new Shape { Name = "S8", Loop = 10, Baseline = 10, Target = "I1", Prefix = "S8Pre", Postfix = "S8Post" },
+            new Shape { Name = "S9", Loop = 12, Baseline = 12, Target = "IB", Prefix = "S8Pre", Postfix = "S9Post" },
+            new Shape { Name = "S11", Loop = 2, Baseline = 2, Target = "I0", Prefix = "S11Pre", Finalizer = "S11Fin" },
+            new Shape { Name = "call", Loop = 15, Baseline = 6, Target = null },
             new Shape { Name = "span.empty", Loop = 5, Baseline = 6, Target = null },
         };
 
@@ -133,6 +217,12 @@ namespace CompetitiveRounds
                 case 4: for (int j = 0; j < n; j++) { if (!FtGate.Off) Dummy.S0(); } break;
                 case 5: for (int j = 0; j < n; j++) { bool sp = FtSpan.Open(FtSpan.Cal, FtSpan.Gated); x++; FtSpan.Close(sp); } break;
                 case 6: for (int j = 0; j < n; j++) { x++; } break;
+                case 10: for (int j = 0; j < n; j++) d.I1(j, 1f); break;
+                case 11: for (int j = 0; j < n; j++) { if (d.IR(j, 1f) == null) x++; } break;
+                case 12: for (int j = 0; j < n; j++) { if (d.IB(j, 1f)) x++; } break;
+                case 13: for (int j = 0; j < n; j++) Dummy.T3(o, "m", j); break;
+                case 14: for (int j = 0; j < n; j++) Dummy.T2(o, o); break;
+                case 15: for (int j = 0; j < n; j++) { Dummy.CallGated(); x++; } break;
             }
             long t = Stopwatch.GetTimestamp() - t0;
             _sink += x;
@@ -155,6 +245,11 @@ namespace CompetitiveRounds
                 for (int b = 0; b < Batches; b++) u[b] = Loop(s.Baseline, Calls);
                 MethodInfo target = s.Target == null ? null : AccessTools.Method(typeof(Dummy), s.Target);
                 if (target != null) harmony.Patch(target, Hm(s.Prefix), Hm(s.Postfix), null, Hm(s.Finalizer), null);
+                // The closed paths need the gate set: the one write of FtGate.Off outside FtSchedule.Boundary,
+                // inside this calibration, with nothing else running on the main thread, restored after.
+                bool gate = FtGate.Off;
+                bool span = s.Name.StartsWith("span.");
+                if (!span) FtGate.Off = true;
                 try
                 {
                     Loop(s.Loop, 1000);
@@ -162,6 +257,7 @@ namespace CompetitiveRounds
                 }
                 finally
                 {
+                    FtGate.Off = gate;
                     if (target != null) harmony.Unpatch(target, HarmonyPatchType.All, HarmonyId);
                 }
                 Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=" + (s.Name.StartsWith("span.") ? "span" : "disp") + " shape=" + s.Name + " n=" + Calls
