@@ -198,3 +198,50 @@ def test_vr7_constant_plant_passes():
 def test_vr7_stalls_in_planted_windows_fail():
     ok, bad = P.vr7(_with_planted(_windows(lambda g, w: 0, lambda g, w: 0), lambda g, w: 1 if w % 5 == 0 else 0))
     assert not ok and "H=4 ms FAIL" in bad
+
+
+# ------------------------------------------------------------------ census and span totals: VR5 per point, K_up
+
+def _pt(gate, **kw):
+    r = {"kind": "p", "pt": "1.1.1", "game": 1, "gate": gate, "span_g": 0, "span_gn": 0, "on_calls": 0, "guarded": 0}
+    r.update(kw)
+    return r
+
+
+def test_vr5_point_zero_holds():
+    ok, bad = P.vr5([_pt(1, guarded=40), _pt(0, span_g=900, span_gn=40, on_calls=40)])
+    assert ok and bad == []
+
+
+def test_vr5_flags_gated_span_time_at_a_gated_point():
+    ok, bad = P.vr5([_pt(1, guarded=40, span_g=3)])
+    assert not ok and bad == ["pt=1.1.1 gated: span_g=3 span_gn=0 on_calls=0"]
+
+
+def test_vr5_flags_guarded_returns_at_an_open_point():
+    ok, bad = P.vr5([_pt(0, guarded=1)])
+    assert not ok and bad == ["pt=1.1.1 open: guarded=1"]
+
+
+def _kup_log(per_frame_ticks, freq=10000000):
+    recs = [{"kind": "settled", "g": 0, "freq": freq}]
+    for g, u in enumerate(per_frame_ticks, 1):
+        recs.append({"kind": "settled", "g": g, "freq": freq})
+        for arm in ("ON", "OFF"):
+            recs.append({"kind": "p", "game": g, "arm": arm, "n": 1000, "pn": 0, "live_frames": 1001,
+                         "span_u": int(u * 1001)})
+    return recs
+
+
+def test_k_up_reads_upkeep_per_live_frame():
+    ticks = [600 + 10 * (i % 3) for i in range(16)]      # 60 to 62 us at 10 MHz
+    est, hw, ku = P.k_up(_kup_log(ticks))
+    assert est == pytest.approx(sum(ticks) / 16 / 10.0, abs=1e-9)
+    assert ku == pytest.approx(est + hw) and hw > 0
+
+
+def test_k_up_refuses_two_frequencies():
+    recs = _kup_log([600] * 16)
+    recs.append({"kind": "settled", "g": 17, "freq": 3000000})
+    with pytest.raises(P.Refused):
+        P.k_up(recs)

@@ -8,6 +8,7 @@ port against values computed with the control.
 Lines read (all values integers; a value with a decimal point is refused, HIGH 5):
   w        window:   pt=g.r.p arm=ON|OFF plant=0|1 partial=0|1 n sF sS sC maxF [medF e4=kmin,kmax e8=.. e16=..] gc
   p        point:    pt arm gate pred n sF sS sC maxF pn psF psS psC plant_mixed windows live_frames missing_end
+                     span_g span_gn span_u span_un on_calls guarded (census and span totals, live moment)
                      (n and the s sums are the unplanted frames, pn and the ps sums the planted ones)
   plant    once:     c_plant (us) ticks from=g.r.p|sentinel
   settled  per game: g seed c_plant W vsync target freq hires f_hat gc_incremental gc_slice_ns f18 ... missing_end
@@ -218,7 +219,7 @@ def _int(key, v):
 INT_KEYS = {"n", "sF", "sS", "sC", "maxF", "medF", "gc", "gate", "windows", "live_frames", "missing_end", "partial",
             "g", "seed", "c_plant", "W", "vsync", "target", "freq", "hires", "f_hat", "frames", "cycle_failures",
             "span_depth_violations", "on", "guarded", "outside", "i", "plant", "pn", "psF", "psS", "psC",
-            "plant_mixed", "ticks"}
+            "plant_mixed", "ticks", "span_g", "span_gn", "span_u", "span_un", "on_calls"}
 
 
 def parse_line(line):
@@ -363,12 +364,41 @@ def e_c(recs, z=Z_END, first_game=1):
 
 
 def vr5(recs):
-    """Census: every entry that ran in ON live frames shows guarded returns in OFF live frames, per game."""
+    """Census: every entry that ran in ON live frames shows guarded returns in OFF live frames, per game; and per
+    point, a gated point has no gated span time, no gated span call and no census call with the gate clear, an
+    ungated point no guarded return."""
     bad = []
     for r in recs:
         if r["kind"] == "census" and r["on"] > 0 and r["guarded"] == 0:
             bad.append("g=%d %s" % (r["g"], r["entry"]))
+        if r["kind"] == "p" and "span_g" in r:
+            if r["gate"] == 1 and (r["span_g"] or r["span_gn"] or r["on_calls"]):
+                bad.append("pt=%s gated: span_g=%d span_gn=%d on_calls=%d" % (r["pt"], r["span_g"], r["span_gn"],
+                                                                          r["on_calls"]))
+            if r["gate"] == 0 and r["guarded"]:
+                bad.append("pt=%s open: guarded=%d" % (r["pt"], r["guarded"]))
     return not bad, bad
+
+
+def k_up(recs, z=Z_END, first_game=1):
+    """K_up (V4 3.3, F13): per game, the upkeep spans' elapsed time per live frame over both arms (sum of span_u
+    over sum of live_frames, in microseconds by the settled line's Stopwatch frequency); over games fw_interval at
+    z, weighted by the game's measured frames. Returns (est, hw, k_up)."""
+    freq = set(r["freq"] for r in recs if r["kind"] == "settled")
+    if len(freq) != 1:
+        raise Refused("K_up needs one Stopwatch frequency across settled lines (got %s)" % sorted(freq))
+    f = freq.pop()
+    g = games_of(recs, first_game)
+    kw = []
+    for k in sorted(g):
+        pts = g[k]
+        if any("span_u" not in q for q in pts):
+            raise Refused("game %d has a point line without span totals" % k)
+        lf = sum(q["live_frames"] for q in pts)
+        nn = sum(q["n"] + q.get("pn", 0) for q in pts)
+        kw.append((sum(q["span_u"] for q in pts) * 1e6 / f / lf, nn))
+    est, hw, _ = fw_interval(kw, z)
+    return est, hw, est + hw
 
 
 def vr2(recs):
@@ -415,7 +445,12 @@ def report(text):
         out.append("VR2 e_C_lo %s (>= 0.5)" % ("PASS" if lo >= 0.5 else "FAIL"))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("e_C not computable: %s" % e)
-    out.append("U not computable yet: D_up and K_up lines are part 3's remainder")
+    try:
+        ke, kh, ku = k_up(recs)
+        out.append("K_up %.3f us per live frame (estimate %.3f, half-width %.3f)" % (ku, ke, kh))
+    except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
+        out.append("K_up not computable: %s" % e)
+    out.append("U not computable yet: D_up waits on the calibration shapes S1 to S11 (part 3's remainder)")
     return "\n".join(out)
 
 

@@ -85,6 +85,20 @@ namespace CompetitiveRounds
             }
         }
 
+        internal static long SumOn()
+        {
+            long s = 0;
+            for (int e = 0; e < Count; e++) s += OnLive[e];
+            return s;
+        }
+
+        internal static long SumGuarded()
+        {
+            long s = 0;
+            for (int e = 0; e < Count; e++) s += Guarded[e];
+            return s;
+        }
+
         internal static void Reset()
         {
             for (int e = 0; e < Count; e++) { OnLive[e] = 0; Guarded[e] = 0; Outside[e] = 0; }

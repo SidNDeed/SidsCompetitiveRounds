@@ -28,8 +28,11 @@ namespace CompetitiveRounds
     /// apart, with plant_mixed counting frames whose plant state differs from their
     /// window's first frame (0 by construction; VR2). At the end of the session's first
     /// OFF point with a full unplanted window, c_plant is fixed at round(0.03 x its mean F).
-    /// Still to come in part 3: the zero-state result and the census and span totals on
-    /// the point line.</summary>
+    /// The point line also carries the point's census and span totals (live moment):
+    /// span_g/span_gn the gated spans' ticks and calls, span_u/span_un the upkeep spans',
+    /// on_calls the census calls with the gate clear and guarded the guarded returns. At a
+    /// gated point span_g, span_gn and on_calls are 0 by construction (VR5). Still to come
+    /// in part 3: the zero-state result.</summary>
     internal static class FtFrames
     {
         internal const int W = 120;
@@ -45,6 +48,7 @@ namespace CompetitiveRounds
         private static bool _wPlant;
         private static long _qn, _qF, _qS, _plantMixed;
         private static ulong _qC;
+        private static long _g0, _gn0, _u0, _un0, _on0, _guard0;   // span and census sums at the point's start
 
         private static long _pn, _pF, _pS, _pMaxF, _pMissingEnd;
         private static ulong _pC;
@@ -70,6 +74,12 @@ namespace CompetitiveRounds
             _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0;
             _pn = 0; _pF = 0; _pS = 0; _pC = 0; _pMaxF = 0; _pMissingEnd = 0;
             _qn = 0; _qF = 0; _qS = 0; _qC = 0; _plantMixed = 0;
+            _g0 = FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Gated);
+            _gn0 = FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Gated);
+            _u0 = FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Upkeep);
+            _un0 = FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Upkeep);
+            _on0 = FtCensus.SumOn();
+            _guard0 = FtCensus.SumGuarded();
             _windows = 0;
         }
 
@@ -81,7 +91,12 @@ namespace CompetitiveRounds
                 + " pred=" + (FtSchedule.PrevArm < 0 ? "none" : FtSchedule.PrevArm == 1 ? "ON" : "OFF")
                 + " n=" + _pn + " sF=" + _pF + " sS=" + _pS + " sC=" + _pC + " maxF=" + _pMaxF
                 + " pn=" + _qn + " psF=" + _qF + " psS=" + _qS + " psC=" + _qC + " plant_mixed=" + _plantMixed
-                + " windows=" + _windows + " live_frames=" + FtSchedule.LiveFrame + " missing_end=" + _pMissingEnd);
+                + " windows=" + _windows + " live_frames=" + FtSchedule.LiveFrame + " missing_end=" + _pMissingEnd
+                + " span_g=" + (FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Gated) - _g0)
+                + " span_gn=" + (FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Gated) - _gn0)
+                + " span_u=" + (FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Upkeep) - _u0)
+                + " span_un=" + (FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Upkeep) - _un0)
+                + " on_calls=" + (FtCensus.SumOn() - _on0) + " guarded=" + (FtCensus.SumGuarded() - _guard0));
             if (FtPlant.Us < 0 && !FtSchedule.ArmOn && _pn >= W)
                 FtPlant.Fix((long)Math.Round(0.03 * _pF * 1000000.0 / ((double)_pn * System.Diagnostics.Stopwatch.Frequency)),
                     FtSchedule.Label());

@@ -69,6 +69,15 @@ namespace CompetitiveRounds
             Calls[i]++;
         }
 
+        /// <summary>Sum of arr over the seven components (not Cal) and both phases, for one moment and kind.</summary>
+        internal static long Sum(long[] arr, int moment, int kind)
+        {
+            long s = 0;
+            for (int c = 0; c < Cal; c++)
+                for (int p = 0; p < Phases; p++) s += arr[Index(c, moment, p, kind)];
+            return s;
+        }
+
         /// <summary>Depth must be 0 at every frame boundary; FT_Start checks it (VR2).</summary>
         internal static int Depth => _depth;
 
