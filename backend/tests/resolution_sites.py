@@ -24,9 +24,21 @@ span bound from one. A resolution site is:
 Every site of a span inside class Bindings goes through the resolver. A
 call of a resolver method (any method class Bindings defines, or the
 visitor's pass-through wrappers `_resolve` / `_check`) is the resolver's
-own: its arguments are not sites and its answer is not a KEY.
+own: its answer is not a KEY. Its ARGUMENTS are read like any other
+expression of the span (round 7, finding resolution_sites:132: a decision
+evaluated inside a resolver call's argument contributed no site).
+
+Round 7 (ruling REHEARSAL-FOUR-R6 (1)(b)): the census is DEFAULT-DENY.
+Before any site is counted, every node of every walker span is checked
+against WALKER_SHAPES (grammar_shapes_a1.py), the frozen shapes of the
+walker code itself (shape_grammar.shape); the walker code holds no
+annotated assignment, so one refuses (finding resolution_sites:145:
+`name: str = node.id` was not followed). `grammar_refusals` lists every
+node outside it.
 """
 import ast
+
+import shape_grammar as _sg
 
 RESOLVER_CLASS = "Bindings"
 RESOLVER_METHODS = set()
@@ -124,13 +136,15 @@ def _own(fn):
 
 
 def _pruned(fn):
-    """ids of fn's nodes inside a resolver call."""
+    """ids of fn's resolver calls and their callee spellings (round 7: a
+    resolver call's ARGUMENTS are never pruned)."""
     got = _PRUNED.get(id(fn))
     if got is None:
         got = set()
         for x in ast.walk(fn):
             if _resolver_call(x):
-                got |= {id(y) for y in ast.walk(x)}
+                got.add(id(x))
+                got |= {id(y) for y in ast.walk(x.func)}
         _PRUNED[id(fn)] = got
     return got
 
@@ -200,6 +214,39 @@ def sites(fn):
                     for x in ops):
                 out.append(("text", n.lineno))
     return out
+
+
+def walker_spans(tree, walkers_only=True):
+    """[(qualname, definition)] of every outermost walker span of module
+    tree: each module-level function (outside `test_*` with walkers_only)
+    and each method of a module-level class; a nested definition is a part
+    of the span that holds it."""
+    out = []
+    for c in tree.body:
+        if isinstance(c, ast.ClassDef):
+            out.extend((f"{c.name}.{d.name}", d) for d in c.body
+                       if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef)))
+        elif isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not (walkers_only and c.name.startswith("test_")):
+                out.append((c.name, c))
+    return out
+
+
+def grammar_refusals(tree, shapes, filename, walkers_only=True):
+    """[(file, line, shape)] for every node of every walker span outside the
+    frozen `shapes`; empty when the walker code is in its grammar. The
+    walker code holds no annotated assignment, so no AnnAssign shape is in
+    WALKER_SHAPES and every one refuses (the census test asserts that no
+    frozen shape names AnnAssign)."""
+    out = []
+    for _q, d in walker_spans(tree, walkers_only):
+        out.extend(_sg.refusals(d, shapes, filename))
+    return out
+
+
+def walker_nodes(tree, walkers_only=True):
+    """The number of nodes the census grammar checks in module tree."""
+    return sum(len(_sg.visit(d)) for _q, d in walker_spans(tree, walkers_only))
 
 
 def census(tree, methods, walkers_only=True):

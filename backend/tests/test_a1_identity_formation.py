@@ -533,23 +533,17 @@ def _handler_bindings(tree, scope):
     if not (len(tree.body) == 1 and isinstance(
             tree.body[0], (_ast.FunctionDef, _ast.AsyncFunctionDef))):
         raise Unclassified((0, "a walked source that is not one definition"))
-    return _cw.Bindings(scope, tree.body[0])
+    return _cw.Bindings(scope, tree.body[0],
+                        grammar=_policy(scope).grammar)
 
 
-def _binding_problems(b, module=(), line=0):
-    """(line, why) for each of `module` that the walked function binds (the
-    walk reads each as the module's), and for a session `db` that is not its
-    own parameter bound once."""
+def _binding_problems(b, line=0):
+    """(line, why) for a session `db` that is not the walked function's own
+    parameter bound once. Round 7 (ruling REHEARSAL-FOUR-R6 (1)(c)) deleted
+    the loop that proved each name the walk reads as the module's unbound:
+    the grammar's binding rule refuses every binding of a meaningful
+    spelling (grammar_shapes_a1.A1_MEANINGFUL holds them) before the walk."""
     out = []
-    for name in module:
-        try:
-            kind, _v = b.resolve(name, line)
-        except Unclassified as e:
-            out.append(e.args[0])
-            continue
-        if kind != "module":
-            out.append((line, f"{name}, a name the walk reads as the "
-                              "module's, is bound by the function"))
     if not b.is_param("db"):
         out.append((line, "the session db is not the walked function's own "
                           "parameter, bound once"))
@@ -607,6 +601,50 @@ def _outer_jumps(node):
 
 from closed_walk import Unclassified  # noqa: E402
 import closed_walk as _cw  # noqa: E402
+import grammar_shapes_a1 as _gs  # noqa: E402
+
+
+# The default-deny grammar of the a1 walks (ruling REHEARSAL-FOUR-R6
+# (1)(b)): every span the walks below visit (a handler, the resolver, the
+# family pick, the relock helper, every helper body def_effects descends
+# into, a builder's or a module accessor's body) is admitted by it BEFORE
+# any walker reasoning: every node's shape in the frozen whitelist
+# (grammar_shapes_a1.A1_SHAPES, generated once from the real spans at
+# a30d37f6 by RF/r7/ga1/gen_shapes.py), no binding of a meaningful spelling
+# but the frozen pairs, every local import one of the frozen triples. A
+# refusal names the file, the line and the shape.
+def _a1_grammar():
+    return _cw.Grammar(_gs.A1_SHAPES, _gs.A1_MEANINGFUL, _gs.A1_BINDINGS,
+                       _gs.A1_IMPORTS, _gs.A1_NAMEDTUPLES)
+
+
+_A1_GRAMMAR = _a1_grammar()
+
+
+def _admit_source(d, scope, src):
+    """Admit the parsed definition `d` of source `src` under the grammar of
+    the a1 policy over `scope`: positioned at its real file and line when
+    `src` is exactly the source of the scope's same-named function, else as
+    planted."""
+    scope = main if scope is None else scope
+    fn = getattr(scope, getattr(d, "name", ""), None)
+    where = ("<planted>", 0)
+    if _inspect.isfunction(fn):
+        try:
+            if _inspect.getsource(fn) == src:
+                where = _cw.source_of(fn)
+        except (OSError, TypeError):
+            pass
+    _policy(scope).grammar.admit(d, *where)
+
+
+def _admit_handler(tree, scope, src):
+    """Admit the one definition a parsed handler source holds; refused
+    (Unclassified) for anything else, or by the grammar."""
+    if not (len(tree.body) == 1 and isinstance(
+            tree.body[0], (_ast.FunctionDef, _ast.AsyncFunctionDef))):
+        raise Unclassified((0, "a walked source that is not one definition"))
+    _admit_source(tree.body[0], scope, src)
 
 
 # The allow-lists are positive and named; the classification itself is
@@ -662,10 +700,29 @@ def _policy(scope=None):
     if key not in _POLICIES:
         _POLICIES[key] = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS,
                                     _PURE_AWAITS, _SQL_LISTS)
+        _POLICIES[key].grammar = _A1_GRAMMAR
     return _POLICIES[key]
 
 
 _POLICIES = {}
+
+
+@pytest.fixture
+def structural_only(monkeypatch):
+    """The a1 walks' STRUCTURAL rules alone, for the controls of rounds 1 to
+    5 (ruling REHEARSAL-FOUR-R6 (1)(b) keeps the structural exit logic, over
+    grammar-admitted spans). Those controls plant small synthetic handlers
+    and helpers; none is a real span, so the frozen grammar refuses each at
+    its first shape (its root's body set) before any structural rule could
+    speak. Here the grammar RECORDS instead, so each older program still
+    reaches the rule it was written for. Every finding of rounds 1 to 6 this
+    child owns is ALSO a round-7 control under the frozen grammar
+    (test_r7_a1_findings_are_refused_under_the_frozen_grammar)."""
+    import sys as _sys
+    me = _sys.modules[__name__]
+    monkeypatch.setattr(me, "_A1_GRAMMAR",
+                        _cw.Grammar((), (), (), (), record=True))
+    monkeypatch.setattr(me, "_POLICIES", {})
 
 
 def _sql_kind(sql):
@@ -943,10 +1000,11 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
     # the handler's one resolver, and every name the walk reads as the
     # module's is first proved unbound by the handler.
     try:
+        _admit_handler(tree, scope, fn_src)
         b = _handler_bindings(tree, scope)
     except Unclassified as e:
         return [], 0, 0, (set(), set()), [e.args[0]]
-    bad = _binding_problems(b, _A1_MODULE_NAMES)
+    bad = _binding_problems(b)
     if bad:
         return [], 0, 0, (set(), set()), bad
     if team:
@@ -1390,13 +1448,6 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
     return exits, n_body, n_loop, (rollbacks, passed), problems
 
 
-# The names the formation walk reads as the module's: each is proved
-# unbound by the handler before the walk (ruling REHEARSAL-FOUR-R5, fix 1).
-_A1_MODULE_NAMES = ("_identity_lock_many", "_lease_acquire_many", "len",
-                    TEAM_RESOLVER, "TeamQueuePollResponse",
-                    "QueuePollResponse", "FORMATION_MAX_ATTEMPTS")
-
-
 def _is_matched_answer(node, b):
     value = getattr(node, "value", None)
     return (isinstance(node, _ast.Return) and isinstance(value, _ast.Call)
@@ -1550,7 +1601,7 @@ class _SampleScope:
 _SAMPLE = _SampleScope()
 
 
-def test_the_formation_exit_oracle_can_fail():
+def test_the_formation_exit_oracle_can_fail(structural_only):
     """Negative control (#391): one planted loop per way the rule can break,
     beside the shapes that keep it, each refused for its own reason."""
     NL = chr(10)
@@ -1996,6 +2047,7 @@ def _attempt_budgets(fn_src):
     one poll gets, and the defect was two `for` loops that each read
     perfectly well on their own line."""
     tree = _ast.parse(fn_src)
+    _admit_handler(tree, None, fn_src)
     # the constant read through the handler's resolver as the module's
     # (ruling REHEARSAL-FOUR-R5, fix 1)
     b = _handler_bindings(tree, None)
@@ -2112,14 +2164,23 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
     problems as sentences, empty when the shape holds."""
     resolve, pick, relock = (_ast.parse(s).body[0]
                              for s in (resolve_src, pick_src, relock_src))
+    for d, s in zip((resolve, pick, relock),
+                    (resolve_src, pick_src, relock_src)):
+        try:
+            _admit_source(d, scope, s)
+        except Unclassified as e:
+            return [f"{d.name}: {e.args[0][1]} (line {e.args[0][0]})"]
     # Ruling REHEARSAL-FOUR-R5, fix 1: each body's spellings are read
     # through its own resolver, the module names proved unbound first.
-    rb = _cw.Bindings(main if scope is None else scope, resolve)
-    lb = _cw.Bindings(main if scope is None else scope, relock)
+    grammar = _policy(scope).grammar
+    rb = _cw.Bindings(main if scope is None else scope, resolve,
+                      grammar=grammar)
+    lb = _cw.Bindings(main if scope is None else scope, relock,
+                      grammar=grammar)
     bad = ([f"{resolve.name}: {why} (line {ln})" for ln, why in
-            _binding_problems(rb, (relock.name, pick.name))]
+            _binding_problems(rb)]
            + [f"{relock.name}: {why} (line {ln})" for ln, why in
-              _binding_problems(lb, ("TeamQueuePollResponse",))])
+              _binding_problems(lb)])
     if bad:
         return bad
     out = [f"{fn.name} ends the transaction itself"
@@ -2440,7 +2501,7 @@ def _round2_a1_programs():
     return good, bad
 
 
-def test_the_closed_walk_refuses_round_2s_programs():
+def test_the_closed_walk_refuses_round_2s_programs(structural_only):
     """Rehearsal-four round 2 (ruling REHEARSAL-FOUR-R2): the exit walk is
     closed. Every statement in a walked span is classified into a named
     shape (expr_effects, _helper_effects, _sql_kind) or the walk fails
@@ -2457,7 +2518,7 @@ def test_the_closed_walk_refuses_round_2s_programs():
         assert any(why in b for b in got), (form, why, got)
 
 
-def test_the_gather_exit_oracle_can_fail():
+def test_the_gather_exit_oracle_can_fail(structural_only):
     """Negative control (#391) for the gather form: one planted handler per
     way the rule can break, beside the shapes that keep it, each refused for
     its own reason."""
@@ -3369,6 +3430,10 @@ def test_the_ffa_gather_decision_is_pure_and_asked_twice():
 
     assert '"gather_seconds_left": _left' in src, (
         "the failed-attempt return still reports a hardcoded window")
+    # P under the grammar (ruling REHEARSAL-FOUR-R6 (1)(b)): the decision's
+    # body is admitted by the a1 grammar, then walked whole by the shared
+    # visitor as a plain function, and takes no effect.
+    assert _cw.plain_effects(main._ffa_gather_decide, _policy()) == frozenset()
 
 
 class _LockTimeoutSession(FakeSession):
@@ -3692,7 +3757,7 @@ def _round3_a1_programs():
     return out
 
 
-def test_the_shared_visitor_refuses_round_3s_programs():
+def test_the_shared_visitor_refuses_round_3s_programs(structural_only):
     """Rehearsal-four round 3 (ruling REHEARSAL-FOUR-R3): the reviewer's a1
     programs and the sitting's probes, one program per argument kind and one
     per mutating method, each refused by the shared visitor for its own
@@ -3706,7 +3771,7 @@ def test_the_shared_visitor_refuses_round_3s_programs():
         assert any(why in b for b in got), (form, why, got)
 
 
-def test_the_resolver_walk_reads_an_awaited_committing_helper():
+def test_the_resolver_walk_reads_an_awaited_committing_helper(structural_only):
     """Round 3, finding a1:2481: an awaited helper that commits, inserted
     into the real resolver and into the real family pick, is refused."""
     names = ("_team_resolve_live_family", "_team_lock_family_pick",
@@ -4184,7 +4249,7 @@ class _R5Scope(_SampleScope):
     Q = "SELECT 1"
 
 
-def test_r5_a1_formation_expressions_resolve_the_handlers_bindings():
+def test_r5_a1_formation_expressions_resolve_the_handlers_bindings(structural_only):
     """Ruling REHEARSAL-FOUR-R5, fix 0, finding a1:665: the formation walk's
     expressions resolve names through the handler's own bindings. A module
     `Q = 'SELECT 1'` must not stand for the handler's local
@@ -4299,3 +4364,445 @@ def test_r5_every_resolution_site_goes_through_the_resolver():
         mutated = dict(sources, **{mod: sources[mod].replace(old, new)})
         got = _census_problems(mutated)
         assert [s for s, _sites in got] == [f"{mod}:{span}"], (span, got)
+
+
+# --- round 7: the default-deny grammar of the a1 walks ---------------------
+# Ruling REHEARSAL-FOUR-R6 (1)(b), arms E, P, B2-callee: every span the a1
+# walks visit is admitted by _A1_GRAMMAR before any walker reasoning.
+
+_REAL_TEAM_RELOCK = ("_team_resolve_live_family", "_team_lock_family_pick",
+                     "_team_relock_existing_series")
+
+
+def _a1_real_walks():
+    """Every walk the a1 arms make over the REAL spans, in one place: the
+    completeness test and the one-time generator (RF/r7/ga1/gen_shapes.py)
+    both call this. [(walk, problems)]; every problems list is empty when
+    the grammar admits every span and the walks' structural rules hold."""
+    src = {n: _inspect.getsource(getattr(main, n)) for n in (
+        "queue_poll", "ovt_queue_poll", "_ffa_queue_poll_inner",
+        "team_queue_poll") + _REAL_TEAM_RELOCK}
+    out = [("queue_poll return", formation_exit_violations(src["queue_poll"]))]
+    for site in ("ovt_queue_poll", "_ffa_queue_poll_inner"):
+        out.append((f"{site} gather",
+                    formation_exit_violations(src[site], "gather")))
+    for site in ("ovt_queue_poll", "_ffa_queue_poll_inner", "team_queue_poll"):
+        try:
+            openings, _c, _l = _attempt_budgets(src[site])
+            out.append((f"{site} budget", [] if len(openings) == 1
+                        else [f"{len(openings)} budget openings"]))
+        except Unclassified as e:
+            out.append((f"{site} budget", [e.args[0]]))
+    out.append(("team_queue_poll team",
+                formation_exit_violations(src["team_queue_poll"], "team")))
+    out.append(("relock", _relock_outcome_problems(
+        *(src[n] for n in _REAL_TEAM_RELOCK))))
+    # P: the FFA gather decision, walked whole as a plain function
+    try:
+        eff = _cw.plain_effects(main._ffa_gather_decide, _policy())
+        out.append(("_ffa_gather_decide plain", sorted(eff)))
+    except Unclassified as e:
+        out.append(("_ffa_gather_decide plain", [e.args[0]]))
+    return out
+
+
+def _span_def(filename, line, name):
+    """Definition `name` at `line` of tests/../api/`filename`, read from the
+    file itself (the completeness test's independent reading)."""
+    import pathlib
+    path = pathlib.Path(__file__).resolve().parent.parent / "api" / filename
+    tree = _SPAN_TREES.get(filename)
+    if tree is None:
+        tree = _SPAN_TREES[filename] = _ast.parse(path.read_text(encoding="utf-8"))
+    hits = [n for n in _ast.walk(tree) if isinstance(
+        n, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and n.name == name
+        and n.lineno == line]
+    assert len(hits) == 1, (filename, line, name, len(hits))
+    return hits[0]
+
+
+_SPAN_TREES = {}
+
+
+def test_r7_the_grammar_checks_every_walked_node_and_refuses_none(monkeypatch):
+    """Completeness (ruling REHEARSAL-FOUR-R6 (1)(b)): with a fresh grammar
+    and fresh policies, every real walk of the a1 arms runs; the refusal
+    list is EMPTY; the spans the grammar admitted are exactly the frozen
+    A1_SPANS; and the nodes it checked, span by span and in total, equal
+    the nodes of those spans counted independently from the source files."""
+    import sys as _sys
+    me = _sys.modules[__name__]
+    g = _a1_grammar()
+    monkeypatch.setattr(me, "_A1_GRAMMAR", g)
+    monkeypatch.setattr(me, "_POLICIES", {})
+    walks = _a1_real_walks()
+    assert [(w, p) for w, p in walks if p] == [], walks
+    want = {(f, ln, name): n for f, ln, name, n in _gs.A1_SPANS}
+    assert set(g.admitted) == set(want), (
+        sorted(set(g.admitted) ^ set(want)))
+    import shape_grammar as _sg
+    imports = set()
+    for key, n in want.items():
+        d = _span_def(*key)
+        assert g.admitted[key] == n == len(_sg.visit(d)), (key, n)
+        imports |= {imp for _ln, imp in _cw.local_imports(d)}
+    assert sum(g.admitted.values()) == sum(want.values()) == _gs.A1_NODES
+    # the local imports the shape rule admits, as (module, name, asname)
+    assert imports == set(_gs.A1_IMPORTS), sorted(imports, key=repr)
+
+
+# --- round 7: every owned finding of rounds 1 to 6, a control ------------
+# Each reviewer's program is planted INTO THE REAL SPAN it was about (the
+# real handler's source, or a real helper the real handler awaits, copied
+# into a module over main's namespace with the program inserted), walked by
+# the same a1 walk under the FROZEN grammar, and refused: by the grammar
+# (the sentence names the shape), by the binding rule, by the P rule, or by
+# the walk's structural exit rule (its sentence). The sentence each is
+# refused with is pinned (R7_A1_WANT).
+
+def _r7_scope(tag, sources=()):
+    """A planted module r7_<tag>: main's namespace, then each of `sources`
+    (a real helper's source with a program inserted, or a class the program
+    defines) executed over it, so the real call site reaches the copy."""
+    import linecache
+    import sys as _sys
+    import types as _types
+    mod = _types.ModuleType(f"r7_{tag}")
+    mod.__file__ = f"<r7_{tag}>"
+    text = "\n\n".join(sources) + "\n"
+    linecache.cache[mod.__file__] = (len(text), None, text.splitlines(True),
+                                     mod.__file__)
+    mod.__dict__.update({k: v for k, v in vars(main).items()
+                         if not k.startswith("__")})
+    _sys.modules[mod.__name__] = mod
+    exec(compile(text, mod.__file__, "exec"), mod.__dict__)
+    return mod
+
+
+def _r7_put(src, anchor, new, replace=False):
+    """`src` with `new` inserted before the one occurrence of `anchor` (or
+    replacing it)."""
+    assert src.count(anchor) == 1, (anchor, src.count(anchor))
+    return src.replace(anchor, new if replace else new + anchor)
+
+
+_R7_H = "_formation_lease_conflict"
+_R7_H_AT = "    # One set, so `allow` and `allow_any` cannot disagree."
+_R7_Q_DRIFT = ("            await db.rollback()\n            opp = None\n"
+               "            continue\n")
+_R7_Q_BARRIER = ('        await _identity_lock_many(db, [steam_id, '
+                 'cand["steam_id"]])\n')
+_R7_O_DRIFT = ("            await db.rollback()\n            lobby = None\n"
+               "            continue\n")
+_R7_T_DRIFT = ("            await db.rollback()\n            others = []\n"
+               "            break\n        if len(still) != 3:\n")
+_R7_T_SPEND = "\n    while _form_left > 0:\n        _form_left -= 1\n"
+_R7_T_RESOLVE = ("            outcome, resp = await _team_resolve_live_family(\n"
+                 "                db, original_pids, my_pid, steam_id, my_qtype, "
+                 "req1, req2)\n")
+
+
+def _r7_src(name):
+    return _textwrap.dedent(_inspect.getsource(getattr(main, name)))
+
+
+def _r7_helper(tag, lines, classes=()):
+    """The real handler queue_poll over a scope whose _R7_H, the real
+    helper it awaits in its formation loop, carries `lines` (statements at
+    the helper's top level) before its first statement after the
+    docstring; `classes` are module statements the program defines."""
+    h = _r7_put(_r7_src(_R7_H), _R7_H_AT,
+                "".join("    " + ln + "\n" for ln in lines))
+    return ("return", _r7_src("queue_poll"),
+            _r7_scope(tag, tuple(classes) + (h,)))
+
+
+def _r7_programs():
+    """[(finding, form, handler source or relock sources, scope)]: each
+    owned finding's program in its real span (rounds 1 to 6; the census
+    findings resolution_sites:132 and :145 are test_r7_census_*)."""
+    q, o, t = _r7_src("queue_poll"), _r7_src("ovt_queue_poll"), _r7_src(
+        "team_queue_poll")
+    rel = [_r7_src(n) for n in _REAL_TEAM_RELOCK]
+    plain = _r7_scope("plain")
+    # main's own committing helper, called with a name the span binds (its
+    # call shape is the grammar's; its body commits)
+    commit = "await _report_commit(db, {})"
+
+    def relock(k):
+        tree = _ast.parse(rel[k])
+        tree.body[0].body.insert(1, _ast.parse(commit.format(
+            ("four_pids", "four_pids", "srow")[k])).body[0])
+        out = list(rel)
+        out[k] = _ast.unparse(tree)
+        return out
+
+    return [
+        ("r1 a1:567 a commit before the drift rollback", "return",
+         _r7_put(q, _R7_Q_DRIFT, "            await db.commit()\n"), plain),
+        ("r1 a1:593 a nested loop's else: continue", "return",
+         _r7_put(q, _R7_Q_DRIFT, "            for _never in ():\n"
+                 "                pass\n            else:\n"
+                 "                continue\n", replace=True), plain),
+        ("r1 a1:1172 the OVT drift rollback deleted", "gather",
+         _r7_put(o, _R7_O_DRIFT, "            lobby = None\n"
+                 "            continue\n", replace=True), plain),
+        ("r2 a1:918 the barrier and a commit under if True", "return",
+         _r7_put(q, _R7_Q_BARRIER, "        if True:\n    " + _R7_Q_BARRIER
+                 + "            await db.commit()\n", replace=True), plain),
+        ("r2 a1:910 a committing helper before the drift rollback", "return",
+         _r7_put(q, _R7_Q_DRIFT, "            " + commit.format("opp") + "\n"),
+         plain),
+        ("r2 a1:961 the team drift keeps the rolled-back roster", "team",
+         _r7_put(t, _R7_T_DRIFT, _R7_T_DRIFT.replace(
+             "others = []", "others = still"), replace=True), plain),
+        ("r2 a1:718 the budget refilled inside the loop", "team",
+         _r7_put(t, _R7_T_SPEND, _R7_T_SPEND
+                 + "        _form_left = max(_form_left, 1)\n", replace=True),
+         plain),
+        ("r3 a1:1397 a commit in the barrier's keyword", "return",
+         _r7_put(q, _R7_Q_BARRIER, _R7_Q_BARRIER.replace(
+             "]])", "]], timeout_ms=(await db.commit()))"), replace=True),
+         plain),
+        ("r3 a1:914 a helper holding a match",
+         *_r7_helper("match", ["match members:", "    case _:",
+                               "        pass"])),
+        ("r3 a1:914 a helper holding a lambda",
+         *_r7_helper("lambda", ["f = (lambda: db.add(members))", "f()"])),
+        ("r3 a1:914 a helper holding a walrus",
+         *_r7_helper("walrus", ["if (w := db.add(members)):", "    pass"])),
+        ("r3 a1:2481 a committing helper in the real resolver", "relock",
+         relock(0), plain),
+        ("r4 cw:699 a builtin rebound to a session method",
+         *_r7_helper("rebound", ["str = db.add", "str(members)"])),
+        ("r4 cw:699 (binding route) a builtin rebound",
+         *_r7_helper("rebound2", ["str = members", "str(members)"])),
+        ("r4 cw:1036 a writing local-function annotation",
+         *_r7_helper("annot", ["def inner(x: db.add(members)):",
+                               "    return x"])),
+        ("r4 cw:825 a helper catches a rollback-then-raise",
+         *_r7_helper("catches", ["try:", "    " + commit.format("members"),
+                                 "except Exception:", "    pass"])),
+        ("r4 a1:1119 the resolver called with *[...]", "team",
+         _r7_put(t, _R7_T_RESOLVE, _R7_T_RESOLVE.replace(
+             "db, original_pids,", "*[db, original_pids],"), replace=True),
+         plain),
+        ("r4 a1:1119 the resolver called with **{}", "team",
+         _r7_put(t, _R7_T_RESOLVE, _R7_T_RESOLVE.replace(
+             "req2)", "req2, **{})"), replace=True), plain),
+        ("r4 a1:2095 a committing helper in the real relock", "relock",
+         relock(2), plain),
+        ("r5 cw:897 a local function rebound to a writer",
+         *_r7_helper("inner", ["def inner():", "    return None",
+                               "inner = _report_commit", "inner()"])),
+        ("r5 cw:1235 an imported builtin rebound",
+         *_r7_helper("import", ["from builtins import str", "str = members",
+                                "str(db, members)"])),
+        ("r5 cw:759 a tuple subclass with a _fields marker",
+         *_r7_helper("marker", ["Marked(members)"], classes=(
+             "class Marked(tuple):\n    _fields = ()\n\n"
+             "    def __new__(cls, *a):\n        return tuple.__new__(cls, a)\n",))),
+        ("r5 cw:1217 a finally that returns",
+         *_r7_helper("finally", ["try:", "    pass", "finally:",
+                                 "    return None"])),
+        ("r6 cw:406 the gate imported from another module",
+         *_r7_helper("gate", ["from evil_gate import _lease_admission_gate",
+                              "await _lease_admission_gate(db, members)"])),
+        ("r6 cw:406 (binding route) the gate rebound",
+         *_r7_helper("gate2", ["_lease_admission_gate = members"])),
+        ("r6 cw:670 a copied namedtuple __new__ under a writing metaclass",
+         *_r7_helper("meta", ["Evil(members)"], classes=(
+             "import collections\n_Nt = collections.namedtuple('_Nt', 'a')\n\n\n"
+             "class Meta(type):\n    def __call__(cls, *a):\n"
+             "        return None\n\n\n"
+             "class Evil(tuple, metaclass=Meta):\n    __new__ = _Nt.__new__\n",))),
+    ]
+
+
+def _r7_outcome(form, prog, scope):
+    """The problems the a1 walk gives the program, as sentences."""
+    if form == "relock":
+        return _relock_outcome_problems(*prog, scope=scope)
+    return formation_exit_violations(prog, form, scope=scope)
+
+
+# finding -> (the rule that refuses it, the text its first problem carries,
+# the construct shapes the grammar must refuse in the program's spans).
+# shape: "a shape outside the grammar ... <shape>"; binding: "the binding
+# rule ... binds <spelling> (<how>)"; P: the namedtuple rule gives no class,
+# so the constructor is a call the walk does not classify; exit: the walk's
+# structural sentence over a grammar-admitted span.
+_GRAMMAR = "a shape outside the grammar at "
+R7_A1_WANT = {
+    "r1 a1:567 a commit before the drift rollback":
+        ("exit", "rollback after commit", ()),
+    "r1 a1:593 a nested loop's else: continue":
+        ("shape", "For.body>If(test=BoolOp,body=[For],orelse=[])",
+         ("For.orelse>Continue()",)),
+    "r1 a1:1172 the OVT drift rollback deleted":
+        ("shape", "For.body>If(test=Compare,body=[Assign|Continue],orelse=[])",
+         ()),
+    "r2 a1:918 the barrier and a commit under if True":
+        ("shape", "For.body>If(test=Constant,body=[Expr],orelse=[])",
+         ("If.test>Constant(value=bool)",)),
+    "r2 a1:910 a committing helper before the drift rollback":
+        ("shape", "<root>>AsyncFunctionDef(name=str,args=arguments,"
+                  "body=[Expr|If],decorator_list=[]", ()),
+    "r2 a1:961 the team drift keeps the rolled-back roster":
+        ("exit", "awaits after rollback", ()),
+    "r2 a1:718 the budget refilled inside the loop":
+        ("exit", "an assignment to the attempt budget this walk does not read",
+         ()),
+    "r3 a1:1397 a commit in the barrier's keyword":
+        ("shape", "Call.keywords>keyword(arg='timeout_ms',value=Await)", ()),
+    "r3 a1:914 a helper holding a match":
+        ("shape", "body=[Assign|Expr|For|If|Match|Return]",
+         ("AsyncFunctionDef.body>Match(",)),
+    "r3 a1:914 a helper holding a lambda":
+        ("shape", "AsyncFunctionDef.body>Assign(targets=[Name],value=Lambda,",
+         ("Assign.value>Lambda(",)),
+    "r3 a1:914 a helper holding a walrus":
+        ("shape", "AsyncFunctionDef.body>If(test=NamedExpr,", ("If.test>NamedExpr(",)),
+    "r3 a1:2481 a committing helper in the real resolver":
+        ("shape", "<root>>AsyncFunctionDef(name=str,args=arguments,"
+                  "body=[Expr|If],decorator_list=[]", ()),
+    "r4 cw:699 a builtin rebound to a session method":
+        ("shape", "AsyncFunctionDef.body>Assign(targets=[Name],value=Attribute,",
+         ("Assign.value>Attribute(value=Name,attr='add',ctx=Load)",)),
+    "r4 cw:699 (binding route) a builtin rebound":
+        ("binding", "binds str (store)", ()),
+    "r4 cw:1036 a writing local-function annotation":
+        ("shape", "body=[Assign|Expr|For|FunctionDef|If|Return]",
+         ("arg.annotation>Call(",)),
+    "r4 cw:825 a helper catches a rollback-then-raise":
+        ("shape", "AsyncFunctionDef.body>Try(body=[Expr],handlers=[ExceptHandler]",
+         ()),
+    "r4 a1:1119 the resolver called with *[...]":
+        ("shape", "Await.value>Call(func=Name,args=[Name|Starred],keywords=[])",
+         ("Call.args>Starred(",)),
+    "r4 a1:1119 the resolver called with **{}":
+        ("shape", "Call.keywords>keyword(arg=None,value=Dict)", ()),
+    "r4 a1:2095 a committing helper in the real relock":
+        ("shape", "<root>>AsyncFunctionDef(name=str,args=arguments,"
+                  "body=[Expr|If],decorator_list=[]", ()),
+    "r5 cw:897 a local function rebound to a writer":
+        # the nested def's own shape is a real one (main nests functions);
+        # the root's statement set and the bare call of the rebound name
+        # are not
+        ("shape", "body=[Assign|Expr|For|FunctionDef|If|Return]",
+         ("Expr.value>Call(func=Name,args=[],keywords=[])",)),
+    "r5 cw:1235 an imported builtin rebound":
+        ("shape", "body=[Assign|Expr|For|If|ImportFrom|Return]",
+         ("ImportFrom(module='builtins'",)),
+    "r5 cw:759 a tuple subclass with a _fields marker":
+        ("P", "a call this walk does not classify: Marked", ()),
+    "r5 cw:1217 a finally that returns":
+        ("shape", "finalbody=[Return]", ("Try.finalbody>Return(",)),
+    "r6 cw:406 the gate imported from another module":
+        ("shape", "body=[Assign|Expr|For|If|ImportFrom|Return]",
+         ("ImportFrom(module='evil_gate'",)),
+    "r6 cw:406 (binding route) the gate rebound":
+        ("binding", "binds _lease_admission_gate (store)", ()),
+    "r6 cw:670 a copied namedtuple __new__ under a writing metaclass":
+        ("P", "a call this walk does not classify: Evil", ()),
+}
+_R7_MARK = {"shape": _GRAMMAR, "binding": "the binding rule at ",
+            "P": "a call this walk does not classify", "exit": ""}
+
+
+def _r7_program_refusals(form, prog, scope):
+    """Every shape the frozen grammar refuses in the program's own spans:
+    its handler (or the three relock bodies) and every definition its
+    planted module holds."""
+    import shape_grammar as _sg
+    srcs = list(prog) if form == "relock" else [prog]
+    path = getattr(scope, "__file__", "")
+    if path.startswith("<r7_"):
+        import linecache
+        srcs.append("".join(linecache.cache[path][2]))
+    out = set()
+    for s in srcs:
+        for d in _ast.parse(_textwrap.dedent(s)).body:
+            if isinstance(d, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                out |= {sh for _f, _l, sh in _sg.refusals(d, _gs.A1_SHAPES, "")}
+    return out
+
+
+def test_r7_a1_findings_are_refused_under_the_frozen_grammar():
+    """Ruling REHEARSAL-FOUR-R6 (3): every finding of rounds 1 to 6 this
+    child owns is a control under the new mechanism. Each reviewer's
+    program, planted into the real span it was about, is walked by the a1
+    walk under the FROZEN grammar and refused, its FIRST problem carrying
+    the rule and the text R7_A1_WANT pins; where a construct sits inside a
+    container shape, the construct's own shape is among the grammar's
+    refusals of the program too. The real spans the programs were planted
+    in are admitted and pass (test_r7_the_grammar_checks_...)."""
+    progs = _r7_programs()
+    assert {f for f, *_ in progs} == set(R7_A1_WANT), (
+        sorted({f for f, *_ in progs} ^ set(R7_A1_WANT)))
+    for finding, form, prog, scope in progs:
+        rule, text, constructs = R7_A1_WANT[finding]
+        got = _r7_outcome(form, prog, scope)
+        assert got and _R7_MARK[rule] in got[0] and text in got[0], (
+            finding, got[:2])
+        if rule == "exit":
+            assert not any(_GRAMMAR in g or "the binding rule" in g
+                           for g in got), (finding, got)
+        refused = _r7_program_refusals(form, prog, scope)
+        for c in constructs:
+            assert any(c in s for s in refused), (finding, c, sorted(refused))
+
+
+def test_r7_census_walker_code_is_in_its_grammar():
+    """The census is default-deny (ruling REHEARSAL-FOUR-R6 (1)(b)): every
+    node of every walker span of closed_walk, the a1 file and the gate file
+    is in WALKER_SHAPES (frozen from the walker code; the gate file's from
+    a30d37f6), the frozen set names no annotated assignment, and the nodes
+    checked equal the nodes of the spans."""
+    import pathlib
+    import resolution_sites as _rs
+    here = pathlib.Path(__file__).resolve().parent
+    assert not [s for s in _gs.WALKER_SHAPES if ">AnnAssign(" in s]
+    total = 0
+    for m in ("closed_walk", "test_a1_identity_formation",
+              "test_match_hold_admission_gate_pg"):
+        tree = _ast.parse((here / f"{m}.py").read_text(encoding="utf-8"))
+        assert _rs.grammar_refusals(tree, _gs.WALKER_SHAPES, m) == [], m
+        total += _rs.walker_nodes(tree)
+    assert total == _gs.WALKER_NODES, (total, _gs.WALKER_NODES)
+
+
+# The census findings of round 6: (finding, the program added to closed_walk
+# outside class Bindings, how it is refused).
+_R7_CENSUS_CONTROLS = [
+    ("r6 resolution_sites:132 a decision inside a resolver call's argument",
+     "def _r7_probe(b, n):\n    return b.named(n, ('db',) if n.id == 'db' "
+     "else ())\n", "census"),
+    ("r6 resolution_sites:145 an annotated alias",
+     "def _r7_probe(node):\n    name: str = node.id\n    return name == 'db'\n",
+     "grammar"),
+]
+
+
+def test_r7_census_controls_are_refused():
+    """Round 6's census findings, each refused: a decision inside a resolver
+    call's argument is a site outside the resolver (the arguments are no
+    longer pruned); an annotated alias is a shape outside the walker
+    grammar (AnnAssign)."""
+    import pathlib
+    import resolution_sites as _rs
+    here = pathlib.Path(__file__).resolve().parent
+    base = {m: (here / f"{m}.py").read_text(encoding="utf-8") for m in (
+        "closed_walk", "test_a1_identity_formation",
+        "test_match_hold_admission_gate_pg")}
+    for finding, prog, how in _R7_CENSUS_CONTROLS:
+        mutated = dict(base, closed_walk=base["closed_walk"] + "\n\n" + prog)
+        census = [s for s, _sites in _census_problems(mutated)]
+        grammar = [sh for _f, _l, sh in _rs.grammar_refusals(
+            _ast.parse(mutated["closed_walk"]), _gs.WALKER_SHAPES,
+            "closed_walk") if _l > len(base["closed_walk"].splitlines())]
+        if how == "census":
+            assert census == ["closed_walk:_r7_probe"], (finding, census)
+        else:
+            assert any(s.startswith("FunctionDef.body>AnnAssign(")
+                       for s in grammar), (finding, grammar)

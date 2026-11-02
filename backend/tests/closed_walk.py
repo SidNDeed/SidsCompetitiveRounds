@@ -44,11 +44,13 @@ The rules:
 import ast as _ast
 import collections as _collections
 import importlib as _importlib
-import sys as _sys
 import inspect as _inspect
 import re as _re
 import textwrap as _textwrap
 import types as _types
+import os as _os
+
+import shape_grammar as _sg
 
 from migration_table_ddl import MigrationDdlError as _LexError
 from migration_table_ddl import _tokens as _lex_tokens
@@ -57,6 +59,140 @@ from migration_table_ddl import _views as _lex_views
 
 class Unclassified(Exception):
     """A construct the closed walk has no named shape for: (line, what)."""
+
+
+# --- the default-deny grammar (ruling REHEARSAL-FOUR-R6 (1)(b)) -----------
+
+def local_imports(d):
+    """[(line, (module, name, asname))] for every import under `d`: module
+    None for a plain `import`, the dotted module (with its leading dots for
+    a relative one) for a `from ... import`."""
+    out = []
+    for n in _ast.walk(d):
+        if isinstance(n, _ast.Import):
+            out.extend((n.lineno, (None, a.name, a.asname)) for a in n.names)
+        elif isinstance(n, _ast.ImportFrom):
+            mod = "." * (n.level or 0) + (n.module or "")
+            out.extend((n.lineno, (mod, a.name, a.asname)) for a in n.names)
+    return out
+
+
+class Grammar:
+    """A walk's frozen default-deny grammar (ruling REHEARSAL-FOUR-R6
+    (1)(b)). Every span the walk visits (a handler, an awaited or plain
+    helper's body, a builder's body, a module accessor's body) is ADMITTED
+    before any walker reasoning reads it:
+
+      1. every node, by shape_grammar.check, has a shape in `shapes`;
+      2. the binding rule (shape_grammar.binding_refusals): no binding of a
+         spelling in `meaningful` except a pair (spelling, how) of `allowed`
+         (the span's own root definition is its name, not a binding).
+
+    A local import needs no third rule: its shape carries its module (an
+    ImportFrom's) and each alias's name and asname, so the shape rule admits
+    exactly the frozen imports' statements; `imports` records them as
+    (module, name, asname) triples, asserted against the real spans by the
+    completeness test.
+
+    Any refusal raises Unclassified((line, sentence)), the sentence naming
+    the file, the absolute line and the shape or binding. `admitted` maps
+    each span (file, line, name) to the number of nodes checked (the
+    completeness count). `namedtuples` holds the frozen statement shapes a
+    module may make a constructor-pure class with (Bindings.namedtuple_class).
+
+    With `record`, nothing is refused: the shapes, bindings and imports met
+    are collected instead (the one-time generator, RF/r7/ga1/gen_shapes.py)."""
+
+    def __init__(self, shapes, meaningful, allowed, imports,
+                 namedtuples=frozenset(), record=False):
+        self.shapes = frozenset(shapes)
+        self.meaningful = frozenset(meaningful)
+        self.allowed = frozenset(allowed)
+        self.imports = frozenset(imports)
+        self.namedtuples = frozenset(namedtuples)
+        self.record = record
+        self.admitted = {}
+        self.trees = {}
+        self.seen = {}
+        self.nt_seen = {}
+        self._done = {}
+
+    def statement_ok(self, st):
+        """Whether every node of top-level statement `st` has a shape in the
+        frozen namedtuple statement shapes (recorded, while recording)."""
+        got = _sg.shapes(st)
+        if self.record:
+            self.nt_seen.update(got)
+            return True
+        return all(s in self.namedtuples for s in got)
+
+    def admit(self, d, filename, offset=0):
+        """Admit span `d` (a definition node) of `filename`, its lines
+        offset by `offset`; refused (Unclassified) by the first rule it
+        breaks. A node already admitted is not checked twice."""
+        if self._done.get(id(d)) is d:
+            return
+        key = (filename, offset + getattr(d, "lineno", 0),
+               getattr(d, "name", type(d).__name__))
+        if self.record:
+            for s, ln in _sg.shapes(d).items():
+                self.seen.setdefault(s, f"{filename}:{offset + ln}")
+            self.trees[key] = d
+            n = len(_sg.visit(d))
+        else:
+            try:
+                n = _sg.check(d, self.shapes, filename)
+            except _sg.Refused as e:
+                f, ln, s = e.args[0]
+                raise Unclassified((ln, f"a shape outside the grammar at "
+                                        f"{f}:{offset + ln}: {s}"))
+            own = (getattr(d, "lineno", 0), f"binds {getattr(d, 'name', '')} (def)")
+            for f, ln, why in _sg.binding_refusals(d, self.meaningful,
+                                                   self.allowed, filename):
+                if (ln, why) == own:
+                    continue        # the span's own name: its root definition
+                raise Unclassified((ln, f"the binding rule at "
+                                        f"{f}:{offset + ln}: {why}"))
+        self._done[id(d)] = d
+        self.admitted[key] = n
+
+
+
+def source_of(fn):
+    """(file, line offset) of function `fn`'s source, for Grammar.admit."""
+    try:
+        f = _inspect.getsourcefile(fn) or "?"
+    except TypeError:
+        f = "?"
+    return _os.path.basename(f), fn.__code__.co_firstlineno - 1
+
+
+def _one_top_binding(tree, name):
+    """The one top-level statement of module `tree` that binds `name`, when
+    the module binds `name` exactly once anywhere (shape_grammar.bindings);
+    None otherwise."""
+    if tree is None or sum(1 for _l, s, _h in _sg.bindings(tree)
+                           if s == name) != 1:
+        return None
+    hits = [st for st in tree.body
+            if any(s == name for _l, s, _h in _sg.bindings(st))]
+    return hits[0] if len(hits) == 1 else None
+
+
+_MODULE_TREES = {}
+
+
+def _module_tree(scope):
+    """The parsed source of module `scope` (cached), or None."""
+    key = getattr(scope, "__name__", None)
+    if key in _MODULE_TREES and _MODULE_TREES[key][0] is scope:
+        return _MODULE_TREES[key][1]
+    try:
+        tree = _ast.parse(_inspect.getsource(scope))
+    except (OSError, TypeError):
+        tree = None
+    _MODULE_TREES[key] = (scope, tree)
+    return tree
 
 
 # --- the node table -------------------------------------------------------
@@ -282,9 +418,14 @@ class Bindings:
     name's spelling, a lookup in a name table, an import) and the sites
     inside this class, and asserts the two counts are equal."""
 
-    def __init__(self, scope, fn=None, stmts=None, session="db"):
+    def __init__(self, scope, fn=None, stmts=None, session="db",
+                 grammar=None):
         self.scope = scope
         self.session = session
+        # The walk's Grammar, when it has one: a local import is then read
+        # only as one of the grammar's frozen (module, name, asname) triples
+        # (ruling REHEARSAL-FOUR-R6 (1)(c): no import resolution by name).
+        self.grammar = grammar
         self.sites = {}
         self.has_fn = fn is not None
         self._enumerated = set()
@@ -403,7 +544,11 @@ class Bindings:
             return node.id
         if kind == "import":
             imp, alias = v
-            if (isinstance(imp, _ast.ImportFrom) and imp.module
+            if self.grammar is not None:
+                # the grammar admitted this import's exact statement shape
+                if isinstance(imp, _ast.ImportFrom) and alias.name == node.id:
+                    return node.id
+            elif (isinstance(imp, _ast.ImportFrom) and imp.module
                     and not imp.level and alias.name == node.id):
                 return node.id
         raise Unclassified((line, f"{node.id}, a name the walk reads as the "
@@ -447,29 +592,16 @@ class Bindings:
 
     def _module_object(self, name, line=0):
         """Whether `name` denotes the module's own object: the function does
-        not bind it, or binds it once by an import of that same object
-        (team_queue_poll's `import uuid as uuid_mod` beside the module's)."""
-        kind, v = self.resolve(name, line)
+        not bind it, or binds it once by a local import the walk's GRAMMAR
+        admitted (team_queue_poll's `import uuid as uuid_mod`: its exact
+        statement shape is frozen). Round 7 (ruling REHEARSAL-FOUR-R6 (1)(c))
+        deleted the reading that imported the module by name and compared
+        the objects; without a grammar a local import is never the
+        module's."""
+        kind, _v = self.resolve(name, line)
         if kind == "module":
             return True
-        if kind != "import":
-            return False
-        imp, alias = v
-        held = getattr(self.scope, name, _MISSING)
-        if isinstance(imp, _ast.Import):
-            if alias.asname is None and "." in alias.name:
-                return False
-            if held is _MISSING:
-                # a local import of a standard-library module under the
-                # listed spelling (`import uuid as uuid_mod`): it reaches no
-                # session
-                return alias.name.split(".")[0] in _sys.stdlib_module_names
-            return _importlib.import_module(alias.name) is held
-        if (isinstance(imp, _ast.ImportFrom) and imp.module and not imp.level
-                and held is not _MISSING):
-            return getattr(_importlib.import_module(imp.module), alias.name,
-                           _MISSING) is held
-        return False
+        return kind == "import" and self.grammar is not None
 
     def spelled_in(self, node, names, kinds=("param", "local"), line=0):
         """The name of `names` that plain name `node` spells when the
@@ -630,13 +762,14 @@ class Bindings:
         elif (isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Call)
               and isinstance(func.value.func, _ast.Name) and not func.value.args
               and not func.value.keywords):
-            mod = self.module_accessor(self.module(func.value.func.id, line))
+            mod = self.module_accessor(self.module(func.value.func.id, line),
+                                       self.grammar)
             obj = getattr(mod, func.attr, None) if mod is not None else None
         obj = _inspect.unwrap(obj) if callable(obj) else None
         return obj if _inspect.isfunction(obj) else None
 
     @staticmethod
-    def module_accessor(fn):
+    def module_accessor(fn, grammar=None):
         """The module a module accessor returns: a plain function of no
         parameters whose body is exactly `import <m>` then `return <m>`
         (after an optional docstring), such as main._mrw_mod. None for
@@ -647,6 +780,8 @@ class Bindings:
             d = _helper_tree(fn)
         except (Unclassified, OSError, TypeError):
             return None
+        if grammar is not None:
+            grammar.admit(d, *source_of(fn))
         body = [s for s in d.body if not (isinstance(s, _ast.Expr)
                                           and isinstance(s.value, _ast.Constant))]
         if not (len(body) == 2 and isinstance(body[0], _ast.Import)
@@ -658,24 +793,33 @@ class Bindings:
         return _importlib.import_module(body[0].names[0].name)
 
     def namedtuple_class(self, func, line=0):
-        """The class plain name `func` names when it is a class
-        collections.namedtuple made (finding closed_walk:759: a `_fields`
-        marker granted purity to a class whose own __new__ wrote): its only
-        base is tuple, it defines no __init__, and its __new__ is the one
-        namedtuple generates (evaluated in namedtuple's own namespace, not
-        a module's). None otherwise."""
+        """The class plain name `func` names when its module makes it by
+        ONE frozen top-level statement (ruling REHEARSAL-FOUR-R6 (1)(c), P:
+        a module-level SHAPE rule replaces round 5's reading of the class's
+        namespace and __new__, and round 6's finding closed_walk:670, a
+        copied __new__ under a writing metaclass, with it): the module binds
+        the name exactly once, anywhere in its source, and that binding is a
+        top-level assignment `X = namedtuple(...)` whose every node shape is
+        one of the grammar's frozen namedtuple shapes; the maker's root name
+        is likewise bound exactly once in the module, by a top-level
+        statement whose shapes are frozen too. A class statement is never
+        admitted (it can carry a metaclass, keywords, a copied __new__).
+        None otherwise, and always None without a grammar."""
         if not isinstance(func, _ast.Name):
             return None
         obj = self.module(func.id, line or getattr(func, "lineno", 0))
-        if not (isinstance(obj, type) and obj.__bases__ == (tuple,)
-                and "__init__" not in vars(obj)):
+        g = self.grammar
+        if g is None or not isinstance(obj, type):
             return None
-        new = vars(obj).get("__new__")
-        new = getattr(new, "__func__", new)
-        g = getattr(new, "__globals__", None)
-        if not (isinstance(g, dict)
-                and g.get("__name__") == f"namedtuple_{obj.__name__}"
-                and g.get("_tuple_new") is tuple.__new__):
+        tree = _module_tree(self.scope)
+        made = _one_top_binding(tree, func.id)
+        if not (isinstance(made, _ast.Assign)
+                and isinstance(made.value, _ast.Call)
+                and g.statement_ok(made)):
+            return None
+        root = _root(made.value.func)
+        maker = _one_top_binding(tree, root) if root else None
+        if maker is None or not g.statement_ok(maker):
             return None
         return obj
 
@@ -865,7 +1009,10 @@ class Bindings:
         if fn is None or _inspect.iscoroutinefunction(fn):
             return [None]
         d = _helper_tree(fn)
-        b = Bindings(_inspect.getmodule(fn), d, session=self.session)
+        if self.grammar is not None:
+            self.grammar.admit(d, *source_of(fn))
+        b = Bindings(_inspect.getmodule(fn), d, session=self.session,
+                     grammar=self.grammar)
         out = []
         for r in _own_nodes(d, _ast.Return):
             texts = b.sql_texts(r.value) if r.value is not None else None
@@ -1241,6 +1388,10 @@ class Policy:
         # is the effect recorded. Only the top-level walk of a span uses it;
         # helper bodies walked by def_effects never do.
         self.helper_hook = None
+        # The walk's default-deny Grammar (ruling REHEARSAL-FOUR-R6 (1)(b)):
+        # when set, every helper body def_effects reads is admitted by it
+        # first. None for a file that has no grammar of its own yet.
+        self.grammar = None
         self.helpers = {}           # (module, qualname) -> effects
         self.walking = set()        # helpers being walked now
         self.met = _collections.Counter()
@@ -1270,6 +1421,7 @@ def plain_effects(fn, policy):
                      policy.pure_methods | PLAIN_BODY_METHODS,
                      policy.pure_awaits, policy.sql, policy.session)
         sub.met = policy.met
+        sub.grammar = policy.grammar
         policy._plain_sub = sub
     return helper_effects(fn, sub)
 
@@ -1302,7 +1454,8 @@ class Visitor:
                  bindings=None):
         self.p = policy
         self.b = (bindings if bindings is not None
-                  else Bindings(policy.scope, session=policy.session))
+                  else Bindings(policy.scope, session=policy.session,
+                                grammar=getattr(policy, "grammar", None)))
         self.local = local
         self.guarded = guarded
         self.params = tuple(params)
@@ -1501,7 +1654,8 @@ class Visitor:
             # closed_walk:712: a source grep let `db.add(row)` through): a
             # plain function takes no effect at all. A module accessor
             # (`import m; return m`, module_accessor) is read by its shape.
-            eff = (frozenset() if self.b.module_accessor(fn) is not None
+            eff = (frozenset() if self.b.module_accessor(fn, self.b.grammar)
+                   is not None
                    else plain_effects(fn, self.p))
             if eff:
                 self.fail(n, f"a plain call of {name}, which takes "
@@ -1536,7 +1690,7 @@ class Visitor:
             if (isinstance(acc, _ast.Call) and isinstance(acc.func, _ast.Name)
                     and not acc.args and not acc.keywords
                     and self.b.module_accessor(self._check(
-                        n, self.b.callee, acc.func)) is not None):
+                        n, self.b.callee, acc.func), self.b.grammar) is not None):
                 # `<accessor>().f(...)`: a plain function of the module the
                 # accessor returns, its body walked like any plain callee.
                 fn = self._check(n, self.b.callee, n.func)
@@ -1732,7 +1886,7 @@ def helper_effects(fn, policy, stack=()):
     policy.walking.add(key)
     try:
         out = def_effects(_helper_tree(fn), _inspect.getmodule(fn), policy,
-                          fn.__name__)
+                          fn.__name__, source=source_of(fn))
     finally:
         policy.walking.discard(key)
     policy.helpers[key] = out
@@ -1740,7 +1894,7 @@ def helper_effects(fn, policy, stack=()):
 
 
 def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
-                ends=frozenset()):
+                ends=frozenset(), source=None):
     """The effects of an awaited helper, read from its own body statement by
     statement through the table: a frozenset drawn from 'read', 'lock',
     'write', 'await', 'savepoint', 'rollback-then-raise' and
@@ -1753,8 +1907,15 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
     as the effect 'rollback' (a caller that names such a helper decides what
     a rollback means for it)."""
     fn = _types.SimpleNamespace(__name__=label)
+    if policy.grammar is not None:
+        # Admitted by the grammar BEFORE any reading below (ruling
+        # REHEARSAL-FOUR-R6 (1)(b)); `source` is (file, line offset).
+        f, off = (source if source is not None
+                  else (getattr(scope, "__name__", "?"), 0))
+        policy.grammar.admit(d, f, off)
     sub = Policy(scope, policy.pure_calls, policy.pure_methods,
                  policy.pure_awaits, policy.sql, policy.session)
+    sub.grammar = policy.grammar
     sub.helpers = policy.helpers
     sub.walking = policy.walking
     sub.met = policy.met
@@ -1763,7 +1924,7 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
             raise Unclassified((0, f"{fn.__name__}: a relative import"))
     # The helper's own bindings: every name the walk reads in it resolves
     # there, one binding per name (ruling REHEARSAL-FOUR-R5 item 2).
-    b = Bindings(scope, d, session=policy.session)
+    b = Bindings(scope, d, session=policy.session, grammar=policy.grammar)
     params = [a.arg for a in d.args.posonlyargs + d.args.args + d.args.kwonlyargs]
     if d.args.vararg or d.args.kwarg:
         raise Unclassified((0, f"{fn.__name__} takes *args or **kwargs"))

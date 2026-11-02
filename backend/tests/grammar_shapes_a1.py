@@ -1,0 +1,4836 @@
+"""The frozen default-deny grammar of the a1 walks (rehearsal-four
+round 7, child ga1; ruling REHEARSAL-FOUR-R6 (1)(b)).
+
+GENERATED ONCE by RF/r7/ga1/gen_shapes.py from the REAL spans the a1
+walks visit at a30d37f6 (backend/api unchanged since), then frozen and
+PRUNED by hand: no shape a prior finding's program needs and the real
+spans do not use. Never regenerated to fit a file: a span that needs a
+shape outside these sets is conformed, or the question goes to the
+integrator. Each shape carries the first real file:line using it.
+"""
+
+
+# (file, def line, name, nodes) of every span the a1 walks admit
+A1_SPANS = (
+    ('main.py', 4295, '_team_clear_dc_fallback_marker', 34),
+    ('main.py', 6449, '_parse_version', 44),
+    ('main.py', 16342, '_lock_queue_rows_ordered', 168),
+    ('main.py', 16795, '_admission_key', 36),
+    ('main.py', 16799, '_lease_admission_gate', 624),
+    ('main.py', 16938, '_lease_acquire', 115),
+    ('main.py', 16988, '_lease_acquire_many', 108),
+    ('main.py', 17374, '_lock_snapshot_rows', 143),
+    ('main.py', 17413, '_lease_live_claim_strict', 29),
+    ('main.py', 17439, '_formation_lease_conflict', 113),
+    ('main.py', 18552, '_region_pings_newer', 63),
+    ('main.py', 18630, '_region_mode_of', 96),
+    ('main.py', 18649, '_region_current', 33),
+    ('main.py', 18661, '_region_volumes', 113),
+    ('main.py', 18683, '_group_region', 706),
+    ('main.py', 19899, 'queue_poll', 2650),
+    ('main.py', 28308, '_bet_fighter_tax', 88),
+    ('main.py', 28327, '_credit_bet_fighter_tax', 113),
+    ('main.py', 28352, '_credit_team_bet_fighter_tax', 115),
+    ('main.py', 37777, '_return_stake_exactly', 96),
+    ('main.py', 48796, '_balance_teams', 230),
+    ('main.py', 48816, '_team_balance_rating', 49),
+    ('main.py', 49167, 'team_queue_poll', 4249),
+    ('main.py', 51053, '_reconcile_team_series_bets', 606),
+    ('main.py', 51683, '_team_quartet_key', 26),
+    ('main.py', 51691, '_team_quartet_lock', 27),
+    ('main.py', 51708, '_team_series_resumable', 139),
+    ('main.py', 51736, '_team_lock_family_pick', 441),
+    ('main.py', 51835, '_team_resolve_live_family', 214),
+    ('main.py', 51875, '_team_relock_existing_series', 271),
+    ('main.py', 53486, 'ovt_queue_poll', 2152),
+    ('main.py', 54211, '_mrw_mod', 9),
+    ('main.py', 55772, '_ffa_gather_decide', 92),
+    ('main.py', 56222, '_rules_normalize', 114),
+    ('main.py', 56244, '_rules_json', 64),
+    ('main.py', 56277, '_mod_version_at_least', 39),
+    ('main.py', 56289, '_ffa_roster_clears_proximity_floor', 59),
+    ('main.py', 56305, '_request_mod_version', 28),
+    ('main.py', 56329, '_rules_for_queue_match', 78),
+    ('main.py', 56352, '_rules_members', 136),
+    ('main.py', 56374, '_rules_for_members', 118),
+    ('main.py', 56839, '_ffa_sort_key', 25),
+    ('main.py', 57187, '_player_body_color', 88),
+    ('main.py', 57207, '_team_color_holders', 51),
+    ('main.py', 57227, '_stamp_team_series_colors', 249),
+    ('main.py', 62065, '_asm_sqlstate', 119),
+    ('main.py', 64662, '_ffa_queue_poll_inner', 2939),
+    ('main.py', 73439, '_assert_no_service_subject', 96),
+    ('main.py', 73487, '_service_player_uuids', 183),
+    ('match_hold.py', 212, 'caps_token_sql', 16),
+    ('match_hold.py', 235, '_mode_or_400', 23),
+    ('match_hold.py', 351, '_latch_sql', 78),
+    ('match_hold.py', 364, '_hold_latch', 108),
+    ('match_report_window.py', 47, '_get', 25),
+    ('match_report_window.py', 51, 'held_overlap', 115),
+    ('match_report_window.py', 68, 'anchor_fresh', 42),
+    ('match_report_window.py', 77, 'series_fresh', 40),
+    ('match_report_window.py', 85, 'series_holds', 30),
+    ('region_pick.py', 39, '_is_number', 26),
+    ('region_pick.py', 43, '_clean_map', 98),
+    ('region_pick.py', 62, '_baseline', 171),
+    ('region_pick.py', 89, 'home_of', 40),
+    ('region_pick.py', 101, 'pick_region_for_group', 54),
+    ('region_pick.py', 186, '_pick', 892),
+    ('tournaments.py', 279, '_region_candidate_volumes', 47),
+)
+
+
+A1_NODES = 20183
+
+
+A1_SHAPES = frozenset({
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Global|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:64662
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:16342
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Import|Return|While],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # main.py:19899
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # main.py:53486
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:16988
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:56352
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:51875
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return|Try],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:16799
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:57207
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:56374
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|FunctionDef|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:18683
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Global|If|Return],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:73487
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:28352
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:16938
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_hold.py:364
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:18661
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # tournaments.py:279
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Try],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:57227
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[AsyncWith|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:57187
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:51691
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|For|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:17374
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:28327
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:17413
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:51053
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:4295
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Assign|Expr|FunctionDef|Return],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:48796
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Assign|Expr|If|Return],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:28308
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|FunctionDef|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # region_pick.py:186
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:18630
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_report_window.py:51
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:55772
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:51708
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:56329
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return|While],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:62065
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_hold.py:351
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:18552
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:48816
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Try],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:56277
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Import|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:54211
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:51683
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:56305
+    '<root>>FunctionDef(name=str,args=arguments,body=[If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_hold.py:235
+    '<root>>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # match_report_window.py:47
+    '<root>>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:16795
+    '<root>>FunctionDef(name=str,args=arguments,body=[Try],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:6449
+    'Assert.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:48801
+    'Assert.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # main.py:28323
+    'Assign.targets>Name(id=str,ctx=Store)',  # main.py:16377
+    'Assign.targets>Subscript(value=Call,slice=Constant,ctx=Store)',  # main.py:65119
+    'Assign.targets>Subscript(value=Name,slice=Call,ctx=Store)',  # main.py:56370
+    'Assign.targets>Subscript(value=Name,slice=Constant,ctx=Store)',  # main.py:18772
+    'Assign.targets>Subscript(value=Name,slice=Name,ctx=Store)',  # main.py:18642
+    'Assign.targets>Subscript(value=Name,slice=Subscript,ctx=Store)',  # main.py:18724
+    'Assign.targets>Tuple(elts=[Name],ctx=Store)',  # main.py:16950
+    'Assign.targets>Tuple(elts=[Subscript],ctx=Store)',  # main.py:18677
+    'Assign.value>Await(value=Call)',  # main.py:16950
+    'Assign.value>BinOp(left=BinOp,op=Add,right=BinOp)',  # main.py:28364
+    'Assign.value>BinOp(left=Call,op=Add,right=Constant)',  # main.py:18642
+    'Assign.value>BinOp(left=Name,op=Add,right=List)',  # main.py:49363
+    'Assign.value>BinOp(left=Name,op=FloorDiv,right=Constant)',  # main.py:28365
+    'Assign.value>BinOp(left=Name,op=Sub,right=Call)',  # main.py:20092
+    'Assign.value>BinOp(left=Name,op=Sub,right=Name)',  # main.py:28318
+    'Assign.value>BoolOp(op=And,values=[Call])',  # main.py:56336
+    'Assign.value>BoolOp(op=And,values=[Call|Compare])',  # main.py:65269
+    'Assign.value>BoolOp(op=And,values=[Compare])',  # main.py:49388
+    'Assign.value>BoolOp(op=Or,values=[BoolOp|Compare])',  # main.py:53651
+    'Assign.value>BoolOp(op=Or,values=[Call|Constant])',  # main.py:18758
+    'Assign.value>BoolOp(op=Or,values=[Call|List])',  # main.py:18757
+    'Assign.value>BoolOp(op=Or,values=[Call|Subscript])',  # main.py:18740
+    'Assign.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:20188
+    'Assign.value>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:20062
+    'Assign.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:16918
+    'Assign.value>Call(func=Attribute,args=[Constant],keywords=[])',  # region_pick.py:201
+    'Assign.value>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # region_pick.py:193
+    'Assign.value>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # match_hold.py:352
+    'Assign.value>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:18727
+    'Assign.value>Call(func=Attribute,args=[Name],keywords=[keyword])',  # main.py:51725
+    'Assign.value>Call(func=Attribute,args=[Subscript|Tuple],keywords=[])',  # main.py:18732
+    'Assign.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:16828
+    'Assign.value>Call(func=Attribute,args=[],keywords=[keyword])',  # main.py:18739
+    'Assign.value>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:20241
+    'Assign.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:28321
+    'Assign.value>Call(func=Name,args=[BinOp|Call],keywords=[])',  # main.py:65146
+    'Assign.value>Call(func=Name,args=[BinOp|Constant],keywords=[])',  # main.py:64819
+    'Assign.value>Call(func=Name,args=[BinOp|Name],keywords=[])',  # main.py:55793
+    'Assign.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:49386
+    'Assign.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:18645
+    'Assign.value>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:65266
+    'Assign.value>Call(func=Name,args=[Constant],keywords=[])',  # match_report_window.py:54
+    'Assign.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:49897
+    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:48809
+    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:64816
+    'Assign.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:17471
+    'Assign.value>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:18748
+    'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:64807
+    'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[keyword])',  # main.py:20220
+    'Assign.value>Call(func=Name,args=[SetComp],keywords=[keyword])',  # main.py:16826
+    'Assign.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:16912
+    'Assign.value>Call(func=Name,args=[],keywords=[])',  # main.py:18743
+    'Assign.value>Call(func=Name,args=[],keywords=[keyword])',  # main.py:20276
+    'Assign.value>Compare(left=Name,ops=[LtE],comparators=[Name])',  # region_pick.py:249
+    'Assign.value>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:51125
+    'Assign.value>Constant(value=NoneType)',  # main.py:18737
+    'Assign.value>Constant(value=bool)',  # main.py:16837
+    'Assign.value>Constant(value=float)',  # main.py:64817
+    'Assign.value>Constant(value=int)',  # main.py:19981
+    'Assign.value>Constant(value=str)',  # main.py:51134
+    'Assign.value>Dict(keys=[Constant],values=[Call])',  # main.py:53738
+    'Assign.value>Dict(keys=[Constant],values=[Call|Constant|List|Name])',  # region_pick.py:227
+    'Assign.value>Dict(keys=[Constant],values=[Call|Name])',  # main.py:20456
+    'Assign.value>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:49697
+    'Assign.value>Dict(keys=[Constant],values=[Name|Subscript])',  # main.py:49760
+    'Assign.value>Dict(keys=[Constant],values=[Subscript])',  # main.py:56248
+    'Assign.value>Dict(keys=[Name],values=[Call])',  # main.py:49853
+    'Assign.value>Dict(keys=[],values=[])',  # main.py:18638
+    'Assign.value>DictComp(key=Attribute,value=Name,generators=[comprehension])',  # main.py:28363
+    'Assign.value>DictComp(key=Call,value=Name,generators=[comprehension])',  # main.py:16892
+    'Assign.value>DictComp(key=Call,value=Tuple,generators=[comprehension])',  # main.py:56360
+    'Assign.value>DictComp(key=Subscript,value=Subscript,generators=[comprehension])',  # main.py:50068
+    'Assign.value>IfExp(test=BoolOp,body=Name,orelse=Constant)',  # region_pick.py:204
+    'Assign.value>IfExp(test=BoolOp,body=Subscript,orelse=Constant)',  # main.py:51096
+    'Assign.value>IfExp(test=Call,body=Name,orelse=Dict)',  # region_pick.py:190
+    'Assign.value>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:20365
+    'Assign.value>IfExp(test=Compare,body=Call,orelse=Set)',  # main.py:16875
+    'Assign.value>IfExp(test=Compare,body=Constant,orelse=Constant)',  # main.py:51910
+    'Assign.value>IfExp(test=Compare,body=Name,orelse=Name)',  # match_report_window.py:61
+    'Assign.value>IfExp(test=Compare,body=Subscript,orelse=Constant)',  # main.py:18640
+    'Assign.value>IfExp(test=Compare,body=Tuple,orelse=Constant)',  # main.py:18723
+    'Assign.value>IfExp(test=Compare,body=Tuple,orelse=IfExp)',  # main.py:51105
+    'Assign.value>IfExp(test=Name,body=Call,orelse=Call)',  # main.py:49390
+    'Assign.value>IfExp(test=Name,body=Call,orelse=Constant)',  # main.py:51126
+    'Assign.value>IfExp(test=Name,body=Call,orelse=Subscript)',  # main.py:53752
+    'Assign.value>IfExp(test=Name,body=Call,orelse=Tuple)',  # main.py:51127
+    'Assign.value>IfExp(test=Name,body=Compare,orelse=Compare)',  # region_pick.py:248
+    'Assign.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:51130
+    'Assign.value>IfExp(test=Name,body=Name,orelse=BinOp)',  # main.py:73536
+    'Assign.value>IfExp(test=Name,body=Name,orelse=IfExp)',  # region_pick.py:250
+    'Assign.value>JoinedStr(values=[Constant|FormattedValue])',  # main.py:20217
+    'Assign.value>List(elts=[Dict],ctx=Load)',  # main.py:50021
+    'Assign.value>List(elts=[Name],ctx=Load)',  # main.py:62069
+    'Assign.value>List(elts=[Subscript],ctx=Load)',  # main.py:49759
+    'Assign.value>List(elts=[Tuple],ctx=Load)',  # main.py:20197
+    'Assign.value>List(elts=[],ctx=Load)',  # main.py:16377
+    'Assign.value>ListComp(elt=Attribute,generators=[comprehension])',  # region_pick.py:74
+    'Assign.value>ListComp(elt=Call,generators=[comprehension])',  # main.py:16830
+    'Assign.value>ListComp(elt=Name,generators=[comprehension])',  # main.py:20198
+    'Assign.value>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:18715
+    'Assign.value>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:57243
+    'Assign.value>Name(id=str,ctx=Load)',  # main.py:18669
+    'Assign.value>Set(elts=[Subscript])',  # main.py:51799
+    'Assign.value>SetComp(elt=Call,generators=[comprehension])',  # main.py:16884
+    'Assign.value>SetComp(elt=Name,generators=[comprehension])',  # region_pick.py:189
+    'Assign.value>Subscript(value=Call,slice=Constant,ctx=Load)',  # main.py:16839
+    'Assign.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:20066
+    'Assign.value>Tuple(elts=[Attribute],ctx=Load)',  # region_pick.py:265
+    'Assign.value>Tuple(elts=[Call],ctx=Load)',  # region_pick.py:241
+    'Assign.value>Tuple(elts=[Call|Name],ctx=Load)',  # main.py:18677
+    'Assign.value>Tuple(elts=[Call|Subscript],ctx=Load)',  # main.py:56370
+    'Assign.value>Tuple(elts=[Constant|Dict|Name],ctx=Load)',  # main.py:18713
+    'Assign.value>Tuple(elts=[Constant|Name],ctx=Load)',  # region_pick.py:269
+    'Assign.value>Tuple(elts=[List],ctx=Load)',  # main.py:50044
+    'Assign.value>Tuple(elts=[Name],ctx=Load)',  # main.py:18729
+    'Assign.value>Tuple(elts=[Name|Subscript],ctx=Load)',  # main.py:18724
+    'Assign.value>Tuple(elts=[Subscript],ctx=Load)',  # main.py:17482
+    'Assign.value>UnaryOp(op=Not,operand=Name)',  # main.py:20177
+    'Assign.value>UnaryOp(op=Not,operand=Subscript)',  # main.py:49407
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Call])',  # main.py:19899
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Constant])',  # main.py:28327
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Name])',  # main.py:51053
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Tuple])',  # main.py:28352
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:4295
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant],kwarg=-,defaults=[])',  # main.py:16342
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|Tuple],kwarg=-,defaults=[Constant])',  # main.py:16799
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|Tuple],kwarg=-,defaults=[Constant|Name])',  # main.py:16938
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|Tuple],kwarg=-,defaults=[])',  # main.py:17439
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[NoneType],kwarg=-,defaults=[])',  # main.py:37777
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Tuple],kwarg=-,defaults=[Constant|Name])',  # main.py:16988
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:19987
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # main.py:28364
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:18757
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:16826
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:16837
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:49697
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=DictComp,type_comment=-)',  # main.py:16892
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:16875
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=JoinedStr,type_comment=-)',  # main.py:53821
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:16377
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:16830
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:18669
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # main.py:16884
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:16910
+    'AsyncFunctionDef.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:65309
+    'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:17001
+    'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:19933
+    'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:18713
+    'AsyncFunctionDef.body>AsyncWith(items=[withitem],body=[Assign],type_comment=-)',  # main.py:57194
+    'AsyncFunctionDef.body>Expr(value=Await)',  # main.py:16958
+    'AsyncFunctionDef.body>Expr(value=Call)',  # main.py:16876
+    'AsyncFunctionDef.body>Expr(value=Constant)',  # main.py:4296
+    'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Break|Expr|If],orelse=[Expr|Raise],type_comment=-)',  # main.py:53741
+    'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',  # main.py:20429
+    'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[If],orelse=[],type_comment=-)',  # main.py:16381
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign],orelse=[],type_comment=-)',  # main.py:56369
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign|Expr],orelse=[],type_comment=-)',  # main.py:51909
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # main.py:51767
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:16911
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Expr],orelse=[],type_comment=-)',  # main.py:17008
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Expr|If],orelse=[],type_comment=-)',  # main.py:51794
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:16378
+    'AsyncFunctionDef.body>For(target=Name,iter=Tuple,body=[Expr],orelse=[],type_comment=-)',  # main.py:50129
+    'AsyncFunctionDef.body>For(target=Tuple,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # main.py:65289
+    'AsyncFunctionDef.body>For(target=Tuple,iter=Call,body=[Expr|If],orelse=[],type_comment=-)',  # main.py:17400
+    'AsyncFunctionDef.body>For(target=Tuple,iter=Name,body=[Assign|If|Return],orelse=[],type_comment=-)',  # main.py:17474
+    'AsyncFunctionDef.body>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:18755
+    'AsyncFunctionDef.body>Global(names=[str])',  # main.py:65135
+    'AsyncFunctionDef.body>If(test=Await,body=[Expr|Return],orelse=[])',  # main.py:49681
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:65140
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',  # main.py:49321
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:20121
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return|Try],orelse=[])',  # main.py:49254
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:53556
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:28344
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:20112
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:18671
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Try],orelse=[])',  # main.py:73507
+    'AsyncFunctionDef.body>If(test=Call,body=[Raise],orelse=[])',  # main.py:73452
+    'AsyncFunctionDef.body>If(test=Call,body=[Return],orelse=[])',  # main.py:16893
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:18768
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr],orelse=[Expr])',  # main.py:20076
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|For],orelse=[Assign])',  # main.py:50043
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:49997
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # main.py:65237
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',  # main.py:49758
+    'AsyncFunctionDef.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:17472
+    'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:20054
+    'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:20414
+    'AsyncFunctionDef.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:16375
+    'AsyncFunctionDef.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:28336
+    'AsyncFunctionDef.body>If(test=Name,body=[Assign|Expr],orelse=[])',  # main.py:51806
+    'AsyncFunctionDef.body>If(test=Name,body=[Assign|Return],orelse=[])',  # main.py:16867
+    'AsyncFunctionDef.body>If(test=Name,body=[Expr],orelse=[])',  # main.py:50131
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|Expr|Return],orelse=[])',  # main.py:53805
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|If],orelse=[])',  # main.py:16949
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|Return],orelse=[])',  # main.py:16827
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # main.py:19967
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Raise],orelse=[])',  # main.py:19924
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Return],orelse=[])',  # main.py:17006
+    "AsyncFunctionDef.body>Import(names=['uuid'])",  # main.py:19922
+    'AsyncFunctionDef.body>Return(value=Await)',  # main.py:53868
+    'AsyncFunctionDef.body>Return(value=BoolOp)',  # main.py:18774
+    'AsyncFunctionDef.body>Return(value=Call)',  # main.py:17433
+    'AsyncFunctionDef.body>Return(value=Constant)',  # main.py:17011
+    'AsyncFunctionDef.body>Return(value=DictComp)',  # tournaments.py:308
+    'AsyncFunctionDef.body>Return(value=Name)',  # main.py:16979
+    'AsyncFunctionDef.body>Return(value=Subscript)',  # main.py:18680
+    'AsyncFunctionDef.body>Return(value=Tuple)',  # main.py:16935
+    'AsyncFunctionDef.body>Try(body=[Assign|AsyncWith|For|If],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:18714
+    'AsyncFunctionDef.body>Try(body=[Assign|AsyncWith|ImportFrom],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:18673
+    'AsyncFunctionDef.body>Try(body=[Assign|Expr|For],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:16838
+    'AsyncFunctionDef.body>Try(body=[Assign|If],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:57233
+    'AsyncFunctionDef.body>Try(body=[AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:4340
+    'AsyncFunctionDef.body>While(test=BoolOp,body=[Assign|AugAssign|Expr|If],orelse=[])',  # main.py:20015
+    'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',  # main.py:49898
+    'AsyncFunctionDef.decorator_list>Call(func=Attribute,args=[Constant],keywords=[keyword])',  # main.py:19898
+    'AsyncFunctionDef.returns>Constant(value=NoneType)',  # main.py:4295
+    'AsyncFunctionDef.returns>Constant(value=str)',  # main.py:73487
+    'AsyncFunctionDef.returns>Name(id=str,ctx=Load)',  # main.py:56352
+    'AsyncFunctionDef.returns>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:16810
+    'AsyncWith.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:18676
+    'AsyncWith.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:51089
+    'AsyncWith.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:51122
+    'AsyncWith.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:51096
+    'AsyncWith.body>Expr(value=Await)',  # main.py:4342
+    'AsyncWith.body>For(target=Name,iter=Call,body=[Assign],orelse=[],type_comment=-)',  # main.py:18722
+    'AsyncWith.body>For(target=Name,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # main.py:51111
+    'AsyncWith.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:51123
+    'AsyncWith.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:51169
+    'AsyncWith.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:51101
+    'AsyncWith.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:51094
+    'AsyncWith.items>withitem(context_expr=Call,optional_vars=-)',  # main.py:4341
+    'Attribute.ctx>Load()',  # main.py:4341
+    "Attribute.value>Attribute(value=Name,attr='headers',ctx=Load)",  # main.py:19933
+    "Attribute.value>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:223
+    'Attribute.value>Await(value=Call)',  # main.py:16828
+    'Attribute.value>BinOp(left=Call,op=Sub,right=BoolOp)',  # main.py:20449
+    'Attribute.value>BinOp(left=Call,op=Sub,right=Name)',  # main.py:53682
+    'Attribute.value>BinOp(left=Call,op=Sub,right=Subscript)',  # main.py:53557
+    'Attribute.value>BinOp(left=Name,op=Sub,right=BoolOp)',  # main.py:20065
+    'Attribute.value>BinOp(left=Name,op=Sub,right=Name)',  # main.py:64819
+    'Attribute.value>BinOp(left=Name,op=Sub,right=Subscript)',  # main.py:20162
+    'Attribute.value>BoolOp(op=Or,values=[Call|Constant])',  # main.py:49656
+    'Attribute.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:57244
+    'Attribute.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:49954
+    'Attribute.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:6451
+    'Attribute.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:56300
+    'Attribute.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:18679
+    'Attribute.value>Call(func=Name,args=[],keywords=[])',  # main.py:51725
+    'Attribute.value>Constant(value=str)',  # main.py:18758
+    'Attribute.value>Name(id=str,ctx=Load)',  # main.py:4341
+    'Attribute.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:53751
+    'AugAssign.op>Add()',  # main.py:20016
+    'AugAssign.op>BitAnd()',  # region_pick.py:239
+    'AugAssign.op>BitOr()',  # main.py:18746
+    'AugAssign.op>Sub()',  # main.py:49762
+    'AugAssign.target>Name(id=str,ctx=Store)',  # main.py:18746
+    'AugAssign.value>BinOp(left=Name,op=Sub,right=Name)',  # match_report_window.py:64
+    'AugAssign.value>Call(func=Name,args=[Attribute],keywords=[])',  # region_pick.py:239
+    'AugAssign.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:18746
+    'AugAssign.value>Constant(value=int)',  # main.py:20016
+    'Await.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:16828
+    'Await.value>Call(func=Attribute,args=[Call|Dict],keywords=[])',  # main.py:4342
+    'Await.value>Call(func=Attribute,args=[Call|Name],keywords=[])',  # match_hold.py:380
+    'Await.value>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # main.py:53849
+    'Await.value>Call(func=Attribute,args=[Constant|Name|Subscript],keywords=[])',  # main.py:49515
+    'Await.value>Call(func=Attribute,args=[Name|Subscript],keywords=[])',  # main.py:51796
+    'Await.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:16863
+    'Await.value>Call(func=Name,args=[Attribute|Constant|List|Name],keywords=[keyword])',  # main.py:20311
+    'Await.value>Call(func=Name,args=[BinOp|Constant|Name],keywords=[])',  # main.py:50173
+    'Await.value>Call(func=Name,args=[BinOp|Constant|Name],keywords=[keyword])',  # main.py:50101
+    'Await.value>Call(func=Name,args=[BinOp|Name],keywords=[])',  # main.py:49784
+    'Await.value>Call(func=Name,args=[BinOp|Name],keywords=[keyword])',  # main.py:49825
+    'Await.value>Call(func=Name,args=[BinOp|Name|Subscript],keywords=[])',  # main.py:50083
+    'Await.value>Call(func=Name,args=[Call|Constant|Name],keywords=[])',  # main.py:28366
+    'Await.value>Call(func=Name,args=[Call|Constant|Name],keywords=[keyword])',  # main.py:49481
+    'Await.value>Call(func=Name,args=[Call|Constant|Name|Subscript],keywords=[])',  # main.py:51923
+    'Await.value>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:17410
+    'Await.value>Call(func=Name,args=[Call|Name|Subscript],keywords=[])',  # main.py:51158
+    'Await.value>Call(func=Name,args=[Constant|ListComp|Name],keywords=[])',  # main.py:49611
+    'Await.value>Call(func=Name,args=[Constant|ListComp|Name],keywords=[keyword])',  # main.py:53836
+    'Await.value>Call(func=Name,args=[Constant|ListComp|Name|Subscript],keywords=[])',  # main.py:49573
+    'Await.value>Call(func=Name,args=[Constant|List|Name],keywords=[])',  # main.py:19979
+    'Await.value>Call(func=Name,args=[Constant|List|Name],keywords=[keyword])',  # main.py:20243
+    'Await.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:49198
+    'Await.value>Call(func=Name,args=[Constant|Name],keywords=[keyword])',  # main.py:20472
+    'Await.value>Call(func=Name,args=[Constant|Name|Subscript],keywords=[])',  # main.py:49334
+    'Await.value>Call(func=Name,args=[Constant|Name|Subscript],keywords=[keyword])',  # main.py:49290
+    'Await.value>Call(func=Name,args=[ListComp|Name],keywords=[])',  # main.py:53760
+    'Await.value>Call(func=Name,args=[ListComp|Name],keywords=[keyword])',  # main.py:49457
+    'Await.value>Call(func=Name,args=[List|Name],keywords=[])',  # main.py:20471
+    'Await.value>Call(func=Name,args=[List|Name],keywords=[keyword])',  # main.py:16950
+    'Await.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:17477
+    'Await.value>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:17001
+    'Await.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:19977
+    'Await.value>Call(func=Name,args=[Name|Subscript],keywords=[keyword])',  # main.py:20238
+    'Await.value>Call(func=Name,args=[],keywords=[])',  # main.py:16383
+    'BinOp.left>BinOp(left=BoolOp,op=Add,right=BoolOp)',  # main.py:51808
+    'BinOp.left>BinOp(left=Constant,op=Add,right=Name)',  # main.py:65026
+    'BinOp.left>BinOp(left=Name,op=BitAnd,right=Name)',  # region_pick.py:244
+    'BinOp.left>BinOp(left=Name,op=FloorDiv,right=Constant)',  # main.py:28364
+    'BinOp.left>BinOp(left=Name,op=Sub,right=Name)',  # match_report_window.py:74
+    'BinOp.left>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:51808
+    'BinOp.left>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:20449
+    'BinOp.left>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # main.py:18642
+    'BinOp.left>Call(func=Name,args=[Attribute],keywords=[])',  # region_pick.py:257
+    'BinOp.left>Constant(value=float)',  # main.py:64819
+    'BinOp.left>Constant(value=int)',  # main.py:53558
+    'BinOp.left>Constant(value=str)',  # main.py:65026
+    'BinOp.left>JoinedStr(values=[Constant|FormattedValue])',  # main.py:18761
+    'BinOp.left>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:49785
+    'BinOp.left>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:49826
+    'BinOp.left>Name(id=str,ctx=Load)',  # main.py:16795
+    'BinOp.left>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51126
+    'BinOp.op>Add()',  # main.py:18642
+    'BinOp.op>BitAnd()',  # region_pick.py:244
+    'BinOp.op>BitOr()',  # main.py:16795
+    'BinOp.op>FloorDiv()',  # main.py:28364
+    'BinOp.op>Mod()',  # main.py:28364
+    'BinOp.op>Mult()',  # main.py:20112
+    'BinOp.op>Sub()',  # main.py:18671
+    'BinOp.right>BinOp(left=Name,op=Mod,right=Constant)',  # main.py:28364
+    'BinOp.right>BinOp(left=Name,op=Sub,right=Constant)',  # main.py:73538
+    'BinOp.right>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:51808
+    'BinOp.right>BoolOp(op=Or,values=[Subscript])',  # main.py:20065
+    'BinOp.right>Call(func=Attribute,args=[],keywords=[])',  # main.py:64819
+    'BinOp.right>Call(func=Name,args=[Name],keywords=[])',  # main.py:51121
+    'BinOp.right>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:51126
+    'BinOp.right>Call(func=Name,args=[],keywords=[keyword])',  # main.py:20092
+    'BinOp.right>Constant(value=NoneType)',  # main.py:16795
+    'BinOp.right>Constant(value=float)',  # main.py:73538
+    'BinOp.right>Constant(value=int)',  # main.py:18642
+    'BinOp.right>Constant(value=str)',  # main.py:65028
+    'BinOp.right>IfExp(test=Compare,body=JoinedStr,orelse=Constant)',  # main.py:18767
+    'BinOp.right>List(elts=[Name],ctx=Load)',  # main.py:49363
+    'BinOp.right>List(elts=[Tuple],ctx=Load)',  # main.py:49827
+    'BinOp.right>Name(id=str,ctx=Load)',  # main.py:28318
+    'BinOp.right>Set(elts=[Name])',  # region_pick.py:244
+    'BinOp.right>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:18671
+    'BinOp.right>Tuple(elts=[Attribute|UnaryOp],ctx=Load)',  # region_pick.py:257
+    'BoolOp.op>And()',  # main.py:16379
+    'BoolOp.op>Or()',  # main.py:17401
+    "BoolOp.values>Attribute(value=Name,attr='admitted_by',ctx=Load)",  # region_pick.py:261
+    "BoolOp.values>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:83
+    'BoolOp.values>BoolOp(op=And,values=[Call|UnaryOp])',  # region_pick.py:232
+    'BoolOp.values>BoolOp(op=And,values=[Compare])',  # main.py:51801
+    'BoolOp.values>BoolOp(op=And,values=[Name|UnaryOp])',  # main.py:53652
+    'BoolOp.values>BoolOp(op=Or,values=[Compare])',  # main.py:64978
+    'BoolOp.values>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:18757
+    'BoolOp.values>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # main.py:18758
+    'BoolOp.values>Call(func=Attribute,args=[],keywords=[])',  # main.py:20579
+    'BoolOp.values>Call(func=Name,args=[Constant|GeneratorExp],keywords=[])',  # main.py:53815
+    'BoolOp.values>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:56336
+    'BoolOp.values>Call(func=Name,args=[Name],keywords=[])',  # main.py:18740
+    'BoolOp.values>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:18728
+    'BoolOp.values>Call(func=Name,args=[Name|Tuple],keywords=[])',  # region_pick.py:40
+    'BoolOp.values>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:64888
+    'BoolOp.values>Call(func=Name,args=[],keywords=[])',  # main.py:53692
+    'BoolOp.values>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # main.py:28344
+    'BoolOp.values>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # main.py:18738
+    'BoolOp.values>Compare(left=Attribute,ops=[NotEq],comparators=[Name])',  # region_pick.py:83
+    'BoolOp.values>Compare(left=Await,ops=[Is],comparators=[Constant])',  # main.py:64948
+    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Constant])',  # main.py:65140
+    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Name])',  # main.py:73508
+    'BoolOp.values>Compare(left=BinOp,ops=[LtE],comparators=[Name])',  # region_pick.py:202
+    'BoolOp.values>Compare(left=BinOp,ops=[Lt],comparators=[Name])',  # main.py:18671
+    'BoolOp.values>Compare(left=BoolOp,ops=[Gt],comparators=[Constant])',  # main.py:51814
+    'BoolOp.values>Compare(left=BoolOp,ops=[LtE],comparators=[Constant])',  # main.py:51721
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Call])',  # main.py:53666
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:53638
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Name])',  # main.py:16920
+    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Call])',  # main.py:65017
+    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Constant])',  # main.py:53689
+    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Name])',  # main.py:64828
+    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Constant])',  # main.py:53665
+    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Name])',  # main.py:28319
+    'BoolOp.values>Compare(left=Call,ops=[In],comparators=[Name])',  # main.py:62072
+    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Call])',  # region_pick.py:261
+    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Constant])',  # main.py:50047
+    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:65220
+    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:49955
+    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # main.py:49859
+    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Name])',  # main.py:49954
+    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Call])',  # main.py:51801
+    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:50047
+    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:64828
+    'BoolOp.values>Compare(left=Name,ops=[GtE],comparators=[Name])',  # main.py:55786
+    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[BinOp])',  # main.py:20112
+    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:53638
+    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[Name])',  # main.py:20163
+    'BoolOp.values>Compare(left=Name,ops=[In],comparators=[Attribute])',  # region_pick.py:83
+    'BoolOp.values>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:16379
+    'BoolOp.values>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:18563
+    'BoolOp.values>Compare(left=Name,ops=[LtE],comparators=[Constant])',  # main.py:28319
+    'BoolOp.values>Compare(left=Name,ops=[LtE],comparators=[Name])',  # main.py:48824
+    'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Constant])',  # main.py:20015
+    'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Name])',  # main.py:18566
+    'BoolOp.values>Compare(left=Name,ops=[NotEq],comparators=[Call])',  # main.py:65221
+    'BoolOp.values>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # main.py:16379
+    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:20112
+    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:49603
+    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Subscript])',  # main.py:51812
+    'BoolOp.values>Compare(left=Subscript,ops=[Gt],comparators=[Call])',  # main.py:64947
+    'BoolOp.values>Compare(left=Subscript,ops=[Gt],comparators=[Name])',  # main.py:51730
+    'BoolOp.values>Compare(left=Subscript,ops=[In],comparators=[Tuple])',  # main.py:16913
+    'BoolOp.values>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:49254
+    'BoolOp.values>Compare(left=Subscript,ops=[Is],comparators=[Constant])',  # main.py:51099
+    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Constant])',  # main.py:20485
+    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:16914
+    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:18563
+    'BoolOp.values>Compare(left=Subscript,ops=[NotIn],comparators=[Name])',  # main.py:51101
+    'BoolOp.values>Constant(value=NoneType)',  # main.py:57204
+    'BoolOp.values>Constant(value=bool)',  # main.py:49400
+    'BoolOp.values>Constant(value=float)',  # main.py:49387
+    'BoolOp.values>Constant(value=int)',  # main.py:20579
+    'BoolOp.values>Constant(value=str)',  # main.py:18760
+    'BoolOp.values>List(elts=[],ctx=Load)',  # main.py:18757
+    'BoolOp.values>Name(id=str,ctx=Load)',  # main.py:16913
+    'BoolOp.values>Subscript(value=BoolOp,slice=Slice,ctx=Load)',  # main.py:57204
+    'BoolOp.values>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:18671
+    'BoolOp.values>Tuple(elts=[],ctx=Load)',  # main.py:17401
+    'BoolOp.values>UnaryOp(op=Not,operand=BoolOp)',  # main.py:20163
+    'BoolOp.values>UnaryOp(op=Not,operand=Call)',  # main.py:53640
+    'BoolOp.values>UnaryOp(op=Not,operand=Name)',  # main.py:49369
+    'BoolOp.values>UnaryOp(op=Not,operand=Subscript)',  # main.py:57202
+    "Call.args>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:20313
+    "Call.args>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:239
+    "Call.args>Attribute(value=Name,attr='n',ctx=Load)",  # tournaments.py:308
+    "Call.args>Attribute(value=Name,attr='region',ctx=Load)",  # region_pick.py:257
+    "Call.args>Attribute(value=Name,attr='rules',ctx=Load)",  # main.py:20241
+    "Call.args>Attribute(value=Name,attr='state',ctx=Load)",  # main.py:56309
+    "Call.args>Attribute(value=Name,attr='sum',ctx=Load)",  # region_pick.py:257
+    "Call.args>Attribute(value=Name,attr='utc',ctx=Load)",  # main.py:20062
+    "Call.args>Attribute(value=Name,attr='worst',ctx=Load)",  # region_pick.py:257
+    "Call.args>Attribute(value=Subscript,attr='map',ctx=Load)",  # region_pick.py:237
+    'Call.args>Await(value=Call)',  # main.py:51796
+    'Call.args>BinOp(left=BinOp,op=Add,right=Constant)',  # main.py:65026
+    'Call.args>BinOp(left=BinOp,op=Sub,right=Set)',  # region_pick.py:244
+    'Call.args>BinOp(left=Constant,op=Sub,right=Call)',  # main.py:64819
+    'Call.args>BinOp(left=JoinedStr,op=Add,right=IfExp)',  # main.py:18761
+    'Call.args>BinOp(left=ListComp,op=Add,right=List)',  # main.py:49785
+    'Call.args>BinOp(left=Name,op=Add,right=Constant)',  # main.py:20429
+    'Call.args>BinOp(left=Name,op=Add,right=Name)',  # main.py:50084
+    'Call.args>BinOp(left=Name,op=Mult,right=Name)',  # main.py:28321
+    'Call.args>BinOp(left=Name,op=Sub,right=Name)',  # main.py:48811
+    'Call.args>BinOp(left=Subscript,op=Mult,right=Call)',  # main.py:51126
+    'Call.args>BoolOp(op=And,values=[Compare|Name|Subscript])',  # main.py:49602
+    'Call.args>BoolOp(op=And,values=[Compare|Subscript])',  # main.py:49604
+    'Call.args>BoolOp(op=Or,values=[Call|Constant])',  # main.py:49386
+    'Call.args>BoolOp(op=Or,values=[Call|Name])',  # main.py:56384
+    'Call.args>BoolOp(op=Or,values=[Constant|Name])',  # main.py:56300
+    'Call.args>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:53638
+    'Call.args>BoolOp(op=Or,values=[List|Subscript])',  # main.py:64862
+    'Call.args>BoolOp(op=Or,values=[Name|Tuple])',  # main.py:17410
+    'Call.args>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:18759
+    'Call.args>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:28368
+    'Call.args>Call(func=Attribute,args=[],keywords=[])',  # main.py:18645
+    'Call.args>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:51126
+    'Call.args>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:17410
+    'Call.args>Call(func=Name,args=[Call],keywords=[])',  # match_hold.py:380
+    'Call.args>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:64823
+    'Call.args>Call(func=Name,args=[Constant],keywords=[])',  # main.py:4342
+    'Call.args>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:62079
+    'Call.args>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:51688
+    'Call.args>Call(func=Name,args=[JoinedStr],keywords=[])',  # main.py:17407
+    'Call.args>Call(func=Name,args=[Name],keywords=[])',  # main.py:20464
+    'Call.args>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:20465
+    'Call.args>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:16918
+    'Call.args>Call(func=Name,args=[],keywords=[keyword])',  # main.py:28346
+    'Call.args>Constant(value=NoneType)',  # main.py:20551
+    'Call.args>Constant(value=float)',  # main.py:64819
+    'Call.args>Constant(value=int)',  # main.py:18642
+    'Call.args>Constant(value=str)',  # main.py:4343
+    'Call.args>Dict(keys=[Constant],values=[Attribute|Name|Subscript])',  # main.py:49600
+    'Call.args>Dict(keys=[Constant],values=[BinOp|Call|Name])',  # main.py:50160
+    'Call.args>Dict(keys=[Constant],values=[BoolOp|Name])',  # main.py:57273
+    'Call.args>Dict(keys=[Constant],values=[Call])',  # main.py:51705
+    'Call.args>Dict(keys=[Constant],values=[Call|Compare|Name|Subscript])',  # main.py:49508
+    'Call.args>Dict(keys=[Constant],values=[Call|IfExp|Name])',  # main.py:18741
+    'Call.args>Dict(keys=[Constant],values=[Call|ListComp|Name])',  # region_pick.py:271
+    'Call.args>Dict(keys=[Constant],values=[Call|ListComp|Name|Subscript])',  # main.py:65286
+    'Call.args>Dict(keys=[Constant],values=[Call|Name])',  # main.py:16933
+    'Call.args>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:50111
+    'Call.args>Dict(keys=[Constant],values=[Call|Subscript])',  # main.py:50029
+    'Call.args>Dict(keys=[Constant],values=[Constant|IfExp|Name|Subscript])',  # main.py:65049
+    'Call.args>Dict(keys=[Constant],values=[Constant|Subscript])',  # main.py:65029
+    'Call.args>Dict(keys=[Constant],values=[ListComp])',  # main.py:50144
+    'Call.args>Dict(keys=[Constant],values=[Name])',  # main.py:4346
+    'Call.args>Dict(keys=[Constant],values=[Name|Subscript])',  # main.py:49281
+    'Call.args>Dict(keys=[Constant],values=[Subscript])',  # main.py:20134
+    'Call.args>GeneratorExp(elt=BinOp,generators=[comprehension])',  # match_hold.py:352
+    'Call.args>GeneratorExp(elt=BoolOp,generators=[comprehension])',  # region_pick.py:83
+    'Call.args>GeneratorExp(elt=Call,generators=[comprehension])',  # main.py:6451
+    'Call.args>GeneratorExp(elt=Compare,generators=[comprehension])',  # main.py:16893
+    'Call.args>GeneratorExp(elt=Constant,generators=[comprehension])',  # region_pick.py:246
+    'Call.args>GeneratorExp(elt=JoinedStr,generators=[comprehension])',  # main.py:18758
+    'Call.args>GeneratorExp(elt=Name,generators=[comprehension])',  # main.py:18646
+    'Call.args>GeneratorExp(elt=Subscript,generators=[comprehension])',  # main.py:48809
+    'Call.args>JoinedStr(values=[Constant|FormattedValue])',  # main.py:16376
+    'Call.args>List(elts=[Constant],ctx=Load)',  # main.py:28345
+    'Call.args>List(elts=[Name],ctx=Load)',  # main.py:16951
+    'Call.args>List(elts=[Name|Subscript],ctx=Load)',  # main.py:20244
+    'Call.args>List(elts=[Subscript],ctx=Load)',  # main.py:19980
+    'Call.args>List(elts=[Tuple],ctx=Load)',  # main.py:20297
+    'Call.args>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:49574
+    'Call.args>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:49458
+    'Call.args>Name(id=str,ctx=Load)',  # main.py:6451
+    'Call.args>SetComp(elt=Name,generators=[comprehension])',  # main.py:16826
+    'Call.args>SetComp(elt=Tuple,generators=[comprehension])',  # main.py:17401
+    'Call.args>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:16892
+    'Call.args>Subscript(value=Name,slice=Name,ctx=Load)',  # match_hold.py:353
+    'Call.args>Subscript(value=Name,slice=Slice,ctx=Load)',  # main.py:53750
+    'Call.args>Tuple(elts=[Constant],ctx=Load)',  # main.py:18732
+    'Call.args>Tuple(elts=[Name],ctx=Load)',  # main.py:18733
+    "Call.func>Attribute(value=Attribute,attr='get',ctx=Load)",  # main.py:19933
+    "Call.func>Attribute(value=Await,attr='all',ctx=Load)",  # main.py:51859
+    "Call.func>Attribute(value=Await,attr='first',ctx=Load)",  # main.py:57195
+    "Call.func>Attribute(value=Await,attr='mappings',ctx=Load)",  # main.py:16839
+    "Call.func>Attribute(value=Await,attr='scalar',ctx=Load)",  # main.py:16851
+    "Call.func>Attribute(value=Await,attr='scalar_one',ctx=Load)",  # main.py:16828
+    "Call.func>Attribute(value=Await,attr='scalar_one_or_none',ctx=Load)",  # main.py:49327
+    "Call.func>Attribute(value=Await,attr='scalars',ctx=Load)",  # main.py:16924
+    "Call.func>Attribute(value=BinOp,attr='total_seconds',ctx=Load)",  # main.py:20065
+    "Call.func>Attribute(value=BoolOp,attr='lower',ctx=Load)",  # main.py:49656
+    "Call.func>Attribute(value=BoolOp,attr='lstrip',ctx=Load)",  # main.py:65270
+    "Call.func>Attribute(value=BoolOp,attr='strip',ctx=Load)",  # match_hold.py:376
+    "Call.func>Attribute(value=Call,attr='all',ctx=Load)",  # main.py:16886
+    "Call.func>Attribute(value=Call,attr='fetchall',ctx=Load)",  # main.py:56363
+    "Call.func>Attribute(value=Call,attr='first',ctx=Load)",  # main.py:17433
+    "Call.func>Attribute(value=Call,attr='lstrip',ctx=Load)",  # main.py:56300
+    "Call.func>Attribute(value=Call,attr='one',ctx=Load)",  # main.py:16839
+    "Call.func>Attribute(value=Call,attr='series_fresh',ctx=Load)",  # main.py:51725
+    "Call.func>Attribute(value=Call,attr='series_holds',ctx=Load)",  # main.py:51796
+    "Call.func>Attribute(value=Call,attr='split',ctx=Load)",  # main.py:6451
+    "Call.func>Attribute(value=Constant,attr='join',ctx=Load)",  # main.py:18758
+    "Call.func>Attribute(value=Name,attr='UUID',ctx=Load)",  # main.py:56359
+    "Call.func>Attribute(value=Name,attr='_asdict',ctx=Load)",  # region_pick.py:274
+    "Call.func>Attribute(value=Name,attr='_hold_latch',ctx=Load)",  # main.py:49515
+    "Call.func>Attribute(value=Name,attr='add',ctx=Load)",  # main.py:17473
+    "Call.func>Attribute(value=Name,attr='append',ctx=Load)",  # main.py:16380
+    "Call.func>Attribute(value=Name,attr='begin_nested',ctx=Load)",  # main.py:4341
+    "Call.func>Attribute(value=Name,attr='caps_token_sql',ctx=Load)",  # main.py:49597
+    "Call.func>Attribute(value=Name,attr='ceil',ctx=Load)",  # main.py:64823
+    "Call.func>Attribute(value=Name,attr='choice',ctx=Load)",  # main.py:57236
+    "Call.func>Attribute(value=Name,attr='commit',ctx=Load)",  # main.py:19950
+    "Call.func>Attribute(value=Name,attr='dumps',ctx=Load)",  # main.py:56251
+    "Call.func>Attribute(value=Name,attr='execute',ctx=Load)",  # main.py:4342
+    "Call.func>Attribute(value=Name,attr='expire',ctx=Load)",  # main.py:28345
+    "Call.func>Attribute(value=Name,attr='extend',ctx=Load)",  # main.py:50130
+    "Call.func>Attribute(value=Name,attr='flush',ctx=Load)",  # main.py:20284
+    "Call.func>Attribute(value=Name,attr='format',ctx=Load)",  # main.py:49695
+    "Call.func>Attribute(value=Name,attr='get',ctx=Load)",  # main.py:16918
+    "Call.func>Attribute(value=Name,attr='intersection',ctx=Load)",  # main.py:73452
+    "Call.func>Attribute(value=Name,attr='items',ctx=Load)",  # main.py:18646
+    "Call.func>Attribute(value=Name,attr='loads',ctx=Load)",  # main.py:18735
+    "Call.func>Attribute(value=Name,attr='lower',ctx=Load)",  # main.py:57238
+    "Call.func>Attribute(value=Name,attr='mappings',ctx=Load)",  # main.py:18722
+    "Call.func>Attribute(value=Name,attr='monotonic',ctx=Load)",  # main.py:18670
+    "Call.func>Attribute(value=Name,attr='now',ctx=Load)",  # main.py:20062
+    "Call.func>Attribute(value=Name,attr='pop',ctx=Load)",  # main.py:62071
+    "Call.func>Attribute(value=Name,attr='replace',ctx=Load)",  # main.py:18739
+    "Call.func>Attribute(value=Name,attr='rollback',ctx=Load)",  # main.py:16863
+    "Call.func>Attribute(value=Name,attr='scalar',ctx=Load)",  # main.py:20579
+    "Call.func>Attribute(value=Name,attr='sort',ctx=Load)",  # main.py:51807
+    "Call.func>Attribute(value=Name,attr='strip',ctx=Load)",  # main.py:6451
+    "Call.func>Attribute(value=Name,attr='time',ctx=Load)",  # main.py:18751
+    "Call.func>Attribute(value=Name,attr='timestamp',ctx=Load)",  # main.py:18742
+    "Call.func>Attribute(value=Name,attr='update',ctx=Load)",  # main.py:16876
+    "Call.func>Attribute(value=Name,attr='uuid4',ctx=Load)",  # main.py:16957
+    "Call.func>Attribute(value=Name,attr='values',ctx=Load)",  # main.py:18645
+    "Call.func>Attribute(value=Subscript,attr='isdigit',ctx=Load)",  # main.py:53751
+    'Call.func>Name(id=str,ctx=Load)',  # main.py:4342
+    "Call.keywords>keyword(arg='_gate_held',value=Constant)",  # main.py:17010
+    "Call.keywords>keyword(arg='affected_player_ids',value=BinOp)",  # main.py:50096
+    "Call.keywords>keyword(arg='affected_player_ids',value=Call)",  # main.py:51847
+    "Call.keywords>keyword(arg='affected_player_ids',value=List)",  # main.py:20006
+    "Call.keywords>keyword(arg='affected_player_ids',value=ListComp)",  # main.py:53831
+    "Call.keywords>keyword(arg='affected_steam_ids',value=List)",  # main.py:20006
+    "Call.keywords>keyword(arg='allow',value=Tuple)",  # main.py:49459
+    "Call.keywords>keyword(arg='allow_any',value=ListComp)",  # main.py:49828
+    "Call.keywords>keyword(arg='allow_any',value=Tuple)",  # main.py:20298
+    "Call.keywords>keyword(arg='allowed_group_ids',value=Name)",  # main.py:16952
+    "Call.keywords>keyword(arg='allowed_hold_ids',value=Name)",  # main.py:16953
+    "Call.keywords>keyword(arg='allowed_keys',value=Name)",  # main.py:17005
+    "Call.keywords>keyword(arg='allowed_keys',value=Tuple)",  # main.py:20314
+    "Call.keywords>keyword(arg='amount',value=Call)",  # main.py:37861
+    "Call.keywords>keyword(arg='amount',value=Name)",  # main.py:28347
+    "Call.keywords>keyword(arg='balance_rating',value=Name)",  # main.py:49398
+    "Call.keywords>keyword(arg='bilateral',value=IfExp)",  # main.py:49696
+    "Call.keywords>keyword(arg='completed_series',value=Name)",  # main.py:49399
+    "Call.keywords>keyword(arg='content',value=Name)",  # main.py:49195
+    "Call.keywords>keyword(arg='current',value=Call)",  # main.py:49483
+    "Call.keywords>keyword(arg='default',value=Constant)",  # main.py:64816
+    "Call.keywords>keyword(arg='detail',value=Constant)",  # main.py:16865
+    "Call.keywords>keyword(arg='display_name',value=Subscript)",  # main.py:49393
+    "Call.keywords>keyword(arg='elo_range',value=IfExp)",  # main.py:20590
+    "Call.keywords>keyword(arg='elo_range',value=Name)",  # main.py:49683
+    "Call.keywords>keyword(arg='elo_unbounded',value=Compare)",  # main.py:20591
+    "Call.keywords>keyword(arg='ge',value=Constant)",  # main.py:49169
+    "Call.keywords>keyword(arg='hold',value=IfExp)",  # main.py:49631
+    "Call.keywords>keyword(arg='key',value=Lambda)",  # main.py:17402
+    "Call.keywords>keyword(arg='key',value=Name)",  # main.py:16381
+    "Call.keywords>keyword(arg='le',value=Constant)",  # main.py:49169
+    "Call.keywords>keyword(arg='live_p1_points',value=Constant)",  # main.py:20279
+    "Call.keywords>keyword(arg='live_p2_points',value=Constant)",  # main.py:20279
+    "Call.keywords>keyword(arg='margin_ms',value=Name)",  # main.py:18750
+    "Call.keywords>keyword(arg='match_age_seconds',value=Constant)",  # main.py:50212
+    "Call.keywords>keyword(arg='match_age_seconds',value=IfExp)",  # main.py:49624
+    "Call.keywords>keyword(arg='max_age_s',value=Name)",  # main.py:18751
+    "Call.keywords>keyword(arg='max_total_seconds',value=Name)",  # main.py:49292
+    "Call.keywords>keyword(arg='minutes',value=Name)",  # main.py:51724
+    "Call.keywords>keyword(arg='my_pid',value=Name)",  # main.py:20245
+    "Call.keywords>keyword(arg='my_pid',value=Subscript)",  # main.py:53838
+    "Call.keywords>keyword(arg='my_ready',value=Call)",  # main.py:49625
+    "Call.keywords>keyword(arg='now',value=Call)",  # main.py:18751
+    "Call.keywords>keyword(arg='now',value=Name)",  # main.py:51725
+    "Call.keywords>keyword(arg='only',value=Constant)",  # main.py:20465
+    "Call.keywords>keyword(arg='only',value=ListComp)",  # main.py:49794
+    "Call.keywords>keyword(arg='only',value=Name)",  # main.py:49952
+    "Call.keywords>keyword(arg='only',value=Subscript)",  # main.py:20484
+    "Call.keywords>keyword(arg='opponent_name',value=Subscript)",  # main.py:20348
+    "Call.keywords>keyword(arg='opponent_rating',value=Subscript)",  # main.py:20349
+    "Call.keywords>keyword(arg='opponent_ready',value=Constant)",  # main.py:20350
+    "Call.keywords>keyword(arg='opponent_ready',value=Name)",  # main.py:20383
+    "Call.keywords>keyword(arg='opponent_steam_id',value=Subscript)",  # main.py:20347
+    "Call.keywords>keyword(arg='opponents',value=List)",  # main.py:51981
+    "Call.keywords>keyword(arg='opponents',value=Name)",  # main.py:49621
+    "Call.keywords>keyword(arg='p1_pings',value=Subscript)",  # main.py:20223
+    "Call.keywords>keyword(arg='p1_pings_at',value=Subscript)",  # main.py:20224
+    "Call.keywords>keyword(arg='p1_series_wins',value=Constant)",  # main.py:20278
+    "Call.keywords>keyword(arg='p1_steam_id',value=IfExp)",  # main.py:20354
+    "Call.keywords>keyword(arg='p1_wins',value=Attribute)",  # main.py:20356
+    "Call.keywords>keyword(arg='p1_wins',value=IfExp)",  # main.py:20391
+    "Call.keywords>keyword(arg='p2_pings',value=Subscript)",  # main.py:20223
+    "Call.keywords>keyword(arg='p2_pings_at',value=Subscript)",  # main.py:20224
+    "Call.keywords>keyword(arg='p2_series_wins',value=Constant)",  # main.py:20278
+    "Call.keywords>keyword(arg='p2_steam_id',value=IfExp)",  # main.py:20355
+    "Call.keywords>keyword(arg='p2_wins',value=Attribute)",  # main.py:20357
+    "Call.keywords>keyword(arg='p2_wins',value=IfExp)",  # main.py:20392
+    "Call.keywords>keyword(arg='parents',value=List)",  # main.py:49787
+    "Call.keywords>keyword(arg='photon_region',value=BoolOp)",  # main.py:20385
+    "Call.keywords>keyword(arg='photon_region',value=Name)",  # main.py:20352
+    "Call.keywords>keyword(arg='player1_id',value=Name)",  # main.py:20277
+    "Call.keywords>keyword(arg='player2_id',value=Subscript)",  # main.py:20277
+    "Call.keywords>keyword(arg='player_id',value=Name)",  # main.py:28347
+    "Call.keywords>keyword(arg='player_id',value=Subscript)",  # main.py:51156
+    "Call.keywords>keyword(arg='player_ids',value=BinOp)",  # main.py:49915
+    "Call.keywords>keyword(arg='player_ids',value=List)",  # main.py:20473
+    "Call.keywords>keyword(arg='player_ids',value=ListComp)",  # main.py:49467
+    "Call.keywords>keyword(arg='player_ids',value=Name)",  # main.py:49374
+    "Call.keywords>keyword(arg='queue_count',value=Call)",  # main.py:49317
+    "Call.keywords>keyword(arg='queue_count',value=Constant)",  # main.py:49683
+    "Call.keywords>keyword(arg='queue_count',value=Name)",  # main.py:50013
+    "Call.keywords>keyword(arg='queue_size',value=Name)",  # main.py:20585
+    "Call.keywords>keyword(arg='rating',value=Call)",  # main.py:49394
+    "Call.keywords>keyword(arg='ready',value=Call)",  # main.py:49400
+    "Call.keywords>keyword(arg='reason',value=Constant)",  # main.py:51157
+    "Call.keywords>keyword(arg='reason',value=Name)",  # main.py:28348
+    "Call.keywords>keyword(arg='reference_id',value=Call)",  # main.py:28348
+    "Call.keywords>keyword(arg='region',value=Subscript)",  # main.py:49395
+    "Call.keywords>keyword(arg='regret_ms',value=Name)",  # main.py:18750
+    "Call.keywords>keyword(arg='request',value=Name)",  # main.py:20245
+    "Call.keywords>keyword(arg='require',value=Constant)",  # main.py:49459
+    "Call.keywords>keyword(arg='response_model',value=Name)",  # main.py:19898
+    "Call.keywords>keyword(arg='reverse',value=Constant)",  # main.py:51809
+    "Call.keywords>keyword(arg='room',value=Name)",  # main.py:49483
+    "Call.keywords>keyword(arg='room_id',value=Name)",  # main.py:20238
+    "Call.keywords>keyword(arg='room_name',value=Name)",  # main.py:20351
+    "Call.keywords>keyword(arg='room_region',value=Name)",  # main.py:49623
+    "Call.keywords>keyword(arg='rules',value=Call)",  # main.py:20358
+    "Call.keywords>keyword(arg='rules',value=Name)",  # main.py:20251
+    "Call.keywords>keyword(arg='rules_prop',value=Call)",  # main.py:20359
+    "Call.keywords>keyword(arg='seconds',value=Name)",  # main.py:20092
+    "Call.keywords>keyword(arg='separators',value=Tuple)",  # main.py:56251
+    "Call.keywords>keyword(arg='series_id',value=Call)",  # main.py:20353
+    "Call.keywords>keyword(arg='series_id',value=Name)",  # main.py:20386
+    "Call.keywords>keyword(arg='sort_keys',value=Constant)",  # main.py:56251
+    "Call.keywords>keyword(arg='status',value=Constant)",  # main.py:19969
+    "Call.keywords>keyword(arg='status',value=IfExp)",  # main.py:20215
+    "Call.keywords>keyword(arg='status_code',value=Constant)",  # main.py:16865
+    "Call.keywords>keyword(arg='steam_id',value=Subscript)",  # main.py:49392
+    "Call.keywords>keyword(arg='strict_team_ovt_queue',value=Name)",  # main.py:16954
+    "Call.keywords>keyword(arg='tags',value=List)",  # main.py:19898
+    "Call.keywords>keyword(arg='team_assigned',value=Name)",  # main.py:49619
+    "Call.keywords>keyword(arg='team_assigned',value=Subscript)",  # main.py:49396
+    "Call.keywords>keyword(arg='teammates',value=List)",  # main.py:51980
+    "Call.keywords>keyword(arg='teammates',value=Name)",  # main.py:49620
+    "Call.keywords>keyword(arg='tzinfo',value=Attribute)",  # main.py:18739
+    "Call.keywords>keyword(arg='using_fallback_rating',value=Name)",  # main.py:49397
+    "Call.keywords>keyword(arg='wait_time',value=Constant)",  # main.py:20418
+    "Call.keywords>keyword(arg='wait_time',value=Name)",  # main.py:20118
+    "Call.keywords>keyword(arg='window',value=Name)",  # main.py:51725
+    "Compare.comparators>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:83
+    'Compare.comparators>BinOp(left=Constant,op=Mult,right=Constant)',  # main.py:53558
+    'Compare.comparators>BinOp(left=Name,op=Mult,right=Constant)',  # main.py:20112
+    'Compare.comparators>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:64947
+    'Compare.comparators>Call(func=Attribute,args=[],keywords=[])',  # main.py:57238
+    'Compare.comparators>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:65017
+    'Compare.comparators>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:65221
+    'Compare.comparators>Call(func=Name,args=[Name],keywords=[])',  # main.py:49795
+    'Compare.comparators>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:49955
+    'Compare.comparators>Constant(value=NoneType)',  # main.py:16379
+    'Compare.comparators>Constant(value=bool)',  # main.py:20314
+    'Compare.comparators>Constant(value=float)',  # main.py:65140
+    'Compare.comparators>Constant(value=int)',  # main.py:20015
+    'Compare.comparators>Constant(value=str)',  # main.py:16389
+    'Compare.comparators>Name(id=str,ctx=Load)',  # main.py:16375
+    'Compare.comparators>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:18563
+    'Compare.comparators>Tuple(elts=[Constant],ctx=Load)',  # main.py:16864
+    'Compare.comparators>Tuple(elts=[Name],ctx=Load)',  # main.py:51910
+    "Compare.left>Attribute(value=Name,attr='home',ctx=Load)",  # region_pick.py:83
+    "Compare.left>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:28344
+    "Compare.left>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:211
+    "Compare.left>Attribute(value=Name,attr='player1_id',ctx=Load)",  # main.py:20354
+    "Compare.left>Attribute(value=Name,attr='tzinfo',ctx=Load)",  # main.py:18738
+    'Compare.left>Await(value=Call)',  # main.py:20199
+    'Compare.left>BinOp(left=BinOp,op=Sub,right=Call)',  # match_report_window.py:74
+    'Compare.left>BinOp(left=Constant,op=Mult,right=Name)',  # region_pick.py:248
+    'Compare.left>BinOp(left=Name,op=Sub,right=Name)',  # main.py:65140
+    'Compare.left>BinOp(left=Name,op=Sub,right=Subscript)',  # main.py:18671
+    'Compare.left>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:51721
+    'Compare.left>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:56239
+    'Compare.left>Call(func=Attribute,args=[],keywords=[])',  # main.py:49656
+    'Compare.left>Call(func=Name,args=[Attribute],keywords=[])',  # region_pick.py:261
+    'Compare.left>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:53638
+    'Compare.left>Call(func=Name,args=[Call],keywords=[])',  # main.py:56284
+    'Compare.left>Call(func=Name,args=[Name],keywords=[])',  # main.py:16864
+    'Compare.left>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:16893
+    'Compare.left>Constant(value=str)',  # main.py:18640
+    'Compare.left>Name(id=str,ctx=Load)',  # main.py:16375
+    'Compare.left>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:16913
+    'Compare.ops>Eq()',  # main.py:16389
+    'Compare.ops>Gt()',  # main.py:20112
+    'Compare.ops>GtE()',  # main.py:48822
+    'Compare.ops>In()',  # main.py:16864
+    'Compare.ops>Is()',  # main.py:16796
+    'Compare.ops>IsNot()',  # main.py:16379
+    'Compare.ops>Lt()',  # main.py:18565
+    'Compare.ops>LtE()',  # main.py:28319
+    'Compare.ops>NotEq()',  # main.py:16914
+    'Compare.ops>NotIn()',  # main.py:16375
+    'Dict.keys>Constant(value=str)',  # main.py:4346
+    'Dict.keys>Name(id=str,ctx=Load)',  # main.py:49853
+    "Dict.values>Attribute(value=Name,attr='HOLD_CAPS_TOKEN',ctx=Load)",  # main.py:49601
+    "Dict.values>Attribute(value=Name,attr='id',ctx=Load)",  # region_pick.py:222
+    'Dict.values>BinOp(left=Name,op=Add,right=Name)',  # main.py:50164
+    'Dict.values>BoolOp(op=And,values=[Compare])',  # main.py:64828
+    'Dict.values>BoolOp(op=Or,values=[Constant|Name])',  # main.py:57273
+    'Dict.values>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:49853
+    'Dict.values>Call(func=Name,args=[Call],keywords=[])',  # main.py:50025
+    'Dict.values>Call(func=Name,args=[Name],keywords=[])',  # main.py:16934
+    'Dict.values>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:18741
+    'Dict.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:64827
+    'Dict.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:64847
+    'Dict.values>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:49509
+    'Dict.values>Constant(value=NoneType)',  # region_pick.py:227
+    'Dict.values>Constant(value=bool)',  # main.py:56339
+    'Dict.values>Constant(value=int)',  # main.py:53511
+    'Dict.values>Constant(value=str)',  # main.py:53511
+    'Dict.values>IfExp(test=Attribute,body=Call,orelse=Constant)',  # region_pick.py:223
+    'Dict.values>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:18742
+    'Dict.values>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:65050
+    'Dict.values>IfExp(test=Subscript,body=Call,orelse=Constant)',  # main.py:64848
+    'Dict.values>JoinedStr(values=[Constant|FormattedValue])',  # main.py:18753
+    'Dict.values>List(elts=[],ctx=Load)',  # region_pick.py:229
+    'Dict.values>ListComp(elt=Call,generators=[comprehension])',  # main.py:51861
+    'Dict.values>ListComp(elt=Dict,generators=[comprehension])',  # main.py:64843
+    'Dict.values>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:50144
+    'Dict.values>Name(id=str,ctx=Load)',  # main.py:4346
+    'Dict.values>Subscript(value=BoolOp,slice=Slice,ctx=Load)',  # main.py:53845
+    'Dict.values>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:20134
+    'Dict.values>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # main.py:53844
+    'Dict.values>UnaryOp(op=USub,operand=Constant)',  # main.py:65123
+    'DictComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:16892
+    'DictComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # main.py:51859
+    "DictComp.key>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:28363
+    "DictComp.key>Attribute(value=Name,attr='region',ctx=Load)",  # tournaments.py:308
+    'DictComp.key>Call(func=Name,args=[Name],keywords=[])',  # main.py:51859
+    'DictComp.key>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:16892
+    'DictComp.key>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50068
+    'DictComp.value>Call(func=Name,args=[Attribute],keywords=[])',  # tournaments.py:308
+    'DictComp.value>Name(id=str,ctx=Load)',  # main.py:16892
+    'DictComp.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50068
+    'DictComp.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:56360
+    'ExceptHandler.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:18737
+    'ExceptHandler.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:73579
+    'ExceptHandler.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:18753
+    'ExceptHandler.body>Expr(value=Await)',  # main.py:16863
+    'ExceptHandler.body>Expr(value=Call)',  # main.py:18679
+    'ExceptHandler.body>If(test=BoolOp,body=[Expr|Raise],orelse=[])',  # main.py:73580
+    'ExceptHandler.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:16864
+    'ExceptHandler.body>If(test=UnaryOp,body=[Expr|Raise],orelse=[])',  # main.py:73565
+    'ExceptHandler.body>Pass()',  # main.py:4348
+    'ExceptHandler.body>Raise(exc=-,cause=-)',  # main.py:16866
+    'ExceptHandler.body>Return(value=Constant)',  # main.py:56286
+    'ExceptHandler.body>Return(value=Tuple)',  # main.py:6453
+    'ExceptHandler.type>Name(id=str,ctx=Load)',  # main.py:4347
+    'Expr.value>Await(value=Call)',  # main.py:4342
+    'Expr.value>Call(func=Attribute,args=[BoolOp],keywords=[])',  # main.py:56384
+    'Expr.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:28346
+    'Expr.value>Call(func=Attribute,args=[Dict],keywords=[])',  # main.py:18741
+    'Expr.value>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # main.py:16876
+    'Expr.value>Call(func=Attribute,args=[List],keywords=[])',  # main.py:50130
+    'Expr.value>Call(func=Attribute,args=[List|Name],keywords=[])',  # main.py:28345
+    'Expr.value>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:16380
+    'Expr.value>Call(func=Attribute,args=[Subscript],keywords=[])',  # main.py:49417
+    'Expr.value>Call(func=Attribute,args=[Tuple],keywords=[])',  # main.py:57214
+    'Expr.value>Call(func=Attribute,args=[],keywords=[keyword])',  # main.py:51807
+    'Expr.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:18761
+    'Expr.value>Call(func=Name,args=[JoinedStr],keywords=[])',  # main.py:18679
+    'Expr.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:19926
+    'Expr.value>Constant(value=str)',  # main.py:4296
+    'For.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:17477
+    'For.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:18740
+    'For.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:16851
+    'For.body>Assign(targets=[Name],value=Compare,type_comment=-)',  # region_pick.py:249
+    'For.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:53794
+    'For.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:20456
+    'For.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:18640
+    'For.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:53751
+    'For.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:20452
+    'For.body>Assign(targets=[Name],value=Tuple,type_comment=-)',  # main.py:17482
+    'For.body>Assign(targets=[Subscript],value=Name,type_comment=-)',  # region_pick.py:58
+    'For.body>Assign(targets=[Subscript],value=Subscript,type_comment=-)',  # main.py:49855
+    'For.body>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # main.py:18724
+    'For.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:57212
+    'For.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:18732
+    'For.body>AugAssign(target=Name,op=BitAnd,value=Call)',  # region_pick.py:239
+    'For.body>Break()',  # main.py:53795
+    'For.body>Expr(value=Await)',  # main.py:17009
+    'For.body>Expr(value=Call)',  # main.py:18741
+    'For.body>For(target=Tuple,iter=List,body=[Expr],orelse=[],type_comment=-)',  # main.py:20524
+    'For.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:18738
+    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr],orelse=[])',  # main.py:20485
+    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr|If],orelse=[])',  # main.py:65191
+    'For.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:51798
+    'For.body>If(test=BoolOp,body=[Continue],orelse=[])',  # main.py:51812
+    'For.body>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # main.py:56383
+    'For.body>If(test=BoolOp,body=[Expr],orelse=[If])',  # main.py:50047
+    'For.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:16379
+    'For.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:16913
+    'For.body>If(test=Call,body=[Assign],orelse=[])',  # main.py:56235
+    'For.body>If(test=Call,body=[AugAssign],orelse=[])',  # main.py:18745
+    'For.body>If(test=Call,body=[Try],orelse=[])',  # main.py:18733
+    'For.body>If(test=Compare,body=[Assign],orelse=[Assign])',  # main.py:51124
+    'For.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:65188
+    'For.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:16854
+    'For.body>If(test=Compare,body=[Assign|Continue|Expr],orelse=[])',  # main.py:53771
+    'For.body>If(test=Compare,body=[Assign|Continue|Expr|If],orelse=[])',  # main.py:20506
+    'For.body>If(test=Compare,body=[AugAssign],orelse=[])',  # match_report_window.py:63
+    'For.body>If(test=Compare,body=[AugAssign|If],orelse=[AugAssign|Expr])',  # main.py:51150
+    'For.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:20466
+    'For.body>If(test=Compare,body=[Continue],orelse=[])',  # main.py:16916
+    'For.body>If(test=Compare,body=[Continue|If],orelse=[])',  # main.py:17478
+    'For.body>If(test=Compare,body=[Expr],orelse=[If])',  # main.py:16389
+    'For.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:16382
+    'For.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:20440
+    'For.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:20437
+    'For.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:17404
+    'For.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:51784
+    'For.body>If(test=Name,body=[Assign],orelse=[])',  # main.py:18641
+    'For.body>If(test=Name,body=[Expr],orelse=[])',  # main.py:57213
+    'For.body>If(test=UnaryOp,body=[Assign],orelse=[])',  # region_pick.py:198
+    'For.body>If(test=UnaryOp,body=[Continue],orelse=[])',  # main.py:51795
+    'For.body>Return(value=Call)',  # main.py:20556
+    'For.body>Return(value=Tuple)',  # main.py:17485
+    'For.iter>BoolOp(op=Or,values=[Name|Tuple])',  # region_pick.py:197
+    'For.iter>Call(func=Attribute,args=[],keywords=[])',  # main.py:18722
+    'For.iter>Call(func=Name,args=[BinOp],keywords=[])',  # region_pick.py:244
+    'For.iter>Call(func=Name,args=[BinOp|Constant],keywords=[])',  # main.py:20429
+    'For.iter>Call(func=Name,args=[Name],keywords=[])',  # main.py:65289
+    'For.iter>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:16381
+    'For.iter>Call(func=Name,args=[SetComp],keywords=[keyword])',  # main.py:17400
+    'For.iter>List(elts=[Tuple],ctx=Load)',  # main.py:20524
+    'For.iter>Name(id=str,ctx=Load)',  # main.py:16378
+    'For.iter>Subscript(value=Name,slice=Slice,ctx=Load)',  # region_pick.py:238
+    'For.iter>Tuple(elts=[Constant],ctx=Load)',  # main.py:56233
+    'For.iter>Tuple(elts=[Name],ctx=Load)',  # main.py:50129
+    'For.orelse>Expr(value=Await)',  # main.py:20570
+    'For.orelse>Expr(value=Call)',  # main.py:20571
+    'For.orelse>Raise(exc=Call,cause=-)',  # main.py:20573
+    'For.target>Name(id=str,ctx=Store)',  # main.py:16378
+    'For.target>Tuple(elts=[Name],ctx=Store)',  # main.py:17400
+    'For.target>Tuple(elts=[Name|Tuple],ctx=Store)',  # main.py:56381
+    'FormattedValue.format_spec>JoinedStr(values=[Constant])',  # main.py:50011
+    "FormattedValue.value>Attribute(value=Call,attr='__name__',ctx=Load)",  # main.py:18679
+    'FormattedValue.value>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:18759
+    'FormattedValue.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:18759
+    'FormattedValue.value>Call(func=Name,args=[Constant],keywords=[])',  # match_hold.py:359
+    'FormattedValue.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:37858
+    'FormattedValue.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:49337
+    'FormattedValue.value>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:50016
+    'FormattedValue.value>Name(id=str,ctx=Load)',  # main.py:16376
+    'FormattedValue.value>Subscript(value=Attribute,slice=Slice,ctx=Load)',  # main.py:20217
+    'FormattedValue.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:20148
+    'FormattedValue.value>Subscript(value=Name,slice=Name,ctx=Load)',  # match_hold.py:355
+    'FunctionDef.args>arguments(posonlyargs=[],args=[],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:54211
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Constant])',  # main.py:18630
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:6449
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant],kwarg=-,defaults=[])',  # region_pick.py:101
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[NoneType],kwarg=-,defaults=[])',  # match_report_window.py:68
+    'FunctionDef.body>Assert(test=Compare,msg=-)',  # main.py:28323
+    'FunctionDef.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # main.py:28318
+    'FunctionDef.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:49388
+    'FunctionDef.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:18645
+    'FunctionDef.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:18638
+    'FunctionDef.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:49390
+    'FunctionDef.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:48803
+    'FunctionDef.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # region_pick.py:74
+    'FunctionDef.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:48802
+    'FunctionDef.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # region_pick.py:189
+    'FunctionDef.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:51726
+    'FunctionDef.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # region_pick.py:208
+    'FunctionDef.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # region_pick.py:241
+    'FunctionDef.body>Expr(value=Call)',  # region_pick.py:259
+    'FunctionDef.body>Expr(value=Constant)',  # main.py:18553
+    'FunctionDef.body>For(target=Name,iter=BoolOp,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # region_pick.py:197
+    'FunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr],orelse=[],type_comment=-)',  # region_pick.py:244
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:18639
+    'FunctionDef.body>For(target=Name,iter=Subscript,body=[AugAssign],orelse=[],type_comment=-)',  # region_pick.py:238
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[Assign|If],orelse=[],type_comment=-)',  # region_pick.py:51
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:48808
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # region_pick.py:210
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # region_pick.py:221
+    'FunctionDef.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:28319
+    'FunctionDef.body>If(test=Call,body=[Assign],orelse=[])',  # main.py:56249
+    'FunctionDef.body>If(test=Call,body=[For|If],orelse=[])',  # main.py:56232
+    'FunctionDef.body>If(test=Call,body=[Try],orelse=[])',  # main.py:56227
+    'FunctionDef.body>If(test=Compare,body=[Assign],orelse=[])',  # region_pick.py:187
+    'FunctionDef.body>If(test=Compare,body=[If|Return],orelse=[])',  # main.py:18562
+    'FunctionDef.body>If(test=Compare,body=[Raise],orelse=[])',  # match_hold.py:236
+    'FunctionDef.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:48822
+    'FunctionDef.body>If(test=Name,body=[Assign],orelse=[Assign])',  # region_pick.py:263
+    'FunctionDef.body>If(test=UnaryOp,body=[Return],orelse=[])',  # main.py:18643
+    "FunctionDef.body>Import(names=['match_report_window'])",  # main.py:54213
+    'FunctionDef.body>Return(value=BinOp)',  # region_pick.py:257
+    'FunctionDef.body>Return(value=BoolOp)',  # main.py:18566
+    'FunctionDef.body>Return(value=Call)',  # main.py:18646
+    'FunctionDef.body>Return(value=Compare)',  # match_report_window.py:74
+    'FunctionDef.body>Return(value=Constant)',  # main.py:51733
+    'FunctionDef.body>Return(value=Dict)',  # main.py:56339
+    'FunctionDef.body>Return(value=IfExp)',  # main.py:18756
+    'FunctionDef.body>Return(value=JoinedStr)',  # match_hold.py:220
+    'FunctionDef.body>Return(value=ListComp)',  # region_pick.py:222
+    'FunctionDef.body>Return(value=Name)',  # main.py:48826
+    'FunctionDef.body>Return(value=Tuple)',  # main.py:16796
+    'FunctionDef.body>Try(body=[Return],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:6450
+    'FunctionDef.body>While(test=Name,body=[Assign|Expr|For|If],orelse=[])',  # main.py:62070
+    'FunctionDef.returns>Name(id=str,ctx=Load)',  # main.py:48816
+    'FunctionDef.returns>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:6449
+    'GeneratorExp.elt>BinOp(left=Constant,op=Add,right=Name)',  # match_hold.py:352
+    'GeneratorExp.elt>BinOp(left=Name,op=Sub,right=Name)',  # region_pick.py:247
+    'GeneratorExp.elt>BoolOp(op=And,values=[Attribute|Compare])',  # region_pick.py:83
+    'GeneratorExp.elt>Call(func=Name,args=[Call|Name],keywords=[keyword])',  # match_report_window.py:81
+    'GeneratorExp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:6451
+    'GeneratorExp.elt>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:53820
+    'GeneratorExp.elt>Compare(left=Call,ops=[GtE],comparators=[Name])',  # main.py:56300
+    'GeneratorExp.elt>Compare(left=Call,ops=[In],comparators=[Name])',  # main.py:16935
+    'GeneratorExp.elt>Compare(left=Call,ops=[NotIn],comparators=[Name])',  # main.py:16893
+    'GeneratorExp.elt>Compare(left=Name,ops=[In],comparators=[Tuple])',  # main.py:49856
+    'GeneratorExp.elt>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # region_pick.py:232
+    'GeneratorExp.elt>Constant(value=int)',  # region_pick.py:246
+    'GeneratorExp.elt>JoinedStr(values=[Constant|FormattedValue])',  # main.py:18759
+    'GeneratorExp.elt>Name(id=str,ctx=Load)',  # main.py:18646
+    'GeneratorExp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:48809
+    'GeneratorExp.generators>comprehension(target=Name,iter=Call,ifs=[],is_async=0)',  # main.py:6451
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:16876
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Subscript],is_async=0)',  # main.py:64816
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:16893
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # main.py:18646
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # region_pick.py:247
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Name,ifs=[],is_async=0)',  # main.py:16883
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Subscript,ifs=[],is_async=0)',  # match_hold.py:352
+    'If.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:20127
+    'If.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # main.py:20092
+    'If.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:20188
+    'If.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:16828
+    'If.body>Assign(targets=[Name],value=Compare,type_comment=-)',  # main.py:51125
+    'If.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:16855
+    'If.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:49760
+    'If.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:20365
+    'If.body>Assign(targets=[Name],value=JoinedStr,type_comment=-)',  # main.py:20217
+    'If.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:20197
+    'If.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:20198
+    'If.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:20225
+    'If.body>Assign(targets=[Name],value=Set,type_comment=-)',  # main.py:51799
+    'If.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:20156
+    'If.body>Assign(targets=[Name],value=UnaryOp,type_comment=-)',  # main.py:20177
+    'If.body>Assign(targets=[Subscript],value=BinOp,type_comment=-)',  # main.py:18642
+    'If.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:65119
+    'If.body>Assign(targets=[Subscript],value=Name,type_comment=-)',  # main.py:18772
+    'If.body>Assign(targets=[Subscript],value=Subscript,type_comment=-)',  # main.py:56240
+    'If.body>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # main.py:18729
+    'If.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:16950
+    'If.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:65216
+    'If.body>Assign(targets=[Tuple],value=IfExp,type_comment=-)',  # main.py:51127
+    'If.body>Assign(targets=[Tuple],value=Name,type_comment=-)',  # main.py:18726
+    'If.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:50044
+    'If.body>AugAssign(target=Name,op=Add,value=BinOp)',  # match_report_window.py:64
+    'If.body>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:51151
+    'If.body>AugAssign(target=Name,op=BitOr,value=Call)',  # main.py:18746
+    'If.body>Break()',  # main.py:16856
+    'If.body>Continue()',  # main.py:16917
+    'If.body>Expr(value=Await)',  # main.py:16383
+    'If.body>Expr(value=Call)',  # main.py:16380
+    'If.body>For(target=Name,iter=Name,body=[Assign],orelse=[],type_comment=-)',  # main.py:49854
+    'If.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:50045
+    'If.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:49415
+    'If.body>For(target=Name,iter=Tuple,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:56233
+    'If.body>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:49385
+    'If.body>If(test=BoolOp,body=[Assign],orelse=[If])',  # main.py:53640
+    'If.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:18728
+    'If.body>If(test=BoolOp,body=[Assign|Break],orelse=[])',  # main.py:65219
+    'If.body>If(test=BoolOp,body=[Assign|Expr],orelse=[])',  # main.py:53706
+    'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:20176
+    'If.body>If(test=BoolOp,body=[Assign|Expr|Return],orelse=[])',  # main.py:49369
+    'If.body>If(test=BoolOp,body=[Assign|If],orelse=[If])',  # main.py:53667
+    'If.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:53659
+    'If.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:64755
+    'If.body>If(test=BoolOp,body=[Expr|If|Return],orelse=[])',  # main.py:64748
+    'If.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:20163
+    'If.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:18563
+    'If.body>If(test=Call,body=[Assign|If],orelse=[])',  # main.py:49856
+    'If.body>If(test=Compare,body=[Assign],orelse=[Assign])',  # main.py:20240
+    'If.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:56239
+    'If.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:49981
+    'If.body>If(test=Compare,body=[Assign|Expr],orelse=[])',  # main.py:20275
+    'If.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # main.py:49331
+    'If.body>If(test=Compare,body=[Assign|If],orelse=[])',  # main.py:64815
+    'If.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:20512
+    'If.body>If(test=Compare,body=[Expr],orelse=[Expr])',  # main.py:20204
+    'If.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:50010
+    'If.body>If(test=Compare,body=[Expr|If],orelse=[])',  # main.py:65193
+    'If.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:20311
+    'If.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:20300
+    'If.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:65079
+    'If.body>If(test=Name,body=[Assign],orelse=[])',  # main.py:49422
+    'If.body>If(test=Name,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:49405
+    'If.body>If(test=Name,body=[Assign|Expr|Return],orelse=[])',  # main.py:20363
+    'If.body>If(test=Name,body=[Expr],orelse=[])',  # main.py:20333
+    'If.body>If(test=Name,body=[Expr|If|Return],orelse=[])',  # main.py:20200
+    'If.body>If(test=Name,body=[Expr|Return],orelse=[])',  # main.py:53695
+    'If.body>If(test=Name,body=[Return],orelse=[])',  # main.py:17479
+    'If.body>If(test=Subscript,body=[Assign|If],orelse=[])',  # main.py:20161
+    'If.body>If(test=UnaryOp,body=[Assign],orelse=[])',  # main.py:20273
+    'If.body>If(test=UnaryOp,body=[Assign|Expr|For|If],orelse=[Assign])',  # main.py:49408
+    'If.body>If(test=UnaryOp,body=[Assign|If],orelse=[If])',  # main.py:20189
+    'If.body>If(test=UnaryOp,body=[Continue],orelse=[])',  # main.py:51801
+    'If.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # main.py:20138
+    'If.body>If(test=UnaryOp,body=[Return],orelse=[])',  # main.py:16955
+    'If.body>Raise(exc=Call,cause=-)',  # main.py:16376
+    'If.body>Raise(exc=Call,cause=Constant)',  # main.py:16865
+    'If.body>Return(value=-)',  # main.py:28337
+    'If.body>Return(value=Await)',  # main.py:53722
+    'If.body>Return(value=BoolOp)',  # main.py:51730
+    'If.body>Return(value=Call)',  # main.py:19969
+    'If.body>Return(value=Compare)',  # main.py:18565
+    'If.body>Return(value=Constant)',  # main.py:16956
+    'If.body>Return(value=Dict)',  # main.py:53511
+    'If.body>Return(value=Name)',  # main.py:18644
+    'If.body>Return(value=Subscript)',  # main.py:18672
+    'If.body>Return(value=Tuple)',  # main.py:16829
+    'If.body>Try(body=[Assign],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:18734
+    'If.body>Try(body=[Assign|AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:73520
+    'If.body>Try(body=[AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:49288
+    'If.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',  # main.py:49761
+    'If.orelse>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:20243
+    'If.orelse>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:20267
+    'If.orelse>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:51133
+    'If.orelse>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:49587
+    'If.orelse>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:50061
+    'If.orelse>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # region_pick.py:268
+    'If.orelse>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:51162
+    'If.orelse>Expr(value=Await)',  # main.py:20106
+    'If.orelse>Expr(value=Call)',  # main.py:50052
+    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[If])',  # main.py:64888
+    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:53685
+    'If.orelse>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # main.py:50049
+    'If.orelse>If(test=Compare,body=[Expr],orelse=[If])',  # main.py:16392
+    'If.orelse>If(test=Compare,body=[Expr],orelse=[])',  # main.py:16398
+    'If.orelse>If(test=Compare,body=[Expr|Return],orelse=[Assign])',  # main.py:20256
+    'If.orelse>If(test=Name,body=[Assign],orelse=[])',  # main.py:53646
+    'If.test>Await(value=Call)',  # main.py:49681
+    'If.test>BoolOp(op=And,values=[BoolOp|Name])',  # main.py:64978
+    'If.test>BoolOp(op=And,values=[Call|Compare|Name|UnaryOp])',  # main.py:53685
+    'If.test>BoolOp(op=And,values=[Call|Name])',  # main.py:62077
+    'If.test>BoolOp(op=And,values=[Compare])',  # main.py:16379
+    'If.test>BoolOp(op=And,values=[Compare|Name])',  # main.py:16913
+    'If.test>BoolOp(op=And,values=[Compare|Subscript])',  # main.py:18671
+    'If.test>BoolOp(op=And,values=[Compare|UnaryOp])',  # main.py:20163
+    'If.test>BoolOp(op=And,values=[Name])',  # main.py:20176
+    'If.test>BoolOp(op=And,values=[Name|UnaryOp])',  # main.py:53640
+    'If.test>BoolOp(op=Or,values=[BoolOp|Compare])',  # main.py:55786
+    'If.test>BoolOp(op=Or,values=[Call|Compare])',  # main.py:18728
+    'If.test>BoolOp(op=Or,values=[Call|UnaryOp])',  # region_pick.py:54
+    'If.test>BoolOp(op=Or,values=[Compare])',  # main.py:18563
+    'If.test>BoolOp(op=Or,values=[Compare|UnaryOp])',  # main.py:57202
+    'If.test>BoolOp(op=Or,values=[Name])',  # main.py:51169
+    'If.test>BoolOp(op=Or,values=[UnaryOp])',  # region_pick.py:52
+    'If.test>Call(func=Attribute,args=[Await],keywords=[])',  # main.py:73464
+    'If.test>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:56249
+    'If.test>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:73452
+    'If.test>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:16893
+    'If.test>Call(func=Name,args=[Name],keywords=[])',  # main.py:56232
+    'If.test>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:18745
+    'If.test>Call(func=Name,args=[Name|Tuple],keywords=[])',  # main.py:18733
+    'If.test>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # region_pick.py:211
+    'If.test>Compare(left=Await,ops=[IsNot],comparators=[Constant])',  # main.py:20414
+    'If.test>Compare(left=Await,ops=[Is],comparators=[Constant])',  # main.py:20311
+    'If.test>Compare(left=Call,ops=[Eq],comparators=[Call])',  # main.py:65188
+    'If.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:49656
+    'If.test>Compare(left=Call,ops=[In],comparators=[Tuple])',  # main.py:16864
+    'If.test>Compare(left=Call,ops=[Lt],comparators=[Constant])',  # main.py:49350
+    'If.test>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:65120
+    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:49795
+    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # main.py:49961
+    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Name])',  # main.py:56296
+    'If.test>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:16389
+    'If.test>Compare(left=Name,ops=[GtE],comparators=[Constant])',  # main.py:50010
+    'If.test>Compare(left=Name,ops=[GtE],comparators=[Name])',  # main.py:48822
+    'If.test>Compare(left=Name,ops=[Gt],comparators=[BinOp])',  # main.py:53558
+    'If.test>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:51152
+    'If.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # match_report_window.py:63
+    'If.test>Compare(left=Name,ops=[In],comparators=[Name])',  # main.py:17483
+    'If.test>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:16382
+    'If.test>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:16854
+    'If.test>Compare(left=Name,ops=[LtE],comparators=[Constant])',  # main.py:28336
+    'If.test>Compare(left=Name,ops=[Lt],comparators=[Name])',  # main.py:65116
+    'If.test>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # main.py:49268
+    'If.test>Compare(left=Name,ops=[NotEq],comparators=[Name])',  # main.py:53753
+    'If.test>Compare(left=Name,ops=[NotIn],comparators=[Attribute])',  # region_pick.py:215
+    'If.test>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # main.py:16375
+    'If.test>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:16916
+    'If.test>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:20512
+    'If.test>Compare(left=Subscript,ops=[In],comparators=[Name])',  # main.py:20209
+    'If.test>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:64815
+    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Constant])',  # main.py:20440
+    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:20256
+    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:20054
+    'If.test>Name(id=str,ctx=Load)',  # main.py:16867
+    'If.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:20161
+    'If.test>UnaryOp(op=Not,operand=Attribute)',  # region_pick.py:213
+    'If.test>UnaryOp(op=Not,operand=Await)',  # main.py:19924
+    'If.test>UnaryOp(op=Not,operand=BoolOp)',  # main.py:51801
+    'If.test>UnaryOp(op=Not,operand=Call)',  # main.py:20147
+    'If.test>UnaryOp(op=Not,operand=Compare)',  # region_pick.py:56
+    'If.test>UnaryOp(op=Not,operand=Name)',  # main.py:16827
+    'If.test>UnaryOp(op=Not,operand=Subscript)',  # main.py:49408
+    'IfExp.body>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:57236
+    'IfExp.body>Call(func=Attribute,args=[],keywords=[])',  # main.py:18742
+    'IfExp.body>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:20365
+    'IfExp.body>Call(func=Name,args=[Attribute|Constant],keywords=[])',  # main.py:56309
+    'IfExp.body>Call(func=Name,args=[Call],keywords=[])',  # main.py:49390
+    'IfExp.body>Call(func=Name,args=[Name],keywords=[])',  # main.py:50081
+    'IfExp.body>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:53752
+    'IfExp.body>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:51127
+    'IfExp.body>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:51908
+    'IfExp.body>Call(func=Name,args=[],keywords=[])',  # main.py:16875
+    'IfExp.body>Compare(left=BinOp,ops=[Gt],comparators=[Name])',  # region_pick.py:248
+    'IfExp.body>Constant(value=NoneType)',  # main.py:16796
+    'IfExp.body>Constant(value=int)',  # main.py:20391
+    'IfExp.body>Constant(value=str)',  # main.py:18756
+    'IfExp.body>JoinedStr(values=[Constant|FormattedValue])',  # main.py:18767
+    'IfExp.body>Name(id=str,ctx=Load)',  # main.py:20354
+    'IfExp.body>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:18640
+    'IfExp.body>Tuple(elts=[Name],ctx=Load)',  # region_pick.py:254
+    'IfExp.body>Tuple(elts=[Subscript],ctx=Load)',  # main.py:18723
+    "IfExp.orelse>Attribute(value=Name,attr='p1_series_wins',ctx=Load)",  # main.py:20391
+    "IfExp.orelse>Attribute(value=Name,attr='p2_series_wins',ctx=Load)",  # main.py:20392
+    'IfExp.orelse>BinOp(left=Name,op=Sub,right=BinOp)',  # main.py:73538
+    'IfExp.orelse>Call(func=Name,args=[Call],keywords=[])',  # main.py:49390
+    'IfExp.orelse>Call(func=Name,args=[Name],keywords=[])',  # main.py:16796
+    'IfExp.orelse>Compare(left=BinOp,ops=[GtE],comparators=[Name])',  # region_pick.py:248
+    'IfExp.orelse>Constant(value=NoneType)',  # main.py:18640
+    'IfExp.orelse>Constant(value=bool)',  # main.py:64841
+    'IfExp.orelse>Constant(value=int)',  # main.py:49624
+    'IfExp.orelse>Constant(value=str)',  # main.py:18767
+    'IfExp.orelse>Dict(keys=[],values=[])',  # region_pick.py:190
+    'IfExp.orelse>IfExp(test=Compare,body=Name,orelse=Subscript)',  # main.py:20388
+    'IfExp.orelse>IfExp(test=Compare,body=Subscript,orelse=Name)',  # main.py:20390
+    'IfExp.orelse>IfExp(test=Compare,body=Tuple,orelse=Tuple)',  # main.py:51107
+    'IfExp.orelse>IfExp(test=Name,body=Name,orelse=Constant)',  # region_pick.py:250
+    'IfExp.orelse>Name(id=str,ctx=Load)',  # main.py:18756
+    'IfExp.orelse>Set(elts=[Call])',  # main.py:16875
+    'IfExp.orelse>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:20354
+    'IfExp.orelse>Subscript(value=Name,slice=Name,ctx=Load)',  # match_report_window.py:48
+    'IfExp.orelse>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # main.py:53752
+    'IfExp.orelse>Tuple(elts=[Constant],ctx=Load)',  # main.py:51129
+    'IfExp.orelse>Tuple(elts=[Name],ctx=Load)',  # region_pick.py:254
+    'IfExp.orelse>Tuple(elts=[],ctx=Load)',  # main.py:51108
+    "IfExp.test>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:223
+    'IfExp.test>BoolOp(op=And,values=[Call|Name])',  # region_pick.py:204
+    'IfExp.test>BoolOp(op=And,values=[Compare])',  # main.py:51097
+    'IfExp.test>Call(func=Name,args=[Constant|Name],keywords=[])',  # match_report_window.py:48
+    'IfExp.test>Call(func=Name,args=[Name],keywords=[])',  # region_pick.py:190
+    'IfExp.test>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # main.py:20354
+    'IfExp.test>Compare(left=BoolOp,ops=[Gt],comparators=[Constant])',  # main.py:64845
+    'IfExp.test>Compare(left=Constant,ops=[In],comparators=[Name])',  # main.py:18640
+    'IfExp.test>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:16875
+    'IfExp.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # match_report_window.py:61
+    'IfExp.test>Compare(left=Name,ops=[In],comparators=[Name])',  # main.py:20215
+    'IfExp.test>Compare(left=Name,ops=[In],comparators=[Tuple])',  # main.py:51910
+    'IfExp.test>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:18742
+    'IfExp.test>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:16796
+    'IfExp.test>Compare(left=Name,ops=[Lt],comparators=[Name])',  # match_report_window.py:62
+    'IfExp.test>Compare(left=Subscript,ops=[Eq],comparators=[Subscript])',  # main.py:53851
+    'IfExp.test>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:18723
+    'IfExp.test>Name(id=str,ctx=Load)',  # main.py:49337
+    'IfExp.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:49624
+    "Import.names>alias(name='match_report_window',asname=None)",  # main.py:54213
+    "Import.names>alias(name='uuid',asname='uuid_mod')",  # main.py:19922
+    "ImportFrom.names>alias(name='_region_candidate_volumes',asname=None)",  # main.py:18674
+    'JoinedStr.values>Constant(value=str)',  # main.py:16376
+    'JoinedStr.values>FormattedValue(value=Attribute,conversion=-1,format_spec=-)',  # main.py:18679
+    'JoinedStr.values>FormattedValue(value=Call,conversion=-1,format_spec=-)',  # main.py:18759
+    'JoinedStr.values>FormattedValue(value=IfExp,conversion=-1,format_spec=-)',  # main.py:49337
+    'JoinedStr.values>FormattedValue(value=ListComp,conversion=-1,format_spec=-)',  # main.py:50016
+    'JoinedStr.values>FormattedValue(value=Name,conversion=-1,format_spec=-)',  # main.py:17407
+    'JoinedStr.values>FormattedValue(value=Name,conversion=114,format_spec=-)',  # main.py:16376
+    'JoinedStr.values>FormattedValue(value=Subscript,conversion=-1,format_spec=-)',  # main.py:20148
+    'JoinedStr.values>FormattedValue(value=Subscript,conversion=-1,format_spec=JoinedStr)',  # main.py:50011
+    'Lambda.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:17402
+    'Lambda.body>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:48812
+    'Lambda.body>Subscript(value=Name,slice=Name,ctx=Load)',  # main.py:50069
+    'Lambda.body>Tuple(elts=[BinOp|Subscript],ctx=Load)',  # main.py:51807
+    'Lambda.body>Tuple(elts=[Call|Subscript],ctx=Load)',  # main.py:17402
+    'Lambda.body>Tuple(elts=[Name|Subscript],ctx=Load)',  # region_pick.py:98
+    'List.ctx>Load()',  # main.py:16377
+    'List.elts>Constant(value=str)',  # main.py:19898
+    'List.elts>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:50022
+    'List.elts>Name(id=str,ctx=Load)',  # main.py:16951
+    'List.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19980
+    'List.elts>Tuple(elts=[Constant|Subscript],ctx=Load)',  # main.py:49787
+    'List.elts>Tuple(elts=[List],ctx=Load)',  # main.py:48804
+    'List.elts>Tuple(elts=[Name],ctx=Load)',  # main.py:20197
+    'List.elts>Tuple(elts=[Name|Subscript],ctx=Load)',  # main.py:20524
+    'List.elts>Tuple(elts=[Subscript],ctx=Load)',  # main.py:20197
+    "ListComp.elt>Attribute(value=Name,attr='home',ctx=Load)",  # region_pick.py:74
+    'ListComp.elt>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:56359
+    'ListComp.elt>Call(func=Attribute,args=[],keywords=[])',  # region_pick.py:274
+    'ListComp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:16830
+    'ListComp.elt>Call(func=Name,args=[],keywords=[keyword])',  # main.py:50196
+    'ListComp.elt>Dict(keys=[Constant],values=[Attribute|IfExp|Name])',  # region_pick.py:222
+    'ListComp.elt>Dict(keys=[Constant],values=[Call|Compare|IfExp|Subscript])',  # main.py:64844
+    'ListComp.elt>Name(id=str,ctx=Load)',  # main.py:20198
+    'ListComp.elt>Subscript(value=Attribute,slice=Name,ctx=Load)',  # region_pick.py:240
+    'ListComp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:18715
+    'ListComp.elt>Tuple(elts=[Call|Name],ctx=Load)',  # main.py:51863
+    'ListComp.elt>Tuple(elts=[Constant|Name],ctx=Load)',  # main.py:49828
+    'ListComp.elt>Tuple(elts=[Name],ctx=Load)',  # main.py:57243
+    'ListComp.elt>Tuple(elts=[Subscript],ctx=Load)',  # main.py:49458
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Attribute],is_async=0)',  # region_pick.py:74
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[BoolOp],is_async=0)',  # region_pick.py:260
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Call],is_async=0)',  # main.py:53751
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:49361
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:16830
+    'ListComp.generators>comprehension(target=Name,iter=Subscript,ifs=[],is_async=0)',  # main.py:48813
+    'ListComp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # main.py:49857
+    'ListComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # region_pick.py:222
+    'ListComp.generators>comprehension(target=Tuple,iter=Name,ifs=[Compare],is_async=0)',  # main.py:20198
+    'Name.ctx>Load()',  # main.py:4341
+    'Name.ctx>Store()',  # main.py:6451
+    'Raise.cause>Constant(value=NoneType)',  # main.py:16865
+    'Raise.exc>Call(func=Name,args=[Constant],keywords=[])',  # match_hold.py:237
+    'Raise.exc>Call(func=Name,args=[JoinedStr],keywords=[])',  # main.py:16376
+    'Raise.exc>Call(func=Name,args=[],keywords=[keyword])',  # main.py:16865
+    'Return.value>Await(value=Call)',  # main.py:53722
+    'Return.value>BinOp(left=Call,op=Add,right=Tuple)',  # region_pick.py:257
+    'Return.value>BoolOp(op=And,values=[Call|UnaryOp])',  # region_pick.py:40
+    'Return.value>BoolOp(op=And,values=[Compare])',  # main.py:51730
+    'Return.value>BoolOp(op=And,values=[Compare|Name])',  # main.py:51732
+    'Return.value>BoolOp(op=Or,values=[Compare])',  # main.py:18566
+    'Return.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:18774
+    'Return.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:51688
+    'Return.value>Call(func=Attribute,args=[Name],keywords=[keyword])',  # main.py:56251
+    'Return.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:17433
+    'Return.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:48811
+    'Return.value>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:6451
+    'Return.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:56387
+    'Return.value>Call(func=Name,args=[Name],keywords=[keyword])',  # region_pick.py:98
+    'Return.value>Call(func=Name,args=[],keywords=[keyword])',  # main.py:19969
+    'Return.value>Compare(left=BinOp,ops=[Lt],comparators=[Name])',  # match_report_window.py:74
+    'Return.value>Compare(left=Call,ops=[GtE],comparators=[Call])',  # main.py:56284
+    'Return.value>Compare(left=Subscript,ops=[Lt],comparators=[Subscript])',  # main.py:18565
+    'Return.value>Constant(value=NoneType)',  # main.py:17486
+    'Return.value>Constant(value=bool)',  # main.py:16956
+    'Return.value>Constant(value=str)',  # region_pick.py:212
+    'Return.value>Dict(keys=[Constant],values=[BoolOp|Call|Compare|Constant|IfExp|ListComp|Name|Subscript])',  # main.py:64824
+    'Return.value>Dict(keys=[Constant],values=[Call|Constant])',  # main.py:53608
+    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name])',  # main.py:65151
+    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name|UnaryOp])',  # main.py:65122
+    'Return.value>Dict(keys=[Constant],values=[Constant])',  # main.py:53511
+    'Return.value>Dict(keys=[Constant],values=[Constant|Name])',  # main.py:56339
+    'Return.value>DictComp(key=Attribute,value=Call,generators=[comprehension])',  # tournaments.py:308
+    'Return.value>IfExp(test=Call,body=Call,orelse=Subscript)',  # match_report_window.py:48
+    'Return.value>IfExp(test=Call,body=Name,orelse=Constant)',  # region_pick.py:194
+    'Return.value>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:56309
+    'Return.value>IfExp(test=Compare,body=Constant,orelse=Name)',  # main.py:18756
+    'Return.value>IfExp(test=Name,body=Tuple,orelse=Tuple)',  # region_pick.py:254
+    'Return.value>JoinedStr(values=[Constant|FormattedValue])',  # match_hold.py:220
+    'Return.value>ListComp(elt=Dict,generators=[comprehension])',  # region_pick.py:222
+    'Return.value>Name(id=str,ctx=Load)',  # main.py:16979
+    'Return.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:18672
+    'Return.value>Tuple(elts=[BoolOp],ctx=Load)',  # main.py:57204
+    'Return.value>Tuple(elts=[BoolOp|Call],ctx=Load)',  # main.py:56844
+    'Return.value>Tuple(elts=[Call|Constant],ctx=Load)',  # main.py:55794
+    'Return.value>Tuple(elts=[Call|Name],ctx=Load)',  # main.py:16935
+    'Return.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:6453
+    'Return.value>Tuple(elts=[Constant|Name],ctx=Load)',  # main.py:16829
+    'Return.value>Tuple(elts=[Constant|Subscript],ctx=Load)',  # region_pick.py:81
+    'Return.value>Tuple(elts=[Dict|Name],ctx=Load)',  # region_pick.py:183
+    'Return.value>Tuple(elts=[IfExp|Name],ctx=Load)',  # main.py:16796
+    'Return.value>Tuple(elts=[ListComp],ctx=Load)',  # main.py:48813
+    'Return.value>Tuple(elts=[Name],ctx=Load)',  # main.py:28324
+    'Return.value>Tuple(elts=[Name|Subscript],ctx=Load)',  # main.py:18654
+    'Set.elts>Call(func=Name,args=[Name],keywords=[])',  # main.py:16875
+    'Set.elts>Name(id=str,ctx=Load)',  # region_pick.py:244
+    'Set.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51799
+    'SetComp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:16884
+    'SetComp.elt>Name(id=str,ctx=Load)',  # main.py:16826
+    'SetComp.elt>Tuple(elts=[Name],ctx=Load)',  # main.py:17401
+    'SetComp.generators>comprehension(target=Name,iter=BoolOp,ifs=[BoolOp],is_async=0)',  # region_pick.py:189
+    'SetComp.generators>comprehension(target=Name,iter=BoolOp,ifs=[Name],is_async=0)',  # main.py:73451
+    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:16826
+    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:73526
+    'SetComp.generators>comprehension(target=Tuple,iter=BoolOp,ifs=[BoolOp],is_async=0)',  # main.py:17401
+    'Slice.lower>Constant(value=int)',  # region_pick.py:238
+    'Slice.upper>Constant(value=int)',  # main.py:20217
+    'Subscript.ctx>Load()',  # main.py:6449
+    'Subscript.ctx>Store()',  # main.py:18642
+    'Subscript.slice>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:56370
+    'Subscript.slice>Constant(value=int)',  # main.py:16910
+    'Subscript.slice>Constant(value=str)',  # main.py:16849
+    'Subscript.slice>Name(id=str,ctx=Load)',  # main.py:18642
+    'Subscript.slice>Slice(lower=-,upper=Constant,step=-)',  # main.py:20217
+    'Subscript.slice>Slice(lower=Constant,upper=-,step=-)',  # region_pick.py:238
+    'Subscript.slice>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:18724
+    'Subscript.slice>Tuple(elts=[BinOp|Name],ctx=Load)',  # main.py:16795
+    'Subscript.slice>Tuple(elts=[Constant|Name],ctx=Load)',  # main.py:6449
+    'Subscript.slice>Tuple(elts=[Name],ctx=Load)',  # main.py:16810
+    'Subscript.slice>Tuple(elts=[Subscript],ctx=Load)',  # main.py:48796
+    "Subscript.value>Attribute(value=Call,attr='hex',ctx=Load)",  # main.py:20217
+    "Subscript.value>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:240
+    'Subscript.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:53845
+    'Subscript.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:57204
+    'Subscript.value>BoolOp(op=Or,values=[Name])',  # region_pick.py:86
+    'Subscript.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:16839
+    'Subscript.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:16910
+    'Subscript.value>Call(func=Name,args=[],keywords=[])',  # main.py:65119
+    'Subscript.value>Name(id=str,ctx=Load)',  # main.py:6449
+    'Subscript.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:53752
+    'Try.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:18747
+    'Try.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:18743
+    'Try.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:18716
+    'Try.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:73535
+    'Try.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:18730
+    'Try.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:18715
+    'Try.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:73544
+    'Try.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # main.py:73526
+    'Try.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:16839
+    'Try.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:18748
+    'Try.body>Assign(targets=[Tuple],value=IfExp,type_comment=-)',  # main.py:57236
+    'Try.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:18677
+    'Try.body>AsyncWith(items=[withitem],body=[Assign],type_comment=-)',  # main.py:18675
+    'Try.body>AsyncWith(items=[withitem],body=[Assign|Expr|For|If],type_comment=-)',  # main.py:51088
+    'Try.body>AsyncWith(items=[withitem],body=[Assign|For],type_comment=-)',  # main.py:18717
+    'Try.body>AsyncWith(items=[withitem],body=[Expr],type_comment=-)',  # main.py:4341
+    'Try.body>Expr(value=Await)',  # main.py:16857
+    'Try.body>For(target=Name,iter=Name,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # main.py:18731
+    'Try.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:16850
+    'Try.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:18744
+    'Try.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:57238
+    'Try.body>If(test=Compare,body=[Assign|If],orelse=[])',  # main.py:18725
+    "Try.body>ImportFrom(module='tournaments',names=[alias],level=0)",  # main.py:18674
+    'Try.body>Return(value=Call)',  # main.py:6451
+    'Try.body>Return(value=Compare)',  # main.py:56284
+    'Try.body>Return(value=IfExp)',  # main.py:56309
+    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Assign])',  # main.py:18736
+    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Pass])',  # main.py:4347
+    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Return])',  # main.py:6452
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign])',  # main.py:18752
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr])',  # main.py:57246
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr|If])',  # main.py:73545
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr])',  # main.py:18678
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr|If|Raise])',  # main.py:16860
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Return])',  # region_pick.py:182
+    'Tuple.ctx>Load()',  # main.py:6453
+    'Tuple.ctx>Store()',  # main.py:16883
+    "Tuple.elts>Attribute(value=Name,attr='admitted_by',ctx=Load)",  # region_pick.py:265
+    "Tuple.elts>Attribute(value=Name,attr='gain',ctx=Load)",  # region_pick.py:266
+    "Tuple.elts>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:20299
+    "Tuple.elts>Attribute(value=Name,attr='max_regret',ctx=Load)",  # region_pick.py:266
+    "Tuple.elts>Attribute(value=Name,attr='region',ctx=Load)",  # region_pick.py:257
+    "Tuple.elts>Attribute(value=Name,attr='sum',ctx=Load)",  # region_pick.py:266
+    "Tuple.elts>Attribute(value=Name,attr='worst',ctx=Load)",  # region_pick.py:266
+    'Tuple.elts>BinOp(left=BinOp,op=Add,right=BoolOp)',  # main.py:51808
+    'Tuple.elts>BinOp(left=Name,op=BitOr,right=Constant)',  # main.py:16795
+    'Tuple.elts>BoolOp(op=Or,values=[Constant|Name])',  # main.py:56844
+    'Tuple.elts>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:57204
+    'Tuple.elts>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:51863
+    'Tuple.elts>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:56844
+    'Tuple.elts>Call(func=Name,args=[Call|Constant],keywords=[])',  # main.py:55794
+    'Tuple.elts>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:16935
+    'Tuple.elts>Call(func=Name,args=[Name],keywords=[])',  # main.py:18677
+    'Tuple.elts>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17402
+    'Tuple.elts>Constant(value=NoneType)',  # main.py:18732
+    'Tuple.elts>Constant(value=bool)',  # main.py:16829
+    'Tuple.elts>Constant(value=ellipsis)',  # main.py:6449
+    'Tuple.elts>Constant(value=int)',  # main.py:6453
+    'Tuple.elts>Constant(value=str)',  # main.py:16864
+    'Tuple.elts>Dict(keys=[Constant],values=[Call])',  # region_pick.py:183
+    'Tuple.elts>Dict(keys=[Constant],values=[JoinedStr])',  # main.py:18753
+    'Tuple.elts>Dict(keys=[],values=[])',  # main.py:18713
+    'Tuple.elts>IfExp(test=Compare,body=Constant,orelse=Call)',  # main.py:16796
+    'Tuple.elts>List(elts=[Subscript],ctx=Load)',  # main.py:48804
+    'Tuple.elts>List(elts=[],ctx=Load)',  # main.py:50044
+    'Tuple.elts>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:48813
+    'Tuple.elts>Name(id=str,ctx=Load)',  # main.py:6449
+    'Tuple.elts>Name(id=str,ctx=Store)',  # main.py:16883
+    'Tuple.elts>Subscript(value=BoolOp,slice=Constant,ctx=Load)',  # region_pick.py:86
+    'Tuple.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:17402
+    'Tuple.elts>Subscript(value=Name,slice=Constant,ctx=Store)',  # main.py:18677
+    'Tuple.elts>Subscript(value=Name,slice=Name,ctx=Load)',  # main.py:48796
+    'Tuple.elts>Tuple(elts=[Attribute|Constant],ctx=Load)',  # main.py:20299
+    'Tuple.elts>Tuple(elts=[Constant],ctx=Load)',  # main.py:20298
+    'Tuple.elts>Tuple(elts=[Name],ctx=Store)',  # main.py:56381
+    'Tuple.elts>UnaryOp(op=USub,operand=Call)',  # region_pick.py:257
+    'UnaryOp.op>Not()',  # main.py:16827
+    'UnaryOp.op>USub()',  # main.py:65123
+    "UnaryOp.operand>Attribute(value=Name,attr='fresh',ctx=Load)",  # region_pick.py:213
+    'UnaryOp.operand>Await(value=Call)',  # main.py:19924
+    'UnaryOp.operand>BoolOp(op=And,values=[Name])',  # main.py:20163
+    'UnaryOp.operand>BoolOp(op=Or,values=[BoolOp])',  # main.py:51801
+    'UnaryOp.operand>Call(func=Name,args=[Attribute],keywords=[])',  # region_pick.py:257
+    'UnaryOp.operand>Call(func=Name,args=[Await|Name],keywords=[])',  # main.py:51795
+    'UnaryOp.operand>Call(func=Name,args=[Name],keywords=[])',  # main.py:20147
+    'UnaryOp.operand>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:53683
+    'UnaryOp.operand>Call(func=Name,args=[],keywords=[])',  # main.py:53640
+    'UnaryOp.operand>Compare(left=Name,ops=[LtE],comparators=[Name])',  # region_pick.py:56
+    'UnaryOp.operand>Constant(value=int)',  # main.py:65123
+    'UnaryOp.operand>Name(id=str,ctx=Load)',  # main.py:16827
+    'UnaryOp.operand>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:49407
+    'While.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:49825
+    'While.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:20018
+    'While.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:49851
+    'While.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:49913
+    'While.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:49798
+    'While.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:49868
+    'While.body>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:20016
+    'While.body>AugAssign(target=Name,op=Sub,value=Constant)',  # main.py:49762
+    'While.body>Break()',  # main.py:49876
+    'While.body>Expr(value=Await)',  # main.py:20017
+    'While.body>Expr(value=Call)',  # main.py:62074
+    'While.body>For(target=Name,iter=Tuple,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:62075
+    'While.body>If(test=BoolOp,body=[Assign|Break|Expr],orelse=[])',  # main.py:49953
+    'While.body>If(test=BoolOp,body=[Continue],orelse=[])',  # main.py:62072
+    'While.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:49905
+    'While.body>If(test=Compare,body=[Assign|For|If],orelse=[])',  # main.py:49852
+    'While.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:49777
+    'While.body>If(test=Compare,body=[Break|Expr],orelse=[])',  # main.py:49829
+    'While.body>If(test=Compare,body=[Continue|Expr],orelse=[])',  # main.py:49795
+    'While.body>If(test=Compare,body=[Continue|Expr|If],orelse=[])',  # main.py:49976
+    'While.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:49872
+    'While.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:49870
+    'While.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # main.py:20027
+    'While.orelse>Expr(value=Await)',  # main.py:49878
+    'While.orelse>Expr(value=Call)',  # main.py:49879
+    'While.orelse>Raise(exc=Call,cause=-)',  # main.py:49881
+    'While.test>BoolOp(op=And,values=[Compare])',  # main.py:20015
+    'While.test>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:49761
+    'While.test>Name(id=str,ctx=Load)',  # main.py:62070
+    'arg.annotation>BinOp(left=Name,op=BitOr,right=Constant)',  # main.py:28333
+    'arg.annotation>Name(id=str,ctx=Load)',  # main.py:6449
+    'arg.annotation>Subscript(value=Name,slice=Name,ctx=Load)',  # main.py:48796
+    'arg.annotation>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:28358
+    'arguments.args>arg(arg=str,annotation=-,type_comment=-)',  # main.py:4295
+    'arguments.args>arg(arg=str,annotation=BinOp,type_comment=-)',  # main.py:28333
+    'arguments.args>arg(arg=str,annotation=Name,type_comment=-)',  # main.py:6449
+    'arguments.args>arg(arg=str,annotation=Subscript,type_comment=-)',  # main.py:28358
+    'arguments.defaults>Call(func=Name,args=[Constant],keywords=[keyword])',  # main.py:49169
+    'arguments.defaults>Call(func=Name,args=[Name],keywords=[])',  # main.py:19899
+    'arguments.defaults>Constant(value=NoneType)',  # main.py:16803
+    'arguments.defaults>Constant(value=float)',  # main.py:48816
+    'arguments.defaults>Constant(value=str)',  # main.py:18630
+    'arguments.defaults>Name(id=str,ctx=Load)',  # main.py:16939
+    'arguments.defaults>Tuple(elts=[],ctx=Load)',  # main.py:28358
+    'arguments.kw_defaults>Constant(value=NoneType)',  # main.py:16343
+    'arguments.kw_defaults>Constant(value=bool)',  # main.py:16809
+    'arguments.kw_defaults>Constant(value=int)',  # main.py:16808
+    'arguments.kw_defaults>Constant(value=str)',  # main.py:18683
+    'arguments.kw_defaults>Tuple(elts=[],ctx=Load)',  # main.py:16805
+    'arguments.kwonlyargs>arg(arg=str,annotation=-,type_comment=-)',  # main.py:16343
+    'arguments.kwonlyargs>arg(arg=str,annotation=Name,type_comment=-)',  # main.py:16808
+    "comprehension.ifs>Attribute(value=Name,attr='home',ctx=Load)",  # region_pick.py:74
+    'comprehension.ifs>BoolOp(op=And,values=[Attribute|Compare])',  # region_pick.py:261
+    'comprehension.ifs>BoolOp(op=And,values=[Call|Name])',  # region_pick.py:189
+    'comprehension.ifs>BoolOp(op=And,values=[Compare|Name])',  # main.py:17401
+    'comprehension.ifs>Call(func=Attribute,args=[],keywords=[])',  # main.py:53751
+    'comprehension.ifs>Call(func=Name,args=[GeneratorExp],keywords=[])',  # region_pick.py:83
+    'comprehension.ifs>Compare(left=Await,ops=[IsNot],comparators=[Constant])',  # main.py:20199
+    'comprehension.ifs>Compare(left=BinOp,ops=[GtE],comparators=[Name])',  # region_pick.py:246
+    'comprehension.ifs>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:57244
+    'comprehension.ifs>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:49857
+    'comprehension.ifs>Compare(left=Name,ops=[Eq],comparators=[Name])',  # main.py:18646
+    'comprehension.ifs>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:16826
+    'comprehension.ifs>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:53815
+    'comprehension.ifs>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:49361
+    'comprehension.ifs>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:49362
+    'comprehension.ifs>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:53816
+    'comprehension.ifs>Compare(left=Subscript,ops=[NotIn],comparators=[Name])',  # main.py:49420
+    'comprehension.ifs>Name(id=str,ctx=Load)',  # main.py:73451
+    'comprehension.ifs>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:64816
+    'comprehension.iter>BoolOp(op=Or,values=[Name|Tuple])',  # main.py:17401
+    'comprehension.iter>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:6451
+    'comprehension.iter>Call(func=Attribute,args=[],keywords=[])',  # main.py:18646
+    'comprehension.iter>Call(func=Name,args=[Name],keywords=[])',  # region_pick.py:225
+    'comprehension.iter>Name(id=str,ctx=Load)',  # main.py:16826
+    'comprehension.iter>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:48813
+    'comprehension.iter>Subscript(value=Name,slice=Name,ctx=Load)',  # match_hold.py:352
+    'comprehension.target>Name(id=str,ctx=Store)',  # main.py:6451
+    'comprehension.target>Tuple(elts=[Name],ctx=Store)',  # main.py:16883
+    "keyword.value>Attribute(value=Name,attr='p1_series_wins',ctx=Load)",  # main.py:20356
+    "keyword.value>Attribute(value=Name,attr='p2_series_wins',ctx=Load)",  # main.py:20357
+    "keyword.value>Attribute(value=Name,attr='utc',ctx=Load)",  # main.py:18739
+    'keyword.value>BinOp(left=ListComp,op=Add,right=Call)',  # main.py:51121
+    'keyword.value>BinOp(left=Name,op=Add,right=List)',  # main.py:49915
+    'keyword.value>BinOp(left=Name,op=Add,right=Name)',  # main.py:50096
+    'keyword.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:20385
+    'keyword.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:18751
+    'keyword.value>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:20353
+    'keyword.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:49400
+    'keyword.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:49394
+    'keyword.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:20358
+    'keyword.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:20359
+    'keyword.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:53828
+    'keyword.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:49318
+    'keyword.value>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:20591
+    'keyword.value>Constant(value=NoneType)',  # main.py:20465
+    'keyword.value>Constant(value=bool)',  # main.py:17010
+    'keyword.value>Constant(value=int)',  # main.py:16865
+    'keyword.value>Constant(value=str)',  # main.py:16865
+    'keyword.value>IfExp(test=Compare,body=Constant,orelse=Attribute)',  # main.py:20391
+    'keyword.value>IfExp(test=Compare,body=Constant,orelse=Constant)',  # main.py:20215
+    'keyword.value>IfExp(test=Compare,body=Constant,orelse=IfExp)',  # main.py:20387
+    'keyword.value>IfExp(test=Compare,body=Constant,orelse=Name)',  # main.py:49696
+    'keyword.value>IfExp(test=Compare,body=Name,orelse=Name)',  # main.py:20590
+    'keyword.value>IfExp(test=Compare,body=Name,orelse=Subscript)',  # main.py:20354
+    'keyword.value>IfExp(test=Compare,body=Subscript,orelse=Name)',  # main.py:20355
+    'keyword.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:49339
+    'keyword.value>IfExp(test=Name,body=Name,orelse=Constant)',  # main.py:49631
+    'keyword.value>IfExp(test=Subscript,body=Call,orelse=Constant)',  # main.py:49624
+    'keyword.value>Lambda(args=arguments,body=Call)',  # main.py:48812
+    'keyword.value>Lambda(args=arguments,body=Subscript)',  # main.py:50069
+    'keyword.value>Lambda(args=arguments,body=Tuple)',  # main.py:17402
+    'keyword.value>List(elts=[Constant],ctx=Load)',  # main.py:19898
+    'keyword.value>List(elts=[Name],ctx=Load)',  # main.py:20006
+    'keyword.value>List(elts=[Name|Subscript],ctx=Load)',  # main.py:20473
+    'keyword.value>List(elts=[Subscript],ctx=Load)',  # main.py:20006
+    'keyword.value>List(elts=[Tuple],ctx=Load)',  # main.py:49787
+    'keyword.value>List(elts=[],ctx=Load)',  # main.py:51980
+    'keyword.value>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:49467
+    'keyword.value>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:49828
+    'keyword.value>Name(id=str,ctx=Load)',  # main.py:16381
+    'keyword.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:20223
+    'keyword.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:56251
+    'keyword.value>Tuple(elts=[Constant|Subscript],ctx=Load)',  # main.py:49459
+    'keyword.value>Tuple(elts=[Tuple],ctx=Load)',  # main.py:20298
+    'withitem.context_expr>Call(func=Attribute,args=[],keywords=[])',  # main.py:4341
+})
+
+
+A1_MEANINGFUL = frozenset({
+    'AsyncSession',
+    'BET_TAX_ODDS_MAX',
+    'BET_TAX_RATE',
+    'Counter',
+    'DBAPIError',
+    'Depends',
+    'Exception',
+    'FFA_GATHER_CAP_SECONDS',
+    'FFA_GATHER_EXTEND_SECONDS',
+    'FFA_GATHER_SECONDS',
+    'FFA_KILLS_TIEBREAK_MIN_VERSION',
+    'FFA_MAX_PLAYERS',
+    'FFA_MIN_PLAYERS',
+    'FFA_PROXIMITY_VICTIM_MIN_VERSION',
+    'FORMATION_MAX_ATTEMPTS',
+    'FRESH_ANCHORS',
+    'GoldTransaction',
+    'HOLD_CAPS_TOKEN',
+    'HTTPException',
+    'IntegrityError',
+    'JSONResponse',
+    'LEASE_MAX_LOBBY_SEAT',
+    'LEASE_TTL_ASSEMBLY',
+    'LEASE_TTL_INGAME',
+    'LEASE_TTL_POLLING',
+    'LOBBY_MEMBER_FRESH_SQL',
+    'MODES',
+    'OperationalError',
+    'PING_MAX_MS',
+    'PING_MIN_MS',
+    'Player',
+    'QUEUE_EXPIRE_MINUTES',
+    'Query',
+    'QueuePollResponse',
+    'RANKED_WINDOW_LEGACY_CAP',
+    'READY_TIMEOUT_SECONDS',
+    'REGION_GROUP_REGRET_MS',
+    'REGION_LIVE_WINDOW_DAYS',
+    'REGION_PINGS_ISSUANCE_MAX_AGE_S',
+    'REGION_PINGS_MARGIN_MS',
+    'REGION_VOLUMES_CACHE_S',
+    'ROOM_RULES_DEFAULT',
+    'ROOM_RULES_MIN_VERSION',
+    'RankedSeries',
+    'Request',
+    'SPECTATE_BROADCAST_STEAM_IDS',
+    'StakeRefundRefused',
+    'TEAM_QUEUE_EXPIRE_MINUTES',
+    'TEAM_READY_TIMEOUT_SECONDS',
+    'TEAM_TRUST_2V2_RATING_AFTER',
+    'TEAM_TRUST_2V2_RD_BELOW',
+    'TeamQueueMember',
+    'TeamQueuePollResponse',
+    'ValueError',
+    'WHY_BASELINE',
+    'WHY_BOUNDED',
+    'WHY_ERROR',
+    'WHY_MAJORITY',
+    'WHY_QUORUM',
+    '_Cand',
+    '_FFA_CANDIDATE_SQL',
+    '_FFA_CLOSE_RECORD_SET',
+    '_MAJORITY_STRICT',
+    '_MEMBER_COLS',
+    '_OVT_CANDIDATE_SQL',
+    '_QUEUE_LOCK_TABLES',
+    '_QUEUE_PARENT_LOCK_TABLES',
+    '_QUEUE_TABLE',
+    '_RANKED_CANDIDATE_SQL',
+    '_REGION_VOLUMES_CACHE',
+    '_ROOM_RULES_QUEUE_TABLES',
+    '_SELECT_BY_WORST',
+    '_SERIES_TABLE',
+    '_SERVICE_UUID_MAX_AGE_SECONDS',
+    '_SERVICE_UUID_REFRESH_SECONDS',
+    '_SKIP_QUORUM',
+    '_Seat',
+    '_TEAM_BET_REFUND_STATUSES',
+    '_TEAM_BILATERAL_SQL',
+    '_TEAM_CALLER_ROW_COLS',
+    '_TEAM_CANDIDATE_SQL_TMPL',
+    '_TEAM_LIVE_FAMILY_IDS_SQL',
+    '_TEAM_RESUME_CONSENT_SQL',
+    '_TEAM_RESUME_WINDOW_MINUTES',
+    '_admission_key',
+    '_asm_poll_step',
+    '_asm_sqlstate',
+    '_assert_no_service_subject',
+    '_balance_teams',
+    '_baseline',
+    '_bet_fighter_tax',
+    '_check_steam_session',
+    '_clean_map',
+    '_credit_bet_fighter_tax',
+    '_credit_team_bet_fighter_tax',
+    '_dissolve_group_rows',
+    '_evict_other_queue_searching',
+    '_ffa_effective_host',
+    '_ffa_gather_decide',
+    '_ffa_gather_last_join_mono',
+    '_ffa_live_lobby_members',
+    '_ffa_lobby_config',
+    '_ffa_poll_locked_payload',
+    '_ffa_roster_clears_proximity_floor',
+    '_ffa_sort_key',
+    '_find_current_active_series',
+    '_form_attempt',
+    '_form_left',
+    '_formation_lease_conflict',
+    '_get',
+    '_group_game_in_progress',
+    '_group_game_positively_live',
+    '_group_region',
+    '_identity_lock_many',
+    '_in_match_evidence_trustworthy',
+    '_is_banned',
+    '_is_number',
+    '_json',
+    '_latch_sql',
+    '_lease_acquire',
+    '_lease_acquire_many',
+    '_lease_admission_gate',
+    '_lease_live_claim_strict',
+    '_lease_live_mode',
+    '_lease_renew',
+    '_lock_group_snapshot',
+    '_lock_queue_rows_ordered',
+    '_lock_snapshot_rows',
+    '_match_hold',
+    '_mod_version_at_least',
+    '_mode_or_400',
+    '_mrw_mod',
+    '_ovt_poll_locked_payload',
+    '_parse_version',
+    '_pick',
+    '_pick_region_for_group',
+    '_pick_room_region',
+    '_player_body_color',
+    '_presence_is_online',
+    '_presence_touch',
+    '_publish_pair_sitting',
+    '_queue_delete_partner_if_reciprocal',
+    '_queue_pair_reciprocal',
+    '_queue_reset_partner_if_reciprocal',
+    '_queue_reset_to_searching',
+    '_queue_stamp_room_reciprocal',
+    '_ranked_identity_phase',
+    '_ranked_window_binds',
+    '_rdm_claim',
+    '_reconcile_ffa_lobby_bets',
+    '_reconcile_team_series_bets',
+    '_region_current',
+    '_region_home_of',
+    '_region_mode_of',
+    '_region_pings_from_header',
+    '_region_pings_newer',
+    '_region_pings_store',
+    '_region_volumes',
+    '_request_mod_version',
+    '_return_stake_exactly',
+    '_rules_admit',
+    '_rules_for_members',
+    '_rules_for_queue_match',
+    '_rules_json',
+    '_rules_members',
+    '_rules_normalize',
+    '_rules_payload',
+    '_rules_prop',
+    '_s2_player_live_hold',
+    '_s2_poll_readmissible',
+    '_service_player_uuids',
+    '_stamp_team_series_colors',
+    '_strict_steam_session_ok',
+    '_team_balance_rating',
+    '_team_clear_dc_fallback_marker',
+    '_team_color_holders',
+    '_team_lock_family_pick',
+    '_team_quartet_key',
+    '_team_quartet_lock',
+    '_team_relock_existing_series',
+    '_team_resolve_live_family',
+    '_team_series_resumable',
+    'abs',
+    'all',
+    'anchor_fresh',
+    'any',
+    'app',
+    'asyncio',
+    'bool',
+    'bytes',
+    'caps_token_sql',
+    'collections',
+    'compute_elo_range',
+    'compute_ranked_window',
+    'ctx',
+    'datetime',
+    'db',
+    'dict',
+    'enumerate',
+    'float',
+    'get_db',
+    'getattr',
+    'globals',
+    'hasattr',
+    'held_overlap',
+    'id',
+    'int',
+    'isinstance',
+    'len',
+    'list',
+    'math',
+    'max',
+    'min',
+    'namedtuple',
+    'next',
+    'print',
+    'random',
+    'range',
+    'repr',
+    'round',
+    'session',
+    'set',
+    'sorted',
+    'str',
+    'sum',
+    'text',
+    'time',
+    'timedelta',
+    'timezone',
+    'tuple',
+    'type',
+    'uuid',
+    'uuid_mod',
+    'zip',
+})
+
+
+A1_BINDINGS = frozenset({
+    ('_form_attempt', 'store'),
+    ('_form_left', 'store'),
+    ('db', 'parameter'),
+    ('uuid_mod', 'import'),
+})
+
+
+A1_IMPORTS = frozenset({
+    ('tournaments', '_region_candidate_volumes', None),
+    (None, 'match_report_window', None),
+    (None, 'uuid', 'uuid_mod'),
+})
+
+
+# the namedtuple constructors the real walks call: {'named tuple _Seat': 1, 'named tuple _Cand': 1}
+# (each class's one top-level statement and its maker's import)
+A1_NAMEDTUPLES = frozenset({
+    '<root>>Assign(targets=[Name],value=Call,type_comment=-)',
+    "<root>>ImportFrom(module='collections',names=[alias],level=0)",
+    'Assign.targets>Name(id=str,ctx=Store)',
+    'Assign.value>Call(func=Name,args=[Constant],keywords=[])',
+    'Call.args>Constant(value=str)',
+    'Call.func>Name(id=str,ctx=Load)',
+    "ImportFrom.names>alias(name='Counter',asname=None)",
+    "ImportFrom.names>alias(name='namedtuple',asname=None)",
+    'Name.ctx>Load()',
+    'Name.ctx>Store()',
+})
+
+# --- the census grammar ------------------------------------------
+# Every node shape of every walker span the census reads
+# (resolution_sites.walker_spans): closed_walk and the a1 file at this
+# child's commit, the gate file at a30d37f6 (child gg owns it and will
+# change it; W30b re-checks at merge). No AnnAssign: the walker code
+# holds none, so one refuses.
+WALKER_NODES = 37286
+
+WALKER_SHAPES = frozenset({
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:87
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:3448
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[AugAssign],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:81
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[AugAssign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:59
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1565
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1559
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:63
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Assign|Expr|For|FunctionDef|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:3681
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Assign|Expr|If|Import|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:4409
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Expr],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:133
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Expr|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:4482
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:106
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|AugAssign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1484
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|AugAssign|Expr|If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1542
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|AugAssign|Expr|Import|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1037
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|ClassDef|Expr|Import|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:3661
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|ClassDef|Expr|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:2793
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:3442
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|FunctionDef|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1896
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|FunctionDef|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:922
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:714
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Import|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:4710
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Raise|While],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1195
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:990
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_match_hold_admission_gate_pg (a30d37f6):280
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Import|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:3858
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:2929
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:66
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:4377
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return|While],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:2945
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|FunctionDef|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:814
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|FunctionDef|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:938
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|FunctionDef|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1136
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:129
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Raise],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:532
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:120
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return|Try],decorator_list=[Name],returns=-,type_comment=-,type_params=[])',  # closed_walk:772
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:185
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Import],decorator_list=[Attribute],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:711
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Import|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:3982
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:513
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_match_hold_admission_gate_pg (a30d37f6):544
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return|While],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:265
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|For|If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:421
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1027
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|FunctionDef|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1905
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:284
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1451
+    '<root>>FunctionDef(name=str,args=arguments,body=[AugAssign],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_match_hold_admission_gate_pg (a30d37f6):238
+    '<root>>FunctionDef(name=str,args=arguments,body=[AugAssign|Expr|For],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1602
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:444
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|For],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1526
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|For|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1174
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|For|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:557
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1362
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:615
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:759
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:279
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:161
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Return|While],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:363
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1512
+    '<root>>FunctionDef(name=str,args=arguments,body=[For],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1609
+    '<root>>FunctionDef(name=str,args=arguments,body=[For|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_match_hold_admission_gate_pg (a30d37f6):374
+    '<root>>FunctionDef(name=str,args=arguments,body=[If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:447
+    '<root>>FunctionDef(name=str,args=arguments,body=[If|Raise],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1506
+    '<root>>FunctionDef(name=str,args=arguments,body=[If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:863
+    '<root>>FunctionDef(name=str,args=arguments,body=[Raise],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1368
+    '<root>>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:2923
+    '<root>>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:377
+    'Assert.msg>Constant(value=str)',  # test_a1_identity_formation:95
+    'Assert.msg>JoinedStr(values=[Constant|FormattedValue])',  # test_a1_identity_formation:136
+    'Assert.msg>Tuple(elts=[Call|Name],ctx=Load)',  # test_a1_identity_formation:4420
+    'Assert.test>BoolOp(op=And,values=[Compare])',  # test_a1_identity_formation:3690
+    'Assert.test>Compare(left=Call,ops=[Eq],comparators=[Call])',  # test_a1_identity_formation:139
+    'Assert.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # test_a1_identity_formation:3696
+    'Assert.test>Compare(left=Constant,ops=[In],comparators=[Name])',  # test_a1_identity_formation:94
+    'Assert.test>Compare(left=Name,ops=[Eq],comparators=[Call])',  # test_a1_identity_formation:135
+    "Assign.targets>Attribute(value=Name,attr='__file__',ctx=Store)",  # test_a1_identity_formation:3666
+    "Assign.targets>Attribute(value=Name,attr='_done',ctx=Store)",  # closed_walk:118
+    "Assign.targets>Attribute(value=Name,attr='_enumerated',ctx=Store)",  # closed_walk:431
+    "Assign.targets>Attribute(value=Name,attr='_lock_calls',ctx=Store)",  # test_a1_identity_formation:3446
+    "Assign.targets>Attribute(value=Name,attr='_plain_sub',ctx=Store)",  # closed_walk:1425
+    "Assign.targets>Attribute(value=Name,attr='_refuse_attempt',ctx=Store)",  # test_match_hold_admission_gate_pg (a30d37f6):1053
+    "Assign.targets>Attribute(value=Name,attr='_refused',ctx=Store)",  # test_match_hold_admission_gate_pg (a30d37f6):1052
+    "Assign.targets>Attribute(value=Name,attr='_rows',ctx=Store)",  # test_a1_identity_formation:37
+    "Assign.targets>Attribute(value=Name,attr='_walked_nodes',ctx=Store)",  # closed_walk:1476
+    "Assign.targets>Attribute(value=Name,attr='admitted',ctx=Store)",  # closed_walk:114
+    "Assign.targets>Attribute(value=Name,attr='allowed',ctx=Store)",  # closed_walk:110
+    "Assign.targets>Attribute(value=Name,attr='b',ctx=Store)",  # closed_walk:1456
+    "Assign.targets>Attribute(value=Name,attr='caught',ctx=Store)",  # closed_walk:1473
+    "Assign.targets>Attribute(value=Name,attr='commits',ctx=Store)",  # test_a1_identity_formation:71
+    "Assign.targets>Attribute(value=Name,attr='depth',ctx=Store)",  # test_a1_identity_formation:2806
+    "Assign.targets>Attribute(value=Name,attr='effects',ctx=Store)",  # closed_walk:1469
+    "Assign.targets>Attribute(value=Name,attr='fail_lease_read',ctx=Store)",  # test_a1_identity_formation:76
+    "Assign.targets>Attribute(value=Name,attr='fail_on',ctx=Store)",  # test_a1_identity_formation:3444
+    "Assign.targets>Attribute(value=Name,attr='gate_kinds',ctx=Store)",  # test_match_hold_admission_gate_pg (a30d37f6):200
+    "Assign.targets>Attribute(value=Name,attr='grammar',ctx=Store)",  # closed_walk:428
+    "Assign.targets>Attribute(value=Name,attr='guarded',ctx=Store)",  # closed_walk:1460
+    "Assign.targets>Attribute(value=Name,attr='has_fn',ctx=Store)",  # closed_walk:430
+    "Assign.targets>Attribute(value=Name,attr='helper',ctx=Store)",  # closed_walk:1463
+    "Assign.targets>Attribute(value=Name,attr='helper_hook',ctx=Store)",  # closed_walk:1390
+    "Assign.targets>Attribute(value=Name,attr='helpers',ctx=Store)",  # closed_walk:1395
+    "Assign.targets>Attribute(value=Name,attr='imports',ctx=Store)",  # closed_walk:111
+    "Assign.targets>Attribute(value=Name,attr='leases',ctx=Store)",  # test_a1_identity_formation:75
+    "Assign.targets>Attribute(value=Name,attr='local',ctx=Store)",  # closed_walk:1459
+    "Assign.targets>Attribute(value=Name,attr='meaningful',ctx=Store)",  # closed_walk:109
+    "Assign.targets>Attribute(value=Name,attr='met',ctx=Store)",  # closed_walk:1397
+    "Assign.targets>Attribute(value=Name,attr='namedtuples',ctx=Store)",  # closed_walk:112
+    "Assign.targets>Attribute(value=Name,attr='nt_seen',ctx=Store)",  # closed_walk:117
+    "Assign.targets>Attribute(value=Name,attr='opaque',ctx=Store)",  # closed_walk:1466
+    "Assign.targets>Attribute(value=Name,attr='p',ctx=Store)",  # closed_walk:1455
+    "Assign.targets>Attribute(value=Name,attr='params',ctx=Store)",  # closed_walk:1461
+    "Assign.targets>Attribute(value=Name,attr='permitted',ctx=Store)",  # closed_walk:1462
+    "Assign.targets>Attribute(value=Name,attr='policy',ctx=Store)",  # test_match_hold_admission_gate_pg (a30d37f6):227
+    "Assign.targets>Attribute(value=Name,attr='pure_awaits',ctx=Store)",  # closed_walk:1383
+    "Assign.targets>Attribute(value=Name,attr='pure_calls',ctx=Store)",  # closed_walk:1381
+    "Assign.targets>Attribute(value=Name,attr='pure_methods',ctx=Store)",  # closed_walk:1382
+    "Assign.targets>Attribute(value=Name,attr='record',ctx=Store)",  # closed_walk:113
+    "Assign.targets>Attribute(value=Name,attr='rollbacks',ctx=Store)",  # test_a1_identity_formation:72
+    "Assign.targets>Attribute(value=Name,attr='savepoints',ctx=Store)",  # test_a1_identity_formation:73
+    "Assign.targets>Attribute(value=Name,attr='scope',ctx=Store)",  # closed_walk:423
+    "Assign.targets>Attribute(value=Name,attr='seen',ctx=Store)",  # closed_walk:116
+    "Assign.targets>Attribute(value=Name,attr='session',ctx=Store)",  # closed_walk:424
+    "Assign.targets>Attribute(value=Name,attr='shapes',ctx=Store)",  # closed_walk:108
+    "Assign.targets>Attribute(value=Name,attr='sites',ctx=Store)",  # closed_walk:429
+    "Assign.targets>Attribute(value=Name,attr='sql',ctx=Store)",  # closed_walk:1384
+    "Assign.targets>Attribute(value=Name,attr='sqlstate',ctx=Store)",  # test_a1_identity_formation:3445
+    "Assign.targets>Attribute(value=Name,attr='statements',ctx=Store)",  # test_a1_identity_formation:69
+    "Assign.targets>Attribute(value=Name,attr='sync_state',ctx=Store)",  # test_a1_identity_formation:3672
+    "Assign.targets>Attribute(value=Name,attr='trees',ctx=Store)",  # closed_walk:115
+    "Assign.targets>Attribute(value=Name,attr='walked_defs',ctx=Store)",  # closed_walk:1468
+    "Assign.targets>Attribute(value=Name,attr='walking',ctx=Store)",  # closed_walk:1396
+    "Assign.targets>Attribute(value=Name,attr='where',ctx=Store)",  # test_match_hold_admission_gate_pg (a30d37f6):235
+    "Assign.targets>Attribute(value=Subscript,attr='grammar',ctx=Store)",  # test_a1_identity_formation:703
+    'Assign.targets>Name(id=str,ctx=Store)',  # closed_walk:70
+    'Assign.targets>Subscript(value=Attribute,slice=Attribute,ctx=Store)',  # test_a1_identity_formation:3667
+    'Assign.targets>Subscript(value=Attribute,slice=Call,ctx=Store)',  # closed_walk:156
+    'Assign.targets>Subscript(value=Attribute,slice=Name,ctx=Store)',  # closed_walk:140
+    'Assign.targets>Subscript(value=Name,slice=Attribute,ctx=Store)',  # closed_walk:1054
+    'Assign.targets>Subscript(value=Name,slice=BoolOp,ctx=Store)',  # test_a1_identity_formation:3820
+    'Assign.targets>Subscript(value=Name,slice=Call,ctx=Store)',  # closed_walk:1040
+    'Assign.targets>Subscript(value=Name,slice=Constant,ctx=Store)',  # test_a1_identity_formation:1436
+    'Assign.targets>Subscript(value=Name,slice=Name,ctx=Store)',  # closed_walk:194
+    'Assign.targets>Tuple(elts=[Attribute],ctx=Store)',  # test_match_hold_admission_gate_pg (a30d37f6):236
+    'Assign.targets>Tuple(elts=[Name],ctx=Store)',  # closed_walk:146
+    'Assign.targets>Tuple(elts=[Name|Subscript],ctx=Store)',  # test_a1_identity_formation:1439
+    'Assign.targets>Tuple(elts=[Name|Tuple],ctx=Store)',  # test_a1_identity_formation:1485
+    'Assign.targets>Tuple(elts=[Subscript],ctx=Store)',  # test_match_hold_admission_gate_pg (a30d37f6):65
+    "Assign.value>Attribute(value=Attribute,attr='id',ctx=Load)",  # closed_walk:905
+    "Assign.value>Attribute(value=Attribute,attr='session',ctx=Load)",  # closed_walk:1739
+    "Assign.value>Attribute(value=Attribute,attr='value',ctx=Load)",  # closed_walk:315
+    "Assign.value>Attribute(value=Call,attr='__name__',ctx=Load)",  # closed_walk:2009
+    "Assign.value>Attribute(value=Call,attr='grammar',ctx=Load)",  # test_a1_identity_formation:2175
+    "Assign.value>Attribute(value=Call,attr='parameters',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):696
+    "Assign.value>Attribute(value=Call,attr='parent',ctx=Load)",  # test_a1_identity_formation:3861
+    "Assign.value>Attribute(value=Name,attr='_refuse_attempt',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1053
+    "Assign.value>Attribute(value=Name,attr='_refused',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1052
+    "Assign.value>Attribute(value=Name,attr='arg',ctx=Load)",  # closed_walk:731
+    "Assign.value>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:1028
+    "Assign.value>Attribute(value=Name,attr='attr',ctx=Load)",  # test_a1_identity_formation:3844
+    "Assign.value>Attribute(value=Name,attr='body',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):781
+    "Assign.value>Attribute(value=Name,attr='elts',ctx=Load)",  # test_a1_identity_formation:845
+    "Assign.value>Attribute(value=Name,attr='exc',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):677
+    "Assign.value>Attribute(value=Name,attr='grammar',ctx=Load)",  # closed_walk:811
+    "Assign.value>Attribute(value=Name,attr='helpers',ctx=Load)",  # closed_walk:1919
+    "Assign.value>Attribute(value=Name,attr='items',ctx=Load)",  # closed_walk:2059
+    "Assign.value>Attribute(value=Name,attr='met',ctx=Load)",  # closed_walk:1423
+    "Assign.value>Attribute(value=Name,attr='name',ctx=Load)",  # test_a1_identity_formation:3820
+    "Assign.value>Attribute(value=Name,attr='session',ctx=Load)",  # closed_walk:1934
+    "Assign.value>Attribute(value=Name,attr='target',ctx=Load)",  # closed_walk:321
+    "Assign.value>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:317
+    "Assign.value>Attribute(value=Name,attr='walking',ctx=Load)",  # closed_walk:1920
+    'Assign.value>BinOp(left=Attribute,op=Add,right=Attribute)',  # closed_walk:1966
+    'Assign.value>BinOp(left=BinOp,op=Add,right=BoolOp)',  # closed_walk:75
+    'Assign.value>BinOp(left=BinOp,op=Add,right=Constant)',  # test_a1_identity_formation:3699
+    'Assign.value>BinOp(left=BinOp,op=Add,right=ListComp)',  # closed_walk:436
+    'Assign.value>BinOp(left=BinOp,op=Div,right=Name)',  # test_a1_identity_formation:4413
+    'Assign.value>BinOp(left=BinOp,op=Sub,right=Attribute)',  # closed_walk:1247
+    'Assign.value>BinOp(left=Call,op=Add,right=Call)',  # test_match_hold_admission_gate_pg (a30d37f6):1046
+    'Assign.value>BinOp(left=Call,op=Add,right=Constant)',  # closed_walk:946
+    'Assign.value>BinOp(left=Call,op=Add,right=ListComp)',  # closed_walk:1620
+    'Assign.value>BinOp(left=Constant,op=Add,right=Subscript)',  # test_a1_identity_formation:2430
+    'Assign.value>BinOp(left=List,op=Add,right=ListComp)',  # test_a1_identity_formation:2445
+    'Assign.value>BinOp(left=List,op=Add,right=Name)',  # test_a1_identity_formation:2437
+    'Assign.value>BinOp(left=ListComp,op=Add,right=ListComp)',  # test_a1_identity_formation:2180
+    'Assign.value>BinOp(left=Name,op=Add,right=Call)',  # test_a1_identity_formation:1793
+    'Assign.value>BinOp(left=Name,op=Add,right=Constant)',  # test_a1_identity_formation:3206
+    'Assign.value>BinOp(left=Name,op=Add,right=ListComp)',  # closed_walk:985
+    'Assign.value>BinOp(left=Name,op=Add,right=Name)',  # test_a1_identity_formation:1376
+    'Assign.value>BinOp(left=Name,op=Add,right=Tuple)',  # test_a1_identity_formation:1283
+    'Assign.value>BinOp(left=Name,op=BitAnd,right=Set)',  # closed_walk:1821
+    'Assign.value>BinOp(left=Subscript,op=Add,right=Attribute)',  # test_a1_identity_formation:1368
+    'Assign.value>BoolOp(op=And,values=[Call|Compare])',  # test_a1_identity_formation:2251
+    'Assign.value>BoolOp(op=And,values=[Call|Compare|Subscript])',  # test_a1_identity_formation:1278
+    'Assign.value>BoolOp(op=And,values=[Compare])',  # closed_walk:1773
+    'Assign.value>BoolOp(op=Or,values=[Call])',  # test_a1_identity_formation:2823
+    'Assign.value>BoolOp(op=Or,values=[Call|Constant])',  # closed_walk:164
+    'Assign.value>BoolOp(op=Or,values=[Call|Name])',  # closed_walk:525
+    'Assign.value>BoolOp(op=Or,values=[Dict|Name])',  # closed_walk:836
+    'Assign.value>BoolOp(op=Or,values=[Name|Subscript])',  # test_match_hold_admission_gate_pg (a30d37f6):379
+    'Assign.value>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:285
+    'Assign.value>Call(func=Attribute,args=[Attribute],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):290
+    'Assign.value>Call(func=Attribute,args=[Attribute|BoolOp],keywords=[])',  # closed_walk:810
+    'Assign.value>Call(func=Attribute,args=[Attribute|Call],keywords=[])',  # closed_walk:765
+    'Assign.value>Call(func=Attribute,args=[Attribute|Call],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):549
+    'Assign.value>Call(func=Attribute,args=[Attribute|Call|IfExp|Name],keywords=[keyword])',  # test_a1_identity_formation:2194
+    'Assign.value>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:144
+    'Assign.value>Call(func=Attribute,args=[Attribute|Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):232
+    'Assign.value>Call(func=Attribute,args=[BinOp],keywords=[])',  # test_a1_identity_formation:3035
+    'Assign.value>Call(func=Attribute,args=[Call],keywords=[])',  # closed_walk:191
+    'Assign.value>Call(func=Attribute,args=[Constant],keywords=[])',  # test_a1_identity_formation:2959
+    'Assign.value>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # test_a1_identity_formation:117
+    'Assign.value>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # test_a1_identity_formation:2975
+    'Assign.value>Call(func=Attribute,args=[IfExp|Name],keywords=[keyword])',  # test_a1_identity_formation:2176
+    'Assign.value>Call(func=Attribute,args=[JoinedStr],keywords=[])',  # test_a1_identity_formation:4470
+    'Assign.value>Call(func=Attribute,args=[List|Name],keywords=[])',  # closed_walk:980
+    'Assign.value>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:123
+    'Assign.value>Call(func=Attribute,args=[Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):198
+    'Assign.value>Call(func=Attribute,args=[Name|Tuple],keywords=[])',  # closed_walk:506
+    'Assign.value>Call(func=Attribute,args=[Subscript],keywords=[])',  # test_a1_identity_formation:98
+    'Assign.value>Call(func=Attribute,args=[Tuple],keywords=[])',  # test_a1_identity_formation:4335
+    'Assign.value>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:270
+    'Assign.value>Call(func=Attribute,args=[],keywords=[keyword])',  # closed_walk:1909
+    'Assign.value>Call(func=Call,args=[],keywords=[])',  # test_a1_identity_formation:3453
+    'Assign.value>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:473
+    'Assign.value>Call(func=Name,args=[Attribute|BinOp],keywords=[])',  # closed_walk:1420
+    'Assign.value>Call(func=Name,args=[Attribute|BinOp|Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):596
+    'Assign.value>Call(func=Name,args=[Attribute|Call|Constant],keywords=[])',  # closed_walk:755
+    'Assign.value>Call(func=Name,args=[Attribute|Call|Name],keywords=[])',  # closed_walk:1820
+    'Assign.value>Call(func=Name,args=[Attribute|Call|Name],keywords=[keyword])',  # closed_walk:1888
+    'Assign.value>Call(func=Name,args=[Attribute|Constant|Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):360
+    'Assign.value>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:815
+    'Assign.value>Call(func=Name,args=[Attribute|Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):358
+    'Assign.value>Call(func=Name,args=[Attribute|Name|Tuple],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):539
+    'Assign.value>Call(func=Name,args=[BinOp],keywords=[])',  # test_a1_identity_formation:2297
+    'Assign.value>Call(func=Name,args=[BinOp|Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1907
+    'Assign.value>Call(func=Name,args=[BoolOp],keywords=[])',  # test_a1_identity_formation:75
+    'Assign.value>Call(func=Name,args=[Call],keywords=[])',  # closed_walk:141
+    'Assign.value>Call(func=Name,args=[Call|Constant],keywords=[])',  # test_a1_identity_formation:838
+    'Assign.value>Call(func=Name,args=[Call|Constant|Name],keywords=[])',  # test_a1_identity_formation:630
+    'Assign.value>Call(func=Name,args=[Call|JoinedStr],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):591
+    'Assign.value>Call(func=Name,args=[Call|Name],keywords=[])',  # test_a1_identity_formation:4514
+    'Assign.value>Call(func=Name,args=[Call|Name],keywords=[keyword])',  # closed_walk:1014
+    'Assign.value>Call(func=Name,args=[Constant],keywords=[])',  # test_a1_identity_formation:2366
+    'Assign.value>Call(func=Name,args=[Constant|GeneratorExp],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):449
+    'Assign.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:187
+    'Assign.value>Call(func=Name,args=[Dict|Name],keywords=[])',  # test_a1_identity_formation:1438
+    'Assign.value>Call(func=Name,args=[Dict|Name|Tuple],keywords=[])',  # test_a1_identity_formation:1349
+    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[])',  # closed_walk:1935
+    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # test_a1_identity_formation:896
+    'Assign.value>Call(func=Name,args=[JoinedStr|Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):764
+    'Assign.value>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:108
+    'Assign.value>Call(func=Name,args=[Name],keywords=[keyword])',  # closed_walk:1927
+    'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # test_a1_identity_formation:2278
+    'Assign.value>Call(func=Name,args=[SetComp],keywords=[])',  # test_a1_identity_formation:1108
+    'Assign.value>Call(func=Name,args=[Starred],keywords=[])',  # closed_walk:1064
+    'Assign.value>Call(func=Name,args=[Subscript],keywords=[])',  # test_a1_identity_formation:1352
+    'Assign.value>Call(func=Name,args=[],keywords=[])',  # closed_walk:309
+    'Assign.value>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # test_a1_identity_formation:1029
+    'Assign.value>Compare(left=Name,ops=[In],comparators=[Tuple])',  # test_a1_identity_formation:998
+    'Assign.value>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # closed_walk:430
+    'Assign.value>Constant(value=NoneType)',  # closed_walk:193
+    'Assign.value>Constant(value=bool)',  # closed_walk:1219
+    'Assign.value>Constant(value=int)',  # test_a1_identity_formation:71
+    'Assign.value>Constant(value=str)',  # closed_walk:166
+    'Assign.value>Dict(keys=[Constant],values=[Constant])',  # test_a1_identity_formation:1035
+    'Assign.value>Dict(keys=[],values=[])',  # closed_walk:114
+    'Assign.value>DictComp(key=Name,value=Call,generators=[comprehension])',  # test_a1_identity_formation:4382
+    'Assign.value>DictComp(key=Name,value=Constant,generators=[comprehension])',  # closed_walk:1035
+    'Assign.value>DictComp(key=Name,value=Name,generators=[comprehension])',  # closed_walk:1086
+    'Assign.value>GeneratorExp(elt=Subscript,generators=[comprehension])',  # test_a1_identity_formation:2165
+    'Assign.value>IfExp(test=Attribute,body=Call,orelse=Compare)',  # closed_walk:700
+    'Assign.value>IfExp(test=Attribute,body=Subscript,orelse=Constant)',  # closed_walk:1076
+    'Assign.value>IfExp(test=BoolOp,body=Attribute,orelse=Constant)',  # test_a1_identity_formation:518
+    'Assign.value>IfExp(test=BoolOp,body=Call,orelse=Constant)',  # closed_walk:947
+    'Assign.value>IfExp(test=BoolOp,body=Subscript,orelse=Constant)',  # test_a1_identity_formation:836
+    'Assign.value>IfExp(test=BoolOp,body=Subscript,orelse=Name)',  # closed_walk:1296
+    'Assign.value>IfExp(test=Call,body=Attribute,orelse=Attribute)',  # test_match_hold_admission_gate_pg (a30d37f6):1251
+    'Assign.value>IfExp(test=Call,body=Attribute,orelse=Constant)',  # closed_walk:1944
+    'Assign.value>IfExp(test=Call,body=Attribute,orelse=List)',  # closed_walk:480
+    'Assign.value>IfExp(test=Call,body=Attribute,orelse=Name)',  # test_match_hold_admission_gate_pg (a30d37f6):664
+    'Assign.value>IfExp(test=Call,body=Call,orelse=Constant)',  # closed_walk:768
+    'Assign.value>IfExp(test=Call,body=Name,orelse=Call)',  # closed_walk:1466
+    'Assign.value>IfExp(test=Call,body=Subscript,orelse=Constant)',  # test_a1_identity_formation:858
+    'Assign.value>IfExp(test=Compare,body=Attribute,orelse=Constant)',  # closed_walk:2060
+    'Assign.value>IfExp(test=Compare,body=Call,orelse=Call)',  # closed_walk:1657
+    'Assign.value>IfExp(test=Compare,body=Call,orelse=Constant)',  # closed_walk:761
+    'Assign.value>IfExp(test=Compare,body=Call,orelse=List)',  # closed_walk:723
+    'Assign.value>IfExp(test=Compare,body=Call,orelse=Name)',  # test_a1_identity_formation:1031
+    'Assign.value>IfExp(test=Compare,body=Constant,orelse=ListComp)',  # closed_walk:961
+    'Assign.value>IfExp(test=Compare,body=Name,orelse=BinOp)',  # closed_walk:1054
+    'Assign.value>IfExp(test=Compare,body=Name,orelse=Call)',  # closed_walk:1456
+    'Assign.value>IfExp(test=Compare,body=Name,orelse=Name)',  # test_a1_identity_formation:629
+    'Assign.value>IfExp(test=Compare,body=Name,orelse=Tuple)',  # closed_walk:1913
+    'Assign.value>IfExp(test=Compare,body=Subscript,orelse=Constant)',  # closed_walk:1772
+    'Assign.value>IfExp(test=Compare,body=Subscript,orelse=Subscript)',  # test_a1_identity_formation:1014
+    'Assign.value>IfExp(test=Name,body=Attribute,orelse=Name)',  # test_match_hold_admission_gate_pg (a30d37f6):519
+    'Assign.value>IfExp(test=Name,body=Call,orelse=Constant)',  # closed_walk:821
+    'Assign.value>IfExp(test=Name,body=Call,orelse=List)',  # test_a1_identity_formation:1290
+    'Assign.value>IfExp(test=Name,body=Dict,orelse=Dict)',  # test_a1_identity_formation:3814
+    'Assign.value>IfExp(test=Name,body=JoinedStr,orelse=Attribute)',  # test_a1_identity_formation:3831
+    'Assign.value>IfExp(test=Name,body=JoinedStr,orelse=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):409
+    'Assign.value>IfExp(test=Name,body=Subscript,orelse=Constant)',  # closed_walk:1230
+    'Assign.value>IfExp(test=UnaryOp,body=Call,orelse=Attribute)',  # closed_walk:699
+    'Assign.value>JoinedStr(values=[Constant|FormattedValue])',  # closed_walk:1508
+    'Assign.value>Lambda(args=arguments,body=Call)',  # test_match_hold_admission_gate_pg (a30d37f6):201
+    'Assign.value>List(elts=[Constant],ctx=Load)',  # closed_walk:1111
+    'Assign.value>List(elts=[Dict],ctx=Load)',  # closed_walk:954
+    'Assign.value>List(elts=[List],ctx=Load)',  # closed_walk:1057
+    'Assign.value>List(elts=[Name],ctx=Load)',  # closed_walk:1493
+    'Assign.value>List(elts=[Tuple],ctx=Load)',  # test_a1_identity_formation:2449
+    'Assign.value>List(elts=[],ctx=Load)',  # closed_walk:70
+    'Assign.value>ListComp(elt=Attribute,generators=[comprehension])',  # closed_walk:721
+    'Assign.value>ListComp(elt=BinOp,generators=[comprehension])',  # closed_walk:1059
+    'Assign.value>ListComp(elt=Call,generators=[comprehension])',  # closed_walk:960
+    'Assign.value>ListComp(elt=IfExp,generators=[comprehension])',  # closed_walk:1207
+    'Assign.value>ListComp(elt=JoinedStr,generators=[comprehension])',  # test_a1_identity_formation:1487
+    'Assign.value>ListComp(elt=Name,generators=[comprehension])',  # closed_walk:177
+    'Assign.value>Name(id=str,ctx=Load)',  # closed_walk:113
+    'Assign.value>SetComp(elt=Attribute,generators=[comprehension])',  # test_a1_identity_formation:1207
+    'Assign.value>SetComp(elt=Call,generators=[comprehension])',  # closed_walk:932
+    'Assign.value>SetComp(elt=Name,generators=[comprehension])',  # closed_walk:1238
+    'Assign.value>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # closed_walk:146
+    'Assign.value>Subscript(value=Attribute,slice=Name,ctx=Load)',  # test_a1_identity_formation:722
+    'Assign.value>Subscript(value=Attribute,slice=Subscript,ctx=Load)',  # test_a1_identity_formation:1041
+    'Assign.value>Subscript(value=Call,slice=Constant,ctx=Load)',  # closed_walk:1858
+    'Assign.value>Subscript(value=Call,slice=UnaryOp,ctx=Load)',  # closed_walk:719
+    'Assign.value>Subscript(value=Name,slice=Attribute,ctx=Load)',  # test_a1_identity_formation:3841
+    'Assign.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:1208
+    'Assign.value>Subscript(value=Name,slice=Name,ctx=Load)',  # closed_walk:728
+    'Assign.value>Subscript(value=Name,slice=Slice,ctx=Load)',  # closed_walk:1202
+    'Assign.value>Subscript(value=Name,slice=UnaryOp,ctx=Load)',  # closed_walk:1286
+    'Assign.value>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # test_a1_identity_formation:1320
+    'Assign.value>Tuple(elts=[Attribute],ctx=Load)',  # closed_walk:945
+    'Assign.value>Tuple(elts=[Attribute|Call|Constant],ctx=Load)',  # test_a1_identity_formation:3667
+    'Assign.value>Tuple(elts=[BinOp|Call],ctx=Load)',  # test_a1_identity_formation:3203
+    'Assign.value>Tuple(elts=[BinOp|Call|Name],ctx=Load)',  # closed_walk:135
+    'Assign.value>Tuple(elts=[BinOp|Constant],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):366
+    'Assign.value>Tuple(elts=[Call],ctx=Load)',  # closed_walk:938
+    'Assign.value>Tuple(elts=[Call|Constant],ctx=Load)',  # closed_walk:1213
+    'Assign.value>Tuple(elts=[Call|Dict],ctx=Load)',  # test_a1_identity_formation:2961
+    'Assign.value>Tuple(elts=[Call|JoinedStr],ctx=Load)',  # closed_walk:149
+    'Assign.value>Tuple(elts=[Call|List],ctx=Load)',  # closed_walk:268
+    'Assign.value>Tuple(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:631
+    'Assign.value>Tuple(elts=[Constant|IfExp],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):355
+    'Assign.value>Tuple(elts=[Constant|JoinedStr],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):344
+    'Assign.value>Tuple(elts=[Constant|List],ctx=Load)',  # test_a1_identity_formation:1141
+    'Assign.value>Tuple(elts=[Dict],ctx=Load)',  # closed_walk:931
+    'Assign.value>Tuple(elts=[List],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):236
+    'Assign.value>Tuple(elts=[Name],ctx=Load)',  # closed_walk:194
+    'Assign.value>Tuple(elts=[Name|Subscript],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):1317
+    'Assign.value>Tuple(elts=[Subscript],ctx=Load)',  # test_a1_identity_formation:1439
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Constant])',  # test_a1_identity_formation:87
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # test_a1_identity_formation:59
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Call,type_comment=-)',  # test_a1_identity_formation:88
+    'AsyncFunctionDef.body>AugAssign(target=Attribute,op=Add,value=Constant)',  # test_a1_identity_formation:60
+    'AsyncFunctionDef.body>Expr(value=Await)',  # test_a1_identity_formation:1567
+    'AsyncFunctionDef.body>Expr(value=Call)',  # test_a1_identity_formation:89
+    'AsyncFunctionDef.body>Expr(value=Constant)',  # test_a1_identity_formation:1560
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assert|Assign|If|Return],orelse=[])',  # test_a1_identity_formation:91
+    'AsyncFunctionDef.body>If(test=Compare,body=[AugAssign|If],orelse=[])',  # test_a1_identity_formation:3450
+    'AsyncFunctionDef.body>Return(value=Await)',  # test_a1_identity_formation:3457
+    'AsyncFunctionDef.body>Return(value=Call)',  # test_a1_identity_formation:100
+    'AsyncFunctionDef.body>Return(value=Constant)',  # test_a1_identity_formation:64
+    'AsyncFunctionDef.body>Return(value=Name)',  # test_a1_identity_formation:61
+    'Attribute.ctx>Load()',  # closed_walk:71
+    'Attribute.ctx>Store()',  # closed_walk:108
+    "Attribute.value>Attribute(value=Attribute,attr='func',ctx=Load)",  # closed_walk:765
+    "Attribute.value>Attribute(value=Attribute,attr='value',ctx=Load)",  # closed_walk:947
+    "Attribute.value>Attribute(value=Call,attr='__name__',ctx=Load)",  # closed_walk:2049
+    "Attribute.value>Attribute(value=Call,attr='grammar',ctx=Load)",  # test_a1_identity_formation:638
+    "Attribute.value>Attribute(value=Call,attr='parent',ctx=Load)",  # test_a1_identity_formation:4413
+    "Attribute.value>Attribute(value=Name,attr='__code__',ctx=Load)",  # closed_walk:167
+    "Attribute.value>Attribute(value=Name,attr='__dict__',ctx=Load)",  # test_a1_identity_formation:4475
+    "Attribute.value>Attribute(value=Name,attr='_done',ctx=Load)",  # closed_walk:133
+    "Attribute.value>Attribute(value=Name,attr='_enumerated',ctx=Load)",  # closed_walk:635
+    "Attribute.value>Attribute(value=Name,attr='_walked_nodes',ctx=Load)",  # closed_walk:1482
+    "Attribute.value>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:436
+    "Attribute.value>Attribute(value=Name,attr='b',ctx=Load)",  # closed_walk:1515
+    "Attribute.value>Attribute(value=Name,attr='effects',ctx=Load)",  # closed_walk:1607
+    "Attribute.value>Attribute(value=Name,attr='func',ctx=Load)",  # closed_walk:314
+    "Attribute.value>Attribute(value=Name,attr='grammar',ctx=Load)",  # closed_walk:1013
+    "Attribute.value>Attribute(value=Name,attr='helper',ctx=Load)",  # closed_walk:1507
+    "Attribute.value>Attribute(value=Name,attr='leases',ctx=Load)",  # test_a1_identity_formation:98
+    "Attribute.value>Attribute(value=Name,attr='left',ctx=Load)",  # closed_walk:905
+    "Attribute.value>Attribute(value=Name,attr='nt_seen',ctx=Load)",  # closed_walk:125
+    "Attribute.value>Attribute(value=Name,attr='p',ctx=Load)",  # closed_walk:1503
+    "Attribute.value>Attribute(value=Name,attr='params',ctx=Load)",  # test_a1_identity_formation:90
+    "Attribute.value>Attribute(value=Name,attr='path',ctx=Load)",  # closed_walk:167
+    "Attribute.value>Attribute(value=Name,attr='policy',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):234
+    "Attribute.value>Attribute(value=Name,attr='problems',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):245
+    "Attribute.value>Attribute(value=Name,attr='seen',ctx=Load)",  # closed_walk:139
+    "Attribute.value>Attribute(value=Name,attr='session',ctx=Load)",  # test_a1_identity_formation:60
+    "Attribute.value>Attribute(value=Name,attr='sites',ctx=Load)",  # closed_walk:445
+    "Attribute.value>Attribute(value=Name,attr='slice',ctx=Load)",  # closed_walk:1039
+    "Attribute.value>Attribute(value=Name,attr='statements',ctx=Load)",  # test_a1_identity_formation:89
+    "Attribute.value>Attribute(value=Name,attr='target',ctx=Load)",  # closed_walk:968
+    "Attribute.value>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:760
+    "Attribute.value>Attribute(value=Name,attr='walked_defs',ctx=Load)",  # closed_walk:2096
+    "Attribute.value>Attribute(value=Name,attr='walking',ctx=Load)",  # closed_walk:1886
+    "Attribute.value>Attribute(value=Subscript,attr='body',ctx=Load)",  # test_a1_identity_formation:4534
+    "Attribute.value>Attribute(value=Subscript,attr='value',ctx=Load)",  # closed_walk:791
+    'Attribute.value>Await(value=Call)',  # test_a1_identity_formation:1562
+    'Attribute.value>BoolOp(op=Or,values=[Attribute])',  # closed_walk:461
+    'Attribute.value>BoolOp(op=Or,values=[Call|Name])',  # closed_walk:1328
+    'Attribute.value>Call(func=Attribute,args=[Call],keywords=[])',  # test_a1_identity_formation:4534
+    'Attribute.value>Call(func=Attribute,args=[Call],keywords=[keyword])',  # test_a1_identity_formation:2924
+    'Attribute.value>Call(func=Attribute,args=[Call|Name],keywords=[])',  # test_a1_identity_formation:4333
+    'Attribute.value>Call(func=Attribute,args=[List|Name],keywords=[])',  # closed_walk:445
+    'Attribute.value>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:138
+    'Attribute.value>Call(func=Attribute,args=[],keywords=[])',  # test_a1_identity_formation:128
+    'Attribute.value>Call(func=Name,args=[Constant],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1046
+    'Attribute.value>Call(func=Name,args=[Constant],keywords=[keyword])',  # closed_walk:360
+    'Attribute.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:355
+    'Attribute.value>Call(func=Name,args=[IfExp|Name],keywords=[])',  # closed_walk:1298
+    'Attribute.value>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:136
+    'Attribute.value>Call(func=Name,args=[Name],keywords=[keyword])',  # closed_walk:1309
+    'Attribute.value>Call(func=Name,args=[],keywords=[])',  # test_a1_identity_formation:1166
+    'Attribute.value>Constant(value=str)',  # closed_walk:575
+    'Attribute.value>Name(id=str,ctx=Load)',  # closed_walk:71
+    'Attribute.value>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # closed_walk:788
+    'Attribute.value>Subscript(value=Attribute,slice=UnaryOp,ctx=Load)',  # test_a1_identity_formation:1355
+    'Attribute.value>Subscript(value=Name,slice=BinOp,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):617
+    'Attribute.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:788
+    'Attribute.value>Subscript(value=Name,slice=Name,ctx=Load)',  # closed_walk:1989
+    'Attribute.value>Subscript(value=Name,slice=Slice,ctx=Load)',  # test_a1_identity_formation:486
+    'Attribute.value>Subscript(value=Name,slice=Subscript,ctx=Load)',  # test_a1_identity_formation:2292
+    'Attribute.value>Subscript(value=Name,slice=UnaryOp,ctx=Load)',  # test_a1_identity_formation:1398
+    'Attribute.value>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # test_a1_identity_formation:1321
+    'AugAssign.op>Add()',  # closed_walk:1503
+    'AugAssign.op>BitOr()',  # test_a1_identity_formation:4724
+    'AugAssign.op>Sub()',  # test_a1_identity_formation:1231
+    "AugAssign.target>Attribute(value=Attribute,attr='savepoints',ctx=Store)",  # test_a1_identity_formation:60
+    "AugAssign.target>Attribute(value=Name,attr='_lock_calls',ctx=Store)",  # test_a1_identity_formation:3451
+    "AugAssign.target>Attribute(value=Name,attr='commits',ctx=Store)",  # test_a1_identity_formation:82
+    "AugAssign.target>Attribute(value=Name,attr='depth',ctx=Store)",  # test_a1_identity_formation:2809
+    "AugAssign.target>Attribute(value=Name,attr='rollbacks',ctx=Store)",  # test_a1_identity_formation:85
+    'AugAssign.target>Name(id=str,ctx=Store)',  # test_a1_identity_formation:1134
+    'AugAssign.target>Subscript(value=Attribute,slice=BinOp,ctx=Store)',  # closed_walk:1545
+    'AugAssign.target>Subscript(value=Attribute,slice=Constant,ctx=Store)',  # closed_walk:1503
+    'AugAssign.target>Subscript(value=Name,slice=BinOp,ctx=Store)',  # test_a1_identity_formation:1109
+    'AugAssign.target>Subscript(value=Name,slice=Constant,ctx=Store)',  # test_a1_identity_formation:1070
+    'AugAssign.target>Subscript(value=Name,slice=JoinedStr,ctx=Store)',  # test_a1_identity_formation:1282
+    'AugAssign.target>Subscript(value=Name,slice=Tuple,ctx=Store)',  # test_match_hold_admission_gate_pg (a30d37f6):239
+    'AugAssign.value>Call(func=Name,args=[Attribute|Name],keywords=[])',  # test_a1_identity_formation:1134
+    'AugAssign.value>Constant(value=int)',  # closed_walk:1503
+    'AugAssign.value>SetComp(elt=Name,generators=[comprehension])',  # test_a1_identity_formation:4724
+    'Await.value>Call(func=Attribute,args=[Call],keywords=[])',  # test_a1_identity_formation:1562
+    'Await.value>Call(func=Attribute,args=[Name],keywords=[])',  # test_a1_identity_formation:3457
+    'Await.value>Call(func=Attribute,args=[],keywords=[])',  # test_a1_identity_formation:1574
+    "BinOp.left>Attribute(value=Attribute,attr='co_firstlineno',ctx=Load)",  # closed_walk:167
+    "BinOp.left>Attribute(value=Attribute,attr='defaults',ctx=Load)",  # closed_walk:1576
+    "BinOp.left>Attribute(value=Attribute,attr='parent',ctx=Load)",  # test_a1_identity_formation:4413
+    "BinOp.left>Attribute(value=Attribute,attr='posonlyargs',ctx=Load)",  # closed_walk:721
+    "BinOp.left>Attribute(value=Name,attr='body',ctx=Load)",  # test_a1_identity_formation:1429
+    "BinOp.left>Attribute(value=Name,attr='end_lineno',ctx=Load)",  # test_a1_identity_formation:3232
+    "BinOp.left>Attribute(value=Name,attr='parent',ctx=Load)",  # test_a1_identity_formation:3863
+    "BinOp.left>Attribute(value=Name,attr='posonlyargs',ctx=Load)",  # closed_walk:378
+    "BinOp.left>Attribute(value=Name,attr='pure_calls',ctx=Load)",  # closed_walk:1420
+    "BinOp.left>Attribute(value=Name,attr='pure_methods',ctx=Load)",  # closed_walk:1421
+    'BinOp.left>BinOp(left=Attribute,op=Add,right=Attribute)',  # closed_walk:378
+    'BinOp.left>BinOp(left=Attribute,op=Div,right=Constant)',  # test_a1_identity_formation:4413
+    'BinOp.left>BinOp(left=BinOp,op=Add,right=Attribute)',  # closed_walk:378
+    'BinOp.left>BinOp(left=BinOp,op=Add,right=Constant)',  # test_a1_identity_formation:3751
+    'BinOp.left>BinOp(left=BinOp,op=Add,right=JoinedStr)',  # test_a1_identity_formation:3755
+    'BinOp.left>BinOp(left=BinOp,op=Add,right=List)',  # test_a1_identity_formation:2372
+    'BinOp.left>BinOp(left=BinOp,op=Add,right=ListComp)',  # test_a1_identity_formation:2372
+    'BinOp.left>BinOp(left=BinOp,op=Add,right=Name)',  # test_a1_identity_formation:2452
+    'BinOp.left>BinOp(left=Call,op=Add,right=Call)',  # closed_walk:436
+    'BinOp.left>BinOp(left=Constant,op=Add,right=Call)',  # test_a1_identity_formation:3035
+    'BinOp.left>BinOp(left=Constant,op=Add,right=Name)',  # test_a1_identity_formation:3693
+    'BinOp.left>BinOp(left=Constant,op=Mult,right=BoolOp)',  # closed_walk:75
+    'BinOp.left>BinOp(left=List,op=Add,right=ListComp)',  # test_a1_identity_formation:2372
+    'BinOp.left>BinOp(left=List,op=Add,right=Name)',  # test_a1_identity_formation:2466
+    'BinOp.left>BinOp(left=Name,op=Add,right=Constant)',  # closed_walk:1218
+    'BinOp.left>BinOp(left=Name,op=Add,right=List)',  # test_a1_identity_formation:2472
+    'BinOp.left>BinOp(left=Name,op=Add,right=Name)',  # test_a1_identity_formation:2450
+    'BinOp.left>BinOp(left=Name,op=Sub,right=Attribute)',  # closed_walk:1247
+    'BinOp.left>Call(func=Attribute,args=[Constant],keywords=[])',  # test_a1_identity_formation:486
+    'BinOp.left>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # closed_walk:946
+    'BinOp.left>Call(func=Attribute,args=[Name],keywords=[])',  # test_a1_identity_formation:4472
+    'BinOp.left>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:436
+    'BinOp.left>Call(func=Name,args=[Constant|Name],keywords=[])',  # test_a1_identity_formation:1483
+    'BinOp.left>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:977
+    'BinOp.left>Call(func=Name,args=[],keywords=[])',  # closed_walk:281
+    'BinOp.left>Constant(value=str)',  # closed_walk:75
+    'BinOp.left>IfExp(test=Name,body=Constant,orelse=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):1832
+    'BinOp.left>JoinedStr(values=[Constant|FormattedValue])',  # test_match_hold_admission_gate_pg (a30d37f6):366
+    'BinOp.left>List(elts=[BinOp],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):1832
+    'BinOp.left>List(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:2372
+    'BinOp.left>ListComp(elt=JoinedStr,generators=[comprehension])',  # test_a1_identity_formation:2180
+    'BinOp.left>Name(id=str,ctx=Load)',  # closed_walk:135
+    'BinOp.left>Subscript(value=Attribute,slice=Slice,ctx=Load)',  # test_a1_identity_formation:1368
+    'BinOp.left>Subscript(value=Name,slice=Attribute,ctx=Load)',  # closed_walk:1054
+    'BinOp.left>Subscript(value=Name,slice=Constant,ctx=Load)',  # test_a1_identity_formation:1352
+    'BinOp.left>Tuple(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:4382
+    'BinOp.op>Add()',  # closed_walk:75
+    'BinOp.op>BitAnd()',  # closed_walk:1054
+    'BinOp.op>BitOr()',  # closed_walk:977
+    'BinOp.op>Div()',  # test_a1_identity_formation:3863
+    'BinOp.op>Mult()',  # closed_walk:75
+    'BinOp.op>Sub()',  # closed_walk:167
+    "BinOp.right>Attribute(value=Attribute,attr='args',ctx=Load)",  # closed_walk:721
+    "BinOp.right>Attribute(value=Attribute,attr='attr',ctx=Load)",  # closed_walk:1685
+    "BinOp.right>Attribute(value=Attribute,attr='kwonlyargs',ctx=Load)",  # closed_walk:1928
+    "BinOp.right>Attribute(value=Call,attr='__name__',ctx=Load)",  # closed_walk:1545
+    "BinOp.right>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:378
+    "BinOp.right>Attribute(value=Name,attr='kwonlyargs',ctx=Load)",  # closed_walk:378
+    "BinOp.right>Attribute(value=Name,attr='orelse',ctx=Load)",  # test_a1_identity_formation:1368
+    "BinOp.right>Attribute(value=Name,attr='read',ctx=Load)",  # closed_walk:1247
+    "BinOp.right>Attribute(value=Name,attr='setting',ctx=Load)",  # closed_walk:1254
+    "BinOp.right>Attribute(value=Name,attr='write',ctx=Load)",  # closed_walk:1247
+    'BinOp.right>BoolOp(op=Or,values=[Attribute|Constant])',  # closed_walk:75
+    'BinOp.right>Call(func=Attribute,args=[Call],keywords=[])',  # closed_walk:1242
+    'BinOp.right>Call(func=Attribute,args=[Constant],keywords=[])',  # test_a1_identity_formation:4554
+    'BinOp.right>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # test_a1_identity_formation:1109
+    'BinOp.right>Call(func=Attribute,args=[Name],keywords=[])',  # test_a1_identity_formation:1155
+    'BinOp.right>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:436
+    'BinOp.right>Call(func=Name,args=[Constant],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1046
+    'BinOp.right>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:135
+    'BinOp.right>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:281
+    'BinOp.right>Constant(value=int)',  # closed_walk:167
+    'BinOp.right>Constant(value=str)',  # test_a1_identity_formation:3035
+    'BinOp.right>IfExp(test=Attribute,body=Subscript,orelse=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):367
+    'BinOp.right>IfExp(test=Name,body=BinOp,orelse=Constant)',  # test_a1_identity_formation:1109
+    'BinOp.right>JoinedStr(values=[Constant|FormattedValue])',  # test_a1_identity_formation:3755
+    'BinOp.right>List(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:2377
+    'BinOp.right>List(elts=[JoinedStr],ctx=Load)',  # test_a1_identity_formation:2220
+    'BinOp.right>List(elts=[Name],ctx=Load)',  # closed_walk:1059
+    'BinOp.right>ListComp(elt=Attribute,generators=[comprehension])',  # closed_walk:1620
+    'BinOp.right>ListComp(elt=BinOp,generators=[comprehension])',  # closed_walk:985
+    'BinOp.right>ListComp(elt=Call,generators=[comprehension])',  # test_a1_identity_formation:2448
+    'BinOp.right>ListComp(elt=JoinedStr,generators=[comprehension])',  # test_a1_identity_formation:2182
+    'BinOp.right>ListComp(elt=Name,generators=[comprehension])',  # closed_walk:379
+    'BinOp.right>Name(id=str,ctx=Load)',  # closed_walk:139
+    'BinOp.right>Set(elts=[Constant])',  # closed_walk:1821
+    'BinOp.right>Subscript(value=Name,slice=Constant,ctx=Load)',  # test_a1_identity_formation:2430
+    'BinOp.right>Tuple(elts=[Name],ctx=Load)',  # test_a1_identity_formation:4517
+    'BinOp.right>Tuple(elts=[Tuple],ctx=Load)',  # test_a1_identity_formation:1262
+    'BoolOp.op>And()',  # closed_walk:188
+    'BoolOp.op>Or()',  # closed_walk:75
+    "BoolOp.values>Attribute(value=Attribute,attr='kwarg',ctx=Load)",  # closed_walk:1929
+    "BoolOp.values>Attribute(value=Attribute,attr='vararg',ctx=Load)",  # closed_walk:1929
+    "BoolOp.values>Attribute(value=Call,attr='parameters',ctx=Load)",  # closed_walk:777
+    "BoolOp.values>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:1749
+    "BoolOp.values>Attribute(value=Name,attr='asname',ctx=Load)",  # closed_walk:461
+    "BoolOp.values>Attribute(value=Name,attr='body',ctx=Load)",  # closed_walk:1939
+    "BoolOp.values>Attribute(value=Name,attr='decorator_list',ctx=Load)",  # closed_walk:2080
+    "BoolOp.values>Attribute(value=Name,attr='defaults',ctx=Load)",  # closed_walk:1031
+    "BoolOp.values>Attribute(value=Name,attr='depth',ctx=Load)",  # test_a1_identity_formation:2824
+    "BoolOp.values>Attribute(value=Name,attr='handlers',ctx=Load)",  # closed_walk:1936
+    "BoolOp.values>Attribute(value=Name,attr='keywords',ctx=Load)",  # closed_walk:1031
+    "BoolOp.values>Attribute(value=Name,attr='kwarg',ctx=Load)",  # closed_walk:1030
+    "BoolOp.values>Attribute(value=Name,attr='kwonlyargs',ctx=Load)",  # closed_walk:1031
+    "BoolOp.values>Attribute(value=Name,attr='level',ctx=Load)",  # closed_walk:75
+    "BoolOp.values>Attribute(value=Name,attr='lineno',ctx=Load)",  # test_a1_identity_formation:1069
+    "BoolOp.values>Attribute(value=Name,attr='module',ctx=Load)",  # closed_walk:75
+    "BoolOp.values>Attribute(value=Name,attr='name',ctx=Load)",  # closed_walk:461
+    "BoolOp.values>Attribute(value=Name,attr='orelse',ctx=Load)",  # test_a1_identity_formation:1329
+    "BoolOp.values>Attribute(value=Name,attr='problems',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):365
+    "BoolOp.values>Attribute(value=Name,attr='rest',ctx=Load)",  # closed_walk:469
+    "BoolOp.values>Attribute(value=Name,attr='vararg',ctx=Load)",  # closed_walk:1030
+    'BoolOp.values>BinOp(left=Name,op=BitAnd,right=Attribute)',  # closed_walk:1258
+    'BoolOp.values>BinOp(left=Name,op=BitAnd,right=Name)',  # test_a1_identity_formation:2982
+    'BoolOp.values>BoolOp(op=And,values=[Call])',  # test_match_hold_admission_gate_pg (a30d37f6):1259
+    'BoolOp.values>BoolOp(op=And,values=[Call|Compare])',  # closed_walk:693
+    'BoolOp.values>BoolOp(op=And,values=[Compare])',  # closed_walk:1232
+    'BoolOp.values>BoolOp(op=And,values=[Compare|Name])',  # test_a1_identity_formation:1100
+    'BoolOp.values>BoolOp(op=Or,values=[Attribute|UnaryOp])',  # closed_walk:1923
+    'BoolOp.values>BoolOp(op=Or,values=[BoolOp|Subscript])',  # test_a1_identity_formation:1100
+    'BoolOp.values>BoolOp(op=Or,values=[Call])',  # closed_walk:1956
+    'BoolOp.values>BoolOp(op=Or,values=[Compare])',  # test_a1_identity_formation:3193
+    'BoolOp.values>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:1560
+    'BoolOp.values>Call(func=Attribute,args=[Attribute|Constant],keywords=[])',  # closed_walk:1078
+    'BoolOp.values>Call(func=Attribute,args=[Attribute|Constant|Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):288
+    'BoolOp.values>Call(func=Attribute,args=[Attribute|Constant|Tuple],keywords=[])',  # test_a1_identity_formation:522
+    'BoolOp.values>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # test_a1_identity_formation:800
+    'BoolOp.values>Call(func=Attribute,args=[Attribute|Name|Tuple],keywords=[])',  # test_a1_identity_formation:852
+    'BoolOp.values>Call(func=Attribute,args=[Attribute|Subscript|Tuple],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):816
+    'BoolOp.values>Call(func=Attribute,args=[Constant],keywords=[])',  # test_a1_identity_formation:3245
+    'BoolOp.values>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # closed_walk:872
+    'BoolOp.values>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # test_a1_identity_formation:1073
+    'BoolOp.values>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:164
+    'BoolOp.values>Call(func=Attribute,args=[Name|Subscript|Tuple],keywords=[])',  # test_a1_identity_formation:2252
+    'BoolOp.values>Call(func=Attribute,args=[Subscript],keywords=[])',  # test_a1_identity_formation:3251
+    'BoolOp.values>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:313
+    'BoolOp.values>Call(func=Name,args=[Attribute|Constant],keywords=[])',  # test_a1_identity_formation:2823
+    'BoolOp.values>Call(func=Name,args=[Attribute|Constant|Name],keywords=[])',  # closed_walk:1945
+    'BoolOp.values>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:311
+    'BoolOp.values>Call(func=Name,args=[Attribute|Subscript],keywords=[])',  # closed_walk:787
+    'BoolOp.values>Call(func=Name,args=[Attribute|Tuple],keywords=[])',  # closed_walk:311
+    'BoolOp.values>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:525
+    'BoolOp.values>Call(func=Name,args=[Constant|Name|Subscript],keywords=[])',  # test_a1_identity_formation:863
+    'BoolOp.values>Call(func=Name,args=[GeneratorExp],keywords=[])',  # closed_walk:871
+    'BoolOp.values>Call(func=Name,args=[IfExp|Name],keywords=[])',  # test_a1_identity_formation:1233
+    'BoolOp.values>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:710
+    'BoolOp.values>Call(func=Name,args=[Name|Tuple],keywords=[])',  # closed_walk:467
+    'BoolOp.values>Call(func=Name,args=[Subscript],keywords=[])',  # closed_walk:1946
+    'BoolOp.values>Call(func=Name,args=[Subscript|Tuple],keywords=[])',  # test_a1_identity_formation:533
+    'BoolOp.values>Compare(left=Attribute,ops=[Eq],comparators=[Attribute])',  # closed_walk:549
+    'BoolOp.values>Compare(left=Attribute,ops=[Eq],comparators=[Constant])',  # closed_walk:950
+    'BoolOp.values>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # closed_walk:523
+    'BoolOp.values>Compare(left=Attribute,ops=[In],comparators=[Call])',  # closed_walk:667
+    'BoolOp.values>Compare(left=Attribute,ops=[In],comparators=[Name])',  # closed_walk:314
+    'BoolOp.values>Compare(left=Attribute,ops=[In],comparators=[Tuple])',  # test_a1_identity_formation:523
+    'BoolOp.values>Compare(left=Attribute,ops=[IsNot],comparators=[Constant])',  # closed_walk:604
+    'BoolOp.values>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # closed_walk:788
+    'BoolOp.values>Compare(left=Attribute,ops=[Is],comparators=[Name])',  # test_match_hold_admission_gate_pg (a30d37f6):776
+    'BoolOp.values>Compare(left=Attribute,ops=[NotEq],comparators=[Constant])',  # closed_walk:1759
+    'BoolOp.values>Compare(left=Attribute,ops=[NotEq],comparators=[UnaryOp])',  # closed_walk:855
+    'BoolOp.values>Compare(left=BinOp,ops=[Lt],comparators=[Call])',  # closed_walk:1225
+    'BoolOp.values>Compare(left=BinOp,ops=[NotIn],comparators=[Name])',  # test_a1_identity_formation:3253
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # closed_walk:672
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[JoinedStr])',  # test_a1_identity_formation:904
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Name])',  # test_a1_identity_formation:850
+    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Call])',  # test_match_hold_admission_gate_pg (a30d37f6):703
+    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Call])',  # test_match_hold_admission_gate_pg (a30d37f6):702
+    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Name])',  # closed_walk:1860
+    'BoolOp.values>Compare(left=Call,ops=[In],comparators=[Attribute])',  # closed_walk:1623
+    'BoolOp.values>Compare(left=Call,ops=[In],comparators=[Name])',  # closed_walk:971
+    'BoolOp.values>Compare(left=Call,ops=[In],comparators=[Tuple])',  # test_a1_identity_formation:920
+    'BoolOp.values>Compare(left=Call,ops=[IsNot],comparators=[Constant])',  # closed_walk:1637
+    'BoolOp.values>Compare(left=Call,ops=[Is],comparators=[Constant])',  # test_a1_identity_formation:1383
+    'BoolOp.values>Compare(left=Call,ops=[Is],comparators=[Name])',  # closed_walk:1051
+    'BoolOp.values>Compare(left=Call,ops=[LtE],comparators=[Name])',  # test_match_hold_admission_gate_pg (a30d37f6):583
+    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Constant])',  # test_match_hold_admission_gate_pg (a30d37f6):784
+    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # closed_walk:1032
+    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # closed_walk:174
+    'BoolOp.values>Compare(left=Call,ops=[NotIn],comparators=[Attribute])',  # closed_walk:1500
+    'BoolOp.values>Compare(left=Call,ops=[NotIn],comparators=[Name])',  # test_a1_identity_formation:924
+    'BoolOp.values>Compare(left=Constant,ops=[In],comparators=[Name])',  # closed_walk:1097
+    'BoolOp.values>Compare(left=Constant,ops=[NotIn],comparators=[Name])',  # closed_walk:1253
+    'BoolOp.values>Compare(left=ListComp,ops=[NotEq],comparators=[List])',  # test_a1_identity_formation:1378
+    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # closed_walk:517
+    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # closed_walk:1223
+    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[Subscript])',  # test_a1_identity_formation:3193
+    'BoolOp.values>Compare(left=Name,ops=[In],comparators=[Attribute])',  # closed_walk:1235
+    'BoolOp.values>Compare(left=Name,ops=[In],comparators=[Name])',  # closed_walk:188
+    'BoolOp.values>Compare(left=Name,ops=[In],comparators=[Subscript])',  # test_a1_identity_formation:1322
+    'BoolOp.values>Compare(left=Name,ops=[In],comparators=[Tuple])',  # closed_walk:1231
+    'BoolOp.values>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # closed_walk:474
+    'BoolOp.values>Compare(left=Name,ops=[IsNot],comparators=[Name])',  # closed_walk:517
+    'BoolOp.values>Compare(left=Name,ops=[Is],comparators=[Constant])',  # closed_walk:174
+    'BoolOp.values>Compare(left=Name,ops=[Is],comparators=[Name])',  # closed_walk:727
+    'BoolOp.values>Compare(left=Name,ops=[Is],comparators=[Subscript])',  # test_a1_identity_formation:1504
+    'BoolOp.values>Compare(left=Name,ops=[LtE],comparators=[Name])',  # test_a1_identity_formation:3193
+    'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Call])',  # closed_walk:727
+    'BoolOp.values>Compare(left=Name,ops=[NotEq],comparators=[Name])',  # closed_walk:732
+    'BoolOp.values>Compare(left=Name,ops=[NotIn],comparators=[Call])',  # closed_walk:474
+    'BoolOp.values>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # closed_walk:1239
+    'BoolOp.values>Compare(left=Name,ops=[NotIn],comparators=[Tuple])',  # closed_walk:1776
+    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # closed_walk:672
+    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # test_a1_identity_formation:1322
+    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Subscript])',  # closed_walk:1187
+    'BoolOp.values>Compare(left=Subscript,ops=[In],comparators=[Tuple])',  # closed_walk:1187
+    'BoolOp.values>Compare(left=Subscript,ops=[Is],comparators=[Name])',  # closed_walk:188
+    'BoolOp.values>Compare(left=Subscript,ops=[Is],comparators=[Subscript])',  # test_a1_identity_formation:2273
+    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Constant])',  # closed_walk:1205
+    'BoolOp.values>Compare(left=Subscript,ops=[NotIn],comparators=[Tuple])',  # closed_walk:906
+    'BoolOp.values>Compare(left=Tuple,ops=[Eq],comparators=[Tuple])',  # test_a1_identity_formation:1101
+    'BoolOp.values>Constant(value=NoneType)',  # test_a1_identity_formation:1073
+    'BoolOp.values>Constant(value=int)',  # closed_walk:75
+    'BoolOp.values>Constant(value=str)',  # closed_walk:75
+    'BoolOp.values>Dict(keys=[],values=[])',  # closed_walk:836
+    'BoolOp.values>List(elts=[Constant],ctx=Load)',  # closed_walk:1025
+    'BoolOp.values>List(elts=[],ctx=Load)',  # closed_walk:1157
+    'BoolOp.values>Name(id=str,ctx=Load)',  # closed_walk:525
+    'BoolOp.values>Subscript(value=Name,slice=Constant,ctx=Load)',  # test_a1_identity_formation:1100
+    'BoolOp.values>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # test_a1_identity_formation:1069
+    'BoolOp.values>UnaryOp(op=Not,operand=Attribute)',  # closed_walk:552
+    'BoolOp.values>UnaryOp(op=Not,operand=BinOp)',  # closed_walk:1253
+    'BoolOp.values>UnaryOp(op=Not,operand=BoolOp)',  # closed_walk:732
+    'BoolOp.values>UnaryOp(op=Not,operand=Call)',  # closed_walk:448
+    'BoolOp.values>UnaryOp(op=Not,operand=Compare)',  # test_a1_identity_formation:1209
+    'BoolOp.values>UnaryOp(op=Not,operand=Name)',  # closed_walk:981
+    'BoolOp.values>UnaryOp(op=Not,operand=Subscript)',  # test_match_hold_admission_gate_pg (a30d37f6):365
+    "Call.args>Attribute(value=Attribute,attr='__name__',ctx=Load)",  # closed_walk:1507
+    "Call.args>Attribute(value=Attribute,attr='callee',ctx=Load)",  # closed_walk:1648
+    "Call.args>Attribute(value=Attribute,attr='defaults',ctx=Load)",  # closed_walk:436
+    "Call.args>Attribute(value=Attribute,attr='execute_kind',ctx=Load)",  # closed_walk:1766
+    "Call.args>Attribute(value=Attribute,attr='func',ctx=Load)",  # closed_walk:763
+    "Call.args>Attribute(value=Attribute,attr='grammar',ctx=Load)",  # closed_walk:1657
+    "Call.args>Attribute(value=Attribute,attr='id',ctx=Load)",  # closed_walk:760
+    "Call.args>Attribute(value=Attribute,attr='kw_defaults',ctx=Load)",  # closed_walk:1969
+    "Call.args>Attribute(value=Attribute,attr='kwonlyargs',ctx=Load)",  # closed_walk:1969
+    "Call.args>Attribute(value=Attribute,attr='listed',ctx=Load)",  # closed_walk:1638
+    "Call.args>Attribute(value=Attribute,attr='namedtuple_class',ctx=Load)",  # closed_walk:1642
+    "Call.args>Attribute(value=Attribute,attr='opaque_callee',ctx=Load)",  # closed_walk:1809
+    "Call.args>Attribute(value=Attribute,attr='pure_awaits',ctx=Load)",  # closed_walk:1781
+    "Call.args>Attribute(value=Attribute,attr='pure_calls',ctx=Load)",  # closed_walk:1638
+    "Call.args>Attribute(value=Attribute,attr='session',ctx=Load)",  # closed_walk:2061
+    "Call.args>Attribute(value=Attribute,attr='session_argument',ctx=Load)",  # closed_walk:1537
+    "Call.args>Attribute(value=Attribute,attr='session_root_ok',ctx=Load)",  # closed_walk:1536
+    "Call.args>Attribute(value=Attribute,attr='spelled_in',ctx=Load)",  # closed_walk:1774
+    "Call.args>Attribute(value=Attribute,attr='sql',ctx=Load)",  # closed_walk:1766
+    "Call.args>Attribute(value=Attribute,attr='value',ctx=Load)",  # closed_walk:473
+    "Call.args>Attribute(value=Call,attr='__name__',ctx=Load)",  # closed_walk:136
+    "Call.args>Attribute(value=Call,attr='body',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):360
+    "Call.args>Attribute(value=Call,attr='effects',ctx=Load)",  # closed_walk:1842
+    "Call.args>Attribute(value=Call,attr='parameters',ctx=Load)",  # closed_walk:723
+    "Call.args>Attribute(value=Name,attr='A1_BINDINGS',ctx=Load)",  # test_a1_identity_formation:617
+    "Call.args>Attribute(value=Name,attr='A1_IMPORTS',ctx=Load)",  # test_a1_identity_formation:618
+    "Call.args>Attribute(value=Name,attr='A1_MEANINGFUL',ctx=Load)",  # test_a1_identity_formation:617
+    "Call.args>Attribute(value=Name,attr='A1_NAMEDTUPLES',ctx=Load)",  # test_a1_identity_formation:618
+    "Call.args>Attribute(value=Name,attr='A1_SHAPES',ctx=Load)",  # test_a1_identity_formation:617
+    "Call.args>Attribute(value=Name,attr='Add',ctx=Load)",  # closed_walk:846
+    "Call.args>Attribute(value=Name,attr='Assert',ctx=Load)",  # closed_walk:2028
+    "Call.args>Attribute(value=Name,attr='Assign',ctx=Load)",  # closed_walk:327
+    "Call.args>Attribute(value=Name,attr='AsyncWith',ctx=Load)",  # closed_walk:2058
+    "Call.args>Attribute(value=Name,attr='Attribute',ctx=Load)",  # closed_walk:313
+    "Call.args>Attribute(value=Name,attr='AugAssign',ctx=Load)",  # closed_walk:966
+    "Call.args>Attribute(value=Name,attr='Await',ctx=Load)",  # closed_walk:1945
+    "Call.args>Attribute(value=Name,attr='BinOp',ctx=Load)",  # closed_walk:846
+    "Call.args>Attribute(value=Name,attr='Break',ctx=Load)",  # test_a1_identity_formation:1298
+    "Call.args>Attribute(value=Name,attr='Call',ctx=Load)",  # closed_walk:313
+    "Call.args>Attribute(value=Name,attr='ClassDef',ctx=Load)",  # closed_walk:454
+    "Call.args>Attribute(value=Name,attr='Compare',ctx=Load)",  # closed_walk:899
+    "Call.args>Attribute(value=Name,attr='Constant',ctx=Load)",  # closed_walk:786
+    "Call.args>Attribute(value=Name,attr='Delete',ctx=Load)",  # closed_walk:2025
+    "Call.args>Attribute(value=Name,attr='Dict',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):650
+    "Call.args>Attribute(value=Name,attr='DictComp',ctx=Load)",  # closed_walk:1591
+    "Call.args>Attribute(value=Name,attr='Eq',ctx=Load)",  # test_a1_identity_formation:854
+    "Call.args>Attribute(value=Name,attr='ExceptHandler',ctx=Load)",  # closed_walk:462
+    "Call.args>Attribute(value=Name,attr='Expr',ctx=Load)",  # closed_walk:785
+    "Call.args>Attribute(value=Name,attr='For',ctx=Load)",  # closed_walk:2037
+    "Call.args>Attribute(value=Name,attr='FormattedValue',ctx=Load)",  # closed_walk:854
+    "Call.args>Attribute(value=Name,attr='FunctionDef',ctx=Load)",  # closed_walk:2076
+    "Call.args>Attribute(value=Name,attr='Global',ctx=Load)",  # closed_walk:2097
+    "Call.args>Attribute(value=Name,attr='If',ctx=Load)",  # closed_walk:899
+    "Call.args>Attribute(value=Name,attr='IfExp',ctx=Load)",  # closed_walk:937
+    "Call.args>Attribute(value=Name,attr='Import',ctx=Load)",  # closed_walk:72
+    "Call.args>Attribute(value=Name,attr='ImportFrom',ctx=Load)",  # closed_walk:74
+    "Call.args>Attribute(value=Name,attr='Is',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):777
+    "Call.args>Attribute(value=Name,attr='IsNot',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1291
+    "Call.args>Attribute(value=Name,attr='JoinedStr',ctx=Load)",  # closed_walk:849
+    "Call.args>Attribute(value=Name,attr='Lambda',ctx=Load)",  # closed_walk:456
+    "Call.args>Attribute(value=Name,attr='Load',ctx=Load)",  # closed_walk:448
+    "Call.args>Attribute(value=Name,attr='MatchMapping',ctx=Load)",  # closed_walk:469
+    "Call.args>Attribute(value=Name,attr='Module',ctx=Load)",  # closed_walk:1296
+    "Call.args>Attribute(value=Name,attr='Name',ctx=Load)",  # closed_walk:311
+    "Call.args>Attribute(value=Name,attr='Not',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):815
+    "Call.args>Attribute(value=Name,attr='NotIn',ctx=Load)",  # closed_walk:901
+    "Call.args>Attribute(value=Name,attr='Pass',ctx=Load)",  # test_a1_identity_formation:1140
+    "Call.args>Attribute(value=Name,attr='Raise',ctx=Load)",  # closed_walk:1287
+    "Call.args>Attribute(value=Name,attr='Return',ctx=Load)",  # closed_walk:789
+    "Call.args>Attribute(value=Name,attr='Starred',ctx=Load)",  # closed_walk:1033
+    "Call.args>Attribute(value=Name,attr='Store',ctx=Load)",  # test_a1_identity_formation:3838
+    "Call.args>Attribute(value=Name,attr='Subscript',ctx=Load)",  # closed_walk:869
+    "Call.args>Attribute(value=Name,attr='Try',ctx=Load)",  # closed_walk:1936
+    "Call.args>Attribute(value=Name,attr='Tuple',ctx=Load)",  # test_a1_identity_formation:839
+    "Call.args>Attribute(value=Name,attr='UnaryOp',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):814
+    "Call.args>Attribute(value=Name,attr='While',ctx=Load)",  # test_a1_identity_formation:896
+    "Call.args>Attribute(value=Name,attr='__dict__',ctx=Load)",  # test_a1_identity_formation:3671
+    "Call.args>Attribute(value=Name,attr='__file__',ctx=Load)",  # test_a1_identity_formation:3671
+    "Call.args>Attribute(value=Name,attr='__name__',ctx=Load)",  # closed_walk:275
+    "Call.args>Attribute(value=Name,attr='_ffa_gather_decide',ctx=Load)",  # test_a1_identity_formation:4402
+    "Call.args>Attribute(value=Name,attr='allowed',ctx=Load)",  # closed_walk:151
+    "Call.args>Attribute(value=Name,attr='annotation',ctx=Load)",  # closed_walk:2087
+    "Call.args>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:434
+    "Call.args>Attribute(value=Name,attr='attr',ctx=Load)",  # closed_walk:761
+    "Call.args>Attribute(value=Name,attr='b',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):425
+    "Call.args>Attribute(value=Name,attr='body',ctx=Load)",  # closed_walk:436
+    "Call.args>Attribute(value=Name,attr='cause',ctx=Load)",  # closed_walk:2073
+    "Call.args>Attribute(value=Name,attr='comprehension',ctx=Load)",  # closed_walk:1581
+    "Call.args>Attribute(value=Name,attr='ctx',ctx=Load)",  # closed_walk:311
+    "Call.args>Attribute(value=Name,attr='effects',ctx=Load)",  # closed_walk:1490
+    "Call.args>Attribute(value=Name,attr='elts',ctx=Load)",  # test_a1_identity_formation:839
+    "Call.args>Attribute(value=Name,attr='end_lineno',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):62
+    "Call.args>Attribute(value=Name,attr='exc',ctx=Load)",  # closed_walk:2071
+    "Call.args>Attribute(value=Name,attr='expr',ctx=Load)",  # closed_walk:1500
+    "Call.args>Attribute(value=Name,attr='finalbody',ctx=Load)",  # closed_walk:2048
+    "Call.args>Attribute(value=Name,attr='func',ctx=Load)",  # closed_walk:313
+    "Call.args>Attribute(value=Name,attr='grammar',ctx=Load)",  # closed_walk:766
+    "Call.args>Attribute(value=Name,attr='guarded',ctx=Load)",  # closed_walk:1767
+    "Call.args>Attribute(value=Name,attr='id',ctx=Load)",  # closed_walk:312
+    "Call.args>Attribute(value=Name,attr='iter',ctx=Load)",  # closed_walk:1583
+    "Call.args>Attribute(value=Name,attr='keys',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):654
+    "Call.args>Attribute(value=Name,attr='left',ctx=Load)",  # closed_walk:847
+    "Call.args>Attribute(value=Name,attr='lineno',ctx=Load)",  # closed_walk:844
+    "Call.args>Attribute(value=Name,attr='local',ctx=Load)",  # closed_walk:1766
+    "Call.args>Attribute(value=Name,attr='meaningful',ctx=Load)",  # closed_walk:150
+    "Call.args>Attribute(value=Name,attr='module',ctx=Load)",  # closed_walk:755
+    "Call.args>Attribute(value=Name,attr='msg',ctx=Load)",  # closed_walk:2031
+    "Call.args>Attribute(value=Name,attr='name',ctx=Load)",  # closed_walk:451
+    "Call.args>Attribute(value=Name,attr='op',ctx=Load)",  # closed_walk:846
+    "Call.args>Attribute(value=Name,attr='opaque',ctx=Load)",  # closed_walk:1804
+    "Call.args>Attribute(value=Name,attr='operand',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):816
+    "Call.args>Attribute(value=Name,attr='ops',ctx=Load)",  # closed_walk:900
+    "Call.args>Attribute(value=Name,attr='orelse',ctx=Load)",  # closed_walk:938
+    "Call.args>Attribute(value=Name,attr='p',ctx=Load)",  # closed_walk:1659
+    "Call.args>Attribute(value=Name,attr='params',ctx=Load)",  # closed_walk:1774
+    "Call.args>Attribute(value=Name,attr='policy',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):290
+    "Call.args>Attribute(value=Name,attr='problems',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1224
+    "Call.args>Attribute(value=Name,attr='pure_awaits',ctx=Load)",  # closed_walk:1422
+    "Call.args>Attribute(value=Name,attr='pure_calls',ctx=Load)",  # closed_walk:1916
+    "Call.args>Attribute(value=Name,attr='pure_methods',ctx=Load)",  # closed_walk:1916
+    "Call.args>Attribute(value=Name,attr='rest',ctx=Load)",  # closed_walk:470
+    "Call.args>Attribute(value=Name,attr='returns',ctx=Load)",  # closed_walk:2089
+    "Call.args>Attribute(value=Name,attr='right',ctx=Load)",  # closed_walk:848
+    "Call.args>Attribute(value=Name,attr='scope',ctx=Load)",  # closed_walk:511
+    "Call.args>Attribute(value=Name,attr='session',ctx=Load)",  # closed_walk:677
+    "Call.args>Attribute(value=Name,attr='shapes',ctx=Load)",  # closed_walk:144
+    "Call.args>Attribute(value=Name,attr='slice',ctx=Load)",  # closed_walk:1038
+    "Call.args>Attribute(value=Name,attr='sql',ctx=Load)",  # closed_walk:1422
+    "Call.args>Attribute(value=Name,attr='statements',ctx=Load)",  # test_a1_identity_formation:108
+    "Call.args>Attribute(value=Name,attr='stmt',ctx=Load)",  # closed_walk:894
+    "Call.args>Attribute(value=Name,attr='target',ctx=Load)",  # closed_walk:967
+    "Call.args>Attribute(value=Name,attr='targets',ctx=Load)",  # closed_walk:943
+    "Call.args>Attribute(value=Name,attr='test',ctx=Load)",  # closed_walk:2029
+    "Call.args>Attribute(value=Name,attr='type',ctx=Load)",  # closed_walk:2054
+    "Call.args>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:759
+    "Call.args>Attribute(value=Name,attr='values',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):653
+    "Call.args>Attribute(value=Subscript,attr='id',ctx=Load)",  # closed_walk:909
+    "Call.args>Attribute(value=Subscript,attr='lineno',ctx=Load)",  # test_a1_identity_formation:1266
+    "Call.args>Attribute(value=Subscript,attr='name',ctx=Load)",  # closed_walk:793
+    "Call.args>Attribute(value=Subscript,attr='names',ctx=Load)",  # closed_walk:788
+    "Call.args>Attribute(value=Subscript,attr='target',ctx=Load)",  # test_a1_identity_formation:908
+    "Call.args>Attribute(value=Subscript,attr='value',ctx=Load)",  # closed_walk:790
+    'Call.args>BinOp(left=Attribute,op=Add,right=Constant)',  # test_a1_identity_formation:3232
+    'Call.args>BinOp(left=Attribute,op=BitOr,right=Name)',  # closed_walk:1420
+    'Call.args>BinOp(left=BinOp,op=Add,right=Call)',  # closed_walk:1220
+    'Call.args>BinOp(left=BinOp,op=Add,right=Constant)',  # test_a1_identity_formation:3035
+    'Call.args>BinOp(left=BinOp,op=Add,right=List)',  # test_a1_identity_formation:2452
+    'Call.args>BinOp(left=BinOp,op=Add,right=ListComp)',  # test_a1_identity_formation:2372
+    'Call.args>BinOp(left=BinOp,op=Add,right=Name)',  # test_a1_identity_formation:2450
+    'Call.args>BinOp(left=Call,op=Add,right=Constant)',  # test_a1_identity_formation:486
+    'Call.args>BinOp(left=Call,op=Add,right=Name)',  # test_match_hold_admission_gate_pg (a30d37f6):1061
+    'Call.args>BinOp(left=Call,op=Add,right=Tuple)',  # test_a1_identity_formation:4517
+    'Call.args>BinOp(left=Call,op=Sub,right=Call)',  # closed_walk:281
+    'Call.args>BinOp(left=Constant,op=Add,right=Subscript)',  # test_match_hold_admission_gate_pg (a30d37f6):381
+    'Call.args>BinOp(left=List,op=Add,right=ListComp)',  # test_match_hold_admission_gate_pg (a30d37f6):1912
+    'Call.args>BinOp(left=List,op=Add,right=Name)',  # test_a1_identity_formation:2469
+    'Call.args>BinOp(left=Name,op=Add,right=Constant)',  # closed_walk:1226
+    'Call.args>BinOp(left=Name,op=Add,right=Name)',  # test_a1_identity_formation:2451
+    'Call.args>BinOp(left=Name,op=Add,right=Tuple)',  # test_a1_identity_formation:1262
+    'Call.args>BinOp(left=Name,op=BitAnd,right=Name)',  # closed_walk:1242
+    'Call.args>BinOp(left=Name,op=Sub,right=Constant)',  # test_a1_identity_formation:3204
+    'Call.args>BinOp(left=Name,op=Sub,right=Name)',  # test_a1_identity_formation:1511
+    'Call.args>BinOp(left=Name,op=Sub,right=Set)',  # test_a1_identity_formation:2297
+    'Call.args>BoolOp(op=Or,values=[Attribute])',  # test_a1_identity_formation:3824
+    'Call.args>BoolOp(op=Or,values=[Call|List])',  # closed_walk:1157
+    'Call.args>BoolOp(op=Or,values=[Call|Name])',  # closed_walk:662
+    'Call.args>BoolOp(op=Or,values=[Call|Subscript])',  # test_match_hold_admission_gate_pg (a30d37f6):255
+    'Call.args>BoolOp(op=Or,values=[Dict|Name])',  # test_a1_identity_formation:75
+    'Call.args>BoolOp(op=Or,values=[Name|Subscript])',  # test_match_hold_admission_gate_pg (a30d37f6):275
+    'Call.args>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:755
+    'Call.args>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:765
+    'Call.args>Call(func=Attribute,args=[BinOp],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1912
+    'Call.args>Call(func=Attribute,args=[Call],keywords=[])',  # closed_walk:1869
+    'Call.args>Call(func=Attribute,args=[Constant],keywords=[])',  # test_a1_identity_formation:3864
+    'Call.args>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # test_a1_identity_formation:4515
+    'Call.args>Call(func=Attribute,args=[List|Name],keywords=[])',  # closed_walk:984
+    'Call.args>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:141
+    'Call.args>Call(func=Attribute,args=[Name|Tuple],keywords=[])',  # closed_walk:494
+    'Call.args>Call(func=Attribute,args=[Subscript],keywords=[])',  # test_a1_identity_formation:4330
+    'Call.args>Call(func=Attribute,args=[Tuple],keywords=[keyword])',  # test_a1_identity_formation:724
+    'Call.args>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:874
+    'Call.args>Call(func=Attribute,args=[],keywords=[keyword])',  # test_a1_identity_formation:1290
+    'Call.args>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:1570
+    'Call.args>Call(func=Name,args=[Attribute|BinOp],keywords=[])',  # test_a1_identity_formation:3232
+    'Call.args>Call(func=Name,args=[Attribute|Constant|Name],keywords=[])',  # test_a1_identity_formation:3671
+    'Call.args>Call(func=Name,args=[Attribute|GeneratorExp],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):653
+    'Call.args>Call(func=Name,args=[Attribute|ListComp],keywords=[])',  # closed_walk:1967
+    'Call.args>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:1820
+    'Call.args>Call(func=Name,args=[Attribute|Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):1249
+    'Call.args>Call(func=Name,args=[BinOp],keywords=[])',  # closed_walk:1242
+    'Call.args>Call(func=Name,args=[BinOp|Name],keywords=[])',  # closed_walk:1220
+    'Call.args>Call(func=Name,args=[BoolOp],keywords=[])',  # test_a1_identity_formation:90
+    'Call.args>Call(func=Name,args=[Call],keywords=[])',  # closed_walk:874
+    'Call.args>Call(func=Name,args=[Call|Constant],keywords=[])',  # test_a1_identity_formation:1218
+    'Call.args>Call(func=Name,args=[Call|Dict],keywords=[])',  # test_a1_identity_formation:1218
+    'Call.args>Call(func=Name,args=[Call|Name],keywords=[])',  # test_a1_identity_formation:2940
+    'Call.args>Call(func=Name,args=[Constant],keywords=[])',  # test_a1_identity_formation:1562
+    'Call.args>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:1515
+    'Call.args>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:133
+    'Call.args>Call(func=Name,args=[Set],keywords=[])',  # test_a1_identity_formation:1256
+    'Call.args>Call(func=Name,args=[Subscript],keywords=[])',  # test_a1_identity_formation:922
+    'Call.args>Call(func=Name,args=[],keywords=[])',  # test_a1_identity_formation:2932
+    'Call.args>Constant(value=NoneType)',  # closed_walk:187
+    'Call.args>Constant(value=bool)',  # closed_walk:1153
+    'Call.args>Constant(value=int)',  # closed_walk:135
+    'Call.args>Constant(value=str)',  # closed_walk:135
+    'Call.args>Dict(keys=[Constant],values=[Attribute])',  # test_a1_identity_formation:3454
+    'Call.args>Dict(keys=[Constant],values=[Dict|Name])',  # test_a1_identity_formation:1219
+    'Call.args>Dict(keys=[NoneType],values=[Name])',  # test_a1_identity_formation:1438
+    'Call.args>Dict(keys=[],values=[])',  # test_a1_identity_formation:725
+    'Call.args>DictComp(key=Attribute,value=Name,generators=[comprehension])',  # closed_walk:1969
+    'Call.args>DictComp(key=Name,value=Name,generators=[comprehension])',  # test_a1_identity_formation:4475
+    'Call.args>GeneratorExp(elt=Attribute,generators=[comprehension])',  # closed_walk:952
+    'Call.args>GeneratorExp(elt=BinOp,generators=[comprehension])',  # test_a1_identity_formation:4515
+    'Call.args>GeneratorExp(elt=BoolOp,generators=[comprehension])',  # closed_walk:871
+    'Call.args>GeneratorExp(elt=Call,generators=[comprehension])',  # closed_walk:919
+    'Call.args>GeneratorExp(elt=Compare,generators=[comprehension])',  # closed_walk:127
+    'Call.args>GeneratorExp(elt=Constant,generators=[comprehension])',  # closed_walk:174
+    'Call.args>GeneratorExp(elt=JoinedStr,generators=[comprehension])',  # test_a1_identity_formation:1109
+    'Call.args>GeneratorExp(elt=Name,generators=[comprehension])',  # closed_walk:498
+    'Call.args>GeneratorExp(elt=Subscript,generators=[comprehension])',  # closed_walk:683
+    'Call.args>GeneratorExp(elt=Tuple,generators=[comprehension])',  # closed_walk:73
+    'Call.args>GeneratorExp(elt=UnaryOp,generators=[comprehension])',  # test_a1_identity_formation:1209
+    'Call.args>IfExp(test=Call,body=Attribute,orelse=Name)',  # test_a1_identity_formation:1233
+    'Call.args>IfExp(test=Call,body=Name,orelse=Constant)',  # closed_walk:1298
+    'Call.args>IfExp(test=Call,body=Tuple,orelse=Tuple)',  # closed_walk:1434
+    'Call.args>IfExp(test=Compare,body=JoinedStr,orelse=Constant)',  # closed_walk:1745
+    'Call.args>IfExp(test=Compare,body=Name,orelse=Name)',  # test_a1_identity_formation:1498
+    'Call.args>IfExp(test=Compare,body=Tuple,orelse=Tuple)',  # closed_walk:1437
+    'Call.args>IfExp(test=Name,body=Constant,orelse=Constant)',  # closed_walk:1995
+    'Call.args>IfExp(test=Name,body=List,orelse=List)',  # test_a1_identity_formation:99
+    'Call.args>IfExp(test=Name,body=Name,orelse=BinOp)',  # test_a1_identity_formation:4486
+    'Call.args>JoinedStr(values=[Constant|FormattedValue])',  # closed_walk:139
+    'Call.args>Lambda(args=arguments,body=Call)',  # closed_walk:1767
+    'Call.args>List(elts=[Attribute],ctx=Load)',  # closed_walk:853
+    'Call.args>List(elts=[BinOp|Constant],ctx=Load)',  # test_a1_identity_formation:4584
+    'Call.args>List(elts=[Call],ctx=Load)',  # closed_walk:847
+    'Call.args>List(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:4568
+    'Call.args>List(elts=[Name],ctx=Load)',  # closed_walk:917
+    'Call.args>List(elts=[],ctx=Load)',  # closed_walk:445
+    'Call.args>ListComp(elt=Attribute,generators=[comprehension])',  # closed_walk:1967
+    'Call.args>Name(id=str,ctx=Load)',  # closed_walk:71
+    'Call.args>Set(elts=[Call])',  # test_a1_identity_formation:2292
+    'Call.args>Set(elts=[Name])',  # test_a1_identity_formation:1256
+    'Call.args>SetComp(elt=Tuple,generators=[comprehension])',  # test_a1_identity_formation:1108
+    'Call.args>Starred(value=Call,ctx=Load)',  # closed_walk:784
+    'Call.args>Starred(value=GeneratorExp,ctx=Load)',  # test_a1_identity_formation:4399
+    'Call.args>Starred(value=ListComp,ctx=Load)',  # test_a1_identity_formation:1166
+    'Call.args>Starred(value=Name,ctx=Load)',  # closed_walk:1064
+    'Call.args>Subscript(value=Attribute,slice=BinOp,ctx=Load)',  # test_a1_identity_formation:1428
+    'Call.args>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # closed_walk:901
+    'Call.args>Subscript(value=Attribute,slice=Name,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):586
+    'Call.args>Subscript(value=Attribute,slice=Slice,ctx=Load)',  # closed_walk:1504
+    'Call.args>Subscript(value=Attribute,slice=UnaryOp,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):822
+    'Call.args>Subscript(value=Call,slice=Constant,ctx=Load)',  # closed_walk:461
+    'Call.args>Subscript(value=Name,slice=Attribute,ctx=Load)',  # closed_walk:865
+    'Call.args>Subscript(value=Name,slice=BinOp,ctx=Load)',  # test_a1_identity_formation:2280
+    'Call.args>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:787
+    'Call.args>Subscript(value=Name,slice=Name,ctx=Load)',  # closed_walk:1059
+    'Call.args>Subscript(value=Name,slice=Slice,ctx=Load)',  # closed_walk:1186
+    'Call.args>Subscript(value=Name,slice=UnaryOp,ctx=Load)',  # test_a1_identity_formation:2274
+    'Call.args>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # closed_walk:1517
+    'Call.args>Subscript(value=Tuple,slice=Name,ctx=Load)',  # test_a1_identity_formation:4535
+    'Call.args>Tuple(elts=[Attribute],ctx=Load)',  # closed_walk:311
+    'Call.args>Tuple(elts=[Attribute|Call|Constant|Name],ctx=Load)',  # test_a1_identity_formation:1261
+    'Call.args>Tuple(elts=[Attribute|Call|Constant|Subscript],ctx=Load)',  # test_a1_identity_formation:1269
+    'Call.args>Tuple(elts=[Attribute|Call|Name],ctx=Load)',  # test_a1_identity_formation:1297
+    'Call.args>Tuple(elts=[Attribute|Constant],ctx=Load)',  # closed_walk:1079
+    'Call.args>Tuple(elts=[Attribute|JoinedStr],ctx=Load)',  # test_a1_identity_formation:1143
+    'Call.args>Tuple(elts=[Attribute|Name],ctx=Load)',  # test_a1_identity_formation:1299
+    'Call.args>Tuple(elts=[Attribute|Subscript],ctx=Load)',  # closed_walk:975
+    'Call.args>Tuple(elts=[BinOp|Constant],ctx=Load)',  # closed_walk:1241
+    'Call.args>Tuple(elts=[BinOp|Name],ctx=Load)',  # test_a1_identity_formation:3255
+    'Call.args>Tuple(elts=[BoolOp|Subscript],ctx=Load)',  # test_a1_identity_formation:1069
+    'Call.args>Tuple(elts=[Call],ctx=Load)',  # closed_walk:915
+    'Call.args>Tuple(elts=[Call|Constant],ctx=Load)',  # closed_walk:1765
+    'Call.args>Tuple(elts=[Call|Constant|Subscript],ctx=Load)',  # test_a1_identity_formation:119
+    'Call.args>Tuple(elts=[Call|JoinedStr],ctx=Load)',  # closed_walk:287
+    'Call.args>Tuple(elts=[Call|Name],ctx=Load)',  # closed_walk:1510
+    'Call.args>Tuple(elts=[Compare|Name],ctx=Load)',  # closed_walk:1237
+    'Call.args>Tuple(elts=[Constant],ctx=Load)',  # closed_walk:1185
+    'Call.args>Tuple(elts=[Constant|JoinedStr],ctx=Load)',  # closed_walk:1183
+    'Call.args>Tuple(elts=[Constant|JoinedStr|Name],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):313
+    'Call.args>Tuple(elts=[Constant|List],ctx=Load)',  # test_a1_identity_formation:4405
+    'Call.args>Tuple(elts=[Constant|Name],ctx=Load)',  # closed_walk:1509
+    'Call.args>Tuple(elts=[Constant|Name|Subscript],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):317
+    'Call.args>Tuple(elts=[IfExp|JoinedStr],ctx=Load)',  # closed_walk:1831
+    'Call.args>Tuple(elts=[JoinedStr|List],ctx=Load)',  # test_a1_identity_formation:4395
+    'Call.args>Tuple(elts=[JoinedStr|Name],ctx=Load)',  # closed_walk:147
+    'Call.args>Tuple(elts=[JoinedStr|Subscript],ctx=Load)',  # closed_walk:1828
+    'Call.args>Tuple(elts=[Name],ctx=Load)',  # closed_walk:445
+    'Call.args>Tuple(elts=[Subscript],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):1210
+    'Call.args>Tuple(elts=[],ctx=Load)',  # closed_walk:494
+    'Call.args>UnaryOp(op=USub,operand=Constant)',  # test_a1_identity_formation:3204
+    "Call.func>Attribute(value=Attribute,attr='add',ctx=Load)",  # closed_walk:635
+    "Call.func>Attribute(value=Attribute,attr='admit',ctx=Load)",  # closed_walk:1013
+    "Call.func>Attribute(value=Attribute,attr='append',ctx=Load)",  # closed_walk:1607
+    "Call.func>Attribute(value=Attribute,attr='basename',ctx=Load)",  # closed_walk:167
+    "Call.func>Attribute(value=Attribute,attr='callee',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):253
+    "Call.func>Attribute(value=Attribute,attr='discard',ctx=Load)",  # closed_walk:1891
+    "Call.func>Attribute(value=Attribute,attr='get',ctx=Load)",  # closed_walk:133
+    "Call.func>Attribute(value=Attribute,attr='helper_hook',ctx=Load)",  # closed_walk:1818
+    "Call.func>Attribute(value=Attribute,attr='insert',ctx=Load)",  # test_a1_identity_formation:4534
+    "Call.func>Attribute(value=Attribute,attr='is_param',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):592
+    "Call.func>Attribute(value=Attribute,attr='is_root',ctx=Load)",  # closed_walk:1565
+    "Call.func>Attribute(value=Attribute,attr='is_session',ctx=Load)",  # closed_walk:1560
+    "Call.func>Attribute(value=Attribute,attr='items',ctx=Load)",  # closed_walk:498
+    "Call.func>Attribute(value=Attribute,attr='lower',ctx=Load)",  # closed_walk:2049
+    "Call.func>Attribute(value=Attribute,attr='module_accessor',ctx=Load)",  # closed_walk:1657
+    "Call.func>Attribute(value=Attribute,attr='named',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):533
+    "Call.func>Attribute(value=Attribute,attr='resolve',ctx=Load)",  # closed_walk:1515
+    "Call.func>Attribute(value=Attribute,attr='same',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):816
+    "Call.func>Attribute(value=Attribute,attr='session_argument',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):273
+    "Call.func>Attribute(value=Attribute,attr='session_root_ok',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):272
+    "Call.func>Attribute(value=Attribute,attr='session_value',ctx=Load)",  # closed_walk:1535
+    "Call.func>Attribute(value=Attribute,attr='setdefault',ctx=Load)",  # closed_walk:139
+    "Call.func>Attribute(value=Attribute,attr='spelled_once',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):658
+    "Call.func>Attribute(value=Attribute,attr='update',ctx=Load)",  # closed_walk:125
+    "Call.func>Attribute(value=Await,attr='scalar',ctx=Load)",  # test_a1_identity_formation:1562
+    "Call.func>Attribute(value=BoolOp,attr='callee',ctx=Load)",  # closed_walk:1337
+    "Call.func>Attribute(value=BoolOp,attr='execute_kind',ctx=Load)",  # closed_walk:1328
+    "Call.func>Attribute(value=BoolOp,attr='split',ctx=Load)",  # closed_walk:461
+    "Call.func>Attribute(value=Call,attr='__init__',ctx=Load)",  # test_a1_identity_formation:3443
+    "Call.func>Attribute(value=Call,attr='accept',ctx=Load)",  # closed_walk:1842
+    "Call.func>Attribute(value=Call,attr='append',ctx=Load)",  # closed_walk:445
+    "Call.func>Attribute(value=Call,attr='bound',ctx=Load)",  # closed_walk:355
+    "Call.func>Attribute(value=Call,attr='execute',ctx=Load)",  # test_a1_identity_formation:3457
+    "Call.func>Attribute(value=Call,attr='guards',ctx=Load)",  # closed_walk:1298
+    "Call.func>Attribute(value=Call,attr='is_session',ctx=Load)",  # closed_walk:1315
+    "Call.func>Attribute(value=Call,attr='items',ctx=Load)",  # closed_walk:138
+    "Call.func>Attribute(value=Call,attr='join',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1046
+    "Call.func>Attribute(value=Call,attr='local_sql',ctx=Load)",  # closed_walk:1308
+    "Call.func>Attribute(value=Call,attr='new_event_loop',ctx=Load)",  # test_a1_identity_formation:128
+    "Call.func>Attribute(value=Call,attr='read',ctx=Load)",  # test_a1_identity_formation:2924
+    "Call.func>Attribute(value=Call,attr='resolve',ctx=Load)",  # test_a1_identity_formation:3861
+    "Call.func>Attribute(value=Call,attr='run_until_complete',ctx=Load)",  # test_a1_identity_formation:128
+    "Call.func>Attribute(value=Call,attr='split',ctx=Load)",  # closed_walk:719
+    "Call.func>Attribute(value=Call,attr='sql_texts',ctx=Load)",  # closed_walk:1275
+    "Call.func>Attribute(value=Call,attr='startswith',ctx=Load)",  # test_a1_identity_formation:2941
+    "Call.func>Attribute(value=Call,attr='union',ctx=Load)",  # test_a1_identity_formation:1166
+    "Call.func>Attribute(value=Call,attr='visit',ctx=Load)",  # test_a1_identity_formation:2828
+    "Call.func>Attribute(value=Constant,attr='join',ctx=Load)",  # closed_walk:575
+    "Call.func>Attribute(value=Name,attr='Bindings',ctx=Load)",  # test_a1_identity_formation:536
+    "Call.func>Attribute(value=Name,attr='Counter',ctx=Load)",  # closed_walk:1397
+    "Call.func>Attribute(value=Name,attr='Expression',ctx=Load)",  # test_a1_identity_formation:1218
+    "Call.func>Attribute(value=Name,attr='Grammar',ctx=Load)",  # test_a1_identity_formation:617
+    "Call.func>Attribute(value=Name,attr='Load',ctx=Load)",  # test_a1_identity_formation:1290
+    "Call.func>Attribute(value=Name,attr='ModuleType',ctx=Load)",  # test_a1_identity_formation:3665
+    "Call.func>Attribute(value=Name,attr='Name',ctx=Load)",  # test_a1_identity_formation:2218
+    "Call.func>Attribute(value=Name,attr='Path',ctx=Load)",  # test_a1_identity_formation:3861
+    "Call.func>Attribute(value=Name,attr='Policy',ctx=Load)",  # test_a1_identity_formation:701
+    "Call.func>Attribute(value=Name,attr='SimpleNamespace',ctx=Load)",  # closed_walk:1909
+    "Call.func>Attribute(value=Name,attr='Tuple',ctx=Load)",  # test_a1_identity_formation:1290
+    "Call.func>Attribute(value=Name,attr='Visitor',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):290
+    "Call.func>Attribute(value=Name,attr='__setattr__',ctx=Load)",  # closed_walk:1365
+    "Call.func>Attribute(value=Name,attr='__subclasses__',ctx=Load)",  # closed_walk:271
+    "Call.func>Attribute(value=Name,attr='_add',ctx=Load)",  # closed_walk:435
+    "Call.func>Attribute(value=Name,attr='_builder_domain_texts',ctx=Load)",  # closed_walk:1025
+    "Call.func>Attribute(value=Name,attr='_check',ctx=Load)",  # closed_walk:1536
+    "Call.func>Attribute(value=Name,attr='_collect',ctx=Load)",  # closed_walk:442
+    "Call.func>Attribute(value=Name,attr='_formatted',ctx=Load)",  # closed_walk:857
+    "Call.func>Attribute(value=Name,attr='_guarded',ctx=Load)",  # test_a1_identity_formation:2814
+    "Call.func>Attribute(value=Name,attr='_helper_args',ctx=Load)",  # closed_walk:1652
+    "Call.func>Attribute(value=Name,attr='_helper_tree',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):358
+    "Call.func>Attribute(value=Name,attr='_module_object',ctx=Load)",  # closed_walk:588
+    "Call.func>Attribute(value=Name,attr='_module_or_enumerated',ctx=Load)",  # closed_walk:653
+    "Call.func>Attribute(value=Name,attr='_plain_args',ctx=Load)",  # closed_walk:1628
+    "Call.func>Attribute(value=Name,attr='_pure',ctx=Load)",  # closed_walk:1639
+    "Call.func>Attribute(value=Name,attr='_resolve',ctx=Load)",  # closed_walk:1622
+    "Call.func>Attribute(value=Name,attr='_sessions',ctx=Load)",  # closed_walk:683
+    "Call.func>Attribute(value=Name,attr='_spelled',ctx=Load)",  # closed_walk:1538
+    "Call.func>Attribute(value=Name,attr='accept',ctx=Load)",  # closed_walk:1979
+    "Call.func>Attribute(value=Name,attr='add',ctx=Load)",  # closed_walk:275
+    "Call.func>Attribute(value=Name,attr='admit',ctx=Load)",  # closed_walk:784
+    "Call.func>Attribute(value=Name,attr='append',ctx=Load)",  # closed_walk:853
+    "Call.func>Attribute(value=Name,attr='awaited',ctx=Load)",  # closed_walk:1598
+    "Call.func>Attribute(value=Name,attr='binding_refusals',ctx=Load)",  # closed_walk:150
+    "Call.func>Attribute(value=Name,attr='bindings',ctx=Load)",  # closed_walk:174
+    "Call.func>Attribute(value=Name,attr='builder_texts',ctx=Load)",  # closed_walk:1096
+    "Call.func>Attribute(value=Name,attr='call',ctx=Load)",  # closed_walk:1595
+    "Call.func>Attribute(value=Name,attr='call_arguments',ctx=Load)",  # test_a1_identity_formation:1054
+    "Call.func>Attribute(value=Name,attr='callee',ctx=Load)",  # closed_walk:709
+    "Call.func>Attribute(value=Name,attr='census',ctx=Load)",  # test_a1_identity_formation:4333
+    "Call.func>Attribute(value=Name,attr='check',ctx=Load)",  # closed_walk:144
+    "Call.func>Attribute(value=Name,attr='clear',ctx=Load)",  # test_a1_identity_formation:1440
+    "Call.func>Attribute(value=Name,attr='commit',ctx=Load)",  # test_a1_identity_formation:1574
+    "Call.func>Attribute(value=Name,attr='compile',ctx=Load)",  # test_a1_identity_formation:3035
+    "Call.func>Attribute(value=Name,attr='count',ctx=Load)",  # closed_walk:700
+    "Call.func>Attribute(value=Name,attr='dedent',ctx=Load)",  # closed_walk:1869
+    "Call.func>Attribute(value=Name,attr='def_effects',ctx=Load)",  # test_a1_identity_formation:2194
+    "Call.func>Attribute(value=Name,attr='dump',ctx=Load)",  # test_a1_identity_formation:2817
+    "Call.func>Attribute(value=Name,attr='escape',ctx=Load)",  # test_a1_identity_formation:3035
+    "Call.func>Attribute(value=Name,attr='every_binding',ctx=Load)",  # test_a1_identity_formation:895
+    "Call.func>Attribute(value=Name,attr='execute',ctx=Load)",  # test_a1_identity_formation:1562
+    "Call.func>Attribute(value=Name,attr='execute_kind',ctx=Load)",  # test_a1_identity_formation:742
+    "Call.func>Attribute(value=Name,attr='expr_effects',ctx=Load)",  # test_a1_identity_formation:755
+    "Call.func>Attribute(value=Name,attr='extend',ctx=Load)",  # closed_walk:73
+    "Call.func>Attribute(value=Name,attr='fail',ctx=Load)",  # closed_walk:1501
+    "Call.func>Attribute(value=Name,attr='fail_at',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):242
+    "Call.func>Attribute(value=Name,attr='find',ctx=Load)",  # test_a1_identity_formation:1791
+    "Call.func>Attribute(value=Name,attr='findall',ctx=Load)",  # test_a1_identity_formation:2976
+    "Call.func>Attribute(value=Name,attr='finditer',ctx=Load)",  # test_a1_identity_formation:470
+    "Call.func>Attribute(value=Name,attr='format',ctx=Load)",  # closed_walk:962
+    "Call.func>Attribute(value=Name,attr='fullmatch',ctx=Load)",  # closed_walk:872
+    "Call.func>Attribute(value=Name,attr='generic_visit',ctx=Load)",  # test_a1_identity_formation:2810
+    "Call.func>Attribute(value=Name,attr='get',ctx=Load)",  # closed_walk:285
+    "Call.func>Attribute(value=Name,attr='get_event_loop_policy',ctx=Load)",  # test_a1_identity_formation:128
+    "Call.func>Attribute(value=Name,attr='getmodule',ctx=Load)",  # closed_walk:1014
+    "Call.func>Attribute(value=Name,attr='getsource',ctx=Load)",  # closed_walk:191
+    "Call.func>Attribute(value=Name,attr='getsourcefile',ctx=Load)",  # closed_walk:164
+    "Call.func>Attribute(value=Name,attr='glob',ctx=Load)",  # test_a1_identity_formation:3864
+    "Call.func>Attribute(value=Name,attr='group',ctx=Load)",  # test_a1_identity_formation:119
+    "Call.func>Attribute(value=Name,attr='guards',ctx=Load)",  # closed_walk:1931
+    "Call.func>Attribute(value=Name,attr='helper_effects',ctx=Load)",  # test_a1_identity_formation:747
+    "Call.func>Attribute(value=Name,attr='import_module',ctx=Load)",  # closed_walk:755
+    "Call.func>Attribute(value=Name,attr='index',ctx=Load)",  # closed_walk:1859
+    "Call.func>Attribute(value=Name,attr='is_db_call',ctx=Load)",  # test_a1_identity_formation:738
+    "Call.func>Attribute(value=Name,attr='is_param',ctx=Load)",  # closed_walk:700
+    "Call.func>Attribute(value=Name,attr='is_session',ctx=Load)",  # closed_walk:692
+    "Call.func>Attribute(value=Name,attr='iscoroutinefunction',ctx=Load)",  # closed_walk:1009
+    "Call.func>Attribute(value=Name,attr='isfunction',ctx=Load)",  # closed_walk:769
+    "Call.func>Attribute(value=Name,attr='items',ctx=Load)",  # closed_walk:920
+    "Call.func>Attribute(value=Name,attr='iter_child_nodes',ctx=Load)",  # closed_walk:1132
+    "Call.func>Attribute(value=Name,attr='join',ctx=Load)",  # test_a1_identity_formation:2371
+    "Call.func>Attribute(value=Name,attr='literal_eval',ctx=Load)",  # test_a1_identity_formation:1160
+    "Call.func>Attribute(value=Name,attr='local_sql',ctx=Load)",  # closed_walk:1932
+    "Call.func>Attribute(value=Name,attr='lru_cache',ctx=Load)",  # test_a1_identity_formation:2922
+    "Call.func>Attribute(value=Name,attr='lstrip',ctx=Load)",  # test_a1_identity_formation:3245
+    "Call.func>Attribute(value=Name,attr='match',ctx=Load)",  # test_a1_identity_formation:117
+    "Call.func>Attribute(value=Name,attr='module',ctx=Load)",  # closed_walk:760
+    "Call.func>Attribute(value=Name,attr='module_accessor',ctx=Load)",  # closed_walk:765
+    "Call.func>Attribute(value=Name,attr='named',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):58
+    "Call.func>Attribute(value=Name,attr='open',ctx=Load)",  # test_a1_identity_formation:2924
+    "Call.func>Attribute(value=Name,attr='parse',ctx=Load)",  # closed_walk:191
+    "Call.func>Attribute(value=Name,attr='plain_effects',ctx=Load)",  # test_a1_identity_formation:4402
+    "Call.func>Attribute(value=Name,attr='pop',ctx=Load)",  # closed_walk:270
+    "Call.func>Attribute(value=Name,attr='read_text',ctx=Load)",  # test_a1_identity_formation:3865
+    "Call.func>Attribute(value=Name,attr='reads',ctx=Load)",  # test_a1_identity_formation:897
+    "Call.func>Attribute(value=Name,attr='refusals',ctx=Load)",  # test_a1_identity_formation:4724
+    "Call.func>Attribute(value=Name,attr='replace',ctx=Load)",  # test_a1_identity_formation:2448
+    "Call.func>Attribute(value=Name,attr='resolve',ctx=Load)",  # closed_walk:516
+    "Call.func>Attribute(value=Name,attr='resolver_methods',ctx=Load)",  # test_a1_identity_formation:4330
+    "Call.func>Attribute(value=Name,attr='roots',ctx=Load)",  # closed_walk:474
+    "Call.func>Attribute(value=Name,attr='same',ctx=Load)",  # test_a1_identity_formation:852
+    "Call.func>Attribute(value=Name,attr='search',ctx=Load)",  # test_a1_identity_formation:2965
+    "Call.func>Attribute(value=Name,attr='session_argument',ctx=Load)",  # test_a1_identity_formation:1062
+    "Call.func>Attribute(value=Name,attr='session_root_ok',ctx=Load)",  # test_a1_identity_formation:1061
+    "Call.func>Attribute(value=Name,attr='session_value',ctx=Load)",  # test_a1_identity_formation:1058
+    "Call.func>Attribute(value=Name,attr='setattr',ctx=Load)",  # test_a1_identity_formation:723
+    "Call.func>Attribute(value=Name,attr='setdefault',ctx=Load)",  # closed_walk:915
+    "Call.func>Attribute(value=Name,attr='shape',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):309
+    "Call.func>Attribute(value=Name,attr='shapes',ctx=Load)",  # closed_walk:123
+    "Call.func>Attribute(value=Name,attr='signature',ctx=Load)",  # closed_walk:723
+    "Call.func>Attribute(value=Name,attr='sort',ctx=Load)",  # test_a1_identity_formation:476
+    "Call.func>Attribute(value=Name,attr='source_of',ctx=Load)",  # test_a1_identity_formation:635
+    "Call.func>Attribute(value=Name,attr='spelled',ctx=Load)",  # closed_walk:561
+    "Call.func>Attribute(value=Name,attr='spelled_in',ctx=Load)",  # test_a1_identity_formation:2232
+    "Call.func>Attribute(value=Name,attr='spelled_once',ctx=Load)",  # closed_walk:611
+    "Call.func>Attribute(value=Name,attr='split',ctx=Load)",  # closed_walk:683
+    "Call.func>Attribute(value=Name,attr='splitlines',ctx=Load)",  # test_a1_identity_formation:3668
+    "Call.func>Attribute(value=Name,attr='sql_kind',ctx=Load)",  # test_a1_identity_formation:730
+    "Call.func>Attribute(value=Name,attr='sql_texts',ctx=Load)",  # closed_walk:847
+    "Call.func>Attribute(value=Name,attr='start',ctx=Load)",  # test_a1_identity_formation:471
+    "Call.func>Attribute(value=Name,attr='startswith',ctx=Load)",  # closed_walk:1507
+    "Call.func>Attribute(value=Name,attr='statement_ok',ctx=Load)",  # closed_walk:818
+    "Call.func>Attribute(value=Name,attr='stores',ctx=Load)",  # test_a1_identity_formation:1155
+    "Call.func>Attribute(value=Name,attr='text',ctx=Load)",  # test_a1_identity_formation:904
+    "Call.func>Attribute(value=Name,attr='unparse',ctx=Load)",  # closed_walk:583
+    "Call.func>Attribute(value=Name,attr='unwrap',ctx=Load)",  # closed_walk:768
+    "Call.func>Attribute(value=Name,attr='update',ctx=Load)",  # closed_walk:919
+    "Call.func>Attribute(value=Name,attr='upper',ctx=Load)",  # closed_walk:1210
+    "Call.func>Attribute(value=Name,attr='values',ctx=Load)",  # closed_walk:873
+    "Call.func>Attribute(value=Name,attr='visit',ctx=Load)",  # closed_walk:141
+    "Call.func>Attribute(value=Name,attr='walk',ctx=Load)",  # closed_walk:71
+    "Call.func>Attribute(value=Subscript,attr='count',ctx=Load)",  # test_a1_identity_formation:486
+    "Call.func>Attribute(value=Subscript,attr='items',ctx=Load)",  # test_a1_identity_formation:1321
+    "Call.func>Attribute(value=Subscript,attr='lstrip',ctx=Load)",  # test_a1_identity_formation:2941
+    "Call.func>Attribute(value=Subscript,attr='upper',ctx=Load)",  # closed_walk:1189
+    "Call.func>Attribute(value=Subscript,attr='values',ctx=Load)",  # test_a1_identity_formation:48
+    'Call.func>Call(func=Name,args=[Constant|Dict|Tuple],keywords=[])',  # test_a1_identity_formation:3453
+    'Call.func>Name(id=str,ctx=Load)',  # closed_walk:72
+    "Call.keywords>keyword(arg='__name__',value=Name)",  # closed_walk:1909
+    "Call.keywords>keyword(arg='barrier',value=Tuple)",  # test_a1_identity_formation:2457
+    "Call.keywords>keyword(arg='bindings',value=Attribute)",  # test_match_hold_admission_gate_pg (a30d37f6):290
+    "Call.keywords>keyword(arg='bindings',value=Name)",  # closed_walk:1843
+    "Call.keywords>keyword(arg='classes',value=Tuple)",  # test_a1_identity_formation:4602
+    "Call.keywords>keyword(arg='ctx',value=Call)",  # test_a1_identity_formation:1290
+    "Call.keywords>keyword(arg='elts',value=Name)",  # test_a1_identity_formation:1290
+    "Call.keywords>keyword(arg='encoding',value=Constant)",  # test_a1_identity_formation:2925
+    "Call.keywords>keyword(arg='ends',value=Call)",  # test_a1_identity_formation:2292
+    "Call.keywords>keyword(arg='fn',value=Call)",  # test_match_hold_admission_gate_pg (a30d37f6):358
+    "Call.keywords>keyword(arg='fn',value=Name)",  # test_match_hold_admission_gate_pg (a30d37f6):591
+    "Call.keywords>keyword(arg='grammar',value=Attribute)",  # closed_walk:1015
+    "Call.keywords>keyword(arg='grammar',value=Call)",  # closed_walk:1458
+    "Call.keywords>keyword(arg='grammar',value=Name)",  # test_a1_identity_formation:2177
+    "Call.keywords>keyword(arg='id',value=Name)",  # test_a1_identity_formation:2218
+    "Call.keywords>keyword(arg='key',value=Attribute)",  # test_a1_identity_formation:135
+    "Call.keywords>keyword(arg='key',value=Lambda)",  # test_a1_identity_formation:898
+    "Call.keywords>keyword(arg='key',value=Name)",  # closed_walk:1059
+    "Call.keywords>keyword(arg='maxsize',value=Constant)",  # test_a1_identity_formation:2922
+    "Call.keywords>keyword(arg='newline',value=Constant)",  # test_a1_identity_formation:2925
+    "Call.keywords>keyword(arg='opaque',value=Dict)",  # test_a1_identity_formation:2196
+    "Call.keywords>keyword(arg='opaque',value=Name)",  # closed_walk:1842
+    "Call.keywords>keyword(arg='permitted',value=Name)",  # test_match_hold_admission_gate_pg (a30d37f6):290
+    "Call.keywords>keyword(arg='plain_only',value=Constant)",  # test_match_hold_admission_gate_pg (a30d37f6):277
+    "Call.keywords>keyword(arg='record',value=Constant)",  # test_a1_identity_formation:724
+    "Call.keywords>keyword(arg='replace',value=Constant)",  # test_a1_identity_formation:4546
+    "Call.keywords>keyword(arg='rollbacks',value=Constant)",  # test_match_hold_admission_gate_pg (a30d37f6):550
+    "Call.keywords>keyword(arg='scope',value=Name)",  # test_a1_identity_formation:1486
+    "Call.keywords>keyword(arg='session',value=Attribute)",  # closed_walk:1014
+    "Call.keywords>keyword(arg='session',value=Name)",  # closed_walk:1315
+    "Call.keywords>keyword(arg='source',value=Call)",  # closed_walk:1889
+    "Call.keywords>keyword(arg='spend',value=Tuple)",  # test_a1_identity_formation:2483
+    "Call.keywords>keyword(arg='stmts',value=Call)",  # closed_walk:1309
+    "Call.keywords>keyword(arg='stmts',value=IfExp)",  # test_match_hold_admission_gate_pg (a30d37f6):233
+    "Call.keywords>keyword(arg='stmts',value=Name)",  # closed_walk:360
+    "Call.keywords>keyword(arg='top',value=Constant)",  # test_match_hold_admission_gate_pg (a30d37f6):361
+    "Call.keywords>keyword(arg='what',value=Constant)",  # test_match_hold_admission_gate_pg (a30d37f6):490
+    "Call.keywords>keyword(arg='what',value=Name)",  # test_match_hold_admission_gate_pg (a30d37f6):277
+    'Call.keywords>keyword(arg=None,value=Dict)',  # closed_walk:960
+    'Call.keywords>keyword(arg=None,value=Name)',  # closed_walk:962
+    "ClassDef.bases>Attribute(value=Name,attr='NodeVisitor',ctx=Load)",  # test_a1_identity_formation:2804
+    'ClassDef.body>FunctionDef(name=str,args=arguments,body=[Assign],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:2805
+    'ClassDef.body>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:2822
+    'ClassDef.body>FunctionDef(name=str,args=arguments,body=[AugAssign|Expr],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:2808
+    'ClassDef.body>FunctionDef(name=str,args=arguments,body=[Expr],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:2813
+    'ClassDef.body>FunctionDef(name=str,args=arguments,body=[If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:2816
+    'ClassDef.body>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:3675
+    "Compare.comparators>Attribute(value=Attribute,attr='pure_methods',ctx=Load)",  # closed_walk:1708
+    "Compare.comparators>Attribute(value=Name,attr='AST',ctx=Load)",  # closed_walk:274
+    "Compare.comparators>Attribute(value=Name,attr='_enumerated',ctx=Load)",  # closed_walk:639
+    "Compare.comparators>Attribute(value=Name,attr='_reads',ctx=Load)",  # test_a1_identity_formation:1590
+    "Compare.comparators>Attribute(value=Name,attr='_walked_nodes',ctx=Load)",  # closed_walk:1500
+    "Compare.comparators>Attribute(value=Name,attr='caught',ctx=Load)",  # closed_walk:1822
+    "Compare.comparators>Attribute(value=Name,attr='fail_on',ctx=Load)",  # test_a1_identity_formation:3452
+    "Compare.comparators>Attribute(value=Name,attr='gate_kinds',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):342
+    "Compare.comparators>Attribute(value=Name,attr='helpers',ctx=Load)",  # closed_walk:1880
+    "Compare.comparators>Attribute(value=Name,attr='id',ctx=Load)",  # closed_walk:549
+    "Compare.comparators>Attribute(value=Name,attr='namedtuples',ctx=Load)",  # closed_walk:127
+    "Compare.comparators>Attribute(value=Name,attr='permitted',ctx=Load)",  # closed_walk:1744
+    "Compare.comparators>Attribute(value=Name,attr='syntax',ctx=Load)",  # closed_walk:1235
+    "Compare.comparators>Attribute(value=Name,attr='walked_defs',ctx=Load)",  # closed_walk:1623
+    "Compare.comparators>Attribute(value=Name,attr='walking',ctx=Load)",  # closed_walk:1882
+    "Compare.comparators>Attribute(value=Subscript,attr='empty',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):704
+    "Compare.comparators>Attribute(value=Subscript,attr='name',ctx=Load)",  # closed_walk:791
+    'Compare.comparators>BinOp(left=Call,op=BitOr,right=Set)',  # test_a1_identity_formation:1209
+    'Compare.comparators>BoolOp(op=Or,values=[Constant|Name])',  # test_a1_identity_formation:4336
+    'Compare.comparators>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:978
+    'Compare.comparators>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:474
+    'Compare.comparators>Call(func=Name,args=[Attribute],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):654
+    'Compare.comparators>Call(func=Name,args=[Attribute|Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):667
+    'Compare.comparators>Call(func=Name,args=[Call],keywords=[])',  # test_a1_identity_formation:139
+    'Compare.comparators>Call(func=Name,args=[Call],keywords=[keyword])',  # test_a1_identity_formation:135
+    'Compare.comparators>Call(func=Name,args=[List],keywords=[])',  # closed_walk:917
+    'Compare.comparators>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:727
+    'Compare.comparators>Constant(value=NoneType)',  # closed_walk:174
+    'Compare.comparators>Constant(value=bool)',  # test_a1_identity_formation:1311
+    'Compare.comparators>Constant(value=int)',  # closed_walk:175
+    'Compare.comparators>Constant(value=str)',  # closed_walk:499
+    'Compare.comparators>JoinedStr(values=[Constant|FormattedValue])',  # test_a1_identity_formation:904
+    'Compare.comparators>List(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:1378
+    'Compare.comparators>Name(id=str,ctx=Load)',  # closed_walk:133
+    'Compare.comparators>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:1187
+    'Compare.comparators>Subscript(value=Name,slice=UnaryOp,ctx=Load)',  # test_a1_identity_formation:2273
+    'Compare.comparators>Tuple(elts=[Attribute],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):700
+    'Compare.comparators>Tuple(elts=[Constant],ctx=Load)',  # closed_walk:906
+    'Compare.comparators>Tuple(elts=[Constant|JoinedStr],ctx=Load)',  # test_a1_identity_formation:920
+    'Compare.comparators>Tuple(elts=[Constant|Name],ctx=Load)',  # test_a1_identity_formation:3819
+    'Compare.comparators>Tuple(elts=[Name],ctx=Load)',  # test_a1_identity_formation:3842
+    'Compare.comparators>Tuple(elts=[Tuple],ctx=Load)',  # test_a1_identity_formation:1506
+    'Compare.comparators>UnaryOp(op=USub,operand=Constant)',  # closed_walk:855
+    "Compare.left>Attribute(value=Attribute,attr='attr',ctx=Load)",  # closed_walk:314
+    "Compare.left>Attribute(value=Attribute,attr='helper_hook',ctx=Load)",  # closed_walk:1816
+    "Compare.left>Attribute(value=Attribute,attr='id',ctx=Load)",  # closed_walk:791
+    "Compare.left>Attribute(value=Attribute,attr='value',ctx=Load)",  # test_a1_identity_formation:811
+    "Compare.left>Attribute(value=Name,attr='_lock_calls',ctx=Load)",  # test_a1_identity_formation:3452
+    "Compare.left>Attribute(value=Name,attr='annotation',ctx=Load)",  # closed_walk:2086
+    "Compare.left>Attribute(value=Name,attr='arg',ctx=Load)",  # closed_walk:1082
+    "Compare.left>Attribute(value=Name,attr='attr',ctx=Load)",  # closed_walk:1557
+    "Compare.left>Attribute(value=Name,attr='callee',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):75
+    "Compare.left>Attribute(value=Name,attr='cause',ctx=Load)",  # closed_walk:2072
+    "Compare.left>Attribute(value=Name,attr='conversion',ctx=Load)",  # closed_walk:855
+    "Compare.left>Attribute(value=Name,attr='exc',ctx=Load)",  # closed_walk:2070
+    "Compare.left>Attribute(value=Name,attr='format_spec',ctx=Load)",  # closed_walk:855
+    "Compare.left>Attribute(value=Name,attr='grammar',ctx=Load)",  # closed_walk:547
+    "Compare.left>Attribute(value=Name,attr='helper',ctx=Load)",  # closed_walk:1507
+    "Compare.left>Attribute(value=Name,attr='id',ctx=Load)",  # closed_walk:523
+    "Compare.left>Attribute(value=Name,attr='kind',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):700
+    "Compare.left>Attribute(value=Name,attr='lineno',ctx=Load)",  # test_a1_identity_formation:4419
+    "Compare.left>Attribute(value=Name,attr='module',ctx=Load)",  # test_a1_identity_formation:3817
+    "Compare.left>Attribute(value=Name,attr='msg',ctx=Load)",  # closed_walk:2030
+    "Compare.left>Attribute(value=Name,attr='name',ctx=Load)",  # closed_walk:549
+    "Compare.left>Attribute(value=Name,attr='returns',ctx=Load)",  # closed_walk:2088
+    "Compare.left>Attribute(value=Name,attr='type',ctx=Load)",  # closed_walk:2053
+    "Compare.left>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:730
+    "Compare.left>Attribute(value=Subscript,attr='asname',ctx=Load)",  # closed_walk:788
+    "Compare.left>Attribute(value=Subscript,attr='default',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):704
+    "Compare.left>Attribute(value=Subscript,attr='optional_vars',ctx=Load)",  # closed_walk:2062
+    "Compare.left>Attribute(value=Subscript,attr='value',ctx=Load)",  # closed_walk:1989
+    'Compare.left>BinOp(left=Name,op=Add,right=Constant)',  # closed_walk:1225
+    'Compare.left>BinOp(left=Name,op=Sub,right=Name)',  # test_a1_identity_formation:4336
+    'Compare.left>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:1044
+    'Compare.left>Call(func=Attribute,args=[Attribute|BinOp],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):58
+    'Compare.left>Call(func=Attribute,args=[Attribute|Call],keywords=[])',  # closed_walk:1692
+    'Compare.left>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:1637
+    'Compare.left>Call(func=Attribute,args=[Attribute|Name|Tuple],keywords=[])',  # closed_walk:1773
+    'Compare.left>Call(func=Attribute,args=[Attribute|Tuple],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):216
+    'Compare.left>Call(func=Attribute,args=[Call],keywords=[])',  # closed_walk:133
+    'Compare.left>Call(func=Attribute,args=[Constant],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):703
+    'Compare.left>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:687
+    'Compare.left>Call(func=Attribute,args=[Name|Tuple],keywords=[])',  # test_a1_identity_formation:2232
+    'Compare.left>Call(func=Attribute,args=[Subscript],keywords=[])',  # test_a1_identity_formation:905
+    'Compare.left>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:788
+    'Compare.left>Call(func=Name,args=[Attribute|Constant],keywords=[])',  # test_a1_identity_formation:3514
+    'Compare.left>Call(func=Name,args=[GeneratorExp],keywords=[])',  # closed_walk:174
+    'Compare.left>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:179
+    'Compare.left>Call(func=Name,args=[Name|Subscript],keywords=[])',  # test_a1_identity_formation:862
+    'Compare.left>Call(func=Name,args=[Subscript],keywords=[])',  # closed_walk:1218
+    'Compare.left>Constant(value=NoneType)',  # closed_walk:1097
+    'Compare.left>Constant(value=str)',  # closed_walk:1104
+    'Compare.left>ListComp(elt=Name,generators=[comprehension])',  # test_a1_identity_formation:1378
+    'Compare.left>Name(id=str,ctx=Load)',  # closed_walk:127
+    'Compare.left>Subscript(value=Call,slice=Constant,ctx=Load)',  # closed_walk:641
+    'Compare.left>Subscript(value=Name,slice=Attribute,ctx=Load)',  # closed_walk:1054
+    'Compare.left>Subscript(value=Name,slice=BinOp,ctx=Load)',  # closed_walk:1225
+    'Compare.left>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:1184
+    'Compare.left>Subscript(value=Name,slice=Name,ctx=Load)',  # test_a1_identity_formation:1796
+    'Compare.left>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # closed_walk:188
+    'Compare.left>Subscript(value=Subscript,slice=Name,ctx=Load)',  # test_a1_identity_formation:1322
+    'Compare.left>Tuple(elts=[Name],ctx=Load)',  # closed_walk:152
+    'Compare.ops>Eq()',  # closed_walk:152
+    'Compare.ops>Gt()',  # closed_walk:507
+    'Compare.ops>GtE()',  # test_match_hold_admission_gate_pg (a30d37f6):703
+    'Compare.ops>In()',  # closed_walk:127
+    'Compare.ops>Is()',  # closed_walk:133
+    'Compare.ops>IsNot()',  # closed_walk:274
+    'Compare.ops>Lt()',  # closed_walk:727
+    'Compare.ops>LtE()',  # closed_walk:986
+    'Compare.ops>NotEq()',  # closed_walk:174
+    'Compare.ops>NotIn()',  # closed_walk:474
+    "Dict.keys>Attribute(value=Name,attr='arg',ctx=Load)",  # closed_walk:960
+    "Dict.keys>Attribute(value=Name,attr='name',ctx=Load)",  # test_a1_identity_formation:2196
+    'Dict.keys>Constant(value=str)',  # test_a1_identity_formation:1035
+    'Dict.keys>Name(id=str,ctx=Load)',  # test_a1_identity_formation:3814
+    "Dict.values>Attribute(value=Name,attr='sqlstate',ctx=Load)",  # test_a1_identity_formation:3454
+    'Dict.values>Constant(value=bool)',  # test_a1_identity_formation:1035
+    'Dict.values>Constant(value=int)',  # test_match_hold_admission_gate_pg (a30d37f6):359
+    'Dict.values>Dict(keys=[],values=[])',  # test_a1_identity_formation:1219
+    'Dict.values>Name(id=str,ctx=Load)',  # closed_walk:960
+    'DictComp.generators>comprehension(target=Name,iter=BinOp,ifs=[],is_async=0)',  # test_a1_identity_formation:4382
+    'DictComp.generators>comprehension(target=Name,iter=Call,ifs=[],is_async=0)',  # test_match_hold_admission_gate_pg (a30d37f6):108
+    'DictComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # closed_walk:1035
+    'DictComp.generators>comprehension(target=Tuple,iter=Call,ifs=[Call],is_async=0)',  # test_a1_identity_formation:1321
+    'DictComp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # closed_walk:1086
+    'DictComp.generators>comprehension(target=Tuple,iter=Call,ifs=[UnaryOp],is_async=0)',  # test_a1_identity_formation:4475
+    'DictComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # closed_walk:920
+    "DictComp.key>Attribute(value=Name,attr='arg',ctx=Load)",  # closed_walk:1969
+    'DictComp.key>Name(id=str,ctx=Load)',  # closed_walk:920
+    'DictComp.value>Call(func=Attribute,args=[Call],keywords=[])',  # test_a1_identity_formation:4382
+    'DictComp.value>Constant(value=NoneType)',  # closed_walk:1035
+    'DictComp.value>Name(id=str,ctx=Load)',  # closed_walk:1086
+    'DictComp.value>Tuple(elts=[Call|Name],ctx=Load)',  # closed_walk:920
+    'ExceptHandler.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # closed_walk:166
+    'ExceptHandler.body>Assign(targets=[Name],value=JoinedStr,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):598
+    'ExceptHandler.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):411
+    'ExceptHandler.body>Assign(targets=[Name],value=Tuple,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):348
+    'ExceptHandler.body>Assign(targets=[Tuple],value=Subscript,type_comment=-)',  # closed_walk:146
+    'ExceptHandler.body>Continue()',  # test_a1_identity_formation:1239
+    'ExceptHandler.body>Expr(value=Call)',  # closed_walk:1517
+    'ExceptHandler.body>Pass()',  # test_a1_identity_formation:637
+    'ExceptHandler.body>Raise(exc=Call,cause=-)',  # closed_walk:147
+    'ExceptHandler.body>Raise(exc=Call,cause=Constant)',  # closed_walk:1103
+    'ExceptHandler.body>Return(value=BinOp)',  # test_a1_identity_formation:2220
+    'ExceptHandler.body>Return(value=Constant)',  # closed_walk:782
+    'ExceptHandler.body>Return(value=IfExp)',  # test_a1_identity_formation:1089
+    'ExceptHandler.body>Return(value=JoinedStr)',  # test_match_hold_admission_gate_pg (a30d37f6):589
+    'ExceptHandler.body>Return(value=List)',  # test_a1_identity_formation:2172
+    'ExceptHandler.body>Return(value=Subscript)',  # test_match_hold_admission_gate_pg (a30d37f6):552
+    'ExceptHandler.body>Return(value=Tuple)',  # test_a1_identity_formation:886
+    "ExceptHandler.type>Attribute(value=Name,attr='Refused',ctx=Load)",  # closed_walk:145
+    'ExceptHandler.type>Name(id=str,ctx=Load)',  # closed_walk:165
+    'ExceptHandler.type>Tuple(elts=[Name],ctx=Load)',  # closed_walk:192
+    'Expr.value>Await(value=Call)',  # test_a1_identity_formation:1567
+    'Expr.value>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:275
+    'Expr.value>Call(func=Attribute,args=[Attribute|Call|Name],keywords=[])',  # test_a1_identity_formation:1062
+    'Expr.value>Call(func=Attribute,args=[Attribute|Constant],keywords=[])',  # closed_walk:1583
+    'Expr.value>Call(func=Attribute,args=[Attribute|Constant|Name],keywords=[])',  # closed_walk:449
+    'Expr.value>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:1536
+    'Expr.value>Call(func=Attribute,args=[Attribute|Tuple],keywords=[])',  # test_a1_identity_formation:2934
+    'Expr.value>Call(func=Attribute,args=[BinOp],keywords=[])',  # closed_walk:1226
+    'Expr.value>Call(func=Attribute,args=[BinOp|Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):381
+    'Expr.value>Call(func=Attribute,args=[BoolOp],keywords=[])',  # test_a1_identity_formation:3824
+    'Expr.value>Call(func=Attribute,args=[BoolOp|JoinedStr],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):275
+    'Expr.value>Call(func=Attribute,args=[BoolOp|Name],keywords=[])',  # closed_walk:662
+    'Expr.value>Call(func=Attribute,args=[BoolOp|Subscript],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):255
+    'Expr.value>Call(func=Attribute,args=[Call],keywords=[])',  # closed_walk:857
+    'Expr.value>Call(func=Attribute,args=[Call|Constant|Name],keywords=[])',  # closed_walk:1366
+    'Expr.value>Call(func=Attribute,args=[Call|Name],keywords=[])',  # closed_walk:1808
+    'Expr.value>Call(func=Attribute,args=[Call|Name|Tuple],keywords=[])',  # test_a1_identity_formation:2218
+    'Expr.value>Call(func=Attribute,args=[Constant],keywords=[])',  # closed_walk:972
+    'Expr.value>Call(func=Attribute,args=[Constant|Dict|Name],keywords=[])',  # test_a1_identity_formation:725
+    'Expr.value>Call(func=Attribute,args=[Constant|JoinedStr],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):363
+    'Expr.value>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # closed_walk:435
+    'Expr.value>Call(func=Attribute,args=[Constant|Subscript],keywords=[])',  # test_a1_identity_formation:4534
+    'Expr.value>Call(func=Attribute,args=[Constant|Subscript|Tuple],keywords=[])',  # closed_walk:461
+    'Expr.value>Call(func=Attribute,args=[DictComp],keywords=[])',  # closed_walk:1969
+    'Expr.value>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # closed_walk:73
+    'Expr.value>Call(func=Attribute,args=[IfExp],keywords=[])',  # closed_walk:1434
+    'Expr.value>Call(func=Attribute,args=[IfExp|Name],keywords=[])',  # closed_walk:1745
+    'Expr.value>Call(func=Attribute,args=[JoinedStr],keywords=[])',  # test_a1_identity_formation:1492
+    'Expr.value>Call(func=Attribute,args=[JoinedStr|Name],keywords=[])',  # closed_walk:139
+    'Expr.value>Call(func=Attribute,args=[JoinedStr|Subscript],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1328
+    'Expr.value>Call(func=Attribute,args=[List],keywords=[])',  # closed_walk:853
+    'Expr.value>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:125
+    'Expr.value>Call(func=Attribute,args=[Name|Starred],keywords=[])',  # closed_walk:784
+    'Expr.value>Call(func=Attribute,args=[Name|Subscript],keywords=[])',  # closed_walk:1517
+    'Expr.value>Call(func=Attribute,args=[Name|Subscript|Tuple],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):811
+    'Expr.value>Call(func=Attribute,args=[Subscript],keywords=[])',  # test_a1_identity_formation:110
+    'Expr.value>Call(func=Attribute,args=[Tuple],keywords=[])',  # closed_walk:445
+    'Expr.value>Call(func=Attribute,args=[],keywords=[])',  # test_a1_identity_formation:476
+    'Expr.value>Call(func=Name,args=[Attribute],keywords=[])',  # test_a1_identity_formation:1194
+    'Expr.value>Call(func=Name,args=[Attribute|Call],keywords=[])',  # test_a1_identity_formation:3671
+    'Expr.value>Call(func=Name,args=[Attribute|Constant],keywords=[])',  # closed_walk:1153
+    'Expr.value>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:1154
+    'Expr.value>Call(func=Name,args=[Attribute|Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):612
+    'Expr.value>Call(func=Name,args=[BoolOp|Name],keywords=[])',  # closed_walk:1157
+    'Expr.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:1163
+    'Expr.value>Call(func=Name,args=[Dict|Name],keywords=[])',  # test_a1_identity_formation:1191
+    'Expr.value>Call(func=Name,args=[JoinedStr|Name],keywords=[])',  # test_a1_identity_formation:1293
+    'Expr.value>Call(func=Name,args=[Name],keywords=[])',  # test_a1_identity_formation:582
+    'Expr.value>Call(func=Name,args=[Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):277
+    'Expr.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # test_a1_identity_formation:647
+    'Expr.value>Call(func=Name,args=[],keywords=[])',  # closed_walk:1495
+    'Expr.value>Constant(value=str)',  # closed_walk:67
+    'For.body>Assign(targets=[Name],value=Attribute,type_comment=-)',  # closed_walk:905
+    'For.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # closed_walk:985
+    'For.body>Assign(targets=[Name],value=Call,type_comment=-)',  # closed_walk:893
+    'For.body>Assign(targets=[Name],value=Compare,type_comment=-)',  # test_a1_identity_formation:3813
+    'For.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # test_a1_identity_formation:3836
+    'For.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # closed_walk:1018
+    'For.body>Assign(targets=[Name],value=List,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):55
+    'For.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # closed_walk:960
+    'For.body>Assign(targets=[Name],value=Name,type_comment=-)',  # closed_walk:328
+    'For.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # closed_walk:1858
+    'For.body>Assign(targets=[Name],value=Tuple,type_comment=-)',  # test_a1_identity_formation:1437
+    'For.body>Assign(targets=[Subscript],value=Call,type_comment=-)',  # test_a1_identity_formation:3865
+    'For.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # test_a1_identity_formation:1436
+    'For.body>Assign(targets=[Subscript],value=IfExp,type_comment=-)',  # closed_walk:1054
+    'For.body>Assign(targets=[Subscript],value=SetComp,type_comment=-)',  # test_a1_identity_formation:2976
+    'For.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # closed_walk:915
+    'For.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # test_a1_identity_formation:1439
+    'For.body>AugAssign(target=Name,op=Add,value=Call)',  # test_a1_identity_formation:1134
+    'For.body>AugAssign(target=Subscript,op=Add,value=Constant)',  # closed_walk:2010
+    'For.body>Expr(value=Call)',  # closed_walk:139
+    'For.body>For(target=Name,iter=Attribute,body=[If],orelse=[],type_comment=-)',  # test_a1_identity_formation:4722
+    'For.body>For(target=Name,iter=Call,body=[Assign],orelse=[],type_comment=-)',  # test_a1_identity_formation:3864
+    'For.body>For(target=Name,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:441
+    'For.body>For(target=Name,iter=Call,body=[If],orelse=[],type_comment=-)',  # closed_walk:483
+    'For.body>For(target=Name,iter=Subscript,body=[Expr|If],orelse=[],type_comment=-)',  # closed_walk:916
+    'For.body>For(target=Name,iter=Tuple,body=[Assign|If],orelse=[],type_comment=-)',  # closed_walk:892
+    'For.body>For(target=Tuple,iter=Call,body=[Assign],orelse=[],type_comment=-)',  # closed_walk:984
+    'For.body>For(target=Tuple,iter=Call,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:897
+    'For.body>For(target=Tuple,iter=Call,body=[Assign|If],orelse=[],type_comment=-)',  # test_a1_identity_formation:4333
+    'For.body>For(target=Tuple,iter=Name,body=[If],orelse=[],type_comment=-)',  # test_a1_identity_formation:2964
+    'For.body>FunctionDef(name=str,args=arguments,body=[For],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:3826
+    'For.body>If(test=BinOp,body=[Expr],orelse=[])',  # test_a1_identity_formation:2200
+    'For.body>If(test=BoolOp,body=[Assign],orelse=[])',  # closed_walk:727
+    'For.body>If(test=BoolOp,body=[Assign|AugAssign|Continue|Expr|If|Try],orelse=[])',  # test_a1_identity_formation:1233
+    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):451
+    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr|If],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):628
+    'For.body>If(test=BoolOp,body=[Assign|Expr],orelse=[])',  # test_a1_identity_formation:2982
+    'For.body>If(test=BoolOp,body=[Assign|Expr|If],orelse=[If])',  # closed_walk:943
+    'For.body>If(test=BoolOp,body=[Assign|Expr|If],orelse=[])',  # closed_walk:1229
+    'For.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # closed_walk:1942
+    'For.body>If(test=BoolOp,body=[Continue],orelse=[])',  # closed_walk:906
+    'For.body>If(test=BoolOp,body=[Continue|Expr],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):421
+    'For.body>If(test=BoolOp,body=[Expr],orelse=[If])',  # closed_walk:311
+    'For.body>If(test=BoolOp,body=[Expr],orelse=[])',  # closed_walk:894
+    'For.body>If(test=BoolOp,body=[Expr|If],orelse=[])',  # closed_walk:1223
+    'For.body>If(test=BoolOp,body=[For],orelse=[If])',  # test_a1_identity_formation:3817
+    'For.body>If(test=BoolOp,body=[Pass],orelse=[If])',  # test_a1_identity_formation:3837
+    'For.body>If(test=BoolOp,body=[Raise],orelse=[])',  # closed_walk:1187
+    'For.body>If(test=BoolOp,body=[Return],orelse=[])',  # closed_walk:1044
+    'For.body>If(test=Call,body=[Assign|Break],orelse=[])',  # test_a1_identity_formation:3205
+    'For.body>If(test=Call,body=[Assign|Continue],orelse=[])',  # test_a1_identity_formation:1337
+    'For.body>If(test=Call,body=[Assign|Continue|Expr|If],orelse=[])',  # test_a1_identity_formation:1324
+    'For.body>If(test=Call,body=[Assign|Continue|If],orelse=[])',  # test_a1_identity_formation:1303
+    'For.body>If(test=Call,body=[Assign|Continue|Try],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):269
+    'For.body>If(test=Call,body=[Assign|Expr|If|Return],orelse=[])',  # test_a1_identity_formation:1285
+    'For.body>If(test=Call,body=[Assign|For|If|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):424
+    'For.body>If(test=Call,body=[Assign|If],orelse=[])',  # closed_walk:484
+    'For.body>If(test=Call,body=[Assign|If|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):621
+    'For.body>If(test=Call,body=[AugAssign],orelse=[If])',  # test_a1_identity_formation:1173
+    'For.body>If(test=Call,body=[AugAssign],orelse=[])',  # test_a1_identity_formation:4723
+    'For.body>If(test=Call,body=[Continue],orelse=[])',  # closed_walk:1145
+    'For.body>If(test=Call,body=[Continue|Expr],orelse=[])',  # test_a1_identity_formation:1058
+    'For.body>If(test=Call,body=[Continue|Expr|If],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1302
+    'For.body>If(test=Call,body=[Expr],orelse=[Expr])',  # closed_walk:1535
+    'For.body>If(test=Call,body=[Expr],orelse=[If])',  # closed_walk:72
+    'For.body>If(test=Call,body=[Expr],orelse=[])',  # closed_walk:331
+    'For.body>If(test=Call,body=[Expr|If|Return],orelse=[])',  # closed_walk:1743
+    'For.body>If(test=Call,body=[For],orelse=[])',  # test_a1_identity_formation:787
+    'For.body>If(test=Call,body=[For|If],orelse=[For])',  # test_a1_identity_formation:1415
+    'For.body>If(test=Call,body=[For|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):505
+    'For.body>If(test=Call,body=[If],orelse=[If])',  # closed_walk:2014
+    'For.body>If(test=Call,body=[Return],orelse=[])',  # closed_walk:561
+    'For.body>If(test=Compare,body=[Assign],orelse=[If])',  # test_a1_identity_formation:481
+    'For.body>If(test=Compare,body=[Assign],orelse=[])',  # closed_walk:730
+    'For.body>If(test=Compare,body=[Assign|AugAssign|Continue|If],orelse=[])',  # test_a1_identity_formation:1277
+    'For.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # closed_walk:957
+    'For.body>If(test=Compare,body=[Assign|Continue|If],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1284
+    'For.body>If(test=Compare,body=[Assign|Expr],orelse=[])',  # closed_walk:1218
+    'For.body>If(test=Compare,body=[Break],orelse=[])',  # closed_walk:917
+    'For.body>If(test=Compare,body=[Continue],orelse=[If])',  # test_match_hold_admission_gate_pg (a30d37f6):376
+    'For.body>If(test=Compare,body=[Continue],orelse=[])',  # closed_walk:152
+    'For.body>If(test=Compare,body=[Continue|Expr],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):266
+    'For.body>If(test=Compare,body=[Expr],orelse=[If])',  # closed_walk:1980
+    'For.body>If(test=Compare,body=[Expr],orelse=[])',  # closed_walk:1532
+    'For.body>If(test=Compare,body=[For],orelse=[])',  # closed_walk:1215
+    'For.body>If(test=Compare,body=[Raise],orelse=[])',  # closed_walk:631
+    'For.body>If(test=Compare,body=[Return],orelse=[])',  # closed_walk:1060
+    'For.body>If(test=Name,body=[Assign],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):63
+    'For.body>If(test=Name,body=[AugAssign|Continue],orelse=[])',  # test_a1_identity_formation:1230
+    'For.body>If(test=Name,body=[Continue|Expr],orelse=[])',  # test_a1_identity_formation:118
+    'For.body>If(test=Name,body=[Expr],orelse=[])',  # test_a1_identity_formation:122
+    'For.body>If(test=UnaryOp,body=[Continue],orelse=[])',  # closed_walk:899
+    'For.body>If(test=UnaryOp,body=[Continue|Expr],orelse=[])',  # closed_walk:1855
+    'For.body>If(test=UnaryOp,body=[Return],orelse=[])',  # closed_walk:1051
+    'For.body>Raise(exc=Call,cause=-)',  # closed_walk:154
+    'For.body>Return(value=JoinedStr)',  # test_match_hold_admission_gate_pg (a30d37f6):642
+    'For.body>Try(body=[Assign],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # test_a1_identity_formation:2193
+    'For.body>Try(body=[Assign|Expr],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # test_a1_identity_formation:4390
+    'For.body>Try(body=[Expr],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # test_a1_identity_formation:2169
+    'For.body>While(test=Call,body=[Assign],orelse=[])',  # closed_walk:329
+    "For.iter>Attribute(value=Call,attr='body',ctx=Load)",  # test_a1_identity_formation:4722
+    "For.iter>Attribute(value=Call,attr='effects',ctx=Load)",  # closed_walk:1979
+    "For.iter>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:1433
+    "For.iter>Attribute(value=Name,attr='body',ctx=Load)",  # test_a1_identity_formation:579
+    "For.iter>Attribute(value=Name,attr='effects',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):307
+    "For.iter>Attribute(value=Name,attr='generators',ctx=Load)",  # closed_walk:1589
+    "For.iter>Attribute(value=Name,attr='handlers',ctx=Load)",  # closed_walk:2052
+    "For.iter>Attribute(value=Name,attr='ifs',ctx=Load)",  # closed_walk:1586
+    "For.iter>Attribute(value=Name,attr='keywords',ctx=Load)",  # closed_walk:729
+    "For.iter>Attribute(value=Name,attr='names',ctx=Load)",  # closed_walk:460
+    "For.iter>Attribute(value=Name,attr='orelse',ctx=Load)",  # test_a1_identity_formation:581
+    "For.iter>Attribute(value=Name,attr='targets',ctx=Load)",  # closed_walk:2018
+    "For.iter>Attribute(value=Name,attr='values',ctx=Load)",  # closed_walk:851
+    'For.iter>BinOp(left=Attribute,op=Add,right=Attribute)',  # test_a1_identity_formation:1429
+    'For.iter>BinOp(left=Attribute,op=Add,right=ListComp)',  # closed_walk:1576
+    'For.iter>BinOp(left=BinOp,op=Add,right=Attribute)',  # closed_walk:2085
+    'For.iter>BinOp(left=Call,op=BitOr,right=Call)',  # closed_walk:977
+    'For.iter>BoolOp(op=Or,values=[Call|List])',  # closed_walk:1158
+    'For.iter>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:150
+    'For.iter>Call(func=Attribute,args=[Call],keywords=[])',  # test_a1_identity_formation:2932
+    'For.iter>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:71
+    'For.iter>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:138
+    'For.iter>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:434
+    'For.iter>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:1017
+    'For.iter>Call(func=Name,args=[Attribute|Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):490
+    'For.iter>Call(func=Name,args=[BinOp|Name],keywords=[])',  # test_a1_identity_formation:3208
+    'For.iter>Call(func=Name,args=[BinOp|UnaryOp],keywords=[])',  # test_a1_identity_formation:3204
+    'For.iter>Call(func=Name,args=[Call],keywords=[])',  # closed_walk:984
+    'For.iter>Call(func=Name,args=[List],keywords=[])',  # test_a1_identity_formation:1416
+    'For.iter>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:897
+    'For.iter>Call(func=Name,args=[Name|Subscript],keywords=[])',  # closed_walk:1186
+    'For.iter>Call(func=Name,args=[Subscript],keywords=[])',  # closed_walk:1228
+    'For.iter>Call(func=Name,args=[Tuple],keywords=[])',  # test_a1_identity_formation:2167
+    'For.iter>IfExp(test=Call,body=Attribute,orelse=List)',  # closed_walk:327
+    'For.iter>IfExp(test=Call,body=List,orelse=List)',  # closed_walk:1591
+    'For.iter>Name(id=str,ctx=Load)',  # closed_walk:440
+    'For.iter>Subscript(value=Attribute,slice=Slice,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):850
+    'For.iter>Subscript(value=Name,slice=Slice,ctx=Load)',  # closed_walk:916
+    'For.iter>Tuple(elts=[BinOp|Name],ctx=Load)',  # test_a1_identity_formation:3863
+    'For.iter>Tuple(elts=[Constant],ctx=Load)',  # closed_walk:892
+    'For.iter>Tuple(elts=[Name],ctx=Load)',  # test_a1_identity_formation:2192
+    'For.iter>Tuple(elts=[Tuple],ctx=Load)',  # closed_walk:1216
+    'For.target>Name(id=str,ctx=Store)',  # closed_walk:71
+    'For.target>Tuple(elts=[Name],ctx=Store)',  # closed_walk:138
+    'For.target>Tuple(elts=[Tuple],ctx=Store)',  # test_a1_identity_formation:4333
+    "FormattedValue.value>Attribute(value=Attribute,attr='__name__',ctx=Load)",  # closed_walk:1508
+    "FormattedValue.value>Attribute(value=Attribute,attr='id',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):479
+    "FormattedValue.value>Attribute(value=Call,attr='__name__',ctx=Load)",  # closed_walk:289
+    "FormattedValue.value>Attribute(value=Name,attr='__name__',ctx=Load)",  # closed_walk:1818
+    "FormattedValue.value>Attribute(value=Name,attr='attr',ctx=Load)",  # closed_walk:1559
+    "FormattedValue.value>Attribute(value=Name,attr='id',ctx=Load)",  # closed_walk:554
+    "FormattedValue.value>Attribute(value=Name,attr='lineno',ctx=Load)",  # test_a1_identity_formation:2208
+    "FormattedValue.value>Attribute(value=Name,attr='name',ctx=Load)",  # test_a1_identity_formation:2172
+    "FormattedValue.value>Attribute(value=Name,attr='value',ctx=Load)",  # test_a1_identity_formation:3849
+    "FormattedValue.value>Attribute(value=Subscript,attr='lineno',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):617
+    'FormattedValue.value>BinOp(left=Name,op=Add,right=Name)',  # closed_walk:139
+    'FormattedValue.value>BoolOp(op=Or,values=[Call|Constant])',  # test_a1_identity_formation:1359
+    'FormattedValue.value>BoolOp(op=Or,values=[Constant|Name])',  # test_a1_identity_formation:1508
+    'FormattedValue.value>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:1732
+    'FormattedValue.value>Call(func=Attribute,args=[Call],keywords=[])',  # closed_walk:1662
+    'FormattedValue.value>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:575
+    'FormattedValue.value>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:1189
+    'FormattedValue.value>Call(func=Name,args=[BinOp],keywords=[])',  # test_a1_identity_formation:1511
+    'FormattedValue.value>Call(func=Name,args=[Call],keywords=[keyword])',  # test_a1_identity_formation:137
+    'FormattedValue.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:149
+    'FormattedValue.value>Call(func=Name,args=[Name],keywords=[])',  # test_a1_identity_formation:892
+    'FormattedValue.value>IfExp(test=Compare,body=Constant,orelse=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):642
+    'FormattedValue.value>IfExp(test=Name,body=Attribute,orelse=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):644
+    'FormattedValue.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):531
+    'FormattedValue.value>Name(id=str,ctx=Load)',  # closed_walk:139
+    'FormattedValue.value>Subscript(value=Call,slice=Slice,ctx=Load)',  # closed_walk:1502
+    'FormattedValue.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):387
+    'FormattedValue.value>Subscript(value=Name,slice=Slice,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):312
+    'FormattedValue.value>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # test_a1_identity_formation:2172
+    'FunctionDef.args>arguments(posonlyargs=[],args=[],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # closed_walk:265
+    'FunctionDef.args>arguments(posonlyargs=[],args=[],vararg=arg,kwonlyargs=[arg],kw_defaults=[Constant],kwarg=-,defaults=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1830
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Call])',  # closed_walk:1272
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Call|Constant])',  # closed_walk:106
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Call|Constant|Tuple])',  # closed_walk:1452
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Constant])',  # closed_walk:129
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Constant|Tuple])',  # closed_walk:565
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Tuple])',  # closed_walk:1877
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # closed_walk:66
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=arg,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # closed_walk:1519
+    'FunctionDef.body>Assert(test=BoolOp,msg=-)',  # test_a1_identity_formation:3690
+    'FunctionDef.body>Assert(test=Compare,msg=-)',  # test_a1_identity_formation:3696
+    'FunctionDef.body>Assert(test=Compare,msg=JoinedStr)',  # test_a1_identity_formation:135
+    'FunctionDef.body>Assert(test=Compare,msg=Tuple)',  # test_a1_identity_formation:4420
+    'FunctionDef.body>Assign(targets=[Attribute],value=Attribute,type_comment=-)',  # closed_walk:1918
+    'FunctionDef.body>Assign(targets=[Attribute],value=Call,type_comment=-)',  # closed_walk:108
+    'FunctionDef.body>Assign(targets=[Attribute],value=Compare,type_comment=-)',  # closed_walk:430
+    'FunctionDef.body>Assign(targets=[Attribute],value=Constant,type_comment=-)',  # closed_walk:1390
+    'FunctionDef.body>Assign(targets=[Attribute],value=Dict,type_comment=-)',  # closed_walk:114
+    'FunctionDef.body>Assign(targets=[Attribute],value=IfExp,type_comment=-)',  # closed_walk:1456
+    'FunctionDef.body>Assign(targets=[Attribute],value=JoinedStr,type_comment=-)',  # test_a1_identity_formation:4471
+    'FunctionDef.body>Assign(targets=[Attribute],value=List,type_comment=-)',  # closed_walk:1469
+    'FunctionDef.body>Assign(targets=[Attribute],value=ListComp,type_comment=-)',  # test_a1_identity_formation:37
+    'FunctionDef.body>Assign(targets=[Attribute],value=Name,type_comment=-)',  # closed_walk:113
+    'FunctionDef.body>Assign(targets=[Name],value=Attribute,type_comment=-)',  # closed_walk:811
+    'FunctionDef.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # closed_walk:1620
+    'FunctionDef.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # closed_walk:525
+    'FunctionDef.body>Assign(targets=[Name],value=Call,type_comment=-)',  # closed_walk:123
+    'FunctionDef.body>Assign(targets=[Name],value=Compare,type_comment=-)',  # test_a1_identity_formation:998
+    'FunctionDef.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # closed_walk:725
+    'FunctionDef.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # closed_walk:889
+    'FunctionDef.body>Assign(targets=[Name],value=DictComp,type_comment=-)',  # closed_walk:1035
+    'FunctionDef.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # closed_walk:699
+    'FunctionDef.body>Assign(targets=[Name],value=JoinedStr,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):1045
+    'FunctionDef.body>Assign(targets=[Name],value=List,type_comment=-)',  # closed_walk:70
+    'FunctionDef.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # closed_walk:177
+    'FunctionDef.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # closed_walk:932
+    'FunctionDef.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # closed_walk:719
+    'FunctionDef.body>Assign(targets=[Name],value=Tuple,type_comment=-)',  # closed_walk:135
+    'FunctionDef.body>Assign(targets=[Subscript],value=BinOp,type_comment=-)',  # test_a1_identity_formation:2430
+    'FunctionDef.body>Assign(targets=[Subscript],value=Call,type_comment=-)',  # test_a1_identity_formation:4537
+    'FunctionDef.body>Assign(targets=[Subscript],value=Name,type_comment=-)',  # closed_walk:156
+    'FunctionDef.body>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # closed_walk:194
+    'FunctionDef.body>Assign(targets=[Tuple],value=Attribute,type_comment=-)',  # test_a1_identity_formation:845
+    'FunctionDef.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # closed_walk:516
+    'FunctionDef.body>Assign(targets=[Tuple],value=GeneratorExp,type_comment=-)',  # test_a1_identity_formation:2165
+    'FunctionDef.body>Assign(targets=[Tuple],value=Name,type_comment=-)',  # test_a1_identity_formation:894
+    'FunctionDef.body>Assign(targets=[Tuple],value=Subscript,type_comment=-)',  # test_a1_identity_formation:835
+    'FunctionDef.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # closed_walk:268
+    'FunctionDef.body>AugAssign(target=Attribute,op=Add,value=Constant)',  # test_a1_identity_formation:2809
+    'FunctionDef.body>AugAssign(target=Attribute,op=Sub,value=Constant)',  # test_a1_identity_formation:2811
+    'FunctionDef.body>AugAssign(target=Subscript,op=Add,value=Constant)',  # closed_walk:1503
+    'FunctionDef.body>ClassDef(name=str,bases=[Attribute],keywords=[],body=[FunctionDef],decorator_list=[],type_params=[])',  # test_a1_identity_formation:2804
+    'FunctionDef.body>ClassDef(name=str,bases=[],keywords=[],body=[FunctionDef],decorator_list=[],type_params=[])',  # test_a1_identity_formation:3674
+    'FunctionDef.body>Expr(value=Call)',  # closed_walk:445
+    'FunctionDef.body>Expr(value=Constant)',  # closed_walk:67
+    'FunctionDef.body>For(target=Name,iter=Attribute,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1433
+    'FunctionDef.body>For(target=Name,iter=Attribute,body=[If],orelse=[],type_comment=-)',  # closed_walk:729
+    'FunctionDef.body>For(target=Name,iter=BinOp,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:977
+    'FunctionDef.body>For(target=Name,iter=BinOp,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1975
+    'FunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # closed_walk:1017
+    'FunctionDef.body>For(target=Name,iter=Call,body=[Assign|If],orelse=[],type_comment=-)',  # closed_walk:1041
+    'FunctionDef.body>For(target=Name,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # test_a1_identity_formation:470
+    'FunctionDef.body>For(target=Name,iter=Call,body=[For],orelse=[],type_comment=-)',  # closed_walk:891
+    'FunctionDef.body>For(target=Name,iter=Call,body=[If],orelse=[],type_comment=-)',  # closed_walk:71
+    'FunctionDef.body>For(target=Name,iter=Call,body=[Try],orelse=[],type_comment=-)',  # test_a1_identity_formation:2216
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign|AugAssign|If],orelse=[],type_comment=-)',  # closed_walk:2007
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # closed_walk:1063
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign|For],orelse=[],type_comment=-)',  # test_a1_identity_formation:2962
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # closed_walk:1058
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:661
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Expr|If],orelse=[],type_comment=-)',  # test_a1_identity_formation:903
+    'FunctionDef.body>For(target=Name,iter=Name,body=[For],orelse=[],type_comment=-)',  # closed_walk:440
+    'FunctionDef.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # closed_walk:560
+    'FunctionDef.body>For(target=Name,iter=Subscript,body=[Return],orelse=[],type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):850
+    'FunctionDef.body>For(target=Name,iter=Tuple,body=[Expr],orelse=[],type_comment=-)',  # test_a1_identity_formation:3748
+    'FunctionDef.body>For(target=Name,iter=Tuple,body=[For],orelse=[],type_comment=-)',  # test_a1_identity_formation:3863
+    'FunctionDef.body>For(target=Name,iter=Tuple,body=[If],orelse=[],type_comment=-)',  # closed_walk:1742
+    'FunctionDef.body>For(target=Name,iter=Tuple,body=[If|Try],orelse=[],type_comment=-)',  # test_a1_identity_formation:2192
+    'FunctionDef.body>For(target=Name,iter=Tuple,body=[Try],orelse=[],type_comment=-)',  # test_a1_identity_formation:4389
+    'FunctionDef.body>For(target=Tuple,iter=Attribute,body=[If],orelse=[],type_comment=-)',  # closed_walk:1979
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[Assign|Expr|For|FunctionDef],orelse=[],type_comment=-)',  # test_a1_identity_formation:3811
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # test_a1_identity_formation:1229
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[Assign|If],orelse=[],type_comment=-)',  # test_a1_identity_formation:116
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[Assign|If|Return],orelse=[],type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):608
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[Expr|If],orelse=[],type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):265
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[For],orelse=[],type_comment=-)',  # test_a1_identity_formation:4332
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[If],orelse=[],type_comment=-)',  # closed_walk:726
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[Try],orelse=[],type_comment=-)',  # test_a1_identity_formation:2167
+    'FunctionDef.body>For(target=Tuple,iter=Name,body=[Expr|If],orelse=[],type_comment=-)',  # closed_walk:1610
+    'FunctionDef.body>For(target=Tuple,iter=Name,body=[If],orelse=[],type_comment=-)',  # closed_walk:630
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|AugAssign|If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1105
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1127
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1193
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1201
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:4532
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|For|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1223
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:847
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Expr|For],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1972
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1091
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[For],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1143
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[If],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:574
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:936
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1072
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:1080
+    'FunctionDef.body>If(test=Attribute,body=[Assign|For],orelse=[Assign|For|Try])',  # closed_walk:137
+    'FunctionDef.body>If(test=Attribute,body=[Expr|Return],orelse=[])',  # closed_walk:124
+    'FunctionDef.body>If(test=Attribute,body=[Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):670
+    'FunctionDef.body>If(test=BinOp,body=[Raise],orelse=[])',  # closed_walk:1240
+    'FunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[If])',  # closed_walk:1091
+    'FunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[Try])',  # test_match_hold_admission_gate_pg (a30d37f6):403
+    'FunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[])',  # closed_walk:710
+    'FunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1247
+    'FunctionDef.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # closed_walk:869
+    'FunctionDef.body>If(test=BoolOp,body=[Assign|If|Return],orelse=[])',  # closed_walk:1253
+    'FunctionDef.body>If(test=BoolOp,body=[Assign|Raise],orelse=[])',  # closed_walk:1507
+    'FunctionDef.body>If(test=BoolOp,body=[AugAssign|Expr|Return],orelse=[])',  # closed_walk:1753
+    'FunctionDef.body>If(test=BoolOp,body=[Expr],orelse=[Assign|If|Try])',  # test_a1_identity_formation:2268
+    'FunctionDef.body>If(test=BoolOp,body=[Expr],orelse=[If])',  # closed_walk:448
+    'FunctionDef.body>If(test=BoolOp,body=[Expr],orelse=[])',  # closed_walk:1546
+    'FunctionDef.body>If(test=BoolOp,body=[Expr|For|Return],orelse=[])',  # closed_walk:1780
+    'FunctionDef.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # closed_walk:1803
+    'FunctionDef.body>If(test=BoolOp,body=[Raise],orelse=[])',  # closed_walk:588
+    'FunctionDef.body>If(test=BoolOp,body=[Return],orelse=[])',  # closed_walk:174
+    'FunctionDef.body>If(test=BoolOp,body=[Try],orelse=[])',  # test_a1_identity_formation:1157
+    'FunctionDef.body>If(test=Call,body=[Assign],orelse=[Assign])',  # closed_walk:720
+    'FunctionDef.body>If(test=Call,body=[Assign],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):721
+    'FunctionDef.body>If(test=Call,body=[Assign|AugAssign|Expr|For|If|Return],orelse=[])',  # closed_walk:1667
+    'FunctionDef.body>If(test=Call,body=[Assign|AugAssign|Expr|If|Return],orelse=[])',  # closed_walk:1621
+    'FunctionDef.body>If(test=Call,body=[Assign|Expr|If|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1255
+    'FunctionDef.body>If(test=Call,body=[Assign|For],orelse=[If])',  # test_a1_identity_formation:1131
+    'FunctionDef.body>If(test=Call,body=[Assign|For],orelse=[])',  # closed_walk:478
+    'FunctionDef.body>If(test=Call,body=[Assign|For|If|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):650
+    'FunctionDef.body>If(test=Call,body=[Assign|For|Return],orelse=[])',  # closed_walk:849
+    'FunctionDef.body>If(test=Call,body=[Assign|If],orelse=[If])',  # closed_walk:748
+    'FunctionDef.body>If(test=Call,body=[Assign|If|Return],orelse=[])',  # closed_walk:839
+    'FunctionDef.body>If(test=Call,body=[Assign|Return],orelse=[])',  # closed_walk:866
+    'FunctionDef.body>If(test=Call,body=[AugAssign|Expr|For|Return],orelse=[])',  # closed_walk:1762
+    'FunctionDef.body>If(test=Call,body=[Expr|Import],orelse=[])',  # test_a1_identity_formation:4717
+    'FunctionDef.body>If(test=Call,body=[If],orelse=[If])',  # test_a1_identity_formation:575
+    'FunctionDef.body>If(test=Call,body=[Raise],orelse=[])',  # closed_walk:1203
+    'FunctionDef.body>If(test=Call,body=[Return],orelse=[])',  # closed_walk:1287
+    'FunctionDef.body>If(test=Call,body=[Try],orelse=[])',  # test_a1_identity_formation:632
+    'FunctionDef.body>If(test=Compare,body=[Assign],orelse=[])',  # closed_walk:438
+    'FunctionDef.body>If(test=Compare,body=[Assign|Expr],orelse=[Assign|Expr])',  # closed_walk:1491
+    'FunctionDef.body>If(test=Compare,body=[Assign|Expr],orelse=[])',  # closed_walk:1910
+    'FunctionDef.body>If(test=Compare,body=[Assign|Expr|For|If|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):773
+    'FunctionDef.body>If(test=Compare,body=[Assign|Expr|If],orelse=[])',  # test_a1_identity_formation:1369
+    'FunctionDef.body>If(test=Compare,body=[Assign|Expr|If|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):533
+    'FunctionDef.body>If(test=Compare,body=[Assign|For],orelse=[])',  # closed_walk:433
+    'FunctionDef.body>If(test=Compare,body=[Assign|If],orelse=[Assign|If])',  # test_a1_identity_formation:1488
+    'FunctionDef.body>If(test=Compare,body=[Assign|If],orelse=[])',  # closed_walk:545
+    'FunctionDef.body>If(test=Compare,body=[Assign|If|Raise],orelse=[])',  # closed_walk:1243
+    'FunctionDef.body>If(test=Compare,body=[Assign|If|Return],orelse=[])',  # closed_walk:1259
+    'FunctionDef.body>If(test=Compare,body=[Expr],orelse=[Assign|If|Try])',  # test_a1_identity_formation:2241
+    'FunctionDef.body>If(test=Compare,body=[Expr],orelse=[Expr])',  # test_a1_identity_formation:2817
+    'FunctionDef.body>If(test=Compare,body=[Expr],orelse=[])',  # closed_walk:783
+    'FunctionDef.body>If(test=Compare,body=[Expr|For|Return],orelse=[])',  # closed_walk:1575
+    'FunctionDef.body>If(test=Compare,body=[Expr|If],orelse=[])',  # test_a1_identity_formation:1196
+    'FunctionDef.body>If(test=Compare,body=[Expr|If|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):819
+    'FunctionDef.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # closed_walk:1594
+    'FunctionDef.body>If(test=Compare,body=[For|If|Return],orelse=[])',  # closed_walk:1556
+    'FunctionDef.body>If(test=Compare,body=[If],orelse=[])',  # test_a1_identity_formation:1353
+    'FunctionDef.body>If(test=Compare,body=[Raise],orelse=[])',  # closed_walk:286
+    'FunctionDef.body>If(test=Compare,body=[Return],orelse=[])',  # closed_walk:133
+    'FunctionDef.body>If(test=Name,body=[Assign|If],orelse=[Assign|If|Try])',  # test_a1_identity_formation:1010
+    'FunctionDef.body>If(test=Name,body=[Expr],orelse=[])',  # closed_walk:1825
+    'FunctionDef.body>If(test=Name,body=[Expr|For|Return],orelse=[])',  # closed_walk:1786
+    'FunctionDef.body>If(test=Name,body=[Return],orelse=[])',  # closed_walk:509
+    'FunctionDef.body>If(test=UnaryOp,body=[Expr],orelse=[AugAssign|Try])',  # test_a1_identity_formation:1044
+    'FunctionDef.body>If(test=UnaryOp,body=[Expr],orelse=[If])',  # test_a1_identity_formation:1362
+    'FunctionDef.body>If(test=UnaryOp,body=[Expr],orelse=[])',  # closed_walk:1728
+    'FunctionDef.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):520
+    'FunctionDef.body>If(test=UnaryOp,body=[Raise],orelse=[])',  # closed_walk:701
+    'FunctionDef.body>If(test=UnaryOp,body=[Return],orelse=[])',  # closed_walk:523
+    "FunctionDef.body>Import(names=['linecache'])",  # test_a1_identity_formation:3663
+    "FunctionDef.body>Import(names=['pathlib'])",  # test_a1_identity_formation:3860
+    "FunctionDef.body>Import(names=['resolution_sites'])",  # test_a1_identity_formation:4329
+    "FunctionDef.body>Import(names=['shape_grammar'])",  # test_a1_identity_formation:4714
+    "FunctionDef.body>Import(names=['sys'])",  # test_a1_identity_formation:721
+    "FunctionDef.body>Import(names=['types'])",  # test_a1_identity_formation:3664
+    'FunctionDef.body>Raise(exc=Call,cause=-)',  # closed_walk:554
+    'FunctionDef.body>Return(value=BinOp)',  # test_match_hold_admission_gate_pg (a30d37f6):1832
+    'FunctionDef.body>Return(value=BoolOp)',  # closed_walk:604
+    'FunctionDef.body>Return(value=Call)',  # closed_walk:127
+    'FunctionDef.body>Return(value=Compare)',  # closed_walk:687
+    'FunctionDef.body>Return(value=Constant)',  # closed_walk:530
+    'FunctionDef.body>Return(value=DictComp)',  # closed_walk:920
+    'FunctionDef.body>Return(value=IfExp)',  # closed_walk:179
+    'FunctionDef.body>Return(value=JoinedStr)',  # test_match_hold_admission_gate_pg (a30d37f6):644
+    'FunctionDef.body>Return(value=List)',  # test_a1_identity_formation:1125
+    'FunctionDef.body>Return(value=ListComp)',  # closed_walk:378
+    'FunctionDef.body>Return(value=Name)',  # closed_walk:77
+    'FunctionDef.body>Return(value=Subscript)',  # closed_walk:1874
+    'FunctionDef.body>Return(value=Tuple)',  # closed_walk:167
+    'FunctionDef.body>Try(body=[Assign],handlers=[ExceptHandler],orelse=[Assign|If],finalbody=[])',  # test_match_hold_admission_gate_pg (a30d37f6):345
+    'FunctionDef.body>Try(body=[Assign],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # closed_walk:163
+    'FunctionDef.body>Try(body=[Assign],handlers=[],orelse=[],finalbody=[Expr])',  # closed_walk:1887
+    'FunctionDef.body>Try(body=[Assign|Expr],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # test_a1_identity_formation:1002
+    'FunctionDef.body>Try(body=[If],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # test_match_hold_admission_gate_pg (a30d37f6):585
+    'FunctionDef.body>Try(body=[Return],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # closed_walk:1514
+    'FunctionDef.body>While(test=BoolOp,body=[Assign],orelse=[])',  # closed_walk:1201
+    'FunctionDef.body>While(test=Call,body=[Assign],orelse=[])',  # closed_walk:366
+    'FunctionDef.body>While(test=Compare,body=[Assign|Expr|While],orelse=[])',  # test_a1_identity_formation:1792
+    'FunctionDef.body>While(test=Name,body=[Assign|Expr|If],orelse=[])',  # closed_walk:1125
+    'FunctionDef.body>While(test=Name,body=[Assign|For],orelse=[])',  # test_a1_identity_formation:2979
+    'FunctionDef.body>While(test=Name,body=[Assign|If],orelse=[])',  # closed_walk:269
+    'FunctionDef.body>While(test=UnaryOp,body=[Assign],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):109
+    "FunctionDef.decorator_list>Attribute(value=Name,attr='fixture',ctx=Load)",  # test_a1_identity_formation:710
+    'FunctionDef.decorator_list>Call(func=Attribute,args=[],keywords=[keyword])',  # test_a1_identity_formation:2922
+    'FunctionDef.decorator_list>Name(id=str,ctx=Load)',  # closed_walk:771
+    "GeneratorExp.elt>Attribute(value=Name,attr='arg',ctx=Load)",  # closed_walk:953
+    "GeneratorExp.elt>Attribute(value=Name,attr='value',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):653
+    'GeneratorExp.elt>BinOp(left=BinOp,op=Add,right=Constant)',  # test_a1_identity_formation:4515
+    'GeneratorExp.elt>BoolOp(op=And,values=[Call])',  # closed_walk:872
+    'GeneratorExp.elt>BoolOp(op=And,values=[Call|Compare])',  # test_a1_identity_formation:562
+    'GeneratorExp.elt>BoolOp(op=And,values=[Call|Compare|UnaryOp])',  # test_a1_identity_formation:3251
+    'GeneratorExp.elt>BoolOp(op=And,values=[Compare])',  # closed_walk:1203
+    'GeneratorExp.elt>BoolOp(op=Or,values=[BoolOp|Call])',  # test_match_hold_admission_gate_pg (a30d37f6):788
+    'GeneratorExp.elt>BoolOp(op=Or,values=[Compare])',  # closed_walk:1860
+    'GeneratorExp.elt>Call(func=Attribute,args=[Name],keywords=[])',  # test_a1_identity_formation:3040
+    'GeneratorExp.elt>Call(func=Name,args=[Attribute],keywords=[])',  # test_a1_identity_formation:778
+    'GeneratorExp.elt>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:1033
+    'GeneratorExp.elt>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:919
+    'GeneratorExp.elt>Call(func=Name,args=[Name|Tuple],keywords=[])',  # closed_walk:1282
+    'GeneratorExp.elt>Compare(left=Attribute,ops=[Is],comparators=[Attribute])',  # test_match_hold_admission_gate_pg (a30d37f6):704
+    'GeneratorExp.elt>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # closed_walk:1082
+    'GeneratorExp.elt>Compare(left=Attribute,ops=[NotIn],comparators=[Tuple])',  # test_match_hold_admission_gate_pg (a30d37f6):700
+    'GeneratorExp.elt>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # test_a1_identity_formation:932
+    'GeneratorExp.elt>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # test_a1_identity_formation:1099
+    'GeneratorExp.elt>Compare(left=Name,ops=[Eq],comparators=[Name])',  # closed_walk:178
+    'GeneratorExp.elt>Compare(left=Name,ops=[In],comparators=[Attribute])',  # closed_walk:127
+    'GeneratorExp.elt>Compare(left=Name,ops=[In],comparators=[Name])',  # test_a1_identity_formation:932
+    'GeneratorExp.elt>Compare(left=Name,ops=[Is],comparators=[Constant])',  # closed_walk:981
+    'GeneratorExp.elt>Compare(left=Name,ops=[Is],comparators=[Name])',  # test_a1_identity_formation:930
+    'GeneratorExp.elt>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # closed_walk:499
+    'GeneratorExp.elt>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # closed_walk:1184
+    'GeneratorExp.elt>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # test_a1_identity_formation:1317
+    'GeneratorExp.elt>Constant(value=int)',  # closed_walk:174
+    'GeneratorExp.elt>JoinedStr(values=[Constant|FormattedValue])',  # test_a1_identity_formation:1109
+    'GeneratorExp.elt>Name(id=str,ctx=Load)',  # closed_walk:498
+    'GeneratorExp.elt>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # test_a1_identity_formation:2165
+    'GeneratorExp.elt>Subscript(value=Call,slice=Constant,ctx=Load)',  # closed_walk:683
+    'GeneratorExp.elt>Subscript(value=Name,slice=Name,ctx=Load)',  # test_a1_identity_formation:4399
+    'GeneratorExp.elt>Tuple(elts=[Attribute|Constant],ctx=Load)',  # test_a1_identity_formation:1381
+    'GeneratorExp.elt>Tuple(elts=[Attribute|Tuple],ctx=Load)',  # closed_walk:73
+    'GeneratorExp.elt>Tuple(elts=[Name],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):72
+    'GeneratorExp.elt>UnaryOp(op=Not,operand=Call)',  # test_a1_identity_formation:1210
+    'GeneratorExp.generators>comprehension(target=Name,iter=Attribute,ifs=[],is_async=0)',  # closed_walk:73
+    'GeneratorExp.generators>comprehension(target=Name,iter=Call,ifs=[BoolOp],is_async=0)',  # closed_walk:1935
+    'GeneratorExp.generators>comprehension(target=Name,iter=Call,ifs=[Call],is_async=0)',  # test_a1_identity_formation:778
+    'GeneratorExp.generators>comprehension(target=Name,iter=Call,ifs=[],is_async=0)',  # closed_walk:683
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[BoolOp],is_async=0)',  # test_a1_identity_formation:1381
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # test_match_hold_admission_gate_pg (a30d37f6):350
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # closed_walk:127
+    'GeneratorExp.generators>comprehension(target=Name,iter=Subscript,ifs=[],is_async=0)',  # test_match_hold_admission_gate_pg (a30d37f6):704
+    'GeneratorExp.generators>comprehension(target=Name,iter=Tuple,ifs=[],is_async=0)',  # test_a1_identity_formation:2165
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Attribute,ifs=[],is_async=0)',  # test_match_hold_admission_gate_pg (a30d37f6):302
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[BoolOp],is_async=0)',  # test_match_hold_admission_gate_pg (a30d37f6):72
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[Call],is_async=0)',  # closed_walk:498
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # closed_walk:174
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # closed_walk:178
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Name,ifs=[],is_async=0)',  # closed_walk:499
+    'If.body>Assert(test=Compare,msg=Constant)',  # test_a1_identity_formation:94
+    'If.body>Assign(targets=[Attribute],value=Attribute,type_comment=-)',  # closed_walk:1423
+    'If.body>Assign(targets=[Attribute],value=Dict,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):200
+    'If.body>Assign(targets=[Attribute],value=Lambda,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):201
+    'If.body>Assign(targets=[Attribute],value=Name,type_comment=-)',  # closed_walk:1425
+    'If.body>Assign(targets=[Name],value=Attribute,type_comment=-)',  # closed_walk:315
+    'If.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # closed_walk:75
+    'If.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # test_a1_identity_formation:1278
+    'If.body>Assign(targets=[Name],value=Call,type_comment=-)',  # closed_walk:141
+    'If.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # closed_walk:958
+    'If.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):51
+    'If.body>Assign(targets=[Name],value=DictComp,type_comment=-)',  # closed_walk:1086
+    'If.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # closed_walk:480
+    'If.body>Assign(targets=[Name],value=JoinedStr,type_comment=-)',  # closed_walk:1508
+    'If.body>Assign(targets=[Name],value=List,type_comment=-)',  # closed_walk:850
+    'If.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # closed_walk:721
+    'If.body>Assign(targets=[Name],value=Name,type_comment=-)',  # closed_walk:758
+    'If.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # closed_walk:728
+    'If.body>Assign(targets=[Name],value=Tuple,type_comment=-)',  # test_a1_identity_formation:3194
+    'If.body>Assign(targets=[Name|Subscript],value=Call,type_comment=-)',  # test_a1_identity_formation:4416
+    'If.body>Assign(targets=[Subscript],value=Attribute,type_comment=-)',  # test_a1_identity_formation:3820
+    'If.body>Assign(targets=[Subscript],value=BinOp,type_comment=-)',  # closed_walk:946
+    'If.body>Assign(targets=[Subscript],value=Call,type_comment=-)',  # test_a1_identity_formation:701
+    'If.body>Assign(targets=[Subscript],value=IfExp,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):1359
+    'If.body>Assign(targets=[Subscript],value=Name,type_comment=-)',  # closed_walk:140
+    'If.body>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):202
+    'If.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # closed_walk:749
+    'If.body>Assign(targets=[Tuple],value=IfExp,type_comment=-)',  # closed_walk:1913
+    'If.body>Assign(targets=[Tuple],value=Name,type_comment=-)',  # closed_walk:546
+    'If.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # closed_walk:938
+    'If.body>AugAssign(target=Attribute,op=Add,value=Constant)',  # test_a1_identity_formation:3451
+    'If.body>AugAssign(target=Name,op=Add,value=Constant)',  # test_a1_identity_formation:1797
+    'If.body>AugAssign(target=Name,op=BitOr,value=SetComp)',  # test_a1_identity_formation:4724
+    'If.body>AugAssign(target=Name,op=Sub,value=Constant)',  # test_a1_identity_formation:1231
+    'If.body>AugAssign(target=Subscript,op=Add,value=Constant)',  # closed_walk:1664
+    'If.body>Break()',  # closed_walk:488
+    'If.body>Continue()',  # closed_walk:153
+    'If.body>Expr(value=Call)',  # closed_walk:73
+    'If.body>For(target=Name,iter=Attribute,body=[Assign|For|If],orelse=[],type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):52
+    'If.body>For(target=Name,iter=Attribute,body=[Assign|If],orelse=[],type_comment=-)',  # closed_walk:955
+    'If.body>For(target=Name,iter=Attribute,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:460
+    'If.body>For(target=Name,iter=Attribute,body=[Expr|If],orelse=[],type_comment=-)',  # closed_walk:2052
+    'If.body>For(target=Name,iter=Attribute,body=[If],orelse=[],type_comment=-)',  # closed_walk:851
+    'If.body>For(target=Name,iter=BinOp,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1576
+    'If.body>For(target=Name,iter=BinOp,body=[If],orelse=[],type_comment=-)',  # closed_walk:2085
+    'If.body>For(target=Name,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:434
+    'If.body>For(target=Name,iter=Call,body=[If],orelse=[],type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):490
+    'If.body>For(target=Name,iter=IfExp,body=[Assign|If|While],orelse=[],type_comment=-)',  # closed_walk:327
+    'If.body>For(target=Name,iter=IfExp,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1591
+    'If.body>For(target=Name,iter=Name,body=[AugAssign],orelse=[],type_comment=-)',  # test_a1_identity_formation:1133
+    'If.body>For(target=Name,iter=Name,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1720
+    'If.body>For(target=Name,iter=Name,body=[For],orelse=[],type_comment=-)',  # closed_walk:482
+    'If.body>For(target=Name,iter=Subscript,body=[Expr],orelse=[],type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):436
+    'If.body>For(target=Name,iter=Subscript,body=[If|Return],orelse=[],type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):787
+    'If.body>For(target=Name,iter=Tuple,body=[If],orelse=[],type_comment=-)',  # closed_walk:1216
+    'If.body>For(target=Tuple,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:138
+    'If.body>For(target=Tuple,iter=Call,body=[If],orelse=[],type_comment=-)',  # closed_walk:1792
+    'If.body>If(test=Attribute,body=[Expr],orelse=[])',  # closed_walk:1582
+    'If.body>If(test=Attribute,body=[Raise],orelse=[])',  # test_a1_identity_formation:92
+    'If.body>If(test=Attribute,body=[Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):839
+    'If.body>If(test=BoolOp,body=[Assign|AugAssign|Expr|If|Return],orelse=[])',  # closed_walk:1690
+    'If.body>If(test=BoolOp,body=[Assign|For],orelse=[Assign])',  # closed_walk:952
+    'If.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):614
+    'If.body>If(test=BoolOp,body=[Assign|If|Return],orelse=[])',  # closed_walk:1246
+    'If.body>If(test=BoolOp,body=[AugAssign|Expr|Return],orelse=[])',  # closed_walk:1623
+    'If.body>If(test=BoolOp,body=[Break|Expr],orelse=[])',  # closed_walk:486
+    'If.body>If(test=BoolOp,body=[Continue],orelse=[])',  # closed_walk:1235
+    'If.body>If(test=BoolOp,body=[Continue|Expr],orelse=[])',  # test_a1_identity_formation:3832
+    'If.body>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # closed_walk:971
+    'If.body>If(test=BoolOp,body=[Expr],orelse=[])',  # closed_walk:474
+    'If.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # closed_walk:1565
+    'If.body>If(test=BoolOp,body=[If],orelse=[])',  # closed_walk:1231
+    'If.body>If(test=BoolOp,body=[Pass],orelse=[])',  # closed_walk:1260
+    'If.body>If(test=BoolOp,body=[Raise],orelse=[])',  # closed_walk:1988
+    'If.body>If(test=BoolOp,body=[Return],orelse=[])',  # closed_walk:549
+    'If.body>If(test=BoolOp,body=[Try],orelse=[])',  # test_a1_identity_formation:1418
+    'If.body>If(test=Call,body=[Expr],orelse=[Expr])',  # closed_walk:1712
+    'If.body>If(test=Call,body=[Expr],orelse=[])',  # closed_walk:318
+    'If.body>If(test=Call,body=[Expr|For|If|Return],orelse=[])',  # closed_walk:1581
+    'If.body>If(test=Call,body=[Expr|If],orelse=[])',  # closed_walk:1673
+    'If.body>If(test=Call,body=[Return],orelse=[])',  # closed_walk:840
+    'If.body>If(test=Compare,body=[Assign],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1211
+    'If.body>If(test=Compare,body=[Assign|Expr],orelse=[])',  # test_a1_identity_formation:1491
+    'If.body>If(test=Compare,body=[Assign|If],orelse=[If])',  # closed_walk:750
+    'If.body>If(test=Compare,body=[Assign|Raise],orelse=[])',  # test_a1_identity_formation:3452
+    'If.body>If(test=Compare,body=[AugAssign|Expr],orelse=[Assign|Expr|If])',  # test_match_hold_admission_gate_pg (a30d37f6):426
+    'If.body>If(test=Compare,body=[AugAssign|Expr|Return],orelse=[])',  # closed_walk:1676
+    'If.body>If(test=Compare,body=[Continue|Expr],orelse=[])',  # test_a1_identity_formation:1240
+    'If.body>If(test=Compare,body=[Expr],orelse=[Expr])',  # test_a1_identity_formation:1354
+    'If.body>If(test=Compare,body=[Expr],orelse=[])',  # closed_walk:1633
+    'If.body>If(test=Compare,body=[Expr|If],orelse=[])',  # test_a1_identity_formation:1177
+    'If.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # closed_walk:1669
+    'If.body>If(test=Compare,body=[If],orelse=[If])',  # closed_walk:547
+    'If.body>If(test=Compare,body=[Return],orelse=[])',  # test_a1_identity_formation:1012
+    'If.body>If(test=Name,body=[Expr],orelse=[])',  # closed_walk:1660
+    'If.body>If(test=Name,body=[Raise],orelse=[])',  # closed_walk:1248
+    'If.body>If(test=UnaryOp,body=[Expr],orelse=[Assign|For|If])',  # test_a1_identity_formation:1390
+    'If.body>If(test=UnaryOp,body=[Expr],orelse=[Expr])',  # test_match_hold_admission_gate_pg (a30d37f6):1287
+    'If.body>If(test=UnaryOp,body=[Expr],orelse=[])',  # closed_walk:2061
+    'If.body>If(test=UnaryOp,body=[For|Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):445
+    'If.body>If(test=UnaryOp,body=[Return],orelse=[])',  # closed_walk:752
+    "If.body>Import(names=['linecache'])",  # test_a1_identity_formation:4718
+    'If.body>Pass()',  # closed_walk:1261
+    'If.body>Raise(exc=Call,cause=-)',  # closed_walk:287
+    'If.body>Return(value=-)',  # closed_walk:134
+    'If.body>Return(value=Attribute)',  # closed_walk:544
+    'If.body>Return(value=BinOp)',  # test_a1_identity_formation:1483
+    'If.body>Return(value=Call)',  # closed_walk:847
+    'If.body>Return(value=Constant)',  # closed_walk:126
+    'If.body>Return(value=Dict)',  # test_a1_identity_formation:1147
+    'If.body>Return(value=IfExp)',  # closed_walk:845
+    'If.body>Return(value=JoinedStr)',  # test_match_hold_admission_gate_pg (a30d37f6):577
+    'If.body>Return(value=List)',  # closed_walk:838
+    'If.body>Return(value=ListComp)',  # test_a1_identity_formation:1117
+    'If.body>Return(value=Name)',  # closed_walk:562
+    'If.body>Return(value=Subscript)',  # closed_walk:189
+    'If.body>Return(value=Tuple)',  # test_a1_identity_formation:790
+    'If.body>Try(body=[Assign],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # test_a1_identity_formation:1159
+    'If.body>Try(body=[Expr],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # test_match_hold_admission_gate_pg (a30d37f6):271
+    'If.body>Try(body=[If],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # test_a1_identity_formation:633
+    'If.body>While(test=Call,body=[Assign],orelse=[])',  # closed_walk:316
+    'If.orelse>Assign(targets=[Name],value=BinOp,type_comment=-)',  # closed_walk:1496
+    'If.orelse>Assign(targets=[Name],value=Call,type_comment=-)',  # closed_walk:964
+    'If.orelse>Assign(targets=[Name],value=Dict,type_comment=-)',  # closed_walk:1089
+    'If.orelse>Assign(targets=[Name],value=IfExp,type_comment=-)',  # closed_walk:723
+    'If.orelse>Assign(targets=[Name],value=ListComp,type_comment=-)',  # test_a1_identity_formation:1496
+    'If.orelse>Assign(targets=[Name],value=SetComp,type_comment=-)',  # test_a1_identity_formation:1427
+    'If.orelse>Assign(targets=[Name],value=Subscript,type_comment=-)',  # test_a1_identity_formation:1023
+    'If.orelse>Assign(targets=[Name],value=Tuple,type_comment=-)',  # closed_walk:149
+    'If.orelse>Assign(targets=[Tuple],value=Call,type_comment=-)',  # test_a1_identity_formation:2246
+    'If.orelse>AugAssign(target=Subscript,op=Add,value=Constant)',  # test_a1_identity_formation:1070
+    'If.orelse>Continue()',  # test_match_hold_admission_gate_pg (a30d37f6):504
+    'If.orelse>Expr(value=Call)',  # closed_walk:974
+    'If.orelse>For(target=Name,iter=BinOp,body=[If],orelse=[],type_comment=-)',  # test_a1_identity_formation:1429
+    'If.orelse>For(target=Name,iter=BoolOp,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1158
+    'If.orelse>For(target=Name,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # test_a1_identity_formation:1425
+    'If.orelse>For(target=Name,iter=Subscript,body=[If],orelse=[],type_comment=-)',  # test_a1_identity_formation:1414
+    'If.orelse>For(target=Name,iter=Tuple,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1156
+    'If.orelse>For(target=Tuple,iter=Call,body=[If|Raise],orelse=[],type_comment=-)',  # closed_walk:150
+    'If.orelse>For(target=Tuple,iter=Name,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # test_a1_identity_formation:1433
+    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[Assign])',  # test_match_hold_admission_gate_pg (a30d37f6):365
+    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[If])',  # closed_walk:759
+    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[])',  # closed_walk:757
+    'If.orelse>If(test=BoolOp,body=[Assign|If],orelse=[])',  # closed_walk:471
+    'If.orelse>If(test=BoolOp,body=[Assign|If|While],orelse=[If])',  # closed_walk:313
+    'If.orelse>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # test_a1_identity_formation:1186
+    'If.orelse>If(test=BoolOp,body=[Expr],orelse=[If])',  # closed_walk:462
+    'If.orelse>If(test=BoolOp,body=[Expr],orelse=[])',  # test_a1_identity_formation:485
+    'If.orelse>If(test=BoolOp,body=[For],orelse=[If])',  # test_a1_identity_formation:2059
+    'If.orelse>If(test=BoolOp,body=[Return],orelse=[])',  # closed_walk:551
+    'If.orelse>If(test=Call,body=[Assign],orelse=[Expr|Return])',  # test_a1_identity_formation:1140
+    'If.orelse>If(test=Call,body=[Assign],orelse=[If])',  # test_a1_identity_formation:1137
+    'If.orelse>If(test=Call,body=[Assign|AugAssign|Expr|If],orelse=[If])',  # closed_walk:2058
+    'If.orelse>If(test=Call,body=[Assign|Expr],orelse=[])',  # closed_walk:74
+    'If.orelse>If(test=Call,body=[Assign|Expr|If],orelse=[If])',  # closed_walk:1986
+    'If.orelse>If(test=Call,body=[Assign|If|While],orelse=[If])',  # closed_walk:320
+    'If.orelse>If(test=Call,body=[AugAssign|Expr|For|If],orelse=[If])',  # closed_walk:2076
+    'If.orelse>If(test=Call,body=[Expr],orelse=[Continue|Expr])',  # test_match_hold_admission_gate_pg (a30d37f6):498
+    'If.orelse>If(test=Call,body=[Expr],orelse=[For])',  # closed_walk:1152
+    'If.orelse>If(test=Call,body=[Expr],orelse=[If])',  # closed_walk:454
+    'If.orelse>If(test=Call,body=[Expr],orelse=[])',  # test_a1_identity_formation:2065
+    'If.orelse>If(test=Call,body=[Expr|For],orelse=[If])',  # closed_walk:450
+    'If.orelse>If(test=Call,body=[Expr|If],orelse=[If])',  # closed_walk:1982
+    'If.orelse>If(test=Call,body=[Expr|If],orelse=[Return])',  # closed_walk:854
+    'If.orelse>If(test=Call,body=[For],orelse=[If])',  # closed_walk:456
+    'If.orelse>If(test=Call,body=[For],orelse=[])',  # closed_walk:326
+    'If.orelse>If(test=Call,body=[If],orelse=[If])',  # closed_walk:2069
+    'If.orelse>If(test=Call,body=[Pass],orelse=[Expr])',  # closed_walk:2097
+    'If.orelse>If(test=Call,body=[Pass],orelse=[If])',  # closed_walk:2074
+    'If.orelse>If(test=Compare,body=[Assign],orelse=[Assign|If])',  # test_match_hold_admission_gate_pg (a30d37f6):354
+    'If.orelse>If(test=Compare,body=[Assign],orelse=[Expr])',  # test_match_hold_admission_gate_pg (a30d37f6):384
+    'If.orelse>If(test=Compare,body=[Assign],orelse=[If])',  # test_a1_identity_formation:483
+    'If.orelse>If(test=Compare,body=[Assign],orelse=[])',  # test_a1_identity_formation:1501
+    'If.orelse>If(test=Compare,body=[AugAssign],orelse=[])',  # test_a1_identity_formation:1798
+    'If.orelse>If(test=Compare,body=[Continue],orelse=[If])',  # test_match_hold_admission_gate_pg (a30d37f6):382
+    'If.orelse>If(test=Compare,body=[Expr],orelse=[If])',  # closed_walk:1994
+    'If.orelse>If(test=Compare,body=[Expr],orelse=[])',  # closed_walk:274
+    'If.orelse>If(test=Compare,body=[Expr|If],orelse=[Expr])',  # test_match_hold_admission_gate_pg (a30d37f6):1209
+    'If.orelse>If(test=Compare,body=[Return],orelse=[])',  # test_a1_identity_formation:1021
+    'If.orelse>If(test=Name,body=[Expr],orelse=[])',  # test_a1_identity_formation:1400
+    'If.orelse>If(test=UnaryOp,body=[Expr],orelse=[])',  # test_a1_identity_formation:2230
+    'If.orelse>If(test=UnaryOp,body=[For],orelse=[])',  # test_a1_identity_formation:583
+    'If.orelse>Return(value=Constant)',  # closed_walk:859
+    'If.orelse>Return(value=Dict)',  # test_a1_identity_formation:1145
+    'If.orelse>Try(body=[Assign],handlers=[ExceptHandler],orelse=[Assign|If],finalbody=[])',  # test_a1_identity_formation:2289
+    'If.orelse>Try(body=[Assign],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # closed_walk:143
+    'If.orelse>Try(body=[For],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # test_a1_identity_formation:1053
+    "If.test>Attribute(value=Name,attr='fail_lease_read',ctx=Load)",  # test_a1_identity_formation:92
+    "If.test>Attribute(value=Name,attr='is_async',ctx=Load)",  # closed_walk:1582
+    "If.test>Attribute(value=Name,attr='problems',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):670
+    "If.test>Attribute(value=Name,attr='record',ctx=Load)",  # closed_walk:124
+    'If.test>BinOp(left=Name,op=BitAnd,right=Name)',  # closed_walk:1240
+    'If.test>BinOp(left=Name,op=BitAnd,right=Set)',  # test_a1_identity_formation:2200
+    'If.test>BoolOp(op=And,values=[Attribute|Call])',  # closed_walk:462
+    'If.test>BoolOp(op=And,values=[Attribute|Call|Compare])',  # closed_walk:1939
+    'If.test>BoolOp(op=And,values=[Attribute|Call|Compare|UnaryOp])',  # closed_walk:551
+    'If.test>BoolOp(op=And,values=[Attribute|Compare])',  # test_a1_identity_formation:2824
+    'If.test>BoolOp(op=And,values=[BinOp|Compare])',  # test_a1_identity_formation:2982
+    'If.test>BoolOp(op=And,values=[BoolOp|Call])',  # closed_walk:1923
+    'If.test>BoolOp(op=And,values=[BoolOp|Compare])',  # test_a1_identity_formation:3193
+    'If.test>BoolOp(op=And,values=[Call])',  # closed_walk:311
+    'If.test>BoolOp(op=And,values=[Call|Compare])',  # closed_walk:313
+    'If.test>BoolOp(op=And,values=[Call|Compare|Name])',  # test_a1_identity_formation:3832
+    'If.test>BoolOp(op=And,values=[Call|Compare|Name|UnaryOp])',  # test_a1_identity_formation:3837
+    'If.test>BoolOp(op=And,values=[Call|Compare|UnaryOp])',  # closed_walk:1093
+    'If.test>BoolOp(op=And,values=[Call|Name])',  # closed_walk:871
+    'If.test>BoolOp(op=And,values=[Call|UnaryOp])',  # closed_walk:448
+    'If.test>BoolOp(op=And,values=[Compare])',  # closed_walk:188
+    'If.test>BoolOp(op=And,values=[Compare|Name])',  # closed_walk:1822
+    'If.test>BoolOp(op=And,values=[Compare|UnaryOp])',  # closed_walk:1253
+    'If.test>BoolOp(op=And,values=[Name|UnaryOp])',  # test_a1_identity_formation:1280
+    'If.test>BoolOp(op=Or,values=[Attribute])',  # closed_walk:1749
+    'If.test>BoolOp(op=Or,values=[Attribute|Call])',  # test_a1_identity_formation:1329
+    'If.test>BoolOp(op=Or,values=[Attribute|Call|Compare])',  # closed_walk:1030
+    'If.test>BoolOp(op=Or,values=[Attribute|UnaryOp])',  # closed_walk:777
+    'If.test>BoolOp(op=Or,values=[BoolOp|Compare])',  # closed_walk:1232
+    'If.test>BoolOp(op=Or,values=[Call])',  # closed_walk:1055
+    'If.test>BoolOp(op=Or,values=[Call|Compare])',  # closed_walk:1009
+    'If.test>BoolOp(op=Or,values=[Call|Name])',  # closed_walk:1184
+    'If.test>BoolOp(op=Or,values=[Call|UnaryOp])',  # closed_walk:981
+    'If.test>BoolOp(op=Or,values=[Compare])',  # closed_walk:174
+    'If.test>BoolOp(op=Or,values=[Compare|Name])',  # test_a1_identity_formation:1384
+    'If.test>BoolOp(op=Or,values=[Compare|UnaryOp])',  # closed_walk:588
+    'If.test>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:840
+    'If.test>Call(func=Attribute,args=[Constant],keywords=[])',  # closed_walk:1982
+    'If.test>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:561
+    'If.test>Call(func=Attribute,args=[Subscript],keywords=[])',  # test_a1_identity_formation:3205
+    'If.test>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:1621
+    'If.test>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:72
+    'If.test>Call(func=Name,args=[Call|Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1249
+    'If.test>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:1762
+    'If.test>Call(func=Name,args=[GeneratorExp],keywords=[])',  # closed_walk:1203
+    'If.test>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:1085
+    'If.test>Call(func=Name,args=[Name|Tuple],keywords=[])',  # closed_walk:320
+    'If.test>Compare(left=Attribute,ops=[Eq],comparators=[Attribute])',  # test_a1_identity_formation:3452
+    'If.test>Compare(left=Attribute,ops=[Eq],comparators=[Constant])',  # closed_walk:1676
+    'If.test>Compare(left=Attribute,ops=[In],comparators=[Attribute])',  # closed_walk:639
+    'If.test>Compare(left=Attribute,ops=[In],comparators=[Tuple])',  # closed_walk:1682
+    'If.test>Compare(left=Attribute,ops=[IsNot],comparators=[Constant])',  # closed_walk:547
+    'If.test>Compare(left=Attribute,ops=[Is],comparators=[Name])',  # closed_walk:730
+    'If.test>Compare(left=Attribute,ops=[NotIn],comparators=[Attribute])',  # closed_walk:1708
+    'If.test>Compare(left=BinOp,ops=[Gt],comparators=[Call])',  # test_a1_identity_formation:833
+    'If.test>Compare(left=BinOp,ops=[In],comparators=[Name])',  # test_a1_identity_formation:3247
+    'If.test>Compare(left=BinOp,ops=[NotEq],comparators=[BoolOp])',  # test_a1_identity_formation:4336
+    'If.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # test_a1_identity_formation:1354
+    'If.test>Compare(left=Call,ops=[Eq],comparators=[Name])',  # closed_walk:1218
+    'If.test>Compare(left=Call,ops=[Gt],comparators=[Constant])',  # closed_walk:507
+    'If.test>Compare(left=Call,ops=[Gt],comparators=[Name])',  # closed_walk:1060
+    'If.test>Compare(left=Call,ops=[In],comparators=[Name])',  # test_a1_identity_formation:916
+    'If.test>Compare(left=Call,ops=[IsNot],comparators=[Constant])',  # closed_walk:1669
+    'If.test>Compare(left=Call,ops=[Is],comparators=[Constant])',  # test_match_hold_admission_gate_pg (a30d37f6):767
+    'If.test>Compare(left=Call,ops=[Is],comparators=[Name])',  # closed_walk:133
+    'If.test>Compare(left=Call,ops=[LtE],comparators=[Name])',  # closed_walk:986
+    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # closed_walk:978
+    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # closed_walk:1872
+    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Name])',  # test_match_hold_admission_gate_pg (a30d37f6):529
+    'If.test>Compare(left=Call,ops=[NotIn],comparators=[Attribute])',  # closed_walk:1744
+    'If.test>Compare(left=Call,ops=[NotIn],comparators=[Name])',  # test_a1_identity_formation:1430
+    'If.test>Compare(left=Constant,ops=[In],comparators=[Call])',  # test_a1_identity_formation:2817
+    'If.test>Compare(left=Constant,ops=[In],comparators=[Name])',  # test_a1_identity_formation:91
+    'If.test>Compare(left=Constant,ops=[NotIn],comparators=[Name])',  # test_match_hold_admission_gate_pg (a30d37f6):49
+    'If.test>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # closed_walk:543
+    'If.test>Compare(left=Name,ops=[Eq],comparators=[Name])',  # test_a1_identity_formation:3038
+    'If.test>Compare(left=Name,ops=[In],comparators=[Attribute])',  # closed_walk:1880
+    'If.test>Compare(left=Name,ops=[In],comparators=[Call])',  # closed_walk:917
+    'If.test>Compare(left=Name,ops=[In],comparators=[Name])',  # closed_walk:1209
+    'If.test>Compare(left=Name,ops=[In],comparators=[Tuple])',  # closed_walk:1259
+    'If.test>Compare(left=Name,ops=[IsNot],comparators=[Attribute])',  # closed_walk:274
+    'If.test>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # closed_walk:433
+    'If.test>Compare(left=Name,ops=[IsNot],comparators=[Name])',  # closed_walk:1363
+    'If.test>Compare(left=Name,ops=[Is],comparators=[Constant])',  # closed_walk:286
+    'If.test>Compare(left=Name,ops=[Is],comparators=[Name])',  # test_a1_identity_formation:789
+    'If.test>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # closed_walk:527
+    'If.test>Compare(left=Name,ops=[NotEq],comparators=[Name])',  # test_a1_identity_formation:1509
+    'If.test>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # closed_walk:573
+    'If.test>Compare(left=Name,ops=[NotIn],comparators=[Tuple])',  # closed_walk:1633
+    'If.test>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # test_a1_identity_formation:1796
+    'If.test>Compare(left=Subscript,ops=[In],comparators=[Tuple])',  # test_match_hold_admission_gate_pg (a30d37f6):376
+    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Constant])',  # closed_walk:641
+    'If.test>Compare(left=Tuple,ops=[Eq],comparators=[Name])',  # closed_walk:152
+    'If.test>Compare(left=Tuple,ops=[In],comparators=[Tuple])',  # test_a1_identity_formation:1506
+    'If.test>Name(id=str,ctx=Load)',  # closed_walk:272
+    'If.test>UnaryOp(op=Not,operand=Attribute)',  # test_a1_identity_formation:46
+    'If.test>UnaryOp(op=Not,operand=BoolOp)',  # closed_walk:523
+    'If.test>UnaryOp(op=Not,operand=Call)',  # closed_walk:808
+    'If.test>UnaryOp(op=Not,operand=Name)',  # closed_walk:701
+    'If.test>UnaryOp(op=Not,operand=Subscript)',  # test_a1_identity_formation:1205
+    "IfExp.body>Attribute(value=Attribute,attr='value',ctx=Load)",  # test_a1_identity_formation:518
+    "IfExp.body>Attribute(value=Name,attr='body',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1251
+    "IfExp.body>Attribute(value=Name,attr='id',ctx=Load)",  # closed_walk:368
+    "IfExp.body>Attribute(value=Name,attr='targets',ctx=Load)",  # closed_walk:327
+    "IfExp.body>Attribute(value=Name,attr='test',ctx=Load)",  # test_a1_identity_formation:1233
+    "IfExp.body>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:1944
+    "IfExp.body>Attribute(value=Subscript,attr='context_expr',ctx=Load)",  # closed_walk:2060
+    "IfExp.body>Attribute(value=Subscript,attr='lineno',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):644
+    'IfExp.body>BinOp(left=Constant,op=Add,right=Call)',  # test_a1_identity_formation:1109
+    'IfExp.body>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:947
+    'IfExp.body>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:700
+    'IfExp.body>Call(func=Attribute,args=[Starred],keywords=[])',  # test_a1_identity_formation:1166
+    'IfExp.body>Call(func=Attribute,args=[],keywords=[])',  # test_a1_identity_formation:1031
+    'IfExp.body>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:723
+    'IfExp.body>Call(func=Name,args=[Attribute|Call],keywords=[])',  # test_a1_identity_formation:1290
+    'IfExp.body>Call(func=Name,args=[Attribute|Constant|Name],keywords=[])',  # closed_walk:761
+    'IfExp.body>Call(func=Name,args=[Attribute|Name],keywords=[])',  # test_a1_identity_formation:1310
+    'IfExp.body>Call(func=Name,args=[Call|IfExp],keywords=[])',  # test_a1_identity_formation:1497
+    'IfExp.body>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:699
+    'IfExp.body>Call(func=Name,args=[],keywords=[])',  # closed_walk:1657
+    'IfExp.body>Constant(value=NoneType)',  # closed_walk:939
+    'IfExp.body>Constant(value=str)',  # closed_walk:1104
+    'IfExp.body>Dict(keys=[Name],values=[Name])',  # test_a1_identity_formation:3814
+    'IfExp.body>JoinedStr(values=[Constant|FormattedValue])',  # closed_walk:1745
+    'IfExp.body>List(elts=[Attribute],ctx=Load)',  # closed_walk:1591
+    'IfExp.body>List(elts=[Name],ctx=Load)',  # closed_walk:845
+    'IfExp.body>List(elts=[Tuple],ctx=Load)',  # test_a1_identity_formation:1089
+    'IfExp.body>List(elts=[],ctx=Load)',  # test_a1_identity_formation:4392
+    'IfExp.body>Name(id=str,ctx=Load)',  # closed_walk:517
+    'IfExp.body>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # closed_walk:1076
+    'IfExp.body>Subscript(value=Call,slice=Constant,ctx=Load)',  # closed_walk:1772
+    'IfExp.body>Subscript(value=Name,slice=BinOp,ctx=Load)',  # closed_walk:1230
+    'IfExp.body>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:179
+    'IfExp.body>Tuple(elts=[Attribute],ctx=Load)',  # closed_walk:677
+    'IfExp.body>Tuple(elts=[Attribute|Constant],ctx=Load)',  # closed_walk:1434
+    'IfExp.body>Tuple(elts=[Subscript],ctx=Load)',  # test_a1_identity_formation:3195
+    "IfExp.orelse>Attribute(value=Name,attr='id',ctx=Load)",  # closed_walk:699
+    "IfExp.orelse>Attribute(value=Name,attr='name',ctx=Load)",  # test_a1_identity_formation:3831
+    "IfExp.orelse>Attribute(value=Name,attr='orelse',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1252
+    "IfExp.orelse>Attribute(value=Name,attr='value',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1256
+    'IfExp.orelse>BinOp(left=Name,op=Add,right=Name)',  # closed_walk:939
+    'IfExp.orelse>BinOp(left=Subscript,op=BitAnd,right=Name)',  # closed_walk:1054
+    'IfExp.orelse>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:678
+    'IfExp.orelse>Call(func=Name,args=[Attribute],keywords=[keyword])',  # closed_walk:1457
+    'IfExp.orelse>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:1659
+    'IfExp.orelse>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:1466
+    'IfExp.orelse>Call(func=Name,args=[],keywords=[])',  # test_a1_identity_formation:1166
+    'IfExp.orelse>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # closed_walk:700
+    'IfExp.orelse>Constant(value=NoneType)',  # closed_walk:179
+    'IfExp.orelse>Constant(value=str)',  # closed_walk:1105
+    'IfExp.orelse>Dict(keys=[],values=[])',  # test_a1_identity_formation:3814
+    'IfExp.orelse>IfExp(test=Compare,body=Constant,orelse=Constant)',  # closed_walk:1104
+    'IfExp.orelse>IfExp(test=Compare,body=Constant,orelse=IfExp)',  # closed_walk:1832
+    'IfExp.orelse>JoinedStr(values=[Constant|FormattedValue])',  # test_match_hold_admission_gate_pg (a30d37f6):601
+    'IfExp.orelse>List(elts=[Attribute],ctx=Load)',  # closed_walk:327
+    'IfExp.orelse>List(elts=[JoinedStr],ctx=Load)',  # test_a1_identity_formation:4393
+    'IfExp.orelse>List(elts=[Name],ctx=Load)',  # test_a1_identity_formation:4715
+    'IfExp.orelse>List(elts=[],ctx=Load)',  # closed_walk:724
+    'IfExp.orelse>ListComp(elt=Call,generators=[comprehension])',  # closed_walk:962
+    'IfExp.orelse>Name(id=str,ctx=Load)',  # closed_walk:1297
+    'IfExp.orelse>Subscript(value=Name,slice=Constant,ctx=Load)',  # test_a1_identity_formation:1014
+    'IfExp.orelse>Tuple(elts=[Attribute|Constant],ctx=Load)',  # closed_walk:1437
+    'IfExp.orelse>Tuple(elts=[Call|Constant],ctx=Load)',  # closed_walk:1914
+    'IfExp.orelse>Tuple(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:3195
+    'IfExp.orelse>Tuple(elts=[Constant|Name],ctx=Load)',  # closed_walk:1435
+    "IfExp.test>Attribute(value=Name,attr='_rows',ctx=Load)",  # test_a1_identity_formation:43
+    "IfExp.test>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:1076
+    "IfExp.test>Attribute(value=Name,attr='has_fn',ctx=Load)",  # closed_walk:700
+    "IfExp.test>Attribute(value=Name,attr='problems',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):367
+    'IfExp.test>BinOp(left=Name,op=BitAnd,right=Set)',  # test_match_hold_admission_gate_pg (a30d37f6):355
+    'IfExp.test>BoolOp(op=And,values=[Call])',  # test_a1_identity_formation:518
+    'IfExp.test>BoolOp(op=And,values=[Call|Compare])',  # closed_walk:948
+    'IfExp.test>BoolOp(op=And,values=[Compare])',  # closed_walk:517
+    'IfExp.test>BoolOp(op=And,values=[Compare|Name])',  # closed_walk:1276
+    'IfExp.test>BoolOp(op=And,values=[Name])',  # test_a1_identity_formation:2247
+    'IfExp.test>BoolOp(op=Or,values=[BinOp|Name])',  # closed_walk:1258
+    'IfExp.test>BoolOp(op=Or,values=[Compare])',  # closed_walk:939
+    'IfExp.test>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:1092
+    'IfExp.test>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:769
+    'IfExp.test>Call(func=Name,args=[Attribute],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):633
+    'IfExp.test>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:327
+    'IfExp.test>Call(func=Name,args=[Constant|Name],keywords=[])',  # test_a1_identity_formation:858
+    'IfExp.test>Call(func=Name,args=[GeneratorExp],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1251
+    'IfExp.test>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:768
+    'IfExp.test>Call(func=Name,args=[Name|Tuple],keywords=[])',  # closed_walk:480
+    'IfExp.test>Compare(left=Attribute,ops=[IsNot],comparators=[Constant])',  # closed_walk:1018
+    'IfExp.test>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # closed_walk:1437
+    'IfExp.test>Compare(left=BinOp,ops=[Lt],comparators=[Call])',  # test_match_hold_admission_gate_pg (a30d37f6):123
+    'IfExp.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # closed_walk:179
+    'IfExp.test>Compare(left=Call,ops=[IsNot],comparators=[Constant])',  # closed_walk:1657
+    'IfExp.test>Compare(left=Constant,ops=[In],comparators=[Name])',  # closed_walk:1104
+    'IfExp.test>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # test_a1_identity_formation:1014
+    'IfExp.test>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # closed_walk:724
+    'IfExp.test>Compare(left=Name,ops=[Is],comparators=[Constant])',  # closed_walk:961
+    'IfExp.test>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # closed_walk:1207
+    'IfExp.test>Compare(left=Subscript,ops=[In],comparators=[Constant])',  # test_match_hold_admission_gate_pg (a30d37f6):642
+    'IfExp.test>Compare(left=Subscript,ops=[Is],comparators=[Constant])',  # closed_walk:1054
+    'IfExp.test>Name(id=str,ctx=Load)',  # closed_walk:821
+    'IfExp.test>UnaryOp(op=Not,operand=Call)',  # closed_walk:699
+    "Import.names>alias(name='linecache',asname='_linecache')",  # test_a1_identity_formation:3663
+    "Import.names>alias(name='linecache',asname=None)",  # test_a1_identity_formation:4467
+    "Import.names>alias(name='pathlib',asname=None)",  # test_a1_identity_formation:3860
+    "Import.names>alias(name='resolution_sites',asname='_rs')",  # test_a1_identity_formation:4329
+    "Import.names>alias(name='shape_grammar',asname='_sg')",  # test_a1_identity_formation:4714
+    "Import.names>alias(name='sys',asname='_sys')",  # test_a1_identity_formation:721
+    "Import.names>alias(name='types',asname='_types')",  # test_a1_identity_formation:3664
+    "Import.names>alias(name='types',asname=None)",  # test_match_hold_admission_gate_pg (a30d37f6):1043
+    'JoinedStr.values>Constant(value=str)',  # closed_walk:139
+    'JoinedStr.values>FormattedValue(value=Attribute,conversion=-1,format_spec=-)',  # closed_walk:289
+    'JoinedStr.values>FormattedValue(value=Attribute,conversion=114,format_spec=-)',  # test_a1_identity_formation:3849
+    'JoinedStr.values>FormattedValue(value=BinOp,conversion=-1,format_spec=-)',  # closed_walk:139
+    'JoinedStr.values>FormattedValue(value=BoolOp,conversion=-1,format_spec=-)',  # test_a1_identity_formation:1359
+    'JoinedStr.values>FormattedValue(value=Call,conversion=-1,format_spec=-)',  # closed_walk:149
+    'JoinedStr.values>FormattedValue(value=Call,conversion=114,format_spec=-)',  # test_a1_identity_formation:137
+    'JoinedStr.values>FormattedValue(value=IfExp,conversion=-1,format_spec=-)',  # test_match_hold_admission_gate_pg (a30d37f6):531
+    'JoinedStr.values>FormattedValue(value=Name,conversion=-1,format_spec=-)',  # closed_walk:139
+    'JoinedStr.values>FormattedValue(value=Name,conversion=114,format_spec=-)',  # closed_walk:1267
+    'JoinedStr.values>FormattedValue(value=Subscript,conversion=-1,format_spec=-)',  # closed_walk:1502
+    'JoinedStr.values>FormattedValue(value=Subscript,conversion=114,format_spec=-)',  # test_match_hold_admission_gate_pg (a30d37f6):461
+    'Lambda.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Name])',  # test_match_hold_admission_gate_pg (a30d37f6):201
+    'Lambda.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # closed_walk:1767
+    "Lambda.body>Attribute(value=Name,attr='lineno',ctx=Load)",  # test_a1_identity_formation:898
+    'Lambda.body>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:1767
+    'Lambda.body>Call(func=Name,args=[Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):201
+    'List.ctx>Load()',  # closed_walk:70
+    "List.elts>Attribute(value=Name,attr='AST',ctx=Load)",  # closed_walk:268
+    "List.elts>Attribute(value=Name,attr='elt',ctx=Load)",  # closed_walk:1591
+    "List.elts>Attribute(value=Name,attr='id',ctx=Load)",  # test_a1_identity_formation:1114
+    "List.elts>Attribute(value=Name,attr='key',ctx=Load)",  # closed_walk:1591
+    "List.elts>Attribute(value=Name,attr='target',ctx=Load)",  # closed_walk:327
+    "List.elts>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:838
+    'List.elts>BinOp(left=Constant,op=Add,right=Call)',  # test_a1_identity_formation:4584
+    'List.elts>BinOp(left=IfExp,op=Add,right=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):1832
+    'List.elts>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:847
+    'List.elts>Constant(value=NoneType)',  # closed_walk:1010
+    'List.elts>Constant(value=str)',  # closed_walk:1111
+    'List.elts>Dict(keys=[],values=[])',  # closed_walk:954
+    'List.elts>JoinedStr(values=[Constant|FormattedValue])',  # test_a1_identity_formation:2172
+    'List.elts>List(elts=[],ctx=Load)',  # closed_walk:1057
+    'List.elts>Name(id=str,ctx=Load)',  # closed_walk:845
+    'List.elts>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # test_a1_identity_formation:1006
+    'List.elts>Tuple(elts=[Attribute|Constant],ctx=Load)',  # test_a1_identity_formation:1028
+    'List.elts>Tuple(elts=[Call|Constant],ctx=Load)',  # test_a1_identity_formation:2450
+    'List.elts>Tuple(elts=[Call|Constant|Name],ctx=Load)',  # test_a1_identity_formation:4541
+    'List.elts>Tuple(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:1089
+    'List.elts>Tuple(elts=[Constant|JoinedStr],ctx=Load)',  # test_a1_identity_formation:1022
+    'List.elts>Tuple(elts=[Constant|Starred],ctx=Load)',  # test_a1_identity_formation:4567
+    "ListComp.elt>Attribute(value=Name,attr='arg',ctx=Load)",  # closed_walk:378
+    "ListComp.elt>Attribute(value=Name,attr='id',ctx=Load)",  # test_a1_identity_formation:1117
+    "ListComp.elt>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:1620
+    'ListComp.elt>BinOp(left=Constant,op=Add,right=Name)',  # test_a1_identity_formation:2375
+    'ListComp.elt>BinOp(left=Name,op=Add,right=List)',  # closed_walk:1059
+    'ListComp.elt>BinOp(left=Name,op=Add,right=Name)',  # closed_walk:985
+    'ListComp.elt>Call(func=Attribute,args=[Constant],keywords=[])',  # test_a1_identity_formation:2448
+    'ListComp.elt>Call(func=Attribute,args=[Name],keywords=[])',  # test_a1_identity_formation:1166
+    'ListComp.elt>Call(func=Attribute,args=[],keywords=[keyword])',  # closed_walk:962
+    'ListComp.elt>Call(func=Name,args=[Name],keywords=[])',  # test_a1_identity_formation:37
+    'ListComp.elt>Call(func=Name,args=[Name],keywords=[keyword])',  # closed_walk:960
+    'ListComp.elt>IfExp(test=Compare,body=Subscript,orelse=Constant)',  # closed_walk:1207
+    'ListComp.elt>JoinedStr(values=[Constant|FormattedValue])',  # test_a1_identity_formation:1487
+    'ListComp.elt>Name(id=str,ctx=Load)',  # closed_walk:177
+    'ListComp.elt>Tuple(elts=[BinOp|Subscript],ctx=Load)',  # test_a1_identity_formation:2940
+    'ListComp.generators>comprehension(target=Name,iter=Attribute,ifs=[Call],is_async=0)',  # closed_walk:177
+    'ListComp.generators>comprehension(target=Name,iter=Attribute,ifs=[Compare],is_async=0)',  # closed_walk:436
+    'ListComp.generators>comprehension(target=Name,iter=Attribute,ifs=[Name],is_async=0)',  # closed_walk:1576
+    'ListComp.generators>comprehension(target=Name,iter=Attribute,ifs=[UnaryOp],is_async=0)',  # closed_walk:785
+    'ListComp.generators>comprehension(target=Name,iter=Attribute,ifs=[],is_async=0)',  # closed_walk:1620
+    'ListComp.generators>comprehension(target=Name,iter=BinOp,ifs=[],is_async=0)',  # closed_walk:378
+    'ListComp.generators>comprehension(target=Name,iter=Call,ifs=[BoolOp],is_async=0)',  # closed_walk:659
+    'ListComp.generators>comprehension(target=Name,iter=Call,ifs=[Call],is_async=0)',  # test_a1_identity_formation:1208
+    'ListComp.generators>comprehension(target=Name,iter=Call,ifs=[Compare],is_async=0)',  # test_a1_identity_formation:1255
+    'ListComp.generators>comprehension(target=Name,iter=Call,ifs=[UnaryOp],is_async=0)',  # test_a1_identity_formation:2940
+    'ListComp.generators>comprehension(target=Name,iter=Call,ifs=[],is_async=0)',  # closed_walk:1059
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Call],is_async=0)',  # test_a1_identity_formation:1500
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # closed_walk:960
+    'ListComp.generators>comprehension(target=Name,iter=Subscript,ifs=[Name],is_async=0)',  # closed_walk:1245
+    'ListComp.generators>comprehension(target=Name,iter=Subscript,ifs=[],is_async=0)',  # closed_walk:1967
+    'ListComp.generators>comprehension(target=Name,iter=Tuple,ifs=[Call],is_async=0)',  # test_a1_identity_formation:2186
+    'ListComp.generators>comprehension(target=Name,iter=Tuple,ifs=[Compare],is_async=0)',  # closed_walk:379
+    'ListComp.generators>comprehension(target=Tuple,iter=Call,ifs=[Call],is_async=0)',  # test_a1_identity_formation:1024
+    'ListComp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # test_a1_identity_formation:2265
+    'ListComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # test_a1_identity_formation:2180
+    'ListComp.generators>comprehension(target=Tuple,iter=Name,ifs=[Compare],is_async=0)',  # test_a1_identity_formation:1496
+    'ListComp.generators>comprehension(target=Tuple,iter=Name,ifs=[],is_async=0)',  # closed_walk:636
+    'ListComp.generators>comprehension(target=Tuple,iter=Subscript,ifs=[BoolOp],is_async=0)',  # test_a1_identity_formation:1489
+    'Name.ctx>Load()',  # closed_walk:71
+    'Name.ctx>Store()',  # closed_walk:70
+    'Raise.cause>Constant(value=NoneType)',  # closed_walk:1103
+    'Raise.exc>Call(func=Name,args=[Constant],keywords=[])',  # closed_walk:1364
+    'Raise.exc>Call(func=Name,args=[Constant|Dict|Name],keywords=[])',  # test_a1_identity_formation:3455
+    'Raise.exc>Call(func=Name,args=[Tuple],keywords=[])',  # closed_walk:147
+    "Return.value>Attribute(value=Attribute,attr='attr',ctx=Load)",  # test_a1_identity_formation:524
+    "Return.value>Attribute(value=Name,attr='id',ctx=Load)",  # closed_walk:544
+    'Return.value>Await(value=Call)',  # test_a1_identity_formation:3457
+    'Return.value>BinOp(left=BinOp,op=Add,right=List)',  # test_match_hold_admission_gate_pg (a30d37f6):1832
+    'Return.value>BinOp(left=Call,op=Add,right=Call)',  # test_a1_identity_formation:1483
+    'Return.value>BinOp(left=Name,op=Add,right=List)',  # test_a1_identity_formation:2220
+    'Return.value>BoolOp(op=And,values=[Call])',  # closed_walk:1289
+    'Return.value>BoolOp(op=And,values=[Call|Compare])',  # closed_walk:667
+    'Return.value>BoolOp(op=And,values=[Call|Compare|UnaryOp])',  # test_a1_identity_formation:849
+    'Return.value>BoolOp(op=And,values=[Compare])',  # closed_walk:604
+    'Return.value>BoolOp(op=Or,values=[BoolOp|Call])',  # closed_walk:692
+    'Return.value>BoolOp(op=Or,values=[Call|Constant])',  # test_a1_identity_formation:1073
+    'Return.value>BoolOp(op=Or,values=[Call|List])',  # closed_walk:1025
+    'Return.value>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:793
+    'Return.value>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:622
+    'Return.value>Call(func=Attribute,args=[BinOp],keywords=[])',  # test_a1_identity_formation:2371
+    'Return.value>Call(func=Attribute,args=[BinOp|Name],keywords=[])',  # test_a1_identity_formation:3693
+    'Return.value>Call(func=Attribute,args=[Call],keywords=[])',  # test_a1_identity_formation:2924
+    'Return.value>Call(func=Attribute,args=[Call|Name],keywords=[])',  # closed_walk:1515
+    'Return.value>Call(func=Attribute,args=[Call|Name],keywords=[keyword])',  # test_a1_identity_formation:755
+    'Return.value>Call(func=Attribute,args=[IfExp|Name],keywords=[])',  # test_a1_identity_formation:4486
+    'Return.value>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:654
+    'Return.value>Call(func=Attribute,args=[Name|Subscript],keywords=[keyword])',  # test_a1_identity_formation:536
+    'Return.value>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:355
+    'Return.value>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:1842
+    'Return.value>Call(func=Name,args=[Attribute|Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):672
+    'Return.value>Call(func=Name,args=[BinOp],keywords=[])',  # closed_walk:281
+    'Return.value>Call(func=Name,args=[BinOp|Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1061
+    'Return.value>Call(func=Name,args=[Call],keywords=[])',  # closed_walk:494
+    'Return.value>Call(func=Name,args=[GeneratorExp],keywords=[])',  # closed_walk:127
+    'Return.value>Call(func=Name,args=[IfExp],keywords=[])',  # test_a1_identity_formation:99
+    'Return.value>Call(func=Name,args=[List],keywords=[])',  # closed_walk:847
+    'Return.value>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:663
+    'Return.value>Call(func=Name,args=[Name],keywords=[keyword])',  # test_a1_identity_formation:1086
+    'Return.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # closed_walk:1504
+    'Return.value>Call(func=Name,args=[Starred],keywords=[])',  # closed_walk:1522
+    'Return.value>Call(func=Name,args=[Starred],keywords=[keyword])',  # test_a1_identity_formation:4625
+    'Return.value>Call(func=Name,args=[Subscript],keywords=[])',  # closed_walk:865
+    'Return.value>Call(func=Name,args=[],keywords=[])',  # closed_walk:1885
+    'Return.value>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # test_a1_identity_formation:766
+    'Return.value>Compare(left=Call,ops=[In],comparators=[Call])',  # closed_walk:687
+    'Return.value>Compare(left=Name,ops=[Is],comparators=[Constant])',  # test_a1_identity_formation:1579
+    'Return.value>Constant(value=NoneType)',  # closed_walk:176
+    'Return.value>Constant(value=bool)',  # closed_walk:126
+    'Return.value>Constant(value=str)',  # closed_walk:1251
+    'Return.value>Dict(keys=[],values=[])',  # test_a1_identity_formation:1145
+    'Return.value>DictComp(key=Name,value=Tuple,generators=[comprehension])',  # closed_walk:920
+    'Return.value>IfExp(test=Attribute,body=Subscript,orelse=Constant)',  # test_a1_identity_formation:43
+    'Return.value>IfExp(test=BoolOp,body=Constant,orelse=BinOp)',  # closed_walk:939
+    'Return.value>IfExp(test=BoolOp,body=Constant,orelse=Constant)',  # closed_walk:1258
+    'Return.value>IfExp(test=BoolOp,body=Name,orelse=Constant)',  # closed_walk:517
+    'Return.value>IfExp(test=BoolOp,body=Subscript,orelse=Constant)',  # closed_walk:1276
+    'Return.value>IfExp(test=Call,body=Attribute,orelse=Constant)',  # closed_walk:368
+    'Return.value>IfExp(test=Call,body=Call,orelse=Call)',  # test_a1_identity_formation:3676
+    'Return.value>IfExp(test=Call,body=Call,orelse=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):394
+    'Return.value>IfExp(test=Call,body=List,orelse=Constant)',  # closed_walk:845
+    'Return.value>IfExp(test=Call,body=List,orelse=List)',  # test_a1_identity_formation:1089
+    'Return.value>IfExp(test=Call,body=Name,orelse=Constant)',  # closed_walk:769
+    'Return.value>IfExp(test=Call,body=Tuple,orelse=Call)',  # closed_walk:677
+    'Return.value>IfExp(test=Compare,body=Constant,orelse=IfExp)',  # closed_walk:1104
+    'Return.value>IfExp(test=Compare,body=Constant,orelse=JoinedStr)',  # test_match_hold_admission_gate_pg (a30d37f6):601
+    'Return.value>IfExp(test=Compare,body=Constant,orelse=Subscript)',  # test_a1_identity_formation:1350
+    'Return.value>IfExp(test=Compare,body=Subscript,orelse=Constant)',  # closed_walk:179
+    'Return.value>IfExp(test=Name,body=Call,orelse=Call)',  # test_a1_identity_formation:1166
+    'Return.value>IfExp(test=Name,body=JoinedStr,orelse=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):554
+    'Return.value>IfExp(test=Name,body=Tuple,orelse=Tuple)',  # test_a1_identity_formation:3195
+    'Return.value>JoinedStr(values=[Constant|FormattedValue])',  # test_match_hold_admission_gate_pg (a30d37f6):577
+    'Return.value>List(elts=[Attribute],ctx=Load)',  # closed_walk:838
+    'Return.value>List(elts=[Constant],ctx=Load)',  # closed_walk:1010
+    'Return.value>List(elts=[JoinedStr],ctx=Load)',  # test_a1_identity_formation:2172
+    'Return.value>List(elts=[Tuple],ctx=Load)',  # test_a1_identity_formation:4540
+    'Return.value>List(elts=[],ctx=Load)',  # test_a1_identity_formation:1122
+    'Return.value>ListComp(elt=Attribute,generators=[comprehension])',  # closed_walk:378
+    'Return.value>ListComp(elt=Name,generators=[comprehension])',  # closed_walk:636
+    'Return.value>ListComp(elt=Tuple,generators=[comprehension])',  # test_a1_identity_formation:2940
+    'Return.value>Name(id=str,ctx=Load)',  # closed_walk:77
+    'Return.value>Subscript(value=Attribute,slice=Call,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):707
+    'Return.value>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):671
+    'Return.value>Subscript(value=Attribute,slice=Name,ctx=Load)',  # closed_walk:1881
+    'Return.value>Subscript(value=Call,slice=Constant,ctx=Load)',  # test_a1_identity_formation:48
+    'Return.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:510
+    'Return.value>Subscript(value=Name,slice=Name,ctx=Load)',  # test_a1_identity_formation:704
+    'Return.value>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # closed_walk:189
+    'Return.value>Tuple(elts=[Attribute],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):1350
+    'Return.value>Tuple(elts=[BinOp|Call],ctx=Load)',  # closed_walk:167
+    'Return.value>Tuple(elts=[Call|Constant],ctx=Load)',  # closed_walk:511
+    'Return.value>Tuple(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:791
+    'Return.value>Tuple(elts=[Constant|List|Name|Tuple],ctx=Load)',  # test_a1_identity_formation:1009
+    'Return.value>Tuple(elts=[Constant|List|Tuple],ctx=Load)',  # test_a1_identity_formation:1006
+    'Return.value>Tuple(elts=[Constant|Name],ctx=Load)',  # test_a1_identity_formation:935
+    'Return.value>Tuple(elts=[List|Subscript],ctx=Load)',  # test_a1_identity_formation:886
+    'Return.value>Tuple(elts=[List|Tuple],ctx=Load)',  # test_a1_identity_formation:892
+    'Return.value>Tuple(elts=[Name],ctx=Load)',  # test_a1_identity_formation:790
+    'Return.value>Tuple(elts=[Name|Tuple],ctx=Load)',  # test_a1_identity_formation:1448
+    'Set.elts>Call(func=Name,args=[Attribute],keywords=[])',  # test_a1_identity_formation:2292
+    'Set.elts>Constant(value=str)',  # closed_walk:1821
+    'Set.elts>Name(id=str,ctx=Load)',  # test_a1_identity_formation:1256
+    "SetComp.elt>Attribute(value=Name,attr='id',ctx=Load)",  # test_a1_identity_formation:1207
+    "SetComp.elt>Attribute(value=Name,attr='lineno',ctx=Load)",  # test_a1_identity_formation:1446
+    "SetComp.elt>Attribute(value=Subscript,attr='id',ctx=Load)",  # test_a1_identity_formation:2210
+    'SetComp.elt>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:932
+    'SetComp.elt>Name(id=str,ctx=Load)',  # closed_walk:1238
+    'SetComp.elt>Tuple(elts=[Name|Subscript],ctx=Load)',  # test_a1_identity_formation:1108
+    'SetComp.generators>comprehension(target=Name,iter=Call,ifs=[BoolOp],is_async=0)',  # test_a1_identity_formation:2210
+    'SetComp.generators>comprehension(target=Name,iter=Call,ifs=[Call],is_async=0)',  # closed_walk:932
+    'SetComp.generators>comprehension(target=Name,iter=Call,ifs=[Compare],is_async=0)',  # test_a1_identity_formation:1446
+    'SetComp.generators>comprehension(target=Name,iter=Call,ifs=[],is_async=0)',  # closed_walk:932
+    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # closed_walk:1101
+    'SetComp.generators>comprehension(target=Tuple,iter=Call,ifs=[BoolOp],is_async=0)',  # closed_walk:1239
+    'SetComp.generators>comprehension(target=Tuple,iter=Call,ifs=[Call],is_async=0)',  # test_a1_identity_formation:1427
+    'SetComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # test_a1_identity_formation:4724
+    'SetComp.generators>comprehension(target=Tuple,iter=Name,ifs=[Compare],is_async=0)',  # test_a1_identity_formation:1108
+    'SetComp.generators>comprehension(target=Tuple,iter=Name,ifs=[],is_async=0)',  # closed_walk:1238
+    'Slice.lower>BinOp(left=Call,op=Sub,right=Call)',  # closed_walk:1967
+    'Slice.lower>BinOp(left=Name,op=Add,right=Constant)',  # closed_walk:916
+    'Slice.lower>BinOp(left=Subscript,op=Add,right=Constant)',  # test_a1_identity_formation:1352
+    'Slice.lower>Call(func=Name,args=[Attribute],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):705
+    'Slice.lower>Constant(value=int)',  # closed_walk:1186
+    'Slice.lower>Name(id=str,ctx=Load)',  # closed_walk:1504
+    'Slice.upper>BinOp(left=BinOp,op=Add,right=Call)',  # closed_walk:1218
+    'Slice.upper>BinOp(left=Name,op=Add,right=Constant)',  # test_a1_identity_formation:835
+    'Slice.upper>BinOp(left=Subscript,op=Add,right=Constant)',  # test_a1_identity_formation:1394
+    'Slice.upper>Constant(value=int)',  # closed_walk:1245
+    'Slice.upper>Name(id=str,ctx=Load)',  # test_a1_identity_formation:486
+    'Slice.upper>UnaryOp(op=USub,operand=Constant)',  # closed_walk:1202
+    'Starred.ctx>Load()',  # closed_walk:784
+    'Starred.value>Call(func=Name,args=[Constant|List],keywords=[])',  # test_a1_identity_formation:4568
+    'Starred.value>Call(func=Name,args=[Constant|List],keywords=[keyword])',  # test_a1_identity_formation:4602
+    'Starred.value>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:784
+    'Starred.value>GeneratorExp(elt=Subscript,generators=[comprehension])',  # test_a1_identity_formation:4399
+    'Starred.value>ListComp(elt=Call,generators=[comprehension])',  # test_a1_identity_formation:1166
+    'Starred.value>Name(id=str,ctx=Load)',  # closed_walk:1064
+    'Subscript.ctx>Load()',  # closed_walk:146
+    'Subscript.ctx>Store()',  # closed_walk:140
+    "Subscript.slice>Attribute(value=Name,attr='__file__',ctx=Load)",  # test_a1_identity_formation:3667
+    "Subscript.slice>Attribute(value=Name,attr='__name__',ctx=Load)",  # test_a1_identity_formation:3670
+    "Subscript.slice>Attribute(value=Name,attr='id',ctx=Load)",  # closed_walk:865
+    "Subscript.slice>Attribute(value=Name,attr='name',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):64
+    "Subscript.slice>Attribute(value=Name,attr='stem',ctx=Load)",  # test_a1_identity_formation:3865
+    "Subscript.slice>Attribute(value=Subscript,attr='id',ctx=Load)",  # test_a1_identity_formation:1160
+    'Subscript.slice>BinOp(left=Constant,op=Add,right=Attribute)',  # closed_walk:1545
+    'Subscript.slice>BinOp(left=Constant,op=Add,right=Name)',  # closed_walk:1603
+    'Subscript.slice>BinOp(left=Name,op=Add,right=Constant)',  # closed_walk:1225
+    'Subscript.slice>BinOp(left=Name,op=Add,right=IfExp)',  # test_a1_identity_formation:1109
+    'Subscript.slice>BinOp(left=Name,op=Sub,right=Constant)',  # closed_walk:1230
+    'Subscript.slice>BoolOp(op=Or,values=[Attribute])',  # test_a1_identity_formation:3820
+    'Subscript.slice>Call(func=Attribute,args=[Constant],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):707
+    'Subscript.slice>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:1040
+    'Subscript.slice>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:156
+    'Subscript.slice>Constant(value=int)',  # closed_walk:146
+    'Subscript.slice>Constant(value=str)',  # closed_walk:1503
+    'Subscript.slice>JoinedStr(values=[Constant|FormattedValue])',  # test_a1_identity_formation:1282
+    'Subscript.slice>Name(id=str,ctx=Load)',  # closed_walk:140
+    'Subscript.slice>Slice(lower=-,upper=-,step=-)',  # test_a1_identity_formation:1439
+    'Subscript.slice>Slice(lower=-,upper=BinOp,step=-)',  # test_a1_identity_formation:1394
+    'Subscript.slice>Slice(lower=-,upper=Constant,step=-)',  # closed_walk:1502
+    'Subscript.slice>Slice(lower=-,upper=Name,step=-)',  # test_a1_identity_formation:486
+    'Subscript.slice>Slice(lower=-,upper=UnaryOp,step=-)',  # closed_walk:1202
+    'Subscript.slice>Slice(lower=BinOp,upper=-,step=-)',  # closed_walk:916
+    'Subscript.slice>Slice(lower=BinOp,upper=BinOp,step=-)',  # closed_walk:1218
+    'Subscript.slice>Slice(lower=Call,upper=-,step=-)',  # test_match_hold_admission_gate_pg (a30d37f6):705
+    'Subscript.slice>Slice(lower=Constant,upper=-,step=-)',  # closed_walk:1186
+    'Subscript.slice>Slice(lower=Constant,upper=Constant,step=-)',  # closed_walk:1245
+    'Subscript.slice>Slice(lower=Constant,upper=UnaryOp,step=-)',  # test_match_hold_admission_gate_pg (a30d37f6):787
+    'Subscript.slice>Slice(lower=Name,upper=-,step=-)',  # closed_walk:1504
+    'Subscript.slice>Slice(lower=Name,upper=BinOp,step=-)',  # test_a1_identity_formation:835
+    'Subscript.slice>Slice(lower=Name,upper=Name,step=-)',  # test_a1_identity_formation:1801
+    'Subscript.slice>Subscript(value=Name,slice=Constant,ctx=Load)',  # test_a1_identity_formation:1041
+    'Subscript.slice>Tuple(elts=[Attribute|Name],ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):239
+    'Subscript.slice>UnaryOp(op=USub,operand=Constant)',  # closed_walk:719
+    "Subscript.value>Attribute(value=Attribute,attr='elts',ctx=Load)",  # test_a1_identity_formation:2248
+    "Subscript.value>Attribute(value=Attribute,attr='met',ctx=Load)",  # closed_walk:1503
+    "Subscript.value>Attribute(value=Call,attr='body',ctx=Load)",  # test_a1_identity_formation:2165
+    "Subscript.value>Attribute(value=Name,attr='_done',ctx=Load)",  # closed_walk:156
+    "Subscript.value>Attribute(value=Name,attr='_rows',ctx=Load)",  # test_a1_identity_formation:43
+    "Subscript.value>Attribute(value=Name,attr='admitted',ctx=Load)",  # closed_walk:157
+    "Subscript.value>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:146
+    "Subscript.value>Attribute(value=Name,attr='body',ctx=Load)",  # closed_walk:1296
+    "Subscript.value>Attribute(value=Name,attr='cache',ctx=Load)",  # test_a1_identity_formation:3667
+    "Subscript.value>Attribute(value=Name,attr='comparators',ctx=Load)",  # closed_walk:902
+    "Subscript.value>Attribute(value=Name,attr='effects',ctx=Load)",  # closed_walk:1504
+    "Subscript.value>Attribute(value=Name,attr='elts',ctx=Load)",  # test_a1_identity_formation:2206
+    "Subscript.value>Attribute(value=Name,attr='gate_kinds',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):343
+    "Subscript.value>Attribute(value=Name,attr='helpers',ctx=Load)",  # closed_walk:1881
+    "Subscript.value>Attribute(value=Name,attr='modules',ctx=Load)",  # test_a1_identity_formation:722
+    "Subscript.value>Attribute(value=Name,attr='ops',ctx=Load)",  # closed_walk:901
+    "Subscript.value>Attribute(value=Name,attr='orelse',ctx=Load)",  # test_a1_identity_formation:1365
+    "Subscript.value>Attribute(value=Name,attr='problems',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):367
+    "Subscript.value>Attribute(value=Name,attr='sites',ctx=Load)",  # closed_walk:906
+    "Subscript.value>Attribute(value=Name,attr='targets',ctx=Load)",  # closed_walk:944
+    "Subscript.value>Attribute(value=Name,attr='trees',ctx=Load)",  # closed_walk:140
+    "Subscript.value>Attribute(value=Subscript,attr='elts',ctx=Load)",  # test_a1_identity_formation:2210
+    "Subscript.value>Attribute(value=Subscript,attr='names',ctx=Load)",  # closed_walk:788
+    'Subscript.value>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:641
+    'Subscript.value>Call(func=Attribute,args=[Constant],keywords=[])',  # closed_walk:461
+    'Subscript.value>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:1502
+    'Subscript.value>Call(func=Name,args=[Call],keywords=[])',  # test_a1_identity_formation:48
+    'Subscript.value>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:1829
+    'Subscript.value>Name(id=str,ctx=Load)',  # closed_walk:179
+    'Subscript.value>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # closed_walk:1103
+    'Subscript.value>Subscript(value=Attribute,slice=Name,ctx=Load)',  # closed_walk:906
+    'Subscript.value>Subscript(value=Name,slice=BinOp,ctx=Load)',  # closed_walk:1229
+    'Subscript.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:672
+    'Subscript.value>Subscript(value=Name,slice=Name,ctx=Load)',  # closed_walk:188
+    'Subscript.value>Subscript(value=Name,slice=UnaryOp,ctx=Load)',  # closed_walk:1201
+    'Subscript.value>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # closed_walk:906
+    'Subscript.value>Tuple(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:4535
+    'Try.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # closed_walk:164
+    'Try.body>Assign(targets=[Name],value=Call,type_comment=-)',  # closed_walk:144
+    'Try.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):409
+    'Try.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # test_a1_identity_formation:1017
+    'Try.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # closed_walk:1101
+    'Try.body>Assign(targets=[Subscript],value=Call,type_comment=-)',  # test_a1_identity_formation:1160
+    'Try.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # closed_walk:1180
+    'Try.body>Expr(value=Call)',  # test_a1_identity_formation:1003
+    'Try.body>For(target=Tuple,iter=Call,body=[If],orelse=[],type_comment=-)',  # test_a1_identity_formation:1054
+    'Try.body>If(test=BoolOp,body=[Return],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):586
+    'Try.body>If(test=Compare,body=[Assign],orelse=[])',  # test_a1_identity_formation:634
+    'Try.body>If(test=UnaryOp,body=[Expr],orelse=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1346
+    'Try.body>Return(value=Call)',  # closed_walk:1515
+    'Try.body>Return(value=Compare)',  # test_a1_identity_formation:766
+    'Try.finalbody>Expr(value=Call)',  # closed_walk:1891
+    'Try.handlers>ExceptHandler(type=Attribute,name=str,body=[Assign|Raise])',  # closed_walk:145
+    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Assign])',  # closed_walk:165
+    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Return])',  # test_a1_identity_formation:767
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign])',  # test_match_hold_admission_gate_pg (a30d37f6):347
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr])',  # test_a1_identity_formation:2253
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr|Return])',  # test_match_hold_admission_gate_pg (a30d37f6):293
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Continue|Expr])',  # test_a1_identity_formation:1237
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr])',  # closed_walk:1516
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr|Return])',  # test_a1_identity_formation:1087
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Raise])',  # closed_walk:1102
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Return])',  # test_a1_identity_formation:885
+    'Try.handlers>ExceptHandler(type=Tuple,name=-,body=[Assign])',  # closed_walk:192
+    'Try.handlers>ExceptHandler(type=Tuple,name=-,body=[Pass])',  # test_a1_identity_formation:636
+    'Try.handlers>ExceptHandler(type=Tuple,name=-,body=[Return])',  # closed_walk:781
+    'Try.orelse>Assign(targets=[Name],value=Call,type_comment=-)',  # test_a1_identity_formation:2297
+    'Try.orelse>If(test=Name,body=[Assign],orelse=[If])',  # test_match_hold_admission_gate_pg (a30d37f6):351
+    'Try.orelse>If(test=Name,body=[Expr],orelse=[])',  # test_a1_identity_formation:2299
+    'Tuple.ctx>Load()',  # closed_walk:73
+    'Tuple.ctx>Store()',  # closed_walk:138
+    "Tuple.elts>Attribute(value=Name,attr='AnnAssign',ctx=Load)",  # closed_walk:326
+    "Tuple.elts>Attribute(value=Name,attr='Assign',ctx=Load)",  # closed_walk:326
+    "Tuple.elts>Attribute(value=Name,attr='AsyncFor',ctx=Load)",  # closed_walk:933
+    "Tuple.elts>Attribute(value=Name,attr='AsyncFunctionDef',ctx=Load)",  # closed_walk:450
+    "Tuple.elts>Attribute(value=Name,attr='Attribute',ctx=Load)",  # closed_walk:316
+    "Tuple.elts>Attribute(value=Name,attr='AugAssign',ctx=Load)",  # closed_walk:320
+    "Tuple.elts>Attribute(value=Name,attr='Await',ctx=Load)",  # closed_walk:1282
+    "Tuple.elts>Attribute(value=Name,attr='BoolOp',ctx=Load)",  # test_a1_identity_formation:1212
+    "Tuple.elts>Attribute(value=Name,attr='Break',ctx=Load)",  # closed_walk:1150
+    "Tuple.elts>Attribute(value=Name,attr='Call',ctx=Load)",  # test_a1_identity_formation:1213
+    "Tuple.elts>Attribute(value=Name,attr='ClassDef',ctx=Load)",  # closed_walk:1128
+    "Tuple.elts>Attribute(value=Name,attr='Compare',ctx=Load)",  # test_a1_identity_formation:1212
+    "Tuple.elts>Attribute(value=Name,attr='Constant',ctx=Load)",  # test_a1_identity_formation:1213
+    "Tuple.elts>Attribute(value=Name,attr='Continue',ctx=Load)",  # closed_walk:1150
+    "Tuple.elts>Attribute(value=Name,attr='Del',ctx=Load)",  # closed_walk:311
+    "Tuple.elts>Attribute(value=Name,attr='Delete',ctx=Load)",  # closed_walk:479
+    "Tuple.elts>Attribute(value=Name,attr='Expr',ctx=Load)",  # closed_walk:2014
+    "Tuple.elts>Attribute(value=Name,attr='For',ctx=Load)",  # closed_walk:933
+    "Tuple.elts>Attribute(value=Name,attr='FunctionDef',ctx=Load)",  # closed_walk:450
+    "Tuple.elts>Attribute(value=Name,attr='Global',ctx=Load)",  # closed_walk:464
+    "Tuple.elts>Attribute(value=Name,attr='Import',ctx=Load)",  # closed_walk:459
+    "Tuple.elts>Attribute(value=Name,attr='ImportFrom',ctx=Load)",  # closed_walk:459
+    "Tuple.elts>Attribute(value=Name,attr='Lambda',ctx=Load)",  # closed_walk:1128
+    "Tuple.elts>Attribute(value=Name,attr='List',ctx=Load)",  # test_a1_identity_formation:1115
+    "Tuple.elts>Attribute(value=Name,attr='Load',ctx=Load)",  # test_a1_identity_formation:1214
+    "Tuple.elts>Attribute(value=Name,attr='MatchAs',ctx=Load)",  # closed_walk:467
+    "Tuple.elts>Attribute(value=Name,attr='MatchStar',ctx=Load)",  # closed_walk:467
+    "Tuple.elts>Attribute(value=Name,attr='Name',ctx=Load)",  # closed_walk:1546
+    "Tuple.elts>Attribute(value=Name,attr='Nonlocal',ctx=Load)",  # closed_walk:464
+    "Tuple.elts>Attribute(value=Name,attr='POSITIONAL_ONLY',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):700
+    "Tuple.elts>Attribute(value=Name,attr='POSITIONAL_OR_KEYWORD',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):700
+    "Tuple.elts>Attribute(value=Name,attr='Pass',ctx=Load)",  # closed_walk:2074
+    "Tuple.elts>Attribute(value=Name,attr='Raise',ctx=Load)",  # test_a1_identity_formation:1187
+    "Tuple.elts>Attribute(value=Name,attr='Return',ctx=Load)",  # closed_walk:1282
+    "Tuple.elts>Attribute(value=Name,attr='Store',ctx=Load)",  # closed_walk:311
+    "Tuple.elts>Attribute(value=Name,attr='Subscript',ctx=Load)",  # closed_walk:316
+    "Tuple.elts>Attribute(value=Name,attr='Tuple',ctx=Load)",  # test_a1_identity_formation:1115
+    "Tuple.elts>Attribute(value=Name,attr='UnaryOp',ctx=Load)",  # test_a1_identity_formation:1212
+    "Tuple.elts>Attribute(value=Name,attr='While',ctx=Load)",  # closed_walk:933
+    "Tuple.elts>Attribute(value=Name,attr='Yield',ctx=Load)",  # closed_walk:2090
+    "Tuple.elts>Attribute(value=Name,attr='YieldFrom',ctx=Load)",  # closed_walk:2090
+    "Tuple.elts>Attribute(value=Name,attr='__file__',ctx=Load)",  # test_a1_identity_formation:3668
+    "Tuple.elts>Attribute(value=Name,attr='__module__',ctx=Load)",  # closed_walk:1879
+    "Tuple.elts>Attribute(value=Name,attr='__qualname__',ctx=Load)",  # closed_walk:1879
+    "Tuple.elts>Attribute(value=Name,attr='asname',ctx=Load)",  # closed_walk:73
+    "Tuple.elts>Attribute(value=Name,attr='boolop',ctx=Load)",  # test_a1_identity_formation:1214
+    "Tuple.elts>Attribute(value=Name,attr='cmpop',ctx=Load)",  # test_a1_identity_formation:1214
+    "Tuple.elts>Attribute(value=Name,attr='col_offset',ctx=Load)",  # closed_walk:975
+    "Tuple.elts>Attribute(value=Name,attr='end_lineno',ctx=Load)",  # test_a1_identity_formation:2934
+    "Tuple.elts>Attribute(value=Name,attr='kwarg',ctx=Load)",  # closed_walk:379
+    "Tuple.elts>Attribute(value=Name,attr='lineno',ctx=Load)",  # closed_walk:73
+    "Tuple.elts>Attribute(value=Name,attr='name',ctx=Load)",  # closed_walk:73
+    "Tuple.elts>Attribute(value=Name,attr='problems',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1350
+    "Tuple.elts>Attribute(value=Name,attr='problems',ctx=Store)",  # test_match_hold_admission_gate_pg (a30d37f6):236
+    "Tuple.elts>Attribute(value=Name,attr='seen',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):1350
+    "Tuple.elts>Attribute(value=Name,attr='seen',ctx=Store)",  # test_match_hold_admission_gate_pg (a30d37f6):236
+    "Tuple.elts>Attribute(value=Name,attr='session',ctx=Load)",  # closed_walk:677
+    "Tuple.elts>Attribute(value=Name,attr='unaryop',ctx=Load)",  # test_a1_identity_formation:1215
+    "Tuple.elts>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:945
+    "Tuple.elts>Attribute(value=Name,attr='vararg',ctx=Load)",  # closed_walk:379
+    "Tuple.elts>Attribute(value=Name,attr='where',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):239
+    "Tuple.elts>Attribute(value=Subscript,attr='id',ctx=Load)",  # closed_walk:945
+    "Tuple.elts>Attribute(value=Subscript,attr='lineno',ctx=Load)",  # test_a1_identity_formation:1264
+    'Tuple.elts>BinOp(left=Attribute,op=Div,right=Constant)',  # test_a1_identity_formation:3863
+    'Tuple.elts>BinOp(left=Attribute,op=Sub,right=Constant)',  # closed_walk:167
+    'Tuple.elts>BinOp(left=Constant,op=Add,right=Call)',  # closed_walk:1241
+    'Tuple.elts>BinOp(left=JoinedStr,op=Add,right=IfExp)',  # test_match_hold_admission_gate_pg (a30d37f6):366
+    'Tuple.elts>BinOp(left=Name,op=Add,right=Call)',  # closed_walk:135
+    'Tuple.elts>BinOp(left=Name,op=Add,right=Constant)',  # test_a1_identity_formation:2940
+    'Tuple.elts>BinOp(left=Name,op=Sub,right=Constant)',  # test_a1_identity_formation:3203
+    'Tuple.elts>BoolOp(op=Or,values=[Attribute|Subscript])',  # test_a1_identity_formation:1069
+    'Tuple.elts>BoolOp(op=Or,values=[Name|Subscript])',  # test_a1_identity_formation:1088
+    'Tuple.elts>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:938
+    'Tuple.elts>Call(func=Attribute,args=[Attribute|Lambda|Name],keywords=[])',  # closed_walk:1765
+    'Tuple.elts>Call(func=Attribute,args=[BinOp|Name],keywords=[])',  # test_a1_identity_formation:3750
+    'Tuple.elts>Call(func=Attribute,args=[Call|Name],keywords=[])',  # test_a1_identity_formation:3739
+    'Tuple.elts>Call(func=Attribute,args=[Constant],keywords=[])',  # test_a1_identity_formation:119
+    'Tuple.elts>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # test_a1_identity_formation:3703
+    'Tuple.elts>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:167
+    'Tuple.elts>Call(func=Attribute,args=[],keywords=[])',  # test_a1_identity_formation:471
+    'Tuple.elts>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:1124
+    'Tuple.elts>Call(func=Name,args=[Attribute|Constant|Name],keywords=[])',  # closed_walk:136
+    'Tuple.elts>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:511
+    'Tuple.elts>Call(func=Name,args=[BinOp],keywords=[])',  # test_a1_identity_formation:1262
+    'Tuple.elts>Call(func=Name,args=[BinOp],keywords=[keyword])',  # test_a1_identity_formation:2457
+    'Tuple.elts>Call(func=Name,args=[BinOp|Name],keywords=[])',  # test_a1_identity_formation:2451
+    'Tuple.elts>Call(func=Name,args=[BinOp|Name],keywords=[keyword])',  # test_a1_identity_formation:2461
+    'Tuple.elts>Call(func=Name,args=[Call],keywords=[])',  # closed_walk:915
+    'Tuple.elts>Call(func=Name,args=[Call|Name],keywords=[])',  # test_a1_identity_formation:3203
+    'Tuple.elts>Call(func=Name,args=[Call|Name],keywords=[keyword])',  # test_a1_identity_formation:4557
+    'Tuple.elts>Call(func=Name,args=[Constant],keywords=[])',  # test_a1_identity_formation:4516
+    'Tuple.elts>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:149
+    'Tuple.elts>Call(func=Name,args=[Constant|Name],keywords=[keyword])',  # test_a1_identity_formation:4544
+    'Tuple.elts>Call(func=Name,args=[Constant|Subscript],keywords=[])',  # test_a1_identity_formation:4388
+    'Tuple.elts>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:920
+    'Tuple.elts>Call(func=Name,args=[Starred],keywords=[])',  # test_a1_identity_formation:4398
+    'Tuple.elts>Call(func=Name,args=[Subscript],keywords=[])',  # test_a1_identity_formation:4385
+    'Tuple.elts>Call(func=Name,args=[],keywords=[])',  # closed_walk:268
+    'Tuple.elts>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # closed_walk:1237
+    'Tuple.elts>Constant(value=NoneType)',  # closed_walk:73
+    'Tuple.elts>Constant(value=bool)',  # closed_walk:1213
+    'Tuple.elts>Constant(value=int)',  # closed_walk:1183
+    'Tuple.elts>Constant(value=str)',  # closed_walk:511
+    'Tuple.elts>Dict(keys=[],values=[])',  # closed_walk:931
+    'Tuple.elts>IfExp(test=BinOp,body=Constant,orelse=Constant)',  # test_match_hold_admission_gate_pg (a30d37f6):355
+    'Tuple.elts>IfExp(test=Compare,body=Call,orelse=Constant)',  # test_a1_identity_formation:1310
+    'Tuple.elts>IfExp(test=Compare,body=Constant,orelse=IfExp)',  # closed_walk:1832
+    'Tuple.elts>IfExp(test=Compare,body=List,orelse=List)',  # test_a1_identity_formation:4392
+    'Tuple.elts>JoinedStr(values=[Constant|FormattedValue])',  # closed_walk:147
+    'Tuple.elts>List(elts=[Attribute],ctx=Load)',  # closed_walk:268
+    'Tuple.elts>List(elts=[Name],ctx=Load)',  # test_a1_identity_formation:1013
+    'Tuple.elts>List(elts=[Subscript],ctx=Load)',  # test_a1_identity_formation:1006
+    'Tuple.elts>List(elts=[Tuple],ctx=Load)',  # test_a1_identity_formation:1022
+    'Tuple.elts>List(elts=[],ctx=Load)',  # closed_walk:1124
+    'Tuple.elts>Name(id=str,ctx=Load)',  # closed_walk:76
+    'Tuple.elts>Name(id=str,ctx=Store)',  # closed_walk:138
+    'Tuple.elts>Starred(value=Call,ctx=Load)',  # test_a1_identity_formation:4568
+    'Tuple.elts>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # test_a1_identity_formation:886
+    'Tuple.elts>Subscript(value=Call,slice=Constant,ctx=Load)',  # closed_walk:1829
+    'Tuple.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:975
+    'Tuple.elts>Subscript(value=Name,slice=Constant,ctx=Store)',  # test_match_hold_admission_gate_pg (a30d37f6):65
+    'Tuple.elts>Subscript(value=Name,slice=Name,ctx=Load)',  # test_a1_identity_formation:2940
+    'Tuple.elts>Subscript(value=Name,slice=Slice,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):317
+    'Tuple.elts>Subscript(value=Name,slice=Slice,ctx=Store)',  # test_a1_identity_formation:1439
+    'Tuple.elts>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # closed_walk:1103
+    'Tuple.elts>Tuple(elts=[Attribute|Constant],ctx=Load)',  # closed_walk:73
+    'Tuple.elts>Tuple(elts=[Attribute|JoinedStr],ctx=Load)',  # test_a1_identity_formation:906
+    'Tuple.elts>Tuple(elts=[Attribute|Name],ctx=Load)',  # closed_walk:76
+    'Tuple.elts>Tuple(elts=[Call],ctx=Load)',  # test_a1_identity_formation:1006
+    'Tuple.elts>Tuple(elts=[Constant],ctx=Load)',  # closed_walk:1216
+    'Tuple.elts>Tuple(elts=[Constant|JoinedStr],ctx=Load)',  # test_a1_identity_formation:892
+    'Tuple.elts>Tuple(elts=[Name],ctx=Load)',  # test_a1_identity_formation:1448
+    'Tuple.elts>Tuple(elts=[Name],ctx=Store)',  # closed_walk:920
+    'UnaryOp.op>Not()',  # closed_walk:448
+    'UnaryOp.op>USub()',  # closed_walk:719
+    "UnaryOp.operand>Attribute(value=Attribute,attr='args',ctx=Load)",  # closed_walk:763
+    "UnaryOp.operand>Attribute(value=Attribute,attr='keywords',ctx=Load)",  # closed_walk:764
+    "UnaryOp.operand>Attribute(value=Name,attr='_rows',ctx=Load)",  # test_a1_identity_formation:46
+    "UnaryOp.operand>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:952
+    "UnaryOp.operand>Attribute(value=Name,attr='held',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):75
+    "UnaryOp.operand>Attribute(value=Name,attr='keywords',ctx=Load)",  # closed_walk:1078
+    "UnaryOp.operand>Attribute(value=Name,attr='level',ctx=Load)",  # closed_walk:552
+    "UnaryOp.operand>Attribute(value=Name,attr='module',ctx=Load)",  # closed_walk:1923
+    "UnaryOp.operand>Attribute(value=Name,attr='orelse',ctx=Load)",  # test_a1_identity_formation:849
+    'UnaryOp.operand>BinOp(left=Name,op=BitAnd,right=Name)',  # closed_walk:1253
+    'UnaryOp.operand>BoolOp(op=And,values=[Attribute|Call|UnaryOp])',  # closed_walk:752
+    'UnaryOp.operand>BoolOp(op=And,values=[Call])',  # closed_walk:785
+    'UnaryOp.operand>BoolOp(op=And,values=[Call|Compare])',  # closed_walk:523
+    'UnaryOp.operand>BoolOp(op=And,values=[Call|Compare|Name])',  # test_a1_identity_formation:2279
+    'UnaryOp.operand>BoolOp(op=And,values=[Call|Compare|Name|UnaryOp])',  # test_a1_identity_formation:2273
+    'UnaryOp.operand>BoolOp(op=And,values=[Call|Compare|UnaryOp])',  # closed_walk:1077
+    'UnaryOp.operand>BoolOp(op=And,values=[Call|Name])',  # closed_walk:910
+    'UnaryOp.operand>BoolOp(op=And,values=[Compare])',  # test_a1_identity_formation:904
+    'UnaryOp.operand>BoolOp(op=Or,values=[BoolOp|Compare])',  # test_a1_identity_formation:2230
+    'UnaryOp.operand>BoolOp(op=Or,values=[Call])',  # closed_walk:732
+    'UnaryOp.operand>Call(func=Attribute,args=[Attribute],keywords=[])',  # closed_walk:1044
+    'UnaryOp.operand>Call(func=Attribute,args=[Attribute|Constant],keywords=[])',  # test_a1_identity_formation:1210
+    'UnaryOp.operand>Call(func=Attribute,args=[Constant],keywords=[])',  # closed_walk:1855
+    'UnaryOp.operand>Call(func=Attribute,args=[Constant|Subscript|Tuple],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):586
+    'UnaryOp.operand>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:588
+    'UnaryOp.operand>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:448
+    'UnaryOp.operand>Call(func=Name,args=[Attribute|Call],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):655
+    'UnaryOp.operand>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:699
+    'UnaryOp.operand>Call(func=Name,args=[Attribute|Subscript],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):782
+    'UnaryOp.operand>Call(func=Name,args=[Attribute|Tuple],keywords=[])',  # closed_walk:1730
+    'UnaryOp.operand>Call(func=Name,args=[Constant|Name],keywords=[])',  # test_a1_identity_formation:763
+    'UnaryOp.operand>Call(func=Name,args=[GeneratorExp],keywords=[])',  # closed_walk:1095
+    'UnaryOp.operand>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:812
+    'UnaryOp.operand>Call(func=Name,args=[Name],keywords=[keyword])',  # test_match_hold_admission_gate_pg (a30d37f6):1346
+    'UnaryOp.operand>Call(func=Name,args=[Name|Tuple],keywords=[])',  # test_a1_identity_formation:583
+    'UnaryOp.operand>Compare(left=Name,ops=[LtE],comparators=[BinOp])',  # test_a1_identity_formation:1209
+    'UnaryOp.operand>Constant(value=int)',  # closed_walk:719
+    'UnaryOp.operand>Name(id=str,ctx=Load)',  # closed_walk:701
+    'UnaryOp.operand>Subscript(value=Name,slice=Constant,ctx=Load)',  # test_a1_identity_formation:1205
+    'While.body>Assign(targets=[Name],value=Attribute,type_comment=-)',  # closed_walk:317
+    'While.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # test_a1_identity_formation:1793
+    'While.body>Assign(targets=[Name],value=Call,type_comment=-)',  # closed_walk:270
+    'While.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # test_a1_identity_formation:1794
+    'While.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # closed_walk:1202
+    'While.body>AugAssign(target=Name,op=Add,value=Constant)',  # test_a1_identity_formation:1800
+    'While.body>Expr(value=Call)',  # closed_walk:1132
+    'While.body>For(target=Tuple,iter=Call,body=[If],orelse=[],type_comment=-)',  # test_a1_identity_formation:2981
+    'While.body>If(test=Call,body=[Continue],orelse=[])',  # closed_walk:1127
+    'While.body>If(test=Call,body=[Expr],orelse=[])',  # closed_walk:1130
+    'While.body>If(test=Compare,body=[AugAssign],orelse=[If])',  # test_a1_identity_formation:1796
+    'While.body>If(test=Name,body=[Expr],orelse=[If])',  # closed_walk:272
+    'While.body>While(test=Name,body=[AugAssign|If],orelse=[])',  # test_a1_identity_formation:1795
+    'While.test>BoolOp(op=And,values=[Compare|Name])',  # closed_walk:1201
+    'While.test>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:1169
+    'While.test>Call(func=Name,args=[Name|Tuple],keywords=[])',  # closed_walk:316
+    'While.test>Compare(left=Name,ops=[NotEq],comparators=[UnaryOp])',  # test_a1_identity_formation:1792
+    'While.test>Name(id=str,ctx=Load)',  # closed_walk:269
+    'While.test>UnaryOp(op=Not,operand=Call)',  # test_match_hold_admission_gate_pg (a30d37f6):109
+    'arguments.args>arg(arg=str,annotation=-,type_comment=-)',  # closed_walk:66
+    'arguments.defaults>Call(func=Name,args=[],keywords=[])',  # closed_walk:107
+    'arguments.defaults>Constant(value=NoneType)',  # closed_walk:421
+    'arguments.defaults>Constant(value=bool)',  # closed_walk:107
+    'arguments.defaults>Constant(value=int)',  # closed_walk:129
+    'arguments.defaults>Constant(value=str)',  # closed_walk:421
+    'arguments.defaults>Name(id=str,ctx=Load)',  # test_match_hold_admission_gate_pg (a30d37f6):201
+    'arguments.defaults>Tuple(elts=[Constant],ctx=Load)',  # closed_walk:565
+    'arguments.defaults>Tuple(elts=[],ctx=Load)',  # closed_walk:1452
+    'arguments.kw_defaults>Constant(value=bool)',  # test_match_hold_admission_gate_pg (a30d37f6):1830
+    'arguments.kwonlyargs>arg(arg=str,annotation=-,type_comment=-)',  # test_match_hold_admission_gate_pg (a30d37f6):1830
+    'arguments.vararg>arg(arg=str,annotation=-,type_comment=-)',  # closed_walk:1519
+    'comprehension.ifs>BoolOp(op=And,values=[Attribute|Call])',  # closed_walk:1936
+    'comprehension.ifs>BoolOp(op=And,values=[BoolOp|Call])',  # test_match_hold_admission_gate_pg (a30d37f6):287
+    'comprehension.ifs>BoolOp(op=And,values=[BoolOp|Call|Compare])',  # closed_walk:1954
+    'comprehension.ifs>BoolOp(op=And,values=[Call])',  # closed_walk:1949
+    'comprehension.ifs>BoolOp(op=And,values=[Call|Compare])',  # closed_walk:659
+    'comprehension.ifs>BoolOp(op=And,values=[Compare])',  # test_a1_identity_formation:1490
+    'comprehension.ifs>BoolOp(op=And,values=[Compare|Name])',  # closed_walk:1239
+    'comprehension.ifs>BoolOp(op=And,values=[Compare|UnaryOp])',  # test_match_hold_admission_gate_pg (a30d37f6):75
+    'comprehension.ifs>Call(func=Name,args=[Attribute|Name],keywords=[])',  # test_a1_identity_formation:779
+    'comprehension.ifs>Call(func=Name,args=[Attribute|Subscript],keywords=[])',  # test_a1_identity_formation:1428
+    'comprehension.ifs>Call(func=Name,args=[GeneratorExp],keywords=[])',  # closed_walk:178
+    'comprehension.ifs>Call(func=Name,args=[Name],keywords=[])',  # test_a1_identity_formation:1500
+    'comprehension.ifs>Call(func=Name,args=[Name|Tuple],keywords=[])',  # closed_walk:933
+    'comprehension.ifs>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # test_a1_identity_formation:1447
+    'comprehension.ifs>Compare(left=Call,ops=[In],comparators=[Name])',  # closed_walk:1087
+    'comprehension.ifs>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # test_a1_identity_formation:1496
+    'comprehension.ifs>Compare(left=Name,ops=[Eq],comparators=[Name])',  # closed_walk:175
+    'comprehension.ifs>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # closed_walk:379
+    'comprehension.ifs>Compare(left=Name,ops=[IsNot],comparators=[Name])',  # test_match_hold_admission_gate_pg (a30d37f6):444
+    'comprehension.ifs>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # test_a1_identity_formation:1108
+    'comprehension.ifs>Compare(left=Name,ops=[NotEq],comparators=[Tuple])',  # test_a1_identity_formation:1257
+    'comprehension.ifs>Compare(left=Name,ops=[NotIn],comparators=[Call])',  # test_a1_identity_formation:1273
+    'comprehension.ifs>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # test_match_hold_admission_gate_pg (a30d37f6):73
+    'comprehension.ifs>Compare(left=Name,ops=[NotIn],comparators=[Tuple])',  # test_match_hold_admission_gate_pg (a30d37f6):553
+    'comprehension.ifs>Name(id=str,ctx=Load)',  # closed_walk:1245
+    'comprehension.ifs>UnaryOp(op=Not,operand=BoolOp)',  # closed_walk:785
+    'comprehension.ifs>UnaryOp(op=Not,operand=Call)',  # test_a1_identity_formation:2941
+    "comprehension.iter>Attribute(value=Attribute,attr='kw_defaults',ctx=Load)",  # closed_walk:437
+    "comprehension.iter>Attribute(value=Name,attr='args',ctx=Load)",  # closed_walk:1033
+    "comprehension.iter>Attribute(value=Name,attr='body',ctx=Load)",  # closed_walk:177
+    "comprehension.iter>Attribute(value=Name,attr='effects',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):302
+    "comprehension.iter>Attribute(value=Name,attr='elts',ctx=Load)",  # test_a1_identity_formation:840
+    "comprehension.iter>Attribute(value=Name,attr='keys',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):651
+    "comprehension.iter>Attribute(value=Name,attr='keywords',ctx=Load)",  # closed_walk:953
+    "comprehension.iter>Attribute(value=Name,attr='names',ctx=Load)",  # closed_walk:73
+    'comprehension.iter>BinOp(left=Attribute,op=Add,right=Attribute)',  # closed_walk:721
+    'comprehension.iter>BinOp(left=BinOp,op=Add,right=Attribute)',  # closed_walk:1928
+    'comprehension.iter>BinOp(left=BinOp,op=Add,right=ListComp)',  # closed_walk:378
+    'comprehension.iter>BinOp(left=Tuple,op=Add,right=Name)',  # test_a1_identity_formation:4382
+    'comprehension.iter>Call(func=Attribute,args=[Attribute],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):1231
+    'comprehension.iter>Call(func=Attribute,args=[Attribute|Constant|Name],keywords=[])',  # test_a1_identity_formation:4724
+    'comprehension.iter>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:174
+    'comprehension.iter>Call(func=Attribute,args=[Name|Tuple],keywords=[])',  # test_a1_identity_formation:895
+    'comprehension.iter>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:498
+    'comprehension.iter>Call(func=Name,args=[Attribute],keywords=[])',  # closed_walk:1969
+    'comprehension.iter>Call(func=Name,args=[Attribute|Call],keywords=[])',  # test_a1_identity_formation:1255
+    'comprehension.iter>Call(func=Name,args=[Call|Name],keywords=[])',  # test_a1_identity_formation:2940
+    'comprehension.iter>Call(func=Name,args=[Constant|Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):74
+    'comprehension.iter>Call(func=Name,args=[Constant|Name|Tuple],keywords=[])',  # test_a1_identity_formation:1464
+    'comprehension.iter>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:1239
+    'comprehension.iter>Call(func=Name,args=[Name],keywords=[keyword])',  # test_a1_identity_formation:1065
+    'comprehension.iter>Call(func=Name,args=[Subscript],keywords=[])',  # test_a1_identity_formation:1427
+    'comprehension.iter>Call(func=Name,args=[Subscript],keywords=[keyword])',  # closed_walk:1059
+    'comprehension.iter>Name(id=str,ctx=Load)',  # closed_walk:127
+    'comprehension.iter>Subscript(value=Name,slice=Slice,ctx=Load)',  # closed_walk:1245
+    'comprehension.iter>Tuple(elts=[Attribute],ctx=Load)',  # closed_walk:379
+    'comprehension.iter>Tuple(elts=[Call],ctx=Load)',  # test_a1_identity_formation:1287
+    'comprehension.iter>Tuple(elts=[IfExp],ctx=Load)',  # test_a1_identity_formation:1310
+    'comprehension.iter>Tuple(elts=[Name],ctx=Load)',  # test_a1_identity_formation:2166
+    'comprehension.target>Name(id=str,ctx=Store)',  # closed_walk:73
+    'comprehension.target>Tuple(elts=[Name],ctx=Store)',  # closed_walk:174
+    'comprehension.target>Tuple(elts=[Name|Tuple],ctx=Store)',  # closed_walk:920
+    "keyword.value>Attribute(value=Attribute,attr='session',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):234
+    "keyword.value>Attribute(value=Call,attr='grammar',ctx=Load)",  # test_a1_identity_formation:537
+    "keyword.value>Attribute(value=Name,attr='_ffa_sort_key',ctx=Load)",  # test_a1_identity_formation:135
+    "keyword.value>Attribute(value=Name,attr='b',ctx=Load)",  # test_match_hold_admission_gate_pg (a30d37f6):290
+    "keyword.value>Attribute(value=Name,attr='grammar',ctx=Load)",  # closed_walk:1015
+    "keyword.value>Attribute(value=Name,attr='session',ctx=Load)",  # closed_walk:1014
+    'keyword.value>Call(func=Attribute,args=[Name],keywords=[])',  # test_match_hold_admission_gate_pg (a30d37f6):358
+    'keyword.value>Call(func=Attribute,args=[],keywords=[])',  # test_a1_identity_formation:1290
+    'keyword.value>Call(func=Name,args=[Constant|List|Name],keywords=[])',  # closed_walk:1309
+    'keyword.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # closed_walk:1458
+    'keyword.value>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:1889
+    'keyword.value>Call(func=Name,args=[Set],keywords=[])',  # test_a1_identity_formation:2292
+    'keyword.value>Constant(value=NoneType)',  # test_a1_identity_formation:2922
+    'keyword.value>Constant(value=bool)',  # test_a1_identity_formation:724
+    'keyword.value>Constant(value=str)',  # test_a1_identity_formation:2925
+    'keyword.value>Dict(keys=[Attribute],values=[Name])',  # closed_walk:960
+    'keyword.value>IfExp(test=BoolOp,body=List,orelse=Name)',  # test_match_hold_admission_gate_pg (a30d37f6):233
+    'keyword.value>Lambda(args=arguments,body=Attribute)',  # test_a1_identity_formation:898
+    'keyword.value>Name(id=str,ctx=Load)',  # closed_walk:360
+    'keyword.value>Tuple(elts=[Constant],ctx=Load)',  # test_a1_identity_formation:2457
+})
