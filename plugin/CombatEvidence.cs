@@ -421,10 +421,20 @@ namespace CompetitiveRounds
         /// block's key for b5_s.</summary>
         internal static void RpcSent(PhotonView view, string method, RpcTarget target)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_c8)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             if (!_open || PerfSuspend) return;
             long t0 = Stamp();
             try { RpcSentBody(view, method, target); } catch (Exception ex) { Fault(K1, ex); }
             Cost(K1, t0);
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static readonly object KV = (byte)0, KS = (byte)2;
@@ -1678,6 +1688,12 @@ namespace CompetitiveRounds
         /// the fault notes and the captured records' builds.</summary>
         internal static void Tick()
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_c7)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidencePerf.Frame(); } catch { }
             if (_open && !PerfSuspend)
             {
@@ -1692,6 +1708,10 @@ namespace CompetitiveRounds
                 BuildCaptures(false);
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static void TickBody()
@@ -2638,14 +2658,34 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(Gun __instance, bool forceAttack, bool useAmmo, out long __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p1)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             __state = 0;
             try { CombatEvidence.AttackEnter(__instance, forceAttack, useAmmo, out __state); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyPostfix]
         private static void Postfix(Gun __instance, bool __result, bool forceAttack, long __state)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.AttackExit(__instance, __result, forceAttack, __state); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2656,15 +2696,35 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(ProjectileInit __instance, int senderID, out int __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p2)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             __state = 0;
             try { __state = CombatEvidence.InitEnter(__instance, senderID, 0); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(ProjectileInit __instance, int __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.InitExit(__instance, __state); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2674,7 +2734,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(ProjectileInit __instance, int senderID)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p3)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.InitEnter(__instance, senderID, 1); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2684,7 +2754,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(ProjectileInit __instance, int senderID)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p4)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.InitEnter(__instance, senderID, 2); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2695,7 +2775,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(GunAmmo __instance, bool playSound)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p5)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.ReloadEnter(__instance, playSound); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2707,15 +2797,35 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(ProjectileHit __instance, Vector2 hitPoint, Vector2 vel, int viewID, bool wasBlocked, out long __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p6)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             __state = 0;
             try { CombatEvidence.HitEnter(__instance, hitPoint, vel, viewID, wasBlocked, out __state); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(ProjectileHit __instance, long __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.HitExit(__instance, __state); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2726,7 +2836,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(ProjectileHit __instance, HitInfo hit)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p7)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.ContactEnter(__instance, hit); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2737,8 +2857,18 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(Block __instance, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p8)) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.BlockDone(__instance); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2749,14 +2879,34 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(Block __instance, out long __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p9)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             __state = 0;
             try { CombatEvidence.TryBlockEnter(__instance, out __state); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyPostfix]
         private static void Postfix(Block __instance, long __state)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.TryBlockExit(__instance, __state); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2767,7 +2917,17 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void Postfix(CharacterStatModifiers __instance)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p10)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.Dealt(__instance); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2778,7 +2938,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(BounceEffectRetarget __instance, Vector2 newVel)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p11)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.TargetBounce(__instance, newVel); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2789,15 +2959,35 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(ScreenEdgeBounce __instance, out long __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p12)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             __state = 0;
             try { CombatEvidence.EdgeBounce(__instance, out __state); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(ScreenEdgeBounce __instance, long __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.EdgeBounceExit(__instance, __state); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2808,7 +2998,17 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void Postfix(SyncProjectile __instance, PhotonStream stream)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p13)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.SyncRead(__instance, stream); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2819,15 +3019,35 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(HealthHandler __instance, Vector2 force, out long __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p14)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             __state = 0;
             try { CombatEvidence.ForceEnter(__instance, force, out __state); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(HealthHandler __instance, long __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.ForceExit(__instance, __state); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2838,15 +3058,35 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(HealthHandler __instance, Vector2 damage, HealthHandler.DamageSource damageSource, out long __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p15)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             __state = 0;
             try { CombatEvidence.DamageEnter(__instance, damage, damageSource == HealthHandler.DamageSource.OutOfBounds, out __state); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(HealthHandler __instance, long __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.DamageExit(__instance, __state); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2857,7 +3097,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(HealthHandler __instance)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p16)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.Die(__instance); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2868,7 +3118,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(HealthHandler __instance)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p17)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.Die(__instance); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2879,7 +3139,17 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void Postfix(BounceEffectRetarget __instance, HitInfo hit, Player __result)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p18)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.FindTarget(__instance, hit, __result); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -2891,15 +3161,35 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(MoveTransform __instance, out long __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CE_p19)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             __state = 0;
             try { CombatEvidence.MoveEnter(__instance, out __state); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(MoveTransform __instance, long __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
+            try
+            {
+#endif
             try { CombatEvidence.MoveExit(__instance, __state); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 }
