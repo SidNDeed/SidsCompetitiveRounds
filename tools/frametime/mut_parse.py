@@ -18,6 +18,9 @@ MUTS = [
     ("VR7 sides swapped off", 'return "ON" if r.get("plant", 0) else "OFF"', 'return r["arm"]'),
     ("K_up without its half-width", "return est, hw, est + hw", "return est, hw, est"),
     ("VR5 point zero dropped", 'if r["kind"] == "p" and "span_g" in r:', 'if False:'),
+    ("D_up without its largest-value floor", 'return max(m + t_q(z, j - 1) * se, max(ds)), ds, rate',
+     'return m + t_q(z, j - 1) * se, ds, rate'),
+    ("cal kind overwrites the line kind", '            k = "ckind"', '            k = "kind"'),
 ]
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 bad = 0

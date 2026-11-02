@@ -245,3 +245,41 @@ def test_k_up_refuses_two_frequencies():
     recs.append({"kind": "settled", "g": 17, "freq": 3000000})
     with pytest.raises(P.Refused):
         P.k_up(recs)
+
+
+# ------------------------------------------------------------------ D_up, dC in us, U
+
+def test_cal_line_keeps_its_line_kind():
+    r = P.parse_line("[FRAME-TIME] cal i=3 why=game2 kind=disp shape=S6 n=100000 u=10,12 p=30,34")
+    assert r["kind"] == "cal" and r["ckind"] == "disp" and r["shape"] == "S6"
+
+
+def _dup_log(costs_by_cal, guarded=3000, off_frames=1000, freq=10000000):
+    recs = [{"kind": "settled", "g": g, "freq": freq} for g in range(0, 3)]
+    recs.append({"kind": "p", "game": 1, "gate": 1, "live_frames": off_frames, "arm": "OFF"})
+    recs.append({"kind": "census", "g": 1, "shape": "S6", "guarded": guarded})
+    for i, c in enumerate(costs_by_cal):
+        # c: closed-path ticks per call at 10 MHz; two batches of n = 1000
+        recs.append({"kind": "cal", "i": i, "why": "game%d" % i, "ckind": "disp", "shape": "S6", "n": 1000,
+                     "u": "1000,1000", "p": "%d,%d" % (1000 + 1000 * c, 1000 + 1000 * c)})
+    return recs
+
+
+def test_d_up_is_rate_times_cost_with_the_largest_as_floor():
+    du, ds, rate = P.d_up(_dup_log([2, 2, 2, 2]))
+    assert rate == {"S6": 3.0}
+    assert ds == [pytest.approx(0.6)] * 4         # 3 calls per frame x 0.2 us
+    assert du == pytest.approx(0.6)
+
+
+def test_d_up_never_below_its_largest_calibration():
+    # sixteen calibrations at 0.3 us and one at 0.9: mean + t SE is about 0.42, so the largest value binds
+    du, ds, rate = P.d_up(_dup_log([1] * 16 + [3]))
+    assert du == pytest.approx(0.9)
+
+
+def test_d_up_refuses_a_missing_shape():
+    recs = _dup_log([2, 2])
+    recs.append({"kind": "census", "g": 1, "shape": "S1", "guarded": 5})
+    with pytest.raises(P.Refused):
+        P.d_up(recs)

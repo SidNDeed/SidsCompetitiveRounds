@@ -229,6 +229,8 @@ def parse_line(line):
     kind, rest = m.group(1), m.group(2)
     rec = {"kind": kind}
     for k, v in _KV.findall(rest):
+        if k == "kind":
+            k = "ckind"      # a cal line's kind=fhat|disp|span must not overwrite the line kind
         if k in INT_KEYS:
             rec[k] = _int(k, v)
         elif re.fullmatch(r"e\d+", k):
@@ -279,6 +281,77 @@ def dC(recs, z=Z_END):
     dw = [contrast_c(g[k]) for k in sorted(g)]
     est, hw, df = fw_interval(dw, z)
     return est, hw, df, lag1([d for d, w in dw])
+
+
+def _fhat(recs):
+    return {r["g"]: r["f_hat"] for r in recs if r["kind"] == "settled"}
+
+
+def dC_us(recs, z=Z_END, first_game=1):
+    """dC in microseconds per frame: each game's frame-weighted contrast in cycles over that game's f_hat (V4 3.2:
+    C in us is cycles / f_hat), then fw_interval at z. Returns (est, hw, df, lag-1)."""
+    fh = _fhat(recs)
+    g = games_of(recs, first_game)
+    dw = []
+    for k in sorted(g):
+        if fh.get(k, 0) <= 0:
+            raise Refused("no f_hat for game %d" % k)
+        d, n = contrast_c(g[k])
+        dw.append((d * 1e6 / fh[k], n))
+    est, hw, df = fw_interval(dw, z)
+    return est, hw, df, lag1([d for d, w in dw])
+
+
+def d_up(recs, z=Z_END, first_game=1):
+    """D_up (V4 3.6, F14): per calibration j at a game start, D_j = sum over shapes of the shape's guarded calls
+    per OFF live frame (census, measured games) x the shape's per-call closed-path cost in calibration j (mean
+    over its batches of (patched - unpatched) / n, us by the settled Stopwatch frequency); D_up = max(mean +
+    t(z, J - 1) SE, largest D_j). Returns (D_up, [D_j], {shape: rate})."""
+    freq = set(r["freq"] for r in recs if r["kind"] == "settled")
+    if len(freq) != 1:
+        raise Refused("D_up needs one Stopwatch frequency (got %s)" % sorted(freq))
+    f = freq.pop()
+    off_frames = sum(q["live_frames"] for pts in games_of(recs, first_game).values() for q in pts if q["gate"] == 1)
+    if off_frames <= 0:
+        raise Refused("no gated live frames")
+    calls = {}
+    for r in recs:
+        if r["kind"] == "census" and r["g"] >= first_game:
+            calls[r["shape"]] = calls.get(r["shape"], 0) + r["guarded"]
+    rate = {s: c / off_frames for s, c in calls.items() if c > 0}
+    cals = {}
+    for r in recs:
+        if r["kind"] == "cal" and r.get("why", "").startswith("game") and r.get("ckind") == "disp":
+            u = [int(x) for x in r["u"].split(",")]
+            pp = [int(x) for x in r["p"].split(",")]
+            if len(u) != len(pp) or not u:
+                raise Refused("cal i=%d shape=%s: batch lists differ" % (r["i"], r["shape"]))
+            cost = sum(b - a for a, b in zip(u, pp)) / len(u) / r["n"] * 1e6 / f
+            cals.setdefault(r["i"], {})[r["shape"]] = cost
+    if len(cals) < 2:
+        raise Refused("D_up needs at least two game-start calibrations (got %d)" % len(cals))
+    ds = []
+    for i in sorted(cals):
+        miss = [s for s in rate if s not in cals[i]]
+        if miss:
+            raise Refused("calibration %d has no line for shapes %s" % (i, miss))
+        ds.append(sum(rate[s] * cals[i][s] for s in rate))
+    j = len(ds)
+    m = sum(ds) / j
+    se = math.sqrt(sum((v - m) ** 2 for v in ds) / (j - 1) / j)
+    return max(m + t_q(z, j - 1) * se, max(ds)), ds, rate
+
+
+def t_ref(recs, first_game=1):
+    """T_ref (V4 section 0): the mean F of the OFF points' unplanted frames, us."""
+    freq = set(r["freq"] for r in recs if r["kind"] == "settled")
+    if len(freq) != 1:
+        raise Refused("T_ref needs one Stopwatch frequency (got %s)" % sorted(freq))
+    pts = [q for v in games_of(recs, first_game).values() for q in v if q["arm"] == "OFF"]
+    n = sum(q["n"] for q in pts)
+    if n <= 0:
+        raise Refused("no OFF frames")
+    return sum(q["sF"] for q in pts) * 1e6 / freq.pop() / n
 
 
 def _side_plain(r):
@@ -412,6 +485,9 @@ def vr2(recs):
         for k in ("missing_end", "cycle_failures", "span_depth_violations"):
             if r.get(k, 0) != 0:
                 bad.append("settled g=%d %s=%d" % (r["g"], k, r[k]))
+    fh = [r["f_hat"] for r in sett if r["g"] >= 0 and r.get("f_hat", 0) > 0]
+    if fh and (max(fh) - min(fh)) > 0.02 * min(fh):
+        bad.append("f_hat spread %d..%d exceeds 2 percent" % (min(fh), max(fh)))
     return not bad, bad
 
 
@@ -450,7 +526,23 @@ def report(text):
         out.append("K_up %.3f us per live frame (estimate %.3f, half-width %.3f)" % (ku, ke, kh))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("K_up not computable: %s" % e)
-    out.append("U not computable yet: D_up waits on the calibration shapes S1 to S11 (part 3's remainder)")
+    try:
+        du, dsj, rate = d_up(recs)
+        out.append("D_up %.3f us per OFF live frame over J=%d calibrations" % (du, len(dsj)))
+        de, dh, _, _ = dC_us(recs)
+        _, _, _, elo, _, _ = e_c(recs)
+        _, _, ku = k_up(recs)
+        u = max(0.0, de + dh) / min(1.0, max(elo, 1e-9)) + ku + du
+        tr = t_ref(recs)
+        out.append("U %.2f us = max(0, dC_up %.2f) / min(1, e_C_lo %.4f) + K_up %.3f + D_up %.3f; T_ref %.1f us; bar"
+                   " 3 percent = %.1f us -> %s" % (u, de + dh, elo, ku, du, tr, 0.03 * tr,
+                                                  "below" if u < 0.03 * tr else "not below"))
+        out.append("U against 60/144/240 FPS: %.3f / %.3f / %.3f percent; R3 %.0f FPS, R5 %.0f FPS"
+                   % (100 * u / 16667, 100 * u / 6944, 100 * u / 4167, 30000 / u if u > 0 else float("inf"),
+                      50000 / u if u > 0 else float("inf")))
+    except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
+        out.append("U not computable: %s" % e)
+    out.append("VERDICT withheld: VR1, VR4, VR6, VR8 and VR9 are not yet computed by this parser")
     return "\n".join(out)
 
 
