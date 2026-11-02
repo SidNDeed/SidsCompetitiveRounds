@@ -115,6 +115,7 @@ namespace CompetitiveRounds
             _open = true;
             if (FtSpan.Depth != 0) DepthViolations++;
             InScript = true;
+            FtSchedule.Boundary();
         }
 
         private static void OnEnd()

@@ -5699,6 +5699,9 @@ namespace CompetitiveRounds
             // Spectator: never tracks a match (defense in depth — the GM
             // lifecycle that fires this is suppressed on a spectator).
             if (RoomActors.LocalIsSpectator) return;
+#if SCR_FRAMETIME
+            try { FtSchedule.GameStart(); } catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] game start failed: " + ex.Message); }
+#endif
             try { Keybinds.OnRoundStart(); } catch { }   // item 17: the first round start of a match
             // Roster census (bug 391 §4.1), BEFORE OnGameStarted: that call
             // resets the per-actor view window, so a census taken after it
@@ -6072,6 +6075,9 @@ namespace CompetitiveRounds
             if (RoomActors.LocalIsSpectator) return;   // spectator: no result paths
             if (!isTracking || gameOverReported) return;
             gameOverReported = true;
+#if SCR_FRAMETIME
+            try { FtSchedule.GameOver(); } catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] game over failed: " + ex.Message); }
+#endif
             // v1.41.0 beta round 6, finding F28: this game's token, and the
             // value the room holds now, are stale for every later game. FIRST,
             // before anything below can throw, and in its own try.
