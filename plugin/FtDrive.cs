@@ -35,7 +35,7 @@ namespace CompetitiveRounds
         private static GameObject _pickFirst;
         private static int _pickIndex;
 
-        internal static bool Active => FtArm.Armed && !Escaped && !Complete;
+        internal static bool Active => FtArm.Armed && !Escaped && !Complete && !FtRematch.TimedOut;
 
         private static double Now => _sw.Elapsed.TotalSeconds;
 
@@ -61,7 +61,7 @@ namespace CompetitiveRounds
             bool a = Active;
             if (a != _wasActive)
                 Log(a ? "armed: inputs are automated"
-                      : "disarmed: " + (Escaped ? "escape" : Complete ? "sitting complete" : "input=" + FtArm.Why));
+                      : "disarmed: " + (Escaped ? "escape" : Complete ? "sitting complete" : FtRematch.TimedOut ? "rematch timeout" : "input=" + FtArm.Why));
             _wasActive = a;
         }
 
