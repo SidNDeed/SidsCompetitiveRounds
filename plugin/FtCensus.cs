@@ -21,6 +21,17 @@ namespace CompetitiveRounds
         internal static readonly long[] Guarded = new long[Capacity];
         internal static readonly long[] Outside = new long[Capacity];
         internal static int Count;
+        internal static int Duplicates;
+
+        /// <summary>Register entry id (FtE's numbering); Count is one past the highest id set.</summary>
+        internal static void Set(int id, string name, int component, string shape)
+        {
+            if (Names[id] != null) Duplicates++;
+            Names[id] = name;
+            ComponentOf[id] = component;
+            ShapeOf[id] = shape;
+            if (id + 1 > Count) Count = id + 1;
+        }
 
         internal static int Register(string name, int component, string shape)
         {
@@ -50,6 +61,7 @@ namespace CompetitiveRounds
             var sb = new StringBuilder();
             for (int e = 0; e < Count; e++)
             {
+                if (Names[e] == null) continue;
                 sb.Length = 0;
                 sb.Append("[FRAME-TIME] census g=").Append(game).Append(" entry=").Append(Names[e])
                   .Append(" comp=").Append(FtSpan.ComponentNames[ComponentOf[e]]).Append(" shape=").Append(ShapeOf[e])

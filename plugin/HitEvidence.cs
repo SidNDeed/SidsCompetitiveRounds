@@ -271,6 +271,12 @@ namespace CompetitiveRounds
         /// evidence's push counts for every captured flush, in capture order.</summary>
         internal static void Drain()
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_c5)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             int n = _fCount;
             for (int i = 0; i < n; i++)
             {
@@ -316,6 +322,10 @@ namespace CompetitiveRounds
                 }
                 catch { }
             }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>Seat evidence's push counts: one point's pairing of the
@@ -367,19 +377,39 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(ExitGames.Client.Photon.Hashtable __0, Photon.Realtime.Player __1, out long __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_p1)) { __state = (long)(uint)HitEvidence.RpcSender | ((long)-1 << 32); return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             int prev = HitEvidence.RpcSender;
             int depth = -1;
             try { depth = SeatEvidence.EnterRpc(__0, __1); } catch { }
             __state = (long)(uint)prev | ((long)depth << 32);
             try { HitEvidence.RpcSender = __1 != null ? __1.ActorNumber : 0; } catch { HitEvidence.RpcSender = 0; }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(long __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             HitEvidence.RpcSender = (int)(uint)(__state & 0xFFFFFFFFL);
             try { SeatEvidence.ExitRpc((int)(__state >> 32)); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -393,8 +423,18 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(HealthHandler __instance, Vector2 damage, out bool __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_p2)) { __state = false; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             __state = false;
             try { __state = SeatEvidence.DamageGate(__instance, damage != Vector2.zero); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>dmg is marked only when the method completed without an
@@ -402,9 +442,19 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(HealthHandler __instance, Vector2 damage, bool __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             try { HitEvidence.NoteDamage(__instance, damage); } catch { }
             try { SeatEvidence.DamageArrived(__instance, __state, __exception == null); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -415,8 +465,18 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(HealthHandler __instance, Vector2 force, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_p3)) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             try { HitEvidence.NoteForce(__instance, force); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -427,8 +487,18 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(HealthHandler __instance, Vector2 damage, Player damagingPlayer, bool healthRemoval, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_p4)) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             try { HitEvidence.NoteDot(__instance, damage, damagingPlayer, healthRemoval); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -442,16 +512,36 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(Block __instance, bool __0, BlockTrigger.BlockTriggerType __2, bool __4, out int __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_p5)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             __state = -1;
             try { __state = SeatEvidence.BlockEnter(__instance, __0, __2, __4); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(Block __instance, int __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             try { HitEvidence.NoteBlock(__instance); } catch { }
             try { SeatEvidence.BlockExit(__state); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -463,9 +553,19 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(ProjectileInit __instance, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_p6)) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             try { HitEvidence.NoteSpawn(__instance, 0); } catch { }
             try { SeatEvidence.ShotArrived(__instance, 0); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -475,9 +575,19 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(ProjectileInit __instance, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_p7)) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             try { HitEvidence.NoteSpawn(__instance, 1); } catch { }
             try { SeatEvidence.ShotArrived(__instance, 1); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -487,9 +597,19 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(ProjectileInit __instance, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_p8)) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             try { HitEvidence.NoteSpawn(__instance, 2); } catch { }
             try { SeatEvidence.ShotArrived(__instance, 2); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -505,18 +625,38 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(ProjectileHit __instance, int __3, bool __5, out long __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.HE_p9)) { __state = 0; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             int pid = 0, frame = -1;
             try { pid = HitEvidence.ProjectileId(__instance); } catch { }
             try { frame = SeatEvidence.HitEnter(__instance, pid, __3, __5); } catch { }
             __state = (long)(uint)pid | ((long)frame << 32);
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(long __state, int viewID, bool wasBlocked, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
+            try
+            {
+#endif
             try { HitEvidence.NoteImpact((int)(uint)(__state & 0xFFFFFFFFL), viewID, wasBlocked); } catch { }
             try { SeatEvidence.HitExit((int)(__state >> 32)); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 

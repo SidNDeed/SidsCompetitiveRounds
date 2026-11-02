@@ -71,6 +71,7 @@ namespace CompetitiveRounds
             UnityEngine.LowLevel.PlayerLoop.SetPlayerLoop(loop);
             Installed = true;
             FtPlant.Init();
+            FtE.RegisterAll();
             ulong probe = Cycles();
             Plugin.Log.LogInfo("[FRAME-TIME] clock installed freq=" + Stopwatch.Frequency + " hires=" + (Stopwatch.IsHighResolution ? 1 : 0)
                 + " cycles=" + (probe != 0 ? 1 : 0));
