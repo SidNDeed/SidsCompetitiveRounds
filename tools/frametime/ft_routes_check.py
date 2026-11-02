@@ -106,6 +106,22 @@ def main():
                     r"internal static class FtRoute_SendPatch\s*\{(.*?)\n    \}", fr, re.S)
     if not pre or "FtRoute.Allow(" not in pre.group(1) or "[HarmonyPrefix]" not in pre.group(1):
         bad.append("FtRoute.cs: the SendWebRequest prefix calling FtRoute.Allow is missing")
+    else:
+        body = pre.group(1)
+        # round-1 MEDIUM (FtRoute.cs:97): a refused request is never sent (the prefix's refusal path returns false,
+        # and nothing rewrites the request to send it elsewhere); every send the original makes is counted by a
+        # postfix that names the request itself, independently of Allow
+        refusal = re.search(r'FtUpload\.RefuseQuiet\("route", route\);\s*return false;', body)
+        if not refusal:
+            bad.append("FtRoute.cs: the prefix's refusal path does not skip the send (return false)")
+        if re.search(r"__instance\.url\s*=", body):
+            bad.append("FtRoute.cs: the prefix rewrites the request's url (a refused request would still be sent)")
+        post = re.search(r"\[HarmonyPostfix\]\s*private static void Postfix\(UnityWebRequest __instance, bool __runOriginal\)"
+                         r"\s*\{(.*?)\n        \}", body, re.S)
+        if not post or 'FtUpload.Count("dispatched", route);' not in post.group(1) \
+                or "FtRoute.Classify(__instance.method, __instance.url)" not in post.group(1) \
+                or "if (!__runOriginal) return;" not in post.group(1) or "Allow(" in post.group(1):
+            bad.append("FtRoute.cs: the independent dispatch-counting postfix is missing or reads Allow")
     pl = open(os.path.join(pdir, "Plugin.cs"), encoding="utf-8-sig").read()
     if "GetCustomAttributes(typeof(HarmonyPatch), true)" not in pl or "CreateClassProcessor(type).Patch()" not in pl:
         bad.append("Plugin.cs: the attribute loop that applies every [HarmonyPatch] class is missing")

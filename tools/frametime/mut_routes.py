@@ -19,6 +19,12 @@ MUTS = [
      "namespace CompetitiveRounds\n{\n    internal static class FtMutNet { internal static void Go() { new System.Net.WebClient(); } }", "FAIL"),
     ("the prefix stops calling Allow", "FtRoute.cs", "try { allowed = FtRoute.Allow(__instance.method, __instance.url, out route); }",
      "try { allowed = true; route = \"\"; }", "FAIL"),
+    ("the refused request redirected and sent", "FtRoute.cs", "FtUpload.RefuseQuiet(\"route\", route);\n            return false;",
+     "FtUpload.RefuseQuiet(\"route\", route);\n            __instance.url = \"http://127.0.0.1:1/x\"; return true;", "FAIL"),
+    ("the dispatch postfix removed", "FtRoute.cs", "FtUpload.Count(\"dispatched\", route);", "", "FAIL"),
+    ("the dispatch counted from Allow's answer", "FtRoute.cs",
+     "try { route = FtRoute.Classify(__instance.method, __instance.url); }",
+     "try { FtRoute.Allow(__instance.method, __instance.url, out route); }", "FAIL"),
     ("a guard outside the variant block", "MusicAssets.cs", "#if SCR_FRAMETIME\n                if (FtUpload.Closed) { FtUpload.RefuseQuiet(\"route\", \"GET_music-asset\");",
      "#if DEBUG\n                if (FtUpload.Closed) { FtUpload.RefuseQuiet(\"route\", \"GET_music-asset\");", "FAIL"),
 ]

@@ -9,18 +9,21 @@ namespace CompetitiveRounds
     /// <summary>FrameTime part b item 5 (FORMAT-M-PLAN.md V2 section 3, F02), the route classifier: a request
     /// is allowed only when it is a GET, to the mod's own backend (ApiClient.BaseUrl's authority), on a route
     /// in read_gate.py's OPEN set (backend/api/read_gate.py:143-158 at 1c77f580: readable with no credential,
-    /// no player data, no write). Everything else, a route it cannot name included, is refused as a transport
-    /// failure and counted per route; an allowed request is counted as sent, so a refused route's send count
-    /// is zero by construction (VR6).
+    /// no player data, no write), or a GET of a local file (a file: url that is not a UNC path: the music
+    /// engine's own clips, read from disk, never a network route; build decision 23). Everything else, a
+    /// route it cannot name included, is refused and counted per route; an allowed request is counted as sent.
     /// One choke point covers every UnityWebRequest transport in the process: a prefix on
     /// UnityWebRequest.SendWebRequest, which runs after the caller has built the request and before anything
-    /// is sent. A refused request has its url replaced by Sink (loopback, port 1, where nothing listens), so it
-    /// fails as a connection error through the caller's own failure path and its body never leaves the seat.
+    /// is sent. A refused request is never sent: the prefix skips the original, so no transport runs at all
+    /// (round-1 MEDIUM, FtRoute.cs:97), SendWebRequest returns null, and the request's result stays InProgress,
+    /// which every caller's `result == Success` test reads as a failure (ApiClient's one polling caller has a
+    /// variant-only null test). A postfix counts every send the original actually made, by the request's own
+    /// method and url and independently of Allow's answer (dispatched:route), so VR6 compares the two counts
+    /// per route: a refused route dispatched, or a route sent and dispatched a different number of times, fails.
     /// The three System.Net downloads (CustomCosmetics, EmojiSprites, MusicAssets) and chat's websocket are
     /// closed at their own sites (gate_specs/routes.py, uploads.py).</summary>
     internal static class FtRoute
     {
-        internal const string Sink = "http://127.0.0.1:1/ft-refused";
         private const int NAME_CAP = 64;
 
         private static readonly string[][] Open =
@@ -34,14 +37,23 @@ namespace CompetitiveRounds
 
         private static string[] T(string p) { return p.Split('/'); }
 
+        /// <summary>The name a request is counted under, from its method and url alone (both counters use it).</summary>
+        internal static string Classify(string method, string url)
+        {
+            Uri u;
+            if (string.IsNullOrEmpty(url) || !Uri.TryCreate(url, UriKind.Absolute, out u)) return "unparsed";
+            if (u.IsFile && !u.IsUnc) return (method ?? "?") + "_local";
+            return Name(method, u);
+        }
+
         /// <summary>True when the request may be sent. route is the name it is counted under.</summary>
         internal static bool Allow(string method, string url, out string route)
         {
-            route = "unparsed";
+            route = Classify(method, url);
             Uri u;
             if (string.IsNullOrEmpty(url) || !Uri.TryCreate(url, UriKind.Absolute, out u)) return false;
-            route = Name(method, u);
             if (!string.Equals(method, "GET", StringComparison.Ordinal)) return false;
+            if (u.IsFile) return !u.IsUnc;
             Uri b;
             string baseUrl = ApiClient.BaseUrl;
             if (string.IsNullOrEmpty(baseUrl) || !Uri.TryCreate(baseUrl, UriKind.Absolute, out b)) return false;
@@ -86,7 +98,7 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(UnityWebRequest), nameof(UnityWebRequest.SendWebRequest))]
     internal static class FtRoute_SendPatch
     {
-        /// <summary>False (the original skipped, nothing sent) only when a refused request cannot be redirected.</summary>
+        /// <summary>False (the original skipped: nothing is sent, no transport runs) for every refused request.</summary>
         [HarmonyPrefix]
         private static bool Prefix(UnityWebRequest __instance)
         {
@@ -96,12 +108,18 @@ namespace CompetitiveRounds
             catch { allowed = false; }
             if (allowed) { FtUpload.Count("sent", route); return true; }
             FtUpload.RefuseQuiet("route", route);
-            try { __instance.url = FtRoute.Sink; return true; }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning("[FRAME-TIME] route refusal could not redirect " + route + ", send skipped: " + ex.Message);
-                return false;
-            }
+            return false;
+        }
+
+        /// <summary>The dispatch counter: every send the original made, named from the request itself.</summary>
+        [HarmonyPostfix]
+        private static void Postfix(UnityWebRequest __instance, bool __runOriginal)
+        {
+            if (!__runOriginal) return;
+            string route;
+            try { route = FtRoute.Classify(__instance.method, __instance.url); }
+            catch { route = "unreadable"; }
+            FtUpload.Count("dispatched", route);
         }
     }
 }

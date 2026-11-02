@@ -9552,10 +9552,12 @@ namespace CompetitiveRounds
         public static void CheckOpponentRanked(string steamId, Action<bool> callback)
         {
 #if SCR_FRAMETIME
-            // F03's mutant first: ranked_hook=1 answers true even in an ft_ room, so matchIsRanked turns true and the
-            // arming predicate disarms (the control); otherwise every ft_ room skips the check and answers false
+            // F03 (round-1 MEDIUM, ApiClient.cs:9557): the ft_ room guard comes FIRST, so the injected ranked answer
+            // below is reached only outside an ft_ room. The control: ranked_hook=1 in an ft_ room still answers
+            // false and the sitting stays armed. The guard's own mutant is a separate switch: ranked_guard_mutant=1
+            // removes the guard alone, the injected answer turns matchIsRanked true and the arming predicate disarms.
+            if (FtConfig.Get("ranked_guard_mutant", "0") != "1" && FtArm.InFtRoom()) { Plugin.Log.LogInfo("[FRAME-TIME] ranked-check skipped"); callback(false); return; }
             if (FtConfig.Get("ranked_hook", "0") == "1") { Plugin.Log.LogInfo("[FRAME-TIME] ranked-check test hook answered true"); callback(true); return; }
-            if (FtArm.InFtRoom()) { Plugin.Log.LogInfo("[FRAME-TIME] ranked-check skipped"); callback(false); return; }
 #endif
             if (string.IsNullOrEmpty(steamId) || steamId.StartsWith("photon_") || steamId == "unknown")
             {
@@ -25689,6 +25691,9 @@ namespace CompetitiveRounds
                     // than letting it finish and discarding the answer.
                     var op = request.SendWebRequest();
                     bool aborted = false;
+#if SCR_FRAMETIME
+                    if (op != null)   // FtRoute skipped a refused send: nothing to poll, and the result is not Success
+#endif
                     while (!op.isDone)
                     {
                         bool stop = false;
