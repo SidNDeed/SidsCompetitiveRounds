@@ -9552,8 +9552,10 @@ namespace CompetitiveRounds
         public static void CheckOpponentRanked(string steamId, Action<bool> callback)
         {
 #if SCR_FRAMETIME
-            if (FtArm.InFtRoom()) { Plugin.Log.LogInfo("[FRAME-TIME] ranked-check skipped"); callback(false); return; }
+            // F03's mutant first: ranked_hook=1 answers true even in an ft_ room, so matchIsRanked turns true and the
+            // arming predicate disarms (the control); otherwise every ft_ room skips the check and answers false
             if (FtConfig.Get("ranked_hook", "0") == "1") { Plugin.Log.LogInfo("[FRAME-TIME] ranked-check test hook answered true"); callback(true); return; }
+            if (FtArm.InFtRoom()) { Plugin.Log.LogInfo("[FRAME-TIME] ranked-check skipped"); callback(false); return; }
 #endif
             if (string.IsNullOrEmpty(steamId) || steamId.StartsWith("photon_") || steamId == "unknown")
             {

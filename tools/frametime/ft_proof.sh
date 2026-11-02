@@ -19,7 +19,8 @@
 #   4. the source check: hunk_check.py <base> <lane> with the Release and Thunderstore /define lists read from
 #      step 3's own Csc lines;
 #   5. the scans: <lane> built in FrameTime in proofB must scan -Build FrameTime clean; step 3's lane Release DLL
-#      must scan Standalone clean. Only with --stage (the integrator's go, build brief) is the lane folder
+#      must scan Standalone clean; ft_absent.py: no format M string or type in step 3's lane Release and
+#      Thunderstore DLLs, and every one in the FrameTime DLL (the probe's positive control). Only with --stage (the integrator's go, build brief) is the lane folder
 #      C:/shared/builds/lanes/frametime-<sha8>/ written: the DLL, sha256.txt, then README.txt last.
 set -u
 [ $# -ge 5 ] || { echo "usage: ft_proof.sh <base-sha40> <lane-sha40> <proofA> <proofB> <outdir> [--stage]"; exit 2; }
@@ -111,7 +112,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$SCAN" -Dll "$(cygpath -w "
   > "$OUT/scan-frametime.log" 2>&1 || fail "step 5: the FrameTime DLL's scan failed (scan-frametime.log)"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SCAN" -Dll "$(cygpath -w "$OUT/lane-release.dll")" \
   > "$OUT/scan-release.log" 2>&1 || fail "step 5: the lane Release DLL's scan failed (scan-release.log)"
-say "step 5 PASS: FrameTime DLL scans FrameTime; lane Release DLL scans Standalone"
+for x in lane-release:absent lane-thunderstore:absent lane-frametime:present; do
+  python -I -B "$HERE/ft_absent.py" "$OUT/${x%%:*}.dll" "${x##*:}" > "$OUT/absent-${x%%:*}.log" 2>&1 \
+    || fail "step 5: ft_absent.py ${x##*:} failed on ${x%%:*} (absent-${x%%:*}.log)"
+done
+say "step 5 PASS: FrameTime DLL scans FrameTime; lane Release DLL scans Standalone; no format M string or type in the lane Release and Thunderstore DLLs, all of them in the FrameTime DLL"
 if [ "$STAGE" = "--stage" ]; then
   S8=${LANE:0:8}
   DEST="C:/shared/builds/lanes/frametime-$S8"
