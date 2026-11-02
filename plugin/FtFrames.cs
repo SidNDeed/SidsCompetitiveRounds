@@ -16,17 +16,23 @@ namespace CompetitiveRounds
     /// per-window integer sums of the measured live frames. A point's measured frames
     /// start at its second live frame (the first carries the arm switch and the zero-state
     /// check) and end at its last full live frame. Every 120 measured frames a window line;
-    /// at each point end a point line. Still to come in part 3: medF and the run-count
-    /// bounds e4/e8/e16 (k_min,k_max by the two-state pass over the window's 118 stored
-    /// frames, F07), the plant (M5) with its planted sums, the zero-state result and the
-    /// census and span totals on the point line. The window's frame values are already
-    /// stored for that pass.</summary>
+    /// at each point end a point line. A full window also carries medF, the lower median of
+    /// its frames 3 to 120, and for H = 4, 8 and 16 ms the run-count bounds k_min,k_max
+    /// (METHOD-V4.md 3.8, F07): a frame is long when F - medF >= H + 2 ticks, short when
+    /// F - medF < H - 2, uncertain otherwise; an event is a run of long frames inside the
+    /// window; a two-state pass gives the least and greatest run count over every
+    /// assignment of the uncertain frames, the frame before frame 3 counting as short. A
+    /// partial window is logged and kept in the sums, not in the event counts. Still to
+    /// come in part 3: the plant (M5) with its planted sums, the zero-state result and the
+    /// census and span totals on the point line.</summary>
     internal static class FtFrames
     {
         internal const int W = 120;
         internal static long CPlant = -1;
 
         private static readonly long[] WinF = new long[W];
+        private static readonly long[] Sorted = new long[W - 2];
+        private static readonly int[] HMs = { 4, 8, 16 };
         private static int _wn;
         private static long _wF, _wS, _wMaxF;
         private static ulong _wC;
@@ -70,10 +76,73 @@ namespace CompetitiveRounds
         private static void FlushWindow(bool partial)
         {
             _windows++;
-            Plugin.Log.LogInfo("[FRAME-TIME] w pt=" + FtSchedule.Label() + " arm=" + (FtSchedule.ArmOn ? "ON" : "OFF")
-                + " partial=" + (partial ? 1 : 0) + " n=" + _wn + " sF=" + _wF + " sS=" + _wS + " sC=" + _wC
-                + " maxF=" + _wMaxF + " gc=" + (GC.CollectionCount(0) - _wGc));
+            var sb = new StringBuilder(160);
+            sb.Append("[FRAME-TIME] w pt=").Append(FtSchedule.Label()).Append(" arm=").Append(FtSchedule.ArmOn ? "ON" : "OFF")
+              .Append(" partial=").Append(partial ? 1 : 0).Append(" n=").Append(_wn).Append(" sF=").Append(_wF)
+              .Append(" sS=").Append(_wS).Append(" sC=").Append(_wC).Append(" maxF=").Append(_wMaxF);
+            if (!partial)
+            {
+                long med = LowerMedian();
+                sb.Append(" medF=").Append(med);
+                for (int h = 0; h < HMs.Length; h++)
+                {
+                    long ticks = HMs[h] * System.Diagnostics.Stopwatch.Frequency / 1000;
+                    int kmin, kmax;
+                    RunBounds(med, ticks, out kmin, out kmax);
+                    sb.Append(" e").Append(HMs[h]).Append('=').Append(kmin).Append(',').Append(kmax);
+                }
+            }
+            sb.Append(" gc=").Append(GC.CollectionCount(0) - _wGc);
+            Plugin.Log.LogInfo(sb.ToString());
             _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0;
+        }
+
+        /// <summary>The lower median of frames 3 to 120 of a full window: s[(n + 1) / 2 - 1], n = 118.</summary>
+        internal static long LowerMedian()
+        {
+            Array.Copy(WinF, 2, Sorted, 0, W - 2);
+            Array.Sort(Sorted);
+            return Sorted[(Sorted.Length + 1) / 2 - 1];
+        }
+
+        /// <summary>k_min and k_max over frames 3 to 120 for threshold h ticks above med.</summary>
+        internal static void RunBounds(long med, long h, out int kmin, out int kmax)
+        {
+            const int None = int.MinValue;
+            int minS = 0, maxS = 0, minL = None, maxL = None;   // runs so far, ending short or long
+            for (int i = 2; i < W; i++)
+            {
+                long d = WinF[i] - med;
+                bool canLong = d >= h - 2;
+                bool canShort = d < h + 2;
+                int nMinS = None, nMaxS = None, nMinL = None, nMaxL = None;
+                if (canShort)
+                {
+                    nMinS = Min(minS, minL);
+                    nMaxS = Max(maxS, maxL);
+                }
+                if (canLong)
+                {
+                    nMinL = Min(minS == None ? None : minS + 1, minL);
+                    nMaxL = Max(maxS == None ? None : maxS + 1, maxL);
+                }
+                minS = nMinS; maxS = nMaxS; minL = nMinL; maxL = nMaxL;
+            }
+            kmin = Min(minS, minL);
+            kmax = Max(maxS, maxL);
+        }
+
+        private static int Min(int a, int b)
+        {
+            const int None = int.MinValue;
+            if (a == None) return b;
+            if (b == None) return a;
+            return a < b ? a : b;
+        }
+
+        private static int Max(int a, int b)
+        {
+            return a > b ? a : b;
         }
     }
 }
