@@ -2009,8 +2009,8 @@ namespace CompetitiveRounds
                 _loaded = keepLoaded; _stale = keepStale; _spoolChecked = keepSpool; _gen = keepGen;
             }
         }
-#endif
 
+#endif
         private static void Answer(string route, string bodyKey, bool ok, string text, bool carried)
         {
 #if SCR_FRAMETIME
