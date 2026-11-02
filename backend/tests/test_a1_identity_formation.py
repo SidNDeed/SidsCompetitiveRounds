@@ -4995,3 +4995,30 @@ def test_r8_the_definition_scope_refuses_a_store_by_shape(case):
         with pytest.raises(Unclassified) as e:
             _cw.plain_effects(mod._pick, _policy(mod))
         assert text in str(e.value.args[0]), (f, e.value.args[0])
+
+
+def test_r8_frozen_callee_picks_one_name_of_a_frozen_statement():
+    """M4, the import route: a local import's form is its statement's text;
+    a statement importing several names maps each BOUND name to its
+    function. Only a frozen statement resolves, and of it only a name the
+    table maps; a statement of one name maps to its function directly."""
+    import types as _types
+
+    def fa():
+        return None
+
+    def fb():
+        return None
+
+    g = _types.SimpleNamespace(imports={
+        "from m import a, b as c": {"a": fa, "c": fb},
+        "from m import a": fa})
+    two = _ast.parse("from m import a, b as c").body[0]
+    one = _ast.parse("from m import a").body[0]
+    other = _ast.parse("from m import a, d").body[0]
+    assert _cw._frozen_callee(g, two, "a") is fa
+    assert _cw._frozen_callee(g, two, "c") is fb
+    assert _cw._frozen_callee(g, two, "b") is None
+    assert _cw._frozen_callee(g, one, "a") is fa
+    assert _cw._frozen_callee(g, other, "a") is None
+    assert _cw._frozen_callee(None, one, "a") is None

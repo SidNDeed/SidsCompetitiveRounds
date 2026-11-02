@@ -108,7 +108,8 @@ class Grammar:
     {form: function} for every callee a walk reaches outside the walked
     function's own module namespace, the form being the callee's spelling
     (`_match_hold._hold_latch`, `_mrw_mod().series_fresh`) or, for a
-    local `from ... import`, the import statement's text. The functions are
+    local `from ... import`, the import statement's text (a statement that
+    imports several names maps to {bound name: function}). The functions are
     bound by the test's own static imports and asserted against frozen
     spans; nothing is imported, and no attribute is looked up, by a name
     read from the tree (Bindings.callee).
@@ -285,14 +286,18 @@ def _spelled_shape(n, p, f):
     return _sg.shape(n, p, f)
 
 
-def _frozen_callee(grammar, node):
+def _frozen_callee(grammar, node, name=None):
     """The function grammar's frozen callee table holds for `node`'s
-    text (a callee spelling, or a local import statement); None without a
-    grammar or for any other text."""
+    text (a callee spelling, or a local import statement); for a statement
+    that imports several names the table holds {bound name: function} and
+    `name` picks one. None without a grammar or for any other text."""
     if grammar is None:
         return None
     table = getattr(grammar, "imports")
-    return table.get(_ast.unparse(node))
+    obj = table.get(_ast.unparse(node))
+    if isinstance(obj, dict) and name is not None:
+        obj = obj.get(name)
+    return obj
 
 
 def _admitted_scope(name, scope, g, line):
@@ -573,9 +578,10 @@ class Bindings:
                  grammar=None):
         self.scope = scope
         self.session = session
-        # The walk's Grammar, when it has one: a local import is then read
-        # only as one of the grammar's frozen (module, name, asname) triples
-        # (ruling REHEARSAL-FOUR-R6 (1)(c): no import resolution by name).
+        # The walk's Grammar, when it has one: a callee outside the
+        # module's own namespace resolves only through its frozen callee
+        # table (round 8, M4; rule (1)(c): no import resolution by name);
+        # without one, only the module's own names resolve.
         self.grammar = grammar
         self.sites = {}
         self.has_fn = fn is not None
@@ -908,7 +914,7 @@ class Bindings:
                 imp, alias = v
                 if not isinstance(imp, _ast.ImportFrom):
                     return None
-                obj = _frozen_callee(self.grammar, imp)
+                obj = _frozen_callee(self.grammar, imp, func.id)
             elif kind == "module" and v is not _MISSING:
                 obj = v
         elif isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Name):
