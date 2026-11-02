@@ -3876,3 +3876,220 @@ def test_r4_closed_walk_names_resolve_through_the_function(helper, want):
     else:
         got = set(_cw.helper_effects(fn, policy))
         assert got == want, got
+
+
+# --- rehearsal-four round 5 (ruling REHEARSAL-FOUR-R5) -----------------------
+
+# The reviewer's programs for round 5's closed_walk findings, read by the
+# shared visitor under a1's policy (fix 0: each executed red at f2b21fbd,
+# where every one of them was accepted).
+_R5_CW_SRC = "\n".join([
+    "from sqlalchemy import text",
+    "Q = 'SELECT 1'",
+    "SAFE = ('x',)",
+    "SAFE_F = ('lo_create',)",
+    "SAFE_LIST = ['x']",
+    "_T = {'a': 't_a', 'b': 't_b'}",
+    "def bad(db, row):",
+    "    db.add(row)",
+    "def plain_session_add(session, row):",
+    "    session.add(row)",
+    "def builder(mode):",
+    "    if mode == 'evil':",
+    "        return 'UPDATE t SET x = 1'",
+    "    base = 'SELECT * FROM '",
+    "    return base + _T[mode]",
+    "def builder_ok(mode):",
+    "    return f'SELECT * FROM {_T[mode]}'",
+    "class Evil(tuple):",
+    "    _fields = ()",
+    "    def __new__(cls, db, row):",
+    "        db.add(row)",
+    "        return tuple.__new__(cls, ())",
+    # closed_walk:897, a local function rebound to a writing helper
+    "async def local_def_rebound(db, row):",
+    "    def inner(x, y):",
+    "        return x",
+    "    inner = bad",
+    "    inner(db, row)",
+    # closed_walk:1235, an imported name reassigned
+    "async def import_rebound(db, row):",
+    "    from builtins import str",
+    "    str = bad",
+    "    str(db, row)",
+    # closed_walk:1005, the session through an alias and a plain parameter
+    "async def session_alias(db, row):",
+    "    s = db",
+    "    s.add(row)",
+    "async def session_to_plain(db, row):",
+    "    plain_session_add(db, row)",
+    # closed_walk:759, a tuple marker on a class whose __new__ writes
+    "async def tuple_marker(db, row):",
+    "    Evil(db, row)",
+    # closed_walk:1217, an exception-suppressing finally (each kind)
+    "async def finally_returns(db):",
+    "    try:",
+    "        await db.execute(text('SELECT 1'), {})",
+    "    except Exception:",
+    "        await db.rollback()",
+    "        raise",
+    "    finally:",
+    "        return None",
+    "async def finally_breaks(db):",
+    "    for _i in (1,):",
+    "        try:",
+    "            await db.execute(text('SELECT 1'), {})",
+    "        except Exception:",
+    "            await db.rollback()",
+    "            raise",
+    "        finally:",
+    "            break",
+    "async def finally_continues(db):",
+    "    for _i in (1,):",
+    "        try:",
+    "            await db.execute(text('SELECT 1'), {})",
+    "        except Exception:",
+    "            await db.rollback()",
+    "            raise",
+    "        finally:",
+    "            continue",
+    # closed_walk:501, a guard's name rebound in its else, its collection mutated
+    "async def guard_else_rebinds(db, name):",
+    "    if name not in SAFE:",
+    "        raise ValueError(name)",
+    "    else:",
+    "        name = 'lo_create(0)'",
+    "    return (await db.execute(text(f'SELECT {name}'), {})).scalar()",
+    "async def guard_collection_mutated(db, name):",
+    "    SAFE_LIST.append('lo_create(0)')",
+    "    if name not in SAFE_LIST:",
+    "        raise ValueError(name)",
+    "    return (await db.execute(text(f'SELECT {name}'), {})).scalar()",
+    # closed_walk:326, a guarded name in a function position
+    "async def guarded_function_name(db, name):",
+    "    if name not in SAFE_F:",
+    "        raise ValueError(name)",
+    "    return (await db.execute(text(f'SELECT {name}(0)'), {})).scalar()",
+    # closed_walk:441, a builder whose unsampled branch writes
+    "async def builder_sampled(db):",
+    "    return (await db.execute(text(builder('evil')), {})).scalar()",
+    # the kept forms
+    "async def guard_kept(db, name):",
+    "    if name not in SAFE:",
+    "        raise ValueError(name)",
+    "    return (await db.execute(text(f'SELECT {name}'), {})).scalar()",
+    "async def builder_kept(db):",
+    "    return (await db.execute(text(builder_ok('a')), {})).scalar()",
+    "async def local_def_kept(db, row):",
+    "    def inner(x):",
+    "        return x",
+    "    inner(row)",
+    "async def finally_kept(db):",
+    "    try:",
+    "        await db.execute(text('SELECT 1'), {})",
+    "    finally:",
+    "        pass",
+    ""])
+
+
+def _r5_cw_scope():
+    import linecache as _linecache
+    import sys as _sys
+    import types as _types
+    mod = _types.ModuleType("r5_cw_controls")
+    mod.__file__ = "<r5_cw_controls>"
+    _linecache.cache[mod.__file__] = (len(_R5_CW_SRC), None,
+                                      _R5_CW_SRC.splitlines(True), mod.__file__)
+    _sys.modules[mod.__name__] = mod
+    exec(compile(_R5_CW_SRC, mod.__file__, "exec"), mod.__dict__)
+    return mod
+
+
+# (helper, what the walk must give: a refusal sentence, or the effects)
+_R5_CW_CONTROLS = [
+    ("local_def_rebound", "a name bound more than once: inner"),
+    ("import_rebound", "a name bound more than once: str"),
+    ("session_alias", "the session as a value"),
+    ("session_to_plain", "the session as a value"),
+    ("tuple_marker", "a call this walk does not classify: Evil"),
+    ("finally_returns", "a return inside a finally"),
+    ("finally_breaks", "a break inside a finally"),
+    ("finally_continues", "a continue inside a finally"),
+    ("guard_else_rebinds", "an execute whose SQL the walk cannot read"),
+    ("guard_collection_mutated", "an execute whose SQL the walk cannot read"),
+    ("guarded_function_name", "a SQL function off the read allow-list: lo_create"),
+    ("builder_sampled", "an execute whose SQL the walk cannot read"),
+    ("guard_kept", {"read"}),
+    ("builder_kept", {"read"}),
+    ("local_def_kept", set()),
+    ("finally_kept", {"read"}),
+]
+
+
+@pytest.mark.parametrize("helper,want", _R5_CW_CONTROLS,
+                         ids=[c[0] for c in _R5_CW_CONTROLS])
+def test_r5_closed_walk_round_5s_programs(helper, want):
+    """Ruling REHEARSAL-FOUR-R5, fix 0: round 5's closed_walk findings :897
+    (a local function rebound), :1235 (an imported name reassigned), :1005
+    (the session through an alias or a plain parameter), :759 (a tuple
+    marker granted constructor purity), :1217 (a finally that swallows a
+    rollback-then-raise: return, break, continue), :501 (a guard's name
+    rebound in its else, its collection mutated), :326 (a formatted name in
+    a SQL function position) and :441 (a builder classified by sampling),
+    each refused for its own reason, beside the kept forms."""
+    scope = _r5_cw_scope()
+    fn = getattr(scope, helper)
+    policy = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS,
+                        _SQL_LISTS)
+    if isinstance(want, str):
+        with pytest.raises(Unclassified) as e:
+            _cw.helper_effects(fn, policy)
+        assert want in e.value.args[0][1], e.value.args[0]
+    else:
+        got = set(_cw.helper_effects(fn, policy))
+        assert got == want, got
+
+
+class _R5Scope(_SampleScope):
+    """_SampleScope with a module SQL constant the planted handler masks."""
+    Q = "SELECT 1"
+
+
+def test_r5_a1_formation_expressions_resolve_the_handlers_bindings():
+    """Ruling REHEARSAL-FOUR-R5, fix 0, finding a1:665: the formation walk's
+    expressions resolve names through the handler's own bindings. A module
+    `Q = 'SELECT 1'` must not stand for the handler's local
+    `Q = 'UPDATE ...'` executed after the rollback, beside the same handler
+    reading the module's Q, which passes."""
+    NL = chr(10)
+    spent = ["await db.rollback()",
+             'raise HTTPException(status_code=503, detail="queue_contended")']
+    acquire = ["if (await _lease_acquire_many(db, rows)) is False:",
+               "    await db.rollback()",
+               '    raise HTTPException(status_code=503, '
+               'detail="admission_contended")']
+
+    def gather(after):
+        return NL.join(
+            ["async def ovt_queue_poll(db):", "    _formed = False",
+             "    for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):",
+             "        rows = await discover(db)",
+             "        await _identity_lock_many(db, rows)",
+             "        if await drifted(db):", "            await db.rollback()",
+             "            continue",
+             "        _formed = True", "        break"]
+            + ["    else:"] + ["        " + ln for ln in spent]
+            + ["    " + ln for ln in after])
+
+    tail = ["    return n",
+            'await db.execute(text("INSERT INTO s VALUES (1)"))'] + acquire
+    kept = gather(["if not _formed:", "    await db.rollback()",
+                   "    n = (await db.execute(text(Q))).scalar()"] + tail)
+    masked = gather(["if not _formed:", "    await db.rollback()",
+                     "    Q = 'UPDATE t SET x = 1'",
+                     "    n = (await db.execute(text(Q))).scalar()"] + tail)
+    scope = _R5Scope()
+    assert formation_exit_violations(kept, "gather", scope=scope) == [], (
+        formation_exit_violations(kept, "gather", scope=scope))
+    got = formation_exit_violations(masked, "gather", scope=scope)
+    assert got != [], got

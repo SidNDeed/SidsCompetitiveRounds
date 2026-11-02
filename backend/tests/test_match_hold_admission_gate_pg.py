@@ -1711,3 +1711,116 @@ def test_h3_round_4s_gate_programs_are_refused():
     for label, expected, stop, lines in R4_PREFIX_PROGRAMS:
         got = prefix(lines, stop)
         assert any(expected in p for p in got), (label, expected, got)
+
+
+# --- rehearsal-four round 5 (ruling REHEARSAL-FOUR-R5) -----------------------
+
+def _r5_answer(*body, is_async=False):
+    """A refusal helper `evil(db, reason)` with `body` before its answer."""
+    return ([("async def" if is_async else "def") + " evil(db, reason):"]
+            + ["    " + ln for ln in body]
+            + ["    return {'status': 'refused', 'reason': reason}"])
+
+
+# (label, the helper's lines, the site's return expression) for finding
+# gate:537: a refusal helper is classified completely and returns its
+# refusal on every path.
+R5_ANSWER_PROGRAMS = [
+    ("gate:537 a session call in the answer", _r5_answer("db.add(reason)"),
+     "evil(db, 'other_mode')"),
+    ("gate:537 an attribute store in the answer",
+     _r5_answer("db.answer = reason"), "evil(db, 'other_mode')"),
+    ("gate:537 a with in the answer", _r5_answer("with db:", "    pass"),
+     "evil(db, 'other_mode')"),
+    ("gate:537 an effect inside the returned answer",
+     ["def evil(db, reason):",
+      "    return {'status': 'refused', 'reason': reason, 'x': db.add(reason)}"],
+     "evil(db, 'other_mode')"),
+    ("gate:537 an early raise in the answer",
+     _r5_answer("if reason:", "    raise RuntimeError(reason)"),
+     "evil(db, 'other_mode')"),
+    ("gate:537 an awaiting answer",
+     _r5_answer("await arbitrary(db)", is_async=True),
+     "await evil(db, 'other_mode')"),
+]
+# (label, the admission call, form, lines) for findings gate:1155, :602, :722
+R5_BRANCH_PROGRAMS = [
+    ("gate:1155 the gate rebound", GATE, "direct",
+     ["_lease_admission_gate = row_of", _R2_DIRECT, "if not admitted:",
+      _R3_REFUSE_CALL.format("pid", "")]),
+    ("gate:602 the raised refusal rebound", "_lease_acquire_many", "shared",
+     ["HTTPException = db.add", _R2_ACQUIRE, "    await db.rollback()",
+      "    raise HTTPException(pid)"]),
+    ("gate:722 the admission flag unpacked twice", GATE, "direct",
+     [_R2_DIRECT.replace("admitted, _", "admitted, admitted"),
+      "if not admitted:", _R3_REFUSE_CALL.format("pid", "")]),
+]
+# (label, the call the walk stops at, lines) for finding gate:1155
+R5_PREFIX_PROGRAMS = [
+    ("gate:1155 the claim target rebound", "_rdm_claim",
+     ["_rdm_claim = row_of", "return await _rdm_claim(ctx, pid)"]),
+]
+
+
+def _r5_gate_harness(extra=()):
+    NL = chr(10)
+    scope = _scope_of_lines(R4_HELPER_LINES + R3_HELPER_LINES
+                            + _ORACLE_HELPER_LINES + R2_HELPER_LINES
+                            + list(extra), R2_CONSTS)
+
+    def site(lines):
+        return ast.parse(NL.join(["async def site(db, ctx, pid, me, n, ids):"]
+                                 + ["    " + ln for ln in lines])).body[0]
+
+    def branch(lines, callee, form):
+        fn = site(lines)
+        call = next(node for node in ast.walk(fn) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == callee)
+        return refusal_branch_violation(fn, call, form, scope)
+
+    def prefix(lines, stop):
+        return claim_prefix_violations(site(lines).body, stop, scope)[0]
+
+    return branch, prefix
+
+
+@pytest.mark.parametrize("label,helper,ret", R5_ANSWER_PROGRAMS,
+                         ids=[p[0] for p in R5_ANSWER_PROGRAMS])
+def test_r5_gate_refusal_answers_are_walked_whole(label, helper, ret):
+    """Ruling REHEARSAL-FOUR-R5, fix 0, finding gate:537: a refusal answer
+    helper is walked whole by the shared visitor with an exit analysis, so
+    a session effect, an attribute store, a with, an early raise or an
+    await in it is refused; the kept answer passes."""
+    branch, _prefix = _r5_gate_harness(helper)
+    assert branch(_R3_HOLD + ["    return _refused('other_mode')"], GATE,
+                  "hold") is None
+    got = branch(_R3_HOLD + ["    return " + ret], GATE, "hold")
+    assert got is not None, (label, got)
+
+
+@pytest.mark.parametrize("label,callee,form,lines", R5_BRANCH_PROGRAMS,
+                         ids=[p[0] for p in R5_BRANCH_PROGRAMS])
+def test_r5_gate_named_calls_resolve_through_the_site(label, callee, form,
+                                                      lines):
+    """Ruling REHEARSAL-FOUR-R5, fix 0, findings gate:1155 (the gate
+    rebound), gate:602 (the raised refusal rebound) and gate:722 (the
+    admission flag unpacked into one name twice): a named call or name is
+    the module's only when the site binds it exactly once or not at all;
+    the kept direct form passes."""
+    branch, _prefix = _r5_gate_harness()
+    assert branch([_R2_DIRECT, "if not admitted:",
+                   _R3_REFUSE_CALL.format("pid", "")], GATE, "direct") is None
+    got = branch(lines, callee, form)
+    assert got is not None, (label, got)
+
+
+@pytest.mark.parametrize("label,stop,lines", R5_PREFIX_PROGRAMS,
+                         ids=[p[0] for p in R5_PREFIX_PROGRAMS])
+def test_r5_gate_claim_target_resolves_through_the_site(label, stop, lines):
+    """Ruling REHEARSAL-FOUR-R5, fix 0, finding gate:1155: the claim walk's
+    stop call is the module's _rdm_claim only when the site does not rebind
+    it; the kept prefix passes."""
+    _branch, prefix = _r5_gate_harness()
+    assert prefix(_R2_ROW + [_R2_GATE] + _R2_REFUSE, GATE) == []
+    got = prefix(lines, stop)
+    assert got != [], (label, got)
