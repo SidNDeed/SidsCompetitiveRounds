@@ -223,7 +223,7 @@ def _int(key, v):
     return int(v)
 
 
-INT_KEYS = {"n", "sF", "sS", "sC", "maxF", "medF", "gc", "gate", "windows", "live_frames", "missing_end", "partial",
+INT_KEYS = {"seg", "pair", "base_us", "segs", "of", "cycles", "n", "sF", "sS", "sC", "maxF", "medF", "gc", "gate", "windows", "live_frames", "missing_end", "partial",
             "g", "seed", "c_plant", "W", "vsync", "target", "freq", "hires", "f_hat", "frames", "cycle_failures",
             "span_depth_violations", "on", "guarded", "outside", "i", "plant", "pn", "psF", "psS", "psC",
             "plant_mixed", "ticks", "span_g", "span_gn", "span_u", "span_un", "on_calls", "zs", "zl",
@@ -691,8 +691,109 @@ def vr2(recs):
     return not bad, bad
 
 
+MENU_LEVELS = ("0.5", "1.5", "3", "5")
+
+
+def menu_check(recs, z=Z_END):
+    """The menu self-check (METHOD-V4.md section 6 step 2; plugin/FtMenu.cs). Segments are FtMenu's menu lines with
+    their point lines (pt=-1.<seg>.1), in log order. Judged: (1) the run completed (one menu_done line,
+    why=complete, segs equal to of); (2) every segment has its point line, the gate the sentinel's force implies
+    (none: OFF segments gated) on both lines, and missing_end 0; (3) the A/A: per pair with both arms, the
+    unplanted mean F of ON minus OFF in us (by the settled lines' Stopwatch freq), batch_interval at z, and the
+    two-sided interval must contain 0; (4) e_C at each of the four levels: per OFF segment with planted and
+    unplanted frames, (psC/pn - sC/n) / (c_plant x f_hat / 10^6) with the menu calibration in force at that
+    segment, batch_interval over the level's segments (at least four), lower end >= 0.5 (VR2's bar); e_F and e_S
+    (by freq) reported; (5) f_hat over the menu calibrations within 2 percent; (6) the last settled line shows no
+    frame without FT_End, no cycle failure and no span depth violation. Returns (ok, report lines, failures)."""
+    sett = [r for r in recs if r["kind"] == "settled"]
+    freq = set(r["freq"] for r in sett)
+    if len(freq) != 1:
+        raise Refused("the menu check needs one Stopwatch frequency across settled lines (got %s)" % sorted(freq))
+    f = freq.pop()
+    done = [r for r in recs if r["kind"] == "menu_done"]
+    if len(done) != 1:
+        raise Refused("the menu check needs exactly one menu_done line (got %d)" % len(done))
+    bad, lines = [], []
+    d = done[0]
+    if d.get("why") != "complete" or d.get("segs") != d.get("of"):
+        bad.append("run not complete: why=%s, %s of %s segments" % (d.get("why"), d.get("segs"), d.get("of")))
+    force = sett[-1].get("force", "none")
+    seg, fh, fhs = {}, None, []
+    for r in recs:
+        if r["kind"] == "cal" and r.get("ckind") == "fhat" and str(r.get("why", "")).startswith("menu"):
+            fh = r["f_hat"]
+            fhs.append(fh)
+        elif r["kind"] == "menu":
+            seg[r["seg"]] = dict(r, f_hat=fh)
+        elif r["kind"] == "p" and r["game"] == -1 and r["round"] in seg:
+            seg[r["round"]]["p"] = r
+    if not fhs:
+        raise Refused("no menu calibration line")
+    pairs, lv = {}, {}
+    for s in sorted(seg):
+        m = seg[s]
+        p = m.get("p")
+        if p is None:
+            bad.append("segment %d has no point line" % s)
+            continue
+        want = 1 if force == "OFF" or (force == "none" and m["arm"] == "OFF") else 0
+        if m["gate"] != want or p["gate"] != want or p["arm"] != m["arm"]:
+            bad.append("segment %d: arm %s gate %d/%d, force=%s wants %d" % (s, m["arm"], m["gate"], p["gate"], force,
+                                                                              want))
+        if p.get("missing_end", 0):
+            bad.append("segment %d: missing_end=%d" % (s, p["missing_end"]))
+        if p["n"] > 0:
+            pairs.setdefault(m["pair"], {})[m["arm"]] = p
+        if m["arm"] == "OFF" and m.get("c_plant", 0) > 0 and p.get("pn", 0) > 0 and p["n"] > 0:
+            cp = m["c_plant"]
+            ec = (p["psC"] / p["pn"] - p["sC"] / p["n"]) / (cp * m["f_hat"] / 1e6)
+            ef = (p["psF"] / p["pn"] - p["sF"] / p["n"]) * 1e6 / f / cp
+            es = (p["psS"] / p["pn"] - p["sS"] / p["n"]) * 1e6 / f / cp
+            lv.setdefault(m["level"], []).append((ec, ef, es))
+    ds = [(q["ON"]["sF"] / q["ON"]["n"] - q["OFF"]["sF"] / q["OFF"]["n"]) * 1e6 / f
+          for k, q in sorted(pairs.items()) if "ON" in q and "OFF" in q]
+    if len(ds) < 4:
+        raise Refused("the A/A needs at least four complete pairs (got %d)" % len(ds))
+    est, hw, df = batch_interval(ds, z)
+    aa_ok = est - hw <= 0 <= est + hw
+    lines.append("menu A/A ON-OFF %.2f us per frame, interval %.2f..%.2f at z %.4f, df %d, %d pairs: %s"
+                 % (est, est - hw, est + hw, z, df, len(ds), "contains 0" if aa_ok else "EXCLUDES 0"))
+    if not aa_ok:
+        bad.append("A/A interval %.2f..%.2f us excludes 0" % (est - hw, est + hw))
+    for L in MENU_LEVELS:
+        v = lv.get(L, [])
+        if len(v) < 4:
+            bad.append("level %s percent: %d planted OFF segments (needs 4)" % (L, len(v)))
+            continue
+        m_, h_, df_ = batch_interval([x[0] for x in v], z)
+        lines.append("menu e_C level %s percent: %.4f, lower end %.4f, df %d, %d segments; e_F %.4f, e_S %.4f"
+                     % (L, m_, m_ - h_, df_, len(v), sum(x[1] for x in v) / len(v), sum(x[2] for x in v) / len(v)))
+        if m_ - h_ < 0.5:
+            bad.append("level %s percent: e_C lower end %.4f below 0.5" % (L, m_ - h_))
+    lines.append("menu f_hat %d..%d over %d calibrations" % (min(fhs), max(fhs), len(fhs)))
+    if max(fhs) - min(fhs) > 0.02 * min(fhs):
+        bad.append("f_hat spread %d..%d exceeds 2 percent" % (min(fhs), max(fhs)))
+    for k in ("missing_end", "cycle_failures", "span_depth_violations"):
+        if sett[-1].get(k, 0) != 0:
+            bad.append("last settled line %s=%d" % (k, sett[-1][k]))
+    return not bad, lines, bad
+
+
+def menu_report(recs):
+    out = ["MENU self-check (one launch, no room)"]
+    try:
+        ok, lines, bad = menu_check(recs)
+        out += lines
+        out.append("MENU %s%s" % ("PASS" if ok else "FAIL: ", "; ".join(bad)))
+    except Refused as e:
+        out.append("MENU not computable: %s" % e)
+    return "\n".join(out)
+
+
 def report(text):
     recs = read(text)
+    if any(r["kind"] in ("menu", "menu_done") for r in recs):
+        return menu_report(recs)
     out = []
     ok2, why2 = vr2(recs)
     out.append("VR2 %s %s" % ("PASS" if ok2 else "FAIL", "; ".join(why2)))

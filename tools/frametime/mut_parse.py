@@ -1,4 +1,4 @@
-# mut_parse.py: three parser mutants, each must turn test_ft_parse.py red (negative controls for the port tests).
+# mut_parse.py: the parser mutants, each must turn test_ft_parse.py red (negative controls for the port tests).
 # Usage: python -I -B mut_parse.py <worktree> <outdir>; writes outdir/mut-<k>/ and runs pytest in each.
 import os
 import shutil
@@ -31,6 +31,10 @@ MUTS = [
     ("zero-state voids only the failing point",
      'return set((r["game"], r["round"]) for r in recs if r["kind"] == "p" and r.get("zs", 0) != 0)',
      'return set()'),
+    ("menu A/A one-sided", "aa_ok = est - hw <= 0 <= est + hw", "aa_ok = est - hw <= 0"),
+    ("menu e_C without f_hat", 'ec = (p["psC"] / p["pn"] - p["sC"] / p["n"]) / (cp * m["f_hat"] / 1e6)',
+     'ec = (p["psC"] / p["pn"] - p["sC"] / p["n"]) / cp'),
+    ("menu run completion ignored", 'if d.get("why") != "complete" or d.get("segs") != d.get("of"):', 'if False:'),
 ]
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 bad = 0

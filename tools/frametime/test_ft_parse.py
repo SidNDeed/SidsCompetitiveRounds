@@ -494,3 +494,113 @@ def test_f18_reading_b_has_no_replay_and_says_unmeasured():
     log = _log(games=4, f18="B").replace(" answer=unmeasured", "")
     ok, _, why, _ = P.f18(P.read(log))
     assert not ok and any("without answer=unmeasured" in w for w in why), why
+
+
+# ------------------------------------------------------------------ the menu self-check (FtMenu)
+
+FREQ = 10000000          # Stopwatch ticks per second: 0.1 us per tick
+FHAT = 3000000000        # cycles per second: 3000 per us
+
+
+def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing_seg=None, why="complete",
+              gate_flip=None):
+    """A menu run as FtMenu writes it: pair 0 unplanted, then the four levels in turn, base 2500 us per frame."""
+    ec = ec or {}
+    out = ["[Info   :CompetitiveRounds] [FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d"
+           " hires=1 f_hat=%d force=%s clock=1 frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0"
+           % (FREQ, FHAT, force),
+           "[FRAME-TIME] menu_armed segments=%d seg_s=10 settle_s=20 force=%s seed=7" % (segs, force)]
+    levels = ("0.5", "1.5", "3", "5")
+    base, level, cp, cycles = 2500, "0", 0, 0
+    for s in range(1, segs + 1):
+        pair = (s - 1) // 2
+        if (s - 1) % 2 == 0:
+            arm = "ON" if pair % 2 == 0 else "OFF"
+            if pair == 0:
+                level, cp = "0", 0
+            else:
+                li = (pair - 1) % 4
+                level = levels[li]
+                cp = int(round(float(level) / 100 * base))
+            if s == 1 or (pair >= 1 and (pair - 1) % 4 == 0):
+                fh = fhat_last if s > 1 and cycles == 4 else FHAT
+                out.append("[FRAME-TIME] cal i=%d why=menu%d kind=fhat f_hat=%d spins=1/1" % (cycles, cycles, fh))
+                cycles += 1
+        else:
+            arm = "OFF" if arm == "ON" else "ON"
+        gate = 1 if force == "OFF" or (force == "none" and arm == "OFF") else 0
+        if gate_flip == s:
+            gate = 1 - gate
+        out.append("[FRAME-TIME] menu seg=%d pair=%d arm=%s gate=%d level=%s c_plant=%d base_us=%d"
+                   % (s, pair, arm, gate, level, cp, base if pair > 0 else -1))
+        common = ((pair * 3) % 7 - 3) * 0.3        # us per frame, both arms of the pair
+        j = ((pair * 7) % 5 - 2) * 0.5             # the pair's own A/A noise, mean 0 over five pairs
+        f_us = base + common + (j / 2 + aa_us if arm == "ON" else -j / 2)
+        n, pn = 4000, 0
+        if arm == "OFF" and cp > 0:
+            n, pn = 3000, 1000
+        e = ec.get(level, 1.0) * (1 + ((s * 13) % 5 - 2) * 0.01)
+        sF = int(round(n * f_us * 10))
+        sS = int(round(n * 900 * 10))
+        sC = int(round(n * f_us * 3000))
+        psF = int(round(pn * (f_us + cp) * 10))
+        psS = int(round(pn * (900 + cp) * 10))
+        psC = int(round(pn * (f_us + cp * e) * 3000))
+        out.append("[FRAME-TIME] p pt=-1.%d.1 arm=%s gate=%d pred=none n=%d sF=%d sS=%d sC=%d maxF=30000 pn=%d psF=%d"
+                   " psS=%d psC=%d plant_mixed=0 windows=34 live_frames=4001 missing_end=%d span_g=0 span_gn=0"
+                   " span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=0 t0=1 t1=2 answer=none"
+                   % (s, arm, gate, n, sF, sS, sC, pn, psF, psS, psC, 1 if missing_seg == s else 0))
+    out.append("[FRAME-TIME] menu_done why=%s segs=%d of=%d base_us=%d cycles=%d" % (why, segs, segs, base, cycles))
+    out.append("[FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
+               " force=%s clock=1 frames=99999 missing_end=0 cycle_failures=0 span_depth_violations=0"
+               % (FREQ, FHAT, force))
+    return "\n".join(out)
+
+
+def test_menu_check_passes_a_clean_run():
+    ok, lines, bad = P.menu_check(P.read(_menu_log()))
+    assert ok, bad
+    assert any("contains 0" in ln for ln in lines), lines
+    ecs = [ln for ln in lines if "menu e_C level" in ln]
+    assert len(ecs) == 4 and all("e_F 1.0000, e_S 1.0000" in ln for ln in ecs), ecs
+    rep = P.report(_menu_log())
+    assert rep.startswith("MENU self-check") and rep.endswith("MENU PASS"), rep
+
+
+def test_menu_check_fails_an_aa_shift_either_way():
+    for shift in (8.0, -8.0):
+        ok, lines, bad = P.menu_check(P.read(_menu_log(aa_us=shift)))
+        assert not ok and any("excludes 0" in b for b in bad), (shift, bad)
+
+
+def test_menu_check_fails_a_level_with_low_exposure():
+    ok, lines, bad = P.menu_check(P.read(_menu_log(ec={"1.5": 0.3})))
+    assert not ok and bad == ["level 1.5 percent: e_C lower end %s below 0.5" % bad[0].split()[-3]], bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(ec={"1.5": 0.8})))
+    assert ok, bad
+
+
+def test_menu_check_fails_fhat_spread_and_an_unstamped_frame():
+    ok, _, bad = P.menu_check(P.read(_menu_log(fhat_last=int(FHAT * 1.05))))
+    assert not ok and any("f_hat spread" in b for b in bad), bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(missing_seg=9)))
+    assert not ok and bad == ["segment 9: missing_end=1"], bad
+
+
+def test_menu_check_fails_an_aborted_run_and_a_wrong_gate():
+    ok, _, bad = P.menu_check(P.read(_menu_log(why="in_room")))
+    assert not ok and any("run not complete: why=in_room" in b for b in bad), bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(gate_flip=6)))
+    assert not ok and any(b.startswith("segment 6: arm") for b in bad), bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(force="ON")))
+    assert ok, bad
+
+
+def test_menu_check_refuses_without_its_lines():
+    log = _menu_log()
+    with pytest.raises(P.Refused):
+        P.menu_check(P.read("\n".join(ln for ln in log.splitlines() if "menu_done" not in ln)))
+    with pytest.raises(P.Refused):
+        P.menu_check(P.read(_menu_log(segs=6)))
+    rep = P.report("\n".join(ln for ln in log.splitlines() if "kind=fhat" not in ln))
+    assert rep.endswith("MENU not computable: no menu calibration line"), rep
