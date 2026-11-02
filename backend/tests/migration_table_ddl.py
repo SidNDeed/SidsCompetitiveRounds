@@ -17,6 +17,11 @@ Users:
 A hand-copied CREATE TABLE drifts from the migration it copied; this module
 reads the statement out of the migration file instead.
 
+ddl_naming_table(text, table) returns every CREATE, ALTER or DROP TABLE
+statement in text that creates, alters or drops the table, read with the
+same lexer (test_mail.py's guard that no other migration changes
+mail_inbox_rev).
+
 table_ddl(migration, table) returns [the CREATE TABLE statement, then every
 CREATE INDEX on that table in the same file], in file order, each cut from
 its CREATE keyword to (not including) its terminating semicolon, with SQL
@@ -28,8 +33,12 @@ silently left out. Concretely:
   * Lexing follows PostgreSQL 16's lexical structure: line comments, NESTED
     block comments, standard strings ('' doubles a quote; a backslash is an
     ordinary character), escape strings E'...' (a backslash escapes the next
-    character), dollar-quoted bodies, and quoted identifiers ("" doubles a
-    quote). Text inside any of them is never taken for a statement.
+    character; a segment continued after whitespace holding a newline, with
+    line comments allowed in that gap, stays an escape string, as scan.l
+    continues it), dollar-quoted bodies (tags of PostgreSQL's identifier
+    alphabet: letters including every non-ASCII character, digits not first,
+    underscores), and quoted identifiers ("" doubles a quote). Text inside
+    any of them is never taken for a statement.
   * Names are compared as PostgreSQL resolves them: an unquoted name folds to
     lower case, a quoted one is taken exactly. A schema-qualified name, or a
     Unicode-escaped one (U&"..."), naming the table raises: the fixtures
@@ -44,7 +53,10 @@ silently left out. Concretely:
     whole. Parentheses that do not balance before the semicolon raise.
   * A CREATE TABLE or CREATE INDEX mentioning the table inside a
     dollar-quoted body (a DO block or a function) raises: whether and when it
-    runs cannot be read from the file.
+    runs cannot be read from the file. Each body, each body nested in it and
+    each string inside a body is lexed as SQL, and a CREATE statement there
+    runs to the lexer's ';', so a ';' in a comment, string or quoted name
+    does not end it. A body that does not lex and mentions the table raises.
   * Any CREATE ... TABLE or CREATE ... INDEX head this grammar cannot parse
     raises, whatever table it names, because it might name this one.
   * A missing file, an unterminated comment, string, identifier or dollar
@@ -57,7 +69,19 @@ import re
 SQL_DIR = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "sql"))
 
-_DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+# PostgreSQL 16 scan.l: dolq_start [A-Za-z\200-\377_], dolq_cont adds 0-9.
+# The \200-\377 bytes are every byte of a multibyte UTF-8 character, so any
+# non-ASCII character is a tag letter; a digit may not come first; "$" never
+# appears inside a tag.
+_DOLLAR_TAG = re.compile(
+    r"\$([A-Za-z_\u0080-\U0010FFFF][A-Za-z0-9_\u0080-\U0010FFFF]*)?\$")
+# scan.l quotecontinue: {whitespace_with_newline}{quote}, i.e. horizontal
+# whitespace or line comments, one newline, then any whitespace or line
+# comments each closed by a newline, then the quote that continues the string.
+# One character per repetition, so no nested quantifier can backtrack.
+_QUOTE_CONTINUE = re.compile(
+    r"(?:[ \t\f\v]|--[^\n\r]*)*[\n\r](?:[ \t\n\r\f\v]|--[^\n\r]*[\n\r])*'")
+_LINE_COMMENT = re.compile(r"--[^\n\r]*")
 _IDENT_START = re.compile(r"[A-Za-z_\u0080-￿]")
 _IDENT = re.compile(r"[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*")
 _TABLE_MODIFIERS = {"global", "local", "temporary", "temp", "unlogged", "foreign"}
@@ -127,6 +151,16 @@ def _views(src):
                 if src[j] == "'":
                     if src.startswith("''", j):
                         j += 2
+                        continue
+                    # An escape string continued after a newline stays an
+                    # escape string (scan.l returns to the state it left), so
+                    # a backslash in the continued segment still escapes.
+                    # Only the gap's line comments are blanked in code.
+                    cont = _QUOTE_CONTINUE.match(src, j + 1) if escape else None
+                    if cont:
+                        for m in _LINE_COMMENT.finditer(src, j + 1, cont.end() - 1):
+                            blank(code, m.start(), m.end())
+                        j = cont.end()
                         continue
                     break
                 j += 1
@@ -251,6 +285,62 @@ def _statement_end(toks, k, migration, label):
     raise MigrationDdlError("%s: %s has no terminating semicolon" % (migration, label))
 
 
+def _mention(table):
+    """The table's name anywhere in raw text, any case, quoted or not: the
+    conservative test for text that cannot be lexed."""
+    return re.compile(r"(?<![\w$])" + re.escape(table) + r"(?![\w$])", re.I)
+
+
+def _is_name(tok, table):
+    """tok is a name that PostgreSQL resolves to table."""
+    return tok[0] in ("ident", "qident") and tok[1] == table
+
+
+def _units(src, mention, include_top=False):
+    """Yield (text, (code, toks), origin) for every dollar-quoted body in src, every
+    body nested in one, and the content of every string literal inside a body
+    (the text an EXECUTE runs), each lexed as SQL; src itself first when
+    include_top. src must lex. A nested unit that does not lex yields
+    (text, None, origin) when mention finds the table's name in it (or a
+    U& name), and nothing otherwise (text that does not contain the name
+    cannot name the table). origin is the offset in src of the outermost
+    dollar body holding the unit (None for src itself)."""
+    def walk(text, nested, origin):
+        try:
+            code, mask, bodies = _views(text)
+        except MigrationDdlError:
+            if not nested:
+                raise
+            if mention.search(text) or re.search(r"[Uu]&", text):
+                yield text, None, origin
+            return
+        toks = _tokens(code, mask)
+        if nested or include_top:
+            yield text, (code, toks), origin
+        for a, b in bodies:
+            yield from walk(text[a:b], True, a if origin is None else origin)
+        if nested:
+            for t in toks:
+                if t[0] != "string":
+                    continue
+                inner = code[t[2] + 1:t[3] - 1]
+                if t[2] > 0 and code[t[2] - 1] in "Ee":
+                    inner = inner.replace("\\\\", "\0").replace("\\'", "'").replace("\0", "\\")
+                yield from walk(inner.replace("''", "'"), True, origin)
+    yield from walk(src, False, None)
+
+
+def _spans(toks, heads):
+    """(k, e) for every token k that is one of the head keywords: the run
+    from it to the next lexer ';' (e is that ';', or len(toks))."""
+    for k, t in enumerate(toks):
+        if t[0] == "ident" and t[1] in heads:
+            e = k + 1
+            while e < len(toks) and toks[e][:2] != ("punct", ";"):
+                e += 1
+            yield k, e
+
+
 def _read(migration):
     path = os.path.join(SQL_DIR, migration)
     if not os.path.isfile(path):
@@ -268,15 +358,24 @@ def table_ddl(migration, table):
     code, mask, bodies = _views(src)
 
     # DDL naming this table inside a dollar-quoted body cannot be placed.
-    body_ddl = re.compile(
-        r"\bCREATE\b[^;]*?\b(?:TABLE|INDEX)\b[^;]*?(?<![\w$])\"?" + table + r"\"?(?![\w$])",
-        re.I | re.S)
-    for a, b in bodies:
-        if body_ddl.search(src, a, b):
+    # Each body (and each string inside one, the text an EXECUTE runs) is
+    # lexed like the file, so its statements end at a lexer ';' and never at
+    # a ';' inside a comment, a string or a quoted name.
+    for _text, lexed, origin in _units(src, mention=_mention(table)):
+        if lexed is None:
             raise MigrationDdlError(
-                "%s: a CREATE TABLE or CREATE INDEX naming %s sits inside a dollar-quoted "
-                "body at offset %d; whether it runs cannot be read from the file"
-                % (migration, table, a))
+                "%s: a dollar-quoted body at offset %d does not lex as SQL and mentions "
+                "%s; whether it creates it cannot be read from the file"
+                % (migration, origin, table))
+        _code, utoks = lexed
+        for k, e in _spans(utoks, ("create",)):
+            kinds = [m for m in range(k + 1, e) if utoks[m][0] == "ident"
+                     and utoks[m][1] in ("table", "index")]
+            if kinds and any(_is_name(utoks[m], table) for m in range(kinds[0] + 1, e)):
+                raise MigrationDdlError(
+                    "%s: a CREATE TABLE or CREATE INDEX naming %s sits inside a dollar-quoted "
+                    "body at offset %d; whether it runs cannot be read from the file"
+                    % (migration, table, origin))
 
     toks = _tokens(code, mask)
     tables, indexes = [], []
@@ -357,3 +456,93 @@ def table_ddl(migration, table):
             "%s holds %d top-level CREATE TABLE statements for %s; exactly one "
             "is required" % (migration, len(tables), table))
     return [code[a:b] for a, b in tables + indexes]
+
+
+def _table_statement_names(toks, k, e, label):
+    """The relations a CREATE, ALTER or DROP statement at toks[k:e] creates,
+    alters or drops, as (schema, rel) pairs; [] when it is not a TABLE
+    statement. Forms read:
+      CREATE [GLOBAL|LOCAL] [TEMP|TEMPORARY|UNLOGGED|FOREIGN] TABLE
+             [IF NOT EXISTS] name
+      ALTER [FOREIGN] TABLE [IF EXISTS] [ONLY] name ... plus the target of
+             every RENAME TO, ATTACH PARTITION and DETACH PARTITION in it
+      ALTER TABLE ALL IN TABLESPACE ... (names no relation)
+      DROP [FOREIGN] TABLE [IF EXISTS] name [, name ...]
+    A name that does not parse raises (MigrationDdlError from _name)."""
+    head = toks[k][1]
+    j = k + 1
+    if head == "create":
+        while (_at(toks, j) or ("",))[0] == "ident" and toks[j][1] in _TABLE_MODIFIERS:
+            j += 1
+    elif _kw(_at(toks, j), "foreign"):
+        j += 1
+    if j >= e or not _kw(toks[j], "table"):
+        return []
+    j += 1
+    names = []
+    if head == "create":
+        if _if_not_exists(toks, j):
+            j += 3
+        schema, rel, j = _name(toks, j, label, "table")
+        names.append((schema, rel))
+    elif head == "alter":
+        if _kw(_at(toks, j), "all") and _kw(_at(toks, j + 1), "in"):
+            return []
+        if _kw(_at(toks, j), "if") and _kw(_at(toks, j + 1), "exists"):
+            j += 2
+        if _kw(_at(toks, j), "only"):
+            j += 1
+        schema, rel, j = _name(toks, j, label, "table")
+        names.append((schema, rel))
+        for m in range(j, e - 1):
+            if ((_kw(toks[m], "to") and _kw(toks[m - 1], "rename"))
+                    or (_kw(toks[m], "partition")
+                        and (_kw(toks[m - 1], "attach") or _kw(toks[m - 1], "detach")))):
+                schema, rel, _j = _name(toks, m + 1, label, "table")
+                names.append((schema, rel))
+    else:
+        if _kw(_at(toks, j), "if") and _kw(_at(toks, j + 1), "exists"):
+            j += 2
+        while True:
+            schema, rel, j = _name(toks, j, label, "table")
+            names.append((schema, rel))
+            if (_at(toks, j) or ())[:2] != ("punct", ","):
+                break
+            j += 1
+    return names
+
+
+def ddl_naming_table(text, table):
+    """Every CREATE, ALTER or DROP TABLE statement in SQL text that creates,
+    alters or drops table (in any schema), cut from its head keyword to (not
+    including) its lexer ';', comments blanked; [] when there is none.
+
+    The statements are found by the same lexer as table_ddl, at the top level
+    and inside every dollar-quoted body and every string inside one, so a
+    quoted name, a comment between TABLE and the name, or a statement inside
+    a DO block is read the way PostgreSQL reads it, and a column or string
+    that merely spells the name is not a statement on it. Raises
+    MigrationDdlError when text does not lex, when a body that does not lex
+    mentions the table, and when a TABLE statement's name does not parse in
+    a unit that mentions the table or holds a Unicode-escaped name."""
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
+        raise MigrationDdlError("not a plain table name: %r" % (table,))
+    mention = _mention(table)
+    out = []
+    for unit, lexed, _origin in _units(text, mention, include_top=True):
+        if lexed is None:
+            raise MigrationDdlError(
+                "a dollar-quoted body or string that does not lex as SQL mentions %s"
+                % (table,))
+        code, toks = lexed
+        for k, e in _spans(toks, ("create", "alter", "drop")):
+            try:
+                names = _table_statement_names(toks, k, e, "a TABLE statement")
+            except MigrationDdlError:
+                if mention.search(unit) or re.search(r"[Uu]&", unit):
+                    raise
+                continue
+            if any(rel == table for _schema, rel in names):
+                end = toks[e][2] if e < len(toks) else len(code)
+                out.append(code[toks[k][2]:end])
+    return out

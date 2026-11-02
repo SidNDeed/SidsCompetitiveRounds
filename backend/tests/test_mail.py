@@ -37,7 +37,7 @@ from sqlalchemy.sql.elements import TextClause
 
 import main
 import models
-from migration_table_ddl import table_ddl
+from migration_table_ddl import ddl_naming_table, table_ddl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DIR = os.path.join(HERE, "..", "..", "plugin")
@@ -2343,9 +2343,14 @@ def test_report_reason_bound_matches_the_client():
 
 
 _TABLE_CONSTRAINT_HEADS = ("CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "EXCLUDE")
-_DDL_ON_MAIL_INBOX_REV = re.compile(
-    r"\b(?:CREATE|ALTER|DROP)\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?"
-    r"(?:ONLY\s+)?(?:public\.)?mail_inbox_rev\b", re.IGNORECASE)
+def _ddl_on_mail_inbox_rev(text):
+    """The CREATE, ALTER or DROP TABLE statements in SQL text that create,
+    alter or drop mail_inbox_rev. Read through migration_table_ddl's lexer
+    and statement grammar, never by matching raw text: a quoted name, a
+    comment between TABLE and the name, a list in DROP TABLE, a RENAME TO and
+    a statement inside a DO block are all seen (REHEARSAL-FOUR round 2,
+    finding 11)."""
+    return ddl_naming_table(text, "mail_inbox_rev")
 
 
 def _split_top_level(text):
@@ -2466,9 +2471,14 @@ def test_migration_300_matches_the_orm_and_the_readers():
     for name in sorted(os.listdir(SQL_DIR)):
         if name.endswith(".sql") and name != "300_mail_inbox_rev.sql":
             with open(os.path.join(SQL_DIR, name), encoding="utf-8") as other:
-                if _DDL_ON_MAIL_INBOX_REV.search(other.read()):
+                if _ddl_on_mail_inbox_rev(other.read()):
                     others.append(name)
     assert others == [], others
+    # the positive control over the real file: 300's own CREATE TABLE is seen
+    with open(os.path.join(SQL_DIR, "300_mail_inbox_rev.sql"), encoding="utf-8") as own:
+        seen = _ddl_on_mail_inbox_rev(own.read())
+    assert [s.split("(")[0].split() for s in seen] == [
+        ["CREATE", "TABLE", "IF", "NOT", "EXISTS", "mail_inbox_rev"]], seen
     assert models.MailInboxRev.__tablename__ == "mail_inbox_rev"
     assert "INSERT INTO mail_inbox_rev" in main._MAIL_REV_BUMP_SQL
     assert "FROM mail_inbox_rev" in inspect.getsource(main.mail_status)
@@ -2527,12 +2537,25 @@ def test_the_mail_inbox_rev_comparison_sees_a_deleted_column():
     for text in ("ALTER TABLE mail_inbox_rev ADD COLUMN x INT;",
                  "alter table if exists only mail_inbox_rev drop column rev;",
                  "DROP TABLE IF EXISTS public.mail_inbox_rev;",
-                 "CREATE UNLOGGED TABLE mail_inbox_rev (a int);"):
-        assert _DDL_ON_MAIL_INBOX_REV.search(text), text
+                 "CREATE UNLOGGED TABLE mail_inbox_rev (a int);",
+                 # round 2, finding 11: each form below passed the raw-text guard
+                 'ALTER TABLE "mail_inbox_rev" ADD COLUMN x INT;',
+                 "ALTER TABLE /* c */ mail_inbox_rev ADD COLUMN x INT;",
+                 "ALTER TABLE -- c\n mail_inbox_rev ADD COLUMN x INT;",
+                 'DROP TABLE IF EXISTS /* ; */ public."mail_inbox_rev";',
+                 "DROP TABLE other, mail_inbox_rev;",
+                 "ALTER TABLE mail_inbox_rev_old RENAME TO mail_inbox_rev;",
+                 "DO $$ BEGIN ALTER TABLE \"mail_inbox_rev\" DROP COLUMN rev; END $$;",
+                 "DO $é$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_rev DROP COLUMN rev'; END $é$;"):
+        assert _ddl_on_mail_inbox_rev(text), text
     for text in ("INSERT INTO mail_inbox_rev (recipient_id, rev) VALUES (1, 0);",
                  "ALTER TABLE mail_inbox_revs ADD COLUMN x INT;",
-                 "ALTER TABLE mail_messages ADD COLUMN mail_inbox_rev INT;"):
-        assert not _DDL_ON_MAIL_INBOX_REV.search(text), text
+                 "ALTER TABLE mail_messages ADD COLUMN mail_inbox_rev INT;",
+                 'ALTER TABLE "Mail_Inbox_Rev" ADD COLUMN x INT;',
+                 "SELECT 'ALTER TABLE mail_inbox_rev DROP COLUMN rev';",
+                 "-- ALTER TABLE mail_inbox_rev DROP COLUMN rev;\nSELECT 1;",
+                 "CREATE INDEX ON mail_inbox_rev (rev);"):
+        assert not _ddl_on_mail_inbox_rev(text), text
     for bad in ('CREATE TABLE t ("Rev" INT)',
                 "CREATE TABLE t (LIKE mail_inbox_rev)",
                 "CREATE TABLE t (a INT) INHERITS (u)",
