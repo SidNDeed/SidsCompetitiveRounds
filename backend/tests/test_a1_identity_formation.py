@@ -3732,3 +3732,102 @@ def test_closed_walk_acceptance_bound():
         # sites are found module by module: the planted module alone
         got = acceptance_sites({mod: sources[mod] + extra})
         assert len(got) > sum(m == mod for m, *_r in sites), (mod, got)
+
+
+# --- ruling REHEARSAL-FOUR-R4 item 2: class B and closed_walk:712 controls --
+
+_R4_CW_SRC = "\n".join([
+    "from sqlalchemy import text",
+    "Q = 'SELECT 1'",
+    "ALLOWED = ('t', 'u')",
+    "def plain_add(db, row):",
+    "    db.add(row)",
+    "def plain_ok(row):",
+    "    return len(row)",
+    "async def shadow_session_method(db, row):",
+    "    str = db.add",
+    "    str(row)",
+    "async def shadow_by_parameter(db, str):",
+    "    str(1)",
+    "async def shadow_module_function(db, row):",
+    "    plain_ok = plain_add",
+    "    plain_ok(db, row)",
+    "async def local_sql_masked(db):",
+    "    Q = 'UPDATE t SET x = 1'",
+    "    await db.execute(text(Q), {})",
+    "async def guard_then_rebind(db, name):",
+    "    if name not in ALLOWED:",
+    "        raise ValueError(name)",
+    "    name = 'lo_create(0)'",
+    "    await db.execute(text(f'SELECT 1 FROM {name}'), {})",
+    "async def guard_in_loop(db, pairs):",
+    "    for name, pid in pairs:",
+    "        if name not in ALLOWED:",
+    "            raise ValueError(name)",
+    "        await db.execute(text(f'SELECT 1 FROM {name} WHERE id = :p'), {'p': pid})",
+    "async def guard_after_use(db, name):",
+    "    await db.execute(text(f'SELECT 1 FROM {name}'), {})",
+    "    if name not in ALLOWED:",
+    "        raise ValueError(name)",
+    "async def plain_helper_writes(db, row):",
+    "    plain_add(db, row)",
+    "async def plain_helper_reads_nothing(db, row):",
+    "    return plain_ok(row)",
+    "async def annotation_writes(db, row):",
+    "    def inner(x: db.add(row)):",
+    "        return x",
+    "    inner(1)",
+    ""])
+
+
+def _r4_cw_scope():
+    import linecache as _linecache
+    import sys as _sys
+    import types as _types
+    mod = _types.ModuleType("r4_cw_controls")
+    mod.__file__ = "<r4_cw_controls>"
+    _linecache.cache[mod.__file__] = (len(_R4_CW_SRC), None,
+                                      _R4_CW_SRC.splitlines(True), mod.__file__)
+    _sys.modules[mod.__name__] = mod
+    exec(compile(_R4_CW_SRC, mod.__file__, "exec"), mod.__dict__)
+    return mod
+
+
+# (helper, what the walk must give: a refusal sentence, or the effects)
+_R4_CW_CONTROLS = [
+    ("shadow_session_method", "a session attribute outside a call of it"),
+    ("shadow_by_parameter", "a name the function binds"),
+    ("shadow_module_function", "a name the function binds"),
+    ("local_sql_masked", {"write"}),
+    ("guard_then_rebind", "an execute whose SQL the walk cannot read"),
+    ("guard_after_use", "an execute whose SQL the walk cannot read"),
+    ("guard_in_loop", {"read"}),
+    ("plain_helper_writes", "a plain call of plain_add, which takes write"),
+    ("plain_helper_reads_nothing", set()),
+    ("annotation_writes", {"write"}),
+]
+
+
+@pytest.mark.parametrize("helper,want", _R4_CW_CONTROLS,
+                         ids=[c[0] for c in _R4_CW_CONTROLS])
+def test_r4_closed_walk_names_resolve_through_the_function(helper, want):
+    """Ruling REHEARSAL-FOUR-R4 item 2, findings closed_walk:699 (a callee
+    name the function binds is not the module's, and a session attribute is
+    reached only as a callee), :322 (a local SQL binding before the module
+    constant), :345 (a guard proves a name only over the statements it
+    dominates, up to a store of the name), :712 (a plain callee's body is
+    walked) and :1036 (a local function's annotations are walked). Each
+    program is read by the shared visitor under a1's policy; the refusals
+    name their reason, and the two kept shapes (a guard inside a loop, a
+    plain callee that touches nothing) still read."""
+    scope = _r4_cw_scope()
+    fn = getattr(scope, helper)
+    policy = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS,
+                        _SQL_LISTS)
+    if isinstance(want, str):
+        with pytest.raises(Unclassified) as e:
+            _cw.helper_effects(fn, policy)
+        assert want in e.value.args[0][1], e.value.args[0]
+    else:
+        got = set(_cw.helper_effects(fn, policy))
+        assert got == want, got
