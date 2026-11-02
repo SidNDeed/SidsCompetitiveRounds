@@ -328,7 +328,7 @@ def test_vr4_bar():
 FREQ, FHAT = 10000000, 3000000000
 
 
-def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10, 20)):
+def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10, 20), f18="A", replay="settled"):
     """A synthetic sitting, every line as FtFrames, FtCalib and FtCensus write it. Point costs: ON adds cost_us of C
     per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor case)."""
     import random
@@ -338,7 +338,9 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
          "[FRAME-TIME] plant c_plant=80 ticks=800 from=0.1.2"]
     for g in range(games):
         L.append("[FRAME-TIME] settled g=%d seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
-                 % (g, FREQ, FHAT))
+                 " f18=%s answer=%s" % (g, FREQ, FHAT, f18, "replay" if f18 == "A" else "unmeasured"))
+        if f18 == "A" and replay:
+            L.append("[FRAME-TIME] answer_replay g=%d ticks=%d result=%s" % (g, 4000, replay))
         L.append("[FRAME-TIME] cal i=%d why=game%d kind=disp shape=S6 n=100000 u=1000000,1000000 p=1300000,1300000"
                  % (g + 1, g))
         L.append("[FRAME-TIME] cal i=%d why=game%d kind=disp shape=S1 n=100000 u=1000000,1000000 p=1200000,1200000"
@@ -372,10 +374,10 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                 clock[0] = t1 + FREQ // 2
                 L.append("[FRAME-TIME] p pt=%d.%d.%d arm=%s gate=%d pred=%s n=%d sF=%d sS=%d sC=%d maxF=%d pn=%d psF=%d "
                          "psS=0 psC=%d plant_mixed=0 windows=%d live_frames=%d missing_end=0 span_g=%d span_gn=%d "
-                         "span_u=%d span_un=%d on_calls=%d guarded=%d zs=%d zl=1 t0=%d t1=%d"
+                         "span_u=%d span_un=%d on_calls=%d guarded=%d zs=%d zl=1 t0=%d t1=%d answer=%s"
                          % (g, rnd, pt, "ON" if on else "OFF", 0 if on else 1, pred, n, sf, sf // 2, sc, sf // n * 3,
                             pn, int(pn * f_us * FREQ / 1e6), psc, (n + pn) // 120, lf, spg, lf if on else 0, spu, lf,
-                            3 * lf if on else 0, gq, zs, t0, t1))
+                            3 * lf if on else 0, gq, zs, t0, t1, "replay" if f18 == "A" else "unmeasured"))
                 for w in range((n + pn) // 120):
                     plant = 1 if (not on and w % 4 == 0) else 0
                     k = 1 if rng.random() < 0.01 else 0
@@ -399,6 +401,7 @@ def test_report_end_to_end_reaches_a_verdict():
     assert "VR8 zero-state PASS: game 0 (mutant) 7 of 7 rounds void" in out
     assert "VERDICT B1:" in out and "INVALID" not in out, out
     assert "VERDICT B3 PASS" in out, out
+    assert "F18 reading A PASS" in out, out
 
 
 def test_predecessor_flags_a_carryover():
@@ -471,3 +474,23 @@ def test_vr6_build_fails_on_a_disarm():
 def test_vr6_build_refuses_without_a_refusals_line():
     with pytest.raises(P.Refused):
         P.vr6_build(P.read("[Info   :CompetitiveRounds] [FRAME-TIME] refused what=queue route=e n=1"))
+
+
+def test_f18_reading_a_needs_a_settled_replay_per_game():
+    ok, rd, why, us = P.f18(P.read(_log(games=4)))
+    assert ok and rd == "A" and len(us) == 3, why
+    ok, _, why, _ = P.f18(P.read(_log(games=4, replay="kept")))
+    assert not ok and any("result kept" in w for w in why), why
+    ok, _, why, _ = P.f18(P.read(_log(games=4, replay=None)))
+    assert not ok and any("no answer_replay line" in w for w in why), why
+
+
+def test_f18_reading_b_has_no_replay_and_says_unmeasured():
+    ok, rd, why, us = P.f18(P.read(_log(games=4, f18="B")))
+    assert ok and rd == "B" and not us, why
+    log = _log(games=4, f18="B").replace("answer=unmeasured", "answer=replay", 1)
+    ok, _, why, _ = P.f18(P.read(log))
+    assert ok, why   # the first replaced line is game 0's settled line, which counts toward nothing
+    log = _log(games=4, f18="B").replace(" answer=unmeasured", "")
+    ok, _, why, _ = P.f18(P.read(log))
+    assert not ok and any("without answer=unmeasured" in w for w in why), why

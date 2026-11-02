@@ -8,6 +8,7 @@ import sys
 W, OUT = sys.argv[1], sys.argv[2]
 src = os.path.join(W, "tools", "frametime")
 MUTS = [
+    ("F18 accepts a replay that did not settle", 'elif r.get("result") != "settled":', 'elif False:'),
     ("VR6 ignores a disarm", 'bad.append("disarmed: " + "; ".join(dis))', 'pass'),
     ("VR6 refused-and-sent check dropped", 'for r in sorted(refused_routes & sent_routes):', 'for r in []:'),
     ("B3 ignores heavy calls with combat live", 'ops[r["op"]] = (a + r["at_call"], e + r["edge"], o + r["off"], lv + r["live"])',

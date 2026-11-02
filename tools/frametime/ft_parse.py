@@ -20,6 +20,7 @@ Lines read (all values integers; a value with a decimal point is refused, HIGH 5
   offthread per game: g span_off hash_t0 hash_t1 (B3)
   refusals at game over and quit: why pairs what:route=count ... (VR6's build half)
   disarmed once, if FtArm's predicate fails after arming: input pt (the sitting is INVALID)
+  answer_replay per game under f18=A: g ticks result (F18; settled and point lines carry answer=replay|unmeasured)
 
 The plant gives e_C_lo (V4 3.5) and VR7. Part 3's remainder adds D_up (V4 3.6) and K_up (UPKEEP spans); until
 those lines exist, report() states U as not computable rather than computing it without them.
@@ -514,6 +515,45 @@ def vr6_build(recs):
     return not bad, bad, pairs, dis
 
 
+def f18(recs, first_game=1):
+    """F18 (build brief section 5): the reading the settled lines name (one for the sitting). Under A each
+    measured game has an answer_replay line with result=settled, and the replay's time (us by the settled
+    frequency) is reported apart from the between-point figure; under B there is no answer_replay line and every
+    settled and point line carries answer=unmeasured. Returns (ok, reading, reasons, [replay us per game])."""
+    st = [r for r in recs if r["kind"] == "settled" and r["g"] >= first_game]
+    readings = set(r.get("f18") for r in st)
+    if len(readings) != 1 or None in readings:
+        raise Refused("F18 needs one reading named on every measured settled line (got %s)" % sorted(map(str, readings)))
+    reading = readings.pop()
+    rep = [r for r in recs if r["kind"] == "answer_replay"]
+    bad = []
+    us = []
+    if reading == "A":
+        freq = set(r["freq"] for r in recs if r["kind"] == "settled")
+        f = freq.pop() if len(freq) == 1 else None
+        games = sorted(set(r["g"] for r in st))
+        byg = dict((r["g"], r) for r in rep)
+        for g in games:
+            r = byg.get(g)
+            if r is None:
+                bad.append("game %d has no answer_replay line" % g)
+            elif r.get("result") != "settled":
+                bad.append("game %d replay result %s" % (g, r.get("result")))
+            elif f:
+                us.append(r["ticks"] * 1e6 / f)
+    elif reading == "B":
+        if rep:
+            bad.append("%d answer_replay lines under reading B" % len(rep))
+        for r in recs:
+            if r["kind"] in ("settled", "p") and r.get("g", r.get("game", 0)) >= first_game \
+                    and r.get("answer") != "unmeasured":
+                bad.append("%s line without answer=unmeasured" % r["kind"])
+                break
+    else:
+        bad.append("unknown reading %s" % reading)
+    return not bad, reading, bad, us
+
+
 def _side_plain(r):
     """B2's sides: the window's arm; planted windows take no side (M5: exposure and VR7 only)."""
     return r["arm"] if r.get("plant", 0) == 0 else None
@@ -758,6 +798,13 @@ def report(text):
             out.append("VERDICT INVALID: the build disarmed (%s)" % "; ".join(dis))
     except Refused as e:
         out.append("VR6 build half not computable: %s" % e)
+    try:
+        ok18, rd, why18, us18 = f18(recs)
+        out.append("F18 reading %s %s%s%s" % (rd, "PASS" if ok18 else "FAIL: ", "; ".join(why18),
+                   ("; answer replay %.1f us mean over %d games (reported apart)" % (sum(us18) / len(us18), len(us18))
+                    if us18 else "")))
+    except Refused as e:
+        out.append("F18 not computable: %s" % e)
     if okb3 is None:
         out.append("VERDICT B3 withheld: not computable")
     elif not vr["VR5"]:
