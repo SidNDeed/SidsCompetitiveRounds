@@ -1681,6 +1681,39 @@ namespace CompetitiveRounds
 
         // -- T: the per-frame tick ------------------------------------------------------------------
 
+#if SCR_FRAMETIME
+        /// <summary>FrameTime zero-state rows 1 to 9 (tools/frametime/ZERO-STATE.md) as a bitmask of failing
+        /// rows: early (late false) rows 1, 4 and 6 to 9; late (right after PointStart) rows 2, 3 and 5.</summary>
+        internal static int FtZeroState(bool late)
+        {
+            var g = _g;
+            if (g == null) return 0;
+            int m = 0;
+            if (!late)
+            {
+                if (g.Own.RingN + g.Opp.RingN != 0) m |= 1 << 1;
+                if (FtZeroAttack(g.Own) || FtZeroAttack(g.Opp)) m |= 1 << 4;
+                for (int k = 0; k < ANCHOR_CAP; k++)
+                {
+                    if (g.OwnPid[k] != 0 && FtZero.IsLiveProj(g.OwnPid[k])) m |= 1 << 6;
+                    if (g.SgOn[k] && FtZero.IsLiveProj(g.SgPid[k])) m |= 1 << 7;
+                    if (g.ALive[k] && g.AObj[k] != null && g.AObj[k].activeInHierarchy) m |= 1 << 8;
+                }
+                if (g.Mask.N != 0 || g.Pack.N != 0) m |= 1 << 9;
+            }
+            else
+            {
+                if (g.Own.WinN + g.Opp.WinN != 0) m |= 1 << 2;
+                if (!FtZeroVolley(g.Own) || !FtZeroVolley(g.Opp)) m |= 1 << 3;
+                if (g.RxRowS != -1 || g.RxRowO != -1) m |= 1 << 5;
+            }
+            return m;
+        }
+
+        private static bool FtZeroAttack(GunState s) { return s.InAttack || s.FirstPending || s.MsgPending || s.RlOpen; }
+
+        private static bool FtZeroVolley(GunState s) { return !s.HasVolley && s.Gmin == -1 && s.Vmax == 0 && s.Refreshes == 0; }
+#endif
         /// <summary>From Plugin's persistent tick. While a game is open: the time
         /// base sums, the two ammunition reads, the own position ring, block
         /// window closes, the reaction sampler, and the deferred arithmetic of the
@@ -1723,7 +1756,11 @@ namespace CompetitiveRounds
             try { live = SeatEvidence.CombatLive(); } catch (Exception ex) { Fault(T, ex); return; }
             float scale = TimeHandler.timeScale, baseScale = TimeHandler.instance != null ? TimeHandler.instance.baseTimeScale : 1f;
             int now = ServerNow();
+#if SCR_FRAMETIME
+            if (live && !g.PointLive) { PointStart(g, now, baseScale); FtZero.Late(FtZeroState(true)); }
+#else
             if (live && !g.PointLive) PointStart(g, now, baseScale);
+#endif
             else if (!live && g.PointLive) PointEnd(g, now);
             // the victim's pending received hit binds only the messages dispatched with it
             if (g.VcOn) { if (!g.VcPush) g.Drop[D_PUSH_EXPIRED]++; g.VcOn = false; g.VcChRow = -1; }
@@ -1800,6 +1837,10 @@ namespace CompetitiveRounds
         private static void PointReset(GunState s, int pt)
         {
             s.Gmin = -1; s.Vmax = 0; s.Refreshes = 0; s.HasVolley = false; s.WinN = 0; s.WinHead = 0;
+#if SCR_FRAMETIME
+            // FrameTime game-0 zero-state mutant (FtZero): one volley-window entry survives every reset.
+            if (FtZero.MutantNow && s.WinN == 0) { s.Win[0] = 0; s.WinHead = 0; s.WinN = 1; }
+#endif
             s.CexpMin = -1; ReadCexp(s);
             s.Acct.Point = pt;
         }

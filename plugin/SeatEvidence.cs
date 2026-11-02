@@ -241,6 +241,15 @@ namespace CompetitiveRounds
             return before;
         }
 
+#if SCR_FRAMETIME
+        /// <summary>FrameTime zero-state row 13 (tools/frametime/ZERO-STATE.md).</summary>
+        internal static int FtZeroState()
+        {
+            foreach (int p in _impDistinct) if (FtZero.IsLiveProj(p)) return 1 << 13;
+            return 0;
+        }
+
+#endif
         internal static void ExitRpc(int before)
         {
             if (before >= 0) _ctxDepth = before;

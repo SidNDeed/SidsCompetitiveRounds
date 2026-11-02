@@ -228,7 +228,7 @@ def _kup_log(per_frame_ticks, freq=10000000):
     for g, u in enumerate(per_frame_ticks, 1):
         recs.append({"kind": "settled", "g": g, "freq": freq})
         for arm in ("ON", "OFF"):
-            recs.append({"kind": "p", "game": g, "arm": arm, "n": 1000, "pn": 0, "live_frames": 1001,
+            recs.append({"kind": "p", "game": g, "round": 1, "arm": arm, "n": 1000, "pn": 0, "live_frames": 1001,
                          "span_u": int(u * 1001)})
     return recs
 
@@ -256,7 +256,7 @@ def test_cal_line_keeps_its_line_kind():
 
 def _dup_log(costs_by_cal, guarded=3000, off_frames=1000, freq=10000000):
     recs = [{"kind": "settled", "g": g, "freq": freq} for g in range(0, 3)]
-    recs.append({"kind": "p", "game": 1, "gate": 1, "live_frames": off_frames, "arm": "OFF"})
+    recs.append({"kind": "p", "game": 1, "round": 1, "gate": 1, "live_frames": off_frames, "arm": "OFF"})
     recs.append({"kind": "census", "g": 1, "shape": "S6", "guarded": guarded})
     for i, c in enumerate(costs_by_cal):
         # c: closed-path ticks per call at 10 MHz; two batches of n = 1000
@@ -283,3 +283,29 @@ def test_d_up_refuses_a_missing_shape():
     recs.append({"kind": "census", "g": 1, "shape": "S1", "guarded": 5})
     with pytest.raises(P.Refused):
         P.d_up(recs)
+
+
+# ------------------------------------------------------------------ zero state (VR8 part 1)
+
+def _zp(g, rnd, pt, arm, zs, n=100, sc=1000):
+    return {"kind": "p", "game": g, "round": rnd, "point": pt, "arm": arm, "n": n, "sC": sc, "zs": zs}
+
+
+def test_zero_state_voids_the_whole_round():
+    recs = [_zp(1, 1, 1, "ON", 0, sc=90000), _zp(1, 1, 2, "OFF", 4), _zp(1, 2, 1, "ON", 0, sc=30000),
+            _zp(1, 2, 2, "OFF", 0, sc=10000)]
+    g = P.games_of(recs)
+    assert [(q["round"], q["point"]) for q in g[1]] == [(2, 1), (2, 2)]
+    assert P.contrast_c(g[1])[0] == pytest.approx(200.0)
+
+
+def test_game0_mutant_must_void_every_round():
+    ok = P.zero_state([_zp(0, 1, 1, "ON", 4), _zp(0, 2, 1, "OFF", 0), _zp(0, 2, 2, "ON", 4)])
+    assert ok[0] and ok[1:3] == (2, 2)
+    bad = P.zero_state([_zp(0, 1, 1, "ON", 4), _zp(0, 2, 1, "OFF", 0), _zp(0, 2, 2, "ON", 0)])
+    assert not bad[0] and bad[1:3] == (1, 2)
+
+
+def test_zero_state_reports_a_game_with_no_valid_round():
+    out = P.zero_state([_zp(0, 1, 1, "ON", 4), _zp(1, 1, 1, "ON", 1), _zp(2, 1, 1, "ON", 0)])
+    assert out[3] == [(1, 1)] and out[4] == [1]

@@ -455,6 +455,22 @@ namespace CompetitiveRounds
         private static I.Survey _survey;
         private static IList<I.FileTarget> _files;
 
+#if SCR_FRAMETIME
+        /// <summary>FrameTime zero-state rows 14 and 15 (tools/frametime/ZERO-STATE.md).</summary>
+        internal static int FtZeroState()
+        {
+            int m = 0;
+            if (_anyDead) m |= 1 << 14;
+            var b = _g != null ? _g.Book : null;
+            if (b != null)
+            {
+                if (b.CurO != null && (b.CurO.ShotFirst >= 0 || b.CurO.End >= 0)) m |= 1 << 15;
+                if (b.CurS != null && (b.CurS.Closed || b.CurS.ShotFirst >= 0)) m |= 1 << 15;
+            }
+            return m;
+        }
+
+#endif
         /// <summary>From Plugin's polling tick, every frame.</summary>
         internal static void Tick()
         {

@@ -3273,6 +3273,17 @@ namespace CompetitiveRounds
             catch { }
         }
 
+#if SCR_FRAMETIME
+        /// <summary>FrameTime zero-state rows 16 and 17 (tools/frametime/ZERO-STATE.md).</summary>
+        internal static int FtZeroState()
+        {
+            int m = 0;
+            if (_sawLost.Count != 0 || _sawFrames != 0) m |= 1 << 16;
+            if (_before.Count != 0) m |= 1 << 17;
+            return m;
+        }
+
+#endif
         /// <summary>From Plugin's tick, ABOVE its modDisabled return and before
         /// GameStateWatcher's tick (so a game's last push counts reach seat
         /// evidence before its record is captured), from the quit hook, and

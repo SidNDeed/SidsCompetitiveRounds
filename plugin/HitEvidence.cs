@@ -266,6 +266,18 @@ namespace CompetitiveRounds
             _point.Clear(); _game.Clear(); _projAmmo.Clear(); _blockedThisPoint = false;
         }
 
+#if SCR_FRAMETIME
+        /// <summary>FrameTime zero-state rows 10 to 12 (tools/frametime/ZERO-STATE.md).</summary>
+        internal static int FtZeroState()
+        {
+            int m = 0;
+            if (_point.Count != 0) m |= 1 << 10;
+            if (_blockedThisPoint) m |= 1 << 11;
+            foreach (var kv in _projAmmo) if (FtZero.IsLiveProj(kv.Key)) { m |= 1 << 12; break; }
+            return m;
+        }
+
+#endif
         /// <summary>From Plugin's tick (through PointEvidence.Drain) and from
         /// the room-exit reset, outside any game method: the lines and seat
         /// evidence's push counts for every captured flush, in capture order.</summary>

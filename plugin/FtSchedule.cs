@@ -75,6 +75,7 @@ namespace CompetitiveRounds
             else ArmOn = !ArmOn;
             PointInRound++;
             Points++;
+            FtZero.Early();
             LiveFrame = 0;
             bool off = FtConfig.Force == "OFF" || (FtConfig.Force == "none" && !ArmOn);
             GateThisPoint = FtArm.Armed && off;

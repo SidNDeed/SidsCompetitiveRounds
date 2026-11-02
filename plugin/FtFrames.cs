@@ -31,8 +31,8 @@ namespace CompetitiveRounds
     /// The point line also carries the point's census and span totals (live moment):
     /// span_g/span_gn the gated spans' ticks and calls, span_u/span_un the upkeep spans',
     /// on_calls the census calls with the gate clear and guarded the guarded returns. At a
-    /// gated point span_g, span_gn and on_calls are 0 by construction (VR5). Still to come
-    /// in part 3: the zero-state result.</summary>
+    /// gated point span_g, span_gn and on_calls are 0 by construction (VR5). zs and zl are
+    /// the point's zero-state result (FtZero).</summary>
     internal static class FtFrames
     {
         internal const int W = 120;
@@ -96,7 +96,8 @@ namespace CompetitiveRounds
                 + " span_gn=" + (FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Gated) - _gn0)
                 + " span_u=" + (FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Upkeep) - _u0)
                 + " span_un=" + (FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Upkeep) - _un0)
-                + " on_calls=" + (FtCensus.SumOn() - _on0) + " guarded=" + (FtCensus.SumGuarded() - _guard0));
+                + " on_calls=" + (FtCensus.SumOn() - _on0) + " guarded=" + (FtCensus.SumGuarded() - _guard0)
+                + " zs=" + FtZero.Mask + " zl=" + FtZero.LateSeen);
             if (FtPlant.Us < 0 && !FtSchedule.ArmOn && _pn >= W)
                 FtPlant.Fix((long)Math.Round(0.03 * _pF * 1000000.0 / ((double)_pn * System.Diagnostics.Stopwatch.Frequency)),
                     FtSchedule.Label());

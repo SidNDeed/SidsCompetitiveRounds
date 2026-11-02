@@ -21,6 +21,9 @@ MUTS = [
     ("D_up without its largest-value floor", 'return max(m + t_q(z, j - 1) * se, max(ds)), ds, rate',
      'return m + t_q(z, j - 1) * se, ds, rate'),
     ("cal kind overwrites the line kind", '            k = "ckind"', '            k = "kind"'),
+    ("zero-state voids only the failing point",
+     'return set((r["game"], r["round"]) for r in recs if r["kind"] == "p" and r.get("zs", 0) != 0)',
+     'return set()'),
 ]
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 bad = 0

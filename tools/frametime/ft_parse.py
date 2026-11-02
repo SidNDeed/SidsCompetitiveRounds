@@ -9,6 +9,7 @@ Lines read (all values integers; a value with a decimal point is refused, HIGH 5
   w        window:   pt=g.r.p arm=ON|OFF plant=0|1 partial=0|1 n sF sS sC maxF [medF e4=kmin,kmax e8=.. e16=..] gc
   p        point:    pt arm gate pred n sF sS sC maxF pn psF psS psC plant_mixed windows live_frames missing_end
                      span_g span_gn span_u span_un on_calls guarded (census and span totals, live moment)
+                     zs zl (zero-state failing rows, late rows read; ZERO-STATE.md)
                      (n and the s sums are the unplanted frames, pn and the ps sums the planted ones)
   plant    once:     c_plant (us) ticks from=g.r.p|sentinel
   settled  per game: g seed c_plant W vsync target freq hires f_hat gc_incremental gc_slice_ns f18 ... missing_end
@@ -219,7 +220,7 @@ def _int(key, v):
 INT_KEYS = {"n", "sF", "sS", "sC", "maxF", "medF", "gc", "gate", "windows", "live_frames", "missing_end", "partial",
             "g", "seed", "c_plant", "W", "vsync", "target", "freq", "hires", "f_hat", "frames", "cycle_failures",
             "span_depth_violations", "on", "guarded", "outside", "i", "plant", "pn", "psF", "psS", "psC",
-            "plant_mixed", "ticks", "span_g", "span_gn", "span_u", "span_un", "on_calls"}
+            "plant_mixed", "ticks", "span_g", "span_gn", "span_u", "span_un", "on_calls", "zs", "zl"}
 
 
 def parse_line(line):
@@ -255,13 +256,33 @@ def read(text):
 
 # ----------------------------------------------------------------------------- verdicts
 
+def void_rounds(recs):
+    """V4 3.3: the rounds (game, round) holding a point whose zero-state check failed (zs != 0)."""
+    return set((r["game"], r["round"]) for r in recs if r["kind"] == "p" and r.get("zs", 0) != 0)
+
+
 def games_of(recs, first_game=1):
-    """Measured games (game 0 is the washout test and counts toward nothing): {game: [point records]}."""
+    """Measured games (game 0 is the washout test and counts toward nothing), void rounds left out:
+    {game: [point records]}. A game with no valid round is absent (reported by zero_state)."""
+    void = void_rounds(recs)
     out = {}
     for r in recs:
-        if r["kind"] == "p" and r["game"] >= first_game and r.get("void", "0") == "0":
+        if r["kind"] == "p" and r["game"] >= first_game and (r["game"], r["round"]) not in void:
             out.setdefault(r["game"], []).append(r)
     return out
+
+
+def zero_state(recs):
+    """VR8, part 1: game 0 (the mutant) must have every round void; reports the void rounds of the measured
+    games and the games left with no valid round. Returns (ok, game-0 void, game-0 rounds, measured void, empty)."""
+    void = void_rounds(recs)
+    rounds = set((r["game"], r["round"]) for r in recs if r["kind"] == "p")
+    g0 = [x for x in rounds if x[0] == 0]
+    g0v = [x for x in g0 if x in void]
+    meas = sorted(x for x in void if x[0] >= 1)
+    games = set(x[0] for x in rounds if x[0] >= 1)
+    empty = sorted(g for g in games if all((g, r) in void for (gg, r) in rounds if gg == g))
+    return bool(g0) and len(g0v) == len(g0), len(g0v), len(g0), meas, empty
 
 
 def contrast_c(points):
@@ -521,6 +542,10 @@ def report(text):
         out.append("VR2 e_C_lo %s (>= 0.5)" % ("PASS" if lo >= 0.5 else "FAIL"))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("e_C not computable: %s" % e)
+    zok, g0v, g0n, meas, empty = zero_state(recs)
+    out.append("VR8 zero-state %s: game 0 (mutant) %d of %d rounds void; measured games: %d rounds void%s"
+               % ("PASS" if zok else "FAIL", g0v, g0n, len(meas),
+                  "; games with no valid round %s" % empty if empty else ""))
     try:
         ke, kh, ku = k_up(recs)
         out.append("K_up %.3f us per live frame (estimate %.3f, half-width %.3f)" % (ku, ke, kh))
@@ -542,7 +567,7 @@ def report(text):
                       50000 / u if u > 0 else float("inf")))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("U not computable: %s" % e)
-    out.append("VERDICT withheld: VR1, VR4, VR6, VR8 and VR9 are not yet computed by this parser")
+    out.append("VERDICT withheld: VR1, VR4, VR6, VR9 and VR8's predecessor check are not yet computed by this parser")
     return "\n".join(out)
 
 
