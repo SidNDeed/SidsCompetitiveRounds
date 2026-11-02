@@ -506,6 +506,12 @@ namespace CompetitiveRounds
             // The thread every [LOG-BUNDLE] line compares its compose thread
             // against: Awake runs on Unity's main thread.
             try { LogBundleCore.RegisterMainThread(); } catch { }
+#if SCR_FRAMETIME
+            // FrameTime (B11 format M): settings from BepInEx/frametime/arm, the per-frame
+            // clock (M1), the process-start calibration (M6) and settled line (M8).
+            try { FtConfig.Load(); FtClock.Install(); FtCalib.Run("start"); FtCalib.Settled(-1, -1); }
+            catch (Exception ex) { Log.LogWarning("[FRAME-TIME] start failed: " + ex.Message); }
+#endif
 
             // BepInEx 5 defaults AppendLog=false, which truncates LogOutput.log
             // on every launch — meaning if a player crashes and reopens to file
