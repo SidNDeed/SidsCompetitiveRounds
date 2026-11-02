@@ -13,17 +13,29 @@ script refuses when that file is missing or names another digest. Six steps:
   3. a wait for "[FRAME-TIME] sitting complete" until its own deadline (TimeoutS minus 600 s), then a graceful quit,
      and a kill by the captured pid only when the game still runs 60 s later;
   4. in every outcome the sentinel removed, then printed in this order: the runs/<stamp> token (UTC), "=== log lines"
-     (every [FRAME-TIME] line but the window lines), the saved slice's class headers (METHOD-V4.md 3.11; the slice
-     itself is saved whole in the run folder with its line count and sha256), and VR6's second listing;
+     (every [FRAME-TIME] line but the window lines), "=== saved slice" (the slice's class headers, METHOD-V4.md 3.11;
+     the slice itself is saved whole in the run folder with its line count and sha256), "=== component slice" (every
+     saved-slice line that carries no [FRAME-TIME] tag, verbatim: queue writes, builds, voids, refusals, the
+     component tags, Failed to patch, the BepInEx banner; it sits after "=== log lines", so pull_result.py keeps it
+     in log-lines.txt), "=== VR6" (VR6's second listing), then "=== restored" (step 5);
   5. the sitting's logs moved into runs/<stamp>/sitting/, the pre-image copies put back, their sha256s printed and
      compared; LogOutput-prev.log must not change during the sitting (this build makes no prev copy);
   6. not here: the Release DLL goes back by `laptop_push.sh release-restore-<sha8>` (or the backup install_remote.sh
      made), and the sitting counts as complete only when the installed sha256 equals the pre-sitting one.
--SelfTest runs steps 1, 4 and 5 against a scratch folder of fixtures (no launch, no game file touched), once clean and
-once for each of two mutants (keep_prev_copy: the sitting writes LogOutput-prev.log; closing_file: the sitting writes
-a closing file); it prints SELFTEST PASS only when the clean run passes and each mutant fails.
-Exit codes: 0 pass, 2 refused before the launch (a step-1 error included), 3 the sitting did not complete, 4 VR6 failed, 5 a restore mismatch,
-6 the self-test failed.
+The cleanups are independent (function Sitting): the shutdown runs in its own finally around the launch and the wait,
+the sentinel removal in a finally around that, and step 5 in a finally around step 4; an error in any of them is
+caught after its cleanup ran, printed, and mapped to an exit code, so a wait error still shuts the game down and
+restores, and a step-4 error still runs step 5.
+-SelfTest runs steps 1, 4 and 5 and function Sitting (with a simulated launch, wait and shutdown) against a scratch
+folder of fixtures (no launch, no game file touched), once clean and once for each mutant: keep_prev_copy (the sitting
+writes LogOutput-prev.log) and closing_file (the sitting writes a closing file) must fail VR6; no_component_slice
+(step 4 drops "=== component slice") must fail the component check; throw_in_wait (the wait throws) and
+throw_in_step4 (step 4 throws) must still print the shutdown marker, remove the sentinel, print "=== restored" with
+every sha256 equal, and end with exit code 3 and 4. It prints SELFTEST PASS only when the clean run passes and every
+mutant behaves as wanted.
+Exit codes: 0 pass, 2 refused before the launch (a step-1 error included), 3 the sitting did not complete (a launch,
+wait or shutdown error included), 4 VR6 failed (a step-4 error included), 5 a restore mismatch (a step-5 error
+included), 6 the self-test failed.
 #>
 [CmdletBinding()]
 param(
@@ -45,6 +57,8 @@ $Vr6Named = @('CompetitiveRounds.seat-evidence.jsonl', 'CompetitiveRounds.seat-e
     'CompetitiveRounds.pending-reports.jsonl', 'CompetitiveRounds.pending-reports.jsonl.tmp',
     'CompetitiveRounds.refused-reports.jsonl', 'com.competitiverounds.mod.cfg')
 $Vr6Patterns = @('CompetitiveRounds.seat-evidence.*', 'CompetitiveRounds.pending-reports.*', 'CompetitiveRounds.refused-reports.*')
+# the self-test's mutant; only -SelfTest sets anything but 'none'
+$script:Mutant = 'none'
 
 $script:Out = New-Object System.Collections.Generic.List[string]
 # Console.Out, never the output stream: a function's output-stream writes would become part of its return value
@@ -134,6 +148,7 @@ function Step4($C, $p) {
     $lines = ReadShared $C.Logs['LogOutput.log']
     Say '=== log lines'
     foreach ($ln in $lines) { if ($ln.Contains('[FRAME-TIME]') -and -not $ln.Contains('[FRAME-TIME] w ')) { Say $ln } }
+    if ($script:Mutant -eq 'throw_in_step4') { throw 'mutant throw_in_step4: an error inside step 4' }
     $slice = New-Object System.Collections.Generic.List[string]
     $count = [ordered]@{}
     foreach ($cls in $SliceClasses) { $count[$cls] = 0 }
@@ -147,6 +162,14 @@ function Step4($C, $p) {
     Say '=== saved slice'
     foreach ($cls in $SliceClasses) { Say ("slice class {0}: {1} lines" -f $cls.Trim('[', ']'), $count[$cls]) }
     Say ("slice saved: {0} lines, sha256 {1}" -f $slice.Count, (Sha $sp))
+    # the component evidence itself (3.11): every slice line without [FRAME-TIME], whose lines are under "=== log lines"
+    # already (the window lines stay in slice.log on the laptop, F05)
+    $comp = @($slice | Where-Object { -not $_.Contains('[FRAME-TIME]') })
+    if ($script:Mutant -ne 'no_component_slice') {
+        Say '=== component slice'
+        Say ("component slice: {0} lines, every saved-slice line without [FRAME-TIME]" -f $comp.Count)
+        foreach ($ln in $comp) { Say $ln }
+    }
     Say '=== VR6'
     $after = Vr6Listing $C
     $bad = @()
@@ -167,22 +190,34 @@ function Step4($C, $p) {
 function Step5($C, $p) {
     $pre = Join-Path $p.Run 'pre'
     $sit = Join-Path $p.Run 'sitting'
-    New-Item -ItemType Directory -Force -Path $sit | Out-Null
     Say '=== restored'
     $ok = $true
-    foreach ($k in $C.Logs.Keys) {
-        $path = $C.Logs[$k]
-        if (Test-Path -LiteralPath $path -PathType Leaf) { Move-Item -LiteralPath $path -Destination (Join-Path $sit $k) -Force }
-        if ($p.Logs[$k] -ne 'absent') { Copy-Item -LiteralPath (Join-Path $pre $k) -Destination $path }
-        $r = Sha $path
-        $eq = $r -eq $p.Logs[$k]
-        if (-not $eq) { $ok = $false }
-        Say ("restored {0} {1} pre {2} {3}" -f $k, $r, $p.Logs[$k], $(if ($eq) { 'equal' } else { 'DIFFERENT' }))
+    try {
+        New-Item -ItemType Directory -Force -Path $sit | Out-Null
+        foreach ($k in $C.Logs.Keys) {
+            # each log on its own: one log's error leaves the others' restore and comparison standing
+            try {
+                $path = $C.Logs[$k]
+                if (Test-Path -LiteralPath $path -PathType Leaf) { Move-Item -LiteralPath $path -Destination (Join-Path $sit $k) -Force }
+                if ($p.Logs[$k] -ne 'absent') { Copy-Item -LiteralPath (Join-Path $pre $k) -Destination $path }
+                $r = Sha $path
+                $eq = $r -eq $p.Logs[$k]
+                if (-not $eq) { $ok = $false }
+                Say ("restored {0} {1} pre {2} {3}" -f $k, $r, $p.Logs[$k], $(if ($eq) { 'equal' } else { 'DIFFERENT' }))
+            }
+            catch { $ok = $false; Say ("restored {0} error: {1} DIFFERENT" -f $k, $_.Exception.Message) }
+        }
     }
-    if ((Sha $C.Cfg) -ne $p.Cfg) { Copy-Item -LiteralPath (Join-Path $pre 'com.competitiverounds.mod.cfg') -Destination $C.Cfg -Force }
-    $rc = Sha $C.Cfg
-    if ($rc -ne $p.Cfg) { $ok = $false }
-    Say ("restored cfg {0} pre {1} {2}" -f $rc, $p.Cfg, $(if ($rc -eq $p.Cfg) { 'equal' } else { 'DIFFERENT' }))
+    finally {
+        # the cfg goes back whatever happened to the logs
+        try {
+            if ((Sha $C.Cfg) -ne $p.Cfg) { Copy-Item -LiteralPath (Join-Path $pre 'com.competitiverounds.mod.cfg') -Destination $C.Cfg -Force }
+            $rc = Sha $C.Cfg
+            if ($rc -ne $p.Cfg) { $ok = $false }
+            Say ("restored cfg {0} pre {1} {2}" -f $rc, $p.Cfg, $(if ($rc -eq $p.Cfg) { 'equal' } else { 'DIFFERENT' }))
+        }
+        catch { $ok = $false; Say ("restored cfg error: {0} DIFFERENT" -f $_.Exception.Message) }
+    }
     return $ok
 }
 
@@ -193,6 +228,48 @@ function NewRun([string]$seat) {
     New-Item -ItemType Directory -Force -Path $run | Out-Null
     Say ('runs/' + $stamp)
     return $run
+}
+
+# ---- steps 2 to 5, one structure for the sitting and the self-test. $Launch ($C) returns the game process or
+# nothing; $Wait ($C, $proc) returns whether the sitting completed; $Shutdown ($proc) prints a line starting
+# "shutdown:". Every cleanup sits in its own finally; errors are caught after their cleanup ran and become exit codes.
+function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]$Shutdown) {
+    $st = @{ Code = 0; Proc = $null; V = $false; R = $false }
+    try {
+        try {
+            try {
+                New-Item -ItemType Directory -Force -Path (Split-Path $C.Arm) | Out-Null
+                Set-Content -LiteralPath $C.Arm -Value @("seed=$Seed", "f18=$F18") -Encoding ascii
+                Say ("sentinel written: seed={0} f18={1}" -f $Seed, $F18)
+                $st.Proc = & $Launch $C
+                if (-not $st.Proc) { Say 'launch: no ROUNDS process within 120 s'; $st.Code = 3 }
+                else {
+                    Say ("launched pid {0}" -f $st.Proc.Id)
+                    if (-not (& $Wait $C $st.Proc)) { $st.Code = 3 }
+                }
+            }
+            finally {
+                try { & $Shutdown $st.Proc }
+                catch { Say ('shutdown error: ' + $_.Exception.Message); $st.Code = 3 }
+            }
+        }
+        finally {
+            if (Test-Path -LiteralPath $C.Arm) { Remove-Item -LiteralPath $C.Arm -Force }
+            Say ("sentinel removed: {0}" -f (-not (Test-Path -LiteralPath $C.Arm)))
+        }
+    }
+    catch { Say ('sitting error (launch, wait or sentinel): ' + $_.Exception.Message); $st.Code = 3 }
+    try {
+        try { $st.V = Step4 $C $p }
+        catch { Say ('step 4 error: ' + $_.Exception.Message); $st.V = $false }
+    }
+    finally {
+        try { $st.R = Step5 $C $p }
+        catch { Say ('step 5 error: ' + $_.Exception.Message); $st.R = $false }
+    }
+    if ($st.Code -eq 0 -and -not $st.V) { $st.Code = 4 }
+    if ($st.Code -eq 0 -and -not $st.R) { $st.Code = 5 }
+    return $st
 }
 
 # ---- the self-test
@@ -213,40 +290,95 @@ function SelfTestOne([string]$root, [string]$mutant) {
     $run = NewRun $seat
     $p = Step1 $C $run
     # the simulated sitting: Unity's rotation, the game's own log, and the mutant's write
-    Move-Item -LiteralPath $C.Logs['Player.log'] -Destination $C.Logs['Player-prev.log'] -Force
-    Set-Content -LiteralPath $C.Logs['Player.log'] -Value 'unity log of the sitting' -Encoding ascii
-    $sim = @('[Message:   BepInEx] BepInEx 5.4.19 - ROUNDS', '[Info   :CompetitiveRounds] [FRAME-TIME] settled g=-1 seed=1',
-        '[Info   :CompetitiveRounds] [FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=0 n=120',
-        '[Info   :CompetitiveRounds] [FRAME-TIME] p pt=1.1.1 arm=ON gate=0 n=500',
-        '[Info   :CompetitiveRounds] [FRAME-TIME] refusals why=quit pairs=1 closing:/api/v1/x=1')
-    foreach ($cls in $SliceClasses) { if ($cls -notmatch 'FRAME-TIME|BepInEx') { $sim += "[Info   :CompetitiveRounds] fixture line $cls" } }
-    Set-Content -LiteralPath $C.Logs['LogOutput.log'] -Value $sim -Encoding ascii
-    if ($mutant -eq 'keep_prev_copy') { Copy-Item -LiteralPath $C.Logs['LogOutput.log'] -Destination $C.Logs['LogOutput-prev.log'] -Force }
-    if ($mutant -eq 'closing_file') { Set-Content -LiteralPath (Join-Path $C.Config 'CompetitiveRounds.seat-evidence.closing-1') -Value 'x' -Encoding ascii }
-    $v = Step4 $C $p
-    $r = Step5 $C $p
+    $launch = {
+        param($C)
+        Move-Item -LiteralPath $C.Logs['Player.log'] -Destination $C.Logs['Player-prev.log'] -Force
+        Set-Content -LiteralPath $C.Logs['Player.log'] -Value 'unity log of the sitting' -Encoding ascii
+        $sim = @('[Message:   BepInEx] BepInEx 5.4.19 - ROUNDS', '[Info   :CompetitiveRounds] [FRAME-TIME] settled g=-1 seed=1',
+            '[Info   :CompetitiveRounds] [FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=0 n=120',
+            '[Info   :CompetitiveRounds] [FRAME-TIME] p pt=1.1.1 arm=ON gate=0 n=500',
+            '[Info   :CompetitiveRounds] [FRAME-TIME] refusals why=quit pairs=1 closing:/api/v1/x=1')
+        foreach ($cls in $SliceClasses) { if ($cls -notmatch 'FRAME-TIME|BepInEx') { $sim += "[Info   :CompetitiveRounds] fixture line $cls" } }
+        Set-Content -LiteralPath $C.Logs['LogOutput.log'] -Value $sim -Encoding ascii
+        if ($script:Mutant -eq 'keep_prev_copy') { Copy-Item -LiteralPath $C.Logs['LogOutput.log'] -Destination $C.Logs['LogOutput-prev.log'] -Force }
+        if ($script:Mutant -eq 'closing_file') { Set-Content -LiteralPath (Join-Path $C.Config 'CompetitiveRounds.seat-evidence.closing-1') -Value 'x' -Encoding ascii }
+        return [pscustomobject]@{ Id = 0; HasExited = $false }
+    }
+    $wait = {
+        param($C, $proc)
+        if ($script:Mutant -eq 'throw_in_wait') { throw 'mutant throw_in_wait: an error inside the wait' }
+        Say 'wait ended: complete True, exited False'
+        return $true
+    }
+    $shutdown = { param($proc) Say ("shutdown: simulated pid {0}" -f $(if ($proc) { $proc.Id } else { 'none' })) }
+    $script:Mutant = $mutant
+    $threw = ''
+    $st = $null
+    try { $st = Sitting $C $p $launch $wait $shutdown }
+    catch { $threw = $_.Exception.Message }
+    finally { $script:Mutant = 'none' }
     $o = @($script:Out)
     $iTok = [array]::IndexOf($o, ($o | Where-Object { $_ -like 'runs/*' } | Select-Object -First 1))
     $iLog = [array]::IndexOf($o, '=== log lines'); $iVr6 = [array]::IndexOf($o, '=== VR6'); $iRes = [array]::IndexOf($o, '=== restored')
-    $order = $iTok -eq 0 -and $iTok -lt $iLog -and $iLog -lt $iVr6 -and $iVr6 -lt $iRes
+    $iSav = [array]::IndexOf($o, '=== saved slice'); $iComp = [array]::IndexOf($o, '=== component slice')
+    $order = $iTok -eq 0 -and $iTok -lt $iLog -and $iLog -lt $iSav -and $iSav -lt $iVr6 -and $iVr6 -lt $iRes
     $headers = @($o | Where-Object { $_ -like 'slice class *' }).Count -eq $SliceClasses.Count
     $allSeen = @($o | Where-Object { $_ -like 'slice class *: 0 lines' }).Count -eq 0
     $noWindow = @($o | Where-Object { $_.Contains('[FRAME-TIME] w ') }).Count -eq 0
-    return @{ Vr6 = $v; Restored = $r; Order = $order; Headers = $headers; AllSeen = $allSeen; NoWindow = $noWindow; Lane = $p.LaneOk }
+    # the component section: after the class headers, before VR6, non-empty, one line at least per non-FRAME-TIME
+    # class, and no [FRAME-TIME] line in it
+    $compLines = @()
+    if ($iComp -ge 0 -and $iVr6 -gt $iComp + 1) { $compLines = @($o[($iComp + 1)..($iVr6 - 1)] | Where-Object { $_ -notlike 'component slice: *' }) }
+    $component = $iComp -gt $iSav -and $iComp -lt $iVr6 -and $compLines.Count -gt 0 -and
+        @($compLines | Where-Object { $_.Contains('[FRAME-TIME]') }).Count -eq 0
+    foreach ($cls in $SliceClasses) {
+        if ($cls -eq '[FRAME-TIME]') { continue }
+        if (@($compLines | Where-Object { $_.Contains($cls) }).Count -eq 0) { $component = $false }
+    }
+    $shut = @($o | Where-Object { $_ -like 'shutdown:*' }).Count -ge 1
+    $sentinelGone = (-not (Test-Path -LiteralPath $C.Arm)) -and @($o | Where-Object { $_ -eq 'sentinel removed: True' }).Count -eq 1
+    $restoredLines = @($o | Where-Object { $_ -like 'restored *' })
+    $restoredAll = $iRes -ge 0 -and $restoredLines.Count -eq ($C.Logs.Count + 1) -and
+        @($restoredLines | Where-Object { $_ -notlike '* equal' }).Count -eq 0
+    return @{ Vr6 = $(if ($st) { $st.V } else { $false }); Restored = $(if ($st) { $st.R } else { $false }) -and $restoredAll
+        Order = $order; Headers = $headers; AllSeen = $allSeen; NoWindow = $noWindow; Lane = $p.LaneOk; Component = $component
+        Shutdown = $shut; SentinelGone = $sentinelGone; Threw = $threw; Code = $(if ($st) { $st.Code } else { 'none' })
+    }
 }
 
 if ($SelfTest) {
     $base = Join-Path ([System.IO.Path]::GetTempPath()) ('ft-seat-selftest-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))
     $fail = @()
-    foreach ($m in @('none', 'keep_prev_copy', 'closing_file')) {
+    foreach ($m in @('none', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4')) {
         Print "=== self-test run: mutant $m"
         $r = SelfTestOne (Join-Path $base $m) $m
-        Print ("self-test {0}: order {1}, slice headers {2}, every class seen {3}, no window line {4}, lane {5}, VR6 {6}, restored {7}" -f
-            $m, $r.Order, $r.Headers, $r.AllSeen, $r.NoWindow, $r.Lane, $r.Vr6, $r.Restored)
-        $common = $r.Order -and $r.Headers -and $r.AllSeen -and $r.NoWindow -and $r.Lane -and $r.Restored
-        if (-not $common) { $fail += "$m (order, headers, lane or restore)" }
-        if ($m -eq 'none' -and -not $r.Vr6) { $fail += 'clean run: VR6 failed' }
-        if ($m -ne 'none' -and $r.Vr6) { $fail += "mutant ${m}: VR6 passed (control FAILED)" }
+        Print ("self-test {0}: order {1}, slice headers {2}, every class seen {3}, no window line {4}, lane {5}, VR6 {6}, component slice {7}, shutdown {8}, sentinel removed {9}, restored {10}, exit code {11}, threw '{12}'" -f
+            $m, $r.Order, $r.Headers, $r.AllSeen, $r.NoWindow, $r.Lane, $r.Vr6, $r.Component, $r.Shutdown, $r.SentinelGone,
+            $r.Restored, $r.Code, $r.Threw)
+        # every run, the mutants that throw included: no error escapes, the game is shut down, the sentinel is removed,
+        # the restore runs with every sha256 equal
+        $cleanup = $r.Threw -eq '' -and $r.Shutdown -and $r.SentinelGone -and $r.Restored -and $r.Lane
+        if (-not $cleanup) { $fail += "$m (an error escaped, or the shutdown, sentinel removal or restore did not happen)" }
+        $full = $r.Order -and $r.Headers -and $r.AllSeen -and $r.NoWindow
+        switch ($m) {
+            'none' {
+                if (-not $full) { $fail += 'clean run: order, headers or window lines' }
+                if (-not $r.Vr6) { $fail += 'clean run: VR6 failed' }
+                if (-not $r.Component) { $fail += 'clean run: the component slice is missing or incomplete' }
+                if ($r.Code -ne 0) { $fail += "clean run: exit code $($r.Code)" }
+            }
+            { $_ -in @('keep_prev_copy', 'closing_file') } {
+                if (-not ($full -and $r.Component)) { $fail += "$m (order, headers, window lines or component slice)" }
+                if ($r.Vr6) { $fail += "mutant ${m}: VR6 passed (control FAILED)" }
+                if ($r.Code -ne 4) { $fail += "mutant ${m}: exit code $($r.Code), not 4" }
+            }
+            'no_component_slice' {
+                if (-not ($full -and $r.Vr6)) { $fail += "$m (order, headers, window lines or VR6)" }
+                if ($r.Component) { $fail += "mutant ${m}: the component check passed (control FAILED)" }
+            }
+            'throw_in_wait' { if ($r.Code -ne 3) { $fail += "mutant ${m}: exit code $($r.Code), not 3" } }
+            'throw_in_step4' { if ($r.Code -ne 4) { $fail += "mutant ${m}: exit code $($r.Code), not 4" } }
+        }
     }
     Print "self-test scratch: $base"
     if ($fail.Count) { Print ('SELFTEST FAIL: ' + ($fail -join '; ')); exit 6 }
@@ -267,43 +399,45 @@ if (Test-Path -LiteralPath $C.Arm) { Say 'REFUSED: a sentinel is already present
 try { $p = Step1 $C $run }
 catch { Say ('REFUSED: step 1 failed: ' + $_.Exception.Message); exit 2 }
 if (-not $p.LaneOk) { Say 'REFUSED: the installed DLL is no staged FrameTime lane (push the lane first)'; exit 2 }
-$code = 0
-$proc = $null
-try {
-    New-Item -ItemType Directory -Force -Path (Split-Path $C.Arm) | Out-Null
-    Set-Content -LiteralPath $C.Arm -Value @("seed=$Seed", "f18=$F18") -Encoding ascii
-    Say ("sentinel written: seed={0} f18={1}" -f $Seed, $F18)
+$launch = {
+    param($C)
     Start-Process 'steam://rungameid/1557740'
-    for ($i = 0; $i -lt 60 -and -not $proc; $i++) {
+    $pr = $null
+    for ($i = 0; $i -lt 60 -and -not $pr; $i++) {
         Start-Sleep -Seconds 2
-        $proc = Get-Process -Name 'Rounds' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $pr = Get-Process -Name 'Rounds' -ErrorAction SilentlyContinue | Select-Object -First 1
     }
-    if (-not $proc) { Say 'launch: no ROUNDS process within 120 s'; $code = 3 }
-    else {
-        Say ("launched pid {0}" -f $proc.Id)
-        $deadline = (Get-Date).AddSeconds($TimeoutS - 600)
-        $done = $false
-        for ($i = 0; $i -lt [int](($TimeoutS - 600) / 15) + 1 -and -not $done; $i++) {
-            if ((Get-Date) -gt $deadline -or $proc.HasExited) { break }
-            Start-Sleep -Seconds 15
-            $done = @((ReadShared $C.Logs['LogOutput.log']) | Where-Object { $_.Contains('[FRAME-TIME] sitting complete') }).Count -gt 0
-        }
-        Say ("wait ended: complete {0}, exited {1}" -f $done, $proc.HasExited)
-        if (-not $done) { $code = 3 }
-        if (-not $proc.HasExited) {
-            [void]$proc.CloseMainWindow()
-            if (-not $proc.WaitForExit(60000)) { Say ("kill pid {0} after 60 s" -f $proc.Id); Stop-Process -Id $proc.Id -Force; [void]$proc.WaitForExit(30000) }
-        }
-        Start-Sleep -Seconds 5
-    }
+    return $pr
 }
+$wait = {
+    param($C, $proc)
+    $deadline = (Get-Date).AddSeconds($TimeoutS - 600)
+    $done = $false
+    for ($i = 0; $i -lt [int](($TimeoutS - 600) / 15) + 1 -and -not $done; $i++) {
+        if ((Get-Date) -gt $deadline -or $proc.HasExited) { break }
+        Start-Sleep -Seconds 15
+        $done = @((ReadShared $C.Logs['LogOutput.log']) | Where-Object { $_.Contains('[FRAME-TIME] sitting complete') }).Count -gt 0
+    }
+    Say ("wait ended: complete {0}, exited {1}" -f $done, $proc.HasExited)
+    return $done
+}
+$shutdown = {
+    param($proc)
+    if (-not $proc) {
+        Say ("shutdown: no pid captured (a kill only by a captured pid); ROUNDS processes now {0}" -f @(Get-Process -Name 'Rounds' -ErrorAction SilentlyContinue).Count)
+        return
+    }
+    if (-not $proc.HasExited) {
+        [void]$proc.CloseMainWindow()
+        if (-not $proc.WaitForExit(60000)) { Say ("kill pid {0} after 60 s" -f $proc.Id); Stop-Process -Id $proc.Id -Force; [void]$proc.WaitForExit(30000) }
+    }
+    Say ("shutdown: pid {0} exited {1}" -f $proc.Id, $proc.HasExited)
+    Start-Sleep -Seconds 5
+}
+$code = 3
+try { $code = (Sitting $C $p $launch $wait $shutdown).Code }
+catch { Say ('sitting error outside the steps: ' + $_.Exception.Message) }
 finally {
-    if (Test-Path -LiteralPath $C.Arm) { Remove-Item -LiteralPath $C.Arm -Force }
-    Say ("sentinel removed: {0}" -f (-not (Test-Path -LiteralPath $C.Arm)))
-    $v = Step4 $C $p
-    $r = Step5 $C $p
-    if ($code -eq 0 -and -not $v) { $code = 4 }
-    if ($code -eq 0 -and -not $r) { $code = 5 }
     $bk = Get-ChildItem -LiteralPath (Join-Path $SeatRoot 'backups') -Filter 'CompetitiveRounds-*.dll' -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     Say ("step 6 (not here): restore the Release DLL; newest backup {0}; installed now {1}" -f $(if ($bk) { $bk.Name } else { 'none' }), (Sha $C.Dll))

@@ -47,6 +47,17 @@ say "base $BASE lane $LANE; proofA $A; proofB $B"
 EXTRA="-p:IncludeSourceRevisionInInformationalVersion=false"
 dll_of() { echo "$1/plugin/bin/$2/netstandard2.1/CompetitiveRounds.dll"; }
 
+# sha_of <file>: the file's full sha256 (64 lowercase hex) on stdout, or exit status 1. The file goes to sha256sum
+# on stdin, so no file name is printed: a name with a backslash would make sha256sum prefix the line with "\" and
+# a fixed cut would drop the digest's last digit. A missing or unreadable file, or anything but 64 hex, is an error.
+sha_of() {
+  local h
+  h=$(sha256sum < "$1") || return 1
+  h=${h%% *}
+  [[ $h =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$h"
+}
+
 # one build: $1 worktree, $2 configuration, $3 name. Writes OUT/<name>.{inputs,sha,dll}.
 build() {
   local w=$1 conf=$2 name=$3
@@ -57,13 +68,18 @@ build() {
   csc=$(grep -E "csc(\.exe|\.dll)? .*/define:" "$OUT/$name.log.build" | tail -1)
   [ -n "$csc" ] || fail "build $name: no Csc command line"
   echo "$csc" > "$OUT/$name.csc"
-  echo "$csc" | grep -oE '/reference:("[^"]+"|[^ ]+)' | sed -e 's#^/reference:##' -e 's#"##g' | sort | while read -r r; do
-    echo "ref $(sha256sum "$r" | cut -c1-64) $(basename "$r")"
-  done >> "$OUT/$name.inputs"
+  # the loop runs in this shell (no pipeline subshell), so a hashing error's fail stops the proof
+  local refs r h
+  refs=$(echo "$csc" | grep -oE '/reference:("[^"]+"|[^ ]+)' | sed -e 's#^/reference:##' -e 's#"##g' | sort)
+  [ -n "$refs" ] || fail "build $name: no /reference on the Csc command line"
+  while IFS= read -r r; do
+    h=$(sha_of "$r") || fail "build $name: could not hash the reference $r"
+    echo "ref $h $(basename "$r")" >> "$OUT/$name.inputs"
+  done <<< "$refs"
   local d; d=$(dll_of "$w" "$conf")
   [ -f "$d" ] || fail "build $name: no DLL at $d"
   cp "$d" "$OUT/$name.dll"
-  sha256sum "$d" | cut -c1-64 > "$OUT/$name.sha"
+  sha_of "$d" > "$OUT/$name.sha" || fail "build $name: could not hash $d"
   say "built $name: $(cat "$OUT/$name.sha"), $(grep -c '^ref ' "$OUT/$name.inputs") references"
 }
 
@@ -125,7 +141,7 @@ if [ "$STAGE" = "--stage" ]; then
   DEST="C:/shared/builds/lanes/frametime-$S8"
   [ -e "$DEST" ] && fail "staging: $DEST exists"
   mkdir -p "$DEST" && cp "$OUT/lane-frametime.dll" "$DEST/CompetitiveRounds.dll" \
-    && sha256sum "$DEST/CompetitiveRounds.dll" | cut -c1-64 > "$DEST/sha256.txt" \
+    && sha_of "$DEST/CompetitiveRounds.dll" > "$DEST/sha256.txt" \
     && printf 'FrameTime lane build of %s (format M). Not a release. Proof log: %s\n' "$LANE" "$LOGF" > "$DEST/README.txt" \
     || fail "staging failed"
   say "staged $DEST"
