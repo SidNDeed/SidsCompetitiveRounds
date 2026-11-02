@@ -44,6 +44,7 @@ The rules:
 import ast as _ast
 import collections as _collections
 import importlib as _importlib
+import sys as _sys
 import inspect as _inspect
 import re as _re
 import textwrap as _textwrap
@@ -209,50 +210,811 @@ _SQL_OTHER_COMMANDS = frozenset({
     "import", "load", "checkpoint", "execute", "deallocate",
 })
 _DML = frozenset({"insert", "update", "delete"})
-# The placeholder a formatted value of an f-string SQL reads as: an
-# identifier, never SQL text.
-SQL_FV = "fv_ident"
 
 
 def bound_names(fn):
-    """Every name function definition `fn` binds in its own body, in any
-    form: its parameters, an assignment, augmented or annotated assignment,
-    deletion, loop, with or comprehension target, walrus, except name,
-    import alias, local definition, match capture, and a global or nonlocal
-    declaration. A name read by the walk is resolved here first: a bound
-    name is never the module's value (findings closed_walk:699 and :322)."""
-    a = fn.args
-    out = {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs}
-    out.update(x.arg for x in (a.vararg, a.kwarg) if x is not None)
-    return frozenset(out) | _body_bindings(fn.body)
+    """Every name function definition `fn` binds, in any form other than a
+    mutation of its value (Bindings): a bound name is never the module's
+    value (findings closed_walk:699 and :322)."""
+    return Bindings(None, fn).bound()
 
 
 def _body_bindings(stmts):
     """The names statements `stmts` bind (bound_names)."""
-    out = set()
-    for n in _ast.walk(_ast.Module(body=list(stmts), type_ignores=[])):
+    return Bindings(None, stmts=stmts).bound()
+
+
+def _root_through(expr):
+    """The name an attribute or item chain starts from (`a` of `a.b[c].d`),
+    else None."""
+    while isinstance(expr, (_ast.Attribute, _ast.Subscript)):
+        expr = expr.value
+    return expr.id if isinstance(expr, _ast.Name) else None
+
+
+_MISSING = object()
+# The most SQL texts one statement may stand for (every combination of its
+# formatted values); more is refused.
+SQL_COMBINATIONS = 256
+
+
+def _arg_names(a):
+    return [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs
+            + [y for y in (a.vararg, a.kwarg) if y is not None]]
+
+
+class Bindings:
+    """THE resolver of the closed walk (ruling REHEARSAL-FOUR-R5 item 2).
+
+    Every name a walk gives a meaning to is resolved here and nowhere else:
+    a callee, a SQL constant, template, table or builder, a guard's name and
+    its collection, an import, a local function, a class, the session, and
+    every name a statement walker identifies by its spelling (the barrier,
+    the admission gate, the raised refusal, the answer classes). The rule is
+    one binding per name:
+
+      * a name the walked function (or statement list) does not bind
+        resolves in the module `scope`;
+      * a name it binds exactly once resolves to that binding (a
+        parameter, an assignment, an import, a local definition), never to
+        the module's value;
+      * a name it binds more than once is refused: resolve raises
+        Unclassified naming it.
+
+    A binding is any store of the name: a parameter; an assignment,
+    augmented or annotated assignment or deletion; a loop, with, except,
+    comprehension or walrus target; an import; a local definition; a
+    global or nonlocal declaration; a match capture; and a mutation of the
+    value the name holds (a mutating method call, an item or attribute
+    store). Nested definitions, lambdas and comprehensions are counted with
+    the function: a superset, so more refusals and never fewer.
+
+    One recorded deviation from "exactly one": a local SQL name may be
+    extended by `+=` outside any loop (real spans do: match_hold's
+    `sql += " FOR NO KEY UPDATE"`, main's `_sql += " AND ..."`). local_sql
+    reads EVERY binding of such a name (each assignment's arms, each
+    suffix) and refuses the name when any binding is not one it reads, so
+    the texts it gives are a superset of every path's.
+
+    test_r5_every_resolution_site_goes_through_the_resolver counts, in each
+    function span of the walkers, the sites that look a walked name up (a
+    getattr keyed by a name read from the tree, a comparison of a walked
+    name's spelling, a lookup in a name table, an import) and the sites
+    inside this class, and asserts the two counts are equal."""
+
+    def __init__(self, scope, fn=None, stmts=None, session="db"):
+        self.scope = scope
+        self.session = session
+        self.sites = {}
+        self.has_fn = fn is not None
+        self._enumerated = set()
+        nodes = []
+        if fn is not None:
+            for x in _arg_names(fn.args):
+                self._add(x, "param", fn)
+            nodes = list(fn.body) + list(fn.args.defaults) + [
+                x for x in fn.args.kw_defaults if x is not None]
+        if stmts is not None:
+            nodes = list(stmts)
+        for top in nodes:
+            for n in _ast.walk(top):
+                self._collect(n)
+
+    def _add(self, name, kind, node):
+        self.sites.setdefault(name, []).append((kind, node))
+
+    def _collect(self, n):
         if isinstance(n, _ast.Name) and not isinstance(n.ctx, _ast.Load):
-            out.add(n.id)
-        elif isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
-                            _ast.ClassDef)):
-            out.add(n.name)
-            for x in (n.args.posonlyargs + n.args.args + n.args.kwonlyargs
-                      if not isinstance(n, _ast.ClassDef) else []):
-                out.add(x.arg)
-        elif isinstance(n, (_ast.Import, _ast.ImportFrom)):
-            out.update((x.asname or x.name).split(".")[0] for x in n.names)
-        elif isinstance(n, _ast.ExceptHandler) and n.name:
-            out.add(n.name)
-        elif isinstance(n, (_ast.Global, _ast.Nonlocal)):
-            out.update(n.names)
-        elif isinstance(n, (_ast.MatchAs, _ast.MatchStar)) and n.name:
-            out.add(n.name)
-        elif isinstance(n, _ast.MatchMapping) and n.rest:
-            out.add(n.rest)
+            self._add(n.id, "local", n)
+        elif isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            self._add(n.name, "def", n)
+            for x in _arg_names(n.args):
+                self._add(x, "param", n)
+        elif isinstance(n, _ast.ClassDef):
+            self._add(n.name, "def", n)
         elif isinstance(n, _ast.Lambda):
-            la = n.args
-            out.update(x.arg for x in la.posonlyargs + la.args + la.kwonlyargs)
-    return frozenset(out)
+            for x in _arg_names(n.args):
+                self._add(x, "param", n)
+        elif isinstance(n, (_ast.Import, _ast.ImportFrom)):
+            for x in n.names:
+                self._add((x.asname or x.name).split(".")[0], "import", (n, x))
+        elif isinstance(n, _ast.ExceptHandler) and n.name:
+            self._add(n.name, "local", n)
+        elif isinstance(n, (_ast.Global, _ast.Nonlocal)):
+            for nm in n.names:
+                self._add(nm, "global", n)
+        elif isinstance(n, (_ast.MatchAs, _ast.MatchStar)) and n.name:
+            self._add(n.name, "local", n)
+        elif isinstance(n, _ast.MatchMapping) and n.rest:
+            self._add(n.rest, "local", n)
+        elif (isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+              and n.func.attr in MUTATING_METHODS):
+            r = _root_through(n.func.value)
+            if r is not None and r not in self.roots():
+                # A session root's method (`db.add(row)`) is a session call
+                # the walk classifies as one, not a binding of the root.
+                self._add(r, "mutated", n)
+        if isinstance(n, (_ast.Assign, _ast.AugAssign, _ast.AnnAssign,
+                          _ast.Delete)):
+            tgs = (n.targets if isinstance(n, (_ast.Assign, _ast.Delete))
+                   else [n.target])
+            for tg in tgs:
+                for t in _ast.walk(tg):
+                    if isinstance(t, (_ast.Attribute, _ast.Subscript)):
+                        r = _root_through(t)
+                        if r is not None and r not in self.roots():
+                            self._add(r, "mutated", n)
+                            break
+
+    # --- the rule ---------------------------------------------------------
+
+    def count(self, name):
+        """How many bindings the walked function gives `name`."""
+        return len(self.sites.get(name, ()))
+
+    def bound(self):
+        """The names bound other than by a mutation (bound_names)."""
+        return frozenset(k for k, v in self.sites.items()
+                         if any(kind != "mutated" for kind, _n in v))
+
+    def resolve(self, name, line=0):
+        """(kind, what) for `name`: ('module', the module's value or
+        _MISSING) when the function does not bind it; its one binding
+        ('param', 'local', 'import', 'def', 'global' or 'mutated', node)
+        when it binds it once; refused when it binds it more than once."""
+        got = self.sites.get(name, ())
+        if len(got) > 1:
+            raise Unclassified((line, f"a name bound more than once: {name}"))
+        if got:
+            return got[0]
+        return ("module", getattr(self.scope, name, _MISSING))
+
+    def module(self, name, line=0):
+        """The module's value of `name` when the function does not bind it;
+        None when it binds it once or the module holds no such name."""
+        kind, v = self.resolve(name, line)
+        return v if kind == "module" and v is not _MISSING else None
+
+    def spelled(self, node, name, line=0):
+        """Whether `node` is the plain name `name`, read by a walk as the
+        module's (the barrier, the admission gate, an answer class, the
+        raised refusal); refused when the walked function binds it."""
+        if not (isinstance(node, _ast.Name) and node.id == name):
+            return False
+        line = line or getattr(node, "lineno", 0)
+        kind, _v = self.resolve(name, line)
+        if kind != "module":
+            raise Unclassified((line, f"{name}, a name the walk reads as the "
+                                      "module's, is bound by the function"))
+        return True
+
+    def named(self, node, names, line=0):
+        """The name of `names` that plain name `node` denotes as a function
+        of its module: the module's own (the function does not bind it), or
+        bound once by `from <module> import <name>` in the function, not
+        renamed and not relative (match_hold imports the gate so); None when
+        `node` spells none of them; refused when the function binds it in
+        any other way."""
+        if not (isinstance(node, _ast.Name) and node.id in names):
+            return None
+        line = line or getattr(node, "lineno", 0)
+        kind, v = self.resolve(node.id, line)
+        if kind == "module":
+            return node.id
+        if kind == "import":
+            imp, alias = v
+            if (isinstance(imp, _ast.ImportFrom) and imp.module
+                    and not imp.level and alias.name == node.id):
+                return node.id
+        raise Unclassified((line, f"{node.id}, a name the walk reads as the "
+                                  "module's, is bound by the function"))
+
+    def spelled_any(self, node, names, line=0):
+        """The name of `names` that plain name `node` spells (spelled), or
+        None."""
+        for name in names:
+            if self.spelled(node, name, line):
+                return name
+        return None
+
+    def spelled_once(self, node, name, kinds=("param", "local"), line=0):
+        """Whether `node` is the plain name `name` bound exactly once by the
+        function, as one of `kinds` (a walk's own parameter or loop
+        target); refused when it is bound otherwise."""
+        if not (isinstance(node, _ast.Name) and node.id == name):
+            return False
+        line = line or getattr(node, "lineno", 0)
+        kind, _n = self.resolve(name, line)
+        if kind not in kinds:
+            raise Unclassified((line, f"{name} is not bound exactly once as "
+                                      f"{' or '.join(kinds)}"))
+        return True
+
+    def listed(self, node, table, line=0):
+        """The spelling of callee `node` when `table` lists it (a pure
+        call, a pure await, an opaque helper) and the walked function does
+        not bind its root, so it is the module's; None when `table` does
+        not list it; refused when it does and the function binds the root."""
+        name = _ast.unparse(node)
+        if name not in table:
+            return None
+        root = _root(node)
+        line = line or getattr(node, "lineno", 0)
+        if root is None or not self._module_object(root, line):
+            raise Unclassified((line, f"a call of {name}, a name the "
+                                      "function binds"))
+        return name
+
+    def _module_object(self, name, line=0):
+        """Whether `name` denotes the module's own object: the function does
+        not bind it, or binds it once by an import of that same object
+        (team_queue_poll's `import uuid as uuid_mod` beside the module's)."""
+        kind, v = self.resolve(name, line)
+        if kind == "module":
+            return True
+        if kind != "import":
+            return False
+        imp, alias = v
+        held = getattr(self.scope, name, _MISSING)
+        if isinstance(imp, _ast.Import):
+            if alias.asname is None and "." in alias.name:
+                return False
+            if held is _MISSING:
+                # a local import of a standard-library module under the
+                # listed spelling (`import uuid as uuid_mod`): it reaches no
+                # session
+                return alias.name.split(".")[0] in _sys.stdlib_module_names
+            return _importlib.import_module(alias.name) is held
+        if (isinstance(imp, _ast.ImportFrom) and imp.module and not imp.level
+                and held is not _MISSING):
+            return getattr(_importlib.import_module(imp.module), alias.name,
+                           _MISSING) is held
+        return False
+
+    def spelled_in(self, node, names, kinds=("param", "local"), line=0):
+        """The name of `names` that plain name `node` spells when the
+        function binds it exactly once as one of `kinds` (spelled_once);
+        None when it spells none of them."""
+        for name in names:
+            if self.spelled_once(node, name, kinds, line):
+                return name
+        return None
+
+    def same(self, a, b, kinds=("param", "local"), line=0):
+        """Whether plain names `a` and `b` spell one name the function binds
+        exactly once as one of `kinds` (a loop counter read back, a
+        variable compared with its own earlier binding)."""
+        if not (isinstance(a, _ast.Name) and isinstance(b, _ast.Name)
+                and a.id == b.id):
+            return False
+        return self.spelled_once(a, a.id, kinds, line)
+
+    def every_binding(self, name, kinds=("local",), line=0):
+        """Every binding of `name`, as nodes, for a walk that accounts for
+        each one itself (an attempt budget: opened, spent and floored by
+        name); refused when any binding is not one of `kinds`. The name is
+        then read as enumerated by `text` and `reads`."""
+        got = self.sites.get(name, ())
+        for kind, node in got:
+            if kind not in kinds:
+                raise Unclassified((line, f"{name} is bound as a {kind}; the "
+                                          f"walk reads it only as "
+                                          f"{' or '.join(kinds)}"))
+        self._enumerated.add(name)
+        return [node for _kind, node in got]
+
+    def _module_or_enumerated(self, x, line):
+        if x.id in self._enumerated:
+            return
+        if self.resolve(x.id, line)[0] != "module":
+            raise Unclassified((line, f"{x.id}, a name the walk reads as the "
+                                      "module's, is bound by the function"))
+
+    def text(self, node, line=0):
+        """The source text of `node` for a comparison against a fixed
+        expression (`range(1, FORMATION_MAX_ATTEMPTS + 1)`, `<budget> > 0`),
+        once every name it reads is the module's or was enumerated
+        (every_binding); refused otherwise."""
+        line = line or getattr(node, "lineno", 0)
+        for x in _ast.walk(node):
+            if isinstance(x, _ast.Name):
+                self._module_or_enumerated(x, line)
+        return _ast.unparse(node)
+
+    def reads(self, node, name, line=0):
+        """Whether `node` reads the plain name `name`, which is then the
+        module's or was enumerated (every_binding); refused otherwise."""
+        hit = [x for x in _ast.walk(node) if isinstance(x, _ast.Name)
+               and isinstance(x.ctx, _ast.Load) and x.id == name]
+        for x in hit:
+            self._module_or_enumerated(x, line or getattr(x, "lineno", 0))
+        return bool(hit)
+
+    def is_root(self, node):
+        """Whether plain name `node` is one of the session roots."""
+        return isinstance(node, _ast.Name) and node.id in self.roots()
+
+    def is_param(self, name):
+        """Whether the function binds `name` exactly once, as a parameter."""
+        got = self.sites.get(name, ())
+        return len(got) == 1 and got[0][0] == "param"
+
+    # --- the session ------------------------------------------------------
+
+    def _sessions(self):
+        return ((self.session,) if isinstance(self.session, str)
+                else tuple(self.session))
+
+    def roots(self):
+        """The names the session spellings start from ('db'; 'ctx' of
+        'ctx.db')."""
+        return frozenset(s.split(".")[0] for s in self._sessions())
+
+    def is_session(self, expr):
+        """Whether expression `expr` spells the session."""
+        return _ast.unparse(expr) in self._sessions()
+
+    def session_value(self, expr):
+        """Whether `expr` evaluates the session or a value it is reached
+        from: a session spelling, or a bare root name ('db', 'ctx')."""
+        return self.is_session(expr) or (
+            isinstance(expr, _ast.Name) and expr.id in self.roots())
+
+    def session_root_ok(self, expr, line=0):
+        """Refused unless the name session spelling `expr` starts from is
+        the walked function's own parameter, bound exactly once (finding
+        closed_walk:1005: the session through an alias)."""
+        root = _root(expr) if not isinstance(expr, _ast.Name) else expr.id
+        ok = self.is_param(root) if self.has_fn else self.count(root) == 0
+        if not ok:
+            raise Unclassified((line, f"the session {root} is not the "
+                                      "function's own parameter, bound once"))
+
+    def opaque_callee(self, func, opaque, line=0):
+        """The opaque helper plain name `func` calls: the scope's function
+        (callee), or else its definition when `opaque` maps names to the
+        definitions the caller reads separately."""
+        fn = self.callee(func, line)
+        if fn is None and isinstance(opaque, dict):
+            fn = opaque.get(func.id)
+        return fn
+
+    def session_argument(self, call, arg, fn, line=0):
+        """A session value passed as an argument of call `call` of function
+        `fn` is classified only when it binds `fn`'s parameter of the same
+        name (the helper's own session); refused otherwise (finding
+        closed_walk:1005: a plain parameter `session` took `db`)."""
+        name = _ast.unparse(arg).split(".")[-1]
+        if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            params = [x.arg for x in fn.args.posonlyargs + fn.args.args]
+        else:
+            params = (list(_inspect.signature(fn).parameters)
+                      if fn is not None else [])
+        bound = None
+        for i, a in enumerate(call.args):
+            if a is arg and i < len(params):
+                bound = params[i]
+        for k in call.keywords:
+            if k.value is arg:
+                bound = k.arg
+        if bound != name or not (isinstance(arg, _ast.Name)
+                                 or self.is_session(arg)):
+            raise Unclassified((line, f"the session as a value: "
+                                      f"{_ast.unparse(arg)} passed to "
+                                      f"{getattr(fn, '__name__', '?')}"))
+
+    # --- callees ----------------------------------------------------------
+
+    def callee(self, func, line=0):
+        """The Python function a callee expression names: a plain name the
+        function does not bind, or imports once (`from m import f`); a
+        module attribute (`_match_hold._hold_latch`) whose module name the
+        function does not bind; `<accessor>().f` of a module accessor. None
+        otherwise; a name bound more than once is refused."""
+        line = line or getattr(func, "lineno", 0)
+        obj = None
+        if isinstance(func, _ast.Name):
+            kind, v = self.resolve(func.id, line)
+            if kind == "import":
+                imp, alias = v
+                if not (isinstance(imp, _ast.ImportFrom) and imp.module
+                        and not imp.level):
+                    return None
+                obj = getattr(_importlib.import_module(imp.module),
+                              alias.name, None)
+            elif kind == "module" and v is not _MISSING:
+                obj = v
+        elif isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Name):
+            mod = self.module(func.value.id, line)
+            obj = getattr(mod, func.attr, None) if mod is not None else None
+        elif (isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Call)
+              and isinstance(func.value.func, _ast.Name) and not func.value.args
+              and not func.value.keywords):
+            mod = self.module_accessor(self.module(func.value.func.id, line))
+            obj = getattr(mod, func.attr, None) if mod is not None else None
+        obj = _inspect.unwrap(obj) if callable(obj) else None
+        return obj if _inspect.isfunction(obj) else None
+
+    @staticmethod
+    def module_accessor(fn):
+        """The module a module accessor returns: a plain function of no
+        parameters whose body is exactly `import <m>` then `return <m>`
+        (after an optional docstring), such as main._mrw_mod. None for
+        anything else."""
+        if not _inspect.isfunction(fn) or _inspect.signature(fn).parameters:
+            return None
+        try:
+            d = _helper_tree(fn)
+        except (Unclassified, OSError, TypeError):
+            return None
+        body = [s for s in d.body if not (isinstance(s, _ast.Expr)
+                                          and isinstance(s.value, _ast.Constant))]
+        if not (len(body) == 2 and isinstance(body[0], _ast.Import)
+                and len(body[0].names) == 1 and body[0].names[0].asname is None
+                and isinstance(body[1], _ast.Return)
+                and isinstance(body[1].value, _ast.Name)
+                and body[1].value.id == body[0].names[0].name):
+            return None
+        return _importlib.import_module(body[0].names[0].name)
+
+    def namedtuple_class(self, func, line=0):
+        """The class plain name `func` names when it is a class
+        collections.namedtuple made (finding closed_walk:759: a `_fields`
+        marker granted purity to a class whose own __new__ wrote): its only
+        base is tuple, it defines no __init__, and its __new__ is the one
+        namedtuple generates (evaluated in namedtuple's own namespace, not
+        a module's). None otherwise."""
+        if not isinstance(func, _ast.Name):
+            return None
+        obj = self.module(func.id, line or getattr(func, "lineno", 0))
+        if not (isinstance(obj, type) and obj.__bases__ == (tuple,)
+                and "__init__" not in vars(obj)):
+            return None
+        new = vars(obj).get("__new__")
+        new = getattr(new, "__func__", new)
+        g = getattr(new, "__globals__", None)
+        if not (isinstance(g, dict)
+                and g.get("__name__") == f"namedtuple_{obj.__name__}"
+                and g.get("_tuple_new") is tuple.__new__):
+            return None
+        return obj
+
+    # --- SQL --------------------------------------------------------------
+
+    def sql_texts(self, node, guarded=None):
+        """Every SQL text a `text(...)` argument can hold, or None: a string
+        constant; a module string the function does not bind; an f-string
+        whose formatted values are each a module string, a guarded name (its
+        collection's values) or a module table's item (the table's values),
+        in every combination (finding closed_walk:326: a placeholder hid a
+        guarded name in a function position, so the real value is
+        classified instead); or a `+` of these."""
+        guarded = guarded or {}
+        if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+            return [node.value]
+        if isinstance(node, _ast.Name):
+            if self.count(node.id):
+                # the function's own name: read with every one of its
+                # bindings by local_sql, never as the module's
+                return None
+            v = self.module(node.id, node.lineno)
+            return [v] if isinstance(v, str) else None
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
+            return _combine([self.sql_texts(node.left, guarded),
+                             self.sql_texts(node.right, guarded)])
+        if isinstance(node, _ast.JoinedStr):
+            parts = []
+            for v in node.values:
+                if isinstance(v, _ast.Constant):
+                    parts.append([v.value])
+                elif isinstance(v, _ast.FormattedValue):
+                    if v.format_spec is not None or v.conversion != -1:
+                        return None
+                    parts.append(self._formatted(v.value, guarded))
+                else:
+                    return None
+            return _combine(parts)
+        return None
+
+    def _formatted(self, inner, guarded):
+        if isinstance(inner, _ast.Name) and inner.id in guarded:
+            return list(guarded[inner.id])
+        if isinstance(inner, _ast.Name):
+            held = self.module(inner.id, inner.lineno)
+            return [held] if isinstance(held, str) else None
+        if isinstance(inner, _ast.Subscript) and isinstance(inner.value, _ast.Name):
+            table = self.module(inner.value.id, inner.lineno)
+            if isinstance(table, dict) and table and all(
+                    isinstance(x, str) and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
+                    for x in table.values()):
+                return sorted(set(table.values()))
+        return None
+
+    def guards(self, tree):
+        """{name: (ids of the nodes its guard proves it at, the values it may
+        hold)} for the names the function guards as identifiers before use:
+        a statement `if <name> not in <COLLECTION>: raise ...` (every path
+        of its body raises), where <name> is bound exactly once by the
+        function and never in the guard's own branches, and <COLLECTION> a
+        module tuple or frozenset the function does not bind or mutate,
+        holding only lower-case identifiers (finding closed_walk:501: a
+        rebinding in the guard's else, and a mutated list, kept their
+        proof). The proof covers the statements after the guard in its own
+        block, up to (not including) the first that stores the name
+        (finding closed_walk:345)."""
+        out = {}
+        blocks = []
+        for n in _ast.walk(tree):
+            for field in ("body", "orelse", "finalbody"):
+                b = getattr(n, field, None)
+                if isinstance(b, list) and b and isinstance(b[0], _ast.stmt):
+                    blocks.append(b)
+        for b in blocks:
+            for i, n in enumerate(b):
+                test = getattr(n, "test", None)
+                if not (isinstance(n, _ast.If) and isinstance(test, _ast.Compare)
+                        and isinstance(test.left, _ast.Name) and len(test.ops) == 1
+                        and isinstance(test.ops[0], _ast.NotIn)
+                        and isinstance(test.comparators[0], _ast.Name)
+                        and all_paths_raise(n.body)):
+                    continue
+                name = test.left.id
+                if self.count(name) != 1 or self.sites[name][0][0] not in (
+                        "param", "local"):
+                    continue
+                coll = self.module(test.comparators[0].id, n.lineno)
+                if not (isinstance(coll, (frozenset, tuple)) and coll
+                        and all(isinstance(x, str)
+                                and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
+                                for x in coll)):
+                    continue
+                ids, _vals = out.setdefault(name, (set(), tuple(sorted(set(coll)))))
+                for later in b[i + 1:]:
+                    if name in _body_bindings([later]):
+                        break
+                    ids.update(id(x) for x in _ast.walk(later))
+        return {k: (frozenset(ids), vals) for k, (ids, vals) in out.items()}
+
+    def local_sql(self, tree):
+        """{local name: [SQL texts]} for each name EVERY binding of which
+        is one this reads: an assignment of SQL sql_texts reads (directly,
+        as either arm of a conditional expression, or as
+        `<MODULE_TEMPLATE>.format(k=<sql or a conditional>)`, every
+        combination), or `<name> += <sql>` outside any loop (every text with
+        and without each suffix). A name with any other binding (a
+        parameter, a loop target, a mutation, a second kind) is left out,
+        so a local SQL name stands for a superset of every path's text."""
+        binds, suffixes, seen = {}, {}, {}
+        looped = {id(x) for lp in _ast.walk(tree)
+                  if isinstance(lp, (_ast.For, _ast.While, _ast.AsyncFor))
+                  for x in _ast.walk(lp)}
+
+        def arms(v):
+            if isinstance(v, _ast.IfExp):
+                a, b = self.sql_texts(v.body), self.sql_texts(v.orelse)
+                return None if a is None or b is None else a + b
+            return self.sql_texts(v)
+
+        for n in _ast.walk(tree):
+            if (isinstance(n, _ast.Assign) and len(n.targets) == 1
+                    and isinstance(n.targets[0], _ast.Name)):
+                name, v = n.targets[0].id, n.value
+                seen[name] = seen.get(name, 0) + 1
+                tmpl = (self.module(v.func.value.id, n.lineno)
+                        if isinstance(v, _ast.Call)
+                        and isinstance(v.func, _ast.Attribute)
+                        and v.func.attr == "format"
+                        and isinstance(v.func.value, _ast.Name) else None)
+                if isinstance(tmpl, str) and not v.args and all(
+                        k.arg for k in v.keywords):
+                    combos = [{}]
+                    for k in v.keywords:
+                        opts = arms(k.value)
+                        if opts is None:
+                            combos = None
+                            break
+                        combos = [dict(c, **{k.arg: o}) for c in combos for o in opts]
+                    texts = (None if combos is None
+                             else [tmpl.format(**c) for c in combos])
+                else:
+                    texts = arms(v)
+                binds.setdefault(name, []).append(texts)
+            elif (isinstance(n, _ast.AugAssign) and isinstance(n.op, _ast.Add)
+                  and isinstance(n.target, _ast.Name)):
+                name = n.target.id
+                seen[name] = seen.get(name, 0) + 1
+                s = self.sql_texts(n.value)
+                if id(n) in looped or s is None or len(s) != 1:
+                    binds.setdefault(name, []).append(None)
+                else:
+                    suffixes.setdefault(name, []).append(
+                        (n.lineno, n.col_offset, s[0]))
+        out = {}
+        for name in set(binds) | set(suffixes):
+            if seen.get(name) != self.count(name):
+                continue        # a binding this does not read
+            assigned = binds.get(name, [])
+            if not assigned or any(t is None for t in assigned):
+                continue
+            texts = [x for t in assigned for x in t]
+            for _line, _col, s in sorted(suffixes.get(name, [])):
+                texts = texts + [x + s for x in texts]
+            if len(texts) <= SQL_COMBINATIONS:
+                out[name] = texts
+        return out
+
+    def builder_texts(self, func, line=0, call=None, pure=None):
+        """The SQL texts a plain builder function can return, or [None].
+
+        First, read: every `return` of it read by sql_texts through its own
+        bindings (a name the builder binds is read as none), the builder
+        standing for the union of them all (finding closed_walk:441: a
+        builder was read by calling it on sampled keys, so an unsampled
+        branch was missed).
+
+        Otherwise, its whole argument domain, proved: the call `call` passes
+        one positional argument per parameter (no defaults, nothing else),
+        each parameter is bound once and read ONLY as the key of a module
+        dict (`_SERIES_TABLE[mode]`), so the builder can depend on it only
+        through those lookups and can return without raising only for a key
+        all of its tables hold; `pure(fn)` (the walk's plain_effects) finds
+        no effect in its body; and the builder is called on every
+        combination of those keys, each answer a str. Anything else is
+        [None]."""
+        fn = self.callee(func, line)
+        if fn is None or _inspect.iscoroutinefunction(fn):
+            return [None]
+        d = _helper_tree(fn)
+        b = Bindings(_inspect.getmodule(fn), d, session=self.session)
+        out = []
+        for r in _own_nodes(d, _ast.Return):
+            texts = b.sql_texts(r.value) if r.value is not None else None
+            if texts is None:
+                out = None
+                break
+            out.extend(texts)
+        if out:
+            return out
+        return b._builder_domain_texts(fn, d, call, pure) or [None]
+
+    def _builder_domain_texts(self, fn, d, call, pure):
+        a = d.args
+        params = [x.arg for x in a.posonlyargs + a.args]
+        if (call is None or pure is None or a.vararg or a.kwarg
+                or a.kwonlyargs or a.defaults or call.keywords
+                or len(call.args) != len(params)
+                or any(isinstance(x, _ast.Starred) for x in call.args)):
+            return None
+        keys = {p: None for p in params}
+        subs = {}
+        for x in _ast.walk(d):
+            if (isinstance(x, _ast.Subscript) and isinstance(x.slice, _ast.Name)
+                    and x.slice.id in keys):
+                subs[id(x.slice)] = x
+        for x in _ast.walk(d):
+            if not (isinstance(x, _ast.Name) and x.id in keys):
+                continue
+            if self.count(x.id) != 1 or not self.is_param(x.id):
+                return None
+            sub = subs.get(id(x))
+            table = (self.module(sub.value.id) if sub is not None
+                     and isinstance(sub.value, _ast.Name) else None)
+            # a plain dict: a subclass (a defaultdict) answers keys it
+            # does not hold
+            if not (isinstance(x.ctx, _ast.Load) and type(table) is dict):
+                return None
+            got = frozenset(table)
+            keys[x.id] = got if keys[x.id] is None else keys[x.id] & got
+        if any(v is None for v in keys.values()) or pure(fn):
+            return None
+        combos = [[]]
+        for p in params:
+            combos = [c + [k] for c in combos for k in sorted(keys[p], key=repr)]
+            if len(combos) > SQL_COMBINATIONS:
+                return None
+        out = []
+        for c in combos:
+            got = fn(*c)
+            if not isinstance(got, str):
+                return None
+            out.append(got)
+        return out
+
+    def execute_kind(self, call, lists, local=None, guarded=frozenset(),
+                     pure=None):
+        """'read', 'lock' or 'write' when `call` is `<session>.execute(
+        text(<sql>), <binds>)` with SQL sql_texts (or a local SQL name, or a
+        builder) reads in every combination and sql_kind classifies each;
+        raises Unclassified otherwise."""
+        first = call.args[0] if call.args else None
+        if not (isinstance(first, _ast.Call) and len(first.args) == 1
+                and not first.keywords and self.spelled(first.func, "text")):
+            raise Unclassified((call.lineno, "an execute of something other "
+                                             "than text(<sql>)"))
+        if any(isinstance(a, _ast.Starred) for a in call.args) or any(
+                k.arg is None for k in call.keywords):
+            raise Unclassified((call.lineno, "an execute with unpacked arguments"))
+        arg = first.args[0]
+        if isinstance(guarded, dict):
+            guarded = {n: vals for n, (ids, vals) in guarded.items()
+                       if id(call) in ids}
+        else:
+            guarded = {}
+        sqls = self.sql_texts(arg, guarded)
+        if sqls is None and isinstance(arg, _ast.Name) and local is not None:
+            sqls = local.get(arg.id) if self.count(arg.id) else None
+        elif (sqls is None and isinstance(arg, _ast.Call)
+              and isinstance(arg.func, _ast.Name) and not arg.keywords
+              and not any(isinstance(a, _ast.Starred) for a in arg.args)):
+            sqls = self.builder_texts(arg.func, call.lineno, arg, pure)
+        if not sqls or None in sqls:
+            raise Unclassified((call.lineno, "an execute whose SQL the walk "
+                                             "cannot read"))
+        try:
+            kinds = {sql_kind(s, lists) for s in sqls}
+        except Unclassified as e:
+            raise Unclassified((call.lineno, e.args[0][1])) from None
+        return ("write" if "write" in kinds else "lock" if "lock" in kinds
+                else "read")
+
+
+def _combine(parts):
+    """Every concatenation of one text from each list in `parts`; None when
+    any part is None or there are more than SQL_COMBINATIONS."""
+    out = [""]
+    for p in parts:
+        if p is None:
+            return None
+        out = [a + b for a in out for b in p]
+        if len(out) > SQL_COMBINATIONS:
+            return None
+    return out
+
+
+def _own_nodes(d, cls):
+    """The nodes of class `cls` in definition `d`'s body, outside any nested
+    definition or lambda."""
+    out, todo = [], list(d.body)
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                          _ast.ClassDef, _ast.Lambda)):
+            continue
+        if isinstance(n, cls):
+            out.append(n)
+        todo.extend(_ast.iter_child_nodes(n))
+    return out
+
+
+def finally_exits(stmts):
+    """The return, break and continue statements that leave the `finally`
+    block `stmts` (finding closed_walk:1217: `finally: return None` swallowed
+    a rollback-then-raise): a return anywhere in it outside a nested
+    definition, and a break or continue not inside a loop of its own."""
+    out = []
+
+    def scan(block, in_loop):
+        for st in block:
+            if isinstance(st, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                               _ast.ClassDef)):
+                continue
+            if isinstance(st, _ast.Return):
+                out.append(st)
+            elif isinstance(st, (_ast.Break, _ast.Continue)) and not in_loop:
+                out.append(st)
+            elif isinstance(st, (_ast.For, _ast.AsyncFor, _ast.While)):
+                scan(st.body, True)
+                scan(st.orelse, in_loop)
+            else:
+                for field in ("body", "orelse", "finalbody"):
+                    scan(getattr(st, field, None) or [], in_loop)
+                for h in getattr(st, "handlers", None) or []:
+                    scan(h.body, in_loop)
+                for c in getattr(st, "cases", None) or []:
+                    scan(c.body, in_loop)
+
+    scan(stmts, False)
+    return out
 
 
 def _root(expr):
@@ -323,7 +1085,7 @@ def sql_kind(sql, lists):
                 if prev == "into" or (prev in ("table", "exists") and head == "create"):
                     continue        # a table and its column list
             name = t[1]
-            if t[0] == "ident" and (name in lists.syntax or name == SQL_FV):
+            if t[0] == "ident" and name in lists.syntax:
                 continue
             funcs.append((name, t[0] == "qident"))
     named = {n for n, _q in funcs}
@@ -358,88 +1120,13 @@ def sql_kind(sql, lists):
     raise Unclassified((0, f"a SQL statement head off the allow-list ({head!r})"))
 
 
-# --- SQL text a call executes ---------------------------------------------
+# --- SQL text a call executes: wrappers over the resolver ----------------
 
 def sql_text(node, scope, guarded=frozenset(), bound=frozenset()):
-    """The SQL a `text(...)` argument holds: a string constant, a name bound
-    to a string at module level in `scope` and not bound by the enclosing
-    function (`bound`), an f-string whose formatted values read as
-    identifiers (never in the statement's head), or a `+` of these. None
-    when it is none of them."""
-    if isinstance(node, _ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, _ast.Name):
-        if node.id in bound:
-            return None
-        value = getattr(scope, node.id, None)
-        return value if isinstance(value, str) else None
-    if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
-        a, b = (sql_text(node.left, scope, guarded, bound),
-                sql_text(node.right, scope, guarded, bound))
-        return None if a is None or b is None else a + b
-    if isinstance(node, _ast.JoinedStr):
-        parts = []
-        for v in node.values:
-            if isinstance(v, _ast.Constant):
-                parts.append(v.value)
-            elif isinstance(v, _ast.FormattedValue):
-                if v.format_spec is not None or v.conversion != -1:
-                    return None
-                inner = v.value
-                held = (getattr(scope, inner.id, None)
-                        if isinstance(inner, _ast.Name)
-                        and inner.id not in bound else None)
-                table = (getattr(scope, inner.value.id, None)
-                         if isinstance(inner, _ast.Subscript)
-                         and isinstance(inner.value, _ast.Name)
-                         and inner.value.id not in bound
-                         else None)
-                if isinstance(held, str):
-                    parts.append(held)
-                elif isinstance(inner, _ast.Name) and inner.id in guarded:
-                    parts.append(f" {SQL_FV} ")
-                elif isinstance(table, dict) and table and all(
-                        isinstance(x, str) and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
-                        for x in table.values()):
-                    parts.append(f" {SQL_FV} ")
-                else:
-                    return None
-            else:
-                return None
-        text = "".join(parts)
-        first = text.split()[0] if text.split() else ""
-        return None if first == SQL_FV else text
-    return None
-
-
-def returned_sql(fn, scope):
-    """The SQL texts a plain module function returns, when every `return`
-    in it returns SQL sql_text can read; or, for a builder of one argument
-    that indexes module tables by it (`_SERIES_TABLE[mode]`), its own output
-    over every key those tables share. [None] otherwise."""
-    if fn is None or _inspect.iscoroutinefunction(fn):
-        return [None]
-    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(fn)))
-    rets = [n.value for n in _ast.walk(tree) if isinstance(n, _ast.Return)]
-    # its own bindings first (the class of finding closed_walk:322)
-    fb = bound_names(tree.body[0]) if tree.body and isinstance(
-        tree.body[0], (_ast.FunctionDef, _ast.AsyncFunctionDef)) else frozenset()
-    out = [sql_text(r, scope, bound=fb) if r is not None else None
-           for r in rets] or [None]
-    if None not in out:
-        return out
-    params = list(_inspect.signature(fn).parameters)
-    tables = [getattr(scope, n.value.id, None) for n in _ast.walk(tree)
-              if isinstance(n, _ast.Subscript) and isinstance(n.value, _ast.Name)
-              and isinstance(n.slice, _ast.Name) and len(params) == 1
-              and n.slice.id == params[0]]
-    if not tables or not all(isinstance(d, dict) and d for d in tables):
-        return [None]
-    keys = set(tables[0])
-    for d in tables[1:]:
-        keys &= set(d)
-    texts = [fn(k) for k in sorted(keys)]
-    return texts if texts and all(isinstance(x, str) for x in texts) else [None]
+    """The one SQL text a `text(...)` argument holds read in module `scope`
+    (Bindings.sql_texts), or None when it holds none or more than one."""
+    texts = Bindings(scope).sql_texts(node)
+    return texts[0] if texts and len(texts) == 1 else None
 
 
 def all_paths_raise(stmts):
@@ -457,133 +1144,28 @@ def all_paths_raise(stmts):
 
 
 def guarded_names(tree, scope):
-    """{name: the ids of the nodes its guard proves it at} for the names a
-    function guards as identifiers before use: a statement `if <name> not
-    in <MODULE_COLLECTION>: raise ...` (every path of its body raises), the
-    collection a module value holding only lower-case identifiers and not a
-    name the function binds. The proof covers the statements after the
-    guard in the guard's own block, up to (not including) the first one
-    that stores the name, and every node inside them: the guard dominates
-    them, and the value it checked is the value they read (finding
-    closed_walk:345: a name rebound after its guard kept its proof).
-    execute_kind counts a name as guarded only at a call inside its
-    proof."""
-    out = {}
-    fn = tree
-    if isinstance(tree, _ast.Module) and len(tree.body) == 1:
-        fn = tree.body[0]
-    bound = (bound_names(fn) if isinstance(
-        fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)) else frozenset())
-    blocks = []
-    for n in _ast.walk(tree):
-        for field in ("body", "orelse", "finalbody"):
-            b = getattr(n, field, None)
-            if isinstance(b, list) and b and isinstance(b[0], _ast.stmt):
-                blocks.append(b)
-    for b in blocks:
-        for i, n in enumerate(b):
-            test = getattr(n, "test", None)
-            if not (isinstance(n, _ast.If) and isinstance(test, _ast.Compare)
-                    and isinstance(test.left, _ast.Name) and len(test.ops) == 1
-                    and isinstance(test.ops[0], _ast.NotIn)
-                    and isinstance(test.comparators[0], _ast.Name)
-                    and test.comparators[0].id not in bound
-                    and all_paths_raise(n.body)):
-                continue
-            coll = getattr(scope, test.comparators[0].id, None)
-            if not (isinstance(coll, (set, frozenset, tuple, list, dict)) and coll
-                    and all(isinstance(x, str)
-                            and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
-                            for x in coll)):
-                continue
-            name = test.left.id
-            ids = out.setdefault(name, set())
-            for later in b[i + 1:]:
-                if name in _body_bindings([later]):
-                    break
-                ids.update(id(x) for x in _ast.walk(later))
-    return {k: frozenset(v) for k, v in out.items()}
-
-
-_sql_text = sql_text
+    """Bindings.guards of function `tree` (a definition, or a module of one)
+    in `scope`."""
+    fn = tree.body[0] if (isinstance(tree, _ast.Module)
+                          and len(tree.body) == 1) else tree
+    return Bindings(scope, fn if isinstance(
+        fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)) else None).guards(tree)
 
 
 def local_sql(tree, scope):
-    """{local name: [SQL texts]} for each name a function binds only to SQL
-    sql_text can read, directly, as either arm of a conditional expression,
-    or as `<MODULE_TEMPLATE>.format(k=<sql or a conditional>)` (every
-    combination of the arms), each optionally extended by `<name> += <sql>`
-    outside any loop (every text with and without each suffix, a superset of
-    what any path builds). A name stored any other way (including by a
-    mutating method, or by += inside a loop) is left out."""
-    binds = {}
-    suffixes = {}
+    """Bindings.local_sql of function `tree` (a definition, or a module of
+    one) in `scope`."""
     fn = tree.body[0] if (isinstance(tree, _ast.Module)
                           and len(tree.body) == 1) else tree
-    bound = (bound_names(fn) if isinstance(
-        fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)) else frozenset())
-
-    def sql_text(v, scope):
-        return _sql_text(v, scope, bound=bound)
-
-    looped = {id(x) for lp in _ast.walk(tree)
-              if isinstance(lp, (_ast.For, _ast.While, _ast.AsyncFor))
-              for x in _ast.walk(lp)}
-
-    def arms(v):
-        return ([sql_text(v.body, scope), sql_text(v.orelse, scope)]
-                if isinstance(v, _ast.IfExp) else [sql_text(v, scope)])
-
-    for n in _ast.walk(tree):
-        if isinstance(n, _ast.Assign):
-            for tg in n.targets:
-                if not isinstance(tg, _ast.Name):
-                    for nm in stores(tg):
-                        binds.setdefault(nm, []).append(None)
-                    continue
-                v = n.value
-                tmpl = (getattr(scope, v.func.value.id, None)
-                        if isinstance(v, _ast.Call)
-                        and isinstance(v.func, _ast.Attribute)
-                        and isinstance(v.func.value, _ast.Name)
-                        and v.func.value.id not in bound
-                        and isinstance(v.func, _ast.Attribute)
-                        and v.func.attr == "format"
-                        and isinstance(v.func.value, _ast.Name) else None)
-                if isinstance(tmpl, str) and not v.args and all(
-                        k.arg for k in v.keywords):
-                    combos = [{}]
-                    for k in v.keywords:
-                        combos = [dict(c, **{k.arg: o})
-                                  for c in combos for o in arms(k.value)]
-                    texts = [None if None in c.values() else tmpl.format(**c)
-                             for c in combos]
-                    binds.setdefault(tg.id, []).extend(texts)
-                else:
-                    binds.setdefault(tg.id, []).extend(arms(v))
-        elif (isinstance(n, _ast.AugAssign) and isinstance(n.op, _ast.Add)
-              and isinstance(n.target, _ast.Name) and id(n) not in looped
-              and sql_text(n.value, scope) is not None):
-            suffixes.setdefault(n.target.id, []).append(
-                (n.lineno, n.col_offset, sql_text(n.value, scope)))
-        elif not isinstance(n, (_ast.Name,)):
-            if isinstance(n, (_ast.AugAssign, _ast.AnnAssign, _ast.For,
-                              _ast.Delete, _ast.Call, _ast.comprehension)):
-                for nm in stores(n):
-                    binds.setdefault(nm, []).append(None)
-    for name, adds in suffixes.items():
-        texts = binds.setdefault(name, [None])
-        for _line, _col, s in sorted(adds):
-            texts = texts + [None if x is None else x + s for x in texts]
-        binds[name] = texts
-    return {k: v for k, v in binds.items() if None not in v}
+    if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+        return Bindings(scope, fn).local_sql(tree)
+    return Bindings(scope, stmts=getattr(tree, "body", [])).local_sql(tree)
 
 
 def is_session(expr, session="db"):
     """Whether expression `expr` spells the session: `session` is one
     spelling ('db') or a tuple of them (('db', 'ctx.db'))."""
-    text = _ast.unparse(expr)
-    return text == session if isinstance(session, str) else text in session
+    return Bindings(None, session=session).is_session(expr)
 
 
 def is_db_call(call, attr, session="db"):
@@ -593,83 +1175,19 @@ def is_db_call(call, attr, session="db"):
 
 
 def execute_kind(call, scope, lists, local=None, guarded=frozenset(),
-                 bound=frozenset()):
-    """'read', 'lock' or 'write' when `call` is `<session>.execute(text(<sql>),
-    <binds>)` with SQL sql_text (or a local SQL name, or a SQL builder) can
-    read and sql_kind classifies; raises Unclassified otherwise."""
-    if not (call.args and isinstance(call.args[0], _ast.Call)
-            and isinstance(call.args[0].func, _ast.Name)
-            and call.args[0].func.id == "text"
-            and len(call.args[0].args) == 1 and not call.args[0].keywords):
-        raise Unclassified((call.lineno, "an execute of something other than "
-                                         "text(<sql>)"))
-    if any(isinstance(a, _ast.Starred) for a in call.args) or any(
-            k.arg is None for k in call.keywords):
-        raise Unclassified((call.lineno, "an execute with unpacked arguments"))
-    arg = call.args[0].args[0]
-    if isinstance(guarded, dict):
-        guarded = frozenset(n for n, ids in guarded.items() if id(call) in ids)
-    sqls = [sql_text(arg, scope, guarded, bound)]
-    if sqls == [None] and isinstance(arg, _ast.Name) and local is not None:
-        sqls = local.get(arg.id, [None])
-    elif (sqls == [None] and isinstance(arg, _ast.Call)
-          and isinstance(arg.func, _ast.Name) and arg.func.id not in bound
-          and not arg.keywords
-          and not any(isinstance(a, _ast.Starred) for a in arg.args)):
-        sqls = returned_sql(resolve_callee(arg.func, scope), scope)
-    if not sqls or None in sqls:
-        raise Unclassified((call.lineno, "an execute whose SQL the walk cannot "
-                                         "read"))
-    try:
-        kinds = {sql_kind(s, lists) for s in sqls}
-    except Unclassified as e:
-        raise Unclassified((call.lineno, e.args[0][1])) from None
-    return ("write" if "write" in kinds else "lock" if "lock" in kinds
-            else "read")
+                 bindings=None):
+    """Bindings.execute_kind under `bindings` (the walked function's), or
+    module `scope`'s when none is given."""
+    return (bindings or Bindings(scope)).execute_kind(call, lists, local, guarded)
 
 
-def module_accessor(fn):
-    """The module a module accessor returns: a plain function of no
-    parameters whose body is exactly `import <m>` then `return <m>` (after
-    an optional docstring), such as main._mrw_mod. None for anything else."""
-    if not _inspect.isfunction(fn) or _inspect.signature(fn).parameters:
-        return None
-    try:
-        d = _helper_tree(fn)
-    except (Unclassified, OSError, TypeError):
-        return None
-    body = [s for s in d.body if not (isinstance(s, _ast.Expr)
-                                      and isinstance(s.value, _ast.Constant))]
-    if not (len(body) == 2 and isinstance(body[0], _ast.Import)
-            and len(body[0].names) == 1 and body[0].names[0].asname is None
-            and isinstance(body[1], _ast.Return)
-            and isinstance(body[1].value, _ast.Name)
-            and body[1].value.id == body[0].names[0].name):
-        return None
-    return _importlib.import_module(body[0].names[0].name)
+module_accessor = Bindings.module_accessor
 
 
-def resolve_callee(func, scope, imports=None):
-    """The Python function a callee expression names in `scope` (a plain
-    name, or a module attribute such as `_match_hold._hold_latch`), else
-    None."""
-    if isinstance(func, _ast.Name) and imports and func.id in imports:
-        mod, attr = imports[func.id]
-        obj = getattr(_importlib.import_module(mod), attr, None)
-    elif isinstance(func, _ast.Name):
-        obj = getattr(scope, func.id, None)
-    elif isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Name):
-        mod = getattr(scope, func.value.id, None)
-        obj = getattr(mod, func.attr, None) if mod is not None else None
-    elif (isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Call)
-          and isinstance(func.value.func, _ast.Name) and not func.value.args
-          and not func.value.keywords):
-        mod = module_accessor(getattr(scope, func.value.func.id, None))
-        obj = getattr(mod, func.attr, None) if mod is not None else None
-    else:
-        return None
-    obj = _inspect.unwrap(obj) if callable(obj) else None
-    return obj if _inspect.isfunction(obj) else None
+def resolve_callee(func, scope, bindings=None):
+    """Bindings.callee under `bindings` (the walked function's), or module
+    `scope`'s when none is given."""
+    return (bindings or Bindings(scope)).callee(func)
 
 
 # --- the visitor ----------------------------------------------------------
@@ -756,12 +1274,6 @@ def plain_effects(fn, policy):
     return helper_effects(fn, sub)
 
 
-def _plain_class(obj):
-    """A named tuple class: constructing one runs no code of its own."""
-    return (isinstance(obj, type) and issubclass(obj, tuple)
-            and isinstance(getattr(obj, "_fields", None), tuple))
-
-
 def call_arguments(call):
     """Every argument expression of `call`, by kind, in source order:
     ('positional' | 'star' | 'keyword' | 'double-star', expression)."""
@@ -781,23 +1293,26 @@ class Visitor:
     rollback>' (a transaction end; only the helper walk permits these, at
     named shapes), 'callback:<param>' (an awaited callback parameter, only in
     a helper body), or 'call' (a plain call); effect 'read', 'lock', 'write'
-    or 'pure'."""
+    or 'pure'. Every name it gives a meaning to is resolved by `bindings`,
+    the walked function's Bindings (one binding per name, ruling
+    REHEARSAL-FOUR-R5 item 2)."""
 
-    def __init__(self, policy, local=None, guarded=frozenset(), imports=None,
-                 params=(), permitted=frozenset(), helper=None, opaque=frozenset(),
-                 bound=frozenset()):
+    def __init__(self, policy, local=None, guarded=frozenset(), params=(),
+                 permitted=frozenset(), helper=None, opaque=frozenset(),
+                 bindings=None):
         self.p = policy
-        # The names the enclosing function binds (bound_names): a callee or
-        # SQL name among them is never resolved in the module.
-        self.bound = frozenset(bound)
+        self.b = (bindings if bindings is not None
+                  else Bindings(policy.scope, session=policy.session))
         self.local = local
         self.guarded = guarded
-        self.imports = imports or {}
         self.params = tuple(params)
         self.permitted = permitted
         self.helper = helper
-        self.opaque = frozenset(opaque)
-        self.local_defs = set()
+        # opaque helpers: names, or {name: its definition} when the caller
+        # reads helpers that are not functions of the scope
+        self.opaque = opaque if isinstance(opaque, dict) else frozenset(opaque)
+        # the local function definitions the helper walk walked (by id)
+        self.walked_defs = set()
         self.effects = []
         # ids of the nodes inside a try body that has handlers, in the
         # function def_effects walks: a rollback-then-raise there is caught
@@ -841,10 +1356,46 @@ class Visitor:
             raise Unclassified((0, what))
         raise Unclassified((getattr(node, "lineno", 0), what))
 
+    def _resolve(self, n, name):
+        """Bindings.resolve, a refusal reported by this visitor."""
+        try:
+            return self.b.resolve(name, getattr(n, "lineno", 0))
+        except Unclassified as e:
+            self.fail(n, e.args[0][1])
+
+    def _check(self, n, how, *args):
+        """A resolver call `how(*args)`, a refusal reported by this visitor."""
+        try:
+            return how(*args)
+        except Unclassified as e:
+            self.fail(n, e.args[0][1])
+
+    def _helper_args(self, n, call, fn):
+        """Every argument of the awaited call `call` of walked helper `fn`:
+        a session value is classified only as fn's same-named parameter
+        (Bindings.session_argument), anything unpacked is refused, every
+        other argument is visited."""
+        for kind, a in call_arguments(call):
+            if kind in ("star", "double-star"):
+                self.fail(n, f"a call of {getattr(fn, '__name__', '?')} with "
+                             "unpacked arguments")
+            if self.b.session_value(a):
+                self._check(n, self.b.session_root_ok, a, n.lineno)
+                self._check(n, self.b.session_argument, call, a, fn, n.lineno)
+                self._spelled(a)
+            else:
+                self.visit(a)
+
     def visit(self, n):
         rule = _rule(n)
         self._walked_nodes.add(id(n))
         self.p.met["node " + type(n).__name__] += 1
+        if isinstance(n, (_ast.Name, _ast.Attribute)) and self.b.session_value(n):
+            # The session is reached only as the receiver of a session call
+            # the walk reads, or as the same-named parameter of a helper it
+            # walks (finding closed_walk:1005: `s = db; s.add(row)`, and a
+            # plain function's `session.add(row)` given `db`).
+            self.fail(n, f"the session as a value: {_ast.unparse(n)}")
         if rule == "leaf":
             return
         if rule == "refuse" or rule == "stmt":
@@ -853,11 +1404,18 @@ class Visitor:
             if isinstance(n, _ast.Attribute) and n.attr in TXN_ATTRS:
                 self.fail(n, f"a transaction word in a spelling this walk does "
                              f"not read (.{n.attr})")
-            if isinstance(n, _ast.Attribute) and is_session(n.value, self.p.session):
+            if isinstance(n, _ast.Attribute) and self.b.is_session(n.value):
                 # A session's attribute is reached only as a callee the walk
                 # reads (finding closed_walk:699: `str = db.add`).
                 self.fail(n, f"a session attribute outside a call of it: "
                              f"{_ast.unparse(n)}")
+            if isinstance(n, _ast.Attribute) and self.b.is_root(n.value):
+                # An attribute read off a session root that is not itself a
+                # session spelling (`ctx.closed`): the root is the walked
+                # function's own parameter, read whole.
+                self._check(n, self.b.session_root_ok, n.value, n.lineno)
+                self._walked_nodes.add(id(n.value))
+                return
             for c in _ast.iter_child_nodes(n):
                 self.visit(c)
             return
@@ -888,60 +1446,62 @@ class Visitor:
             return
         self.fail(n, f"a rule the walk does not know: {rule}")
 
+    def _pure(self, n, name, written):
+        self.p.met["call " + name] += 1
+        self._spelled(n.func)
+        for a in written:
+            self.visit(a)
+        self.effects.append(("call", "pure"))
+
+    def _plain_args(self, n, name, args):
+        for kind, a in args:
+            if kind in ("star", "double-star"):
+                self.fail(n, f"a call of {name} with unpacked arguments")
+            self.visit(a)
+
     # A call: the callee shape, then every argument kind.
     def call(self, n):
         name = _ast.unparse(n.func)
         args = call_arguments(n)
         # the argument nodes as written (a `*x` visits its Starred node)
         written = list(n.args) + [k.value for k in n.keywords]
-        if isinstance(n.func, _ast.Name) and n.func.id in self.local_defs:
-            # A plain function the helper defines: its defaults and body were
-            # walked at its definition, through the same table.
-            for kind, a in args:
-                if kind in ("star", "double-star"):
-                    self.fail(n, f"a call of {name} with unpacked arguments")
-                self.visit(a)
-            self._spelled(n.func)
-            self.p.met["local function call"] += 1
-            self.effects.append(("call", "pure"))
-            return
-        if (isinstance(n.func, (_ast.Name, _ast.Attribute))
-                and _root(n.func) in self.bound
-                and not (isinstance(n.func, _ast.Attribute)
-                         and (is_session(n.func.value, self.p.session)
-                              or name not in self.p.pure_calls))):
-            # A callee spelled from a name the function binds is not the
-            # module's (finding closed_walk:699: `str = ...; str(row)`).
-            self.fail(n, f"a call of {name}, a name the function binds")
         if isinstance(n.func, _ast.Name):
-            if name in self.p.pure_calls:
-                self.p.met["call " + name] += 1
+            kind, what = self._resolve(n, n.func.id)
+            if kind == "def" and id(what) in self.walked_defs:
+                # A plain function the helper defines, bound exactly once:
+                # its defaults and body were walked at its definition,
+                # through the same table (finding closed_walk:897: a local
+                # function rebound kept this reading).
+                self._plain_args(n, name, args)
                 self._spelled(n.func)
-                for a in written:
-                    self.visit(a)
+                self.p.met["local function call"] += 1
                 self.effects.append(("call", "pure"))
                 return
-            if _plain_class(getattr(self.p.scope, n.func.id, None)):
-                for kind, a in args:
-                    if kind in ("star", "double-star"):
-                        self.fail(n, f"a call of {name} with unpacked arguments")
-                    self.visit(a)
+            if kind not in ("module", "import"):
+                # A callee spelled from a name the function binds is not the
+                # module's (finding closed_walk:699: `str = ...; str(row)`).
+                self.fail(n, f"a call of {name}, a name the function binds")
+            if kind == "module" and self._check(
+                    n, self.b.listed, n.func, self.p.pure_calls) is not None:
+                self._pure(n, name, written)
+                return
+            if kind == "module" and self._check(
+                    n, self.b.namedtuple_class, n.func) is not None:
+                self._plain_args(n, name, args)
                 self._spelled(n.func)
                 self.p.met["named tuple " + name] += 1
                 self.effects.append(("call", "pure"))
                 return
-            fn = resolve_callee(n.func, self.p.scope, self.imports)
+            fn = self._check(n, self.b.callee, n.func)
             if fn is None or _inspect.iscoroutinefunction(fn):
                 self.fail(n, f"a call this walk does not classify: {name}")
-            for kind, a in args:
-                if kind in ("star", "double-star"):
-                    self.fail(n, f"a call of {name} with unpacked arguments")
-                self.visit(a)
+            # a session value only as fn's same-named parameter
+            self._helper_args(n, n, fn)
             # Its whole body through this visitor's table (finding
             # closed_walk:712: a source grep let `db.add(row)` through): a
             # plain function takes no effect at all. A module accessor
             # (`import m; return m`, module_accessor) is read by its shape.
-            eff = (frozenset() if module_accessor(fn) is not None
+            eff = (frozenset() if self.b.module_accessor(fn) is not None
                    else plain_effects(fn, self.p))
             if eff:
                 self.fail(n, f"a plain call of {name}, which takes "
@@ -951,30 +1511,23 @@ class Visitor:
             self.effects.append(("call", "pure"))
             return
         if isinstance(n.func, _ast.Attribute):
-            if name in self.p.pure_calls:
-                self.p.met["call " + name] += 1
-                self._spelled(n.func)
-                for a in written:
-                    self.visit(a)
-                self.effects.append(("call", "pure"))
+            root = _root(n.func)
+            if self._check(n, self.b.listed, n.func,
+                           self.p.pure_calls) is not None:
+                self._pure(n, name, written)
                 return
-            if is_session(n.func.value, self.p.session):
+            if self.b.is_session(n.func.value):
+                self._check(n, self.b.session_root_ok, n.func.value, n.lineno)
                 self._spelled(n.func)
                 if n.func.attr == "expire":
                     # Marks loaded rows stale; their next read is a SELECT.
-                    for kind, a in args:
-                        if kind in ("star", "double-star"):
-                            self.fail(n, f"a call of {name} with unpacked arguments")
-                        self.visit(a)
+                    self._plain_args(n, name, args)
                     self.p.met["session .expire"] += 1
                     self.effects.append(("sql", "read"))
                     return
                 if n.func.attr in ("add", "add_all"):
                     # An ORM row added to the session: a write at its flush.
-                    for kind, a in args:
-                        if kind in ("star", "double-star"):
-                            self.fail(n, f"a call of {name} with unpacked arguments")
-                        self.visit(a)
+                    self._plain_args(n, name, args)
                     self.p.met["session ." + n.func.attr] += 1
                     self.effects.append(("sql", "write"))
                     return
@@ -982,18 +1535,14 @@ class Visitor:
             acc = n.func.value
             if (isinstance(acc, _ast.Call) and isinstance(acc.func, _ast.Name)
                     and not acc.args and not acc.keywords
-                    and acc.func.id not in self.bound
-                    and module_accessor(resolve_callee(
-                        acc.func, self.p.scope, self.imports)) is not None):
+                    and self.b.module_accessor(self._check(
+                        n, self.b.callee, acc.func)) is not None):
                 # `<accessor>().f(...)`: a plain function of the module the
                 # accessor returns, its body walked like any plain callee.
-                fn = resolve_callee(n.func, self.p.scope, self.imports)
+                fn = self._check(n, self.b.callee, n.func)
                 if fn is None or _inspect.iscoroutinefunction(fn):
                     self.fail(n, f"a call this walk does not classify: {name}")
-                for kind, a in args:
-                    if kind in ("star", "double-star"):
-                        self.fail(n, f"a call of {name} with unpacked arguments")
-                    self.visit(a)
+                self._plain_args(n, name, args)
                 eff = plain_effects(fn, self.p)
                 if eff:
                     self.fail(n, f"a plain call of {name}, which takes "
@@ -1006,7 +1555,14 @@ class Visitor:
                 self.fail(n, f"a method call this walk does not classify: {name}")
             self.p.met["method ." + n.func.attr] += 1
             self._walked_nodes.add(id(n.func))
-            self.visit(n.func.value)
+            if self.b.is_root(n.func.value):
+                # a listed method of a session root (`ctx.seat_of(pid)`):
+                # the root is the function's own parameter, read whole as
+                # the receiver, never as a value
+                self._check(n, self.b.session_root_ok, n.func.value, n.lineno)
+                self._walked_nodes.add(id(n.func.value))
+            else:
+                self.visit(n.func.value)
             for a in written:
                 self.visit(a)
             self.effects.append(("call", "pure"))
@@ -1027,6 +1583,8 @@ class Visitor:
         self._walked_nodes.add(id(call))
         self._spelled(call.func)
         s = self.p.session
+        if isinstance(call.func, _ast.Attribute) and self.b.is_session(call.func.value):
+            self._check(n, self.b.session_root_ok, call.func.value, n.lineno)
         for end in ("commit", "rollback"):
             if is_db_call(call, end, s):
                 if id(n) not in self.permitted:
@@ -1050,49 +1608,57 @@ class Visitor:
         if is_db_call(call, "execute", s):
             for _kind, a in call_arguments(call):
                 self.visit(a)
-            self.effects.append(("sql", execute_kind(
-                call, self.p.scope, self.p.sql, self.local, self.guarded,
-                self.bound)))
+            self.effects.append(("sql", self._check(
+                n, self.b.execute_kind, call, self.p.sql, self.local,
+                self.guarded, lambda f: plain_effects(f, self.p))))
             self.p.met["execute"] += 1
             return
         name = _ast.unparse(call.func)
-        if (_root(call.func) in self.bound
-                and not (isinstance(call.func, _ast.Name)
-                         and call.func.id in self.params + tuple(self.opaque))):
+        root = _root(call.func)
+        kind = self._resolve(n, root)[0] if root is not None else "module"
+        callback = (kind == "param" and self._check(
+            n, self.b.spelled_in, call.func, self.params, ("param",))
+            is not None)
+        if kind not in ("module", "import") and not callback:
             # A callee spelled from a name the function binds is not the
             # module's (finding closed_walk:699).
             self.fail(n, f"an await of {name}, a name the function binds")
-        if name in self.p.pure_awaits:
+        if kind == "module" and self._check(
+                n, self.b.listed, call.func, self.p.pure_awaits) is not None:
             for _kind, a in call_arguments(call):
                 self.visit(a)
             self.effects.append(("call", "pure"))
             return
-        if isinstance(call.func, _ast.Name) and call.func.id in self.params:
+        if callback:
             # A callback parameter of the helper being walked: classified at
-            # each call site (checked_callbacks).
-            for _kind, a in call_arguments(call):
-                self.visit(a)
-            self.effects.append((f"callback:{call.func.id}", "pure"))
+            # each call site (checked_callbacks). A session value passed to
+            # it reaches the callback's own parameter, which its walk reads
+            # under its own bindings: a parameter not spelled as a session
+            # takes no session call there.
+            for kind, a in call_arguments(call):
+                if kind in ("star", "double-star"):
+                    self.fail(n, f"a call of {_ast.unparse(call.func)} with "
+                                 "unpacked arguments")
+                if self.b.session_value(a):
+                    self._check(n, self.b.session_root_ok, a, n.lineno)
+                    self._spelled(a)
+                else:
+                    self.visit(a)
+            self.effects.append((f"callback:{_ast.unparse(call.func)}", "pure"))
             return
-        if not isinstance(call.func, (_ast.Name, _ast.Attribute)):
-            self.fail(n, f"an await of a computed callee: {name}")
-        if isinstance(call.func, _ast.Name) and call.func.id in self.opaque:
+        if (isinstance(call.func, _ast.Name) and self._check(
+                n, self.b.listed, call.func, self.opaque) is not None):
             # A helper whose own shape the caller reads separately (the team
             # resolver's relock helper): its arguments are classified here,
             # its body there.
-            for kind, a in call_arguments(call):
-                if kind in ("star", "double-star"):
-                    self.fail(n, f"a call of {name} with unpacked arguments")
-                self.visit(a)
+            self._helper_args(n, call, self._check(
+                n, self.b.opaque_callee, call.func, self.opaque))
             self.effects.append((f"helper:{name}", "opaque"))
             return
-        fn = resolve_callee(call.func, self.p.scope, self.imports)
+        fn = self._check(n, self.b.callee, call.func)
         if fn is None or not _inspect.iscoroutinefunction(fn):
             self.fail(n, f"an awaited call this walk does not classify: {name}")
-        for kind, a in call_arguments(call):
-            if kind in ("star", "double-star"):
-                self.fail(n, f"a call of {fn.__name__} with unpacked arguments")
-            self.visit(a)
+        self._helper_args(n, call, fn)
         if self.p.helper_hook is not None and self.helper is None:
             self.p.met["helper by the policy's hook"] += 1
             self.effects.append((f"helper:{fn.__name__}", self.p.helper_hook(fn)))
@@ -1114,11 +1680,13 @@ class Visitor:
 
 
 def expr_effects(node, policy, local=None, guarded=frozenset(),
-                 opaque=frozenset(), bound=frozenset()):
-    """The (shape, effect) list of evaluating `node` (Visitor); raises
-    Unclassified naming the construct and its line."""
+                 opaque=frozenset(), bindings=None):
+    """The (shape, effect) list of evaluating `node` (Visitor) under
+    `bindings`, the enclosing function's (finding a1:665: the formation
+    walk's expressions resolved names in the module); raises Unclassified
+    naming the construct and its line."""
     return list(Visitor(policy, local, guarded, opaque=opaque,
-                        bound=bound).accept(node).effects)
+                        bindings=bindings).accept(node).effects)
 
 
 def checked_callbacks(call, fn, effects, line):
@@ -1190,18 +1758,17 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
     sub.helpers = policy.helpers
     sub.walking = policy.walking
     sub.met = policy.met
-    imports = {}
     for n in _ast.walk(d):
-        if isinstance(n, _ast.ImportFrom):
-            if not n.module or n.level:
-                raise Unclassified((0, f"{fn.__name__}: a relative import"))
-            for a in n.names:
-                imports[a.asname or a.name] = (n.module, a.name)
+        if isinstance(n, _ast.ImportFrom) and (not n.module or n.level):
+            raise Unclassified((0, f"{fn.__name__}: a relative import"))
+    # The helper's own bindings: every name the walk reads in it resolves
+    # there, one binding per name (ruling REHEARSAL-FOUR-R5 item 2).
+    b = Bindings(scope, d, session=policy.session)
     params = [a.arg for a in d.args.posonlyargs + d.args.args + d.args.kwonlyargs]
     if d.args.vararg or d.args.kwarg:
         raise Unclassified((0, f"{fn.__name__} takes *args or **kwargs"))
-    guarded = guarded_names(d, scope)
-    local = local_sql(d, scope)
+    guarded = b.guards(d)
+    local = b.local_sql(d)
     permitted = set()
     s = policy.session
     caught = frozenset(id(x) for t in _ast.walk(d)
@@ -1231,8 +1798,8 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
         raise Unclassified((0, f"{fn.__name__}: a named end that is not an "
                                "awaited commit or rollback of its body"))
     permitted.update(named_ends)
-    v = Visitor(sub, local, guarded, imports, params, frozenset(permitted), fn,
-                opaque, bound_names(d) - set(imports))
+    v = Visitor(sub, local, guarded, params, frozenset(permitted), fn,
+                opaque, bindings=b)
     v.caught = caught
     effects = set()
     named = d.args.posonlyargs + d.args.args
@@ -1314,6 +1881,12 @@ def _helper_block(v, stmts, effects):
             _helper_block(v, st.body, effects)
             _helper_block(v, st.orelse, effects)
         elif isinstance(st, _ast.Try):
+            # A return, break or continue that leaves a finally discards the
+            # exception in flight (finding closed_walk:1217: `finally:
+            # return None` swallowed a rollback-then-raise).
+            for x in finally_exits(st.finalbody):
+                v.fail(x, f"{v.helper.__name__}: a {type(x).__name__.lower()} "
+                          "inside a finally")
             _helper_block(v, st.body, effects)
             for h in st.handlers:
                 if h.type is not None:
@@ -1359,7 +1932,7 @@ def _helper_block(v, stmts, effects):
                            "or yields")
             v.p.met["helper local function"] += 1
             _helper_block(v, st.body, effects)
-            v.local_defs.add(st.name)
+            v.walked_defs.add(id(st))
         elif isinstance(st, _ast.Global):
             # A module-level cache the helper refreshes (the service-account
             # uuid cache): a process value, not a session effect.

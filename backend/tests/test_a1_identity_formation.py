@@ -510,18 +510,50 @@ def test_the_poll_reacquires_after_the_inversion_loop_commit():
     )
 
 
-def _txn_end(node):
+def _txn_end(node, b):
     """'commit' or 'rollback' when `node` is the statement `await db.commit()`
-    or `await db.rollback()`, else None."""
+    or `await db.rollback()`, else None; `db` read through `b`, the walked
+    function's closed_walk.Bindings, as its own parameter bound once
+    (ruling REHEARSAL-FOUR-R5, fix 1)."""
     call = (node.value.value if isinstance(node, _ast.Expr)
             and isinstance(node.value, _ast.Await) else None)
     if (isinstance(call, _ast.Call) and not call.args and not call.keywords
             and isinstance(call.func, _ast.Attribute)
-            and isinstance(call.func.value, _ast.Name)
-            and call.func.value.id == "db"
+            and b.spelled_once(call.func.value, "db", ("param",))
             and call.func.attr in ("commit", "rollback")):
         return call.func.attr
     return None
+
+
+def _handler_bindings(tree, scope):
+    """closed_walk.Bindings of the one definition `tree` (a parsed handler
+    source) holds: the one resolver every spelling the a1 walk reads goes
+    through (ruling REHEARSAL-FOUR-R5, fix 1); refused for a source that is
+    not exactly one definition."""
+    if not (len(tree.body) == 1 and isinstance(
+            tree.body[0], (_ast.FunctionDef, _ast.AsyncFunctionDef))):
+        raise Unclassified((0, "a walked source that is not one definition"))
+    return _cw.Bindings(scope, tree.body[0])
+
+
+def _binding_problems(b, module=(), line=0):
+    """(line, why) for each of `module` that the walked function binds (the
+    walk reads each as the module's), and for a session `db` that is not its
+    own parameter bound once."""
+    out = []
+    for name in module:
+        try:
+            kind, _v = b.resolve(name, line)
+        except Unclassified as e:
+            out.append(e.args[0])
+            continue
+        if kind != "module":
+            out.append((line, f"{name}, a name the walk reads as the "
+                              "module's, is bound by the function"))
+    if not b.is_param("db"):
+        out.append((line, "the session db is not the walked function's own "
+                          "parameter, bound once"))
+    return out
 
 
 def _awaits(node):
@@ -658,11 +690,13 @@ def _helper_effects(fn, scope=None):
     return _cw.helper_effects(fn, _policy(scope))
 
 
-def expr_effects(node, scope=None, local_sql=None, opaque=frozenset()):
+def expr_effects(node, scope=None, local_sql=None, opaque=frozenset(),
+                 bindings=None):
     """closed_walk.expr_effects under the a1 policy: the (shape, effect) list
-    of evaluating `node`; raises Unclassified naming the construct and its
-    line."""
-    return _cw.expr_effects(node, _policy(scope), local_sql, opaque=opaque)
+    of evaluating `node` under `bindings`, the handler's Bindings; raises
+    Unclassified naming the construct and its line."""
+    return _cw.expr_effects(node, _policy(scope), local_sql, opaque=opaque,
+                            bindings=bindings)
 
 
 def _plain_read(call):
@@ -703,23 +737,24 @@ def _block_holding(tree, node):
 TEAM_RESOLVER = "_team_resolve_live_family"
 
 
-def _calls_named(node, name):
-    """Whether `node` holds a call of the plain name `name`."""
-    return any(isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
-               and n.func.id == name for n in _ast.walk(node))
+def _calls_named(node, name, b):
+    """Whether `node` holds a call of the plain name `name`, the module's
+    (read through `b`, the walked function's Bindings)."""
+    return any(isinstance(n, _ast.Call) and b.spelled(n.func, name)
+               for n in _ast.walk(node))
 
 
-def _is_team_answer(node, status):
-    """Whether `node` is `return TeamQueuePollResponse(status=<status>, ...)`."""
+def _is_team_answer(node, status, b):
+    """Whether `node` is `return TeamQueuePollResponse(status=<status>, ...)`,
+    the answer class the module's (read through `b`)."""
     value = getattr(node, "value", None)
     return (isinstance(node, _ast.Return) and isinstance(value, _ast.Call)
-            and isinstance(value.func, _ast.Name)
-            and value.func.id == "TeamQueuePollResponse"
+            and b.spelled(value.func, "TeamQueuePollResponse")
             and any(k.arg == "status" and isinstance(k.value, _ast.Constant)
                     and k.value.value == status for k in value.keywords))
 
 
-def _resolver_dispatch(stmts, i):
+def _resolver_dispatch(stmts, i, b):
     """The team resolver's outcome dispatch at stmts[i:i + 3], exactly as
     team_queue_poll states it, as (the 'relocked' return, the 'defer'
     branch); None for any other shape:
@@ -733,7 +768,11 @@ def _resolver_dispatch(stmts, i):
 
     What follows it is the 'fresh' outcome. The resolver's docstring:
     "Returns ('relocked', TeamQueuePollResponse) / ('fresh', None) /
-    ('defer', None)"."""
+    ('defer', None)".
+
+    Names read through `b`, the handler's Bindings: the resolver the
+    module's, <o> and <r> two locals each bound exactly once (ruling
+    REHEARSAL-FOUR-R5, fix 1), so `<o>, <o> = ...` is refused."""
     if i + 3 > len(stmts):
         return None
     st, rel, dfr = stmts[i:i + 3]
@@ -744,33 +783,32 @@ def _resolver_dispatch(stmts, i):
             and all(isinstance(e, _ast.Name) for e in target.elts)
             and isinstance(st.value, _ast.Await)
             and isinstance(call, _ast.Call)
-            and isinstance(call.func, _ast.Name)
-            and call.func.id == TEAM_RESOLVER):
+            and b.spelled(call.func, TEAM_RESOLVER)):
         return None
-    outcome, answer = (e.id for e in target.elts)
+    outcome, answer = target.elts
 
     def branch(node, word, size):
         test = getattr(node, "test", None)
         return (isinstance(node, _ast.If) and not node.orelse
                 and len(node.body) == size
                 and isinstance(test, _ast.Compare)
-                and isinstance(test.left, _ast.Name)
-                and test.left.id == outcome and len(test.ops) == 1
+                and b.same(test.left, outcome, ("local",))
+                and len(test.ops) == 1
                 and isinstance(test.ops[0], _ast.Eq)
                 and isinstance(test.comparators[0], _ast.Constant)
                 and test.comparators[0].value == word)
 
     ret = rel.body[0] if branch(rel, "relocked", 1) else None
-    if not (isinstance(ret, _ast.Return) and isinstance(ret.value, _ast.Name)
-            and ret.value.id == answer):
+    if not (isinstance(ret, _ast.Return)
+            and b.same(ret.value, answer, ("local",))):
         return None
-    if not (branch(dfr, "defer", 2) and _txn_end(dfr.body[0]) == "commit"
-            and _is_team_answer(dfr.body[1], "searching")):
+    if not (branch(dfr, "defer", 2) and _txn_end(dfr.body[0], b) == "commit"
+            and _is_team_answer(dfr.body[1], "searching", b)):
         return None
     return ret, dfr
 
 
-def _team_formation_loops(fn_src, tree):
+def _team_formation_loops(fn_src, tree, b):
     """team_queue_poll's two formation loops, resume then fresh, read as the
     poll spends them: ONE attempt budget (_attempt_budgets: one opening, one
     counter) across exactly two `while <counter> > 0:` loops, each spending
@@ -779,23 +817,35 @@ def _team_formation_loops(fn_src, tree):
     max(<counter>, 1)`), and every _identity_lock_many call in the poll one
     of the loops' barriers, one statement in each loop's body, so no
     formation is left outside the walk. Returns (loops, None), or ([],
-    (line, why)) for any other shape."""
+    (line, why)) for any other shape.
+
+    The budget is the one name the walk reads with every binding
+    (`b.every_binding`, ruling REHEARSAL-FOUR-R5 fix 1): each of its
+    bindings is a local the walk accounts for by node, never by spelling;
+    every other name it reads goes through `b` as the module's."""
+    try:
+        return _team_formation_loops_read(fn_src, tree, b)
+    except Unclassified as e:
+        return [], e.args[0]
+
+
+def _team_formation_loops_read(fn_src, tree, b):
     openings, counters, _whiles = _attempt_budgets(fn_src)
     if len(openings) != 1 or len(counters) != 1:
         return [], (0, f"{len(openings)} attempt budget openings over "
                        f"{sorted(counters)}; the team form spends one")
     (counter,) = counters
+    bindings = {id(x) for x in b.every_binding(counter, ("local",))}
     loops = sorted((n for n in _ast.walk(tree) if isinstance(n, _ast.While)
-                    and any(isinstance(x, _ast.Name) and x.id == counter
-                            for x in _ast.walk(n.test))),
+                    and b.reads(n.test, counter)),
                    key=lambda n: n.lineno)
     if len(loops) != 2:
         return [], (0, f"{len(loops)} loops over the attempt budget; the "
                        "team form has two")
     stores = set()
     for n in loops:
-        if not (_ast.unparse(n.test) == f"{counter} > 0"
-                and _ast.unparse(n.body[0]) == f"{counter} -= 1"):
+        if not (b.text(n.test) == f"{counter} > 0"
+                and b.text(n.body[0]) == f"{counter} -= 1"):
             return [], (n.lineno, "a loop over the attempt budget that is not "
                                   f"`while {counter} > 0:` spending it first")
         stores.add(id(n.body[0].target))
@@ -809,19 +859,16 @@ def _team_formation_loops(fn_src, tree):
         if id(n) in inside:
             continue
         if (isinstance(n, _ast.Assign) and len(n.targets) == 1
-                and isinstance(n.targets[0], _ast.Name)
-                and n.targets[0].id == counter
-                and _ast.unparse(n.value) in ("FORMATION_MAX_ATTEMPTS",
-                                              f"max({counter}, 1)")):
+                and id(n.targets[0]) in bindings
+                and b.text(n.value) in ("FORMATION_MAX_ATTEMPTS",
+                                        f"max({counter}, 1)")):
             stores.add(id(n.targets[0]))
     for n in _ast.walk(tree):
-        if (isinstance(n, _ast.Name) and n.id == counter
-                and isinstance(n.ctx, _ast.Store) and id(n) not in stores):
+        if id(n) in bindings and id(n) not in stores:
             return [], (n.lineno, "an assignment to the attempt budget this "
                                   "walk does not read")
     barriers = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call)
-                and isinstance(n.func, _ast.Name)
-                and n.func.id == "_identity_lock_many"]
+                and b.spelled(n.func, "_identity_lock_many")]
     held = [st for n in loops for st in n.body if any(
         c is b for c in _ast.walk(st) for b in barriers)]
     if len(barriers) != 2 or len(held) != 2 or any(
@@ -892,21 +939,33 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
     tree = _ast.parse(fn_src)
     scope = main if scope is None else scope
     team = form in ("team-resume", "team-fresh")
+    # Ruling REHEARSAL-FOUR-R5, fix 1: every spelling below is read through
+    # the handler's one resolver, and every name the walk reads as the
+    # module's is first proved unbound by the handler.
+    try:
+        b = _handler_bindings(tree, scope)
+    except Unclassified as e:
+        return [], 0, 0, (set(), set()), [e.args[0]]
+    bad = _binding_problems(b, _A1_MODULE_NAMES)
+    if bad:
+        return [], 0, 0, (set(), set()), bad
     if team:
-        loops, why = _team_formation_loops(fn_src, tree)
+        loops, why = _team_formation_loops(fn_src, tree, b)
         if why is not None:
             return [], 0, 0, (set(), set()), [why]
         loop = loops[1] if form == "team-fresh" else loops[0]
     else:
-        loops = [n for n in _ast.walk(tree) if isinstance(n, _ast.For)
-                 and isinstance(n.target, _ast.Name)
-                 and n.target.id == "_form_attempt"]
+        try:
+            loops = [n for n in _ast.walk(tree) if isinstance(n, _ast.For)
+                     and b.spelled_once(n.target, "_form_attempt", ("local",))]
+        except Unclassified as e:
+            return [], 0, 0, (set(), set()), [e.args[0]]
         if len(loops) != 1:
             return [], 0, 0, (set(), set()), [(0, f"{len(loops)} formation loops")]
         loop = loops[0]
     barrier = [i for i, st in enumerate(loop.body) if any(
-        isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
-        and c.func.id == "_identity_lock_many" for c in _ast.walk(st))]
+        isinstance(c, _ast.Call) and b.spelled(c.func, "_identity_lock_many")
+        for c in _ast.walk(st))]
     if not barrier:
         return [], 0, 0, (set(), set()), [(loop.lineno, "no identity barrier")]
     gather = form == "gather"
@@ -925,8 +984,7 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
     bcall = (bst.value.value if isinstance(bst, _ast.Expr)
              and isinstance(bst.value, _ast.Await) else None)
     if not (len(barrier) == 1 and isinstance(bcall, _ast.Call)
-            and isinstance(bcall.func, _ast.Name)
-            and bcall.func.id == "_identity_lock_many"):
+            and b.spelled(bcall.func, "_identity_lock_many")):
         problems.append((bst.lineno, "the identity barrier is not the plain "
                          "statement `await _identity_lock_many(...)`"))
     else:
@@ -939,7 +997,15 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
                 if kind in ("star", "double-star"):
                     raise Unclassified((bst.lineno, "the barrier has unpacked "
                                                     "arguments"))
-                if any(sh != "call" for sh, _e in expr_effects(a, scope)):
+                if b.session_value(a):
+                    # the session only as the barrier's own same-named
+                    # parameter (ruling REHEARSAL-FOUR-R5, fix 1)
+                    b.session_root_ok(a, bst.lineno)
+                    b.session_argument(bcall, a, b.callee(bcall.func),
+                                       bst.lineno)
+                    continue
+                if any(sh != "call" for sh, _e in expr_effects(
+                        a, scope, bindings=b)):
                     problems.append((bst.lineno, "the barrier's arguments await"))
         except Unclassified as e:
             problems.append((e.args[0][0] or bst.lineno, e.args[0][1]))
@@ -948,14 +1014,18 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
     def ended(state):
         return ", ".join(kind for kind, _ln in state) or None
 
-    local_sql = _local_sql(tree, scope)
+    try:
+        local_sql = b.local_sql(tree.body[0])
+    except Unclassified as e:
+        return [], 0, 0, (set(), set()), [e.args[0]]
 
     def effects_of(node, line, opaque=frozenset()):
         # An unclassified construct is reported where it stands; if it
         # awaits, it also counts as an await on the path, so a path that
-        # ended the transaction still reports it.
+        # ended the transaction still reports it. Its names resolve through
+        # the handler's bindings (finding a1:665).
         try:
-            return expr_effects(node, scope, local_sql, opaque)
+            return expr_effects(node, scope, local_sql, opaque, bindings=b)
         except Unclassified as e:
             problems.append((e.args[0][0] or line, e.args[0][1]))
             return [("unclassified", "await")] if _awaits(node) else []
@@ -1055,7 +1125,7 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
             elif isinstance(st, _ast.For) and not st.orelse:
                 loop_head(st, state)
                 nested(st.body, state)
-            elif (_txn_end(st) is not None
+            elif (_txn_end(st, b) is not None
                   or isinstance(st, (_ast.Return, _ast.Raise))):
                 problems.append((st.lineno, "an end or an exit inside a nested "
                                  "loop"))
@@ -1079,7 +1149,7 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
         names = {n.id for n in _ast.walk(test) if isinstance(n, _ast.Name)}
         calls = [n for n in _ast.walk(test) if isinstance(n, _ast.Call)]
         if not names or not names <= set(env) | {"len"} or any(
-                not (isinstance(c.func, _ast.Name) and c.func.id == "len")
+                not b.spelled(c.func, "len")
                 for c in calls) or any(
                 not isinstance(n, (_ast.Compare, _ast.BoolOp, _ast.UnaryOp,
                                    _ast.Call, _ast.Name, _ast.Constant,
@@ -1103,8 +1173,12 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
                 skip -= 1
                 continue
             if team and _calls_named(st.test if isinstance(st, _ast.If)
-                                     else st, TEAM_RESOLVER):
-                shape = _resolver_dispatch(stmts, i)
+                                     else st, TEAM_RESOLVER, b):
+                try:
+                    shape = _resolver_dispatch(stmts, i, b)
+                except Unclassified as e:
+                    problems.append((e.args[0][0] or st.lineno, e.args[0][1]))
+                    continue
                 if shape is None:
                     problems.append((st.lineno, "a resolver call this walk "
                                      "does not read"))
@@ -1141,7 +1215,7 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
                        if k not in assigned([st])}
                 skip = 2
                 continue
-            kind = _txn_end(st)
+            kind = _txn_end(st, b)
             if kind is not None:
                 harmless = (mode["post"] and kind == "rollback"
                             and all(k == "rollback" for k, _ln in state))
@@ -1248,13 +1322,13 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
                              "to fresh formation after exactly one commit"))
         problems.extend((st.lineno, "awaits between the resume loop and its "
                          "fall-through commit") for st in after
-                        if _txn_end(st) is None and _awaits(st))
+                        if _txn_end(st, b) is None and _awaits(st))
     if gather or form == "team-fresh":
         block, at = _block_holding(tree, loop)
         after = block[at + 1:]
         acquire = [i for i, st in enumerate(after) if any(
-            isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
-            and c.func.id == "_lease_acquire_many" for c in _ast.walk(st))]
+            isinstance(c, _ast.Call) and b.spelled(c.func, "_lease_acquire_many")
+            for c in _ast.walk(st))]
         if not acquire:
             problems.append((loop.lineno, "no _lease_acquire_many after the "
                              "formation loop"))
@@ -1312,15 +1386,21 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
                     problems.append((b_line, f"the break after {ended(b_state)} "
                                      "reaches the lease acquisition"))
     rollbacks = {n.lineno for st in span for n in _ast.walk(st)
-                 if _txn_end(n) == "rollback"}
+                 if _txn_end(n, b) == "rollback"}
     return exits, n_body, n_loop, (rollbacks, passed), problems
 
 
-def _is_matched_answer(node):
+# The names the formation walk reads as the module's: each is proved
+# unbound by the handler before the walk (ruling REHEARSAL-FOUR-R5, fix 1).
+_A1_MODULE_NAMES = ("_identity_lock_many", "_lease_acquire_many", "len",
+                    TEAM_RESOLVER, "TeamQueuePollResponse",
+                    "QueuePollResponse", "FORMATION_MAX_ATTEMPTS")
+
+
+def _is_matched_answer(node, b):
     value = getattr(node, "value", None)
     return (isinstance(node, _ast.Return) and isinstance(value, _ast.Call)
-            and isinstance(value.func, _ast.Name)
-            and value.func.id == "QueuePollResponse"
+            and b.spelled(value.func, "QueuePollResponse")
             and any(k.arg == "status" and isinstance(k.value, _ast.Constant)
                     and k.value.value == "matched" for k in value.keywords))
 
@@ -1363,7 +1443,10 @@ def formation_exit_violations(fn_src, form="return", scope=None):
             success = []
     else:
         commits = [n for _ln, _k, e, n in exits if e == "commit"]
-        success = [n for n in commits if _is_matched_answer(n)]
+        b = (_handler_bindings(_ast.parse(fn_src),
+                               main if scope is None else scope)
+             if commits else None)
+        success = [n for n in commits if _is_matched_answer(n, b)]
         if len(commits) != 1:
             success = []
     for ln, kind, end, node in exits:
@@ -1913,13 +1996,16 @@ def _attempt_budgets(fn_src):
     one poll gets, and the defect was two `for` loops that each read
     perfectly well on their own line."""
     tree = _ast.parse(fn_src)
+    # the constant read through the handler's resolver as the module's
+    # (ruling REHEARSAL-FOUR-R5, fix 1)
+    b = _handler_bindings(tree, None)
     openings, counters, loops = [], set(), []
     for node in _ast.walk(tree):
-        if isinstance(node, _ast.For) and (
-                "FORMATION_MAX_ATTEMPTS" in _ast.unparse(node.iter)):
+        if isinstance(node, _ast.For) and b.reads(
+                node.iter, "FORMATION_MAX_ATTEMPTS"):
             openings.append(_ast.unparse(node.iter))
-        elif isinstance(node, _ast.Assign) and (
-                _ast.unparse(node.value) == "FORMATION_MAX_ATTEMPTS"):
+        elif isinstance(node, _ast.Assign) and b.spelled(
+                node.value, "FORMATION_MAX_ATTEMPTS"):
             for t in node.targets:
                 if isinstance(t, _ast.Name):
                     openings.append(_ast.unparse(node))
@@ -2026,6 +2112,16 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
     problems as sentences, empty when the shape holds."""
     resolve, pick, relock = (_ast.parse(s).body[0]
                              for s in (resolve_src, pick_src, relock_src))
+    # Ruling REHEARSAL-FOUR-R5, fix 1: each body's spellings are read
+    # through its own resolver, the module names proved unbound first.
+    rb = _cw.Bindings(main if scope is None else scope, resolve)
+    lb = _cw.Bindings(main if scope is None else scope, relock)
+    bad = ([f"{resolve.name}: {why} (line {ln})" for ln, why in
+            _binding_problems(rb, (relock.name, pick.name))]
+           + [f"{relock.name}: {why} (line {ln})" for ln, why in
+              _binding_problems(lb, ("TeamQueuePollResponse",))])
+    if bad:
+        return bad
     out = [f"{fn.name} ends the transaction itself"
            for fn in (resolve, pick) if _ends_inside(fn)]
     # Both bodies are walked by the shared closed walk (round 3, finding
@@ -2036,7 +2132,7 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
         try:
             eff = _cw.def_effects(fn, main if scope is None else scope,
                                   _policy(scope), fn.name,
-                                  opaque={relock.name, pick.name})
+                                  opaque={relock.name: relock, pick.name: pick})
         except Unclassified as e:
             out.append(f"{fn.name}: {e.args[0][1]} (line {e.args[0][0]})")
             continue
@@ -2055,7 +2151,12 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
               and isinstance(st.targets[0], _ast.Tuple)
               and isinstance(st.targets[0].elts[0], _ast.Name)
               and isinstance(st.value, _ast.Await)
-              and _calls_named(st.value, pick.name)}
+              and _calls_named(st.value, pick.name, rb)}
+    for nm in sorted(picked):
+        try:
+            rb.spelled_once(_ast.Name(id=nm, ctx=_ast.Load()), nm, ("local",))
+        except Unclassified as e:
+            return out + [f"{resolve.name}: {e.args[0][1]}"]
     relocked = []
     for st in _ast.walk(resolve):
         if not isinstance(st, _ast.Return):
@@ -2067,11 +2168,11 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
             relocked.append(st)
         elif not ((isinstance(first, _ast.Constant)
                    and first.value in ("defer", "fresh"))
-                  or (isinstance(first, _ast.Name) and first.id in picked)):
+                  or rb.spelled_in(first, picked, ("local",)) is not None):
             out.append(f"{resolve.name} line {st.lineno}: an answer this read "
                        "does not place")
     relocks = [n for n in _ast.walk(resolve) if isinstance(n, _ast.Call)
-               and isinstance(n.func, _ast.Name) and n.func.id == relock.name]
+               and rb.spelled(n.func, relock.name)]
     if len(relocks) != 1:
         out.append(f"{resolve.name} calls {relock.name} {len(relocks)} "
                    "times; the read takes the one its 'relocked' answer "
@@ -2085,22 +2186,23 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
         prev = block[at - 1] if block and at else None
         name = ret.value.elts[1]
         call = getattr(getattr(prev, "value", None), "value", None)
-        if not (isinstance(name, _ast.Name) and isinstance(prev, _ast.Assign)
-                and len(prev.targets) == 1
-                and isinstance(prev.targets[0], _ast.Name)
-                and prev.targets[0].id == name.id
-                and isinstance(prev.value, _ast.Await)
+        try:
+            same = (isinstance(prev, _ast.Assign) and len(prev.targets) == 1
+                    and rb.same(prev.targets[0], name, ("local",)))
+        except Unclassified as e:
+            out.append(f"{resolve.name}: {e.args[0][1]}")
+            same = False
+        if not (same and isinstance(prev.value, _ast.Await)
                 and isinstance(call, _ast.Call)
-                and isinstance(call.func, _ast.Name)
-                and call.func.id == relock.name):
+                and rb.spelled(call.func, relock.name)):
             out.append(f"{resolve.name}'s 'relocked' answer is not "
                        f"{relock.name}'s, bound in the statement before it")
     body = [st for st in relock.body if not (
         isinstance(st, _ast.Expr) and isinstance(st.value, _ast.Constant))]
     spellings = [n for n in _ast.walk(relock) if isinstance(n, _ast.Attribute)
                  and n.attr in ("commit", "rollback")]
-    commits = [i for i, st in enumerate(body) if _txn_end(st) == "commit"]
-    rollbacks = [n for n in _ast.walk(relock) if _txn_end(n) == "rollback"]
+    commits = [i for i, st in enumerate(body) if _txn_end(st, lb) == "commit"]
+    rollbacks = [n for n in _ast.walk(relock) if _txn_end(n, lb) == "rollback"]
     returns = [n for n in _ast.walk(relock) if isinstance(n, _ast.Return)]
     if len(spellings) != 2 or len(commits) != 1 or len(rollbacks) != 1:
         out.append(f"{relock.name}: not one commit in its body and one "
@@ -2108,7 +2210,7 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
     else:
         tail = body[commits[0] + 1:]
         if not (tail and len(returns) == 1 and returns[0] is tail[-1]
-                and _is_team_answer(tail[-1], "matched")
+                and _is_team_answer(tail[-1], "matched", lb)
                 and not any(_awaits(st) for st in tail)):
             out.append(f"{relock.name}: its commit is not its last await "
                        "before its one return, the matched answer")
@@ -3831,7 +3933,9 @@ _R4_CW_CONTROLS = [
     ("shadow_by_parameter", "a name the function binds"),
     ("shadow_module_function", "a name the function binds"),
     ("local_sql_masked", {"write"}),
-    ("guard_then_rebind", "an execute whose SQL the walk cannot read"),
+    # the guard's name stored again: refused by the one-binding bound
+    # (ruling REHEARSAL-FOUR-R5, fix 1) before any guard reading
+    ("guard_then_rebind", "a name bound more than once: name"),
     ("guard_after_use", "an execute whose SQL the walk cannot read"),
     ("guard_in_loop", {"read"}),
     ("plain_helper_writes", "a plain call of plain_add, which takes write"),
@@ -3839,7 +3943,10 @@ _R4_CW_CONTROLS = [
     ("annotation_writes", {"write"}),
     # the 322 class swept (grep getattr(scope, ...)): a SQL builder's return
     # and a SQL template read through their own function's bindings
-    ("builder_masked", "an execute whose SQL the walk cannot read"),
+    # the builder's own local is never the module's: since ruling
+    # REHEARSAL-FOUR-R5 fix 3 a builder of no parameters is called (its
+    # whole domain) and its true text classified, a write
+    ("builder_masked", {"write"}),
     ("template_masked", "an execute whose SQL the walk cannot read"),
     # finding closed_walk:825 (class C): a rollback-then-raise propagates to
     # the helper that awaits it, and none is caught inside the walked helper
@@ -3899,6 +4006,10 @@ _R5_CW_SRC = "\n".join([
     "        return 'UPDATE t SET x = 1'",
     "    base = 'SELECT * FROM '",
     "    return base + _T[mode]",
+    "def builder_two(mode):",
+    "    if mode == 'evil':",
+    "        return 'UPDATE t SET x = 1'",
+    "    return 'SELECT 1'",
     "def builder_ok(mode):",
     "    return f'SELECT * FROM {_T[mode]}'",
     "class Evil(tuple):",
@@ -3965,12 +4076,26 @@ _R5_CW_SRC = "\n".join([
     "    if name not in SAFE_LIST:",
     "        raise ValueError(name)",
     "    return (await db.execute(text(f'SELECT {name}'), {})).scalar()",
+    # closed_walk:501's two routes, one control each: a module list as a
+    # guard collection (never a proof, mutated or not), and a module table
+    # updated in place before its item is read as a formatted SQL value
+    "async def guard_mutable_list(db, name):",
+    "    if name not in SAFE_LIST:",
+    "        raise ValueError(name)",
+    "    return (await db.execute(text(f'SELECT {name}'), {})).scalar()",
+    "async def table_mutated(db, mode):",
+    "    _T.update(a='t_a; UPDATE t SET x = 1')",
+    "    return (await db.execute(text(f'SELECT * FROM {_T[mode]}'), {})).scalar()",
+    "async def table_kept(db, mode):",
+    "    return (await db.execute(text(f'SELECT * FROM {_T[mode]}'), {})).scalar()",
     # closed_walk:326, a guarded name in a function position
     "async def guarded_function_name(db, name):",
     "    if name not in SAFE_F:",
     "        raise ValueError(name)",
     "    return (await db.execute(text(f'SELECT {name}(0)'), {})).scalar()",
     # closed_walk:441, a builder whose unsampled branch writes
+    "async def builder_union(db):",
+    "    return (await db.execute(text(builder_two('a')), {})).scalar()",
     "async def builder_sampled(db):",
     "    return (await db.execute(text(builder('evil')), {})).scalar()",
     # the kept forms
@@ -4015,10 +4140,14 @@ _R5_CW_CONTROLS = [
     ("finally_returns", "a return inside a finally"),
     ("finally_breaks", "a break inside a finally"),
     ("finally_continues", "a continue inside a finally"),
-    ("guard_else_rebinds", "an execute whose SQL the walk cannot read"),
+    ("guard_else_rebinds", "a name bound more than once: name"),
     ("guard_collection_mutated", "an execute whose SQL the walk cannot read"),
+    ("guard_mutable_list", "an execute whose SQL the walk cannot read"),
+    ("table_mutated", "an execute whose SQL the walk cannot read"),
+    ("table_kept", {"read"}),
     ("guarded_function_name", "a SQL function off the read allow-list: lo_create"),
     ("builder_sampled", "an execute whose SQL the walk cannot read"),
+    ("builder_union", {"write"}),
     ("guard_kept", {"read"}),
     ("builder_kept", {"read"}),
     ("local_def_kept", set()),
@@ -4092,4 +4221,81 @@ def test_r5_a1_formation_expressions_resolve_the_handlers_bindings():
     assert formation_exit_violations(kept, "gather", scope=scope) == [], (
         formation_exit_violations(kept, "gather", scope=scope))
     got = formation_exit_violations(masked, "gather", scope=scope)
-    assert got != [], got
+    # the local Q is the handler's (an UPDATE), read after the rollback
+    assert "line 17: awaits after rollback" in got, got
+
+
+# The resolution-site census (ruling REHEARSAL-FOUR-R5, fix 1, a BOUND): in
+# each function span of the three walkers, the sites that decide what a
+# walked identifier denotes (resolution_sites.sites) all lie inside class
+# closed_walk.Bindings, the one resolver. One span is exempt, by name and
+# with its count pinned, so a new site in it fails as well:
+_CENSUS_EXEMPT = {
+    # acceptance_sites counts every spelling of the R4 token as a reference
+    # (a superset): it decides no name's binding, and over-counts only.
+    ("test_a1_identity_formation", "acceptance_sites.visit"): 4,
+}
+# One bypassing site per walker, each put where the census must count it:
+# (module, the exact text replaced, its replacement, the span it lands in).
+_CENSUS_MUTANTS = [
+    ("closed_walk",
+     '''            fn = self._check(n, self.b.callee, n.func)
+            if fn is None or _inspect.iscoroutinefunction(fn):''',
+     '''            fn = self._check(n, self.b.callee, n.func)
+            fn = getattr(self.p.scope, n.func.id, None) or fn
+            if fn is None or _inspect.iscoroutinefunction(fn):''',
+     "Visitor.call"),
+    # (escaped quotes, so this literal is not itself the text replaced)
+    ("test_a1_identity_formation",
+     "            and b.spelled_once(call.func.value, \"db\", (\"param\",))",
+     "            and call.func.value.id == \"db\"",
+     "_txn_end"),
+    ("test_match_hold_admission_gate_pg",
+     '''    return any(isinstance(n, ast.Call) and b.named(n.func, (stop,)) is not None''',
+     '''    return any(isinstance(n, ast.Call) and n.func.id == stop''',
+     "_calls"),
+]
+
+
+def _census_problems(sources):
+    """(span, sites) for every walker span whose resolution sites do not all
+    go through the resolver (resolution_sites.census), the exempt spans held
+    to their pinned counts; empty when the bound holds."""
+    import resolution_sites as _rs
+    methods = _rs.resolver_methods(_ast.parse(sources["closed_walk"]))
+    out = []
+    for mod, text in sorted(sources.items()):
+        for (q, _ln), (n, through, sites) in _rs.census(
+                _ast.parse(text), methods).items():
+            pinned = _CENSUS_EXEMPT.get((mod, q))
+            if (n - through) != (pinned or 0):
+                out.append((f"{mod}:{q}", sites))
+    return out
+
+
+def test_r5_every_resolution_site_goes_through_the_resolver():
+    """Ruling REHEARSAL-FOUR-R5, fix 1: one resolver, exactly one binding per
+    name or refuse. Within each function span of closed_walk and of the a1
+    and gate walkers (never file-wide, #432), the resolution sites counted
+    equal the sites that go through the resolver, class Bindings; the
+    exempt span holds exactly its pinned count. Each mutant adds one
+    bypassing site and must be counted, in the span it lands in."""
+    import pathlib
+    here = pathlib.Path(__file__).resolve().parent
+    sources = {m: (here / f"{m}.py").read_text(encoding="utf-8") for m in (
+        "closed_walk", "test_a1_identity_formation",
+        "test_match_hold_admission_gate_pg")}
+    assert _census_problems(sources) == []
+    import resolution_sites as _rs
+    methods = _rs.resolver_methods(_ast.parse(sources["closed_walk"]))
+    for (q, _ln) in _rs.census(_ast.parse(sources["test_a1_identity_formation"]),
+                               methods):
+        if q.startswith("acceptance_sites"):
+            break
+    else:
+        raise AssertionError("the exempt span is gone; drop its exemption")
+    for mod, old, new, span in _CENSUS_MUTANTS:
+        assert sources[mod].count(old) == 1, (mod, span)
+        mutated = dict(sources, **{mod: sources[mod].replace(old, new)})
+        got = _census_problems(mutated)
+        assert [s for s, _sites in got] == [f"{mod}:{span}"], (span, got)

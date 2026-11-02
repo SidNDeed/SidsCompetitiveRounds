@@ -1,0 +1,248 @@
+"""The resolution-site census of ruling REHEARSAL-FOUR-R5 fix 1 (shared by
+the bound test and by the survey): in each function span of a walker, the
+sites that decide what a walked identifier denotes.
+
+The walkers are every function of closed_walk.py and every function of the
+a1 and gate test modules that is not a test (a `test_*` function and the
+definitions nested in it are oracles over fixed code and test scaffolding,
+not walks).
+
+A KEY expression carries a walked identifier: it reads `.id` off a tree
+node, or is a name the span bound (assigned, looped, unpacked, walrus) from
+an expression whose value can carry one (a comparison's operands and a
+comprehension's conditions decide which values, they are not the value). A TEXT expression is a call of `unparse`, or a name the
+span bound from one. A resolution site is:
+  getattr(<x>, K, ...)   K a KEY expression or reads `.attr`;
+  <x>[K] / <x>.get(K)    K a KEY expression (a name-table lookup);
+  a comparison           ==, !=, in, not in, with a KEY operand, or with a
+                         TEXT operand against anything but a string literal
+                         that is not a dotted identifier (a callee's or a
+                         constant's spelling compared; a whole statement's
+                         text compared with a fixed non-identifier text is a
+                         shape assertion, not a resolution);
+  import_module(...)     an import by name.
+Every site of a span inside class Bindings goes through the resolver. A
+call of a resolver method (any method class Bindings defines, or the
+visitor's pass-through wrappers `_resolve` / `_check`) is the resolver's
+own: its arguments are not sites and its answer is not a KEY.
+"""
+import ast
+
+RESOLVER_CLASS = "Bindings"
+RESOLVER_METHODS = set()
+_PRUNED = {}
+
+
+def resolver_methods(tree):
+    """The method names class Bindings defines in module tree, plus the
+    visitor's two pass-through wrappers."""
+    out = {"_resolve", "_check"}
+    for c in ast.walk(tree):
+        if isinstance(c, ast.ClassDef) and c.name == RESOLVER_CLASS:
+            out |= {d.name for d in c.body
+                    if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return out
+
+
+def _resolver_call(x):
+    if not isinstance(x, ast.Call):
+        return False
+    f = x.func
+    if isinstance(f, ast.Attribute) and f.attr in RESOLVER_METHODS:
+        return True
+    return ((isinstance(f, ast.Name) and f.id == RESOLVER_CLASS)
+            or (isinstance(f, ast.Attribute) and f.attr == RESOLVER_CLASS))
+
+
+def _walk(e):
+    """ast.walk without descending into a resolver call."""
+    todo = [e]
+    while todo:
+        x = todo.pop()
+        if _resolver_call(x):
+            continue
+        yield x
+        todo.extend(ast.iter_child_nodes(x))
+
+
+def _is_unparse(x):
+    return isinstance(x, ast.Call) and (
+        (isinstance(x.func, ast.Attribute) and x.func.attr == "unparse")
+        or (isinstance(x.func, ast.Name) and x.func.id == "unparse"))
+
+
+def _reads(e, keyed, text=False):
+    """Whether e is KEY (text False) or TEXT (text True)."""
+    for x in _walk(e):
+        if not text and isinstance(x, ast.Attribute) and x.attr == "id":
+            return True
+        if text and _is_unparse(x):
+            return True
+        if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) and x.id in keyed:
+            return True
+    return False
+
+
+def _value_walk(e):
+    """The nodes of e that can reach its value: _walk without a
+    comparison's operands or a comprehension's conditions (a name bound
+    from `[i for i ... if x.id == "f"]` holds indices, not spellings)."""
+    todo = [e]
+    while todo:
+        x = todo.pop()
+        if _resolver_call(x) or isinstance(x, ast.Compare):
+            continue
+        yield x
+        if isinstance(x, ast.comprehension):
+            todo.extend([x.target, x.iter])
+        else:
+            todo.extend(ast.iter_child_nodes(x))
+
+
+def _value_reads(e, keyed, text):
+    for x in _value_walk(e):
+        if not text and isinstance(x, ast.Attribute) and x.attr == "id":
+            return True
+        if text and _is_unparse(x):
+            return True
+        if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) and x.id in keyed:
+            return True
+    return False
+
+
+def _own(fn):
+    """fn's nodes outside nested definitions and lambdas."""
+    out, todo = [], list(ast.iter_child_nodes(fn))
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                          ast.Lambda)):
+            continue
+        out.append(n)
+        todo.extend(ast.iter_child_nodes(n))
+    return out
+
+
+def _pruned(fn):
+    """ids of fn's nodes inside a resolver call."""
+    got = _PRUNED.get(id(fn))
+    if got is None:
+        got = set()
+        for x in ast.walk(fn):
+            if _resolver_call(x):
+                got |= {id(y) for y in ast.walk(x)}
+        _PRUNED[id(fn)] = got
+    return got
+
+
+def _bound_from(nodes, text):
+    keyed = set()
+    changed = True
+    while changed:
+        changed = False
+        for n in nodes:
+            pairs = []
+            if isinstance(n, ast.Assign):
+                pairs = [(t, n.value) for t in n.targets]
+            elif isinstance(n, (ast.For, ast.comprehension)):
+                pairs = [(n.target, n.iter)]
+            elif isinstance(n, ast.NamedExpr):
+                pairs = [(n.target, n.value)]
+            for tg, v in pairs:
+                if _value_reads(v, keyed, text):
+                    for x in ast.walk(tg):
+                        if isinstance(x, ast.Name) and x.id not in keyed:
+                            keyed.add(x.id)
+                            changed = True
+    return keyed
+
+
+def _plain_text(x):
+    """A string literal that is not a dotted identifier."""
+    return (isinstance(x, ast.Constant) and isinstance(x.value, str)
+            and not all(p.isidentifier() for p in x.value.split(".")))
+
+
+def sites(fn):
+    """[(kind, line)] of the resolution sites in fn's own span."""
+    nodes = _own(fn)
+    keyed = _bound_from(nodes, False)
+    texts = _bound_from(nodes, True)
+    pruned = _pruned(fn)
+    out = []
+    for n in nodes:
+        if id(n) in pruned:
+            continue
+        if isinstance(n, ast.Call):
+            f = n.func
+            if (isinstance(f, ast.Name) and f.id == "getattr" and len(n.args) >= 2
+                    and not isinstance(n.args[1], ast.Constant)
+                    and (_reads(n.args[1], keyed) or any(
+                        isinstance(x, ast.Attribute) and x.attr == "attr"
+                        for x in _walk(n.args[1])))):
+                out.append(("getattr", n.lineno))
+            elif ast.unparse(f).endswith("import_module"):
+                out.append(("import", n.lineno))
+            elif (isinstance(f, ast.Attribute) and f.attr == "get" and n.args
+                  and _reads(n.args[0], keyed)):
+                out.append(("table", n.lineno))
+        elif (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Load)
+              and _reads(n.slice, keyed)):
+            out.append(("table", n.lineno))
+        elif isinstance(n, ast.Compare) and any(
+                isinstance(op, (ast.Eq, ast.NotEq, ast.In, ast.NotIn))
+                for op in n.ops):
+            ops = [n.left] + n.comparators
+            if any(_reads(x, keyed) for x in ops):
+                out.append(("spelling", n.lineno))
+            elif any(_reads(x, texts, True) for x in ops) and any(
+                    not _reads(x, texts, True) and not _plain_text(x)
+                    for x in ops):
+                out.append(("text", n.lineno))
+    return out
+
+
+def census(tree, methods, walkers_only=True):
+    """{(qualname, line): (all sites, sites inside the resolver, sites)}
+    for every walker span of module tree (every function, or with
+    walkers_only every function outside a `test_*` function); `methods`
+    the resolver's method names (resolver_methods of closed_walk)."""
+    RESOLVER_METHODS.clear()
+    RESOLVER_METHODS.update(methods)
+    _PRUNED.clear()
+    out = {}
+
+    def walk(node, prefix, in_resolver):
+        for c in ast.iter_child_nodes(node):
+            if isinstance(c, ast.ClassDef):
+                walk(c, prefix + c.name + ".",
+                     in_resolver or c.name == RESOLVER_CLASS)
+            elif isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if walkers_only and not prefix and c.name.startswith("test_"):
+                    continue
+                s = sites(c)
+                out[(prefix + c.name, c.lineno)] = (
+                    len(s), len(s) if in_resolver else 0, s)
+                walk(c, prefix + c.name + ".", in_resolver)
+            else:
+                walk(c, prefix, in_resolver)
+
+    walk(tree, "", False)
+    return out
+
+
+if __name__ == "__main__":
+    import sys
+    methods = resolver_methods(
+        ast.parse(open(sys.argv[1], encoding="utf-8").read()))
+    for path in sys.argv[1:]:
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        tot = 0
+        for (q, ln), (a, r, s) in sorted(census(tree, methods).items(),
+                                         key=lambda kv: kv[0][1]):
+            if a != r:
+                tot += a - r
+                print(f"{path.split('/')[-1]}:{ln} {q}: {a - r} outside: "
+                      + ", ".join(f"{k}@{x}" for k, x in
+                                  sorted(s, key=lambda t: t[1])))
+        print(f"== {path.split('/')[-1]}: {tot} sites outside the resolver")
