@@ -573,10 +573,15 @@ def _outer_jumps(node):
 # list because the walk met it in main's real spans and it reads, locks or
 # writes rows without ending the transaction.
 
-class Unclassified(Exception):
-    """A construct the closed walk has no named shape for: (line, what)."""
+from closed_walk import Unclassified  # noqa: E402
+import closed_walk as _cw  # noqa: E402
 
 
+# The allow-lists are positive and named; the classification itself is
+# closed_walk's (rehearsal-four round 3, ruling REHEARSAL-FOUR-R3: one shared
+# default-deny visitor, every concrete ast class in its NODE_TABLE, SQL
+# classified from migration_table_ddl's lexer tokens).
+#
 # Functions a reading statement may call: each reads, computes or casts and
 # writes nothing. Anything else in a SELECT (lo_create, nextval, setval,
 # pg_advisory_*, a user function) is unclassified.
@@ -588,11 +593,13 @@ _SQL_READ_FUNCS = frozenset({
     "cardinality", "unnest", "exists", "string_agg", "row_number", "rank",
     "lag", "lead", "over", "filter", "in", "values", "concat",
     "clock_timestamp", "make_interval", "current_setting", "string_to_array",
+    "hashtextextended",
 })
-# Functions that change a transaction-local setting and nothing else
-# (`set_config(<name>, <value>, true)`): such a statement is read as 'lock',
-# never as a plain read.
-_SQL_SETTING_FUNCS = frozenset({"set_config"})
+# Functions that take a transaction-scoped lock or change a transaction-local
+# setting and nothing else (`set_config(<name>, <value>, true)`,
+# `pg_advisory_xact_lock(<key>)`, released at the transaction's end): such a
+# statement is read as 'lock', never as a plain read.
+_SQL_SETTING_FUNCS = frozenset({"set_config", "pg_advisory_xact_lock"})
 # Functions a writing statement may call besides the reading ones.
 _SQL_WRITE_FUNCS = frozenset({"gen_random_uuid"})
 # Words followed by "(" that are SQL syntax, not function calls.
@@ -604,263 +611,8 @@ _SQL_SYNTAX = frozenset({
     "lateral", "within", "group", "order", "having", "limit", "offset",
     "materialized",
 })
-_SQL_END_WORDS = ("COMMIT", "ROLLBACK", "BEGIN", "SAVEPOINT", "RELEASE",
-                  "ABORT", "END", "PREPARE", "START")
-_SQL_LOCK = _re.compile(r"\bFOR\s+(?:NO\s+KEY\s+UPDATE|UPDATE|KEY\s+SHARE|SHARE)"
-                        r"(?:\s+OF\s+\w+(?:\s*,\s*\w+)*)?(?:\s+(?:SKIP\s+LOCKED|NOWAIT))?\b",
-                        _re.IGNORECASE)
-_SQL_DML = _re.compile(r"\b(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE|COPY|CALL|DO"
-                       r"|LOCK|GRANT|REVOKE|CREATE|ALTER|DROP|VACUUM|ANALYZE"
-                       r"|NOTIFY|LISTEN|SET|RESET|DISCARD|REFRESH)\b",
-                       _re.IGNORECASE)
-# The placeholder a formatted value of an f-string SQL reads as: an
-# identifier, never SQL text (a formatted value in the statement's head, or
-# one holding SQL, is unclassified).
-_SQL_FV = "fv_ident"
-
-
-def _sql_strip(sql):
-    """`sql` with comments removed and string literals emptied, so a keyword
-    inside a literal or a comment is not read as SQL."""
-    out, i, n = [], 0, len(sql)
-    while i < n:
-        c = sql[i]
-        if sql.startswith("--", i):
-            j = sql.find("\n", i)
-            i = n if j < 0 else j
-        elif sql.startswith("/*", i):
-            j = sql.find("*/", i + 2)
-            if j < 0:
-                raise Unclassified((0, "an unterminated SQL comment"))
-            i = j + 2
-            out.append(" ")
-        elif c == "'":
-            j = i + 1
-            while True:
-                j = sql.find("'", j)
-                if j < 0:
-                    raise Unclassified((0, "an unterminated SQL string"))
-                if sql.startswith("''", j):
-                    j += 2
-                    continue
-                break
-            out.append("''")
-            i = j + 1
-        elif c == "$":
-            raise Unclassified((0, "dollar quoting in walked SQL"))
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
-
-
-def _sql_kind(sql):
-    """'read', 'lock' or 'write' for one statement of SQL text; raises
-    Unclassified for a transaction command, more than one statement, an
-    unknown head, or a function off the allow-lists (rehearsal-four round 2,
-    findings 5 and 7: `SELECT lo_create(0)` was read as a plain SELECT)."""
-    body = _sql_strip(sql).strip().rstrip(";").strip()
-    if ";" in body:
-        raise Unclassified((0, "more than one SQL statement"))
-    words = body.split()
-    head = words[0].upper() if words else ""
-    if head in _SQL_END_WORDS:
-        raise Unclassified((0, f"a transaction command in SQL text ({head})"))
-    callable_text = _re.sub(r"\bINTO\s+[A-Za-z_][A-Za-z_0-9.]*\s*\(", "INTO (",
-                            body, flags=_re.IGNORECASE)
-    funcs = {m.group(1).lower() for m in
-             _re.finditer(r"([A-Za-z_][A-Za-z_0-9]*)\s*\(", callable_text)}
-    funcs -= _SQL_SYNTAX
-    funcs.discard(_SQL_FV)
-    unlocked = _SQL_LOCK.sub(" ", body)
-    if head in ("SELECT", "WITH") and not _SQL_DML.search(unlocked):
-        bad = funcs - _SQL_READ_FUNCS - _SQL_SETTING_FUNCS
-        if bad:
-            raise Unclassified((0, "a SQL function off the read allow-list: "
-                                   + ", ".join(sorted(bad))))
-        return ("lock" if _SQL_LOCK.search(body) or funcs & _SQL_SETTING_FUNCS
-                else "read")
-    if head in ("INSERT", "UPDATE", "DELETE", "WITH"):
-        bad = funcs - _SQL_READ_FUNCS - _SQL_WRITE_FUNCS
-        if bad:
-            raise Unclassified((0, "a SQL function off the write allow-list: "
-                                   + ", ".join(sorted(bad))))
-        # `ON CONFLICT ... DO UPDATE` / `DO NOTHING` is an INSERT's own
-        # clause; a DO block would have DO as its head, refused above.
-        if _re.search(r"\b(?:MERGE|TRUNCATE|COPY|CALL|GRANT|REVOKE|CREATE"
-                      r"|ALTER|DROP|VACUUM|ANALYZE|NOTIFY|LISTEN|RESET"
-                      r"|DISCARD|REFRESH)\b", unlocked, _re.IGNORECASE):
-            raise Unclassified((0, "a SQL command off the write allow-list"))
-        return "write"
-    raise Unclassified((0, f"a SQL statement head off the allow-list ({head!r})"))
-
-
-def _sql_text(node, scope, guarded=frozenset()):
-    """The SQL a `text(...)` argument holds: a string constant, a name bound
-    to a string at module level in `scope`, an f-string whose formatted values
-    read as identifiers (never in the statement's head), or a `+` of these.
-    None when it is none of them."""
-    if isinstance(node, _ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, _ast.Name):
-        value = getattr(scope, node.id, None)
-        return value if isinstance(value, str) else None
-    if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
-        a, b = (_sql_text(node.left, scope, guarded),
-                _sql_text(node.right, scope, guarded))
-        return None if a is None or b is None else a + b
-    if isinstance(node, _ast.JoinedStr):
-        parts = []
-        for v in node.values:
-            if isinstance(v, _ast.Constant):
-                parts.append(v.value)
-            elif isinstance(v, _ast.FormattedValue):
-                inner = v.value
-                held = (getattr(scope, inner.id, None)
-                        if isinstance(inner, _ast.Name) else None)
-                table = (getattr(scope, inner.value.id, None)
-                         if isinstance(inner, _ast.Subscript)
-                         and isinstance(inner.value, _ast.Name) else None)
-                if isinstance(held, str):
-                    parts.append(held)
-                elif isinstance(inner, _ast.Name) and inner.id in guarded:
-                    parts.append(f" {_SQL_FV} ")   # refused unless an identifier
-                elif isinstance(table, dict) and table and all(
-                        isinstance(x, str) and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
-                        for x in table.values()):
-                    parts.append(f" {_SQL_FV} ")   # one of the table's identifiers
-                else:
-                    return None
-            else:
-                return None
-        text = "".join(parts)
-        first = text.split()[0] if text.split() else ""
-        return None if first == _SQL_FV else text
-    return None
-
-
-def _execute_kind(call, scope, local_sql=None, guarded=frozenset()):
-    """'read', 'lock' or 'write' when `call` is `db.execute(text(<sql>),
-    <binds>)` with classifiable SQL (_sql_text, _sql_kind); raises
-    Unclassified for any other execute."""
-    if not (call.args and isinstance(call.args[0], _ast.Call)
-            and isinstance(call.args[0].func, _ast.Name)
-            and call.args[0].func.id == "text"
-            and len(call.args[0].args) == 1 and not call.args[0].keywords):
-        raise Unclassified((call.lineno, "an execute of something other than "
-                                         "text(<sql>)"))
-    arg = call.args[0].args[0]
-    sqls = [_sql_text(arg, scope, guarded)]
-    if sqls == [None] and isinstance(arg, _ast.Name) and local_sql is not None:
-        sqls = local_sql.get(arg.id, [None])
-    elif (sqls == [None] and isinstance(arg, _ast.Call)
-          and isinstance(arg.func, _ast.Name)):
-        sqls = _returned_sql(_resolve_callee(arg.func, scope), scope)
-    if not sqls or None in sqls:
-        raise Unclassified((call.lineno, "an execute whose SQL the walk cannot "
-                                         "read"))
-    try:
-        kinds = {_sql_kind(s) for s in sqls}
-    except Unclassified as e:
-        raise Unclassified((call.lineno, e.args[0][1])) from None
-    return ("write" if "write" in kinds else "lock" if "lock" in kinds
-            else "read")
-
-
-def _returned_sql(fn, scope):
-    """The SQL texts a plain module function returns, when every `return`
-    in it returns SQL _sql_text can read (`text(_latch_sql(mode))`); else
-    [None]."""
-    if fn is None or _inspect.iscoroutinefunction(fn):
-        return [None]
-    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(fn)))
-    rets = [n.value for n in _ast.walk(tree) if isinstance(n, _ast.Return)]
-    out = [_sql_text(r, scope) if r is not None else None for r in rets] or [None]
-    if None not in out:
-        return out
-    # A builder of one argument that indexes module tables by it
-    # (match_hold._latch_sql(mode): `_SERIES_TABLE[mode]`): its SQL is the
-    # builder's own output over every key those tables share, evaluated.
-    params = list(_inspect.signature(fn).parameters)
-    tables = [getattr(scope, n.value.id, None) for n in _ast.walk(tree)
-              if isinstance(n, _ast.Subscript) and isinstance(n.value, _ast.Name)
-              and isinstance(n.slice, _ast.Name) and len(params) == 1
-              and n.slice.id == params[0]]
-    if not tables or not all(isinstance(d, dict) and d for d in tables):
-        return [None]
-    keys = set(tables[0])
-    for d in tables[1:]:
-        keys &= set(d)
-    texts = [fn(k) for k in sorted(keys)]
-    return texts if texts and all(isinstance(x, str) for x in texts) else [None]
-
-
-def _guarded(tree, scope):
-    """The local names a function guards as identifiers before use:
-    `if <name> not in <MODULE_COLLECTION>: raise ...`, where the module
-    collection holds only lower-case identifiers (`_QUEUE_LOCK_TABLES`). An
-    f-string SQL may splice such a name as an identifier."""
-    out = set()
-    for n in _ast.walk(tree):
-        test = getattr(n, "test", None)
-        if (isinstance(n, _ast.If) and isinstance(test, _ast.Compare)
-                and isinstance(test.left, _ast.Name) and len(test.ops) == 1
-                and isinstance(test.ops[0], _ast.NotIn)
-                and isinstance(test.comparators[0], _ast.Name)
-                and _all_paths_raise(n.body)):
-            coll = getattr(scope, test.comparators[0].id, None)
-            if isinstance(coll, (set, frozenset, tuple, list, dict)) and coll and all(
-                    isinstance(x, str) and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
-                    for x in coll):
-                out.add(test.left.id)
-    return frozenset(out)
-
-
-def _local_sql(tree, scope):
-    """{local name: [SQL texts]} for each name a function binds only to SQL
-    _sql_text can read, directly or as either arm of a conditional
-    expression (`_cand_sql = _A if x else _B`)."""
-    binds = {}
-
-    def arms(v):
-        return ([_sql_text(v.body, scope), _sql_text(v.orelse, scope)]
-                if isinstance(v, _ast.IfExp) else [_sql_text(v, scope)])
-
-    for n in _ast.walk(tree):
-        if isinstance(n, _ast.Assign):
-            for tg in n.targets:
-                if not isinstance(tg, _ast.Name):
-                    continue
-                v = n.value
-                tmpl = (getattr(scope, v.func.value.id, None)
-                        if isinstance(v, _ast.Call)
-                        and isinstance(v.func, _ast.Attribute)
-                        and v.func.attr == "format"
-                        and isinstance(v.func.value, _ast.Name) else None)
-                if isinstance(tmpl, str) and not v.args:
-                    # `<MODULE_TEMPLATE>.format(k=<sql or a conditional of
-                    # two>)`: every combination of the arms, formatted.
-                    combos = [{}]
-                    for k in v.keywords:
-                        opts = arms(k.value) if k.arg else [None]
-                        combos = [dict(c, **{k.arg or "": o})
-                                  for c in combos for o in opts]
-                    texts = [None if None in c.values() else tmpl.format(**c)
-                             for c in combos]
-                    binds.setdefault(tg.id, []).extend(texts)
-                else:
-                    binds.setdefault(tg.id, []).extend(arms(v))
-        elif isinstance(n, (_ast.AugAssign, _ast.AnnAssign)) and isinstance(
-                n.target, _ast.Name):
-            binds.setdefault(n.target.id, []).append(None)
-    return {k: v for k, v in binds.items() if None not in v}
-
-
-def _is_db_call(call, attr):
-    return (isinstance(call, _ast.Call) and isinstance(call.func, _ast.Attribute)
-            and isinstance(call.func.value, _ast.Name)
-            and call.func.value.id == "db" and call.func.attr == attr)
-
+_SQL_LISTS = _cw.SqlLists(_SQL_READ_FUNCS, _SQL_SETTING_FUNCS, _SQL_WRITE_FUNCS,
+                          _SQL_SYNTAX)
 
 # Plain calls a step may make that touch no session: builtins and the clock,
 # id and log functions the spans use.
@@ -870,6 +622,8 @@ _PURE_CALLS = frozenset({
     "zip", "isinstance", "abs", "round", "sum", "repr", "text", "frozenset",
     "HTTPException", "QueuePollResponse", "TeamQueuePollResponse",
     "datetime.now", "time.monotonic", "uuid.uuid4", "uuid_mod.uuid4",
+    "ValueError", "_json.loads", "random.choice", "uuid.UUID", "GoldTransaction", "type",
+    "time.time", "StakeRefundRefused",
 })
 # Methods a step may call on a local value (rows, lists, dicts, strings).
 _PURE_METHODS = frozenset({
@@ -877,254 +631,54 @@ _PURE_METHODS = frozenset({
     "strip", "lstrip", "rstrip", "mappings", "all", "first", "scalar",
     "scalars", "one", "one_or_none", "fetchall", "fetchone", "isoformat",
     "total_seconds", "split", "join", "copy", "index", "count", "add",
-    "setdefault", "pop", "sort",
+    "setdefault", "pop", "sort", "scalar_one", "intersection", "update",
+    "replace", "timestamp",
 })
 # Awaited library calls a helper may make that touch no session.
 _PURE_AWAITS = frozenset({"asyncio.sleep"})
 
 
-def _resolve_callee(func, scope, imports=None):
-    """The Python function a callee expression names in `scope` (a plain
-    name, or a module attribute such as `_match_hold._hold_latch`), else
-    None."""
-    if isinstance(func, _ast.Name) and imports and func.id in imports:
-        mod, attr = imports[func.id]
-        obj = getattr(_importlib.import_module(mod), attr, None)
-    elif isinstance(func, _ast.Name):
-        obj = getattr(scope, func.id, None)
-    elif isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Name):
-        mod = getattr(scope, func.value.id, None)
-        obj = getattr(mod, func.attr, None) if mod is not None else None
-    else:
-        return None
-    obj = _inspect.unwrap(obj) if callable(obj) else None
-    return obj if _inspect.isfunction(obj) else None
+def _policy(scope=None):
+    """The a1 walk's policy over `scope` (main by default). One policy per
+    scope, so its helper cache and met-shape counter persist."""
+    scope = main if scope is None else scope
+    key = id(scope)
+    if key not in _POLICIES:
+        _POLICIES[key] = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS,
+                                    _PURE_AWAITS, _SQL_LISTS)
+    return _POLICIES[key]
 
 
-_HELPER_EFFECTS = {}
+_POLICIES = {}
 
 
-def _helper_effects(fn, stack=()):
-    """The effects of an awaited helper, read from its own body: a set drawn
-    from 'read', 'lock', 'write', 'await' (it awaits a classified helper or
-    library call). Raises Unclassified when the body ends the transaction
-    (any `.commit`, `.rollback`, `.begin`, `.begin_nested` or `.close`, or a
-    transaction command in SQL text: round 2, finding 2) or awaits anything
-    the walk cannot classify. Every awaited call in the helper is classified
-    the way a step's is, recursively; its plain calls cannot reach the
-    session (it is async), so they are not read."""
-    key = (fn.__module__, fn.__qualname__)
-    if key in _HELPER_EFFECTS:
-        return _HELPER_EFFECTS[key]
-    if key in stack:
-        return frozenset()
-    scope = _inspect.getmodule(fn)
-    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(fn)))
-    local_sql = _local_sql(tree, scope)
-    guarded = _guarded(tree, scope)
-    imports = {a.asname or a.name: (n.module, a.name) for n in _ast.walk(tree)
-               if isinstance(n, _ast.ImportFrom) and n.module and not n.level
-               for a in n.names}
-    effects = set()
-    # Two named shapes may hold a transaction word inside a helper:
-    #  - a savepoint block, `async with db.begin_nested():`, which ends only
-    #    its own savepoint;
-    #  - an exception handler that opens with `await db.rollback()` and then
-    #    raises on every path, awaiting nothing (the admission gate's
-    #    lock-timeout handler: "Discard every earlier formation write before
-    #    returning a retryable refusal"). Its caller leaves by that raise,
-    #    after the rollback, which is the A1 rule's exit.
-    permitted = set()
-    for n in _ast.walk(tree):
-        if isinstance(n, _ast.AsyncWith):
-            items = n.items
-            ctx = items[0].context_expr if len(items) == 1 else None
-            if not (_is_db_call(ctx, "begin_nested") and not ctx.args
-                    and items[0].optional_vars is None):
-                raise Unclassified((0, f"{fn.__name__} has an async with this "
-                                       f"walk does not classify (its line "
-                                       f"{n.lineno})"))
-            permitted.add(id(ctx.func))
-            effects.add("savepoint")
-        if isinstance(n, _ast.ExceptHandler) and n.body and _txn_end(
-                n.body[0]) == "rollback" and _all_paths_raise(n.body[1:]):
-            permitted.add(id(n.body[0].value.value.func))
-            permitted.add(id(n.body[0].value))
-            effects.add("rollback-then-raise")
-    for n in _ast.walk(tree):
-        if isinstance(n, _ast.Attribute) and n.attr in (
-                "commit", "rollback", "begin", "begin_nested", "close"
-        ) and id(n) not in permitted:
-            raise Unclassified((0, f"{fn.__name__} ends the transaction "
-                                   f"(.{n.attr} at its line {n.lineno})"))
-    for n in _ast.walk(tree):
-        if isinstance(n, _ast.AsyncFor):
-            raise Unclassified((0, f"{fn.__name__} has an async for at its "
-                                   f"line {n.lineno}"))
-        if isinstance(n, _ast.Await) and id(n) not in permitted:
-            call = n.value
-            if not isinstance(call, _ast.Call):
-                raise Unclassified((0, f"{fn.__name__} awaits a non-call at its "
-                                       f"line {n.lineno}"))
-            if _is_db_call(call, "execute"):
-                try:
-                    effects.add(_execute_kind(call, scope, local_sql, guarded))
-                except Unclassified as e:
-                    raise Unclassified((0, f"{fn.__name__}: {e.args[0][1]} at "
-                                           f"its line {n.lineno}")) from None
-                continue
-            if _ast.unparse(call.func) in _PURE_AWAITS:
-                effects.add("await")
-                continue
-            params = list(_inspect.signature(fn).parameters)
-            if isinstance(call.func, _ast.Name) and call.func.id in params:
-                # A callback parameter: classified at each call site, which
-                # must not pass one (_checked_callbacks).
-                effects.add(f"callback:{call.func.id}")
-                continue
-            inner = _resolve_callee(call.func, scope, imports)
-            if inner is None or not _inspect.iscoroutinefunction(inner):
-                raise Unclassified((0, f"{fn.__name__} awaits "
-                                       f"{_ast.unparse(call.func)}, which the "
-                                       f"walk cannot classify (its line "
-                                       f"{n.lineno})"))
-            effects |= _checked_callbacks(
-                call, inner, _helper_effects(inner, stack + (key,)), n.lineno)
-            effects.add("await")
-    out = frozenset(effects)
-    _HELPER_EFFECTS[key] = out
-    return out
+def _sql_kind(sql):
+    """'read', 'lock' or 'write' (closed_walk.sql_kind under the a1 lists)."""
+    return _cw.sql_kind(sql, _SQL_LISTS)
 
 
-def _all_paths_raise(stmts):
-    """Whether every path through `stmts` ends in a raise, with no await,
-    return, break or continue on the way."""
-    if not stmts or any(isinstance(x, (_ast.Await, _ast.Return, _ast.Break,
-                                       _ast.Continue))
-                        for s in stmts for x in _ast.walk(s)):
-        return False
-    last = stmts[-1]
-    if isinstance(last, _ast.Raise):
-        return True
-    return (isinstance(last, _ast.If) and _all_paths_raise(last.body)
-            and _all_paths_raise(last.orelse))
+def _local_sql(tree, scope):
+    return _cw.local_sql(tree, scope)
 
 
-def _checked_callbacks(call, fn, effects, line):
-    """`effects` of helper `fn` at the call `call`, without its callback
-    parameters, after checking that the call passes none of them: an
-    awaited callback is not a shape the walk classifies."""
-    params = list(_inspect.signature(fn).parameters)
-    out = set()
-    for e in effects:
-        if not e.startswith("callback:"):
-            out.add(e)
-            continue
-        name = e.split(":", 1)[1]
-        at = params.index(name)
-        if any(k.arg == name for k in call.keywords) or len(call.args) > at:
-            raise Unclassified((line, f"a callback passed to {fn.__name__} "
-                                      f"({name}), which the walk does not "
-                                      "classify"))
-    return frozenset(out)
+def _is_db_call(call, attr):
+    return _cw.is_db_call(call, attr)
+
+
+def _execute_kind(call, scope, local_sql=None, guarded=frozenset()):
+    return _cw.execute_kind(call, scope, _SQL_LISTS, local_sql, guarded)
+
+
+def _helper_effects(fn, scope=None):
+    """closed_walk.helper_effects under the a1 policy."""
+    return _cw.helper_effects(fn, _policy(scope))
 
 
 def expr_effects(node, scope=None, local_sql=None):
-    """The effects of evaluating `node`, an expression or a simple
-    statement, as a list of (shape, effect) in evaluation order: shape is
-    'sql' (an execute), 'helper:<name>' (an awaited helper) or 'call' (a
-    plain call), effect 'read', 'lock', 'write', or 'pure'. Raises
-    Unclassified, naming the construct and its line, for anything off the
-    named shapes: a transaction end in any spelling, an awaited call it
-    cannot classify, a call of a computed callee (a lambda call), an
-    assignment expression, a yield, or an expression kind it does not
-    list."""
-    scope = main if scope is None else scope
-    out = []
-
-    def visit(n):
-        if isinstance(n, _ast.Await):
-            call = n.value
-            if not isinstance(call, _ast.Call):
-                raise Unclassified((n.lineno, "an await of a non-call"))
-            if _is_db_call(call, "commit") or _is_db_call(call, "rollback"):
-                raise Unclassified((n.lineno, "a transaction end in a spelling "
-                                              "this walk does not read"))
-            for a in list(call.args) + [k.value for k in call.keywords]:
-                visit(a)
-            if _is_db_call(call, "execute"):
-                out.append(("sql", _execute_kind(call, scope, local_sql)))
-                return
-            fn = _resolve_callee(call.func, scope)
-            if fn is None or not _inspect.iscoroutinefunction(fn):
-                raise Unclassified((n.lineno, "an awaited call this walk does "
-                                              f"not classify: {_ast.unparse(call.func)}"))
-            try:
-                eff = _checked_callbacks(call, fn, _helper_effects(fn), n.lineno)
-            except Unclassified as e:
-                raise Unclassified((n.lineno, e.args[0][1])) from None
-            kinds = eff & {"read", "lock", "write"}
-            out.append((f"helper:{fn.__name__}",
-                        "write" if "write" in kinds else "lock" if "lock" in kinds
-                        else "read" if "read" in kinds else "pure"))
-            return
-        if isinstance(n, _ast.Call):
-            name = _ast.unparse(n.func)
-            if isinstance(n.func, _ast.Attribute) and name not in _PURE_CALLS:
-                if (isinstance(n.func.value, _ast.Name)
-                        and n.func.value.id == "db"):
-                    raise Unclassified((n.lineno, f"a session call this walk "
-                                                  f"does not classify: {name}"))
-                if n.func.attr not in _PURE_METHODS:
-                    raise Unclassified((n.lineno, f"a method call this walk "
-                                                  f"does not classify: {name}"))
-                visit(n.func.value)
-            elif isinstance(n.func, _ast.Name):
-                if name not in _PURE_CALLS:
-                    fn = _resolve_callee(n.func, scope)
-                    if fn is None or _inspect.iscoroutinefunction(fn):
-                        raise Unclassified((n.lineno, f"a call this walk does "
-                                                      f"not classify: {name}"))
-                    if any(isinstance(x, _ast.Attribute) and x.attr in (
-                            "commit", "rollback", "execute", "begin", "flush")
-                           for x in _ast.walk(_ast.parse(_textwrap.dedent(
-                               _inspect.getsource(fn))))):
-                        raise Unclassified((n.lineno, f"a plain call of {name}, "
-                                                      "which touches a session"))
-            elif name not in _PURE_CALLS:
-                raise Unclassified((n.lineno, "a call of a computed callee: "
-                                              f"{name}"))
-            for a in n.args:
-                visit(a)
-            for k in n.keywords:
-                visit(k.value)
-            out.append(("call", "pure"))
-            return
-        if isinstance(n, _ast.Lambda):
-            visit(n.body)               # a lambda passed as a value
-            return
-        if isinstance(n, (_ast.NamedExpr, _ast.Yield, _ast.YieldFrom)):
-            raise Unclassified((n.lineno, f"a {type(n).__name__} this walk does "
-                                          "not classify"))
-        if not isinstance(n, _EXPR_KINDS):
-            raise Unclassified((getattr(n, "lineno", 0),
-                                f"an expression this walk does not classify: "
-                                f"{type(n).__name__}"))
-        for c in _ast.iter_child_nodes(n):
-            visit(c)
-
-    visit(node)
-    return out
-
-
-_EXPR_KINDS = (
-    _ast.Name, _ast.Constant, _ast.Attribute, _ast.Subscript, _ast.Slice,
-    _ast.BinOp, _ast.BoolOp, _ast.UnaryOp, _ast.Compare, _ast.IfExp,
-    _ast.JoinedStr, _ast.FormattedValue, _ast.List, _ast.Tuple, _ast.Dict,
-    _ast.Set, _ast.Starred, _ast.keyword, _ast.comprehension, _ast.ListComp,
-    _ast.SetComp, _ast.DictComp, _ast.GeneratorExp, _ast.arguments, _ast.arg,
-    _ast.expr_context, _ast.operator, _ast.boolop, _ast.unaryop, _ast.cmpop,
-)
+    """closed_walk.expr_effects under the a1 policy: the (shape, effect) list
+    of evaluating `node`; raises Unclassified naming the construct and its
+    line."""
+    return _cw.expr_effects(node, _policy(scope), local_sql)
 
 
 def _plain_read(call):
@@ -1392,10 +946,17 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
         problems.append((bst.lineno, "the identity barrier is not the plain "
                          "statement `await _identity_lock_many(...)`"))
     else:
+        # Every argument kind of the barrier call is classified: positional,
+        # keyword, and unpacked ones are refused (round 3, finding a1:1397:
+        # `timeout_ms=(await db.commit())` passed when only the positional
+        # arguments were read).
         try:
-            if any(sh != "call" for sh, _e in expr_effects(
-                    _ast.Tuple(elts=list(bcall.args), ctx=_ast.Load()), scope)):
-                problems.append((bst.lineno, "the barrier's arguments await"))
+            for kind, a in _cw.call_arguments(bcall):
+                if kind in ("star", "double-star"):
+                    raise Unclassified((bst.lineno, "the barrier has unpacked "
+                                                    "arguments"))
+                if any(sh != "call" for sh, _e in expr_effects(a, scope)):
+                    problems.append((bst.lineno, "the barrier's arguments await"))
         except Unclassified as e:
             problems.append((e.args[0][0] or bst.lineno, e.args[0][1]))
         shapes["barrier"] += 1
@@ -1476,7 +1037,10 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
         if not allowed(eff, state):
             problems.append((st.lineno, f"awaits after {ended(state)}"))
         env = dict(env)
-        for nm in names:
+        # A store is any binding of the name, including a mutating method
+        # on it (round 3, ruling item b: `others.extend(still)` after the
+        # drift's `others = []` kept the rolled-back roster).
+        for nm in set(names) | _cw.stores(st):
             env.pop(nm, None)
         if (isinstance(st, _ast.Assign) and len(st.targets) == 1
                 and isinstance(st.targets[0], _ast.Name)):
@@ -1487,8 +1051,7 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
         return env
 
     def assigned(stmts):
-        return {n.id for s in stmts for n in _ast.walk(s)
-                if isinstance(n, _ast.Name) and isinstance(n.ctx, _ast.Store)}
+        return set().union(*[_cw.stores(s) for s in stmts]) if stmts else set()
 
     def nested(stmts, state):
         """The body of a loop nested in the span: simple statements, ifs,
@@ -1739,16 +1302,15 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
                             pre_env[st.targets[0].id] = _ast.literal_eval(st.value)
                         except (ValueError, TypeError, SyntaxError):
                             pass
-                elif not isinstance(st, _ast.Expr):
+                else:
                     for nm in assigned([st]):
                         pre_env.pop(nm, None)
             exit_only = {id(s) for k, s in enumerate(loop.body[:-1])
                          if isinstance(loop.body[k + 1], _ast.Break)}
             for s in loop.body + loop.orelse:
-                for x in _ast.walk(s):
-                    if (isinstance(x, _ast.Name) and isinstance(x.ctx, _ast.Store)
-                            and not (id(s) in exit_only)):
-                        pre_env.pop(x.id, None)
+                if id(s) not in exit_only:
+                    for nm in _cw.stores(s):
+                        pre_env.pop(nm, None)
             for b_state, b_env, b_line in body_breaks:
                 if not b_state:
                     continue
@@ -2461,7 +2023,7 @@ def test_gather_drift_rolls_back_and_never_commits(site):
         sorted(rollbacks), sorted(passed))
 
 
-def _relock_outcome_problems(resolve_src, pick_src, relock_src):
+def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
     """The team forms accept the resolver's 'relocked' answer as an exit
     whose transaction end is not in the poll, so that end is read where it
     is rather than assumed. The resolver (`resolve_src`) answers
@@ -2479,6 +2041,20 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src):
                              for s in (resolve_src, pick_src, relock_src))
     out = [f"{fn.name} ends the transaction itself"
            for fn in (resolve, pick) if _ends_inside(fn)]
+    # Both bodies are walked by the shared closed walk (round 3, finding
+    # a1:2481: an awaited helper that commits, inserted into the real
+    # resolver, passed this read). The relock helper's own body is read
+    # below; at its one call only its arguments are classified.
+    for fn in (resolve, pick):
+        try:
+            eff = _cw.def_effects(fn, main if scope is None else scope,
+                                  _policy(scope), fn.name,
+                                  opaque={relock.name, pick.name})
+        except Unclassified as e:
+            out.append(f"{fn.name}: {e.args[0][1]} (line {e.args[0][0]})")
+            continue
+        if eff & {"rollback-then-raise", "savepoint"}:
+            out.append(f"{fn.name} ends the transaction itself")
     for st in _ast.walk(pick):
         value = getattr(st, "value", None)
         if isinstance(st, _ast.Return) and not (
@@ -3013,7 +2589,8 @@ def test_the_gather_exit_oracle_can_fail():
         "    await db.commit()",
         "    team = 1",
         '    return TeamQueuePollResponse(status="matched")'])
-    assert _relock_outcome_problems(resolve_src, pick_src, relock_src) == []
+    assert _relock_outcome_problems(resolve_src, pick_src, relock_src,
+                                    _SAMPLE) == []
     relock_planted = [
         ("answers 'relocked' in 0 places", resolve_src.replace(
             '("relocked", resp)', '("defer", resp)'), pick_src, relock_src),
@@ -3041,7 +2618,7 @@ def test_the_gather_exit_oracle_can_fail():
                             "        return None")),
     ]
     for why, *srcs in relock_planted:
-        got = _relock_outcome_problems(*srcs)
+        got = _relock_outcome_problems(*srcs, scope=_SAMPLE)
         assert any(why in p for p in got), (why, got)
 
 
@@ -3869,3 +3446,171 @@ def test_fix1b_r4_null_stays_below_every_floor_consumer():
         calls = _fix1b_calls(function_name, "_ffa_roster_clears_proximity_floor")
         assert len(calls) == 1, function_name
         assert _ast.unparse(calls[0]) == expression, function_name
+
+
+def test_the_node_table_names_every_concrete_ast_class():
+    """Ruling REHEARSAL-FOUR-R3 (a): every concrete node class of the running
+    interpreter's ast module is in closed_walk.NODE_TABLE with a rule, so no
+    construct is accepted by omission; a class a newer interpreter adds
+    fails here until it is given a rule."""
+    assert _cw.table_gaps() == [], _cw.table_gaps()
+    assert set(_cw.NODE_TABLE.values()) <= {
+        "leaf", "children", "call", "await", "lambda", "comp", "stmt", "refuse"}
+
+
+_R3_HELPER_SRC = chr(10).join([
+    "async def finish(db):",
+    "    await db.commit()",
+    "async def cbhelper(db, callback=None):",
+    "    if callback is not None:",
+    "        await callback(db)",
+    "async def defaulthelper(db, callback=finish):",
+    "    await callback(db)",
+    "async def matchhelper(db):",
+    "    match 1:",
+    "        case _:",
+    "            pass",
+    "async def lambdahelper(db):",
+    "    (lambda: None)()",
+    "async def walrushelper(db):",
+    "    if (hit := 1):",
+    "        pass",
+    "async def yieldhelper(db):",
+    "    yield 1",
+    "async def defaultspelling(db, end=None):",
+    "    x = db.commit",
+    "async def comphelper(db):",
+    "    return [await db.commit() for _ in range(1)]",
+    "async def committing(db):",
+    "    await sync_state(db)",
+    ""])
+
+
+def _r3_scope():
+    """A scope whose helpers are _R3_HELPER_SRC's, then _SAMPLE's."""
+    import linecache as _linecache
+    import types as _types
+    mod = _types.ModuleType("r3_helpers")
+    mod.__file__ = "<r3_helpers>"
+    _linecache.cache[mod.__file__] = (len(_R3_HELPER_SRC), None,
+                                      _R3_HELPER_SRC.splitlines(True), mod.__file__)
+    import sys as _sys
+    _sys.modules[mod.__name__] = mod
+    exec(compile(_R3_HELPER_SRC, mod.__file__, "exec"), mod.__dict__)
+    mod.sync_state = _sample_commits
+
+    class Scope:
+        def __getattr__(self, name):
+            return getattr(mod, name) if hasattr(mod, name) else getattr(_SAMPLE, name)
+
+    return Scope()
+
+
+def _round3_a1_programs():
+    """Rehearsal-four round 3's programs (the reviewer's a1 findings and the
+    sitting's three probes) and one program per argument kind and per
+    mutating method, as (form, a sentence the shared visitor must give,
+    source): each must be refused. Templates are round 2's good programs."""
+    NL = chr(10)
+    good, _bad = _round2_a1_programs()
+    q, g, t = good[0][1], good[1][1], good[2][1]
+    drift_line = "        if await drifted(db):"
+    assert q.count(drift_line) == 1 and g.count(drift_line) == 1
+
+    def before_drift(src, line):
+        return src.replace(drift_line, "        " + line + NL + drift_line)
+
+    barrier = "        await _identity_lock_many(db, [cand])"
+    assert q.count(barrier) == 1
+    sql = '"SELECT COUNT(*) FROM q"'
+    assert g.count(sql) == 1
+    drop = "            others = []" + NL + "            break"
+    assert t.count(drop) == 1
+    out = [
+        # a1:1397: every argument kind of the barrier call
+        ("return", "a transaction end in a spelling", q.replace(
+            barrier, "        await _identity_lock_many(db, [cand], "
+                     "timeout_ms=(await db.commit()))")),
+        ("return", "the barrier has unpacked arguments", q.replace(
+            barrier, "        await _identity_lock_many(db, *[[cand]])")),
+        ("return", "the barrier has unpacked arguments", q.replace(
+            barrier, "        await _identity_lock_many(db, [cand], **{})")),
+        # a1:914: helper bodies are closed
+        ("return", "a Match this walk does not classify",
+         before_drift(q, "await matchhelper(db)")),
+        ("return", "a call of a computed callee",
+         before_drift(q, "await lambdahelper(db)")),
+        ("return", "a NamedExpr this walk does not classify",
+         before_drift(q, "await walrushelper(db)")),
+        ("return", "an awaited call this walk does not classify: yieldhelper",
+         before_drift(q, "await yieldhelper(db)")),
+        ("return", "a transaction word in a spelling",
+         before_drift(q, "await defaultspelling(db)")),
+        ("return", "ends the transaction (.commit)",
+         before_drift(q, "await comphelper(db)")),
+        ("return", "ends the transaction (.commit)",
+         before_drift(q, "await committing(db)")),
+        # probe P3: a callback through ** or a parameter default
+        ("return", "a call of cbhelper with unpacked arguments",
+         before_drift(q, "await cbhelper(db, **{'callback': finish})")),
+        ("return", "a call of cbhelper with unpacked arguments",
+         before_drift(q, "await cbhelper(*[db])")),
+        ("return", "has a default the walk does not classify",
+         before_drift(q, "await defaulthelper(db)")),
+        # argument kinds in a step: a lambda's default, a comprehension
+        ("return", "a transaction end in a spelling this walk does not read",
+         before_drift(q, "f = (lambda x=(await db.commit()): x)")),
+        ("return", "a transaction end in a spelling this walk does not read",
+         before_drift(q, "xs = [await db.commit() for _ in range(1)]")),
+        # a1:672 and probe P2: SQL after the gather rollback, lexer-first
+        ("gather", "a SQL function off the read allow-list: lo_create",
+         g.replace(sql, repr('SELECT "lo_create"(0)'))),
+        ("gather", "a SQL function off the read allow-list: lo_create",
+         g.replace(sql, repr("SELECT '/*' || lo_create(0)::text || '*/'"))),
+        ("gather", "awaits after rollback",
+         g.replace(sql, repr("SELECT 1 INTO tmp_probe"))),
+        ("gather", "awaits after rollback",
+         g.replace(sql, repr("CREATE TEMP TABLE p AS SELECT 1"))),
+    ]
+    # probe P1 and ruling item (b): a mutating method on a carried name
+    for m in ("append(still)", "extend(still)", "update(still)", "clear()",
+              "pop()", "setdefault(1, still)", "insert(0, still)"):
+        out.append(("team", "reaches the lease acquisition", t.replace(
+            drop, "            others = []" + NL + "            others." + m + NL
+            + "            break")))
+    for op in ("+=", "|="):
+        out.append(("team", "reaches the lease acquisition", t.replace(
+            drop, "            others = []" + NL + f"            others {op} still"
+            + NL + "            break")))
+    return out
+
+
+def test_the_shared_visitor_refuses_round_3s_programs():
+    """Rehearsal-four round 3 (ruling REHEARSAL-FOUR-R3): the reviewer's a1
+    programs and the sitting's probes, one program per argument kind and one
+    per mutating method, each refused by the shared visitor for its own
+    reason; round 2's good templates still pass."""
+    scope = _r3_scope()
+    good, _bad = _round2_a1_programs()
+    for form, src in good:
+        assert formation_exit_violations(src, form, scope=scope) == [], form
+    for form, why, src in _round3_a1_programs():
+        got = formation_exit_violations(src, form, scope=scope)
+        assert any(why in b for b in got), (form, why, got)
+
+
+def test_the_resolver_walk_reads_an_awaited_committing_helper():
+    """Round 3, finding a1:2481: an awaited helper that commits, inserted
+    into the real resolver and into the real family pick, is refused."""
+    names = ("_team_resolve_live_family", "_team_lock_family_pick",
+             "_team_relock_existing_series")
+    srcs = [_inspect.getsource(getattr(main, n)) for n in names]
+    assert _relock_outcome_problems(*srcs) == []
+    for k in (0, 1):
+        tree = _ast.parse(_textwrap.dedent(srcs[k]))
+        fn = tree.body[0]
+        fn.body.insert(1, _ast.parse("await sync_state(db)").body[0])
+        mutated = list(srcs)
+        mutated[k] = _ast.unparse(tree)
+        got = _relock_outcome_problems(*mutated, scope=_SAMPLE)
+        assert any("ends the transaction" in g for g in got), (names[k], got)
