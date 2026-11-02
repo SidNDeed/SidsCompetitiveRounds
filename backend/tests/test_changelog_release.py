@@ -56,6 +56,25 @@ def test_a_bullet_runs_over_its_indented_lines_and_stops_at_the_next():
     ]
 
 
+def test_a_continuation_paragraph_after_a_blank_line_stays_with_its_bullet():
+    """Rehearsal-four round 2, finding 10: an indented paragraph after a blank
+    line is the bullet's own (Markdown renders it inside the list item), so a
+    claim placed there is read with the bullet; a line at column 0 after the
+    blank line still ends it."""
+    text = chr(10).join([
+        "## v1.40.2 (2026-08-28)", "",
+        "- The region a ranked room is created in is the one both seats",
+        "  measured best.", "",
+        "  It no longer goes to whichever region came first alphabetically.",
+        "",
+        "Unrelated paragraph at column 0.",
+        "- Next bullet.", ""])
+    bullet = one_bullet("1.40.2", "The region a ranked room is created in", text)
+    assert "came first alphabetically" in bullet, bullet
+    assert "Unrelated paragraph" not in bullet, bullet
+    assert release_bullets("1.40.2", text)[1] == "Next bullet."
+
+
 def test_two_bullets_matching_in_the_release_raise():
     with pytest.raises(ChangelogError):
         one_bullet("1.0.0", "widget", DOC)

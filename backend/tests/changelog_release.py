@@ -14,10 +14,13 @@ one heading names that version.
 release_bullets(version) is that section's top-level bullets, each one line
 of running text (whitespace collapsed, the leading "- " dropped). A bullet
 starts at a line that begins with "- " and runs over the indented lines that
-follow it; a blank line or any line that starts at column 0 ends it, so the
-next bullet, a "**Heading**" paragraph or a "### " heading is never part of
-it. This file has no multi-paragraph bullets (no indented line follows a
-blank line anywhere in it), so nothing indented is orphaned by that rule.
+follow it, blank lines included when an indented line follows them: an
+indented paragraph after a blank line is the bullet's own continuation
+paragraph, as Markdown renders it, so a claim placed there is read with the
+bullet (rehearsal-four round 2, finding 10: the reader stopped at the blank
+line and a claim in the second paragraph went unread). A line that starts at
+column 0 ends the bullet, so the next bullet, a "**Heading**" paragraph or a
+"### " heading is never part of it.
 
 one_bullet(version, phrase) is the one bullet of that release whose running
 text contains the phrase (compared with whitespace collapsed on both sides).
@@ -69,8 +72,10 @@ def release_bullets(version, text=None):
             if current is not None:
                 bullets.append(current)
             current = [line[2:]]
-        elif current is not None and line.strip() and line[0] in " \t":
-            current.append(line)
+        elif current is not None and not line.strip():
+            continue                # held: the next line decides
+        elif current is not None and line[0] in " \t":
+            current.append(line)    # a wrapped line or a continuation paragraph
         else:
             if current is not None:
                 bullets.append(current)
