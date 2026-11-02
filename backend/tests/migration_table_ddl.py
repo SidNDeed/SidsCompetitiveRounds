@@ -55,9 +55,13 @@ silently left out. Concretely:
     table name may be quoted, the name may be absent -- and is returned
     whole. Parentheses that do not balance before the semicolon raise.
   * A line comment ends at CR or at LF (scan.l's non_newline excludes both).
-  * Executable positions are the dollar-quoted body of a DO and of a CREATE
+  * Executable positions are the dollar-quoted body of a DO (read only as
+    DO body, DO LANGUAGE name body or DO body LANGUAGE name, name one
+    unquoted identifier; any other DO shape raises) and of a CREATE
     FUNCTION or PROCEDURE ... AS, and, inside such a body, the command of a
-    PL/pgSQL EXECUTE (up to its INTO, USING or ';') when it is one constant
+    PL/pgSQL EXECUTE (every EXECUTE except the privilege inside a GRANT or
+    REVOKE and the function of a CREATE [OR REPLACE] [CONSTRAINT] TRIGGER,
+    each judged by the statement's head; up to its INTO, USING or ';') when it is one constant
     or a '||' concatenation of constants, read whole as the joined text;
     recursively. Each is lexed as SQL by the same lexer. Nothing is
     decoded: in an executable position a DO or AS body that is not
@@ -78,6 +82,7 @@ silently left out. Concretely:
     body, and a statement with no terminating semicolon raise.
 """
 
+import hashlib
 import os
 import re
 
@@ -381,24 +386,89 @@ def _literal_start(toks, p):
     return p
 
 
+def _constant_at(toks, j):
+    """(index of the string or dollar token, index after it) when toks[j]
+    begins one constant: a dollar-quoted string, a standard string, or a
+    prefixed string constant (E'', B'', X'', N'' as the ident and the string,
+    U&'' as u, & and the string, each adjacent); None otherwise."""
+    t = _at(toks, j)
+    if t is None:
+        return None
+    if t[0] in ("dollar", "string"):
+        return j, j + 1
+    nxt = _at(toks, j + 1)
+    if (t[0] == "ident" and t[1] in _LITERAL_PREFIXES and nxt is not None
+            and nxt[0] == "string" and _adjacent(t, nxt)):
+        return j + 1, j + 2
+    lit = _at(toks, j + 2)
+    if (t[:2] == ("ident", "u") and (nxt or ())[:2] == ("punct", "&") and lit is not None
+            and lit[0] == "string" and _adjacent(t, nxt) and _adjacent(nxt, lit)):
+        return j + 2, j + 3
+    return None
+
+
+def _do_bodies(toks, where):
+    """The index of the body token of every DO statement in toks.
+
+    A DO statement is read in exactly these shapes (REHEARSAL-FOUR-R5
+    finding 14; backend/sql uses only the first):
+        DO body
+        DO LANGUAGE name body
+        DO body LANGUAGE name
+    each followed by ';' or the end of the unit, where body is one constant
+    (a dollar-quoted body, or a string constant that the walk then refuses as
+    not dollar-quoted) and name is one unquoted identifier that does not
+    begin a constant. DO followed by NOTHING or UPDATE is the action of an
+    ON CONFLICT clause, not a statement. Every other shape after DO raises,
+    whatever its body holds: a LANGUAGE name that is a string, a prefixed
+    string, a dollar-quoted string or a quoted identifier, a second body or
+    LANGUAGE clause, and anything else before the ';'."""
+    out = []
+    for k, t in enumerate(toks):
+        if not _kw(t, "do"):
+            continue
+        nxt = _at(toks, k + 1)
+        if _kw(nxt, "nothing") or _kw(nxt, "update"):
+            continue
+        j, body, language = k + 1, None, False
+        while True:
+            t2 = _at(toks, j)
+            if t2 is None or t2[:2] == ("punct", ";"):
+                break
+            if _kw(t2, "language") and not language:
+                name = _at(toks, j + 1)
+                if name is None or name[0] != "ident" or _constant_at(toks, j + 1) is not None:
+                    raise MigrationDdlError(
+                        "the DO in %s at offset %d has a LANGUAGE name that is not one "
+                        "unquoted identifier; the DO is not read" % (where, t[2]))
+                language = True
+                j += 2
+                continue
+            if body is None:
+                found = _constant_at(toks, j)
+                if found is not None:
+                    body, j = found
+                    continue
+            raise MigrationDdlError(
+                "the DO in %s at offset %d is not DO [LANGUAGE name] body or DO body "
+                "[LANGUAGE name]; it is not read" % (where, t[2]))
+        if body is None:
+            raise MigrationDdlError("the DO in %s at offset %d has no body; it is not read"
+                                    % (where, t[2]))
+        out.append(body)
+    return out
+
+
 def _exec_kind(toks, p, top, execute_at):
     """Whether toks[p] (a 'dollar' or 'string' token) sits in an executable
-    position: 'do' (the body of DO [LANGUAGE name]), 'as' (the AS body of a
-    CREATE FUNCTION or PROCEDURE), 'execute' (p in execute_at, in a body), or
-    None (data). A prefixed string constant (E'', U&'', B'', X'', N'') is
-    located from its prefix, so such a body is found and refused like any
-    other body that is not dollar-quoted (REHEARSAL-FOUR-R4 item 2.2); the
-    LANGUAGE name may itself be a prefixed string."""
+    position other than a DO body (DO bodies are found by _do_bodies): 'as'
+    (the AS body of a CREATE FUNCTION or PROCEDURE), 'execute' (p in
+    execute_at, in a body), or None (data). A prefixed string constant (E'',
+    U&'', B'', X'', N'') is located from its prefix, so such a body is found
+    and refused like any other body that is not dollar-quoted
+    (REHEARSAL-FOUR-R4 item 2.2)."""
     s = _literal_start(toks, p)
     prev = toks[s - 1] if s else None
-    if _kw(prev, "do"):
-        return "do"
-    q = s - 1
-    if q >= 0 and toks[q][0] == "string":
-        q = _literal_start(toks, q)
-    if (q >= 2 and toks[q][0] in ("ident", "qident", "string")
-            and _kw(toks[q - 1], "language") and _kw(toks[q - 2], "do")):
-        return "do"
     if _kw(prev, "as"):
         b = s - 2
         while b >= 0 and toks[b][:2] != ("punct", ";"):
@@ -410,15 +480,52 @@ def _exec_kind(toks, p, top, execute_at):
     return None
 
 
+# The PL/pgSQL keywords after which a statement begins inside a block, besides
+# ';' and the start of the unit: BEGIN, and THEN (IF/ELSIF/CASE/EXCEPTION ...
+# THEN; backend/sql's one trigger inside a body follows THEN). Only these
+# two: a keyword left out (ELSE, LOOP) only lengthens a statement back to an
+# earlier start, which can make an EXECUTE dynamic, never exempt it.
+_BLOCK_KEYWORDS = ("begin", "then")
+
+
+def _statement_start(toks, k):
+    """Index of the first token of the statement holding toks[k]: the nearest
+    token at or before k that follows ';', a block keyword, or the start of
+    the unit."""
+    b = k
+    while b > 0:
+        prev = toks[b - 1]
+        if prev[:2] == ("punct", ";") or (prev[0] == "ident" and prev[1] in _BLOCK_KEYWORDS):
+            break
+        b -= 1
+    return b
+
+
 def _is_dynamic_execute(toks, k):
-    """toks[k] is EXECUTE: whether it is a PL/pgSQL dynamic command, i.e. not
-    the privilege of GRANT/REVOKE EXECUTE (next ON or ',', or previous GRANT
-    or REVOKE) and not a trigger's EXECUTE FUNCTION|PROCEDURE name."""
-    nxt, prev = _at(toks, k + 1), toks[k - 1] if k else None
-    if _kw(nxt, "on") or (nxt or ())[:2] == ("punct", ","):
-        return False
-    if _kw(prev, "grant") or _kw(prev, "revoke"):
-        return False
+    """toks[k] is EXECUTE: whether it is a PL/pgSQL dynamic command. Only two
+    statement contexts make it something else (REHEARSAL-FOUR-R5 finding 15:
+    the context is the statement's head, never the neighbouring tokens):
+      GRANT|REVOKE ... EXECUTE ON|,     the privilege
+      CREATE [OR REPLACE] [CONSTRAINT] TRIGGER ... EXECUTE FUNCTION|PROCEDURE
+          name                          the trigger's function, the only
+                                        EXECUTE in that statement
+    Every other EXECUTE, a variable named function included, is dynamic."""
+    nxt = _at(toks, k + 1)
+    h = _statement_start(toks, k)
+    head = toks[h]
+    if _kw(head, "grant") or _kw(head, "revoke"):
+        return not (_kw(nxt, "on") or (nxt or ())[:2] == ("punct", ","))
+    if not _kw(head, "create"):
+        return True
+    j = h + 1
+    if _kw(_at(toks, j), "or") and _kw(_at(toks, j + 1), "replace"):
+        j += 2
+    if _kw(_at(toks, j), "constraint"):
+        j += 1
+    if not _kw(_at(toks, j), "trigger"):
+        return True
+    if any(_kw(toks[m], "execute") for m in range(j + 1, k)):
+        return True
     if ((_kw(nxt, "function") or _kw(nxt, "procedure"))
             and (_at(toks, k + 2) or ("",))[0] in ("ident", "qident")):
         return False
@@ -516,10 +623,11 @@ def _units(src, unresolved=None):
                     unresolved.append((where, t[2], " ".join(code[t[2]:end].split())))
                     continue
                 yield from walk(command, origin, False)
+        do_at = set(_do_bodies(toks, where))
         for p, t in enumerate(toks):
             if t[0] not in ("dollar", "string"):
                 continue
-            kind = _exec_kind(toks, p, top, ())
+            kind = "do" if p in do_at else _exec_kind(toks, p, top, ())
             if kind is None:
                 continue
             if t[0] == "dollar":
@@ -736,3 +844,24 @@ def ddl_naming_table(text, table, unresolved=None):
                 end = toks[e][2] if e < len(toks) else len(code)
                 out.append(code[toks[k][2]:end])
     return out
+
+
+def code_md5(src):
+    """md5 of src's code as this module reads it: for every unit _units walks
+    (the file, each executable DO or AS body, each EXECUTE command it reads),
+    its tokens' text joined by single spaces, an executable DO or AS body
+    token written as its kind only (the body is a unit of its own, read in
+    turn). Comments and whitespace do not count; any other change does.
+    test_mail.py pins with it every migration whose EXECUTEs it accounts for
+    by hand (REHEARSAL-FOUR-R5 finding 17). An EXECUTE whose command cannot
+    be read stays in its unit's tokens and does not refuse here."""
+    h = hashlib.md5()
+    for code, toks, origin in _units(src, []):
+        top = origin is None
+        executable = set(_do_bodies(toks, "a unit"))
+        executable |= {p for p, t in enumerate(toks) if t[0] in ("dollar", "string")
+                       and _exec_kind(toks, p, top, ()) is not None}
+        words = [("<%s>" % t[0]) if p in executable else code[t[2]:t[3]]
+                 for p, t in enumerate(toks)]
+        h.update((" ".join(words) + "\n").encode("utf-8"))
+    return h.hexdigest()

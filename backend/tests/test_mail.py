@@ -37,7 +37,7 @@ from sqlalchemy.sql.elements import TextClause
 
 import main
 import models
-from migration_table_ddl import MigrationDdlError, ddl_naming_table, table_ddl
+from migration_table_ddl import MigrationDdlError, code_md5, ddl_naming_table, table_ddl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DIR = os.path.join(HERE, "..", "..", "plugin")
@@ -2342,7 +2342,115 @@ def test_report_reason_bound_matches_the_client():
     assert (exc.status_code, exc.detail) == (400, "reason_too_long") and not db3.cases
 
 
-_TABLE_CONSTRAINT_HEADS = ("CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "EXCLUDE")
+# The reserved words that begin a table constraint: an element that starts
+# with one cannot be a column. EXCLUDE is an unreserved keyword, so `exclude`
+# can name a column; an element starting with it is an exclusion constraint
+# only when USING or a parenthesis follows (a column's second word is its
+# type, USING is reserved, and no type begins with a parenthesis).
+_RESERVED_CONSTRAINT_HEADS = ("CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN")
+_PLAIN_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _element_items(element):
+    """The top-level items of one column-list element, in order: ("w", WORD)
+    for each word (upper case), ("()", inner text) for each parenthesised
+    group, ("''", "") for each string literal."""
+    items, word, inner, depth, quote = [], [], [], 0, False
+
+    def flush():
+        if word:
+            items.append(("w", "".join(word).upper()))
+            del word[:]
+    for ch in element:
+        if depth:
+            if quote:
+                quote = ch != "'"
+            elif ch == "'":
+                quote = True
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    items.append(("()", "".join(inner)))
+                    del inner[:]
+                    continue
+            inner.append(ch)
+        elif quote:
+            if ch == "'":
+                quote = False
+                items.append(("''", ""))
+        elif ch == "'":
+            flush()
+            quote = True
+        elif ch == "(":
+            flush()
+            depth = 1
+        elif ch == ")":
+            raise AssertionError("a closing parenthesis with no opening one")
+        elif ch.isspace():
+            flush()
+        else:
+            word.append(ch)
+    flush()
+    if depth or quote:
+        raise AssertionError("an unclosed string literal or parenthesis")
+    return items
+
+
+def _table_constraint(element):
+    """None when the column-list element is a column; otherwise the columns
+    of the PRIMARY KEY it declares ([] for an exclusion constraint). A table
+    constraint is read by its whole shape (REHEARSAL-FOUR-R5 finding 16),
+    in the two shapes the readers' cases use (300's own statement has none):
+        [CONSTRAINT name] PRIMARY KEY ( col [, col ...] )
+        [CONSTRAINT name] EXCLUDE [USING method] ( ... )
+    An element that begins with a reserved constraint word (CONSTRAINT,
+    PRIMARY, UNIQUE, CHECK, FOREIGN) and is not one of these shapes raises:
+    it cannot be a column, and this reader does not read it. An element that
+    begins with EXCLUDE followed by USING or a parenthesis is an exclusion
+    constraint and is read whole or raises; any other EXCLUDE element is a
+    column named exclude."""
+    items = _element_items(element)
+
+    def word(i):
+        return items[i][1] if i < len(items) and items[i][0] == "w" else None
+
+    def group(i):
+        return i < len(items) and items[i][0] == "()"
+    if word(0) == "EXCLUDE":
+        if not (word(1) == "USING" or group(1)):
+            return None
+    elif word(0) not in _RESERVED_CONSTRAINT_HEADS:
+        return None
+    unread = AssertionError("a table constraint this reader does not parse: %s"
+                            % " ".join(element.split()))
+    i = 0
+    if word(0) == "CONSTRAINT":
+        if word(1) is None or not _PLAIN_NAME.fullmatch(word(1)):
+            raise unread
+        i = 2
+    if word(i) == "PRIMARY" and word(i + 1) == "KEY" and group(i + 2):
+        keys = [c.strip().lower() for c in items[i + 2][1].split(",")]
+        if not all(_PLAIN_NAME.fullmatch(c) for c in keys):
+            raise unread
+        end = i + 3
+    elif word(i) == "EXCLUDE":
+        end, keys = i + 1, []
+        if word(end) == "USING":
+            if word(end + 1) is None or not _PLAIN_NAME.fullmatch(word(end + 1)):
+                raise unread
+            end += 2
+        if not group(end):
+            raise unread
+        end += 1
+    else:
+        raise unread
+    if end != len(items):
+        raise unread
+    return keys
+
+
 def _ddl_on_mail_inbox_rev(text):
     """The CREATE, ALTER or DROP TABLE statements in SQL text that create,
     alter or drop mail_inbox_rev. Read through migration_table_ddl's lexer
@@ -2372,6 +2480,20 @@ def _ddl_on_mail_inbox_rev(text):
 #        text of the bug_reports target; and format(current_setting(
 #        'm373.accounted_sql')), whose value is the constant SELECT at 373:541
 #        set at 373:643.
+# Each reading above rests on code outside the EXECUTE text (373's template
+# and the set_config that binds it, 336's v_coltype, 192's c.conname, ...),
+# so each file holding one is pinned by migration_table_ddl.code_md5 (its
+# code with comments and whitespace removed, every unit included): a change
+# to any of its code fails the guard until the file is read again and
+# re-pinned (REHEARSAL-FOUR-R5 finding 17).
+_UNRESOLVED_EXECUTE_FILES_CODE_MD5 = {
+    "086_bug_report_number.sql": "2820ffe3559a547bdc82a000c8daea71",
+    "192_chat_moderation.sql": "3d962a42d8059c36f942dcf4ae0949a5",
+    "195_merge_dotless_card_names.sql": "30f1253de338e81ec0aeed05724abb32",
+    "198_merge_dotless_card_names_offers_only.sql": "0827f26020ed92d89dd7e067a5ad8a73",
+    "336_bug_reports_kind.sql": "e9918ff1a97a09975c958b21e48ed9b1",
+    "373_bug_reports_auto_number.sql": "57e9d3be8fcf677a0e9ca816fb5342db",
+}
 _UNRESOLVED_EXECUTES_READ = sorted([
     ("086_bug_report_number.sql", "EXECUTE format('CREATE SEQUENCE IF NOT EXISTS bug_reports_number_seq START WITH %s', next_num)"),
     ("192_chat_moderation.sql", "EXECUTE format('ALTER TABLE admin_actions DROP CONSTRAINT %I', c.conname)"),
@@ -2528,9 +2650,10 @@ def _create_table_columns(stmt):
 
     The statement comes from migration_table_ddl.table_ddl (one top-level
     statement, comments blanked). Its outer parentheses are split at
-    top-level commas. An element whose first word is a table-constraint
-    keyword is a constraint (a PRIMARY KEY one makes its columns NOT NULL);
-    any other element is a column named by its first word (folded to lower
+    top-level commas. An element is a table constraint when
+    _table_constraint reads it as one, by its whole shape (a PRIMARY KEY
+    makes its columns NOT NULL; `exclude INTEGER` is a column, EXCLUDE
+    being unreserved); any other element is a column named by its first word (folded to lower
     case, as PostgreSQL folds an unquoted name) whose nullability is read
     from its constraints by _column_nullable (never from text inside a
     DEFAULT, CHECK or REFERENCES clause). A form this reader does
@@ -2566,15 +2689,11 @@ def _create_table_columns(stmt):
         if not words:
             raise AssertionError("an empty element in the column list")
         upper = [w.upper() for w in words]
-        pairs = list(zip(upper, upper[1:]))
         if upper[0] == "LIKE":
             raise AssertionError("LIKE copies another table's columns: not read here")
-        if upper[0] in _TABLE_CONSTRAINT_HEADS:
-            if ("PRIMARY", "KEY") in pairs:
-                flat = " ".join(element.split())
-                inner = flat[flat.upper().index("PRIMARY KEY"):]
-                inner = inner[inner.index("(") + 1:inner.index(")")]
-                primary += [n.strip().lower() for n in inner.split(",")]
+        keys = _table_constraint(element)
+        if keys is not None:
+            primary += keys
             continue
         name = words[0].lower()
         if name in columns:
@@ -2615,6 +2734,14 @@ def test_migration_300_matches_the_orm_and_the_readers():
                 unresolved += [(name, text) for _where, _offset, text in found]
     assert others == [], others
     assert sorted(unresolved) == _UNRESOLVED_EXECUTES_READ, sorted(unresolved)
+    pinned = sorted({name for name, _text in unresolved})
+    assert pinned == sorted(_UNRESOLVED_EXECUTE_FILES_CODE_MD5), pinned
+    for name in pinned:
+        with open(os.path.join(SQL_DIR, name), encoding="utf-8") as other:
+            got = code_md5(other.read())
+        assert got == _UNRESOLVED_EXECUTE_FILES_CODE_MD5[name], (
+            "%s: its code changed since its unresolved EXECUTEs were read by hand (code_md5 %s); "
+            "read them again and re-pin" % (name, got))
     # the positive control over the real file: 300's own CREATE TABLE is seen
     with open(os.path.join(SQL_DIR, "300_mail_inbox_rev.sql"), encoding="utf-8") as own:
         seen = _ddl_on_mail_inbox_rev(own.read())
@@ -3252,8 +3379,40 @@ def test_r5_the_guard_sees_a_change_to_373s_unresolved_template(tmp_path, monkey
 
 def test_r5_kept_the_guard_passes_over_an_unchanged_copy(tmp_path, monkeypatch):
     """17, kept: the copied tree passes as is, and an edit to a comment in 373
-    that changes no command passes too."""
+    that changes no command passes too, at the top level and inside the
+    body that declares the template."""
     _r5_guard_over(tmp_path, monkeypatch)
     (tmp_path / "c").mkdir()
     _r5_guard_over(tmp_path / "c", monkeypatch,
                    ("-- ONE POLICY, ONE COPY.", "-- ONE POLICY, ONE COPY, reworded."))
+    (tmp_path / "d").mkdir()
+    _r5_guard_over(tmp_path / "d", monkeypatch,
+                   ("-- THE ADOPTION-FLOOR POLICY.", "-- THE ADOPTION-FLOOR POLICY, reworded."))
+
+
+def test_r5_constraint_shapes_not_read_refuse():
+    """16: a table constraint is read by its whole shape or refuses; an
+    element that begins with a reserved constraint word cannot be a column,
+    and an EXCLUDE followed by USING or a parenthesis is a constraint."""
+    for bad in ("CREATE TABLE t (a INT, UNIQUE (a))",
+                "CREATE TABLE t (a INT, CHECK (a > 0))",
+                "CREATE TABLE t (a INT, FOREIGN KEY (a) REFERENCES u)",
+                "CREATE TABLE t (a INT, PRIMARY KEY (a) DEFERRABLE)",
+                "CREATE TABLE t (a INT, PRIMARY KEY a)",
+                "CREATE TABLE t (a INT, CONSTRAINT p UNIQUE (a))",
+                "CREATE TABLE t (a INT, CONSTRAINT PRIMARY KEY (a))",
+                "CREATE TABLE t (a INT, EXCLUDE USING gist (a WITH =) WHERE (a > 0))",
+                "CREATE TABLE t (a INT, EXCLUDE USING (a WITH =))",
+                "CREATE TABLE t (a INT, EXCLUDE USING gist)",
+                "CREATE TABLE t (a INT, EXCLUDE (a WITH =) INCLUDE (a))",
+                "CREATE TABLE t (a INT, PRIMARY KEY (a + 1))",
+                "CREATE TABLE t (a INT, EXCLUDE USING gist.x (a WITH =))",
+                "CREATE TABLE t (a INT, CONSTRAINT p.q PRIMARY KEY (a))"):
+        with pytest.raises(AssertionError, match="table constraint"):
+            _create_table_columns(bad)
+    assert _create_table_columns(
+        "CREATE TABLE t (a INT, b INT, CONSTRAINT p PRIMARY KEY (a, b), "
+        "EXCLUDE USING gist (a WITH =), CONSTRAINT x EXCLUDE (b WITH =))"
+    ) == {"a": False, "b": False}
+    assert _create_table_columns("CREATE TABLE t (exclude INT, a INT, PRIMARY KEY (a))") == {
+        "exclude": True, "a": False}

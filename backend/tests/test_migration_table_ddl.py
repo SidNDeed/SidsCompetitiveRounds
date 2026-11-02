@@ -307,7 +307,10 @@ R4_PREFIXED_BODIES = [
     "DO X'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
     "DO N'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
     "DO LANGUAGE plpgsql e'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
-    "DO LANGUAGE 'plpgsql' E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "DO $$ BEGIN END $$ LANGUAGE plpgsql;\nDO LANGUAGE plpgsql "
+    "E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    # DO LANGUAGE 'plpgsql' E'...' moved to R5_LANGUAGE_NAMES_REFUSED: since
+    # round 5 a string LANGUAGE name refuses before the body is reached
     "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS "
     "E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
     "CREATE PROCEDURE p() LANGUAGE plpgsql AS "
@@ -324,11 +327,15 @@ def test_r4_prefixed_string_bodies_refuse(text):
         naming(text)
 
 
-def test_r4_a_prefixed_language_name_still_leads_to_the_body(sql):
-    """2.2 sibling: DO LANGUAGE <prefixed string> $$...$$ is a DO body."""
-    assert naming("DO LANGUAGE E'plpgsql' $$ BEGIN ALTER TABLE mail_inbox_rev "
-                  "ADD COLUMN x int; END $$;\n") == ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
-    with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
+def test_r4_a_prefixed_language_name_refuses(sql):
+    """2.2 sibling, revised by REHEARSAL-FOUR-R5 finding 14: round 4 read
+    DO LANGUAGE <prefixed string> $$...$$ as a DO body; the DO grammar now
+    reads only an unquoted identifier as the LANGUAGE name (backend/sql
+    names none), so a prefixed-string name refuses, in both readers."""
+    with pytest.raises(mtd.MigrationDdlError, match="has a LANGUAGE name that is not"):
+        naming("DO LANGUAGE E'plpgsql' $$ BEGIN ALTER TABLE mail_inbox_rev "
+               "ADD COLUMN x int; END $$;\n")
+    with pytest.raises(mtd.MigrationDdlError, match="has a LANGUAGE name that is not"):
         sql("CREATE TABLE t (a int);\nDO LANGUAGE U&'plpgsql' $$ BEGIN "
             "CREATE INDEX i ON t (a); END $$;\n")
 
@@ -464,3 +471,61 @@ def test_r5_kept_trigger_declarations_are_not_commands():
     found = []
     assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == [] and found == []
     assert naming(text) == []
+
+
+R5_DO_SHAPES_REFUSED = [
+    "DO LANGUAGE 'plpgsql' E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "DO LANGUAGE 'plpgsql' $b$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $b$;\n",
+    "DO LANGUAGE \"plpgsql\" $b$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $b$;\n",
+    "DO $b$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $b$ LANGUAGE $l$plpgsql$l$;\n",
+    "DO $b$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $b$ LANGUAGE 'plpgsql';\n",
+    "DO LANGUAGE plpgsql LANGUAGE plpgsql $b$ BEGIN END $b$;\n",
+    "DO $b$ BEGIN END $b$ $c$ BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END $c$;\n",
+    "DO $b$ BEGIN END $b$ plpgsql;\n",
+    "DO;\n",
+    "DO $$ BEGIN EXECUTE 'DO LANGUAGE $l$plpgsql$l$ $b$ BEGIN END $b$'; END $$;\n",
+]
+
+
+@pytest.mark.parametrize("text", R5_DO_SHAPES_REFUSED)
+def test_r5_do_shapes_outside_the_grammar_refuse(text):
+    """14: a DO is read only as DO body, DO LANGUAGE name body or DO body
+    LANGUAGE name (name one unquoted identifier); every other shape refuses,
+    in the file and inside an executed command."""
+    with pytest.raises(mtd.MigrationDdlError, match="the DO in"):
+        naming(text)
+
+
+def test_r5_on_conflict_do_is_not_a_do_statement(sql):
+    """14, kept: DO NOTHING and DO UPDATE after ON CONFLICT (the only other
+    DO in backend/sql) are not DO statements, at the top level and in a body."""
+    text = ("INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING;\n"
+            "INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 2;\n"
+            "DO $$ BEGIN INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING; END $$;\n")
+    assert naming(text) == []
+    assert sql("CREATE TABLE t (a int);\n" + text) == ["CREATE TABLE t (a int)"]
+
+
+def test_r5_execute_judged_by_its_statement_head():
+    """15: a privilege EXECUTE counts only inside GRANT or REVOKE, a trigger's
+    only inside CREATE [OR REPLACE] [CONSTRAINT] TRIGGER, whatever the
+    neighbouring tokens are."""
+    for text in ("DO $$ DECLARE on_ text; BEGIN PERFORM 1; EXECUTE s; END $$;\n",
+                 "DO $$ BEGIN IF true THEN EXECUTE function COLLATE \"C\"; END IF; END $$;\n",
+                 "DO $$ BEGIN PERFORM grant_x(); EXECUTE procedure INTO r; END $$;\n",
+                 # inside GRANT, only EXECUTE ON|, is the privilege
+                 "DO $$ BEGIN GRANT EXECUTE function COLLATE \"C\"; END $$;\n",
+                 # an event trigger is not a CREATE [OR REPLACE] [CONSTRAINT] TRIGGER
+                 # (none in backend/sql): its EXECUTE is collected, not exempted
+                 "DO $$ BEGIN CREATE EVENT TRIGGER e ON ddl_command_start "
+                 "EXECUTE FUNCTION f(); END $$;\n",
+                 # a second EXECUTE in a trigger's statement is not the trigger's
+                 "DO $$ BEGIN CREATE TRIGGER g AFTER INSERT ON y FOR EACH ROW "
+                 "EXECUTE FUNCTION f() EXECUTE function COLLATE \"C\"; END $$;\n"):
+        found = []
+        assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == []
+        assert len(found) == 1 and found[0][2].startswith("EXECUTE"), (text, found)
+    found = []
+    text = ("DO $$ BEGIN IF NOT EXISTS (SELECT 1) THEN CREATE TRIGGER g AFTER INSERT ON y "
+            "FOR EACH ROW EXECUTE FUNCTION f(); END IF; END $$;\n")
+    assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == [] and found == []
