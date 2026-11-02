@@ -10,3 +10,5 @@ tools/kept_view_census/classes.tsv whitespace=-blank-at-eol
 backend/tests/fixtures/card_evidence/** -text
 # The combat evidence canonical fixtures are reproduced byte for byte by the client.
 backend/tests/fixtures/combat_evidence/** -text
+# The FrameTime lane scripts run under bash on the Windows seats: always LF.
+tools/frametime/*.sh text eol=lf
