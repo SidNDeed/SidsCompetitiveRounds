@@ -1443,7 +1443,11 @@ namespace CompetitiveRounds
         private static readonly HashSet<string> _spoolKept = new HashSet<string>(StringComparer.Ordinal);
         private static long _nextPumpMs, _gen;
 
+#if SCR_FRAMETIME
+        private static string QueuePath() { return FtReplay.Running ? FtReplay.QueuePath : Path.Combine(Paths.ConfigPath, "CompetitiveRounds.seat-evidence.jsonl"); }
+#else
         private static string QueuePath() { return Path.Combine(Paths.ConfigPath, "CompetitiveRounds.seat-evidence.jsonl"); }
+#endif
 
         private const string SPOOL_PREFIX = "CompetitiveRounds.seat-evidence.closing-";
         private const int SPOOL_CAP = 16;
@@ -1524,7 +1528,7 @@ namespace CompetitiveRounds
         private static bool Load()
         {
 #if SCR_FRAMETIME
-            if (FtUpload.Closed) { FtUpload.Refuse("load", null); return false; }
+            if (FtUpload.Closed && !FtReplay.Running) { FtUpload.Refuse("load", null); return false; }
 #endif
             if (_loaded && !_stale && _spoolChecked) return true;
             try
@@ -1768,7 +1772,7 @@ namespace CompetitiveRounds
             FtHeavy.Mark(FtHeavy.Enqueue);
 #endif
 #if SCR_FRAMETIME
-            if (FtUpload.Closed) { FtUpload.Refuse("queue", route); return true; }
+            if (FtUpload.Closed && !FtReplay.Running) { FtUpload.Refuse("queue", route); return true; }
 #endif
             if (!Load()) return false;
             var next = new List<C.Pending>(_queue);
@@ -1973,6 +1977,39 @@ namespace CompetitiveRounds
                 + (FLIGHT_LIMIT_MS / 1000).ToString(CultureInfo.InvariantCulture) + " s (flight "
                 + id.ToString(CultureInfo.InvariantCulture) + "): held for the next launch");
         }
+
+#if SCR_FRAMETIME
+        internal static string FtRealQueuePath() { return Path.Combine(Paths.ConfigPath, "CompetitiveRounds.seat-evidence.jsonl"); }
+
+        /// <summary>F18 reading A (FtReplay): one recorded answer through Answer, against the scratch copy. Runs
+        /// only while FtReplay.Running; the in-memory queue state is saved and restored around it and PromoteSpool
+        /// is held off (_spoolChecked true), so only the scratch files are written.</summary>
+        internal static string FtReplayAnswer(int game, out long ticks)
+        {
+            ticks = 0;
+            if (!FtReplay.Running) return "not_running";
+            var keepQueue = new List<C.Pending>(_queue);
+            bool keepLoaded = _loaded, keepStale = _stale, keepSpool = _spoolChecked;
+            long keepGen = _gen;
+            try
+            {
+                _queue.Clear(); _loaded = false; _stale = false; _spoolChecked = true;
+                string body = "{\"ft_replay\":" + game.ToString(CultureInfo.InvariantCulture) + "}";
+                if (!Enqueue("e", body)) return "enqueue_failed";
+                bool opened = FtSpan.Open(FtSpan.Seat, FtSpan.Replay);
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                try { Answer("e", body, true, "{\"status\":\"recorded\"}", true); }
+                finally { ticks = System.Diagnostics.Stopwatch.GetTimestamp() - t0; FtSpan.Close(opened); }
+                return Find(_queue, "e", body) < 0 ? "settled" : "kept";
+            }
+            finally
+            {
+                _queue.Clear();
+                _queue.AddRange(keepQueue);
+                _loaded = keepLoaded; _stale = keepStale; _spoolChecked = keepSpool; _gen = keepGen;
+            }
+        }
+#endif
 
         private static void Answer(string route, string bodyKey, bool ok, string text, bool carried)
         {

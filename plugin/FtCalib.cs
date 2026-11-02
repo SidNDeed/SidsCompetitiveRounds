@@ -280,7 +280,7 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo("[FRAME-TIME] settled g=" + game + " seed=" + FtConfig.Seed + " c_plant=" + cPlant + " W=120"
                 + " vsync=" + UnityEngine.QualitySettings.vSyncCount + " target=" + UnityEngine.Application.targetFrameRate
                 + " freq=" + Stopwatch.Frequency + " hires=" + (Stopwatch.IsHighResolution ? 1 : 0) + " f_hat=" + FHat
-                + " gc_incremental=" + incremental + " gc_slice_ns=" + slice + " f18=" + FtConfig.F18
+                + " gc_incremental=" + incremental + " gc_slice_ns=" + slice + " f18=" + FtConfig.F18 + " answer=" + FtReplay.AnswerField
                 + " armfile=" + (FtConfig.Present ? 1 : 0) + " force=" + FtConfig.Force
                 + (FtConfig.Problems.Length > 0 ? " problems=" + FtConfig.Problems.Trim().Replace(' ', ',') : "")
                 + " clock=" + (FtClock.Installed ? 1 : 0) + " frames=" + FtClock.Frames + " missing_end=" + FtClock.MissingEnd

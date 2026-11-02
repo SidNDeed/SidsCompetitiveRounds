@@ -113,6 +113,7 @@ namespace CompetitiveRounds
         internal static void GameOver()
         {
             FtSpan.Moment = FtSpan.GameOver;
+            FtReplay.Run(Game);
             FtCensus.LogGame(Game);
             FtHeavy.LogGame(Game);
             FtUpload.LogCounts("game" + Game);

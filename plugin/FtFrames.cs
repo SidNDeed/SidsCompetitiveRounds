@@ -102,7 +102,7 @@ namespace CompetitiveRounds
                 + " span_un=" + (FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Upkeep) - _un0)
                 + " on_calls=" + (FtCensus.SumOn() - _on0) + " guarded=" + (FtCensus.SumGuarded() - _guard0)
                 + " zs=" + FtZero.Mask + " zl=" + FtZero.LateSeen
-                + " t0=" + _t0 + " t1=" + System.Diagnostics.Stopwatch.GetTimestamp());
+                + " t0=" + _t0 + " t1=" + System.Diagnostics.Stopwatch.GetTimestamp() + " answer=" + FtReplay.AnswerField);
             if (FtPlant.Us < 0 && !FtSchedule.ArmOn && _pn >= W)
                 FtPlant.Fix((long)Math.Round(0.03 * _pF * 1000000.0 / ((double)_pn * System.Diagnostics.Stopwatch.Frequency)),
                     FtSchedule.Label());
