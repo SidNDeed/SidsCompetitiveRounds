@@ -13,7 +13,9 @@ import sys
 W, OUT = sys.argv[1], sys.argv[2]
 src = os.path.join(W, "tools", "frametime")
 # every file test_ft_parse.py reads, as worktree-relative paths; the copy keeps the same relative layout
-FIXTURES = ["tools/frametime/ft_parse.py", "tools/frametime/test_ft_parse.py", "plugin/CombatEvidence.cs"]
+FIXTURES = ["tools/frametime/ft_parse.py", "tools/frametime/test_ft_parse.py", "tools/frametime/gate_specs/entries.py",
+            "tools/frametime/gate_specs/a3.py",
+            "plugin/CombatEvidence.cs"]
 MUTS = [
     ("F18 accepts a replay that did not settle", 'elif r.get("result") != "settled":', 'elif False:'),
     ("VR6 ignores a disarm", 'bad.append("disarmed: " + "; ".join(dis))', 'pass'),
@@ -32,8 +34,8 @@ MUTS = [
     ("VR7 sides swapped off", 'return "ON" if r.get("plant", 0) else "OFF"', 'return r["arm"]'),
     ("K_up without its half-width", "return est, hw, est + hw", "return est, hw, est"),
     ("VR5 point zero dropped", 'if r["kind"] == "p" and "span_g" in r:', 'if False:'),
-    ("D_up without its largest-value floor", 'return max(m + t_q(z, j - 1) * se, max(ds)), ds, rate',
-     'return m + t_q(z, j - 1) * se, ds, rate'),
+    ("D_up without its largest-value floor", 'return max(m + t_q(z, j - 1) * se, max(ds)), ds, rate\n',
+     'return m + t_q(z, j - 1) * se, ds, rate\n'),
     ("cal kind overwrites the line kind", '            k = "ckind"', '            k = "kind"'),
     ("zero-state voids only the failing point",
      'return set((r["game"], r["round"]) for r in recs if r["kind"] == "p" and r.get("zs", 0) != 0)',
@@ -45,6 +47,32 @@ MUTS = [
      'for k in ("missing_end", "cycle_failures", "span_depth_violations"):\n            if r.get(k, 0) != 0:',
      'for k in ("missing_end", "span_depth_violations"):\n            if r.get(k, 0) != 0:'),
     ("menu run completion ignored", 'if d.get("why") != "complete" or d.get("segs") != d.get("of"):', 'if False:'),
+    ("sitting completion line ignored", 'if len(done) != 1:\n        miss.append(', 'if False:\n        miss.append('),
+    ("sitting games not required", "        gone = sorted(want - have)\n", "        gone = []\n"),
+    ("VR5 missing census passes", 'gone = sorted(e for e in exp if e not in seen)', 'gone = []'),
+    ("VR5 opened line not required", 'bad.append("g=%d: %d opened lines (needs 1)" % (g, len(op)))', 'pass'),
+    ("VR5 collector opening ignored", 'shut = [c for c in OPENED if op[0].get(c) != 1]', 'shut = []'),
+    ("D_up pooled rate", 'rate[k] = max(rate.get(k, 0.0), r["on"] / on_frames[r["g"]])',
+     'rate[k] = rate.get(k, 0.0) + r["on"] / sum(on_frames.values())'),
+    ("VR2 calibration coverage dropped", 'gone = sorted(shapes - got)', 'gone = []'),
+    ("VR2 one run per game not required", 'bad.append("game %d: %d calibration runs (needs 1)" % (g, len(runs)))\n            continue',
+     'continue'),
+    ("B1 not guarded by VR6", '"B1": ("VR1", "VR2", "VR3", "VR4", "VR5", "VR6", "VR8", "VR9")',
+     '"B1": ("VR1", "VR2", "VR3", "VR4", "VR5", "VR8", "VR9")'),
+    ("B2 not guarded by VR7", '"B2": ("VR7",)', '"B2": ()'),
+    ("B3 not guarded by VR6", '"B3": ("VR5", "VR6")', '"B3": ("VR5",)'),
+    ("verdicts given on an incomplete sitting", 'if miss:\n            return "withheld: sitting incomplete"', 'if False:\n            pass'),
+    ("SID band dropped", 'if u <= 0.05 * tref:\n        return "SID"', 'if False:\n        return "SID"'),
+    ("menu e_C band upper end dropped", 'if not (lo_b <= m_ - h_ and m_ + h_ <= hi_b):', 'if not (lo_b <= m_ - h_):'),
+    ("menu e_C nearness dropped", 'if abs(m_ - 1.0) > MENU_EC_NEAR:', 'if False:'),
+    ("B3 ignores edge calls", 'for op, v in sorted(ops.items()) if v[1] > 0]', 'for op, v in sorted(ops.items()) if False]'),
+    ("A3 left out of U", "u = lead + ku + du + a3v", "u = lead + ku + du"),
+    ("A3 per-game maximum replaced by the last game", 'rate[k] = max(rate.get(k, 0.0), rows[0]["reads_win"] / on_frames[g])',
+     'rate[k] = rows[0]["reads_win"] / on_frames[g]'),
+    ("A3 missing line passes", 'raise Refused("A3 structure %s: game %d has %d a3 lines (needs 1)" % (k, g, len(rows)))',
+     'continue'),
+    ("A3 missing calibration passes", 'raise Refused("calibration %d has no a3 line for %s" % (i, miss))', 'continue'),
+    ("VR6 dispatch count ignored", 'if disp.get(r, 0) != sent.get(r, 0):', 'if False:'),
 ]
 # the tests each mutant must turn red (taken from a --discover run on a green baseline, then pinned)
 KILLS = {
@@ -88,6 +116,49 @@ KILLS = {
         ['test_vr2_flags_span_depth_and_cycle_failures'],
     'menu run completion ignored':
         ['test_menu_check_fails_an_aborted_run_and_a_wrong_gate'],
+    # round 1's fixes (FRAME-TIME-ROUND-R1): each mutant's named killing test, pinned from mp-discover runs
+    'sitting completion line ignored':
+        ['test_verdicts_need_the_complete_sitting'],
+    'sitting games not required':
+        ['test_verdicts_need_the_complete_sitting'],
+    'VR5 missing census passes':
+        ['test_vr5_needs_every_expected_record'],
+    'VR5 opened line not required':
+        ['test_vr5_needs_every_expected_record'],
+    'VR5 collector opening ignored':
+        ['test_vr5_needs_every_expected_record'],
+    'D_up pooled rate':
+        ['test_d_up_uses_the_largest_per_game_on_rate_not_a_pooled_off_rate'],
+    'VR2 calibration coverage dropped':
+        ['test_vr2_needs_every_game_start_calibration'],
+    'VR2 one run per game not required':
+        ['test_vr2_needs_every_game_start_calibration'],
+    'B1 not guarded by VR6':
+        ['test_a_failed_rule_invalidates_the_claims_it_guards'],
+    'B2 not guarded by VR7':
+        ['test_a_failed_rule_invalidates_the_claims_it_guards'],
+    'B3 not guarded by VR6':
+        ['test_a_failed_rule_invalidates_the_claims_it_guards'],
+    'verdicts given on an incomplete sitting':
+        ['test_verdicts_need_the_complete_sitting'],
+    'SID band dropped':
+        ['test_report_carries_the_specified_figures'],
+    'menu e_C band upper end dropped':
+        ['test_menu_check_fails_a_tenfold_exposure'],
+    'menu e_C nearness dropped':
+        ['test_menu_check_fails_a_tenfold_exposure'],
+    'A3 left out of U':
+        ['test_report_adds_a3_to_u'],
+    'A3 per-game maximum replaced by the last game':
+        ['test_a3_is_the_largest_per_game_window_rate_times_the_calibrated_difference'],
+    'A3 missing line passes':
+        ['test_a3_refuses_a_missing_line_or_calibration'],
+    'A3 missing calibration passes':
+        ['test_a3_refuses_a_missing_line_or_calibration'],
+    'B3 ignores edge calls':
+        ['test_b3_flags_heavy_work_in_a_live_frame_after_combat_ended'],
+    'VR6 dispatch count ignored':
+        ['test_vr6_counts_dispatches_independently'],
 }
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]

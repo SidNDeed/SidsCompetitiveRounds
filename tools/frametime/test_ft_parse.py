@@ -4,6 +4,8 @@ Run: python -I -B -m pytest tools/frametime/test_ft_parse.py -q"""
 import os
 import sys
 
+import re
+
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -118,7 +120,7 @@ def test_mutant_runs_kmax_for_fail_does_not_fail_on_uncertain_only():
 def test_vr5_flags_an_ungated_entry():
     recs = [{"kind": "census", "g": 1, "entry": "SeatEvidence.Tick", "on": 50, "guarded": 0},
             {"kind": "census", "g": 1, "entry": "CombatEvidence.Tick", "on": 50, "guarded": 40}]
-    ok, bad = P.vr5(recs)
+    ok, bad = P.vr5_points(recs)
     assert not ok and bad == ["g=1 SeatEvidence.Tick"]
 
 
@@ -209,17 +211,17 @@ def _pt(gate, **kw):
 
 
 def test_vr5_point_zero_holds():
-    ok, bad = P.vr5([_pt(1, guarded=40), _pt(0, span_g=900, span_gn=40, on_calls=40)])
+    ok, bad = P.vr5_points([_pt(1, guarded=40), _pt(0, span_g=900, span_gn=40, on_calls=40)])
     assert ok and bad == []
 
 
 def test_vr5_flags_gated_span_time_at_a_gated_point():
-    ok, bad = P.vr5([_pt(1, guarded=40, span_g=3)])
+    ok, bad = P.vr5_points([_pt(1, guarded=40, span_g=3)])
     assert not ok and bad == ["pt=1.1.1 gated: span_g=3 span_gn=0 on_calls=0"]
 
 
 def test_vr5_flags_guarded_returns_at_an_open_point():
-    ok, bad = P.vr5([_pt(0, guarded=1)])
+    ok, bad = P.vr5_points([_pt(0, guarded=1)])
     assert not ok and bad == ["pt=1.1.1 open: guarded=1"]
 
 
@@ -254,21 +256,25 @@ def test_cal_line_keeps_its_line_kind():
     assert r["kind"] == "cal" and r["ckind"] == "disp" and r["shape"] == "S6"
 
 
-def _dup_log(costs_by_cal, guarded=3000, off_frames=1000, freq=10000000):
-    recs = [{"kind": "settled", "g": g, "freq": freq} for g in range(0, 3)]
-    recs.append({"kind": "p", "game": 1, "round": 1, "gate": 1, "live_frames": off_frames, "arm": "OFF"})
-    recs.append({"kind": "census", "g": 1, "shape": "S6", "guarded": guarded})
+def _dup_log(costs_by_cal, on_calls=(3000,), on_frames=1000, freq=10000000, shape="S6"):
+    """One entry E1 of the given shape; per measured game g its ON calls on_calls[g - 1] over on_frames ON live
+    frames (one ON point per game), and an OFF point that must not matter."""
+    recs = [{"kind": "settled", "g": g, "freq": freq} for g in range(0, len(on_calls) + 1)]
+    for g, c in enumerate(on_calls, 1):
+        recs.append({"kind": "p", "game": g, "round": 1, "gate": 0, "live_frames": on_frames, "arm": "ON"})
+        recs.append({"kind": "p", "game": g, "round": 1, "gate": 1, "live_frames": 50 * on_frames, "arm": "OFF"})
+        recs.append({"kind": "census", "g": g, "entry": "E1", "shape": shape, "on": c, "guarded": 7})
     for i, c in enumerate(costs_by_cal):
         # c: closed-path ticks per call at 10 MHz; two batches of n = 1000
-        recs.append({"kind": "cal", "i": i, "why": "game%d" % i, "ckind": "disp", "shape": "S6", "n": 1000,
+        recs.append({"kind": "cal", "i": i, "why": "game%d" % i, "ckind": "disp", "shape": shape, "n": 1000,
                      "u": "1000,1000", "p": "%d,%d" % (1000 + 1000 * c, 1000 + 1000 * c)})
     return recs
 
 
 def test_d_up_dispatch_is_rate_times_cost_with_the_largest_as_floor():
     du, ds, rate = P.d_up(_dup_log([2, 2, 2, 2]))
-    assert rate == {"S6": 3.0}
-    assert ds == [pytest.approx(0.6)] * 4         # 3 calls per frame x 0.2 us
+    assert rate == {"E1": 3.0}
+    assert ds == [pytest.approx(0.6)] * 4         # 3 calls per ON live frame x 0.2 us
     assert du == pytest.approx(0.6)
 
 
@@ -280,9 +286,18 @@ def test_d_up_dispatch_never_below_its_largest_calibration():
 
 def test_d_up_dispatch_refuses_a_missing_shape():
     recs = _dup_log([2, 2])
-    recs.append({"kind": "census", "g": 1, "shape": "S1", "guarded": 5})
+    recs.append({"kind": "census", "g": 1, "entry": "E2", "shape": "S1", "on": 5, "guarded": 5})
     with pytest.raises(P.Refused):
         P.d_up(recs)
+
+
+def test_d_up_uses_the_largest_per_game_on_rate_not_a_pooled_off_rate():
+    # round-1 HIGH 3's counterexample: game 1 runs E1 20 times per ON live frame, game 2 0.2 times, at 1 us a call
+    # (10 ticks). n_max is 20, so D_j = 20 us; a pooled rate (10.1) or a rate over the 50x larger OFF frames (0.2)
+    # understates it.
+    du, ds, rate = P.d_up(_dup_log([10, 10, 10], on_calls=(20000, 200)))
+    assert rate == {"E1": pytest.approx(20.0)}
+    assert du == pytest.approx(20.0) and ds == [pytest.approx(20.0)] * 3
 
 
 # ------------------------------------------------------------------ zero state (VR8 part 1)
@@ -328,9 +343,17 @@ def test_vr4_bar():
 FREQ, FHAT = 10000000, 3000000000
 
 
-def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10, 20), f18="A", replay="settled"):
-    """A synthetic sitting, every line as FtFrames, FtCalib and FtCensus write it. Point costs: ON adds cost_us of C
-    per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor case)."""
+ENTRIES = P.expected_entries()
+SHAPES = sorted(set(s for e, s in ENTRIES))
+A3_DEP = [n for n, sid, kind, why in P.a3_spec() if kind == "dependent"]
+
+
+def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10, 20), f18="A", replay="settled", heavy_edge=0,
+         drop_cal=(), drop_disp=(), drop_opened=(), shut_ic=(), drop_census=(), complete=True, routes="",
+         drop_a3=(), drop_a3cal=()):
+    """A synthetic sitting, every line as FtFrames, FtCalib, FtCensus and FtDrive write it. Point costs: ON adds
+    cost_us of C per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor
+    case). The drop_* and shut_ic arguments remove or spoil records for the completeness controls."""
     import random
     rng = random.Random(seed)
     clock = [10 ** 6]
@@ -341,14 +364,26 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                  " f18=%s answer=%s" % (g, FREQ, FHAT, f18, "replay" if f18 == "A" else "unmeasured"))
         if f18 == "A" and replay:
             L.append("[FRAME-TIME] answer_replay g=%d ticks=%d result=%s" % (g, 4000, replay))
-        L.append("[FRAME-TIME] cal i=%d why=game%d kind=disp shape=S6 n=100000 u=1000000,1000000 p=1300000,1300000"
-                 % (g + 1, g))
-        L.append("[FRAME-TIME] cal i=%d why=game%d kind=disp shape=S1 n=100000 u=1000000,1000000 p=1200000,1200000"
-                 % (g + 1, g))
+        if g not in drop_cal:
+            L.append("[FRAME-TIME] cal i=%d why=game%d kind=fhat f_hat=%d spins=1/1" % (g + 1, g, FHAT))
+            for s in SHAPES:
+                if (g, s) in drop_disp:
+                    continue
+                L.append("[FRAME-TIME] cal i=%d why=game%d kind=disp shape=%s n=100000 u=1000000,1000000"
+                         " p=1030000,1030000" % (g + 1, g, s))
+            L.append("[FRAME-TIME] cal i=%d why=game%d kind=span shape=span.empty n=100000 u=100000,100000"
+                     " p=150000,150000" % (g + 1, g))
+            for k in A3_DEP:
+                if (g, k) not in drop_a3cal:
+                    L.append("[FRAME-TIME] cal i=%d why=game%d kind=a3 k=%s n=1000 u=100000,100000 p=130000,130000"
+                             % (g + 1, g, k))
+        if g not in drop_opened:
+            L.append("[FRAME-TIME] opened g=%d se=1 ce=1 %s" % (g, "ic=0" if g in shut_ic else "ic=1"))
         base = 2600.0 * (1 + 0.05 * rng.random())
         pred = "none"
         guarded = 0
         offl = 0
+        onlf = 0
         for rnd in range(1, 8):
             first_on = rng.random() < 0.5
             for pt in (1, 2):
@@ -372,36 +407,169 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                 t0 = clock[0]
                 t1 = t0 + int(lf * c_us * FREQ / 1e6)
                 clock[0] = t1 + FREQ // 2
+                onlf += lf if on else 0
                 L.append("[FRAME-TIME] p pt=%d.%d.%d arm=%s gate=%d pred=%s n=%d sF=%d sS=%d sC=%d maxF=%d pn=%d psF=%d "
-                         "psS=0 psC=%d plant_mixed=0 windows=%d live_frames=%d missing_end=0 span_g=%d span_gn=%d "
-                         "span_u=%d span_un=%d on_calls=%d guarded=%d zs=%d zl=1 t0=%d t1=%d answer=%s"
+                         "psS=%d psC=%d sP=%d psP=%d excl=1 plant_mixed=0 windows=%d live_frames=%d missing_end=0 "
+                         "span_g=%d span_gn=%d span_u=%d span_un=%d on_calls=%d guarded=%d zs=%d zl=1 t0=%d t1=%d "
+                         "answer=%s"
                          % (g, rnd, pt, "ON" if on else "OFF", 0 if on else 1, pred, n, sf, sf // 2, sc, sf // n * 3,
-                            pn, int(pn * f_us * FREQ / 1e6), psc, (n + pn) // 120, lf, spg, lf if on else 0, spu, lf,
+                            pn, int(pn * f_us * FREQ / 1e6), int(pn * (f_us / 2 + 80.0) * FREQ / 1e6), psc,
+                            int(sc * 1.1), int(psc * 1.1), (n + pn) // 120, lf, spg, lf if on else 0, spu, lf,
                             3 * lf if on else 0, gq, zs, t0, t1, "replay" if f18 == "A" else "unmeasured"))
+                if g >= 1:
+                    L.append("[FRAME-TIME] between g=%d after=%s ticks=%d calls=4" % (g, "ON" if on else "OFF", 2000))
                 for w in range((n + pn) // 120):
                     plant = 1 if (not on and w % 4 == 0) else 0
                     k = 1 if rng.random() < 0.01 else 0
                     L.append("[FRAME-TIME] w pt=%d.%d.%d arm=%s plant=%d partial=0 n=120 sF=1 sS=1 sC=1 maxF=1 medF=1 "
                              "e4=%d,%d e8=0,0 e16=0,0 gc=0" % (g, rnd, pt, "ON" if on else "OFF", plant, k, k))
                 pred = "ON" if on else "OFF"
-        L.append("[FRAME-TIME] census g=%d entry=CE-p6 comp=CombatEvidence shape=S6 on=%d guarded=%d outside=0"
-                 % (g, guarded, guarded))
+        for k, (e, s) in enumerate(ENTRIES):
+            if (g, e) in drop_census or (g, "*") in drop_census:
+                continue
+            on_n = 3 * onlf if k == 0 else 0
+            L.append("[FRAME-TIME] census g=%d entry=%s comp=X shape=%s on=%d guarded=%d outside=0"
+                     % (g, e, s, on_n, guarded if k == 0 else 0))
         for op in ("ce_build", "se_build", "enqueue", "pump"):
             k = heavy_live if op == "pump" else 0
-            L.append("[FRAME-TIME] heavy g=%d op=%s live=%d between=7 pick=1 over=1 menu=0 at_call=%d edge=0 off=0"
-                     % (g, op, k, k))
+            ke = heavy_edge if op == "enqueue" else 0
+            L.append("[FRAME-TIME] heavy g=%d op=%s live=%d between=7 pick=1 over=1 menu=0 at_call=%d edge=%d off=0"
+                     % (g, op, k + ke, k, ke))
         L.append("[FRAME-TIME] offthread g=%d span_off=0 hash_t0=%d hash_t1=%d" % (g, hash_at[0], hash_at[1]))
-    L.append("[FRAME-TIME] refusals why=quit pairs=2 queue:e=3 sent:GET_h/api/v1/mod-version=1")
+        for k in A3_DEP:
+            if (g, k) not in drop_a3:
+                L.append("[FRAME-TIME] a3 g=%d k=%s cap=32 steady=1 reads_on=%d reads_win=%d writes_on=%d"
+                         % (g, k, 2 * onlf, onlf // 4, 3 * onlf))
+    if complete:
+        L.append("[FRAME-TIME] sitting complete g=%d" % (games - 1))
+    L.append("[FRAME-TIME] refusals why=quit pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
+             "dispatched:GET_h/api/v1/mod-version=1" + routes)
     return "\n".join("[Info   :CompetitiveRounds] " + x for x in L)
 
 
 def test_report_end_to_end_reaches_a_verdict():
     out = P.report(_log())
     assert "not computable" not in out, out
+    assert "SITTING complete: games 0 to 16" in out, out
     assert "VR8 zero-state PASS: game 0 (mutant) 7 of 7 rounds void" in out
-    assert "VERDICT B1:" in out and "INVALID" not in out, out
-    assert "VERDICT B3 PASS" in out, out
+    assert re.search(r"^VERDICT B1 (PASS|SID|FAIL): U [0-9.]+ us against T_ref", out, re.M), out
+    assert "INVALID" not in out and "withheld" not in out, out
+    assert "VERDICT B2 PASS" in out and "VERDICT B3 PASS" in out, out
     assert "F18 reading A PASS" in out, out
+
+
+def test_report_carries_the_specified_figures():
+    # round-1 MEDIUM (ft_parse:793): the classification and the figures V4 section 0 and 3.3 to 3.9 report
+    out = P.report(_log())
+    for want in ("U without D_up", "dF ", "dS ", "dP (process CPU, all threads)", "e_F ", "e_S ", "trend: d_g slope",
+                 "last four games' mean", "UPKEEP spans per live frame: ON", "format M's own stamps",
+                 "between-point spans after ON points", "conditional: U bounds the NET", "PASS <= 3, SID <= 5"):
+        assert want in out, (want, out)
+    assert P.classify(2.9, 100) == "PASS" and P.classify(4.0, 100) == "SID" and P.classify(5.1, 100) == "FAIL"
+
+
+def test_a3_is_the_largest_per_game_window_rate_times_the_calibrated_difference():
+    # ruling FRAME-TIME-ROUND-R1-A1 (route D): A3 = sum over dependent structures of r_k_max x d_k
+    recs = P.read(_log())
+    v, ds, rate, dk = P.a3(recs, last_game=P.LAST_GAME)
+    d = 30000 / 1000 * 1e6 / FREQ                     # (p - u) / n ticks per read, in us
+    assert set(rate) == set(A3_DEP) and all(abs(dk[k] - d) < 1e-9 for k in A3_DEP)
+    games = P.games_of(recs)
+    want = 0.0
+    for k in A3_DEP:
+        rk = max(r["reads_win"] / sum(q["live_frames"] for q in games[r["g"]] if q["gate"] == 0)
+                 for r in recs if r["kind"] == "a3" and r["k"] == k and r["g"] in games)
+        assert abs(rate[k] - rk) < 1e-12
+        want += rk * d
+    assert abs(v - want) < 1e-9 and v > 0
+
+
+def test_a3_refuses_a_missing_line_or_calibration():
+    # ruling A1 part 3: the refill window counted from absent records cannot pass, nor a missing calibration
+    k = A3_DEP[0]
+    with pytest.raises(P.Refused, match="a3 lines"):
+        P.a3(P.read(_log(drop_a3={(5, k)})), last_game=P.LAST_GAME)
+    with pytest.raises(P.Refused, match="no a3 line"):
+        P.a3(P.read(_log(drop_a3cal={(7, k)})), last_game=P.LAST_GAME)
+    out = P.report(_log(drop_a3={(5, k)}))
+    assert "U not computable" in out and "VERDICT B1 withheld" in out, out
+
+
+def test_a3_rows_need_a_kind_and_a_zero_row_its_reason():
+    recs = P.read(_log())
+    with pytest.raises(P.Refused, match="names no structure"):
+        P.a3(recs, spec=[])
+    with pytest.raises(P.Refused, match="needs a reason"):
+        P.a3(recs, spec=[("X", "S99", "zero", " ")])
+    assert P.a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins")])[0] == 0.0
+
+
+def test_report_adds_a3_to_u():
+    out = P.report(_log())
+    assert re.search(r"^A3 [0-9.]+ us per live frame", out, re.M), out
+    assert re.search(r"\+ D_up [0-9.]+ \+ A3 [0-9.]+;", out) and "U without A3" in out, out
+    m = re.search(r"^U ([0-9.]+) us = max\(0, dC_up ([-0-9.]+)\) / min\(1, e_C_lo ([0-9.]+)\) \+ K_up ([0-9.]+) "
+                  r"\+ D_up ([0-9.]+) \+ A3 ([0-9.]+);", out, re.M)
+    u, dc, e, k, d, a = (float(x) for x in m.groups())
+    assert a > 0 and abs(u - (max(0.0, dc) / min(1.0, e) + k + d + a)) < 0.02, (u, dc, e, k, d, a)
+
+
+def test_verdicts_need_the_complete_sitting():
+    # round-1 HIGH 4: four measured games, or a sitting without its completion line, gets no verdict at all
+    for log in (_log(games=5, complete=False), _log(games=5), _log(complete=False)):
+        out = P.report(log)
+        assert "SITTING INCOMPLETE" in out, out
+        for c in ("B1", "B2", "B3"):
+            assert "VERDICT %s withheld: sitting incomplete" % c in out, out
+    assert P.complete(P.read(_log())) == []
+    assert any("sitting complete" in m for m in P.complete(P.read(_log(complete=False))))
+    assert any("games [5, 6" in m for m in P.complete(P.read(_log(games=5))))
+
+
+def test_vr5_needs_every_expected_record():
+    # round-1 HIGH 5: deleting census rows, an opened line, or one collector's opening must fail VR5
+    assert P.vr5(P.read(_log()), 0, 16)[0]
+    ok, bad = P.vr5(P.read(_log(drop_census=[(3, ENTRIES[5][0])])), 0, 16)
+    assert not ok and any("g=3: 1 census records missing" in b for b in bad), bad
+    ok, bad = P.vr5(P.read(_log(drop_census=[(g, "*") for g in range(17)])), 0, 16)
+    assert not ok and sum("census records missing" in b for b in bad) == 17, bad
+    ok, bad = P.vr5(P.read(_log(drop_opened=[4])), 0, 16)
+    assert not ok and "g=4: 0 opened lines (needs 1)" in bad, bad
+    ok, bad = P.vr5(P.read(_log(shut_ic=[2])), 0, 16)
+    assert not ok and "g=2: collection not opened: ic" in bad, bad
+    log = _log() + "\n[FRAME-TIME] census g=6 entry=%s comp=X shape=%s on=0 guarded=0 outside=0" % ENTRIES[0]
+    ok, bad = P.vr5(P.read(log), 0, 16)
+    assert not ok and any("g=6: census records duplicated" in b for b in bad), bad
+    out = P.report(_log(drop_census=[(3, ENTRIES[5][0])]))
+    assert "VERDICT B1 INVALID: VR5 failed" in out and "VERDICT B3 INVALID: VR5 failed" in out, out
+
+
+def test_vr2_needs_every_game_start_calibration():
+    # round-1 MEDIUM (ft_parse:677): deleting game 8's calibrations, or one shape's line, must fail VR2
+    assert P.vr2(P.read(_log()), 16)[0]
+    ok, bad = P.vr2(P.read(_log(drop_cal=[8])), 16)
+    assert not ok and "game 8: 0 calibration runs (needs 1)" in bad, bad
+    ok, bad = P.vr2(P.read(_log(drop_disp=[(8, SHAPES[1])])), 16)
+    assert not ok and any(b.startswith("game 8: calibration 9 has no disp line for shapes") for b in bad), bad
+
+
+def test_a_failed_rule_invalidates_the_claims_it_guards():
+    # round-1 MEDIUM (ft_parse:894): VR6 guards B1 and B3, VR7 guards B2
+    out = P.report(_log(routes=" route:GET_h/api/v1/x=1 sent:GET_h/api/v1/x=1"))
+    assert "VERDICT B1 INVALID: VR6 failed" in out and "VERDICT B3 INVALID: VR6 failed" in out, out
+    assert "VERDICT B2 PASS" in out, out
+    out = P.report(_log() + "\n[FRAME-TIME] disarmed input=fighters pt=3.2.1")
+    assert "VERDICT B1 INVALID: VR6 failed" in out and "VERDICT B3 INVALID: VR6 failed" in out, out
+    log = P.read(_log())
+    for r in log:
+        if r["kind"] == "w" and r["arm"] == "OFF" and r.get("plant") == 1:
+            r["e4"] = (3, 3)
+    assert not P.vr7(log)[0]
+    # VR7 failing invalidates B2 in the report, and B2 alone
+    text = re.sub(r"(arm=OFF plant=1 partial=0 .*?e4=)\d+,\d+", r"\g<1>3,3", _log())
+    out = P.report(text)
+    assert "VERDICT B2 INVALID: VR7 failed" in out, out
+    assert "VERDICT B1 INVALID" not in out and "VERDICT B3 INVALID" not in out, out
 
 
 def test_predecessor_flags_a_carryover():
@@ -427,6 +595,12 @@ def test_b3_flags_heavy_work_with_combat_live():
     assert not ok and any("pump ran" in w for w in why), why
 
 
+def test_b3_flags_heavy_work_in_a_live_frame_after_combat_ended():
+    # round-1 MEDIUM (FtHeavy.cs:39): V4 3.9 forbids heavy work in a live-combat frame, the edge of one included
+    ok, why, _ = P.b3(P.read(_log(heavy_edge=1)))
+    assert not ok and any("enqueue ran" in w and "(edge)" in w for w in why), why
+
+
 def test_b3_flags_a_hashing_job_overlapping_a_point():
     ok, why, _ = P.b3(P.read(_log(hash_at=(10 ** 6 + 5, 10 ** 6 + 10))))
     assert not ok and any("overlaps live points 0.1.1" in w for w in why), why
@@ -448,8 +622,8 @@ def _vr6_log(extra=()):
         "[FRAME-TIME] refused what=queue route=e n=1",
         "[FRAME-TIME] refusals why=game1 pairs=3 queue:e=1 route:GET_10.0.0.1/api/v1/queue/poll/{n}=4 "
         "sent:GET_10.0.0.1/api/v1/mod-version=2",
-        "[FRAME-TIME] refusals why=quit pairs=4 queue:e=2 closing:x=1 route:GET_10.0.0.1/api/v1/queue/poll/{n}=9 "
-        "sent:GET_10.0.0.1/api/v1/mod-version=2",
+        "[FRAME-TIME] refusals why=quit pairs=5 queue:e=2 closing:x=1 route:GET_10.0.0.1/api/v1/queue/poll/{n}=9 "
+        "sent:GET_10.0.0.1/api/v1/mod-version=2 dispatched:GET_10.0.0.1/api/v1/mod-version=2",
     ] + list(extra)
     return "\n".join("[Info   :CompetitiveRounds] " + x for x in base)
 
@@ -464,6 +638,17 @@ def test_vr6_routes_fail_a_route_refused_and_sent():
     log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=2 route:GET_h/api/v1/x=1 sent:GET_h/api/v1/x=1"])
     ok, why, _, _ = P.vr6_build(P.read(log))
     assert not ok and any("both refused and sent" in w for w in why), why
+
+
+def test_vr6_counts_dispatches_independently():
+    # round-1 MEDIUM (FtRoute.cs:97): a refused route the transport still dispatched, or an allowed route dispatched
+    # more often than the classifier counted it sent, fails VR6
+    log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=3 route:GET_h/api/v1/x=2 dispatched:GET_h/api/v1/x=2"])
+    ok, why, _, _ = P.vr6_build(P.read(log))
+    assert not ok and "route GET_h/api/v1/x dispatched 2 times, sent 0" in why, why
+    log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=2 sent:GET_h/api/v1/y=1 dispatched:GET_h/api/v1/y=3"])
+    ok, why, _, _ = P.vr6_build(P.read(log))
+    assert not ok and "route GET_h/api/v1/y dispatched 3 times, sent 1" in why, why
 
 
 def test_vr6_build_fails_on_a_disarm():
@@ -575,9 +760,19 @@ def test_menu_check_fails_an_aa_shift_either_way():
 
 def test_menu_check_fails_a_level_with_low_exposure():
     ok, lines, bad = P.menu_check(P.read(_menu_log(ec={"1.5": 0.3})))
-    assert not ok and bad == ["level 1.5 percent: e_C lower end %s below 0.5" % bad[0].split()[-3]], bad
-    ok, _, bad = P.menu_check(P.read(_menu_log(ec={"1.5": 0.8})))
+    assert not ok and any(b.startswith("level 1.5 percent: e_C interval") for b in bad), bad
+    assert any(b.startswith("level 1.5 percent: e_C 0.") and "not within 0.10 of 1" in b for b in bad), bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(ec={"1.5": 0.95})))
     assert ok, bad
+
+
+def test_menu_check_fails_a_tenfold_exposure():
+    # round-1 MEDIUM (ft_parse:771): e_C about 10 passed a lower-only bar; the declared band is two-sided
+    ok, _, bad = P.menu_check(P.read(_menu_log(ec={"3": 10.0})))
+    assert not ok and any(b.startswith("level 3 percent: e_C interval") for b in bad), bad
+    assert any(b.startswith("level 3 percent: e_C 10") for b in bad), bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(ec={"3": 1.3})))
+    assert not ok and "level 3 percent: e_C 1.3000 not within 0.10 of 1" in bad, bad
 
 
 def test_menu_check_fails_fhat_spread_and_an_unstamped_frame():
@@ -611,7 +806,9 @@ def test_vr2_flags_span_depth_and_cycle_failures():
     recs = [{"kind": "p", "game": 1},
             {"kind": "settled", "g": 1, "missing_end": 0, "cycle_failures": 4, "span_depth_violations": 2}]
     ok, bad = P.vr2(recs)
-    assert not ok and bad == ["settled g=1 cycle_failures=4", "settled g=1 span_depth_violations=2"], bad
+    assert not ok, bad
+    assert [b for b in bad if b.startswith("settled")] == ["settled g=1 cycle_failures=4",
+                                                            "settled g=1 span_depth_violations=2"], bad
 
 
 def test_tb_tot_from_retained_point_rows():
