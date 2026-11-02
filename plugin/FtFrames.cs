@@ -52,6 +52,7 @@ namespace CompetitiveRounds
         private static long _g0, _gn0, _u0, _un0, _on0, _guard0;   // span and census sums at the point's start
 
         private static long _pn, _pF, _pS, _pMaxF, _pMissingEnd;
+        internal static long LastN, LastSF;   // the last point's unplanted frames and F sum (FtMenu's base)
         private static ulong _pC;
 
         /// <summary>Frame f closed; FtSchedule still holds frame f's state.</summary>
@@ -103,7 +104,9 @@ namespace CompetitiveRounds
                 + " on_calls=" + (FtCensus.SumOn() - _on0) + " guarded=" + (FtCensus.SumGuarded() - _guard0)
                 + " zs=" + FtZero.Mask + " zl=" + FtZero.LateSeen
                 + " t0=" + _t0 + " t1=" + System.Diagnostics.Stopwatch.GetTimestamp() + " answer=" + FtReplay.AnswerField);
-            if (FtPlant.Us < 0 && !FtSchedule.ArmOn && _pn >= W)
+            LastN = _pn;
+            LastSF = _pF;
+            if (FtPlant.Us < 0 && FtSchedule.Game >= 0 && !FtSchedule.ArmOn && _pn >= W)
                 FtPlant.Fix((long)Math.Round(0.03 * _pF * 1000000.0 / ((double)_pn * System.Diagnostics.Stopwatch.Frequency)),
                     FtSchedule.Label());
         }

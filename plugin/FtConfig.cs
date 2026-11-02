@@ -10,7 +10,9 @@ namespace CompetitiveRounds
     /// Config.Bind would write a new key into com.competitiverounds.mod.cfg, which VR6
     /// pins by sha256 (FORMAT-M-PLAN.md V2 part b, F01). Keys: seed (integer), force
     /// (ON, OFF or none: the menu self-check), f18 (A or B: section 5 of the build brief;
-    /// A when absent). The file's presence is also the arming input of part b.</summary>
+    /// A when absent), plant_us, menu (1: the menu self-check, FtMenu) and menu_segments; the
+    /// controls' keys (zs_mutant, ranked_hook, rematch_mutant, join) are read where they act.
+    /// The file's presence is also the arming input of part b.</summary>
     internal static class FtConfig
     {
         internal static string Dir => Path.Combine(BepInEx.Paths.BepInExRootPath, "frametime");
@@ -21,6 +23,8 @@ namespace CompetitiveRounds
         internal static string Force = "none";
         internal static string F18 = "A";
         internal static int PlantUs = -1;     // plant_us: c_plant fixed by the sentinel (M5); -1 = derived
+        internal static bool Menu;            // menu=1: the menu self-check (FtMenu); the sitting never arms
+        internal static int MenuSegments = 64;   // menu_segments: even, 4 to 400
         internal static string Problems = "";
 
         private static readonly Dictionary<string, string> Kv = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -51,6 +55,15 @@ namespace CompetitiveRounds
             if (r != "A" && r != "B") Problems += " bad-f18";
             string pu = Get("plant_us", "-1");
             if (!int.TryParse(pu, out PlantUs) || PlantUs < -1) { PlantUs = -1; Problems += " bad-plant_us"; }
+            string mn = Get("menu", "0");
+            Menu = mn == "1";
+            if (mn != "0" && mn != "1") Problems += " bad-menu";
+            string ms = Get("menu_segments", "64");
+            if (!int.TryParse(ms, out MenuSegments) || MenuSegments < 4 || MenuSegments > 400 || MenuSegments % 2 != 0)
+            {
+                MenuSegments = 64;
+                Problems += " bad-menu_segments";
+            }
         }
 
         internal static string Get(string key, string fallback)

@@ -76,7 +76,7 @@ namespace CompetitiveRounds
             double now = Now;
             if (now < _nextJoinS) return;
             _nextJoinS = now + 30.0;
-            if (FtConfig.Get("join", "1") == "0") return;
+            if (FtConfig.Menu || FtConfig.Get("join", "1") == "0") return;   // the menu self-check has no room
             try
             {
                 if (Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.OfflineMode) return;

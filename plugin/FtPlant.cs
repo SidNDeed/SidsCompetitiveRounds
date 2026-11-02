@@ -42,6 +42,14 @@ namespace CompetitiveRounds
             return window % 4 == slot;
         }
 
+        /// <summary>The menu self-check's level (FtMenu): us >= 0 sets the spin of its planted windows; -1
+        /// returns it to the sitting's own c_plant (none while that is unfixed).</summary>
+        internal static void SetMenu(long us)
+        {
+            long u = us >= 0 ? us : (Us > 0 ? Us : 0);
+            _ticks = u * Stopwatch.Frequency / 1000000;
+        }
+
         internal static void OnUpdate()
         {
             if (!Now || _ticks <= 0) return;

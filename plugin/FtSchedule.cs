@@ -18,7 +18,8 @@ namespace CompetitiveRounds
         // FT_Start, so it is constant within a frame: a patch's prefix and finalizer in one frame always decide
         // alike (an RPC cannot span a frame boundary). GameStart and GameOver may run mid-frame and never touch it.
         // The one other writer is FtCalib's dispatch calibration, which sets it around its own patched loops (nothing
-        // else runs meanwhile) and restores the value it found.
+        // else runs meanwhile) and restores the value it found. FtMenu, called from Boundary, writes it at its own
+        // segment boundaries in a menu self-check process (no room, so no live combat).
         internal static int Game = -1;
         internal static int Round;
         internal static int PointInRound;
@@ -42,6 +43,7 @@ namespace CompetitiveRounds
             FtRematch.Poll();
             FtDrive.JoinTick();
             if (!FtArm.Armed && FtGate.Off) FtGate.Off = false;   // a disarm opens the gate at this boundary
+            if (FtMenu.Boundary()) return;   // the menu self-check owns this frame (menu=1, no room)
             bool live = SeatEvidence.CombatLive();
             if (live && !Live) StartPoint();
             else if (!live && Live) EndPoint();
@@ -144,10 +146,5 @@ namespace CompetitiveRounds
             return (z & 1UL) == 1UL;
         }
     }
-
-    /// <summary>The arming predicate of FORMAT-M-PLAN.md V2 part b (matchIsRanked false,
-    /// the ft_ room, FT_REGION, exactly two fighters, the arm file present), evaluated on
-    /// every frame the drive runs. Part 4 of the build brief implements it; until then the
-    /// build never arms, so the gate never sets.</summary>
 }
 #endif

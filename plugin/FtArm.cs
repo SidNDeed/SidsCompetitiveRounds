@@ -110,16 +110,40 @@ namespace CompetitiveRounds
             return i >= 0 ? r.Substring(0, i) : r;
         }
 
+        /// <summary>The inputs the sitting and the menu self-check share.</summary>
+        private static string Common()
+        {
+            if (!FtConfig.Present) return "sentinel";
+            if (FtConfig.Problems.Length > 0) return "sentinel_problems";
+            if (!FtClock.Installed) return "clock";
+            string probe = CombatEvidencePerf.Mode;
+            if (probe == "menu" || probe == "match") return "perf_probe";
+            if (_icFixture) return "ic_fixture";
+            return null;
+        }
+
+        /// <summary>The menu self-check's own arming (build decision 14): the shared inputs, no room and no
+        /// game. FtMenu evaluates it at every frame boundary while the sentinel names menu=1.</summary>
+        internal static string MenuCheck()
+        {
+            try
+            {
+                string c = Common();
+                if (c != null) return c;
+                if (PhotonNetwork.InRoom) return "in_room";
+                if (FtSchedule.Game >= 0) return "game_started";
+                return null;
+            }
+            catch (Exception ex) { return "error_" + ex.GetType().Name; }
+        }
+
         private static string Check()
         {
             try
             {
-                if (!FtConfig.Present) return "sentinel";
-                if (FtConfig.Problems.Length > 0) return "sentinel_problems";
-                if (!FtClock.Installed) return "clock";
-                string probe = CombatEvidencePerf.Mode;
-                if (probe == "menu" || probe == "match") return "perf_probe";
-                if (_icFixture) return "ic_fixture";
+                string c = Common();
+                if (c != null) return c;
+                if (FtConfig.Menu) return "menu_mode";   // a menu self-check process never arms the sitting
                 if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return "room";
                 if (GameStateWatcher.MatchIsRanked) return "matchIsRanked";
                 string want = ExpectedRoom();
