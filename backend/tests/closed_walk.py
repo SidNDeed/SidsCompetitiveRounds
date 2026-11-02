@@ -422,9 +422,15 @@ def local_sql(tree, scope):
     """{local name: [SQL texts]} for each name a function binds only to SQL
     sql_text can read, directly, as either arm of a conditional expression,
     or as `<MODULE_TEMPLATE>.format(k=<sql or a conditional>)` (every
-    combination of the arms). A name stored any other way (including by a
-    mutating method) is left out."""
+    combination of the arms), each optionally extended by `<name> += <sql>`
+    outside any loop (every text with and without each suffix, a superset of
+    what any path builds). A name stored any other way (including by a
+    mutating method, or by += inside a loop) is left out."""
     binds = {}
+    suffixes = {}
+    looped = {id(x) for lp in _ast.walk(tree)
+              if isinstance(lp, (_ast.For, _ast.While, _ast.AsyncFor))
+              for x in _ast.walk(lp)}
 
     def arms(v):
         return ([sql_text(v.body, scope), sql_text(v.orelse, scope)]
@@ -454,17 +460,34 @@ def local_sql(tree, scope):
                     binds.setdefault(tg.id, []).extend(texts)
                 else:
                     binds.setdefault(tg.id, []).extend(arms(v))
+        elif (isinstance(n, _ast.AugAssign) and isinstance(n.op, _ast.Add)
+              and isinstance(n.target, _ast.Name) and id(n) not in looped
+              and sql_text(n.value, scope) is not None):
+            suffixes.setdefault(n.target.id, []).append(
+                (n.lineno, n.col_offset, sql_text(n.value, scope)))
         elif not isinstance(n, (_ast.Name,)):
             if isinstance(n, (_ast.AugAssign, _ast.AnnAssign, _ast.For,
                               _ast.Delete, _ast.Call, _ast.comprehension)):
                 for nm in stores(n):
                     binds.setdefault(nm, []).append(None)
+    for name, adds in suffixes.items():
+        texts = binds.setdefault(name, [None])
+        for _line, _col, s in sorted(adds):
+            texts = texts + [None if x is None else x + s for x in texts]
+        binds[name] = texts
     return {k: v for k, v in binds.items() if None not in v}
+
+
+def is_session(expr, session="db"):
+    """Whether expression `expr` spells the session: `session` is one
+    spelling ('db') or a tuple of them (('db', 'ctx.db'))."""
+    text = _ast.unparse(expr)
+    return text == session if isinstance(session, str) else text in session
 
 
 def is_db_call(call, attr, session="db"):
     return (isinstance(call, _ast.Call) and isinstance(call.func, _ast.Attribute)
-            and _ast.unparse(call.func.value) == session
+            and is_session(call.func.value, session)
             and call.func.attr == attr)
 
 
@@ -567,6 +590,11 @@ class Policy:
         self.pure_awaits = frozenset(pure_awaits)
         self.sql = sql
         self.session = session
+        # An awaited helper's effect, when a file names its own reading of
+        # helpers (the gate's kinds): called with the function, its result
+        # is the effect recorded. Only the top-level walk of a span uses it;
+        # helper bodies walked by def_effects never do.
+        self.helper_hook = None
         self.helpers = {}           # (module, qualname) -> effects
         self.walking = set()        # helpers being walked now
         self.met = _collections.Counter()
@@ -696,7 +724,7 @@ class Visitor:
                     self.visit(a)
                 self.effects.append(("call", "pure"))
                 return
-            if _ast.unparse(n.func.value) == self.p.session:
+            if is_session(n.func.value, self.p.session):
                 if n.func.attr == "expire":
                     # Marks loaded rows stale; their next read is a SELECT.
                     for kind, a in args:
@@ -747,8 +775,8 @@ class Visitor:
             self.p.met["session .flush"] += 1
             self.effects.append(("sql", "write"))
             return
-        if isinstance(call.func, _ast.Attribute) and _ast.unparse(
-                call.func.value) == s and call.func.attr != "execute":
+        if isinstance(call.func, _ast.Attribute) and is_session(
+                call.func.value, s) and call.func.attr != "execute":
             self.fail(n, f"a session call this walk does not classify: "
                          f"{_ast.unparse(call.func)}")
         if is_db_call(call, "execute", s):
@@ -790,6 +818,10 @@ class Visitor:
             if kind in ("star", "double-star"):
                 self.fail(n, f"a call of {fn.__name__} with unpacked arguments")
             self.visit(a)
+        if self.p.helper_hook is not None and self.helper is None:
+            self.p.met["helper by the policy's hook"] += 1
+            self.effects.append((f"helper:{fn.__name__}", self.p.helper_hook(fn)))
+            return
         eff = checked_callbacks(call, fn, helper_effects(fn, self.p), n.lineno)
         kinds = eff & {"read", "lock", "write"}
         self.effects.append((f"helper:{fn.__name__}",
@@ -855,7 +887,7 @@ def helper_effects(fn, policy, stack=()):
     return out
 
 
-def def_effects(d, scope, policy, label, opaque=frozenset()):
+def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False):
     """The effects of an awaited helper, read from its own body statement by
     statement through the table: a frozenset drawn from 'read', 'lock',
     'write', 'await', 'savepoint', 'rollback-then-raise' and
@@ -863,7 +895,10 @@ def def_effects(d, scope, policy, label, opaque=frozenset()):
     any transaction end outside the two named shapes (a savepoint block
     `async with <session>.begin_nested():`, and an exception handler that
     opens with `await <session>.rollback()` and raises on every path), and
-    any callback parameter with a default other than None."""
+    any callback parameter with a default other than None. With
+    `rollbacks`, every awaited `<session>.rollback()` is permitted and read
+    as the effect 'rollback' (a caller that names such a helper decides what
+    a rollback means for it)."""
     fn = _types.SimpleNamespace(__name__=label)
     sub = Policy(scope, policy.pure_calls, policy.pure_methods,
                  policy.pure_awaits, policy.sql, policy.session)
@@ -891,6 +926,9 @@ def def_effects(d, scope, policy, label, opaque=frozenset()):
             if (isinstance(aw, _ast.Await) and is_db_call(aw.value, "rollback", s)
                     and all_paths_raise(n.body[1:])):
                 permitted.add(id(aw))
+    if rollbacks:
+        permitted.update(id(n) for n in _ast.walk(d) if isinstance(n, _ast.Await)
+                         and is_db_call(n.value, "rollback", s))
     v = Visitor(sub, local, guarded, imports, params, frozenset(permitted), fn,
                 opaque)
     effects = set()
@@ -920,7 +958,7 @@ def def_effects(d, scope, policy, label, opaque=frozenset()):
                                        "classify"))
             effects.add(sh)
         elif sh == "end:rollback":
-            effects.add("rollback-then-raise")
+            effects.add("rollback" if rollbacks else "rollback-then-raise")
     return frozenset(effects)
 
 
