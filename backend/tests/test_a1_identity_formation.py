@@ -4728,7 +4728,15 @@ def _r7_program_refusals(form, prog, scope):
     return out
 
 
-def test_r7_a1_findings_are_refused_under_the_frozen_grammar():
+def test_r7_every_owned_finding_has_its_control():
+    """The programs and R7_A1_WANT name the same findings."""
+    progs = _r7_programs()
+    assert {f for f, *_ in progs} == set(R7_A1_WANT), (
+        sorted({f for f, *_ in progs} ^ set(R7_A1_WANT)))
+
+
+@pytest.mark.parametrize("finding", sorted(R7_A1_WANT))
+def test_r7_a1_findings_are_refused_under_the_frozen_grammar(finding):
     """Ruling REHEARSAL-FOUR-R6 (3): every finding of rounds 1 to 6 this
     child owns is a control under the new mechanism. Each reviewer's
     program, planted into the real span it was about, is walked by the a1
@@ -4737,10 +4745,9 @@ def test_r7_a1_findings_are_refused_under_the_frozen_grammar():
     container shape, the construct's own shape is among the grammar's
     refusals of the program too. The real spans the programs were planted
     in are admitted and pass (test_r7_the_grammar_checks_...)."""
-    progs = _r7_programs()
-    assert {f for f, *_ in progs} == set(R7_A1_WANT), (
-        sorted({f for f, *_ in progs} ^ set(R7_A1_WANT)))
-    for finding, form, prog, scope in progs:
+    for f, form, prog, scope in _r7_programs():
+        if f != finding:
+            continue
         rule, text, constructs = R7_A1_WANT[finding]
         got = _r7_outcome(form, prog, scope)
         assert got and _R7_MARK[rule] in got[0] and text in got[0], (
