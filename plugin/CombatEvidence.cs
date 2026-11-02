@@ -422,7 +422,7 @@ namespace CompetitiveRounds
         internal static void RpcSent(PhotonView view, string method, RpcTarget target)
         {
 #if SCR_FRAMETIME
-            if (FtCensus.Skip(FtE.CE_c8)) return;
+            if (FtGate.Off) return;   // nested: live only through SE-p1, the PhotonNetwork.RPC postfix (no census row)
             bool ftSpan = FtSpan.Open(FtSpan.Combat, FtSpan.Gated);
             try
             {

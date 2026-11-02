@@ -63,6 +63,12 @@ namespace CompetitiveRounds
         /// the join of every later room.</summary>
         internal static void StageBuildProp(string source)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.PB_c2)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.PeerBuild, FtSpan.Gated);
+            try
+            {
+#endif
             try
             {
                 if (_staged || _stageFailed) return;
@@ -94,12 +100,22 @@ namespace CompetitiveRounds
                 _stageFailed = true;
                 try { Plugin.Log.LogWarning("[BUILD-PROP] staging failed: " + ex.Message); } catch { }
             }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>Every remote seat of the current room: print its line when
         /// it is new to this room or its values changed since it was printed.</summary>
         internal static void Tick()
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.PB_c3)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.PeerBuild, FtSpan.Gated);
+            try
+            {
+#endif
             try
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null)
@@ -134,6 +150,10 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 }

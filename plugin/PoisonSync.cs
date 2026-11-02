@@ -3280,9 +3280,19 @@ namespace CompetitiveRounds
         /// item D's, then the late-verdict lines.</summary>
         internal static void Drain()
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.PT_c5)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Point, FtSpan.Gated);
+            try
+            {
+#endif
             try { DrainOwn(); } catch { }
             try { HitEvidence.Drain(); } catch { }
             try { PoisonSync.DrainLateSilences(); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         private static void DrainOwn()
@@ -3331,13 +3341,33 @@ namespace CompetitiveRounds
     internal static class SawPointEvidencePatch
     {
         [HarmonyPrefix]
+#if SCR_FRAMETIME
+        private static void Before()
+        {
+            if (FtCensus.Skip(FtE.PT_p1)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Point, FtSpan.Gated);
+            try { try { PointEvidence.SawBefore(); } catch { } }
+            finally { FtSpan.Close(ftSpan); }
+        }
+#else
         private static void Before() { try { PointEvidence.SawBefore(); } catch { } }
+#endif
 
         [HarmonyFinalizer]
         private static Exception After(Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Point, FtSpan.Gated);
+            try
+            {
+#endif
             try { PointEvidence.SawAfter(); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 

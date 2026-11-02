@@ -458,6 +458,12 @@ namespace CompetitiveRounds
         /// <summary>From Plugin's polling tick, every frame.</summary>
         internal static void Tick()
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.IC_c6)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Gated);
+            try
+            {
+#endif
             long now = SwUs;
             long frameUs = _lastTickUs > 0 ? now - _lastTickUs : 0;
             _lastTickUs = now;
@@ -481,6 +487,10 @@ namespace CompetitiveRounds
             }
             catch { _cost[C2].Fault(); }
             try { BuildCaptures(); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>The survey's per-tick time budget (a cost bound).</summary>
@@ -809,15 +819,35 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(ExitGames.Client.Photon.Hashtable __0, Photon.Realtime.Player __1, out int __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.IC_p1)) { __state = -1; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Gated);
+            try
+            {
+#endif
             __state = -1;
             try { __state = IdentityClockEvidence.EnterRpc(__0, __1); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyFinalizer]
         private static Exception Finalizer(int __state, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Gated);
+            try
+            {
+#endif
             try { IdentityClockEvidence.ExitRpc(__state); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -850,6 +880,12 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static void Prefix(SyncPlayerMovement __instance, PhotonStream __0, out int __state)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.IC_p4)) { __state = -1; return; }
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Gated);
+            try
+            {
+#endif
             __state = -1;
             try
             {
@@ -858,11 +894,21 @@ namespace CompetitiveRounds
                 __state = list != null ? list.Count : -1;
             }
             catch { __state = -1; }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         [HarmonyPostfix]
         private static void Postfix(SyncPlayerMovement __instance, PhotonMessageInfo __1, int __state)
         {
+#if SCR_FRAMETIME
+            if (FtGate.Off) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Identity, FtSpan.Gated);
+            try
+            {
+#endif
             if (__state < 0) return;
             try
             {
@@ -871,6 +917,10 @@ namespace CompetitiveRounds
                 IdentityClockEvidence.Package(__instance, __1.SentServerTimestamp);
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 }

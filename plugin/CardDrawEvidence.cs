@@ -882,6 +882,12 @@ namespace CompetitiveRounds
         /// the events, the seals and the captured records' builds.</summary>
         internal static void Tick()
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CD_c6)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Gated);
+            try
+            {
+#endif
             try
             {
                 DrainNotes();
@@ -891,6 +897,10 @@ namespace CompetitiveRounds
                 BuildPending(false);
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>Application.quitting, after the seat evidence quit flush:
@@ -1070,6 +1080,12 @@ namespace CompetitiveRounds
         /// name shared by two category objects fails the dump.</summary>
         internal static void EnsureCensusDump()
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.CD_c7)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.CardDraw, FtSpan.Gated);
+            try
+            {
+#endif
             try
             {
                 if (_dumpDone) return;
@@ -1122,6 +1138,10 @@ namespace CompetitiveRounds
                 _dumpDone = true;
                 try { Plugin.Log.LogWarning(TAG + " census dump failed: " + ex.GetType().Name); } catch { }
             }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 

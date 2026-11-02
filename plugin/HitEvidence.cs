@@ -272,7 +272,7 @@ namespace CompetitiveRounds
         internal static void Drain()
         {
 #if SCR_FRAMETIME
-            if (FtCensus.Skip(FtE.HE_c5)) return;
+            if (FtGate.Off) return;   // nested: live only through PT-c5, PointEvidence.Drain (no census row)
             bool ftSpan = FtSpan.Open(FtSpan.Hit, FtSpan.Gated);
             try
             {

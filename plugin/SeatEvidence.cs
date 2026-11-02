@@ -285,6 +285,12 @@ namespace CompetitiveRounds
         /// <summary>One player-stream batch from `actor` stamped `stamp` by its sender.</summary>
         internal static void NoteView(int actor, int stamp)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.SE_c50)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Gated);
+            try
+            {
+#endif
             try
             {
                 if (!_open || actor == 0 || actor != _oppActor) return;
@@ -296,6 +302,10 @@ namespace CompetitiveRounds
                 _cad.Add(stamp, sw);
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         // -- blocks -------------------------------------------------------------------------
@@ -634,6 +644,12 @@ namespace CompetitiveRounds
         /// and one send.</summary>
         internal static void Tick()
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.SE_c53)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Gated);
+            try
+            {
+#endif
             try
             {
                 long now = SwMs;
@@ -655,6 +671,10 @@ namespace CompetitiveRounds
                 Pump(now);
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         /// <summary>The CURRENT frame's combat state (C.CombatRead): the game's
@@ -911,6 +931,12 @@ namespace CompetitiveRounds
         /// then runs (DisabledSeatSession).</summary>
         internal static void CompatTick()
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.SE_c52)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Gated);
+            try
+            {
+#endif
             try
             {
                 if (CombatLive()) return;
@@ -938,6 +964,10 @@ namespace CompetitiveRounds
                 DisabledSeatSession();
             }
             catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
 
         // -- the disabled seat's session (V1 6.4; F5) ------------------------------------------
@@ -1833,8 +1863,18 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void Postfix(PhotonView __0, string __1, RpcTarget __2)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.SE_p1)) return;
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Gated);
+            try
+            {
+#endif
             try { SeatEvidence.BlockSent(__0, __1, __2); } catch { }
             try { CombatEvidence.RpcSent(__0, __1, __2); } catch { }
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -1845,8 +1885,18 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(Block __instance, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.SE_p2)) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Gated);
+            try
+            {
+#endif
             try { SeatEvidence.UnkeyedReset(__instance); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 
@@ -1856,8 +1906,18 @@ namespace CompetitiveRounds
         [HarmonyFinalizer]
         private static Exception Finalizer(Block __instance, Exception __exception)
         {
+#if SCR_FRAMETIME
+            if (FtCensus.Skip(FtE.SE_p3)) return __exception;
+            bool ftSpan = FtSpan.Open(FtSpan.Seat, FtSpan.Gated);
+            try
+            {
+#endif
             try { SeatEvidence.UnkeyedReset(__instance); } catch { }
             return __exception;
+#if SCR_FRAMETIME
+            }
+            finally { FtSpan.Close(ftSpan); }
+#endif
         }
     }
 }
