@@ -11,9 +11,11 @@ import ast
 import collections
 import contextlib
 import inspect
+import linecache
 import os
 import sys
 import textwrap
+import types
 import uuid
 
 import pytest
@@ -28,6 +30,8 @@ import main  # noqa: E402
 import test_match_hold_pg as hold_test  # noqa: E402
 import closed_walk as _cw  # noqa: E402
 import grammar_shapes_gate as _gg  # noqa: E402
+from grammar_shapes_gate import (  # noqa: E402
+    ADMITTED, Refusal, check_body, check_site, node_key, path_to, prefix_span)
 import shape_grammar as _sg  # noqa: E402
 from closed_walk import Unclassified  # noqa: E402
 # The match_hold the hold suite loaded: the MATCH_HOLD_SRC copy when set
@@ -56,9 +60,9 @@ def admission_sites():
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             found = []
-            b = _cw.Bindings(main, fn)
+            w = _Walk(main, "census", fn)
             for node in ast.walk(fn):
-                if (isinstance(node, ast.Call) and b.named(
+                if (isinstance(node, ast.Call) and w.b.named(
                         node.func, ACQUIRERS + (GATE,)) is not None):
                     held = any(kw.arg == "_gate_held" and isinstance(kw.value, ast.Constant)
                                and kw.value.value is True for kw in node.keywords)
@@ -207,15 +211,22 @@ _GATE_POLICIES = {}
 # <what>`. _G["record"] is the one-time generator's collector (no test sets
 # it); _G["trace"], while set, lists every span and body checked.
 
-_G = {"record": None, "trace": None, "hooks": 0}
+_G = {"record": None, "trace": None, "hooks": []}
 _ORIG_HELPER_TREE = _cw._helper_tree
 _MAIN_AT = (inspect.getsourcefile(main), 0)
 
 
 def _source_at(fn):
     """(file, line offset) of function object fn's source."""
-    return (inspect.getsourcefile(fn) or inspect.getmodule(fn).__file__,
-            fn.__code__.co_firstlineno - 1)
+    return _source_file(fn), fn.__code__.co_firstlineno - 1
+
+
+def _source_file(fn):
+    """The file inspect reads fn's source from, else its module's."""
+    path = inspect.getsourcefile(fn)
+    if path is None:
+        path = getattr(inspect.getmodule(fn), "__file__")
+    return path
 
 
 def _body(fn, role):
@@ -223,39 +234,58 @@ def _body(fn, role):
     before any walk reads it."""
     d = _ORIG_HELPER_TREE(fn)
     filename, offset = _source_at(fn)
-    n = _gg.check_body(d, role, filename, offset, _G["record"])
-    if _G["trace"] is not None:
-        _G["trace"].append((role, (fn.__module__, fn.__qualname__), [d], n,
-                            None, d))
+    n = check_body(d, role, filename, offset, _G["record"])
+    key = (fn.__module__, fn.__qualname__)
+    trees = [d]
+    _traced(role, key, trees, n, None, d)
     return d
 
 
 def _check_site(fn, stmts, at):
     """Site span `stmts` of fn (grammar_shapes_gate.check_site); `at` is
     (file, line offset) of fn's source."""
-    n = _gg.check_site(fn, stmts, at[0], at[1], _G["record"])
-    if _G["trace"] is not None:
-        _G["trace"].append(("site", (at[0], fn.name), list(stmts), n,
-                            _gg.path_to(fn, stmts[0]), fn))
+    filename, offset = at
+    n = check_site(fn, stmts, filename, offset, _G["record"])
+    name = fn.name
+    key = (filename, name)
+    trees = list(stmts)
+    path = path_to(fn, trees[0])
+    _traced("site", key, trees, n, path, fn)
+
+
+def _traced(role, key, trees, n, path, fn):
+    """One entry of the completeness trace, while _G["trace"] is set."""
+    trace = _G["trace"]
+    if trace is not None:
+        trace.append((role, key, trees, n, path, fn))
 
 
 def _helper_tree_checked(fn):
-    return _body(fn, "helper")
+    d = _body(fn, "helper")
+    return d
 
 
-@contextlib.contextmanager
-def _grammar_walk():
-    """While a walk runs, every body closed_walk descends into is read
-    through _body: closed_walk._helper_tree, its one reader of a function's
-    source, is wrapped, and restored when the outermost walk ends."""
-    _G["hooks"] += 1
-    _cw._helper_tree = _helper_tree_checked
+def _in_grammar_walk(run, *args):
+    """run(*args) while closed_walk._helper_tree, its one reader of a
+    function's source, is _helper_tree_checked, so every body a walk
+    descends into is read through _body; restored when the outermost walk
+    ends."""
+    hooks = _G["hooks"]
+    hooks.append(run)
+    setattr(_cw, "_helper_tree", _helper_tree_checked)
+    out = None
     try:
-        yield
+        out = run(*args)
     finally:
-        _G["hooks"] -= 1
-        if not _G["hooks"]:
-            _cw._helper_tree = _ORIG_HELPER_TREE
+        _grammar_walk_off(hooks)
+    return out
+
+
+def _grammar_walk_off(hooks):
+    """Leave one walk; the outermost restores closed_walk's reader."""
+    hooks.pop()
+    if not hooks:
+        setattr(_cw, "_helper_tree", _ORIG_HELPER_TREE)
 
 
 def _gate_policy(scope):
@@ -276,12 +306,12 @@ def _is_docstring(st):
             and isinstance(st.value.value, str))
 
 
-def _awaited_name_call(node, b, name=None):
+def _awaited_name_call(node, w, name=None):
     """The call of `await <name>(...)` (any plain name when `name` is None),
-    `name` read through `b` as the module's."""
+    `name` read through the walk w's Bindings as the module's."""
     call = node.value if isinstance(node, ast.Await) else None
     if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-            and (name is None or b.named(call.func, (name,)) is not None)):
+            and (name is None or w.b.named(call.func, (name,)) is not None)):
         return call
     return None
 
@@ -408,18 +438,26 @@ def _helper_kind(fn, p):
                  callback parameter."""
     key = (fn.__module__, fn.__qualname__)
     if key in p.gate_kinds:
-        return p.gate_kinds[key]
+        known = p.gate_kinds[key]
+        if known is not None:
+            return known
     p.gate_kinds[key] = (None, f"{fn.__name__} awaits itself")
+    result = None
     try:
         result = _helper_kind_read(fn, p)
-    except _gg.Refusal:
-        del p.gate_kinds[key]
-        raise
-    p.gate_kinds[key] = result
+    finally:
+        _helper_kind_settle(p, key, result)
     return result
 
 
+def _helper_kind_settle(p, key, result):
+    """The helper's kind recorded; None (read again next time) when its
+    read raised, a grammar refusal."""
+    p.gate_kinds[key] = result
+
+
 def _helper_kind_read(fn, p):
+    """_helper_kind's reading of fn's effects and refusing paths."""
     try:
         eff = _cw.helper_effects(fn, p)
     except Unclassified as e:
@@ -466,9 +504,9 @@ def _helper_state(w, node, effects, wrote, state):
     return wrote
 
 
-def _is_refusal_exit(st, b):
+def _is_refusal_exit(st, w):
     """The call of `return await _rdm_refuse(...)`, or None."""
-    return (_awaited_name_call(st.value, b, "_rdm_refuse")
+    return (_awaited_name_call(st.value, w, "_rdm_refuse")
             if isinstance(st, ast.Return) else None)
 
 
@@ -499,7 +537,7 @@ def _helper_block(w, stmts, wrote, state, top=False):
             w.shape("docstring")
             continue
         if isinstance(st, ast.Return):
-            refusal = _is_refusal_exit(st, w.b)
+            refusal = _is_refusal_exit(st, w)
             if refusal is not None:
                 w.shape("exit: return await _rdm_refuse(...)")
                 _refusal_exit_problem(w, st, refusal)
@@ -552,7 +590,7 @@ def _hold_block(w, stmts):
     grammar (grammar_shapes_gate.NARROWED, finding gate:136)."""
     for i, st in enumerate(stmts):
         value = getattr(st, "value", None)
-        named = _awaited_name_call(value, w.b)
+        named = _awaited_name_call(value, w)
         if isinstance(st, ast.Expr) and named is not None:
             w.shape("hold: awaited helper call")
             _plain_args(w, named, f"the arguments of {named.func.id}")
@@ -621,15 +659,21 @@ def _hold_replay_problem(w, fn):
     permitted, reads (a row lock included) and rolls back only: no write,
     no commit, no savepoint, no callback; else why."""
     try:
-        with _grammar_walk():
-            eff = _cw.def_effects(_body(fn, "answer"), inspect.getmodule(fn),
-                                  w.policy, fn.__name__, rollbacks=True)
+        eff = _in_grammar_walk(_replay_effects, fn, w.policy)
     except Unclassified as e:
         return e.args[0][1]
-    except _gg.Refusal as e:
+    except Refusal as e:
         return e.args[0]
     other = sorted(e for e in eff if e not in ("read", "lock", "await", "rollback"))
     return f"it takes {', '.join(other)}" if other else None
+
+
+def _replay_effects(fn, policy):
+    """The shared visitor's effects of replay fn's body, read through
+    _body (rollbacks permitted)."""
+    d = _body(fn, "answer")
+    return _cw.def_effects(d, inspect.getmodule(fn), policy,
+                           getattr(fn, "__name__"), rollbacks=True)
 
 
 def _refusal_answer_problem(fn, call, seen, b):
@@ -800,11 +844,10 @@ def refusal_branch_violation(fn, call, form, scope=None, at=("<site>", 0)):
     (ruling REHEARSAL-FOUR-R5, fix 1), a grammar refusal likewise (round 7);
     `at` is (file, line offset) of fn's source."""
     try:
-        with _grammar_walk():
-            return _refusal_branch_read(fn, call, form, scope, at)
+        return _in_grammar_walk(_refusal_branch_read, fn, call, form, scope, at)
     except Unclassified as e:
         return f"line {e.args[0][0]}: {e.args[0][1]}"
-    except _gg.Refusal as e:
+    except Refusal as e:
         return e.args[0]
 
 
@@ -844,8 +887,8 @@ def _refusal_branch_read(fn, call, form, scope=None, at=("<site>", 0)):
     them by their ancestor shapes (a try, a with or a loop around a refusal
     is refused there: finding gate:769), then the binding rule over fn."""
     stmt = _statement_of(fn, call)
-    nxt = _next_statement(fn, stmt) if form != "shared" else None
-    _check_site(fn, [stmt] + ([nxt] if nxt is not None else []), at)
+    span = _branch_span(fn, stmt, form)
+    _check_site(fn, span, at)
     w = _Walk(scope, f"{fn.name} [{form}]", fn=fn)
     # The admission call is the module's (finding gate:1155: a function
     # that rebinds the gate's name passed as the gate).
@@ -916,7 +959,7 @@ def _refusal_branch_read(fn, call, form, scope=None, at=("<site>", 0)):
             return "the refusal branch does not open with return False"
         w.shape("acquirer: exit, return False")
         return _after_exit(branch)
-    refused = _is_refusal_exit(first, w.b)
+    refused = _is_refusal_exit(first, w)
     if refused is not None:
         # its arguments read first, so an unpacked one is named as such
         _refusal_exit_problem(w, first, refused)
@@ -927,6 +970,18 @@ def _refusal_branch_read(fn, call, form, scope=None, at=("<site>", 0)):
                 'return await _rdm_refuse(..., "other_mode")')
     w.shape("direct: exit, return await _rdm_refuse(...)")
     return _after_exit(branch)
+
+
+def _branch_span(fn, stmt, form):
+    """The site span of a refusal branch: the statement holding the
+    admission call and, for the gate forms, the statement after it."""
+    span = [stmt]
+    nxt = None
+    if form != "shared":
+        nxt = _next_statement(fn, stmt)
+    if nxt is not None:
+        span.append(nxt)
+    return span
 
 
 def _after_exit(branch):
@@ -1041,17 +1096,19 @@ def _scope_of_lines(lines, consts=None):
 _INSPECTED = {"sink": None, "file": None}
 
 
-def _calls(node, stop, b):
+def _calls(node, stop, w):
     """Whether `node` holds a call of `stop`, the module's (read through
-    `b`, the walked function's Bindings: a function that rebinds it is
-    refused, finding gate:1155). Every node of `node` is read, none skipped
-    after a match, so the prefix walk can compare what it read with what the
-    grammar admitted (claim_prefix_violations)."""
+    the walk w's Bindings: a function that rebinds it is refused, finding
+    gate:1155). Every node of `node` is read, none skipped after a match, so
+    the prefix walk can compare what it read with what the grammar admitted
+    (claim_prefix_violations)."""
     found = False
+    sink = _INSPECTED.get("sink")
+    here = _INSPECTED.get("file")
     for n in ast.walk(node):
-        if _INSPECTED["sink"] is not None:
-            _INSPECTED["sink"].append(_gg.node_key(_INSPECTED["file"], n))
-        if isinstance(n, ast.Call) and b.named(n.func, (stop,)) is not None:
+        if sink is not None:
+            sink.append(node_key(here, n))
+        if isinstance(n, ast.Call) and w.b.named(n.func, (stop,)) is not None:
             found = True
     return found
 
@@ -1080,7 +1137,7 @@ def _prefix_effects(w, st, effects):
 def _prefix_exit(w, st):
     """An exit before the target: `return await _rdm_refuse(<plain values>)`,
     or a return of a plain answer that awaits nothing."""
-    refusal = _is_refusal_exit(st, w.b)
+    refusal = _is_refusal_exit(st, w)
     if refusal is not None:
         before = len(w.problems)
         _refusal_exit_problem(w, st, refusal)
@@ -1105,16 +1162,16 @@ def _prefix_target(w, st, stop):
     test classified, then the statements before the call inside the
     containing branch), or the call as a statement of its own (an
     assignment to names, an expression or a return) with plain arguments."""
-    if isinstance(st, ast.If) and not _calls(st.test, stop, w.b):
+    if isinstance(st, ast.If) and not _calls(st.test, stop, w):
         w.shape("if around the target, walked into")
-        if _prefix_effects(w, st, _effects(w, st.test, what="an if's test")):
+        effects = _effects(w, st.test, what="an if's test")
+        if _prefix_effects(w, st, effects):
             w.fail(st, "the answer of a refusing helper is not refused at once")
         # Round 6, finding gate:1251: every arm that reaches the target is
         # walked (both arms of an if may call it); no arm is chosen over
         # another.
-        for arm in (st.body, st.orelse):
-            if any(_calls(s, stop, w.b) for s in arm):
-                _prefix_block(w, arm, stop)
+        _prefix_arm(w, st.body, stop)
+        _prefix_arm(w, st.orelse, stop)
         return
     if isinstance(st, (ast.Assign, ast.Expr, ast.Return)):
         value = st.value.value if isinstance(st.value, ast.Await) else st.value
@@ -1133,11 +1190,27 @@ def _prefix_target(w, st, stop):
                "this walk classifies")
 
 
+def _prefix_arm(w, arm, stop):
+    """An arm of an if around the target, walked when it reaches it."""
+    if not any(_calls(s, stop, w) for s in arm):
+        return
+    _prefix_block(w, arm, stop)
+
+
+def _prefix_suffix(w, rest, stop):
+    """The statements after an if target: none may reach the target again
+    (they follow a path that passed the if without its call)."""
+    for st in rest:
+        if _calls(st, stop, w):
+            w.fail(st, f"a second statement reaching {stop}, after "
+                       "a prefix this walk does not read")
+
+
 def _prefix_block(w, stmts, stop, top=False):
     """Walk a block of the prefix; True when it reached the call of `stop`."""
     pending = None
     for i, st in enumerate(stmts):
-        if _calls(st, stop, w.b):
+        if _calls(st, stop, w):
             if pending is not None:
                 w.fail(st, f"the answer of {pending[1]} is not refused at once")
             _prefix_target(w, st, stop)
@@ -1149,10 +1222,7 @@ def _prefix_block(w, stmts, stop, top=False):
             # gate:1140); a call that is a statement of its own runs on every
             # path through that statement.
             if isinstance(st, ast.If):
-                for rest in stmts[i + 1:]:
-                    if _calls(rest, stop, w.b):
-                        w.fail(rest, f"a second statement reaching {stop}, after "
-                                     "a prefix this walk does not read")
+                _prefix_suffix(w, stmts[i + 1:], stop)
             return True
         if top and i == 0 and _is_docstring(st):
             w.shape("docstring")
@@ -1227,44 +1297,87 @@ def claim_prefix_violations(fn, stop, scope, where="prefix", at=("<site>", 0)):
     Round 8 (finding gate:1140): the nodes the grammar admitted and the
     nodes _calls read are both recorded, and any difference between the two
     sets is a problem of the walk (_PREFIX_NODES keeps the last counts)."""
-    stmts = fn.body
     admitted, inspected = [], []
+    refused = None
     try:
-        with _grammar_walk():
-            _gg.ADMITTED["sink"] = admitted
-            try:
-                _check_site(fn, _gg.prefix_span(fn, stop), at)
-            finally:
-                _gg.ADMITTED["sink"] = None
-            w = _Walk(scope, where, stmts=stmts)
-            _INSPECTED.update(sink=inspected, file=at[0])
-            try:
-                if not _prefix_block(w, stmts, stop, top=True):
-                    w.problems.append(f"no statement calls {stop}")
-            except Unclassified as e:
-                w.problems.append(f"line {e.args[0][0]}: {e.args[0][1]}")
-            finally:
-                _INSPECTED["sink"] = None
-    except _gg.Refusal as e:
-        return [e.args[0]], []
-    w.problems.extend(_node_set_problems(set(inspected), set(admitted)))
+        w = _in_grammar_walk(_prefix_walk, fn, stop, scope, where, at,
+                             admitted, inspected)
+    except Refusal as e:
+        refused = e.args[0]
+    if refused is not None:
+        return _refusal_only(refused)
+    _node_set_problems(w, inspected, admitted)
     return w.problems, w.seen
+
+
+def _refusal_only(sentence):
+    """(problems, seen) of a walk the grammar refused: its sentence only."""
+    problems = [sentence]
+    seen = []
+    return problems, seen
+
+
+def _prefix_walk(fn, stop, scope, where, at, admitted, inspected):
+    """claim_prefix_violations' walk: the grammar check of the span (its
+    admitted nodes into `admitted`), then the closed walk (the nodes _calls
+    read into `inspected`); the walk."""
+    ADMITTED["sink"] = admitted
+    try:
+        span = prefix_span(fn, stop)
+        checked = _check_site(fn, span, at)
+    finally:
+        _sink_off(ADMITTED)
+    stmts = fn.body
+    w = _Walk(scope, where, None, stmts)
+    filename, offset = at
+    _INSPECTED["sink"] = inspected
+    _INSPECTED["file"] = filename
+    try:
+        reached = _prefix_read(w, stmts, stop)
+    finally:
+        _sink_off(_INSPECTED)
+    return w
+
+
+def _sink_off(sinks):
+    """A recording sink switched off (its readers take .get("sink"))."""
+    sinks.pop("sink")
+
+
+def _prefix_read(w, stmts, stop):
+    """_prefix_block over the walked function's body, its refusals the
+    walk's problems; whether it reached the call of `stop`."""
+    reached = False
+    try:
+        reached = _prefix_block(w, stmts, stop, True)
+    except Unclassified as e:
+        w.fail_at(e.args[0][0], e.args[0][1])
+        reached = True
+    if not reached:
+        w.problems.append(f"no statement calls {stop}")
+    return reached
 
 
 _PREFIX_NODES = {"last": None}
 
 
-def _node_set_problems(inspected, admitted):
-    """The M6 assertion: a sentence for each node set difference between
-    what the prefix walk read and what the grammar admitted (none when
-    equal); the two counts kept in _PREFIX_NODES."""
-    _PREFIX_NODES["last"] = (len(inspected), len(admitted))
-    out = []
-    for what, got in (("inspected but not admitted", inspected - admitted),
-                      ("admitted but not inspected", admitted - inspected)):
-        if got:
-            out.append(f"{len(got)} nodes {what}, the first {min(got, key=str)}")
-    return out
+def _node_set_problems(w, inspected, admitted):
+    """The M6 assertion: a problem of walk w for each difference between the
+    set of nodes the prefix walk read and the set the grammar admitted (none
+    when equal), compared as (file, line, col, node type); the two set
+    sizes kept in _PREFIX_NODES."""
+    read, ok = set(inspected), set(admitted)
+    _PREFIX_NODES["last"] = (len(read), len(ok))
+    _node_difference(w, "inspected but not admitted", read, ok)
+    _node_difference(w, "admitted but not inspected", ok, read)
+
+
+def _node_difference(w, what, these, those):
+    """A problem naming the nodes of `these` outside `those`, if any."""
+    got = sorted(str(k) for k in these if k not in those)
+    if not got:
+        return
+    w.problems.append(f"{len(got)} nodes {what}, the first {got[0]}")
 
 _MAIN_DEFS = {}
 
@@ -1457,41 +1570,92 @@ def _planted(module, name, edits=(), helpers=(), helper_edits=()):
     holding everything `module` holds plus `helpers` (source lines) and the
     real helpers named in `helper_edits` with their own edits; `at` the
     planted source's (file, line offset)."""
-    import linecache
-    import types
-
-    def edited(text, pairs, what):
-        for old, new in pairs:
-            assert text.count(old) == 1, (what, text.count(old), old)
-            text = text.replace(old, new)
-        return text
-
-    src = edited(textwrap.dedent(inspect.getsource(getattr(module, name))),
-                 edits, name)
+    src = _edited(module, name, edits)
     lines = list(helpers)
-    for helper, pairs in helper_edits:
-        lines += edited(textwrap.dedent(inspect.getsource(getattr(module, helper))),
-                        pairs, helper).splitlines()
+    for edit in helper_edits:
+        lines.extend(_helper_lines(module, edit))
+    mod = _planted_module(module, name, lines)
+    at = (f"<planted {name}>", 0)
+    tree = ast.parse(src)
+    first = tree.body[0]
+    return first, mod, at
+
+
+def _helper_lines(module, edit):
+    """The lines of a real helper with its edits: edit is (name, pairs)."""
+    helper, pairs = edit
+    text = _edited(module, helper, pairs)
+    return text.splitlines()
+
+
+def _edited(module, name, pairs):
+    """The dedented source of `module`.`name` with each (old, new) of
+    `pairs` applied, each old text found exactly once."""
+    text = textwrap.dedent(inspect.getsource(getattr(module, name)))
+    texts = [text]
+    for pair in pairs:
+        _applied_once(texts, pair, name)
+    last = texts[-1]
+    return last
+
+
+def _applied_once(texts, pair, what):
+    """The last of `texts` with one planting edit (old, new) applied,
+    appended; its old text must occur exactly once."""
+    old, new = pair
+    text = texts[-1]
+    n = text.count(old)
+    if n != 1:
+        raise AssertionError((what, n, old))
+    texts.append(text.replace(old, new))
+
+
+def _synth_next():
     _SYNTH[0] += 1
-    mod_name = f"gate_planted_{_SYNTH[0]}"
-    mod = types.ModuleType(mod_name)
+
+
+def _planted_module(module, name, lines):
+    """A module holding everything `module` holds plus the source `lines`,
+    registered with linecache under one file name per planted function (so
+    a pinned refusal names it)."""
+    _synth_next()
+    mod = types.ModuleType(f"gate_planted_{_SYNTH[0]}")
     mod.__dict__.update({k: v for k, v in module.__dict__.items()
                          if not k.startswith("__")})
-    # One file name per planted function, so a pinned refusal names it.
-    mod.__file__ = f"<planted helpers for {name}>"
-    text = chr(10).join(lines) + chr(10)
-    linecache.cache[mod.__file__] = (len(text), None, text.splitlines(True),
-                                     mod.__file__)
-    sys.modules[mod_name] = mod
-    exec(compile(text, mod.__file__, "exec"), mod.__dict__)
-    return ast.parse(src).body[0], mod, (f"<planted {name}>", 0)
+    filename = f"<planted helpers for {name}>"
+    mod.__file__ = filename
+    text = _lines_text(lines)
+    size = len(text)
+    mtime = None
+    rows = text.splitlines(True)
+    linecache.cache[filename] = (size, mtime, rows, filename)
+    sys.modules[mod.__name__] = mod
+    exec(compile(text, filename, "exec"), mod.__dict__)
+    return mod
+
+
+def _lines_text(lines):
+    """`lines` as one text, each line ended."""
+    ended = list(lines)
+    ended.append("")
+    return chr(10).join(ended)
 
 
 def _wrapped(text, head, tail):
     """`text` (whole lines at four spaces) one level deeper, between `head`
     and `tail` (lines at four spaces)."""
-    deeper = chr(10).join(("    " + ln) if ln else ln for ln in text.split(chr(10)))
-    return head + chr(10) + deeper + chr(10) + tail
+    lines = [head]
+    for ln in text.split(chr(10)):
+        lines.append(_deeper(ln))
+    lines.append(tail)
+    return chr(10).join(lines)
+
+
+def _deeper(ln):
+    """One line four spaces deeper (an empty line kept empty)."""
+    if not ln:
+        return ln
+    return f"    {ln}"
 
 
 # The real spans the controls plant into: (module, function, entry, target).
@@ -1555,16 +1719,28 @@ _R8_SUFFIX = ('    if req.step == "x":' + chr(10)
               + '        return await (lambda: _rdm_claim)()(ctx, pid, me, req)')
 
 
+_HOLD_LIVE_LINE = chr(10) + "    if not _hold_live(hold, now):"
+
+
 def _hold_returns(expr):
     """The hold branch's refusal replaced by `return <expr>`."""
-    return [(_H_REFUSE, f"        return {expr}" + chr(10)
-             + "    if not _hold_live(hold, now):")]
+    new = f"        return {expr}{_HOLD_LIVE_LINE}"
+    pair = (_H_REFUSE, new)
+    pairs = [pair]
+    return pairs
 
 
-def _answer(*body, head="def evil(reason: str) -> dict:"):
-    """A refusal answer `evil` with `body` before its refusal."""
-    return ([head] + ["    " + ln for ln in body]
-            + ["    return {\"status\": \"refused\", \"reason\": reason}"])
+_EVIL_HEAD = "def evil(reason: str) -> dict:"
+_REFUSED_RETURN = "    return {\"status\": \"refused\", \"reason\": reason}"
+
+
+def _answer(head, *body):
+    """A refusal answer headed `head` with `body` before its refusal."""
+    lines = [head]
+    for ln in body:
+        lines.append(_deeper(ln))
+    lines.append(_REFUSED_RETURN)
+    return lines
 
 
 # (finding, label, real span, edits, helper lines, helper edits, the refusal)
@@ -1638,12 +1814,12 @@ R7_CONTROLS = [
       "    return {\"status\": \"refused\", \"reason\": reason}"], (), 'the refusal branch does not end by returning its "other_mode" refusal'),
     ("r4 gate:541", "a refusal answer that rebinds reason", HOLD,
      _hold_returns('rebinds("other_mode")'),
-     _answer('reason = "not_other_mode"', head="def rebinds(reason: str) -> dict:"),
+     _answer("def rebinds(reason: str) -> dict:", 'reason = "not_other_mode"'),
      (), 'grammar <planted helpers for match_hold_claim>:2: FunctionDef.body>Assign(targets=[Name],value=Constant,type_comment=-)'),
     ("r4 gate:541", "a refusal answer through a match", HOLD,
      _hold_returns('by_match("other_mode")'),
-     _answer("match reason:", "    case _:", "        pass",
-             head="def by_match(reason: str) -> dict:"), (), 'grammar <planted helpers for match_hold_claim>:1: <root>>FunctionDef(name=str,args=arguments,body=[Match|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])'),
+     _answer("def by_match(reason: str) -> dict:",
+             "match reason:", "    case _:", "        pass"), (), 'grammar <planted helpers for match_hold_claim>:1: <root>>FunctionDef(name=str,args=arguments,body=[Match|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])'),
     ("r4 gate:541", "a refusal answer through a computed lambda call", HOLD,
      _hold_returns('by_lambda("other_mode")'),
      ["def by_lambda(reason: str) -> dict:",
@@ -1651,12 +1827,12 @@ R7_CONTROLS = [
      'grammar <planted helpers for match_hold_claim>:2: Return.value>Call(func=Lambda,args=[Name],keywords=[])'),
     # round 5
     ("r5 gate:537", "a session call in the answer", HOLD,
-     _hold_returns('evil("other_mode")'), _answer("db.add(reason)"), (), 'grammar <planted helpers for match_hold_claim>:2: FunctionDef.body>Expr(value=Call)'),
+     _hold_returns('evil("other_mode")'), _answer(_EVIL_HEAD, "db.add(reason)"), (), 'grammar <planted helpers for match_hold_claim>:2: FunctionDef.body>Expr(value=Call)'),
     ("r5 gate:537", "an attribute store in the answer", HOLD,
-     _hold_returns('evil("other_mode")'), _answer("db.answer = reason"), (),
+     _hold_returns('evil("other_mode")'), _answer(_EVIL_HEAD, "db.answer = reason"), (),
      'grammar <planted helpers for match_hold_claim>:2: FunctionDef.body>Assign(targets=[Attribute],value=Name,type_comment=-)'),
     ("r5 gate:537", "a with in the answer", HOLD,
-     _hold_returns('evil("other_mode")'), _answer("with db:", "    pass"), (),
+     _hold_returns('evil("other_mode")'), _answer(_EVIL_HEAD, "with db:", "    pass"), (),
      'grammar <planted helpers for match_hold_claim>:1: <root>>FunctionDef(name=str,args=arguments,body=[Return|With],decorator_list=[],returns=Name,type_comment=-,type_params=[])'),
     ("r5 gate:537", "an effect inside the returned answer", HOLD,
      _hold_returns('evil("other_mode")'),
@@ -1665,10 +1841,10 @@ R7_CONTROLS = [
      (), 'grammar <planted helpers for match_hold_claim>:2: Return.value>Dict(keys=[Constant],values=[Call|Constant|Name])'),
     ("r5 gate:537", "an early raise in the answer", HOLD,
      _hold_returns('evil("other_mode")'),
-     _answer("if reason:", "    raise RuntimeError(reason)"), (), 'grammar <planted helpers for match_hold_claim>:2: FunctionDef.body>If(test=Name,body=[Raise],orelse=[])'),
+     _answer(_EVIL_HEAD, "if reason:", "    raise RuntimeError(reason)"), (), 'grammar <planted helpers for match_hold_claim>:2: FunctionDef.body>If(test=Name,body=[Raise],orelse=[])'),
     ("r5 gate:537", "an arbitrary await in the answer", HOLD,
      _hold_returns('await evil(db, hold_id, "claim", now, "other_mode")'),
-     _answer("await arbitrary(db)", head="async def evil(db, hold_id, kind, now, reason):"),
+     _answer("async def evil(db, hold_id, kind, now, reason):", "await arbitrary(db)"),
      (),
      'line 39: the hold refusal evil does not answer a refusal: evil line 2: an await of arbitrary, not a function of its module this walk finds'),
     ("r5 gate:1155", "the gate rebound", DIRECT,
@@ -1907,7 +2083,7 @@ def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
 
     row = next(r for r in R7_CONTROLS if r[1] == _R8_SUFFIX_LABEL)
     fn, scope, at = _planted(main, "_asm_readmit_work", row[3])
-    monkeypatch.setattr(_gg, "prefix_span", round7_span)
+    monkeypatch.setattr(sys.modules[__name__], "prefix_span", round7_span)
     problems, _ = claim_prefix_violations(fn, "_rdm_claim", scope,
                                           "_asm_readmit_work", at)
     assert problems and all(" nodes inspected but not admitted" in p

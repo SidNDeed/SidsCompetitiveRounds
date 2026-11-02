@@ -599,8 +599,9 @@ def nodes(root, filename, offset, record=None):
     except _sg.Refused as e:
         f, line, shape = e.args[0]
         raise Refusal(f"grammar {f}:{line + offset}: {shape}") from None
-    if ADMITTED["sink"] is not None:
-        ADMITTED["sink"].extend(node_key(filename, x) for x, _p, _f in _sg.visit(root))
+    sink = ADMITTED.get("sink")
+    if sink is not None:
+        sink.extend(node_key(filename, x) for x, _p, _f in _sg.visit(root))
     return n
 
 
