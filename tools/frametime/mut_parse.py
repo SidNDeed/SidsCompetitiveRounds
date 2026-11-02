@@ -81,7 +81,7 @@ MUTS = [
     ("A3 drained nonempty passes",
      'if r.get("starts", 0) <= 0 or r.get("nonempty", -1) != 0 or r.get("faults", -1) != 0:',
      'if r.get("starts", 0) <= 0 or r.get("faults", -1) != 0:'),
-    ("A3 inventory row removed", '    ("CE_Recent", "S06", "dependent", "", ""),\n', '',
+    ("A3 inventory row removed", '    ("CE_Recent", "S06", "dependent", "", ""),', '',
      "tools/frametime/gate_specs/a3.py"),
     ("A3 dependent row demoted to zero", '    ("CE_Pos", "S05", "dependent", "", ""),',
      '    ("CE_Pos", "S05", "zero", "demoted", "sweep:no-live-write"),', "tools/frametime/gate_specs/a3.py"),
