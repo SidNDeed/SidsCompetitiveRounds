@@ -155,8 +155,7 @@ _PLAIN_NODES = (ast.Constant, ast.Name, ast.Attribute, ast.Subscript, ast.Slice,
 # Calls with no database effect: builtins by name; methods by attribute name
 # (the result accessors of an executed statement, a mapping read, and
 # seat_of, the assembly context's in-memory seat lookup).
-_PLAIN_BUILTINS = frozenset({"bool", "int", "str", "len", "list", "tuple",
-                             "min", "max"})
+_PLAIN_BUILTINS = frozenset({"bool", "int", "str", "list"})
 _PLAIN_METHODS = frozenset({"get", "seat_of", "mappings", "first", "scalar"})
 # The one exception a refusal raises.
 _REFUSAL_EXCEPTIONS = frozenset({"HTTPException"})
@@ -164,11 +163,10 @@ _REFUSAL_EXCEPTIONS = frozenset({"HTTPException"})
 # whose every function is on this read-only list (a row lock, FOR UPDATE or
 # FOR NO KEY UPDATE, is a read the design requires before the gate).  A write
 # is one INSERT, UPDATE or DELETE statement.  A transaction command ends the
-# transaction.  Anything else is SQL the walk does not read.
-_SQL_READ_FUNCTIONS = frozenset({"CAST", "COALESCE", "COUNT", "MAX", "MIN",
-                                 "NOW", "CLOCK_TIMESTAMP", "ANY"})
-_SQL_PAREN_KEYWORDS = frozenset({"IN", "EXISTS", "FROM", "JOIN", "WHERE", "AND",
-                                 "OR", "NOT", "ON", "AS", "SELECT"})
+# transaction.  Anything else is SQL the walk does not read.  The read-only
+# list holds what the real reads name (CAST); any other word before a
+# parenthesis, a keyword included, is refused until a real read needs it.
+_SQL_READ_FUNCTIONS = frozenset({"CAST"})
 _SQL_WRITE_HEADS = frozenset({"INSERT", "UPDATE", "DELETE"})
 _SQL_TXN_HEADS = frozenset({"COMMIT", "ROLLBACK", "SAVEPOINT", "BEGIN", "START",
                             "RELEASE", "END", "ABORT", "PREPARE"})
@@ -203,10 +201,13 @@ def _sql_shape(sql):
         return None, f"the statement head {head or body[:12]!r} is not on the list"
     if _SQL_WRITES.search(_SQL_ROW_LOCK.sub(" ", body)):
         return "write", "SELECT naming DML"
-    for name in re.findall(r"\b([A-Za-z_][A-Za-z_0-9]*)\s*\(", body):
-        if name.upper() not in _SQL_READ_FUNCTIONS | _SQL_PAREN_KEYWORDS:
+    names = re.findall(r"\b([A-Za-z_][A-Za-z_0-9]*)\s*\(", body)
+    for name in names:
+        if name.upper() not in _SQL_READ_FUNCTIONS:
             return None, f"the function {name} is not on the read-only list"
-    return ("lock" if _SQL_ROW_LOCK.search(body) else "read"), head
+    listed = ", ".join(sorted({n.upper() for n in names}))
+    return (("lock" if _SQL_ROW_LOCK.search(body) else "read"),
+            f"{head}; {listed}" if listed else head)
 
 
 def _execute_sql(call, consts):
