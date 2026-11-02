@@ -219,8 +219,12 @@ class _Walk:
     """One closed walk over a span of module `scope`: its problems and the
     shapes it met (seen; also counted in SHAPES_MET under `where`)."""
 
-    def __init__(self, scope, where):
+    def __init__(self, scope, where, bound=frozenset()):
         self.scope = main if scope is None else scope
+        # The names the walked function binds (closed_walk.bound_names): a
+        # callee among them is never resolved in the module (the class of
+        # finding closed_walk:699, swept here).
+        self.bound = frozenset(bound)
         self.policy = _gate_policy(self.scope)
         self.where = where
         self.problems, self.seen = [], []
@@ -233,6 +237,14 @@ class _Walk:
 
     def fail_at(self, line, what):
         self.problems.append(f"line {line}: {what}")
+
+
+def _resolve(w, func):
+    """The function `func` names in the walk's scope, None when the walked
+    function binds that name itself."""
+    if isinstance(func, ast.Name) and func.id in w.bound:
+        return None
+    return _cw.resolve_callee(func, w.scope)
 
 
 def _plain_args(w, call, what):
@@ -255,7 +267,7 @@ def _effects(w, node, plain_only=False, what="an expression"):
     ends = frozenset(id(n) for n in ast.walk(node) if isinstance(n, ast.Await)
                      and (_cw.is_db_call(n.value, "commit", s)
                           or _cw.is_db_call(n.value, "rollback", s)))
-    v = _cw.Visitor(w.policy, permitted=ends)
+    v = _cw.Visitor(w.policy, permitted=ends, bound=w.bound)
     try:
         accepted = v.accept(node)
     except Unclassified as e:
@@ -323,7 +335,8 @@ def _helper_kind(fn, p):
             result = ("reads" if eff & {"read", "lock"} else "pure"), None
         else:
             scope = inspect.getmodule(fn)
-            w = _Walk(scope, fn.__name__)
+            w = _Walk(scope, fn.__name__,
+                      _cw.bound_names(_cw._helper_tree(fn)))
             state = {"refusals": 0}
             wrote = _helper_block(w, _cw._helper_tree(fn).body, None, state,
                                   top=True)
@@ -366,7 +379,7 @@ def _refusal_exit_problem(w, st, call):
     """The designed refusal: plain arguments of every kind, and _rdm_refuse
     itself read by the shared visitor, keeping the transaction."""
     _plain_args(w, call, "the refusal's arguments")
-    fn = _cw.resolve_callee(call.func, w.scope)
+    fn = _resolve(w, call.func)
     if fn is None or not inspect.iscoroutinefunction(fn):
         why = "a helper this walk cannot find"
     else:
@@ -489,7 +502,7 @@ def _hold_refusal_problem(w, st):
         return
     _plain_args(w, call, "the refusal's arguments")
     name = call.func.id
-    fn = _cw.resolve_callee(call.func, w.scope)
+    fn = _resolve(w, call.func)
     if fn is None:
         w.fail(st, f"the hold refusal {name} is not a function this walk finds")
         return
@@ -560,6 +573,9 @@ def _refusal_answer_problem(fn, call, seen):
              and not isinstance(n.ctx, ast.Load))
                 or (isinstance(n, ast.ExceptHandler) and n.name == "reason")):
             return f"{fn.__name__} line {n.lineno}: rebinds reason"
+        if isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load):
+            # any store: a name it answers through is the module's
+            return f"{fn.__name__} line {n.lineno}: stores {n.id}"
     for r in (n for n in ast.walk(d) if isinstance(n, ast.Return)):
         v = r.value
         if isinstance(v, ast.Dict):
@@ -574,7 +590,7 @@ def _refusal_answer_problem(fn, call, seen):
         inner = v.value if isinstance(v, ast.Await) else v
         g = (_cw.resolve_callee(inner.func, inspect.getmodule(fn))
              if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
-             else None)
+             and inner.func.id not in _cw.bound_names(d) else None)
         if g is None or inspect.iscoroutinefunction(g) != isinstance(v, ast.Await):
             return f"{fn.__name__} line {r.lineno} returns another answer"
         why = _refusal_answer_problem(g, inner, seen + (fn,))
@@ -593,12 +609,13 @@ def _raise_problem(w, st):
     _plain_args(w, exc, "the raised refusal")
 
 
-def _reason_argument(call, scope):
+def _reason_argument(call, scope, bound=frozenset()):
     """The argument `call` binds to its callee's `reason` parameter: the
     callee a function of `scope` named by a plain name, called with every
     argument positional, nothing unpacked, no keyword, `reason` among the
     bound and every unbound parameter defaulted; else None (finding gate:535: the last argument was read instead)."""
-    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            and call.func.id not in bound):
         return None
     fn = _cw.resolve_callee(call.func, scope)
     if fn is None:
@@ -617,20 +634,20 @@ def _reason_argument(call, scope):
     return call.args[params.index("reason")]
 
 
-def _is_other_mode(call, scope):
+def _is_other_mode(call, scope, bound=frozenset()):
     """Whether `call` binds its callee's `reason` to the literal
     "other_mode"."""
-    arg = _reason_argument(call, scope)
+    arg = _reason_argument(call, scope, bound)
     return isinstance(arg, ast.Constant) and arg.value == "other_mode"
 
 
-def _returns_other_mode(stmt, scope):
+def _returns_other_mode(stmt, scope, bound=frozenset()):
     """Whether `stmt` is `return <refusal>(...)`, awaited or not, whose
     `reason` is "other_mode"."""
     value = stmt.value if isinstance(stmt, ast.Return) else None
     if isinstance(value, ast.Await):
         value = value.value
-    return _is_other_mode(value, scope)
+    return _is_other_mode(value, scope, bound)
 
 
 def refusal_branch_violation(fn, call, form, scope=None):
@@ -662,7 +679,7 @@ def refusal_branch_violation(fn, call, form, scope=None):
                 through into the action; what lies between is the
                 refusal's own fresh transaction (the timeouts rearmed,
                 the audit row written), walked by _hold_block."""
-    w = _Walk(scope, f"{fn.name} [{form}]")
+    w = _Walk(scope, f"{fn.name} [{form}]", _cw.bound_names(fn))
     stmt = _statement_of(fn, call)
     _plain_args(w, call, f"the arguments of {call.func.id}")
     if w.problems:
@@ -713,7 +730,7 @@ def refusal_branch_violation(fn, call, form, scope=None):
     if form == "hold":
         if not _is_db_rollback(first):
             return "the refusal branch does not open with await db.rollback()"
-        if not _returns_other_mode(branch.body[-1], w.scope):
+        if not _returns_other_mode(branch.body[-1], w.scope, w.bound):
             return ('the refusal branch does not end by returning its '
                     '"other_mode" refusal')
         w.shape("hold: await db.rollback()")
@@ -732,7 +749,7 @@ def refusal_branch_violation(fn, call, form, scope=None):
         _refusal_exit_problem(w, first, refused)
         if w.problems:
             return w.problems[0]
-    if not (refused is not None and _is_other_mode(refused, w.scope)):
+    if not (refused is not None and _is_other_mode(refused, w.scope, w.bound)):
         return ('the refusal branch does not open with '
                 'return await _rdm_refuse(..., "other_mode")')
     w.shape("direct: exit, return await _rdm_refuse(...)")
@@ -1217,7 +1234,7 @@ def claim_prefix_violations(stmts, stop, scope, where="prefix"):
     awaits nothing.  The statement holding the call is walked into when it is
     an if or a with, so the statements before the call inside its branch are
     classified the same way.  Anything else is refused, naming its line."""
-    w = _Walk(scope, where)
+    w = _Walk(scope, where, _cw._body_bindings(stmts))
     if not _prefix_block(w, stmts, stop, top=True):
         w.problems.append(f"no statement calls {stop}")
     return w.problems, w.seen
@@ -1620,6 +1637,8 @@ R4_HELPER_LINES = [
     "def _refused_rebinds(reason):",
     "    reason = 'other_mode'",
     "    return {'status': 'refused', 'reason': reason}",
+    "def _refused_param(_refused, reason):",
+    "    return _refused(reason)",
     "def _refused_by_match(reason):",
     "    match reason:",
     "        case _:",
@@ -1641,6 +1660,13 @@ R4_BRANCH_PROGRAMS = [
     ("gate:541 a refusal answer through a match",
      "a Match in a refusal answer", GATE, "hold",
      _R3_HOLD + ["    return _refused_by_match('other_mode')"]),
+    ("gate:541 sweep: a refusal answer through a parameter",
+     "returns another answer", GATE, "hold",
+     _R3_HOLD + ["    return _refused_param(None, 'other_mode')"]),
+    ("closed_walk:699 sweep: the site rebinds its refusal",
+     "is not classified (a helper this walk cannot find)", GATE, "direct",
+     ["_rdm_refuse = row_of", _R2_DIRECT, "if not admitted:",
+      _R3_REFUSE_CALL.format("pid", "")]),
     ("gate:647 a second assignment target",
      "the gate's answer is not unpacked into a name", GATE, "direct",
      ["admitted, _ = ctx.answer = await _lease_admission_gate(db, [pid], 'ffa', None)",
