@@ -824,6 +824,9 @@ namespace CompetitiveRounds
                 // #194: ServicePointManager governs HttpWebRequest/WebClient (and
                 // nothing else) — same TLS1.2 opt-in as the cosmetics bootstrap.
                 try { System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12; } catch { }
+#if SCR_FRAMETIME
+                if (FtUpload.Closed) { FtUpload.RefuseQuiet("route", "GET_music-asset"); throw new System.Net.WebException("frametime: refused"); }
+#endif
                 var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url);
                 req.UserAgent = "CompetitiveRounds-Mod/" + Plugin.ModVersion;
                 using (var resp = (System.Net.HttpWebResponse)req.GetResponse())

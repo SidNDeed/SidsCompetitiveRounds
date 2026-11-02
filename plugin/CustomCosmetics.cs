@@ -527,6 +527,9 @@ namespace CompetitiveRounds
                 tmpZip = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(_cosmeticsDir), "cosmetics-download.zip");
                 Plugin.Log?.LogInfo($"[COSMETIC] downloading {COSMETICS_ZIP_URL} → {tmpZip}");
                 try { System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12; } catch { }
+#if SCR_FRAMETIME
+                if (FtUpload.Closed) { FtUpload.RefuseQuiet("route", "GET_cosmetics-zip"); throw new System.Net.WebException("frametime: refused"); }
+#endif
                 using (var wc = new System.Net.WebClient())
                 {
                     wc.Headers.Add("User-Agent", "CompetitiveRounds-Mod/" + Plugin.ModVersion);

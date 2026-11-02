@@ -33,7 +33,7 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo("[FRAME-TIME] refused what=" + what + " route=" + (route ?? "-") + " n=1");
         }
 
-        private static long Count(string what, string route)
+        internal static long Count(string what, string route)
         {
             string k = what + ":" + (route ?? "-");
             lock (_counts)
