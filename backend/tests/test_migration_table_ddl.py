@@ -282,3 +282,101 @@ def test_data_strings_and_bodies_are_not_executable(sql):
             "INSERT INTO y VALUES ($m$it's$m$); END $$;\n")
     assert sql(text) == ["CREATE TABLE t (a int)"]
     assert naming(text) == []
+
+
+# ── REHEARSAL-FOUR-R4 item 2 (class D) ───────────────────────────────────
+
+def test_r4_line_comment_ends_at_cr(sql):
+    """2.1: a -- comment ends at CR as well as LF (scan.l non_newline is
+    [^\n\r]), so the text after a CR is SQL, not comment."""
+    code, mask, _bodies = mtd._views("SELECT 1 -- comment\r, lo_create(0)")
+    assert "lo_create(0)" in code
+    assert ("ident", "lo_create") in [t[:2] for t in mtd._tokens(code, mask)]
+    assert naming("SELECT 1 -- c\rALTER TABLE mail_inbox_rev ADD COLUMN x int;\n") == [
+        "ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
+    assert sql("-- c\rCREATE TABLE t (a int);\n") == ["CREATE TABLE t (a int)"]
+    # LF and CRLF endings unchanged
+    assert naming("SELECT 1 -- c\r\nALTER TABLE mail_inbox_rev ADD x int;\n") == [
+        "ALTER TABLE mail_inbox_rev ADD x int"]
+
+
+R4_PREFIXED_BODIES = [
+    "DO E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "DO U&'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "DO B'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "DO X'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "DO N'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "DO LANGUAGE plpgsql e'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "DO LANGUAGE 'plpgsql' E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS "
+    "E'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "CREATE PROCEDURE p() LANGUAGE plpgsql AS "
+    "U&'BEGIN ALTER TABLE mail_inbox_rev ADD COLUMN x int; END';\n",
+    "DO $$ BEGIN EXECUTE 'DO E''BEGIN ALTER TABLE mail_inbox_rev ADD x int; END'''; END $$;\n",
+]
+
+
+@pytest.mark.parametrize("text", R4_PREFIXED_BODIES)
+def test_r4_prefixed_string_bodies_refuse(text):
+    """2.2: a DO or AS body in a prefixed string constant is located from its
+    prefix and refused like any body that is not dollar-quoted."""
+    with pytest.raises(mtd.MigrationDdlError, match="not dollar-quoted"):
+        naming(text)
+
+
+def test_r4_a_prefixed_language_name_still_leads_to_the_body(sql):
+    """2.2 sibling: DO LANGUAGE <prefixed string> $$...$$ is a DO body."""
+    assert naming("DO LANGUAGE E'plpgsql' $$ BEGIN ALTER TABLE mail_inbox_rev "
+                  "ADD COLUMN x int; END $$;\n") == ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
+    with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
+        sql("CREATE TABLE t (a int);\nDO LANGUAGE U&'plpgsql' $$ BEGIN "
+            "CREATE INDEX i ON t (a); END $$;\n")
+
+
+def test_r4_execute_concatenation_is_read_whole(sql):
+    """2.3: an EXECUTE command that is a || chain of constants is read as the
+    joined text, so a name split across the pieces is found."""
+    want = ["ALTER TABLE mail_inbox_rev ADD COLUMN x int"]
+    assert naming("DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_' || 'rev ADD COLUMN x int'; "
+                  "END $$;\n") == want
+    assert naming("DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_'||$q$rev ADD COLUMN x int$q$ "
+                  "INTO v; END $$;\n") == want
+    assert naming("DO $$ BEGIN EXECUTE 'ALTER TABLE mail_' || 'inbox_' || 'rev ADD COLUMN x int' "
+                  "USING 1; END $$;\n") == want
+    with pytest.raises(mtd.MigrationDdlError, match="dollar-quoted body"):
+        sql("CREATE TABLE t (a int);\n"
+            "DO $$ BEGIN EXECUTE 'CREATE INDEX i ' || 'ON t (a)'; END $$;\n")
+    # a prefixed constant in the chain still refuses
+    with pytest.raises(mtd.MigrationDdlError, match="E'' string"):
+        naming("DO $$ BEGIN EXECUTE 'SELECT 1' || E'x'; END $$;\n")
+
+
+R4_UNRESOLVED = [
+    "DO $$ BEGIN EXECUTE format('ALTER TABLE %I ADD x int', 'mail_inbox_rev'); END $$;\n",
+    "DO $$ DECLARE s text := 'ALTER TABLE mail_inbox_rev ADD x int'; BEGIN EXECUTE s; END $$;\n",
+    "DO $$ BEGIN EXECUTE 'ALTER TABLE ' || tbl || ' ADD x int'; END $$;\n",
+    "DO $$ BEGIN EXECUTE ('ALTER TABLE mail_inbox_' || 'rev ADD x int'); END $$;\n",
+    "DO $$ BEGIN EXECUTE 'ALTER TABLE mail_inbox_' || 'rev ADD x int'::text; END $$;\n",
+    "DO $$ BEGIN EXECUTE; END $$;\n",
+]
+
+
+@pytest.mark.parametrize("text", R4_UNRESOLVED)
+def test_r4_an_unresolved_execute_refuses_or_is_reported(text):
+    """2.3: any other EXECUTE command expression is not read: it raises, or,
+    with a list passed, is appended there for the caller to account for."""
+    with pytest.raises(mtd.MigrationDdlError, match="is not read"):
+        naming(text)
+    found = []
+    assert mtd.ddl_naming_table(text, "mail_inbox_rev", found) == []
+    assert len(found) == 1 and found[0][2].startswith("EXECUTE"), found
+
+
+def test_r4_privilege_and_trigger_execute_are_not_commands(sql):
+    """2.3 sibling: GRANT/REVOKE EXECUTE and a trigger's EXECUTE FUNCTION are
+    not dynamic commands and are not refused."""
+    text = ("DO $$ BEGIN GRANT EXECUTE ON FUNCTION f() TO r; "
+            "REVOKE EXECUTE ON FUNCTION f() FROM r; GRANT USAGE, EXECUTE ON FUNCTION f() TO r; "
+            "CREATE TRIGGER g AFTER INSERT ON y FOR EACH ROW EXECUTE FUNCTION f(); "
+            "CREATE TRIGGER h AFTER INSERT ON y FOR EACH ROW EXECUTE PROCEDURE f(); END $$;\n")
+    assert naming(text) == []

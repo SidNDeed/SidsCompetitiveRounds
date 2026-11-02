@@ -2355,6 +2355,42 @@ def _ddl_on_mail_inbox_rev(text):
     return ddl_naming_table(text, "mail_inbox_rev")
 
 
+# Every EXECUTE in the other migrations whose command the reader cannot
+# resolve (format(), a setting), as (file, command text with whitespace
+# collapsed), read by hand (REHEARSAL-FOUR-R4 item 2.3): none is a CREATE,
+# ALTER or DROP TABLE that can name mail_inbox_rev. The guard below requires
+# the reader's list to equal this one exactly, so a new unresolved EXECUTE, or
+# a change to one of these, fails until it is read and added here.
+#   086: CREATE SEQUENCE ... START WITH %s; next_num is an integer.
+#   192: ALTER TABLE admin_actions DROP CONSTRAINT %I; %I is one quoted
+#        constraint name, the table is the literal admin_actions.
+#   195, 198: UPDATE and SELECT over %I (one quoted name): no TABLE DDL.
+#   336: CREATE TEMP TABLE pg_temp.m336_expected_probe (kind %s); %s is
+#        format_type() of bug_reports.kind (336:315), a type name.
+#   373: SELECTs FROM %I.<literal> / %s (current_schema(), regclass text);
+#        CREATE TEMP TABLE m373_number_probe (LIKE %s ...), %s the regclass
+#        text of the bug_reports target; and format(current_setting(
+#        'm373.accounted_sql')), whose value is the constant SELECT at 373:541
+#        set at 373:643.
+_UNRESOLVED_EXECUTES_READ = sorted([
+    ("086_bug_report_number.sql", "EXECUTE format('CREATE SEQUENCE IF NOT EXISTS bug_reports_number_seq START WITH %s', next_num)"),
+    ("192_chat_moderation.sql", "EXECUTE format('ALTER TABLE admin_actions DROP CONSTRAINT %I', c.conname)"),
+    ("195_merge_dotless_card_names.sql", "EXECUTE format( 'UPDATE %I tgt SET card_name = m.canon FROM _dotless_map m WHERE tgt.card_name = m.dotless', t)"),
+    ("195_merge_dotless_card_names.sql", "EXECUTE format( 'SELECT COUNT(*) FROM %I tgt JOIN _dotless_map m ON tgt.card_name = m.dotless', t)"),
+    ("198_merge_dotless_card_names_offers_only.sql", "EXECUTE format( 'UPDATE %I tgt SET card_name = m.canon FROM _dotless_map2 m WHERE tgt.card_name = m.dotless', t)"),
+    ("198_merge_dotless_card_names_offers_only.sql", "EXECUTE format( 'SELECT COUNT(*) FROM %I WHERE card_name LIKE ''%%'' || chr(305) || ''%%''', t)"),
+    ("336_bug_reports_kind.sql", "EXECUTE format( 'CREATE TEMP TABLE pg_temp.m336_expected_probe (kind %s) ON COMMIT DROP', v_coltype)"),
+    ("373_bug_reports_auto_number.sql", "EXECUTE format('SELECT last_value, is_called FROM %I.bug_reports_auto_number_seq', current_schema())"),
+    ("373_bug_reports_auto_number.sql", "EXECUTE format('SELECT max(bug_number) FROM %I.bug_reports WHERE bug_number <= $1', current_schema())"),
+    ("373_bug_reports_auto_number.sql", "EXECUTE format('SELECT COUNT(*) FROM %I.bug_reports ' 'WHERE kind = ''auto'' AND bug_number >= 0', current_schema())"),
+    ("373_bug_reports_auto_number.sql", "EXECUTE format('SELECT last_value FROM %s', v_humanseq::text)"),
+    ("373_bug_reports_auto_number.sql", "EXECUTE format(current_setting('m373.accounted_sql', true), format('%I.%I', current_schema(), 'bug_reports_auto_number_seq'))"),
+    ("373_bug_reports_auto_number.sql", "EXECUTE format('CREATE TEMP TABLE m373_number_probe (LIKE %s INCLUDING ' 'DEFAULTS INCLUDING CONSTRAINTS) ON COMMIT DROP', v_target::regclass::text)"),
+    ("373_bug_reports_auto_number.sql", "EXECUTE format('SELECT last_value FROM %s', v_humanseq::text)"),
+    ("373_bug_reports_auto_number.sql", "EXECUTE format('SELECT COUNT(*) FROM %s WHERE kind = ''auto''', v_target::regclass::text)"),
+])
+
+
 def _split_top_level(text):
     """(top-level words, elements): text cut at commas outside parentheses and
     standard string literals, and the words that stand outside both. A
@@ -2389,6 +2425,103 @@ def _split_top_level(text):
     return "".join(words).split(), elements
 
 
+_COLUMN_CONSTRAINT_HEADS = {"CONSTRAINT", "NOT", "NULL", "PRIMARY", "UNIQUE", "CHECK", "DEFAULT",
+                            "REFERENCES", "GENERATED", "COLLATE", "DEFERRABLE", "INITIALLY"}
+_DEFAULT_WORD = re.compile(r"(?:-?[0-9][0-9.]*|[A-Za-z_][A-Za-z0-9_]*)?(?:::[A-Za-z_][A-Za-z0-9_]*)*")
+_EXPRESSION_KEYWORDS = {"CASE", "WHEN", "THEN", "ELSE", "END", "AND", "OR", "IS", "IN", "LIKE",
+                        "BETWEEN", "SELECT", "ARRAY", "DISTINCT"}
+_REFERENTIAL_ACTIONS = {("CASCADE",), ("RESTRICT",), ("NO", "ACTION"), ("SET", "NULL"), ("SET", "DEFAULT")}
+
+
+def _column_nullable(words):
+    """Whether the column whose top-level words (outside parentheses and
+    string literals) are words is nullable, read from its constraints only
+    (REHEARSAL-FOUR-R4 item 2.4): NOT NULL and PRIMARY KEY make it NOT NULL,
+    NULL leaves it nullable, and text inside a DEFAULT expression, a CHECK, or
+    a REFERENCES action is never taken for a constraint. The column is
+    name, type words up to the first constraint keyword, then constraints:
+      CONSTRAINT name | NOT NULL | NULL | PRIMARY KEY
+      | UNIQUE [NULLS [NOT] DISTINCT] | CHECK (...) [NO INHERIT]
+      | DEFAULT d | COLLATE name | [NOT] DEFERRABLE | INITIALLY DEFERRED|IMMEDIATE
+      | REFERENCES t [(...)] [MATCH m] [ON DELETE|UPDATE action ...]
+    where d has at most one top-level word, a number or a name with optional
+    ::type casts (a string literal or a parenthesised expression leaves
+    none). Anything else raises: a DEFAULT expression of more than one word
+    (CASE ... END, an operator), GENERATED, NULL with NOT NULL, a constraint
+    this reader does not know."""
+    upper = [w.upper() for w in words]
+    i = 1
+    while i < len(upper) and upper[i] not in _COLUMN_CONSTRAINT_HEADS:
+        i += 1
+    if i == 1:
+        raise AssertionError("column %s has no type: not read here" % words[0])
+    not_null = null = False
+
+    def at(k):
+        return upper[k] if k < len(upper) else None
+
+    while i < len(upper):
+        w = upper[i]
+        if w == "CONSTRAINT" and at(i + 1) is not None:
+            i += 2
+        elif w == "NOT" and at(i + 1) == "NULL":
+            not_null, i = True, i + 2
+        elif w == "NOT" and at(i + 1) == "DEFERRABLE":
+            i += 2
+        elif w == "NULL":
+            null, i = True, i + 1
+        elif w == "PRIMARY" and at(i + 1) == "KEY":
+            not_null, i = True, i + 2
+        elif w == "UNIQUE":
+            i += 1
+            if at(i) == "NULLS":
+                i += 1 + (at(i + 1) == "NOT")
+                if at(i) != "DISTINCT":
+                    raise AssertionError("UNIQUE NULLS without DISTINCT: not read here")
+                i += 1
+        elif w == "CHECK":
+            i += 1
+            if at(i) == "NO" and at(i + 1) == "INHERIT":
+                i += 2
+        elif w == "DEFAULT":
+            j = i + 1
+            while j < len(upper) and upper[j] not in _COLUMN_CONSTRAINT_HEADS:
+                j += 1
+            expr = words[i + 1:j]
+            if len(expr) > 1 or (expr and (not _DEFAULT_WORD.fullmatch(expr[0])
+                                           or expr[0].upper() in _EXPRESSION_KEYWORDS)):
+                raise AssertionError("a DEFAULT expression this reader does not parse: %s"
+                                     % " ".join(expr))
+            i = j
+        elif w == "COLLATE" and at(i + 1) is not None:
+            i += 2
+        elif w == "DEFERRABLE":
+            i += 1
+        elif w == "INITIALLY" and at(i + 1) in ("DEFERRED", "IMMEDIATE"):
+            i += 2
+        elif w == "REFERENCES" and at(i + 1) is not None:
+            i += 2
+            while i < len(upper):
+                if at(i) == "MATCH" and at(i + 1) in ("FULL", "PARTIAL", "SIMPLE"):
+                    i += 2
+                elif at(i) == "ON" and at(i + 1) in ("DELETE", "UPDATE"):
+                    i += 2
+                    for action in _REFERENTIAL_ACTIONS:
+                        if tuple(upper[i:i + len(action)]) == action:
+                            i += len(action)
+                            break
+                    else:
+                        raise AssertionError("a referential action this reader does not parse")
+                else:
+                    break
+        else:
+            raise AssertionError("column %s: a constraint this reader does not parse at %s"
+                                 % (words[0], " ".join(words[i:])))
+    if not_null and null:
+        raise AssertionError("column %s is both NULL and NOT NULL: not read here" % words[0])
+    return not not_null
+
+
 def _create_table_columns(stmt):
     """{column name: nullable} of one CREATE TABLE statement, read from its
     column list.
@@ -2398,8 +2531,9 @@ def _create_table_columns(stmt):
     top-level commas. An element whose first word is a table-constraint
     keyword is a constraint (a PRIMARY KEY one makes its columns NOT NULL);
     any other element is a column named by its first word (folded to lower
-    case, as PostgreSQL folds an unquoted name) and nullable unless NOT NULL
-    or PRIMARY KEY stands among its top-level words. A form this reader does
+    case, as PostgreSQL folds an unquoted name) whose nullability is read
+    from its constraints by _column_nullable (never from text inside a
+    DEFAULT, CHECK or REFERENCES clause). A form this reader does
     not handle raises instead of being skipped: a quoted name, an escape
     string (E'...'), dollar quoting, LIKE, a repeated column, an empty
     element, and any text after the column list (INHERITS, PARTITION BY,
@@ -2445,7 +2579,7 @@ def _create_table_columns(stmt):
         name = words[0].lower()
         if name in columns:
             raise AssertionError("column %s is defined twice" % name)
-        columns[name] = ("NOT", "NULL") not in pairs and ("PRIMARY", "KEY") not in pairs
+        columns[name] = _column_nullable(words)
     for name in primary:
         if name not in columns:
             raise AssertionError("PRIMARY KEY names %s, which is not a column" % name)
@@ -2469,13 +2603,18 @@ def test_migration_300_matches_the_orm_and_the_readers():
     assert table == model, ("300's mail_inbox_rev against the model", table, model)
     # 300's statement is the table's whole definition: no other migration
     # creates, alters or drops it (one that did would have to be read too).
-    others = []
+    # An EXECUTE whose command the reader cannot resolve is accounted for by
+    # the hand-read list above, entry for entry (REHEARSAL-FOUR-R4 item 2.3).
+    others, unresolved = [], []
     for name in sorted(os.listdir(SQL_DIR)):
         if name.endswith(".sql") and name != "300_mail_inbox_rev.sql":
             with open(os.path.join(SQL_DIR, name), encoding="utf-8") as other:
-                if _ddl_on_mail_inbox_rev(other.read()):
+                found = []
+                if ddl_naming_table(other.read(), "mail_inbox_rev", found):
                     others.append(name)
+                unresolved += [(name, text) for _where, _offset, text in found]
     assert others == [], others
+    assert sorted(unresolved) == _UNRESOLVED_EXECUTES_READ, sorted(unresolved)
     # the positive control over the real file: 300's own CREATE TABLE is seen
     with open(os.path.join(SQL_DIR, "300_mail_inbox_rev.sql"), encoding="utf-8") as own:
         seen = _ddl_on_mail_inbox_rev(own.read())
@@ -2581,6 +2720,35 @@ def test_the_mail_inbox_rev_comparison_sees_a_deleted_column():
     assert _create_table_columns(
         "CREATE TABLE t (a INT, b TEXT DEFAULT 'x, (y', CONSTRAINT p PRIMARY KEY (a, b))"
     ) == {"a": False, "b": False}
+
+
+def test_r4_nullability_comes_from_constraints_not_default_text():
+    """REHEARSAL-FOUR-R4 item 2.4: a column's nullability is read from its
+    constraints only. 300's rev with NOT NULL removed and a DEFAULT whose
+    text spells NOT NULL must not read NOT NULL: the unparsed expression
+    refuses, and the same expression in parentheses reads nullable."""
+    stmt = table_ddl("300_mail_inbox_rev.sql", "mail_inbox_rev")[0]
+    assert stmt.count("NOT NULL DEFAULT 0") == 1
+    case = stmt.replace("NOT NULL DEFAULT 0", "DEFAULT CASE WHEN NULL IS NOT NULL THEN 1 ELSE 0 END")
+    with pytest.raises(AssertionError, match="DEFAULT expression"):
+        _create_table_columns(case)
+    paren = stmt.replace("NOT NULL DEFAULT 0", "DEFAULT (CASE WHEN NULL IS NOT NULL THEN 1 ELSE 0 END)")
+    assert _create_table_columns(paren)["rev"] is True
+    assert _create_table_columns(stmt)["rev"] is False
+    # the other places NOT and NULL stand without making a column NOT NULL
+    assert _create_table_columns(
+        "CREATE TABLE t (a INT REFERENCES u ON DELETE SET NULL, b INT UNIQUE NULLS NOT DISTINCT, "
+        "c INT CHECK (c IS NOT NULL), d INT NOT DEFERRABLE, e INT NULL DEFAULT NULL, "
+        "f TIMESTAMPTZ NOT NULL DEFAULT NOW(), g TEXT DEFAULT 'x'::text NOT NULL)"
+    ) == {"a": True, "b": True, "c": True, "d": True, "e": True, "f": False, "g": False}
+    for bad in ("CREATE TABLE t (a INT DEFAULT 1 + 1)",
+                "CREATE TABLE t (a INT DEFAULT CASE WHEN TRUE THEN 1 END)",
+                "CREATE TABLE t (a INT GENERATED ALWAYS AS IDENTITY)",
+                "CREATE TABLE t (a INT NULL NOT NULL)",
+                "CREATE TABLE t (a INT NOT VALID)",
+                "CREATE TABLE t (a)"):
+        with pytest.raises(AssertionError):
+            _create_table_columns(bad)
 
 
 # ── review r2 pins ────────────────────────────────────────────────────────

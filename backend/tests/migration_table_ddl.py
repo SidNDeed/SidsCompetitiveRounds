@@ -54,15 +54,20 @@ silently left out. Concretely:
     table [USING method] ( ... ) [anything else] ; -- the index name and the
     table name may be quoted, the name may be absent -- and is returned
     whole. Parentheses that do not balance before the semicolon raise.
+  * A line comment ends at CR or at LF (scan.l's non_newline excludes both).
   * Executable positions are the dollar-quoted body of a DO and of a CREATE
-    FUNCTION or PROCEDURE ... AS, and, inside such a body, the dollar bodies
-    and string constants of a PL/pgSQL EXECUTE command (up to its INTO, USING
-    or ';'); recursively. Each is lexed as SQL by the same lexer. Nothing is
+    FUNCTION or PROCEDURE ... AS, and, inside such a body, the command of a
+    PL/pgSQL EXECUTE (up to its INTO, USING or ';') when it is one constant
+    or a '||' concatenation of constants, read whole as the joined text;
+    recursively. Each is lexed as SQL by the same lexer. Nothing is
     decoded: in an executable position a DO or AS body that is not
-    dollar-quoted, an E'', U&'', B'' or X'' constant, a backslash in a
-    string, a U& identifier, and a unit that does not lex to its end raise,
-    whatever they name. A doubled quote and a newline continuation are
-    lexing and are read. Dollar bodies and strings elsewhere are data.
+    dollar-quoted (a prefixed E'', U&'', B'', X'' or N'' body included), an
+    E'', U&'', B'' or X'' constant, a backslash in a string, a U&
+    identifier, an EXECUTE command that is any other expression (format(),
+    a variable; ddl_naming_table can report these to a caller instead), and
+    a unit that does not lex to its end raise, whatever they name. A
+    doubled quote and a newline continuation are lexing and are read.
+    Dollar bodies and strings elsewhere are data.
   * A CREATE TABLE or CREATE INDEX naming the table in an executable
     position raises: whether and when it runs cannot be read from the file.
     A CREATE statement there runs to the lexer's ';', so a ';' in a comment,
@@ -92,6 +97,10 @@ _DOLLAR_TAG = re.compile(
 _QUOTE_CONTINUE = re.compile(
     r"(?:[ \t\f\v]|--[^\n\r]*)*[\n\r](?:[ \t\n\r\f\v]|--[^\n\r]*[\n\r])*'")
 _LINE_COMMENT = re.compile(r"--[^\n\r]*")
+_NEWLINE = re.compile(r"[\n\r]")
+# The one-letter prefixes of a string constant (E'', B'', X'', N''); U&'' is
+# the other prefixed form, read as the tokens u, & and the string.
+_LITERAL_PREFIXES = ("e", "b", "x", "n")
 # A closing quote followed by another bare quote through whitespace and
 # comments that did not form a quotecontinue (tried first): no newline in
 # the gap, or a block comment in it. One character or one whole comment per
@@ -135,8 +144,10 @@ def _views(src):
     while i < n:
         c = src[i]
         if src.startswith("--", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
+            # scan.l: comment ("--"{non_newline}*), non_newline [^\n\r]. A line
+            # comment ends at CR as well as at LF (REHEARSAL-FOUR-R4 item 2.1).
+            end = _NEWLINE.search(src, i)
+            j = n if end is None else end.start()
             blank(code, i, j)
             blank(mask, i, j)
             i = j
@@ -354,17 +365,42 @@ def _string_content(code, toks, p, where):
     return "".join(out)
 
 
+def _literal_start(toks, p):
+    """Index of the first token of the constant toks[p]: the prefix of a
+    prefixed string constant (E'', B'', X'', N'' are the ident and the
+    string, U&'' is u, & and the string, each adjacent), else p."""
+    t = toks[p]
+    prev = toks[p - 1] if p else None
+    if t[0] != "string" or not _adjacent(prev, t):
+        return p
+    if prev[0] == "ident" and prev[1] in _LITERAL_PREFIXES:
+        return p - 1
+    if (prev[:2] == ("punct", "&") and p >= 2 and toks[p - 2][:2] == ("ident", "u")
+            and _adjacent(toks[p - 2], prev)):
+        return p - 2
+    return p
+
+
 def _exec_kind(toks, p, top, execute_at):
     """Whether toks[p] (a 'dollar' or 'string' token) sits in an executable
     position: 'do' (the body of DO [LANGUAGE name]), 'as' (the AS body of a
-    CREATE FUNCTION or PROCEDURE), 'execute' (inside the command of a
-    PL/pgSQL EXECUTE, in a body: from EXECUTE to its INTO, USING or ';'), or
-    None (data)."""
-    prev = toks[p - 1] if p else None
-    if _kw(prev, "do") or (p >= 3 and _kw(toks[p - 3], "do") and _kw(toks[p - 2], "language")):
+    CREATE FUNCTION or PROCEDURE), 'execute' (p in execute_at, in a body), or
+    None (data). A prefixed string constant (E'', U&'', B'', X'', N'') is
+    located from its prefix, so such a body is found and refused like any
+    other body that is not dollar-quoted (REHEARSAL-FOUR-R4 item 2.2); the
+    LANGUAGE name may itself be a prefixed string."""
+    s = _literal_start(toks, p)
+    prev = toks[s - 1] if s else None
+    if _kw(prev, "do"):
+        return "do"
+    q = s - 1
+    if q >= 0 and toks[q][0] == "string":
+        q = _literal_start(toks, q)
+    if (q >= 2 and toks[q][0] in ("ident", "qident", "string")
+            and _kw(toks[q - 1], "language") and _kw(toks[q - 2], "do")):
         return "do"
     if _kw(prev, "as"):
-        b = p - 2
+        b = s - 2
         while b >= 0 and toks[b][:2] != ("punct", ";"):
             if toks[b][0] == "ident" and toks[b][1] in ("function", "procedure"):
                 return "as"
@@ -374,19 +410,76 @@ def _exec_kind(toks, p, top, execute_at):
     return None
 
 
-def _units(src):
+def _is_dynamic_execute(toks, k):
+    """toks[k] is EXECUTE: whether it is a PL/pgSQL dynamic command, i.e. not
+    the privilege of GRANT/REVOKE EXECUTE (next ON or ',', or previous GRANT
+    or REVOKE) and not a trigger's EXECUTE FUNCTION|PROCEDURE name."""
+    nxt, prev = _at(toks, k + 1), toks[k - 1] if k else None
+    if _kw(nxt, "on") or (nxt or ())[:2] == ("punct", ","):
+        return False
+    if _kw(prev, "grant") or _kw(prev, "revoke"):
+        return False
+    if ((_kw(nxt, "function") or _kw(nxt, "procedure"))
+            and (_at(toks, k + 2) or ("",))[0] in ("ident", "qident")):
+        return False
+    return True
+
+
+def _execute_command(code, toks, a, e, where):
+    """The text of the EXECUTE command toks[a:e] when it is one constant or a
+    '||' concatenation of constants (standard strings, read by
+    _string_content, and dollar bodies), joined as PostgreSQL joins them;
+    None for any other expression (a variable, a function call such as
+    format(), a cast, parentheses). A prefixed string constant in the chain
+    refuses through _string_content (REHEARSAL-FOUR-R4 item 2.3)."""
+    parts, q = [], a
+    while True:
+        if q >= e:
+            return None
+        lit = q
+        if (toks[q][0] == "ident" and toks[q][1] in _LITERAL_PREFIXES and q + 1 < e
+                and toks[q + 1][0] == "string" and _adjacent(toks[q], toks[q + 1])):
+            lit = q + 1
+        elif (toks[q][:2] == ("ident", "u") and q + 2 < e
+              and toks[q + 1][:2] == ("punct", "&") and toks[q + 2][0] == "string"
+              and _adjacent(toks[q], toks[q + 1]) and _adjacent(toks[q + 1], toks[q + 2])):
+            lit = q + 2
+        t = toks[lit]
+        if t[0] == "string":
+            parts.append(_string_content(code, toks, lit, where))
+        elif t[0] == "dollar":
+            tag = _DOLLAR_TAG.match(code, t[2]).group(0)
+            parts.append(code[t[2] + len(tag):t[3] - len(tag)])
+        else:
+            return None
+        q = lit + 1
+        if q == e:
+            return "".join(parts)
+        if not (toks[q][:2] == ("punct", "|") and q + 1 < e
+                and toks[q + 1][:2] == ("punct", "|") and _adjacent(toks[q], toks[q + 1])):
+            return None
+        q += 2
+
+
+def _units(src, unresolved=None):
     """Yield (code, toks, origin) for src and every executable unit inside it,
     each lexed as SQL: the dollar-quoted body of a DO or of a CREATE FUNCTION
-    or PROCEDURE ... AS, and, inside such a body, the dollar bodies and string
-    constants of an EXECUTE command; recursively. origin is the offset in src
-    of the outermost body (None for src itself).
+    or PROCEDURE ... AS, and, inside such a body, the command of a dynamic
+    EXECUTE (up to its INTO, USING or ';') when that command is one constant
+    or a '||' concatenation of constants, read whole as the joined text;
+    recursively. origin is the offset in src of the outermost body (None for
+    src itself).
 
     Refused unconditionally, whatever the text names: a DO or AS body that is
-    not dollar-quoted; an executable string that is an E'', U&'', B'' or X''
-    constant or holds a backslash; a U& identifier in any unit; and a unit
-    that does not lex to its end. Doubled quotes and newline continuations
-    are lexing and are read. Dollar bodies and strings in any other position
-    are data and are not walked."""
+    not dollar-quoted (prefixed string bodies included); an executable string
+    that is an E'', U&'', B'' or X'' constant or holds a backslash; a U&
+    identifier in any unit; and a unit that does not lex to its end. Doubled
+    quotes and newline continuations are lexing and are read. An EXECUTE
+    command that is any other expression (format(), a variable, a cast)
+    cannot be read: it raises, or, when the caller passes a list as
+    unresolved, is appended to it as (where, offset, command text with
+    whitespace collapsed) for the caller to account for. Dollar bodies and
+    strings in any other position are data and are not walked."""
     def walk(text, origin, top):
         try:
             code, mask, _bodies = _views(text)
@@ -404,31 +497,38 @@ def _units(src):
                 raise MigrationDdlError("a U& identifier in %s at offset %d is not read"
                                         % (where, toks[k][2]))
         yield code, toks, origin
-        execute_at = set()
         if not top:
             for k, t in enumerate(toks):
-                if _kw(t, "execute"):
-                    e = k + 1
-                    while (e < len(toks) and toks[e][:2] != ("punct", ";")
-                           and not _kw(toks[e], "into") and not _kw(toks[e], "using")):
-                        execute_at.add(e)
-                        e += 1
+                if not _kw(t, "execute") or not _is_dynamic_execute(toks, k):
+                    continue
+                e = k + 1
+                while (e < len(toks) and toks[e][:2] != ("punct", ";")
+                       and not _kw(toks[e], "into") and not _kw(toks[e], "using")):
+                    e += 1
+                command = _execute_command(code, toks, k + 1, e, where)
+                if command is None:
+                    end = toks[e][2] if e < len(toks) else len(code)
+                    if unresolved is None:
+                        raise MigrationDdlError(
+                            "the EXECUTE in %s at offset %d runs a command that is not one "
+                            "constant or a || concatenation of constants; it is not read"
+                            % (where, t[2]))
+                    unresolved.append((where, t[2], " ".join(code[t[2]:end].split())))
+                    continue
+                yield from walk(command, origin, False)
         for p, t in enumerate(toks):
             if t[0] not in ("dollar", "string"):
                 continue
-            kind = _exec_kind(toks, p, top, execute_at)
+            kind = _exec_kind(toks, p, top, ())
             if kind is None:
                 continue
             if t[0] == "dollar":
                 tag = _DOLLAR_TAG.match(code, t[2]).group(0)
                 a = t[2] + len(tag)
                 yield from walk(text[a:t[3] - len(tag)], a if top else origin, False)
-            elif kind in ("do", "as"):
+            else:
                 raise MigrationDdlError("a %s body in %s at offset %d is not dollar-quoted"
                                         % (kind.upper(), where, t[2]))
-            else:
-                inner = _string_content(code, toks, p, where)
-                yield from walk(inner, t[2] if top else origin, False)
     yield from walk(src, None, True)
 
 
@@ -610,7 +710,7 @@ def _table_statement_names(toks, k, e, label):
     return names
 
 
-def ddl_naming_table(text, table):
+def ddl_naming_table(text, table, unresolved=None):
     """Every CREATE, ALTER or DROP TABLE statement in SQL text that creates,
     alters or drops table (in any schema), cut from its head keyword to (not
     including) its lexer ';', comments blanked; [] when there is none.
@@ -622,11 +722,14 @@ def ddl_naming_table(text, table):
     inside a DO block is read the way PostgreSQL reads it, and a column or
     string that merely spells the name is not a statement on it. Raises
     MigrationDdlError when any unit cannot be read (see _units) and when a
-    TABLE statement's name does not parse, whatever it names."""
+    TABLE statement's name does not parse, whatever it names. An EXECUTE
+    whose command is not one constant or a || concatenation of constants
+    raises too, unless unresolved is a list: then it is appended there (see
+    _units) and the caller must account for every entry."""
     if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
         raise MigrationDdlError("not a plain table name: %r" % (table,))
     out = []
-    for code, toks, _origin in _units(text):
+    for code, toks, _origin in _units(text, unresolved):
         for k, e in _spans(toks, ("create", "alter", "drop")):
             names = _table_statement_names(toks, k, e, "a TABLE statement")
             if any(rel == table for _schema, rel in names):
