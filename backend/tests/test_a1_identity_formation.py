@@ -417,6 +417,9 @@ import inspect as _inspect
 import functools as _functools
 from sqlalchemy.exc import DBAPIError as _DBAPIError
 import re as _re
+import textwrap as _textwrap
+import collections as _collections
+import importlib as _importlib
 
 _IDENTITY = _re.compile(r"_identity_lock_many\(|_ranked_identity_phase\(")
 _ROWLOCK = _re.compile(r"_lock_snapshot_rows\(|_lock_queue_rows_ordered\(")
@@ -560,36 +563,580 @@ def _outer_jumps(node):
     return out
 
 
-# A read that takes a row or advisory lock, or a statement that writes.
-_LOCKING_OR_WRITING_SQL = _re.compile(
-    r"\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b|\bFOR\s+(?:KEY\s+)?SHARE\b|\bLOCK\b"
-    r"|\bpg_(?:try_)?advisory|\b(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE)\b",
-    _re.IGNORECASE)
+# The exit walk is CLOSED (rehearsal-four round 2, ruling REHEARSAL-FOUR-R2):
+# every statement it meets in a walked span is classified into a NAMED shape,
+# and a construct it cannot classify fails the test naming the construct and
+# its line. Round 1's walk listed bad shapes (a commit before the rollback, a
+# write after it) and let every construct it did not name through: a barrier
+# and a commit under `if True:`, a helper that commits, `SELECT lo_create(0)`
+# read as a plain SELECT. The allow-lists below are positive: a name is on a
+# list because the walk met it in main's real spans and it reads, locks or
+# writes rows without ending the transaction.
+
+class Unclassified(Exception):
+    """A construct the closed walk has no named shape for: (line, what)."""
+
+
+# Functions a reading statement may call: each reads, computes or casts and
+# writes nothing. Anything else in a SELECT (lo_create, nextval, setval,
+# pg_advisory_*, a user function) is unclassified.
+_SQL_READ_FUNCS = frozenset({
+    "any", "array_agg", "bool_or", "bool_and", "cast", "coalesce", "count",
+    "date_trunc", "extract", "greatest", "interval", "least", "length",
+    "lower", "max", "min", "now", "nullif", "sum", "upper", "abs", "round",
+    "jsonb_build_object", "json_build_object", "to_jsonb", "array_length",
+    "cardinality", "unnest", "exists", "string_agg", "row_number", "rank",
+    "lag", "lead", "over", "filter", "in", "values", "concat",
+    "clock_timestamp", "make_interval", "current_setting", "string_to_array",
+})
+# Functions that change a transaction-local setting and nothing else
+# (`set_config(<name>, <value>, true)`): such a statement is read as 'lock',
+# never as a plain read.
+_SQL_SETTING_FUNCS = frozenset({"set_config"})
+# Functions a writing statement may call besides the reading ones.
+_SQL_WRITE_FUNCS = frozenset({"gen_random_uuid"})
+# Words followed by "(" that are SQL syntax, not function calls.
+_SQL_SYNTAX = frozenset({
+    "and", "or", "not", "as", "on", "using", "from", "where", "select", "join",
+    "into", "set", "returning", "conflict", "do", "when", "then", "else",
+    "case", "is", "null", "by", "with", "table", "key", "update", "insert",
+    "delete", "partition", "distinct", "all", "union", "except", "intersect",
+    "lateral", "within", "group", "order", "having", "limit", "offset",
+    "materialized",
+})
+_SQL_END_WORDS = ("COMMIT", "ROLLBACK", "BEGIN", "SAVEPOINT", "RELEASE",
+                  "ABORT", "END", "PREPARE", "START")
+_SQL_LOCK = _re.compile(r"\bFOR\s+(?:NO\s+KEY\s+UPDATE|UPDATE|KEY\s+SHARE|SHARE)"
+                        r"(?:\s+OF\s+\w+(?:\s*,\s*\w+)*)?(?:\s+(?:SKIP\s+LOCKED|NOWAIT))?\b",
+                        _re.IGNORECASE)
+_SQL_DML = _re.compile(r"\b(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE|COPY|CALL|DO"
+                       r"|LOCK|GRANT|REVOKE|CREATE|ALTER|DROP|VACUUM|ANALYZE"
+                       r"|NOTIFY|LISTEN|SET|RESET|DISCARD|REFRESH)\b",
+                       _re.IGNORECASE)
+# The placeholder a formatted value of an f-string SQL reads as: an
+# identifier, never SQL text (a formatted value in the statement's head, or
+# one holding SQL, is unclassified).
+_SQL_FV = "fv_ident"
+
+
+def _sql_strip(sql):
+    """`sql` with comments removed and string literals emptied, so a keyword
+    inside a literal or a comment is not read as SQL."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j
+        elif sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            if j < 0:
+                raise Unclassified((0, "an unterminated SQL comment"))
+            i = j + 2
+            out.append(" ")
+        elif c == "'":
+            j = i + 1
+            while True:
+                j = sql.find("'", j)
+                if j < 0:
+                    raise Unclassified((0, "an unterminated SQL string"))
+                if sql.startswith("''", j):
+                    j += 2
+                    continue
+                break
+            out.append("''")
+            i = j + 1
+        elif c == "$":
+            raise Unclassified((0, "dollar quoting in walked SQL"))
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _sql_kind(sql):
+    """'read', 'lock' or 'write' for one statement of SQL text; raises
+    Unclassified for a transaction command, more than one statement, an
+    unknown head, or a function off the allow-lists (rehearsal-four round 2,
+    findings 5 and 7: `SELECT lo_create(0)` was read as a plain SELECT)."""
+    body = _sql_strip(sql).strip().rstrip(";").strip()
+    if ";" in body:
+        raise Unclassified((0, "more than one SQL statement"))
+    words = body.split()
+    head = words[0].upper() if words else ""
+    if head in _SQL_END_WORDS:
+        raise Unclassified((0, f"a transaction command in SQL text ({head})"))
+    callable_text = _re.sub(r"\bINTO\s+[A-Za-z_][A-Za-z_0-9.]*\s*\(", "INTO (",
+                            body, flags=_re.IGNORECASE)
+    funcs = {m.group(1).lower() for m in
+             _re.finditer(r"([A-Za-z_][A-Za-z_0-9]*)\s*\(", callable_text)}
+    funcs -= _SQL_SYNTAX
+    funcs.discard(_SQL_FV)
+    unlocked = _SQL_LOCK.sub(" ", body)
+    if head in ("SELECT", "WITH") and not _SQL_DML.search(unlocked):
+        bad = funcs - _SQL_READ_FUNCS - _SQL_SETTING_FUNCS
+        if bad:
+            raise Unclassified((0, "a SQL function off the read allow-list: "
+                                   + ", ".join(sorted(bad))))
+        return ("lock" if _SQL_LOCK.search(body) or funcs & _SQL_SETTING_FUNCS
+                else "read")
+    if head in ("INSERT", "UPDATE", "DELETE", "WITH"):
+        bad = funcs - _SQL_READ_FUNCS - _SQL_WRITE_FUNCS
+        if bad:
+            raise Unclassified((0, "a SQL function off the write allow-list: "
+                                   + ", ".join(sorted(bad))))
+        # `ON CONFLICT ... DO UPDATE` / `DO NOTHING` is an INSERT's own
+        # clause; a DO block would have DO as its head, refused above.
+        if _re.search(r"\b(?:MERGE|TRUNCATE|COPY|CALL|GRANT|REVOKE|CREATE"
+                      r"|ALTER|DROP|VACUUM|ANALYZE|NOTIFY|LISTEN|RESET"
+                      r"|DISCARD|REFRESH)\b", unlocked, _re.IGNORECASE):
+            raise Unclassified((0, "a SQL command off the write allow-list"))
+        return "write"
+    raise Unclassified((0, f"a SQL statement head off the allow-list ({head!r})"))
+
+
+def _sql_text(node, scope, guarded=frozenset()):
+    """The SQL a `text(...)` argument holds: a string constant, a name bound
+    to a string at module level in `scope`, an f-string whose formatted values
+    read as identifiers (never in the statement's head), or a `+` of these.
+    None when it is none of them."""
+    if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, _ast.Name):
+        value = getattr(scope, node.id, None)
+        return value if isinstance(value, str) else None
+    if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
+        a, b = (_sql_text(node.left, scope, guarded),
+                _sql_text(node.right, scope, guarded))
+        return None if a is None or b is None else a + b
+    if isinstance(node, _ast.JoinedStr):
+        parts = []
+        for v in node.values:
+            if isinstance(v, _ast.Constant):
+                parts.append(v.value)
+            elif isinstance(v, _ast.FormattedValue):
+                inner = v.value
+                held = (getattr(scope, inner.id, None)
+                        if isinstance(inner, _ast.Name) else None)
+                table = (getattr(scope, inner.value.id, None)
+                         if isinstance(inner, _ast.Subscript)
+                         and isinstance(inner.value, _ast.Name) else None)
+                if isinstance(held, str):
+                    parts.append(held)
+                elif isinstance(inner, _ast.Name) and inner.id in guarded:
+                    parts.append(f" {_SQL_FV} ")   # refused unless an identifier
+                elif isinstance(table, dict) and table and all(
+                        isinstance(x, str) and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
+                        for x in table.values()):
+                    parts.append(f" {_SQL_FV} ")   # one of the table's identifiers
+                else:
+                    return None
+            else:
+                return None
+        text = "".join(parts)
+        first = text.split()[0] if text.split() else ""
+        return None if first == _SQL_FV else text
+    return None
+
+
+def _execute_kind(call, scope, local_sql=None, guarded=frozenset()):
+    """'read', 'lock' or 'write' when `call` is `db.execute(text(<sql>),
+    <binds>)` with classifiable SQL (_sql_text, _sql_kind); raises
+    Unclassified for any other execute."""
+    if not (call.args and isinstance(call.args[0], _ast.Call)
+            and isinstance(call.args[0].func, _ast.Name)
+            and call.args[0].func.id == "text"
+            and len(call.args[0].args) == 1 and not call.args[0].keywords):
+        raise Unclassified((call.lineno, "an execute of something other than "
+                                         "text(<sql>)"))
+    arg = call.args[0].args[0]
+    sqls = [_sql_text(arg, scope, guarded)]
+    if sqls == [None] and isinstance(arg, _ast.Name) and local_sql is not None:
+        sqls = local_sql.get(arg.id, [None])
+    elif (sqls == [None] and isinstance(arg, _ast.Call)
+          and isinstance(arg.func, _ast.Name)):
+        sqls = _returned_sql(_resolve_callee(arg.func, scope), scope)
+    if not sqls or None in sqls:
+        raise Unclassified((call.lineno, "an execute whose SQL the walk cannot "
+                                         "read"))
+    try:
+        kinds = {_sql_kind(s) for s in sqls}
+    except Unclassified as e:
+        raise Unclassified((call.lineno, e.args[0][1])) from None
+    return ("write" if "write" in kinds else "lock" if "lock" in kinds
+            else "read")
+
+
+def _returned_sql(fn, scope):
+    """The SQL texts a plain module function returns, when every `return`
+    in it returns SQL _sql_text can read (`text(_latch_sql(mode))`); else
+    [None]."""
+    if fn is None or _inspect.iscoroutinefunction(fn):
+        return [None]
+    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(fn)))
+    rets = [n.value for n in _ast.walk(tree) if isinstance(n, _ast.Return)]
+    out = [_sql_text(r, scope) if r is not None else None for r in rets] or [None]
+    if None not in out:
+        return out
+    # A builder of one argument that indexes module tables by it
+    # (match_hold._latch_sql(mode): `_SERIES_TABLE[mode]`): its SQL is the
+    # builder's own output over every key those tables share, evaluated.
+    params = list(_inspect.signature(fn).parameters)
+    tables = [getattr(scope, n.value.id, None) for n in _ast.walk(tree)
+              if isinstance(n, _ast.Subscript) and isinstance(n.value, _ast.Name)
+              and isinstance(n.slice, _ast.Name) and len(params) == 1
+              and n.slice.id == params[0]]
+    if not tables or not all(isinstance(d, dict) and d for d in tables):
+        return [None]
+    keys = set(tables[0])
+    for d in tables[1:]:
+        keys &= set(d)
+    texts = [fn(k) for k in sorted(keys)]
+    return texts if texts and all(isinstance(x, str) for x in texts) else [None]
+
+
+def _guarded(tree, scope):
+    """The local names a function guards as identifiers before use:
+    `if <name> not in <MODULE_COLLECTION>: raise ...`, where the module
+    collection holds only lower-case identifiers (`_QUEUE_LOCK_TABLES`). An
+    f-string SQL may splice such a name as an identifier."""
+    out = set()
+    for n in _ast.walk(tree):
+        test = getattr(n, "test", None)
+        if (isinstance(n, _ast.If) and isinstance(test, _ast.Compare)
+                and isinstance(test.left, _ast.Name) and len(test.ops) == 1
+                and isinstance(test.ops[0], _ast.NotIn)
+                and isinstance(test.comparators[0], _ast.Name)
+                and _all_paths_raise(n.body)):
+            coll = getattr(scope, test.comparators[0].id, None)
+            if isinstance(coll, (set, frozenset, tuple, list, dict)) and coll and all(
+                    isinstance(x, str) and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
+                    for x in coll):
+                out.add(test.left.id)
+    return frozenset(out)
+
+
+def _local_sql(tree, scope):
+    """{local name: [SQL texts]} for each name a function binds only to SQL
+    _sql_text can read, directly or as either arm of a conditional
+    expression (`_cand_sql = _A if x else _B`)."""
+    binds = {}
+
+    def arms(v):
+        return ([_sql_text(v.body, scope), _sql_text(v.orelse, scope)]
+                if isinstance(v, _ast.IfExp) else [_sql_text(v, scope)])
+
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.Assign):
+            for tg in n.targets:
+                if not isinstance(tg, _ast.Name):
+                    continue
+                v = n.value
+                tmpl = (getattr(scope, v.func.value.id, None)
+                        if isinstance(v, _ast.Call)
+                        and isinstance(v.func, _ast.Attribute)
+                        and v.func.attr == "format"
+                        and isinstance(v.func.value, _ast.Name) else None)
+                if isinstance(tmpl, str) and not v.args:
+                    # `<MODULE_TEMPLATE>.format(k=<sql or a conditional of
+                    # two>)`: every combination of the arms, formatted.
+                    combos = [{}]
+                    for k in v.keywords:
+                        opts = arms(k.value) if k.arg else [None]
+                        combos = [dict(c, **{k.arg or "": o})
+                                  for c in combos for o in opts]
+                    texts = [None if None in c.values() else tmpl.format(**c)
+                             for c in combos]
+                    binds.setdefault(tg.id, []).extend(texts)
+                else:
+                    binds.setdefault(tg.id, []).extend(arms(v))
+        elif isinstance(n, (_ast.AugAssign, _ast.AnnAssign)) and isinstance(
+                n.target, _ast.Name):
+            binds.setdefault(n.target.id, []).append(None)
+    return {k: v for k, v in binds.items() if None not in v}
+
+
+def _is_db_call(call, attr):
+    return (isinstance(call, _ast.Call) and isinstance(call.func, _ast.Attribute)
+            and isinstance(call.func.value, _ast.Name)
+            and call.func.value.id == "db" and call.func.attr == attr)
+
+
+# Plain calls a step may make that touch no session: builtins and the clock,
+# id and log functions the spans use.
+_PURE_CALLS = frozenset({
+    "len", "list", "dict", "sorted", "min", "max", "int", "float", "bool",
+    "str", "set", "tuple", "any", "all", "enumerate", "next", "print", "range",
+    "zip", "isinstance", "abs", "round", "sum", "repr", "text", "frozenset",
+    "HTTPException", "QueuePollResponse", "TeamQueuePollResponse",
+    "datetime.now", "time.monotonic", "uuid.uuid4", "uuid_mod.uuid4",
+})
+# Methods a step may call on a local value (rows, lists, dicts, strings).
+_PURE_METHODS = frozenset({
+    "append", "extend", "items", "values", "keys", "get", "lower", "upper",
+    "strip", "lstrip", "rstrip", "mappings", "all", "first", "scalar",
+    "scalars", "one", "one_or_none", "fetchall", "fetchone", "isoformat",
+    "total_seconds", "split", "join", "copy", "index", "count", "add",
+    "setdefault", "pop", "sort",
+})
+# Awaited library calls a helper may make that touch no session.
+_PURE_AWAITS = frozenset({"asyncio.sleep"})
+
+
+def _resolve_callee(func, scope, imports=None):
+    """The Python function a callee expression names in `scope` (a plain
+    name, or a module attribute such as `_match_hold._hold_latch`), else
+    None."""
+    if isinstance(func, _ast.Name) and imports and func.id in imports:
+        mod, attr = imports[func.id]
+        obj = getattr(_importlib.import_module(mod), attr, None)
+    elif isinstance(func, _ast.Name):
+        obj = getattr(scope, func.id, None)
+    elif isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Name):
+        mod = getattr(scope, func.value.id, None)
+        obj = getattr(mod, func.attr, None) if mod is not None else None
+    else:
+        return None
+    obj = _inspect.unwrap(obj) if callable(obj) else None
+    return obj if _inspect.isfunction(obj) else None
+
+
+_HELPER_EFFECTS = {}
+
+
+def _helper_effects(fn, stack=()):
+    """The effects of an awaited helper, read from its own body: a set drawn
+    from 'read', 'lock', 'write', 'await' (it awaits a classified helper or
+    library call). Raises Unclassified when the body ends the transaction
+    (any `.commit`, `.rollback`, `.begin`, `.begin_nested` or `.close`, or a
+    transaction command in SQL text: round 2, finding 2) or awaits anything
+    the walk cannot classify. Every awaited call in the helper is classified
+    the way a step's is, recursively; its plain calls cannot reach the
+    session (it is async), so they are not read."""
+    key = (fn.__module__, fn.__qualname__)
+    if key in _HELPER_EFFECTS:
+        return _HELPER_EFFECTS[key]
+    if key in stack:
+        return frozenset()
+    scope = _inspect.getmodule(fn)
+    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(fn)))
+    local_sql = _local_sql(tree, scope)
+    guarded = _guarded(tree, scope)
+    imports = {a.asname or a.name: (n.module, a.name) for n in _ast.walk(tree)
+               if isinstance(n, _ast.ImportFrom) and n.module and not n.level
+               for a in n.names}
+    effects = set()
+    # Two named shapes may hold a transaction word inside a helper:
+    #  - a savepoint block, `async with db.begin_nested():`, which ends only
+    #    its own savepoint;
+    #  - an exception handler that opens with `await db.rollback()` and then
+    #    raises on every path, awaiting nothing (the admission gate's
+    #    lock-timeout handler: "Discard every earlier formation write before
+    #    returning a retryable refusal"). Its caller leaves by that raise,
+    #    after the rollback, which is the A1 rule's exit.
+    permitted = set()
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.AsyncWith):
+            items = n.items
+            ctx = items[0].context_expr if len(items) == 1 else None
+            if not (_is_db_call(ctx, "begin_nested") and not ctx.args
+                    and items[0].optional_vars is None):
+                raise Unclassified((0, f"{fn.__name__} has an async with this "
+                                       f"walk does not classify (its line "
+                                       f"{n.lineno})"))
+            permitted.add(id(ctx.func))
+            effects.add("savepoint")
+        if isinstance(n, _ast.ExceptHandler) and n.body and _txn_end(
+                n.body[0]) == "rollback" and _all_paths_raise(n.body[1:]):
+            permitted.add(id(n.body[0].value.value.func))
+            permitted.add(id(n.body[0].value))
+            effects.add("rollback-then-raise")
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.Attribute) and n.attr in (
+                "commit", "rollback", "begin", "begin_nested", "close"
+        ) and id(n) not in permitted:
+            raise Unclassified((0, f"{fn.__name__} ends the transaction "
+                                   f"(.{n.attr} at its line {n.lineno})"))
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.AsyncFor):
+            raise Unclassified((0, f"{fn.__name__} has an async for at its "
+                                   f"line {n.lineno}"))
+        if isinstance(n, _ast.Await) and id(n) not in permitted:
+            call = n.value
+            if not isinstance(call, _ast.Call):
+                raise Unclassified((0, f"{fn.__name__} awaits a non-call at its "
+                                       f"line {n.lineno}"))
+            if _is_db_call(call, "execute"):
+                try:
+                    effects.add(_execute_kind(call, scope, local_sql, guarded))
+                except Unclassified as e:
+                    raise Unclassified((0, f"{fn.__name__}: {e.args[0][1]} at "
+                                           f"its line {n.lineno}")) from None
+                continue
+            if _ast.unparse(call.func) in _PURE_AWAITS:
+                effects.add("await")
+                continue
+            params = list(_inspect.signature(fn).parameters)
+            if isinstance(call.func, _ast.Name) and call.func.id in params:
+                # A callback parameter: classified at each call site, which
+                # must not pass one (_checked_callbacks).
+                effects.add(f"callback:{call.func.id}")
+                continue
+            inner = _resolve_callee(call.func, scope, imports)
+            if inner is None or not _inspect.iscoroutinefunction(inner):
+                raise Unclassified((0, f"{fn.__name__} awaits "
+                                       f"{_ast.unparse(call.func)}, which the "
+                                       f"walk cannot classify (its line "
+                                       f"{n.lineno})"))
+            effects |= _checked_callbacks(
+                call, inner, _helper_effects(inner, stack + (key,)), n.lineno)
+            effects.add("await")
+    out = frozenset(effects)
+    _HELPER_EFFECTS[key] = out
+    return out
+
+
+def _all_paths_raise(stmts):
+    """Whether every path through `stmts` ends in a raise, with no await,
+    return, break or continue on the way."""
+    if not stmts or any(isinstance(x, (_ast.Await, _ast.Return, _ast.Break,
+                                       _ast.Continue))
+                        for s in stmts for x in _ast.walk(s)):
+        return False
+    last = stmts[-1]
+    if isinstance(last, _ast.Raise):
+        return True
+    return (isinstance(last, _ast.If) and _all_paths_raise(last.body)
+            and _all_paths_raise(last.orelse))
+
+
+def _checked_callbacks(call, fn, effects, line):
+    """`effects` of helper `fn` at the call `call`, without its callback
+    parameters, after checking that the call passes none of them: an
+    awaited callback is not a shape the walk classifies."""
+    params = list(_inspect.signature(fn).parameters)
+    out = set()
+    for e in effects:
+        if not e.startswith("callback:"):
+            out.add(e)
+            continue
+        name = e.split(":", 1)[1]
+        at = params.index(name)
+        if any(k.arg == name for k in call.keywords) or len(call.args) > at:
+            raise Unclassified((line, f"a callback passed to {fn.__name__} "
+                                      f"({name}), which the walk does not "
+                                      "classify"))
+    return frozenset(out)
+
+
+def expr_effects(node, scope=None, local_sql=None):
+    """The effects of evaluating `node`, an expression or a simple
+    statement, as a list of (shape, effect) in evaluation order: shape is
+    'sql' (an execute), 'helper:<name>' (an awaited helper) or 'call' (a
+    plain call), effect 'read', 'lock', 'write', or 'pure'. Raises
+    Unclassified, naming the construct and its line, for anything off the
+    named shapes: a transaction end in any spelling, an awaited call it
+    cannot classify, a call of a computed callee (a lambda call), an
+    assignment expression, a yield, or an expression kind it does not
+    list."""
+    scope = main if scope is None else scope
+    out = []
+
+    def visit(n):
+        if isinstance(n, _ast.Await):
+            call = n.value
+            if not isinstance(call, _ast.Call):
+                raise Unclassified((n.lineno, "an await of a non-call"))
+            if _is_db_call(call, "commit") or _is_db_call(call, "rollback"):
+                raise Unclassified((n.lineno, "a transaction end in a spelling "
+                                              "this walk does not read"))
+            for a in list(call.args) + [k.value for k in call.keywords]:
+                visit(a)
+            if _is_db_call(call, "execute"):
+                out.append(("sql", _execute_kind(call, scope, local_sql)))
+                return
+            fn = _resolve_callee(call.func, scope)
+            if fn is None or not _inspect.iscoroutinefunction(fn):
+                raise Unclassified((n.lineno, "an awaited call this walk does "
+                                              f"not classify: {_ast.unparse(call.func)}"))
+            try:
+                eff = _checked_callbacks(call, fn, _helper_effects(fn), n.lineno)
+            except Unclassified as e:
+                raise Unclassified((n.lineno, e.args[0][1])) from None
+            kinds = eff & {"read", "lock", "write"}
+            out.append((f"helper:{fn.__name__}",
+                        "write" if "write" in kinds else "lock" if "lock" in kinds
+                        else "read" if "read" in kinds else "pure"))
+            return
+        if isinstance(n, _ast.Call):
+            name = _ast.unparse(n.func)
+            if isinstance(n.func, _ast.Attribute) and name not in _PURE_CALLS:
+                if (isinstance(n.func.value, _ast.Name)
+                        and n.func.value.id == "db"):
+                    raise Unclassified((n.lineno, f"a session call this walk "
+                                                  f"does not classify: {name}"))
+                if n.func.attr not in _PURE_METHODS:
+                    raise Unclassified((n.lineno, f"a method call this walk "
+                                                  f"does not classify: {name}"))
+                visit(n.func.value)
+            elif isinstance(n.func, _ast.Name):
+                if name not in _PURE_CALLS:
+                    fn = _resolve_callee(n.func, scope)
+                    if fn is None or _inspect.iscoroutinefunction(fn):
+                        raise Unclassified((n.lineno, f"a call this walk does "
+                                                      f"not classify: {name}"))
+                    if any(isinstance(x, _ast.Attribute) and x.attr in (
+                            "commit", "rollback", "execute", "begin", "flush")
+                           for x in _ast.walk(_ast.parse(_textwrap.dedent(
+                               _inspect.getsource(fn))))):
+                        raise Unclassified((n.lineno, f"a plain call of {name}, "
+                                                      "which touches a session"))
+            elif name not in _PURE_CALLS:
+                raise Unclassified((n.lineno, "a call of a computed callee: "
+                                              f"{name}"))
+            for a in n.args:
+                visit(a)
+            for k in n.keywords:
+                visit(k.value)
+            out.append(("call", "pure"))
+            return
+        if isinstance(n, _ast.Lambda):
+            visit(n.body)               # a lambda passed as a value
+            return
+        if isinstance(n, (_ast.NamedExpr, _ast.Yield, _ast.YieldFrom)):
+            raise Unclassified((n.lineno, f"a {type(n).__name__} this walk does "
+                                          "not classify"))
+        if not isinstance(n, _EXPR_KINDS):
+            raise Unclassified((getattr(n, "lineno", 0),
+                                f"an expression this walk does not classify: "
+                                f"{type(n).__name__}"))
+        for c in _ast.iter_child_nodes(n):
+            visit(c)
+
+    visit(node)
+    return out
+
+
+_EXPR_KINDS = (
+    _ast.Name, _ast.Constant, _ast.Attribute, _ast.Subscript, _ast.Slice,
+    _ast.BinOp, _ast.BoolOp, _ast.UnaryOp, _ast.Compare, _ast.IfExp,
+    _ast.JoinedStr, _ast.FormattedValue, _ast.List, _ast.Tuple, _ast.Dict,
+    _ast.Set, _ast.Starred, _ast.keyword, _ast.comprehension, _ast.ListComp,
+    _ast.SetComp, _ast.DictComp, _ast.GeneratorExp, _ast.arguments, _ast.arg,
+    _ast.expr_context, _ast.operator, _ast.boolop, _ast.unaryop, _ast.cmpop,
+)
 
 
 def _plain_read(call):
-    """Whether `call` is `db.execute(text(<sql>), ...)` with <sql> a string
-    constant, or a module-level name of main.py holding one, that starts with
-    SELECT or WITH and has no locking clause, lock function or writing
-    statement."""
-    if not (isinstance(call, _ast.Call) and isinstance(call.func, _ast.Attribute)
-            and isinstance(call.func.value, _ast.Name)
-            and call.func.value.id == "db" and call.func.attr == "execute"
-            and call.args and isinstance(call.args[0], _ast.Call)
-            and isinstance(call.args[0].func, _ast.Name)
-            and call.args[0].func.id == "text"
-            and len(call.args[0].args) == 1):
+    """Whether `call` is `db.execute(text(<sql>), ...)` whose SQL _sql_kind
+    reads as 'read': one SELECT or WITH statement, no lock, no write, every
+    function on the read allow-list."""
+    if not _is_db_call(call, "execute"):
         return False
-    arg = call.args[0].args[0]
-    if isinstance(arg, _ast.Constant):
-        sql = arg.value
-    elif isinstance(arg, _ast.Name):
-        sql = getattr(main, arg.id, None)
-    else:
+    try:
+        return _execute_kind(call, main) == "read"
+    except Unclassified:
         return False
-    return (isinstance(sql, str)
-            and sql.lstrip().upper().startswith(("SELECT", "WITH"))
-            and not _LOCKING_OR_WRITING_SQL.search(sql))
 
 
 def _only_plain_reads(node):
@@ -714,7 +1261,15 @@ def _team_formation_loops(fn_src, tree):
             return [], (n.lineno, "a loop over the attempt budget that is not "
                                   f"`while {counter} > 0:` spending it first")
         stores.add(id(n.body[0].target))
+    # The opening and the fresh phase's floor are stores of the budget only
+    # OUTSIDE both loops: a floor inside a loop refills the budget on every
+    # attempt (rehearsal-four round 2, finding 4: `_form_left =
+    # max(_form_left, 1)` after the decrement passed and made the drift
+    # retries unbounded).
+    inside = {id(x) for lp in loops for x in _ast.walk(lp)}
     for n in _ast.walk(tree):
+        if id(n) in inside:
+            continue
         if (isinstance(n, _ast.Assign) and len(n.targets) == 1
                 and isinstance(n.targets[0], _ast.Name)
                 and n.targets[0].id == counter
@@ -738,7 +1293,7 @@ def _team_formation_loops(fn_src, tree):
     return loops, None
 
 
-def formation_loop_exits(fn_src, form="return"):
+def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
     """Every exit of the handler's one `for _form_attempt` loop taken after
     the loop body's identity barrier, path by path, with the transaction ends
     its path passed, in order. The loop's `else:` (attempts exhausted) is
@@ -797,6 +1352,7 @@ def formation_loop_exits(fn_src, form="return"):
     Lines are handler-relative.
     """
     tree = _ast.parse(fn_src)
+    scope = main if scope is None else scope
     team = form in ("team-resume", "team-fresh")
     if team:
         loops, why = _team_formation_loops(fn_src, tree)
@@ -816,22 +1372,184 @@ def formation_loop_exits(fn_src, form="return"):
     if not barrier:
         return [], 0, 0, (set(), set()), [(loop.lineno, "no identity barrier")]
     gather = form == "gather"
-    exits, problems, passed = [], [], set()
+    exits, problems, passed, breaks = [], [], set(), []
+    shapes = _collections.Counter() if shapes is None else shapes
+    # post: walking the statements after the loop from a rollback-ended
+    # break (round 2, finding 3), where a further rollback after reads only
+    # is harmless and the break's bindings decide the conditions they can.
+    mode = {"post": False}
+
+    # The barrier is ONE named shape: the plain statement
+    # `await _identity_lock_many(<pure arguments>)` (round 2, finding 1: a
+    # barrier and a commit under `if True:` made the whole `if` the barrier
+    # statement, and the walk started after it).
+    bst = loop.body[barrier[0]]
+    bcall = (bst.value.value if isinstance(bst, _ast.Expr)
+             and isinstance(bst.value, _ast.Await) else None)
+    if not (len(barrier) == 1 and isinstance(bcall, _ast.Call)
+            and isinstance(bcall.func, _ast.Name)
+            and bcall.func.id == "_identity_lock_many"):
+        problems.append((bst.lineno, "the identity barrier is not the plain "
+                         "statement `await _identity_lock_many(...)`"))
+    else:
+        try:
+            if any(sh != "call" for sh, _e in expr_effects(
+                    _ast.Tuple(elts=list(bcall.args), ctx=_ast.Load()), scope)):
+                problems.append((bst.lineno, "the barrier's arguments await"))
+        except Unclassified as e:
+            problems.append((e.args[0][0] or bst.lineno, e.args[0][1]))
+        shapes["barrier"] += 1
 
     def ended(state):
         return ", ".join(kind for kind, _ln in state) or None
 
-    def may_await(node, state):
+    local_sql = _local_sql(tree, scope)
+
+    def effects_of(node, line):
+        # An unclassified construct is reported where it stands; if it
+        # awaits, it also counts as an await on the path, so a path that
+        # ended the transaction still reports it.
+        try:
+            return expr_effects(node, scope, local_sql)
+        except Unclassified as e:
+            problems.append((e.args[0][0] or line, e.args[0][1]))
+            return [("unclassified", "await")] if _awaits(node) else []
+
+    def allowed(eff, state):
+        """Whether effects `eff` may run on a path that passed `state`:
+        anything classified while the transaction is open; after a rollback
+        at a gather site (or after the loop, from a rollback-ended break)
+        only plain reads and plain calls; after any other end, nothing that
+        awaits."""
         if not state:
             return True
-        if gather and ended(state) == "rollback":
-            return _only_plain_reads(node)
-        return not _awaits(node)
+        if all(k == "rollback" for k, _ln in state) and (
+                (gather and len(state) == 1) or mode["post"]):
+            return all(sh == "call" or (sh, e) == ("sql", "read")
+                       for sh, e in eff)
+        return all(sh == "call" for sh, _e in eff)
 
-    def walk(stmts, state):
+    def record(prefix, eff):
+        if any(sh == "unclassified" for sh, _e in eff):
+            return
+        kinds = sorted({(s.split(":")[0], e) for s, e in eff if s != "call"})
+        shapes[prefix + (": " + ", ".join(f"{s} {e}" for s, e in kinds)
+                         if kinds else ": pure")] += 1
+
+    def target_ok(tg, line):
+        if isinstance(tg, _ast.Name):
+            return [tg.id]
+        if isinstance(tg, (_ast.Tuple, _ast.List)) and all(
+                isinstance(e, _ast.Name) for e in tg.elts):
+            return [e.id for e in tg.elts]
+        if isinstance(tg, _ast.Subscript) and isinstance(tg.value, _ast.Name):
+            eff = effects_of(tg.slice, line)
+            if eff and any(sh != "call" for sh, _e in eff):
+                problems.append((line, "an assignment target that awaits"))
+            return []
+        problems.append((line, "an assignment target this walk does not "
+                         f"classify: {_ast.unparse(tg)}"))
+        return []
+
+    def simple(st, state, env):
+        """A simple statement: an assignment to locals, an expression, or
+        pass. Returns the bindings after it."""
+        names = []
+        if isinstance(st, (_ast.Assign, _ast.AnnAssign, _ast.AugAssign)):
+            tgs = st.targets if isinstance(st, _ast.Assign) else [st.target]
+            for tg in tgs:
+                names += target_ok(tg, st.lineno)
+            eff = effects_of(st.value, st.lineno) if st.value is not None else []
+            prefix = "assignment"
+        elif isinstance(st, _ast.Expr):
+            eff = effects_of(st.value, st.lineno)
+            prefix = "expression"
+        elif isinstance(st, _ast.Pass):
+            eff, prefix = [], "pass"
+        else:
+            problems.append((st.lineno, "a statement this walk does not "
+                             f"classify: {type(st).__name__}"))
+            return {}
+        if eff is None:
+            return {}
+        record(prefix, eff)
+        if not allowed(eff, state):
+            problems.append((st.lineno, f"awaits after {ended(state)}"))
+        env = dict(env)
+        for nm in names:
+            env.pop(nm, None)
+        if (isinstance(st, _ast.Assign) and len(st.targets) == 1
+                and isinstance(st.targets[0], _ast.Name)):
+            try:
+                env[st.targets[0].id] = _ast.literal_eval(st.value)
+            except (ValueError, TypeError, SyntaxError):
+                pass
+        return env
+
+    def assigned(stmts):
+        return {n.id for s in stmts for n in _ast.walk(s)
+                if isinstance(n, _ast.Name) and isinstance(n.ctx, _ast.Store)}
+
+    def nested(stmts, state):
+        """The body of a loop nested in the span: simple statements, ifs,
+        nested loops and the jumps the nested loop captures; no transaction
+        end and no exit."""
+        for st in stmts:
+            if isinstance(st, (_ast.Continue, _ast.Break)):
+                shapes["nested loop jump"] += 1
+            elif isinstance(st, _ast.If):
+                eff = effects_of(st.test, st.lineno)
+                if eff is not None:
+                    record("nested if test", eff)
+                    if not allowed(eff, state):
+                        problems.append((st.lineno, f"awaits after {ended(state)}"))
+                nested(st.body, state)
+                nested(st.orelse, state)
+            elif isinstance(st, _ast.For) and not st.orelse:
+                loop_head(st, state)
+                nested(st.body, state)
+            elif (_txn_end(st) is not None
+                  or isinstance(st, (_ast.Return, _ast.Raise))):
+                problems.append((st.lineno, "an end or an exit inside a nested "
+                                 "loop"))
+            else:
+                simple(st, state, {})
+
+    def loop_head(st, state):
+        target_ok(st.target, st.lineno)
+        eff = effects_of(st.iter, st.lineno)
+        if eff is not None:
+            record("nested for", eff)
+            if not allowed(eff, state):
+                problems.append((st.lineno, f"awaits after {ended(state)}"))
+
+    def decide(test, env):
+        """True or False when the bindings `env` decide `test` (names bound
+        to literals, `len`, comparisons and boolean operators only), else
+        None."""
+        if not mode["post"]:
+            return None
+        names = {n.id for n in _ast.walk(test) if isinstance(n, _ast.Name)}
+        calls = [n for n in _ast.walk(test) if isinstance(n, _ast.Call)]
+        if not names or not names <= set(env) | {"len"} or any(
+                not (isinstance(c.func, _ast.Name) and c.func.id == "len")
+                for c in calls) or any(
+                not isinstance(n, (_ast.Compare, _ast.BoolOp, _ast.UnaryOp,
+                                   _ast.Call, _ast.Name, _ast.Constant,
+                                   _ast.Load, _ast.cmpop, _ast.boolop,
+                                   _ast.unaryop)) for n in _ast.walk(test)):
+            return None
+        try:
+            return bool(eval(compile(_ast.Expression(test), "<test>", "eval"),
+                             {"__builtins__": {}, "len": len}, dict(env)))
+        except Exception:
+            return None
+
+    def walk(stmts, state, env):
         # `state`: the transaction ends this path passed, in order, as
-        # (kind, line). Returns the state of the path that falls off
-        # `stmts`; None when every path through them exits.
+        # (kind, line); `env`: the locals the path bound to literals.
+        # Returns (state, env) of the path that falls off `stmts`; None when
+        # every path through them exits.
         skip = 0
         for i, st in enumerate(stmts):
             if skip:
@@ -843,79 +1561,113 @@ def formation_loop_exits(fn_src, form="return"):
                 if shape is None:
                     problems.append((st.lineno, "a resolver call this walk "
                                      "does not read"))
-                else:
-                    # The resolver's outcomes as the dispatch states them:
-                    # 'relocked' returns the answer of the resolver's own
-                    # relock, whose commit ends that path (read there by
-                    # _relock_outcome_problems); 'defer' commits the
-                    # resolver's bookkeeping and answers searching; 'fresh'
-                    # carries on below, the transaction still open.
-                    ret, dfr = shape
-                    if not may_await(st, state):
-                        problems.append((st.lineno,
-                                         f"awaits after {ended(state)}"))
-                    exits.append((ret.lineno, "relocked",
-                                  ended(state + (("relock", ret.lineno),)),
-                                  ret))
-                    if state:
-                        problems.append((dfr.body[0].lineno,
-                                         f"commit after {ended(state)}"))
-                    exits.append((dfr.body[1].lineno, "defer",
-                                  ended(state + (("commit",
-                                                  dfr.body[0].lineno),)),
-                                  dfr.body[1]))
-                    skip = 2
                     continue
+                # The resolver's outcomes as the dispatch states them:
+                # 'relocked' returns the answer of the resolver's own
+                # relock, whose commit ends that path (read there by
+                # _relock_outcome_problems); 'defer' commits the resolver's
+                # bookkeeping and answers searching; 'fresh' carries on
+                # below, the transaction still open.
+                ret, dfr = shape
+                eff = effects_of(_ast.Tuple(elts=list(st.value.value.args)
+                                            + [k.value for k in
+                                               st.value.value.keywords],
+                                            ctx=_ast.Load()), st.lineno)
+                shapes["resolver dispatch"] += 1
+                if state:
+                    problems.append((st.lineno, f"awaits after {ended(state)}"))
+                exits.append((ret.lineno, "relocked",
+                              ended(state + (("relock", ret.lineno),)), ret))
+                if state:
+                    problems.append((dfr.body[0].lineno,
+                                     f"commit after {ended(state)}"))
+                d_eff = effects_of(dfr.body[1].value, dfr.body[1].lineno)
+                if d_eff and any(sh != "call" for sh, _e in d_eff):
+                    problems.append((dfr.body[1].lineno, "the defer answer awaits"))
+                exits.append((dfr.body[1].lineno, "defer",
+                              ended(state + (("commit", dfr.body[0].lineno),)),
+                              dfr.body[1]))
+                env = {k: v for k, v in env.items()
+                       if k not in assigned([st])}
+                skip = 2
+                continue
             kind = _txn_end(st)
             if kind is not None:
-                if state:
+                harmless = (mode["post"] and kind == "rollback"
+                            and all(k == "rollback" for k, _ln in state))
+                if state and not harmless:
                     problems.append((st.lineno, f"{kind} after {ended(state)}"))
+                shapes[f"transaction end: {kind}"] += 1
                 state = state + ((kind, st.lineno),)
                 continue
             if isinstance(st, (_ast.Continue, _ast.Break, _ast.Raise,
                                _ast.Return)):
-                if _ends_inside(st):
-                    problems.append((st.lineno, "a transaction end in a "
-                                     "spelling this walk does not read"))
-                if not may_await(st, state):
-                    problems.append((st.lineno, f"awaits after {ended(state)}"))
+                parts = [x for x in (getattr(st, "exc", None),
+                                     getattr(st, "cause", None),
+                                     getattr(st, "value", None)) if x is not None]
+                eff = effects_of(_ast.Tuple(elts=parts, ctx=_ast.Load()),
+                                 st.lineno) if parts else []
+                if eff is not None:
+                    record(f"exit {type(st).__name__.lower()}", eff)
+                    if not allowed(eff, state):
+                        problems.append((st.lineno, f"awaits after {ended(state)}"))
                 end = ended(state)
                 exits.append((st.lineno, type(st).__name__.lower(), end, st))
+                if isinstance(st, _ast.Break):
+                    breaks.append((state, env, st.lineno))
                 if end == "rollback":
                     passed.add(state[-1][1])
                 return None
             if isinstance(st, _ast.If):
-                if _ends_inside(st.test):
-                    problems.append((st.lineno, "a transaction end in a "
-                                     "spelling this walk does not read"))
-                if not may_await(st.test, state):
-                    problems.append((st.lineno, f"awaits after {ended(state)}"))
-                live = [r for r in (walk(st.body, state),
-                                    walk(st.orelse, state))
+                eff = effects_of(st.test, st.lineno)
+                if eff is not None:
+                    record("if test", eff)
+                    if not allowed(eff, state):
+                        problems.append((st.lineno, f"awaits after {ended(state)}"))
+                taken = decide(st.test, env)
+                live = [r for r in ((walk(st.body, state, env) if taken
+                                     is not False else None),
+                                    (walk(st.orelse, state, env) if taken
+                                     is not True else None))
                         if r is not None]
                 if not live:
                     return None
-                if any(r != state for r in live):
+                if any(r[0] != state for r in live):
                     problems.append((st.lineno, "a branch ends the "
                                      "transaction and falls through"))
-                state = live[0]
+                state = live[0][0]
+                env = {k: v for k, v in live[0][1].items()
+                       if all(k in r[1] and r[1][k] == v for r in live)}
                 continue
-            # Anything else is one plain step. A jump in it that leaves for
-            # the formation loop, or an end or an exit anywhere in it, is a
-            # shape this walk does not follow, so it is reported rather than
-            # skipped.
+            if isinstance(st, _ast.For):
+                # A loop nested in the span: its body is classified, it may
+                # capture its own jumps, and it holds no transaction end and
+                # no exit. Its `else:` is not a shape this walk classifies
+                # (round 1, finding 2: a nested loop's `else: continue`).
+                if st.orelse or _outer_jumps(st):
+                    problems.append((st.lineno, "a continue or break for the "
+                                     "formation loop inside a nested construct"))
+                loop_head(st, state)
+                nested(st.body, state)
+                env = {k: v for k, v in env.items()
+                       if k not in assigned([st])}
+                continue
+            if isinstance(st, (_ast.Assign, _ast.AnnAssign, _ast.AugAssign,
+                               _ast.Expr, _ast.Pass)):
+                env = simple(st, state, env)
+                continue
+            problems.append((st.lineno, "a statement this walk does not "
+                             f"classify: {type(st).__name__}"))
             if _outer_jumps(st):
                 problems.append((st.lineno, "a continue or break for the "
                                  "formation loop inside a nested construct"))
-            if _ends_inside(st) or any(isinstance(n, (_ast.Raise, _ast.Return))
-                                       for n in _ast.walk(st)):
-                problems.append((st.lineno, "an end or an exit inside a "
-                                 "construct this walk does not model"))
-            if not may_await(st, state):
-                problems.append((st.lineno, f"awaits after {ended(state)}"))
-        return state
+        return state, env
 
-    off = walk(loop.body[barrier[0] + 1:], ())
+    def walk_off(stmts):
+        r = walk(stmts, (), {})
+        return None if r is None else r[0]
+
+    off = walk_off(loop.body[barrier[0] + 1:])
     if off is not None:
         if ended(off) == "rollback":          # an implicit continue
             exits.append((loop.body[-1].lineno, "continue", "rollback", None))
@@ -924,9 +1676,10 @@ def formation_loop_exits(fn_src, form="return"):
             problems.append((loop.body[-1].lineno, "the attempt runs off the "
                              f"loop body after {ended(off) or 'no transaction end'}"))
     n_body = len(exits)
+    body_breaks = list(breaks)
     if not loop.orelse:
         problems.append((loop.lineno, "no exhausted-attempts exit"))
-    elif walk(loop.orelse, ()) is not None:
+    elif walk_off(loop.orelse) is not None:
         problems.append((loop.orelse[0].lineno,
                          "the exhausted-attempts path does not exit"))
     n_loop = len(exits)
@@ -939,7 +1692,7 @@ def formation_loop_exits(fn_src, form="return"):
         block, at = _block_holding(tree, loop)
         after = block[at + 1:]
         span = span + after
-        out = walk(after, ())
+        out = walk_off(after)
         if out is None or [kind for kind, _ln in out] != ["commit"]:
             problems.append((loop.lineno, "the resume does not fall through "
                              "to fresh formation after exactly one commit"))
@@ -958,13 +1711,57 @@ def formation_loop_exits(fn_src, form="return"):
         else:
             post = after[:acquire[0] + 1]
             span = span + post
-            out = walk(post, ())
+            out = walk_off(post)
             if out is None:
                 problems.append((post[-1].lineno, "no path after the loop "
                                  "reaches the formation writes"))
             elif out:
                 problems.append((post[-1].lineno, "the formation passes its "
                                  f"lease acquisition after {ended(out)}"))
+            # Round 2, finding 3: every rollback-ended break of the loop body
+            # is walked into the statements after the loop with its own
+            # state and bindings, so a break that rolled back and then
+            # reaches the formation writes (`others = still` for
+            # `others = []`) is refused there, not lost at the loop's end.
+            # The break's bindings start from the literals bound before the
+            # loop (`ordered = None`, `_formed = False`) for names the loop
+            # body stores only right before a top-level `break` (the success
+            # exit, after which no attempt follows), then the break's own
+            # path's bindings.
+            pre_env = {}
+            for st in block[:at]:
+                if isinstance(st, (_ast.Assign, _ast.AugAssign, _ast.AnnAssign)):
+                    for nm in assigned([st]):
+                        pre_env.pop(nm, None)
+                    if (isinstance(st, _ast.Assign) and len(st.targets) == 1
+                            and isinstance(st.targets[0], _ast.Name)):
+                        try:
+                            pre_env[st.targets[0].id] = _ast.literal_eval(st.value)
+                        except (ValueError, TypeError, SyntaxError):
+                            pass
+                elif not isinstance(st, _ast.Expr):
+                    for nm in assigned([st]):
+                        pre_env.pop(nm, None)
+            exit_only = {id(s) for k, s in enumerate(loop.body[:-1])
+                         if isinstance(loop.body[k + 1], _ast.Break)}
+            for s in loop.body + loop.orelse:
+                for x in _ast.walk(s):
+                    if (isinstance(x, _ast.Name) and isinstance(x.ctx, _ast.Store)
+                            and not (id(s) in exit_only)):
+                        pre_env.pop(x.id, None)
+            for b_state, b_env, b_line in body_breaks:
+                if not b_state:
+                    continue
+                mode["post"] = True
+                keep = (list(exits), set(passed))
+                r = walk(post, b_state, {**pre_env, **b_env})
+                exits[:], kept = keep[0], keep[1]
+                passed.clear()
+                passed.update(kept)
+                mode["post"] = False
+                if r is not None:
+                    problems.append((b_line, f"the break after {ended(b_state)} "
+                                     "reaches the lease acquisition"))
     rollbacks = {n.lineno for st in span for n in _ast.walk(st)
                  if _txn_end(n) == "rollback"}
     return exits, n_body, n_loop, (rollbacks, passed), problems
@@ -987,7 +1784,7 @@ def _raises_detail(node, detail):
         and k.value.value == detail for k in getattr(exc, "keywords", ()))
 
 
-def formation_exit_violations(fn_src, form="return"):
+def formation_exit_violations(fn_src, form="return", scope=None):
     """The A1 rule over every exit formation_loop_exits derives, as sentences
     (empty when the handler keeps it): each exit after the barrier has
     rolled back, once, with no other transaction end on its path, except ONE
@@ -1003,10 +1800,10 @@ def formation_exit_violations(fn_src, form="return"):
     them: 'relocked' (ended by the resolver's relock commit) and 'defer'
     (one commit, then the searching answer)."""
     if form == "team":
-        return (formation_exit_violations(fn_src, "team-resume")
-                + formation_exit_violations(fn_src, "team-fresh"))
+        return (formation_exit_violations(fn_src, "team-resume", scope)
+                + formation_exit_violations(fn_src, "team-fresh", scope))
     exits, n_body, _n_loop, (rollbacks, passed), problems = (
-        formation_loop_exits(fn_src, form))
+        formation_loop_exits(fn_src, form, scope=scope))
     out = [f"line {ln}: {why}" for ln, why in problems]
     if form in ("gather", "team-resume", "team-fresh"):
         success = [n for _ln, k, e, n in exits[:n_body]
@@ -1076,6 +1873,51 @@ def test_the_formation_loop_is_bounded_and_rolls_back_rather_than_commits():
         sorted(rollbacks), sorted(passed))
 
 
+async def _sample_read(db):
+    """A planted handler's invented helper that reads (the can-fail tests'
+    scope, _SampleScope)."""
+    return (await db.execute(text("SELECT 1"))).scalar()
+
+
+async def _sample_write(db):
+    """A planted handler's invented helper that writes."""
+    await db.execute(text("UPDATE sample SET x = 1"))
+
+
+async def _sample_commits(db):
+    """A planted handler's invented helper that commits (round 2, finding 2:
+    a helper committing before the drift rollback)."""
+    await db.execute(text("UPDATE sample SET x = 1"))
+    await db.commit()
+
+
+def _sample_stale(row):
+    """A planted handler's invented plain predicate (no session)."""
+    return row is None
+
+
+class _SampleScope:
+    """The scope the can-fail tests' planted handlers resolve in: each
+    invented helper reads, writes or commits as named here; every other name
+    is main's."""
+    _reads = {"discover", "drifted", "pending", "won_early", "consent",
+              "leased", "early", "mine", "none", "other", "recheck"}
+
+    def __getattr__(self, name):
+        if name in self._reads:
+            return _sample_read
+        if name in ("settle", "write"):
+            return _sample_write
+        if name == "sync_state":
+            return _sample_commits
+        if name == "stale":
+            return _sample_stale
+        return getattr(main, name)
+
+
+_SAMPLE = _SampleScope()
+
+
 def test_the_formation_exit_oracle_can_fail():
     """Negative control (#391): one planted loop per way the rule can break,
     beside the shapes that keep it, each refused for its own reason."""
@@ -1098,12 +1940,12 @@ def test_the_formation_exit_oracle_can_fail():
               'detail="admission_contended")']
     win = ["await db.commit()", 'return QueuePollResponse(status="matched")']
     drift = ["if await drifted(db):", "    await db.rollback()", "    continue"]
-    assert formation_exit_violations(handler(drift + refuse + win)) == []
+    assert formation_exit_violations(handler(drift + refuse + win), scope=_SAMPLE) == []
     # A nested loop's own break and continue stay inside it.
     own_jumps = ["for r in cand:", "    if r is None:", "        break",
                  "    if r:", "        continue"]
     assert formation_exit_violations(
-        handler(own_jumps + drift + refuse + win)) == []
+        handler(own_jumps + drift + refuse + win), scope=_SAMPLE) == []
 
     planted = [
         # a drift exit that commits: publishes the half-formation
@@ -1135,7 +1977,7 @@ def test_the_formation_exit_oracle_can_fail():
              ["try:", "    if await drifted(db):", "        continue",
               "finally:", "    pass"] + refuse + win)),
         # a transaction end in a spelling the walk does not read
-        ("an end or an exit inside a construct this walk does not model",
+        ("a transaction end in a spelling this walk does not read",
          handler(["_ = await db.commit()"] + drift + refuse + win)),
         # a refusal that leaves with nothing ended: the writes stay pending
         ("raise after no transaction end", handler(
@@ -1159,7 +2001,7 @@ def test_the_formation_exit_oracle_can_fail():
              '    return QueuePollResponse(status="matched")'] + drift + win)),
     ]
     for why, src in planted:
-        bad = formation_exit_violations(src)
+        bad = formation_exit_violations(src, scope=_SAMPLE)
         assert any(why in b for b in bad), (why, bad)
 
 
@@ -1771,6 +2613,167 @@ def test_team_formation_exits_roll_back_and_never_commit():
     assert problems == [], problems
 
 
+def _round2_a1_programs():
+    """Rehearsal-four round 2's programs for findings 1 to 5, and the generic
+    controls, as (form, the sentence the closed walk must give, source): each
+    passed round 2's walk (tools: r2_old_vs_new.py) and each must fail this
+    one. Templates as in the can-fail tests above; invented helpers resolve
+    in _SampleScope."""
+    NL = chr(10)
+    spent = ["await db.rollback()",
+             'raise HTTPException(status_code=503, detail="queue_contended")']
+
+    def queue(body, barrier=("await _identity_lock_many(db, [cand])",)):
+        return NL.join(
+            ["async def queue_poll(db):",
+             "    for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):",
+             "        cand = await discover(db)"]
+            + ["        " + ln for ln in barrier]
+            + ["        " + ln for ln in body]
+            + ["    else:"] + ["        " + ln for ln in spent])
+
+    def gather(body, after):
+        return NL.join(
+            ["async def ovt_queue_poll(db):", "    _formed = False",
+             "    for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):",
+             "        rows = await discover(db)",
+             "        await _identity_lock_many(db, rows)"]
+            + ["        " + ln for ln in body]
+            + ["    else:"] + ["        " + ln for ln in spent]
+            + ["    " + ln for ln in after])
+
+    def team(fresh, after, barrier=("await _identity_lock_many(db, cands)",),
+             spend=("_form_left -= 1",)):
+        resume = ["still = await consent(db)",
+                  "if len(still) != len(present):", "    await db.rollback()",
+                  "    continue",
+                  "if await leased(db):", "    await db.rollback()", "    break",
+                  "outcome, resp = await _team_resolve_live_family(db, present)",
+                  'if outcome == "relocked":', "    return resp",
+                  'if outcome == "defer":', "    await db.commit()",
+                  '    return TeamQueuePollResponse(status="searching")',
+                  "break"]
+        return NL.join(
+            ["async def team_queue_poll(db):",
+             "    _form_left = FORMATION_MAX_ATTEMPTS",
+             "    if dc_row is not None:",
+             "        while _form_left > 0:",
+             "            _form_left -= 1",
+             "            present = await consent(db)",
+             "            if len(present) < 3:",
+             "                break",
+             "            await _identity_lock_many(db, present)"]
+            + ["            " + ln for ln in resume]
+            + ["        else:"] + ["            " + ln for ln in spent]
+            + ["        await db.commit()",
+               "    others = None",
+               "    _form_left = max(_form_left, 1)",
+               "    while _form_left > 0:"]
+            + ["        " + ln for ln in spend]
+            + ["        cands = await discover(db)",
+               "        if len(cands) < 3:",
+               "            others = cands",
+               "            break"]
+            + ["        " + ln for ln in barrier]
+            + ["        " + ln for ln in fresh]
+            + ["    else:"] + ["        " + ln for ln in spent]
+            + ["    " + ln for ln in after])
+
+    drift = ["if await drifted(db):", "    await db.rollback()", "    continue"]
+    refuse = ["if (await _lease_acquire_many(db, [cand])) is False:",
+              "    await db.rollback()",
+              'raise HTTPException(status_code=503, detail="admission_contended")']
+    refuse[2] = "    " + refuse[2]
+    win = ["await db.commit()", 'return QueuePollResponse(status="matched")']
+    g_win = ["_formed = True", "break"]
+    acquire = ["if (await _lease_acquire_many(db, rows)) is False:",
+               "    await db.rollback()",
+               '    raise HTTPException(status_code=503, '
+               'detail="admission_contended")']
+    g_after = (["if not _formed:", "    await db.rollback()",
+                '    n = (await db.execute(text("SELECT COUNT(*) FROM q"))).scalar()',
+                "    return n",
+                'await db.execute(text("INSERT INTO s VALUES (1)"))'] + acquire)
+    head = ["_mine = await mine(db)", "still = await recheck(db)"]
+    pred = ["if stale(_mine):", "    await db.rollback()", "    others = []",
+            "    break"]
+    size = ["if len(still) != 3:", "    await db.rollback()", "    continue"]
+    t_after = (["if len(others) < 3:", "    await db.rollback()",
+                '    return TeamQueuePollResponse(status="searching")',
+                'await db.execute(text("INSERT INTO s VALUES (1)"))']
+               + [ln.replace("rows", "others") for ln in acquire])
+    good = [
+        ("return", queue(drift + refuse + win)),
+        ("gather", gather(drift + g_win, g_after)),
+        ("team", team(head + pred + size + ["others = still", "break"], t_after)),
+    ]
+    bad = [
+        # finding 1 (a1:918): the barrier and a commit under `if True:`
+        ("return", "the identity barrier is not the plain statement",
+         queue(drift + refuse + win, barrier=(
+             "if True:", "    await _identity_lock_many(db, [cand])",
+             "    await db.commit()"))),
+        ("team", "the identity barrier is not the plain statement",
+         team(head + pred + size + ["others = still", "break"], t_after,
+              barrier=("if True:", "    await _identity_lock_many(db, cands)",
+                       "    await db.commit()"))),
+        # finding 2 (a1:910): a helper that commits before the drift rollback
+        ("return", "ends the transaction", queue(
+            ["if await drifted(db):", "    await sync_state(db)",
+             "    await db.rollback()", "    continue"] + refuse + win)),
+        ("gather", "ends the transaction", gather(
+            ["if await drifted(db):", "    await sync_state(db)",
+             "    await db.rollback()", "    continue"] + g_win, g_after)),
+        ("team", "ends the transaction", team(
+            head + ["if stale(_mine):", "    await sync_state(db)",
+                    "    await db.rollback()", "    others = []", "    break"]
+            + size + ["others = still", "break"], t_after)),
+        # finding 3 (a1:961): the drift break keeps the roster it rolled back
+        ("team", "reaches the lease acquisition", team(
+            head + ["if stale(_mine):", "    await db.rollback()",
+                    "    others = still", "    break"]
+            + size + ["others = still", "break"], t_after)),
+        # finding 4 (a1:718): the budget refilled inside the loop
+        ("team", "an assignment to the attempt budget this walk does not read",
+         team(head + pred + size + ["others = still", "break"], t_after,
+              spend=("_form_left -= 1", "_form_left = max(_form_left, 1)"))),
+        # finding 5 (a1:590): a function that writes, inside a SELECT after
+        # the rollback
+        ("gather", "a SQL function off the read allow-list: lo_create", gather(
+            ["if await drifted(db):", "    await db.rollback()",
+             '    rows = (await db.execute(text("SELECT lo_create(0)"))).all()',
+             "    if not rows:", "        break", "    continue"] + g_win,
+            g_after)),
+        # generic: constructs the walk has never met
+        ("return", "a call of a computed callee", queue(
+            ["(lambda: None)()"] + drift + refuse + win)),
+        ("return", "a statement this walk does not classify: Match", queue(
+            ["match cand:", "    case _:", "        pass"]
+            + drift + refuse + win)),
+        ("return", "a NamedExpr this walk does not classify", queue(
+            ["if (hit := await drifted(db)):", "    await db.rollback()",
+             "    continue"] + refuse + win)),
+    ]
+    return good, bad
+
+
+def test_the_closed_walk_refuses_round_2s_programs():
+    """Rehearsal-four round 2 (ruling REHEARSAL-FOUR-R2): the exit walk is
+    closed. Every statement in a walked span is classified into a named
+    shape (expr_effects, _helper_effects, _sql_kind) or the walk fails
+    naming it. Each of the reviewer's programs for findings 1 to 5, and one
+    construct of each kind the walk has never met (a lambda call, a match
+    statement, an assignment expression), is refused for its own reason,
+    beside the same templates kept whole, which pass."""
+    good, bad = _round2_a1_programs()
+    for form, src in good:
+        assert formation_exit_violations(src, form, scope=_SAMPLE) == [], (
+            form, formation_exit_violations(src, form, scope=_SAMPLE))
+    for form, why, src in bad:
+        got = formation_exit_violations(src, form, scope=_SAMPLE)
+        assert any(why in b for b in got), (form, why, got)
+
+
 def test_the_gather_exit_oracle_can_fail():
     """Negative control (#391) for the gather form: one planted handler per
     way the rule can break, beside the shapes that keep it, each refused for
@@ -1791,7 +2794,7 @@ def test_the_gather_exit_oracle_can_fail():
             + ["    " + ln for ln in after])
 
     def bad_of(src):
-        return formation_exit_violations(src, "gather")
+        return formation_exit_violations(src, "gather", scope=_SAMPLE)
 
     drift = ["if await drifted(db):", "    await db.rollback()", "    continue"]
     rediscover = ["if await drifted(db):", "    await db.rollback()",
@@ -1899,7 +2902,7 @@ def test_the_gather_exit_oracle_can_fail():
             + ["    " + ln for ln in after])
 
     def team_bad(src):
-        return formation_exit_violations(src, "team")
+        return formation_exit_violations(src, "team", scope=_SAMPLE)
 
     consent = ["still = await consent(db)",
                "if len(still) != len(present):", "    await db.rollback()",
@@ -1910,7 +2913,7 @@ def test_the_gather_exit_oracle_can_fail():
              '    return TeamQueuePollResponse(status="searching")']
     resolve = "outcome, resp = await _team_resolve_live_family(db, present)"
     resume = consent + peer + [resolve] + relocked + defer + ["break"]
-    pred = ["if drifted(_mine):", "    await db.rollback()", "    others = []",
+    pred = ["if stale(_mine):", "    await db.rollback()", "    others = []",
             "    break"]
     size = ["if len(still) != 3:", "    await db.rollback()", "    continue"]
     head = ["_mine = await mine(db)", "still = await recheck(db)"]
@@ -1929,7 +2932,7 @@ def test_the_gather_exit_oracle_can_fail():
         # item T's mutants: the predicate drift's rollback deleted (t1), the
         # roster drift's rollback deleted (t2), a commit placed before it (t3)
         ("2 success exits", team(resume, head + [
-            "if drifted(_mine):", "    others = []", "    break"]
+            "if stale(_mine):", "    others = []", "    break"]
             + size + ["others = still", "break"], team_after)),
         ("continue after no transaction end", team(resume, head + pred + [
             "if len(still) != 3:", "    continue", "others = still",
