@@ -1047,7 +1047,11 @@ namespace CompetitiveRounds
                         else if (Enqueue("c", body))
                         {
                             _compatOutcome = null;
+#if SCR_FRAMETIME
+                            Plugin.Log.LogInfo(TAG + " compat outcome refused: " + outcome + " plugins=" + _compatPlugins.Count.ToString(CultureInfo.InvariantCulture));
+#else
                             Plugin.Log.LogInfo(TAG + " compat outcome queued: " + outcome + " plugins=" + _compatPlugins.Count.ToString(CultureInfo.InvariantCulture));
+#endif
                         }
                         else _compatNextTryMs = SwMs + 5000;
                     }
@@ -1519,6 +1523,9 @@ namespace CompetitiveRounds
         /// removes it from the file.</summary>
         private static bool Load()
         {
+#if SCR_FRAMETIME
+            if (FtUpload.Closed) { FtUpload.Refuse("load", null); return false; }
+#endif
             if (_loaded && !_stale && _spoolChecked) return true;
             try
             {
@@ -1640,6 +1647,9 @@ namespace CompetitiveRounds
             try
             {
                 if (body == null || (route != "e" && route != "k" && route != "c" && route != "x" && route != "i")) return false;
+#if SCR_FRAMETIME
+                if (FtUpload.Closed) { FtUpload.Refuse("closing", route); return true; }
+#endif
                 var p = new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() };
                 string name = SPOOL_PREFIX + DateTime.UtcNow.Ticks.ToString("D19", CultureInfo.InvariantCulture) + "-"
                               + (++_spoolSeq).ToString("D4", CultureInfo.InvariantCulture) + ".jsonl";
@@ -1757,6 +1767,9 @@ namespace CompetitiveRounds
 #if SCR_FRAMETIME
             FtHeavy.Mark(FtHeavy.Enqueue);
 #endif
+#if SCR_FRAMETIME
+            if (FtUpload.Closed) { FtUpload.Refuse("queue", route); return true; }
+#endif
             if (!Load()) return false;
             var next = new List<C.Pending>(_queue);
             bool evicted = false;
@@ -1830,6 +1843,9 @@ namespace CompetitiveRounds
         {
 #if SCR_FRAMETIME
             FtHeavy.Mark(FtHeavy.Pump);
+#endif
+#if SCR_FRAMETIME
+            if (FtUpload.Closed) return;   // called every frame outside combat: not counted
 #endif
             if (_inFlight || nowMs < _nextPumpMs) return;
             if (!Plugin.DataConsentGranted || !ApiClient.SeatEvidenceReady) return;

@@ -238,6 +238,9 @@ namespace CompetitiveRounds
 
         public static void Connect()
         {
+#if SCR_FRAMETIME
+            if (FtUpload.Closed) { FtUpload.Refuse("chat", "connect"); return; }
+#endif
             if (running) return;
             if (!Plugin.DataConsentGranted)
             {

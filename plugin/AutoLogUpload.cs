@@ -264,6 +264,9 @@ namespace CompetitiveRounds
         /// leave+rejoin entirely (#430b).</summary>
         internal static void OnRoomLeft()
         {
+#if SCR_FRAMETIME
+            if (FtUpload.Closed) { FtUpload.Refuse("autolog", "room-left"); return; }
+#endif
             bool gameRan = _gameRan;
             string mode = _mode, room = _roomName, opp = _opponentSteamId, series = _seriesId;
             // Room-bound state dies with the room whatever happens below, and

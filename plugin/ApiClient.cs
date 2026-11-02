@@ -1076,6 +1076,9 @@ namespace CompetitiveRounds
 
         public static void EnqueueFailedReport(string url, string json)
         {
+#if SCR_FRAMETIME
+            if (FtUpload.Closed) { FtUpload.Refuse("outbox", "enqueue"); return; }
+#endif
             try
             {
                 if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(json)) return;
@@ -1278,6 +1281,9 @@ namespace CompetitiveRounds
 
         private static void PersistOutbox()
         {
+#if SCR_FRAMETIME
+            if (FtUpload.Closed) { FtUpload.Refuse("outbox", "persist"); return; }
+#endif
             try
             {
                 string tmp = OutboxTempPath;
@@ -1482,6 +1488,9 @@ namespace CompetitiveRounds
 
         private static void LoadOutbox()
         {
+#if SCR_FRAMETIME
+            if (FtUpload.Closed) { FtUpload.Refuse("outbox", "load"); return; }
+#endif
             // Once per process. Not once per behaviour: the list is static and
             // the behaviour is not, so a respawn used to add the previous
             // session's reports on top of the copies already held.
@@ -1587,6 +1596,9 @@ namespace CompetitiveRounds
         /// at most once every few seconds.</summary>
         internal static void OutboxTick()
         {
+#if SCR_FRAMETIME
+            if (FtUpload.Closed) return;
+#endif
             if (_pendingReports.Count == 0) return;
             float now = Time.realtimeSinceStartup;
             if (now - _outboxTickRt < 5f) return;

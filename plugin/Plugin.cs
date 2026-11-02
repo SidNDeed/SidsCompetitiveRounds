@@ -525,6 +525,9 @@ namespace CompetitiveRounds
                 {
                     try
                     {
+#if SCR_FRAMETIME
+                        if (FtUpload.Closed) { FtUpload.Refuse("log", "prev-copy"); FtUpload.LogCounts("quit"); return; }
+#endif
                         string src = CompetitiveUI.BepInExLogPathPublic();
                         string dst = CompetitiveUI.BepInExLogPreviousPath();
                         if (!string.IsNullOrEmpty(src) && !string.IsNullOrEmpty(dst) && System.IO.File.Exists(src))
