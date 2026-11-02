@@ -21,12 +21,19 @@ span bound from one. A resolution site is:
                          text compared with a fixed non-identifier text is a
                          shape assertion, not a resolution);
   import_module(...)     an import by name.
-Every site of a span inside class Bindings goes through the resolver. A
-call of a resolver method (any method class Bindings defines, or the
-visitor's pass-through wrappers `_resolve` / `_check`) is the resolver's
-own: its answer is not a KEY. Its ARGUMENTS are read like any other
-expression of the span (round 7, finding resolution_sites:132: a decision
-evaluated inside a resolver call's argument contributed no site).
+Every site of a span inside class Bindings goes through the resolver.
+Outside it, a call is the resolver's own (its answer is not a KEY) in ONE
+frozen form only (round 8, ruling REHEARSAL-FOUR-R7-A1, M7): a method
+class Bindings defines, called on the attribute `b` of a plain name,
+`<name>.b.<method>(...)` (the visitor's `self.b.callee(...)`, the gate
+walk's `w.b.named(...)`). Every other call is an ordinary expression,
+its value read for KEY and TEXT: `b.named(...)` on a plain name (round 7
+admitted any receiver, so `return b.named(n.id) == 'db'` counted no
+site), the visitor's `self._check(...)` and `self._resolve(...)`,
+`Bindings(...).<method>(...)`. The resolver call's ARGUMENTS are read
+like any other expression of the span (round 7, finding
+resolution_sites:132: a decision evaluated inside a resolver call's
+argument contributed no site).
 
 Round 7 (ruling REHEARSAL-FOUR-R6 (1)(b)): the census is DEFAULT-DENY.
 Before any site is counted, every node of every walker span is checked
@@ -46,9 +53,8 @@ _PRUNED = {}
 
 
 def resolver_methods(tree):
-    """The method names class Bindings defines in module tree, plus the
-    visitor's two pass-through wrappers."""
-    out = {"_resolve", "_check"}
+    """The method names class Bindings defines in module tree."""
+    out = set()
     for c in ast.walk(tree):
         if isinstance(c, ast.ClassDef) and c.name == RESOLVER_CLASS:
             out |= {d.name for d in c.body
@@ -57,13 +63,14 @@ def resolver_methods(tree):
 
 
 def _resolver_call(x):
+    """Whether x is a resolver call in the one frozen resolver form,
+    `<name>.b.<method>(...)` with <method> one class Bindings defines."""
     if not isinstance(x, ast.Call):
         return False
     f = x.func
-    if isinstance(f, ast.Attribute) and f.attr in RESOLVER_METHODS:
-        return True
-    return ((isinstance(f, ast.Name) and f.id == RESOLVER_CLASS)
-            or (isinstance(f, ast.Attribute) and f.attr == RESOLVER_CLASS))
+    return (isinstance(f, ast.Attribute) and f.attr in RESOLVER_METHODS
+            and isinstance(f.value, ast.Attribute) and f.value.attr == "b"
+            and isinstance(f.value.value, ast.Name))
 
 
 def _walk(e):

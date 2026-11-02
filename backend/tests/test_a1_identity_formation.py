@@ -602,6 +602,22 @@ def _outer_jumps(node):
 from closed_walk import Unclassified  # noqa: E402
 import closed_walk as _cw  # noqa: E402
 import grammar_shapes_a1 as _gs  # noqa: E402
+import match_hold as _a1_match_hold  # noqa: E402
+import match_report_window as _a1_mrw  # noqa: E402
+import tournaments as _a1_tournaments  # noqa: E402
+
+# The frozen callee table (round 8, ruling REHEARSAL-FOUR-R7-A1, M4):
+# grammar_shapes_a1.A1_CALLEES names each form and its frozen span; the
+# functions are bound HERE, by this file's static imports, and the two are
+# asserted to agree (test_r8_the_callee_table_is_the_frozen_one). The walks
+# import nothing and look up no attribute by a name read from a tree.
+_A1_CALLEES = {
+    "from tournaments import _region_candidate_volumes":
+        _a1_tournaments._region_candidate_volumes,
+    "_match_hold._hold_latch": _a1_match_hold._hold_latch,
+    "_mrw_mod().series_fresh": _a1_mrw.series_fresh,
+    "_mrw_mod().series_holds": _a1_mrw.series_holds,
+}
 
 
 # The default-deny grammar of the a1 walks (ruling REHEARSAL-FOUR-R6
@@ -610,12 +626,14 @@ import grammar_shapes_a1 as _gs  # noqa: E402
 # into, a builder's or a module accessor's body) is admitted by it BEFORE
 # any walker reasoning: every node's shape in the frozen whitelist
 # (grammar_shapes_a1.A1_SHAPES, generated once from the real spans at
-# a30d37f6 by RF/r7/ga1/gen_shapes.py), no binding of a meaningful spelling
-# but the frozen pairs, every local import one of the frozen triples. A
-# refusal names the file, the line and the shape.
+# a30d37f6 by RF/r7/ga1/gen_shapes.py), every meaningful store and every
+# transaction end at a frozen anchor (round 8, M3), every callee outside a
+# module's own namespace through the frozen callee table (M4), every
+# constructor-pure class in a complete frozen definition scope (M5). A
+# refusal names the file, the line and the shape or anchor.
 def _a1_grammar():
     return _cw.Grammar(_gs.A1_SHAPES, _gs.A1_MEANINGFUL, _gs.A1_BINDINGS,
-                       _gs.A1_IMPORTS, _gs.A1_NAMEDTUPLES)
+                       _A1_CALLEES, _gs.A1_NAMEDTUPLES)
 
 
 _A1_GRAMMAR = _a1_grammar()
@@ -717,11 +735,14 @@ def structural_only(monkeypatch):
     speak. Here the grammar RECORDS instead, so each older program still
     reaches the rule it was written for. Every finding of rounds 1 to 6 this
     child owns is ALSO a round-7 control under the frozen grammar
-    (test_r7_a1_findings_are_refused_under_the_frozen_grammar)."""
+    (test_r7_a1_findings_are_refused_under_the_frozen_grammar). The
+    recording grammar keeps the frozen callee table (round 8, M4): it is
+    the only route to a callee outside a module's own namespace."""
     import sys as _sys
     me = _sys.modules[__name__]
-    monkeypatch.setattr(me, "_A1_GRAMMAR",
-                        _cw.Grammar((), (), (), (), record=True))
+    none = frozenset()
+    g = _cw.Grammar(none, none, none, _A1_CALLEES, record=True)
+    monkeypatch.setattr(me, "_A1_GRAMMAR", g)
     monkeypatch.setattr(me, "_POLICIES", {})
 
 
@@ -4299,6 +4320,10 @@ _CENSUS_EXEMPT = {
     # acceptance_sites counts every spelling of the R4 token as a reference
     # (a superset): it decides no name's binding, and over-counts only.
     ("test_a1_identity_formation", "acceptance_sites.visit"): 4,
+    # closed_walk._anchored_node (round 8, M3) asks whether a STORED Name's
+    # spelling is a meaningful one: the grammar's own rule over the frozen
+    # A1_MEANINGFUL, deciding no name's binding.
+    ("closed_walk", "_anchored_node"): 1,
 }
 # One bypassing site per walker, each put where the census must count it:
 # (module, the exact text replaced, its replacement, the span it lands in).
@@ -4458,7 +4483,10 @@ def test_r7_the_grammar_checks_every_walked_node_and_refuses_none(monkeypatch):
 # the same a1 walk under the FROZEN grammar, and refused: by the grammar
 # (the sentence names the shape), by the binding rule, by the P rule, or by
 # the walk's structural exit rule (its sentence). The sentence each is
-# refused with is pinned (R7_A1_WANT).
+# refused with is pinned (R7_A1_WANT). Round 8 (ruling REHEARSAL-FOUR-R7-A1,
+# M3, M5): no control is refused by a walk's sentence over an admitted
+# shape any more; each is refused by a shape, an anchor (named by its
+# innermost shape) or the definition scope (named by its shape).
 
 def _r7_scope(tag, sources=()):
     """A planted module r7_<tag>: main's namespace, then each of `sources`
@@ -4628,14 +4656,16 @@ def _r7_outcome(form, prog, scope):
 
 # finding -> (the rule that refuses it, the text its first problem carries,
 # the construct shapes the grammar must refuse in the program's spans).
-# shape: "a shape outside the grammar ... <shape>"; binding: "the binding
-# rule ... binds <spelling> (<how>)"; P: the namedtuple rule gives no class,
-# so the constructor is a call the walk does not classify; exit: the walk's
-# structural sentence over a grammar-admitted span.
+# shape: "a shape outside the grammar ... <shape>"; anchored: "the anchored
+# rule ... binds <spelling> (<how>) at <shape>" or "... a transaction end,
+# <attr>, at <shape>" (round 8, M3: round 7's three exit controls and its
+# two binding controls); scope: "<class>: a shape outside the definition
+# scope at <file>:<line>: <shape>" (round 8, M5: round 7's two P controls).
 _GRAMMAR = "a shape outside the grammar at "
 R7_A1_WANT = {
     "r1 a1:567 a commit before the drift rollback":
-        ("exit", "rollback after commit", ()),
+        ("anchored", "a transaction end, commit, at "
+                     "Await.value>Call(func=Attribute,args=[],keywords=[])", ()),
     "r1 a1:593 a nested loop's else: continue":
         ("shape", "For.body>If(test=BoolOp,body=[For],orelse=[])",
          ("For.orelse>Continue()",)),
@@ -4649,10 +4679,9 @@ R7_A1_WANT = {
         ("shape", "<root>>AsyncFunctionDef(name=str,args=arguments,"
                   "body=[Expr|If],decorator_list=[]", ()),
     "r2 a1:961 the team drift keeps the rolled-back roster":
-        ("exit", "awaits after rollback", ()),
+        ("anchored", "binds others (store) at Assign.targets>Name(", ()),
     "r2 a1:718 the budget refilled inside the loop":
-        ("exit", "an assignment to the attempt budget this walk does not read",
-         ()),
+        ("anchored", "binds _form_left (store) at Assign.targets>Name(", ()),
     "r3 a1:1397 a commit in the barrier's keyword":
         ("shape", "Call.keywords>keyword(arg='timeout_ms',value=Await)", ()),
     "r3 a1:914 a helper holding a match":
@@ -4670,7 +4699,7 @@ R7_A1_WANT = {
         ("shape", "AsyncFunctionDef.body>Assign(targets=[Name],value=Attribute,",
          ("Assign.value>Attribute(value=Name,attr='add',ctx=Load)",)),
     "r4 cw:699 (binding route) a builtin rebound":
-        ("binding", "binds str (store)", ()),
+        ("anchored", "binds str (store) at Assign.targets>Name(", ()),
     "r4 cw:1036 a writing local-function annotation":
         ("shape", "body=[Assign|Expr|For|FunctionDef|If|Return]",
          ("arg.annotation>Call(",)),
@@ -4695,19 +4724,22 @@ R7_A1_WANT = {
         ("shape", "body=[Assign|Expr|For|If|ImportFrom|Return]",
          ("ImportFrom(module='builtins'",)),
     "r5 cw:759 a tuple subclass with a _fields marker":
-        ("P", "a call this walk does not classify: Marked", ()),
+        ("scope", "Marked: a shape outside the definition scope at "
+                  "<r7_marker>:", ()),
     "r5 cw:1217 a finally that returns":
         ("shape", "finalbody=[Return]", ("Try.finalbody>Return(",)),
     "r6 cw:406 the gate imported from another module":
         ("shape", "body=[Assign|Expr|For|If|ImportFrom|Return]",
          ("ImportFrom(module='evil_gate'",)),
     "r6 cw:406 (binding route) the gate rebound":
-        ("binding", "binds _lease_admission_gate (store)", ()),
+        ("anchored", "binds _lease_admission_gate (store) at "
+                     "Assign.targets>Name(", ()),
     "r6 cw:670 a copied namedtuple __new__ under a writing metaclass":
-        ("P", "a call this walk does not classify: Evil", ()),
+        ("scope", "Evil: a shape outside the definition scope at "
+                  "<r7_meta>:", ()),
 }
-_R7_MARK = {"shape": _GRAMMAR, "binding": "the binding rule at ",
-            "P": "a call this walk does not classify", "exit": ""}
+_R7_MARK = {"shape": _GRAMMAR, "anchored": "the anchored rule at ",
+            "scope": "a shape outside the definition scope at "}
 
 
 def _r7_program_refusals(form, prog, scope):
@@ -4750,66 +4782,216 @@ def test_r7_a1_findings_are_refused_under_the_frozen_grammar(finding):
             continue
         rule, text, constructs = R7_A1_WANT[finding]
         got = _r7_outcome(form, prog, scope)
+        # round 8: every control is refused BY SHAPE (a shape, an anchor's
+        # shape, a definition-scope shape), never by a walk's sentence
         assert got and _R7_MARK[rule] in got[0] and text in got[0], (
             finding, got[:2])
-        if rule == "exit":
-            assert not any(_GRAMMAR in g or "the binding rule" in g
-                           for g in got), (finding, got)
         refused = _r7_program_refusals(form, prog, scope)
         for c in constructs:
             assert any(c in s for s in refused), (finding, c, sorted(refused))
 
 
-def test_r7_census_walker_code_is_in_its_grammar():
-    """The census is default-deny (ruling REHEARSAL-FOUR-R6 (1)(b)): every
-    node of every walker span of closed_walk, the a1 file and the gate file
-    is in WALKER_SHAPES (frozen from the walker code; the gate file's from
-    a30d37f6), the frozen set names no annotated assignment, and the nodes
-    checked equal the nodes of the spans."""
+@pytest.mark.parametrize("m", ["closed_walk", "test_a1_identity_formation",
+                               "test_match_hold_admission_gate_pg"])
+def test_r7_census_walker_code_is_in_its_grammar(m):
+    """The census is default-deny (ruling REHEARSAL-FOUR-R6 (1)(b)), FILE
+    BY FILE (round 8, M8): every node of every walker span of the file is
+    in WALKER_SHAPES (ga1's round-7 freeze, 51d4faf2, less three removed
+    shapes: test_r8_the_walker_grammar_is_the_round_7_freeze_less_three),
+    the frozen set names no annotated assignment, and the nodes the census
+    checks in the file equal the nodes of its outermost walker definitions
+    counted independently here (ast.walk). A refusal lists the file's
+    shapes outside, with lines. Round 8: red for the gate file only, whose
+    walker code is child gg's to conform (RF/r8/ga1/GATE-WALKER-OUTSIDE.txt)."""
     import pathlib
     import resolution_sites as _rs
     here = pathlib.Path(__file__).resolve().parent
     assert not [s for s in _gs.WALKER_SHAPES if ">AnnAssign(" in s]
-    total = 0
-    for m in ("closed_walk", "test_a1_identity_formation",
-              "test_match_hold_admission_gate_pg"):
-        tree = _ast.parse((here / f"{m}.py").read_text(encoding="utf-8"))
-        assert _rs.grammar_refusals(tree, _gs.WALKER_SHAPES, m) == [], m
-        total += _rs.walker_nodes(tree)
-    assert total == _gs.WALKER_NODES, (total, _gs.WALKER_NODES)
+    tree = _ast.parse((here / f"{m}.py").read_text(encoding="utf-8"))
+    defs = []
+    for c in tree.body:
+        if isinstance(c, _ast.ClassDef):
+            defs += [d for d in c.body if isinstance(
+                d, (_ast.FunctionDef, _ast.AsyncFunctionDef))]
+        elif (isinstance(c, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+              and not c.name.startswith("test_")):
+            defs.append(c)
+    independent = sum(sum(1 for _n in _ast.walk(d)) for d in defs)
+    assert _rs.walker_nodes(tree) == independent, (m, independent)
+    outside = _rs.grammar_refusals(tree, _gs.WALKER_SHAPES, m)
+    assert outside == [], (m, len(outside), [f"{f}:{ln} {sh}"
+                                             for f, ln, sh in outside])
 
 
-# The census findings of round 6: (finding, the program added to closed_walk
-# outside class Bindings, how it is refused).
+def test_r8_the_walker_grammar_is_the_round_7_freeze_less_three():
+    """The boundary (round 8, ruling REHEARSAL-FOUR-R7-A1, M8): WALKER_SHAPES
+    is ga1's round-7 freeze (51d4faf2), never regenerated from the code it
+    bounds, less the three shapes M4 and M7 removed; pinned by its size and
+    the digest of its sorted members, so any shape added fails."""
+    import hashlib
+    removed = {"Call.func>Attribute(value=Name,attr='import_module',ctx=Load)",
+               "Call.func>Attribute(value=Name,attr='module_accessor',ctx=Load)",
+               "Call.func>Attribute(value=Name,attr='named',ctx=Load)"}
+    assert not removed & _gs.WALKER_SHAPES
+    assert len(_gs.WALKER_SHAPES) == 2850, len(_gs.WALKER_SHAPES)
+    digest = hashlib.sha256("\n".join(sorted(_gs.WALKER_SHAPES)).encode(
+        "utf-8")).hexdigest()
+    assert digest == ("073ed1959c7a09552e6d372d62988636"
+                      "c8c77e90fe0d1157f57e276279648822"), digest
+
+
+# The census findings of rounds 6 and 7: (finding, the program added to
+# closed_walk outside class Bindings, whether the census must count it in
+# the probe's span, the shape the walker grammar must refuse or None).
 _R7_CENSUS_CONTROLS = [
     ("r6 resolution_sites:132 a decision inside a resolver call's argument",
      "def _r7_probe(b, n):\n    return b.named(n, ('db',) if n.id == 'db' "
-     "else ())\n", "census"),
+     "else ())\n", True, None),
     ("r6 resolution_sites:145 an annotated alias",
      "def _r7_probe(node):\n    name: str = node.id\n    return name == 'db'\n",
-     "grammar"),
+     None, "FunctionDef.body>AnnAssign("),
+    # round 8, M7: the report's own example; `b.named` on a plain name is
+    # no resolver call (the one form is `<name>.b.<method>(...)`), and its
+    # shape is no longer in the walker grammar
+    ("r7 grammar_shapes_a1:3101 a resolver answer outside the resolver form",
+     "def _r7_probe(b, n):\n    return b.named(n.id) == 'db'\n", True,
+     "Call.func>Attribute(value=Name,attr='named',ctx=Load)"),
+    # round 8, M4: the import and accessor routes' calls are no longer in
+    # the walker grammar
+    ("r7 closed_walk:755 a callee imported by a name read from the tree",
+     "def _r7_probe(n):\n    return _importlib.import_module(n.module)\n",
+     None, "Call.func>Attribute(value=Name,attr='import_module',ctx=Load)"),
+    ("r7 closed_walk:755 a callee through the accessor route",
+     "def _r7_probe(b, fn):\n    return b.module_accessor(fn)\n", None,
+     "Call.func>Attribute(value=Name,attr='module_accessor',ctx=Load)"),
 ]
 
 
 def test_r7_census_controls_are_refused():
-    """Round 6's census findings, each refused: a decision inside a resolver
-    call's argument is a site outside the resolver (the arguments are no
-    longer pruned); an annotated alias is a shape outside the walker
-    grammar (AnnAssign)."""
+    """Round 6's and round 7's census findings, each refused: a decision
+    inside a resolver call's argument is a site outside the resolver (the
+    arguments are no longer pruned); an annotated alias is a shape outside
+    the walker grammar (AnnAssign); a resolver method on a plain name is a
+    site (round 8, M7: only `<name>.b.<method>(...)` is the resolver's) and
+    a shape outside; the import and accessor routes' calls are shapes
+    outside (M4)."""
     import pathlib
     import resolution_sites as _rs
     here = pathlib.Path(__file__).resolve().parent
     base = {m: (here / f"{m}.py").read_text(encoding="utf-8") for m in (
         "closed_walk", "test_a1_identity_formation",
         "test_match_hold_admission_gate_pg")}
-    for finding, prog, how in _R7_CENSUS_CONTROLS:
+    for finding, prog, counted, shape in _R7_CENSUS_CONTROLS:
         mutated = dict(base, closed_walk=base["closed_walk"] + "\n\n" + prog)
         census = [s for s, _sites in _census_problems(mutated)]
         grammar = [sh for _f, _l, sh in _rs.grammar_refusals(
             _ast.parse(mutated["closed_walk"]), _gs.WALKER_SHAPES,
             "closed_walk") if _l > len(base["closed_walk"].splitlines())]
-        if how == "census":
+        assert counted or shape, finding
+        if counted:
             assert census == ["closed_walk:_r7_probe"], (finding, census)
-        else:
-            assert any(s.startswith("FunctionDef.body>AnnAssign(")
-                       for s in grammar), (finding, grammar)
+        if shape:
+            assert any(s.startswith(shape) for s in grammar), (finding, grammar)
+
+
+# --- round 8: the callee table and the definition scope ---------------------
+# Ruling REHEARSAL-FOUR-R7-A1, M4 and M5 (rule (1)(c)): a callee outside the
+# walked function's own module namespace is admitted only through a frozen
+# form (grammar_shapes_a1.A1_CALLEES, bound by _A1_CALLEES); a class is
+# constructor-pure only inside a complete frozen definition scope
+# (grammar_shapes_a1.A1_NAMEDTUPLES, every spelled shape of region_pick.py).
+
+
+def test_r8_the_callee_table_is_the_frozen_one():
+    """_A1_CALLEES names exactly the frozen forms, and each function this
+    file's static imports bind stands at the form's frozen span, one of
+    A1_SPANS."""
+    want = {form: (f, ln, name) for form, f, ln, name in _gs.A1_CALLEES}
+    assert set(_A1_CALLEES) == set(want), sorted(set(_A1_CALLEES) ^ set(want))
+    spans = {(f, ln, name) for f, ln, name, _n in _gs.A1_SPANS}
+    for form, fn in _A1_CALLEES.items():
+        f, off = _cw.source_of(fn)
+        d = _ast.parse(_textwrap.dedent(_inspect.getsource(fn))).body[0]
+        got = (f, off + d.lineno, d.name)
+        assert got == want[form] and got in spans, (form, got, want[form])
+
+
+@pytest.mark.parametrize("form", sorted(f for f, *_ in _gs.A1_CALLEES))
+def test_r8_a_callee_outside_the_table_is_refused(monkeypatch, form):
+    """Each route the real walks take outside a module's namespace (a local
+    `from ... import`, a module attribute, an accessor's attribute) reaches
+    its callee ONLY through the frozen table: with the form's entry
+    dropped, the real walks refuse at that call. With the full table they
+    refuse nothing (test_r7_the_grammar_checks_every_walked_node_...)."""
+    import sys as _sys
+    me = _sys.modules[__name__]
+    table = {k: v for k, v in _A1_CALLEES.items() if k != form}
+    monkeypatch.setattr(me, "_A1_GRAMMAR", _cw.Grammar(
+        _gs.A1_SHAPES, _gs.A1_MEANINGFUL, _gs.A1_BINDINGS, table,
+        _gs.A1_NAMEDTUPLES))
+    monkeypatch.setattr(me, "_POLICIES", {})
+    got = [(w, p) for w, p in _a1_real_walks() if p]
+    name = [n for _form, _f, _ln, n in _gs.A1_CALLEES if _form == form][0]
+    assert got and any(name in str(x) for _w, p in got for x in p), (form, got)
+
+
+_R8_WRITER = "\n\ndef _r8_writer(cls, *a):\n    raise SystemExit(a)\n"
+_R8_SCOPE_CONTROLS = [
+    # the report's own example (closed_walk:815): a store appended
+    ("m5 closed_walk:815 a store to _Cand.__new__ appended", "append",
+     _R8_WRITER + "\n\n_Cand.__new__ = staticmethod(_r8_writer)\n",
+     "_Seat: a shape outside the definition scope at <r8_store>:"),
+    ("m5 a setattr of _Cand appended", "append",
+     _R8_WRITER + "\n\nsetattr(_Cand, '__new__', staticmethod(_r8_writer))\n",
+     "_Seat: a shape outside the definition scope at <r8_setattr>:"),
+    ("m5 the store inside the walked function", "inside",
+     _R8_WRITER, "a shape outside the grammar at "),
+    ("m5 a store to _Seat's field appended", "append",
+     "\n\n_Seat._fields = ()\n",
+     "_Seat: a shape outside the definition scope at <r8_fields>:"),
+]
+
+
+@pytest.mark.parametrize("case", [c[0] for c in _R8_SCOPE_CONTROLS])
+def test_r8_the_definition_scope_refuses_a_store_by_shape(case):
+    """M5: a copy of region_pick.py with a store to its constructor-pure
+    class appended (or inside the walked function) is refused BY SHAPE when
+    the real function _pick is walked over the copy; the unchanged copy
+    (the negative control) is walked without a refusal."""
+    import linecache
+    import sys as _sys
+    import types as _types
+    import region_pick as _rp
+    tag = {"m5 closed_walk:815 a store to _Cand.__new__ appended": "store",
+           "m5 a setattr of _Cand appended": "setattr",
+           "m5 the store inside the walked function": "inside",
+           "m5 a store to _Seat's field appended": "fields"}
+
+    def planted(name, extra, inside=False):
+        src = _inspect.getsource(_rp)
+        if inside:
+            at = "def _pick(members,"
+            assert src.count(at) == 1
+            head, tail = src.split(at)
+            first = tail.index("\n") + 1
+            src = (head + at + tail[:first]
+                   + "    _Cand.__new__ = staticmethod(_r8_writer)\n"
+                   + tail[first:])
+        text = src + extra
+        mod = _types.ModuleType(f"r8_{name}")
+        mod.__file__ = f"<r8_{name}>"
+        linecache.cache[mod.__file__] = (len(text), None,
+                                         text.splitlines(True), mod.__file__)
+        _sys.modules[mod.__name__] = mod
+        exec(compile(text, mod.__file__, "exec"), mod.__dict__)
+        return mod
+
+    plain = planted("unchanged", "")
+    _cw.plain_effects(plain._pick, _policy(plain))       # negative control
+    for f, where, extra, text in _R8_SCOPE_CONTROLS:
+        if f != case:
+            continue
+        mod = planted(tag[f], extra, inside=(where == "inside"))
+        with pytest.raises(Unclassified) as e:
+            _cw.plain_effects(mod._pick, _policy(mod))
+        assert text in str(e.value.args[0]), (f, e.value.args[0])
