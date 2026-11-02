@@ -580,60 +580,44 @@ import closed_walk as _cw  # noqa: E402
 # The allow-lists are positive and named; the classification itself is
 # closed_walk's (rehearsal-four round 3, ruling REHEARSAL-FOUR-R3: one shared
 # default-deny visitor, every concrete ast class in its NODE_TABLE, SQL
-# classified from migration_table_ddl's lexer tokens).
+# classified from migration_table_ddl's lexer tokens). Each list holds only
+# what main's real spans met, verified by count (round 3: every entry with a
+# count of zero was removed).
 #
 # Functions a reading statement may call: each reads, computes or casts and
 # writes nothing. Anything else in a SELECT (lo_create, nextval, setval,
 # pg_advisory_*, a user function) is unclassified.
-_SQL_READ_FUNCS = frozenset({
-    "any", "array_agg", "bool_or", "bool_and", "cast", "coalesce", "count",
-    "date_trunc", "extract", "greatest", "interval", "least", "length",
-    "lower", "max", "min", "now", "nullif", "sum", "upper", "abs", "round",
-    "jsonb_build_object", "json_build_object", "to_jsonb", "array_length",
-    "cardinality", "unnest", "exists", "string_agg", "row_number", "rank",
-    "lag", "lead", "over", "filter", "in", "values", "concat",
-    "clock_timestamp", "make_interval", "current_setting", "string_to_array",
-    "hashtextextended",
-})
+_SQL_READ_FUNCS = frozenset({"abs", "any", "cast", "clock_timestamp",
+    "coalesce", "count", "current_setting", "exists", "extract",
+    "hashtextextended", "in", "least", "make_interval", "max", "now", "nullif",
+    "string_to_array", "unnest", "values"})
 # Functions that take a transaction-scoped lock or change a transaction-local
 # setting and nothing else (`set_config(<name>, <value>, true)`,
 # `pg_advisory_xact_lock(<key>)`, released at the transaction's end): such a
 # statement is read as 'lock', never as a plain read.
-_SQL_SETTING_FUNCS = frozenset({"set_config", "pg_advisory_xact_lock"})
+_SQL_SETTING_FUNCS = frozenset({"pg_advisory_xact_lock", "set_config"})
 # Functions a writing statement may call besides the reading ones.
-_SQL_WRITE_FUNCS = frozenset({"gen_random_uuid"})
+_SQL_WRITE_FUNCS = frozenset()
 # Words followed by "(" that are SQL syntax, not function calls.
-_SQL_SYNTAX = frozenset({
-    "and", "or", "not", "as", "on", "using", "from", "where", "select", "join",
-    "into", "set", "returning", "conflict", "do", "when", "then", "else",
-    "case", "is", "null", "by", "with", "table", "key", "update", "insert",
-    "delete", "partition", "distinct", "all", "union", "except", "intersect",
-    "lateral", "within", "group", "order", "having", "limit", "offset",
-    "materialized",
-})
+_SQL_SYNTAX = frozenset({"and", "conflict", "from", "materialized", "not",
+    "where"})
 _SQL_LISTS = _cw.SqlLists(_SQL_READ_FUNCS, _SQL_SETTING_FUNCS, _SQL_WRITE_FUNCS,
                           _SQL_SYNTAX)
 
 # Plain calls a step may make that touch no session: builtins and the clock,
 # id and log functions the spans use.
-_PURE_CALLS = frozenset({
-    "len", "list", "dict", "sorted", "min", "max", "int", "float", "bool",
-    "str", "set", "tuple", "any", "all", "enumerate", "next", "print", "range",
-    "zip", "isinstance", "abs", "round", "sum", "repr", "text", "frozenset",
-    "HTTPException", "QueuePollResponse", "TeamQueuePollResponse",
-    "datetime.now", "time.monotonic", "uuid.uuid4", "uuid_mod.uuid4",
-    "ValueError", "_json.loads", "random.choice", "uuid.UUID", "GoldTransaction", "type",
-    "time.time", "StakeRefundRefused",
-})
+_PURE_CALLS = frozenset({"GoldTransaction", "HTTPException",
+    "QueuePollResponse", "StakeRefundRefused", "TeamQueuePollResponse",
+    "ValueError", "_json.loads", "all", "any", "bool", "datetime.now", "dict",
+    "enumerate", "float", "int", "isinstance", "len", "list", "min", "next",
+    "print", "random.choice", "round", "set", "sorted", "str", "text",
+    "time.monotonic", "time.time", "type", "uuid.UUID", "uuid.uuid4",
+    "uuid_mod.uuid4"})
 # Methods a step may call on a local value (rows, lists, dicts, strings).
-_PURE_METHODS = frozenset({
-    "append", "extend", "items", "values", "keys", "get", "lower", "upper",
-    "strip", "lstrip", "rstrip", "mappings", "all", "first", "scalar",
-    "scalars", "one", "one_or_none", "fetchall", "fetchone", "isoformat",
-    "total_seconds", "split", "join", "copy", "index", "count", "add",
-    "setdefault", "pop", "sort", "scalar_one", "intersection", "update",
-    "replace", "timestamp",
-})
+_PURE_METHODS = frozenset({"add", "all", "append", "extend", "fetchall",
+    "first", "get", "intersection", "items", "join", "lower", "lstrip",
+    "mappings", "one", "replace", "scalar", "scalar_one", "scalars", "sort",
+    "strip", "timestamp", "update", "values"})
 # Awaited library calls a helper may make that touch no session.
 _PURE_AWAITS = frozenset({"asyncio.sleep"})
 
@@ -3480,7 +3464,7 @@ _R3_HELPER_SRC = chr(10).join([
     "async def defaultspelling(db, end=None):",
     "    x = db.commit",
     "async def comphelper(db):",
-    "    return [await db.commit() for _ in range(1)]",
+    "    return [await db.commit() for _ in [1]]",
     "async def committing(db):",
     "    await sync_state(db)",
     ""])
@@ -3561,7 +3545,7 @@ def _round3_a1_programs():
         ("return", "a transaction end in a spelling this walk does not read",
          before_drift(q, "f = (lambda x=(await db.commit()): x)")),
         ("return", "a transaction end in a spelling this walk does not read",
-         before_drift(q, "xs = [await db.commit() for _ in range(1)]")),
+         before_drift(q, "xs = [await db.commit() for _ in [1]]")),
         # a1:672 and probe P2: SQL after the gather rollback, lexer-first
         ("gather", "a SQL function off the read allow-list: lo_create",
          g.replace(sql, repr('SELECT "lo_create"(0)'))),

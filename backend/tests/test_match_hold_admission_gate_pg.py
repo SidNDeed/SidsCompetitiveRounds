@@ -170,7 +170,11 @@ _REFUSAL_EXCEPTIONS = frozenset({"HTTPException"})
 # SQL, read from the lexer's tokens by closed_walk.sql_kind: a read names
 # only the functions on the read list (CAST, what the real reads name); a
 # write names only those; any other word before a parenthesis, a keyword
-# included, is refused until a real statement needs it.
+# included, is refused until a real statement needs it.  Two entries no real
+# span names, kept for the controls' own programs: now() (round 2's F6
+# UPDATE, so it is read as the write it is) and the VALUES row constructor
+# (round 1's planted INSERT); every other entry is met by the real spans,
+# by count.
 _SQL_LISTS = _cw.SqlLists(read=frozenset({"cast", "coalesce", "max", "cardinality",
                                          "jsonb_build_object", "unnest",
                                          "clock_timestamp", "now"}),
