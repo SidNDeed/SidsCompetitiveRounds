@@ -540,7 +540,11 @@ namespace CompetitiveRounds
                     if (!rpc || c.Sender == 0 || c.Sender != _oppActor) return -1;
                     _imp[0]++;
                     if (wasBlocked) _imp[1]++;
+#if SCR_FRAMETIME
+                    else if (_impDistinct.Count < IMP_DISTINCT_CAP) { FtImpRead(); _impDistinct.Add(pid); }
+#else
                     else if (_impDistinct.Count < IMP_DISTINCT_CAP) _impDistinct.Add(pid);
+#endif
                     long own = C.SinceMs(_mine.EverReset, data.block != null ? data.block.sinceBlock : float.NaN);
                     var e = C.HitRecvEntry(0, c.Stamp, 0, _ordHitRecv.Next(0, c.Stamp, 0), ServerNow(), wasBlocked, false, own);
                     if (_winRecv.Offer(e, c.Stamp)) _hitRecv.Add(e);
@@ -2078,6 +2082,121 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo(TAG + " " + What(p.Route) + " settled: " + reason + " (HTTP " + status.ToString(CultureInfo.InvariantCulture)
                 + ", attempt " + p.Attempts.ToString(CultureInfo.InvariantCulture) + ")");
         }
+#if SCR_FRAMETIME
+
+        // -- FrameTime A3 (FtA3; SURVIVORS.md S19, S20, S23) --------------------------------------
+
+        /// <summary>FtA3.RegisterAll: this component's A3 rows.
+        /// SE_Hw (S19): the two HitWindows, read and written at every Offer and Block (SeatEvidenceCore HitWindow).
+        /// steady false: Pending holds only this point's hits after PENDING_CAP offers in the point and RecentBlocks
+        /// only this point's blocks after RECENT_CAP blocks, and the writes are offers and blocks mixed, so no single
+        /// count of them guarantees both (PENDING_CAP + RECENT_CAP offers with no block leave RecentBlocks an earlier
+        /// point's): every read counts. PENDING_CAP is passed as the code constant; FtA3 does not use it when steady
+        /// is false.
+        /// SE_Logs (S20, and S23's _impDistinct): List and HashSet growth only. steady false; a read is one List
+        /// (or the HashSet) instance that receives an Add on a counted frame, once per instance per game
+        /// (SeatEvidenceCore.FtLogRead; FtImpRead); no writes are counted. SampleLog.CAP is passed as the code
+        /// constant and is unused (steady false).</summary>
+        internal static void FtA3Rows()
+        {
+            FtA3.Set(FtA3.SE_Hw, "SE_Hw", C.HitWindow.PENDING_CAP, false, FtCalHw, 500);
+            FtA3.Set(FtA3.SE_Logs, "SE_Logs", C.SampleLog.CAP, false, FtCalLogs, 4);
+        }
+
+        private static HashSet<int> _ftImpSet;
+        private static int _ftImpSerial = -1;
+
+        /// <summary>SE_Logs at the _impDistinct Add site: the set is replaced at every Handover, so a new instance
+        /// starts uncounted; then the once-per-instance-per-game rule of SeatEvidenceCore.FtLogRead.</summary>
+        private static void FtImpRead()
+        {
+            if (!object.ReferenceEquals(_ftImpSet, _impDistinct)) { _ftImpSet = _impDistinct; _ftImpSerial = -1; }
+            C.FtLogRead(ref _ftImpSerial, 1);
+        }
+
+        private static long _ftSink;
+        private static long[][] _ftHwHits;
+        private static long[] _ftHwProbe;
+
+        /// <summary>S19 calibration: one read = the real Offer then the real Block on a scratch HitWindow (an upper
+        /// bound on either call alone, so every counted read is covered whichever it was). Setup, identical in both
+        /// halves: two new scratch windows, their lists pre-sized past the caps (a live window's lists keep their
+        /// grown capacity: they are readonly and only cleared, so the reads never grow them after the first time),
+        /// and PENDING_CAP hits plus RECENT_CAP block stamps added to ONE of them: the read window when full, the
+        /// other when empty. CAPACITY in its costliest content: RecentBlocks holds RECENT_CAP stamps none of which
+        /// admits the offered hit (Offer scans all of them, appends, and drops the oldest of PENDING_CAP + 1); every
+        /// pending hit is inside the block's window (Block scans all PENDING_CAP, admits each into its new list,
+        /// and removes them all). EMPTY: both lists empty.</summary>
+        internal static long FtCalHw(bool full, int n)
+        {
+            if (_ftHwHits == null)
+            {
+                var hits = new long[C.HitWindow.PENDING_CAP][];
+                for (int i = 0; i < hits.Length; i++) hits[i] = new long[] { 0, 0 };
+                _ftHwProbe = new long[] { 0, 0 };
+                _ftHwHits = hits;
+            }
+            long sink = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                var a = new C.HitWindow();
+                var b = new C.HitWindow();
+                a.Pending.Capacity = C.HitWindow.PENDING_CAP + 1; a.RecentBlocks.Capacity = C.HitWindow.RECENT_CAP + 1;
+                b.Pending.Capacity = C.HitWindow.PENDING_CAP + 1; b.RecentBlocks.Capacity = C.HitWindow.RECENT_CAP + 1;
+                var fill = full ? a : b;
+                for (int i = 0; i < C.HitWindow.PENDING_CAP; i++) fill.Pending.Add(_ftHwHits[i]);
+                for (int i = 0; i < C.HitWindow.RECENT_CAP; i++) fill.RecentBlocks.Add(1000000 + i);
+                if (a.Offer(_ftHwProbe, 0)) sink++;
+                sink += a.Block(0, 1).Count;
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += sink;
+            return t;
+        }
+
+        private static HashSet<int> _ftImpPresized;
+        private static List<long> _ftLogPresized;
+
+        /// <summary>S20 / S23 calibration: one read = one instance's whole growth sequence. FULL: SampleLog.CAP longs
+        /// (the widest element among these lists: long; the long[] references of EventList are the same width) added
+        /// to a new List&lt;long&gt;() at default capacity, so every doubling happens, AND IMP_DISTINCT_CAP distinct
+        /// ints added to a new HashSet&lt;int&gt;() (every rehash happens). EMPTY: the same adds into a new
+        /// list and a set pre-sized once, outside the timed region (the set by adding IMP_DISTINCT_CAP ints and
+        /// clearing it: no HashSet capacity constructor is assumed on the game's runtime), so the EMPTY half allocates
+        /// nothing and d includes every allocation of the growth sequence; both halves clear their list and set after
+        /// each read at the same size, so the clears match.
+        /// The bound: each list's (and the set's) growth over a game is a prefix of its own 0-to-cap sequence, and
+        /// every cap is at most SampleLog.CAP (GAP_CAP, the reservoirs' 512, LIST_CAP) or IMP_DISTINCT_CAP, so the
+        /// growth work two arms' instances differ by is at most one full sequence per instance per game; d (full
+        /// minus empty) is at least either sequence, so it overbounds every counted instance.</summary>
+        internal static long FtCalLogs(bool full, int n)
+        {
+            if (_ftImpPresized == null)
+            {
+                var s0 = new HashSet<int>();
+                for (int i = 0; i < IMP_DISTINCT_CAP; i++) s0.Add(i);
+                s0.Clear();
+                _ftImpPresized = s0;
+            }
+            if (_ftLogPresized == null) _ftLogPresized = new List<long>(C.SampleLog.CAP);
+            long sink = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                var l = full ? new List<long>() : _ftLogPresized;
+                for (int i = 0; i < C.SampleLog.CAP; i++) l.Add(i);
+                var s = full ? new HashSet<int>() : _ftImpPresized;
+                for (int i = 0; i < IMP_DISTINCT_CAP; i++) s.Add(i);
+                sink += l.Count + s.Count;
+                l.Clear();
+                s.Clear();
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += sink;
+            return t;
+        }
+#endif
     }
 
     /// <summary>B5: this seat's own block RPC to Others. The postfix reads the

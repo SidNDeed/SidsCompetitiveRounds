@@ -3249,6 +3249,11 @@ namespace CompetitiveRounds
         }
         private static readonly Rec[] _recs = NewRecs();
         private static int _recCount, _recDropped;
+#if SCR_FRAMETIME
+        /// <summary>FtA3.RegisterAll: SURVIVORS.md S28, the point-end records, a drained row (emptied by the first
+        /// tick after the point end).</summary>
+        internal static void FtA3Rows() { FtA3.SetDrained(FtA3.PE_Rec, "PE_Rec", () => _recCount); }
+#endif
 
         private static Rec[] NewRecs()
         {

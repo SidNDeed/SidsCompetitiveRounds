@@ -258,6 +258,21 @@ namespace CompetitiveRounds
 
         // -- sampling (private state: never the game's RNG) -------------------------
 
+#if SCR_FRAMETIME
+        /// <summary>FrameTime A3 row SE_Logs (SURVIVORS.md S20, with S23's _impDistinct): at the Add site of a
+        /// per-game log, before a List Add that can grow it. `lists` List instances receive this Add together; each
+        /// counts as one read, ONCE per instance per game: the instance keeps the FtA3.Serial it last counted in,
+        /// stored only when the call is on a counted frame (FtA3's own test: an ON live frame on the main thread),
+        /// so an Add first seen outside one is still counted at the instance's first Add inside one.</summary>
+        internal static void FtLogRead(ref int serial, int lists)
+        {
+            if (serial == FtA3.Serial) return;
+            if (!FtSchedule.Live || FtGate.Off || System.Threading.Thread.CurrentThread.ManagedThreadId != FtSpan.MainThread) return;
+            for (int i = 0; i < lists; i++) FtA3.Read(FtA3.SE_Logs);
+            serial = FtA3.Serial;
+        }
+
+#endif
         /// <summary>xorshift32 owned by one collector.</summary>
         internal sealed class Rng
         {
@@ -275,12 +290,18 @@ namespace CompetitiveRounds
             internal long N;
             internal int Min = int.MaxValue, Max = int.MinValue;
             private readonly Rng _rng;
+#if SCR_FRAMETIME
+            internal int FtSerial = -1;
+#endif
             internal Reservoir(int cap, uint seed) { Cap = cap; _rng = new Rng(seed); }
             internal void Add(int v)
             {
                 N++;
                 if (v < Min) Min = v;
                 if (v > Max) Max = v;
+#if SCR_FRAMETIME
+                if (Items.Count < Cap) FtLogRead(ref FtSerial, 1);
+#endif
                 if (Items.Count < Cap) { Items.Add(v); return; }
                 long j = (long)(_rng.Next() % (ulong)N);
                 if (j < Cap) Items[(int)j] = v;
@@ -337,9 +358,15 @@ namespace CompetitiveRounds
             internal readonly List<long> Sw = new List<long>();    // own Stopwatch ms at dispatch
             internal long Dropped;
 
+#if SCR_FRAMETIME
+            internal int FtSerial = -1;
+#endif
             internal void Add(int arrivalEst, int ageMs, long epoch, bool view, int stamp, long swMs)
             {
                 if (Arr.Count >= CAP) { Dropped++; return; }
+#if SCR_FRAMETIME
+                FtLogRead(ref FtSerial, 6);
+#endif
                 Arr.Add(arrivalEst); Age.Add(ageMs); Ep.Add((int)Clamp(epoch, 0, 1000000));
                 View.Add(view); Stamp.Add(stamp); Sw.Add(swMs);
             }
@@ -448,6 +475,9 @@ namespace CompetitiveRounds
             private bool _has;
             private int _prev;
 
+#if SCR_FRAMETIME
+            internal int FtSerial = -1;
+#endif
             internal void Add(int stamp, long swMs)
             {
                 Batches++;
@@ -457,6 +487,9 @@ namespace CompetitiveRounds
                 int gap = WrapDiff(stamp, _prev);
                 if (gap <= 0) return;          // same stamp, or reordered: not a new batch interval
                 _prev = stamp;
+#if SCR_FRAMETIME
+                if (Gaps.Count < GAP_CAP) FtLogRead(ref FtSerial, 2);
+#endif
                 if (Gaps.Count < GAP_CAP) { Gaps.Add(gap); GapSw.Add(swMs); }
             }
 
@@ -485,7 +518,12 @@ namespace CompetitiveRounds
         {
             internal readonly List<long[]> Items = new List<long[]>();
             internal long Omitted;
+#if SCR_FRAMETIME
+            internal int FtSerial = -1;
+            internal void Add(long[] e) { if (Items.Count < LIST_CAP) { FtLogRead(ref FtSerial, 1); Items.Add(e); } else Omitted++; }
+#else
             internal void Add(long[] e) { if (Items.Count < LIST_CAP) Items.Add(e); else Omitted++; }
+#endif
         }
 
         /// <summary>A map a hook writes (seat evidence fix pass 4, F4): created at
@@ -581,6 +619,10 @@ namespace CompetitiveRounds
             /// is kept (bounded) for a block stamp that may follow.</summary>
             internal bool Offer(long[] hit, int stamp)
             {
+#if SCR_FRAMETIME
+                // FrameTime A3 row SE_Hw (SURVIVORS.md S19): the RecentBlocks scan and the Pending append below
+                FtA3.Read(FtA3.SE_Hw); FtA3.Wrote(FtA3.SE_Hw);
+#endif
                 for (int i = 0; i < RecentBlocks.Count && i < RECENT_CAP; i++)
                 {
                     int d = WrapDiff(stamp, RecentBlocks[i]);
@@ -596,6 +638,10 @@ namespace CompetitiveRounds
             /// stamp position.</summary>
             internal List<long[]> Block(int tb, int stampIndex)
             {
+#if SCR_FRAMETIME
+                // FrameTime A3 row SE_Hw (SURVIVORS.md S19): the Pending scan and the RecentBlocks append below
+                FtA3.Read(FtA3.SE_Hw); FtA3.Wrote(FtA3.SE_Hw);
+#endif
                 RecentBlocks.Add(tb);
                 if (RecentBlocks.Count > RECENT_CAP) RecentBlocks.RemoveAt(0);
                 var admitted = new List<long[]>();

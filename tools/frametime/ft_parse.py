@@ -234,7 +234,7 @@ INT_KEYS = {"seg", "pair", "base_us", "segs", "of", "cycles", "n", "sF", "sS", "
             "plant_mixed", "ticks", "span_g", "span_gn", "span_u", "span_un", "on_calls", "zs", "zl",
             "t0", "t1", "live", "between", "pick", "over", "menu", "at_call", "edge", "off", "span_off",
             "hash_t0", "hash_t1", "sP", "psP", "excl", "se", "ce", "ic", "calls", "dispatched",
-            "cap", "steady", "reads_on", "reads_win", "writes_on"}
+            "cap", "steady", "reads_on", "reads_win", "writes_on", "starts", "nonempty", "faults"}
 
 
 def parse_line(line):
@@ -434,8 +434,9 @@ def d_up(recs, z=Z_END, first_game=1):
 
 
 def a3_spec():
-    """The A3 inventory (gate_specs/a3.py, from SURVIVORS.md): [(name, survivor id, "dependent" | "zero", reason)].
-    A "zero" row is a structure whose live reads cost the same whatever its content (its reason says why)."""
+    """The A3 inventory (gate_specs/a3.py, from SURVIVORS.md): [(name, survivor id, "dependent" | "drained" | "zero",
+    reason)]. A "zero" row is a structure whose live reads cost the same whatever its content (its reason says why);
+    a "drained" row is one the build checks empty at every point's first live frame (FtA3.PointStart)."""
     here = os.path.dirname(os.path.abspath(__file__))
     return runpy.run_path(os.path.join(here, "gate_specs", "a3.py"))["A3"]
 
@@ -449,16 +450,20 @@ def a3(recs, z=Z_END, first_game=1, last_game=None, spec=None):
     largest per-game count of such reads over the game's ON live frames (frame-weighted, as D_up's n_k_max).
     Per calibration j at a game start, d_kj is |mean over batches of (full - empty) / n|: the per-read cost
     difference between k at its capacity and k empty, us; A_j = sum_k r_k_max x d_kj; A3 = max(mean + t(z, J - 1)
-    SE, largest A_j). Zero rows add nothing and are listed. Refuses when the spec names no structure, or when
-    a dependent structure lacks its a3 line in a measured game (or carries two) or its calibration line in a
-    game-start calibration. Returns (A3, [A_j], {k: r_k_max}, {k: mean d_k us})."""
+    SE, largest A_j). Zero rows add nothing and are listed. A drained row adds nothing only because the build saw
+    it empty at the first live frame of every point of the game: its a3drain line must say so (starts above 0,
+    nonempty 0, faults 0). Refuses when the spec names no structure, when a row's kind is unknown or a zero or
+    drained row has no reason, when a dependent structure lacks its a3 line in a measured game (or carries two) or
+    its calibration line in a game-start calibration, or when a drained row lacks its a3drain line (or carries two)
+    or reports a point that started with it holding entries. Returns (A3, [A_j], {k: r_k_max}, {k: mean d_k us})."""
     spec = a3_spec() if spec is None else spec
     if not spec:
         raise Refused("the A3 inventory names no structure")
     dep = [n for n, sid, kind, why in spec if kind == "dependent"]
+    drained = [n for n, sid, kind, why in spec if kind == "drained"]
     for n, sid, kind, why in spec:
-        if kind not in ("dependent", "zero") or (kind == "zero" and not why.strip()):
-            raise Refused("A3 row %s (%s): kind %r needs a reason when zero" % (n, sid, kind))
+        if kind not in ("dependent", "drained", "zero") or (kind != "dependent" and not why.strip()):
+            raise Refused("A3 row %s (%s): kind %r needs a reason when zero or drained" % (n, sid, kind))
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("A3 needs one Stopwatch frequency (got %s)" % sorted(freq))
@@ -478,6 +483,15 @@ def a3(recs, z=Z_END, first_game=1, last_game=None, spec=None):
             if on_frames[g] <= 0:
                 raise Refused("game %d has no ON live frames" % g)
             rate[k] = max(rate.get(k, 0.0), rows[0]["reads_win"] / on_frames[g])
+    for k in drained:
+        for g in sorted(on_frames):
+            rows = [r for r in recs if r["kind"] == "a3drain" and r.get("g") == g and r.get("k") == k]
+            if len(rows) != 1:
+                raise Refused("A3 drained structure %s: game %d has %d a3drain lines (needs 1)" % (k, g, len(rows)))
+            r = rows[0]
+            if r.get("starts", 0) <= 0 or r.get("nonempty", -1) != 0 or r.get("faults", -1) != 0:
+                raise Refused("A3 drained structure %s: game %d starts=%s nonempty=%s faults=%s (needs starts > 0, "
+                              "nonempty 0, faults 0)" % (k, g, r.get("starts"), r.get("nonempty"), r.get("faults")))
     cals = {}
     for r in recs:
         if r["kind"] == "cal" and r.get("why", "").startswith("game") and r.get("ckind") == "a3":

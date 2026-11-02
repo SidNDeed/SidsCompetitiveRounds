@@ -1198,6 +1198,11 @@ namespace CompetitiveRounds
             internal void FlushBucket()
             {
                 if (_bucket == int.MinValue) return;
+#if SCR_FRAMETIME
+                // FrameTime A3 row IC_Clock (SURVIVORS.md S31): the two Medians over the bucket, the CadB append,
+                // and the flush itself, which empties the bucket (the refill)
+                FtA3.Read(FtA3.IC_Clock); FtA3.Wrote(FtA3.IC_Clock);
+#endif
                 if (_bBatches > 0 && CadB.Count < CAD_MAX + 64)
                     CadB.Add(L((long)_bucket, Clamp(_bBatches, 0, COUNT_MAX), (long)Median(_gapHist, _bGapN),
                                (long)Median(_tdHist, _bTdN), Clamp(_bTdSat, 0, COUNT_MAX)));
@@ -1206,6 +1211,18 @@ namespace CompetitiveRounds
                 _bucket = int.MinValue;
             }
 
+#if SCR_FRAMETIME
+            /// <summary>FrameTime A3 (IC_Clock calibration, scratch books only): opens bucket 0 holding n batches,
+            /// every gap and stated interval in the last bin of its histogram (the costliest content for Median: each
+            /// scan runs the whole histogram before the count passes the median); n = 0 opens it empty. The same
+            /// stores for any n.</summary>
+            internal void FtSetBucket(int n)
+            {
+                _bucket = 0; _bBatches = n; _bGapN = n; _bTdN = n; _bTdSat = n;
+                _gapHist[_gapHist.Length - 1] = n; _tdHist[_tdHist.Length - 1] = n;
+            }
+
+#endif
             internal static int Median(int[] hist, int n)
             {
                 if (n <= 0) return -1;
@@ -1380,11 +1397,22 @@ namespace CompetitiveRounds
             internal void Add(string name)
             {
                 string k = name ?? "";
+#if SCR_FRAMETIME
+                // FrameTime A3 row IC_Rpc (SURVIVORS.md S30): the linear scan below
+                FtA3.Read(FtA3.IC_Rpc);
+#endif
                 int i = _names.IndexOf(k);
                 if (i >= 0) { if (_n[i] < COUNT_MAX) _n[i]++; return; }
                 if (_names.Count >= KEEP) { Overflow++; return; }
+#if SCR_FRAMETIME
+                FtA3.Wrote(FtA3.IC_Rpc);
+#endif
                 _names.Add(k); _n.Add(1);
             }
+#if SCR_FRAMETIME
+            /// <summary>FrameTime A3 (IC_Rpc calibration, scratch instances only): the same IndexOf Add runs.</summary>
+            internal int FtScan(string k) { return _names.IndexOf(k); }
+#endif
             internal List<object> Entries(Privacy priv)
             {
                 var l = new List<object>();

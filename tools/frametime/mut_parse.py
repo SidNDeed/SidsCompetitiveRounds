@@ -14,8 +14,11 @@ W, OUT = sys.argv[1], sys.argv[2]
 src = os.path.join(W, "tools", "frametime")
 # every file test_ft_parse.py reads, as worktree-relative paths; the copy keeps the same relative layout
 FIXTURES = ["tools/frametime/ft_parse.py", "tools/frametime/test_ft_parse.py", "tools/frametime/gate_specs/entries.py",
-            "tools/frametime/gate_specs/a3.py",
-            "plugin/CombatEvidence.cs"]
+            "tools/frametime/gate_specs/a3.py", "tools/frametime/SURVIVORS.md", "plugin/FtA3.cs",
+            "plugin/CombatEvidence.cs", "plugin/SeatEvidence.cs", "plugin/IdentityClockEvidence.cs",
+            "plugin/HitEvidence.cs", "plugin/PoisonSync.cs"]
+# A mutant row is (name, anchor, replacement) on ft_parse.py, or (name, anchor, replacement, fixture) on that fixture
+# (its repo-relative path, one of FIXTURES): the inventory controls of ruling FRAME-TIME-ROUND-R1-A1 part 3.
 MUTS = [
     ("F18 accepts a replay that did not settle", 'elif r.get("result") != "settled":', 'elif False:'),
     ("VR6 ignores a disarm", 'bad.append("disarmed: " + "; ".join(dis))', 'pass'),
@@ -73,6 +76,19 @@ MUTS = [
      'continue'),
     ("A3 missing calibration passes", 'raise Refused("calibration %d has no a3 line for %s" % (i, miss))', 'continue'),
     ("VR6 dispatch count ignored", 'if disp.get(r, 0) != sent.get(r, 0):', 'if False:'),
+    ("A3 drained missing line passes",
+     'raise Refused("A3 drained structure %s: game %d has %d a3drain lines (needs 1)" % (k, g, len(rows)))', 'continue'),
+    ("A3 drained nonempty passes",
+     'if r.get("starts", 0) <= 0 or r.get("nonempty", -1) != 0 or r.get("faults", -1) != 0:',
+     'if r.get("starts", 0) <= 0 or r.get("faults", -1) != 0:'),
+    ("A3 inventory row removed", '    ("CE_Recent", "S06", "dependent", ""),\n', '',
+     "tools/frametime/gate_specs/a3.py"),
+    ("A3 dependent row demoted to zero", '    ("CE_Pos", "S05", "dependent", ""),',
+     '    ("CE_Pos", "S05", "zero", "demoted"),', "tools/frametime/gate_specs/a3.py"),
+    ("A3 capacity typed", 'FtA3.Set(FtA3.CE_Ping, "CE_Ping", PING_BIN_CAP,', 'FtA3.Set(FtA3.CE_Ping, "CE_Ping", 2000,',
+     "plugin/CombatEvidence.cs"),
+    ("A3 row not registered", 'FtA3.SetDrained(FtA3.PE_Rec, "PE_Rec", () => _recCount);', '',
+     "plugin/PoisonSync.cs"),
 ]
 # the tests each mutant must turn red (taken from a --discover run on a green baseline, then pinned)
 KILLS = {
@@ -159,6 +175,18 @@ KILLS = {
         ['test_b3_flags_heavy_work_in_a_live_frame_after_combat_ended'],
     'VR6 dispatch count ignored':
         ['test_vr6_counts_dispatches_independently'],
+    'A3 drained missing line passes':
+        ['test_a3_drained_rows_refuse_a_missing_line_or_a_point_that_started_holding_entries'],
+    'A3 drained nonempty passes':
+        ['test_a3_drained_rows_refuse_a_missing_line_or_a_point_that_started_holding_entries'],
+    'A3 inventory row removed':
+        ['test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row'],
+    'A3 dependent row demoted to zero':
+        ['test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row'],
+    'A3 capacity typed':
+        ['test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row'],
+    'A3 row not registered':
+        ['test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row'],
 }
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]
@@ -197,12 +225,22 @@ if rc0 != 0:
     print("PARSER MUTANTS FAIL (no green baseline)")
     sys.exit(1)
 bad = 0
-for k, (name, a, b) in enumerate(MUTS, 1):
+for k, row in enumerate(MUTS, 1):
+    name, a, b = row[:3]
     kills = KILLS.get(name, [])
     d = os.path.join(OUT, "mut-%d" % k)
     os.makedirs(d, exist_ok=False)
     td = make_copy(d)
-    if a is not None:
+    if len(row) == 4:
+        if row[3] not in FIXTURES:
+            sys.exit("REFUSED: mutant %d targets %s, not a fixture" % (k, row[3]))
+        fp = os.path.join(d, *row[3].split("/"))
+        f0 = open(fp, encoding="utf-8", newline="").read()
+        if f0.count(a) != 1:
+            sys.exit("REFUSED: mutant %d anchor matched %d times in %s" % (k, f0.count(a), row[3]))
+        open(fp, "w", encoding="utf-8", newline="").write(f0.replace(a, b))
+        t = t0
+    elif a is not None:
         if t0.count(a) != 1:
             sys.exit("REFUSED: mutant %d anchor matched %d times" % (k, t0.count(a)))
         t = t0.replace(a, b)

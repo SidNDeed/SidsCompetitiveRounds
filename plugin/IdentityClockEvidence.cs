@@ -884,6 +884,91 @@ namespace CompetitiveRounds
             finally { FtSpan.Close(ftSpan); }
 #endif
         }
+#if SCR_FRAMETIME
+
+        // -- FrameTime A3 (FtA3; SURVIVORS.md S30, S31) -------------------------------------------
+
+        /// <summary>FtA3.RegisterAll: this component's A3 rows.
+        /// IC_Rpc (S30): RpcNames, read at every IndexOf in RpcNames.Add (EnterRpc, every opponent RPC), written at
+        /// every append. steady false: the list is the game's distinct names in first-seen order, never refilled;
+        /// KEEP is passed as the code constant and is unused (steady false).
+        /// IC_Clock (S31): ClockBook's cadence bucket, read and written at every FlushBucket of an open bucket
+        /// (from Cadence on a bucket change, in Package). steady true, refill 1: the bucket that is open at the
+        /// point's first live frame is the only one that can hold an earlier point's samples, and the point's first
+        /// flush closes it and empties both histograms; every bucket flushed after that opened inside this point.
+        /// So one write (that flush) is the refill: 1, not a capacity constant, because a bucket is replaced whole,
+        /// never entry by entry.</summary>
+        internal static void FtA3Rows()
+        {
+            FtA3.Set(FtA3.IC_Rpc, "IC_Rpc", I.RpcNames.KEEP, false, FtCalRpc, 500);
+            FtA3.Set(FtA3.IC_Clock, "IC_Clock", 1, true, FtCalClock, 500);
+        }
+
+        private static long _ftSink;
+        private static I.RpcNames _ftRpcFull, _ftRpcEmpty;
+        private static string _ftRpcProbe;
+
+        /// <summary>S30 calibration: the IndexOf RpcNames.Add runs (RpcNames.FtScan), on scratch instances. FULL:
+        /// KEEP distinct names held, the probe absent, so the scan compares every one; all are NAME_MAX characters
+        /// (the record's name bound; ROUNDS' RPC method names are shorter) and differ from the probe only in the last
+        /// three, so each comparison runs nearly the whole string. EMPTY: no names. No setup per read in either half
+        /// (the scan does not change the list).</summary>
+        internal static long FtCalRpc(bool full, int n)
+        {
+            if (_ftRpcFull == null)
+            {
+                var f = new I.RpcNames();
+                string stem = new string('R', I.NAME_MAX - 3);
+                for (int i = 0; i < I.RpcNames.KEEP; i++) f.Add(stem + i.ToString("D3", CultureInfo.InvariantCulture));
+                _ftRpcProbe = stem + "999";
+                _ftRpcEmpty = new I.RpcNames();
+                _ftRpcFull = f;
+            }
+            var r = full ? _ftRpcFull : _ftRpcEmpty;
+            long sink = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++) sink += r.FtScan(_ftRpcProbe);
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += sink;
+            return t;
+        }
+
+        private const int FT_CAD_DOUBLING = 256;
+        private static I.ClockBook _ftBook;
+        private static List<object> _ftCadFill;
+
+        /// <summary>S31 calibration: the real FlushBucket on a scratch ClockBook. Setup, identical in both halves:
+        /// CadB rebuilt at FT_CAD_DOUBLING entries with exactly that capacity (CadB's last doubling below its cap of
+        /// CAD_MAX + 64, so an append there copies the whole list), and bucket 0 opened by FtSetBucket. CAPACITY in
+        /// its costliest content: the bucket holds batches whose every gap and stated interval sit in the last bin,
+        /// so both Medians scan their whole histograms, and the flush appends a cad_b row to a CadB that must grow.
+        /// EMPTY: the bucket open with no batches (no Median, no append). The only work that differs outside
+        /// FlushBucket is CadB.Clear covering the one row the full flush appended.</summary>
+        internal static long FtCalClock(bool full, int n)
+        {
+            if (_ftBook == null)
+            {
+                var fill = new List<object>(FT_CAD_DOUBLING);
+                for (int i = 0; i < FT_CAD_DOUBLING; i++) fill.Add(null);
+                _ftCadFill = fill;
+                _ftBook = new I.ClockBook(0);
+            }
+            var b = _ftBook;
+            int batches = full ? 1000 : 0;
+            long sink = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                b.CadB.Clear(); b.CadB.Capacity = 0; b.CadB.Capacity = FT_CAD_DOUBLING; b.CadB.AddRange(_ftCadFill);
+                b.FtSetBucket(batches);
+                b.FlushBucket();
+                sink += b.CadB.Count;
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            _ftSink += sink;
+            return t;
+        }
+#endif
     }
 
     /// <summary>K1x: the RPC frame (own stack, nesting-safe) for the point

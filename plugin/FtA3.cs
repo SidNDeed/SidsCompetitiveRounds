@@ -7,36 +7,51 @@ using System.Threading;
 namespace CompetitiveRounds
 {
     /// <summary>FrameTime A3 (integrator ruling FRAME-TIME-ROUND-R1-A1, route D; METHOD-V4.1 section 0): the counts
-    /// and calibrations behind U's fifth term, which bounds the carryover of every class (iii) structure the
-    /// whole-entry gate leaves (SURVIVORS.md; tools/frametime/gate_specs/a3.py lists the rows).
-    /// Each content-dependent survivor registers once (Set) with its capacity passed as the code constant that
-    /// sizes it, never a typed number, and whether it has a steady state (a refilling structure: after capacity
-    /// writes since the point's first live frame it holds only this point's content) or not (it accumulates over
-    /// the game, so every read can differ). Its writers call Wrote and its content-dependent live readers call
-    /// Read, both inside #if SCR_FRAMETIME at the component's own sites; only main-thread calls in the live frames
-    /// of a point the gate leaves open (an ON point) count. reads_win counts the reads whose work can differ from an
-    /// always-ON game's: every read for a structure without a steady state, else the reads made while fewer than
-    /// capacity writes have happened since the point's first live frame. The game's line is written by
-    /// FtSchedule.FlushGame. Calibration (FtCalib.Run, every game start): each row's own Cal runs the real read
-    /// on a scratch copy of the structure EMPTY (u) and at its CAPACITY (p), 20 batches of n reads.</summary>
+    /// and calibrations behind U's fifth term, which bounds the carryover of every content-dependent survivor the
+    /// whole-entry gate leaves (tools/frametime/SURVIVORS.md; tools/frametime/gate_specs/a3.py lists the rows with the
+    /// same names). Two kinds of row register here, each once, from its component's own FtA3Rows:
+    ///
+    /// DEPENDENT (Set): a survivor whose live read costs more or less with its content. Its writers call Wrote and its
+    /// content-dependent live readers call Read, inside #if SCR_FRAMETIME at the component's own sites; only main-thread
+    /// calls in the live frames of a point the gate leaves open (an ON point) count. A row with a steady state (steady
+    /// true) holds only the current point's content once `refill` writes have happened since the point's first live
+    /// frame; reads_win counts its reads before that. A row without one (steady false: it accumulates over the game)
+    /// counts every read in reads_win. The row's calibration (FtCalib.Run, every game start) runs the read on a scratch
+    /// copy of the structure EMPTY (u) and in its costliest content at CAPACITY (p), 20 batches of n reads.
+    ///
+    /// DRAINED (SetDrained): a survivor SURVIVORS.md finds emptied between points (a queue or ring the component drains
+    /// on the non-live frames). Its zero is checked, not assumed: at the boundary of every point's first live frame
+    /// (after the last non-live frame's work, before any live work) the structure must be EMPTY, so nothing written
+    /// before the point reaches its live reads. nonempty counts the points that started with the structure holding
+    /// entries; faults counts fill probes that threw (each also counted nonempty).
+    ///
+    /// FtSchedule.FlushGame writes one a3 line per dependent row and one a3drain line per drained row; the parser
+    /// (ft_parse.a3) refuses a game without each, a drained row with nonempty or faults above 0, and a calibration
+    /// without each dependent row.</summary>
     internal static class FtA3
     {
         internal const int Capacity = 32;
         private const int Batches = 20;
 
-        // The rows (gate_specs/a3.py's "dependent" rows, same names; the parser refuses a game without each line).
-        internal const int CE_Top = 0, CE_Ht = 1;
-        internal const int Rows = 2;
+        // The rows (gate_specs/a3.py, same names). Dependent:
+        internal const int CE_Top = 0, CE_Ht = 1, CE_Ping = 2, CE_Pos = 3, CE_Recent = 4, CE_B5c = 5;
+        internal const int SE_Hw = 6, SE_Logs = 7, IC_Rpc = 8, IC_Clock = 9;
+        // Drained:
+        internal const int CE_Wait = 10, CE_Rings = 11, CE_Gun = 12, HE_Flush = 13, PE_Rec = 14;
+        internal const int Rows = 15;
 
         private static bool _registered;
 
-        /// <summary>Once, at clock install (beside FtE.RegisterAll): every row with its capacity constant.</summary>
+        /// <summary>Once, at clock install (beside FtE.RegisterAll): every component registers its rows.</summary>
         internal static void RegisterAll()
         {
             if (_registered) return;
             _registered = true;
-            Set(CE_Top, "CE_Top", CombatEvidence.TOP_CAP, false, CombatEvidence.FtCalTop, 2000);
-            Set(CE_Ht, "CE_Ht", CombatEvidence.HT_CAP, false, CombatEvidence.FtCalHt, 2000);
+            CombatEvidence.FtA3Rows();
+            SeatEvidence.FtA3Rows();
+            IdentityClockEvidence.FtA3Rows();
+            HitEvidence.FtA3Rows();
+            PointEvidence.FtA3Rows();
             int missing = 0;
             for (int k = 0; k < Rows; k++) if (Names[k] == null) missing++;
             Plugin.Log.LogInfo("[FRAME-TIME] a3rows registered=" + Count + " expected=" + Rows + " missing=" + missing
@@ -47,27 +62,54 @@ namespace CompetitiveRounds
         /// returns the batch's Stopwatch ticks.</summary>
         internal delegate long CalBatch(bool full, int n);
 
+        /// <summary>A drained row's fill: how many entries the structure holds now (0 when empty or absent).</summary>
+        internal delegate int Fill();
+
         internal static readonly string[] Names = new string[Capacity];
-        private static readonly int[] _cap = new int[Capacity];
+        private static readonly bool[] _drained = new bool[Capacity];
+        private static readonly int[] _refill = new int[Capacity];
         private static readonly bool[] _steady = new bool[Capacity];
         private static readonly CalBatch[] _cal = new CalBatch[Capacity];
         private static readonly int[] _calN = new int[Capacity];
+        private static readonly Fill[] _fill = new Fill[Capacity];
         private static readonly long[] _writesPt = new long[Capacity];
         private static readonly long[] _writesOn = new long[Capacity];
         private static readonly long[] _readsOn = new long[Capacity];
         private static readonly long[] _readsWin = new long[Capacity];
+        private static readonly long[] _starts = new long[Capacity];
+        private static readonly long[] _nonempty = new long[Capacity];
+        private static readonly long[] _faults = new long[Capacity];
         internal static int Count;
         internal static int Duplicates;
 
-        internal static void Set(int k, string name, int cap, bool steady, CalBatch cal, int calN)
+        /// <summary>The game's serial (Reset adds one): a row that counts once per game per instance keeps the
+        /// serial it last counted in.</summary>
+        internal static int Serial;
+
+        private static void Name(int k, string name)
         {
             if (Names[k] != null) Duplicates++;
             Names[k] = name;
-            _cap[k] = cap;
+            if (k + 1 > Count) Count = k + 1;
+        }
+
+        /// <summary>A dependent row. refill: the writes since the point's first live frame after which the structure
+        /// holds only this point's content (a code constant; unused when steady is false).</summary>
+        internal static void Set(int k, string name, int refill, bool steady, CalBatch cal, int calN)
+        {
+            Name(k, name);
+            _refill[k] = refill;
             _steady[k] = steady;
             _cal[k] = cal;
             _calN[k] = calN;
-            if (k + 1 > Count) Count = k + 1;
+        }
+
+        /// <summary>A drained row.</summary>
+        internal static void SetDrained(int k, string name, Fill fill)
+        {
+            Name(k, name);
+            _drained[k] = true;
+            _fill[k] = fill;
         }
 
         private static bool OnLive()
@@ -75,10 +117,23 @@ namespace CompetitiveRounds
             return FtSchedule.Live && !FtGate.Off && Thread.CurrentThread.ManagedThreadId == FtSpan.MainThread;
         }
 
-        /// <summary>FtFrames.StartPoint, at every point's start: the writes since the point's first live frame restart.</summary>
+        private static bool Empty(int k)
+        {
+            try { return _fill[k]() == 0; }
+            catch { _faults[k]++; return false; }
+        }
+
+        /// <summary>FtSchedule.StartPoint, at the boundary of every point's first live frame (before its work): the
+        /// writes since that frame restart, and each drained row is probed for emptiness.</summary>
         internal static void PointStart()
         {
-            for (int k = 0; k < Count; k++) _writesPt[k] = 0;
+            for (int k = 0; k < Count; k++)
+            {
+                _writesPt[k] = 0;
+                if (!_drained[k]) continue;
+                _starts[k]++;
+                if (!Empty(k)) _nonempty[k]++;
+            }
         }
 
         internal static void Wrote(int k)
@@ -92,31 +147,41 @@ namespace CompetitiveRounds
         {
             if (!OnLive()) return;
             _readsOn[k]++;
-            if (!_steady[k] || _writesPt[k] < _cap[k]) _readsWin[k]++;
+            if (!_steady[k] || _writesPt[k] < _refill[k]) _readsWin[k]++;
         }
 
+        /// <summary>FtSchedule.GameStart: the game's counts restart.</summary>
         internal static void Reset()
         {
-            for (int k = 0; k < Count; k++) { _writesPt[k] = 0; _writesOn[k] = 0; _readsOn[k] = 0; _readsWin[k] = 0; }
+            Serial++;
+            for (int k = 0; k < Count; k++)
+            {
+                _writesPt[k] = 0; _writesOn[k] = 0; _readsOn[k] = 0; _readsWin[k] = 0;
+                _starts[k] = 0; _nonempty[k] = 0; _faults[k] = 0;
+            }
         }
 
-        /// <summary>At FtSchedule.FlushGame: one a3 line per registered structure.</summary>
+        /// <summary>At FtSchedule.FlushGame: one a3 line per dependent row, one a3drain line per drained row.</summary>
         internal static void LogGame(int game)
         {
             for (int k = 0; k < Count; k++)
             {
                 if (Names[k] == null) continue;
-                Plugin.Log.LogInfo("[FRAME-TIME] a3 g=" + game + " k=" + Names[k] + " cap=" + _cap[k] + " steady=" + (_steady[k] ? 1 : 0)
-                    + " reads_on=" + _readsOn[k] + " reads_win=" + _readsWin[k] + " writes_on=" + _writesOn[k]);
+                if (_drained[k])
+                    Plugin.Log.LogInfo("[FRAME-TIME] a3drain g=" + game + " k=" + Names[k] + " starts=" + _starts[k]
+                        + " nonempty=" + _nonempty[k] + " faults=" + _faults[k]);
+                else
+                    Plugin.Log.LogInfo("[FRAME-TIME] a3 g=" + game + " k=" + Names[k] + " cap=" + _refill[k] + " steady=" + (_steady[k] ? 1 : 0)
+                        + " reads_on=" + _readsOn[k] + " reads_win=" + _readsWin[k] + " writes_on=" + _writesOn[k]);
             }
         }
 
-        /// <summary>Every registered structure's calibration, from FtCalib.Run (outside live combat).</summary>
+        /// <summary>Every dependent row's calibration, from FtCalib.Run (outside live combat).</summary>
         internal static void Calibrate(int i, string why)
         {
             for (int k = 0; k < Count; k++)
             {
-                if (Names[k] == null) continue;
+                if (Names[k] == null || _drained[k]) continue;
                 if (_cal[k] == null)
                 {
                     Plugin.Log.LogWarning("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=a3 k=" + Names[k] + " failed: no calibration");
@@ -126,8 +191,9 @@ namespace CompetitiveRounds
                 var p = new long[Batches];
                 try
                 {
-                    _cal[k](false, 100);
-                    _cal[k](true, 100);
+                    int warm = Math.Min(100, _calN[k]);
+                    _cal[k](false, warm);
+                    _cal[k](true, warm);
                     for (int b = 0; b < Batches; b++)
                     {
                         u[b] = _cal[k](false, _calN[k]);

@@ -346,11 +346,14 @@ FREQ, FHAT = 10000000, 3000000000
 ENTRIES = P.expected_entries()
 SHAPES = sorted(set(s for e, s in ENTRIES))
 A3_DEP = [n for n, sid, kind, why in P.a3_spec() if kind == "dependent"]
+A3_DRAIN = [n for n, sid, kind, why in P.a3_spec() if kind == "drained"]
+# the plugin files holding the FtA3 registrations (mut_parse copies each)
+A3_SITES = ["CombatEvidence.cs", "SeatEvidence.cs", "IdentityClockEvidence.cs", "HitEvidence.cs", "PoisonSync.cs"]
 
 
 def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10, 20), f18="A", replay="settled", heavy_edge=0,
          drop_cal=(), drop_disp=(), drop_opened=(), shut_ic=(), drop_census=(), complete=True, routes="",
-         drop_a3=(), drop_a3cal=()):
+         drop_a3=(), drop_a3cal=(), a3_peak=None, drop_a3drain=(), a3_dirty=None):
     """A synthetic sitting, every line as FtFrames, FtCalib, FtCensus and FtDrive write it. Point costs: ON adds
     cost_us of C per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor
     case). The drop_* and shut_ic arguments remove or spoil records for the completeness controls."""
@@ -439,7 +442,11 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
         for k in A3_DEP:
             if (g, k) not in drop_a3:
                 L.append("[FRAME-TIME] a3 g=%d k=%s cap=32 steady=1 reads_on=%d reads_win=%d writes_on=%d"
-                         % (g, k, 2 * onlf, onlf // 4, 3 * onlf))
+                         % (g, k, 2 * onlf, (3 * onlf if a3_peak == (g, k) else onlf // 4), 3 * onlf))
+        for k in A3_DRAIN:
+            if (g, k) not in drop_a3drain:
+                L.append("[FRAME-TIME] a3drain g=%d k=%s starts=%d nonempty=%d faults=0"
+                         % (g, k, 12, 1 if a3_dirty == (g, k) else 0))
     if complete:
         L.append("[FRAME-TIME] sitting complete g=%d" % (games - 1))
     L.append("[FRAME-TIME] refusals why=quit pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
@@ -482,6 +489,14 @@ def test_a3_is_the_largest_per_game_window_rate_times_the_calibrated_difference(
         assert abs(rate[k] - rk) < 1e-12
         want += rk * d
     assert abs(v - want) < 1e-9 and v > 0
+    # the per-game maximum, not the last game's rate: a peak planted in an early game sets r_k_max
+    k = A3_DEP[0]
+    recs = P.read(_log(a3_peak=(3, k)))
+    v2, ds2, rate2, dk2 = P.a3(recs, last_game=P.LAST_GAME)
+    games = P.games_of(recs)
+    peak = [r for r in recs if r["kind"] == "a3" and r["k"] == k and r["g"] == 3][0]["reads_win"]
+    r3 = peak / sum(q["live_frames"] for q in games[3] if q["gate"] == 0)
+    assert r3 > 2 and abs(rate2[k] - r3) < 1e-12 and v2 > v, (rate2, r3)
 
 
 def test_a3_refuses_a_missing_line_or_calibration():
@@ -493,6 +508,65 @@ def test_a3_refuses_a_missing_line_or_calibration():
         P.a3(P.read(_log(drop_a3cal={(7, k)})), last_game=P.LAST_GAME)
     out = P.report(_log(drop_a3={(5, k)}))
     assert "U not computable" in out and "VERDICT B1 withheld" in out, out
+
+
+def test_a3_drained_rows_refuse_a_missing_line_or_a_point_that_started_holding_entries():
+    # ruling A1 part 3: a drained row's zero is checked by the build, never assumed
+    assert A3_DRAIN, "the inventory names no drained row"
+    k = A3_DRAIN[0]
+    v, ds, rate, dk = P.a3(P.read(_log()), last_game=P.LAST_GAME)
+    assert k not in rate and k not in dk
+    with pytest.raises(P.Refused, match="a3drain lines"):
+        P.a3(P.read(_log(drop_a3drain={(4, k)})), last_game=P.LAST_GAME)
+    with pytest.raises(P.Refused, match="nonempty"):
+        P.a3(P.read(_log(a3_dirty=(6, k))), last_game=P.LAST_GAME)
+    out = P.report(_log(a3_dirty=(6, k)))
+    assert "U not computable" in out and "VERDICT B1 withheld" in out, out
+
+
+def _survivor_ids():
+    here = os.path.dirname(os.path.abspath(__file__))
+    ids, dep = [], []
+    sec = None
+    for ln in open(os.path.join(here, "SURVIVORS.md"), encoding="utf-8"):
+        if ln.startswith("## "):
+            sec = ln.strip()
+            continue
+        m = re.match(r"\| (S\d\d) ", ln)
+        if not m:
+            continue
+        if sec == "## Survivors read live":
+            ids.append(m.group(1))
+        elif sec == "## Content-dependent rows and their steady state":
+            dep.append(m.group(1))
+    return ids, dep
+
+
+def test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row():
+    # ruling A1 part 2: the inventory is SURVIVORS.md's; part 3: removing a structure fails, a row the build does not
+    # register fails, a capacity typed instead of taken from the code constant fails
+    spec = P.a3_spec()
+    ids, dep = _survivor_ids()
+    sids = [sid for n, sid, kind, why in spec]
+    assert len(ids) >= 36 and sorted(sids) == sorted(ids) and len(set(sids)) == len(sids), (sids, ids)
+    kinds = dict((sid, kind) for n, sid, kind, why in spec)
+    for sid in dep:
+        assert kinds[sid] in ("dependent", "drained") or sid == "S18", (sid, kinds[sid])
+    assert kinds["S18"] == "zero"
+    plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
+    ft = open(os.path.join(plug, "FtA3.cs"), encoding="utf-8-sig").read()
+    src = "".join(open(os.path.join(plug, f), encoding="utf-8-sig").read() for f in A3_SITES)
+    live = [(n, kind) for n, sid, kind, why in spec if kind != "zero"]
+    m = re.search(r"internal const int Rows = (\d+);", ft)
+    assert m and int(m.group(1)) == len(live), "FtA3.Rows differs from the inventory's registered rows"
+    for n, kind in live:
+        assert re.search(r"\b%s = \d+" % n, ft), "FtA3 has no constant for %s" % n
+        call = "SetDrained" if kind == "drained" else "Set"
+        hits = re.findall(r"FtA3\.%s\(FtA3\.%s, \"%s\", ([^,)]+)" % (call, n, n), src)
+        assert len(hits) == 1, "%s: %d FtA3.%s registrations" % (n, len(hits), call)
+        if kind == "dependent":
+            assert not re.fullmatch(r"\s*\d+\s*", hits[0]) or hits[0].strip() == "1", \
+                "%s: refill typed as %s, not a code constant" % (n, hits[0])
 
 
 def test_a3_rows_need_a_kind_and_a_zero_row_its_reason():

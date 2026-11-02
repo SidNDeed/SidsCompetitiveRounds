@@ -1022,6 +1022,9 @@ namespace CompetitiveRounds
             int i = (head + n) % RECENT_CAP;
             if (n < RECENT_CAP) n++; else head = (head + 1) % RECENT_CAP;
             ring[i * 4] = pid; ring[i * 4 + 1] = sInit; ring[i * 4 + 2] = cord; ring[i * 4 + 3] = stamp;
+#if SCR_FRAMETIME
+            FtA3.Wrote(FtA3.CE_Recent);
+#endif
         }
 
         /// <summary>The last RECENT_CAP forces on one player (own: this seat's player),
@@ -1035,6 +1038,9 @@ namespace CompetitiveRounds
             int i = (head + n) % RECENT_CAP;
             if (n < RECENT_CAP) n++; else head = (head + 1) % RECENT_CAP;
             ring[i * 5] = pid; ring[i * 5 + 1] = sInit; ring[i * 5 + 2] = cord; ring[i * 5 + 3] = snd; ring[i * 5 + 4] = stamp;
+#if SCR_FRAMETIME
+            FtA3.Wrote(FtA3.CE_Recent);
+#endif
             if (own) { g.RfOwnHead = head; g.RfOwnN = n; } else { g.RfOppHead = head; g.RfOppN = n; }
         }
 
@@ -1044,6 +1050,9 @@ namespace CompetitiveRounds
         /// older unmatched contact of that projectile exists, else `c_unpaired`.</summary>
         private static void FillContact(Game g, int pid, int stamp)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_B5c);
+#endif
             var raw = g.B5c.Raw;
             int w = g.B5c.Width, count = g.B5c.Count;
             int start = count > PAIR_CAP ? count - PAIR_CAP : 0;
@@ -1102,6 +1111,9 @@ namespace CompetitiveRounds
             g.B5tot[6]++;
             if (since >= 0 && since < 300) g.B5tot[7]++;
             int o = g.B5c.NextSlot();
+#if SCR_FRAMETIME
+            if (o >= 0) FtA3.Wrote(FtA3.CE_B5c);
+#endif
             if (o < 0) return;
             var a = g.B5c.Raw;
             a[o] = pid; a[o + 1] = sInit; a[o + 2] = cord; a[o + 3] = ServerNow(); a[o + 4] = since; a[o + 5] = 0; a[o + 6] = W.OWN_SINCE_NONE;
@@ -1629,6 +1641,9 @@ namespace CompetitiveRounds
             int ord = own ? g.DeathOrdOwn++ : g.DeathOrdOpp++;
             int cause = own ? g.LastSrcOwn : g.LastSrcOpp;
             if (own) g.LastSrcOwn = W.DEATH_CAUSE_UNKNOWN; else g.LastSrcOpp = W.DEATH_CAUSE_UNKNOWN;
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_Recent);
+#endif
             var rows = own ? g.BdS : g.BdO;
             var ring = own ? g.RhOwn : g.RhOpp;
             int head = own ? g.RhOwnHead : g.RhOppHead, n = own ? g.RhOwnN : g.RhOppN;
@@ -1804,6 +1819,9 @@ namespace CompetitiveRounds
                     int i = (g.PosHead + g.PosN) % POS_CAP;
                     if (g.PosN < POS_CAP) g.PosN++; else g.PosHead = (g.PosHead + 1) % POS_CAP;
                     g.PosT[i] = now; g.PosX[i] = p.x; g.PosY[i] = p.y;
+#if SCR_FRAMETIME
+                    FtA3.Wrote(FtA3.CE_Pos);
+#endif
                 }
                 CloseWindows(g, now);
                 RxSample(now);
@@ -1813,7 +1831,13 @@ namespace CompetitiveRounds
             {
                 g.NextPingMs = sw + 1000;
                 int ping = PhotonNetwork.GetPing();
+#if SCR_FRAMETIME
+                int ftPingN = g.PingN;
+#endif
                 if (ping > 0 && g.PingN < PING_CAP) { g.PingBin[Math.Min(ping, PING_BIN_CAP)]++; g.PingN++; }
+#if SCR_FRAMETIME
+                if (g.PingN != ftPingN) FtA3.Wrote(FtA3.CE_Ping);
+#endif
             }
             DrainWaits(g, now);
             DrainMasks(g);
@@ -1978,6 +2002,9 @@ namespace CompetitiveRounds
         /// the per-millisecond bins: exact below PING_BIN_CAP ms, no sort (M8).</summary>
         private static int LHatMs(Game g)
         {
+#if SCR_FRAMETIME
+            FtA3.Read(FtA3.CE_Ping);
+#endif
             if (g.PingN == 0) return -1;
             long k = (g.PingN - 1) / 2, acc = 0;
             for (int i = 0; i <= PING_BIN_CAP; i++)
@@ -2072,6 +2099,9 @@ namespace CompetitiveRounds
                 }
                 if (g.PosN == 0 || _ownP == null) continue;
                 // a1m: own position at (stamp - L^); a1n: the nearest over [stamp - 2L^ - W, stamp]
+#if SCR_FRAMETIME
+                FtA3.Read(FtA3.CE_Pos);
+#endif
                 int want = stamp - lhat, lo = stamp - 2 * lhat - E.A1N_W_MS;
                 int best = -1; long bestD = long.MaxValue; long bestErr = 0; bool haveN = false;
                 for (int k = 0; k < g.PosN && k < POS_CAP; k++)
@@ -2367,6 +2397,147 @@ namespace CompetitiveRounds
                 HtUpsert(g, 7, 1, 99999, 5);
             }
             return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+        }
+
+        /// <summary>FtA3.RegisterAll: this component's A3 rows (SURVIVORS.md S01, S02, S03, S05, S06, S11 dependent;
+        /// S07, S08, S10 drained). Each capacity is the code constant that sizes the structure.</summary>
+        internal static void FtA3Rows()
+        {
+            FtA3.Set(FtA3.CE_Top, "CE_Top", TOP_CAP, false, FtCalTop, 2000);
+            FtA3.Set(FtA3.CE_Ht, "CE_Ht", HT_CAP, false, FtCalHt, 2000);
+            FtA3.Set(FtA3.CE_Ping, "CE_Ping", PING_BIN_CAP, false, FtCalPing, 500);
+            FtA3.Set(FtA3.CE_Pos, "CE_Pos", POS_CAP, true, FtCalPos, 500);
+            FtA3.Set(FtA3.CE_Recent, "CE_Recent", RECENT_CAP, false, FtCalRecent, 5000);
+            FtA3.Set(FtA3.CE_B5c, "CE_B5c", PAIR_CAP + OUTSIDE_SCAN_CAP, false, FtCalB5c, 2000);
+            FtA3.SetDrained(FtA3.CE_Wait, "CE_Wait", () => { var g = _g; return g == null ? 0 : g.WN; });
+            FtA3.SetDrained(FtA3.CE_Rings, "CE_Rings", () => { var g = _g; return g == null ? 0 : g.Mask.N + g.Aim.N + g.Res.N + g.Pack.N; });
+            FtA3.SetDrained(FtA3.CE_Gun, "CE_Gun", () => { var g = _g; return g == null ? 0 : g.Own.RingN + g.Opp.RingN; });
+        }
+
+        private static Game FtScratch()
+        {
+            if (_ftHtGame == null) _ftHtGame = new Game();
+            return _ftHtGame;
+        }
+
+        internal static long FtSink;
+
+        /// <summary>S03: the real LHatMs. EMPTY: no samples. CAPACITY in its costliest content: PING_CAP samples, all in
+        /// the last bin, so the loop walks every bin.</summary>
+        internal static long FtCalPing(bool full, int n)
+        {
+            var g = FtScratch();
+            Array.Clear(g.PingBin, 0, g.PingBin.Length);
+            long s = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                g.PingN = full ? PING_CAP : 0;
+                g.PingBin[PING_BIN_CAP] = full ? PING_CAP : 0;
+                s += LHatMs(g);
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            FtSink += s;
+            return t;
+        }
+
+        /// <summary>S05: DrainAim's own-aim window, from `int want` to the A1n add (a line-for-line copy of
+        /// CombatEvidence.DrainAim's loop over the Pos ring and the two adds after it; the line-of-sight cast before the
+        /// adds reads the players, not the ring, and is left out). EMPTY: no positions (the real code skips the loop).
+        /// CAPACITY in its costliest content: POS_CAP positions, every one inside [stamp - 2 L^ - W, stamp], so each
+        /// entry also runs SignedMrad.</summary>
+        internal static long FtCalPos(bool full, int n)
+        {
+            var g = FtScratch();
+            int stamp = 500000, lhat = 0;
+            double px = 1, py = 2, fx = 0.6, fy = 0.8;
+            bool vis = false;
+            for (int i = 0; i < POS_CAP; i++) { g.PosT[i] = stamp - i; g.PosX[i] = 3 + i; g.PosY[i] = 4 - i; }
+            g.PosHead = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                g.PosN = full ? POS_CAP : 0;
+                if (g.PosN == 0) continue;
+                int want = stamp - lhat, lo = stamp - 2 * lhat - E.A1N_W_MS;
+                int best = -1; long bestD = long.MaxValue; long bestErr = 0; bool haveN = false;
+                for (int k = 0; k < g.PosN && k < POS_CAP; k++)
+                {
+                    int i = (g.PosHead + k) % POS_CAP;
+                    long d = Math.Abs((long)C.WrapDiff(g.PosT[i], want));
+                    if (d < bestD) { bestD = d; best = i; }
+                    if (C.WrapDiff(g.PosT[i], lo) >= 0 && C.WrapDiff(stamp, g.PosT[i]) >= 0)
+                    {
+                        long e = SignedMrad(fx, fy, g.PosX[i] - px, g.PosY[i] - py);
+                        if (!haveN || Math.Abs(e) < Math.Abs(bestErr)) { bestErr = e; haveN = true; }
+                    }
+                }
+                if (best >= 0) g.A1m.Add(SignedMrad(fx, fy, g.PosX[best] - px, g.PosY[best] - py), !vis);
+                if (haveN) g.A1n.Add(bestErr, !vis);
+            }
+            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+        }
+
+        private static readonly long[] _ftDieRow = new long[8 + RECENT_CAP * 9];
+
+        /// <summary>S06: DieBody's two ring copies (a line-for-line copy of its two `for (int h = 0; h &lt; RECENT_CAP;
+        /// h++)` loops; the rest of DieBody reads the player, not the rings). EMPTY: both rings empty. CAPACITY: both
+        /// rings holding RECENT_CAP entries.</summary>
+        internal static long FtCalRecent(bool full, int n)
+        {
+            var g = FtScratch();
+            for (int i = 0; i < RECENT_CAP * 4; i++) g.RhOwn[i] = 1000 + i;
+            for (int i = 0; i < RECENT_CAP * 5; i++) g.RfOwn[i] = 2000 + i;
+            var a = _ftDieRow;
+            var ring = g.RhOwn; var fring = g.RfOwn;
+            int now = 600000, o = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                int head = 0, n1 = full ? RECENT_CAP : 0, fhead = 0, fn = full ? RECENT_CAP : 0;
+                for (int h = 0; h < RECENT_CAP; h++)
+                {
+                    int f = o + 8 + h * 4;
+                    if (h < n1)
+                    {
+                        int i = ((head + n1 - 1 - h) % RECENT_CAP) * 4;
+                        a[f] = ring[i]; a[f + 1] = ring[i + 1]; a[f + 2] = ring[i + 2];
+                        a[f + 3] = E.Clamp(C.WrapDiff(now, ring[i + 3]), 0, 600000);
+                    }
+                    else { a[f] = -1; a[f + 1] = 0; a[f + 2] = -1; a[f + 3] = -1; }
+                }
+                for (int h = 0; h < RECENT_CAP; h++)
+                {
+                    int f = o + 8 + RECENT_CAP * 4 + h * 5;
+                    if (h < fn)
+                    {
+                        int i = ((fhead + fn - 1 - h) % RECENT_CAP) * 5;
+                        a[f] = fring[i]; a[f + 1] = fring[i + 1]; a[f + 2] = fring[i + 2]; a[f + 3] = fring[i + 3];
+                        a[f + 4] = E.Clamp(C.WrapDiff(now, fring[i + 4]), 0, 600000);
+                    }
+                    else { a[f] = -1; a[f + 1] = 0; a[f + 2] = -1; a[f + 3] = -1; a[f + 4] = -1; }
+                }
+            }
+            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+        }
+
+        /// <summary>S11: the real FillContact. EMPTY: no B5c rows. CAPACITY in its costliest content: B5c full of rows of
+        /// another projectile, so both scans run to their caps and nothing pairs.</summary>
+        internal static long FtCalB5c(bool full, int n)
+        {
+            var g = FtScratch();
+            var raw = g.B5c.Raw;
+            int w = g.B5c.Width;
+            for (int i = 0; i < g.B5c.Cap; i++) { raw[i * w] = -7; raw[i * w + 6] = W.OWN_SINCE_NONE; }
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int j = 0; j < n; j++)
+            {
+                g.B5c.Count = full ? g.B5c.Cap : 0;
+                FillContact(g, 5, 0);
+            }
+            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            g.B5c.Count = 0;
+            return t;
         }
 #endif
         // -- the game-over capture and the build ----------------------------------------------------

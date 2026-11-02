@@ -201,6 +201,11 @@ namespace CompetitiveRounds
         private static readonly SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>[] _fPoint = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>[FLUSH_CAP];
         private static readonly SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>[] _fGame = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>[FLUSH_CAP];
         private static int _fCount, _fDropped;
+#if SCR_FRAMETIME
+        /// <summary>FtA3.RegisterAll: SURVIVORS.md S24, the flush queue, a drained row (held at the point end,
+        /// emptied by the next Drain).</summary>
+        internal static void FtA3Rows() { FtA3.SetDrained(FtA3.HE_Flush, "HE_Flush", () => _fCount); }
+#endif
         private static readonly Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>> _spareP = new Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>>(FLUSH_CAP + 1);
         private static readonly Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>> _spareG = new Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>>(FLUSH_CAP + 1);
 
