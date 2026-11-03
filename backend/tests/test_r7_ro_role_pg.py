@@ -425,10 +425,36 @@ def test_cluster_read_names_what_is_missing():
         "step 1 has not run here)",
         "the template database rf8_ro_absent_tmpl does not exist on this cluster "
         "(provision.sql step 2 has not run here)"], got
-    # template1 exists and is a template, but PUBLIC may CONNECT to it and
-    # (on a superuser-initialised cluster) it is owned by the bootstrap user.
+    # The postgres database exists on every cluster and initdb makes it no
+    # template; provisioning never changes it, so its sentence is named on
+    # every cluster.
+    got = run(ro_role.read_cluster(ADMIN_DSN, template="postgres"))
+    assert "the template postgres has datistemplate=False, provisioned as True" in got, got
+    # template1's sentences are exactly the properties a separate read finds
+    # unmet: PUBLIC may CONNECT to it on 55432, and a seat may have revoked
+    # that, so the expectation is read, not assumed.
     got = run(ro_role.read_cluster(ADMIN_DSN, template="template1"))
-    assert "the template template1 has public_connect=True, provisioned as False" in got, got
+    want = run(_template_unmet(ADMIN_DSN, "template1"))
+    assert got == want, (got, want)
+
+
+async def _template_unmet(dsn, template):
+    """The provisioned template properties `template` does not hold, read
+    through pg_roles and the expanded ACL (not ro_role.TEMPLATE_SQL), in
+    read_cluster's sentence form."""
+    conn = await asyncpg.connect(ro_role.dsn_for(dsn, "postgres"))
+    try:
+        r = await conn.fetchrow(
+            "SELECT d.datistemplate, o.rolname AS owner, EXISTS (SELECT 1 FROM "
+            "aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a "
+            "WHERE a.grantee = 0 AND a.privilege_type = 'CONNECT') AS public_connect "
+            "FROM pg_database d JOIN pg_roles o ON o.oid = d.datdba WHERE d.datname = $1",
+            template)
+    finally:
+        await conn.close()
+    want = (("datistemplate", True), ("owner", "postgres"), ("public_connect", False))
+    return ["the template %s has %s=%r, provisioned as %r" % (template, k, r[k], v)
+            for k, v in want if r[k] != v]
 
 
 def test_identity_assertion_refuses_another_role(env):
