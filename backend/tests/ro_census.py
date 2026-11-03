@@ -114,13 +114,122 @@ def forms(path, source):
     return sorted(out)
 
 
+# ---------------------------------------------------------------------------
+# The complete layer (ruling REHEARSAL-R8-A1 G1): complete opener forms.
+# The coarse forms above bind an opener's callee spelling and nothing else,
+# so a call that keeps its callee and changes its arguments (keyword
+# unpacking, a different positional DSN) keeps every coarse form, and a
+# getattr whose attribute name is built at run time yields no form at all.
+# This layer binds every node of an opener call and refuses, by shape, every
+# construction it does not recognise. Each file's layer is census key
+# `file + COMPLETE`, frozen once at the round-8 tip effc36c6 (a judgement
+# recorded in the round-9 notes). Kinds:
+#
+#   call      every Call whose callee is an opener name (a Name in
+#             OPENER_NAMES, or an Attribute whose attr is one) spelled as a
+#             dotted name chain, with no starred argument and no keyword
+#             unpacking: the whole call as written (callee, every positional
+#             argument, every keyword name and value, their order);
+#   ref       every Load of an opener name that is not a call's callee (an
+#             alias capture, a callback, a receiver): its parent node as
+#             written;
+#   dynamic   every dynamic attribute or module access, whatever it names:
+#             getattr/setattr/delattr/hasattr whose attribute name is not a
+#             string literal (a Name, a concatenation, an f-string, ...),
+#             any call of vars, globals, locals, __import__, eval, exec,
+#             attrgetter, methodcaller or import_module, any __dict__,
+#             __getattribute__ or __getattr__ attribute, and sys.modules: the
+#             node as written;
+#   refuse    an opener call with a starred argument or keyword unpacking,
+#             or whose callee is not a dotted name chain: refused by shape;
+#             the freeze holds none (the one declared exception, FORWARDING,
+#             is a `call`).
+#
+# A form of any kind the freeze lacks is refused by the census diff; a
+# `refuse` form is refused whatever the freeze holds.
+COMPLETE = "#complete"
+DYNAMIC_ATTR_CALLS = frozenset({"getattr", "setattr", "delattr", "hasattr"})
+DYNAMIC_BUILTINS = frozenset({"vars", "globals", "locals", "__import__", "eval", "exec"})
+DYNAMIC_CALLS = frozenset({"attrgetter", "methodcaller", "import_module"})
+DYNAMIC_ATTRS = frozenset({"__dict__", "__getattribute__", "__getattr__"})
+# Declared exceptions to the keyword-unpacking refusal, one by one, each
+# with its reason: (file, the complete call as written).
+FORWARDING = {
+    ("api/database.py",
+     "_sqlalchemy_create_async_engine(url, hide_parameters=True, **options)"):
+        "database.create_async_engine is the module's forwarding wrapper "
+        "(def create_async_engine(url, **options)); every keyword it forwards "
+        "comes from a call of create_async_engine, and each such call is "
+        "itself a complete `call` form here (literal keyword names, frozen), "
+        "so the forwarded keywords are bound at their call sites",
+}
+
+
+def _name_of(func):
+    """The opener name a callee or reference spells (its last segment)."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def complete_forms(path, source):
+    """The sorted list of (kind, spelling) forms of the complete layer of
+    `source` (`path` relative to backend/, as in the census)."""
+    out = []
+    tree = ast.parse(source, filename=path)
+    parent = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = _name_of(node.func)
+            if name in OPENER_NAMES:
+                text = ast.unparse(node)
+                unpacked = any(k.arg is None for k in node.keywords) or any(
+                    isinstance(a, ast.Starred) for a in node.args)
+                if (path, text) in FORWARDING:
+                    out.append(("call", text))
+                elif unpacked or _dotted(node.func) is None:
+                    out.append(("refuse", text))
+                else:
+                    out.append(("call", text))
+            if name in DYNAMIC_ATTR_CALLS:
+                literal = (len(node.args) >= 2 and not any(
+                    isinstance(a, ast.Starred) for a in node.args[:2])
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)
+                    and not any(k.arg is None for k in node.keywords))
+                if not literal:
+                    out.append(("dynamic", ast.unparse(node)))
+            elif (isinstance(node.func, ast.Name) and name in DYNAMIC_BUILTINS) \
+                    or name in DYNAMIC_CALLS:
+                out.append(("dynamic", ast.unparse(node)))
+        if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load) \
+                and _name_of(node) in OPENER_NAMES:
+            up = parent.get(node)
+            if not (isinstance(up, ast.Call) and up.func is node):
+                out.append(("ref", ast.unparse(up) if up is not None else ast.unparse(node)))
+        if isinstance(node, ast.Attribute) and (
+                node.attr in DYNAMIC_ATTRS or _dotted(node) == "sys.modules"):
+            out.append(("dynamic", ast.unparse(node)))
+    return sorted(out)
+
+
+def file_forms(rel, source):
+    """Both layers of one file: {rel: forms, rel + COMPLETE: complete forms}."""
+    return {rel: forms(rel, source), rel + COMPLETE: complete_forms(rel, source)}
+
+
 def census(root, files):
-    """{file: sorted forms} over `files` (paths relative to `root`); a file
-    with no form maps to []."""
+    """{file: sorted forms, file + COMPLETE: sorted complete forms} over
+    `files` (paths relative to `root`); a file with no form maps to []."""
     got = {}
     for rel in files:
         with open(os.path.join(root, rel), encoding="utf-8") as fh:
-            got[rel] = forms(rel, fh.read())
+            got.update(file_forms(rel, fh.read()))
     return got
 
 
