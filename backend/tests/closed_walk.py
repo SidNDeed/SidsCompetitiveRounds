@@ -960,15 +960,17 @@ class Bindings:
 
     # --- the frozen execute lookup (round 8, M1) -------------------------
 
-    def execute_kind(self, call, reads):
-        """'read' when the execute `call` stands at a position of `reads`,
-        the walk's frozen read table (round 8, ruling REHEARSAL-FOUR-R7-A1,
-        M1: the positions of ro_covered.COVERED whose OUTCOME under the
-        read-only role is 'ok'); 'write' for every other execute, one at a
-        position in no table, or one the walk cannot place, included. No
-        SQL text is read: the static S analysis is retired (rule (1)(c))."""
-        if _position(self, call) in reads:
-            return "read"
+    def execute_kind(self, call, table):
+        """The answer the walk's frozen table gives for the execute `call`'s
+        position (round 8, ruling REHEARSAL-FOUR-R7-A1 M1, revised by R-A):
+        'read' at a position of ro_covered.COVERED measured green under the
+        read-only role, 'lock' at a position of ro_covered.WRITERS, and
+        'write' for every other execute, one at a position in no table, or
+        one the walk cannot place (edited, planted, ambiguous), included.
+        No SQL text is read: the static S analysis is retired."""
+        pos = _position(self, call)
+        if pos in table:
+            return table[pos]
         return "write"
 
 
@@ -1579,8 +1581,9 @@ class Visitor:
             for _kind, a in call_arguments(call):
                 self.visit(a)
             kind = self._check(n, self.b.execute_kind, call, self.p.sql)
-            if kind != "read":
-                # anything but a frozen read position is a write
+            if kind not in ("read", "lock"):
+                # the frozen table answers read, lock or write; anything
+                # else is a write
                 kind = "write"
             self.effects.append(("sql", kind))
             self.p.met["execute"] += 1

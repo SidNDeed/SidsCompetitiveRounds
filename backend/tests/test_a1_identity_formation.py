@@ -666,15 +666,14 @@ def _admit_handler(tree, scope, src):
     _admit_source(tree.body[0], scope, src)
 
 
-# The frozen read table (round 8, ruling REHEARSAL-FOUR-R7-A1, M1; rule
-# (1)(c)): an execute is 'read' only at a position (file, line, end line) of
-# ro_covered.COVERED whose OUTCOME under the read-only role is 'ok'
-# (closed_walk.Bindings.execute_kind); every other execute, a writer, a
-# covered position the role did not reach (ruling (a)) and a position in
-# neither table included, is 'write'. The static S analysis (the SQL lexer
-# and its allow-lists) is retired.
-_A1_READS = frozenset((f, ln, end) for f, ln, end in (
-    e[1:4] for e in _ro.COVERED if _ro.OUTCOME[e] == "ok"))
+# The frozen lookup table (round 8, ruling REHEARSAL-FOUR-R7-A1 M1, revised
+# by R-A; closed_walk.Bindings.execute_kind): a position (file, line, end
+# line) answers 'read' when it is in ro_covered.COVERED and green under the
+# read-only role, 'lock' when it is in ro_covered.WRITERS; every other
+# execute, a covered position the role did not reach and a position in no
+# table included, is 'write'. The static S analysis is retired.
+_A1_TABLE = _ro.lookup_table()
+_A1_READS = frozenset(p for p, k in _A1_TABLE.items() if k == "read")
 
 # Plain calls a step may make that touch no session: builtins and the clock,
 # id and log functions the spans use.
@@ -701,7 +700,7 @@ def _policy(scope=None):
     key = id(scope)
     if key not in _POLICIES:
         _POLICIES[key] = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS,
-                                    _PURE_AWAITS, _A1_READS)
+                                    _PURE_AWAITS, _A1_TABLE)
         _POLICIES[key].grammar = _A1_GRAMMAR
     return _POLICIES[key]
 
@@ -3994,7 +3993,7 @@ def test_r4_closed_walk_names_resolve_through_the_function(helper, want):
     fn = getattr(scope, helper)
     # .format added for the template program, so it reaches the SQL read
     policy = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS | {"format"},
-                        _PURE_AWAITS, _A1_READS)
+                        _PURE_AWAITS, _A1_TABLE)
     if isinstance(want, str):
         with pytest.raises(Unclassified) as e:
             _cw.helper_effects(fn, policy)
@@ -4179,7 +4178,7 @@ def test_r5_closed_walk_round_5s_programs(helper, want):
     scope = _r5_cw_scope()
     fn = getattr(scope, helper)
     policy = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS,
-                        _A1_READS)
+                        _A1_TABLE)
     if isinstance(want, str):
         with pytest.raises(Unclassified) as e:
             _cw.helper_effects(fn, policy)
@@ -4923,12 +4922,12 @@ _SR_RETIRED = ("SqlLists", "_SQL_END_WORDS", "_SQL_OTHER_COMMANDS", "_DML",
 
 
 def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
-    """The lookup, position by position: every COVERED position whose
-    OUTCOME is 'ok' reads; every other COVERED position (ruling (a): the reads
-    the role did not reach: 22 positions in this COVERED) and every WRITERS position (ruling (b):
-    main.py:16839 and :51703 named) is a write; a real execute in neither
-    table is a write; the key holds the file (a WRITERS line under another
-    file's name in the table is still a write)."""
+    """The lookup, position by position (ruling R-A): every COVERED
+    position whose OUTCOME is green reads; every WRITERS position locks
+    (main.py:16839 and :51703 named: 'ok' under the role, so the walk's lock
+    rule alone bounds them); every other COVERED position (the reads the
+    role did not reach) and a real execute in no table is a write; the key
+    holds the file (a WRITERS line under another file's name is a write)."""
     def _sr_modules():
         import match_hold as _mh
         import match_report_window as _mrw
@@ -4949,22 +4948,22 @@ def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
         assert len(hits) == 1, (entry, len(hits))
         return b, hits[0]
 
-    ok = {e[1:4] for e in _ro.COVERED if _ro.OUTCOME[e] == "ok"}
-    assert _A1_READS == ok and len(ok) == 13, sorted(_A1_READS ^ ok)
-    unreached = [e for e in _ro.COVERED if _ro.OUTCOME[e] != "ok"]
-    assert len(unreached) == 22, len(unreached)
+    ok = {e[1:4] for e in _ro.COVERED if _ro.green(_ro.OUTCOME[e])}
+    assert _A1_READS == ok, sorted(_A1_READS ^ ok)
+    locks = {e[1:4] for e in _ro.WRITERS}
+    assert len(locks) == 14 and {k for p, k in _A1_TABLE.items() if p in locks} == {"lock"}
+    assert set(_A1_TABLE) == ok | locks
     for e in _ro.COVERED + _ro.WRITERS:
         b, c = _sr_placed(e)
-        want = "read" if e[1:4] in ok else "write"
-        assert b.execute_kind(c, _A1_READS) == want, (e, want)
+        want = "read" if e[1:4] in ok else "lock" if e[1:4] in locks else "write"
+        assert b.execute_kind(c, _A1_TABLE) == want, (e, want)
     for ln in (16839, 51703):
         e = [w for w in _ro.WRITERS if w[1] == "main.py" and w[2] == ln][0]
         b, c = _sr_placed(e)
-        assert b.execute_kind(c, _A1_READS) == "write", e
+        assert b.execute_kind(c, _A1_TABLE) == "lock", e
         # the key holds the file: the same line and end under another file
-        assert b.execute_kind(c, frozenset({("tournaments.py",) + e[2:4]})
-                              ) == "write", e
-        assert b.execute_kind(c, frozenset({e[1:4]})) == "read", e
+        assert b.execute_kind(c, {("tournaments.py",) + e[2:4]: "lock"}) == "write", e
+        assert b.execute_kind(c, {e[1:4]: "lock"}) == "lock", e
     known = {e[1:4] for e in _ro.COVERED + _ro.WRITERS}
     d = _ast.parse(_textwrap.dedent(_inspect.getsource(main.queue_poll))).body[0]
     b = _cw.Bindings(main, d)
@@ -4972,7 +4971,7 @@ def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
              and _cw._position(b, c) is not None
              and _cw._position(b, c) not in known]
     assert other, "queue_poll has no execute in neither table"
-    assert {b.execute_kind(c, _A1_READS) for c in other} == {"write"}
+    assert {b.execute_kind(c, _A1_TABLE) for c in other} == {"write"}
     # a planted copy of a covered 'ok' call cannot be placed: a write
     e = [x for x in _ro.COVERED if _ro.OUTCOME[x] == "ok"][0]
     _b, c = _sr_placed(e)
@@ -4980,14 +4979,14 @@ def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
         "async def _sr_planted(db):\n    await " + _ast.unparse(c) + "\n").body[0])
     call = [x for x in _ast.walk(planted.where) if _cw._is_execute(x)][0]
     assert _cw._position(planted, call) is None
-    assert planted.execute_kind(call, _A1_READS) == "write"
+    assert planted.execute_kind(call, _A1_TABLE) == "write"
 
 
 def test_r8_sr_every_walked_execute_is_classified_by_the_lookup(monkeypatch):
     """Every execute the real a1 walks visit is classified by the frozen
-    lookup and by nothing else: each recorded kind is 'read' exactly when
-    its position is in _A1_READS; the walks visit at least one read and one
-    write; and closed_walk holds no S symbol (each retired name occurs in
+    lookup and by nothing else: each recorded kind is the table's answer
+    for its position (_A1_TABLE, 'write' when absent); the walks visit a
+    read, a lock and a write; and closed_walk holds no S symbol (each retired name occurs in
     its source 0 times)."""
     import pathlib
     import sys as _sys
@@ -4999,18 +4998,16 @@ def test_r8_sr_every_walked_execute_is_classified_by_the_lookup(monkeypatch):
 
     def spy(self, call, reads):
         got = orig(self, call, reads)
-        seen.append((_cw._position(self, call), got, reads is _A1_READS))
+        seen.append((_cw._position(self, call), got, reads is _A1_TABLE))
         return got
 
     monkeypatch.setattr(_cw.Bindings, "execute_kind", spy)
     _a1_real_walks()
     assert seen and all(t for _p, _k, t in seen), seen[:3]
-    assert all(k == ("read" if p in _A1_READS else "write")
-               for p, k, _t in seen), [x for x in seen
-                                       if x[1] != ("read" if x[0] in _A1_READS
-                                                   else "write")]
+    wrong = [x for x in seen if x[1] != _A1_TABLE.get(x[0], "write")]
+    assert wrong == [], wrong
     kinds = {k for _p, k, _t in seen}
-    assert kinds == {"read", "write"}, kinds
+    assert kinds == {"read", "lock", "write"}, kinds
     text = (pathlib.Path(__file__).resolve().parent / "closed_walk.py"
             ).read_text(encoding="utf-8")
     left = {n: len(_re.findall(r"\b" + _re.escape(n) + r"\b", text))

@@ -158,7 +158,7 @@ def _is_db_rollback(stmt, b):
 # closed_walk's one shared visitor (ruling REHEARSAL-FOUR-R3): its NODE_TABLE
 # names every concrete ast class, a call is classified by its callee shape and
 # by every argument kind, and an execute is 'read' only at a frozen read
-# position (round 8, M1; _GATE_READS).  No other walker reads a span, and nothing falls back to one.  The
+# position (round 8, M1 and R-A; _GATE_TABLE).  No other walker reads a span, and nothing falls back to one.  The
 # lists below are positive: an entry is here because a real span of main.py or
 # match_hold.py, or the design, needs it.  SHAPES_MET counts the statement
 # shapes a walk met, per walked function, and each policy's `met` counts the
@@ -180,13 +180,13 @@ _PLAIN_AWAITS = frozenset()
 _SESSIONS = ("db", "ctx.db")
 # The one exception a refusal raises.
 _REFUSAL_EXCEPTIONS = frozenset({"HTTPException"})
-# The frozen read table (round 8, ruling REHEARSAL-FOUR-R7-A1, M1; rule
-# (1)(c)): an execute is 'read' only at a position (file, line, end line) of
-# ro_covered.COVERED whose OUTCOME under the read-only role is 'ok'
-# (closed_walk.Bindings.execute_kind); every other execute is 'write'. The
-# static S analysis (the SQL lexer and its allow-lists) is retired.
-_GATE_READS = frozenset(e[1:4] for e in ro_covered.COVERED
-                        if ro_covered.OUTCOME[e] == "ok")
+# The frozen lookup table (round 8, ruling REHEARSAL-FOUR-R7-A1 M1, revised
+# by R-A; closed_walk.Bindings.execute_kind): 'read' at a position of
+# ro_covered.COVERED green under the read-only role, 'lock' at a position of
+# ro_covered.WRITERS (a locking read is accepted before the gate, the
+# design's own order), 'write' for every other execute. The static S
+# analysis is retired.
+_GATE_TABLE = ro_covered.lookup_table()
 # A hold refusal may instead answer the request id another transaction
 # already recorded, from that record alone (match_hold._open_replay: "Acts
 # on nothing and writes nothing"): a replay on this list, whose own walk by
@@ -327,7 +327,7 @@ def _gate_policy(scope):
     key = id(scope)
     if key not in _GATE_POLICIES:
         p = _cw.Policy(scope, _PLAIN_CALLS, _PLAIN_METHODS, _PLAIN_AWAITS,
-                       _GATE_READS, session=_SESSIONS)
+                       _GATE_TABLE, session=_SESSIONS)
         p.gate_kinds = {}
         p.helper_hook = lambda fn, p=p: _helper_kind(fn, p)
         p.grammar = _GATE_GRAMMAR

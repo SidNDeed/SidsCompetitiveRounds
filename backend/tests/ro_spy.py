@@ -4,9 +4,9 @@ about (round 8, M1: the static S analysis is retired): each call of
 closed_walk.Bindings.execute_kind, with the position the lookup itself
 places the call at (closed_walk._position: the walked function's module
 file, the call's line and end line), the innermost enclosing function of
-that module, whether the position is in the read table the walk passed,
-and the kind the lookup returned ('read' or 'write') or the exception it
-raised.
+that module, the answer the table the walk passed holds for the position
+('write' when absent), and the kind the lookup returned ('read', 'lock' or
+'write') or the exception it raised.
 
 A call the lookup cannot place is recorded with line None: status
 'synthetic' when the walked definition is in no definition of its module
@@ -56,7 +56,7 @@ def _kind(self, call, reads, *args, **kwargs):
            "line": pos[1] if pos else None, "end": pos[2] if pos else None,
            "span": _span(self, pos[1]) if pos else None,
            "status": "real" if pos else _status(self),
-           "in_reads": bool(pos is not None and pos in reads)}
+           "table_kind": reads.get(pos, "write") if pos is not None else "write"}
     try:
         kind = _ORIG_KIND(self, call, reads, *args, **kwargs)
     except Exception as e:

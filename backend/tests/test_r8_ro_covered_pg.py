@@ -5,8 +5,9 @@ REHEARSAL-FOUR-R7-A1 M1, R7-A2).
    walks) under the ro_spy plugin; every execute position the walks ask the
    frozen lookup about inside backend/api is collected (round 8, M1: the S
    analysis is retired), and the set must equal the frozen lists
-   ro_covered.COVERED and ro_covered.WRITERS together, exactly, both ways:
-   a visited position in neither table is a finding. No position may be
+   ro_covered.COVERED, ro_covered.WRITERS and ro_covered.VISITED_WRITES
+   (ruling R-C) together, exactly, both ways: a visited position in no
+   table is a finding. No position may be
    ambiguous, every answer is the read table's, and the walks must pass.
 
 2. Execution. A clone of scr_seat_ro_tmpl is built by the harness under the
@@ -26,6 +27,19 @@ REHEARSAL-FOUR-R7-A1 M1, R7-A2).
    main.py:51703, pg_advisory_xact_lock), 'ok' as measured: writers by S
    whose bound the role does not measure.
 
+3. Grant run (ruling R-B). Each driver holding a COVERED position the
+   role did not reach runs again on a READ WRITE session as the role, with
+   the table privileges of the statement that refused first on its path
+   (ro_covered.REFUSER_GRANTS) granted for that run only; the grant layer
+   (42501) refuses every other write. Around the position's own statement
+   the transaction's write counters are read (ro_covered.CountingSession):
+   the position is a read only when it succeeds with a zero delta,
+   OUTCOME ('ok-under-grant', grants, 0, the role's own outcome). Every
+   other unreached position keeps its role outcome and its grant run is
+   pinned in GRANT_OUTCOME (the measured reason it stays a write). A
+   control plants a write under a grant: refused with 42501 when its table
+   is not granted, counted (a nonzero delta, not green) when it is.
+
 Runs under CF_TEST_PG_DSN naming an admin DSN (superuser, or LOGIN
 CREATEDB). Never skips. RO8_ENUM_FROM (a JSON of a previous enumeration of
 the same tree) replaces step 1's live walk run; it exists for the mutant
@@ -41,6 +55,7 @@ import sys
 import types
 import uuid
 
+import asyncpg
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +70,9 @@ import match_report_window  # noqa: E402
 import ro_covered  # noqa: E402
 import ro_role  # noqa: E402
 import tournaments  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import DBAPIError  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 ADMIN_DSN = ro_role.pg_dsn(os.environ.get("CF_TEST_PG_DSN") or "")
 
@@ -83,7 +101,11 @@ def test_covered_set_is_the_enumeration_both_ways():
     assert len(frozen_lock) == len(ro_covered.WRITERS), "a duplicate writer entry"
     assert not (frozen_read & frozen_lock)
     visited = {p[:5] for p in pos}
-    frozen = frozen_read | frozen_lock
+    writes = set(ro_covered.VISITED_WRITES)
+    assert len(writes) == len(ro_covered.VISITED_WRITES), "a duplicate visited write"
+    assert not (writes & (frozen_read | frozen_lock))
+    # ruling R-C: the visited writes in neither table are frozen too
+    frozen = frozen_read | frozen_lock | writes
     # every difference reported at once: the visited set both ways, the
     # unplaceable or inconsistent answers, and the walks' own outcome
     problems = {
@@ -256,6 +278,7 @@ async def _run_all(admin_dsn, clone, mp, only=None):
                             await db.rollback()
                 finally:
                     await engine.dispose()
+            out["grant_runs"] = await _grant_runs(admin_dsn, clone, c.schema, s, mp)
             # Control: the identity assertion on a covered path, the
             # connection opened as the admin role.
             engine = ro_covered.role_engine(clone_dsn, c.schema, ro_role.ROLE, [])
@@ -270,6 +293,115 @@ async def _run_all(admin_dsn, clone, mp, only=None):
                 await engine.dispose()
         finally:
             env.close()
+    return out
+
+
+# ------------------------------------------------------------- 3. grant run
+
+UNREACHED = [e for e in ro_covered.COVERED
+             if ro_covered.role_outcome(e) != "ok"]
+
+
+async def _grants(admin, schema, grants, verb):
+    for g in sorted(grants):
+        priv, table = g.split()
+        await admin.execute("%s %s ON %s.%s %s %s" % (
+            verb, priv, ro_role._q(schema), ro_role._q(table),
+            "TO" if verb == "GRANT" else "FROM", ro_role._q(ro_role.ROLE)))
+
+
+async def _counted(role_dsn, schema, checked, drive, s, mp, targets):
+    engine = ro_covered.role_engine(role_dsn, schema, ro_role.ROLE, checked,
+                                    read_write=True)
+    try:
+        async with ro_covered.role_sessionmaker(engine, ro_covered.CountingSession)() as db:
+            db.info["targets"] = targets
+            try:
+                await drive(db, s, mp)
+            except BaseException:   # noqa: BLE001 -- the log holds the outcome
+                pass
+            finally:
+                log = list(db.info.get("log", []))
+                deltas = list(db.info.get("deltas", []))
+                await db.rollback()
+    finally:
+        await engine.dispose()
+    return log, deltas
+
+
+def _merge(results):
+    """One position held by several drivers: a run that reached it green
+    wins (with the largest delta of those runs), then a refusal at it, then
+    the first run that did not reach it."""
+    ok = [r for r in results if r[0] == "ok-under-grant"]
+    if ok:
+        return ("ok-under-grant", ok[0][1], max(r[2] for r in ok))
+    for kind in ("refused under grant", "not reached under grant"):
+        got = [r for r in results if r[0] == kind]
+        if got:
+            return got[0]
+    return None
+
+
+async def _grant_runs(admin_dsn, clone, schema, s, mp):
+    out = {"outcomes": {}, "control": {}, "checked": [], "plan": {}}
+    role_dsn = ro_role.dsn_for(admin_dsn, clone, user=ro_role.ROLE)
+    plan = collections.OrderedDict()
+    for e in UNREACHED:
+        grants = ro_covered.REFUSER_GRANTS[ro_covered.role_outcome(e)[1]]
+        for name in DRIVERS:
+            if name.split()[0].split(".")[-1] == e[4]:
+                g, es = plan.setdefault(name, (set(), []))
+                g.update(grants)
+                es.append(e)
+    results = collections.defaultdict(list)
+    admin = await asyncpg.connect(ro_role.dsn_for(admin_dsn, clone))
+    try:
+        for name, (grants, entries) in plan.items():
+            out["plan"][name] = sorted(grants)
+            await _grants(admin, schema, grants, "GRANT")
+            try:
+                log, deltas = await _counted(role_dsn, schema, out["checked"],
+                                             DRIVERS[name], s, mp,
+                                             {e[1:4] for e in entries})
+            finally:
+                await _grants(admin, schema, grants, "REVOKE")
+            for e in entries:
+                results[e].append(ro_covered.under_grant(log, deltas, e, sorted(grants)))
+        out["outcomes"] = {e: _merge(r) for e, r in results.items()}
+        save = os.environ.get("RO8_GRANT_SAVE")
+        if save:
+            with open(save, "w", encoding="utf-8") as fh:
+                json.dump([[list(e), list(o) if o else o]
+                           for e, o in out["outcomes"].items()], fh)
+        # Control: a write planted under a grant is counted (its table
+        # granted) or refused by the grant layer (its table not granted).
+        ctl = out["control"]
+        await _grants(admin, schema, {"UPDATE players"}, "GRANT")
+        try:
+            engine = ro_covered.role_engine(role_dsn, schema, ro_role.ROLE,
+                                            out["checked"], read_write=True)
+            try:
+                async with ro_covered.role_sessionmaker(
+                        engine, ro_covered.CountingSession)() as db:
+                    before = await db.writes()
+                    await AsyncSession.execute(db, text(
+                        "UPDATE players SET display_name = display_name"
+                        " WHERE id = CAST(:p AS uuid)"), {"p": str(s.lob.pids[0])})
+                    ctl["granted_delta"] = await db.writes() - before
+                    try:
+                        await AsyncSession.execute(db, text(
+                            "DELETE FROM ranked_queue WHERE false"))
+                        ctl["ungranted"] = "ran"
+                    except DBAPIError as e:
+                        ctl["ungranted"] = ro_covered._sqlstate(e)
+                    await db.rollback()
+            finally:
+                await engine.dispose()
+        finally:
+            await _grants(admin, schema, {"UPDATE players"}, "REVOKE")
+    finally:
+        await admin.close()
     return out
 
 
@@ -342,7 +474,7 @@ def test_clone_grant_census_is_empty(runs):
 @pytest.mark.parametrize("entry", list(ro_covered.COVERED),
                          ids=["%s:%s %s" % (e[1], e[2], e[4]) for e in ro_covered.COVERED])
 def test_covered_position_under_the_role(runs, entry):
-    want = ro_covered.OUTCOME[entry]
+    want = ro_covered.role_outcome(entry)
     got = measured(runs, entry)
     assert got == want, (entry, got, want, runs["errors"])
     if want != "ok":
@@ -357,10 +489,34 @@ def test_writer_position_under_the_role(runs, entry):
     assert measured(runs, entry) == ro_covered.WRITER_OUTCOME[entry]
 
 
+@pytest.mark.parametrize("entry", UNREACHED,
+                         ids=["%s:%s %s" % (e[1], e[2], e[4]) for e in UNREACHED])
+def test_unreached_position_under_grant(runs, entry):
+    """Ruling R-B: the grant run's measured outcome at every position the
+    role did not reach equals OUTCOME's (a read: 'ok-under-grant' with a
+    zero delta) or GRANT_OUTCOME's (the measured reason it stays a write)."""
+    o = ro_covered.OUTCOME[entry]
+    want = o[:3] if o[0] == "ok-under-grant" else ro_covered.GRANT_OUTCOME.get(entry)
+    got = runs["grant_runs"]["outcomes"].get(entry)
+    assert got == want, (entry, got, want, runs["grant_runs"]["plan"])
+
+
+def test_grant_run_planted_write_is_refused_or_counted(runs):
+    ctl = runs["grant_runs"]["control"]
+    assert ctl.get("ungranted") == "42501", ctl
+    assert ctl.get("granted_delta", 0) > 0, ctl
+    planted = ("ok-under-grant", ("UPDATE players",), ctl["granted_delta"], None)
+    assert not ro_covered.green(planted), planted
+    assert ro_covered.green(("ok-under-grant", ("UPDATE players",), 0, None))
+
+
 def test_outcome_tables_are_whole():
+    assert set(ro_covered.GRANT_OUTCOME) == {
+        e for e in UNREACHED if ro_covered.OUTCOME[e][0] != "ok-under-grant"}
     assert set(ro_covered.OUTCOME) == set(ro_covered.COVERED)
     assert set(ro_covered.WRITER_OUTCOME) == set(ro_covered.WRITERS)
     # The read-only claim holds only the green positions; a position whose
     # outcome is a refusal or a lock is not in COVERED's 'ok' set.
-    assert all(v == "ok" or (isinstance(v, tuple) and v[0] == "not reached")
+    assert all(v == "ok" or (isinstance(v, tuple) and v[0] in ("not reached",
+                                                               "ok-under-grant"))
                for v in ro_covered.OUTCOME.values())
