@@ -753,11 +753,36 @@ def apply_file(psql, dsn, path):
 
 
 def dump(pg_dump, dsn):
-    """pg_dump --schema-only of the database, newlines normalised."""
+    """pg_dump --schema-only of the database, newlines normalised, its
+    session key pair removed (without_session_key)."""
     proc = subprocess.run([pg_dump, "--schema-only", "-d", dsn], capture_output=True)
     if proc.returncode:
         raise AssertionError("pg_dump failed: %s" % proc.stderr.decode("utf-8", "replace")[-500:])
-    return proc.stdout.decode("utf-8").replace("\r\n", "\n")
+    return without_session_key(proc.stdout.decode("utf-8").replace("\r\n", "\n"))
+
+
+# pg_dump 16.10 and later open the script with '\restrict <key>' (after the
+# header comments, before any object block) and close it with
+# '\unrestrict <key>', a fresh random key per dump. The pair belongs to no
+# object. Exactly that pair is removed: the restrict line in the region
+# before the first object header, the unrestrict line as the dump's last
+# line, both naming one key. A dump with neither is returned unchanged
+# (pg_dump 16.9 and earlier).
+_RESTRICT = re.compile(r"^\\restrict ([A-Za-z0-9]+)\n", re.M)
+_UNRESTRICT_END = re.compile(r"\n\\unrestrict ([A-Za-z0-9]+)\n*\Z")
+
+
+def without_session_key(text):
+    h = _DUMP_HEADER.search(text)
+    head_end = h.start() if h else len(text)
+    r = list(_RESTRICT.finditer(text, 0, head_end))
+    u = _UNRESTRICT_END.search(text)
+    if not r and not u:
+        return text
+    if len(r) != 1 or not u or r[0].group(1) != u.group(1):
+        raise AssertionError("unreadable pg_dump session key: restrict %s, unrestrict %s"
+                             % ([m.group(1) for m in r], u.group(1) if u else None))
+    return text[:r[0].start()] + text[r[0].end():u.start()] + "\n"
 
 
 _DUMP_HEADER = re.compile(r"^--\n-- (Name: [^\n]*)\n--\n", re.M)

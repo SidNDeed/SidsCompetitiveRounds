@@ -1006,6 +1006,36 @@ def _route_out():
     return out
 
 
+_KEYED = ("--\n-- PostgreSQL database dump\n--\n\n\\restrict %s\n\n"
+          "SET statement_timeout = 0;\n\n"
+          "--\n-- Name: f(); Type: FUNCTION; Schema: public; Owner: postgres\n--\n\n"
+          "CREATE FUNCTION public.f() RETURNS text LANGUAGE sql AS $$\n"
+          "\\restrict notakey\n$$;\n\n"
+          "--\n-- Name: e; Type: EVENT TRIGGER; Schema: -; Owner: postgres\n--\n\n"
+          "CREATE EVENT TRIGGER e ON sql_drop EXECUTE FUNCTION public.g();\n\n"
+          "--\n-- PostgreSQL database dump complete\n--\n\n\\unrestrict %s\n\n")
+
+
+def test_pg_dump_session_key_belongs_to_no_object():
+    """Database-free (the seat-4 finding of round 8): two dumps that differ
+    only in pg_dump's per-dump session key change no object; a key line
+    inside an object's body is the object's text; a pair that does not
+    match is refused; a dump without the pair is unchanged."""
+    a, b = _KEYED % ("KeyA1", "KeyA1"), _KEYED % ("KeyB2", "KeyB2")
+    assert cd.dump_objects(a, b) == ["(preamble)", "EVENT TRIGGER|-|e"]  # control: unnormalised
+    na, nb = cd.without_session_key(a), cd.without_session_key(b)
+    assert cd.dump_objects(na, nb) == []
+    assert "\\restrict notakey\n" in na and "\\restrict KeyA1" not in na and "unrestrict" not in na
+    changed = cd.without_session_key(b.replace("RETURNS text", "RETURNS int"))
+    assert cd.dump_objects(na, changed) == ["FUNCTION|public|f()"]
+    for bad in (_KEYED % ("KeyA1", "KeyB2"), (_KEYED % ("KeyA1", "KeyA1")).replace("\\restrict KeyA1\n", ""),
+                (_KEYED % ("KeyA1", "KeyA1")).replace("\\unrestrict KeyA1\n", "")):
+        with pytest.raises(AssertionError, match="session key"):
+            cd.without_session_key(bad)
+    plain = (_KEYED % ("K", "K")).replace("\\restrict K\n", "").replace("\\unrestrict K\n", "")
+    assert cd.without_session_key(plain) == plain
+
+
 def test_route_verdict_accepts_only_privilege_refusals_and_their_dependents():
     """The refusal rule of _route_verdict, without a database: what it
     accepts under a non-superuser admin role, and everything it rejects."""
