@@ -826,6 +826,9 @@ namespace CompetitiveRounds
         private static void NoteAnchor(Game g, GameObject obj, int pid, int stamp, bool own)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_anchor);
             FtA3.Wrote(FtA3.CE_counters);
 #endif
@@ -854,6 +857,9 @@ namespace CompetitiveRounds
             int i = g.Mask.PushSlot();
             if (i < 0) { g.Drop[D_MASK]++; return; }
             g.Mask.V[i * 2] = slot; g.Mask.V[i * 2 + 1] = own ? 1 : 0; g.MaskObj[i] = obj;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- N2: GunAmmo.ReloadAmmo prefix --------------------------------------------------------------
@@ -1215,11 +1221,17 @@ namespace CompetitiveRounds
         private static void SegFrame(Game g, int k, long f, float px, float py, float x, float y)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Wrote(FtA3.CE_anchor);
 #endif
             if (f == 0) return;
             if (g.SgCause[k] != 0 && f != g.SgCause[k]) { g.SgLx[k] = px; g.SgLy[k] = py; SegClose(g, k); }
             g.SgCause[k] = f; g.SgLx[k] = x; g.SgLy[k] = y; g.SgStamp[k] = FrameNow(g);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Lists the open segment of slot k (when it changed anything) and opens
@@ -1227,12 +1239,18 @@ namespace CompetitiveRounds
         private static void SegClose(Game g, int k)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Wrote(FtA3.CE_anchor);
 #endif
             if (!g.SgOn[k]) return;
             if (g.SgCause[k] != 0 && g.OwnPid[k] == g.SgPid[k])
                 VchgRow(g, g.SgPid[k], g.OwnSInit[k], g.SgStamp[k], g.SgCause[k], g.SgOx[k], g.SgOy[k], g.SgLx[k], g.SgLy[k]);
             g.SgCause[k] = 0; g.SgOx[k] = g.SgLx[k]; g.SgOy[k] = g.SgLy[k];
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Before a message path changes own projectile `pid` (velocity x, y as it
@@ -1241,17 +1259,26 @@ namespace CompetitiveRounds
         private static void SegBreak(Game g, int k, int pid, float x, float y)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor);
 #endif
             if (!g.SgOn[k] || g.SgPid[k] != pid) return;
             if (x != g.SgLx[k] || y != g.SgLy[k]) SegFrame(g, k, (long)W.CAUSE_STEERING, g.SgLx[k], g.SgLy[k], x, y);
             SegClose(g, k);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>After a message path changed own projectile `pid`'s velocity (and
         /// listed that change itself): the next segment starts at the new velocity.</summary>
         private static void SegRebase(Game g, int pid, float x, float y)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Wrote(FtA3.CE_anchor);
 #endif
@@ -1260,17 +1287,26 @@ namespace CompetitiveRounds
             SegClose(g, k);
             g.SgOn[k] = true; g.SgPid[k] = pid; g.SgCause[k] = 0;
             g.SgOx[k] = x; g.SgOy[k] = y; g.SgLx[k] = x; g.SgLy[k] = y;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The shared clock once per rendered frame (G1 runs per projectile per frame).</summary>
         private static int FrameNow(Game g)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Wrote(FtA3.CE_scratch);
 #endif
             int f = Time.frameCount;
             if (f != g.NowFrame) { g.NowFrame = f; g.NowAt = ServerNow(); }
             return g.NowAt;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void VchgRow(Game g, int pid, int sInit, int stamp, long cause, float ox, float oy, float nx, float ny)
@@ -1359,6 +1395,9 @@ namespace CompetitiveRounds
         private static void FillContact(Game g, int pid, int stamp)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_counters);
 #endif
 #if SCR_FRAMETIME
@@ -1378,6 +1417,9 @@ namespace CompetitiveRounds
                 if (raw[o] == pid && raw[o + 6] == W.OWN_SINCE_NONE) { g.Drop[D_C_OUTSIDE]++; return; }
             }
             g.Drop[D_C_UNPAIRED]++;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static long OwnSinceMs()
@@ -1648,6 +1690,9 @@ namespace CompetitiveRounds
         private static void OwnBlockKeyed(Game g, int o, int tb)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Wrote(FtA3.CE_scratch);
 #endif
             if (o < 0) return;
@@ -1658,6 +1703,9 @@ namespace CompetitiveRounds
             if (g.OwnPressDone && g.OwnOpened) r[o + 4] = r[o + 3];
             g.OwnPressKeyed = true;
             g.HasOwnTb = true; g.LastOwnTb = tb;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- K5: CharacterStatModifiers.DealtDamage postfix -------------------------------------------
@@ -2025,11 +2073,17 @@ namespace CompetitiveRounds
         private static void Wait(Game g, int kind, E.FixedRows rows, int o, int player)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_counters);
 #endif
             if (g.WN >= WAIT_CAP) { g.Drop[D_WAIT]++; return; }
             int i = (g.WHead + g.WN) % WAIT_CAP; g.WN++;
             g.WKind[i] = kind; g.WList[i] = rows; g.WRow[i] = o; g.WPlayer[i] = player; g.WFrame[i] = Time.frameCount;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void DrainWaits(Game g, int now)
@@ -2609,6 +2663,9 @@ namespace CompetitiveRounds
         private static int LHatMs(Game g)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_Ping);
 #endif
             if (g.PingN == 0) return -1;
@@ -2619,6 +2676,9 @@ namespace CompetitiveRounds
                 if (acc > k) return i / 2;
             }
             return PING_BIN_CAP / 2;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static int _lHatCache = -1; private static long _lHatAtMs;
@@ -2646,6 +2706,9 @@ namespace CompetitiveRounds
         private static void DrainMasks(Game g)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_anchor);
             FtA3.Wrote(FtA3.CE_counters);
 #endif
@@ -2668,6 +2731,9 @@ namespace CompetitiveRounds
                     if (mask != 0) g.P3n[1]++;
                 }
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The steering components present on a projectile (design 5.1).</summary>
@@ -2754,6 +2820,9 @@ namespace CompetitiveRounds
         private static bool Clear(Game g, Vector2 from, Vector2 to)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_counters);
 #endif
             var pm = PlayerManager.instance;
@@ -2771,6 +2840,9 @@ namespace CompetitiveRounds
                 if (root.GetComponent<SpawnedAttack>() == null && root.GetComponent<Player>() == null) return false;
             }
             return true;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         internal static long SignedMrad(double fx, double fy, double tx, double ty)
@@ -2900,6 +2972,9 @@ namespace CompetitiveRounds
         private static void RxVolley(Game g, bool own, int stamp)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch);
 #endif
             int o = own ? g.RxRowS : g.RxRowO;
@@ -2908,12 +2983,18 @@ namespace CompetitiveRounds
             if (a[o + 2] >= 0) return;
             long d = C.WrapDiff(stamp, g.RxOnset);
             if (d >= 0) a[o + 2] = Math.Min(d, 600000);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- the deferred residual and homing arithmetic -------------------------------------------
 
         private static void DrainResiduals(Game g)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_scratch);
             FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_scratch);
@@ -2959,12 +3040,18 @@ namespace CompetitiveRounds
 #endif
                 TopInsert(g.Top, ref g.TopN, TOP_CAP, 8, e, 2);
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Keeps the `cap` rows with the largest field `key` (ties: the
         /// earlier row stays), in descending order. Bounded by ROWS_CAP.</summary>
         private static void TopInsert(long[] a, ref int n, int cap, int w, long[] e, int key)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Wrote(FtA3.CE_Top); FtA3.Wrote(FtA3.CE_Ht);
 #endif
@@ -2975,10 +3062,16 @@ namespace CompetitiveRounds
             for (int j = 0, i = last; j < ROWS_CAP && i > pos; j++, i--) Array.Copy(a, (i - 1) * w, a, i * w, w);
             Array.Copy(e, 0, a, pos * w, w);
             if (n < cap) n++;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void DrainPackages(Game g)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_anchor);
             FtA3.Wrote(FtA3.CE_counters);
@@ -3013,10 +3106,16 @@ namespace CompetitiveRounds
                 }
                 g.AHasPack[slot] = true; g.APvx[slot] = vx; g.APvy[slot] = vy;
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void HtUpsert(Game g, int pid, int sInit, long ratio, long n)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Wrote(FtA3.CE_scratch);
 #endif
@@ -3035,6 +3134,9 @@ namespace CompetitiveRounds
             var e = g.HtEntry;
             e[0] = pid; e[1] = sInit; e[2] = E.Clamp(ratio, 0, 99999); e[3] = E.Clamp(n, 0, 99999);
             TopInsert(g.Ht, ref g.HtN, HT_CAP, 4, e, 2);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
 #if SCR_FRAMETIME

@@ -210,7 +210,10 @@ namespace CompetitiveRounds
         }
 
         /// <summary>A dependent row. refill: the writes since the point's first live frame after which the structure
-        /// holds only this point's content (a code constant; unused when steady is false).</summary>
+        /// holds only this point's content (a code constant; unused when steady is false). Ruling
+        /// FRAME-TIME-ROUND-R5 retires the scratch A3: EVERY dependent row is calibrated in game (LiveCalibrated here,
+        /// by construction), so Calibrate runs no game-start calibration for any of them and LogGame writes each
+        /// row's executed line per game; cal and calN are kept only as the a3host's record of the retired design.</summary>
         internal static void Set(int k, string name, int refill, bool steady, CalBatch cal, int calN)
         {
             Name(k, name);
@@ -218,6 +221,7 @@ namespace CompetitiveRounds
             _steady[k] = steady;
             _cal[k] = cal;
             _calN[k] = calN;
+            LiveCalibrated(k);
         }
 
         /// <summary>A drained row.</summary>
@@ -269,13 +273,15 @@ namespace CompetitiveRounds
             else _lUnscoped[k]++;
         }
 
-        /// <summary>A growth row's read (HE_hitset; SE_Logs keeps its own SeatEvidenceCore.FtLogRead): ONCE per
-        /// instance per game. The instance keeps the Serial it last counted in, stored only when this call counts (an
-        /// ON live frame on the main thread), so an instance first touched outside one is still counted at its first
-        /// touch inside one. The row's calibration is the instance's whole growth sequence to its cap.</summary>
+        /// <summary>A growth row's read (HE_hitset; SE_Logs keeps its own SeatEvidenceCore.FtLogRead). Round 6
+        /// (ruling FRAME-TIME-ROUND-R5): a live row counts EVERY growth step, each inside its reader's timing scope,
+        /// so the executed d_k is the cost of a growth step and r_k_max counts them all (the once-per-instance rule
+        /// served the retired scratch calibration, which timed the instance's whole growth sequence per read). A row
+        /// not live keeps the once rule: the instance keeps the Serial it last counted in, stored only when this call
+        /// counts (an ON live frame on the main thread).</summary>
         internal static void ReadOnce(int k, ref int serial)
         {
-            if (serial == Serial) return;
+            if (!_live[k] && serial == Serial) return;
             if (!OnLive()) return;
             Read(k);
             serial = Serial;

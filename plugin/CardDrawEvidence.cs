@@ -894,6 +894,9 @@ namespace CompetitiveRounds
         private static void DrainNotes()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CD_notes); FtA3.Wrote(FtA3.CD_notes);
 #endif
             for (int i = 0; i < K.COLLECTORS; i++)
@@ -916,6 +919,9 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning(TAG + n);
 #endif
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>From Plugin's persistent tick, ABOVE its modDisabled
@@ -1145,6 +1151,9 @@ namespace CompetitiveRounds
         internal static void EnsureCensusDump()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CD_notes);
 #endif
 #if SCR_FRAMETIME
@@ -1208,6 +1217,9 @@ namespace CompetitiveRounds
 #if SCR_FRAMETIME
             }
             finally { FtSpan.Close(ftSpan); }
+#endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
 #endif
         }
 #if SCR_FRAMETIME

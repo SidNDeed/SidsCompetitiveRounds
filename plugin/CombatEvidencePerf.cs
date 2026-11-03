@@ -41,6 +41,9 @@ namespace CompetitiveRounds
         private static void Bind()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
 #endif
             _bound = true;
@@ -54,11 +57,17 @@ namespace CompetitiveRounds
                 if (_on) Plugin.Log.LogWarning(TAG + " probe on, mode " + _mode + ", windows of " + PERF_WINDOW_CAP.ToString(CultureInfo.InvariantCulture) + " frames");
             }
             catch { _on = false; }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Once per frame from CombatEvidence.Tick (outside every collector).</summary>
         internal static void Frame()
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_perf_probe);
 #endif
@@ -67,10 +76,16 @@ namespace CompetitiveRounds
             long us = (long)(Time.unscaledDeltaTime * 1e6);
             if (_mode == "menu") MenuFrame(us);
             else MatchFrame(us);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void Add(long us)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
 #endif
@@ -78,10 +93,16 @@ namespace CompetitiveRounds
             _bins[(int)Math.Min(us / BIN_US, BIN_CAP - 1)]++;
             _frames++;
             if (us > _maxUs) _maxUs = us;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static long Quantile(double q)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_perf_probe);
 #endif
@@ -90,10 +111,16 @@ namespace CompetitiveRounds
             if (rank < 1) rank = 1;
             for (int i = 0; i < BIN_CAP; i++) { acc += _bins[i]; if (acc >= rank) return (long)i * BIN_US + BIN_US / 2; }
             return _maxUs;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void Close(string label)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
 #endif
@@ -116,6 +143,9 @@ namespace CompetitiveRounds
             }
             _window++;
             Array.Clear(_bins, 0, BIN_CAP); _frames = 0; _maxUs = 0;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void Spin(double ms)
@@ -127,6 +157,9 @@ namespace CompetitiveRounds
         private static void MenuFrame(long us)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
 #endif
             bool inRoom = false;
@@ -137,10 +170,16 @@ namespace CompetitiveRounds
             if (_window == 2) Spin(PLANT_MS);                  // the planted cost runs inside the measured frames
             Add(us);
             if (_frames >= PERF_WINDOW_CAP) Close(_window == 0 ? "AA1" : (_window == 1 ? "AA2" : "PLANT"));
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void MenuReport()
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_perf_probe);
 #endif
@@ -159,6 +198,9 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo(TAG + " menu run complete (collectors idle outside a game; the A/B in a ranked match remains)");
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void MatchFrame(long us)
@@ -193,6 +235,9 @@ namespace CompetitiveRounds
         private static void MatchReport()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_perf_probe); FtA3.Wrote(FtA3.CE_perf_probe);
 #endif
             long a50 = 0, a99 = 0, b50 = 0, b99 = 0, amax = 0, bmax = 0; int na = 0, nb = 0;
@@ -214,6 +259,9 @@ namespace CompetitiveRounds
                     + "us, B " + (nb > 0 ? b50 / nb : 0).ToString(CultureInfo.InvariantCulture) + "/" + (nb > 0 ? b99 / nb : 0).ToString(CultureInfo.InvariantCulture) + "/" + bmax.ToString(CultureInfo.InvariantCulture) + "us");
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 #if SCR_FRAMETIME
 

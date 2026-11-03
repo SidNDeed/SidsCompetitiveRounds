@@ -316,6 +316,9 @@ namespace CompetitiveRounds
         internal static bool RpcTop(out int stamp, out int sender, out int viewId, out string method)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames);
 #endif
             stamp = 0; sender = 0; viewId = 0; method = null;
@@ -323,12 +326,18 @@ namespace CompetitiveRounds
             if (top < 0 || top >= CTX_CAP || !_ctx[top].HasStamp) return false;
             stamp = _ctx[top].Stamp; sender = _ctx[top].Sender; viewId = _ctx[top].ViewId; method = _ctx[top].Method;
             return true;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The innermost RPC frame when it runs `method` on `viewId`
         /// and is not yet taken by an earlier hook of this RPC.</summary>
         private static bool TopFrame(string a, string b, int viewId, bool take, out Ctx c)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Wrote(FtA3.SE_frames);
 #endif
@@ -339,6 +348,9 @@ namespace CompetitiveRounds
             if (c.Consumed || !c.HasStamp || c.ViewId != viewId || (c.Method != a && (b == null || c.Method != b))) return false;
             if (take) _ctx[top].Consumed = true;
             return true;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void NoteRemoteRpc(Ctx c)
@@ -2449,12 +2461,18 @@ namespace CompetitiveRounds
         private static MethodBase TargetMethod()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames);
 #endif
             var m = AccessTools.Method(typeof(PhotonNetwork), "RPC",
                 new[] { typeof(PhotonView), typeof(string), typeof(RpcTarget), typeof(Photon.Realtime.Player), typeof(bool), typeof(object[]) });
             if (m == null) throw new Exception("PhotonNetwork.RPC(PhotonView, string, RpcTarget, Player, bool, object[]) not found - no block send stamp");
             return m;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         [HarmonyPostfix]

@@ -56,6 +56,9 @@ namespace CompetitiveRounds
                                   out int paired, out int damageAlone, out int forceAlone)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_point);
 #endif
             if (damage == null || force == null) throw new ArgumentNullException();
@@ -72,10 +75,16 @@ namespace CompetitiveRounds
             }
             damageAlone += damage.Count - i;
             forceAlone += force.Count - j;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void Ascending(IList<float> t, string name)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_point);
 #endif
@@ -84,6 +93,9 @@ namespace CompetitiveRounds
                 if (float.IsNaN(t[k])) throw new ArgumentException(name + " has NaN");
                 if (k > 0 && t[k] < t[k - 1]) throw new ArgumentException(name + " is not ascending");
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>One remote actor's messages to the local player in one point.</summary>
@@ -104,23 +116,35 @@ namespace CompetitiveRounds
             internal void AddDirect(float t, float mag, bool converted)
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.HE_point); FtA3.Wrote(FtA3.HE_point);
 #endif
                 Direct++; DirectSum += mag; if (converted) Converted++;
                 if (DirectT.Count < TIMES_CAP) DirectT.Add(t); else Unchecked++;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             internal void AddForce(float t, float mag, bool inert)
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.HE_point); FtA3.Wrote(FtA3.HE_point);
 #endif
                 Force++; ForceSum += mag; if (inert) ForceInert++;
                 if (ForceT.Count < TIMES_CAP) ForceT.Add(t); else Unchecked++;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
 #if SCR_FRAMETIME
-            internal void AddDot(float mag) { FtA3.Read(FtA3.HE_point); FtA3.Wrote(FtA3.HE_point); Dot++; DotSum += mag; }
+            internal void AddDot(float mag) { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.HE_point); FtA3.Wrote(FtA3.HE_point); Dot++; DotSum += mag; } finally { FtA3.TExit(ftScope); } }
 #else
             internal void AddDot(float mag) { Dot++; DotSum += mag; }
 #endif
@@ -153,6 +177,9 @@ namespace CompetitiveRounds
             internal void AddImpact(int projectile, bool blocked, bool ammo)
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.HE_game); FtA3.Wrote(FtA3.HE_game);
 #endif
                 if (blocked) { ImpactsBlocked++; return; }
@@ -164,6 +191,9 @@ namespace CompetitiveRounds
 #endif
                 Hit.Add(projectile);
                 if (ammo) DistinctAmmo++; else DistinctOther++;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             internal bool Any
@@ -178,6 +208,9 @@ namespace CompetitiveRounds
         /// never an account identity.</summary>
         internal static string HitRecvLine(int point, int actor, PointTally t)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_point);
 #endif
@@ -194,11 +227,17 @@ namespace CompetitiveRounds
               .Append(" dot_ticks=").Append(t.Dot).Append(" dot_sum=").Append(F(t.DotSum));
             if (t.Unchecked > 0) sb.Append(" unchecked=").Append(t.Unchecked);
             return sb.ToString();
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>D2.</summary>
         internal static string ShotObsLine(int game, int actor, GameTally g)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_game);
 #endif
@@ -212,11 +251,17 @@ namespace CompetitiveRounds
               .Append(" observed_hit_pct=").Append(g.SpawnAmmo > 0 ? F(100.0 * g.DistinctAmmo / g.SpawnAmmo) : "na");
             if (g.HitOverflow > 0) sb.Append(" overflow=").Append(g.HitOverflow);
             return sb.ToString();
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>D3.</summary>
         internal static string BlockMissLine(int game, int actor, GameTally g)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_game);
 #endif
@@ -228,6 +273,9 @@ namespace CompetitiveRounds
               .Append(" later=").Append(g.Buckets[(int)BlockBucket.Later])
               .Append(" never_blocked_point=").Append(g.Buckets[(int)BlockBucket.Never]);
             return sb.ToString();
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Merge pass 6, G1-L1: whether one RPCA_NextRound call

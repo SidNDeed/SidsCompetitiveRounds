@@ -1127,12 +1127,18 @@ namespace CompetitiveRounds
         private static MethodBase TargetMethod()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.IC_scalars);
 #endif
             var m = AccessTools.Method(typeof(PhotonNetwork), "ExecuteRpc",
                 new[] { typeof(ExitGames.Client.Photon.Hashtable), typeof(Photon.Realtime.Player) });
             if (m == null) throw new Exception("PhotonNetwork.ExecuteRpc(Hashtable, Player) not found");
             return m;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         [HarmonyPrefix]

@@ -263,10 +263,13 @@ namespace CompetitiveRounds
         /// per-game log, before a List Add that can grow it. `lists` List instances receive this Add together; each
         /// counts as one read, ONCE per instance per game: the instance keeps the FtA3.Serial it last counted in,
         /// stored only when the call is on a counted frame (FtA3's own test: an ON live frame on the main thread),
-        /// so an Add first seen outside one is still counted at the instance's first Add inside one.</summary>
+        /// so an Add first seen outside one is still counted at the instance's first Add inside one. Round 6
+        /// (ruling FRAME-TIME-ROUND-R5): SE_Logs is live, so the once rule is off and every growth Add counts, its
+        /// cost marking the caller's timing scope (this helper opens none).</summary>
         internal static void FtLogRead(ref int serial, int lists)
         {
-            if (serial == FtA3.Serial) return;
+            // round 6 (ruling FRAME-TIME-ROUND-R5): SE_Logs is live, so every growth step counts (FtA3.ReadOnce)
+            if (!FtA3.IsLive(FtA3.SE_Logs) && serial == FtA3.Serial) return;
             if (!FtSchedule.Live || FtGate.Off || System.Threading.Thread.CurrentThread.ManagedThreadId != FtSpan.MainThread) return;
             for (int i = 0; i < lists; i++) FtA3.Read(FtA3.SE_Logs);
             serial = FtA3.Serial;
@@ -300,6 +303,9 @@ namespace CompetitiveRounds
             internal Reservoir(int cap, uint seed) { Cap = cap; _rng = new Rng(seed); }
             internal void Add(int v)
             {
+#if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
                 N++;
                 if (v < Min) Min = v;
                 if (v > Max) Max = v;
@@ -309,6 +315,9 @@ namespace CompetitiveRounds
                 if (Items.Count < Cap) { Items.Add(v); return; }
                 long j = (long)(_rng.Next() % (ulong)N);
                 if (j < Cap) Items[(int)j] = v;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
             internal int Pct(int p) { return Percentile(Items, p); }
         }
@@ -367,12 +376,18 @@ namespace CompetitiveRounds
 #endif
             internal void Add(int arrivalEst, int ageMs, long epoch, bool view, int stamp, long swMs)
             {
+#if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
                 if (Arr.Count >= CAP) { Dropped++; return; }
 #if SCR_FRAMETIME
                 FtLogRead(ref FtSerial, 6);
 #endif
                 Arr.Add(arrivalEst); Age.Add(ageMs); Ep.Add((int)Clamp(epoch, 0, 1000000));
                 View.Add(view); Stamp.Add(stamp); Sw.Add(swMs);
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             private int Index(int i, int t0) { return FloorDiv(WrapDiff(Arr[i], t0), BUCKET_MS); }
@@ -484,6 +499,9 @@ namespace CompetitiveRounds
 #endif
             internal void Add(int stamp, long swMs)
             {
+#if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
                 Batches++;
                 if (FirstSw < 0) FirstSw = swMs;
                 LastSw = swMs;
@@ -495,6 +513,9 @@ namespace CompetitiveRounds
                 if (Gaps.Count < GAP_CAP) FtLogRead(ref FtSerial, 2);
 #endif
                 if (Gaps.Count < GAP_CAP) { Gaps.Add(gap); GapSw.Add(swMs); }
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             /// <summary>cad: [p10, p50, p50 first half, p50 second half,
@@ -524,7 +545,7 @@ namespace CompetitiveRounds
             internal long Omitted;
 #if SCR_FRAMETIME
             internal int FtSerial = -1;
-            internal void Add(long[] e) { if (Items.Count < LIST_CAP) { FtLogRead(ref FtSerial, 1); Items.Add(e); } else Omitted++; }
+            internal void Add(long[] e) { int ftScope = FtA3.TEnter(); try { if (Items.Count < LIST_CAP) { FtLogRead(ref FtSerial, 1); Items.Add(e); } else Omitted++; } finally { FtA3.TExit(ftScope); } }
 #else
             internal void Add(long[] e) { if (Items.Count < LIST_CAP) Items.Add(e); else Omitted++; }
 #endif
@@ -548,13 +569,13 @@ namespace CompetitiveRounds
             }
 
 #if SCR_FRAMETIME
-            internal int Count { get { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); return _d.Count; } }
+            internal int Count { get { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); return _d.Count; } finally { FtA3.TExit(ftScope); } } }
 #else
             internal int Count { get { return _d.Count; } }
 #endif
 
 #if SCR_FRAMETIME
-            internal bool TryGetValue(TKey key, out TValue value) { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); return _d.TryGetValue(key, out value); }
+            internal bool TryGetValue(TKey key, out TValue value) { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); return _d.TryGetValue(key, out value); } finally { FtA3.TExit(ftScope); } }
 #else
             internal bool TryGetValue(TKey key, out TValue value) { return _d.TryGetValue(key, out value); }
 #endif
@@ -566,12 +587,18 @@ namespace CompetitiveRounds
             internal bool Admit(TKey key)
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map);
                 FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map);
 #endif
                 if (_d.Count < Cap || _d.ContainsKey(key)) return true;
                 Refused++;
                 return false;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             /// <summary>Sets an existing key, or adds a new one below the cap; a
@@ -579,29 +606,35 @@ namespace CompetitiveRounds
             internal bool Set(TKey key, TValue value)
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map);
                 FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map);
 #endif
                 if (_d.Count >= Cap && !_d.ContainsKey(key)) { Refused++; return false; }
                 _d[key] = value;
                 return true;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
 #if SCR_FRAMETIME
-            internal bool Remove(TKey key) { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map); return _d.Remove(key); }
+            internal bool Remove(TKey key) { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map); return _d.Remove(key); } finally { FtA3.TExit(ftScope); } }
 #else
             internal bool Remove(TKey key) { return _d.Remove(key); }
 #endif
 
 #if SCR_FRAMETIME
-            internal void Clear() { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map); if (_d.Count > 0) _d.Clear(); }
+            internal void Clear() { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map); if (_d.Count > 0) _d.Clear(); } finally { FtA3.TExit(ftScope); } }
 #else
             internal void Clear() { if (_d.Count > 0) _d.Clear(); }
 #endif
 
             /// <summary>The refusals since the last call, then zero.</summary>
 #if SCR_FRAMETIME
-            internal int TakeRefused() { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map); int r = Refused; Refused = 0; return r; }
+            internal int TakeRefused() { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.PE_map); FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.PE_map); int r = Refused; Refused = 0; return r; } finally { FtA3.TExit(ftScope); } }
 #else
             internal int TakeRefused() { int r = Refused; Refused = 0; return r; }
 #endif
@@ -625,6 +658,9 @@ namespace CompetitiveRounds
             internal int Next(long a, long b, long c)
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.SE_ordinals); FtA3.Wrote(FtA3.SE_ordinals);
 #endif
                 string k = a.ToString(CultureInfo.InvariantCulture) + ":" + b.ToString(CultureInfo.InvariantCulture)
@@ -636,6 +672,9 @@ namespace CompetitiveRounds
                 _ring[_head] = k;
                 _head = (_head + 1) % KEEP;
                 return 0;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
             internal void Clear() { _seen.Clear(); Array.Clear(_ring, 0, KEEP); _head = 0; }
         }
@@ -655,6 +694,9 @@ namespace CompetitiveRounds
             internal bool Offer(long[] hit, int stamp)
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 // FrameTime A3 row SE_Hw (SURVIVORS.md S19): the RecentBlocks scan and the Pending append below
                 FtA3.Read(FtA3.SE_Hw); FtA3.Wrote(FtA3.SE_Hw);
 #endif
@@ -666,6 +708,9 @@ namespace CompetitiveRounds
                 Pending.Add(hit);
                 if (Pending.Count > PENDING_CAP) Pending.RemoveAt(0);
                 return false;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             /// <summary>A block stamp: admits (and returns, in arrival order) the
@@ -673,6 +718,9 @@ namespace CompetitiveRounds
             /// stamp position.</summary>
             internal List<long[]> Block(int tb, int stampIndex)
             {
+#if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
                 // FrameTime A3 row SE_Hw (SURVIVORS.md S19): the Pending scan and the RecentBlocks append below
                 FtA3.Read(FtA3.SE_Hw); FtA3.Wrote(FtA3.SE_Hw);
@@ -693,6 +741,9 @@ namespace CompetitiveRounds
                 }
                 if (kept < n) Pending.RemoveRange(kept, n - kept);
                 return admitted;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             internal void Clear() { Pending.Clear(); RecentBlocks.Clear(); }

@@ -1782,20 +1782,65 @@ def a3_check(uni, sw, text, fields_out, spec=None, drop=None, plant=None, noscop
         if kind == "zero" and proof not in ZERO_PROOFS:
             fails.append("a3.py row %s: zero needs a sweep proof this sweep checks (%s), got %r"
                          % (n, "|".join(ZERO_PROOFS), proof))
-        if kind == "dependent" and proof not in ("", LIVE_PROOF):
-            fails.append("a3.py row %s: a dependent row carries no proof or %s, got %r" % (n, LIVE_PROOF, proof))
+        # ruling FRAME-TIME-ROUND-R5: the scratch A3 is retired; every dependent row is calibrated only by its in-game
+        # executed lines, so its proof is live:executed and nothing else
+        if kind == "dependent" and proof != LIVE_PROOF:
+            fails.append("a3.py row %s: a dependent row is calibrated only in game (ruling FRAME-TIME-ROUND-R5), its "
+                         "proof is %s, got %r" % (n, LIVE_PROOF, proof))
     for sid in md:
         if sid not in names.values():
             fails.append("SURVIVORS.md row %s has no a3.py row" % sid)
     idx = A3Index(uni, drop=drop, plant=plant)
     live_rows = {row[0] for row in spec if len(row) == 5 and row[2] == "dependent" and row[4] == LIVE_PROOF}
     scoped = 0
+    # noscope: one (file, line) or a set of them, treated as unscoped (the selftest's controls)
+    ns = {noscope} if isinstance(noscope, tuple) else set(noscope or ())
+
+    def in_scope(view, mem, pos):
+        a = view.code.rfind("FtA3.TEnter()", mem.body_start, pos)
+        b = view.code.find("FtA3.TExit(ftScope)", pos, mem.end + 1)
+        return a >= 0 and b >= 0 and (view.name, view.line(pos)) not in ns
+
+    ft_members = [m for ms in idx.ft_of.values() for m in ms] + [m for ms in idx.helpers.values() for m in ms]
+
+    def helper_sites(name, depth=0):
+        """Round 6 (ruling FRAME-TIME-ROUND-R5): a Read inside a FrameTime-only HELPER marks the innermost open scope,
+        which must be its caller's: [(view, member, pos)] of every call of the helper from a release twin, through
+        nested helpers (depth 3)."""
+        out = []
+        if depth > 3:
+            return out
+        for m in ft_members:
+            for mt in re.finditer(r"\b%s\s*\(" % re.escape(name), m.src.code[m.body_start:m.end]):
+                pos = m.body_start + mt.start()
+                if id(m) in idx.twin:
+                    out.append((m.src, m, pos))
+                else:
+                    out += helper_sites(m.name, depth + 1)
+        return out
+
     for (v, p, const, fm) in idx.reads:
         if const not in live_rows or v is None:
             continue
-        a = v.code.rfind("FtA3.TEnter()", fm.body_start, p)
-        b = v.code.find("FtA3.TExit(ftScope)", p, fm.end + 1)
-        if a < 0 or b < 0 or noscope == (v.name, v.line(p)):
+        if id(fm) not in idx.twin:
+            # a helper's Read: the helper itself carries no scope (its scope would take the read's cost from its
+            # reader), and every call reaching it from a reader sits in that reader's scope
+            sites = helper_sites(fm.name)
+            if "FtA3.TEnter()" in v.code[fm.body_start:fm.end + 1]:
+                fails.append("a3 row %s: the helper %s at %s:%d opens its own timing scope; its Read must mark its "
+                             "caller's" % (const, fm.name, v.name, v.line(p)))
+            elif not sites:
+                fails.append("a3 row %s: the helper %s at %s:%d has no caller in a release member"
+                             % (const, fm.name, v.name, v.line(p)))
+            else:
+                out = [(sv, sm, sp) for (sv, sm, sp) in sites if not in_scope(sv, sm, sp)]
+                for (sv, sm, sp) in out:
+                    fails.append("a3 row %s: the call of helper %s at %s:%d sits outside a timing scope (FtA3.TEnter ... "
+                                 "FtA3.TExit(ftScope) in its member %s)" % (const, fm.name, sv.name, sv.line(sp), sm.name))
+                if not out:
+                    scoped += 1
+            continue
+        if not in_scope(v, fm, p):
             fails.append("a3 row %s: the live read at %s:%d sits outside a timing scope (FtA3.TEnter ... "
                          "FtA3.TExit(ftScope) in its member %s)" % (const, v.name, v.line(p), fm.name))
         else:
@@ -2237,13 +2282,40 @@ def selftest_a3(uni, sw, text):
     print("  (h) the live read of %s at %s:%d unscoped: %s" % (c_, v_.name, v_.line(p_), "FAILS as required"
                                                              if h_ok else "did NOT fail (%s)" % fh[:2]))
     ok &= h_ok
-    calr = next(e for e in dep if e["proof"] == "")
-    spec_h = [(n, sid, k, w, LIVE_PROOF) if n == calr["name"] else (n, sid, k, w, pf) for (n, sid, k, w, pf) in spec]
-    fh2, _ = a3_check(uni, sw, text, fields_out, spec=spec_h)
-    h2_ok = any("a3 row %s: the live read" % calr["name"] in x for x in fh2)
-    print("  (h2) %s (calibrated at game start, its readers unscoped) marked live: %s" % (
-        calr["name"], "FAILS as required" if h2_ok else "did NOT fail (%s)" % fh2[:2]))
+    # (h2) round 6 (ruling FRAME-TIME-ROUND-R5): every dependent row is live; a row whose every read is unscoped fails
+    # once per read, and a dependent row given the retired scratch proof "" fails
+    calr = next(e for e in dep if len([r for r in lr if r[2] == e["name"]]) >= 2)
+    sites = {(v.name, v.line(p)) for (v, p, const, fm) in lr if const == calr["name"]}
+    fh2, _ = a3_check(uni, sw, text, fields_out, spec=spec, noscope=sites)
+    nfail = sum(1 for x in fh2 if "a3 row %s: the live read" % calr["name"] in x)
+    h2_ok = nfail == len([r for r in lr if r[2] == calr["name"]])
+    print("  (h2) every read of %s unscoped (%d sites): %s" % (calr["name"], len(sites), "FAILS as required, %d reads"
+                                                             % nfail if h2_ok else "did NOT fail per read (%s)" % fh2[:2]))
     ok &= h2_ok
+    spec_s = [(n, sid, k, w, "") if n == calr["name"] else (n, sid, k, w, pf) for (n, sid, k, w, pf) in spec]
+    fs, _ = a3_check(uni, sw, text, fields_out, spec=spec_s)
+    s_ok = any("a3.py row %s: a dependent row is calibrated only in game" % calr["name"] in x for x in fs)
+    print("  (h3) %s given the retired scratch proof \"\": %s" % (calr["name"], "FAILS as required" if s_ok
+                                                                  else "did NOT fail (%s)" % fs[:2]))
+    ok &= s_ok
+    # (h4) a helper's Read is judged at its callers: one caller's call treated as unscoped fails, naming the helper
+    hr = [(v, p, const, fm) for (v, p, const, fm) in lr if id(fm) not in idx.twin]
+    if not hr:
+        print("  (h4) no helper read of a live row: the helper control has no subject")
+        return False
+    hv, hp, hc, hfm = hr[0]
+    calls = []
+    for ms in idx.ft_of.values():
+        for m in ms:
+            for mt in re.finditer(r"\b%s\s*\(" % re.escape(hfm.name), m.src.code[m.body_start:m.end]):
+                calls.append((m.src.name, m.src.line(m.body_start + mt.start())))
+    hcalls = sorted(set(calls))
+    fh4, _ = a3_check(uni, sw, text, fields_out, spec=spec, noscope=set(hcalls[:1])) if hcalls else ([], None)
+    h4_ok = bool(hcalls) and any("the call of helper %s at %s:%d" % (hfm.name, hcalls[0][0], hcalls[0][1]) in x
+                                 for x in fh4)
+    print("  (h4) helper %s's call at %s unscoped: %s" % (hfm.name, hcalls[:1], "FAILS as required" if h4_ok
+                                                          else "did NOT fail (%s)" % fh4[:2]))
+    ok &= h4_ok
     # (e) a dependent row with live writes declared zero by sweep proof
     flip = next(e for e in dep if e["writers"])
     spec_e = [(n, sid, "zero", "control", "sweep:no-live-write") if n == flip["name"] else (n, sid, k, w, pf)

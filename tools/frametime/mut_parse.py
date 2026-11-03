@@ -77,9 +77,10 @@ MUTS = [
     ("A3 left out of U", "u = lead + ku + du + a3v", "u = lead + ku + du"),
     ("A3 per-game maximum replaced by the last game", 'rate[k] = max(rate.get(k, 0.0), rows[0]["reads_win"] / on_frames[g])',
      'rate[k] = rows[0]["reads_win"] / on_frames[g]'),
-    ("A3 missing line passes", 'raise Refused("A3 structure %s: game %d has %d a3 lines (needs 1)" % (k, g, len(rows)))',
-     'continue'),
-    ("A3 missing calibration passes", 'raise Refused("calibration %d has no a3 line for %s" % (i, miss))', 'continue'),
+    # ruling FRAME-TIME-ROUND-R5: every dependent row is live, so a3_live's cross-check against the game's a3 line is
+    # the first guard of a missing line (the rate loop's own count stays as a second guard, reached by no live row)
+    ("A3 missing line passes", 'if len(a3l) != 1 or a3l[0].get("reads_on") != r["reads"]:',
+     'if a3l and a3l[0].get("reads_on") != r["reads"]:'),
     ("VR6 dispatch count ignored", 'if disp.get(r, 0) != sent.get(r, 0):', 'if False:'),
     ("A3 drained missing line passes",
      'raise Refused("A3 drained structure %s: game %d has %d a3drain lines (needs 1)" % (k, g, len(rows)))', 'continue'),
@@ -97,8 +98,6 @@ MUTS = [
     ("A3 row not registered", 'FtA3.SetDrained(FtA3.PE_Rec, "PE_Rec", () => _recCount);', '',
      "plugin/PoisonSync.cs"),
     # ruling FRAME-TIME-ROUND-R2: the kind rule, H4 and its absent-record class, the MEDIUMs' parser halves
-    ("A3 per-game calibration rule removed (the old acceptance)", "    if calc:\n        cal_games = {}",
-     "    if False:\n        cal_games = {}"),
     ("A3 zero row without its proof passes", r'if kind == "zero" and not re.fullmatch(r"(sweep|probe):\S+", proof):',
      "if False:"),
     ("A3 drained row without its probe passes", 'if kind == "drained" and proof != "probe:a3drain":', "if False:"),
@@ -132,7 +131,6 @@ MUTS = [
     ('contrary live writes for a zero row pass', 'if wr:', 'if False:'),
     ('probe:a3zero evidence not required', 'if proof == "probe:a3zero":', 'if False:'),
     ('a3zero written count not checked', ' or r.get("written", -1) != 0', ''),
-    ('A3 row withheld by the build passes', 'raise Refused("A3 rows withheld by the build (no executed real reader): %s" % ", ".join(held))', 'pass'),
     ('VR2 counters values not judged', 'bad.append("counters g=%d %s=%s" % (g, k, cs[0].get(k)))', 'pass'),
     ('VR2 absent counters line passes', 'bad.append("game %d: %d counters lines (needs 1, written at its flush)" % (g, len(cs)))', 'pass'),
     ('VR2 point missing_end passes', 'bad.append("point %s: missing_end=%d" % (r["pt"], r["missing_end"]))', 'pass'),
@@ -155,8 +153,21 @@ MUTS = [
     ('live row marker removed: its planning value passes', '    ("CE_Pos", "S05", "dependent", "", "live:executed"),',
      '    ("CE_Pos", "S05", "dependent", "", ""),', 'tools/frametime/gate_specs/a3.py'),
     ('live row planning or withheld line beside its executed line passes',
-     'elif k in live:\n            raise Refused("A3 live row %s: cal i=%s carries a %s line;',
-     'elif False:\n            raise Refused("A3 live row %s: cal i=%s carries a %s line;'),
+     'if bad or "live" not in r:\n            raise Refused("A3 live row %s: cal i=%s carries a %s line;',
+     'if False:\n            raise Refused("A3 live row %s: cal i=%s carries a %s line;'),
+    # round 6 (ruling FRAME-TIME-ROUND-R5): M1's one predicate, M2's peer requirement, the method change
+    ('M1: the live marker exempts its line from the stand-in fields (the round-5 branch)', 'if bad or "live" not in r:',
+     'if "live" not in r:'),
+    ('M1: the failure field dropped from the stand-in predicate', 'STAND_IN = ("withheld", "failed", "u", "p", "n")',
+     'STAND_IN = ("withheld", "u", "p", "n")'),
+    ('M2: A3 reads one seat\'s log as both', 'if dep and peer_recs is None:\n        raise Refused(',
+     'if dep and peer_recs is None:\n        peer_recs = recs\n        Refused('),
+    ('M2: report gives a verdict from one seat\'s log', 'raise Refused("a verdict needs both seats\' logs:',
+     'peer = text; Refused("a verdict needs both seats\' logs:'),
+    ('M2: report regains a bypass parameter', 'def report(text, peer=None):',
+     'def report(text, peer=None, require_peer=True):'),
+    ('R5: a dependent row keeps the retired scratch proof', 'if kind == "dependent" and proof != LIVE_PROOF:',
+     'if kind == "dependent" and proof not in (LIVE_PROOF, ""):'),
     ('live row executed reads not matched to its a3 line', 'if len(a3l) != 1 or a3l[0].get("reads_on") != r["reads"]:',
      'if len(a3l) != 1:'),
     ('live row unscoped reads or unbalanced scopes pass', 'if r["unscoped"] != 0 or r["depth_err"] != 0:', 'if False:'),
@@ -167,12 +178,10 @@ MUTS = [
     ('live row d is the last game, not the largest', 'best = v if best is None else max(best, v)', 'best = v'),
     ('live row with no executed read passes', 'if best is None:\n            raise Refused(',
      'if False:\n            raise Refused('),
-    ('live line for a calibrated row passes', 'if k in names and k not in live:', 'if False:'),
-    ('peer seat live lines ignored', '    if peer_recs is not None:\n        pd, _ = a3_live(',
-     '    if False:\n        pd, _ = a3_live('),
-    ('peer log not required on the command line form', 'if peer_recs is None and require_peer and', 'if False and'),
-    ('live rows left out of A_j', '(ld[k] if k in ld else cals[i][k]) for k in dep))',
-     '(cals[i][k] if k in cals[i] else 0.0) for k in dep))'),
+    ('live line for a calibrated row passes', 'if k not in live:\n            # a drained or zero row',
+     'if False:\n            # a drained or zero row'),
+    ('peer seat live lines ignored', 'ld = {k: max(v, pd[k]) for k, v in ld.items()}', 'ld = dict(ld)'),
+    ('live rows left out of A3', 'a3v = sum(rate[k] * ld[k] for k in dep)', 'a3v = sum(rate[k] for k in dep)'),
     ('cal failure warnings unmarked', '        rec["failed"] = 1', '        pass'),
     ('VR2 failure warnings pass', '        if fails:\n            bad.append("game %d: calibration %d carries failure warnings',
      '        if False:\n            bad.append("game %d: calibration %d carries failure warnings'),
@@ -261,8 +270,6 @@ KILLS = {
         ['test_a3_is_the_largest_per_game_window_rate_times_the_calibrated_difference'],
     'A3 missing line passes':
         ['test_a3_refuses_a_missing_line_or_calibration'],
-    'A3 missing calibration passes':
-        ['test_a3_refuses_a_missing_line_or_calibration'],
     'B3 ignores edge calls':
         ['test_b3_flags_heavy_work_in_a_live_frame_after_combat_ended'],
     'VR6 dispatch count ignored':
@@ -281,8 +288,6 @@ KILLS = {
         ['test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row'],
     'A3 zero row with its proof reference removed':
         ['test_a3_zero_row_without_its_proof_reference_fails_the_parse'],
-    'A3 per-game calibration rule removed (the old acceptance)':
-        ['test_a3_every_games_calibration_is_required_and_a_dropped_one_never_passes'],
     'A3 zero row without its proof passes':
         ['test_a3_zero_row_without_its_proof_reference_fails_the_parse'],
     'A3 drained row without its probe passes':
@@ -331,8 +336,6 @@ KILLS = {
         ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail', 'test_deleting_each_record_kind_withholds'],
     'a3zero written count not checked':
         ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail'],
-    'A3 row withheld by the build passes':
-        ['test_a3_row_withheld_by_the_build_withholds_b1'],
     'VR2 counters values not judged':
         ['test_vr2_judges_the_last_games_counters_and_every_point_stamp'],
     'VR2 absent counters line passes':
@@ -370,7 +373,20 @@ KILLS = {
     'live row marker removed: its planning value passes':
         ['test_live_row_planning_or_withheld_line_never_passes_as_executed'],
     'live row planning or withheld line beside its executed line passes':
-        ['test_live_row_planning_or_withheld_line_never_passes_as_executed'],
+        ['test_live_row_planning_or_withheld_line_never_passes_as_executed', 'test_a3_row_withheld_by_the_build_withholds_b1',
+         'test_live_marked_stand_in_line_is_refused_in_either_seat'],
+    'M1: the live marker exempts its line from the stand-in fields (the round-5 branch)':
+        ['test_live_marked_stand_in_line_is_refused_in_either_seat'],
+    'M1: the failure field dropped from the stand-in predicate':
+        ['test_live_marked_stand_in_line_is_refused_in_either_seat'],
+    "M2: A3 reads one seat's log as both":
+        ['test_peer_seat_live_lines_are_read_and_required'],
+    "M2: report gives a verdict from one seat's log":
+        ['test_peer_seat_live_lines_are_read_and_required'],
+    'M2: report regains a bypass parameter':
+        ['test_peer_seat_live_lines_are_read_and_required'],
+    'R5: a dependent row keeps the retired scratch proof':
+        ['test_a_dependent_row_is_calibrated_only_by_its_in_game_lines'],
     'live row executed reads not matched to its a3 line':
         ['test_live_row_lines_are_complete_and_consistent'],
     'live row unscoped reads or unbalanced scopes pass':
@@ -387,9 +403,7 @@ KILLS = {
         ['test_live_row_lines_are_complete_and_consistent'],
     'peer seat live lines ignored':
         ['test_peer_seat_live_lines_are_read_and_required'],
-    'peer log not required on the command line form':
-        ['test_peer_seat_live_lines_are_read_and_required'],
-    'live rows left out of A_j':
+    'live rows left out of A3':
         ['test_live_rows_take_their_executed_in_game_calibration'],
     'cal failure warnings unmarked':
         ['test_vr2_needs_a_successful_fhat_and_rejects_calibration_failures'],

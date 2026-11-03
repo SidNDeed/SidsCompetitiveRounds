@@ -468,11 +468,17 @@ namespace CompetitiveRounds
         private static int Count(Rec r, string k)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_B5c); FtA3.Read(FtA3.CE_aimset);
 #endif
             object v = r[k];
             var l = v as List<long[]>;
             return l != null ? l.Count : ((List<Group>)v).Count;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void RemoveLast(Rec r, string k)
@@ -1052,12 +1058,18 @@ namespace CompetitiveRounds
             internal void Add(long signedMrad, bool noSight)
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_aimset); FtA3.Wrote(FtA3.CE_aimset);
 #endif
                 long a = signedMrad < 0 ? -signedMrad : signedMrad;
                 Hist[Bin(AIM_EDGES, a)]++;
                 Count++; Sum += signedMrad; Sq += (double)signedMrad * signedMrad;
                 if (noSight) NoSight++;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
             internal long[] Summary()
             {
@@ -1119,7 +1131,7 @@ namespace CompetitiveRounds
             }
 
 #if SCR_FRAMETIME
-            internal bool Open { get { FtA3.Read(FtA3.CE_gun_account); return _open; } }
+            internal bool Open { get { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.CE_gun_account); return _open; } finally { FtA3.TExit(ftScope); } } }
 #else
             internal bool Open { get { return _open; } }
 #endif
@@ -1131,6 +1143,9 @@ namespace CompetitiveRounds
             /// carries rep >= 0 (own gun) or am >= 0 (the copy).</summary>
             internal void AddShot(long pid, long stamp, long ammoBefore, bool reloading, long counterMs, long rep, long since, long fl, long am)
             {
+#if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
 #endif
@@ -1184,11 +1199,17 @@ namespace CompetitiveRounds
                     if (Own) { Tot[TotIx("emit")]++; if (rep == 0) Tot[TotIx("gate")]++; }
                     else Tot[TotIx("atk_msg")]++;
                 }
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             /// <summary>A regeneration of `amt` units seen on this copy (applied before the next shot).</summary>
             internal void AddRegen(long amt, long st, long gapG, long gapS, long gapR)
             {
+#if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
 #endif
@@ -1202,6 +1223,9 @@ namespace CompetitiveRounds
                     _regs[o + 3] = Clamp(gapG, -1, 600000); _regs[o + 4] = Clamp(gapS, -1, 600000); _regs[o + 5] = Clamp(gapR, -1, 600000);
                     _nRegs[_gi]++;
                 }
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             /// <summary>An accepted attack whose emission listed no ammo init (own:
@@ -1209,24 +1233,39 @@ namespace CompetitiveRounds
             internal void AddNoInit()
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
 #endif
                 Tot[TotIx("atk_noinit")]++;
                 if (Own) Tot[TotIx("gate")]++; else Tot[TotIx("atk_msg")]++;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             internal void AddKind(bool noAmmo)
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
 #endif
                 Tot[TotIx(noAmmo ? "noammo" : "separate")]++;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             /// <summary>The refill or point end that closes the open cycle. A refill
             /// with no open cycle is counted (rf_idle).</summary>
             internal void CloseCycle(long end, long src, long amt, long stEnd, long rlG, long rlS, long rlR)
             {
+#if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
 #endif
@@ -1288,10 +1327,16 @@ namespace CompetitiveRounds
                     }
                     else CxOmitted++;
                 }
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             private void Start(long pid, long stamp)
             {
+#if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_gun_account); FtA3.Wrote(FtA3.CE_gun_account);
 #endif
@@ -1302,6 +1347,9 @@ namespace CompetitiveRounds
                 _s0 = Wrap(stamp); _pid0 = pid; _pt = Point; _n = 0; _lastPid = pid; _lastStamp = _s0;
                 _mag = Mag; _rexp = Rexp; _count = Mag; _regen = 0; _nrg = 0; _vol = 0; _hasVolLast = false;
                 _exh = false; _inTail = false; _tail = 0; _inRl = 0; _gapN = 0; _hasPostVol = false; _foundRl = false; _gateRl = false;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 
             /// <summary>The kept cycle groups as record rows (the tick's work).</summary>
@@ -1363,14 +1411,20 @@ namespace CompetitiveRounds
             internal int NextSlot()
             {
 #if SCR_FRAMETIME
+                int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
                 FtA3.Read(FtA3.CE_B5c); FtA3.Wrote(FtA3.CE_B5c);
 #endif
                 Total++;
                 if (Count >= Cap) { Omitted++; return -1; }
                 return (Count++) * Width;
+#if SCR_FRAMETIME
+                } finally { FtA3.TExit(ftScope); }
+#endif
             }
 #if SCR_FRAMETIME
-            internal long[] Raw { get { FtA3.Read(FtA3.CE_B5c); return _a; } }
+            internal long[] Raw { get { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.CE_B5c); return _a; } finally { FtA3.TExit(ftScope); } } }
 #else
             internal long[] Raw { get { return _a; } }
 #endif

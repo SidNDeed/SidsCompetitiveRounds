@@ -346,10 +346,11 @@ FREQ, FHAT = 10000000, 3000000000
 ENTRIES = P.expected_entries()
 SHAPES = sorted(set(s for e, s in ENTRIES))
 A3_DEP = [r[0] for r in P.a3_spec() if r[2] == "dependent"]
-# ruling FRAME-TIME-ROUND-R4: the live rows (calibrated in game) and the rows calibrated at every game start
+# rulings FRAME-TIME-ROUND-R4 and R5: the live rows (calibrated in game); since R5 retired the scratch A3, every
+# dependent row is live and no row is calibrated at game start
 A3_LIVE = [r[0] for r in P.a3_spec() if r[2] == "dependent" and r[4] == P.LIVE_PROOF]
 A3_CAL = [k for k in A3_DEP if k not in A3_LIVE]
-# the six rows the ruling names (fixed here, so a row losing its live marker in a3.py fails the controls)
+# the six rows ruling R4 named first (a sample the per-row controls loop over)
 LIVE_SIX = ["CE_Pos", "CE_Recent", "CE_gun_scalars", "CE_capture", "SE_scalars", "IC_game"]
 A3_DRAIN = [r[0] for r in P.a3_spec() if r[2] == "drained"]
 # the plugin files holding the FtA3 registrations (mut_parse copies each)
@@ -363,7 +364,8 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
          drop_flushed=(), drop_between=(), drop_w=(), refusals_why=("game", "quit"), a3_starts=None, a3_cal_p=None,
          drop_p=(), drop_replay=(), replay_bad=None, drop_counters=(), counters_bad=None, point_missing_end=None,
          a3_withheld=None, a3zero_lines=None, live_planning=None, live_beside=None, live_drop=(), live_bad=None,
-         live_ticks=30, live_peak=None, fhat_fail=(), fhat_extra_fail=(), fhat_zero=(), disp_fail=None):
+         live_ticks=30, live_peak=None, fhat_fail=(), fhat_extra_fail=(), fhat_zero=(), disp_fail=None,
+         live_game=None, live_tail=None):
     """A synthetic sitting, every line as FtFrames, FtCalib, FtCensus and FtDrive write it. Point costs: ON adds
     cost_us of C per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor
     case). The drop_* and shut_ic arguments remove or spoil records for the completeness controls."""
@@ -485,12 +487,13 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
             if (g, k) in live_drop or k in (live_planning, a3_withheld):
                 continue
             rd = 2 * onlf
-            tk = rd * (live_ticks * 3 if live_peak == (g, k) else live_ticks)
+            per = (live_game or {}).get(g, live_ticks)
+            tk = rd * (per * 3 if live_peak == (g, k) else per)
             v = dict(i=g + 1, reads=rd, scopes=rd // 2, ticks=tk, tmax=4 * live_ticks, unscoped=0, depth_err=0)
             v.update((live_bad or {}).get((g, k), {}))
             L.append("[FRAME-TIME] cal i=%d why=game%d kind=a3 k=%s live=1 reads=%d scopes=%d ticks=%d tmax=%d "
-                     "unscoped=%d depth_err=%d" % (v["i"], g, k, v["reads"], v["scopes"], v["ticks"], v["tmax"],
-                                                   v["unscoped"], v["depth_err"]))
+                     "unscoped=%d depth_err=%d%s" % (v["i"], g, k, v["reads"], v["scopes"], v["ticks"], v["tmax"],
+                                                     v["unscoped"], v["depth_err"], (live_tail or {}).get((g, k), "")))
         for k in A3_DRAIN:
             if (g, k) not in drop_a3drain:
                 st = a3_starts[2] if a3_starts and a3_starts[:2] == (g, k) else 14     # 7 rounds of 2 points
@@ -522,8 +525,29 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
     return "\n".join("[Info   :CompetitiveRounds] " + x for x in L)
 
 
+
+_PEER = {}
+
+
+def _peer_text():
+    """The other seat's log (round-5 MEDIUM, ft_parse.py:1643: every verdict needs both seats' logs); a clean sitting
+    of its own seed. A test about the peer passes its own."""
+    if "t" not in _PEER:
+        _PEER["t"] = _log(seed=9)
+    return _PEER["t"]
+
+
+def _report(text, **kw):
+    kw.setdefault("peer", _peer_text())
+    return P.report(text, **kw)
+
+
+def _a3(recs, **kw):
+    kw.setdefault("peer_recs", P.read(_peer_text()))
+    return P.a3(recs, **kw)
+
 def test_report_end_to_end_reaches_a_verdict():
-    out = P.report(_log())
+    out = _report(_log())
     assert "not computable" not in out, out
     assert "SITTING complete: games 0 to 16" in out, out
     assert "VR8 zero-state PASS: game 0 (mutant) 7 of 7 rounds void" in out
@@ -535,7 +559,7 @@ def test_report_end_to_end_reaches_a_verdict():
 
 def test_report_carries_the_specified_figures():
     # round-1 MEDIUM (ft_parse:793): the classification and the figures V4 section 0 and 3.3 to 3.9 report
-    out = P.report(_log())
+    out = _report(_log())
     for want in ("U without D_up", "dF ", "dS ", "dP (process CPU, all threads)", "e_F ", "e_S ", "trend: d_g slope",
                  "last four games' mean", "UPKEEP spans per live frame: ON", "format M's own stamps",
                  "between-point spans after ON points", "conditional: U bounds the NET", "PASS <= 3, SID <= 5"):
@@ -546,7 +570,7 @@ def test_report_carries_the_specified_figures():
 def test_a3_is_the_largest_per_game_window_rate_times_the_calibrated_difference():
     # ruling FRAME-TIME-ROUND-R1-A1 (route D): A3 = sum over dependent structures of r_k_max x d_k
     recs = P.read(_log())
-    v, ds, rate, dk = P.a3(recs, last_game=P.LAST_GAME)
+    v, ds, rate, dk = _a3(recs, last_game=P.LAST_GAME)
     d = 30000 / 1000 * 1e6 / FREQ                     # (p - u) / n ticks per read, in us
     assert set(rate) == set(A3_DEP) and all(abs(dk[k] - d) < 1e-9 for k in A3_DEP)
     games = P.games_of(recs)
@@ -560,7 +584,7 @@ def test_a3_is_the_largest_per_game_window_rate_times_the_calibrated_difference(
     # the per-game maximum, not the last game's rate: a peak planted in an early game sets r_k_max
     k = A3_DEP[0]
     recs = P.read(_log(a3_peak=(3, k)))
-    v2, ds2, rate2, dk2 = P.a3(recs, last_game=P.LAST_GAME)
+    v2, ds2, rate2, dk2 = _a3(recs, last_game=P.LAST_GAME)
     games = P.games_of(recs)
     peak = [r for r in recs if r["kind"] == "a3" and r["k"] == k and r["g"] == 3][0]["reads_win"]
     r3 = peak / sum(q["live_frames"] for q in games[3] if q["gate"] == 0)
@@ -570,11 +594,12 @@ def test_a3_is_the_largest_per_game_window_rate_times_the_calibrated_difference(
 def test_a3_refuses_a_missing_line_or_calibration():
     # ruling A1 part 3: the refill window counted from absent records cannot pass, nor a missing calibration
     k = A3_DEP[0]
-    with pytest.raises(P.Refused, match="a3 lines"):
-        P.a3(P.read(_log(drop_a3={(5, k)})), last_game=P.LAST_GAME)
-    with pytest.raises(P.Refused, match="no a3 line"):
-        P.a3(P.read(_log(drop_a3cal={(7, k)})), last_game=P.LAST_GAME)
-    out = P.report(_log(drop_a3={(5, k)}))
+    # every dependent row is live since ruling R5, so the executed-reads cross-check meets the missing line first
+    with pytest.raises(P.Refused, match="game 5 executed reads [0-9]+, the game's a3 line counts \[\]"):
+        _a3(P.read(_log(drop_a3={(5, k)})), last_game=P.LAST_GAME)
+    with pytest.raises(P.Refused, match="game 7 has 0 executed calibration lines"):
+        _a3(P.read(_log(live_drop={(7, k)})), last_game=P.LAST_GAME)
+    out = _report(_log(drop_a3={(5, k)}))
     assert "U not computable" in out and "VERDICT B1 withheld" in out, out
 
 
@@ -582,13 +607,13 @@ def test_a3_drained_rows_refuse_a_missing_line_or_a_point_that_started_holding_e
     # ruling A1 part 3: a drained row's zero is checked by the build, never assumed
     assert A3_DRAIN, "the inventory names no drained row"
     k = A3_DRAIN[0]
-    v, ds, rate, dk = P.a3(P.read(_log()), last_game=P.LAST_GAME)
+    v, ds, rate, dk = _a3(P.read(_log()), last_game=P.LAST_GAME)
     assert k not in rate and k not in dk
     with pytest.raises(P.Refused, match="a3drain lines"):
-        P.a3(P.read(_log(drop_a3drain={(4, k)})), last_game=P.LAST_GAME)
+        _a3(P.read(_log(drop_a3drain={(4, k)})), last_game=P.LAST_GAME)
     with pytest.raises(P.Refused, match="nonempty"):
-        P.a3(P.read(_log(a3_dirty=(6, k))), last_game=P.LAST_GAME)
-    out = P.report(_log(a3_dirty=(6, k)))
+        _a3(P.read(_log(a3_dirty=(6, k))), last_game=P.LAST_GAME)
+    out = _report(_log(a3_dirty=(6, k)))
     assert "U not computable" in out and "VERDICT B1 withheld" in out, out
 
 
@@ -642,10 +667,10 @@ def test_a3_inventory_names_every_survivor_once_and_the_build_registers_each_row
 def test_a3_rows_need_a_kind_and_a_zero_row_its_reason():
     recs = P.read(_log())
     with pytest.raises(P.Refused, match="names no structure"):
-        P.a3(recs, spec=[])
+        _a3(recs, spec=[])
     with pytest.raises(P.Refused, match="needs a reason"):
-        P.a3(recs, spec=[("X", "S99", "zero", " ", "sweep:no-live-write")])
-    assert P.a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins", "sweep:no-live-write")])[0] == 0.0
+        _a3(recs, spec=[("X", "S99", "zero", " ", "sweep:no-live-write")])
+    assert _a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins", "sweep:no-live-write")])[0] == 0.0
 
 
 def test_a3_zero_row_without_its_proof_reference_fails_the_parse():
@@ -654,14 +679,14 @@ def test_a3_zero_row_without_its_proof_reference_fails_the_parse():
     recs = P.read(_log())
     for proof in ("", " ", "sweep:", "because", "probe"):
         with pytest.raises(P.Refused, match="proof reference"):
-            P.a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins", proof)])
+            _a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins", proof)])
     with pytest.raises(P.Refused, match="probe:a3drain"):
-        P.a3(recs, spec=[("X", "S99", "drained", "emptied between points", "sweep:no-live-write")])
+        _a3(recs, spec=[("X", "S99", "drained", "emptied between points", "sweep:no-live-write")])
     with pytest.raises(P.Refused, match="name, survivor id, kind, reason, proof"):
-        P.a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins")])
+        _a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins")])
     # round-3 MEDIUM (ft_parse.py:540): a probe token is accepted only with its records
     with pytest.raises(P.Refused, match="probe:a3zero needs one a3zero line"):
-        P.a3(recs, spec=[("X", "S99", "zero", "r", "probe:a3zero")])
+        _a3(recs, spec=[("X", "S99", "zero", "r", "probe:a3zero")])
     # the shipped inventory: every zero row names its proof, every drained row its probe
     for r in P.a3_spec():
         assert len(r) == 5, r
@@ -669,27 +694,28 @@ def test_a3_zero_row_without_its_proof_reference_fails_the_parse():
             assert re.fullmatch(r"(sweep|probe):\S+", r[4]), r
         if r[2] == "drained":
             assert r[4] == "probe:a3drain", r
-    P.a3(recs, last_game=P.LAST_GAME)
+    _a3(recs, last_game=P.LAST_GAME)
 
 
 def test_a3_every_games_calibration_is_required_and_a_dropped_one_never_passes():
-    # round-2 HIGH (ft_parse.py:495), Codex's own control: game 8's A3 calibration costs most, so A_8 decides A3 and
-    # B1 is FAIL; dropping game 8's family used to shrink J and turn FAIL into PASS. Now it withholds the verdict.
-    big = {8: 100000 + 2000000}
-    out = P.report(_log(a3_cal_p=big))
+    # round-2 HIGH (ft_parse.py:495), Codex's own control, on the executed lines (ruling FRAME-TIME-ROUND-R5): game 8's
+    # reads cost most, so game 8 sets every d_k and B1 is FAIL; dropping game 8's executed lines (every row's, or one
+    # row's) must withhold the verdict, never fall back to the cheaper games
+    big = {8: 2000}
+    out = _report(_log(live_game=big))
     assert "VERDICT B1 FAIL" in out, out
     for drop in ({(8, k) for k in A3_DEP}, {(8, A3_DEP[0])}):
-        out2 = P.report(_log(a3_cal_p=big, drop_a3cal=drop))
+        out2 = _report(_log(live_game=big, live_drop=drop))
         assert "VERDICT B1 withheld" in out2, out2
         assert not re.search(r"^VERDICT B1 (PASS|SID)", out2, re.M), out2
     with pytest.raises(P.Refused, match="game 8"):
-        P.a3(P.read(_log(a3_cal_p=big, drop_a3cal={(8, k) for k in A3_DEP})), last_game=P.LAST_GAME)
-    # a live row's executed line names game 8's start calibration, which is gone: either refusal names it
-    with pytest.raises(P.Refused, match="game 8 (has 0 start calibrations|line i=9 is not the game's start calibration)"):
-        P.a3(P.read(_log(drop_cal={8})), last_game=P.LAST_GAME)
+        _a3(P.read(_log(live_game=big, live_drop={(8, k) for k in A3_DEP})), last_game=P.LAST_GAME)
+    # a row's executed line names game 8's start calibration, which is gone
+    with pytest.raises(P.Refused, match="game 8 line i=9 is not the game's start calibration"):
+        _a3(P.read(_log(drop_cal={8})), last_game=P.LAST_GAME)
     # the default reads the sitting's games too: no caller can skip the per-game rule by omitting last_game
     with pytest.raises(P.Refused, match="game 8"):
-        P.a3(P.read(_log(a3_cal_p=big, drop_a3cal={(8, k) for k in A3_DEP})))
+        _a3(P.read(_log(live_game=big, live_drop={(8, k) for k in A3_DEP})))
 
 
 def test_a3_drained_starts_equal_the_games_point_count():
@@ -697,8 +723,8 @@ def test_a3_drained_starts_equal_the_games_point_count():
     k = A3_DRAIN[0]
     for st in (13, 15, 1):
         with pytest.raises(P.Refused, match="point starts"):
-            P.a3(P.read(_log(a3_starts=(4, k, st))), last_game=P.LAST_GAME)
-    P.a3(P.read(_log(a3_starts=(4, k, 14))), last_game=P.LAST_GAME)
+            _a3(P.read(_log(a3_starts=(4, k, st))), last_game=P.LAST_GAME)
+    _a3(P.read(_log(a3_starts=(4, k, 14))), last_game=P.LAST_GAME)
 
 
 # the absent-record sweep (ruling FRAME-TIME-ROUND-R2): each record's absence fails the run
@@ -776,24 +802,24 @@ def _a3zero_case():
     spec = [(n, s, ("zero" if n == k else kd), (w or "r"), ("probe:a3zero" if n == k else pr))
             for n, s, kd, w, pr in P.a3_spec()]
     drop = {(g, k) for g in range(17)}
-    return _log(drop_a3=drop, drop_a3cal=drop, a3zero_lines={k: 0}), spec
+    return _log(drop_a3=drop, live_drop=drop, a3zero_lines={k: 0}), spec
 
 
 @pytest.mark.parametrize("kind,fixture,where,want", DELETIONS)
 def test_deleting_each_record_kind_withholds(kind, fixture, where, want):
     if fixture == "sitting":
         base = _log()
-        assert re.search(r"^VERDICT B1 SID", P.report(base), re.M)
+        assert re.search(r"^VERDICT B1 SID", _report(base), re.M)
         log, n = _drop_kind(base, kind, where)
         assert n >= 1, kind
-        assert re.search(want, P.report(log), re.M), (kind, P.report(log))
+        assert re.search(want, _report(log), re.M), (kind, _report(log))
     elif fixture == "a3zero":
         base, spec = _a3zero_case()
-        P.a3(P.read(base), spec=spec)
+        _a3(P.read(base), spec=spec, peer_recs=P.read(base))
         log, n = _drop_kind(base, kind, where)
         assert n >= 1
         with pytest.raises(P.Refused, match=want):
-            P.a3(P.read(log), spec=spec)
+            _a3(P.read(log), spec=spec, peer_recs=P.read(log))
     else:
         base = _menu_log()
         assert P.menu_check(P.read(base))[0]
@@ -845,7 +871,7 @@ def test_failure_events_make_the_run_incomplete():
         i = log.index("[FRAME-TIME] flushed g=9")
         log = log[:i] + ln + "\n" + log[i:]
         assert any("failure event" in m for m in P.complete(P.read(log))), ln
-        assert re.search(INCOMPLETE, P.report(log), re.M), ln
+        assert re.search(INCOMPLETE, _report(log), re.M), ln
         ok, _, bad = P.menu_check(P.read(_menu_log() + "\n" + ln))
         assert not ok and any("failure event" in b for b in bad), (ln, bad)
     # the control the other way: the clock's ordinary line is not a failure
@@ -856,7 +882,7 @@ def test_failure_events_make_the_run_incomplete():
 
 def test_f18_failure_guards_b1():
     # round-3 MEDIUM (ft_parse.py:1461): game 8's replay failing makes F18 FAIL, and B1 is INVALID, never PASS or SID
-    out = P.report(_log(replay_bad=8))
+    out = _report(_log(replay_bad=8))
     assert re.search(r"^F18 reading A FAIL", out, re.M), out
     assert re.search(r"^VERDICT B1 INVALID: .*F18", out, re.M), out
 
@@ -918,20 +944,21 @@ def test_a3_probe_proofs_need_their_records_and_contrary_ones_fail():
     k = A3_DEP[0]
     spec = [(n, s, ("zero" if n == k else kd), (w or "r"), ("probe:a3zero" if n == k else pr))
             for n, s, kd, w, pr in P.a3_spec()]
-    recs = P.read(_log(drop_a3={(g, k) for g in range(17)}, drop_a3cal={(g, k) for g in range(17)}))
+    drop = {(g, k) for g in range(17)}
+    recs = P.read(_log(drop_a3=drop, live_drop=drop))
     with pytest.raises(P.Refused, match="probe:a3zero needs one a3zero line"):
-        P.a3(recs, spec=spec)
-    good = P.read(_log(drop_a3={(g, k) for g in range(17)}, drop_a3cal={(g, k) for g in range(17)}, a3zero_lines={k: 0}))
-    P.a3(good, spec=spec)
-    bad = P.read(_log(drop_a3={(g, k) for g in range(17)}, drop_a3cal={(g, k) for g in range(17)}, a3zero_lines={k: 1}))
+        _a3(recs, spec=spec, peer_recs=recs)
+    good = P.read(_log(drop_a3=drop, live_drop=drop, a3zero_lines={k: 0}))
+    _a3(good, spec=spec, peer_recs=good)
+    bad = P.read(_log(drop_a3=drop, live_drop=drop, a3zero_lines={k: 1}))
     with pytest.raises(P.Refused, match="written=1"):
-        P.a3(bad, spec=spec)
+        _a3(bad, spec=spec, peer_recs=good)
     spec2 = [(n, s, kd, w, ("sweep:anything" if n == k else pr)) for n, s, kd, w, pr in spec]
     with pytest.raises(P.Refused, match="names no evidence"):
-        P.a3(good, spec=spec2)
+        _a3(good, spec=spec2, peer_recs=good)
     spec3 = [(n, s, kd, w, ("sweep:no-live-write" if n == k else pr)) for n, s, kd, w, pr in spec]
     with pytest.raises(P.Refused, match="contrary evidence"):
-        P.a3(P.read(_log()), spec=spec3)
+        _a3(P.read(_log()), spec=spec3)
 
 
 def test_vr2_needs_a_successful_fhat_and_rejects_calibration_failures():
@@ -949,29 +976,44 @@ def test_vr2_needs_a_successful_fhat_and_rejects_calibration_failures():
     s = sorted(SHAPES)[0]
     ok, why = P.vr2(P.read(_log(disp_fail=(5, s))), P.LAST_GAME)
     assert not ok and any("no disp line for shapes" in w for w in why), why
-    out = P.report(_log(fhat_fail={5}))
+    out = _report(_log(fhat_fail={5}))
     assert "VR2 instrument FAIL" in out and re.search(r"^VERDICT B1 (INVALID|withheld)", out, re.M), out
 
 
 def test_live_rows_take_their_executed_in_game_calibration():
-    # ruling FRAME-TIME-ROUND-R4: the six live rows are calibrated by their executed in-game lines: d_k is the
-    # largest per-game ticks / reads, and enters every A_j
-    assert sorted(A3_LIVE) == sorted(LIVE_SIX)
+    # rulings FRAME-TIME-ROUND-R4 and R5: every dependent row is calibrated by its executed in-game lines (the scratch
+    # A3 is retired): d_k is the largest per-game ticks / reads, and A3 is the one sum r_k_max x d_k
+    assert sorted(A3_LIVE) == sorted(A3_DEP) and len(A3_DEP) == 32 and not A3_CAL and set(LIVE_SIX) <= set(A3_LIVE)
     recs = P.read(_log())
     d, det = P.a3_live(recs)
     want = 30 * 1e6 / FREQ
     assert sorted(d) == sorted(A3_LIVE) and all(abs(d[k] - want) < 1e-9 for k in A3_LIVE), d
     assert all(len(det[k]) == P.LAST_GAME + 1 for k in A3_LIVE), det
-    v, ds, rate, dk = P.a3(recs, last_game=P.LAST_GAME)
+    v, ds, rate, dk = _a3(recs, last_game=P.LAST_GAME)
     assert all(abs(dk[k] - want) < 1e-9 for k in A3_LIVE)
     # the per-game maximum: a game whose reads cost three times as much sets d_k
     k = A3_LIVE[0]
     d2, _ = P.a3_live(P.read(_log(live_peak=(4, k))))
     assert abs(d2[k] - 3 * want) < 1e-9, d2
-    v2 = P.a3(P.read(_log(live_peak=(4, k))), last_game=P.LAST_GAME)[0]
+    v2 = _a3(P.read(_log(live_peak=(4, k))), last_game=P.LAST_GAME)[0]
     assert v2 > v
-    out = P.report(_log())
+    out = _report(_log())
     assert "A3 live rows (this seat): " in out and "U not computable" not in out, out
+
+
+def test_a_dependent_row_is_calibrated_only_by_its_in_game_lines():
+    # ruling FRAME-TIME-ROUND-R5 (round 5's HIGH, CombatEvidence.cs:3217, FtCalB5c): the scratch A3 is retired for every
+    # dependent row; an inventory that gives a dependent row any proof but live:executed (the scratch path's "") is
+    # refused, whichever row it is, and the shipped inventory marks all 32 live
+    recs = P.read(_log())
+    for k in (A3_DEP[0], "CE_B5c", A3_DEP[-1]):
+        for proof in ("", "scratch", "sweep:no-live-write"):
+            spec = [(n, s, kd, w, (proof if n == k else pr)) for n, s, kd, w, pr in P.a3_spec()]
+            with pytest.raises(P.Refused, match="A3 row %s .*the scratch A3 is retired" % k):
+                _a3(recs, spec=spec, last_game=P.LAST_GAME)
+    assert len(A3_DEP) == 32 and all(r[4] == P.LIVE_PROOF for r in P.a3_spec() if r[2] == "dependent")
+    # the positive control: the shipped inventory with both seats' executed lines
+    _a3(recs, last_game=P.LAST_GAME)
 
 
 def test_live_row_planning_or_withheld_line_never_passes_as_executed():
@@ -979,15 +1021,40 @@ def test_live_row_planning_or_withheld_line_never_passes_as_executed():
     # row's executed calibration, in place of it or beside it
     for k in LIVE_SIX:
         with pytest.raises(P.Refused, match="live row %s: cal i=\\d+ carries a planning" % k):
-            P.a3(P.read(_log(live_planning=k)), last_game=P.LAST_GAME)
+            _a3(P.read(_log(live_planning=k)), last_game=P.LAST_GAME)
     k = A3_LIVE[1]
     with pytest.raises(P.Refused, match="live row %s: cal i=\\d+ carries a planning" % k):
-        P.a3(P.read(_log(live_beside=k)), last_game=P.LAST_GAME)
+        _a3(P.read(_log(live_beside=k)), last_game=P.LAST_GAME)
     with pytest.raises(P.Refused, match="live row %s: cal i=\\d+ carries a withheld" % k):
-        P.a3(P.read(_log(a3_withheld=k)), last_game=P.LAST_GAME)
+        _a3(P.read(_log(a3_withheld=k)), last_game=P.LAST_GAME)
     for kw in (dict(live_planning=k), dict(live_beside=k), dict(a3_withheld=k)):
-        out = P.report(_log(**kw))
+        out = _report(_log(**kw))
         assert "U not computable" in out and "VERDICT B1 withheld" in out, (kw, out)
+
+
+def test_live_marked_stand_in_line_is_refused_in_either_seat():
+    # round-5 MEDIUM (ft_parse.py:637), the reviewer's probe: a peer CE_Pos line carrying live=1 together with
+    # withheld=1, or "failed: control", or the planning fields, passed the live branch as an executed line. One
+    # predicate now refuses the failure, withholding and planning fields whatever the live marker says, in this seat's
+    # log and in the peer's, and B1 is withheld.
+    k = "CE_Pos"
+    clean = P.read(_log())
+    for tail, what in ((" withheld=1", "withheld"), (" failed: control", "failed"),
+                       (" n=1000 u=100000,100000 p=130000,130000", "planning")):
+        bad = _log(live_tail={(5, k): tail})
+        assert "live=1" in [x for x in bad.splitlines() if "why=game5 kind=a3 k=%s " % k in x][0]
+        with pytest.raises(P.Refused, match="live row %s: cal i=6 carries a %s" % (k, what)):
+            P.a3_live(P.read(bad))
+        with pytest.raises(P.Refused, match="live row %s: cal i=6 carries a %s" % (k, what)):
+            P.a3(clean, last_game=P.LAST_GAME, peer_recs=P.read(bad))
+        with pytest.raises(P.Refused, match="live row %s: cal i=6 carries a %s" % (k, what)):
+            P.a3(P.read(bad), last_game=P.LAST_GAME, peer_recs=clean)
+        out = P.report(_log(), peer=bad)
+        assert "U not computable" in out and "VERDICT B1 withheld" in out, (tail, out)
+    # the positive control: the clean executed lines pass in both seats
+    d, _ = P.a3_live(clean)
+    assert k in d
+    P.a3(clean, last_game=P.LAST_GAME, peer_recs=P.read(_peer_text()))
 
 
 def test_live_row_lines_are_complete_and_consistent():
@@ -1006,44 +1073,53 @@ def test_live_row_lines_are_complete_and_consistent():
     ]
     for kw, msg in cases:
         with pytest.raises(P.Refused, match=re.escape(msg)):
-            P.a3(P.read(_log(**kw)), last_game=P.LAST_GAME)
+            _a3(P.read(_log(**kw)), last_game=P.LAST_GAME)
     # no read in any measured game: the row's in-game calibration is empty (its a3 lines agree: reads_on 0)
     txt = _log(live_bad={(g, k): {"reads": 0, "scopes": 0, "ticks": 0, "tmax": 0} for g in range(17)})
     txt = re.sub(r"(a3 g=\d+ k=%s cap=32 steady=1 reads_on=)\d+" % k, r"\g<1>0", txt)
     with pytest.raises(P.Refused, match="no measured game executed a read"):
         P.a3_live(P.read(txt))
-    # a live line for a row calibrated at game start
+    # a live line for a row the inventory does not mark live (since R5 no dependent row is calibrated at game start,
+    # so the subject is a drained row, which carries no a3 calibration line at all)
     txt = _log() + "\n[FRAME-TIME] cal i=3 why=game2 kind=a3 k=%s live=1 reads=1 scopes=1 ticks=1 tmax=1 unscoped=0 " \
-        "depth_err=0" % A3_CAL[0]
+        "depth_err=0" % A3_DRAIN[0]
     with pytest.raises(P.Refused, match="does not mark live:executed"):
-        P.a3(P.read(txt), last_game=P.LAST_GAME)
+        _a3(P.read(txt), last_game=P.LAST_GAME)
 
 
 def test_peer_seat_live_lines_are_read_and_required():
     # ruling FRAME-TIME-ROUND-R4: the live rows' calibration is read from both seats' logs; each is validated, d_k is
-    # the larger of the two, and the command line's form withholds U without the peer's log
+    # the larger of the two. Round-5 MEDIUM (ft_parse.py:1643): no verdict-producing API takes one seat's log, and no
+    # parameter bypasses that
     k = A3_LIVE[0]
-    v, _, _, dk = P.a3(P.read(_log()), last_game=P.LAST_GAME, peer_recs=P.read(_log(live_ticks=60, seed=9)))
+    v, _, _, dk = _a3(P.read(_log()), last_game=P.LAST_GAME, peer_recs=P.read(_log(live_ticks=60, seed=9)))
     assert abs(dk[k] - 60 * 1e6 / FREQ) < 1e-9, dk
     with pytest.raises(P.Refused, match="game 3 has 0 executed calibration lines"):
-        P.a3(P.read(_log()), last_game=P.LAST_GAME, peer_recs=P.read(_log(live_drop={(3, k)})))
+        _a3(P.read(_log()), last_game=P.LAST_GAME, peer_recs=P.read(_log(live_drop={(3, k)})))
     with pytest.raises(P.Refused, match="carries a planning"):
-        P.a3(P.read(_log()), last_game=P.LAST_GAME, peer_recs=P.read(_log(live_planning=k)))
-    out = P.report(_log(), peer=_log(seed=9), require_peer=True)
+        _a3(P.read(_log()), last_game=P.LAST_GAME, peer_recs=P.read(_log(live_planning=k)))
+    out = P.report(_log(), peer=_log(seed=9))
     assert "A3 live rows (peer seat): " in out and "U not computable" not in out, out
-    out = P.report(_log(), require_peer=True)
-    assert "U not computable: the live rows' in-game calibration is read from both seats' logs" in out, out
-    assert "VERDICT B1 withheld" in out, out
-    out = P.report(_log(), peer=_log(live_drop={(3, k)}), require_peer=True)
+    assert re.search(r"^VERDICT B1 (PASS|SID|FAIL): U", out, re.M), out
+    # the reviewer's control: report on one complete seat's log alone is Refused, and so is A3 from one seat's log
+    with pytest.raises(P.Refused, match="a verdict needs both seats' logs"):
+        P.report(_log())
+    with pytest.raises(P.Refused, match="no peer log was given"):
+        P.a3(P.read(_log()), last_game=P.LAST_GAME)
+    import inspect
+    assert "require_peer" not in inspect.signature(P.report).parameters
+    with pytest.raises(TypeError):
+        P.report(_log(), require_peer=False)
+    out = P.report(_log(), peer=_log(live_drop={(3, k)}))
     assert "U not computable" in out and "VERDICT B1 withheld" in out, out
 
 
 def test_a3_row_withheld_by_the_build_withholds_b1():
     # ruling FRAME-TIME-ROUND-R3-A1: a row whose real reader cannot run is withheld; U is not computable, B1 withheld
     k = A3_DEP[1]
-    with pytest.raises(P.Refused, match="withheld by the build.*%s" % k):
-        P.a3(P.read(_log(a3_withheld=k)), last_game=P.LAST_GAME)
-    out = P.report(_log(a3_withheld=k))
+    with pytest.raises(P.Refused, match="live row %s: cal i=\\d+ carries a withheld" % k):
+        _a3(P.read(_log(a3_withheld=k)), last_game=P.LAST_GAME)
+    out = _report(_log(a3_withheld=k))
     assert "U not computable" in out and "VERDICT B1 withheld" in out, out
 
 
@@ -1052,7 +1128,7 @@ def test_each_absent_record_fails_the_run(what, kw):
     recs = P.read(_log(**kw))
     miss = P.complete(recs)
     assert any(what in m for m in miss), (what, miss)
-    out = P.report(_log(**kw))
+    out = _report(_log(**kw))
     for c in ("B1", "B2", "B3"):
         assert "VERDICT %s withheld: sitting incomplete" % c in out, (what, out)
 
@@ -1104,7 +1180,7 @@ def test_report_items_per_minute_longest_frames_and_dc_minus_ds():
         mx = max(q["maxF"] for q in recs if q["kind"] == "p" and q["game"] >= 1 and q["arm"] == arm)
         assert abs(lf[arm] - mx * 1000.0 / FREQ) < 1e-12 and lf[arm] > 0
     assert abs(P.dc_minus_ds(recs) - (P.dC_us(recs)[0] - P.d_key_us(recs, "sS", "ticks")[0])) < 1e-9
-    out = P.report(_log())
+    out = _report(_log())
     tr = P.t_ref(recs)
     b2 = P.hitch(recs)
     for h, v in b2.items():
@@ -1114,7 +1190,7 @@ def test_report_items_per_minute_longest_frames_and_dc_minus_ds():
 
 
 def test_report_adds_a3_to_u():
-    out = P.report(_log())
+    out = _report(_log())
     assert re.search(r"^A3 [0-9.]+ us per live frame", out, re.M), out
     assert re.search(r"\+ D_up [0-9.]+ \+ A3 [0-9.]+;", out) and "U without A3" in out, out
     m = re.search(r"^U ([0-9.]+) us = max\(0, dC_up ([-0-9.]+)\) / min\(1, e_C_lo ([0-9.]+)\) \+ K_up ([0-9.]+) "
@@ -1126,7 +1202,7 @@ def test_report_adds_a3_to_u():
 def test_verdicts_need_the_complete_sitting():
     # round-1 HIGH 4: four measured games, or a sitting without its completion line, gets no verdict at all
     for log in (_log(games=5, complete=False), _log(games=5), _log(complete=False)):
-        out = P.report(log)
+        out = _report(log)
         assert "SITTING INCOMPLETE" in out, out
         for c in ("B1", "B2", "B3"):
             assert "VERDICT %s withheld: sitting incomplete" % c in out, out
@@ -1149,7 +1225,7 @@ def test_vr5_needs_every_expected_record():
     log = _log() + "\n[FRAME-TIME] census g=6 entry=%s comp=X shape=%s on=0 guarded=0 outside=0" % ENTRIES[0]
     ok, bad = P.vr5(P.read(log), 0, 16)
     assert not ok and any("g=6: census records duplicated" in b for b in bad), bad
-    out = P.report(_log(drop_census=[(3, ENTRIES[5][0])]))
+    out = _report(_log(drop_census=[(3, ENTRIES[5][0])]))
     assert "VERDICT B1 INVALID: VR5 failed" in out and "VERDICT B3 INVALID: VR5 failed" in out, out
 
 
@@ -1164,10 +1240,10 @@ def test_vr2_needs_every_game_start_calibration():
 
 def test_a_failed_rule_invalidates_the_claims_it_guards():
     # round-1 MEDIUM (ft_parse:894): VR6 guards B1 and B3, VR7 guards B2
-    out = P.report(_log(routes=" route:GET_h/api/v1/x=1 sent:GET_h/api/v1/x=1"))
+    out = _report(_log(routes=" route:GET_h/api/v1/x=1 sent:GET_h/api/v1/x=1"))
     assert "VERDICT B1 INVALID: VR6 failed" in out and "VERDICT B3 INVALID: VR6 failed" in out, out
     assert "VERDICT B2 PASS" in out, out
-    out = P.report(_log() + "\n[FRAME-TIME] disarmed input=fighters pt=3.2.1")
+    out = _report(_log() + "\n[FRAME-TIME] disarmed input=fighters pt=3.2.1")
     assert "VERDICT B1 INVALID: VR6 failed" in out and "VERDICT B3 INVALID: VR6 failed" in out, out
     log = P.read(_log())
     for r in log:
@@ -1176,7 +1252,7 @@ def test_a_failed_rule_invalidates_the_claims_it_guards():
     assert not P.vr7(log)[0]
     # VR7 failing invalidates B2 in the report, and B2 alone
     text = re.sub(r"(arm=OFF plant=1 partial=0 .*?e4=)\d+,\d+", r"\g<1>3,3", _log())
-    out = P.report(text)
+    out = _report(text)
     assert "VERDICT B2 INVALID: VR7 failed" in out, out
     assert "VERDICT B1 INVALID" not in out and "VERDICT B3 INVALID" not in out, out
 
@@ -1380,7 +1456,7 @@ def test_menu_check_passes_a_clean_run():
     assert any("contains 0" in ln for ln in lines), lines
     ecs = [ln for ln in lines if "menu e_C level" in ln]
     assert len(ecs) == 4 and all("e_F 1.0000, e_S 1.0000" in ln for ln in ecs), ecs
-    rep = P.report(_menu_log())
+    rep = _report(_menu_log())
     assert rep.startswith("MENU self-check") and rep.endswith("MENU PASS"), rep
 
 
@@ -1429,7 +1505,7 @@ def test_menu_check_refuses_without_its_lines():
         P.menu_check(P.read("\n".join(ln for ln in log.splitlines() if "menu_done" not in ln)))
     with pytest.raises(P.Refused):
         P.menu_check(P.read(_menu_log(segs=6)))
-    rep = P.report("\n".join(ln for ln in log.splitlines() if "kind=fhat" not in ln))
+    rep = _report("\n".join(ln for ln in log.splitlines() if "kind=fhat" not in ln))
     assert rep.endswith("MENU not computable: no menu calibration line"), rep
 
 

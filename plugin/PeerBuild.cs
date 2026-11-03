@@ -74,6 +74,9 @@ namespace CompetitiveRounds
         internal static void StageBuildProp(string source)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.PB_printed);
 #endif
 #if SCR_FRAMETIME
@@ -117,12 +120,18 @@ namespace CompetitiveRounds
             }
             finally { FtSpan.Close(ftSpan); }
 #endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Every remote seat of the current room: print its line when
         /// it is new to this room or its values changed since it was printed.</summary>
         internal static void Tick()
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.PB_printed); FtA3.Wrote(FtA3.PB_printed);
 #endif
@@ -180,6 +189,9 @@ namespace CompetitiveRounds
 #if SCR_FRAMETIME
             }
             finally { FtSpan.Close(ftSpan); }
+#endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
 #endif
         }
 #if SCR_FRAMETIME

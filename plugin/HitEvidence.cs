@@ -52,10 +52,16 @@ namespace CompetitiveRounds
         private static bool RemoteSender(out int actor)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_sender);
 #endif
             actor = RpcSender;
             return actor != 0 && actor != LocalActor();
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static bool LocalVictim(Component c, out CharacterData data)
@@ -79,6 +85,9 @@ namespace CompetitiveRounds
         private static HitEvidenceCore.GameTally G(int actor)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_game);
 #endif
             HitEvidenceCore.GameTally t;
@@ -87,12 +96,18 @@ namespace CompetitiveRounds
             t = new HitEvidenceCore.GameTally();
             _game.Set(actor, t);
             return t;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- D1 / D3: what arrived for the local player -------------------------
 
         internal static void NoteDamage(HealthHandler hh, Vector2 damage)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_game); FtA3.Read(FtA3.HE_point); FtA3.Wrote(FtA3.HE_game); FtA3.Wrote(FtA3.HE_point);
 #endif
@@ -111,6 +126,9 @@ namespace CompetitiveRounds
                 g.Buckets[(int)HitEvidenceCore.Bucket(_blockedThisPoint, since)]++;
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         internal static void NoteForce(HealthHandler hh, Vector2 force)
@@ -162,6 +180,9 @@ namespace CompetitiveRounds
         internal static void NoteSpawn(Component init, int kind)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_game); FtA3.Wrote(FtA3.HE_game);
 #endif
             try
@@ -175,6 +196,9 @@ namespace CompetitiveRounds
                 _projAmmo.Set(pv.ViewID, kind == 0);
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         internal static int ProjectileId(ProjectileHit ph)
@@ -498,6 +522,9 @@ namespace CompetitiveRounds
         internal static void Drain()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_game);
 #endif
 #if SCR_FRAMETIME
@@ -554,6 +581,9 @@ namespace CompetitiveRounds
 #if SCR_FRAMETIME
             }
             finally { FtSpan.Close(ftSpan); }
+#endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
 #endif
         }
 
@@ -617,6 +647,9 @@ namespace CompetitiveRounds
         private static void Prefix(ExitGames.Client.Photon.Hashtable __0, Photon.Realtime.Player __1, out long __state)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.HE_sender); FtA3.Wrote(FtA3.HE_sender);
 #endif
 #if SCR_FRAMETIME
@@ -633,6 +666,9 @@ namespace CompetitiveRounds
 #if SCR_FRAMETIME
             }
             finally { FtSpan.Close(ftSpan); }
+#endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
 #endif
         }
 
