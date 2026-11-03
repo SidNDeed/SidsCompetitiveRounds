@@ -27,6 +27,15 @@ may be 'OK' under the role. Every class also runs under the admin DSN in a
 rolled-back transaction and must succeed there: the statement is valid and
 is a write wherever the privilege exists.
 
+A refusal is not the only bound (ruling REHEARSAL-R8-A1, E4): an ordinary
+role keeps the right to change its OWN persistent defaults (ALTER ROLE
+CURRENT_USER SET), which no grant and no read-only layer past READ WRITE
+refuses. So every attempt on a role connection reads the catalogs before
+and after its body, inside its transaction, as catalog_all reads them for
+the catalog diff (every pg_catalog relation, the role's own shared rows
+included); a body that succeeds with any catalog difference returns
+'CATALOG:<catalogs>' instead of 'OK'.
+
 The sixteen prior-finding programs (rounds 2 to 6) run as Python against a
 real SQLAlchemy/asyncpg session under the role, the route the walker missed
 being the route executed.
@@ -56,6 +65,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
 
+import catalog_all  # noqa: E402
 import ro_census  # noqa: E402
 import ro_census_frozen  # noqa: E402
 import ro_role  # noqa: E402
@@ -195,10 +205,26 @@ def assert_identity(row, expect):
         "session_user=%s, not as %s" % (got[0], got[1], expect))
 
 
+async def _catalog(conn):
+    """The write bound's catalog reading (ruling REHEARSAL-R8-A1, E4): every
+    pg_catalog relation as catalog_all reads it for the catalog diff, inside
+    the caller's transaction (its own uncommitted changes are visible)."""
+    return await catalog_all.snapshot(conn)
+
+
+def _effect(before, after):
+    """'OK' when the two readings are equal; otherwise 'CATALOG:' and the
+    catalogs whose rows differ."""
+    k = catalog_all.keys({"added": sorted(after - before), "removed": sorted(before - after)})
+    return "CATALOG:" + ",".join(k) if k else "OK"
+
+
 async def raw_attempt(dsn, layer, body, expect=None):
     """`body(conn)` on a fresh asyncpg connection, in a transaction that is
     always rolled back; 'OK' or the SQLSTATE PostgreSQL returned. With
-    `expect`, the connection's identity is asserted first."""
+    `expect`, the connection's identity is asserted first, and the catalogs
+    are read before and after the body (_effect: a body that succeeds and
+    changes any catalog row returns 'CATALOG:...', not 'OK')."""
     conn = await asyncpg.connect(dsn)
     try:
         if expect is not None:
@@ -212,11 +238,12 @@ async def raw_attempt(dsn, layer, body, expect=None):
                 await conn.execute("SET TRANSACTION READ WRITE")
             ro = await conn.fetchval("SHOW transaction_read_only")
             assert ro == ("on" if layer == PROVISIONED else "off"), (layer, ro)
+            before = await _catalog(conn) if expect is not None else None
             try:
                 await body(conn)
-                return "OK"
             except asyncpg.PostgresError as e:
                 return e.sqlstate
+            return _effect(before, await _catalog(conn)) if expect is not None else "OK"
         finally:
             await tr.rollback()
     finally:
@@ -237,7 +264,9 @@ class RfRow(_Base):
 async def orm_attempt(dsn, layer, prog, expect=None):
     """`prog(db)` on a SQLAlchemy AsyncSession over asyncpg (the repo's
     driver), always rolled back; 'OK' or the SQLSTATE. With `expect`, the
-    session's identity is asserted first."""
+    session's identity is asserted first, and the catalogs are read before
+    and after the program on the session's own driver connection, inside
+    its transaction (_effect)."""
     engine = create_async_engine(dsn.replace("postgresql://", "postgresql+asyncpg://"),
                                  poolclass=NullPool)
     if layer == GRANT_ONLY:
@@ -255,11 +284,16 @@ async def orm_attempt(dsn, layer, prog, expect=None):
                     assert_identity((await db.execute(text(WHO_SQL))).one(), expect)
                 ro = (await db.execute(text("SHOW transaction_read_only"))).scalar()
                 assert ro == ("on" if layer == PROVISIONED else "off"), (layer, ro)
+                driver = None
+                if expect is not None:
+                    driver = (await (await db.connection()).get_raw_connection()).driver_connection
+                    assert driver.is_in_transaction(), "the ORM session's transaction is not open"
+                before = await _catalog(driver) if driver is not None else None
                 try:
                     await prog(db)
-                    return "OK"
                 except DBAPIError as e:
                     return _sqlstate(e)
+                return _effect(before, await _catalog(driver)) if driver is not None else "OK"
             finally:
                 await db.rollback()
     finally:
@@ -400,6 +434,83 @@ def test_role_reads(env, layer):
         assert await conn.fetchval("SELECT last_value FROM public.rf_seq") >= 1
         assert await conn.fetchval("SELECT abs(-3)") == 3
     assert run(raw_attempt(env["ro_dsn"], layer, body, ro_role.ROLE)) == "OK"
+
+
+# E4 (ruling REHEARSAL-R8-A1): the role changing its own persistent default,
+# the reviewer's example (application_name) and E1's (work_mem). PostgreSQL
+# refuses it in the read-only layer; past READ WRITE it lets an ordinary role
+# do it, and the catalog reading exposes it. The attempt is rolled back, and
+# the key is RESET (that key only, never the role: the role's own
+# default_transaction_read_only lives in the same setconfig array) in a
+# finally block; the role's setconfig must read the same before and after.
+ROLE_DEFAULT_CONTROLS = (("application_name", "'rf9_probe'"), ("work_mem", "'63MB'"))
+ROLE_DEFAULT_EXPECTED = {PROVISIONED: "25006", GRANT_ONLY: "CATALOG:pg_db_role_setting"}
+
+
+async def _role_setconfig(dsn, role):
+    """The role's database-independent setconfig (pg_db_role_setting), or None."""
+    conn = await asyncpg.connect(dsn)
+    try:
+        got = await conn.fetchval(
+            "SELECT s.setconfig FROM pg_catalog.pg_db_role_setting s JOIN pg_catalog.pg_roles r "
+            "ON r.oid = s.setrole WHERE s.setdatabase = 0 AND r.rolname = $1", role)
+        return list(got) if got is not None else None
+    finally:
+        await conn.close()
+
+
+async def _reset_own_key(ro_dsn, key):
+    """ALTER ROLE CURRENT_USER RESET key, as the role itself."""
+    conn = await asyncpg.connect(ro_dsn)
+    try:
+        assert_identity(await conn.fetchrow(WHO_SQL), ro_role.ROLE)
+        await conn.execute("SET default_transaction_read_only = off")
+        await conn.execute("ALTER ROLE CURRENT_USER RESET %s" % key)
+    finally:
+        await conn.close()
+
+
+def _alter_own_default(route, key, value):
+    """The control's program for each route: the raw asyncpg body, or the
+    SQLAlchemy session program (its catalog reading runs on the session's own
+    driver connection)."""
+    stmt = "ALTER ROLE CURRENT_USER SET %s = %s" % (key, value)
+    if route == RAW:
+        return _sql(stmt)
+
+    async def prog(db):
+        await db.execute(text(stmt))
+    return prog
+
+
+@pytest.mark.parametrize("layer", LAYERS)
+@pytest.mark.parametrize("route", (RAW, ORM))
+@pytest.mark.parametrize("key,value", ROLE_DEFAULT_CONTROLS, ids=[k for k, _v in ROLE_DEFAULT_CONTROLS])
+def test_role_default_change_is_exposed_by_the_write_bound(env, key, value, route, layer):
+    before = run(_role_setconfig(env["admin_ro_db_dsn"], ro_role.ROLE))
+    assert before is not None and "default_transaction_read_only=on" in before, before
+    assert not [s for s in before if s.startswith(key + "=")], (
+        "%s already carries %s in its setconfig %s: the control does not plant over it"
+        % (ro_role.ROLE, key, before))
+    try:
+        got = run((raw_attempt if route == RAW else orm_attempt)(
+            env["ro_dsn"], layer, _alter_own_default(route, key, value), ro_role.ROLE))
+    finally:
+        run(_reset_own_key(env["ro_dsn"], key))
+        after = run(_role_setconfig(env["admin_ro_db_dsn"], ro_role.ROLE))
+    assert after == before, (before, after)
+    assert got == ROLE_DEFAULT_EXPECTED[layer], (
+        "ALTER ROLE CURRENT_USER SET %s, route %s, layer %s: %s, expected %s"
+        % (key, route, layer, got, ROLE_DEFAULT_EXPECTED[layer]))
+
+
+@pytest.mark.parametrize("layer", LAYERS)
+def test_role_reads_through_the_orm_change_no_catalog(env, layer):
+    """Positive control of the ORM route's catalog reading: a read through a
+    SQLAlchemy session under the role returns 'OK' (no catalog row moved)."""
+    async def prog(db):
+        assert (await db.execute(text("SELECT count(*) FROM public.rf_t"))).scalar() == 2
+    assert run(orm_attempt(env["ro_dsn"], layer, prog, ro_role.ROLE)) == "OK"
 
 
 def test_privilege_census_is_empty(env):
