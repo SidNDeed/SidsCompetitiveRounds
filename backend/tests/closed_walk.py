@@ -50,6 +50,7 @@ import types as _types
 import os as _os
 
 import shape_grammar as _sg
+from shape_grammar import header_digest as _header_digest
 
 
 
@@ -253,6 +254,9 @@ def anchored_refusals(d, meaningful, allowed, filename):
     for key, ln, shape in positions(d, meaningful, allowed):
         if key not in allowed:
             out.append((filename, ln, _position_sentence(key, shape)))
+    for key, ln, shape in orders(d, allowed):
+        if key not in allowed:
+            out.append((filename, ln, _order_sentence(key, shape)))
     return out
 
 
@@ -329,6 +333,62 @@ def _index_of(n, kids):
         if k is n:
             return i
     return None
+
+
+# Round 9 (W30b at the merge; the gr child's question 2): the ORDER rule.
+# The position rule binds where every anchored node and every constant
+# stands, and A1_SPANS pins each span's node count, but a permutation of
+# consecutive statements none of which holds a position kept every
+# position (RF/r9/tip/order_runs.py measured 39 such runs in the a1 spans,
+# among them queue_poll's `db.add(series)` before `await db.flush()`).
+# When `allowed` holds ORDERED, every statement of a span, the root
+# included, stands at a frozen ORDER key: (shape_grammar.header_digest of
+# the statement, "order", the span's name, the index path), the header
+# being the statement's own nodes with each nested list of statements
+# replaced by its length. A permutation, an inserted or removed statement,
+# or a change to any node a statement owns refuses, naming the statement.
+# Taken once from the real spans at the round-9 merge
+# (grammar_shapes_a1.A1_ORDERS).
+ORDERED = ("<orders>",)
+
+
+def orders(d, allowed):
+    """[(key, line, shape)] for every statement under definition `d` (`d`
+    included, at the empty path), in visit order, when `allowed` holds
+    ORDERED (the order rule); empty otherwise."""
+    paths = {}
+    for n, p, f in _sg.visit(d):
+        if p is not None:
+            paths[id(n)] = _index_path(paths, n, p, f)
+    out = []
+    for n, p, f in _sg.visit(d):
+        path = paths.get(id(n))
+        if path is None:
+            path = []
+        if _ordered_node(n, allowed):
+            out.append(_order_key(n, d, path, _line(n, p),
+                                  _sg.shape(n, p, f)))
+    return out
+
+
+def _ordered_node(n, allowed):
+    """Whether the order rule reads node `n`."""
+    if ORDERED not in allowed:
+        return False
+    return isinstance(n, _ast.stmt)
+
+
+def _order_key(n, d, path, line, shape):
+    """(key, line, shape) of a statement (orders)."""
+    key = (_header_digest(n), "order", d.name, tuple(path))
+    return (key, line, shape)
+
+
+def _order_sentence(key, shape):
+    """The refusal of a statement outside its frozen order key."""
+    digest, how, name, path = key
+    return (f"a statement, {shape}, outside its frozen {how} "
+            f"(header {digest}), in {name} at {path}")
 
 
 def _position_sentence(key, shape):

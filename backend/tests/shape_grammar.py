@@ -27,6 +27,7 @@ global or nonlocal) is listed, and a corpus refuses a binding of a spelling
 it gives a meaning to.
 """
 import ast
+import hashlib
 
 # Identity fields whose literal value is part of the shape.
 IDENTITY = {
@@ -45,6 +46,25 @@ def _child(v):
     if isinstance(v, ast.AST):
         return type(v).__name__
     return type(v).__name__
+
+
+def header(node):
+    """A statement's own nodes as text (closed_walk's ORDER rule): every
+    field, recursively, with each nested list of statements replaced by its
+    length; line and column attributes are not fields and are not read."""
+    if isinstance(node, list):
+        if node and all(isinstance(x, ast.stmt) for x in node):
+            return f"<{len(node)} statements>"
+        return "[" + ", ".join(header(x) for x in node) + "]"
+    if not isinstance(node, ast.AST):
+        return repr(node)
+    parts = [f"{f}={header(v)}" for f, v in ast.iter_fields(node)]
+    return f"{type(node).__name__}(" + ", ".join(parts) + ")"
+
+
+def header_digest(node):
+    """The first 16 hex digits of the sha256 of header(node)."""
+    return hashlib.sha256(header(node).encode("utf-8")).hexdigest()[:16]
 
 
 def shape(node, parent=None, field=None):

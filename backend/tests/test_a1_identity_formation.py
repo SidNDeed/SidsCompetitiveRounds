@@ -4746,7 +4746,7 @@ def test_r7_a1_findings_are_refused_under_the_frozen_grammar(finding, monkeypatc
         if not finding.startswith(("r8 grammar_shapes_a1:2106", "r9 ")):
             monkeypatch.setattr(me, "_A1_GRAMMAR", _cw.Grammar(
                 _gs.A1_SHAPES, _gs.A1_MEANINGFUL,
-                _gs.A1_BINDINGS - {_cw.POSITIONED}, _A1_CALLEES,
+                _gs.A1_BINDINGS - {_cw.POSITIONED, _cw.ORDERED}, _A1_CALLEES,
                 _gs.A1_NAMEDTUPLES))
             monkeypatch.setattr(me, "_POLICIES", {})
             got = _r7_outcome(form, prog, scope)
@@ -4982,7 +4982,8 @@ def test_r9_queue_poll_refusals_roll_back():
         assert nxt + off + 1 in lines, (want, nxt + off + 1, sorted(lines))
     pos = _gs.A1_POSITIONS
     anchors = frozenset(b for b in _gs.A1_BINDINGS
-                        if b not in pos and b != _cw.POSITIONED)
+                        if b not in pos and b != _cw.POSITIONED
+                        and b not in _gs.A1_ORDERS and b != _cw.ORDERED)
     for lit, size, want in ((anchors, 69, "419ade3900e75191"),
                             (pos, 2322, "f9f0a2e4dbae2cd3")):
         digest = hashlib.sha256(repr(sorted(lit, key=repr)).encode(
@@ -4992,6 +4993,84 @@ def test_r9_queue_poll_refusals_roll_back():
     raise_chains = [k for k in anchors if len(k) == 3 and k[0] == "commit"
                     and any("body=[Expr|Raise]" in c for c in k[2])]
     assert raise_chains == [], raise_chains
+
+
+def test_r9_statement_order_is_bound():
+    """The ORDER rule (round 9, W30b at the merge; the gr child's question
+    2). The position rule binds every anchored node and every constant to
+    its place, but a permutation of consecutive statements none of which
+    holds a position kept every position. Now every statement of every a1
+    span stands at its frozen order key (grammar_shapes_a1.A1_ORDERS, pinned
+    here by size and digest). The class sweep: in every span, every
+    adjacent pair of statements of one list, neither holding a position
+    and with different headers, is swapped in a copy of the real
+    definition; with the order marker the swap is refused by the order
+    rule naming the moved statement's path, and with the marker off (the
+    round-8 grammar plus positions) it is refused by nothing: each pair
+    was free and is now bound. A header control: the two arguments of
+    _team_resolve_live_family's quartet lock swapped (same shapes, no
+    position), refused by the order rule alone. The real spans are
+    admitted with the marker on."""
+    import copy
+    import hashlib
+    import shape_grammar as _sg
+    orders = sorted(_gs.A1_ORDERS)
+    digest = hashlib.sha256(repr(orders).encode("utf-8")).hexdigest()[:16]
+    assert (len(orders), digest) == (1537, "f6e1af03c9867031"), (len(orders), digest)
+    assert _cw.ORDERED in _gs.A1_BINDINGS
+    assert _gs.A1_ORDERS <= _gs.A1_BINDINGS
+    on = _gs.A1_BINDINGS
+    off = _gs.A1_BINDINGS - {_cw.ORDERED}
+    mean = _gs.A1_MEANINGFUL
+
+    def refusals(d, allowed):
+        own = "binds %s (def)" % d.name
+        return [why for _f, _ln, why in _cw.anchored_refusals(d, mean, allowed, "<r9>")
+                if why != own]
+
+    swapped = 0
+    for f, ln, name, _n in _gs.A1_SPANS:
+        d = copy.deepcopy(_span_def(f, ln, name))
+        assert refusals(d, on) == [], (name, refusals(d, on)[:2])
+        held = [p[3] for p in _gs.A1_POSITIONS if p[2] == name]
+        paths = {}
+        for n, p, fld in _sg.visit(d):
+            if p is not None:
+                paths[id(n)] = tuple(_cw._index_path(paths, n, p, fld))
+        lists = []
+        for n, _p, _f in _sg.visit(d):
+            for _fld, v in _ast.iter_fields(n):
+                if isinstance(v, list) and len(v) > 1 and all(
+                        isinstance(s, _ast.stmt) for s in v):
+                    lists.append(v)
+        for v in lists:
+            free = [not any(q[:len(paths[id(s)])] == paths[id(s)] for q in held)
+                    for s in v]
+            for i in range(len(v) - 1):
+                if not (free[i] and free[i + 1]):
+                    continue
+                if _sg.header(v[i]) == _sg.header(v[i + 1]):
+                    continue
+                path = paths[id(v[i])]
+                v[i], v[i + 1] = v[i + 1], v[i]
+                got_on, got_off = refusals(d, on), refusals(d, off)
+                v[i], v[i + 1] = v[i + 1], v[i]
+                assert got_off == [], (name, path, got_off[:2])
+                assert any("outside its frozen order" in w and f"at {path}" in w
+                           for w in got_on), (name, path, got_on[:2])
+                assert all("outside its frozen order" in w for w in got_on), (
+                    name, path, got_on[:3])
+                swapped += 1
+    assert swapped == 57, swapped
+    d = copy.deepcopy(_span_def(*next(
+        (f, ln, name) for f, ln, name, _n in _gs.A1_SPANS
+        if name == "_team_resolve_live_family")))
+    (call,) = [n for n in _ast.walk(d) if isinstance(n, _ast.Call)
+               and _ast.unparse(n) == "_team_quartet_lock(db, four_pids)"]
+    call.args = [call.args[1], call.args[0]]
+    assert refusals(d, off) == []
+    got = refusals(d, on)
+    assert got and all("outside its frozen order" in w for w in got), got[:3]
 
 
 def test_r8_the_callee_table_is_the_frozen_one():
