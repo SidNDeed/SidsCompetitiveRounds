@@ -152,6 +152,14 @@ async def seed(env):
     s.ovt_search = await _player(conn, "ovt_search")
     await mh.queue_row(conn, "ovt", s.ovt_search[0], s.ovt_search[1], "rjs1")
     s.lob = await env.lobby(4)
+    # The ffa gather formation (W30b, ruling R-B widened along the path):
+    # three searching rows with no lobby; _ffa_gather re-writes them fresh
+    # before each call (the formation reads rows polled in the last 10 s).
+    s.ffa_gather = [await _player(conn, "ffa_gather_%d" % i) for i in range(3)]
+    s.ffa_lead = min((st for _p, st in s.ffa_gather), key=main._ffa_sort_key)
+    s.ffa_other = [st for _p, st in s.ffa_gather if st != s.ffa_lead][0]
+    s.admin = conn
+    await _ffa_gather_rows(s)
     s.rdm_pid = s.lob.pids[0]
     await conn.execute(
         "INSERT INTO ffa_seat_readmissions (lobby_id, player_id, n, anchor_at, held_at,"
@@ -163,6 +171,36 @@ async def seed(env):
         " VALUES ($1, 'rf8ro_room', clock_timestamp(), 'refused', 'pending')", s.attempt_rid)
     s.now = await conn.fetchval("SELECT clock_timestamp()")
     return s
+
+
+async def _ffa_gather_rows(s):
+    """The three gather rows, fresh and searching (admin connection)."""
+    pids = [p for p, _st in s.ffa_gather]
+    await s.admin.execute("DELETE FROM ffa_queue WHERE player_id = ANY($1::uuid[])", pids)
+    for pid, steam in s.ffa_gather:
+        await s.admin.execute(
+            "INSERT INTO ffa_queue (player_id, steam_id, display_name, status, joined_at,"
+            "  last_polled) VALUES ($1, $2, 'rf8ro g', 'searching', clock_timestamp(),"
+            "  clock_timestamp())", pid, steam)
+
+
+async def _ffa_gather(db, s, conflict_with):
+    """_ffa_queue_poll_inner for the gather's leader, through its formation
+    loop: the gather decision answers go and the lease check answers a
+    conflict naming `conflict_with` (inputs only; restored after)."""
+    async def _conflict(_db, _members, **_k):
+        return (conflict_with, "rf8ro")
+
+    saved = (main._ffa_gather_decide, main._formation_lease_conflict,
+             main._ffa_gather_started_mono, main._ffa_gather_pool_seen_mono)
+    await _ffa_gather_rows(s)
+    main._ffa_gather_decide = lambda *_a, **_k: (True, 0)
+    main._formation_lease_conflict = _conflict
+    try:
+        return await main._ffa_queue_poll_inner(s.ffa_lead, cf_asm.FakeRequest(), db)
+    finally:
+        (main._ffa_gather_decide, main._formation_lease_conflict,
+         main._ffa_gather_started_mono, main._ffa_gather_pool_seen_mono) = saved
 
 
 def _rdm_ctx(db, s):
@@ -205,6 +243,12 @@ DRIVERS = collections.OrderedDict([
         s.ovt_search[1], cf_asm.FakeRequest(), db, rdm=0)),
     ("main._ffa_queue_poll_inner", lambda db, s, mp: main._ffa_queue_poll_inner(
         s.lob.sids[2], cf_asm.FakeRequest(), db)),
+    # after the lobby driver, so the role outcome of an unreached ffa
+    # position stays the lobby path's first refusal
+    ("main._ffa_queue_poll_inner gather, conflict on another seat",
+     lambda db, s, mp: _ffa_gather(db, s, s.ffa_other)),
+    ("main._ffa_queue_poll_inner gather, conflict on the caller",
+     lambda db, s, mp: _ffa_gather(db, s, s.ffa_lead)),
     ("main._reconcile_team_series_bets", lambda db, s, mp: main._reconcile_team_series_bets(
         db, s.team.sid, "rf8ro")),
     ("main._team_lock_family_pick", lambda db, s, mp: main._team_lock_family_pick(

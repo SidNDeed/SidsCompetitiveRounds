@@ -129,12 +129,12 @@ OUTCOME = {
     ('a1', 'main.py', 51793, 51793, '_team_lock_family_pick'): ('ok-under-grant', ('UPDATE team_series',), 0, ('not reached', 'main.py:51768', '25006')),
     ('a1', 'main.py', 51859, 51861, '_team_resolve_live_family'): ('not reached', 'main.py:51768', '25006'),
     ('a1', 'main.py', 53768, 53770, 'ovt_queue_poll'): ('not reached', 'main.py:16396', '25006'),
-    ('a1', 'main.py', 53808, 53811, 'ovt_queue_poll'): ('not reached', 'main.py:16396', '25006'),
+    ('a1', 'main.py', 53808, 53811, 'ovt_queue_poll'): ('ok-under-grant', ('DELETE ovt_queue', 'UPDATE ovt_queue'), 0, ('not reached', 'main.py:16396', '25006')),
     ('a1', 'main.py', 56363, 56368, '_rules_members'): 'ok',
     ('a1', 'main.py', 57195, 57201, '_player_body_color'): 'ok',
-    ('a1', 'main.py', 65184, 65186, '_ffa_queue_poll_inner'): ('not reached', 'main.py:17406', '25006'),
-    ('a1', 'main.py', 65206, 65208, '_ffa_queue_poll_inner'): ('not reached', 'main.py:17406', '25006'),
-    ('a1', 'main.py', 65249, 65253, '_ffa_queue_poll_inner'): ('not reached', 'main.py:17406', '25006'),
+    ('a1', 'main.py', 65184, 65186, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:17406', '25006')),
+    ('a1', 'main.py', 65206, 65208, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:17406', '25006')),
+    ('a1', 'main.py', 65249, 65253, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:17406', '25006')),
     ('a1', 'main.py', 65263, 65265, '_ffa_queue_poll_inner'): ('not reached', 'main.py:17406', '25006'),
     ('a1', 'main.py', 73522, 73525, '_service_player_uuids'): 'ok',
     ('a1', 'match_hold.py', 381, 384, '_hold_latch'): ('ok-under-grant', ('UPDATE team_series',), 0, ('not reached', 'match_hold.py:380', '25006')),
@@ -247,9 +247,9 @@ GRANT_OUTCOME = {
     ('a1', 'main.py', 16868, 16868, '_lease_admission_gate'):
         ('not reached under grant', ('UPDATE players',), None),
     ('a1', 'main.py', 20479, 20481, 'queue_poll'):
-        ('not reached under grant', ('DELETE queue_blocks',), 'main.py:19936 42501'),
+        ('not reached under grant', ('DELETE queue_blocks', 'UPDATE queue_blocks', 'UPDATE ranked_queue'), None),
     ('a1', 'main.py', 20482, 20484, 'queue_poll'):
-        ('not reached under grant', ('DELETE queue_blocks',), 'main.py:19936 42501'),
+        ('not reached under grant', ('DELETE queue_blocks', 'UPDATE queue_blocks', 'UPDATE ranked_queue'), None),
     ('a1', 'main.py', 49791, 49794, 'team_queue_poll'):
         ('not reached under grant', ('UPDATE team_queue',), None),
     ('a1', 'main.py', 49822, 49824, 'team_queue_poll'):
@@ -263,17 +263,9 @@ GRANT_OUTCOME = {
     ('a1', 'main.py', 51859, 51861, '_team_resolve_live_family'):
         ('not reached under grant', ('UPDATE team_series',), None),
     ('a1', 'main.py', 53768, 53770, 'ovt_queue_poll'):
-        ('not reached under grant', ('UPDATE ovt_queue',), 'main.py:53536 42501'),
-    ('a1', 'main.py', 53808, 53811, 'ovt_queue_poll'):
-        ('not reached under grant', ('UPDATE ovt_queue',), 'main.py:53536 42501'),
-    ('a1', 'main.py', 65184, 65186, '_ffa_queue_poll_inner'):
-        ('not reached under grant', ('UPDATE ffa_lobbies',), 'main.py:16399 42501'),
-    ('a1', 'main.py', 65206, 65208, '_ffa_queue_poll_inner'):
-        ('not reached under grant', ('UPDATE ffa_lobbies',), 'main.py:16399 42501'),
-    ('a1', 'main.py', 65249, 65253, '_ffa_queue_poll_inner'):
-        ('not reached under grant', ('UPDATE ffa_lobbies',), 'main.py:16399 42501'),
+        ('not reached under grant', ('DELETE ovt_queue', 'UPDATE ovt_queue'), None),
     ('a1', 'main.py', 65263, 65265, '_ffa_queue_poll_inner'):
-        ('not reached under grant', ('UPDATE ffa_lobbies',), 'main.py:16399 42501'),
+        ('not reached under grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), None),
 }
 
 
@@ -437,12 +429,32 @@ class CountingSession(RecordingSession):
 # Ruling R-B: the table privileges of each statement that refused first on a
 # path holding an unreached COVERED position (the sites OUTCOME names), each
 # granted to the role in the clone, as its owner, for that path's run only.
+# The ruling extends this along the same path: each successive statement
+# refused with 42501 gets its exact privileges, one at a time, until the
+# position is reached or a refusal other than 42501 occurs; each added
+# grant carries the measured refusal that required it.
 REFUSER_GRANTS = {
     "main.py:16851": ("UPDATE players",),
     "main.py:16393": ("UPDATE team_queue",),
-    "main.py:16396": ("UPDATE ovt_queue",),
-    "main.py:17406": ("UPDATE ffa_lobbies",),
-    "main.py:19936": ("DELETE queue_blocks",),
+    # then main.py:53536 (DELETE ovt_queue ... FOR UPDATE), 42501 under
+    # UPDATE ovt_queue alone (rb-measure-2)
+    "main.py:16396": ("UPDATE ovt_queue", "DELETE ovt_queue"),
+    # then main.py:16399 (ffa_queue FOR UPDATE, a WRITERS lock), 42501
+    # under UPDATE ffa_lobbies alone (rb-measure-2); then main.py:64692
+    # (DELETE FROM ffa_queue ... FOR UPDATE SKIP LOCKED), 42501 under those
+    # two (r8-w30b-sr-widen-measure-1)
+    # then main.py:62975 (UPDATE ffa_assembly_seats), 42501 under the grants before it (r8-w30b-sr-widen-measure-2)
+    "main.py:17406": (
+        "UPDATE ffa_lobbies",
+        "UPDATE ffa_queue",
+        "DELETE ffa_queue",
+        "UPDATE ffa_assembly_seats",
+    ),
+    # 19936 is a DELETE whose subquery locks FOR UPDATE SKIP LOCKED: 42501
+    # under DELETE queue_blocks alone (rb-measure-2), so UPDATE too; then
+    # main.py:16390 (ranked_queue FOR UPDATE, a WRITERS lock), 42501 under
+    # those two (r8-w30b-sr-widen-measure-1)
+    "main.py:19936": ("DELETE queue_blocks", "UPDATE queue_blocks", "UPDATE ranked_queue"),
     "main.py:51089": ("UPDATE team_series",),
     "main.py:51768": ("UPDATE team_series",),
     "match_hold.py:380": ("UPDATE team_series",),
