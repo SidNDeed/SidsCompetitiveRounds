@@ -534,6 +534,26 @@ IMPORTS = frozenset({
 })
 # --- END FROZEN ---
 
+# Round 8 (ruling REHEARSAL-FOUR-R7-A1, M3): shapes taken OUT of the frozen
+# whitelist by hand, each after the real spans were conformed so that none
+# uses it (the completeness test re-proves every real refusal list empty).
+# Narrowing only: nothing is ever added here or to the literal above.
+#   Call.func>Attribute(value=Name,attr='commit')  match_hold.match_hold_open's
+#     refusal branch and match_hold._refuse_attempt committed their fresh
+#     refusal transaction with `await db.commit()`; both now await
+#     match_hold._commit_fresh(db), a function of the module the walks do not
+#     descend into (like _attempt, the fresh transaction's own write), so no
+#     walked span or body commits by a session method, and finding gate:136's
+#     committing refusal is refused by this shape.
+NARROWED = frozenset({
+    "Call.func>Attribute(value=Name,attr='commit',ctx=Load)",
+})
+SHAPES = SHAPES - NARROWED
+
+# Round 8 (M6): while set to a list, every node a site span's check admitted
+# is appended as (file, line, col, node type) (nodes(), after its check).
+ADMITTED = {"sink": None}
+
 
 def callees(nodes):
     """The plain-name callees under `nodes` (a list of trees)."""
@@ -575,10 +595,21 @@ def nodes(root, filename, offset, record=None):
         record["shapes"].update(_sg.shape(n, p, f) for n, p, f in _sg.visit(root))
         return len(_sg.visit(root))
     try:
-        return _sg.check(root, SHAPES, filename)
+        n = _sg.check(root, SHAPES, filename)
     except _sg.Refused as e:
         f, line, shape = e.args[0]
         raise Refusal(f"grammar {f}:{line + offset}: {shape}") from None
+    sink = ADMITTED.get("sink")
+    if sink is not None:
+        sink.extend(node_key(filename, x) for x, _p, _f in _sg.visit(root))
+    return n
+
+
+def node_key(filename, node):
+    """(file, line, col, node type): how the M6 assertion compares an
+    inspected node with an admitted one."""
+    return (filename, getattr(node, "lineno", None),
+            getattr(node, "col_offset", None), type(node).__name__)
 
 
 def binding_problems(fn, role, meaningful, filename, offset, record=None):
@@ -650,11 +681,17 @@ def check_site(fn, stmts, filename, offset, record=None):
 
 
 def prefix_span(fn, stop):
-    """fn's statements from the first to the first one holding a call of the
-    plain name `stop` (included); all of them when none does."""
+    """Every statement of fn the prefix walk inspects: from the first to the
+    first one holding a call of the plain name `stop` (included) and, when
+    that statement is an `if` (a path may pass it without the call), every
+    statement after it as well, since the walk reads each of them for a
+    second call of `stop` (round 8, finding gate:1140: a suffix statement
+    inspected was never admitted); all of them when none holds the call."""
     out = []
-    for st in fn.body:
+    for i, st in enumerate(fn.body):
         out.append(st)
         if stop in callees([st]):
+            if isinstance(st, ast.If):
+                out.extend(fn.body[i + 1:])
             break
     return out
