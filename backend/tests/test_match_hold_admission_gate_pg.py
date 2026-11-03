@@ -2350,9 +2350,9 @@ def test_r9_module_sql_constant_is_bound():
              + "    _RDM_ATTEMPT_SQL = 'COMMIT'" + chr(10),
              head + "bound 3 times in api/main.py"),
             (src + chr(10) + "setattr(sys.modules[__name__], '_RDM_ATTEMPT_SQL', 'COMMIT')"
-             + chr(10), head + "spells it as a string"),
+             + chr(10), head + f"api/main.py:{src.count(chr(10)) + 2} spells it as a string"),
             (src + chr(10) + "sys.modules[__name__]._RDM_ATTEMPT_SQL = 'COMMIT'" + chr(10),
-             head + "names it as an attribute")):
+             head + f"api/main.py:{src.count(chr(10)) + 2} names it as an attribute")):
         got = _gg.sql_problem(attempt, "<r9>", 0, module_src=edited)
         if want is None:
             assert got is None, got
