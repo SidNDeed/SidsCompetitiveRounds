@@ -87,6 +87,12 @@ FIXTURE_SQL = [
     "CREATE TABLE rf_s.t (id int, x int)",
     "INSERT INTO rf_s.t VALUES (1, 1)",
     "GRANT USAGE, CREATE ON SCHEMA rf_s TO PUBLIC",
+    # A schema PUBLIC holds nothing on: the role reaches it only through
+    # the grant step's own USAGE (public and rf_s carry PUBLIC's USAGE, so
+    # without this schema the schema_usage step would be unobserved).
+    "CREATE SCHEMA rf_priv",
+    "CREATE TABLE rf_priv.t (id int)",
+    "INSERT INTO rf_priv.t VALUES (1)",
     "CREATE FUNCTION public.rf_secdef_write() RETURNS int LANGUAGE sql "
     "SECURITY DEFINER AS 'INSERT INTO public.rf_t VALUES (100, 100) RETURNING id'",
     # The tables the real admission path locks (main.py _lease_admission_gate
@@ -124,9 +130,8 @@ def env():
     if missing:
         pytest.fail("the cluster is not provisioned for the read-only bound: "
                     + "; ".join(missing))
-    stamp = _stamp()
-    name, plain = "rf8_ro_" + stamp, "rf8_ro_plain_" + stamp
-    out = {"db": name, "plain_db": plain, "role": ro_role.ROLE}
+    name = "rf8_ro_" + _stamp()
+    out = {"db": name, "role": ro_role.ROLE}
     made = []
 
     async def setup():
@@ -134,16 +139,34 @@ def env():
         made.append(name)
         await _fixture(ADMIN_DSN, name)
         out["report"] = await ro_role.grant(ADMIN_DSN, name)
-        await ro_role.clone(ADMIN_DSN, plain, template="template1")
-        made.append(plain)
-        await _fixture(ADMIN_DSN, plain)
-        out["admin_db_dsn"] = ro_role.dsn_for(ADMIN_DSN, plain)
         out["admin_ro_db_dsn"] = ro_role.dsn_for(ADMIN_DSN, name)
         out["ro_dsn"] = out["report"]["dsn"]
 
     try:
         run(setup())
         yield out
+    finally:
+        for db in made:
+            run(ro_role.drop_clone(ADMIN_DSN, db))
+
+
+@pytest.fixture(scope="module")
+def plain():
+    """A clone of template1 carrying the same fixture, as the admin owns it:
+    where the admin's validity controls run (every privilege present)."""
+    if not ADMIN_DSN:
+        pytest.fail("CF_TEST_PG_DSN is unset; this module never skips")
+    name = "rf8_ro_plain_" + _stamp()
+    made = []
+
+    async def setup():
+        await ro_role.clone(ADMIN_DSN, name, template="template1")
+        made.append(name)
+        await _fixture(ADMIN_DSN, name)
+
+    try:
+        run(setup())
+        yield {"admin_db_dsn": ro_role.dsn_for(ADMIN_DSN, name)}
     finally:
         for db in made:
             run(ro_role.drop_clone(ADMIN_DSN, db))
@@ -358,10 +381,10 @@ def test_write_class_refused_under_role(env, cls, layer):
 
 
 @pytest.mark.parametrize("cls", list(CLASSES))
-def test_write_class_succeeds_under_admin(env, cls):
+def test_write_class_succeeds_under_admin(plain, cls):
     """The control is a real write: valid, and applied where the privilege
     exists (rolled back)."""
-    assert run(_attempt(env["admin_db_dsn"], GRANT_ONLY, cls)) == "OK"
+    assert run(_attempt(plain["admin_db_dsn"], GRANT_ONLY, cls)) == "OK"
 
 
 @pytest.mark.parametrize("layer", LAYERS)
@@ -372,6 +395,7 @@ def test_role_reads(env, layer):
         assert await conn.fetchval("SELECT count(*) FROM public.rf_t") == 2
         assert await conn.fetchval("SELECT count(*) FROM public.rf_v") == 2
         assert await conn.fetchval("SELECT count(*) FROM rf_s.t") == 1
+        assert await conn.fetchval("SELECT count(*) FROM rf_priv.t") == 1
         # nextval/setval are not rolled back, so the admin controls move it.
         assert await conn.fetchval("SELECT last_value FROM public.rf_seq") >= 1
         assert await conn.fetchval("SELECT abs(-3)") == 3
@@ -382,7 +406,7 @@ def test_privilege_census_is_empty(env):
     rep = env["report"]
     assert any(s.startswith("rf_secdef_write") or ".rf_secdef_write" in s
                for s in rep["secdef_revoked"]), rep["secdef_revoked"]
-    assert set(rep["schemas"]) == {"public", "rf_s"}, rep["schemas"]
+    assert set(rep["schemas"]) == {"public", "rf_s", "rf_priv"}, rep["schemas"]
     # The template's large-object revokes, carried into the clone: every
     # overload of every writer (12 on PostgreSQL 16), none executable.
     writers, executable = run(ro_role.template_lo_state(ADMIN_DSN, env["db"]))
@@ -598,10 +622,10 @@ def test_prior_finding_program_refused_under_role(env, fid, layer):
 
 
 @pytest.mark.parametrize("fid", list(FINDINGS))
-def test_prior_finding_program_writes_under_admin(env, fid):
+def test_prior_finding_program_writes_under_admin(plain, fid):
     """The program really writes: under the admin DSN it succeeds (rolled
     back), so the role's refusal is the only thing stopping it."""
-    assert run(orm_attempt(env["admin_db_dsn"], GRANT_ONLY, FINDINGS[fid][2])) == "OK"
+    assert run(orm_attempt(plain["admin_db_dsn"], GRANT_ONLY, FINDINGS[fid][2])) == "OK"
 
 
 # ---------------------------------------------------------- DSN census
