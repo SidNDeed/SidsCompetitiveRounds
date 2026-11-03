@@ -2161,14 +2161,22 @@ namespace CompetitiveRounds
         /// SE_Logs (S20, with _impDistinct, moved from S23 in round 2): List and HashSet growth only. steady false; a read is one List
         /// (or the HashSet) instance that receives an Add on a counted frame, once per instance per game
         /// (SeatEvidenceCore.FtLogRead; FtImpRead); no writes are counted. SampleLog.CAP is passed as the code
-        /// constant and is unused (steady false).</summary>
+        /// constant and is unused (steady false).
+        /// Round 4 (ruling FRAME-TIME-ROUND-R3-A1): each calibration executes the row's real reader on scratch state
+        /// (SE_frames on the live RPC frame stack above its top, restored), named by FtA3.Executed; SE_scalars is
+        /// withheld with its reason.</summary>
         internal static void FtA3Rows()
         {
             FtA3.Set(FtA3.SE_Hw, "SE_Hw", C.HitWindow.PENDING_CAP, false, FtCalHw, 500);
-            FtA3.Set(FtA3.SE_Logs, "SE_Logs", C.SampleLog.CAP, false, FtCalLogs, 4);
+            FtA3.Executed(FtA3.SE_Hw, "SeatEvidenceCore.HitWindow.Offer, SeatEvidenceCore.HitWindow.Block");
+            FtA3.Set(FtA3.SE_Logs, "SE_Logs", C.SampleLog.CAP, false, FtCalLogs, 2);
+            FtA3.Executed(FtA3.SE_Logs, "SeatEvidenceCore.SampleLog.Add");
             FtA3.Set(FtA3.SE_ordinals, "SE_ordinals", C.Ordinals.KEEP, false, FtCalOrdinals, 500);
-            FtA3.Set(FtA3.SE_frames, "SE_frames", CTX_CAP, false, FtCalFrames, 5000);
-            FtA3.Set(FtA3.SE_scalars, "SE_scalars", 1, false, FtCalSeScalars, 5000);
+            FtA3.Executed(FtA3.SE_ordinals, "SeatEvidenceCore.Ordinals.Next");
+            FtA3.Set(FtA3.SE_frames, "SE_frames", CTX_CAP, false, FtCalFrames, 2000);
+            FtA3.Executed(FtA3.SE_frames, "SeatEvidence.EnterRpc, SeatEvidence.RpcTop, SeatEvidence.TopFrame, SeatEvidence.ExitRpc");
+            FtA3.Set(FtA3.SE_scalars, "SE_scalars", 1, false, null, 5000);
+            FtA3.Withhold(FtA3.SE_scalars, "the scalars select branches only through the live game's statics (_open, _oppActor, the offset and stat-object state), which a calibration cannot set without changing the live game, and the costliest readers (SamplePing, ReadOffset, Tick, the hook bodies) read Photon and the players");
         }
 
         private static HashSet<int> _ftImpSet;
@@ -2182,19 +2190,20 @@ namespace CompetitiveRounds
             C.FtLogRead(ref _ftImpSerial, 1);
         }
 
-        private static long _ftSink;
+        private static long FtNow() { return System.Diagnostics.Stopwatch.GetTimestamp(); }
+
         private static long[][] _ftHwHits;
         private static long[] _ftHwProbe;
 
         /// <summary>S19 calibration: one read = the real Offer then the real Block on a scratch HitWindow (an upper
-        /// bound on either call alone, so every counted read is covered whichever it was). Setup, identical in both
-        /// halves: two new scratch windows, their lists pre-sized past the caps (a live window's lists keep their
-        /// grown capacity: they are readonly and only cleared, so the reads never grow them after the first time),
-        /// and PENDING_CAP hits plus RECENT_CAP block stamps added to ONE of them: the read window when full, the
-        /// other when empty. CAPACITY in its costliest content: RecentBlocks holds RECENT_CAP stamps none of which
-        /// admits the offered hit (Offer scans all of them, appends, and drops the oldest of PENDING_CAP + 1); every
-        /// pending hit is inside the block's window (Block scans all PENDING_CAP, admits each into its new list,
-        /// and removes them all). EMPTY: both lists empty.</summary>
+        /// bound on either call alone, so every counted read is covered whichever it was). Setup before each read,
+        /// outside the clock and identical in both halves: two new scratch windows, their lists pre-sized past the caps
+        /// (a live window's lists keep their grown capacity: they are readonly and only cleared, so the reads never
+        /// grow them after the first time), and PENDING_CAP hits plus RECENT_CAP block stamps added to ONE of them: the
+        /// read window when full, the other when empty. CAPACITY in its costliest content: RecentBlocks holds
+        /// RECENT_CAP stamps none of which admits the offered hit (Offer scans all of them, appends, and drops the
+        /// oldest of PENDING_CAP + 1); every pending hit is inside the block's window (Block scans all PENDING_CAP,
+        /// admits each into its new list, and removes them all). EMPTY: both lists empty.</summary>
         internal static long FtCalHw(bool full, int n)
         {
             if (_ftHwHits == null)
@@ -2204,8 +2213,8 @@ namespace CompetitiveRounds
                 _ftHwProbe = new long[] { 0, 0 };
                 _ftHwHits = hits;
             }
-            long sink = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
                 var a = new C.HitWindow();
@@ -2215,53 +2224,48 @@ namespace CompetitiveRounds
                 var fill = full ? a : b;
                 for (int i = 0; i < C.HitWindow.PENDING_CAP; i++) fill.Pending.Add(_ftHwHits[i]);
                 for (int i = 0; i < C.HitWindow.RECENT_CAP; i++) fill.RecentBlocks.Add(1000000 + i);
-                if (a.Offer(_ftHwProbe, 0)) sink++;
-                sink += a.Block(0, 1).Count;
+                long s = FtNow();
+                bool held = a.Offer(_ftHwProbe, 0);
+                int admitted = a.Block(0, 1).Count;
+                t += FtNow() - s;
+                ok &= !held && admitted == (full ? C.HitWindow.PENDING_CAP : 1) && a.Pending.Count == 0;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += sink;
+            FtA3.Check(FtA3.SE_Hw, full ? "full-scanned-all-admitted-all" : "empty-offered-one-admitted", ok);
             return t;
         }
 
-        private static HashSet<int> _ftImpPresized;
-        private static List<long> _ftLogPresized;
+        private static C.SampleLog _ftLogGrown;
 
-        /// <summary>S20 / S23 calibration: one read = one instance's whole growth sequence. FULL: SampleLog.CAP longs
-        /// (the widest element among these lists: long; the long[] references of EventList are the same width) added
-        /// to a new List&lt;long&gt;() at default capacity, so every doubling happens, AND IMP_DISTINCT_CAP distinct
-        /// ints added to a new HashSet&lt;int&gt;() (every rehash happens). EMPTY: the same adds into a new
-        /// list and a set pre-sized once, outside the timed region (the set by adding IMP_DISTINCT_CAP ints and
-        /// clearing it: no HashSet capacity constructor is assumed on the game's runtime), so the EMPTY half allocates
-        /// nothing and d includes every allocation of the growth sequence; both halves clear their list and set after
-        /// each read at the same size, so the clears match.
-        /// The bound: each list's (and the set's) growth over a game is a prefix of its own 0-to-cap sequence, and
-        /// every cap is at most SampleLog.CAP (GAP_CAP, the reservoirs' 512, LIST_CAP) or IMP_DISTINCT_CAP, so the
-        /// growth work two arms' instances differ by is at most one full sequence per instance per game; d (full
-        /// minus empty) is at least either sequence, so it overbounds every counted instance.</summary>
+        /// <summary>S20 calibration: one read = one instance's whole growth sequence, the real SampleLog.Add called
+        /// CAP times. SampleLog is the costliest instance of the row: its six lists grow to CAP (65536) each, against
+        /// Cadence's two lists of GAP_CAP (32768), the reservoirs' 512, EventList's LIST_CAP (160) and the
+        /// _impDistinct set's IMP_DISTINCT_CAP (8192) ints, so its growth bounds any one instance's. FULL: a new
+        /// SampleLog (every doubling of every list happens). EMPTY: one SampleLog grown to CAP once and cleared by its
+        /// own Clear before each read (empty, its capacity kept: the same Adds, no growth). d is the growth work.</summary>
         internal static long FtCalLogs(bool full, int n)
         {
-            if (_ftImpPresized == null)
+            if (_ftLogGrown == null)
             {
-                var s0 = new HashSet<int>();
-                for (int i = 0; i < IMP_DISTINCT_CAP; i++) s0.Add(i);
-                s0.Clear();
-                _ftImpPresized = s0;
+                var g = new C.SampleLog();
+                for (int i = 0; i < C.SampleLog.CAP; i++) g.Add(i, i, 0, false, i, i);
+                g.Clear();
+                _ftLogGrown = g;
             }
-            if (_ftLogPresized == null) _ftLogPresized = new List<long>(C.SampleLog.CAP);
-            long sink = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                var l = full ? new List<long>() : _ftLogPresized;
-                for (int i = 0; i < C.SampleLog.CAP; i++) l.Add(i);
-                var s = full ? new HashSet<int>() : _ftImpPresized;
-                for (int i = 0; i < IMP_DISTINCT_CAP; i++) s.Add(i);
-                sink += l.Count + s.Count;
-                l.Clear();
-                s.Clear();
+                var log = full ? new C.SampleLog() : _ftLogGrown;
+                log.Clear();
+                int cap0 = log.Arr.Capacity;
+                long s = FtNow();
+                for (int i = 0; i < C.SampleLog.CAP; i++) log.Add(i, i, j, (i & 1) == 0, i, i);
+                t += FtNow() - s;
+                ok &= log.Arr.Count == C.SampleLog.CAP && log.Sw.Count == C.SampleLog.CAP && log.Dropped == 0
+                      && (full ? cap0 == 0 && log.Arr.Capacity >= C.SampleLog.CAP : log.Arr.Capacity == cap0);
+                log.Clear();
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += sink;
+            FtA3.Check(FtA3.SE_Logs, full ? "full-grew-to-cap" : "empty-filled-no-growth", ok);
             return t;
         }
 
@@ -2270,64 +2274,71 @@ namespace CompetitiveRounds
 
         /// <summary>S21 (SE_ordinals, round-2 HIGH 3): the real Ordinals.Next on a scratch table, every measured key
         /// new. FULL: the table holds KEEP prefixes (filled before the clock starts), so every measured Next misses,
-        /// evicts the oldest prefix (the Dictionary Remove) and inserts its own. EMPTY: the table cleared before the
-        /// clock starts, so the n measured Nexts insert below KEEP and never evict. n must stay below KEEP (refused
-        /// otherwise: the empty half would start evicting).</summary>
+        /// evicts the oldest prefix (the Dictionary Remove) and inserts its own; the table stays at KEEP. EMPTY: the
+        /// table cleared by its own Clear before each read, so each measured Next inserts into an empty table.</summary>
         internal static long FtCalOrdinals(bool full, int n)
         {
-            if (n >= C.Ordinals.KEEP) throw new ArgumentOutOfRangeException("n");
             if (_ftOrd == null) _ftOrd = new C.Ordinals();
             var o = _ftOrd;
             o.Clear();
             if (full) for (int i = 0; i < C.Ordinals.KEEP; i++) o.Next(1, i, 0);
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++) s += o.Next(2, ++_ftOrdKey, 0);
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            o.Clear();
-            _ftSink += s;
-            return t;
-        }
-
-        private static readonly Ctx[] _ftCtx = new Ctx[CTX_CAP];
-        private static int _ftCtxDepth;
-
-        /// <summary>S22 (SE_frames): a live reader's frame access on a scratch Ctx stack: a push, the top-of-stack read
-        /// of TopFrame / RpcTop, a pop. EMPTY: depth 0. FULL: CTX_CAP - 1 frames held.</summary>
-        internal static long FtCalFrames(bool full, int n)
-        {
-            for (int i = 0; i < CTX_CAP; i++) { _ftCtx[i].Stamp = i; _ftCtx[i].ViewId = i; _ftCtx[i].Method = "RPCA_Fire"; _ftCtx[i].HasStamp = true; }
-            int depth0 = full ? CTX_CAP - 1 : 0;
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                _ftCtxDepth = depth0;
-                if (_ftCtxDepth < CTX_CAP) { _ftCtx[_ftCtxDepth].Stamp = j; _ftCtx[_ftCtxDepth].Consumed = false; _ftCtxDepth++; }
-                int d = _ftCtxDepth - 1;
-                if (d >= 0 && _ftCtx[d].HasStamp && !_ftCtx[d].Consumed) s += _ftCtx[d].Stamp + _ftCtx[d].ViewId;
-                _ftCtxDepth--;
+                if (!full) o.Clear();
+                int key = ++_ftOrdKey;
+                long s = FtNow();
+                int r = o.Next(2, key, 0);
+                t += FtNow() - s;
+                ok &= r == 0;
+                if (!full) ok &= o.Next(2, key, 0) == 1;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += s;
+            // full: the first prefix filled was evicted by the first measured Next (it answers as new again)
+            if (full) ok &= o.Next(1, 0, 0) == 0;
+            o.Clear();
+            FtA3.Check(FtA3.SE_ordinals, full ? "full-missed-and-evicted" : "empty-inserted", ok);
             return t;
         }
 
-        private static C.Rng _ftRng;
-        private static readonly long[] _ftSeScal = new long[8];
+        private static ExitGames.Client.Photon.Hashtable _ftRpcData;
 
-        /// <summary>S23 (SE_scalars): the real Rng.Next on a scratch generator, then a hook's scalar test-and-increment
-        /// on scratch counters. EMPTY: counters 0. FULL: counters at 1e12 (the generator's state is a value: its
-        /// xorshift costs the same at any state).</summary>
-        internal static long FtCalSeScalars(bool full, int n)
+        /// <summary>S22 (SE_frames): the real EnterRpc, RpcTop, TopFrame (taking the frame) and ExitRpc, as one RPC's
+        /// hooks run them, on the live frame stack ABOVE its top: the depth found at the calibration is restored by
+        /// ExitRpc after every read and in every outcome, and the frames pushed carry no sender, so EnterRpc's
+        /// remote-RPC branch is not taken (no live state but the dead slots above the top changes). The other readers
+        /// read the top frame through TopFrame or RpcTop. FULL: the stack at CTX_CAP - 1 frames (pushed by EnterRpc
+        /// before the clock), so the measured EnterRpc stores into the last slot. EMPTY: the stack as found (no frame
+        /// outside an RPC).</summary>
+        internal static long FtCalFrames(bool full, int n)
         {
-            if (_ftRng == null) _ftRng = new C.Rng(12345);
-            for (int i = 0; i < _ftSeScal.Length; i++) _ftSeScal[i] = full ? 1000000000000L : 0;
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++) { s += _ftRng.Next(); if (_ftSeScal[0] >= 0) _ftSeScal[j & 7]++; }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += s;
+            if (_ftRpcData == null) _ftRpcData = new ExitGames.Client.Photon.Hashtable { { K0, 5 }, { K2, 0 }, { K3, "RPCA_Fire" } };
+            int base0 = _ctxDepth;
+            long t = 0;
+            bool ok = true;
+            try
+            {
+                for (int j = 0; j < n; j++)
+                {
+                    _ftRpcData[K2] = j + 1;
+                    if (full) while (_ctxDepth < CTX_CAP - 1) EnterRpc(_ftRpcData, null);
+                    int stamp, sender, view;
+                    string method;
+                    Ctx c;
+                    long s = FtNow();
+                    int before = EnterRpc(_ftRpcData, null);
+                    bool top = RpcTop(out stamp, out sender, out view, out method);
+                    bool took = TopFrame("RPCA_Fire", null, 5, true, out c);
+                    ExitRpc(before);
+                    t += FtNow() - s;
+                    ok &= top && took && stamp == j + 1 && view == 5 && method == "RPCA_Fire"
+                          && before == (full ? CTX_CAP - 1 : base0) && _ctxDepth == before;
+                    ExitRpc(base0);
+                }
+            }
+            finally { ExitRpc(base0); }
+            ok &= _ctxDepth == base0;
+            FtA3.Check(FtA3.SE_frames, full ? "full-top-slot-stored-read-taken" : "empty-pushed-read-taken", ok);
             return t;
         }
 #endif

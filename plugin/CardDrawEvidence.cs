@@ -1208,39 +1208,12 @@ namespace CompetitiveRounds
 
         /// <summary>FtA3.RegisterAll: CD_notes (S35), the fault notes and the census flag, dependent by default-deny
         /// (ruling FRAME-TIME-ROUND-R2 (1)): DrainNotes writes them every tick, so it is counted at every live reader
-        /// call (DrainNotes, EnsureCensusDump), steady false; COLLECTORS is the code constant.</summary>
+        /// call (DrainNotes, EnsureCensusDump), steady false; COLLECTORS is the code constant. Round 4 (ruling
+        /// FRAME-TIME-ROUND-R3-A1): withheld, with its reason; no real reader of the row runs on scratch state.</summary>
         internal static void FtA3Rows()
         {
-            FtA3.Set(FtA3.CD_notes, "CD_notes", K.COLLECTORS, false, FtCalNotes, 2000);
-        }
-
-        private static readonly string[] _ftNotes = new string[K.COLLECTORS];
-        private static string _ftNoRecord;
-        private static long _ftSink;
-
-        /// <summary>S35 (CD_notes): DrainNotes' loop, line for line, over scratch notes, with the log call replaced by
-        /// a read of the note's length (a note is logged once and nulled, so the log line is one event per fault, not
-        /// a cost an earlier point's content repeats). FULL: every COLLECTORS slot and the no-record note held, so the
-        /// loop takes and nulls each (re-armed every call). EMPTY: every slot null.</summary>
-        internal static long FtCalNotes(bool full, int n)
-        {
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++)
-            {
-                if (full) { for (int i = 0; i < K.COLLECTORS; i++) _ftNotes[i] = "fault"; _ftNoRecord = " no record"; }
-                for (int i = 0; i < K.COLLECTORS; i++)
-                {
-                    string note = _ftNotes[i];
-                    if (note == null) continue;
-                    _ftNotes[i] = null;
-                    s += note.Length;
-                }
-                if (_ftNoRecord != null) { string note = _ftNoRecord; _ftNoRecord = null; s += note.Length; }
-            }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += s;
-            return t;
+            FtA3.Set(FtA3.CD_notes, "CD_notes", K.COLLECTORS, false, null, 2000);
+            FtA3.Withhold(FtA3.CD_notes, "DrainNotes reads the component's live static notes and logs each held one through Plugin.Log, so running it on scratch notes would write fault lines into the live log; EnsureCensusDump needs CardChoice and Photon and writes a file");
         }
 #endif
     }

@@ -32,7 +32,7 @@ A3 = [
     ("CE_gun_account", "S15", "dependent", _LIVE + "GunAccount appends and CloseCycle, counted per live reader", ""),
     ("CE_aimset", "S16", "dependent", _LIVE + "AimSet.Add, counted per call", ""),
     ("CE_capture", "S17", "dependent", _LIVE + "process and capture scalars, counted per live reader", ""),
-    ("CE_perf_probe", "S18", "dependent", _LIVE + "written only with Debug.CombatEvidencePerfProbe on, which FtArm refuses to arm; a runtime guard, not a sweep proof, so it is counted (0 in a sitting)", ""),
+    ("CE_perf_probe", "S18", "dependent", _LIVE + "CombatEvidencePerf.Frame calls FtA3.Read on every ON live frame before it returns disabled (FtArm arms only with Debug.CombatEvidencePerfProbe off), so a sitting counts one read per ON live frame (round-3 MEDIUM a3.py:35); the histogram writes need the probe on", ""),
     ("SE_Hw", "S19", "dependent", "", ""),
     ("SE_Logs", "S20", "dependent", "", ""),
     ("SE_ordinals", "S21", "dependent", _LIVE + "Ordinals.Next with its eviction at KEEP (round-2 HIGH 3)", ""),

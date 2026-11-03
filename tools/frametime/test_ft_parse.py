@@ -356,7 +356,8 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
          drop_cal=(), drop_disp=(), drop_opened=(), shut_ic=(), drop_census=(), complete=True, routes="",
          drop_a3=(), drop_a3cal=(), a3_peak=None, drop_a3drain=(), a3_dirty=None, drop_heavy=(), drop_offthread=(),
          drop_flushed=(), drop_between=(), drop_w=(), refusals_why=("game", "quit"), a3_starts=None, a3_cal_p=None,
-         drop_p=()):
+         drop_p=(), drop_replay=(), replay_bad=None, drop_counters=(), counters_bad=None, point_missing_end=None,
+         a3_withheld=None, a3zero_lines=None):
     """A synthetic sitting, every line as FtFrames, FtCalib, FtCensus and FtDrive write it. Point costs: ON adds
     cost_us of C per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor
     case). The drop_* and shut_ic arguments remove or spoil records for the completeness controls."""
@@ -369,7 +370,9 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
         L.append("[FRAME-TIME] settled g=%d seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
                  " f18=%s answer=%s" % (g, FREQ, FHAT, f18, "replay" if f18 == "A" else "unmeasured"))
         if f18 == "A" and replay:
-            L.append("[FRAME-TIME] answer_replay g=%d ticks=%d result=%s" % (g, 4000, replay))
+            if g not in drop_replay:
+                L.append("[FRAME-TIME] answer_replay g=%d ticks=%d result=%s"
+                         % (g, 4000, "timeout" if replay_bad == g else replay))
         if g not in drop_cal:
             L.append("[FRAME-TIME] cal i=%d why=game%d kind=fhat f_hat=%d spins=1/1" % (g + 1, g, FHAT))
             for s in SHAPES:
@@ -382,6 +385,9 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
             for k in A3_DEP:
                 if (g, k) not in drop_a3cal:
                     ap = (a3_cal_p or {}).get(g, 130000)
+                    if a3_withheld == k:
+                        L.append("[FRAME-TIME] cal i=%d why=game%d kind=a3 k=%s withheld=1" % (g + 1, g, k))
+                        continue
                     L.append("[FRAME-TIME] cal i=%d why=game%d kind=a3 k=%s n=1000 u=100000,100000 p=%d,%d"
                              % (g + 1, g, k, ap, ap))
         if g not in drop_opened:
@@ -464,6 +470,19 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
              "dispatched:GET_h/api/v1/mod-version=1" % ("game%d" % g) + routes)
         if g not in drop_flushed:
             L.append("[FRAME-TIME] flushed g=%d why=%s" % (g, "next_game" if g < games - 1 else "settle"))
+        if g not in drop_counters:
+            cb = counters_bad if counters_bad and counters_bad[0] == g else (g, None)
+            L.append("[FRAME-TIME] counters g=%d frames=%d missing_end=%d cycle_failures=%d span_depth_violations=%d"
+                     % (g, 1000 * (g + 1), cb[1] == "missing_end", cb[1] == "cycle_failures",
+                        cb[1] == "span_depth_violations"))
+        for (zk, zw) in (a3zero_lines or {}).items():
+            if g >= 1:
+                L.append("[FRAME-TIME] a3zero g=%d k=%s starts=14 written=%d faults=0" % (g, zk, zw))
+    if point_missing_end:
+        head = "[FRAME-TIME] p pt=%d.%d.%d " % point_missing_end
+        hit = [i for i, x in enumerate(L) if x.startswith(head)]
+        assert len(hit) == 1
+        L[hit[0]] = L[hit[0]].replace(" missing_end=0 ", " missing_end=1 ")
     if complete:
         L.append("[FRAME-TIME] sitting complete g=%d" % (games - 1))
     if "quit" in refusals_why:
@@ -609,7 +628,9 @@ def test_a3_zero_row_without_its_proof_reference_fails_the_parse():
         P.a3(recs, spec=[("X", "S99", "drained", "emptied between points", "sweep:no-live-write")])
     with pytest.raises(P.Refused, match="name, survivor id, kind, reason, proof"):
         P.a3(recs, spec=[("X", "S99", "zero", "a fixed loop over all bins")])
-    assert P.a3(recs, spec=[("X", "S99", "zero", "r", "probe:a3zero")])[0] == 0.0
+    # round-3 MEDIUM (ft_parse.py:540): a probe token is accepted only with its records
+    with pytest.raises(P.Refused, match="probe:a3zero needs one a3zero line"):
+        P.a3(recs, spec=[("X", "S99", "zero", "r", "probe:a3zero")])
     # the shipped inventory: every zero row names its proof, every drained row its probe
     for r in P.a3_spec():
         assert len(r) == 5, r
@@ -660,7 +681,217 @@ ABSENT = (
     ("window", dict(drop_w={(2, 4, 1)})),
     ("refusals", dict(refusals_why=())),
     ("between", dict(drop_p={(6, 2, 1)})),
+    ("answer_replay", dict(drop_replay={8})),
+    ("answer_replay", dict(drop_replay={0})),
+    ("counters", dict(drop_counters={16})),
+    ("counters", dict(drop_counters={4})),
 )
+
+
+def _g16(r):
+    return r.get("g") == 16 or r.get("game") == 16 or r.get("why") == "game16"
+
+
+def _drop_kind(log, kind, where=None):
+    """The log with every line of `kind` (as parse_line reads it) removed, where `where(rec)` holds; and the count."""
+    keep, n = [], 0
+    for ln in log.splitlines():
+        r = P.parse_line(ln)
+        if r is not None and r["kind"] == kind and (where is None or where(r)):
+            n += 1
+            continue
+        keep.append(ln)
+    return "\n".join(keep), n
+
+
+INCOMPLETE = r"^VERDICT B1 withheld: sitting incomplete"
+# One deletion control per kind the parser reads (round-3 MEDIUMs ft_parse.py:1461, ft_parse.py:1077, FtSchedule.cs:140,
+# ruling FRAME-TIME-ROUND-R3-A1): (kind, fixture, which lines go, what the run must then say). Every RECORDS kind is
+# here or in RECORD_EVENTS; test_every_record_kind_has_a_deletion_control fails on a kind in neither.
+DELETIONS = (
+    ("settled", "sitting", _g16, INCOMPLETE),
+    ("p", "sitting", _g16, INCOMPLETE),
+    ("w", "sitting", _g16, INCOMPLETE),
+    ("cal", "sitting", _g16, INCOMPLETE),
+    ("census", "sitting", _g16, INCOMPLETE),
+    ("opened", "sitting", _g16, r"^VERDICT B1 INVALID: VR5 failed"),
+    ("heavy", "sitting", _g16, INCOMPLETE),
+    ("offthread", "sitting", _g16, INCOMPLETE),
+    ("a3", "sitting", _g16, r"^VERDICT B1 withheld: U not computable"),
+    ("a3drain", "sitting", _g16, r"^VERDICT B1 withheld: U not computable"),
+    ("answer_replay", "sitting", _g16, INCOMPLETE),
+    ("between", "sitting", _g16, INCOMPLETE),
+    ("flushed", "sitting", _g16, INCOMPLETE),
+    ("counters", "sitting", _g16, INCOMPLETE),
+    ("plant", "sitting", None, r"^VERDICT B1 withheld: VR1"),
+    ("refusals", "sitting", None, INCOMPLETE),
+    ("sitting", "sitting", None, INCOMPLETE),
+    ("a3zero", "a3zero", _g16, "probe:a3zero needs one a3zero line in game 16"),
+    ("menu", "menu", lambda r: r.get("seg") == 9, "menu"),
+    ("p", "menu", lambda r: r.get("pt") == "-1.9.1", "menu"),
+    ("cal", "menu", lambda r: r.get("why") == "menu2", "menu"),
+    ("menu_done", "menu", None, "menu"),
+    ("settled", "menu", None, "menu"),
+)
+# the kinds whose PRESENCE is the event (their absence is the normal case): test_failure_events_make_the_run_incomplete
+# and test_vr6_build_fails_on_a_disarm are their controls
+RECORD_EVENTS = {"disarmed", "game", "start", "clock"}
+
+
+def _a3zero_case():
+    k = A3_DEP[0]
+    spec = [(n, s, ("zero" if n == k else kd), (w or "r"), ("probe:a3zero" if n == k else pr))
+            for n, s, kd, w, pr in P.a3_spec()]
+    drop = {(g, k) for g in range(17)}
+    return _log(drop_a3=drop, drop_a3cal=drop, a3zero_lines={k: 0}), spec
+
+
+@pytest.mark.parametrize("kind,fixture,where,want", DELETIONS)
+def test_deleting_each_record_kind_withholds(kind, fixture, where, want):
+    if fixture == "sitting":
+        base = _log()
+        assert re.search(r"^VERDICT B1 SID", P.report(base), re.M)
+        log, n = _drop_kind(base, kind, where)
+        assert n >= 1, kind
+        assert re.search(want, P.report(log), re.M), (kind, P.report(log))
+    elif fixture == "a3zero":
+        base, spec = _a3zero_case()
+        P.a3(P.read(base), spec=spec)
+        log, n = _drop_kind(base, kind, where)
+        assert n >= 1
+        with pytest.raises(P.Refused, match=want):
+            P.a3(P.read(log), spec=spec)
+    else:
+        base = _menu_log()
+        assert P.menu_check(P.read(base))[0]
+        log, n = _drop_kind(base, kind, where)
+        assert n >= 1, kind
+        bad = "refused"
+        try:
+            ok, _, bad = P.menu_check(P.read(log))
+        except P.Refused:
+            ok = False
+        assert not ok, (kind, bad)
+
+
+def test_every_record_kind_has_a_deletion_control():
+    covered = set(k for k, _, _, _ in DELETIONS)
+    assert covered | RECORD_EVENTS == set(P.RECORDS), (sorted(set(P.RECORDS) - covered - RECORD_EVENTS),
+                                                       sorted((covered | RECORD_EVENTS) - set(P.RECORDS)))
+    assert not covered & RECORD_EVENTS
+
+
+def test_every_emitted_kind_is_read_or_named():
+    # every "[FRAME-TIME] <kind>" the build writes is a RECORDS kind or named in EMITTED_UNREAD with its reason; no kind
+    # the parser reads is called unread; every RECORDS kind but a3zero (no build writes it today) is written
+    here = os.path.dirname(os.path.abspath(__file__))
+    plug = os.path.join(here, "..", "..", "plugin")
+    emitted = set()
+    for fn in sorted(os.listdir(plug)):
+        if fn.endswith(".cs"):
+            emitted |= set(re.findall(r'"\[FRAME-TIME\] (\w+)', open(os.path.join(plug, fn), encoding="utf-8").read()))
+    src = open(os.path.join(here, "ft_parse.py"), encoding="utf-8").read()
+    used = set(re.findall(r'\["kind"\] [!=]= "(\w+)"', src)) | set(k for k, _, _ in P.FAILURE_EVENTS)
+    assert emitted <= set(P.RECORDS) | set(P.EMITTED_UNREAD), sorted(emitted - set(P.RECORDS) - set(P.EMITTED_UNREAD))
+    assert not set(P.EMITTED_UNREAD) & used, sorted(set(P.EMITTED_UNREAD) & used)
+    assert not set(P.EMITTED_UNREAD) & set(P.RECORDS)
+    assert set(P.EMITTED_UNREAD) <= emitted, sorted(set(P.EMITTED_UNREAD) - emitted)
+    assert set(P.RECORDS) - emitted == {"a3zero"}, sorted(set(P.RECORDS) - emitted)
+
+
+FAILURE_LINES = ("[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: boom",
+                 "[Warning:CompetitiveRounds] [FRAME-TIME] game start failed: boom",
+                 "[Warning:CompetitiveRounds] [FRAME-TIME] start failed: boom",
+                 "[Warning:CompetitiveRounds] [FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate 1)")
+
+
+def test_failure_events_make_the_run_incomplete():
+    # round-4 sweep of every kind the build writes: a failure warning is never ignored
+    for ln in FAILURE_LINES:
+        log = _log()
+        i = log.index("[FRAME-TIME] flushed g=9")
+        log = log[:i] + ln + "\n" + log[i:]
+        assert any("failure event" in m for m in P.complete(P.read(log))), ln
+        assert re.search(INCOMPLETE, P.report(log), re.M), ln
+        ok, _, bad = P.menu_check(P.read(_menu_log() + "\n" + ln))
+        assert not ok and any("failure event" in b for b in bad), (ln, bad)
+    # the control the other way: the clock's ordinary line is not a failure
+    ok_line = "[Info   :CompetitiveRounds] [FRAME-TIME] clock installed freq=10000000 hires=1"
+    assert P.complete(P.read(_log() + "\n" + ok_line)) == []
+    assert P.menu_check(P.read(_menu_log() + "\n" + ok_line))[0]
+
+
+def test_f18_failure_guards_b1():
+    # round-3 MEDIUM (ft_parse.py:1461): game 8's replay failing makes F18 FAIL, and B1 is INVALID, never PASS or SID
+    out = P.report(_log(replay_bad=8))
+    assert re.search(r"^F18 reading A FAIL", out, re.M), out
+    assert re.search(r"^VERDICT B1 INVALID: .*F18", out, re.M), out
+
+
+def test_vr2_judges_the_last_games_counters_and_every_point_stamp():
+    # round-3 MEDIUM (FtSchedule.cs:140): the last game's play is judged by its flush-time counters line, and a point
+    # line with a missed FT_End stamp fails VR2
+    ok, why = P.vr2(P.read(_log()), P.LAST_GAME)
+    assert ok, why
+    for kw, want in ((dict(counters_bad=(16, "missing_end")), "counters g=16 missing_end=1"),
+                     (dict(counters_bad=(16, "cycle_failures")), "counters g=16 cycle_failures=1"),
+                     (dict(counters_bad=(9, "span_depth_violations")), "counters g=9 span_depth_violations=1"),
+                     (dict(drop_counters={16}), "game 16: 0 counters lines"),
+                     (dict(point_missing_end=(16, 7, 2)), "point 16.7.2: missing_end=1")):
+        ok, why = P.vr2(P.read(_log(**kw)), P.LAST_GAME)
+        assert not ok and any(want in w for w in why), (kw, why)
+
+
+def test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot():
+    # round-3 MEDIUM (ft_parse.py:1077): a failing menu calibration (cycle 4 off by 5 percent) deleted must not pass,
+    # nor a deleted or failing terminal snapshot
+    ok, _, bad = P.menu_check(P.read(_menu_log(fhat_last=int(FHAT * 1.05))))
+    assert not ok, bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(fhat_last=int(FHAT * 1.05), drop_menu_cal=4)))
+    assert not ok and any("menu calibrations" in b for b in bad), bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(drop_menu_cal=0)))
+    assert not ok and any("menu calibrations" in b for b in bad), bad
+    with pytest.raises(P.Refused, match="Stopwatch frequency"):
+        P.menu_check(P.read(_menu_log(drop_terminal=True)))
+    # the snapshot written before menu_done is not the terminal one
+    with pytest.raises(P.Refused, match="settled line after menu_done"):
+        P.menu_check(P.read(_menu_log(terminal_misplaced=True)))
+    ok, _, bad = P.menu_check(P.read(_menu_log(terminal_bad=True)))
+    assert not ok and any("terminal settled line missing_end=1" in b for b in bad), bad
+    # a settled line the build never writes in a menu run fails it (its counters are not this run's)
+    ok, _, bad = P.menu_check(P.read(_menu_log(extra_settled=True)))
+    assert not ok and any("2 settled lines in a menu run" in b for b in bad), bad
+
+
+def test_a3_probe_proofs_need_their_records_and_contrary_ones_fail():
+    # round-3 MEDIUM (ft_parse.py:540): probe:a3zero accepted only with consistent a3zero lines; an unknown token, a
+    # contrary record, or live writes counted for a zero row are refused
+    k = A3_DEP[0]
+    spec = [(n, s, ("zero" if n == k else kd), (w or "r"), ("probe:a3zero" if n == k else pr))
+            for n, s, kd, w, pr in P.a3_spec()]
+    recs = P.read(_log(drop_a3={(g, k) for g in range(17)}, drop_a3cal={(g, k) for g in range(17)}))
+    with pytest.raises(P.Refused, match="probe:a3zero needs one a3zero line"):
+        P.a3(recs, spec=spec)
+    good = P.read(_log(drop_a3={(g, k) for g in range(17)}, drop_a3cal={(g, k) for g in range(17)}, a3zero_lines={k: 0}))
+    P.a3(good, spec=spec)
+    bad = P.read(_log(drop_a3={(g, k) for g in range(17)}, drop_a3cal={(g, k) for g in range(17)}, a3zero_lines={k: 1}))
+    with pytest.raises(P.Refused, match="written=1"):
+        P.a3(bad, spec=spec)
+    spec2 = [(n, s, kd, w, ("sweep:anything" if n == k else pr)) for n, s, kd, w, pr in spec]
+    with pytest.raises(P.Refused, match="names no evidence"):
+        P.a3(good, spec=spec2)
+    spec3 = [(n, s, kd, w, ("sweep:no-live-write" if n == k else pr)) for n, s, kd, w, pr in spec]
+    with pytest.raises(P.Refused, match="contrary evidence"):
+        P.a3(P.read(_log()), spec=spec3)
+
+
+def test_a3_row_withheld_by_the_build_withholds_b1():
+    # ruling FRAME-TIME-ROUND-R3-A1: a row whose real reader cannot run is withheld; U is not computable, B1 withheld
+    k = A3_DEP[1]
+    with pytest.raises(P.Refused, match="withheld by the build.*%s" % k):
+        P.a3(P.read(_log(a3_withheld=k)), last_game=P.LAST_GAME)
+    out = P.report(_log(a3_withheld=k))
+    assert "U not computable" in out and "VERDICT B1 withheld" in out, out
 
 
 @pytest.mark.parametrize("what,kw", ABSENT)
@@ -913,13 +1144,16 @@ FHAT = 3000000000        # cycles per second: 3000 per us
 
 
 def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing_seg=None, why="complete",
-              gate_flip=None, excl_seg=None, empty_seg=None, drop_menu_seg=None):
+              gate_flip=None, excl_seg=None, empty_seg=None, drop_menu_seg=None, drop_menu_cal=None,
+              drop_terminal=False, terminal_bad=False, terminal_misplaced=False, extra_settled=False):
     """A menu run as FtMenu writes it: pair 0 unplanted, then the four levels in turn, base 2500 us per frame."""
     ec = ec or {}
+    # FtMenu writes one settled line, after menu_done (FtMenu.cs FtCalib.Settled); extra_settled adds one before the
+    # run, as round 3's fixture did, which the build never writes
     out = ["[Info   :CompetitiveRounds] [FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d"
            " hires=1 f_hat=%d force=%s clock=1 frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0"
-           % (FREQ, FHAT, force),
-           "[FRAME-TIME] menu_armed segments=%d seg_s=10 settle_s=20 force=%s seed=7" % (segs, force)]
+           % (FREQ, FHAT, force)] if extra_settled else []
+    out.append("[FRAME-TIME] menu_armed segments=%d seg_s=10 settle_s=20 force=%s seed=7" % (segs, force))
     levels = ("0.5", "1.5", "3", "5")
     base, level, cp, cycles = 2500, "0", 0, 0
     for s in range(1, segs + 1):
@@ -934,7 +1168,8 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
                 cp = int(round(float(level) / 100 * base))
             if s == 1 or (pair >= 1 and (pair - 1) % 4 == 0):
                 fh = fhat_last if s > 1 and cycles == 4 else FHAT
-                out.append("[FRAME-TIME] cal i=%d why=menu%d kind=fhat f_hat=%d spins=1/1" % (cycles, cycles, fh))
+                if drop_menu_cal != cycles:
+                    out.append("[FRAME-TIME] cal i=%d why=menu%d kind=fhat f_hat=%d spins=1/1" % (cycles, cycles, fh))
                 cycles += 1
         else:
             arm = "OFF" if arm == "ON" else "ON"
@@ -964,10 +1199,15 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
                    " span_gn=0 span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=0 t0=1 t1=2 answer=none"
                    % (s, arm, gate, n, sF, sS, sC, pn, psF, psS, psC, 1 if excl_seg == s else 0,
                       1 if missing_seg == s else 0))
-    out.append("[FRAME-TIME] menu_done why=%s segs=%d of=%d base_us=%d cycles=%d" % (why, segs, segs, base, cycles))
-    out.append("[FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
-               " force=%s clock=1 frames=99999 missing_end=0 cycle_failures=0 span_depth_violations=0"
-               % (FREQ, FHAT, force))
+    done = "[FRAME-TIME] menu_done why=%s segs=%d of=%d base_us=%d cycles=%d" % (why, segs, segs, base, cycles)
+    if not terminal_misplaced:
+        out.append(done)
+    if not drop_terminal:
+        out.append("[FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
+                   " force=%s clock=1 frames=99999 missing_end=%d cycle_failures=0 span_depth_violations=0"
+                   % (FREQ, FHAT, force, 1 if terminal_bad else 0))
+    if terminal_misplaced:
+        out.append(done)
     return "\n".join(out)
 
 

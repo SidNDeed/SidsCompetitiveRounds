@@ -218,113 +218,180 @@ namespace CompetitiveRounds
         /// emptied by the next Drain); S25 HE_game, S26 HE_point and S27 HE_sender, dependent by default-deny (ruling
         /// FRAME-TIME-ROUND-R2 (1)), counted at every live reader call; S37 HE_hitset (round-2 HIGH 3), the GameTally
         /// Hit set's growth, counted once per tally per game (FtA3.ReadOnce in GameTally.AddImpact). Every one steady
-        /// false; capacities are the code constants (1 for the RPC-scoped scalar).</summary>
+        /// false; capacities are the code constants (1 for the RPC-scoped scalar). Round 4 (ruling
+        /// FRAME-TIME-ROUND-R3-A1): each calibration executes the row's real reader on scratch state, named by
+        /// FtA3.Executed.</summary>
         internal static void FtA3Rows()
         {
             FtA3.SetDrained(FtA3.HE_Flush, "HE_Flush", () => _fCount);
             FtA3.Set(FtA3.HE_game, "HE_game", ACTOR_KEY_CAP, false, FtCalGame, 2000);
+            FtA3.Executed(FtA3.HE_game, "HitEvidence.G, SeatEvidenceCore.CappedMap.TryGetValue, SeatEvidenceCore.CappedMap.Admit, SeatEvidenceCore.CappedMap.Set, HitEvidenceCore.ShotObsLine, HitEvidenceCore.BlockMissLine, SeatEvidenceCore.CappedMap.Count, SeatEvidenceCore.CappedMap.Clear");
             FtA3.Set(FtA3.HE_point, "HE_point", HitEvidenceCore.TIMES_CAP, false, FtCalPoint, 20);
+            FtA3.Executed(FtA3.HE_point, "HitEvidenceCore.HitRecvLine, HitEvidenceCore.Pair, HitEvidenceCore.Ascending");
             FtA3.Set(FtA3.HE_sender, "HE_sender", 1, false, FtCalSender, 5000);
+            FtA3.Executed(FtA3.HE_sender, "HitEvidence.RemoteSender");
             FtA3.Set(FtA3.HE_hitset, "HE_hitset", HitEvidenceCore.PROJ_CAP, false, FtCalHitset, 4);
+            FtA3.Executed(FtA3.HE_hitset, "HitEvidenceCore.GameTally.AddImpact");
         }
+
+        private static long FtNow() { return System.Diagnostics.Stopwatch.GetTimestamp(); }
 
         private static long _ftSink;
-        private static SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally> _ftGame;
+        private static SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally> _ftGameFull, _ftGameEmpty;
+        private static HitEvidenceCore.GameTally _ftTallyFull;
 
-        /// <summary>S25 (HE_game): G()'s real CappedMap probe on a scratch map, then one tally increment. EMPTY: the
-        /// map empty, every probe misses. FULL: ACTOR_KEY_CAP tallies held, every probe hits.</summary>
+        /// <summary>S25 (HE_game): per read, the real G() (the probe-and-admit reader NoteDamage, NoteSpawn and the
+        /// impact path reach the map through) run against a scratch map swapped into _game for the read and restored
+        /// in a finally, then the two real per-actor game lines Drain builds from a tally (ShotObsLine, BlockMissLine;
+        /// their cost depends on the counters' digits and the overflow field), then the real CappedMap.Clear of the
+        /// map (the costliest member on a map at its cap; every CappedMap member counts this row). CAPACITY in its
+        /// costliest content: ACTOR_KEY_CAP tallies held (restored before each read, outside the clock) with every
+        /// counter at its largest and the Hit set overflowed; each read runs G for an actor not held (TryGetValue
+        /// misses and Admit refuses at the cap, the longest path through G on a full map) and G for a held actor (the
+        /// probe hits), the held tally's lines, and the Clear of all ACTOR_KEY_CAP keys. EMPTY: the map empty before
+        /// each read, so the one G misses, admits, allocates and stores a new tally, whose lines follow, and the Clear
+        /// empties one key. The full half's extra G call makes d an overbound. G's own allocation is in the EMPTY half
+        /// only, so it lowers d by the cost of one small allocation.</summary>
         internal static long FtCalGame(bool full, int n)
         {
-            if (_ftGame == null) _ftGame = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>(ACTOR_KEY_CAP);
-            var m = _ftGame;
-            m.Clear();
-            if (full) for (int i = 0; i < ACTOR_KEY_CAP; i++) m.Set(i + 1, new HitEvidenceCore.GameTally());
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++)
+            if (_ftGameFull == null)
             {
-                HitEvidenceCore.GameTally t;
-                if (m.TryGetValue(j % ACTOR_KEY_CAP + 1, out t)) { t.SpawnAmmo++; s += t.Impacts; }
-                else s++;
+                var f = new HitEvidenceCore.GameTally();
+                f.SpawnAmmo = f.SpawnNoAmmo = f.SpawnSeparate = f.Impacts = f.ImpactsBlocked = int.MaxValue;
+                f.DistinctAmmo = f.DistinctOther = f.Direct = f.HitOverflow = int.MaxValue;
+                for (int i = 0; i < f.Buckets.Length; i++) f.Buckets[i] = int.MaxValue;
+                _ftTallyFull = f;
+                _ftGameFull = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>(ACTOR_KEY_CAP);
+                _ftGameEmpty = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>(ACTOR_KEY_CAP);
             }
-            long tt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            var m = full ? _ftGameFull : _ftGameEmpty;
+            var live = _game;
             m.Clear();
-            _ftSink += s;
-            return tt;
+            m.TakeRefused();
+            long t = 0, sink = 0;
+            bool ok = true;
+            try
+            {
+                for (int j = 0; j < n; j++)
+                {
+                    if (full) for (int i = 0; i < ACTOR_KEY_CAP; i++) m.Set(i + 1, _ftTallyFull);
+                    else m.Clear();
+                    int actor = j % ACTOR_KEY_CAP + 1;
+                    _game = m;
+                    long s = FtNow();
+                    HitEvidenceCore.GameTally miss = full ? G(ACTOR_KEY_CAP + actor) : null;
+                    HitEvidenceCore.GameTally g = G(actor);
+                    string a = g != null ? HitEvidenceCore.ShotObsLine(j, actor, g) : "";
+                    string b = g != null ? HitEvidenceCore.BlockMissLine(j, actor, g) : "";
+                    int held = m.Count;
+                    m.Clear();
+                    t += FtNow() - s;
+                    _game = live;
+                    sink += a.Length + b.Length;
+                    ok &= g != null && miss == null && (g == _ftTallyFull) == full
+                          && (a.IndexOf(" overflow=", StringComparison.Ordinal) >= 0) == full
+                          && held == (full ? ACTOR_KEY_CAP : 1) && m.Count == 0;
+                }
+            }
+            finally { _game = live; }
+            ok &= m.TakeRefused() == (full ? n : 0) && ReferenceEquals(_game, live);
+            m.Clear();
+            _ftSink += sink;
+            FtA3.Check(FtA3.HE_game, full ? "full-miss-refused-hit-overflow-line-cleared" : "empty-admitted-new-tally-cleared", ok);
+            return t;
         }
 
-        private static List<float> _ftPd, _ftPf, _ftPe;
+        private static HitEvidenceCore.PointTally _ftPtFull, _ftPtEmpty;
 
-        /// <summary>S26 (HE_point): the costliest live reader, the real HitEvidenceCore.Pair (both Ascending checks and
-        /// the merge) over a damage and a force time list. FULL: both lists at TIMES_CAP ascending times, interleaved
-        /// one unit apart against a half-unit window, so nothing pairs and the merge walks both lists whole. EMPTY:
-        /// both lists empty. The O(1) readers (AddDirect, AddForce, AddDot, NoteDamage) count under the same row, so
-        /// this unit bounds them too.</summary>
+        /// <summary>S26 (HE_point): the costliest live reader, the real HitEvidenceCore.HitRecvLine (Pair's two Ascending
+        /// checks and the merge over the tally's damage and force time lists, then the line). FULL: both lists at
+        /// TIMES_CAP ascending times, interleaved one unit apart against a half-unit window, so nothing pairs and the
+        /// merge walks both lists whole. EMPTY: a new tally (both lists empty). The O(1) readers (AddDirect, AddForce,
+        /// AddDot, NoteDamage) count under the same row, so this unit bounds them too. HitRecvLine does not change the
+        /// tally.</summary>
         internal static long FtCalPoint(bool full, int n)
         {
-            if (_ftPd == null)
+            if (_ftPtFull == null)
             {
-                var d0 = new List<float>(HitEvidenceCore.TIMES_CAP); var f0 = new List<float>(HitEvidenceCore.TIMES_CAP);
-                for (int i = 0; i < HitEvidenceCore.TIMES_CAP; i++) { d0.Add(i * 2f); f0.Add(i * 2f + 1f); }
-                _ftPe = new List<float>();
-                _ftPd = d0; _ftPf = f0;
+                var p = new HitEvidenceCore.PointTally();
+                for (int i = 0; i < HitEvidenceCore.TIMES_CAP; i++) { p.DirectT.Add(i * 2f); p.ForceT.Add(i * 2f + 1f); }
+                _ftPtEmpty = new HitEvidenceCore.PointTally();
+                _ftPtFull = p;
             }
-            var d = full ? _ftPd : _ftPe;
-            var f = full ? _ftPf : _ftPe;
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            var tally = full ? _ftPtFull : _ftPtEmpty;
+            string want = full ? " paired=0 direct_no_force=" + HitEvidenceCore.TIMES_CAP + " force_no_direct=" + HitEvidenceCore.TIMES_CAP + " "
+                               : " paired=0 direct_no_force=0 force_no_direct=0 ";
+            long t = 0, sink = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                int a, b, c;
-                HitEvidenceCore.Pair(d, f, 0.5f, out a, out b, out c);
-                s += a + b + c;
+                long s = FtNow();
+                string line = HitEvidenceCore.HitRecvLine(j, 7, tally);
+                t += FtNow() - s;
+                sink += line.Length;
+                ok &= line.IndexOf(want, StringComparison.Ordinal) >= 0;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += s;
+            ok &= tally.DirectT.Count == (full ? HitEvidenceCore.TIMES_CAP : 0);
+            _ftSink += sink;
+            FtA3.Check(FtA3.HE_point, full ? "full-merged-whole-nothing-paired" : "empty-no-times", ok);
             return t;
         }
 
-        private static int _ftSender;
-
-        /// <summary>S27 (HE_sender): RemoteSender's one int read, on a scratch scalar. EMPTY: no sender (-1). FULL: an
-        /// actor number.</summary>
+        /// <summary>S27 (HE_sender): the real RemoteSender, the reader of the RPC-scoped sender (the ExecuteRpc prefix
+        /// writes it). EMPTY: no sender (0: RemoteSender returns at its first test). FULL: an actor number, so it also
+        /// reads the local actor. The live value (0 outside an RPC) is saved before the reads and restored after them
+        /// in every outcome.</summary>
         internal static long FtCalSender(bool full, int n)
         {
-            _ftSender = full ? 1001 : -1;
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++) s += _ftSender >= 0 ? _ftSender : 0;
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += s;
+            int keep = RpcSender;
+            long t = 0;
+            bool ok = true;
+            try
+            {
+                for (int j = 0; j < n; j++)
+                {
+                    RpcSender = full ? 1001 : 0;
+                    int actor;
+                    long s = FtNow();
+                    bool remote = RemoteSender(out actor);
+                    t += FtNow() - s;
+                    ok &= remote == full && actor == (full ? 1001 : 0);
+                }
+            }
+            finally { RpcSender = keep; }
+            FtA3.Check(FtA3.HE_sender, full ? "full-remote-sender" : "empty-no-sender", ok);
             return t;
         }
 
-        private static HashSet<int> _ftHitPresized;
+        private static HitEvidenceCore.GameTally _ftHitGrown;
 
-        /// <summary>S37 (HE_hitset, round-2 HIGH 3): one read = one GameTally Hit set's whole growth sequence, as
-        /// SeatEvidence.FtCalLogs calibrates SE_Logs. FULL: PROJ_CAP distinct Contains + Add pairs into a new HashSet,
-        /// so every rehash happens. EMPTY: the same pairs into a set already grown to PROJ_CAP and cleared (no rehash).
-        /// The difference is the growth work a set filled by earlier points can move into a later point.</summary>
+        /// <summary>S37 (HE_hitset, round-2 HIGH 3): one read = one GameTally Hit set's whole growth sequence, the real
+        /// AddImpact called with PROJ_CAP distinct unblocked projectiles (each a Contains then an Add). FULL: a new
+        /// tally, so every rehash happens. EMPTY: one tally whose set was grown to PROJ_CAP once and is cleared before
+        /// each read (empty, its capacity kept: the same calls, no rehash). The difference is the growth work a set
+        /// filled by earlier points can move into a later point.</summary>
         internal static long FtCalHitset(bool full, int n)
         {
-            if (_ftHitPresized == null)
+            if (_ftHitGrown == null)
             {
-                var s0 = new HashSet<int>();
-                for (int i = 0; i < HitEvidenceCore.PROJ_CAP; i++) s0.Add(i);
-                s0.Clear();
-                _ftHitPresized = s0;
+                var g0 = new HitEvidenceCore.GameTally();
+                for (int i = 0; i < HitEvidenceCore.PROJ_CAP; i++) g0.AddImpact(i, false, true);
+                _ftHitGrown = g0;
             }
-            long sink = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                var hs = full ? new HashSet<int>() : _ftHitPresized;
-                for (int i = 0; i < HitEvidenceCore.PROJ_CAP; i++) if (!hs.Contains(i)) hs.Add(i);
-                sink += hs.Count;
-                hs.Clear();
+                var g = full ? new HitEvidenceCore.GameTally() : _ftHitGrown;
+                g.Hit.Clear();
+                long d0 = g.DistinctAmmo;
+                long s = FtNow();
+                for (int i = 0; i < HitEvidenceCore.PROJ_CAP; i++) g.AddImpact(i, false, true);
+                t += FtNow() - s;
+                ok &= g.Hit.Count == HitEvidenceCore.PROJ_CAP && g.HitOverflow == 0 && g.DistinctAmmo - d0 == HitEvidenceCore.PROJ_CAP;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += sink;
+            _ftHitGrown.Hit.Clear();
+            FtA3.Check(FtA3.HE_hitset, full ? "full-grew-to-cap" : "empty-filled-no-growth", ok);
             return t;
         }
 #endif

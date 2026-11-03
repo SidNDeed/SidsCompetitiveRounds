@@ -3252,38 +3252,53 @@ namespace CompetitiveRounds
 #if SCR_FRAMETIME
         /// <summary>FtA3.RegisterAll: SURVIVORS.md S28, the point-end records, a drained row (emptied by the first
         /// tick after the point end); S29 PE_map, the two CappedMaps, dependent by default-deny (ruling
-        /// FRAME-TIME-ROUND-R2 (1)), counted at every live reader call (the CappedMap members), steady false.</summary>
+        /// FRAME-TIME-ROUND-R2 (1)), counted at every live reader call (the CappedMap members), steady false. Round 4
+        /// (ruling FRAME-TIME-ROUND-R3-A1): the calibration executes the real CappedMap members, named by
+        /// FtA3.Executed.</summary>
         internal static void FtA3Rows()
         {
             FtA3.SetDrained(FtA3.PE_Rec, "PE_Rec", () => _recCount);
             FtA3.Set(FtA3.PE_map, "PE_map", PLAYER_SCAN_CAP, false, FtCalMap, 5000);
+            FtA3.Executed(FtA3.PE_map, "SeatEvidenceCore.CappedMap.TryGetValue, SeatEvidenceCore.CappedMap.Set, SeatEvidenceCore.CappedMap.Count, SeatEvidenceCore.CappedMap.Clear");
         }
 
         private static SeatEvidenceCore.CappedMap<int, float> _ftMap;
         private static double _ftSink;
 
-        /// <summary>S29 (PE_map): the real CappedMap TryGetValue then Set on a scratch map of the larger cap
-        /// (PLAYER_SCAN_CAP, _before's). EMPTY: the map empty, every probe misses and the Set admits a key (cleared
-        /// again outside the clock between batches only). FULL: PLAYER_SCAN_CAP keys held, every probe hits and the
-        /// Set overwrites.</summary>
+        /// <summary>S29 (PE_map): one read = the real CappedMap TryGetValue, Set, Count and Clear, the live scan's
+        /// probe-and-store and the map's per-pass clear (_before.Clear; the other members are an admission test or a
+        /// removal), on a scratch map of the larger cap (PLAYER_SCAN_CAP, _before's). Each read is timed alone. EMPTY:
+        /// the map emptied by its own Clear before EVERY read (outside the clock), so every probe misses, the Set
+        /// admits one key into an empty map and the timed Clear empties that one key; the probes' hits are counted from
+        /// TryGetValue's own result and must be zero (round-3 HIGH 2: without the per-read clear the keys the Sets
+        /// admitted made 4,936 of 5,000 empty probes hit). FULL: PLAYER_SCAN_CAP keys set before EVERY read (outside
+        /// the clock), so every probe hits, the Set overwrites and the timed Clear empties the whole cap.</summary>
         internal static long FtCalMap(bool full, int n)
         {
             if (_ftMap == null) _ftMap = new SeatEvidenceCore.CappedMap<int, float>(PLAYER_SCAN_CAP);
             var m = _ftMap;
-            m.Clear();
-            if (full) for (int i = 0; i < PLAYER_SCAN_CAP; i++) m.Set(i, i);
             double s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long t = 0;
+            int hits = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
+                if (full) for (int i = 0; i < PLAYER_SCAN_CAP; i++) m.Set(i, i);
+                else m.Clear();
                 int k = j % PLAYER_SCAN_CAP;
                 float v;
-                if (m.TryGetValue(k, out v)) s += v;
-                m.Set(k, j);
+                long a = System.Diagnostics.Stopwatch.GetTimestamp();
+                bool hit = m.TryGetValue(k, out v);
+                bool set = m.Set(k, j);
+                int held = m.Count;
+                m.Clear();
+                t += System.Diagnostics.Stopwatch.GetTimestamp() - a;
+                if (hit) { hits++; s += v; }
+                ok &= set && held == (full ? PLAYER_SCAN_CAP : 1) && m.Count == 0;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             m.Clear();
             _ftSink += s;
+            FtA3.Check(FtA3.PE_map, full ? "full-every-probe-hit" : "empty-probe-hits-zero", ok && hits == (full ? n : 0));
             return t;
         }
 #endif

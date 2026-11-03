@@ -918,25 +918,33 @@ namespace CompetitiveRounds
         /// together with both Medians at their costliest content, so one counted read covers both. The 1 passed as the
         /// capacity is unused (steady false).
         /// IC_scalars (S32), IC_point (S33), IC_game (S34): dependent by default-deny (ruling FRAME-TIME-ROUND-R2
-        /// (1)), counted at every live reader call, steady false.</summary>
+        /// (1)), counted at every live reader call, steady false.
+        /// Round 4 (ruling FRAME-TIME-ROUND-R3-A1): each calibration executes the row's real reader on a scratch
+        /// instance, named by FtA3.Executed; IC_game is withheld with its reason.</summary>
         internal static void FtA3Rows()
         {
             FtA3.Set(FtA3.IC_Rpc, "IC_Rpc", I.RpcNames.KEEP, false, FtCalRpc, 500);
+            FtA3.Executed(FtA3.IC_Rpc, "IdentityClockCore.RpcNames.Add");
             FtA3.Set(FtA3.IC_Clock, "IC_Clock", 1, false, FtCalClock, 500);
-            FtA3.Set(FtA3.IC_scalars, "IC_scalars", 1, false, FtCalIcScalars, 5000);
-            FtA3.Set(FtA3.IC_point, "IC_point", 1, false, FtCalIcPoint, 5000);
-            FtA3.Set(FtA3.IC_game, "IC_game", 1, false, FtCalIcGame, 5000);
+            FtA3.Executed(FtA3.IC_Clock, "IdentityClockCore.ClockBook.FlushBucket, IdentityClockCore.ClockBook.Median");
+            FtA3.Set(FtA3.IC_scalars, "IC_scalars", 1, false, FtCalIcScalars, 200);
+            FtA3.Executed(FtA3.IC_scalars, "IdentityClockCore.ClockBook.Package, IdentityClockCore.ClockBook.Cadence");
+            FtA3.Set(FtA3.IC_point, "IC_point", 1, false, FtCalIcPoint, 2000);
+            FtA3.Executed(FtA3.IC_point, "IdentityClockCore.ClockBook.Package, IdentityClockCore.ClockBook.PointPkg");
+            FtA3.Set(FtA3.IC_game, "IC_game", 1, false, null, 5000);
+            FtA3.Withhold(FtA3.IC_game, "its fields are the component's live statics (_g, _lastTickUs, _wasPicking, the RPC depth, the survey) with no scratch instance; Tick and Slice read SeatEvidence.CombatState and the players, Package needs a SyncPlayerMovement, EnterRpc pushes onto the live RPC frame stack and reads Photon's settings");
         }
 
-        private static long _ftSink;
-        private static I.RpcNames _ftRpcFull, _ftRpcEmpty;
+        private static long FtNow() { return System.Diagnostics.Stopwatch.GetTimestamp(); }
+
+        private static I.RpcNames _ftRpcFull;
         private static string _ftRpcProbe;
 
-        /// <summary>S30 calibration: the IndexOf RpcNames.Add runs (RpcNames.FtScan), on scratch instances. FULL:
-        /// KEEP distinct names held, the probe absent, so the scan compares every one; all are NAME_MAX characters
-        /// (the record's name bound; ROUNDS' RPC method names are shorter) and differ from the probe only in the last
-        /// three, so each comparison runs nearly the whole string. EMPTY: no names. No setup per read in either half
-        /// (the scan does not change the list).</summary>
+        /// <summary>S30 calibration: the real RpcNames.Add, the row's only reader. FULL: KEEP distinct names held, the
+        /// probe absent, so Add's IndexOf compares every one and the cap refuses the append (the list stays full); all
+        /// are NAME_MAX characters (the record's name bound; ROUNDS' RPC method names are shorter) and differ from the
+        /// probe only in the last three, so each comparison runs nearly the whole string. EMPTY: a new RpcNames before
+        /// each read (outside the clock), so Add scans nothing and appends the name.</summary>
         internal static long FtCalRpc(bool full, int n)
         {
             if (_ftRpcFull == null)
@@ -945,15 +953,21 @@ namespace CompetitiveRounds
                 string stem = new string('R', I.NAME_MAX - 3);
                 for (int i = 0; i < I.RpcNames.KEEP; i++) f.Add(stem + i.ToString("D3", CultureInfo.InvariantCulture));
                 _ftRpcProbe = stem + "999";
-                _ftRpcEmpty = new I.RpcNames();
                 _ftRpcFull = f;
             }
-            var r = full ? _ftRpcFull : _ftRpcEmpty;
-            long sink = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++) sink += r.FtScan(_ftRpcProbe);
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += sink;
+            long over0 = _ftRpcFull.Overflow;
+            long t = 0;
+            bool ok = true;
+            for (int j = 0; j < n; j++)
+            {
+                var r = full ? _ftRpcFull : new I.RpcNames();
+                long s = FtNow();
+                r.Add(_ftRpcProbe);
+                t += FtNow() - s;
+                if (!full) ok &= r.Overflow == 0 && r.FtScan(_ftRpcProbe) == 0;
+            }
+            if (full) ok &= _ftRpcFull.Overflow - over0 == n && _ftRpcFull.FtScan(_ftRpcProbe) < 0;
+            FtA3.Check(FtA3.IC_Rpc, full ? "full-scanned-all-refused" : "empty-appended", ok);
             return t;
         }
 
@@ -961,13 +975,13 @@ namespace CompetitiveRounds
         private static I.ClockBook _ftBook;
         private static List<object> _ftCadFill;
 
-        /// <summary>S31 calibration: the real FlushBucket on a scratch ClockBook. Setup, identical in both halves:
-        /// CadB rebuilt at FT_CAD_DOUBLING entries with exactly that capacity (CadB's last doubling below its cap of
-        /// CAD_MAX + 64, so an append there copies the whole list), and bucket 0 opened by FtSetBucket. CAPACITY in
-        /// its costliest content: the bucket holds batches whose every gap and stated interval sit in the last bin,
-        /// so both Medians scan their whole histograms, and the flush appends a cad_b row to a CadB that must grow.
-        /// EMPTY: the bucket open with no batches (no Median, no append). The only work that differs outside
-        /// FlushBucket is CadB.Clear covering the one row the full flush appended.</summary>
+        /// <summary>S31 calibration: the real FlushBucket on a scratch ClockBook (Cadence, the other direct reader,
+        /// reaches the bucket's content only through it). Setup before each read, outside the clock and identical in
+        /// both halves: CadB rebuilt at FT_CAD_DOUBLING entries with exactly that capacity (CadB's last doubling below
+        /// its cap of CAD_MAX + 64, so an append there copies the whole list), and bucket 0 opened by FtSetBucket.
+        /// CAPACITY in its costliest content: the bucket holds batches whose every gap and stated interval sit in the
+        /// last bin, so both Medians scan their whole histograms, and the flush appends a cad_b row to a CadB that
+        /// must grow. EMPTY: the bucket open with no batches (no Median, no append).</summary>
         internal static long FtCalClock(bool full, int n)
         {
             if (_ftBook == null)
@@ -979,69 +993,102 @@ namespace CompetitiveRounds
             }
             var b = _ftBook;
             int batches = full ? 1000 : 0;
-            long sink = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
                 b.CadB.Clear(); b.CadB.Capacity = 0; b.CadB.Capacity = FT_CAD_DOUBLING; b.CadB.AddRange(_ftCadFill);
                 b.FtSetBucket(batches);
+                long s = FtNow();
                 b.FlushBucket();
-                sink += b.CadB.Count;
+                t += FtNow() - s;
+                if (full)
+                {
+                    var row = b.CadB.Count == FT_CAD_DOUBLING + 1 ? b.CadB[FT_CAD_DOUBLING] as List<object> : null;
+                    ok &= row != null && b.CadB.Capacity > FT_CAD_DOUBLING && (long)row[2] == 1000 && (long)row[3] == I.TD_CEIL_MS;
+                }
+                else ok &= b.CadB.Count == FT_CAD_DOUBLING && b.CadB.Capacity == FT_CAD_DOUBLING;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += sink;
+            b.CadB.Clear();
+            FtA3.Check(FtA3.IC_Clock, full ? "full-medians-last-bin-appended" : "empty-no-append", ok);
             return t;
         }
 
-        private static I.Cost _ftCost;
+        private static I.ClockBook _ftScalBook;
+        private static int _ftScalStamp;
 
-        /// <summary>S32 (IC_scalars): the real Cost.Add (three capped counter updates) on a scratch Cost. EMPTY: a new
-        /// Cost (counters 0). FULL: every counter at COUNT_MAX (the capped branches).</summary>
+        private static I.Pkg FtPkg(int stamp)
+        {
+            return new I.Pkg { Stamp = stamp, ArrServer = 5, ArrSw = stamp, Vx = 1, TdMs = I.TD_CEIL_MS };
+        }
+
+        /// <summary>S32 (IC_scalars): the real ClockBook.Package (with Cadence inside it), the scalar reader with the
+        /// content-dependent branch: the stream state (_have, _prev) selects the interval accounting, whose bin search
+        /// runs to the last edge. Cost.Add, Cost.Fault and the hook entries update fixed counters; Survey.Step returns
+        /// at its live test in a live frame. FULL: a book that has a previous package (same bucket, moving), the new
+        /// one 1,100 ms later at the stated-interval ceiling, so the gap's excess passes every edge. EMPTY: a new book
+        /// before each read (outside the clock): no previous package.</summary>
         internal static long FtCalIcScalars(bool full, int n)
         {
-            if (_ftCost == null) _ftCost = new I.Cost(0);
-            var c = _ftCost;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_ftScalBook == null)
+            {
+                _ftScalBook = new I.ClockBook(0);
+                _ftScalStamp = 1000;
+                _ftScalBook.Package(FtPkg(_ftScalStamp));
+            }
+            int last = I.TDG_EDGES.Length;
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                if ((j & 63) == 0) { long v = full ? I.COUNT_MAX : 0; c.Calls = v; c.UsTotal = v; c.UsMax = v; }
-                c.Add(j & 255);
+                I.ClockBook b;
+                I.Pkg p;
+                if (full) { b = _ftScalBook; _ftScalStamp += 1100; p = FtPkg(_ftScalStamp); }
+                else { b = new I.ClockBook(0); p = FtPkg(1000); }
+                long n0 = b.TdgN, l0 = b.TdgBins[last];
+                long s = FtNow();
+                b.Package(p);
+                t += FtNow() - s;
+                ok &= full ? (b.TdgN == n0 + 1 && b.TdgBins[last] == l0 + 1) : b.TdgN == 0;
             }
-            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            FtA3.Check(FtA3.IC_scalars, full ? "full-interval-last-edge" : "empty-first-package", ok);
+            return t;
         }
 
-        private static I.PointS _ftPointS;
+        private static I.ClockBook _ftPtBook;
 
-        /// <summary>S33 (IC_point): the real PointS.MoveFrame on a scratch PointS (the tick's per-frame call). EMPTY:
-        /// a new PointS (no move started: MoveFrame returns at its test). FULL: a move started and not released, so
-        /// every call counts the frame and compares its maximum.</summary>
+        /// <summary>S33 (IC_point): the real ClockBook.Package reaching PointPkg, the point reader with the most work
+        /// (the distance, the rungs, the first input; OtherShot and the PointS members store at most a field). The
+        /// book has had one package before (both halves), and every read repeats its stamp, so the stream and cadence
+        /// work inside Package is the same in both halves. FULL: a point opened by the real PointStart and Target
+        /// before each read (outside the clock), the package at the target, so PointPkg computes the distance, sets
+        /// every rung, the reference and the first input. EMPTY: no open point (the real ClosePoint before each read),
+        /// so PointPkg returns at its first test.</summary>
         internal static long FtCalIcPoint(bool full, int n)
         {
-            var p = _ftPointS = new I.PointS();
-            if (full) { p.MoveStartSw = 1; p.ReleaseSw = -1; }
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++) p.MoveFrame(j & 1023);
-            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-        }
-
-        private static bool _ftIcFlag;
-        private static long _ftIcTick;
-
-        /// <summary>S34 (IC_game): the per-game scalars' test-and-store (Tick's `_lastTickUs`, Slice's `_wasPicking`)
-        /// on scratch scalars. EMPTY: unset (0, false). FULL: set (a large tick, true).</summary>
-        internal static long FtCalIcGame(bool full, int n)
-        {
-            _ftIcTick = full ? long.MaxValue / 4 : 0; _ftIcFlag = full;
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_ftPtBook == null)
+            {
+                _ftPtBook = new I.ClockBook(0);
+                _ftPtBook.Package(FtPkg(1010));
+            }
+            var b = _ftPtBook;
+            var p = FtPkg(1010);
+            p.Dx = 1;
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                long dt = _ftIcTick > 0 ? j - _ftIcTick : 0;
-                if (_ftIcFlag != ((j & 1) == 0)) _ftIcFlag = !_ftIcFlag;
-                s += dt;
+                if (full) { b.PtO.Clear(); b.PtS.Clear(); b.PointStart(true, 1000, 1000, 0); b.Target(0, 0); }
+                else b.ClosePoint(0);
+                long s = FtNow();
+                b.Package(p);
+                t += FtNow() - s;
+                var o = b.CurO;
+                ok &= full ? (o != null && o.Seen && o.DistStart == 0 && o.Inpos[I.REF_RUNG] == 10 && o.Inpos[I.RUNGS_CU.Length - 1] == 10 && o.InFirst == 10)
+                           : o == null;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            _ftSink += s;
+            b.ClosePoint(0); b.PtO.Clear(); b.PtS.Clear();
+            FtA3.Check(FtA3.IC_point, full ? "full-point-package-every-rung" : "empty-no-point", ok);
             return t;
         }
 #endif

@@ -173,6 +173,10 @@ namespace CompetitiveRounds
             FtHeavy.LogGame(g);
             FtA3.LogGame(g);
             FtUpload.LogCounts("game" + g);
+            // round-3 MEDIUM (FtSchedule.cs:140): the game's settled line is written at its start, before its play;
+            // this snapshot, after the game's work, is what VR2 judges for the game's frames (the last game's included)
+            Plugin.Log.LogInfo("[FRAME-TIME] counters g=" + g + " frames=" + FtClock.Frames + " missing_end=" + FtClock.MissingEnd
+                + " cycle_failures=" + FtClock.CycleFailures + " span_depth_violations=" + FtClock.DepthViolations);
             Plugin.Log.LogInfo("[FRAME-TIME] flushed g=" + g + " why=" + why);
         }
 

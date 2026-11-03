@@ -17,6 +17,11 @@ FIXTURES = ["tools/frametime/ft_parse.py", "tools/frametime/test_ft_parse.py", "
             "tools/frametime/gate_specs/a3.py", "tools/frametime/SURVIVORS.md", "plugin/FtA3.cs",
             "plugin/CombatEvidence.cs", "plugin/SeatEvidence.cs", "plugin/IdentityClockEvidence.cs",
             "plugin/HitEvidence.cs", "plugin/PoisonSync.cs", "plugin/CardDrawEvidence.cs", "plugin/PeerBuild.cs"]
+# round 4: test_every_emitted_kind_is_read_or_named reads the plugin sources; the copy carries every one that writes a
+# FrameTime line (a source without the literal adds no kind, so the emitted set is the worktree's)
+FIXTURES += sorted("plugin/" + f for f in os.listdir(os.path.join(W, "plugin"))
+                   if f.endswith(".cs") and "plugin/" + f not in FIXTURES
+                   and "[FRAME-TIME]" in open(os.path.join(W, "plugin", f), encoding="utf-8").read())
 # A mutant row is (name, anchor, replacement) on ft_parse.py, or (name, anchor, replacement, fixture) on that fixture
 # (its repo-relative path, one of FIXTURES): the inventory controls of ruling FRAME-TIME-ROUND-R1-A1 part 3.
 MUTS = [
@@ -60,8 +65,8 @@ MUTS = [
     ("VR2 calibration coverage dropped", 'gone = sorted(shapes - got)', 'gone = []'),
     ("VR2 one run per game not required", 'bad.append("game %d: %d calibration runs (needs 1)" % (g, len(runs)))\n            continue',
      'continue'),
-    ("B1 not guarded by VR6", '"B1": ("VR1", "VR2", "VR3", "VR4", "VR5", "VR6", "VR8", "VR9")',
-     '"B1": ("VR1", "VR2", "VR3", "VR4", "VR5", "VR8", "VR9")'),
+    ("B1 not guarded by VR6", '"B1": ("VR1", "VR2", "VR3", "VR4", "VR5", "VR6", "VR8", "VR9", "F18")',
+     '"B1": ("VR1", "VR2", "VR3", "VR4", "VR5", "VR8", "VR9", "F18")'),
     ("B2 not guarded by VR7", '"B2": ("VR7",)', '"B2": ()'),
     ("B3 not guarded by VR6", '"B3": ("VR5", "VR6")', '"B3": ("VR5",)'),
     ("verdicts given on an incomplete sitting", 'if miss:\n            return "withheld: sitting incomplete"', 'if False:\n            pass'),
@@ -120,6 +125,31 @@ MUTS = [
     ("dC minus dS drops dS", 'return dC_us(recs)[0] - d_key_us(recs, "sS", "ticks")[0]', "return dC_us(recs)[0]"),
     ("menu segment without its menu line passes", "if sorted(seg) != want_segs:", "if False:"),
     ("menu point line without its menu line passes", "    if orphan:\n        bad.append(", "    if False:\n        bad.append("),
+    # round 4 (ruling FRAME-TIME-ROUND-R3-A1): the proof records, the withheld rows, VR2's final counters, the replay
+    # and counters sweep, F18's guard, the menu cycles and terminal snapshot, the failure events, the records table
+    ('zero proof naming no evidence passes', 'if kind == "zero" and proof not in ZERO_PROOFS:', 'if False:'),
+    ('proof records never checked', 'proof_records(recs, spec, last_game)', 'None'),
+    ('contrary live writes for a zero row pass', 'if wr:', 'if False:'),
+    ('probe:a3zero evidence not required', 'if proof == "probe:a3zero":', 'if False:'),
+    ('a3zero written count not checked', ' or r.get("written", -1) != 0', ''),
+    ('A3 row withheld by the build passes', 'raise Refused("A3 rows withheld by the build (no executed real reader): %s" % ", ".join(held))', 'pass'),
+    ('VR2 counters values not judged', 'bad.append("counters g=%d %s=%s" % (g, k, cs[0].get(k)))', 'pass'),
+    ('VR2 absent counters line passes', 'bad.append("game %d: %d counters lines (needs 1, written at its flush)" % (g, len(cs)))', 'pass'),
+    ('VR2 point missing_end passes', 'bad.append("point %s: missing_end=%d" % (r["pt"], r["missing_end"]))', 'pass'),
+    ('absent answer_replay passes the sweep', 'miss.append("game %d: %d answer_replay lines (reading %s needs %d)" % (g, n, "/".join(sorted(map(str, readings))), want))', 'pass'),
+    ('absent counters line passes the sweep', 'miss.append("game %d: %d counters lines (needs 1)" % (g, n))', 'pass'),
+    ('F18 does not guard B1', '"VR8", "VR9", "F18"), "B2"', '"VR8", "VR9"), "B2"'),
+    ('menu cycle calibrations not required', 'bad.append("menu calibrations %s, menu_done counts %s cycles" % (sorted(whys), cyc))', 'pass'),
+    ('menu terminal snapshot read anywhere', 'post = [r for r in recs[idone + 1:] if r["kind"] == "settled"]', 'post = sett[-1:]'),
+    ('menu terminal snapshot counters not judged', 'if terminal.get(k, -1) != 0:', 'if False:'),
+    ("menu run's extra settled lines pass", 'bad.append("%d settled lines in a menu run (FtMenu writes one, after menu_done)" % len(sett))', 'pass'),
+    ('failure events ignored by the sweep', 'miss = failure_events(recs)', 'miss = []'),
+    ('failure events ignored by the menu check', 'bad += failure_events(recs)', 'pass'),
+    ('clock installed read as a failure', '("clock", "refused:",', '("clock", None,'),
+    ('records table counters row removed', '"counters": "records_missing() and vr2(): one per game, written at its flush, the three counters 0",', ''),
+    ('a read kind named unread', '    "spans": "FtCensus', '    "counters": "x",\n    "spans": "FtCensus'),
+    ('a deletion control removed from the table', '("counters", "sitting", _g16, INCOMPLETE),', '', 'tools/frametime/test_ft_parse.py'),
+    ('the build stops writing the counters line', 'Plugin.Log.LogInfo("[FRAME-TIME] counters g="', 'Plugin.Log.LogInfo("[FRAME-TIME] Counters g="', 'plugin/FtSchedule.cs'),
 ]
 # the tests each mutant must turn red (taken from a --discover run on a green baseline, then pinned)
 KILLS = {
@@ -260,6 +290,52 @@ KILLS = {
         ['test_menu_check_fails_a_segment_whose_menu_line_is_absent'],
     'menu point line without its menu line passes':
         ['test_menu_check_fails_a_segment_whose_menu_line_is_absent'],
+    'zero proof naming no evidence passes':
+        ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail'],
+    'proof records never checked':
+        ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail', 'test_deleting_each_record_kind_withholds'],
+    'contrary live writes for a zero row pass':
+        ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail'],
+    'probe:a3zero evidence not required':
+        ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail', 'test_deleting_each_record_kind_withholds'],
+    'a3zero written count not checked':
+        ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail'],
+    'A3 row withheld by the build passes':
+        ['test_a3_row_withheld_by_the_build_withholds_b1'],
+    'VR2 counters values not judged':
+        ['test_vr2_judges_the_last_games_counters_and_every_point_stamp'],
+    'VR2 absent counters line passes':
+        ['test_vr2_judges_the_last_games_counters_and_every_point_stamp'],
+    'VR2 point missing_end passes':
+        ['test_vr2_judges_the_last_games_counters_and_every_point_stamp'],
+    'absent answer_replay passes the sweep':
+        ['test_each_absent_record_fails_the_run', 'test_deleting_each_record_kind_withholds'],
+    'absent counters line passes the sweep':
+        ['test_each_absent_record_fails_the_run', 'test_deleting_each_record_kind_withholds'],
+    'F18 does not guard B1':
+        ['test_f18_failure_guards_b1'],
+    'menu cycle calibrations not required':
+        ['test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot', 'test_deleting_each_record_kind_withholds'],
+    'menu terminal snapshot read anywhere':
+        ['test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot'],
+    'menu terminal snapshot counters not judged':
+        ['test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot'],
+    "menu run's extra settled lines pass":
+        ['test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot'],
+    'failure events ignored by the sweep':
+        ['test_failure_events_make_the_run_incomplete'],
+    'failure events ignored by the menu check':
+        ['test_failure_events_make_the_run_incomplete'],
+    'clock installed read as a failure':
+        ['test_failure_events_make_the_run_incomplete'],
+    'records table counters row removed':
+        ['test_records_table_names_every_kind_the_parser_reads', 'test_every_record_kind_has_a_deletion_control'],
+    'a read kind named unread':
+        ['test_every_emitted_kind_is_read_or_named'],
+    'a deletion control removed from the table':
+        ['test_every_record_kind_has_a_deletion_control'],
+    'the build stops writing the counters line':
+        ['test_every_emitted_kind_is_read_or_named'],
 }
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]
@@ -284,7 +360,7 @@ def make_copy(d):
 
 def run_suite(td):
     r = subprocess.run([sys.executable, "-I", "-B", "-m", "pytest", "test_ft_parse.py", "-q", "-rf", "-p", "no:cacheprovider"],
-                       cwd=td, capture_output=True, text=True, timeout=300)
+                       cwd=td, capture_output=True, text=True, timeout=1800)
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     failed = {}
     for ln in lines:
@@ -305,6 +381,7 @@ if rc0 != 0:
     print("PARSER MUTANTS FAIL (no green baseline)")
     sys.exit(1)
 bad = 0
+jobs = []
 for k, row in enumerate(MUTS, 1):
     name, a, b = row[:3]
     kills = KILLS.get(name, [])
@@ -333,7 +410,13 @@ for k, row in enumerate(MUTS, 1):
                       "    off = [p['sC'] / p['n'] for p in points if p['arm'] == 'OFF' and p['n']]\n"
                       "    return sum(on) / len(on) - sum(off) / len(off), sum(p['n'] for p in points)\n\n") + t0[j:]
     open(os.path.join(td, "ft_parse.py"), "w", encoding="utf-8", newline="").write(t)
-    rc, last, failed, out = run_suite(td)
+    jobs.append((k, name, kills, td))
+# the copies are independent directories, so their suites run side by side (--jobs N); results print in mutant order
+import concurrent.futures  # noqa: E402
+JOBS = int(next((x.split("=", 1)[1] for x in sys.argv[3:] if x.startswith("--jobs=")), "1"))
+with concurrent.futures.ThreadPoolExecutor(max_workers=JOBS) as ex:
+    results = list(ex.map(lambda j: run_suite(j[3]), jobs))
+for (k, name, kills, td), (rc, last, failed, out) in zip(jobs, results):
     unrelated = sorted(n for n, why in failed.items() if any(u in why for u in UNRELATED))
     missing = sorted(set(kills) - set(failed))
     red = rc == 1 and failed and not unrelated and not missing and (kills or DISCOVER)

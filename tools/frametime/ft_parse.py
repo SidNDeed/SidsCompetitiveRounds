@@ -228,7 +228,7 @@ def _int(key, v):
     return int(v)
 
 
-INT_KEYS = {"seg", "pair", "base_us", "segs", "of", "cycles", "n", "sF", "sS", "sC", "maxF", "medF", "gc", "gate", "windows", "live_frames", "missing_end", "partial",
+INT_KEYS = {"written", "withheld", "seg", "pair", "base_us", "segs", "of", "cycles", "n", "sF", "sS", "sC", "maxF", "medF", "gc", "gate", "windows", "live_frames", "missing_end", "partial",
             "g", "seed", "c_plant", "W", "vsync", "target", "freq", "hires", "f_hat", "frames", "cycle_failures",
             "span_depth_violations", "on", "guarded", "outside", "i", "plant", "pn", "psF", "psS", "psC",
             "plant_mixed", "ticks", "span_g", "span_gn", "span_u", "span_un", "on_calls", "zs", "zl",
@@ -243,6 +243,9 @@ def parse_line(line):
         return None
     kind, rest = m.group(1), m.group(2)
     rec = {"kind": kind}
+    # the first word after the kind: a failure event (FAILURE_EVENTS) is told apart from its kind's ordinary line by it
+    words = rest.split()
+    rec["head"] = words[0] if words else ""
     if kind == "refusals":
         # what:route=count tokens; route names hold ':' and '/', so split each token at its last '='
         kv = {}
@@ -342,7 +345,7 @@ def records_missing(recs, last_game=LAST_GAME):
     withholds the verdict instead of shrinking what is judged. RECORDS below lists each kind with its rule; the
     kinds required elsewhere (settled, census, opened, cal, a3, a3drain, answer_replay, plant, refusals, sitting)
     are named there with the function that requires them. Returns the list of what is missing."""
-    miss = []
+    miss = failure_events(recs)
     for g in range(0, last_game + 1):
         pts = [r for r in recs if r["kind"] == "p" and r["game"] == g]
         # flushed: FtSchedule.FlushGame writes one per game (next_game, settle or quit)
@@ -367,6 +370,19 @@ def records_missing(recs, last_game=LAST_GAME):
             if n != q.get("windows", -1):
                 miss.append("point %s: %d window lines, the point line counts %s" % (q["pt"], n, q.get("windows")))
                 break
+    # answer_replay (round-3 MEDIUM ft_parse.py:1461): under reading A, FtSchedule.GameOver runs FtReplay for every
+    # game, so each game 0..last has exactly one replay line; under reading B there is none
+    readings = set(r.get("f18") for r in recs if r["kind"] == "settled" and r.get("g", -1) >= 0)
+    for g in range(0, last_game + 1):
+        n = sum(1 for r in recs if r["kind"] == "answer_replay" and r.get("g") == g)
+        want = 1 if readings == {"A"} else 0
+        if n != want:
+            miss.append("game %d: %d answer_replay lines (reading %s needs %d)" % (g, n, "/".join(sorted(map(str, readings))), want))
+    # counters: FtSchedule.FlushGame writes one per game (VR2 judges its values)
+    for g in range(0, last_game + 1):
+        n = sum(1 for r in recs if r["kind"] == "counters" and r.get("g") == g)
+        if n != 1:
+            miss.append("game %d: %d counters lines (needs 1)" % (g, n))
     # refusals: VR6 reads the cumulative counts of the line written after the last game (its flush or the quit)
     if not any(r["kind"] == "refusals" and r.get("why") in ("quit", "game%d" % last_game) for r in recs):
         miss.append("no refusals line after game %d (why=game%d or why=quit)" % (last_game, last_game))
@@ -386,15 +402,54 @@ RECORDS = {
     "offthread": "records_missing() and b3(): one per game",
     "a3": "a3(): one per dependent row per measured game",
     "a3drain": "a3(): one per drained row per measured game, starts equal to the game's points",
-    "answer_replay": "f18() under reading A: one settled replay per measured game (reading B: none)",
+    "answer_replay": "records_missing(): one per game 0..16 under reading A, none under B; f18() judges it, F18 guards B1",
     "between": "records_missing(): one per point after the game's first",
     "flushed": "records_missing(): one per game",
+    "counters": "records_missing() and vr2(): one per game, written at its flush, the three counters 0",
+    "a3zero": "proof_records(): one per measured game for a zero row proved by probe:a3zero (none today)",
     "plant": "e_c(): exactly one",
     "refusals": "records_missing(): one after the last game; vr6_build reads it",
     "sitting": "complete(): exactly one for the last game",
     "menu": "menu_check(): one per segment 1..of, and no menu point line without one (menu runs only)",
-    "menu_done": "menu_check(): exactly one (menu runs only)",
+    "menu_done": "menu_check(): exactly one, its cycles each with a menu fhat calibration, one settled line after it",
     "disarmed": "event: its presence fails VR6; its absence is normal and is judged on a complete log",
+    "game": "event (FAILURE_EVENTS): a game start or game over failure; its presence makes the sitting incomplete",
+    "start": "event (FAILURE_EVENTS): the FrameTime start failed; its presence makes the run incomplete",
+    "clock": "event (FAILURE_EVENTS) when refused: the clock never installed; 'clock installed' is informational",
+}
+
+# the failure warnings the build writes (round-4 sweep of every kind the build emits): any one makes the sitting
+# incomplete (records_missing) and fails the menu check, so a run whose game start or game over threw midway is never
+# judged on what it happened to write. (kind, head or None for every line of the kind, the writer)
+FAILURE_EVENTS = (
+    ("game", None, "GameStateWatcher: FtSchedule.GameStart or GameOver threw ('game start failed', 'game over failed')"),
+    ("start", None, "Plugin: the FrameTime start threw ('start failed')"),
+    ("clock", "refused:", "FtClock: a player-loop phase was missing, so the clock never installed ('clock refused')"),
+)
+
+
+def failure_events(recs):
+    return ["failure event: %s %s (%s)" % (r["kind"], r.get("head", ""), why) for r in recs
+            for k, h, why in FAILURE_EVENTS if r["kind"] == k and (h is None or r.get("head") == h)]
+
+
+# every other kind the build writes (each "[FRAME-TIME] <kind>" in plugin/*.cs), with why no verdict reads it: the
+# test test_every_emitted_kind_is_read_or_named fails on a written kind in neither table, and on a kind named here
+# that the parser reads
+EMITTED_UNREAD = {
+    "a3rows": "FtA3.RegisterAll's count; a row that failed to register writes no a3 or a3drain line, which a3() requires",
+    "armed": "FtArm's arming record; an unarmed run writes no settled line, which complete() requires per game",
+    "not": "FtArm's 'not armed' record; as for armed",
+    "room": "FtArm's room record; as for armed",
+    "ended": "FtArm's end record; complete() requires the sitting complete line instead",
+    "menu_armed": "FtMenu's configuration echo; menu_done's of= and the terminal settled line's force= carry what menu_check judges",
+    "menu_base": "FtMenu's base sample; menu_done's base_us and the menu point lines carry what menu_check judges",
+    "menu_wait": "FtMenu waiting for its input; a run that never completes has menu_done why= the failed input",
+    "ranked": "the ranked-check guard trace ('ranked-check ...'); _LINE does not even match it (the hyphen)",
+    "self": "FtDrive's self-drive trace ('self-drive ...'); _LINE does not match it; sitting complete proves the drive",
+    "refused": "FtUpload's per-refusal line; the cumulative refusals line (required) carries the counts VR6 reads",
+    "rematch": "FtRematch's answer trace; the next game's settled and point lines (required) prove the rematch",
+    "spans": "FtCensus's per-component span breakdown (diagnostic); the point lines' sS carries the span cost judged",
 }
 
 
@@ -499,6 +554,42 @@ def d_up(recs, z=Z_END, first_game=1):
     return max(m + t_q(z, j - 1) * se, max(ds)), ds, rate
 
 
+# the zero proofs the parser can check (ruling FRAME-TIME-ROUND-R3-A1, round-3 MEDIUM ft_parse.py:540):
+# sweep:no-live-write, which survivor_sweep.py verifies per row against the sources (the parser requires that no a3
+# line counts a write for the row), and probe:a3zero, which needs one a3zero line per measured game for the row with
+# starts equal to the game's point lines, written 0 and faults 0 (no build writes a3zero lines today, so a row
+# claiming it cannot pass)
+ZERO_PROOFS = ("sweep:no-live-write", "probe:a3zero")
+
+
+def proof_records(recs, spec, last_game=None):
+    """Every proof token's evidence (round-3 MEDIUM): present and consistent, contrary evidence refused."""
+    games = sorted(set(q["game"] for q in recs if q["kind"] == "p" and q["game"] >= 1
+                       and (last_game is None or q["game"] <= last_game)))
+    for n, sid, kind, why, proof in spec:
+        a3l = [r for r in recs if r["kind"] == "a3" and r.get("k") == n]
+        if kind == "zero":
+            wr = [r for r in a3l if r.get("writes_on", 0) != 0]
+            if wr:
+                raise Refused("A3 row %s (%s): zero by %s, but game %d counts %d live writes (contrary evidence)"
+                              % (n, sid, proof, wr[0]["g"], wr[0]["writes_on"]))
+            if proof == "probe:a3zero":
+                for g in games:
+                    rows = [r for r in recs if r["kind"] == "a3zero" and r.get("g") == g and r.get("k") == n]
+                    npts = sum(1 for q in recs if q["kind"] == "p" and q["game"] == g)
+                    if len(rows) != 1:
+                        raise Refused("A3 row %s (%s): probe:a3zero needs one a3zero line in game %d (got %d)"
+                                      % (n, sid, g, len(rows)))
+                    r = rows[0]
+                    if r.get("starts", -1) != npts or r.get("written", -1) != 0 or r.get("faults", -1) != 0:
+                        raise Refused("A3 row %s (%s): game %d a3zero starts=%s written=%s faults=%s (needs starts %d, "
+                                      "written 0, faults 0)" % (n, sid, g, r.get("starts"), r.get("written"),
+                                                                r.get("faults"), npts))
+        elif kind == "drained":
+            if any(r["kind"] == "a3zero" and r.get("k") == n for r in recs):
+                raise Refused("A3 row %s (%s): drained, but a3zero lines name it (contrary proof)" % (n, sid))
+
+
 def a3_spec():
     """The A3 inventory (gate_specs/a3.py, from SURVIVORS.md): [(name, survivor id, "dependent" | "drained" | "zero",
     reason, proof)]. Kinds are default-deny (ruling FRAME-TIME-ROUND-R2 (1)): "zero" only with a proof reference,
@@ -540,11 +631,23 @@ def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None):
         if kind == "zero" and not re.fullmatch(r"(sweep|probe):\S+", proof):
             raise Refused("A3 row %s (%s): a zero row needs its proof reference (sweep:... or probe:...), got %r"
                           % (n, sid, proof))
+        # round-3 MEDIUM (ft_parse.py:540): a proof token is a claim about records; it is accepted only when the
+        # records it names are present and consistent (proof_records), and a token naming no known evidence is refused
+        if kind == "zero" and proof not in ZERO_PROOFS:
+            raise Refused("A3 row %s (%s): zero proof %r names no evidence the parser can check (known: %s)"
+                          % (n, sid, proof, ", ".join(sorted(ZERO_PROOFS))))
         if kind == "drained" and proof != "probe:a3drain":
             raise Refused("A3 row %s (%s): a drained row's proof is its probe (probe:a3drain), got %r" % (n, sid, proof))
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("A3 needs one Stopwatch frequency (got %s)" % sorted(freq))
+    proof_records(recs, spec, last_game)
+    # ruling FRAME-TIME-ROUND-R3-A1: a row whose real reader the build cannot execute is withheld by the build (its a3
+    # calibration line says withheld=1); A3 then has no bound for it, so U is not computable and B1 is withheld,
+    # naming the rows
+    held = sorted(set(r["k"] for r in recs if r["kind"] == "cal" and r.get("ckind") == "a3" and r.get("withheld")))
+    if held:
+        raise Refused("A3 rows withheld by the build (no executed real reader): %s" % ", ".join(held))
     f = freq.pop()
     on_frames = {}
     for g, pts in games_of(recs, first_game).items():
@@ -1038,6 +1141,22 @@ def vr2(recs, last_game=None):
         for k in ("missing_end", "cycle_failures", "span_depth_violations"):
             if r.get(k, 0) != 0:
                 bad.append("settled g=%d %s=%d" % (r["g"], k, r[k]))
+    # round-3 MEDIUM (FtSchedule.cs:140): a game's settled line is written at its start, before its play, so the last
+    # game's play had no health snapshot. FtSchedule.FlushGame writes a counters line after every game's work: one
+    # per game is required, each with the three counters at 0, and no point line may carry a missed FT_End stamp
+    for g in games:
+        if g < 0:
+            continue
+        cs = [r for r in recs if r["kind"] == "counters" and r.get("g") == g]
+        if len(cs) != 1:
+            bad.append("game %d: %d counters lines (needs 1, written at its flush)" % (g, len(cs)))
+            continue
+        for k in ("missing_end", "cycle_failures", "span_depth_violations"):
+            if cs[0].get(k, -1) != 0:
+                bad.append("counters g=%d %s=%s" % (g, k, cs[0].get(k)))
+    for r in recs:
+        if r["kind"] == "p" and r["game"] >= 0 and r.get("missing_end", 0) != 0:
+            bad.append("point %s: missing_end=%d" % (r["pt"], r["missing_end"]))
     fh = [r["f_hat"] for r in sett if r["g"] >= 0 and r.get("f_hat", 0) > 0]
     if fh and (max(fh) - min(fh)) > 0.02 * min(fh):
         bad.append("f_hat spread %d..%d exceeds 2 percent" % (min(fh), max(fh)))
@@ -1083,6 +1202,23 @@ def menu_check(recs, z=Z_END):
             seg[r["round"]]["p"] = r
     if not fhs:
         raise Refused("no menu calibration line")
+    # round-3 MEDIUM (ft_parse.py:1077): every menu calibration cycle menu_done counts has its fhat line, once, and a
+    # settled line follows menu_done (the terminal snapshot (6) judges); a deleted failing record must not pass
+    cyc = d.get("cycles")
+    whys = [str(r.get("why")) for r in recs if r["kind"] == "cal" and r.get("ckind") == "fhat"
+            and str(r.get("why", "")).startswith("menu")]
+    if cyc is None or sorted(whys) != sorted("menu%d" % c for c in range(cyc)):
+        bad.append("menu calibrations %s, menu_done counts %s cycles" % (sorted(whys), cyc))
+    idone = max(i for i, r in enumerate(recs) if r["kind"] == "menu_done")
+    post = [r for r in recs[idone + 1:] if r["kind"] == "settled"]
+    if len(post) != 1:
+        raise Refused("the menu check needs exactly one settled line after menu_done (got %d)" % len(post))
+    terminal = post[0]
+    # a menu run writes one settled line, FtMenu's FtCalib.Settled after menu_done (no game starts in a menu run, so
+    # FtSchedule writes none): any other is not this run's
+    if len(sett) != 1:
+        bad.append("%d settled lines in a menu run (FtMenu writes one, after menu_done)" % len(sett))
+    bad += failure_events(recs)
     # the absent-record sweep (ruling FRAME-TIME-ROUND-R2): every segment FtMenu counted has its menu line, and every
     # menu point line its segment; a dropped menu line must not leave its segment out of the judgement
     want_segs = list(range(1, (d.get("of") or 0) + 1))
@@ -1145,8 +1281,8 @@ def menu_check(recs, z=Z_END):
     if max(fhs) - min(fhs) > 0.02 * min(fhs):
         bad.append("f_hat spread %d..%d exceeds 2 percent" % (min(fhs), max(fhs)))
     for k in ("missing_end", "cycle_failures", "span_depth_violations"):
-        if sett[-1].get(k, 0) != 0:
-            bad.append("last settled line %s=%d" % (k, sett[-1][k]))
+        if terminal.get(k, -1) != 0:
+            bad.append("terminal settled line %s=%s" % (k, terminal.get(k)))
     return not bad, lines, bad
 
 
@@ -1459,6 +1595,7 @@ def report(text):
         out.append("B3 not computable: %s" % e)
     try:
         ok18, rd, why18, us18 = f18(recs)
+        vr["F18"] = ok18
         out.append("F18 reading %s %s%s%s" % (rd, "PASS" if ok18 else "FAIL: ", "; ".join(why18),
                    ("; answer replay %.1f us mean over %d games (reported apart)" % (sum(us18) / len(us18), len(us18))
                     if us18 else "")))
@@ -1466,7 +1603,9 @@ def report(text):
         out.append("F18 not computable: %s" % e)
     # the verdicts (V4 3.7: a failed rule makes the run INVALID for the claim it guards; round-1 MEDIUM,
     # ft_parse:894: VR7 guards B2; VR1 to VR6, VR8 and VR9 guard B1; VR5 and VR6 guard B3 as well)
-    guards = {"B1": ("VR1", "VR2", "VR3", "VR4", "VR5", "VR6", "VR8", "VR9"), "B2": ("VR7",), "B3": ("VR5", "VR6")}
+    # round-3 MEDIUM (ft_parse.py:1461): F18's reading guards B1 (U's answer cost is measured or excluded by it)
+    guards = {"B1": ("VR1", "VR2", "VR3", "VR4", "VR5", "VR6", "VR8", "VR9", "F18"), "B2": ("VR7",),
+              "B3": ("VR5", "VR6")}
 
     def gate(claim):
         if miss:

@@ -94,6 +94,36 @@ namespace CompetitiveRounds
         internal static int Count;
         internal static int Duplicates;
 
+        // Round 4 (ruling FRAME-TIME-ROUND-R3-A1): a dependent row's calibration EXECUTES THE REAL READER, the production
+        // method at its site on scratch state of the live shape, never a stand-in written for the calibration. Each row
+        // names what it executes (Executed, the audit list), or is WITHHELD with its reason when its real reader cannot
+        // run outside live combat (Withhold: no timing, its a3 calibration line says withheld, and the parser withholds
+        // B1 naming it). Check records a claim the calibration proves from the production method's own effect on the
+        // scratch state (a branch reached, a store made, a probe that missed): tools/frametime a3host runs every
+        // calibration outside the game and fails on any row without a Check, or with a Check that did not hold.
+        internal static readonly string[] Executes = new string[Capacity];
+        internal static readonly string[] WithheldWhy = new string[Capacity];
+        internal static readonly System.Collections.Generic.List<string> CheckLabels = new System.Collections.Generic.List<string>();
+        internal static readonly System.Collections.Generic.List<int> CheckRow = new System.Collections.Generic.List<int>();
+        internal static readonly System.Collections.Generic.List<long> CheckCalls = new System.Collections.Generic.List<long>();
+        internal static readonly System.Collections.Generic.List<long> CheckFails = new System.Collections.Generic.List<long>();
+
+        internal static void Executed(int k, string methods) { Executes[k] = methods; }
+
+        internal static void Withhold(int k, string why) { WithheldWhy[k] = why; }
+
+        /// <summary>A calibration's claim about the production method it just ran: ok must come from that method's
+        /// effect on the scratch state, never from a flag the calibration sets itself.</summary>
+        internal static void Check(int k, string label, bool ok)
+        {
+            int i = -1;
+            for (int j = 0; j < CheckLabels.Count; j++)
+                if (CheckRow[j] == k && CheckLabels[j] == label) { i = j; break; }
+            if (i < 0) { CheckLabels.Add(label); CheckRow.Add(k); CheckCalls.Add(0); CheckFails.Add(0); i = CheckLabels.Count - 1; }
+            CheckCalls[i]++;
+            if (!ok) CheckFails[i]++;
+        }
+
         /// <summary>The game's serial (Reset adds one): a row that counts once per game per instance keeps the
         /// serial it last counted in.</summary>
         internal static int Serial;
@@ -206,6 +236,11 @@ namespace CompetitiveRounds
             for (int k = 0; k < Count; k++)
             {
                 if (Names[k] == null || _drained[k]) continue;
+                if (WithheldWhy[k] != null)
+                {
+                    Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=a3 k=" + Names[k] + " withheld=1");
+                    continue;
+                }
                 if (_cal[k] == null)
                 {
                     Plugin.Log.LogWarning("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=a3 k=" + Names[k] + " failed: no calibration");

@@ -146,6 +146,16 @@ namespace CompetitiveRounds
                 if (room != _room) { _printed.Clear(); _room = room; }
                 var others = PhotonNetwork.PlayerListOthers;
                 if (others == null) return;
+#if SCR_FRAMETIME
+                // FrameTime A3 (PB_printed, ruling FRAME-TIME-ROUND-R3-A1): this build runs each seat's scan and line
+                // through FtPeerLine (the statements of the branch below, on parameters), so the row's calibration
+                // executes the reader this loop runs
+                foreach (var p in others)
+                {
+                    if (p == null) continue;
+                    FtPeerLine(_printed, p.ActorNumber, p.CustomProperties, Plugin.Log);
+                }
+#else
                 foreach (var p in others)
                 {
                     if (p == null) continue;
@@ -164,6 +174,7 @@ namespace CompetitiveRounds
                     _printed[p.ActorNumber] = values;
                     Plugin.Log.LogInfo(PeerBuildCore.Line(p.ActorNumber, props));
                 }
+#endif
             }
             catch { }
 #if SCR_FRAMETIME
@@ -178,42 +189,90 @@ namespace CompetitiveRounds
         /// <summary>FtA3.RegisterAll: PB_printed (S36), the printed-peer table and the scan scalars, dependent by
         /// default-deny (ruling FRAME-TIME-ROUND-R2 (1)): Tick writes them, so it is counted at every live reader call
         /// (Tick, StageBuildProp), steady false. No code constant sizes _printed (the room's actors bound it); 1 is
-        /// passed and unused.</summary>
+        /// passed and unused. Round 4 (ruling FRAME-TIME-ROUND-R3-A1): the calibration executes FtPeerLine, the scan
+        /// and line Tick runs per seat in this build, named by FtA3.Executed.</summary>
         internal static void FtA3Rows()
         {
-            FtA3.Set(FtA3.PB_printed, "PB_printed", 1, false, FtCalPrinted, 2000);
+            FtA3.Set(FtA3.PB_printed, "PB_printed", 1, false, FtCalPrinted, 5);
+            FtA3.Executed(FtA3.PB_printed, "PeerBuild.FtPeerLine (Tick's per-seat scan and line in the FrameTime build), PeerBuildCore.Values, PeerBuildCore.Line");
         }
 
-        private const int FT_PEERS = 32;
-        private static Dictionary<int, string> _ftPrinted;
-        private static string _ftValues;
-        private static long _ftSink;
+        /// <summary>One remote seat of Tick's scan in the FrameTime build: its custom properties read into a
+        /// dictionary, the printed-values probe of `printed` and its string compare, and, when the seat is new or
+        /// changed, the store and the [PEER-BUILD] line to `log` (Tick passes _printed and Plugin.Log). The statements
+        /// are those of Tick's loop body in the other builds.</summary>
+        internal static void FtPeerLine(Dictionary<int, string> printed, int actor, ExitGames.Client.Photon.Hashtable cp, BepInEx.Logging.ManualLogSource log)
+        {
+            var props = new Dictionary<string, string>();
+            if (cp != null)
+                foreach (object k in cp.Keys)
+                {
+                    if (k == null) continue;
+                    object v = cp[k];
+                    props[k.ToString()] = v != null ? v.ToString() : null;
+                }
+            string values = PeerBuildCore.Values(props);
+            string last;
+            if (printed.TryGetValue(actor, out last) && last == values) return;
+            printed[actor] = values;
+            log.LogInfo(PeerBuildCore.Line(actor, props));
+        }
 
-        /// <summary>S36 (PB_printed): Tick's per-player probe of _printed and its string compare, on a scratch table.
-        /// FULL: FT_PEERS actors printed (above any ROUNDS room), each with a 256-character values string equal to the
-        /// probe's but for its last character, so the compare runs nearly whole. EMPTY: the table empty, every probe
-        /// misses.</summary>
+        private const int FT_PEERS = 32, FT_KEYS = 40;
+        private static Dictionary<int, string> _ftPrinted;
+        private static ExitGames.Client.Photon.Hashtable[] _ftProps;
+        private static string[] _ftValues, _ftHeld;
+        private static BepInEx.Logging.ManualLogSource _ftLog;
+        private static long _ftLines;
+
+        /// <summary>S36 (PB_printed): one read = Tick's scan of FT_PEERS seats (above any ROUNDS room), the real
+        /// FtPeerLine per seat on a scratch table, logging to a scratch ManualLogSource that no listener holds (nothing
+        /// reaches the live log; its events are counted). StageBuildProp, the other reader, tests two flags of the
+        /// row. Each seat publishes every value key with a value past the token cut plus further keys up to FT_KEYS
+        /// (continuation lines), the same in both halves, so every seat logs in both halves and the line work cancels
+        /// in d. CAPACITY in its costliest content: every seat printed, each held values string equal to the seat's
+        /// but for its last character (restored before each read, outside the clock), so each probe hits and the
+        /// compare runs the whole string before the store and the line. EMPTY: the table emptied before each read,
+        /// so each probe misses.</summary>
         internal static long FtCalPrinted(bool full, int n)
         {
-            if (_ftPrinted == null)
+            if (_ftProps == null)
             {
+                _ftLog = new BepInEx.Logging.ManualLogSource("FrameTime-A3");
+                _ftLog.LogEvent += (s, e) => _ftLines++;
                 _ftPrinted = new Dictionary<int, string>();
-                _ftValues = new string('v', 255) + "b";
+                var props = new ExitGames.Client.Photon.Hashtable[FT_PEERS];
+                var values = new string[FT_PEERS];
+                var held = new string[FT_PEERS];
+                var probe = new Dictionary<int, string>();
+                for (int i = 0; i < FT_PEERS; i++)
+                {
+                    var h = new ExitGames.Client.Photon.Hashtable();
+                    foreach (var key in PeerBuildCore.ValueKeys) h[key] = key + "|" + new string('v', PeerBuildCore.MAX_TOKEN) + i;
+                    for (int k = h.Count; k < FT_KEYS; k++) h["cr_x" + k.ToString(System.Globalization.CultureInfo.InvariantCulture)] = k;
+                    props[i] = h;
+                    FtPeerLine(probe, i, h, _ftLog);
+                    values[i] = probe[i];
+                    string v = values[i];
+                    held[i] = v.Substring(0, v.Length - 1) + (v[v.Length - 1] == 'a' ? 'b' : 'a');
+                }
+                _ftProps = props; _ftValues = values; _ftHeld = held;
             }
-            _ftPrinted.Clear();
-            string held = new string('v', 255) + "a";
-            if (full) for (int i = 0; i < FT_PEERS; i++) _ftPrinted[i] = held;
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                string last;
-                if (_ftPrinted.TryGetValue(j % FT_PEERS, out last) && last == _ftValues) continue;
-                s++;
+                _ftPrinted.Clear();
+                if (full) for (int i = 0; i < FT_PEERS; i++) _ftPrinted[i] = _ftHeld[i];
+                long l0 = _ftLines;
+                long s = System.Diagnostics.Stopwatch.GetTimestamp();
+                for (int i = 0; i < FT_PEERS; i++) FtPeerLine(_ftPrinted, i, _ftProps[i], _ftLog);
+                t += System.Diagnostics.Stopwatch.GetTimestamp() - s;
+                ok &= _ftLines - l0 == FT_PEERS && _ftPrinted.Count == FT_PEERS;
+                for (int i = 0; i < FT_PEERS; i++) { string got; ok &= _ftPrinted.TryGetValue(i, out got) && got == _ftValues[i]; }
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             _ftPrinted.Clear();
-            _ftSink += s;
+            FtA3.Check(FtA3.PB_printed, full ? "full-scan-compared-stored-logged" : "empty-scan-stored-logged", ok);
             return t;
         }
 #endif

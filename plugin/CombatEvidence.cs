@@ -2642,41 +2642,101 @@ namespace CompetitiveRounds
         }
 
 #if SCR_FRAMETIME
-        // FrameTime A3 (FtA3, SURVIVORS.md): the calibrations of the two content-dependent reads above, on scratch
-        // copies, never on a live game's state. EMPTY: no rows. CAPACITY in its costliest content: every row held and
-        // the new row ranking first, so TopInsert shifts every held row (and HtUpsert first finds the pid at row 0,
-        // shifting the rest down, then reinserts it first). Both halves make the same scratch copy per call.
-        private static readonly long[] _ftTopFull = new long[TOP_CAP * 8], _ftTopWork = new long[TOP_CAP * 8], _ftTopE = new long[8];
-        private static Game _ftHtGame;
-        private static readonly long[] _ftHtFull = new long[HT_CAP * 4];
+        // FrameTime A3 (FtA3, SURVIVORS.md; ruling FRAME-TIME-ROUND-R3-A1, round 4): each dependent row's calibration
+        // EXECUTES THE REAL READER, the production method on a scratch Game (never the live _g) whose state has the live
+        // shape: EMPTY for full=false, at capacity in its costliest content for full=true. Each read is timed alone; the
+        // setup that restores the shape before it runs outside the clock, so an EMPTY half is empty at every timed read
+        // and a FULL half full. After the reads each calibration records FtA3.Check claims computed from the production
+        // method's own effect on the scratch state. A row whose real reader cannot run outside live combat is withheld
+        // in FtA3Rows (FtA3.Withhold, with the reason) and has no calibration.
+        private static Game _ftGame;
+        private static readonly long[] _ftTopFull = FtTopFull(), _ftHtFull = FtHtFull();
 
-        internal static long FtCalTop(bool full, int n)
+        private static long[] FtTopFull()
         {
-            for (int i = 0; i < TOP_CAP; i++) _ftTopFull[i * 8 + 2] = 1000000 - i;
-            _ftTopE[2] = 2000000;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++)
-            {
-                Array.Copy(_ftTopFull, _ftTopWork, _ftTopFull.Length);
-                int cnt = full ? TOP_CAP : 0;
-                TopInsert(_ftTopWork, ref cnt, TOP_CAP, 8, _ftTopE, 2);
-            }
-            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            var a = new long[TOP_CAP * 8];
+            for (int i = 0; i < TOP_CAP; i++) a[i * 8] = 1000 + i;   // ranking key (field 2) 0: a new row ranks first
+            return a;
         }
 
-        internal static long FtCalHt(bool full, int n)
+        private static long[] FtHtFull()
         {
-            if (_ftHtGame == null) _ftHtGame = new Game();
-            var g = _ftHtGame;
-            for (int i = 0; i < HT_CAP; i++) { _ftHtFull[i * 4] = 7 + i; _ftHtFull[i * 4 + 2] = 90000 - i; }
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            var a = new long[HT_CAP * 4];
+            for (int i = 0; i < HT_CAP; i++) { a[i * 4] = 7 + i; a[i * 4 + 2] = 90000 - i; }
+            return a;
+        }
+
+        private static Game FtScratch()
+        {
+            if (_ftGame == null) _ftGame = new Game();
+            return _ftGame;
+        }
+
+        private static long FtNow() { return System.Diagnostics.Stopwatch.GetTimestamp(); }
+
+        private static long FtSum(long[] a) { long s = 0; for (int i = 0; i < a.Length; i++) s += a[i]; return s; }
+
+        internal static long FtSink;
+
+        /// <summary>One residual row on the scratch Game's Res ring, as the hooks queue it: anchor `slot` (-1: none),
+        /// projectile `pid`, dT 0 (no integration step), the copy 5 units across the owner's line of flight, so the
+        /// row's ranking key (the perpendicular residual) is positive.</summary>
+        private static void FtPushResidual(Game g, int slot, int pid)
+        {
+            int o = g.Res.PushRow();
+            if (o < 0) return;
+            var r = g.Res.V;
+            Array.Clear(r, o, g.Res.Width);
+            r[o] = slot; r[o + 1] = pid; r[o + 2] = 500000;
+            r[o + 4] = 5; r[o + 7] = 1;      // the copy: (5, 0), moving (0, 1)
+            r[o + 11] = 1;                   // the owner: (0, 0), moving (0, 1)
+            r[o + 15] = 1; r[o + 16] = 1; r[o + 19] = 1;
+        }
+
+        /// <summary>S01 (CE_Top): the real DrainResiduals with one residual row per read, the reader that reaches
+        /// TopInsert on the Top list (TopInsert's only caller for this list; one CE_Top read per row it inserts).
+        /// CAPACITY in its costliest content: TOP_CAP rows held, the new row ranking first, so TopInsert shifts every
+        /// held row. EMPTY: no rows held.</summary>
+        internal static long FtCalTop(bool full, int n)
+        {
+            var g = FtScratch();
+            g.Res.N = 0; g.Res.Head = 0;
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                Array.Copy(_ftHtFull, g.Ht, _ftHtFull.Length);
-                g.HtN = full ? HT_CAP : 0;
-                HtUpsert(g, 7, 1, 99999, 5);
+                if (full) Array.Copy(_ftTopFull, g.Top, _ftTopFull.Length);
+                g.TopN = full ? TOP_CAP : 0;
+                FtPushResidual(g, -1, 77);
+                long a = FtNow();
+                DrainResiduals(g);
+                t += FtNow() - a;
+                ok &= g.Res.N == 0 && g.Top[0] == 77 && g.Top[2] > 0 && g.TopN == (full ? TOP_CAP : 1)
+                      && (!full || (g.Top[8] == 1000 && g.Top[(TOP_CAP - 1) * 8] == 1000 + TOP_CAP - 2));
             }
-            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            FtA3.Check(FtA3.CE_Top, full ? "full-insert-first-shifted-all" : "empty-insert-first", ok);
+            return t;
+        }
+
+        /// <summary>S02 (CE_Ht): the real HtUpsert, the row's direct reader (DrainPackages reaches the list only
+        /// through it). CAPACITY in its costliest content: HT_CAP rows held, the pid at row 0, so HtUpsert removes it
+        /// (shifting every row up) and reinserts it first (shifting every row down). EMPTY: no rows held.</summary>
+        internal static long FtCalHt(bool full, int n)
+        {
+            var g = FtScratch();
+            long t = 0;
+            bool ok = true;
+            for (int j = 0; j < n; j++)
+            {
+                if (full) Array.Copy(_ftHtFull, g.Ht, _ftHtFull.Length);
+                g.HtN = full ? HT_CAP : 0;
+                long a = FtNow();
+                HtUpsert(g, 7, 1, 99999, 5);
+                t += FtNow() - a;
+                ok &= g.Ht[0] == 7 && g.Ht[2] == 99999 && g.HtN == (full ? HT_CAP : 1) && (!full || g.Ht[4] == 8);
+            }
+            FtA3.Check(FtA3.CE_Ht, full ? "full-removed-and-reinserted" : "empty-inserted", ok);
+            return t;
         }
 
         /// <summary>FtA3.RegisterAll: this component's A3 rows (SURVIVORS.md S01, S02, S03, S05, S06, S11 dependent;
@@ -2684,327 +2744,287 @@ namespace CompetitiveRounds
         /// capacity is the code constant that sizes the structure, or 1 where none does (unused: every row here has
         /// steady false, so every live read counts). CE_Pos is steady false since round-2 HIGH 1: its window test also
         /// reads L^ (S03 / S04), so refilling the POS_CAP ring does not make its reads cost the same as in any other
-        /// point.</summary>
+        /// point. Round 4: each executed row names the production method(s) its calibration runs; the withheld rows
+        /// name why no real reader of theirs runs outside live combat.</summary>
         internal static void FtA3Rows()
         {
             FtA3.Set(FtA3.CE_Top, "CE_Top", TOP_CAP, false, FtCalTop, 2000);
+            FtA3.Executed(FtA3.CE_Top, "CombatEvidence.DrainResiduals");
             FtA3.Set(FtA3.CE_Ht, "CE_Ht", HT_CAP, false, FtCalHt, 2000);
+            FtA3.Executed(FtA3.CE_Ht, "CombatEvidence.HtUpsert");
             FtA3.Set(FtA3.CE_Ping, "CE_Ping", PING_BIN_CAP, false, FtCalPing, 500);
-            FtA3.Set(FtA3.CE_Pos, "CE_Pos", POS_CAP, false, FtCalPos, 500);
-            FtA3.Set(FtA3.CE_Recent, "CE_Recent", RECENT_CAP, false, FtCalRecent, 5000);
+            FtA3.Executed(FtA3.CE_Ping, "CombatEvidence.LHatMs");
+            FtA3.Set(FtA3.CE_Pos, "CE_Pos", POS_CAP, false, null, 500);
+            FtA3.Withhold(FtA3.CE_Pos, "DrainAim reaches the own-position window only with the live own Player (_ownP) and runs PosOf and the Physics2D sight cast on it; TickBody needs TimeHandler, Time and Photon");
+            FtA3.Set(FtA3.CE_Recent, "CE_Recent", RECENT_CAP, false, null, 5000);
+            FtA3.Withhold(FtA3.CE_Recent, "DieBody, the costliest reader (both ring copies), needs a HealthHandler's CharacterData and playerVel; VictimHit reads Time.frameCount; HitBody and RecentForce read the live _g");
             FtA3.Set(FtA3.CE_B5c, "CE_B5c", PAIR_CAP + OUTSIDE_SCAN_CAP, false, FtCalB5c, 2000);
+            FtA3.Executed(FtA3.CE_B5c, "CombatEvidence.FillContact, CombatEvidenceCore.FixedRows.Raw");
             FtA3.SetDrained(FtA3.CE_Wait, "CE_Wait", () => { var g = _g; return g == null ? 0 : g.WN; });
             FtA3.SetDrained(FtA3.CE_Rings, "CE_Rings", () => { var g = _g; return g == null ? 0 : g.Mask.N + g.Aim.N + g.Res.N + g.Pack.N; });
             FtA3.SetDrained(FtA3.CE_Gun, "CE_Gun", () => { var g = _g; return g == null ? 0 : g.Own.RingN + g.Opp.RingN; });
             FtA3.Set(FtA3.CE_lhat_cache, "CE_lhat_cache", 1, false, FtCalLhatCache, 5000);
+            FtA3.Executed(FtA3.CE_lhat_cache, "CombatEvidence.DrainAim");
             FtA3.Set(FtA3.CE_anchor, "CE_anchor", ANCHOR_CAP, false, FtCalAnchor, 5000);
-            FtA3.Set(FtA3.CE_counters, "CE_counters", 1, false, FtCalCounters, 5000);
+            FtA3.Executed(FtA3.CE_anchor, "CombatEvidence.NoteAnchor (opponent and own), CombatEvidence.SegClose, SeatEvidenceCore.CappedMap.TryGetValue, .Remove, .Set");
+            FtA3.Set(FtA3.CE_counters, "CE_counters", 1, false, FtCalCounters, 500);
+            FtA3.Executed(FtA3.CE_counters, "CombatEvidence.DrainResiduals");
             FtA3.Set(FtA3.CE_scratch, "CE_scratch", 1, false, FtCalScratch, 5000);
-            FtA3.Set(FtA3.CE_gun_scalars, "CE_gun_scalars", 1, false, FtCalGunScalars, 5000);
+            FtA3.Executed(FtA3.CE_scratch, "CombatEvidence.DrainResiduals, CombatEvidence.TopInsert");
+            FtA3.Set(FtA3.CE_gun_scalars, "CE_gun_scalars", 1, false, null, 5000);
+            FtA3.Withhold(FtA3.CE_gun_scalars, "every reader's work past its null test reads a live Gun or GunAmmo (Unity objects that compare equal to null unless engine-backed): Reconcile, ReloadBody, ReadCexp, Bind and the hook bodies");
             FtA3.Set(FtA3.CE_gun_account, "CE_gun_account", 1, false, FtCalGunAccount, 2000);
+            FtA3.Executed(FtA3.CE_gun_account, "CombatEvidenceCore.GunAccount.CloseCycle");
             FtA3.Set(FtA3.CE_aimset, "CE_aimset", 1, false, FtCalAimset, 5000);
-            FtA3.Set(FtA3.CE_capture, "CE_capture", 1, false, FtCalCapture, 5000);
-            FtA3.Set(FtA3.CE_perf_probe, "CE_perf_probe", CombatEvidencePerf.BIN_CAP, false, FtCalPerfProbe, 500);
+            FtA3.Executed(FtA3.CE_aimset, "CombatEvidenceCore.AimSet.Add");
+            FtA3.Set(FtA3.CE_capture, "CE_capture", 1, false, null, 5000);
+            FtA3.Withhold(FtA3.CE_capture, "its fields are the component's static hook state of the live game (_open, _ownP/_oppP, the actors, the cost counters), with no scratch instance; the costliest reader, ResolvePlayers and GunOf, resolves Players through PlayerManager");
+            FtA3.Set(FtA3.CE_perf_probe, "CE_perf_probe", CombatEvidencePerf.BIN_CAP, false, null, 500);
+            FtA3.Withhold(FtA3.CE_perf_probe, "its fields are CombatEvidencePerf's static probe state with no scratch instance; Frame reads Time.unscaledDeltaTime, Close and the reports log through Plugin.Log");
         }
 
-        private static Game FtScratch()
-        {
-            if (_ftHtGame == null) _ftHtGame = new Game();
-            return _ftHtGame;
-        }
-
-        internal static long FtSink;
-
-        /// <summary>S03: the real LHatMs. EMPTY: no samples. CAPACITY in its costliest content: PING_CAP samples, all in
-        /// the last bin, so the loop walks every bin.</summary>
+        /// <summary>S03 (CE_Ping): the real LHatMs, the reader with the content-dependent loop (TickBody's ping
+        /// work is one bin increment). EMPTY: no samples (LHatMs returns -1 at once). CAPACITY in its costliest
+        /// content: PING_CAP samples, all in the last bin, so the loop walks every bin.</summary>
         internal static long FtCalPing(bool full, int n)
         {
             var g = FtScratch();
             Array.Clear(g.PingBin, 0, g.PingBin.Length);
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
                 g.PingN = full ? PING_CAP : 0;
                 g.PingBin[PING_BIN_CAP] = full ? PING_CAP : 0;
-                s += LHatMs(g);
+                long a = FtNow();
+                int v = LHatMs(g);
+                t += FtNow() - a;
+                ok &= v == (full ? PING_BIN_CAP / 2 : -1);
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            FtSink += s;
+            g.PingN = 0; g.PingBin[PING_BIN_CAP] = 0;
+            FtA3.Check(FtA3.CE_Ping, full ? "full-walked-every-bin" : "empty-no-sample", ok);
             return t;
         }
 
-        /// <summary>S05: DrainAim's own-aim window, from `int want` to the A1n add (a line-for-line copy of
-        /// CombatEvidence.DrainAim's loop over the Pos ring and the two adds after it; the line-of-sight cast before the
-        /// adds reads the players, not the ring, and is left out). EMPTY: no positions (the real code skips the loop).
-        /// CAPACITY in its costliest content: POS_CAP positions, every one inside [stamp - 2 L^ - W, stamp], so each
-        /// entry also runs SignedMrad.</summary>
-        internal static long FtCalPos(bool full, int n)
-        {
-            var g = FtScratch();
-            int stamp = 500000, lhat = 0;
-            double px = 1, py = 2, fx = 0.6, fy = 0.8;
-            bool vis = false;
-            for (int i = 0; i < POS_CAP; i++) { g.PosT[i] = stamp - i; g.PosX[i] = 3 + i; g.PosY[i] = 4 - i; }
-            g.PosHead = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++)
-            {
-                g.PosN = full ? POS_CAP : 0;
-                if (g.PosN == 0) continue;
-                int want = stamp - lhat, lo = stamp - 2 * lhat - E.A1N_W_MS;
-                int best = -1; long bestD = long.MaxValue; long bestErr = 0; bool haveN = false;
-                for (int k = 0; k < g.PosN && k < POS_CAP; k++)
-                {
-                    int i = (g.PosHead + k) % POS_CAP;
-                    long d = Math.Abs((long)C.WrapDiff(g.PosT[i], want));
-                    if (d < bestD) { bestD = d; best = i; }
-                    if (C.WrapDiff(g.PosT[i], lo) >= 0 && C.WrapDiff(stamp, g.PosT[i]) >= 0)
-                    {
-                        long e = SignedMrad(fx, fy, g.PosX[i] - px, g.PosY[i] - py);
-                        if (!haveN || Math.Abs(e) < Math.Abs(bestErr)) { bestErr = e; haveN = true; }
-                    }
-                }
-                if (best >= 0) g.A1m.Add(SignedMrad(fx, fy, g.PosX[best] - px, g.PosY[best] - py), !vis);
-                if (haveN) g.A1n.Add(bestErr, !vis);
-            }
-            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-        }
-
-        private static readonly long[] _ftDieRow = new long[8 + RECENT_CAP * 9];
-
-        /// <summary>S06: DieBody's two ring copies (a line-for-line copy of its two `for (int h = 0; h &lt; RECENT_CAP;
-        /// h++)` loops; the rest of DieBody reads the player, not the rings). EMPTY: both rings empty. CAPACITY: both
-        /// rings holding RECENT_CAP entries.</summary>
-        internal static long FtCalRecent(bool full, int n)
-        {
-            var g = FtScratch();
-            for (int i = 0; i < RECENT_CAP * 4; i++) g.RhOwn[i] = 1000 + i;
-            for (int i = 0; i < RECENT_CAP * 5; i++) g.RfOwn[i] = 2000 + i;
-            var a = _ftDieRow;
-            var ring = g.RhOwn; var fring = g.RfOwn;
-            int now = 600000, o = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++)
-            {
-                int head = 0, n1 = full ? RECENT_CAP : 0, fhead = 0, fn = full ? RECENT_CAP : 0;
-                for (int h = 0; h < RECENT_CAP; h++)
-                {
-                    int f = o + 8 + h * 4;
-                    if (h < n1)
-                    {
-                        int i = ((head + n1 - 1 - h) % RECENT_CAP) * 4;
-                        a[f] = ring[i]; a[f + 1] = ring[i + 1]; a[f + 2] = ring[i + 2];
-                        a[f + 3] = E.Clamp(C.WrapDiff(now, ring[i + 3]), 0, 600000);
-                    }
-                    else { a[f] = -1; a[f + 1] = 0; a[f + 2] = -1; a[f + 3] = -1; }
-                }
-                for (int h = 0; h < RECENT_CAP; h++)
-                {
-                    int f = o + 8 + RECENT_CAP * 4 + h * 5;
-                    if (h < fn)
-                    {
-                        int i = ((fhead + fn - 1 - h) % RECENT_CAP) * 5;
-                        a[f] = fring[i]; a[f + 1] = fring[i + 1]; a[f + 2] = fring[i + 2]; a[f + 3] = fring[i + 3];
-                        a[f + 4] = E.Clamp(C.WrapDiff(now, fring[i + 4]), 0, 600000);
-                    }
-                    else { a[f] = -1; a[f + 1] = 0; a[f + 2] = -1; a[f + 3] = -1; a[f + 4] = -1; }
-                }
-            }
-            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-        }
-
-        /// <summary>S11: the real FillContact. EMPTY: no B5c rows. CAPACITY in its costliest content: B5c full of rows of
-        /// another projectile, so both scans run to their caps and nothing pairs.</summary>
+        /// <summary>S11 (CE_B5c): the real FillContact (both scans; the FixedRows Raw/Count readers are O(1) inside
+        /// it). EMPTY: no B5c rows. CAPACITY in its costliest content: B5c full of rows of another projectile, so both
+        /// scans run to their caps and nothing pairs.</summary>
         internal static long FtCalB5c(bool full, int n)
         {
             var g = FtScratch();
             var raw = g.B5c.Raw;
             int w = g.B5c.Width;
             for (int i = 0; i < g.B5c.Cap; i++) { raw[i * w] = -7; raw[i * w + 6] = W.OWN_SINCE_NONE; }
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long u0 = g.Drop[D_C_UNPAIRED], o0 = g.Drop[D_C_OUTSIDE];
+            long t = 0;
             for (int j = 0; j < n; j++)
             {
                 g.B5c.Count = full ? g.B5c.Cap : 0;
+                long a = FtNow();
                 FillContact(g, 5, 0);
+                t += FtNow() - a;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            bool ok = g.Drop[D_C_UNPAIRED] - u0 == n && g.Drop[D_C_OUTSIDE] == o0 && raw[(g.B5c.Cap - 1) * w + 6] == W.OWN_SINCE_NONE;
             g.B5c.Count = 0;
+            FtA3.Check(FtA3.CE_B5c, full ? "full-both-scans-unpaired" : "empty-unpaired", ok);
             return t;
         }
 
-        // -- the rows default-deny made dependent (ruling FRAME-TIME-ROUND-R2 (1); SURVIVORS.md S04, S09, S12 to S18).
-        // Each live reader of these rows does O(1) work per call (a scalar or indexed access, a CappedMap probe, a loop of
-        // constant length), so each calibration runs that access on scratch state, EMPTY against FULL (the structure at
-        // its capacity or its largest values). d may be near 0: it is measured, not assumed. Every live reader call
-        // counts once (FtA3.Read on entry), so one calibrated unit is one call's access.
-        private static int _ftLhCache = -1;
-        private static long _ftLhAt;
-
-        /// <summary>S04 (CE_lhat_cache): DrainAim's cache test and read (its first two lines) on scratch scalars.
-        /// EMPTY: no cached value (-1): the test passes and the cache is stored; the recompute the test guards is
-        /// LHatMs, CE_Ping's read, counted and calibrated there, so a fixed value stands in for it. FULL: a value cached
-        /// at `sw`: the test fails.</summary>
+        /// <summary>S04 (CE_lhat_cache): the real DrainAim, the row's only reader, on the scratch Game with its Aim ring
+        /// empty. Its cache work is the test and, when the cache is absent or stale, the recompute; each read starts
+        /// with the cache absent (the costlier branch). EMPTY: no ping samples, so the recompute returns at once.
+        /// CAPACITY: PING_CAP samples in the last bin, so the recompute walks every bin. The live cache (two statics)
+        /// is saved before the reads and restored after them in every outcome.</summary>
         internal static long FtCalLhatCache(bool full, int n)
         {
-            long sw = SwMs, s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++)
+            var g = FtScratch();
+            Array.Clear(g.PingBin, 0, g.PingBin.Length);
+            g.PingN = full ? PING_CAP : 0;
+            g.PingBin[PING_BIN_CAP] = full ? PING_CAP : 0;
+            g.Aim.N = 0; g.Aim.Head = 0;
+            int keep = _lHatCache;
+            long keepAt = _lHatAtMs;
+            long t = 0;
+            bool ok = true;
+            try
             {
-                _ftLhCache = full ? 250 : -1; _ftLhAt = sw;
-                if (sw - _ftLhAt > 5000 || _ftLhCache < 0) { _ftLhCache = 250; _ftLhAt = sw; }
-                s += _ftLhCache < 0 ? 0 : _ftLhCache;
+                for (int j = 0; j < n; j++)
+                {
+                    _lHatCache = -1;
+                    long a = FtNow();
+                    DrainAim(g);
+                    t += FtNow() - a;
+                    ok &= _lHatCache == (full ? PING_BIN_CAP / 2 : -1) && g.Aim.N == 0;
+                }
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            FtSink += s;
+            finally { _lHatCache = keep; _lHatAtMs = keepAt; g.PingN = 0; g.PingBin[PING_BIN_CAP] = 0; }
+            FtA3.Check(FtA3.CE_lhat_cache, full ? "full-recomputed-every-bin" : "empty-recomputed-none", ok);
             return t;
         }
 
-        /// <summary>S09 (CE_anchor): the real CappedMap probe of the scratch Game's Slot map, then the anchor and
-        /// segment slots it names. EMPTY: the map empty, every probe misses. FULL: ANCHOR_CAP keys held, every probe
-        /// hits.</summary>
+        private static int _ftAnchorPid = 1 << 20;
+
+        /// <summary>S09 (CE_anchor): the real NoteAnchor, twice per read (an upper bound on either call alone): an
+        /// opponent projectile, then an own one. It is the anchor reader with the map's eviction (probe, evict, insert)
+        /// and, own, the segment close (SegClose, which lists the open segment); DrainMasks, DrainPackages,
+        /// DrainResiduals and the hook bodies read a slot by index, and SegFrame, SegBreak and SegRebase are bounded
+        /// by SegClose. CAPACITY in its costliest content: the Slot map at ANCHOR_CAP keys with every slot live, so
+        /// each new opponent pid misses, evicts the slot's previous key and inserts its own; the own pid's slot holds
+        /// an open segment of another projectile with a cause, so SegClose lists it. EMPTY: the map empty and no slot
+        /// live (restored before each read), so the probe misses and the pid is admitted; no open segment. Live, the
+        /// Slot map is only probed, removed from and set (NoteAnchor and the slot lookups); it is never cleared,
+        /// so no counted read of it is a Clear.</summary>
         internal static long FtCalAnchor(bool full, int n)
         {
             var g = FtScratch();
-            g.Slot.Clear();
-            if (full) for (int i = 0; i < ANCHOR_CAP; i++) g.Slot.Set(i * 7 + 1, i);
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            g.Slot.Clear(); Array.Clear(g.ALive, 0, ANCHOR_CAP); Array.Clear(g.SgOn, 0, ANCHOR_CAP); g.ANext = 0;
+            g.Mask.N = 0; g.Mask.Head = 0;
+            if (full) for (int i = 0; i < ANCHOR_CAP; i++) { int k = ++_ftAnchorPid; g.Slot.Set(k, i); g.APid[i] = k; g.ALive[i] = true; }
+            long ev0 = g.P3n[6], vt0 = g.Vchg.Total;
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                int slot;
-                if (g.Slot.TryGetValue((j % ANCHOR_CAP) * 7 + 1, out slot)) s += g.APid[slot] + g.OwnPid[slot] + (g.SgOn[slot] ? 1 : 0);
-                else s += g.ANext;
+                int pid = ++_ftAnchorPid, k = pid & (ANCHOR_CAP - 1);
+                if (full) { g.SgOn[k] = true; g.SgPid[k] = pid + ANCHOR_CAP; g.OwnPid[k] = pid + ANCHOR_CAP; g.SgCause[k] = 1; }
+                else { g.Slot.Clear(); Array.Clear(g.ALive, 0, ANCHOR_CAP); g.ANext = 0; g.SgOn[k] = false; }
+                g.Vchg.Count = 0;
+                long a = FtNow();
+                NoteAnchor(g, null, pid, 0, false);
+                NoteAnchor(g, null, pid, 0, true);
+                t += FtNow() - a;
+                while (g.Mask.PopSlot() >= 0) { }
+                ok &= g.Slot.Count == (full ? ANCHOR_CAP : 1);
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            g.Slot.Clear();
-            FtSink += s;
+            long ev = g.P3n[6] - ev0, vt = g.Vchg.Total - vt0;
+            ok &= full ? (ev == n && vt == n) : (ev == 0 && vt == 0);
+            g.Slot.Clear(); Array.Clear(g.ALive, 0, ANCHOR_CAP); Array.Clear(g.SgOn, 0, ANCHOR_CAP); g.ANext = 0; g.Vchg.Count = 0;
+            FtA3.Check(FtA3.CE_anchor, full ? "full-evicted-and-segment-listed" : "empty-admitted-no-segment", ok);
             return t;
         }
 
-        /// <summary>S12 (CE_counters): the live readers' indexed counter increments (Drop, P3n, B5tot) on the scratch
-        /// Game. EMPTY: the counters at 0. FULL: at 1e12, far above any game's.</summary>
+        /// <summary>S12 (CE_counters): the real DrainResiduals, the counter reader with the most counter work per call
+        /// (per row: the drop or the two steering histograms, the top-seen count, and TopInsert). No reader's cost
+        /// depends on a counter's value (each is an indexed increment), so the calibration bounds the reader's whole
+        /// per-call work instead: CAPACITY: a tick's TICK_ROWS_CAP residual rows, each on a scanned steering anchor
+        /// (both histogram increments); EMPTY: no rows (the reader returns at its first pop). Since no cost
+        /// depends on the counters' values, d is an overbound of the counters' dependence: it is the whole
+        /// per-call work of the reader with the most of it.</summary>
         internal static long FtCalCounters(bool full, int n)
         {
             var g = FtScratch();
-            long v = full ? 1000000000000L : 0;
-            for (int i = 0; i < g.Drop.Length; i++) g.Drop[i] = v;
-            for (int i = 0; i < g.P3n.Length; i++) g.P3n[i] = v;
-            for (int i = 0; i < g.B5tot.Length; i++) g.B5tot[i] = v;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++) { g.Drop[j % g.Drop.Length]++; g.P3n[j % g.P3n.Length]++; g.B5tot[j % g.B5tot.Length]++; }
-            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            g.Res.N = 0; g.Res.Head = 0;
+            g.APid[0] = 77; g.AMaskKnown[0] = true; g.AMask[0] = 1;
+            long s0 = g.P3topSeen, h0 = FtSum(g.P3dp1), m0 = g.Drop[D_RES_MASK_UNKNOWN];
+            long t = 0;
+            bool ok = true;
+            for (int j = 0; j < n; j++)
+            {
+                g.TopN = 0;
+                if (full) for (int r = 0; r < TICK_ROWS_CAP; r++) FtPushResidual(g, 0, 77);
+                long a = FtNow();
+                DrainResiduals(g);
+                t += FtNow() - a;
+                ok &= g.Res.N == 0;
+            }
+            long seen = g.P3topSeen - s0, hist = FtSum(g.P3dp1) - h0;
+            ok &= g.Drop[D_RES_MASK_UNKNOWN] == m0 && (full ? (seen == (long)n * TICK_ROWS_CAP && hist == seen) : (seen == 0 && hist == 0));
+            g.APid[0] = 0; g.AMaskKnown[0] = false; g.AMask[0] = 0; g.TopN = 0;
+            FtA3.Check(FtA3.CE_counters, full ? "full-tick-rows-counted" : "empty-no-row", ok);
+            return t;
         }
 
-        /// <summary>S13 (CE_scratch): a per-hook scratch row filled and read back (TopEntry, ResOut) on the scratch
-        /// Game. EMPTY: the rows at 0. FULL: at the clamps' largest value.</summary>
+        /// <summary>S13 (CE_scratch): the real DrainResiduals with one residual row per read, which fills the scratch
+        /// rows (ResOut, TopEntry) and hands TopEntry to TopInsert; the other scratch readers fill or read a row of the
+        /// same width. EMPTY: the scratch rows at 0. FULL: at the clamps' largest value. The rows are restored before
+        /// each read. No reader's cost depends on the rows' values (each field is a store or a copy), so d is an
+        /// overbound.</summary>
         internal static long FtCalScratch(bool full, int n)
         {
             var g = FtScratch();
-            long v = full ? 9999999 : 0, s = 0;
-            for (int i = 0; i < g.TopEntry.Length; i++) g.TopEntry[i] = v;
-            for (int i = 0; i < g.ResOut.Length; i++) g.ResOut[i] = v;
-            var e = g.TopEntry;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++) { e[j & 7] = e[(j + 1) & 7]; s += g.ResOut[j % 3]; }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            FtSink += s;
-            return t;
-        }
-
-        private static GunState _ftGun;
-
-        /// <summary>S14 (CE_gun_scalars): a gun hook's scalar test-and-store on a scratch GunState. EMPTY: a new
-        /// state. FULL: its counters at their largest values.</summary>
-        internal static long FtCalGunScalars(bool full, int n)
-        {
-            if (_ftGun == null) _ftGun = new GunState(true);
-            var st = _ftGun;
-            st.AttackEmits = full ? int.MaxValue / 2 : 0; st.LastEvtSw = full ? long.MaxValue / 2 : 0;
-            st.RlStamp = full ? int.MaxValue / 2 : 0; st.HasEvt = full;
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            g.Res.N = 0; g.Res.Head = 0;
+            long v = full ? 9999999 : 0;
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                if (!st.HasEvt || st.LastEvtSw != j) { st.LastEvtSw = j; st.HasEvt = true; }
-                s += st.AttackEmits + st.RlStamp;
+                for (int i = 0; i < g.TopEntry.Length; i++) g.TopEntry[i] = v;
+                for (int i = 0; i < g.ResOut.Length; i++) g.ResOut[i] = v;
+                g.TopN = 0;
+                FtPushResidual(g, -1, 88);
+                long a = FtNow();
+                DrainResiduals(g);
+                t += FtNow() - a;
+                ok &= g.TopEntry[0] == 88 && g.Top[0] == 88 && g.Res.N == 0;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            FtSink += s;
+            g.TopN = 0;
+            FtA3.Check(FtA3.CE_scratch, full ? "full-scratch-overwritten" : "empty-scratch-written", ok);
             return t;
         }
 
-        /// <summary>S15 (CE_gun_account): the real GunAccount.AddNoInit and AddKind (Tot increments through the
-        /// field-name lookup) on a scratch account. EMPTY: a new account. FULL: its totals at 1e12.</summary>
+        private static E.GunAccount _ftAcct, _ftAcctIdle;
+
+        /// <summary>S15 (CE_gun_account): the real GunAccount.CloseCycle, the account's costliest reader (the cycle's
+        /// header store, the totals through the field-name lookups, and the cycle's exception row with its gap list;
+        /// AddShot, AddRegen, AddNoInit, AddKind, Start and Open each store at most one row and look up at most two
+        /// totals). CAPACITY in its costliest content: an open cycle that is listed (below the group cap) and is an
+        /// exception (over the magazine, shot in reload, a short first gap) below the exception cap, so CloseCycle
+        /// makes every store; the account is renewed outside the clock before either cap is reached, and the cycle is
+        /// opened by the real AddShot outside the clock. EMPTY: an account with no open cycle (CloseCycle counts the
+        /// idle refill and returns).</summary>
         internal static long FtCalGunAccount(bool full, int n)
         {
-            var a = new E.GunAccount(true);
-            if (full) for (int i = 0; i < a.Tot.Length; i++) a.Tot[i] = 1000000000000L;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++) { a.AddNoInit(); a.AddKind((j & 1) == 0); }
-            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-        }
-
-        /// <summary>S16 (CE_aimset): the real AimSet.Add on a scratch set. EMPTY: a new set. FULL: its histogram and
-        /// sums at 1e12.</summary>
-        internal static long FtCalAimset(bool full, int n)
-        {
-            var a = new E.AimSet();
-            if (full) { for (int i = 0; i < a.Hist.Length; i++) a.Hist[i] = 1000000000000L; a.Count = 1000000000000L; a.Sum = 1e12; a.Sq = 1e18; }
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int j = 0; j < n; j++) a.Add((j * 37) % 3001 - 1500, (j & 1) == 0);
-            return System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-        }
-
-        private static bool _ftCapOpen;
-        private static object _ftCapP;
-        private static readonly long[] _ftCapCalls = new long[4];
-
-        /// <summary>S17 (CE_capture): a hook's entry test and cost-counter increment (the `_open` / player-reference
-        /// test, then `_calls` / `_ticks`) on scratch statics of the same types. EMPTY: closed, no player, counters 0.
-        /// FULL: open, a player held, counters at 1e12.</summary>
-        internal static long FtCalCapture(bool full, int n)
-        {
-            _ftCapOpen = full; _ftCapP = full ? (object)_ftCapCalls : null;
-            for (int i = 0; i < _ftCapCalls.Length; i++) _ftCapCalls[i] = full ? 1000000000000L : 0;
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            int gcap = W.CAP[E.Ix("sh_s")], ccap = W.CAP[E.Ix("cx_s")];
+            int cyc = E.TotIx("cycles"), idle = E.TotIx("rf_idle");
+            if (_ftAcctIdle == null) _ftAcctIdle = new E.GunAccount(true);
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                if (_ftCapOpen && _ftCapP != null) s += ++_ftCapCalls[j & 3];
-                else s++;
+                E.GunAccount a;
+                if (full)
+                {
+                    if (_ftAcct == null || _ftAcct.GroupCount >= gcap || _ftAcct.CxCount >= ccap) _ftAcct = new E.GunAccount(true);
+                    a = _ftAcct;
+                    a.Mag = 1; a.Rexp = 100000;
+                    a.AddShot(1, 1000, 1, false, -1, 0, 0, 0, -1);
+                    a.AddShot(2, 1100, 0, true, 50, 0, 0, 0, -1);
+                }
+                else a = _ftAcctIdle;
+                int g0 = a.GroupCount, c0 = a.CxCount;
+                long y0 = a.Tot[cyc], i0 = a.Tot[idle];
+                long s = FtNow();
+                a.CloseCycle(W.END_TIMER, W.SRC_NONE, 1, 1200, 10, 10, 10);
+                t += FtNow() - s;
+                if (full) ok &= a.GroupCount == g0 + 1 && a.CxCount == c0 + 1 && a.Tot[cyc] == y0 + 1;
+                else ok &= a.GroupCount == 0 && a.CxCount == 0 && a.Tot[cyc] == 0 && a.Tot[idle] == i0 + 1;
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            FtSink += s;
+            FtA3.Check(FtA3.CE_gun_account, full ? "full-closecycle-stores" : "empty-idle-refill", ok);
             return t;
         }
 
-        private static readonly int[] _ftPerfBins = new int[CombatEvidencePerf.BIN_CAP];
+        private static E.AimSet _ftAim;
 
-        /// <summary>S18 (CE_perf_probe): CombatEvidencePerf.Quantile's loop, line for line, over a scratch histogram
-        /// (the probe's own state is never touched; the probe is off in every armed sitting, so this row counts 0
-        /// reads there, but nothing but a runtime guard says so). EMPTY: no frames (Quantile returns at once). FULL:
-        /// PERF_WINDOW_CAP frames all in the last bin, so the loop walks every bin.</summary>
-        internal static long FtCalPerfProbe(bool full, int n)
+        /// <summary>S16 (CE_aimset): the real AimSet.Add (CombatEvidenceCore.Count, the other reader, counts a record's
+        /// rows at the build, O(1)). The argument is the largest error (the last histogram bin). EMPTY: the set
+        /// cleared before each read. FULL: its histogram and sums at 1e12.</summary>
+        internal static long FtCalAimset(bool full, int n)
         {
-            Array.Clear(_ftPerfBins, 0, _ftPerfBins.Length);
-            long frames = full ? CombatEvidencePerf.PERF_WINDOW_CAP : 0;
-            _ftPerfBins[CombatEvidencePerf.BIN_CAP - 1] = (int)frames;
-            long s = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            var a = _ftAim ?? (_ftAim = new E.AimSet());
+            Array.Clear(a.Hist, 0, a.Hist.Length); a.Count = 0; a.NoSight = 0; a.Sum = 0; a.Sq = 0;
+            if (full) { for (int i = 0; i < a.Hist.Length; i++) a.Hist[i] = 1000000000000L; a.Count = 1000000000000L; a.Sum = 1e12; a.Sq = 1e18; }
+            long t = 0;
+            bool ok = true;
             for (int j = 0; j < n; j++)
             {
-                if (frames == 0) { s++; continue; }
-                long rank = (long)Math.Ceiling(0.99 * frames), acc = 0;
-                if (rank < 1) rank = 1;
-                for (int i = 0; i < CombatEvidencePerf.BIN_CAP; i++)
-                {
-                    acc += _ftPerfBins[i];
-                    if (acc >= rank) { s += (long)i * CombatEvidencePerf.BIN_US; break; }
-                }
+                if (!full) { Array.Clear(a.Hist, 0, a.Hist.Length); a.Count = 0; a.NoSight = 0; a.Sum = 0; a.Sq = 0; }
+                long c0 = a.Count, ns0 = a.NoSight;
+                long s = FtNow();
+                a.Add(3142, true);
+                t += FtNow() - s;
+                ok &= a.Count == c0 + 1 && a.NoSight == ns0 + 1 && (full ? a.Count > 1000000000000L : a.Count == 1);
             }
-            long t = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            FtSink += s;
+            FtA3.Check(FtA3.CE_aimset, full ? "full-added" : "empty-added-once", ok);
             return t;
         }
 #endif
