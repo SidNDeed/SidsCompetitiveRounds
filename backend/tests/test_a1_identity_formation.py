@@ -4341,8 +4341,8 @@ _CENSUS_MUTANTS = [
      "            and call.func.value.id == \"db\"",
      "_txn_end"),
     ("test_match_hold_admission_gate_pg",
-     '''    return any(isinstance(n, ast.Call) and b.named(n.func, (stop,)) is not None''',
-     '''    return any(isinstance(n, ast.Call) and n.func.id == stop''',
+     '''        if isinstance(n, ast.Call) and w.b.named(n.func, (stop,)) is not None:''',
+     '''        if isinstance(n, ast.Call) and n.func.id == stop:''',
      "_calls"),
 ]
 

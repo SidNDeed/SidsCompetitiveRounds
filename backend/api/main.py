@@ -63878,7 +63878,7 @@ async def _asm_readmit_work(ctx, pid, req) -> dict:
         return await _rdm_bind(ctx, pid, me, req)
     if req.step == "decline":
         return await _rdm_decline(ctx, pid, me, req)
-    return await _rdm_entered(ctx, pid, me, req)
+    if req.step == "entered": return await _rdm_entered(ctx, pid, me, req)  # noqa: E701
 
 
 class _AsmReadmitReq(BaseModel):
