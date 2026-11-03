@@ -901,12 +901,20 @@ namespace CompetitiveRounds
                 string n = _faultNote[i];
                 if (n == null) continue;
                 _faultNote[i] = null;
+#if SCR_FRAMETIME
+                FtLog.LogWarning(TAG + " C" + (i + 1).ToString(CultureInfo.InvariantCulture) + " fault (counted, once per game): " + n);
+#else
                 Plugin.Log.LogWarning(TAG + " C" + (i + 1).ToString(CultureInfo.InvariantCulture) + " fault (counted, once per game): " + n);
+#endif
             }
             if (_noRecordNote != null)
             {
                 string n = _noRecordNote; _noRecordNote = null;
+#if SCR_FRAMETIME
+                FtLog.LogWarning(TAG + n);
+#else
                 Plugin.Log.LogWarning(TAG + n);
+#endif
             }
         }
 
@@ -1208,12 +1216,63 @@ namespace CompetitiveRounds
 
         /// <summary>FtA3.RegisterAll: CD_notes (S35), the fault notes and the census flag, dependent by default-deny
         /// (ruling FRAME-TIME-ROUND-R2 (1)): DrainNotes writes them every tick, so it is counted at every live reader
-        /// call (DrainNotes, EnsureCensusDump), steady false; COLLECTORS is the code constant. Round 4 (ruling
-        /// FRAME-TIME-ROUND-R3-A1): withheld, with its reason; no real reader of the row runs on scratch state.</summary>
+        /// call (DrainNotes, EnsureCensusDump), steady false; COLLECTORS is the code constant. Round 5 (ruling
+        /// FRAME-TIME-ROUND-R4-A1, M1): executed, FtCalNotes.</summary>
         internal static void FtA3Rows()
         {
-            FtA3.Set(FtA3.CD_notes, "CD_notes", K.COLLECTORS, false, null, 2000);
-            FtA3.Withhold(FtA3.CD_notes, "DrainNotes reads the component's live static notes and logs each held one through Plugin.Log, so running it on scratch notes would write fault lines into the live log; EnsureCensusDump needs CardChoice and Photon and writes a file");
+            FtA3.Set(FtA3.CD_notes, "CD_notes", K.COLLECTORS, false, FtCalNotes, 2000);
+            FtA3.Executed(FtA3.CD_notes, "CardDrawEvidence.DrainNotes");
+        }
+
+        /// <summary>DrainNotes' log in this build: Plugin.Log, except while FtCalNotes runs DrainNotes (main thread,
+        /// outside live combat), when it is the calibration's scratch source. Only DrainNotes' two lines use it.</summary>
+        private static BepInEx.Logging.ManualLogSource FtLog { get { return _ftSink ?? Plugin.Log; } }
+        private static BepInEx.Logging.ManualLogSource _ftSink, _ftScratch;
+        private static readonly string FtNote = new string('N', 128);
+        private const string FT_NO_RECORD = " a captured record was dropped before it was persisted: too many waiting";
+
+        /// <summary>S35 (CD_notes), executed (round 5, ruling FRAME-TIME-ROUND-R4-A1, M1): one read = the real
+        /// DrainNotes on the component's own statics, saved before the call and restored in a finally (every slot of
+        /// _faultNote, _noRecordNote, and the log hook), its two lines routed to FtA3.ScratchLog (no live listener, no
+        /// file). CAPACITY in its costliest content: every collector holds a note (128 characters, above any
+        /// exception type name a note carries) and the no-record note is the longest one the component writes, so the
+        /// read logs COLLECTORS + 1 lines and clears them all. EMPTY: no note held, so the read logs nothing. Checks
+        /// from DrainNotes' own effect: FULL wrote COLLECTORS + 1 lines and left every note cleared; EMPTY wrote no
+        /// line. EnsureCensusDump, the row's other reader, is not run: in a live frame (in a room) its work that the
+        /// row's content selects is the _dumpDone test and then CardChoice.instance and PhotonNetwork.InRoom before it
+        /// returns (the bind and the dump run only at the menu), far below one logged line, and its census count and
+        /// span (FtCensus.Skip, FtSpan.Open) would change this sitting's own census if a calibration called it.</summary>
+        internal static long FtCalNotes(bool full, int n)
+        {
+            if (_ftScratch == null) _ftScratch = FtA3.ScratchLog("FrameTime-A3-CD");
+            var savedNotes = (string[])_faultNote.Clone();
+            string savedNoRecord = _noRecordNote;
+            var savedSink = _ftSink;
+            long t = 0;
+            bool ok = true;
+            try
+            {
+                _ftSink = _ftScratch;
+                for (int j = 0; j < n; j++)
+                {
+                    for (int i = 0; i < K.COLLECTORS; i++) _faultNote[i] = full ? FtNote : null;
+                    _noRecordNote = full ? FT_NO_RECORD : null;
+                    long l0 = FtA3.ScratchLines;
+                    long s = Stopwatch.GetTimestamp();
+                    DrainNotes();
+                    t += Stopwatch.GetTimestamp() - s;
+                    ok &= FtA3.ScratchLines - l0 == (full ? K.COLLECTORS + 1 : 0) && _noRecordNote == null;
+                    for (int i = 0; i < K.COLLECTORS; i++) ok &= _faultNote[i] == null;
+                }
+            }
+            finally
+            {
+                Array.Copy(savedNotes, _faultNote, savedNotes.Length);
+                _noRecordNote = savedNoRecord;
+                _ftSink = savedSink;
+            }
+            FtA3.Check(FtA3.CD_notes, full ? "full-every-note-logged-and-cleared" : "empty-no-line", ok);
+            return t;
         }
 #endif
     }

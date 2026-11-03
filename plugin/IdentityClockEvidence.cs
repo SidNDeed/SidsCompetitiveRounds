@@ -357,6 +357,9 @@ namespace CompetitiveRounds
         internal static int EnterRpc(ExitGames.Client.Photon.Hashtable data, Photon.Realtime.Player sender)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.IC_scalars); FtA3.Read(FtA3.IC_game); FtA3.Wrote(FtA3.IC_scalars);
             FtA3.Wrote(FtA3.IC_game);
 #endif
@@ -399,6 +402,9 @@ namespace CompetitiveRounds
             catch { _cost[K1X].Fault(); }
             _cost[K1X].Add(SwUs - t0);
             return before;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
 #if SCR_FRAMETIME
@@ -454,6 +460,9 @@ namespace CompetitiveRounds
         internal static void Package(SyncPlayerMovement spm, int stamp)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.IC_game);
 #endif
             long t0 = SwUs;
@@ -480,6 +489,9 @@ namespace CompetitiveRounds
             }
             catch { _cost[K6X].Fault(); }
             _cost[K6X].Add(SwUs - t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static int Cu(float v) { return (int)I.Clamp((long)Math.Round(v * 100.0), -I.CU_MAX, I.CU_MAX); }
@@ -509,6 +521,9 @@ namespace CompetitiveRounds
         /// <summary>From Plugin's polling tick, every frame.</summary>
         internal static void Tick()
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.IC_game); FtA3.Wrote(FtA3.IC_game);
 #endif
@@ -545,6 +560,9 @@ namespace CompetitiveRounds
             }
             finally { FtSpan.Close(ftSpan); }
 #endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The survey's per-tick time budget (a cost bound).</summary>
@@ -552,6 +570,9 @@ namespace CompetitiveRounds
 
         private static void Slice(long frameUs, bool combat)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.IC_game); FtA3.Wrote(FtA3.IC_game);
 #endif
@@ -593,6 +614,9 @@ namespace CompetitiveRounds
             _anyDead = anyDead;
             // the other seat's published frame rate (cr_gstats field 7), outside combat
             if (!combat && SwMs >= _nextFpsReadMs) { _nextFpsReadMs = SwMs + 1000; ReadPubFps(g); }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static int _lastSer = -1;
@@ -932,7 +956,8 @@ namespace CompetitiveRounds
             FtA3.Set(FtA3.IC_point, "IC_point", 1, false, FtCalIcPoint, 2000);
             FtA3.Executed(FtA3.IC_point, "IdentityClockCore.ClockBook.Package, IdentityClockCore.ClockBook.PointPkg");
             FtA3.Set(FtA3.IC_game, "IC_game", 1, false, null, 5000);
-            FtA3.Withhold(FtA3.IC_game, "its fields are the component's live statics (_g, _lastTickUs, _wasPicking, the RPC depth, the survey) with no scratch instance; Tick and Slice read SeatEvidence.CombatState and the players, Package needs a SyncPlayerMovement, EnterRpc pushes onto the live RPC frame stack and reads Photon's settings");
+            FtA3.Executed(FtA3.IC_game, "in game (ruling FRAME-TIME-ROUND-R4), its live readers timed in their own bodies: IdentityClockEvidence.EnterRpc, IdentityClockEvidence.Package, IdentityClockEvidence.Slice, IdentityClockEvidence.Tick");
+            FtA3.LiveCalibrated(FtA3.IC_game);
         }
 
         private static long FtNow() { return System.Diagnostics.Stopwatch.GetTimestamp(); }

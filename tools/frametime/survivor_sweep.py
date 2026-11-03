@@ -1750,11 +1750,17 @@ def live_callers(uni, sw):
     return sw._live_callers
 
 
-def a3_check(uni, sw, text, fields_out, spec=None, drop=None, plant=None):
+LIVE_PROOF = "live:executed"
+
+
+def a3_check(uni, sw, text, fields_out, spec=None, drop=None, plant=None, noscope=None):
     """The A3 checks: (i) a3.py names every SURVIVORS.md row once, as a 5-tuple with a known kind; (ii) every zero row
     carries a sweep proof this function re-derives (no live write of any of its fields); (iii) every live reader member
     of every dependent row counts it (FtA3.Read, direct, through a helper, or COVERED by its callers), and every
-    FtA3.Read sits in a live reader of its row. Returns (fails, report) where report is per row."""
+    FtA3.Read sits in a live reader of its row; (iv) ruling FRAME-TIME-ROUND-R4: every FtA3.Read of a live row
+    (proof live:executed, calibrated in game) sits inside its member's timing scope, FtA3.TEnter() before it and
+    FtA3.TExit(ftScope) after it in the same member (noscope: a (file, line) read treated as unscoped, the selftest's
+    control). Returns (fails, report) where report is per row."""
     fails = []
     spec = load_a3() if spec is None else spec
     md = a3_rows_of_md(text)
@@ -1776,12 +1782,26 @@ def a3_check(uni, sw, text, fields_out, spec=None, drop=None, plant=None):
         if kind == "zero" and proof not in ZERO_PROOFS:
             fails.append("a3.py row %s: zero needs a sweep proof this sweep checks (%s), got %r"
                          % (n, "|".join(ZERO_PROOFS), proof))
-        if kind == "dependent" and proof:
-            fails.append("a3.py row %s: a dependent row carries no proof, got %r" % (n, proof))
+        if kind == "dependent" and proof not in ("", LIVE_PROOF):
+            fails.append("a3.py row %s: a dependent row carries no proof or %s, got %r" % (n, LIVE_PROOF, proof))
     for sid in md:
         if sid not in names.values():
             fails.append("SURVIVORS.md row %s has no a3.py row" % sid)
     idx = A3Index(uni, drop=drop, plant=plant)
+    live_rows = {row[0] for row in spec if len(row) == 5 and row[2] == "dependent" and row[4] == LIVE_PROOF}
+    scoped = 0
+    for (v, p, const, fm) in idx.reads:
+        if const not in live_rows or v is None:
+            continue
+        a = v.code.rfind("FtA3.TEnter()", fm.body_start, p)
+        b = v.code.find("FtA3.TExit(ftScope)", p, fm.end + 1)
+        if a < 0 or b < 0 or noscope == (v.name, v.line(p)):
+            fails.append("a3 row %s: the live read at %s:%d sits outside a timing scope (FtA3.TEnter ... "
+                         "FtA3.TExit(ftScope) in its member %s)" % (const, v.name, v.line(p), fm.name))
+        else:
+            scoped += 1
+    if live_rows and not scoped:
+        fails.append("a3.py marks %s live, but no FtA3.Read of them was found" % sorted(live_rows))
     callers = live_callers(uni, sw)
     report = []
     readers_of = {}
@@ -2204,6 +2224,26 @@ def selftest_a3(uni, sw, text):
     print("  (d2) FtA3.Read(FtA3.%s) planted in %s: %s" % (row["name"], others[0].key, "FAILS as required (%s)" % next(
         x for x in fp if "no live reader" in x) if p_ok else "did NOT fail on the misplaced read (%s)" % fp[:2]))
     ok &= p_ok
+    # (h) ruling FRAME-TIME-ROUND-R4: a live row's read treated as unscoped fails; a calibrated row marked live,
+    # whose readers carry no timing scope, fails for every one of its reads
+    lr = [(v, p, const, fm) for (v, p, const, fm) in idx.reads
+          if v is not None and any(r[0] == const and r[2] == "dependent" and r[4] == LIVE_PROOF for r in spec)]
+    if not lr:
+        print("  (h) no live row's read in the FrameTime text: the scope control has no subject")
+        return False
+    v_, p_, c_, fm_ = lr[0]
+    fh, _ = a3_check(uni, sw, text, fields_out, spec=spec, noscope=(v_.name, v_.line(p_)))
+    h_ok = any("sits outside a timing scope" in x and "%s:%d" % (v_.name, v_.line(p_)) in x for x in fh)
+    print("  (h) the live read of %s at %s:%d unscoped: %s" % (c_, v_.name, v_.line(p_), "FAILS as required"
+                                                             if h_ok else "did NOT fail (%s)" % fh[:2]))
+    ok &= h_ok
+    calr = next(e for e in dep if e["proof"] == "")
+    spec_h = [(n, sid, k, w, LIVE_PROOF) if n == calr["name"] else (n, sid, k, w, pf) for (n, sid, k, w, pf) in spec]
+    fh2, _ = a3_check(uni, sw, text, fields_out, spec=spec_h)
+    h2_ok = any("a3 row %s: the live read" % calr["name"] in x for x in fh2)
+    print("  (h2) %s (calibrated at game start, its readers unscoped) marked live: %s" % (
+        calr["name"], "FAILS as required" if h2_ok else "did NOT fail (%s)" % fh2[:2]))
+    ok &= h2_ok
     # (e) a dependent row with live writes declared zero by sweep proof
     flip = next(e for e in dep if e["writers"])
     spec_e = [(n, sid, "zero", "control", "sweep:no-live-write") if n == flip["name"] else (n, sid, k, w, pf)

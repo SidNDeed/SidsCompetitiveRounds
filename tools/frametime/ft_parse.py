@@ -234,7 +234,8 @@ INT_KEYS = {"written", "withheld", "seg", "pair", "base_us", "segs", "of", "cycl
             "plant_mixed", "ticks", "span_g", "span_gn", "span_u", "span_un", "on_calls", "zs", "zl",
             "t0", "t1", "live", "between", "pick", "over", "menu", "at_call", "edge", "off", "span_off",
             "hash_t0", "hash_t1", "sP", "psP", "excl", "se", "ce", "ic", "calls", "dispatched",
-            "cap", "steady", "reads_on", "reads_win", "writes_on", "starts", "nonempty", "faults"}
+            "cap", "steady", "reads_on", "reads_win", "writes_on", "starts", "nonempty", "faults",
+            "reads", "scopes", "tmax", "unscoped", "depth_err"}
 
 
 def parse_line(line):
@@ -267,6 +268,10 @@ def parse_line(line):
             rec[k] = (_int(k, a), _int(k, b))
         else:
             rec[k] = v
+    # round-4 MEDIUM (ft_parse.py:1132): FtCalib and FtA3 write a failed calibration as a warning that still carries
+    # kind=<fhat|disp|a3|span>; it is marked here, and every check counting a calibration kind counts only unmarked lines
+    if kind == "cal" and re.search(r"(^|\s)failed:", rest):
+        rec["failed"] = 1
     if "pt" in rec:
         g, r, p = rec["pt"].split(".")
         rec["game"], rec["round"], rec["point"] = int(g), int(r), int(p)
@@ -395,7 +400,9 @@ RECORDS = {
     "settled": "complete() and vr2: one per game",
     "p": "complete(): point lines per game; a3(): a drained row's probe count equals the game's point lines",
     "w": "records_missing(): per point, as many as the point line's windows",
-    "cal": "complete() and vr2: one game-start run per game with fhat, span and every disp shape; a3(): its a3 family",
+    "menu_armed": "menu_check(): one per menu run, the startup snapshot before it and none between it and menu_done",
+    "cal": "complete() and vr2: one game-start run per game with a successful fhat, span and every disp shape and no "
+           "failure warning; a3(): its a3 family; a3_live(): a live row's executed line per game",
     "census": "complete() and vr5_records: one per registered entry per game",
     "opened": "vr5_records: one per game",
     "heavy": "records_missing() and b3(): one per operation per game",
@@ -442,7 +449,6 @@ EMITTED_UNREAD = {
     "not": "FtArm's 'not armed' record; as for armed",
     "room": "FtArm's room record; as for armed",
     "ended": "FtArm's end record; complete() requires the sitting complete line instead",
-    "menu_armed": "FtMenu's configuration echo; menu_done's of= and the terminal settled line's force= carry what menu_check judges",
     "menu_base": "FtMenu's base sample; menu_done's base_us and the menu point lines carry what menu_check judges",
     "menu_wait": "FtMenu waiting for its input; a run that never completes has menu_done why= the failed input",
     "ranked": "the ranked-check guard trace ('ranked-check ...'); _LINE does not even match it (the hyphen)",
@@ -600,7 +606,94 @@ def a3_spec():
     return runpy.run_path(os.path.join(here, "gate_specs", "a3.py"))["A3"]
 
 
-def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None):
+LIVE_PROOF = "live:executed"
+
+
+def fhat_ok(fh, why):
+    """One successful f_hat calibration line for the run: why as named, f_hat above 0, its spins dk/dt list."""
+    return (len(fh) == 1 and fh[0].get("why") == why and isinstance(fh[0].get("f_hat"), int) and fh[0]["f_hat"] > 0
+            and re.fullmatch(r"\d+/\d+(,\d+/\d+)*", str(fh[0].get("spins", ""))) is not None)
+
+
+def a3_live(recs, spec=None, first_game=1, last_game=LAST_GAME):
+    """Ruling FRAME-TIME-ROUND-R4: the in-game executed calibration of the live rows (a3.py proof live:executed),
+    whose real readers run only in live combat. The build times every live reader method of such a row in its own
+    body (FtA3.TEnter/TExit, exclusive of nested reader scopes) and writes per game one line
+    cal i=<the game's start calibration> why=game<g> kind=a3 k=<row> live=1 reads= scopes= ticks= tmax= unscoped=
+    depth_err=. d_k is the largest, over the measured games with reads, of ticks / reads (us by the Stopwatch
+    frequency): the executed exclusive cost of the row's reader bodies per live read, so r_k_max x d_k bounds the
+    row's per-frame read cost from above (its reads_win are a subset of its scoped reads). Refuses when a live row
+    carries a planning (u/p), withheld or failed calibration line, when a non-live row carries a live line, when a
+    game 0 to last_game lacks exactly one live line for a live row or that line is not under the game's start
+    calibration, when its reads differ from the game's a3 line reads_on or any read ran outside a scope (unscoped)
+    or a scope was unbalanced (depth_err), and when no measured game executed a read of the row. Returns
+    ({k: d_k us}, {k: [(g, reads, scopes, ticks, tmax)]})."""
+    spec = a3_spec() if spec is None else spec
+    live = [n for n, sid, kind, why, proof in spec if kind == "dependent" and proof == LIVE_PROOF]
+    names = set(row[0] for row in spec)
+    a3c = [r for r in recs if r["kind"] == "cal" and r.get("ckind") == "a3"]
+    for r in a3c:
+        k = r.get("k")
+        if "live" in r:
+            # a row the inventory names but does not mark live; a name outside the inventory is ignored, as every
+            # other a3 line of one is (the inventory's own coverage is test_a3_inventory_names_every_survivor_once)
+            if k in names and k not in live:
+                raise Refused("cal i=%s a3 k=%s: an in-game executed line for a row the inventory does not mark %s"
+                              % (r.get("i"), k, LIVE_PROOF))
+        elif k in live:
+            raise Refused("A3 live row %s: cal i=%s carries a %s line; a live row is calibrated only by its in-game "
+                          "executed line (ruling FRAME-TIME-ROUND-R4)"
+                          % (k, r.get("i"), "withheld" if r.get("withheld") else "failed" if r.get("failed")
+                             else "planning (u/p)"))
+    if not live:
+        return {}, {}
+    freq = set(r["freq"] for r in recs if r["kind"] == "settled")
+    if len(freq) != 1:
+        raise Refused("A3 live rows need one Stopwatch frequency (got %s)" % sorted(freq))
+    f = freq.pop()
+    starts = {}
+    for r in recs:
+        if (r["kind"] == "cal" and re.fullmatch(r"game\d+", str(r.get("why", ""))) and "live" not in r
+                and not r.get("failed")):
+            starts.setdefault(int(r["why"][4:]), set()).add(r["i"])
+    d, det = {}, {}
+    for k in live:
+        best = None
+        for g in range(0, last_game + 1):
+            rows = [r for r in a3c if r.get("k") == k and "live" in r and r.get("why") == "game%d" % g]
+            if len(rows) != 1:
+                raise Refused("A3 live row %s: game %d has %d executed calibration lines (needs 1)" % (k, g, len(rows)))
+            r = rows[0]
+            gone = [x for x in ("i", "reads", "scopes", "ticks", "tmax", "unscoped", "depth_err") if x not in r]
+            if gone or r["live"] != 1:
+                raise Refused("A3 live row %s: game %d line lacks %s or live=%s" % (k, g, gone, r.get("live")))
+            run = starts.get(g, set())
+            if len(run) != 1 or r["i"] not in run:
+                raise Refused("A3 live row %s: game %d line i=%d is not the game's start calibration %s"
+                              % (k, g, r["i"], sorted(run)))
+            if r["unscoped"] != 0 or r["depth_err"] != 0:
+                raise Refused("A3 live row %s: game %d unscoped=%d depth_err=%d (needs 0 and 0: every read timed in "
+                              "a balanced scope)" % (k, g, r["unscoped"], r["depth_err"]))
+            if min(r["reads"], r["scopes"], r["ticks"], r["tmax"]) < 0 or r["scopes"] > r["reads"] or \
+                    (r["reads"] == 0) != (r["scopes"] == 0) or r["tmax"] > r["ticks"]:
+                raise Refused("A3 live row %s: game %d reads=%d scopes=%d ticks=%d tmax=%d are inconsistent"
+                              % (k, g, r["reads"], r["scopes"], r["ticks"], r["tmax"]))
+            a3l = [q for q in recs if q["kind"] == "a3" and q.get("g") == g and q.get("k") == k]
+            if len(a3l) != 1 or a3l[0].get("reads_on") != r["reads"]:
+                raise Refused("A3 live row %s: game %d executed reads %d, the game's a3 line counts %s"
+                              % (k, g, r["reads"], [q.get("reads_on") for q in a3l]))
+            det.setdefault(k, []).append((g, r["reads"], r["scopes"], r["ticks"], r["tmax"]))
+            if g >= first_game and r["reads"] > 0:
+                v = r["ticks"] / r["reads"] * 1e6 / f
+                best = v if best is None else max(best, v)
+        if best is None:
+            raise Refused("A3 live row %s: no measured game executed a read of it (its in-game calibration is empty)"
+                          % k)
+        d[k] = best
+    return d, det
+
+
+def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None, peer_recs=None):
     """A3 (ruling FRAME-TIME-ROUND-R1-A1, route D; METHOD-V4.1 section 0), the fifth term of U: a deterministic
     bound on the class (iii) carryover the whole-entry gate leaves. Per content-dependent survivor k, the build
     counts, in every ON point's live frames, the live reads of k whose work can differ from an always-ON game's:
@@ -614,7 +707,10 @@ def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None):
     nonempty 0, faults 0). Refuses when the spec names no structure, when a row's kind is unknown or a zero or
     drained row has no reason, when a dependent structure lacks its a3 line in a measured game (or carries two) or
     its calibration line in a game-start calibration, or when a drained row lacks its a3drain line (or carries two)
-    or reports a point that started with it holding entries. Returns (A3, [A_j], {k: r_k_max}, {k: mean d_k us})."""
+    or reports a point that started with it holding entries. A live row (proof live:executed, ruling
+    FRAME-TIME-ROUND-R4) takes its d_k from its in-game executed lines (a3_live), the same in every A_j; with
+    peer_recs (the other seat's log) its executed lines are required and validated too, and d_k is the larger of the
+    two seats'. Returns (A3, [A_j], {k: r_k_max}, {k: mean d_k us})."""
     spec = a3_spec() if spec is None else spec
     if not spec:
         raise Refused("the A3 inventory names no structure")
@@ -638,10 +734,17 @@ def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None):
                           % (n, sid, proof, ", ".join(sorted(ZERO_PROOFS))))
         if kind == "drained" and proof != "probe:a3drain":
             raise Refused("A3 row %s (%s): a drained row's proof is its probe (probe:a3drain), got %r" % (n, sid, proof))
+        if kind == "dependent" and proof not in ("", LIVE_PROOF):
+            raise Refused("A3 row %s (%s): a dependent row's proof is empty or %s, got %r" % (n, sid, LIVE_PROOF, proof))
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("A3 needs one Stopwatch frequency (got %s)" % sorted(freq))
     proof_records(recs, spec, last_game)
+    # ruling FRAME-TIME-ROUND-R4: the live rows' in-game executed calibration, from this log and the peer's
+    ld, _ = a3_live(recs, spec, first_game, last_game)
+    if peer_recs is not None:
+        pd, _ = a3_live(peer_recs, spec, first_game, last_game)
+        ld = {k: max(v, pd[k]) for k, v in ld.items()}
     # ruling FRAME-TIME-ROUND-R3-A1: a row whose real reader the build cannot execute is withheld by the build (its a3
     # calibration line says withheld=1); A3 then has no bound for it, so U is not computable and B1 is withheld,
     # naming the rows
@@ -680,16 +783,21 @@ def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None):
     cals = {}
     for r in recs:
         if r["kind"] == "cal" and re.fullmatch(r"game\d+", str(r.get("why", ""))) and r.get("ckind") == "a3":
+            if "live" in r:
+                continue
+            if r.get("failed") or "u" not in r or "p" not in r or "n" not in r:
+                raise Refused("cal i=%s a3 k=%s: a failed or incomplete calibration line" % (r.get("i"), r.get("k")))
             u = [int(x) for x in r["u"].split(",")]
             pp = [int(x) for x in r["p"].split(",")]
             if len(u) != len(pp) or not u:
                 raise Refused("cal i=%d a3 k=%s: batch lists differ" % (r["i"], r["k"]))
             cals.setdefault(r["i"], {})[r["k"]] = abs(sum(b - a for a, b in zip(u, pp)) / len(u)) / r["n"] * 1e6 / f
-    if dep and len(cals) < 2:
+    calc = [k for k in dep if k not in ld]
+    if calc and len(cals) < 2:
         raise Refused("A3 needs at least two game-start calibrations (got %d)" % len(cals))
     # round-2 HIGH (ft_parse.py:495): every game's start calibration carries the A3 family; one game's family
     # dropped must withhold the verdict, never shrink J
-    if dep:
+    if calc:
         cal_games = {}
         for r in recs:
             if r["kind"] == "cal" and re.fullmatch(r"game\d+", str(r.get("why", ""))):
@@ -700,15 +808,15 @@ def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None):
                 raise Refused("A3: game %d has %d start calibrations (needs 1)" % (g, len(runs)))
             i = next(iter(runs))
             if i not in cals:
-                raise Refused("calibration %d (game %d) has no a3 line for %s" % (i, g, sorted(dep)))
+                raise Refused("calibration %d (game %d) has no a3 line for %s" % (i, g, sorted(calc)))
     ds, dk = [], {}
     for i in sorted(cals):
-        miss = sorted(k for k in dep if k not in cals[i])
+        miss = sorted(k for k in calc if k not in cals[i])
         if miss:
             raise Refused("calibration %d has no a3 line for %s" % (i, miss))
-        ds.append(sum(rate[k] * cals[i][k] for k in dep))
+        ds.append(sum(rate[k] * (ld[k] if k in ld else cals[i][k]) for k in dep))
         for k in dep:
-            dk.setdefault(k, []).append(cals[i][k])
+            dk.setdefault(k, []).append(ld[k] if k in ld else cals[i][k])
     if not dep:
         return 0.0, [], {}, {}
     j = len(ds)
@@ -1124,13 +1232,23 @@ def vr2(recs, last_game=None):
     for g in games:
         if g < 0:
             continue
-        runs = sorted(set(r["i"] for r in recs if r["kind"] == "cal" and r.get("why") == "game%d" % g))
+        # a live row's executed line (ruling FRAME-TIME-ROUND-R4) is written at the game's end under the start run's i;
+        # it is no start calibration, so it never stands for a missing run
+        runs = sorted(set(r["i"] for r in recs if r["kind"] == "cal" and r.get("why") == "game%d" % g
+                          and "live" not in r))
         if len(runs) != 1:
             bad.append("game %d: %d calibration runs (needs 1)" % (g, len(runs)))
             continue
-        cl = [r for r in recs if r["kind"] == "cal" and r.get("i") == runs[0]]
-        if not any(r.get("ckind") == "fhat" for r in cl):
-            bad.append("game %d: calibration %d has no fhat line" % (g, runs[0]))
+        allc = [r for r in recs if r["kind"] == "cal" and r.get("i") == runs[0]]
+        # round-4 MEDIUM (ft_parse.py:1132): a failure warning names its kind but is no calibration; any one in the
+        # game's run fails VR2, and the coverage below counts successful lines only
+        fails = sorted(set(str(r.get("ckind")) for r in allc if r.get("failed")))
+        if fails:
+            bad.append("game %d: calibration %d carries failure warnings for %s" % (g, runs[0], ", ".join(fails)))
+        cl = [r for r in allc if not r.get("failed")]
+        if not fhat_ok([r for r in cl if r.get("ckind") == "fhat"], "game%d" % g):
+            bad.append("game %d: calibration %d has no successful fhat line (one, why=game%d, f_hat > 0, its spins)"
+                       % (g, runs[0], g))
         if not any(r.get("ckind") == "span" for r in cl):
             bad.append("game %d: calibration %d has no span line" % (g, runs[0]))
         got = set(r.get("shape") for r in cl if r.get("ckind") == "disp")
@@ -1193,7 +1311,8 @@ def menu_check(recs, z=Z_END):
     force = sett[-1].get("force", "none")
     seg, fh, fhs = {}, None, []
     for r in recs:
-        if r["kind"] == "cal" and r.get("ckind") == "fhat" and str(r.get("why", "")).startswith("menu"):
+        if (r["kind"] == "cal" and r.get("ckind") == "fhat" and str(r.get("why", "")).startswith("menu")
+                and not r.get("failed")):
             fh = r["f_hat"]
             fhs.append(fh)
         elif r["kind"] == "menu":
@@ -1214,10 +1333,24 @@ def menu_check(recs, z=Z_END):
     if len(post) != 1:
         raise Refused("the menu check needs exactly one settled line after menu_done (got %d)" % len(post))
     terminal = post[0]
-    # a menu run writes one settled line, FtMenu's FtCalib.Settled after menu_done (no game starts in a menu run, so
-    # FtSchedule writes none): any other is not this run's
-    if len(sett) != 1:
-        bad.append("%d settled lines in a menu run (FtMenu writes one, after menu_done)" % len(sett))
+    # round-4 MEDIUM (ft_parse.py:1219): a menu run carries two snapshots, at their own positions: the startup one
+    # (Plugin's FtCalib.Settled(-1, -1) before FtMenu arms, so before menu_armed, c_plant -1) and the terminal one
+    # (FtMenu's FtCalib.Settled after menu_done, judged above and required); no game starts in a menu run, so
+    # FtSchedule writes none, and a settled line anywhere else is not this run's
+    iarm = [i for i, r in enumerate(recs) if r["kind"] == "menu_armed"]
+    if len(iarm) != 1:
+        bad.append("%d menu_armed lines (needs 1)" % len(iarm))
+    else:
+        pre = [r for r in recs[:iarm[0]] if r["kind"] == "settled"]
+        if len(pre) != 1 or pre[0].get("g") != -1 or pre[0].get("c_plant") != -1:
+            bad.append("startup snapshot: %d settled lines before menu_armed (needs 1, g=-1 c_plant=-1)" % len(pre))
+        mid = [r for r in recs[iarm[0]:idone] if r["kind"] == "settled"]
+        if mid:
+            bad.append("%d settled lines inside the menu run (only the startup and the terminal snapshot belong to it)"
+                       % len(mid))
+    mfail = sorted(set("%s %s" % (r.get("why", "-"), r.get("ckind")) for r in recs if r["kind"] == "cal" and r.get("failed")))
+    if mfail:
+        bad.append("menu run carries calibration failure warnings: %s" % ", ".join(mfail))
     bad += failure_events(recs)
     # the absent-record sweep (ruling FRAME-TIME-ROUND-R2): every segment FtMenu counted has its menu line, and every
     # menu point line its segment; a dropped menu line must not leave its segment out of the judgement
@@ -1435,7 +1568,10 @@ QUALIFY = ("conditional: U bounds the NET main-thread CPU the seven components a
            "VR6's file-listing half is frame_time_seat.ps1's report")
 
 
-def report(text):
+def report(text, peer=None, require_peer=False):
+    """The verdict report of one seat's sitting log. peer: the other seat's log text (ruling FRAME-TIME-ROUND-R4:
+    the live rows' in-game calibration is read from both logs); require_peer: the command line's form, where a
+    sitting log without the peer's leaves U not computable when the inventory has live rows."""
     recs = read(text)
     if any(r["kind"] in ("menu", "menu_done") for r in recs):
         return menu_report(recs)
@@ -1503,7 +1639,18 @@ def report(text):
         _, _, _, elo2, _, _ = e_c(recs)
         _, _, ku = k_up(recs)
         tr = t_ref(recs)
-        a3v, a3j, a3r, a3d = a3(recs, last_game=LAST_GAME)
+        peer_recs = read(peer) if peer is not None else None
+        if peer_recs is None and require_peer and any(r[4] == LIVE_PROOF for r in a3_spec()):
+            raise Refused("the live rows' in-game calibration is read from both seats' logs; no peer log was given")
+        for who, rr in (("this seat", recs), ("peer seat", peer_recs)):
+            if rr is not None:
+                lv, ldet = a3_live(rr, last_game=LAST_GAME)
+                out.append("A3 live rows (%s): %s" % (who, "; ".join(
+                    "%s d %.4f us over %d games, reads %d, tmax %d ticks" % (k, lv[k], len(ldet[k]),
+                                                                           sum(x[1] for x in ldet[k]),
+                                                                           max(x[4] for x in ldet[k]))
+                    for k in sorted(lv)) or "none"))
+        a3v, a3j, a3r, a3d = a3(recs, last_game=LAST_GAME, peer_recs=peer_recs)
         out.append("A3 %.3f us per live frame over J=%d calibrations, %d content-dependent structures%s"
                    % (a3v, len(a3j), len(a3r), "".join("; %s r_max %.4f d %.4f us" % (k, a3r[k], a3d[k]) for k in sorted(a3r))))
         lead = max(0.0, de + dh) / min(1.0, max(elo2, 1e-9))
@@ -1638,7 +1785,8 @@ def report(text):
 
 if __name__ == "__main__":
     try:
-        print(report(open(sys.argv[1], encoding="utf-8", errors="replace").read()))
+        _peer = open(sys.argv[2], encoding="utf-8", errors="replace").read() if len(sys.argv) > 2 else None
+        print(report(open(sys.argv[1], encoding="utf-8", errors="replace").read(), peer=_peer, require_peer=True))
     except Refused as e:
         print("REFUSED: %s" % e)
         sys.exit(3)

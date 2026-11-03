@@ -346,6 +346,11 @@ FREQ, FHAT = 10000000, 3000000000
 ENTRIES = P.expected_entries()
 SHAPES = sorted(set(s for e, s in ENTRIES))
 A3_DEP = [r[0] for r in P.a3_spec() if r[2] == "dependent"]
+# ruling FRAME-TIME-ROUND-R4: the live rows (calibrated in game) and the rows calibrated at every game start
+A3_LIVE = [r[0] for r in P.a3_spec() if r[2] == "dependent" and r[4] == P.LIVE_PROOF]
+A3_CAL = [k for k in A3_DEP if k not in A3_LIVE]
+# the six rows the ruling names (fixed here, so a row losing its live marker in a3.py fails the controls)
+LIVE_SIX = ["CE_Pos", "CE_Recent", "CE_gun_scalars", "CE_capture", "SE_scalars", "IC_game"]
 A3_DRAIN = [r[0] for r in P.a3_spec() if r[2] == "drained"]
 # the plugin files holding the FtA3 registrations (mut_parse copies each)
 A3_SITES = ["CombatEvidence.cs", "SeatEvidence.cs", "IdentityClockEvidence.cs", "HitEvidence.cs", "PoisonSync.cs",
@@ -357,7 +362,8 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
          drop_a3=(), drop_a3cal=(), a3_peak=None, drop_a3drain=(), a3_dirty=None, drop_heavy=(), drop_offthread=(),
          drop_flushed=(), drop_between=(), drop_w=(), refusals_why=("game", "quit"), a3_starts=None, a3_cal_p=None,
          drop_p=(), drop_replay=(), replay_bad=None, drop_counters=(), counters_bad=None, point_missing_end=None,
-         a3_withheld=None, a3zero_lines=None):
+         a3_withheld=None, a3zero_lines=None, live_planning=None, live_beside=None, live_drop=(), live_bad=None,
+         live_ticks=30, live_peak=None, fhat_fail=(), fhat_extra_fail=(), fhat_zero=(), disp_fail=None):
     """A synthetic sitting, every line as FtFrames, FtCalib, FtCensus and FtDrive write it. Point costs: ON adds
     cost_us of C per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor
     case). The drop_* and shut_ic arguments remove or spoil records for the completeness controls."""
@@ -374,9 +380,19 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                 L.append("[FRAME-TIME] answer_replay g=%d ticks=%d result=%s"
                          % (g, 4000, "timeout" if replay_bad == g else replay))
         if g not in drop_cal:
-            L.append("[FRAME-TIME] cal i=%d why=game%d kind=fhat f_hat=%d spins=1/1" % (g + 1, g, FHAT))
+            # round-4 MEDIUM (ft_parse.py:1132): a failed f_hat calibration is a warning that still names its kind
+            if g in fhat_fail:
+                L.append("[FRAME-TIME] cal i=%d kind=fhat failed: overflow" % (g + 1))
+            else:
+                L.append("[FRAME-TIME] cal i=%d why=game%d kind=fhat f_hat=%d spins=1/1"
+                         % (g + 1, g, 0 if g in fhat_zero else FHAT))
+            if g in fhat_extra_fail:
+                L.append("[FRAME-TIME] cal i=%d kind=fhat failed: overflow" % (g + 1))
             for s in SHAPES:
                 if (g, s) in drop_disp:
+                    continue
+                if disp_fail == (g, s):
+                    L.append("[FRAME-TIME] cal i=%d why=game%d kind=disp shape=%s failed: no calls" % (g + 1, g, s))
                     continue
                 L.append("[FRAME-TIME] cal i=%d why=game%d kind=disp shape=%s n=100000 u=1000000,1000000"
                          " p=1030000,1030000" % (g + 1, g, s))
@@ -387,6 +403,10 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                     ap = (a3_cal_p or {}).get(g, 130000)
                     if a3_withheld == k:
                         L.append("[FRAME-TIME] cal i=%d why=game%d kind=a3 k=%s withheld=1" % (g + 1, g, k))
+                        continue
+                    # a live row has no game-start calibration (FtA3.Calibrate skips it); live_planning gives it
+                    # the planning (u/p) line a stand-in would write, in place of its executed line
+                    if k in A3_LIVE and k not in (live_planning, live_beside):
                         continue
                     L.append("[FRAME-TIME] cal i=%d why=game%d kind=a3 k=%s n=1000 u=100000,100000 p=%d,%d"
                              % (g + 1, g, k, ap, ap))
@@ -460,6 +480,17 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
             if (g, k) not in drop_a3:
                 L.append("[FRAME-TIME] a3 g=%d k=%s cap=32 steady=1 reads_on=%d reads_win=%d writes_on=%d"
                          % (g, k, 2 * onlf, (3 * onlf if a3_peak == (g, k) else onlf // 4), 3 * onlf))
+        # ruling FRAME-TIME-ROUND-R4: each live row's executed line, written by FtA3.LogGame with the a3 lines
+        for k in A3_LIVE:
+            if (g, k) in live_drop or k in (live_planning, a3_withheld):
+                continue
+            rd = 2 * onlf
+            tk = rd * (live_ticks * 3 if live_peak == (g, k) else live_ticks)
+            v = dict(i=g + 1, reads=rd, scopes=rd // 2, ticks=tk, tmax=4 * live_ticks, unscoped=0, depth_err=0)
+            v.update((live_bad or {}).get((g, k), {}))
+            L.append("[FRAME-TIME] cal i=%d why=game%d kind=a3 k=%s live=1 reads=%d scopes=%d ticks=%d tmax=%d "
+                     "unscoped=%d depth_err=%d" % (v["i"], g, k, v["reads"], v["scopes"], v["ticks"], v["tmax"],
+                                                   v["unscoped"], v["depth_err"]))
         for k in A3_DRAIN:
             if (g, k) not in drop_a3drain:
                 st = a3_starts[2] if a3_starts and a3_starts[:2] == (g, k) else 14     # 7 rounds of 2 points
@@ -653,7 +684,8 @@ def test_a3_every_games_calibration_is_required_and_a_dropped_one_never_passes()
         assert not re.search(r"^VERDICT B1 (PASS|SID)", out2, re.M), out2
     with pytest.raises(P.Refused, match="game 8"):
         P.a3(P.read(_log(a3_cal_p=big, drop_a3cal={(8, k) for k in A3_DEP})), last_game=P.LAST_GAME)
-    with pytest.raises(P.Refused, match="game 8 has 0 start calibrations"):
+    # a live row's executed line names game 8's start calibration, which is gone: either refusal names it
+    with pytest.raises(P.Refused, match="game 8 (has 0 start calibrations|line i=9 is not the game's start calibration)"):
         P.a3(P.read(_log(drop_cal={8})), last_game=P.LAST_GAME)
     # the default reads the sitting's games too: no caller can skip the per-game rule by omitting last_game
     with pytest.raises(P.Refused, match="game 8"):
@@ -731,6 +763,7 @@ DELETIONS = (
     ("p", "menu", lambda r: r.get("pt") == "-1.9.1", "menu"),
     ("cal", "menu", lambda r: r.get("why") == "menu2", "menu"),
     ("menu_done", "menu", None, "menu"),
+    ("menu_armed", "menu", None, "menu"),
     ("settled", "menu", None, "menu"),
 )
 # the kinds whose PRESENCE is the event (their absence is the normal case): test_failure_events_make_the_run_incomplete
@@ -851,7 +884,7 @@ def test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot():
     assert not ok and any("menu calibrations" in b for b in bad), bad
     ok, _, bad = P.menu_check(P.read(_menu_log(drop_menu_cal=0)))
     assert not ok and any("menu calibrations" in b for b in bad), bad
-    with pytest.raises(P.Refused, match="Stopwatch frequency"):
+    with pytest.raises(P.Refused, match="settled line after menu_done"):
         P.menu_check(P.read(_menu_log(drop_terminal=True)))
     # the snapshot written before menu_done is not the terminal one
     with pytest.raises(P.Refused, match="settled line after menu_done"):
@@ -860,7 +893,23 @@ def test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot():
     assert not ok and any("terminal settled line missing_end=1" in b for b in bad), bad
     # a settled line the build never writes in a menu run fails it (its counters are not this run's)
     ok, _, bad = P.menu_check(P.read(_menu_log(extra_settled=True)))
-    assert not ok and any("2 settled lines in a menu run" in b for b in bad), bad
+    assert not ok and any("settled lines inside the menu run" in b for b in bad), bad
+
+
+def test_menu_check_validates_the_startup_and_the_terminal_snapshot():
+    # round-4 MEDIUM (ft_parse.py:1219): Codex's counterexample, the real menu shape with its startup snapshot,
+    # passes; the startup snapshot is required at its position and shape, the terminal one after menu_done
+    ok, _, bad = P.menu_check(P.read(_menu_log()))
+    assert ok, bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(drop_startup=True)))
+    assert not ok and any("startup snapshot" in b for b in bad), bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(startup_bad=True)))
+    assert not ok and any("startup snapshot" in b for b in bad), bad
+    with pytest.raises(P.Refused, match="settled line after menu_done"):
+        P.menu_check(P.read(_menu_log(drop_terminal=True)))
+    # a calibration failure warning in a menu run fails it
+    ok, _, bad = P.menu_check(P.read(_menu_log(menu_fhat_fail=True)))
+    assert not ok and any("failure warnings" in b for b in bad), bad
 
 
 def test_a3_probe_proofs_need_their_records_and_contrary_ones_fail():
@@ -883,6 +932,110 @@ def test_a3_probe_proofs_need_their_records_and_contrary_ones_fail():
     spec3 = [(n, s, kd, w, ("sweep:no-live-write" if n == k else pr)) for n, s, kd, w, pr in spec]
     with pytest.raises(P.Refused, match="contrary evidence"):
         P.a3(P.read(_log()), spec=spec3)
+
+
+def test_vr2_needs_a_successful_fhat_and_rejects_calibration_failures():
+    # round-4 MEDIUM (ft_parse.py:1132): Codex's counterexample, a failure warning in place of game 5's fhat line, kept
+    # VR2 PASS; it now fails, as does a failure beside a success, an f_hat of 0 and a failed disp shape
+    ok, why = P.vr2(P.read(_log()), P.LAST_GAME)
+    assert ok, why
+    ok, why = P.vr2(P.read(_log(fhat_fail={5})), P.LAST_GAME)
+    assert not ok and any("game 5: calibration 6 has no successful fhat line" in w for w in why), why
+    assert any("game 5: calibration 6 carries failure warnings for fhat" in w for w in why), why
+    ok, why = P.vr2(P.read(_log(fhat_extra_fail={5})), P.LAST_GAME)
+    assert not ok and any("carries failure warnings for fhat" in w for w in why), why
+    ok, why = P.vr2(P.read(_log(fhat_zero={5})), P.LAST_GAME)
+    assert not ok and any("game 5: calibration 6 has no successful fhat line" in w for w in why), why
+    s = sorted(SHAPES)[0]
+    ok, why = P.vr2(P.read(_log(disp_fail=(5, s))), P.LAST_GAME)
+    assert not ok and any("no disp line for shapes" in w for w in why), why
+    out = P.report(_log(fhat_fail={5}))
+    assert "VR2 instrument FAIL" in out and re.search(r"^VERDICT B1 (INVALID|withheld)", out, re.M), out
+
+
+def test_live_rows_take_their_executed_in_game_calibration():
+    # ruling FRAME-TIME-ROUND-R4: the six live rows are calibrated by their executed in-game lines: d_k is the
+    # largest per-game ticks / reads, and enters every A_j
+    assert sorted(A3_LIVE) == sorted(LIVE_SIX)
+    recs = P.read(_log())
+    d, det = P.a3_live(recs)
+    want = 30 * 1e6 / FREQ
+    assert sorted(d) == sorted(A3_LIVE) and all(abs(d[k] - want) < 1e-9 for k in A3_LIVE), d
+    assert all(len(det[k]) == P.LAST_GAME + 1 for k in A3_LIVE), det
+    v, ds, rate, dk = P.a3(recs, last_game=P.LAST_GAME)
+    assert all(abs(dk[k] - want) < 1e-9 for k in A3_LIVE)
+    # the per-game maximum: a game whose reads cost three times as much sets d_k
+    k = A3_LIVE[0]
+    d2, _ = P.a3_live(P.read(_log(live_peak=(4, k))))
+    assert abs(d2[k] - 3 * want) < 1e-9, d2
+    v2 = P.a3(P.read(_log(live_peak=(4, k))), last_game=P.LAST_GAME)[0]
+    assert v2 > v
+    out = P.report(_log())
+    assert "A3 live rows (this seat): " in out and "U not computable" not in out, out
+
+
+def test_live_row_planning_or_withheld_line_never_passes_as_executed():
+    # ruling FRAME-TIME-ROUND-R4 (R3-A1 stands): a planning value or a withheld line can never stand in for a live
+    # row's executed calibration, in place of it or beside it
+    for k in LIVE_SIX:
+        with pytest.raises(P.Refused, match="live row %s: cal i=\\d+ carries a planning" % k):
+            P.a3(P.read(_log(live_planning=k)), last_game=P.LAST_GAME)
+    k = A3_LIVE[1]
+    with pytest.raises(P.Refused, match="live row %s: cal i=\\d+ carries a planning" % k):
+        P.a3(P.read(_log(live_beside=k)), last_game=P.LAST_GAME)
+    with pytest.raises(P.Refused, match="live row %s: cal i=\\d+ carries a withheld" % k):
+        P.a3(P.read(_log(a3_withheld=k)), last_game=P.LAST_GAME)
+    for kw in (dict(live_planning=k), dict(live_beside=k), dict(a3_withheld=k)):
+        out = P.report(_log(**kw))
+        assert "U not computable" in out and "VERDICT B1 withheld" in out, (kw, out)
+
+
+def test_live_row_lines_are_complete_and_consistent():
+    # every game 0..16 carries exactly one executed line per live row, under that game's start calibration, its
+    # reads equal to the game's a3 line, every read scoped and every scope balanced; a live line for a row the
+    # inventory does not mark live is refused; a row never read in any measured game is withheld
+    k = A3_LIVE[2]
+    cases = [
+        (dict(live_drop={(5, k)}), "game 5 has 0 executed calibration lines"),
+        (dict(live_drop={(0, k)}), "game 0 has 0 executed calibration lines"),
+        (dict(live_bad={(5, k): {"reads": 7, "scopes": 3, "ticks": 210, "tmax": 120}}), "game 5 executed reads 7"),
+        (dict(live_bad={(5, k): {"unscoped": 1}}), "game 5 unscoped=1"),
+        (dict(live_bad={(5, k): {"depth_err": 2}}), "depth_err=2"),
+        (dict(live_bad={(5, k): {"i": 3}}), "game 5 line i=3 is not the game's start calibration"),
+        (dict(live_bad={(5, k): {"tmax": 10 ** 12}}), "are inconsistent"),
+    ]
+    for kw, msg in cases:
+        with pytest.raises(P.Refused, match=re.escape(msg)):
+            P.a3(P.read(_log(**kw)), last_game=P.LAST_GAME)
+    # no read in any measured game: the row's in-game calibration is empty (its a3 lines agree: reads_on 0)
+    txt = _log(live_bad={(g, k): {"reads": 0, "scopes": 0, "ticks": 0, "tmax": 0} for g in range(17)})
+    txt = re.sub(r"(a3 g=\d+ k=%s cap=32 steady=1 reads_on=)\d+" % k, r"\g<1>0", txt)
+    with pytest.raises(P.Refused, match="no measured game executed a read"):
+        P.a3_live(P.read(txt))
+    # a live line for a row calibrated at game start
+    txt = _log() + "\n[FRAME-TIME] cal i=3 why=game2 kind=a3 k=%s live=1 reads=1 scopes=1 ticks=1 tmax=1 unscoped=0 " \
+        "depth_err=0" % A3_CAL[0]
+    with pytest.raises(P.Refused, match="does not mark live:executed"):
+        P.a3(P.read(txt), last_game=P.LAST_GAME)
+
+
+def test_peer_seat_live_lines_are_read_and_required():
+    # ruling FRAME-TIME-ROUND-R4: the live rows' calibration is read from both seats' logs; each is validated, d_k is
+    # the larger of the two, and the command line's form withholds U without the peer's log
+    k = A3_LIVE[0]
+    v, _, _, dk = P.a3(P.read(_log()), last_game=P.LAST_GAME, peer_recs=P.read(_log(live_ticks=60, seed=9)))
+    assert abs(dk[k] - 60 * 1e6 / FREQ) < 1e-9, dk
+    with pytest.raises(P.Refused, match="game 3 has 0 executed calibration lines"):
+        P.a3(P.read(_log()), last_game=P.LAST_GAME, peer_recs=P.read(_log(live_drop={(3, k)})))
+    with pytest.raises(P.Refused, match="carries a planning"):
+        P.a3(P.read(_log()), last_game=P.LAST_GAME, peer_recs=P.read(_log(live_planning=k)))
+    out = P.report(_log(), peer=_log(seed=9), require_peer=True)
+    assert "A3 live rows (peer seat): " in out and "U not computable" not in out, out
+    out = P.report(_log(), require_peer=True)
+    assert "U not computable: the live rows' in-game calibration is read from both seats' logs" in out, out
+    assert "VERDICT B1 withheld" in out, out
+    out = P.report(_log(), peer=_log(live_drop={(3, k)}), require_peer=True)
+    assert "U not computable" in out and "VERDICT B1 withheld" in out, out
 
 
 def test_a3_row_withheld_by_the_build_withholds_b1():
@@ -1145,15 +1298,25 @@ FHAT = 3000000000        # cycles per second: 3000 per us
 
 def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing_seg=None, why="complete",
               gate_flip=None, excl_seg=None, empty_seg=None, drop_menu_seg=None, drop_menu_cal=None,
-              drop_terminal=False, terminal_bad=False, terminal_misplaced=False, extra_settled=False):
+              drop_terminal=False, terminal_bad=False, terminal_misplaced=False, extra_settled=False,
+              drop_startup=False, startup_bad=False, menu_fhat_fail=False):
     """A menu run as FtMenu writes it: pair 0 unplanted, then the four levels in turn, base 2500 us per frame."""
     ec = ec or {}
-    # FtMenu writes one settled line, after menu_done (FtMenu.cs FtCalib.Settled); extra_settled adds one before the
-    # run, as round 3's fixture did, which the build never writes
-    out = ["[Info   :CompetitiveRounds] [FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d"
-           " hires=1 f_hat=%d force=%s clock=1 frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0"
-           % (FREQ, FHAT, force)] if extra_settled else []
+    # round-4 MEDIUM (ft_parse.py:1219): a menu run carries two snapshots, as the build writes them: the startup one
+    # (Plugin.cs FtCalib.Run("start"); FtCalib.Settled(-1, -1), before FtMenu arms) and the terminal one (FtMenu's
+    # FtCalib.Settled after menu_done); extra_settled adds one inside the run, which the build never writes
+    out = [] if drop_startup else [
+        "[FRAME-TIME] cal i=0 why=start kind=fhat f_hat=%d spins=1/1" % FHAT,
+        "[Info   :CompetitiveRounds] [FRAME-TIME] settled g=-1 seed=7 c_plant=%d W=120 vsync=0 target=-1 freq=%d"
+        " hires=1 f_hat=%d force=%s clock=1 frames=0 missing_end=0 cycle_failures=0 span_depth_violations=0"
+        % (80 if startup_bad else -1, FREQ, FHAT, force)]
     out.append("[FRAME-TIME] menu_armed segments=%d seg_s=10 settle_s=20 force=%s seed=7" % (segs, force))
+    if extra_settled:
+        out.append("[FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
+                   " force=%s clock=1 frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0"
+                   % (FREQ, FHAT, force))
+    if menu_fhat_fail:
+        out.append("[FRAME-TIME] cal i=9 kind=fhat failed: overflow")
     levels = ("0.5", "1.5", "3", "5")
     base, level, cp, cycles = 2500, "0", 0, 0
     for s in range(1, segs + 1):

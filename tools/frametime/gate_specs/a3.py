@@ -13,14 +13,18 @@
 #              checks each carries FtA3.Read(FtA3.<name>)), its a3 line required in every measured game and its
 #              calibration (empty against its costliest content at capacity) at every game start; it adds
 #              r_k_max x d_k to A3. Proof "". The reason of a former zero row says why it is no longer zero.
+#              Proof "live:executed" (ruling FRAME-TIME-ROUND-R4): the row's real readers run only in live combat, so
+#              it has no game-start calibration; every live reader method is timed in its own body in game and the
+#              build writes the row's executed calibration line per game (ft_parse.a3_live); no planning value and no
+#              withheld line may stand in for it.
 _LIVE = "default-deny (ruling FRAME-TIME-ROUND-R2 (1)): the sweep finds its fields written in live members, so it is no zero row; "
 A3 = [
     ("CE_Top", "S01", "dependent", "", ""),
     ("CE_Ht", "S02", "dependent", "", ""),
     ("CE_Ping", "S03", "dependent", "", ""),
     ("CE_lhat_cache", "S04", "dependent", _LIVE + "DrainAim's cache test and read, calibrated as that test on scratch scalars", ""),
-    ("CE_Pos", "S05", "dependent", "", ""),
-    ("CE_Recent", "S06", "dependent", "", ""),
+    ("CE_Pos", "S05", "dependent", "", "live:executed"),
+    ("CE_Recent", "S06", "dependent", "", "live:executed"),
     ("CE_Wait", "S07", "drained", "DrainWaits runs on the non-live frames between points and every carried entry is due one frame later", "probe:a3drain"),
     ("CE_Rings", "S08", "drained", "the Mask/Aim/Res/Pack drains run TICK_ROWS_CAP rows per frame on the non-live frames between points too", "probe:a3drain"),
     ("CE_anchor", "S09", "dependent", _LIVE + "the anchor and segment slots and their CappedMap, counted per live reader", ""),
@@ -28,16 +32,16 @@ A3 = [
     ("CE_B5c", "S11", "dependent", "", ""),
     ("CE_counters", "S12", "dependent", _LIVE + "indexed counter increments, counted per live reader", ""),
     ("CE_scratch", "S13", "dependent", _LIVE + "per-hook scratch rows and scalars, counted per live reader", ""),
-    ("CE_gun_scalars", "S14", "dependent", _LIVE + "per-gun scalars, counted per live reader", ""),
+    ("CE_gun_scalars", "S14", "dependent", _LIVE + "per-gun scalars, counted per live reader", "live:executed"),
     ("CE_gun_account", "S15", "dependent", _LIVE + "GunAccount appends and CloseCycle, counted per live reader", ""),
     ("CE_aimset", "S16", "dependent", _LIVE + "AimSet.Add, counted per call", ""),
-    ("CE_capture", "S17", "dependent", _LIVE + "process and capture scalars, counted per live reader", ""),
+    ("CE_capture", "S17", "dependent", _LIVE + "process and capture scalars, counted per live reader", "live:executed"),
     ("CE_perf_probe", "S18", "dependent", _LIVE + "CombatEvidencePerf.Frame calls FtA3.Read on every ON live frame before it returns disabled (FtArm arms only with Debug.CombatEvidencePerfProbe off), so a sitting counts one read per ON live frame (round-3 MEDIUM a3.py:35); the histogram writes need the probe on", ""),
     ("SE_Hw", "S19", "dependent", "", ""),
     ("SE_Logs", "S20", "dependent", "", ""),
     ("SE_ordinals", "S21", "dependent", _LIVE + "Ordinals.Next with its eviction at KEEP (round-2 HIGH 3)", ""),
     ("SE_frames", "S22", "dependent", _LIVE + "RPC, block and hit frame stacks, counted per live reader", ""),
-    ("SE_scalars", "S23", "dependent", _LIVE + "per-game scalars and the seat Rng, counted per live reader", ""),
+    ("SE_scalars", "S23", "dependent", _LIVE + "per-game scalars and the seat Rng, counted per live reader", "live:executed"),
     ("HE_Flush", "S24", "drained", "HoldPoint fills the flush queue at the point end and the next Drain empties it", "probe:a3drain"),
     ("HE_game", "S25", "dependent", _LIVE + "the per-actor CappedMap and GameTally scalars, counted per live reader", ""),
     ("HE_point", "S26", "dependent", _LIVE + "PointTally adds, their time lists and the pair scans, counted per live reader", ""),
@@ -48,7 +52,7 @@ A3 = [
     ("IC_Clock", "S31", "dependent", "", ""),
     ("IC_scalars", "S32", "dependent", _LIVE + "package state, RPC frames and cost counters, counted per live reader", ""),
     ("IC_point", "S33", "dependent", _LIVE + "the point objects CurO / CurS, counted per live reader", ""),
-    ("IC_game", "S34", "dependent", _LIVE + "per-game scalars, counted per live reader", ""),
+    ("IC_game", "S34", "dependent", _LIVE + "per-game scalars, counted per live reader", "live:executed"),
     ("CD_notes", "S35", "dependent", _LIVE + "the fault notes and the census flag, counted per live reader", ""),
     ("PB_printed", "S36", "dependent", _LIVE + "the printed-peer Dictionary and scan scalars, counted per live reader", ""),
     ("HE_hitset", "S37", "dependent", "", ""),

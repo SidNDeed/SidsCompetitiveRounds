@@ -279,7 +279,7 @@ namespace CompetitiveRounds
             private uint _s;
             internal Rng(uint seed) { _s = seed == 0 ? 2463534242u : seed; }
 #if SCR_FRAMETIME
-            internal uint Next() { FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars); uint x = _s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; _s = x; return x; }
+            internal uint Next() { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars); uint x = _s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; _s = x; return x; } finally { FtA3.TExit(ftScope); } }
 #else
             internal uint Next() { uint x = _s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; _s = x; return x; }
 #endif

@@ -260,6 +260,9 @@ namespace CompetitiveRounds
         internal static int EnterRpc(ExitGames.Client.Photon.Hashtable data, Photon.Realtime.Player sender)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
 #endif
             int before = _ctxDepth;
@@ -286,6 +289,9 @@ namespace CompetitiveRounds
             }
             catch { }
             return before;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
 #if SCR_FRAMETIME
@@ -338,6 +344,9 @@ namespace CompetitiveRounds
         private static void NoteRemoteRpc(Ctx c)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars);
 #endif
             int now = ServerNow();
@@ -346,6 +355,9 @@ namespace CompetitiveRounds
             _samples.Add(now, age, _offUpdates, false, c.Stamp, SwMs);
             if (c.Method == "RPCA_DoHit") _ageHit.Add(age);
             else if (c.Method == "RPCAO_DoBlock" || c.Method == "RPCA_DoBlock") _ageBlk.Add(age);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- view batches (NetworkReplicaDiagnostics.CommitTiming) ------------------------
@@ -353,6 +365,9 @@ namespace CompetitiveRounds
         /// <summary>One player-stream batch from `actor` stamped `stamp` by its sender.</summary>
         internal static void NoteView(int actor, int stamp)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_scalars);
 #endif
@@ -377,12 +392,18 @@ namespace CompetitiveRounds
             }
             finally { FtSpan.Close(ftSpan); }
 #endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- blocks -------------------------------------------------------------------------
 
         private static bool CopyOf(Component c, out bool mine, out bool opp, out CharacterData data)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_scalars);
 #endif
@@ -394,6 +415,9 @@ namespace CompetitiveRounds
             mine = v.IsMine;
             opp = !mine && _oppActor != 0 && v.OwnerActorNr == _oppActor;
             return mine || opp;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private struct BlockFrame { internal bool Live, Mine, Keyed, Recv; internal int Tb, Kind, Ord, Ta; internal bool OnlyEffects; internal Block B; }
@@ -406,6 +430,9 @@ namespace CompetitiveRounds
         /// unkeyed) and returns a frame for the finalizer, or -1.</summary>
         internal static int BlockEnter(Block b, bool firstBlock, BlockTrigger.BlockTriggerType trig, bool onlyEffects)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
             FtA3.Wrote(FtA3.SE_scalars);
@@ -455,12 +482,18 @@ namespace CompetitiveRounds
                 return idx;
             }
             catch { return -1; }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Block.RPCA_DoBlock finalizer: `started` is whether this
         /// copy's sinceBlock reset ran in the synchronous part (B7).</summary>
         internal static void BlockExit(int idx)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
             FtA3.Wrote(FtA3.SE_scalars);
@@ -487,6 +520,9 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>PhotonNetwork.RPC postfix: this seat's own RPCAO_DoBlock to
@@ -494,6 +530,9 @@ namespace CompetitiveRounds
         /// filled (PhotonNetwork.rpcEvent, B5), never from a separate clock read.</summary>
         internal static void BlockSent(PhotonView view, string method, RpcTarget target)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
             FtA3.Wrote(FtA3.SE_scalars);
@@ -515,12 +554,18 @@ namespace CompetitiveRounds
                 Admit(_winRecv, _hitRecv, tb);
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Block.DoBlock / TryBlockMe finalizers: a reset with no block key (a blocked impact): the
         /// copy's last reset is now UNKEYED (B7 reset 2: since_ms counts from it, last_* [0,-1,0]).</summary>
         internal static void UnkeyedReset(Block b)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
 #endif
@@ -533,6 +578,9 @@ namespace CompetitiveRounds
                 copy.EverReset = true; copy.HasLast = false;
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void Admit(C.HitWindow w, C.EventList list, int tb)
@@ -561,6 +609,9 @@ namespace CompetitiveRounds
         /// partner went missing; the path field itself is the label.</summary>
         internal static int HitEnter(ProjectileHit ph, int pid, int viewID, bool wasBlocked)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
             FtA3.Wrote(FtA3.SE_scalars);
@@ -610,10 +661,16 @@ namespace CompetitiveRounds
                 return idx;
             }
             catch { return -1; }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         internal static void HitExit(int idx)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
             FtA3.Wrote(FtA3.SE_scalars);
@@ -630,6 +687,9 @@ namespace CompetitiveRounds
                 if (_winSent.Offer(e, f.Stamp)) _hitSent.Add(e);
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>HealthHandler.RPCA_SendTakeDamage prefix: whether the
@@ -659,6 +719,9 @@ namespace CompetitiveRounds
         internal static void DamageArrived(HealthHandler hh, bool gate, bool completed)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_frames);
             FtA3.Wrote(FtA3.SE_scalars);
 #endif
@@ -684,6 +747,9 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- shots ---------------------------------------------------------------------------
@@ -695,6 +761,9 @@ namespace CompetitiveRounds
         /// it (usedCooldown / attackSpeedMultiplier). A count, nothing more.</summary>
         internal static void ShotArrived(Component init, int kind)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_frames); FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
 #endif
@@ -723,12 +792,18 @@ namespace CompetitiveRounds
                 _hasFireStamp = true; _lastFireStamp = c.Stamp;
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>From HitEvidence.PointEnd: one point's pairing of the
         /// damage and knockback messages the other seat sent this seat.</summary>
         internal static void AddPush(int actor, int dmg, int force, int paired, int dmgAlone, int forceAlone, int inert, int dot)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
 #endif
@@ -739,6 +814,9 @@ namespace CompetitiveRounds
                 _push[4] += forceAlone; _push[5] += inert; _push[6] += dot;
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- own clocks and the send loop (the host's per-frame tick) --------------------------
@@ -755,6 +833,9 @@ namespace CompetitiveRounds
         /// and one send.</summary>
         internal static void Tick()
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
 #endif
@@ -789,6 +870,9 @@ namespace CompetitiveRounds
             }
             finally { FtSpan.Close(ftSpan); }
 #endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The CURRENT frame's combat state (C.CombatRead): the game's
@@ -813,6 +897,9 @@ namespace CompetitiveRounds
 
         private static void ReadOffset()
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
 #endif
@@ -839,11 +926,17 @@ namespace CompetitiveRounds
                 _offHas = true; _offLast = v;
             }
             catch { _offUnreadable = true; }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The 3 s round-trip sample: one call, taken in combat too.</summary>
         private static void SamplePing()
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.SE_scalars); FtA3.Wrote(FtA3.SE_scalars);
 #endif
@@ -853,6 +946,9 @@ namespace CompetitiveRounds
                 if (ping >= 0) { _rttSum += ping; _rttN++; if (ping > _rttMax) _rttMax = ping; }
             }
             catch { }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private const int OPP_KEYS_SCAN_CAP = 256;
@@ -2176,7 +2272,8 @@ namespace CompetitiveRounds
             FtA3.Set(FtA3.SE_frames, "SE_frames", CTX_CAP, false, FtCalFrames, 2000);
             FtA3.Executed(FtA3.SE_frames, "SeatEvidence.EnterRpc, SeatEvidence.RpcTop, SeatEvidence.TopFrame, SeatEvidence.ExitRpc");
             FtA3.Set(FtA3.SE_scalars, "SE_scalars", 1, false, null, 5000);
-            FtA3.Withhold(FtA3.SE_scalars, "the scalars select branches only through the live game's statics (_open, _oppActor, the offset and stat-object state), which a calibration cannot set without changing the live game, and the costliest readers (SamplePing, ReadOffset, Tick, the hook bodies) read Photon and the players");
+            FtA3.Executed(FtA3.SE_scalars, "in game (ruling FRAME-TIME-ROUND-R4), its live readers timed in their own bodies: SeatEvidence.AddPush, SeatEvidence.BlockEnter, SeatEvidence.BlockExit, SeatEvidence.BlockSent, SeatEvidence.CopyOf, SeatEvidence.DamageArrived, SeatEvidence.EnterRpc, SeatEvidence.HitEnter, SeatEvidence.HitExit, SeatEvidence.NoteRemoteRpc, SeatEvidence.NoteView, SeatEvidence.ReadOffset, SeatEvidence.SamplePing, SeatEvidence.ShotArrived, SeatEvidence.Tick, SeatEvidence.UnkeyedReset, SeatEvidenceCore.Rng.Next");
+            FtA3.LiveCalibrated(FtA3.SE_scalars);
         }
 
         private static HashSet<int> _ftImpSet;

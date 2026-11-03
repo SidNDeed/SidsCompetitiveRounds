@@ -86,18 +86,18 @@ MUTS = [
     ("A3 drained nonempty passes",
      'if r.get("starts", 0) <= 0 or r.get("nonempty", -1) != 0 or r.get("faults", -1) != 0:',
      'if r.get("starts", 0) <= 0 or r.get("faults", -1) != 0:'),
-    ("A3 inventory row removed", '    ("CE_Recent", "S06", "dependent", "", ""),', '',
+    ("A3 inventory row removed", '    ("CE_Recent", "S06", "dependent", "", "live:executed"),', '',
      "tools/frametime/gate_specs/a3.py"),
-    ("A3 dependent row demoted to zero", '    ("CE_Pos", "S05", "dependent", "", ""),',
+    ("A3 dependent row demoted to zero", '    ("CE_Pos", "S05", "dependent", "", "live:executed"),',
      '    ("CE_Pos", "S05", "zero", "demoted", "sweep:no-live-write"),', "tools/frametime/gate_specs/a3.py"),
-    ("A3 zero row with its proof reference removed", '    ("CE_Pos", "S05", "dependent", "", ""),',
+    ("A3 zero row with its proof reference removed", '    ("CE_Pos", "S05", "dependent", "", "live:executed"),',
      '    ("CE_Pos", "S05", "zero", "demoted", ""),', "tools/frametime/gate_specs/a3.py"),
     ("A3 capacity typed", 'FtA3.Set(FtA3.CE_Ping, "CE_Ping", PING_BIN_CAP,', 'FtA3.Set(FtA3.CE_Ping, "CE_Ping", 2000,',
      "plugin/CombatEvidence.cs"),
     ("A3 row not registered", 'FtA3.SetDrained(FtA3.PE_Rec, "PE_Rec", () => _recCount);', '',
      "plugin/PoisonSync.cs"),
     # ruling FRAME-TIME-ROUND-R2: the kind rule, H4 and its absent-record class, the MEDIUMs' parser halves
-    ("A3 per-game calibration rule removed (the old acceptance)", "    if dep:\n        cal_games = {}",
+    ("A3 per-game calibration rule removed (the old acceptance)", "    if calc:\n        cal_games = {}",
      "    if False:\n        cal_games = {}"),
     ("A3 zero row without its proof passes", r'if kind == "zero" and not re.fullmatch(r"(sweep|probe):\S+", proof):',
      "if False:"),
@@ -142,7 +142,7 @@ MUTS = [
     ('menu cycle calibrations not required', 'bad.append("menu calibrations %s, menu_done counts %s cycles" % (sorted(whys), cyc))', 'pass'),
     ('menu terminal snapshot read anywhere', 'post = [r for r in recs[idone + 1:] if r["kind"] == "settled"]', 'post = sett[-1:]'),
     ('menu terminal snapshot counters not judged', 'if terminal.get(k, -1) != 0:', 'if False:'),
-    ("menu run's extra settled lines pass", 'bad.append("%d settled lines in a menu run (FtMenu writes one, after menu_done)" % len(sett))', 'pass'),
+    ("menu run's extra settled lines pass", '        if mid:\n            bad.append(', '        if False:\n            bad.append('),
     ('failure events ignored by the sweep', 'miss = failure_events(recs)', 'miss = []'),
     ('failure events ignored by the menu check', 'bad += failure_events(recs)', 'pass'),
     ('clock installed read as a failure', '("clock", "refused:",', '("clock", None,'),
@@ -150,7 +150,38 @@ MUTS = [
     ('a read kind named unread', '    "spans": "FtCensus', '    "counters": "x",\n    "spans": "FtCensus'),
     ('a deletion control removed from the table', '("counters", "sitting", _g16, INCOMPLETE),', '', 'tools/frametime/test_ft_parse.py'),
     ('the build stops writing the counters line', 'Plugin.Log.LogInfo("[FRAME-TIME] counters g="', 'Plugin.Log.LogInfo("[FRAME-TIME] Counters g="', 'plugin/FtSchedule.cs'),
+    # round 5 (ruling FRAME-TIME-ROUND-R4 and R4-A1): the live rows' in-game calibration, M2's two snapshots, M3's
+    # failure warnings
+    ('live row marker removed: its planning value passes', '    ("CE_Pos", "S05", "dependent", "", "live:executed"),',
+     '    ("CE_Pos", "S05", "dependent", "", ""),', 'tools/frametime/gate_specs/a3.py'),
+    ('live row planning or withheld line beside its executed line passes',
+     'elif k in live:\n            raise Refused("A3 live row %s: cal i=%s carries a %s line;',
+     'elif False:\n            raise Refused("A3 live row %s: cal i=%s carries a %s line;'),
+    ('live row executed reads not matched to its a3 line', 'if len(a3l) != 1 or a3l[0].get("reads_on") != r["reads"]:',
+     'if len(a3l) != 1:'),
+    ('live row unscoped reads or unbalanced scopes pass', 'if r["unscoped"] != 0 or r["depth_err"] != 0:', 'if False:'),
+    ('live row missing game line passes',
+     'raise Refused("A3 live row %s: game %d has %d executed calibration lines (needs 1)" % (k, g, len(rows)))',
+     'continue'),
+    ('live row line not tied to its start calibration', 'if len(run) != 1 or r["i"] not in run:', 'if False:'),
+    ('live row d is the last game, not the largest', 'best = v if best is None else max(best, v)', 'best = v'),
+    ('live row with no executed read passes', 'if best is None:\n            raise Refused(',
+     'if False:\n            raise Refused('),
+    ('live line for a calibrated row passes', 'if k in names and k not in live:', 'if False:'),
+    ('peer seat live lines ignored', '    if peer_recs is not None:\n        pd, _ = a3_live(',
+     '    if False:\n        pd, _ = a3_live('),
+    ('peer log not required on the command line form', 'if peer_recs is None and require_peer and', 'if False and'),
+    ('live rows left out of A_j', '(ld[k] if k in ld else cals[i][k]) for k in dep))',
+     '(cals[i][k] if k in cals[i] else 0.0) for k in dep))'),
+    ('cal failure warnings unmarked', '        rec["failed"] = 1', '        pass'),
+    ('VR2 failure warnings pass', '        if fails:\n            bad.append("game %d: calibration %d carries failure warnings',
+     '        if False:\n            bad.append("game %d: calibration %d carries failure warnings'),
+    ('VR2 f_hat value not validated', ' and isinstance(fh[0].get("f_hat"), int) and fh[0]["f_hat"] > 0', ''),
+    ('menu startup snapshot not required',
+     'if len(pre) != 1 or pre[0].get("g") != -1 or pre[0].get("c_plant") != -1:', 'if False:'),
+    ('menu failure warnings pass', '    if mfail:\n        bad.append(', '    if False:\n        bad.append('),
 ]
+
 # the tests each mutant must turn red (taken from a --discover run on a green baseline, then pinned)
 KILLS = {
     'F18 accepts a replay that did not settle':
@@ -336,6 +367,40 @@ KILLS = {
         ['test_every_record_kind_has_a_deletion_control'],
     'the build stops writing the counters line':
         ['test_every_emitted_kind_is_read_or_named'],
+    'live row marker removed: its planning value passes':
+        ['test_live_row_planning_or_withheld_line_never_passes_as_executed'],
+    'live row planning or withheld line beside its executed line passes':
+        ['test_live_row_planning_or_withheld_line_never_passes_as_executed'],
+    'live row executed reads not matched to its a3 line':
+        ['test_live_row_lines_are_complete_and_consistent'],
+    'live row unscoped reads or unbalanced scopes pass':
+        ['test_live_row_lines_are_complete_and_consistent'],
+    'live row missing game line passes':
+        ['test_live_row_lines_are_complete_and_consistent', 'test_peer_seat_live_lines_are_read_and_required'],
+    'live row line not tied to its start calibration':
+        ['test_live_row_lines_are_complete_and_consistent'],
+    'live row d is the last game, not the largest':
+        ['test_live_rows_take_their_executed_in_game_calibration'],
+    'live row with no executed read passes':
+        ['test_live_row_lines_are_complete_and_consistent'],
+    'live line for a calibrated row passes':
+        ['test_live_row_lines_are_complete_and_consistent'],
+    'peer seat live lines ignored':
+        ['test_peer_seat_live_lines_are_read_and_required'],
+    'peer log not required on the command line form':
+        ['test_peer_seat_live_lines_are_read_and_required'],
+    'live rows left out of A_j':
+        ['test_live_rows_take_their_executed_in_game_calibration'],
+    'cal failure warnings unmarked':
+        ['test_vr2_needs_a_successful_fhat_and_rejects_calibration_failures'],
+    'VR2 failure warnings pass':
+        ['test_vr2_needs_a_successful_fhat_and_rejects_calibration_failures'],
+    'VR2 f_hat value not validated':
+        ['test_vr2_needs_a_successful_fhat_and_rejects_calibration_failures'],
+    'menu startup snapshot not required':
+        ['test_menu_check_validates_the_startup_and_the_terminal_snapshot'],
+    'menu failure warnings pass':
+        ['test_menu_check_validates_the_startup_and_the_terminal_snapshot'],
 }
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]

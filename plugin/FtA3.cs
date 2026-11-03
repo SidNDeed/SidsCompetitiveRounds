@@ -112,6 +112,80 @@ namespace CompetitiveRounds
 
         internal static void Withhold(int k, string why) { WithheldWhy[k] = why; }
 
+        // Ruling FRAME-TIME-ROUND-R4: a row whose real reader cannot run outside live combat is calibrated IN GAME, by
+        // executing its own live reads. Every live reader method of a live row runs inside a timing scope
+        // (TEnter/TExit, inside #if SCR_FRAMETIME at the method's own body), and each Read of a live row inside a scope
+        // marks that scope. At the scope's end its EXCLUSIVE time (its elapsed ticks less the elapsed ticks of the
+        // scopes nested inside it) is added to every live row it marked. Only main-thread scopes in ON live frames
+        // run (the same test as Read), so the measured reads are exactly the counted ones. LogGame writes, per game, one
+        // executed calibration line per live row: reads (the scoped Reads), scopes, ticks (the exclusive ticks summed),
+        // tmax (the largest exclusive scope), unscoped (Reads of the row outside any scope, which must be 0) and
+        // depth_err (scopes left unbalanced or refused past the stack's depth, which must be 0). No planning value
+        // and no stand-in reaches the line: it is the reader's own executed cost in the sitting.
+        private static readonly bool[] _live = new bool[Capacity];
+        private static readonly int[] _liveBit = new int[Capacity];
+        private static readonly int[] _liveRow = new int[64];
+        private static int _liveN;
+        private static readonly long[] _lReads = new long[Capacity];
+        private static readonly long[] _lScopes = new long[Capacity];
+        private static readonly long[] _lTicks = new long[Capacity];
+        private static readonly long[] _lMax = new long[Capacity];
+        private static readonly long[] _lUnscoped = new long[Capacity];
+        private const int Depth = 64;
+        private static readonly long[] _sT0 = new long[Depth];
+        private static readonly long[] _sChild = new long[Depth];
+        private static readonly ulong[] _sMask = new ulong[Depth];
+        private static int _depth;
+        private static long _depthErr;
+        private static int _calI = -1;
+
+        /// <summary>Row k is calibrated in game (ruling FRAME-TIME-ROUND-R4): no game-start calibration line; LogGame
+        /// writes its executed line from the timed live reads.</summary>
+        internal static void LiveCalibrated(int k)
+        {
+            if (_live[k]) return;
+            _live[k] = true;
+            _liveBit[k] = _liveN;
+            _liveRow[_liveN] = k;
+            _liveN++;
+        }
+
+        internal static bool IsLive(int k) { return _live[k]; }
+
+        /// <summary>Opens a live reader's timing scope; returns its depth index, or -1 when this call is not timed (not
+        /// an ON live frame on the main thread, or the stack full, which counts a depth error).</summary>
+        internal static int TEnter()
+        {
+            if (!OnLive()) return -1;
+            if (_depth >= Depth) { _depthErr++; return -1; }
+            int d = _depth++;
+            _sChild[d] = 0;
+            _sMask[d] = 0;
+            _sT0[d] = Stopwatch.GetTimestamp();
+            return d;
+        }
+
+        /// <summary>Closes the scope TEnter opened (from the reader's finally).</summary>
+        internal static void TExit(int d)
+        {
+            if (d < 0) return;
+            long el = Stopwatch.GetTimestamp() - _sT0[d];
+            if (_depth != d + 1) _depthErr++;
+            long ex = el - _sChild[d];
+            if (ex < 0) ex = 0;
+            ulong m = _sMask[d];
+            for (int b = 0; m != 0 && b < _liveN; b++)
+            {
+                if ((m & (1UL << b)) == 0) continue;
+                int k = _liveRow[b];
+                _lTicks[k] += ex;
+                _lScopes[k]++;
+                if (ex > _lMax[k]) _lMax[k] = ex;
+            }
+            _depth = d;
+            if (d > 0) _sChild[d - 1] += el;
+        }
+
         /// <summary>A calibration's claim about the production method it just ran: ok must come from that method's
         /// effect on the scratch state, never from a flag the calibration sets itself.</summary>
         internal static void Check(int k, string label, bool ok)
@@ -190,6 +264,9 @@ namespace CompetitiveRounds
             if (!OnLive()) return;
             _readsOn[k]++;
             if (!_steady[k] || _writesPt[k] < _refill[k]) _readsWin[k]++;
+            if (!_live[k]) return;
+            if (_depth > 0) { _sMask[_depth - 1] |= 1UL << _liveBit[k]; _lReads[k]++; }
+            else _lUnscoped[k]++;
         }
 
         /// <summary>A growth row's read (HE_hitset; SE_Logs keeps its own SeatEvidenceCore.FtLogRead): ONCE per
@@ -212,10 +289,35 @@ namespace CompetitiveRounds
             {
                 _writesPt[k] = 0; _writesOn[k] = 0; _readsOn[k] = 0; _readsWin[k] = 0;
                 _starts[k] = 0; _nonempty[k] = 0; _faults[k] = 0;
+                _lReads[k] = 0; _lScopes[k] = 0; _lTicks[k] = 0; _lMax[k] = 0; _lUnscoped[k] = 0;
             }
+            _depthErr = 0;
+            _depth = 0;
         }
 
         /// <summary>At FtSchedule.FlushGame: one a3 line per dependent row, one a3drain line per drained row.</summary>
+        // -- child C5, round 5 (ruling FRAME-TIME-ROUND-R4-A1, H1 and M1): the scratch log of the executed calibrations.
+        // A separate block: nothing above or below it uses it except the calibrations of PB_printed, CD_notes and
+        // CE_perf_probe.
+
+        /// <summary>Lines every ScratchLog source received; a calibration takes its delta around a read.</summary>
+        internal static long ScratchLines;
+        private static System.IO.StreamWriter _scratchWriter;
+
+        /// <summary>A log source for a calibration's executed reader. It is never registered with BepInEx's Logger
+        /// (Logger.Sources), so no live listener (the disk log, the console, Unity) receives its lines. Its one
+        /// listener counts each line in ScratchLines and does the disk listener's per-line work in memory: the line
+        /// formatted as LogEventArgs formats it and written through a StreamWriter over Stream.Null. Nothing reaches
+        /// the live log or a file.</summary>
+        internal static BepInEx.Logging.ManualLogSource ScratchLog(string name)
+        {
+            if (_scratchWriter == null) _scratchWriter = new System.IO.StreamWriter(System.IO.Stream.Null);
+            var log = new BepInEx.Logging.ManualLogSource(name);
+            log.LogEvent += (s, e) => { ScratchLines++; _scratchWriter.WriteLine(e.ToString()); };
+            return log;
+        }
+        // -- end of child C5's block
+
         internal static void LogGame(int game)
         {
             for (int k = 0; k < Count; k++)
@@ -228,14 +330,26 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo("[FRAME-TIME] a3 g=" + game + " k=" + Names[k] + " cap=" + _refill[k] + " steady=" + (_steady[k] ? 1 : 0)
                         + " reads_on=" + _readsOn[k] + " reads_win=" + _readsWin[k] + " writes_on=" + _writesOn[k]);
             }
+            // ruling FRAME-TIME-ROUND-R4: each live row's executed calibration line, from this game's timed live reads,
+            // under the game's own calibration run (why=game<g>, the i FtCalib.Run gave it)
+            for (int k = 0; k < Count; k++)
+            {
+                if (Names[k] == null || !_live[k]) continue;
+                Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + _calI + " why=game" + game + " kind=a3 k=" + Names[k] + " live=1"
+                    + " reads=" + _lReads[k] + " scopes=" + _lScopes[k] + " ticks=" + _lTicks[k] + " tmax=" + _lMax[k]
+                    + " unscoped=" + _lUnscoped[k] + " depth_err=" + _depthErr);
+            }
         }
 
         /// <summary>Every dependent row's calibration, from FtCalib.Run (outside live combat).</summary>
         internal static void Calibrate(int i, string why)
         {
+            _calI = i;
             for (int k = 0; k < Count; k++)
             {
                 if (Names[k] == null || _drained[k]) continue;
+                // a live row has no game-start calibration: its executed line comes from the game's own live reads
+                if (_live[k]) continue;
                 if (WithheldWhy[k] != null)
                 {
                     Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=a3 k=" + Names[k] + " withheld=1");

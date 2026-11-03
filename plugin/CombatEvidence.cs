@@ -55,19 +55,31 @@ namespace CompetitiveRounds
         internal static void Cost(int i, long t0)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_capture);
 #endif
             long d = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             _calls[i]++; _ticks[i] += d; if (d > _maxTicks[i]) _maxTicks[i] = d;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         internal static void Fault(int i, Exception ex)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_capture);
 #endif
             _faults[i]++;
             if (!_faultLogged[i]) { _faultLogged[i] = true; _faultNote[i] = ex != null ? ex.GetType().Name : "fault"; }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static long Us(long ticks) { return (long)(ticks * 1000000.0 / System.Diagnostics.Stopwatch.Frequency); }
@@ -91,7 +103,7 @@ namespace CompetitiveRounds
         private static long SwMs { get { return SeatEvidence.SwMs; } }
 
 #if SCR_FRAMETIME
-        internal static bool Open { get { FtA3.Read(FtA3.CE_capture); return _open; } }
+        internal static bool Open { get { int ftScope = FtA3.TEnter(); try { FtA3.Read(FtA3.CE_capture); return _open; } finally { FtA3.TExit(ftScope); } } }
 #else
         internal static bool Open { get { return _open; } }
 #endif
@@ -133,12 +145,18 @@ namespace CompetitiveRounds
         private static void ResolvePlayers()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_capture);
 #endif
             var pm = PlayerManager.instance;
             if (pm == null) return;
             if (_ownP == null) _ownP = pm.GetPlayerWithActorID(_localActor);
             if (_oppP == null) _oppP = pm.GetPlayerWithActorID(_oppActor);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Room exit (beside SeatEvidence.RoomExit): the window stops and
@@ -381,6 +399,9 @@ namespace CompetitiveRounds
         private static GunState GunOf(Gun gun)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             var g = _g;
@@ -389,10 +410,16 @@ namespace CompetitiveRounds
             if (_ownP != null && _ownP.data != null && _ownP.data.weaponHandler != null && gun == _ownP.data.weaponHandler.gun) return g.Own;
             if (_oppP != null && _oppP.data != null && _oppP.data.weaponHandler != null && gun == _oppP.data.weaponHandler.gun) return g.Opp;
             return null;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static GunState GunOfActor(int actor)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
@@ -401,10 +428,16 @@ namespace CompetitiveRounds
             if (actor == _localActor) return g.Own;
             if (actor == _oppActor) return g.Opp;
             return null;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void Bind(GunState s, bool own)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_gun_scalars); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_gun_scalars);
 #endif
@@ -412,6 +445,9 @@ namespace CompetitiveRounds
             var p = own ? _ownP : _oppP;
             var gun = p != null && p.data != null && p.data.weaponHandler != null ? p.data.weaponHandler.gun : null;
             if (gun != s.G) { s.G = gun; s.A = gun != null ? gun.gunAmmo : null; s.LastAmmo = int.MinValue; }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static int Ms(float seconds) { return (int)Math.Round(seconds * 1000.0, MidpointRounding.ToEven); }
@@ -419,9 +455,15 @@ namespace CompetitiveRounds
         private static void Mark(GunState s, int stamp)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_gun_scalars);
 #endif
             s.LastEvtStamp = stamp; s.LastEvtSw = SwMs; s.LastEvtGame = _gameMs; s.HasEvt = true;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static double _gameMs;
@@ -433,6 +475,9 @@ namespace CompetitiveRounds
         /// rise is a regeneration. Fixed cost; from the tick and the init prefix.</summary>
         private static void Reconcile(GunState s)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_gun_scalars); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_gun_scalars);
 #endif
@@ -464,6 +509,9 @@ namespace CompetitiveRounds
                 Mark(s, stamp);
             }
             s.LastAmmo = now;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- K1: an RPC this seat sends (SeatEvidence_RpcSendPatch postfix) --------------------------
@@ -473,6 +521,9 @@ namespace CompetitiveRounds
         /// block's key for b5_s.</summary>
         internal static void RpcSent(PhotonView view, string method, RpcTarget target)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
@@ -490,12 +541,18 @@ namespace CompetitiveRounds
             }
             finally { FtSpan.Close(ftSpan); }
 #endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static readonly object KV = (byte)0, KS = (byte)2;
 
         private static void RpcSentBody(PhotonView view, string method, RpcTarget target)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_gun_scalars); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_scratch); FtA3.Wrote(FtA3.CE_gun_scalars);
@@ -523,12 +580,18 @@ namespace CompetitiveRounds
                 g.OwnPressPending = false;
                 OwnBlockKeyed(g, g.OwnPressRow, (int)st);
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- N1: Gun.Attack prefix + postfix ----------------------------------------------------------
 
         internal static void AttackEnter(Gun gun, bool forceAttack, bool useAmmo, out long state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
@@ -537,10 +600,16 @@ namespace CompetitiveRounds
             long t0 = Stamp();
             try { state = AttackEnterBody(gun, forceAttack, useAmmo); } catch (Exception ex) { Fault(N1, ex); }
             Cost(N1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static long AttackEnterBody(Gun gun, bool forceAttack, bool useAmmo)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_gun_scalars); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_gun_scalars);
 #endif
@@ -566,10 +635,16 @@ namespace CompetitiveRounds
                 ReadCexp(s);
             }
             return 0;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         internal static void AttackExit(Gun gun, bool result, bool forceAttack, long state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
@@ -577,10 +652,16 @@ namespace CompetitiveRounds
             long t0 = Stamp();
             try { AttackExitBody(gun, result, forceAttack); } catch (Exception ex) { Fault(N1, ex); }
             Cost(N1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void AttackExitBody(Gun gun, bool result, bool forceAttack)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_gun_scalars); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_gun_scalars);
@@ -605,10 +686,16 @@ namespace CompetitiveRounds
                 var p = gun.shootPosition.position; var f = gun.shootPosition.forward;
                 g.Aim.V[o] = 1; g.Aim.V[o + 1] = ServerNow(); g.Aim.V[o + 2] = p.x; g.Aim.V[o + 3] = p.y; g.Aim.V[o + 4] = f.x; g.Aim.V[o + 5] = f.y; g.Aim.V[o + 6] = 0;
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void ReadCexp(GunState s)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_gun_scalars);
 #endif
@@ -616,6 +703,9 @@ namespace CompetitiveRounds
             if (gun == null || gun.attackSpeedMultiplier <= 0f) return;
             long c = (long)Math.Round(gun.usedCooldown / gun.attackSpeedMultiplier * 1000.0);
             if (s.CexpMin < 0 || c < s.CexpMin) s.CexpMin = c;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- K2: ProjectileInit.RPCA_Init* prefix + finalizer -------------------------------------------
@@ -626,6 +716,9 @@ namespace CompetitiveRounds
         internal static int InitEnter(ProjectileInit init, int senderID, int kind)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (!_open || PerfSuspend) return 0;
@@ -634,12 +727,18 @@ namespace CompetitiveRounds
             try { r = InitEnterBody(init, senderID, kind); } catch (Exception ex) { Fault(K2, ex); }
             Cost(K2, t0);
             return r;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static readonly string[] INIT_METHODS = { "RPCA_Init", "RPCA_Init_noAmmoUse", "RPCA_Init_SeparateGun" };
 
         private static int InitEnterBody(ProjectileInit init, int senderID, int kind)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_gun_scalars); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_gun_scalars);
@@ -692,11 +791,17 @@ namespace CompetitiveRounds
             s.LastAmmo = ammo - 1;
             Mark(s, stamp);
             return 1 | (rl ? 2 : 0) | (own ? 4 : 0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Init finalizer: a reload this Shoot started (the counter it set, for rl_g).</summary>
         internal static void InitExit(ProjectileInit init, int state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_gun_scalars); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_gun_scalars);
 #endif
@@ -713,6 +818,9 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Fault(K2, ex); }
             Cost(K2, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void NoteAnchor(Game g, GameObject obj, int pid, int stamp, bool own)
@@ -753,16 +861,25 @@ namespace CompetitiveRounds
         internal static void ReloadEnter(GunAmmo ammo, bool playSound)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (!_open || PerfSuspend) return;
             long t0 = Stamp();
             try { ReloadBody(ammo, playSound); } catch (Exception ex) { Fault(N2, ex); }
             Cost(N2, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void ReloadBody(GunAmmo ammo, bool playSound)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_gun_scalars); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_gun_scalars);
 #endif
@@ -786,6 +903,9 @@ namespace CompetitiveRounds
             s.RlOpen = false;
             s.LastAmmo = ammo.maxAmmo;
             Mark(s, stamp);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- K3: ProjectileHit.RPCA_DoHit prefix (before :204 overwrites the copy); H1: its finalizer ---------
@@ -797,6 +917,9 @@ namespace CompetitiveRounds
         internal static void HitEnter(ProjectileHit ph, Vector2 point, Vector2 vel, int viewID, bool wasBlocked, out long state)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             state = 0;
@@ -804,30 +927,48 @@ namespace CompetitiveRounds
             long t0 = Stamp();
             try { state = HitBody(ph, point, vel, viewID, wasBlocked); } catch (Exception ex) { Fault(K3, ex); }
             Cost(K3, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static bool IsOwnPlayerView(int viewID)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (viewID == -1 || _ownP == null || _ownP.data == null) return false;
             var target = PhotonNetwork.GetPhotonView(viewID);
             return target != null && target.IsMine && target == _ownP.data.view;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static bool IsOppPlayerView(int viewID)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (viewID == -1 || _oppP == null || _oppP.data == null) return false;
             var target = PhotonNetwork.GetPhotonView(viewID);
             return target != null && target.OwnerActorNr == _oppActor && target == _oppP.data.view;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static long HitBody(ProjectileHit ph, Vector2 point, Vector2 vel, int viewID, bool wasBlocked)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_Recent); FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters);
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_Recent);
@@ -930,6 +1071,9 @@ namespace CompetitiveRounds
             }
             g.OwnDecOn[k] = false;
             return st | 1;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The hit message's finalizer: the shooter's scope closes; an own
@@ -937,16 +1081,25 @@ namespace CompetitiveRounds
         internal static void HitExit(ProjectileHit ph, long state)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (!_open || state == 0) return;
             long t0 = Stamp();
             try { HitExitBody(ph, state); } catch (Exception ex) { Fault(H1, ex); }
             Cost(H1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void HitExitBody(ProjectileHit ph, long state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_scratch);
 #endif
@@ -965,6 +1118,9 @@ namespace CompetitiveRounds
             if (cause == 0) return;
             if ((cause & ((long)W.CAUSE_COLLIDER | (long)W.CAUSE_SURFACE)) == 0) cause |= g.HvView != -1 ? (long)W.CAUSE_COLLIDER : (long)W.CAUSE_SURFACE;
             VchgRow(g, g.HvPid, g.HvSInit, g.HvStamp, cause, g.HvX, g.HvY, nx, ny);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- G1: MoveTransform.Update prefix + finalizer (R2 gravity and steering, M11) ---------------
@@ -978,6 +1134,9 @@ namespace CompetitiveRounds
         internal static void MoveEnter(MoveTransform mt, out long state)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             state = 0;
@@ -985,10 +1144,16 @@ namespace CompetitiveRounds
             long t0 = Stamp();
             try { state = MoveBody(mt); } catch (Exception ex) { Fault(G1, ex); }
             Cost(G1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static long MoveBody(MoveTransform mt)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_anchor);
 #endif
@@ -1008,12 +1173,18 @@ namespace CompetitiveRounds
             g.SgPx[k] = g.SgLx[k]; g.SgPy[k] = g.SgLy[k]; g.SgSteer[k] = x != g.SgLx[k] || y != g.SgLy[k];
             g.SgLx[k] = x; g.SgLy[k] = y;
             return k + 1;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>G1 finalizer: the frame's causes (steering before it, the integrator's
         /// own gravity and drag inside it: MoveTransform.Update's terms).</summary>
         internal static void MoveExit(MoveTransform mt, long state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_capture);
 #endif
@@ -1032,6 +1203,9 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Fault(G1, ex); }
             Cost(G1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>One frame of an own projectile with causes `f` that took its velocity
@@ -1118,6 +1292,9 @@ namespace CompetitiveRounds
         private static void VictimHit(Game g, int pid, int sInit, int cord, bool wasBlocked)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_Recent); FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_scratch);
             FtA3.Wrote(FtA3.CE_Recent); FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_scratch);
 #endif
@@ -1133,6 +1310,9 @@ namespace CompetitiveRounds
             var a = g.ChS.Raw;
             a[o] = pid; a[o + 1] = sInit; a[o + 2] = cord; a[o + 3] = ServerNow(); a[o + 4] = -1; a[o + 5] = -1; a[o + 6] = -1; a[o + 7] = 0;
             a[o + 8] = -1;                                   // A1 f: t_frc_rcv, the force's receipt here (ForceBody)
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The last RECENT_CAP hits on one player (pid, s_init, cord, stamp), newest last.</summary>
@@ -1152,6 +1332,9 @@ namespace CompetitiveRounds
         private static void RecentForce(bool own, int pid, int sInit, int cord, int snd, int stamp)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_Recent); FtA3.Read(FtA3.CE_capture);
 #endif
             var g = _g;
@@ -1164,6 +1347,9 @@ namespace CompetitiveRounds
             FtA3.Wrote(FtA3.CE_Recent);
 #endif
             if (own) { g.RfOwnHead = head; g.RfOwnN = n; } else { g.RfOppHead = head; g.RfOppN = n; }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>A received hit message pairs to the OLDEST unmatched contact of the
@@ -1197,11 +1383,17 @@ namespace CompetitiveRounds
         private static long OwnSinceMs()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             var b = _ownP != null && _ownP.data != null ? _ownP.data.block : null;
             if (b == null) return -1;
             return (long)Math.Round(Math.Min(b.sinceBlock * 1000.0, 600000.0));
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- N7: ProjectileHit.Hit prefix (the copy's contact with this seat's player) ------------------
@@ -1209,16 +1401,25 @@ namespace CompetitiveRounds
         internal static void ContactEnter(ProjectileHit ph, HitInfo hit)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (!_open || PerfSuspend) return;
             long t0 = Stamp();
             try { ContactBody(ph, hit); } catch (Exception ex) { Fault(N7, ex); }
             Cost(N7, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void ContactBody(ProjectileHit ph, HitInfo hit)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.CE_counters);
@@ -1252,6 +1453,9 @@ namespace CompetitiveRounds
             if (o < 0) return;
             var a = g.B5c.Raw;
             a[o] = pid; a[o + 1] = sInit; a[o + 2] = cord; a[o + 3] = ServerNow(); a[o + 4] = since; a[o + 5] = 0; a[o + 6] = W.OWN_SINCE_NONE;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- K4: Block.RPCA_DoBlock finalizer; N6: Block.TryBlock prefix + postfix -----------------------
@@ -1259,16 +1463,25 @@ namespace CompetitiveRounds
         internal static void BlockDone(Block b)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (!_open || PerfSuspend) return;
             long t0 = Stamp();
             try { BlockBody(b); } catch (Exception ex) { Fault(K4, ex); }
             Cost(K4, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void BlockBody(Block b)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_scratch);
@@ -1307,6 +1520,9 @@ namespace CompetitiveRounds
             a[o + 5] = started ? 1 : 0; a[o + 6] = -1; a[o + 7] = -1; a[o + 8] = 0; a[o + 9] = C.WrapDiff(oPred, stamp);
             a[o + 10] = E.Clamp(cd, 0, 600000); a[o + 11] = gapPrev; a[o + 12] = 0;
             if (started) { g.OppWin = o; g.OppWinStamp = now; g.OppWinFrames = 0; } else g.OppWin = -1;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The own press's prefix. An accepted press (the game's own test,
@@ -1317,6 +1533,9 @@ namespace CompetitiveRounds
         /// full list omits arms nothing.</summary>
         internal static void TryBlockEnter(Block b, out long state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
@@ -1336,10 +1555,16 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Fault(N6, ex); }
             Cost(N6, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void ReserveOwnBlock(Block b, long counterMs)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_scratch);
@@ -1360,10 +1585,16 @@ namespace CompetitiveRounds
             r[o2 + 8] = E.Clamp((long)Math.Round(TimeHandler.timeScale * 1000.0), 0, 10000); r[o2 + 9] = E.Clamp(cd, 0, 600000);
             r[o2 + 10] = E.Clamp(counterMs, -1, 600000); r[o2 + 11] = 0;
             g.OwnPressPending = true;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         internal static void TryBlockExit(Block b, long state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
@@ -1371,10 +1602,16 @@ namespace CompetitiveRounds
             long t0 = Stamp();
             try { TryBlockBody(b, (state & 2) != 0, state >> 2); } catch (Exception ex) { Fault(N6, ex); }
             Cost(N6, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void TryBlockBody(Block b, bool accepted, long counterMs)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_scratch);
@@ -1401,6 +1638,9 @@ namespace CompetitiveRounds
                 if (g.OwnPressKeyed) r[o2 + 4] = r[o2 + 3];
                 g.OwnWin = o2; g.OwnWinStamp = g.OwnPressStamp; g.OwnWinFrames = 0; g.OwnWinSw = SwMs;
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The own block's stamp arrived with its outgoing RPC: the
@@ -1425,6 +1665,9 @@ namespace CompetitiveRounds
         internal static void Dealt(CharacterStatModifiers stats)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (!_open || PerfSuspend) return;
@@ -1441,6 +1684,9 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Fault(K5, ex); }
             Cost(K5, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- N3: BounceEffectRetarget.SetNewVel prefix; N4: ScreenEdgeBounce.DoHit prefix + E1 finalizer ---
@@ -1448,16 +1694,25 @@ namespace CompetitiveRounds
         internal static void TargetBounce(BounceEffectRetarget r, Vector2 newVel)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (!_open || PerfSuspend) return;
             long t0 = Stamp();
             try { TargetBounceBody(r, newVel); } catch (Exception ex) { Fault(N3, ex); }
             Cost(N3, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void TargetBounceBody(BounceEffectRetarget r, Vector2 newVel)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.CE_counters);
@@ -1510,6 +1765,9 @@ namespace CompetitiveRounds
             if (oo < 0) return;
             var aa = g.P3tb.Raw;
             aa[oo] = opid; aa[oo + 1] = sInit; aa[oo + 2] = keyed ? stamp : 0; aa[oo + 3] = gap; aa[oo + 4] = has; aa[oo + 5] = E.Clamp(ang, 0, 3142);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>S1: BounceEffectRetarget.FindTarget postfix, the OWNER's copy only:
@@ -1520,16 +1778,25 @@ namespace CompetitiveRounds
         internal static void FindTarget(BounceEffectRetarget r, HitInfo hit, Player result)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (!_open || PerfSuspend) return;
             long t0 = Stamp();
             try { FindTargetBody(r, hit, result); } catch (Exception ex) { Fault(S1, ex); }
             Cost(S1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void FindTargetBody(BounceEffectRetarget r, HitInfo hit, Player result)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.CE_counters);
@@ -1551,6 +1818,9 @@ namespace CompetitiveRounds
             int b = k * 5;
             g.Bs[b] = target; g.Bs[b + 1] = dSelf; g.Bs[b + 2] = losSelf; g.Bs[b + 3] = dOther; g.Bs[b + 4] = losOther;
             g.BsOn[k] = true; g.BsPid[k] = pid;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>N4 prefix: an edge bounce. The other seat's copy marks its anchor
@@ -1559,6 +1829,9 @@ namespace CompetitiveRounds
         internal static void EdgeBounce(ScreenEdgeBounce b, out long state)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             state = 0;
@@ -1566,10 +1839,16 @@ namespace CompetitiveRounds
             long t0 = Stamp();
             try { state = EdgeBounceBody(b); } catch (Exception ex) { Fault(N4, ex); }
             Cost(N4, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static long EdgeBounceBody(ScreenEdgeBounce b)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_anchor); FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_scratch);
@@ -1594,11 +1873,17 @@ namespace CompetitiveRounds
             SegBreak(g, k, pid, mv.velocity.x, mv.velocity.y);
             g.EvOn = true; g.EvX = mv.velocity.x; g.EvY = mv.velocity.y; g.EvPid = pid; g.EvSInit = g.OwnSInit[k]; g.EvStamp = stamp;
             return 1;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>E1: the owner's edge bounce has reflected its velocity (R2, cause surface).</summary>
         internal static void EdgeBounceExit(ScreenEdgeBounce b, long state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_scratch);
 #endif
@@ -1618,6 +1903,9 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Fault(E1, ex); }
             Cost(E1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- P1: HealthHandler.RPCA_SendTakeForce prefix + finalizer (R1 push) ---------------------------
@@ -1632,6 +1920,9 @@ namespace CompetitiveRounds
         internal static void ForceEnter(HealthHandler hh, Vector2 force, out long state)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             state = 0;
@@ -1639,10 +1930,16 @@ namespace CompetitiveRounds
             long t0 = Stamp();
             try { state = ForceBody(hh, force); } catch (Exception ex) { Fault(P1, ex); }
             Cost(P1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static long ForceBody(HealthHandler hh, Vector2 force)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_scratch);
@@ -1686,12 +1983,18 @@ namespace CompetitiveRounds
             a[o + 11] = Centi(pos.x, 9999999); a[o + 12] = Centi(pos.y, 9999999);
             a[o + 13] = a[o + 11]; a[o + 14] = a[o + 12];
             return ((long)o << 2) | (own ? 0L : 2L) | 1L;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>P1 finalizer: the velocity after the force; the position after is the
         /// first tick in a later frame (the wait ring).</summary>
         internal static void ForceExit(HealthHandler hh, long state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
@@ -1712,6 +2015,9 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Fault(P1, ex); }
             Cost(P1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>A row waiting for a later tick: kind 0 a push's after-position (player 0 own, 1 other),
@@ -1728,6 +2034,9 @@ namespace CompetitiveRounds
 
         private static void DrainWaits(Game g, int now)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
@@ -1746,6 +2055,9 @@ namespace CompetitiveRounds
                 Vector2 p;
                 if (PosOf(g.WPlayer[i] == 0 ? _ownP : _oppP, out p)) { a[o + 13] = Centi(p.x, 9999999); a[o + 14] = Centi(p.y, 9999999); }
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- D1: HealthHandler.RPCA_SendTakeDamage prefix + finalizer (R3 chain, R5 cause) -------------------
@@ -1759,6 +2071,9 @@ namespace CompetitiveRounds
         internal static void DamageEnter(HealthHandler hh, Vector2 damage, bool outOfBounds, out long state)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             state = 0;
@@ -1766,10 +2081,16 @@ namespace CompetitiveRounds
             long t0 = Stamp();
             try { state = DamageBody(hh, damage, outOfBounds); } catch (Exception ex) { Fault(D1, ex); }
             Cost(D1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static long DamageBody(HealthHandler hh, Vector2 damage, bool outOfBounds)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_scratch);
 #endif
@@ -1798,10 +2119,16 @@ namespace CompetitiveRounds
                 if (g.ScChRow >= 0) g.ChO.Raw[g.ScChRow + 5] = stamp;
             }
             return 0;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         internal static void DamageExit(HealthHandler hh, long state)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_scratch);
 #endif
@@ -1822,6 +2149,9 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Fault(D1, ex); }
             Cost(D1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- X1: HealthHandler.RPCA_Die / RPCA_Die_Phoenix prefix (R5 deaths) ------------------------------
@@ -1835,16 +2165,25 @@ namespace CompetitiveRounds
         internal static void Die(HealthHandler hh)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             if (!_open || PerfSuspend) return;
             long t0 = Stamp();
             try { DieBody(hh); } catch (Exception ex) { Fault(X1, ex); }
             Cost(X1, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void DieBody(HealthHandler hh)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_Recent);
             FtA3.Wrote(FtA3.CE_scratch);
@@ -1898,12 +2237,18 @@ namespace CompetitiveRounds
                 }
                 else { a[f] = -1; a[f + 1] = 0; a[f + 2] = -1; a[f + 3] = -1; a[f + 4] = -1; }
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- N5: SyncProjectile.OnPhotonSerializeView postfix (reading branch) -------------------------
 
         internal static void SyncRead(SyncProjectile sp, PhotonStream stream)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_anchor); FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_capture);
             FtA3.Wrote(FtA3.CE_counters);
@@ -1938,6 +2283,9 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Fault(N5, ex); }
             Cost(N5, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         // -- T: the per-frame tick ------------------------------------------------------------------
@@ -1983,6 +2331,9 @@ namespace CompetitiveRounds
         internal static void Tick()
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
 #if SCR_FRAMETIME
@@ -2009,10 +2360,16 @@ namespace CompetitiveRounds
             }
             finally { FtSpan.Close(ftSpan); }
 #endif
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void TickBody()
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_Ping); FtA3.Read(FtA3.CE_Pos); FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_scratch);
             FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_counters); FtA3.Wrote(FtA3.CE_scratch);
@@ -2075,6 +2432,9 @@ namespace CompetitiveRounds
             DrainAim(g);
             DrainResiduals(g);
             DrainPackages(g);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void PointStart(Game g, int now, float baseScale)
@@ -2208,6 +2568,9 @@ namespace CompetitiveRounds
         private static void CloseWindows(Game g, int now)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_scratch);
 #endif
             if (g.OwnWin >= 0)
@@ -2236,6 +2599,9 @@ namespace CompetitiveRounds
                     g.OppWin = -1;
                 }
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>Half the lower median ping (the sorted sample at (n-1)/2), read from
@@ -2323,6 +2689,9 @@ namespace CompetitiveRounds
         private static void DrainAim(Game g)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_lhat_cache); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_lhat_cache);
 #endif
             long sw = SwMs;
@@ -2366,6 +2735,9 @@ namespace CompetitiveRounds
                 if (best >= 0) g.A1m.Add(SignedMrad(fx, fy, g.PosX[best] - px, g.PosY[best] - py), !vis);
                 if (haveN) g.A1n.Add(bestErr, !vis);
             }
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The game's own line-of-sight rule (PlayerManager.CanSeePlayer: a
@@ -2424,16 +2796,25 @@ namespace CompetitiveRounds
         internal static void RxSample(int now)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_scratch);
 #endif
             if (_g == null || SwMs < _g.RxNextMs) return;
             long t0 = Stamp();
             try { var g = _g; g.RxNextMs = SwMs + RX_PERIOD_MS; RxBody(g, now); } catch (Exception ex) { Fault(RX, ex); }
             Cost(RX, t0);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void RxBody(Game g, int now)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_counters); FtA3.Read(FtA3.CE_capture); FtA3.Wrote(FtA3.CE_counters);
             FtA3.Wrote(FtA3.CE_scratch);
@@ -2452,6 +2833,9 @@ namespace CompetitiveRounds
             }
             RxAim(g, g.RxS, g.RxRowS, _ownP, a, b, now);
             RxAim(g, g.RxO, g.RxRowO, _oppP, b, a, now);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>The aim error (mrad) of player p at `from` toward `to`, and the
@@ -2476,6 +2860,9 @@ namespace CompetitiveRounds
         private static int RxOpen(E.FixedRows rows, Player p, Vector2 from, Vector2 to, int now)
         {
 #if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
+#if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_capture);
 #endif
             int o = rows.NextSlot();
@@ -2485,10 +2872,16 @@ namespace CompetitiveRounds
             var a = rows.Raw;
             a[o] = now; a[o + 1] = err <= radius ? 0 : -1; a[o + 2] = -1; a[o + 3] = E.Clamp(err, 0, 3142);
             return o;
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         private static void RxAim(Game g, E.FixedRows rows, int o, Player p, Vector2 from, Vector2 to, int now)
         {
+#if SCR_FRAMETIME
+            int ftScope = FtA3.TEnter(); try {
+#endif
 #if SCR_FRAMETIME
             FtA3.Read(FtA3.CE_scratch); FtA3.Read(FtA3.CE_capture);
 #endif
@@ -2498,6 +2891,9 @@ namespace CompetitiveRounds
             long radius;
             long err = AimErr(p, from, to, p == _ownP ? _oppP : _ownP, out radius);
             if (err <= radius) a[o + 1] = E.Clamp(C.WrapDiff(now, g.RxOnset), 0, 600000);
+#if SCR_FRAMETIME
+            } finally { FtA3.TExit(ftScope); }
+#endif
         }
 
         /// <summary>A volley's stamp (from the init prefix): the open row's first volley after the onset.</summary>
@@ -2755,9 +3151,11 @@ namespace CompetitiveRounds
             FtA3.Set(FtA3.CE_Ping, "CE_Ping", PING_BIN_CAP, false, FtCalPing, 500);
             FtA3.Executed(FtA3.CE_Ping, "CombatEvidence.LHatMs");
             FtA3.Set(FtA3.CE_Pos, "CE_Pos", POS_CAP, false, null, 500);
-            FtA3.Withhold(FtA3.CE_Pos, "DrainAim reaches the own-position window only with the live own Player (_ownP) and runs PosOf and the Physics2D sight cast on it; TickBody needs TimeHandler, Time and Photon");
+            FtA3.Executed(FtA3.CE_Pos, "in game (ruling FRAME-TIME-ROUND-R4), its live readers timed in their own bodies: CombatEvidence.DrainAim, CombatEvidence.TickBody");
+            FtA3.LiveCalibrated(FtA3.CE_Pos);
             FtA3.Set(FtA3.CE_Recent, "CE_Recent", RECENT_CAP, false, null, 5000);
-            FtA3.Withhold(FtA3.CE_Recent, "DieBody, the costliest reader (both ring copies), needs a HealthHandler's CharacterData and playerVel; VictimHit reads Time.frameCount; HitBody and RecentForce read the live _g");
+            FtA3.Executed(FtA3.CE_Recent, "in game (ruling FRAME-TIME-ROUND-R4), its live readers timed in their own bodies: CombatEvidence.DieBody, CombatEvidence.HitBody, CombatEvidence.RecentForce, CombatEvidence.VictimHit");
+            FtA3.LiveCalibrated(FtA3.CE_Recent);
             FtA3.Set(FtA3.CE_B5c, "CE_B5c", PAIR_CAP + OUTSIDE_SCAN_CAP, false, FtCalB5c, 2000);
             FtA3.Executed(FtA3.CE_B5c, "CombatEvidence.FillContact, CombatEvidenceCore.FixedRows.Raw");
             FtA3.SetDrained(FtA3.CE_Wait, "CE_Wait", () => { var g = _g; return g == null ? 0 : g.WN; });
@@ -2772,15 +3170,17 @@ namespace CompetitiveRounds
             FtA3.Set(FtA3.CE_scratch, "CE_scratch", 1, false, FtCalScratch, 5000);
             FtA3.Executed(FtA3.CE_scratch, "CombatEvidence.DrainResiduals, CombatEvidence.TopInsert");
             FtA3.Set(FtA3.CE_gun_scalars, "CE_gun_scalars", 1, false, null, 5000);
-            FtA3.Withhold(FtA3.CE_gun_scalars, "every reader's work past its null test reads a live Gun or GunAmmo (Unity objects that compare equal to null unless engine-backed): Reconcile, ReloadBody, ReadCexp, Bind and the hook bodies");
+            FtA3.Executed(FtA3.CE_gun_scalars, "in game (ruling FRAME-TIME-ROUND-R4), its live readers timed in their own bodies: CombatEvidence.AttackEnterBody, CombatEvidence.AttackExitBody, CombatEvidence.Bind, CombatEvidence.InitEnterBody, CombatEvidence.InitExit, CombatEvidence.ReadCexp, CombatEvidence.Reconcile, CombatEvidence.ReloadBody, CombatEvidence.RpcSentBody");
+            FtA3.LiveCalibrated(FtA3.CE_gun_scalars);
             FtA3.Set(FtA3.CE_gun_account, "CE_gun_account", 1, false, FtCalGunAccount, 2000);
             FtA3.Executed(FtA3.CE_gun_account, "CombatEvidenceCore.GunAccount.CloseCycle");
             FtA3.Set(FtA3.CE_aimset, "CE_aimset", 1, false, FtCalAimset, 5000);
             FtA3.Executed(FtA3.CE_aimset, "CombatEvidenceCore.AimSet.Add");
             FtA3.Set(FtA3.CE_capture, "CE_capture", 1, false, null, 5000);
-            FtA3.Withhold(FtA3.CE_capture, "its fields are the component's static hook state of the live game (_open, _ownP/_oppP, the actors, the cost counters), with no scratch instance; the costliest reader, ResolvePlayers and GunOf, resolves Players through PlayerManager");
-            FtA3.Set(FtA3.CE_perf_probe, "CE_perf_probe", CombatEvidencePerf.BIN_CAP, false, null, 500);
-            FtA3.Withhold(FtA3.CE_perf_probe, "its fields are CombatEvidencePerf's static probe state with no scratch instance; Frame reads Time.unscaledDeltaTime, Close and the reports log through Plugin.Log");
+            FtA3.Executed(FtA3.CE_capture, "in game (ruling FRAME-TIME-ROUND-R4), its live readers timed in their own bodies: CombatEvidence.AttackEnter, CombatEvidence.AttackEnterBody, CombatEvidence.AttackExit, CombatEvidence.AttackExitBody, CombatEvidence.Bind, CombatEvidence.BlockBody, CombatEvidence.BlockDone, CombatEvidence.CloseWindows, CombatEvidence.ContactBody, CombatEvidence.ContactEnter, CombatEvidence.Cost, CombatEvidence.DamageBody, CombatEvidence.DamageEnter, CombatEvidence.DamageExit, CombatEvidence.Dealt, CombatEvidence.Die, CombatEvidence.DieBody, CombatEvidence.DrainAim, CombatEvidence.DrainWaits, CombatEvidence.EdgeBounce, CombatEvidence.EdgeBounceBody, CombatEvidence.EdgeBounceExit, CombatEvidence.Fault, CombatEvidence.FindTarget, CombatEvidence.FindTargetBody, CombatEvidence.ForceBody, CombatEvidence.ForceEnter, CombatEvidence.ForceExit, CombatEvidence.GunOf, CombatEvidence.GunOfActor, CombatEvidence.HitBody, CombatEvidence.HitEnter, CombatEvidence.HitExit, CombatEvidence.HitExitBody, CombatEvidence.InitEnter, CombatEvidence.InitEnterBody, CombatEvidence.InitExit, CombatEvidence.IsOppPlayerView, CombatEvidence.IsOwnPlayerView, CombatEvidence.Mark, CombatEvidence.MoveBody, CombatEvidence.MoveEnter, CombatEvidence.MoveExit, CombatEvidence.Open, CombatEvidence.OwnSinceMs, CombatEvidence.RecentForce, CombatEvidence.Reconcile, CombatEvidence.ReloadBody, CombatEvidence.ReloadEnter, CombatEvidence.ReserveOwnBlock, CombatEvidence.ResolvePlayers, CombatEvidence.RpcSent, CombatEvidence.RpcSentBody, CombatEvidence.RxAim, CombatEvidence.RxBody, CombatEvidence.RxOpen, CombatEvidence.RxSample, CombatEvidence.SyncRead, CombatEvidence.TargetBounce, CombatEvidence.TargetBounceBody, CombatEvidence.Tick, CombatEvidence.TickBody, CombatEvidence.TryBlockBody, CombatEvidence.TryBlockEnter, CombatEvidence.TryBlockExit, CombatEvidencePerf.MatchFrame");
+            FtA3.LiveCalibrated(FtA3.CE_capture);
+            FtA3.Set(FtA3.CE_perf_probe, "CE_perf_probe", CombatEvidencePerf.BIN_CAP, false, CombatEvidencePerf.FtCalPerf, 500);
+            FtA3.Executed(FtA3.CE_perf_probe, "CombatEvidencePerf.Frame (probe off), CombatEvidencePerf.Add, CombatEvidencePerf.Close, CombatEvidencePerf.Quantile, CombatEvidencePerf.MatchReport");
         }
 
         /// <summary>S03 (CE_Ping): the real LHatMs, the reader with the content-dependent loop (TickBody's ping
@@ -2963,22 +3363,40 @@ namespace CompetitiveRounds
         }
 
         private static E.GunAccount _ftAcct, _ftAcctIdle;
+        private const long FT_REXP = 100000, FT_GAP = 100, FT_RL_MS = 50, FT_TIMER_MS = 10;
 
         /// <summary>S15 (CE_gun_account): the real GunAccount.CloseCycle, the account's costliest reader (the cycle's
         /// header store, the totals through the field-name lookups, and the cycle's exception row with its gap list;
         /// AddShot, AddRegen, AddNoInit, AddKind, Start and Open each store at most one row and look up at most two
-        /// totals). CAPACITY in its costliest content: an open cycle that is listed (below the group cap) and is an
-        /// exception (over the magazine, shot in reload, a short first gap) below the exception cap, so CloseCycle
-        /// makes every store; the account is renewed outside the clock before either cap is reached, and the cycle is
-        /// opened by the real AddShot outside the clock. EMPTY: an account with no open cycle (CloseCycle counts the
-        /// idle refill and returns).</summary>
+        /// totals). CAPACITY in its costliest content (round 5, ruling FRAME-TIME-ROUND-R4-A1, H2): every branch of
+        /// CloseCycle populated. The cycle is opened and filled outside the clock by the real AddShot: its first shot
+        /// is a gate-call emission in reload (rep 0, FL_RELOADING, not forced) that exhausts a one-unit magazine, so
+        /// both reload flags are set (found-reloading before exhaustion, gate-reloading); then GAP_COUNT further
+        /// emissions in reload at new stamps, each a volley after exhaustion, so every gap slot is filled and the
+        /// in-reload units exceed the tail. A timer refill closes it: the timer fields are stored, and the first gap
+        /// (FT_GAP) is under the expected reload time, so it is short. The cycle is listed (below the group cap) and
+        /// below the exception cap, so CloseCycle stores the header and the exception row with every gap; Rexp rises
+        /// by one per exception row of the account, so each close lowers gap_minus_rexp_min and makes that store too;
+        /// all five reasons are counted. The account is renewed outside the clock before either cap. Checks, from the
+        /// account's own state: after each read the header stored (the group count and the cycle total), the
+        /// exception row stored, each of the five reason totals counted and the gap minimum stored; after the call,
+        /// from the last group and exception row, the timer fields stored, every gap listed and the reason mask
+        /// whole. EMPTY: an account with no open cycle closed at a point end, CloseCycle's cheapest path (it returns
+        /// with no store, not even the idle-refill count).</summary>
         internal static long FtCalGunAccount(bool full, int n)
         {
             int gcap = W.CAP[E.Ix("sh_s")], ccap = W.CAP[E.Ix("cx_s")];
-            int cyc = E.TotIx("cycles"), idle = E.TotIx("rf_idle");
+            int cyc = E.TotIx("cycles"), idle = E.TotIx("rf_idle"), gmin = E.TotIx("gap_minus_rexp_min");
+            int[] why =
+            {
+                E.TotIx("why_over_mag"), E.TotIx("why_in_reload"), E.TotIx("why_short_gap"),
+                E.TotIx("why_found_reloading"), E.TotIx("why_gate_reloading"),
+            };
+            const long allWhy = W.WHY_OVER_MAG | W.WHY_IN_RELOAD | W.WHY_SHORT_GAP | W.WHY_FOUND_RELOADING | W.WHY_GATE_RELOADING;
             if (_ftAcctIdle == null) _ftAcctIdle = new E.GunAccount(true);
-            long t = 0;
-            bool ok = true;
+            var w0 = new long[why.Length];
+            long t = 0, rexp = 0;
+            bool okHdr = true, okCx = true, okWhy = true, okMin = true, okIdle = true;
             for (int j = 0; j < n; j++)
             {
                 E.GunAccount a;
@@ -2986,20 +3404,44 @@ namespace CompetitiveRounds
                 {
                     if (_ftAcct == null || _ftAcct.GroupCount >= gcap || _ftAcct.CxCount >= ccap) _ftAcct = new E.GunAccount(true);
                     a = _ftAcct;
-                    a.Mag = 1; a.Rexp = 100000;
-                    a.AddShot(1, 1000, 1, false, -1, 0, 0, 0, -1);
-                    a.AddShot(2, 1100, 0, true, 50, 0, 0, 0, -1);
+                    rexp = FT_REXP + a.CxCount;
+                    a.Mag = 1; a.Rexp = rexp;
+                    a.AddShot(1, 1000, 1, true, FT_RL_MS, 0, 0, W.FL_RELOADING, -1);
+                    for (int q = 1; q <= W.GAP_COUNT; q++) a.AddShot(1 + q, 1000 + q * FT_GAP, 0, true, FT_RL_MS, 0, 0, W.FL_RELOADING, -1);
+                    for (int q = 0; q < why.Length; q++) w0[q] = a.Tot[why[q]];
                 }
                 else a = _ftAcctIdle;
                 int g0 = a.GroupCount, c0 = a.CxCount;
                 long y0 = a.Tot[cyc], i0 = a.Tot[idle];
                 long s = FtNow();
-                a.CloseCycle(W.END_TIMER, W.SRC_NONE, 1, 1200, 10, 10, 10);
+                a.CloseCycle(full ? W.END_TIMER : W.END_POINT, W.SRC_NONE, 1, 1000 + (W.GAP_COUNT + 1) * FT_GAP, FT_TIMER_MS, FT_TIMER_MS, FT_TIMER_MS);
                 t += FtNow() - s;
-                if (full) ok &= a.GroupCount == g0 + 1 && a.CxCount == c0 + 1 && a.Tot[cyc] == y0 + 1;
-                else ok &= a.GroupCount == 0 && a.CxCount == 0 && a.Tot[cyc] == 0 && a.Tot[idle] == i0 + 1;
+                if (full)
+                {
+                    okHdr &= a.GroupCount == g0 + 1 && a.Tot[cyc] == y0 + 1;
+                    okCx &= a.CxCount == c0 + 1;
+                    for (int q = 0; q < why.Length; q++) okWhy &= a.Tot[why[q]] == w0[q] + 1;
+                    okMin &= a.Tot[gmin] == FT_GAP - rexp;
+                }
+                else okIdle &= a.GroupCount == 0 && a.CxCount == 0 && a.Tot[cyc] == 0 && a.Tot[idle] == i0;
             }
-            FtA3.Check(FtA3.CE_gun_account, full ? "full-closecycle-stores" : "empty-idle-refill", ok);
+            if (full)
+            {
+                var gs = _ftAcct.Groups();
+                long[] h = gs[gs.Count - 1].H;
+                var xs = _ftAcct.CxRows();
+                long[] x = xs[xs.Count - 1];
+                bool okGaps = true;
+                for (int q = 0; q < W.GAP_COUNT; q++) okGaps &= x[8 + q] == (q + 1) * FT_GAP;
+                FtA3.Check(FtA3.CE_gun_account, "full-header-stored", okHdr);
+                FtA3.Check(FtA3.CE_gun_account, "full-exception-row-stored", okCx);
+                FtA3.Check(FtA3.CE_gun_account, "full-five-reasons-counted", okWhy);
+                FtA3.Check(FtA3.CE_gun_account, "full-gap-minimum-stored", okMin);
+                FtA3.Check(FtA3.CE_gun_account, "full-timer-fields-stored", h[4] == W.END_TIMER && h[8] == FT_TIMER_MS && h[9] == FT_TIMER_MS && h[10] == FT_TIMER_MS);
+                FtA3.Check(FtA3.CE_gun_account, "full-every-gap-listed", okGaps);
+                FtA3.Check(FtA3.CE_gun_account, "full-reason-mask-whole", x[13] == allWhy);
+            }
+            else FtA3.Check(FtA3.CE_gun_account, "empty-point-end-no-store", okIdle);
             return t;
         }
 
