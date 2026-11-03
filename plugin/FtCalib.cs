@@ -28,8 +28,10 @@ namespace CompetitiveRounds
     ///     closed path increments is restored afterwards. The line's shape is the entry's census
     ///     id, and the census maps every patched entry to itself, so D_up prices each entry with
     ///     its own run (V4 3.6). A direct-call entry uses "call": a call whose body opens with the
-    ///     census check, against the empty loop. Before the plugin's patches are applied (the
-    ///     process-start run) there is nothing to read back and no entry run is made; VR2 requires
+    ///     census check, against the empty loop. The entry table is built only after Plugin.Awake
+    ///     signals, right after its own Harmony patch loop, that this plugin's patches are applied
+    ///     (OwnPatchesApplied; ruling FRAME-TIME-ROUND-R6-A1); the process-start run sits before that
+    ///     loop, so it logs that the table is not built yet and makes no entry run. VR2 requires
     ///     every entry's run at every game start, so a failed entry run (logged) fails VR2.
     /// (c) The span's own cost: an outermost span around an empty body (x++), against the
     ///     body alone, in the calibration's own span slot (FtSpan.Cal).
@@ -88,6 +90,21 @@ namespace CompetitiveRounds
 
         private static EntryCal[] _cals;
         private static ModuleBuilder _module;
+        private static readonly EntryCal[] NotBuilt = new EntryCal[0];
+
+        /// <summary>The positive signal that this plugin's own Harmony patches exist: set only by
+        /// OwnPatchesApplied, which Plugin.Awake calls right after its patch loop logs "[HARMONY] Patches
+        /// applied" (ruling FRAME-TIME-ROUND-R6-A1). Another mod's patches never set it.</summary>
+        private static volatile bool _ownPatchesApplied;
+
+        /// <summary>Called once by Plugin.Awake after its own patch loop: sets the signal, then builds the entry
+        /// table at once, so the startup log carries its counts line (own-owner targets, entries, errors).</summary>
+        internal static void OwnPatchesApplied()
+        {
+            _ownPatchesApplied = true;
+            try { Cals(); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] cal i=-1 why=patches kind=entries failed: " + ex.GetType().Name + ": " + ex.Message); }
+        }
 
         /// <summary>One calibration run; why names the moment (start, or game g).</summary>
         internal static void Run(string why)
@@ -181,7 +198,19 @@ namespace CompetitiveRounds
         private static void RunEntries(int i, string why)
         {
             EntryCal[] cals = Cals();
-            if (cals.Length == 0) return;   // before the plugin's patches exist (the process-start run)
+            if (!_ownPatchesApplied)
+            {
+                // Plugin.Awake has not yet signalled that this plugin's own patches are applied (the process-start
+                // run sits before its patch loop): the table is not built, nothing is cached, and the first run after
+                // the signal builds it
+                Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=entries built=0 own_patches=not-applied");
+                return;
+            }
+            if (cals.Length == 0)
+            {
+                Plugin.Log.LogWarning("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=entries failed: the built table holds no patched entry");
+                return;
+            }
             var harmony = new Harmony(HarmonyId);
             foreach (EntryCal c in cals)
             {
@@ -227,12 +256,17 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>Every patched entry's calibration, built once after the plugin's patches exist.</summary>
+        /// <summary>Every patched entry's calibration. Before Plugin.Awake's signal (OwnPatchesApplied) it returns
+        /// an empty table and stores nothing; after it, the table is built once from the patches owned by this
+        /// plugin's own Harmony id (PatchedTargets) and kept. An entry whose patch class has no such target after
+        /// the signal is a patch that did not attach (lesson #83): its error names the class and is logged by
+        /// name on every run (RunEntries), so VR2 and the menu check fail on it by name.</summary>
         private static EntryCal[] Cals()
         {
             if (_cals != null) return _cals;
+            if (!_ownPatchesApplied) return NotBuilt;
             Dictionary<Type, MethodBase> targets = PatchedTargets();
-            if (targets.Count == 0) return new EntryCal[0];
+            int errors = 0;
             var list = new List<EntryCal>();
             for (int e = 0; e < FtE.Count; e++)
             {
@@ -240,15 +274,19 @@ namespace CompetitiveRounds
                 if (pt == null) continue;
                 var c = new EntryCal { Entry = e, Name = FtCensus.ShapeOf[e] ?? ("entry" + e) };
                 try { Build(c, pt, targets); }
-                catch (Exception ex) { c.Error = ex.GetType().Name + ": " + ex.Message; }
+                catch (Exception ex) { c.Error = ex.GetType().Name + ": " + ex.Message; errors++; }
                 list.Add(c);
             }
             _cals = list.ToArray();
+            Plugin.Log.LogInfo("[FRAME-TIME] cal i=-1 why=patches kind=entries built=1 own_owner=" + Plugin.ModId
+                + " own_targets=" + targets.Count + " entries=" + _cals.Length + " errors=" + errors);
             return _cals;
         }
 
-        /// <summary>Harmony's own table: each patch class (not this calibration's) and the one target it patches
-        /// (null when a class patches more than one).</summary>
+        /// <summary>Harmony's own table, restricted to the patches owned by this plugin's Harmony id
+        /// (Plugin.ModId, the owner of Plugin.Awake's patch loop): each such patch class and the one target it
+        /// patches (null when a class patches more than one). Other owners' patches (other mods, this
+        /// calibration's own dummies) never enter it.</summary>
         private static Dictionary<Type, MethodBase> PatchedTargets()
         {
             var map = new Dictionary<Type, MethodBase>();
@@ -259,7 +297,7 @@ namespace CompetitiveRounds
                 foreach (var group in new[] { info.Prefixes, info.Postfixes, info.Finalizers, info.Transpilers })
                     foreach (Patch q in group)
                     {
-                        if (q.owner == HarmonyId || q.PatchMethod == null) continue;
+                        if (q.owner != Plugin.ModId || q.PatchMethod == null) continue;
                         Type t = q.PatchMethod.DeclaringType;
                         MethodBase prev;
                         if (map.TryGetValue(t, out prev)) { if (prev != m) map[t] = null; }
@@ -280,7 +318,8 @@ namespace CompetitiveRounds
         private static void Build(EntryCal c, Type pt, Dictionary<Type, MethodBase> targets)
         {
             MethodBase target;
-            if (!targets.TryGetValue(pt, out target)) throw new InvalidOperationException("no patched target for " + pt.Name);
+            if (!targets.TryGetValue(pt, out target))
+                throw new InvalidOperationException(pt.Name + " is not attached: no target patched by " + Plugin.ModId + " (lesson #83)");
             if (target == null) throw new InvalidOperationException(pt.Name + " patches more than one target");
             var mi = target as MethodInfo;
             if (mi == null) throw new InvalidOperationException(pt.Name + " patches a constructor");

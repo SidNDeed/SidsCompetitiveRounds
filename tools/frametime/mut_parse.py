@@ -189,6 +189,8 @@ MUTS = [
     ('menu startup snapshot not required',
      'if len(pre) != 1 or pre[0].get("g") != -1 or pre[0].get("c_plant") != -1:', 'if False:'),
     ('menu failure warnings pass', '    if mfail:\n        bad.append(', '    if False:\n        bad.append('),
+    # ruling FRAME-TIME-ROUND-R6-A1: a failed entry calibration is named by its shape in the menu check
+    ('menu failure unnamed', ' if r.get("shape") else', ' if False else'),
 ]
 
 # the tests each mutant must turn red (taken from a --discover run on a green baseline, then pinned)
@@ -415,6 +417,8 @@ KILLS = {
         ['test_menu_check_validates_the_startup_and_the_terminal_snapshot'],
     'menu failure warnings pass':
         ['test_menu_check_validates_the_startup_and_the_terminal_snapshot'],
+    'menu failure unnamed':
+        ['test_menu_check_names_an_entry_patch_that_did_not_attach'],
 }
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]

@@ -938,6 +938,22 @@ def test_menu_check_validates_the_startup_and_the_terminal_snapshot():
     assert not ok and any("failure warnings" in b for b in bad), bad
 
 
+def test_menu_check_names_an_entry_patch_that_did_not_attach():
+    # ruling FRAME-TIME-ROUND-R6-A1: the entry table's readiness lines (not built before the plugin's own patches, the
+    # counts line once built) are no failure; an entry calibration that failed after the signal (a patch that did not
+    # attach, lesson #83) fails the menu run, named by its shape
+    lines = _menu_log().splitlines()
+    ready = ["[FRAME-TIME] cal i=0 why=start kind=entries built=0 own_patches=not-applied",
+             "[FRAME-TIME] cal i=-1 why=patches kind=entries built=1 own_owner=com.competitiverounds.mod"
+             " own_targets=40 entries=40 errors=0"]
+    ok, _, bad = P.menu_check(P.read("\n".join(lines[:1] + ready + lines[1:])))
+    assert ok, bad
+    fail = ["[FRAME-TIME] cal i=1 why=menu0 kind=disp shape=HE7 failed: InvalidOperationException: HeFooPatch is not"
+            " attached: no target patched by com.competitiverounds.mod (lesson #83)"]
+    ok, _, bad = P.menu_check(P.read("\n".join(lines[:1] + ready + fail + lines[1:])))
+    assert not ok and any("failure warnings" in b and "menu0 disp HE7" in b for b in bad), bad
+
+
 def test_a3_probe_proofs_need_their_records_and_contrary_ones_fail():
     # round-3 MEDIUM (ft_parse.py:540): probe:a3zero accepted only with consistent a3zero lines; an unknown token, a
     # contrary record, or live writes counted for a zero row are refused

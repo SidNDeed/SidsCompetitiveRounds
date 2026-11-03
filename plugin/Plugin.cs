@@ -1437,6 +1437,12 @@ namespace CompetitiveRounds
                     }
                 }
                 Log.LogInfo($"[HARMONY] Patches applied: {applied} ok, {failed} failed");
+#if SCR_FRAMETIME
+                // FrameTime: the positive signal that this plugin's own patches exist; the per-entry
+                // calibration table is built only from here on (ruling FRAME-TIME-ROUND-R6-A1).
+                try { FtCalib.OwnPatchesApplied(); }
+                catch (Exception ex) { Log.LogWarning("[FRAME-TIME] cal i=-1 why=patches kind=entries failed: " + ex.Message); }
+#endif
                 // Card draw evidence (B4): one line naming its six patches as attached.
                 try { CardDrawEvidence.BootLine(); } catch { }
                 // Combat evidence (B1-B5 and the addendum): one line naming every

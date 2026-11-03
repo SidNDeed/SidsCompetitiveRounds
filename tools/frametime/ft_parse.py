@@ -1330,7 +1330,10 @@ def menu_check(recs, z=Z_END):
         if mid:
             bad.append("%d settled lines inside the menu run (only the startup and the terminal snapshot belong to it)"
                        % len(mid))
-    mfail = sorted(set("%s %s" % (r.get("why", "-"), r.get("ckind")) for r in recs if r["kind"] == "cal" and r.get("failed")))
+    # ruling FRAME-TIME-ROUND-R6-A1: a failed entry calibration is named by its shape (a patch that did not attach)
+    mfail = sorted(set(("%s %s %s" % (r.get("why", "-"), r.get("ckind"), r["shape"])) if r.get("shape") else
+                       ("%s %s" % (r.get("why", "-"), r.get("ckind")))
+                       for r in recs if r["kind"] == "cal" and r.get("failed")))
     if mfail:
         bad.append("menu run carries calibration failure warnings: %s" % ", ".join(mfail))
     bad += failure_events(recs)
