@@ -14,30 +14,34 @@ execution:
     copy a table's CREATE statement out of its migration, reproduces the
     relation that migration produced.
 
-How. The test creates its own database through CF_TEST_PG_DSN (an admin DSN
-that may CREATE DATABASE; the database named in it is only used to connect)
-and drops it afterwards. It installs catalog_diff.PROBE_SQL (two event
-triggers that log every DDL command), then applies backend/sql in order, each
-numbered file whole with psql (ON_ERROR_STOP, as a migration is applied),
-and reads the catalog (catalog_diff.CATALOG_SQL) and pg_dump --schema-only
-after each step. The difference after a step is the DDL that step performed,
-whatever language, dynamic EXECUTE, format() or function call performed it.
+How. Every database this file measures is a CLONE of the template database
+D2_TEMPLATE (default scr_seat_d2_tmpl; ruling REHEARSAL-FOUR-R7-A2), made
+through CF_TEST_PG_DSN (an admin DSN that may CREATE DATABASE; it need not
+be a superuser, the database named in it is only used to connect) and
+dropped afterwards. The template carries catalog_diff's probe (two event
+triggers that log every DDL command, which only a superuser can create);
+the test reads the template from the cluster and fails with a sentence when
+it is absent, is not a template, or its clone does not carry exactly
+catalog_diff.PROBE_SQL's probe. No test creates a role, an event trigger or
+changes a pg_catalog ACL.
 
-The chain cannot be applied standalone. Migration 020 already reads
-players.total_xp, and ranked_series, bets, tournament_matches,
-flagged_matches and other tables are created only by the ORM. Data-repair
-migrations also refuse on an empty database by design, through their own
-gates. So the chain is the faithful build of cf_pg.build(faithful=True), with
-whole files in place of its split statements: pass 1 applies every numbered
-file in order; then the ORM's create_all and the widen step add what only
-the ORM defines; then the files refused in pass 1 are applied again, in
-order, up to twice. Every step, the ORM and widen included, is measured and
-attributed. The files still refused after pass 3 are UNMEASURED (each with
-its SQLSTATE). For them only the command log of what each ran before its
-refusal is checked.
+The chain is applied ONCE, in order, each numbered file whole with psql
+(ON_ERROR_STOP, as a migration is applied), and the catalog
+(catalog_diff.CATALOG_SQL) and pg_dump --schema-only are read after each
+step. The difference after a step is the DDL that step performed, whatever
+language, dynamic EXECUTE, format() or function call performed it.
 
-Run (fails, never skips, without a server and psql):
-    CF_TEST_PG_DSN=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
+The chain was never applied to an empty database in one go: some files read
+tables and columns only the ORM defines, and the data repairs, releases and
+seeds check production rows through their own gates and post-checks. Ruling
+R7-A1 (M11): the harness supplies those prerequisites (d2_seed.PREREQS),
+under the admin role, right before the file that needs them, each as its own
+measured step labelled "<prereq FILE>", so that EVERY numbered file runs to
+its end (rc 0, every statement). There are no declared failures. After the
+last file the ORM's create_all and the widen step run, also measured.
+
+Run (fails, never skips, without a server, the template and psql):
+    CF_TEST_PG_DSN=postgresql+asyncpg://<admin>@127.0.0.1:55432/postgres \
     D2_TEST_PSQL=<psql> D2_TEST_PG_DUMP=<pg_dump> \
     D2_CATALOG_OUT=<dir for the diffs> D2_DB_PREFIX=<scratch db prefix> \
         python -m pytest -q -p no:cacheprovider test_r7_catalog_diff_pg.py
@@ -56,6 +60,8 @@ import os
 import re
 import sys
 
+import subprocess
+
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,6 +69,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "api"))
 sys.path.insert(0, HERE)
 
 import catalog_diff as cd  # noqa: E402
+import d2_seed  # noqa: E402
 import models  # noqa: E402
 from migration_table_ddl import table_ddl  # noqa: E402
 
@@ -73,6 +80,15 @@ except ImportError:                                    # pragma: no cover
 
 ADMIN = (os.environ.get("CF_TEST_PG_DSN") or "").replace("postgresql+asyncpg://", "postgresql://")
 SQL_DIR = os.path.normpath(os.path.join(HERE, "..", "sql"))
+REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
+# Every migration is applied from the OBJECT STORE (ruling R8-CRLF): the
+# blob of backend/sql/<file> at one revision frozen for the session (the
+# checkout's HEAD, or D2_SQL_REV), written byte for byte to the run's out
+# directory, never the working copy (an autocrlf checkout carries CR in every
+# dollar-quoted body, and the files that hash their own text, e.g. 287's
+# release notes, then refuse at their post-checks) and never a CR strip.
+CRLF_FILE = "287_release_notes_v1401.sql"
+_REV = {}
 MAIL = "public.mail_inbox_rev"
 M300 = "300_mail_inbox_rev.sql"
 M373 = "373_bug_reports_auto_number.sql"
@@ -118,52 +134,39 @@ DECLARED_DDL = {
     M373: ["public.bug_reports", "public.bug_reports_auto_number_seq"],
 }
 
-# DECLARED: the files the faithful build cannot run to their end, each with
-# the SQLSTATE of its refusal in the last pass.
-DECLARED_UNMEASURED = {
-    # A pass-1 partial application (no BEGIN) left the FK its pass-2 re-run adds.
-    "047_tournaments.sql": "42710",
-    # data repairs of production rows that do not exist here
-    "099_resolve_stuck_2v2_series.sql": "23503",
-    "100_rebuild_2v2_glicko.sql": "23503",
-    "108_fix_2v2_series_9369b7a5_dc_forfeit.sql": "23503",
-    "115_backfill_july12_lost_matches.sql": "23503",
-    "168_ffa_recover_wiped_games.sql": "23502",
-    # each file's own gate or post-check (RAISE EXCEPTION) on production rows
-    "149_release_spooky_head_bouncers.sql": "P0001",
-    "172_publish_tattered_cape_rev2.sql": "P0001",
-    "175_release_v1355_cosmetics.sql": "P0001",
-    "190_release_v1360_cosmetics.sql": "P0001",
-    "197_publish_magical_hat_animated.sql": "P0001",
-    "211_release_twisted_topper.sql": "P0001",
-    "213_seed_machine_translations_uk_sv.sql": "P0001",
-    "214_translator_titles.sql": "P0001",
-    "217_fix_animated_submission_metadata.sql": "P0001",
-    "223_seed_vocab_and_new_shop_strings.sql": "P0001",
-    "228_release_poison_set.sql": "P0001",
-    "231_grant_notnic_gold.sql": "P0001",
-    "239_seed_machine_translations_v1391.sql": "P0001",
-    "240_release_spring_nuclear.sql": "P0001",
-    "243_seed_machine_translations_forfeit.sql": "P0001",
-    "247_release_v1392_cosmetics.sql": "P0001",
-    "248_i18n_keys_v1392.sql": "P0001",
-    "249_seed_machine_translations_v1392.sql": "P0001",
-    "260_release_five_faces.sql": "P0001",
-    "264_release_five_faces_v2.sql": "P0001",
-    "265_seed_machine_translations_chatmod.sql": "P0001",
-    "266_i18n_keys_v1396.sql": "P0001",
-    "268_publish_party_crown_rev2.sql": "P0001",
-    "281_clavar_activation.sql": "P0001",
-    "282_i18n_keys_v1400.sql": "P0001",
-    "285_clavar_track_count_14.sql": "P0001",
-    "287_release_notes_v1401.sql": "P0001",
-    "304_release_straw_hat_florabelle.sql": "P0001",
-    "321_pc_rank2_legendary.sql": "P0001",
-    "366_title_refunds_voidshot_kingslayer.sql": "P0001",
-    "376_i18n_337_demonic_proposals.sql": "P0001",
-    "387_ffa_rating_restore_2f60481d.sql": "P0001",
-    "388_ffa_rating_restore_2f60481d.sql": "P0001",
-    "398_release_five_faces_v1410.sql": "P0001",
+# The template every measured database is cloned from (ruling R7-A2).
+TEMPLATE = os.environ.get("D2_TEMPLATE", "scr_seat_d2_tmpl")
+
+# The M11 control's file: a file the round-7 build declared unmeasured (it
+# stopped at its own post-check, P0001 at line 153), the last of the chain.
+TAIL_FILE = "399_shop_face_descriptions.sql"
+TAIL_AFTER = "END $$;\n\nCOMMIT;\n"
+TAIL_ALTER = "ALTER TABLE mail_inbox_rev ADD COLUMN d2c_tail int;\n"
+
+# RECORD ONLY: the 41 files round 7 declared unmeasured, each with the
+# SQLSTATE of its refusal. Nothing accepts a failure by this list; it names
+# the files completion.json marks "declared in round 7".
+R7_DECLARED = {
+    "047_tournaments.sql": "42710", "099_resolve_stuck_2v2_series.sql": "23503",
+    "100_rebuild_2v2_glicko.sql": "23503", "108_fix_2v2_series_9369b7a5_dc_forfeit.sql": "23503",
+    "115_backfill_july12_lost_matches.sql": "23503", "168_ffa_recover_wiped_games.sql": "23502",
+    "149_release_spooky_head_bouncers.sql": "P0001", "172_publish_tattered_cape_rev2.sql": "P0001",
+    "175_release_v1355_cosmetics.sql": "P0001", "190_release_v1360_cosmetics.sql": "P0001",
+    "197_publish_magical_hat_animated.sql": "P0001", "211_release_twisted_topper.sql": "P0001",
+    "213_seed_machine_translations_uk_sv.sql": "P0001", "214_translator_titles.sql": "P0001",
+    "217_fix_animated_submission_metadata.sql": "P0001", "223_seed_vocab_and_new_shop_strings.sql": "P0001",
+    "228_release_poison_set.sql": "P0001", "231_grant_notnic_gold.sql": "P0001",
+    "239_seed_machine_translations_v1391.sql": "P0001", "240_release_spring_nuclear.sql": "P0001",
+    "243_seed_machine_translations_forfeit.sql": "P0001", "247_release_v1392_cosmetics.sql": "P0001",
+    "248_i18n_keys_v1392.sql": "P0001", "249_seed_machine_translations_v1392.sql": "P0001",
+    "260_release_five_faces.sql": "P0001", "264_release_five_faces_v2.sql": "P0001",
+    "265_seed_machine_translations_chatmod.sql": "P0001", "266_i18n_keys_v1396.sql": "P0001",
+    "268_publish_party_crown_rev2.sql": "P0001", "281_clavar_activation.sql": "P0001",
+    "282_i18n_keys_v1400.sql": "P0001", "285_clavar_track_count_14.sql": "P0001",
+    "287_release_notes_v1401.sql": "P0001", "304_release_straw_hat_florabelle.sql": "P0001",
+    "321_pc_rank2_legendary.sql": "P0001", "366_title_refunds_voidshot_kingslayer.sql": "P0001",
+    "376_i18n_337_demonic_proposals.sql": "P0001", "387_ffa_rating_restore_2f60481d.sql": "P0001",
+    "388_ffa_rating_restore_2f60481d.sql": "P0001", "398_release_five_faces_v1410.sql": "P0001",
     "399_shop_face_descriptions.sql": "P0001",
 }
 
@@ -177,6 +180,66 @@ def _require():
     if cd.client("D2_TEST_PSQL", "psql") is None:
         pytest.fail("no psql: set D2_TEST_PSQL or put psql on PATH; migrations are applied "
                     "with psql, as they are deployed")
+    problem = asyncio.run(_template_problem())
+    if problem:
+        pytest.fail(problem)
+
+
+async def _template_problem():
+    """None when TEMPLATE exists in the cluster as a template database owned
+    by a superuser (only a superuser can have installed its event
+    triggers); otherwise the sentence naming what is missing."""
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        row = await conn.fetchrow(
+            "SELECT d.datistemplate, r.rolsuper, r.rolname FROM pg_database d "
+            "JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname = $1", TEMPLATE)
+    finally:
+        await conn.close()
+    if row is None:
+        return ("the template database %s does not exist in this cluster: provision it with "
+                "ai-collab/rehearsal-1410/seat-ro-d2/provision.sql (it carries catalog_diff's probe)" % TEMPLATE)
+    if not row["datistemplate"]:
+        return "the database %s exists but is not marked as a template (datistemplate false)" % TEMPLATE
+    if not row["rolsuper"]:
+        return "the template database %s is owned by %s, not a superuser" % (TEMPLATE, row["rolname"])
+    return None
+
+
+async def _probe_problems(dsn):
+    """[] when the database carries exactly catalog_diff.PROBE_SQL's probe:
+    both event triggers, enabled ('O'), on their events, calling their
+    d2_probe functions, whose bodies equal PROBE_SQL's byte for byte."""
+    conn = await asyncpg.connect(dsn)
+    try:
+        trig = {r["evtname"]: r for r in await conn.fetch(
+            "SELECT e.evtname, e.evtevent, e.evtenabled::text AS evtenabled, n.nspname, p.proname "
+            "FROM pg_event_trigger e JOIN pg_proc p ON p.oid = e.evtfoid "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace")}
+        body = {r["proname"]: r["prosrc"] for r in await conn.fetch(
+            "SELECT p.proname, p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = $1", cd.PROBE_SCHEMA)}
+    finally:
+        await conn.close()
+    problems = []
+    want_bodies = cd.probe_bodies()
+    for name, (event, fn) in sorted(cd.PROBE_TRIGGERS.items()):
+        t = trig.get(name)
+        if t is None:
+            problems.append("event trigger %s is missing from the clone of %s" % (name, TEMPLATE))
+            continue
+        if (t["evtevent"], t["evtenabled"], t["nspname"], t["proname"]) != (event, "O", cd.PROBE_SCHEMA, fn):
+            problems.append("event trigger %s is %s/%s calling %s.%s, not %s/O calling %s.%s" % (
+                name, t["evtevent"], t["evtenabled"], t["nspname"], t["proname"], event, cd.PROBE_SCHEMA, fn))
+        if body.get(fn) != want_bodies.get(fn):
+            problems.append("function %s.%s differs from catalog_diff.PROBE_SQL's body" % (cd.PROBE_SCHEMA, fn))
+    return problems
+
+
+async def _clone(name, template=None):
+    """CREATE DATABASE name TEMPLATE template (TEMPLATE by default); CREATEDB
+    suffices."""
+    await _admin('CREATE DATABASE "%s" TEMPLATE "%s"' % (name, template or TEMPLATE))
 
 
 def _dsn(name):
@@ -210,8 +273,71 @@ async def _drop_db(name):
     await _admin('DROP DATABASE IF EXISTS "%s"' % name)
 
 
+def _git(*args):
+    proc = subprocess.run(["git", "-C", REPO] + list(args), capture_output=True)
+    if proc.returncode:
+        raise AssertionError("git %s failed: %s" % (" ".join(args), proc.stderr.decode("utf-8", "replace")[-300:]))
+    return proc.stdout
+
+
+def sql_rev():
+    """The revision every migration is read from, frozen once per session."""
+    if "rev" not in _REV:
+        want = os.environ.get("D2_SQL_REV") or "HEAD"
+        _REV["rev"] = _git("rev-parse", "--verify", want + "^{commit}").decode().strip()
+    return _REV["rev"]
+
+
+def _blobs():
+    """{file name: bytes} of every blob under backend/sql at sql_rev(), read
+    once per session from the object store (ls-tree, then one cat-file
+    --batch)."""
+    if "blobs" not in _REV:
+        rows = []
+        for line in _git("ls-tree", sql_rev(), "backend/sql/").decode("utf-8").splitlines():
+            meta, path = line.split("\t", 1)
+            mode, kind, oid = meta.split()
+            if kind == "blob":
+                rows.append((os.path.basename(path), oid))
+        proc = subprocess.run(["git", "-C", REPO, "cat-file", "--batch"],
+                              input="".join(oid + "\n" for _n, oid in rows).encode(), capture_output=True)
+        if proc.returncode:
+            raise AssertionError("git cat-file failed: %s" % proc.stderr.decode("utf-8", "replace")[-300:])
+        data, pos, blobs = proc.stdout, 0, {}
+        for name, oid in rows:
+            end = data.index(b"\n", pos)
+            got_oid, kind, size = data[pos:end].decode().split()
+            assert got_oid == oid and kind == "blob", (name, data[pos:end])
+            blobs[name] = data[end + 1:end + 1 + int(size)]
+            pos = end + 1 + int(size) + 1
+        _REV["blobs"] = blobs
+    return _REV["blobs"]
+
+
+def _blob(name):
+    """The bytes of backend/sql/<name> in the object store at sql_rev()."""
+    blobs = _blobs()
+    if name not in blobs:
+        raise AssertionError("backend/sql/%s is not in the object store at %s" % (name, sql_rev()))
+    return blobs[name]
+
+
+def _blob_file(out, name):
+    """Path of the blob of <name>, written byte for byte under out/sql_blobs."""
+    path = os.path.join(out, "sql_blobs", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(_blob(name))
+    return path
+
+
+def _crlf_db(pre_db):
+    """The database cloned right before CRLF_FILE (the object-store control)."""
+    return (pre_db + "_crlf")[:63]
+
+
 def _files():
-    names = sorted(n for n in os.listdir(SQL_DIR) if n.endswith(".sql"))
+    names = sorted(n for n in _blobs() if n.endswith(".sql"))
     numbered = [n for n in names if re.match(r"^\d{3}_", n)]
     return numbered, [n for n in names if n not in numbered]
 
@@ -220,8 +346,12 @@ def _jsonable(d):
     return {"added": [list(r) for r in d["added"]], "removed": [list(r) for r in d["removed"]]}
 
 
+def _row(r):
+    return tuple(tuple(v) if isinstance(v, list) else v for v in r)
+
+
 def _undiff(d):
-    return {"added": [tuple(r) for r in d["added"]], "removed": [tuple(r) for r in d["removed"]]}
+    return {"added": [_row(r) for r in d["added"]], "removed": [_row(r) for r in d["removed"]]}
 
 
 async def _orm(dsn):
@@ -260,16 +390,37 @@ def _kept_rows(rows):
     return frozenset(r for r in rows if r[1] in KEEP_RELS)
 
 
-async def _build(dsn, out, psql, pg_dump):
-    """Apply the chain to dsn, measuring every step. Returns (steps, kept,
-    unmeasured): steps are dicts with the step's catalog diff, kept maps a
-    KEEP_FILES file (and '<end>') to the catalog rows of KEEP_RELS right
-    after it, unmeasured maps each file still refused to its SQLSTATE."""
+async def _prereq(dsn, step):
+    """One d2_seed prerequisite step on its own connection; returns the
+    step's outcome (rc 0, or rc 3 with the SQLSTATE when PostgreSQL refused
+    it) and its command log."""
     conn = await _connect(dsn)
+    logs = []
+    conn.add_log_listener(lambda _c, msg: logs.append(msg.message))
     try:
-        await conn.execute(cd.PROBE_SQL)
+        guard = await d2_seed.apply(conn, step, models)
+        out = {"rc": 0, "sqlstate": None, "error": None, "error_line": None, "guard": guard}
+    except asyncpg.PostgresError as exc:
+        out = {"rc": 3, "sqlstate": exc.sqlstate, "error": str(exc).splitlines()[0][:300], "error_line": None}
+    except AssertionError as exc:
+        # d2_seed's own refusal (the id-move guard, a seed file's md5): a
+        # refused step, recorded like PostgreSQL's
+        out = {"rc": 3, "sqlstate": "GUARD", "error": str(exc)[:300], "error_line": None}
     finally:
         await conn.close()
+    out["commands"] = cd.commands("\n".join(logs))
+    return out
+
+
+async def _build(dsn, out, psql, pg_dump, pre_db):
+    """Apply the chain to dsn ONCE, in order, measuring every step: each
+    numbered file preceded by its d2_seed prerequisites (each its own step,
+    labelled '<prereq FILE>'), then the ORM's create_all and the widen step.
+    Right before TAIL_FILE's prerequisites the database is cloned to pre_db
+    (the M11 control's starting state). Returns (steps, kept): steps are
+    dicts with the step's catalog diff and, with pg_dump, its object match;
+    kept maps a KEEP_FILES file (and '<end>') to the catalog rows of
+    KEEP_RELS right after it."""
     numbered, _aux = _files()
     state = {"prev": await _snap(dsn), "dump": cd.dump(pg_dump, dsn) if pg_dump else None}
     if pg_dump:
@@ -278,73 +429,67 @@ async def _build(dsn, out, psql, pg_dump):
     steps, kept = [], {}
     log = open(os.path.join(out, "steps.jsonl"), "w", encoding="utf-8")
 
-    async def record(label, npass, outcome):
+    async def record(label, kind, outcome):
         cur = await _snap(dsn)
         d = cd.diff(state["prev"], cur)
-        dd = None
+        dd = mt = None
         if pg_dump:
             now = cd.dump(pg_dump, dsn)
             dd = cd.dump_diff(state["dump"], now)
+            mt = cd.match(d, state["dump"], now)
             state["dump"] = now
-        step = dict(outcome, n=len(steps), label=label, npass=npass, diff=d, dump=dd)
+        step = dict(outcome, n=len(steps), label=label, kind=kind, diff=d, dump=dd, match=mt)
         steps.append(step)
         state["prev"] = cur
         added, removed, changed = cd.changes(d)
         log.write(json.dumps({
-            "n": step["n"], "label": label, "pass": npass, "rc": outcome["rc"],
+            "n": step["n"], "label": label, "kind": kind, "rc": outcome["rc"],
             "sqlstate": outcome["sqlstate"], "error": outcome["error"],
             "error_line": outcome.get("error_line"),
             "added": len(added), "removed": len(removed), "changed": len(changed),
             "touched": cd.touched(d), "commands": outcome["commands"],
-            "dump": dd}) + "\n")
+            "dump": dd, "match": mt}) + "\n")
         if not cd.empty(d):
-            _write(out, os.path.join("diffs", "%04d_%s.json" % (step["n"], label.strip("<>").replace(" ", "_"))),
-                   json.dumps({"label": label, "pass": npass, "added": added, "removed": removed,
-                               "changed": changed, "rows": _jsonable(d)}, indent=1))
+            _write(out, os.path.join("diffs", "%04d_%s.json" % (
+                step["n"], re.sub(r"[^\w.]+", "_", label.strip("<>")))),
+                json.dumps({"label": label, "kind": kind, "added": added, "removed": removed,
+                            "changed": changed, "rows": _jsonable(d)}, indent=1))
         return cur
 
     def run(name):
-        outcome = cd.apply_file(psql, dsn, os.path.join(SQL_DIR, name))
+        outcome = cd.apply_file(psql, dsn, _blob_file(out, name))
         if outcome["rc"] not in (0, 3):
             raise AssertionError("psql could not run %s (rc %d): %s" % (name, outcome["rc"], outcome["error"]))
         return outcome
 
     try:
-        refused = []
         for name in numbered:
+            if name == TAIL_FILE:
+                await _clone(pre_db, dsn.rsplit("/", 1)[1])
+            if name == CRLF_FILE:
+                await _clone(_crlf_db(pre_db), dsn.rsplit("/", 1)[1])
+            for step in d2_seed.steps_for(name):
+                await record("<prereq %s>" % name, "prereq", await _prereq(dsn, step))
             outcome = run(name)
-            cur = await record(name, 1, outcome)
-            if outcome["rc"]:
-                refused.append(name)
-            elif name in KEEP_FILES:
+            cur = await record(name, "migration", outcome)
+            if name in KEEP_FILES:
                 kept[name] = _kept_rows(cur)
             if name == M300:
                 _write(out, "snapshot_after_300.json", json.dumps(sorted(cur), indent=0))
                 if pg_dump:
                     _write(out, "dump_after_300.sql", state["dump"])
+        none = {"rc": 0, "sqlstate": None, "error": None, "error_line": None, "commands": []}
         await _orm(dsn)
-        await record("<orm create_all>", 0, {"rc": 0, "sqlstate": None, "error": None, "error_line": None, "commands": []})
+        await record("<orm create_all>", "orm", none)
         await _widen(dsn)
-        await record("<widen>", 0, {"rc": 0, "sqlstate": None, "error": None, "error_line": None, "commands": []})
-        last = {}
-        for npass in (2, 3):
-            again = []
-            for name in refused:
-                outcome = run(name)
-                cur = await record(name, npass, outcome)
-                if outcome["rc"]:
-                    again.append(name)
-                    last[name] = outcome["sqlstate"]
-                elif name in KEEP_FILES and name not in kept:
-                    kept[name] = _kept_rows(cur)
-            refused = again
+        await record("<widen>", "orm", none)
         kept["<end>"] = _kept_rows(state["prev"])
         _write(out, "snapshot_end.json", json.dumps(sorted(state["prev"]), indent=0))
         if pg_dump:
             _write(out, "dump_end.sql", state["dump"])
     finally:
         log.close()
-    return steps, kept, {name: last[name] for name in refused}
+    return steps, kept
 
 
 def _write(out, rel, text):
@@ -376,6 +521,16 @@ class Chain:
     pass
 
 
+async def _whoami():
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        return dict(await conn.fetchrow(
+            "SELECT current_user AS admin_user, r.rolsuper AS superuser, r.rolcreatedb AS createdb, "
+            "r.rolcreaterole AS createrole, version() AS server FROM pg_roles r WHERE r.rolname = current_user"))
+    finally:
+        await conn.close()
+
+
 @pytest.fixture(scope="module")
 def chain(tmp_path_factory):
     _require()
@@ -385,35 +540,42 @@ def chain(tmp_path_factory):
     os.makedirs(out, exist_ok=True)
     c = Chain()
     c.out, c.psql, c.pg_dump = out, psql, pg_dump
+    c.who = asyncio.run(_whoami())
     reuse = os.environ.get("D2_REUSE_DB")
     if reuse:
         with open(os.environ["D2_REUSE_STATE"], encoding="utf-8") as fh:
             st = json.load(fh)
         c.db, c.dsn, c.reused = reuse, _dsn(reuse), True
+        c.pre_db = st["pre_db"]
         c.steps = [dict(s, diff=_undiff(s["diff"])) for s in st["steps"]]
-        c.kept = {k: frozenset(tuple(r) for r in v) for k, v in st["kept"].items()}
-        c.unmeasured = st["unmeasured"]
+        c.kept = {k: frozenset(_row(r) for r in v) for k, v in st["kept"].items()}
     else:
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
         c.db = ("%s_%s_%d" % (os.environ.get("D2_DB_PREFIX", "d2catalog"), stamp, os.getpid())).lower()
+        c.pre_db = (c.db + "_pre")[:63]
         c.dsn, c.reused = _dsn(c.db), False
-        asyncio.run(_admin('CREATE DATABASE "%s"' % c.db))
-    _write(out, "run.json", json.dumps({
-        "db": c.db, "reused": c.reused, "psql": psql, "pg_dump": pg_dump or "(absent)",
-        "admin_dsn_host": ADMIN.split("@")[-1].rsplit("/", 1)[0]}, indent=1))
+        asyncio.run(_clone(c.db))
+    _write(out, "run.json", json.dumps(dict(c.who, **{
+        "db": c.db, "pre_db": c.pre_db, "crlf_db": _crlf_db(c.pre_db), "sql_rev": sql_rev(),
+        "template": TEMPLATE, "reused": c.reused, "psql": psql,
+        "pg_dump": pg_dump or "(absent)", "admin_dsn_host": ADMIN.split("@")[-1].rsplit("/", 1)[0]}),
+        indent=1))
     try:
+        c.probe = asyncio.run(_probe_problems(c.dsn))
         if not c.reused:
-            c.steps, c.kept, c.unmeasured = asyncio.run(_build(c.dsn, out, psql, pg_dump))
+            c.steps, c.kept = asyncio.run(_build(c.dsn, out, psql, pg_dump, c.pre_db))
             if os.environ.get("D2_KEEP_DB") == "1":
                 _write(out, "state.json", json.dumps({
+                    "pre_db": c.pre_db,
                     "steps": [dict(s, diff=_jsonable(s["diff"])) for s in c.steps],
-                    "kept": {k: sorted(v) for k, v in c.kept.items()},
-                    "unmeasured": c.unmeasured}))
+                    "kept": {k: sorted(v) for k, v in c.kept.items()}}))
         c.model = asyncio.run(_model_rows(c.dsn))
         yield c
     finally:
         if not c.reused and os.environ.get("D2_KEEP_DB") != "1":
             asyncio.run(_drop_db(c.db))
+            asyncio.run(_drop_db(c.pre_db))
+            asyncio.run(_drop_db(_crlf_db(c.pre_db)))
 
 
 def _attribution(steps):
@@ -425,34 +587,48 @@ def _model_shape(c):
 
 
 async def _evaluate(dsn, exprs):
+    """Each catalog default expression evaluated INSIDE one transaction,
+    beside that transaction's own clock: {column: (value,
+    transaction_timestamp())} (ruling R7-A1, M10). The transaction's first
+    statement is a short sleep, so the statement and wall clocks have
+    moved past the transaction clock by the time the defaults run: only an
+    expression that IS the transaction clock (now(), CURRENT_TIMESTAMP,
+    transaction_timestamp()) returns it exactly."""
     conn = await _connect(dsn)
     try:
-        return {col: await conn.fetchval("SELECT " + e) for col, e in exprs.items()}
+        async with conn.transaction():
+            await conn.execute("SELECT pg_sleep(0.01)")
+            out = {}
+            for col, e in exprs.items():
+                row = await conn.fetchrow("SELECT (%s) AS value, transaction_timestamp() AS clock" % e)
+                out[col] = (row["value"], row["clock"])
+            return out
     finally:
         await conn.close()
 
 
 def _default_mismatches(values):
     """Where the evaluated catalog defaults differ from the model's defaults:
-    a scalar model default must equal the value, a callable one (now) must
-    land within five minutes of it, and a column without a model default
-    must have none in the catalog."""
+    a scalar model default must equal the value; a callable one that
+    returns the current time must equal the DATABASE clock of the
+    transaction the default ran in, exactly (no tolerance window); a
+    column without a model default must have none in the catalog."""
     out = []
     for col in models.MailInboxRev.__table__.columns:
         assert col.server_default is None, col.name
         d = col.default
         if d is None:
             if col.name in values:
-                out.append((col.name, "catalog default where the model has none", values[col.name]))
+                out.append((col.name, "catalog default where the model has none", values[col.name][0]))
             continue
         if col.name not in values:
             out.append((col.name, "no catalog default", None))
             continue
         want = d.arg(None) if d.is_callable else d.arg
-        got = values[col.name]
-        if isinstance(want, datetime.datetime):
-            ok = (isinstance(got, datetime.datetime) and got.tzinfo is not None
-                  and abs((got - want).total_seconds()) < 300)
+        got, clock = values[col.name]
+        if d.is_callable and isinstance(want, datetime.datetime):
+            ok = isinstance(got, datetime.datetime) and got.tzinfo is not None and got == clock
+            want = "transaction clock %s" % clock
         else:
             ok = got == want
         if not ok:
@@ -474,32 +650,56 @@ def _table_matches_model(c, rows, rel):
 # --- the chain ------------------------------------------------------------
 
 
-def test_the_chain_was_applied_and_every_file_is_measured_or_declared(chain):
+def test_the_measured_database_is_a_clone_carrying_the_probe(chain):
+    """Ruling R7-A2: the chain database is a clone of TEMPLATE and carries
+    exactly catalog_diff.PROBE_SQL's probe (triggers enabled 'O', bodies
+    byte-equal); the command log below is that probe's."""
+    assert chain.probe == [], chain.probe
+
+
+def _completion(steps):
+    """[(file, rc, sqlstate, error_line, error, commands, prereq steps)] per
+    numbered file, in chain order."""
+    rows, pre = [], []
+    for s in steps:
+        if s["kind"] == "prereq":
+            pre.append((s["rc"], s["sqlstate"], s["error"]))
+        elif s["kind"] == "migration":
+            rows.append((s["label"], s["rc"], s["sqlstate"], s.get("error_line"), s["error"],
+                         len(s["commands"]), pre))
+            pre = []
+    return rows
+
+
+def test_every_migration_file_runs_to_its_end(chain):
+    """Ruling R7-A1 (M11): every numbered file in backend/sql is applied
+    exactly once and exits 0 (every statement executed), its prerequisites
+    included; there are no declared failures. The per-file table
+    (completion.json) records each file's rc, command log and
+    prerequisite steps."""
     numbered, _aux = _files()
-    applied = {s["label"] for s in chain.steps if s["rc"] == 0}
-    assert set(numbered) - applied == set(chain.unmeasured), (
-        sorted(set(numbered) - applied), chain.unmeasured)
-    # each unmeasured file's command log (every pass) names nothing of
-    # mail_inbox_rev; where each stopped is recorded (unmeasured.json)
-    rows = []
-    for name in sorted(chain.unmeasured):
-        mine = [s for s in chain.steps if s["label"] == name]
-        cmds = [c for s in mine for c in s["commands"]]
-        with open(os.path.join(SQL_DIR, name), encoding="utf-8") as fh:
-            lines = len(fh.read().splitlines())
-        rows.append({"file": name, "lines": lines,
-                     "passes": [{"pass": s["npass"], "sqlstate": s["sqlstate"],
-                                 "error_line": s.get("error_line"), "error": s["error"]} for s in mine],
-                     "commands_before_refusal": len(cmds)})
-        assert not [c for c in cmds if "mail_inbox_rev" in c[2]], (name, cmds)
-    _write(chain.out, "unmeasured.json", json.dumps(rows, indent=1))
-    assert chain.unmeasured == DECLARED_UNMEASURED, chain.unmeasured
+    rows = _completion(chain.steps)
+    _write(chain.out, "completion.json", json.dumps(
+        [{"file": f, "rc": rc, "sqlstate": st, "error_line": ln, "error": er, "commands": nc,
+          "prereq_steps": [list(p) for p in pre], "declared_in_round_7": R7_DECLARED.get(f)}
+         for f, rc, st, ln, er, nc, pre in rows], indent=1))
+    assert [r[0] for r in rows] == numbered, "not every numbered file was applied exactly once, in order"
+    incomplete = [(f, rc, st, ln, er) for f, rc, st, ln, er, _nc, _pre in rows if rc != 0 or st is not None]
+    assert incomplete == [], incomplete
+    refused_prereqs = [(f, p) for f, *_x, pre in rows for p in pre if p[0] != 0]
+    assert refused_prereqs == [], refused_prereqs
+    # the prerequisites are fixture steps: none of them changes mail_inbox_rev
+    pre_steps = [(s["label"], s["diff"]) for s in chain.steps if s["kind"] == "prereq"]
+    assert pre_steps, "no prerequisite step ran"
+    assert cd.changers(pre_steps, MAIL) == []
+    assert not [c for s in chain.steps if s["kind"] == "prereq" for c in s["commands"]
+                if "mail_inbox_rev" in c[2]]
 
 
 def test_only_the_declared_migration_changes_mail_inbox_rev(chain):
     got = cd.changers(_attribution(chain.steps), MAIL)
     assert sorted(set(got)) == DECLARED_CHANGERS, got
-    # 300 changes it in one step: the pass-1 application that creates it
+    # 300 changes it in one step: its one application, which creates it
     assert got == [M300], got
 
 
@@ -528,7 +728,7 @@ def test_declared_ddl_of_the_covered_migrations(chain):
     table = {}
     for name in [M300] + HAND_READ:
         mine = [s for s in chain.steps if s["label"] == name]
-        assert [s["rc"] for s in mine][-1:] == [0], (name, [(s["npass"], s["sqlstate"]) for s in mine])
+        assert [s["rc"] for s in mine][-1:] == [0], (name, [(s["kind"], s["sqlstate"]) for s in mine])
         d = {"added": [], "removed": []}
         for s in mine:
             d["added"] += s["diff"]["added"]
@@ -542,22 +742,478 @@ def test_declared_ddl_of_the_covered_migrations(chain):
     assert [n for n, v in table.items() if v["changes_mail_inbox_rev"]] == DECLARED_CHANGERS
 
 
+def _unmatched(step):
+    """The objects one side of a step changed and the other did not."""
+    m = step["match"]
+    return {"catalog_only": m["catalog_only"], "dump_only": m["dump_only"]}
+
+
 def test_catalog_query_and_pg_dump_agree_on_every_step(chain):
+    """Ruling R7-A1 (M9): on every step of the chain the catalog diff and the
+    pg_dump diff change the SAME object set; an object either side changed
+    and the other did not fails the test. pg_dump prints no oid, so rows
+    differing only in oid (a relation dropped and recreated with the same
+    definition) are listed apart (oid_only_steps.json) and are not objects."""
     if not chain.pg_dump:
         assert os.environ.get("D2_PG_DUMP_ABSENT_OK") == "1", (
             "no pg_dump: set D2_TEST_PG_DUMP or put it on PATH, or record the waiver with "
             "D2_PG_DUMP_ABSENT_OK=1")
         _write(chain.out, "pg_dump_absent.txt", "pg_dump absent; the catalog query stands alone\n")
         return
-    # pg_dump prints no oid, so a relation dropped and recreated with the
-    # same definition changes the catalog (its oid) and not the dump; those
-    # steps are listed, and the agreement is judged without the oid
-    oid_only = [(s["n"], s["label"]) for s in chain.steps
-                if not cd.empty(s["diff"]) and cd.empty(cd.without_oid(s["diff"]))]
+    oid_only = [(s["n"], s["label"], [list(r[:3]) for r in cd.oid_only(s["diff"])]) for s in chain.steps
+                if cd.oid_only(s["diff"])]
     _write(chain.out, "oid_only_steps.json", json.dumps(oid_only, indent=1))
-    disagree = [(s["n"], s["label"], cd.touched(s["diff"]), s["dump"]) for s in chain.steps
-                if cd.empty(cd.without_oid(s["diff"])) != (not any(s["dump"].values()))]
+    _write(chain.out, "object_match.json", json.dumps(
+        [{"n": s["n"], "label": s["label"], "matched": s["match"]["matched"],
+          "unmatched": _unmatched(s)} for s in chain.steps if s["match"]["matched"] or any(_unmatched(s).values())],
+        indent=1))
+    disagree = [(s["n"], s["label"], _unmatched(s)) for s in chain.steps if any(_unmatched(s).values())]
     assert disagree == [], disagree
+    assert sum(len(s["match"]["matched"]) for s in chain.steps) > 0
+
+
+def test_every_pg_dump_type_is_swept(chain):
+    """Every pg_dump object type the chain's dumps contain is in
+    catalog_diff.DUMP_SWEEP with the catalog CATALOG_SQL reads it from."""
+    if not chain.pg_dump:
+        pytest.skip("covered by the D2_PG_DUMP_ABSENT_OK waiver above")      # pragma: no cover
+    with open(os.path.join(chain.out, "dump_end.sql"), encoding="utf-8") as fh:
+        types = cd.dump_types(fh.read())
+    _write(chain.out, "dump_types_end.json", json.dumps(types, indent=1))
+    assert [t for t in types if not cd.DUMP_SWEEP.get(t)] == []
+
+
+# --- object-set controls (M9), one per catalog route --------------------------
+#
+# Each control runs, in order, on its OWN clone of the template (not the
+# chain), as the admin DSN's user. A control is (name, SQL, kind, object):
+# after the SQL the catalog diff and the pg_dump diff must change the same
+# object set, the object named must be among the matched ones, and the
+# catalog diff must hold a row of the named kind (so every arm of
+# CATALOG_SQL has a route of its own). {me} is the admin user. Controls
+# marked SU need a superuser: under a non-superuser DSN PostgreSQL refuses
+# them (42501) and the refusal is the outcome recorded.
+
+SU = "su"
+ROUTE_CONTROLS = [
+    ("rt_namespace", "CREATE SCHEMA d2r_s", "namespace", "SCHEMA|-|d2r_s", None),
+    ("rt_acl_schema", "GRANT USAGE ON SCHEMA d2r_s TO PUBLIC", "acl", "ACL|-|SCHEMA d2r_s", None),
+    ("rt_class_create", "CREATE TABLE d2r_t (id serial PRIMARY KEY, n int NOT NULL DEFAULT 1, m text)",
+     "class", "TABLE|public|d2r_t", None),
+    ("rt_class_option", "ALTER TABLE d2r_t SET (fillfactor = 70)", "class", "TABLE|public|d2r_t", None),
+    ("rt_rls", "ALTER TABLE d2r_t ENABLE ROW LEVEL SECURITY", "rls", "ROW SECURITY|public|d2r_t", None),
+    ("rt_acl_table", "GRANT SELECT ON d2r_t TO PUBLIC", "acl", "ACL|public|TABLE d2r_t", None),
+    ("rt_attribute", "ALTER TABLE d2r_t ADD COLUMN x int", "attribute", "TABLE|public|d2r_t", None),
+    ("rt_acl_column", "GRANT SELECT (m) ON d2r_t TO PUBLIC", "acl", "ACL|public|COLUMN d2r_t.m", None),
+    ("rt_default_inline", "ALTER TABLE d2r_t ALTER COLUMN x SET DEFAULT 7", "default", "TABLE|public|d2r_t", None),
+    ("rt_default_separate", "ALTER SEQUENCE d2r_t_id_seq RENAME TO d2r_t_id_seq2", "default",
+     "DEFAULT|public|d2r_t id", None),
+    ("rt_constraint_check", "ALTER TABLE d2r_t ADD CONSTRAINT d2r_chk CHECK (x > 0)", "constraint",
+     "TABLE|public|d2r_t", None),
+    ("rt_constraint_unique", "ALTER TABLE d2r_t ADD CONSTRAINT d2r_uq UNIQUE (m)", "constraint",
+     "CONSTRAINT|public|d2r_t d2r_uq", None),
+    ("rt_index_create", "CREATE INDEX d2r_idx ON d2r_t (x)", "index", "INDEX|public|d2r_idx", None),
+    ("rt_index_cluster", "ALTER TABLE d2r_t CLUSTER ON d2r_idx", "index", "INDEX|public|d2r_idx", None),
+    ("rt_proc", "CREATE FUNCTION d2r_f(a int) RETURNS int LANGUAGE sql AS $$ SELECT a $$", "proc",
+     "FUNCTION|public|d2r_f(integer)", None),
+    ("rt_proc_atomic_body", "CREATE OR REPLACE FUNCTION d2r_f(a int) RETURNS int LANGUAGE sql "
+     "BEGIN ATOMIC SELECT a + 1; END", "proc", "FUNCTION|public|d2r_f(integer)", None),
+    ("rt_acl_proc", "REVOKE EXECUTE ON FUNCTION d2r_f(int) FROM PUBLIC", "acl",
+     "ACL|public|FUNCTION d2r_f(a integer)", None),
+    ("rt_trigger", "CREATE FUNCTION d2r_tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; "
+     "CREATE TRIGGER d2r_trg BEFORE UPDATE ON d2r_t FOR EACH ROW EXECUTE FUNCTION d2r_tf()", "trigger",
+     "TRIGGER|public|d2r_t d2r_trg", None),
+    ("rt_policy", "CREATE POLICY d2r_pol ON d2r_t USING (true)", "policy", "POLICY|public|d2r_t d2r_pol", None),
+    ("rt_rule", "CREATE RULE d2r_rule AS ON DELETE TO d2r_t DO INSTEAD NOTHING", "rule",
+     "RULE|public|d2r_t d2r_rule", None),
+    ("rt_view_rule", "CREATE VIEW d2r_v AS SELECT id FROM d2r_t; CREATE OR REPLACE VIEW d2r_v AS "
+     "SELECT id, x FROM d2r_t", "rule", "VIEW|public|d2r_v", None),
+    ("rt_type", "CREATE TYPE d2r_mood AS ENUM ('a')", "type", "TYPE|public|d2r_mood", None),
+    ("rt_type_label", "ALTER TYPE d2r_mood ADD VALUE 'b'", "type", "TYPE|public|d2r_mood", None),
+    ("rt_acl_type", "REVOKE USAGE ON TYPE d2r_mood FROM PUBLIC", "acl", "ACL|public|TYPE d2r_mood", None),
+    ("rt_sequence", "ALTER SEQUENCE d2r_t_id_seq2 INCREMENT BY 2", "sequence",
+     "SEQUENCE|public|d2r_t_id_seq2", None),
+    ("rt_owned", "CREATE SEQUENCE d2r_free; ALTER SEQUENCE d2r_free OWNED BY d2r_t.x", "owned",
+     "SEQUENCE OWNED BY|public|d2r_free", None),
+    ("rt_inherits", "CREATE TABLE d2r_parent (a int); CREATE TABLE d2r_child (b int) INHERITS (d2r_parent); "
+     "ALTER TABLE d2r_child NO INHERIT d2r_parent", "attribute", "TABLE|public|d2r_child", None),
+    ("rt_inherits_add", "ALTER TABLE d2r_child INHERIT d2r_parent", "inherits", "TABLE|public|d2r_child", None),
+    ("rt_partition", "CREATE TABLE d2r_p (k int) PARTITION BY RANGE (k); "
+     "CREATE TABLE d2r_p1 PARTITION OF d2r_p FOR VALUES FROM (0) TO (10)", "partition",
+     "TABLE ATTACH|public|d2r_p1", None),
+    ("rt_partition_bound", "ALTER TABLE d2r_p DETACH PARTITION d2r_p1; "
+     "ALTER TABLE d2r_p ATTACH PARTITION d2r_p1 FOR VALUES FROM (0) TO (5)", "partition",
+     "TABLE ATTACH|public|d2r_p1", None),
+    ("rt_statistics", "CREATE STATISTICS d2r_st ON n, x FROM d2r_t", "statistics", "STATISTICS|public|d2r_st", None),
+    ("rt_extension", 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"', "extension", "EXTENSION|-|uuid-ossp", None),
+    ("rt_default_acl", "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC",
+     "default_acl", "DEFAULT ACL|public|DEFAULT PRIVILEGES FOR TABLES|{me}", None),
+    ("rt_default_acl_global", "ALTER DEFAULT PRIVILEGES GRANT USAGE ON SEQUENCES TO PUBLIC",
+     "default_acl", "DEFAULT ACL|-|DEFAULT PRIVILEGES FOR SEQUENCES|{me}", None),
+    ("rt_collation", "CREATE COLLATION d2r_coll (provider = icu, locale = 'und')", "collation",
+     "COLLATION|public|d2r_coll", None),
+    ("rt_conversion", "CREATE CONVERSION d2r_conv FOR 'LATIN1' TO 'UTF8' FROM iso8859_1_to_utf8",
+     "conversion", "CONVERSION|public|d2r_conv", None),
+    ("rt_operator", "CREATE OPERATOR === (leftarg = int, rightarg = int, function = int4eq)", "operator",
+     "OPERATOR|public|===", None),
+    ("rt_cast", "CREATE TYPE d2r_pair AS (x int); CREATE CAST (d2r_pair AS text) WITH INOUT", "cast",
+     "CAST|-|CAST (public.d2r_pair AS text)", None),
+    ("rt_ts_config", "CREATE TEXT SEARCH CONFIGURATION d2r_cfg (COPY = english)", "ts_config",
+     "TEXT SEARCH CONFIGURATION|public|d2r_cfg", None),
+    ("rt_ts_dict", "CREATE TEXT SEARCH DICTIONARY d2r_dict (TEMPLATE = simple)", "ts_dict",
+     "TEXT SEARCH DICTIONARY|public|d2r_dict", None),
+    ("rt_publication", "CREATE PUBLICATION d2r_pub", "publication", "PUBLICATION|-|d2r_pub", None),
+    ("rt_publication_rel", "ALTER PUBLICATION d2r_pub ADD TABLE d2r_t", "publication_rel",
+     "PUBLICATION TABLE|public|d2r_pub d2r_t", None),
+    ("rt_comment", "COMMENT ON TABLE d2r_t IS 'd2r'", "comment", "COMMENT|public|TABLE d2r_t", None),
+    ("rt_comment_column", "COMMENT ON COLUMN d2r_t.x IS 'd2r'", "comment", "COMMENT|public|COLUMN d2r_t.x", None),
+    ("rt_publication_ns", "ALTER PUBLICATION d2r_pub ADD TABLES IN SCHEMA d2r_s", "publication_ns",
+     "PUBLICATION TABLES IN SCHEMA|d2r_s|d2r_pub d2r_s", SU),
+    ("rt_event_trigger", "CREATE EVENT TRIGGER d2r_evt ON sql_drop EXECUTE FUNCTION d2_probe.log_drop()",
+     "event_trigger", "EVENT TRIGGER|-|d2r_evt", SU),
+    ("rt_opfamily", "CREATE OPERATOR FAMILY d2r_fam USING btree", "opfamily", "OPERATOR FAMILY|public|d2r_fam", SU),
+    ("rt_opclass", "CREATE OPERATOR CLASS d2r_opc FOR TYPE int4 USING btree FAMILY d2r_fam AS "
+     "OPERATOR 1 <, FUNCTION 1 btint4cmp(int4, int4)", "opclass", "OPERATOR CLASS|public|d2r_opc", SU),
+    ("rt_ts_parser", "CREATE TEXT SEARCH PARSER d2r_prs (START = prsd_start, GETTOKEN = prsd_nexttoken, "
+     "END = prsd_end, LEXTYPES = prsd_lextype)", "ts_parser", "TEXT SEARCH PARSER|public|d2r_prs", SU),
+    ("rt_ts_template", "CREATE TEXT SEARCH TEMPLATE d2r_tmpl (LEXIZE = dsimple_lexize)", "ts_template",
+     "TEXT SEARCH TEMPLATE|public|d2r_tmpl", SU),
+    ("rt_language", "CREATE LANGUAGE d2r_lang HANDLER plpgsql_call_handler", "language",
+     "PROCEDURAL LANGUAGE|-|d2r_lang", SU),
+    ("rt_transform", "CREATE FUNCTION d2r_tf_from(internal) RETURNS internal LANGUAGE internal IMMUTABLE STRICT "
+     "AS 'int4recv'; CREATE FUNCTION d2r_tf_to(internal) RETURNS int LANGUAGE internal IMMUTABLE STRICT "
+     "AS 'int4recv'; CREATE TRANSFORM FOR int LANGUAGE d2r_lang (FROM SQL WITH FUNCTION d2r_tf_from(internal), "
+     "TO SQL WITH FUNCTION d2r_tf_to(internal))", "transform", "TRANSFORM|-|TRANSFORM FOR integer LANGUAGE d2r_lang",
+     SU),
+    ("rt_fdw", "CREATE FOREIGN DATA WRAPPER d2r_fdw", "fdw", "FOREIGN DATA WRAPPER|-|d2r_fdw", SU),
+    ("rt_server", "CREATE SERVER d2r_srv FOREIGN DATA WRAPPER d2r_fdw", "server", "SERVER|-|d2r_srv", SU + "<rt_fdw"),
+    ("rt_user_mapping", "CREATE USER MAPPING FOR PUBLIC SERVER d2r_srv", "user_mapping",
+     "USER MAPPING|-|USER MAPPING public SERVER d2r_srv", SU + "<rt_server"),
+    ("rt_foreign_table", "CREATE FOREIGN TABLE d2r_ft (a int) SERVER d2r_srv", "class",
+     "FOREIGN TABLE|public|d2r_ft", SU + "<rt_server"),
+    ("rt_access_method", "CREATE ACCESS METHOD d2r_am TYPE TABLE HANDLER heap_tableam_handler", "access_method",
+     "ACCESS METHOD|-|d2r_am", SU),
+    ("rt_subscription", "CREATE SUBSCRIPTION d2r_sub CONNECTION 'dbname=postgres' PUBLICATION d2r_pub "
+     "WITH (connect = false)", "subscription", "SUBSCRIPTION|-|d2r_sub", SU),
+    ("rt_subscription_drop", "ALTER SUBSCRIPTION d2r_sub DISABLE; ALTER SUBSCRIPTION d2r_sub SET (slot_name = NONE); "
+     "DROP SUBSCRIPTION d2r_sub", "subscription", "SUBSCRIPTION|-|d2r_sub", SU + "<rt_subscription"),
+    # an owner change rewrites the Owner field of the comment block's header
+    # and not its text: that block is not a changed object
+    # a column under a UNIQUE constraint widened in place: the constraint's
+    # index carries the column too, and that index column is the table's
+    # (pg_dump re-renders the TABLE, not the CONSTRAINT); found by the chain
+    # at 183_widen_bracket_side.sql
+    ("rt_index_column_setup", "CREATE TABLE d2r_w (a varchar(4), CONSTRAINT d2r_w_a_key UNIQUE (a))",
+     "class", "TABLE|public|d2r_w", None),
+    ("rt_index_column_widen", "ALTER TABLE d2r_w ALTER COLUMN a TYPE varchar(16)", "attribute",
+     "TABLE|public|d2r_w", None),
+    ("rt_owner_only_header", "ALTER TABLE d2r_t OWNER TO pg_database_owner", "class", "TABLE|public|d2r_t", None),
+    # no object changes: a temporary table, a read
+    ("rt_none_temp", "CREATE TEMP TABLE d2r_tmp (a int)", None, None, None),
+    ("rt_none_select", "SELECT 1", None, None, None),
+]
+
+
+async def _route_run(dsn, pg_dump, controls, me, superuser, wrap=None):
+    """Run the controls in order on dsn; per control: refused SQLSTATE, or
+    the object match with whether the named object and row kind are there.
+    wrap(name, diff, before_dump, after_dump) may replace the comparison
+    inputs (the rejection controls below use it)."""
+    conn = await _connect(dsn)
+    out = []
+    try:
+        prev, pdump = await cd.snapshot(conn), cd.dump(pg_dump, dsn)
+        for name, sql, kind, obj, su in controls:
+            obj = obj.replace("{me}", me) if obj else None
+            try:
+                await conn.execute(sql)
+            except asyncpg.PostgresError as exc:
+                out.append({"control": name, "refused": exc.sqlstate, "su": su,
+                            "error": str(exc).splitlines()[0][:200]})
+                continue
+            cur, cdump = await cd.snapshot(conn), cd.dump(pg_dump, dsn)
+            d = cd.diff(prev, cur)
+            args = wrap(name, d, pdump, cdump) if wrap else (d, pdump, cdump)
+            m = cd.match(*args)
+            kinds = sorted({r[0] for r in args[0]["added"] + args[0]["removed"]})
+            out.append({"control": name, "refused": None, "su": su, "object": obj, "kind": kind,
+                        "matched": m["matched"], "catalog_only": m["catalog_only"], "dump_only": m["dump_only"],
+                        "kinds": kinds})
+            prev, pdump = cur, cdump
+    finally:
+        await conn.close()
+    return out
+
+
+def _route_verdict(r, superuser, accepted=frozenset()):
+    """'ok' or the reason the control failed. Under an admin role that is not
+    a superuser, a superuser-only control (SU) is accepted when PostgreSQL
+    refuses it for privilege (42501); a control that needs a superuser-only
+    control's object (SU + "<" + that control) is accepted when it is
+    refused because the object is missing (42704) AND that control's own
+    refusal was accepted (accepted: the names of accepted refusals, earlier
+    in the run). Under a superuser no refusal is accepted."""
+    if r["refused"]:
+        if not superuser and r["su"] == SU and r["refused"] == "42501":
+            return "ok"
+        if (not superuser and r["su"] and r["su"].startswith(SU + "<") and r["refused"] == "42704"
+                and r["su"][len(SU) + 1:] in accepted):
+            return "ok"
+        return "refused %s: %s" % (r["refused"], r["error"])
+    if r["catalog_only"] or r["dump_only"]:
+        return "unmatched: catalog_only %s dump_only %s" % (sorted(r["catalog_only"]), r["dump_only"])
+    if r["object"] is None:
+        return "ok" if not r["matched"] else "changed %s" % r["matched"]
+    if r["object"] not in r["matched"]:
+        return "object %s not matched (matched %s)" % (r["object"], r["matched"])
+    if r["kind"] not in r["kinds"]:
+        return "no %s row in the catalog diff (kinds %s)" % (r["kind"], r["kinds"])
+    return "ok"
+
+
+def _scratch_clone(tag):
+    _require()
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
+    db = ("%s_%s_%s_%d" % (os.environ.get("D2_DB_PREFIX", "d2catalog"), tag, stamp, os.getpid())).lower()
+    asyncio.run(_clone(db))
+    return db
+
+
+@pytest.fixture(scope="module")
+def route_db():
+    """A clone of the template for the object-set controls, dropped after."""
+    db = _scratch_clone("rt")
+    try:
+        yield db
+    finally:
+        asyncio.run(_drop_db(db))
+
+
+@pytest.fixture(scope="module")
+def m9_db():
+    """A clone of the template for the report's example, dropped after."""
+    db = _scratch_clone("m9")
+    try:
+        yield db
+    finally:
+        asyncio.run(_drop_db(db))
+
+
+def _route_out():
+    out = os.environ.get("D2_CATALOG_OUT")
+    if out:
+        os.makedirs(out, exist_ok=True)
+    return out
+
+
+def test_route_verdict_accepts_only_privilege_refusals_and_their_dependents():
+    """The refusal rule of _route_verdict, without a database: what it
+    accepts under a non-superuser admin role, and everything it rejects."""
+    base = {"control": "c", "error": "e", "object": None, "kind": None, "matched": [],
+            "catalog_only": {}, "dump_only": [], "kinds": []}
+    v = lambda refused, su, superuser, accepted=(): _route_verdict(
+        dict(base, refused=refused, su=su), superuser, set(accepted))
+    assert v("42501", SU, False) == "ok"
+    assert v("42704", SU + "<p", False, {"p"}) == "ok"
+    rejected = [
+        v("42501", SU, True),                      # a superuser is never refused
+        v("42704", SU + "<p", True, {"p"}),
+        v("42704", SU + "<p", False),              # its prerequisite was not refused-and-accepted
+        v("42704", SU + "<p", False, {"q"}),
+        v("42501", SU + "<p", False, {"p"}),       # a dependent is accepted only as missing-object
+        v("42704", SU, False),                     # a plain SU control only for privilege
+        v("42501", None, False),                   # a control not marked SU
+        v("42704", None, False, {"p"}),
+    ]
+    assert all(x != "ok" for x in rejected), rejected
+
+
+def test_route_controls_match_object_sets(route_db):
+    """M9's route controls: every arm of CATALOG_SQL has a control whose
+    change pg_dump renders as the named object and the catalog diff holds
+    as a row of that arm's kind; catalog and dump change the same objects."""
+    pg_dump = cd.client("D2_TEST_PG_DUMP", "pg_dump")
+    assert pg_dump, "the object-set controls need pg_dump (D2_TEST_PG_DUMP or PATH)"
+    who = asyncio.run(_whoami())
+    res = asyncio.run(_route_run(_dsn(route_db), pg_dump, ROUTE_CONTROLS, who["admin_user"], who["superuser"]))
+    verdicts, accepted = [], set()
+    for r in res:
+        v = _route_verdict(r, who["superuser"], accepted)
+        if r["refused"] and v == "ok":
+            accepted.add(r["control"])
+        verdicts.append((r["control"], v))
+    out = _route_out()
+    if out:
+        _write(out, "route_controls.json", json.dumps(
+            [dict(r, verdict=v) for r, (_n, v) in zip(res, verdicts)], indent=1, default=str))
+    assert [r["control"] for r in res] == [c[0] for c in ROUTE_CONTROLS]
+    assert [(n, v) for n, v in verdicts if v != "ok"] == []
+    # every kind CATALOG_SQL emits has a control naming it
+    arms = set(re.findall(r"^SELECT '(\w+)'", cd.CATALOG_SQL, re.M))
+    assert arms - {c[2] for c in ROUTE_CONTROLS} == set(), arms - {c[2] for c in ROUTE_CONTROLS}
+
+
+# The report's own example (M9): an ALTER DEFAULT PRIVILEGES beside ordinary
+# DDL. Matched with the whole catalog query; and the comparison REJECTS the
+# same step when the catalog side lacks pg_default_acl, or when the two
+# sides measure different spans, although neither side is empty.
+M9_EXAMPLE = [
+    ("m9_default_acl_beside_ddl", "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC; "
+     "CREATE TABLE d2m9_t (a int)", "default_acl", "DEFAULT ACL|public|DEFAULT PRIVILEGES FOR TABLES|{me}", None),
+]
+
+
+def _without_default_acl(name, d, before, after):
+    keep = lambda rows: [r for r in rows if r[0] != "default_acl"]  # noqa: E731
+    return {"added": keep(d["added"]), "removed": keep(d["removed"])}, before, after
+
+
+def _dump_span_without_change(name, d, before, after):
+    return d, before, before
+
+
+def test_m9_report_example_and_its_rejections(m9_db):
+    pg_dump = cd.client("D2_TEST_PG_DUMP", "pg_dump")
+    assert pg_dump, "the object-set controls need pg_dump (D2_TEST_PG_DUMP or PATH)"
+    who = asyncio.run(_whoami())
+    me = who["admin_user"]
+    want = "DEFAULT ACL|public|DEFAULT PRIVILEGES FOR TABLES|%s" % me
+    results = {}
+    # each variant grants a privilege the earlier ones did not, so each
+    # changes the default ACL again
+    for label, wrap, suffix, priv in (("whole", None, "a", "SELECT"),
+                                      ("no_default_acl", _without_default_acl, "b", "INSERT"),
+                                      ("dump_unchanged", _dump_span_without_change, "c", "UPDATE")):
+        controls = [(n + "_" + label, s.replace("d2m9_t", "d2m9_" + suffix).replace("SELECT ON TABLES",
+                                                                                   priv + " ON TABLES"), k, o, su)
+                    for n, s, k, o, su in M9_EXAMPLE]
+        results[label] = asyncio.run(_route_run(_dsn(m9_db), pg_dump, controls, me, who["superuser"], wrap))[0]
+    out = _route_out()
+    if out:
+        _write(out, "m9_example.json", json.dumps(results, indent=1, default=str))
+    whole = results["whole"]
+    assert _route_verdict(whole, who["superuser"]) == "ok", whole
+    assert want in whole["matched"] and "TABLE|public|d2m9_a" in whole["matched"], whole
+    # the catalog side without pg_default_acl: the dump's DEFAULT ACL is unmatched
+    nod = results["no_default_acl"]
+    assert nod["dump_only"] == [want] and not nod["catalog_only"], nod
+    # the dump side measuring no change: every catalog object is unmatched
+    unch = results["dump_unchanged"]
+    assert unch["dump_only"] == [] and want in unch["catalog_only"], unch
+
+
+# --- M11: a tail behind a former refusal is measured ---------------------------
+
+
+async def _apply_tail(db, path, with_prereqs, psql):
+    """On database db: TAIL_FILE's prerequisites (or none), then the file at
+    path; returns the file's outcome and its own catalog diff."""
+    dsn = _dsn(db)
+    pre = []
+    if with_prereqs:
+        for step in d2_seed.steps_for(TAIL_FILE):
+            pre.append(await _prereq(dsn, step))
+    before = await _snap(dsn)
+    outcome = cd.apply_file(psql, dsn, path)
+    after = await _snap(dsn)
+    return dict(outcome, prereqs=[(p["rc"], p["sqlstate"]) for p in pre], diff=cd.diff(before, after))
+
+
+def test_id_moving_seeds_are_guarded_by_their_foreign_keys(chain):
+    """The 398 and 399 seeds move rows to other ids (d2_seed.ID_MOVES). In
+    the chain each ran under d2_seed's guard, which recorded every foreign
+    key (pg_constraint) into the moved table and the moved ids. Control on a
+    clone of the state right before TAIL_FILE, with a table referencing the
+    row TAIL_FILE's seed moves: a plain foreign key makes the seed refuse
+    (23503) and leaves every id where it was; an ON UPDATE CASCADE foreign
+    key lets it run, recorded as cascading, the reference moved with the
+    row."""
+    for name in sorted(d2_seed.ID_MOVES):
+        got = [s for s in chain.steps if s["label"] == "<prereq %s>" % name and s.get("guard")]
+        assert len(got) == 1 and got[0]["rc"] == 0, (name, got)
+        assert set(got[0]["guard"]) == set(d2_seed.ID_MOVES[name]), got[0]["guard"]
+    step = [st for st in d2_seed.steps_for(TAIL_FILE) if st[0] == "sql"]
+    assert len(step) == 1 and len(step[0]) == 3, step
+    db = ("%s_fkg" % chain.pre_db)[:63]
+    asyncio.run(_clone(db, chain.pre_db))
+    dsn = _dsn(db)
+
+    async def ids():
+        conn = await _connect(dsn)
+        try:
+            return {r[0]: r[1] for r in await conn.fetch("SELECT id, sku FROM shop_items")}
+        finally:
+            await conn.close()
+
+    async def ddl(sql):
+        conn = await _connect(dsn)
+        try:
+            if sql.lstrip().upper().startswith("SELECT"):
+                return await conn.fetch(sql)
+            return await conn.execute(sql)
+        finally:
+            await conn.close()
+
+    try:
+        start = asyncio.run(ids())
+        target = 250
+        assert start.get(target) not in (None, "face_detail_spooky_head_bouncers"), start.get(target)
+        asyncio.run(ddl("CREATE TABLE d2fk_plain (item int REFERENCES shop_items(id)); "
+                        "INSERT INTO d2fk_plain VALUES (%d)" % target))
+        plain = asyncio.run(_prereq(dsn, step[0]))
+        after_plain = asyncio.run(ids())
+        asyncio.run(ddl("DROP TABLE d2fk_plain; CREATE TABLE d2fk_cascade (item int REFERENCES shop_items(id) "
+                        "ON UPDATE CASCADE); INSERT INTO d2fk_cascade VALUES (%d)" % target))
+        cascade = asyncio.run(_prereq(dsn, step[0]))
+        moved_to = [r[0] for r in asyncio.run(ddl("SELECT item FROM d2fk_cascade"))]
+    finally:
+        asyncio.run(_drop_db(db))
+    _write(chain.out, "id_move_guard_control.json", json.dumps({
+        "plain": {k: plain[k] for k in ("rc", "sqlstate", "error")},
+        "cascade": {k: cascade[k] for k in ("rc", "sqlstate", "error", "guard")},
+        "reference_after_cascade": moved_to}, indent=1, default=str))
+    assert plain["rc"] == 3 and plain["sqlstate"] == "23503", plain
+    assert after_plain == start, "the refused seed moved ids"
+    assert cascade["rc"] == 0, cascade
+    fks = cascade["guard"]["shop_items"]["foreign_keys"]
+    assert [f for f in fks if f[1] == "d2fk_cascade" and f[4]], fks
+    assert target in cascade["guard"]["shop_items"]["moved"], cascade["guard"]
+    assert moved_to == [870000 + target], moved_to
+
+
+def test_m11_alter_behind_the_former_refusal_is_measured(chain):
+    """TAIL_FILE stopped at its post-check in round 7 (declared P0001, its
+    tail unmeasured). Here an ALTER of mail_inbox_rev is placed right after
+    that refusing statement. With the prerequisites the file runs to its
+    end, the ALTER runs, and the per-file attribution names the file beside
+    300 (caught). Without them (the round-7 method) the file stops before
+    the ALTER: no row and no command of mail_inbox_rev, so the declared
+    list would still have held (missed)."""
+    src = _read(TAIL_FILE)
+    assert src.count(TAIL_AFTER) == 1, TAIL_AFTER
+    edited = src.replace(TAIL_AFTER, "END $$;\n\n" + TAIL_ALTER + "\nCOMMIT;\n", 1)
+    path = os.path.join(chain.out, "m11_tail_" + TAIL_FILE)
+    _write(chain.out, "m11_tail_" + TAIL_FILE, edited)
+    res = {}
+    for label, with_prereqs in (("prereqs", True), ("round7_method", False)):
+        db = ("%s_m11%s" % (chain.db, label[0]))[:63]
+        asyncio.run(_clone(db, chain.pre_db))
+        try:
+            res[label] = asyncio.run(_apply_tail(db, path, with_prereqs, chain.psql))
+        finally:
+            asyncio.run(_drop_db(db))
+    label = TAIL_FILE + " (m11 tail)"
+    got = cd.changers(_attribution(chain.steps) + [(label, res["prereqs"]["diff"])], MAIL)
+    old = res["round7_method"]
+    _write(chain.out, "m11_control.json", json.dumps({
+        k: dict(v, diff=None, rows_on_mail=[list(r) for r in cd.rows_on(v["diff"], MAIL)])
+        for k, v in res.items()} | {"changers_with_prereqs": got}, indent=1))
+    assert res["prereqs"]["rc"] == 0 and res["prereqs"]["sqlstate"] is None, res["prereqs"]
+    assert got == [M300, label], got
+    assert [c for c in res["prereqs"]["commands"] if c[2] == MAIL], res["prereqs"]["commands"]
+    # the round-7 method: refused before the ALTER, no trace of it
+    assert old["rc"] == 3 and old["sqlstate"] == "P0001", old
+    assert not cd.rows_on(old["diff"], MAIL) and not [c for c in old["commands"] if "mail_inbox_rev" in c[2]]
 
 
 async def _in_schema(dsn, schema, sql):
@@ -584,13 +1240,14 @@ def test_table_ddl_reproduces_the_relation_its_migration_produced(chain, migrati
     stmts = table_ddl(migration, table)
     rows = asyncio.run(_in_schema(chain.dsn, "d2_a1", ";\n".join(stmts) + ";"))
     want = chain.kept[migration]
-    # the scratch schema is not on the reading search_path, so a reference to
-    # the copy's own relation (a self-referencing FK, a serial's sequence)
-    # prints qualified; the public original prints bare
+    # the catalog is read with search_path '' (as pg_dump reads it), so a
+    # reference to the copy's own relation (a self-referencing FK, a
+    # serial's sequence) prints d2_a1-qualified where the original prints
+    # public-qualified
     strip = re.compile(r"\bd2_a1\.")
-    assert [(k, i, strip.sub("", d)) for k, i, d in cd.shape(rows, "d2_a1." + table)] == \
+    assert [(k, i, strip.sub("public.", d)) for k, i, d in cd.shape(rows, "d2_a1." + table)] == \
         cd.shape(want, "public." + table)
-    assert {k: strip.sub("", v) for k, v in cd.defaults(rows, "d2_a1." + table).items()} == \
+    assert {k: strip.sub("public.", v) for k, v in cd.defaults(rows, "d2_a1." + table).items()} == \
         cd.defaults(want, "public." + table)
 
 
@@ -863,9 +1520,50 @@ def test_language_control(chain, name, finding, extension, program):
         assert res["refused"] == "42704" and not cd.rows_on(res["diff"], MAIL), res
 
 
+def test_migrations_are_applied_from_the_object_store(chain):
+    """Ruling R8-CRLF. Every migration is applied from the blob at the frozen
+    revision. Control on a clone of the state right before CRLF_FILE (whose
+    post-check hashes its own release-note text): the file with CRLF line
+    ends (what an autocrlf checkout holds) refuses at that post-check with
+    P0001 and changes nothing; the file as the chain applies it (_blob_file)
+    then runs to its end."""
+    rev = sql_rev()
+    with open(os.path.join(chain.out, "run.json"), encoding="utf-8") as fh:
+        assert json.load(fh)["sql_rev"] == rev
+    blob = _blob(CRLF_FILE)
+    assert b"\r" not in blob, "the blob of %s at %s carries CR" % (CRLF_FILE, rev)
+    crlf = blob.replace(b"\n", b"\r\n")
+    crlf_path = os.path.join(chain.out, "crlf_" + CRLF_FILE)
+    with open(crlf_path, "wb") as fh:
+        fh.write(crlf)
+    with open(os.path.join(SQL_DIR, CRLF_FILE), "rb") as fh:
+        working = fh.read()
+    step = [s for s in chain.steps if s["label"] == CRLF_FILE]
+    assert len(step) == 1 and step[0]["rc"] == 0, step
+    db = (_crlf_db(chain.pre_db) + "_t")[:63]
+    asyncio.run(_clone(db, _crlf_db(chain.pre_db)))
+    dsn = _dsn(db)
+    try:
+        before = asyncio.run(_snap(dsn))
+        refused = cd.apply_file(chain.psql, dsn, crlf_path)
+        after_refusal = asyncio.run(_snap(dsn))
+        for st in d2_seed.steps_for(CRLF_FILE):
+            assert asyncio.run(_prereq(dsn, st))["rc"] == 0
+        route = cd.apply_file(chain.psql, dsn, _blob_file(chain.out, CRLF_FILE))
+    finally:
+        asyncio.run(_drop_db(db))
+    _write(chain.out, "object_store_control.json", json.dumps({
+        "sql_rev": rev, "file": CRLF_FILE, "working_copy_is_crlf": working == crlf,
+        "working_copy_is_blob": working == blob,
+        "crlf": {k: refused[k] for k in ("rc", "sqlstate", "error", "error_line")},
+        "route": {k: route[k] for k in ("rc", "sqlstate", "error", "error_line")}}, indent=1))
+    assert refused["rc"] == 3 and refused["sqlstate"] == "P0001", refused
+    assert cd.empty(cd.diff(before, after_refusal)), "the refused CRLF copy changed the catalog"
+    assert route["rc"] == 0, route
+
+
 def _read(name):
-    with open(os.path.join(SQL_DIR, name), encoding="utf-8") as fh:
-        return fh.read()
+    return _blob(name).decode("utf-8")
 
 
 def _edited(src, edit):
@@ -902,6 +1600,18 @@ MODEL_CONTROLS = [
      ("rev          BIGINT      NOT NULL", "rev          INTEGER     NOT NULL"), "shape"),
     ("rule_default_value", "rule default value",
      ("NOT NULL DEFAULT 0,", "NOT NULL DEFAULT 1,"), "default"),
+    # round 7, :455 (M10): a shifted updated_at default, measured against the
+    # database clock with no window; the report's example and its siblings
+    ("r7_455_updated_at_four_minutes_ahead", "r7 test_r7_catalog_diff_pg.py:455",
+     ("TIMESTAMPTZ NOT NULL DEFAULT NOW()", "TIMESTAMPTZ NOT NULL DEFAULT NOW() + interval '4 minutes'"), "default"),
+    ("r8_updated_at_one_second_behind", "r7 test_r7_catalog_diff_pg.py:455",
+     ("TIMESTAMPTZ NOT NULL DEFAULT NOW()", "TIMESTAMPTZ NOT NULL DEFAULT NOW() - interval '1 second'"), "default"),
+    ("r8_updated_at_clock_timestamp", "r7 test_r7_catalog_diff_pg.py:455",
+     ("TIMESTAMPTZ NOT NULL DEFAULT NOW()", "TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()"), "default"),
+    ("r8_updated_at_statement_timestamp", "r7 test_r7_catalog_diff_pg.py:455",
+     ("TIMESTAMPTZ NOT NULL DEFAULT NOW()", "TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()"), "default"),
+    ("k_updated_at_current_timestamp", "kept",
+     ("TIMESTAMPTZ NOT NULL DEFAULT NOW()", "TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"), None),
     ("rule_foreign_key_action", "rule constraint",
      ("REFERENCES players(id) ON DELETE CASCADE", "REFERENCES players(id)"), "shape"),
 ]
@@ -965,8 +1675,9 @@ def test_attribution_control(chain, name, finding, edit, expect):
 
 def test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev(chain):
     """Every other file in backend/sql (rollback_*, resume_*), applied in
-    order with psql to a copy of the chain database: none changes
-    mail_inbox_rev. Their own refusals are recorded."""
+    order with psql to a copy of the chain database, each after its own
+    d2_seed prerequisites (if any): every file runs to its end (rc 0; ruling
+    R7-A1's class, no declared refusals) and none changes mail_inbox_rev."""
     _numbered, aux = _files()
     assert aux, "no rollback or resume files found"
     # newest first, as rollbacks are undone (rollback_399 before rollback_398 ...)
@@ -977,7 +1688,11 @@ def test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev(chain):
     try:
         prev, steps, rows = asyncio.run(_snap(dsn)), [], []
         for name in aux:
-            outcome = cd.apply_file(chain.psql, dsn, os.path.join(SQL_DIR, name))
+            for st in d2_seed.steps_for(name):
+                pre = asyncio.run(_prereq(dsn, st))
+                rows.append({"file": "<prereq %s>" % name, "rc": pre["rc"], "sqlstate": pre["sqlstate"],
+                             "error": pre["error"], "touched": [], "commands": pre["commands"]})
+            outcome = cd.apply_file(chain.psql, dsn, _blob_file(chain.out, name))
             assert outcome["rc"] in (0, 3), (name, outcome)
             cur = asyncio.run(_snap(dsn))
             d = cd.diff(prev, cur)
@@ -987,6 +1702,8 @@ def test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev(chain):
                          "error": outcome["error"], "touched": cd.touched(d),
                          "commands": outcome["commands"]})
         _write(chain.out, "aux_files.json", json.dumps(rows, indent=1))
+        incomplete = [(r["file"], r["sqlstate"], r["error"]) for r in rows if r["rc"] != 0]
+        assert incomplete == [], incomplete
         assert cd.changers(steps, MAIL) == []
         assert not [(r["file"], c) for r in rows for c in r["commands"] if "mail_inbox_rev" in c[2]]
     finally:
