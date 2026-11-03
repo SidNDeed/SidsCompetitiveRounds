@@ -71,8 +71,13 @@ MUTS = [
     ("B3 not guarded by VR6", '"B3": ("VR5", "VR6")', '"B3": ("VR5",)'),
     ("verdicts given on an incomplete sitting", 'if miss:\n            return "withheld: sitting incomplete"', 'if False:\n            pass'),
     ("SID band dropped", 'if u <= 0.05 * tref:\n        return "SID"', 'if False:\n        return "SID"'),
-    ("menu e_C band upper end dropped", 'if not (lo_b <= m_ - h_ and m_ + h_ <= hi_b):', 'if not (lo_b <= m_ - h_):'),
-    ("menu e_C nearness dropped", 'if abs(m_ - 1.0) > MENU_EC_NEAR:', 'if False:'),
+    # decision 21'' (ruling FRAME-TIME-ROUND-R6-A3.2), replacing R1-A1's band and nearness mutants
+    ("menu e_C contains-1 upper end dropped", 'if not (m_ - h_ <= 1.0 <= m_ + h_):', 'if not (m_ - h_ <= 1.0):'),
+    ("menu e_C excludes-0 dropped", 'if m_ - h_ <= 0.0 <= m_ + h_:', 'if False:'),
+    ("menu e_C_lo bar dropped", 'if L == MENU_EC_LO_LEVEL and m_ - h_ < MENU_EC_LO_MIN:', 'if False:'),
+    ("menu e_C_lo bar at every level", 'if L == MENU_EC_LO_LEVEL and m_ - h_ < MENU_EC_LO_MIN:',
+     'if m_ - h_ < MENU_EC_LO_MIN:'),
+    ("menu level outside the pattern admitted", '    if outside:\n', '    if False:\n'),
     ("B3 ignores edge calls", 'for op, v in sorted(ops.items()) if v[1] > 0]', 'for op, v in sorted(ops.items()) if False]'),
     ("A3 left out of U", "u = lead + ku + du + a3v", "u = lead + ku + du"),
     ("A3 per-game maximum replaced by the last game", 'rate[k] = max(rate.get(k, 0.0), rows[0]["reads_win"] / on_frames[g])',
@@ -191,6 +196,21 @@ MUTS = [
     ('menu failure warnings pass', '    if mfail:\n        bad.append(', '    if False:\n        bad.append('),
     # ruling FRAME-TIME-ROUND-R6-A1: a failed entry calibration is named by its shape in the menu check
     ('menu failure unnamed', ' if r.get("shape") else', ' if False else'),
+    # ruling FRAME-TIME-ROUND-R6-A3: VR1's hold line, the named unplanted OFF segment, the menu frame-rate state
+    ('VR1 hold not required', 'if not any(FPSCAP_HOLD in ln for ln in caps):', 'if False:'),
+    ('VR1 other cap admitted', 'other = [ln for ln in caps if FPSCAP_HOLD not in ln]', 'other = []'),
+    ('VR1 window the whole log', 'return ls[:last + 1]', 'return ls'),
+    ('menu unplanted OFF segment unnamed', '    if unplanted:\n', '    if False:\n'),
+    ('menu frame rate hold not required',
+     'bad.append("no \'%s\' line: the hold is not proven reached" % FPSCAP_HOLD)\n    elif', 'pass\n    elif'),
+    ('menu frame rate hold order unchecked', 'not (arm < hold < done)', 'False'),
+    ('menu frame rate cap before the hold admitted', 'pre = [c for c in caps if arm < c[0] < hold]', 'pre = []'),
+    ('menu frame rate cap after the hold admitted',
+     'mid = [c for c in caps if start < c[0] < done and FPSCAP_RELEASED not in c[1]]', 'mid = []'),
+    ('menu frame rate any cap line admitted as a release', 'and FPSCAP_RELEASED not in c[1]]', 'and "[FPSCAP]" not in c[1]]'),
+    ('menu frame rate closing target unchecked',
+     'if (o.get("target"), o.get("vsync")) != (c.get("target"), c.get("vsync")):', 'if False:'),
+    ('menu frame rate segment floor dropped', 'low = [s for s in fr if fr[s] * MENU_SEG_FLOOR < fr[s0]]', 'low = []'),
 ]
 
 # the tests each mutant must turn red (taken from a --discover run on a green baseline, then pinned)
@@ -262,10 +282,16 @@ KILLS = {
         ['test_verdicts_need_the_complete_sitting'],
     'SID band dropped':
         ['test_report_carries_the_specified_figures'],
-    'menu e_C band upper end dropped':
-        ['test_menu_check_fails_a_tenfold_exposure'],
-    'menu e_C nearness dropped':
-        ['test_menu_check_fails_a_tenfold_exposure'],
+    'menu e_C contains-1 upper end dropped':
+        ['test_menu_check_fails_a_level_with_low_exposure'],
+    'menu e_C excludes-0 dropped':
+        ['test_menu_check_e_c_lo_bar_at_3_percent_only'],
+    'menu e_C_lo bar dropped':
+        ['test_menu_check_e_c_lo_bar_at_3_percent_only'],
+    'menu e_C_lo bar at every level':
+        ['test_menu_check_e_c_lo_bar_at_3_percent_only'],
+    'menu level outside the pattern admitted':
+        ['test_menu_check_names_a_level_outside_the_pattern'],
     'A3 left out of U':
         ['test_report_adds_a3_to_u'],
     'A3 per-game maximum replaced by the last game':
@@ -419,6 +445,17 @@ KILLS = {
         ['test_menu_check_validates_the_startup_and_the_terminal_snapshot'],
     'menu failure unnamed':
         ['test_menu_check_names_an_entry_patch_that_did_not_attach'],
+    'VR1 hold not required': ['test_vr1_flags_a_cap'],
+    'VR1 other cap admitted': ['test_vr1_flags_a_cap'],
+    'VR1 window the whole log': ['test_vr1_flags_a_cap'],
+    'menu unplanted OFF segment unnamed': ['test_menu_check_names_an_off_segment_with_no_planted_window'],
+    'menu frame rate hold not required': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
+    'menu frame rate hold order unchecked': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
+    'menu frame rate cap before the hold admitted': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
+    'menu frame rate cap after the hold admitted': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
+    'menu frame rate any cap line admitted as a release': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
+    'menu frame rate closing target unchecked': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
+    'menu frame rate segment floor dropped': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
 }
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]

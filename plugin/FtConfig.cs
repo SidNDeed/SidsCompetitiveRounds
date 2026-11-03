@@ -27,7 +27,9 @@ namespace CompetitiveRounds
         internal static string F18 = "A";
         internal static int PlantUs = -1;     // plant_us: c_plant fixed by the sentinel (M5); -1 = derived
         internal static bool Menu;            // menu=1: the menu self-check (FtMenu); the sitting never arms
-        internal static int MenuSegments = 64;   // menu_segments: even, 4 to 400
+        // ruling FRAME-TIME-ROUND-R6-A3.2 (1): 200 segments, the power formula's length (FtMenu's summary)
+        internal const int MenuSegmentsDefault = 200;
+        internal static int MenuSegments = MenuSegmentsDefault;   // menu_segments: even, 4 to 400
         internal static string Problems = "";
         internal static bool Changed;         // the sentinel's write time or length changed after Load
 
@@ -68,10 +70,10 @@ namespace CompetitiveRounds
             string mn = Get("menu", "0");
             Menu = mn == "1";
             if (mn != "0" && mn != "1") Problems += " bad-menu";
-            string ms = Get("menu_segments", "64");
+            string ms = Get("menu_segments", MenuSegmentsDefault.ToString());
             if (!int.TryParse(ms, out MenuSegments) || MenuSegments < 4 || MenuSegments > 400 || MenuSegments % 2 != 0)
             {
-                MenuSegments = 64;
+                MenuSegments = MenuSegmentsDefault;
                 Problems += " bad-menu_segments";
             }
         }

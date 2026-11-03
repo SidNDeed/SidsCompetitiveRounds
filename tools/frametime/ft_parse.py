@@ -43,8 +43,16 @@ A_HITCH = 0.05 / (2 * len(H_MS))      # alpha' = 0.05/6: three H, two ends
 CHI_Q = 0.10
 VR3_MAX = 0.349
 LAST_GAME = 16                        # the sitting: game 0 (the washout mutant), then games 1 to 16 (V4 3.3)
-MENU_EC_BAND = (0.5, 1.5)             # the menu check's declared two-sided band for e_C's interval (decision 21')
-MENU_EC_NEAR = 0.10                   # and |e_C - 1| at most this (a spin's response is about 1 by construction)
+# decision 21'' (ruling FRAME-TIME-ROUND-R6-A3.2, superseding R1-A1's decision 21': the band 0.5..1.5 and the
+# nearness 0.10, which the per-segment spread made unreachable at any level, spread-r6a3.md): at each menu level the
+# e_C interval contains 1 and excludes 0, and at MENU_EC_LO_LEVEL its lower end is at least MENU_EC_LO_MIN, VR2's
+# own criterion (METHOD-V4 VR2: e_C_lo >= 0.5) rehearsed at the menu
+MENU_EC_LO_MIN = 0.5
+MENU_EC_LO_LEVEL = "3"
+# the planning model the menu's length comes from (plugin/FtMenu.cs summary), reported against each run's own w
+MENU_PLAN_W_US = 146.6                # window-to-window SD of a 120-frame window's mean C, the 17:35 sitting
+MENU_PLAN_MARGIN = 1.6                # on the model's per-segment SE
+MENU_PLAN_ZPOW = 1.2816               # probability 0.9 of e_C_lo >= 0.5 at a true e_C of 1
 
 _LINE = re.compile(r"\[FRAME-TIME\] (\w+) (.*)$")
 _KV = re.compile(r"(\w+)=(\S+)")
@@ -819,12 +827,30 @@ def t_ref(recs, first_game=1):
     return sum(q["sF"] for q in pts) * 1e6 / freq.pop() / n
 
 
+FPSCAP_HOLD = "[FPSCAP] held by frame-time calibration"
+FPSCAP_RELEASED = "[FPSCAP] released ("
+
+
+def _until_last_settled(text):
+    """The log's lines up to and including its last [FRAME-TIME] settled line (the sitting's end): an armfile removed
+    after the sitting releases the hold, and the cap may then engage, outside every measured frame."""
+    ls = text.splitlines()
+    last = max([i for i, ln in enumerate(ls) if "[FRAME-TIME] settled " in ln], default=len(ls) - 1)
+    return ls[:last + 1]
+
+
 def vr1(recs, text, tref):
-    """VR1, no cap: no [FPSCAP] line; every settled line vsync 0 and target -1 or above 1000; T_ref not within 2
-    percent of 1e6 / k for k in 60, 75, 120, 144, 165, 240."""
+    """VR1, no cap (ruling FRAME-TIME-ROUND-R6-A3): up to the last settled line the log carries the frame-time
+    calibration hold's line ("[FPSCAP] held by frame-time calibration": the mod's frame-rate cap held off while the
+    armfile is present, proven reached by its own line, lesson #83) and no other [FPSCAP] line; every settled line
+    vsync 0 and target -1 or above 1000; T_ref not within 2 percent of 1e6 / k for k in 60, 75, 120, 144, 165, 240."""
     bad = []
-    if "[FPSCAP]" in text:
-        bad.append("an [FPSCAP] line is present")
+    caps = [ln.strip() for ln in _until_last_settled(text) if "[FPSCAP]" in ln]
+    if not any(FPSCAP_HOLD in ln for ln in caps):
+        bad.append("no '%s' line: the hold is not proven reached" % FPSCAP_HOLD)
+    other = [ln for ln in caps if FPSCAP_HOLD not in ln]
+    if other:
+        bad.append("an [FPSCAP] line other than the hold is present: %s" % other[0][other[0].find("[FPSCAP]"):])
     for r in recs:
         if r["kind"] == "settled" and r["g"] >= 0:
             if r.get("vsync", 0) != 0:
@@ -1263,7 +1289,58 @@ def vr2(recs, last_game=None):
     return not bad, bad
 
 
-MENU_LEVELS = ("0.5", "1.5", "3", "5")
+MENU_LEVELS = ("3", "5")              # ruling FRAME-TIME-ROUND-R6-A3.2 (1): 0.5 and 1.5 percent dropped
+
+
+def menu_power(recs, seg, lv, z=Z_END):
+    """Report only (ruling FRAME-TIME-ROUND-R6-A3.2 (1) and (3)): the menu length's planning model re-run on this run's
+    own noise. w is the median over segments of the SD of the unplanted 120-frame window means of C (complete
+    windows; us by the segment's f_hat); per level, the model's per-segment SE (MENU_PLAN_MARGIN x w x
+    sqrt(1/n_p + 1/n_u) / c_plant, with this run's mean planted and unplanted windows per segment) against the
+    observed SD of the segments' e_C, and the k the formula needs at each:
+    (t_q(z, floor(k/2) - 1) + MENU_PLAN_ZPOW) x s / sqrt(k) <= MENU_EC_LO_MIN."""
+    out = []
+    win = {}
+    for r in recs:
+        if r["kind"] == "w" and r.get("game") == -1 and not r.get("plant") and not r.get("partial") and r.get("n", 0) > 0:
+            win.setdefault(r["round"], []).append(r["sC"] / r["n"])
+    sds = []
+    for s, ms in win.items():
+        if len(ms) >= 3 and s in seg and (seg[s].get("f_hat") or 0) > 0:
+            sds.append(statistics.stdev(ms) / (seg[s]["f_hat"] / 1e6))
+    if not sds:
+        return ["menu power: no complete unplanted window lines, w not measured"]
+    w = statistics.median(sds)
+
+    def k_need(s):
+        for k in range(4, 100000):
+            if (t_q(z, k // 2 - 1) + MENU_PLAN_ZPOW) * s / math.sqrt(k) <= MENU_EC_LO_MIN:
+                return k
+        return -1
+    out.append("menu power: w %.1f us over %d segments (planning %.1f us, measured margin %.2f)"
+               % (w, len(sds), MENU_PLAN_W_US, w / MENU_PLAN_W_US))
+    for L in MENU_LEVELS:
+        ks = sorted(s for s in seg if seg[s].get("level") == L and seg[s].get("arm") == "OFF"
+                    and seg[s].get("p") and seg[s]["p"].get("pn", 0) > 0 and seg[s].get("c_plant", 0) > 0)
+        v = [x[0] for x in lv.get(L, [])]
+        if len(ks) < 2 or len(v) < 2:
+            out.append("menu power level %s percent: fewer than two planted OFF segments" % L)
+            continue
+        wp = [sum(1 for r in recs if r["kind"] == "w" and r.get("game") == -1 and r["round"] == s and r.get("plant"))
+              for s in ks]
+        wu = [sum(1 for r in recs if r["kind"] == "w" and r.get("game") == -1 and r["round"] == s and not r.get("plant"))
+              for s in ks]
+        np_, nu_ = sum(wp) / len(wp), sum(wu) / len(wu)
+        cp = sum(seg[s]["c_plant"] for s in ks) / len(ks)
+        if np_ <= 0 or nu_ <= 0:
+            out.append("menu power level %s percent: no planted or no unplanted windows" % L)
+            continue
+        s_model = MENU_PLAN_MARGIN * w * math.sqrt(1 / np_ + 1 / nu_) / cp
+        s_obs = statistics.stdev(v)
+        out.append("menu power level %s percent: %d segments, c_plant %.0f us, windows %.1f/%.1f; model SE %.3f"
+                   " (k needed %d), observed SD %.3f (k needed %d)"
+                   % (L, len(v), cp, np_, nu_, s_model, k_need(s_model), s_obs, k_need(s_obs)))
+    return out
 
 
 def menu_check(recs, z=Z_END):
@@ -1272,12 +1349,15 @@ def menu_check(recs, z=Z_END):
     why=complete, segs equal to of); (2) every segment has its point line, the gate the sentinel's force implies
     (none: OFF segments gated) on both lines, and missing_end 0; (3) the A/A: per pair with both arms, the
     unplanted mean F of ON minus OFF in us (by the settled lines' Stopwatch freq), batch_interval at z, and the
-    two-sided interval must contain 0; (4) e_C at each of the four levels: per OFF segment with planted and
-    unplanted frames, (psC/pn - sC/n) / (c_plant x f_hat / 10^6) with the menu calibration in force at that
-    segment, batch_interval over the level's segments (at least four), its two-sided interval inside MENU_EC_BAND
-    and its estimate within MENU_EC_NEAR of 1 (decision 21', replacing the lower-end-only bar); e_F and e_S
-    (by freq) reported; (5) f_hat over the menu calibrations within 2 percent; (6) the last settled line shows no
-    frame without FT_End, no cycle failure and no span depth violation. Returns (ok, report lines, failures)."""
+    two-sided interval must contain 0; (4) e_C at each of the two levels (3 and 5 percent): per OFF segment with
+    planted and unplanted frames, (psC/pn - sC/n) / (c_plant x f_hat / 10^6) with the menu calibration in force at
+    that segment, batch_interval over the level's segments (at least four); decision 21'' (ruling
+    FRAME-TIME-ROUND-R6-A3.2, superseding R1-A1's decision 21'): the two-sided interval contains 1 and excludes 0,
+    and at MENU_EC_LO_LEVEL its lower end e_C_lo is at least MENU_EC_LO_MIN; an OFF segment with a planted level and
+    no planted window is a named failure; e_F and e_S (by freq) reported; the planning model's power figures are
+    reported against the run's own window noise (menu_power), never judged; (5) f_hat over the menu calibrations
+    within 2 percent; (6) the last settled line shows no frame without FT_End, no cycle failure and no span depth
+    violation. Returns (ok, report lines, failures)."""
     sett = [r for r in recs if r["kind"] == "settled"]
     freq = set(r["freq"] for r in sett)
     if len(freq) != 1:
@@ -1345,7 +1425,7 @@ def menu_check(recs, z=Z_END):
     orphan = sorted(r["round"] for r in recs if r["kind"] == "p" and r["game"] == -1 and r["round"] not in seg)
     if orphan:
         bad.append("menu point lines with no menu line: segments %s" % orphan)
-    pairs, lv = {}, {}
+    pairs, lv, unplanted, offw = {}, {}, [], []
     for s in sorted(seg):
         m = seg[s]
         p = m.get("p")
@@ -1364,12 +1444,26 @@ def menu_check(recs, z=Z_END):
             bad.append("segment %d: excl=%d n=%d (a menu segment measures every frame)" % (s, p.get("excl", 0), p["n"]))
         if p["n"] > 0:
             pairs.setdefault(m["pair"], {})[m["arm"]] = p
+        # ruling FRAME-TIME-ROUND-R6-A3 (2): an OFF segment with a planted level and no planted window is named, never
+        # a silent drop from its level's count; every such segment's window count is reported
+        if m["arm"] == "OFF" and m.get("c_plant", 0) > 0:
+            offw.append("%d:%s:%d:%d" % (s, m["level"], p.get("windows", -1), p.get("pn", 0)))
+            if p.get("pn", 0) <= 0:
+                unplanted.append("%d (level %s, %d windows, n %d)" % (s, m["level"], p.get("windows", -1), p["n"]))
         if m["arm"] == "OFF" and m.get("c_plant", 0) > 0 and p.get("pn", 0) > 0 and p["n"] > 0:
             cp = m["c_plant"]
             ec = (p["psC"] / p["pn"] - p["sC"] / p["n"]) / (cp * m["f_hat"] / 1e6)
             ef = (p["psF"] / p["pn"] - p["sF"] / p["n"]) * 1e6 / f / cp
             es = (p["psS"] / p["pn"] - p["sS"] / p["n"]) * 1e6 / f / cp
             lv.setdefault(m["level"], []).append((ec, ef, es))
+    lines.append("menu OFF segments with a planted level (segment:level:windows:planted frames): %s"
+                 % (" ".join(offw) or "none"))
+    # ruling FRAME-TIME-ROUND-R6-A3.2: a planted level outside MENU_LEVELS is a build that is not this check's
+    outside = sorted(set(seg[s]["level"] for s in seg if seg[s].get("c_plant", 0) > 0) - set(MENU_LEVELS))
+    if outside:
+        bad.append("segments planted at levels outside %s: %s" % (", ".join(MENU_LEVELS), ", ".join(outside)))
+    if unplanted:
+        bad.append("OFF segments with a planted level and no planted window: %s" % ", ".join(unplanted))
     ds = [(q["ON"]["sF"] / q["ON"]["n"] - q["OFF"]["sF"] / q["OFF"]["n"]) * 1e6 / f
           for k, q in sorted(pairs.items()) if "ON" in q and "OFF" in q]
     if len(ds) < 4:
@@ -1388,13 +1482,15 @@ def menu_check(recs, z=Z_END):
         m_, h_, df_ = batch_interval([x[0] for x in v], z)
         lines.append("menu e_C level %s percent: %.4f, lower end %.4f, df %d, %d segments; e_F %.4f, e_S %.4f"
                      % (L, m_, m_ - h_, df_, len(v), sum(x[1] for x in v) / len(v), sum(x[2] for x in v) / len(v)))
-        # decision 21' (round-1 MEDIUM, ft_parse:771): "about 1" is a declared two-sided band: the two-sided
-        # interval at z lies inside MENU_EC_BAND and the estimate within MENU_EC_NEAR of 1
-        lo_b, hi_b = MENU_EC_BAND
-        if not (lo_b <= m_ - h_ and m_ + h_ <= hi_b):
-            bad.append("level %s percent: e_C interval %.4f..%.4f outside %.1f..%.1f" % (L, m_ - h_, m_ + h_, lo_b, hi_b))
-        if abs(m_ - 1.0) > MENU_EC_NEAR:
-            bad.append("level %s percent: e_C %.4f not within %.2f of 1" % (L, m_, MENU_EC_NEAR))
+        # decision 21'' (ruling FRAME-TIME-ROUND-R6-A3.2): the interval contains 1 and excludes 0 at each level;
+        # e_C_lo at least MENU_EC_LO_MIN at MENU_EC_LO_LEVEL
+        if not (m_ - h_ <= 1.0 <= m_ + h_):
+            bad.append("level %s percent: e_C interval %.4f..%.4f does not contain 1" % (L, m_ - h_, m_ + h_))
+        if m_ - h_ <= 0.0 <= m_ + h_:
+            bad.append("level %s percent: e_C interval %.4f..%.4f does not exclude 0" % (L, m_ - h_, m_ + h_))
+        if L == MENU_EC_LO_LEVEL and m_ - h_ < MENU_EC_LO_MIN:
+            bad.append("level %s percent: e_C_lo %.4f below %.1f" % (L, m_ - h_, MENU_EC_LO_MIN))
+    lines += menu_power(recs, seg, lv, z)
     lines.append("menu f_hat %d..%d over %d calibrations" % (min(fhs), max(fhs), len(fhs)))
     if max(fhs) - min(fhs) > 0.02 * min(fhs):
         bad.append("f_hat spread %d..%d exceeds 2 percent" % (min(fhs), max(fhs)))
@@ -1404,7 +1500,83 @@ def menu_check(recs, z=Z_END):
     return not bad, lines, bad
 
 
-def menu_report(recs):
+MENU_SEG_FLOOR = 10
+
+
+def menu_framerate(text):
+    """The menu sitting's frame-rate state (ruling FRAME-TIME-ROUND-R6-A3 (3)), read from the log in line order. The
+    arm is the startup settled line (g=-1, armfile=1). The hold line ("[FPSCAP] held by frame-time calibration")
+    follows the arm and precedes menu_done, with no [FPSCAP] line between the arm and the hold. From the hold (or,
+    when it is missing, from the arm) to menu_done the only [FPSCAP] line admitted is the release of a cap the mod
+    owned ("[FPSCAP] released ("): no engaged, deep idle, stage change, re-assert or hold-released line. The closing
+    settled line's target and vsync equal the opening one's. Every menu segment's frames (n + pn: a planted OFF
+    segment's n leaves its planted frames out) are at least one tenth of the first segment's. Every failure is
+    named; a missing hold line does not stop the other checks. Returns (ok, lines, bad)."""
+    bad, lines = [], []
+    arm = hold = done = None
+    settled, segs, caps = [], {}, []
+    for i, ln in enumerate(text.splitlines()):
+        if "[FPSCAP]" in ln:
+            caps.append((i, ln.strip()[ln.strip().find("[FPSCAP]"):]))
+            if hold is None and FPSCAP_HOLD in ln:
+                hold = i
+            continue
+        r = parse_line(ln)
+        if r is None:
+            continue
+        if r["kind"] == "settled" and r.get("g") == -1:
+            settled.append(r)
+            if arm is None and str(r.get("armfile")) == "1":
+                arm = i
+        elif r["kind"] == "menu_done" and done is None:
+            done = i
+        elif r["kind"] == "p" and r.get("game") == -1 and r["round"] not in segs:
+            segs[r["round"]] = r
+    if arm is None:
+        bad.append("no startup settled line with armfile=1 (the arm)")
+    if done is None:
+        bad.append("no menu_done line")
+    if hold is None:
+        bad.append("no '%s' line: the hold is not proven reached" % FPSCAP_HOLD)
+    elif arm is not None and done is not None and not (arm < hold < done):
+        bad.append("the hold line (log line %d) is not between the arm (line %d) and menu_done (line %d)"
+                   % (hold + 1, arm + 1, done + 1))
+    if arm is not None and hold is not None:
+        pre = [c for c in caps if arm < c[0] < hold]
+        if pre:
+            bad.append("an [FPSCAP] line between the arm and the hold: line %d %s" % (pre[0][0] + 1, pre[0][1]))
+    start = hold if hold is not None else arm
+    if start is not None and done is not None:
+        mid = [c for c in caps if start < c[0] < done and FPSCAP_RELEASED not in c[1]]
+        for c in mid[:3]:
+            bad.append("an [FPSCAP] line between the %s and menu_done: line %d %s"
+                       % ("hold" if hold is not None else "arm", c[0] + 1, c[1]))
+        if len(mid) > 3:
+            bad.append("%d more [FPSCAP] lines between the %s and menu_done" % (len(mid) - 3, "hold" if hold is not None else "arm"))
+    if len(settled) < 2:
+        bad.append("%d settled g=-1 lines (needs the opening and the closing one)" % len(settled))
+    else:
+        o, c = settled[0], settled[-1]
+        lines.append("menu frame rate: opening settled target=%s vsync=%s, closing target=%s vsync=%s"
+                     % (o.get("target"), o.get("vsync"), c.get("target"), c.get("vsync")))
+        if (o.get("target"), o.get("vsync")) != (c.get("target"), c.get("vsync")):
+            bad.append("the closing settled line's target=%s vsync=%s differs from the opening one's target=%s vsync=%s"
+                       % (c.get("target"), c.get("vsync"), o.get("target"), o.get("vsync")))
+    if not segs:
+        bad.append("no menu segment point lines")
+    else:
+        fr = {s: segs[s]["n"] + segs[s].get("pn", 0) for s in sorted(segs)}
+        s0 = min(fr)
+        low = [s for s in fr if fr[s] * MENU_SEG_FLOOR < fr[s0]]
+        lines.append("menu segment frames (n + pn): first %d (segment %d), least %d (segment %d), %d segments"
+                     % (fr[s0], s0, min(fr.values()), min(fr, key=fr.get), len(fr)))
+        if low:
+            bad.append("segments below one tenth of the first segment's %d frames: %s"
+                       % (fr[s0], ", ".join("%d (%d)" % (s, fr[s]) for s in low)))
+    return not bad, lines, bad
+
+
+def menu_report(recs, text=None):
     out = ["MENU self-check (one launch, no room)"]
     try:
         ok, lines, bad = menu_check(recs)
@@ -1412,6 +1584,10 @@ def menu_report(recs):
         out.append("MENU %s%s" % ("PASS" if ok else "FAIL: ", "; ".join(bad)))
     except Refused as e:
         out.append("MENU not computable: %s" % e)
+    if text is not None:
+        fok, flines, fbad = menu_framerate(text)
+        out += flines
+        out.append("MENU FRAMERATE %s%s" % ("PASS" if fok else "FAIL: ", "; ".join(fbad)))
     return "\n".join(out)
 
 
@@ -1561,7 +1737,7 @@ def report(text, peer=None):
     report and produces no verdict."""
     recs = read(text)
     if any(r["kind"] in ("menu", "menu_done") for r in recs):
-        return menu_report(recs)
+        return menu_report(recs, text)
     if peer is None and any(r[2] == "dependent" for r in a3_spec()):
         raise Refused("a verdict needs both seats' logs: the dependent rows' in-game calibration is read from each "
                       "(rulings FRAME-TIME-ROUND-R4 and R5); no peer log was given")

@@ -330,10 +330,20 @@ def test_zero_state_reports_a_game_with_no_valid_round():
 
 def test_vr1_flags_a_cap():
     recs = [{"kind": "settled", "g": 1, "vsync": 0, "target": -1}]
-    assert P.vr1(recs, "", 2650.0)[0]
-    assert not P.vr1(recs, "", 1e6 / 144)[0]                       # T_ref sits on 144 FPS
-    assert not P.vr1([{"kind": "settled", "g": 1, "vsync": 1, "target": -1}], "", 2650.0)[0]
-    assert not P.vr1(recs, "[FPSCAP] on", 2650.0)[0]
+    st = "[FRAME-TIME] settled g=1 vsync=0 target=-1"
+    held = FPSCAP_HOLD_LINE + "\n" + st
+    assert P.vr1(recs, held, 2650.0)[0]
+    assert not P.vr1(recs, held, 1e6 / 144)[0]                     # T_ref sits on 144 FPS
+    assert not P.vr1([{"kind": "settled", "g": 1, "vsync": 1, "target": -1}], held, 2650.0)[0]
+    # ruling FRAME-TIME-ROUND-R6-A3: the hold line is required, and no other [FPSCAP] line up to the last settled line
+    ok, bad = P.vr1(recs, st, 2650.0)
+    assert not ok and bad == ["no '[FPSCAP] held by frame-time calibration' line: the hold is not proven reached"], bad
+    ok, bad = P.vr1(recs, FPSCAP_HOLD_LINE + "\n[FPSCAP] engaged unfocused cap: target=120\n" + st, 2650.0)
+    assert not ok and bad == ["an [FPSCAP] line other than the hold is present: [FPSCAP] engaged unfocused cap:"
+                              " target=120"], bad
+    # after the sitting's last settled line (the armfile removed) the hold's release and a cap are outside it
+    ok, bad = P.vr1(recs, held + "\n[FPSCAP] hold released\n[FPSCAP] engaged unfocused cap: target=120", 2650.0)
+    assert ok, bad
 
 
 def test_vr4_bar():
@@ -358,6 +368,9 @@ A3_SITES = ["CombatEvidence.cs", "SeatEvidence.cs", "IdentityClockEvidence.cs", 
             "CardDrawEvidence.cs", "PeerBuild.cs"]
 
 
+FPSCAP_HOLD_LINE = "[Info   :Competitive ROUNDS] [FPSCAP] held by frame-time calibration"
+
+
 def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10, 20), f18="A", replay="settled", heavy_edge=0,
          drop_cal=(), drop_disp=(), drop_opened=(), shut_ic=(), drop_census=(), complete=True, routes="",
          drop_a3=(), drop_a3cal=(), a3_peak=None, drop_a3drain=(), a3_dirty=None, drop_heavy=(), drop_offthread=(),
@@ -373,6 +386,7 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
     rng = random.Random(seed)
     clock = [10 ** 6]
     L = ["[FRAME-TIME] settled g=-1 seed=1 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d" % (FREQ, FHAT),
+         "%s" % FPSCAP_HOLD_LINE,
          "[FRAME-TIME] plant c_plant=80 ticks=800 from=0.1.2"]
     for g in range(games):
         L.append("[FRAME-TIME] settled g=%d seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
@@ -1391,8 +1405,20 @@ FHAT = 3000000000        # cycles per second: 3000 per us
 def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing_seg=None, why="complete",
               gate_flip=None, excl_seg=None, empty_seg=None, drop_menu_seg=None, drop_menu_cal=None,
               drop_terminal=False, terminal_bad=False, terminal_misplaced=False, extra_settled=False,
-              drop_startup=False, startup_bad=False, menu_fhat_fail=False):
-    """A menu run as FtMenu writes it: pair 0 unplanted, then the four levels in turn, base 2500 us per frame."""
+              drop_startup=False, startup_bad=False, menu_fhat_fail=False, armfile=True, hold=True,
+              hold_after_seg=None, cap_lines=(), closing_target=-1, slow_from=None, unplanted_seg=None,
+              levels=("3", "3", "5"), ec_noise=None):
+    """A menu run as FtMenu writes it: pair 0 unplanted, then the levels in turn (the pattern 3, 3, 5 by default),
+    base 2500 us per frame.
+    The frame-rate state (ruling FRAME-TIME-ROUND-R6-A3): the startup snapshot carries armfile=1 and the hold line
+    follows it (hold_after_seg moves it after that segment's lines); cap_lines are (segment, [FPSCAP] text) pairs
+    written after that segment; closing_target is the terminal snapshot's target; slow_from divides every later
+    segment's frames by 24 (the deep-idle collapse); unplanted_seg gives that OFF segment no planted frame."""
+    caps = {}
+    for s_, t_ in cap_lines:
+        caps.setdefault(s_, []).append("[Info   :Competitive ROUNDS] " + t_)
+    if hold and hold_after_seg is not None:
+        caps.setdefault(hold_after_seg, []).append(FPSCAP_HOLD_LINE)
     ec = ec or {}
     # round-4 MEDIUM (ft_parse.py:1219): a menu run carries two snapshots, as the build writes them: the startup one
     # (Plugin.cs FtCalib.Run("start"); FtCalib.Settled(-1, -1), before FtMenu arms) and the terminal one (FtMenu's
@@ -1400,8 +1426,10 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
     out = [] if drop_startup else [
         "[FRAME-TIME] cal i=0 why=start kind=fhat f_hat=%d spins=1/1" % FHAT,
         "[Info   :CompetitiveRounds] [FRAME-TIME] settled g=-1 seed=7 c_plant=%d W=120 vsync=0 target=-1 freq=%d"
-        " hires=1 f_hat=%d force=%s clock=1 frames=0 missing_end=0 cycle_failures=0 span_depth_violations=0"
-        % (80 if startup_bad else -1, FREQ, FHAT, force)]
+        " hires=1 f_hat=%d%s force=%s clock=1 frames=0 missing_end=0 cycle_failures=0 span_depth_violations=0"
+        % (80 if startup_bad else -1, FREQ, FHAT, " armfile=1" if armfile else "", force)]
+    if hold and hold_after_seg is None:
+        out.append(FPSCAP_HOLD_LINE)
     out.append("[FRAME-TIME] menu_armed segments=%d seg_s=10 settle_s=20 force=%s seed=7" % (segs, force))
     if extra_settled:
         out.append("[FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
@@ -1409,7 +1437,6 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
                    % (FREQ, FHAT, force))
     if menu_fhat_fail:
         out.append("[FRAME-TIME] cal i=9 kind=fhat failed: overflow")
-    levels = ("0.5", "1.5", "3", "5")
     base, level, cp, cycles = 2500, "0", 0, 0
     for s in range(1, segs + 1):
         pair = (s - 1) // 2
@@ -1418,10 +1445,10 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
             if pair == 0:
                 level, cp = "0", 0
             else:
-                li = (pair - 1) % 4
+                li = (pair - 1) % len(levels)
                 level = levels[li]
                 cp = int(round(float(level) / 100 * base))
-            if s == 1 or (pair >= 1 and (pair - 1) % 4 == 0):
+            if s == 1 or (pair >= 1 and (pair - 1) % len(levels) == 0):
                 fh = fhat_last if s > 1 and cycles == 4 else FHAT
                 if drop_menu_cal != cycles:
                     out.append("[FRAME-TIME] cal i=%d why=menu%d kind=fhat f_hat=%d spins=1/1" % (cycles, cycles, fh))
@@ -1440,9 +1467,13 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
         n, pn = 4000, 0
         if arm == "OFF" and cp > 0:
             n, pn = 3000, 1000
+        if unplanted_seg == s:
+            n, pn = 4000, 0
+        if slow_from is not None and s >= slow_from:
+            n, pn = n // 24, pn // 24
         if empty_seg == s:
             n, pn = 0, 0
-        e = ec.get(level, 1.0) * (1 + ((s * 13) % 5 - 2) * 0.01)
+        e = ec.get(level, 1.0) * (1 + ((s * 13) % 5 - 2) * (ec_noise or {}).get(level, 0.01))
         sF = int(round(n * f_us * 10))
         sS = int(round(n * 900 * 10))
         sC = int(round(n * f_us * 3000))
@@ -1454,13 +1485,14 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
                    " span_gn=0 span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=0 t0=1 t1=2 answer=none"
                    % (s, arm, gate, n, sF, sS, sC, pn, psF, psS, psC, 1 if excl_seg == s else 0,
                       1 if missing_seg == s else 0))
+        out += caps.get(s, [])
     done = "[FRAME-TIME] menu_done why=%s segs=%d of=%d base_us=%d cycles=%d" % (why, segs, segs, base, cycles)
     if not terminal_misplaced:
         out.append(done)
     if not drop_terminal:
-        out.append("[FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d"
+        out.append("[FRAME-TIME] settled g=-1 seed=7 c_plant=-1 W=120 vsync=0 target=%d freq=%d hires=1 f_hat=%d"
                    " force=%s clock=1 frames=99999 missing_end=%d cycle_failures=0 span_depth_violations=0"
-                   % (FREQ, FHAT, force, 1 if terminal_bad else 0))
+                   % (closing_target, FREQ, FHAT, force, 1 if terminal_bad else 0))
     if terminal_misplaced:
         out.append(done)
     return "\n".join(out)
@@ -1471,9 +1503,71 @@ def test_menu_check_passes_a_clean_run():
     assert ok, bad
     assert any("contains 0" in ln for ln in lines), lines
     ecs = [ln for ln in lines if "menu e_C level" in ln]
-    assert len(ecs) == 4 and all("e_F 1.0000, e_S 1.0000" in ln for ln in ecs), ecs
+    assert len(ecs) == 2 and all("e_F 1.0000, e_S 1.0000" in ln for ln in ecs), ecs
+    # the planning model is reported, never judged; a log without window lines says w was not measured
+    assert "menu power: no complete unplanted window lines, w not measured" in lines, lines
     rep = _report(_menu_log())
-    assert rep.startswith("MENU self-check") and rep.endswith("MENU PASS"), rep
+    assert rep.startswith("MENU self-check") and "\nMENU PASS\n" in rep and rep.endswith("MENU FRAMERATE PASS"), rep
+
+
+def test_menu_check_names_an_off_segment_with_no_planted_window():
+    # ruling FRAME-TIME-ROUND-R6-A3 (2): an OFF segment with a planted level and no planted window is a named MENU
+    # FAIL reason by number, never a silent drop from its level's count; every such segment's windows are reported
+    ok, lines, bad = P.menu_check(P.read(_menu_log(unplanted_seg=3)))
+    assert not ok and "OFF segments with a planted level and no planted window: 3 (level 3, 34 windows, n 4000)" \
+        in bad, bad
+    assert any(ln.startswith("menu e_C level 3 percent:") and ln.endswith("10 segments; e_F 1.0000, e_S 1.0000")
+               for ln in lines), lines
+    w = [ln for ln in lines if ln.startswith("menu OFF segments with a planted level")]
+    assert len(w) == 1 and " 3:3:34:0 " in w[0] and " 6:3:34:1000 " in w[0] and " 7:5:34:1000 " in w[0], w
+    ok, lines, bad = P.menu_check(P.read(_menu_log()))
+    assert ok and not any("no planted window" in b for b in bad), bad
+
+
+def test_menu_framerate_passes_the_held_run():
+    ok, lines, bad = P.menu_framerate(_menu_log())
+    assert ok, bad
+    assert "menu frame rate: opening settled target=-1 vsync=0, closing target=-1 vsync=0" in lines, lines
+    # the release of a cap the mod owned on the hold's first tick is admitted
+    ok, _, bad = P.menu_framerate(_menu_log(cap_lines=[(1, "[FPSCAP] released (restored target=-1 vsync=0, "
+                                                           "focused=False)")]))
+    assert ok, bad
+
+
+def test_menu_framerate_c5_shape_fails_on_each_named_reason():
+    # the 16:53 sitting's shape (ruling FRAME-TIME-ROUND-R6-A3 C5): no hold, the unfocused cap then deep idle, the
+    # closing target 15, the segments collapsed; each reason named, the missing hold stopping none of the others
+    log = _menu_log(hold=False, closing_target=15, slow_from=10,
+                    cap_lines=[(5, "[FPSCAP] engaged unfocused cap: target=120 (baseline target=-1 vsync=0)"),
+                               (8, "[FPSCAP] deep idle (60s+ unfocused, out of room): target=15")])
+    ok, _, bad = P.menu_framerate(log)
+    assert not ok
+    assert "no '[FPSCAP] held by frame-time calibration' line: the hold is not proven reached" in bad, bad
+    assert any(b.startswith("an [FPSCAP] line between the arm and menu_done") and "deep idle (60s+" in b
+               for b in bad), bad
+    assert any(b.startswith("an [FPSCAP] line between the arm and menu_done") and "engaged unfocused cap" in b
+               for b in bad), bad
+    assert "the closing settled line's target=15 vsync=0 differs from the opening one's target=-1 vsync=0" in bad, bad
+    assert any(b.startswith("segments below one tenth of the first segment's 4000 frames: 10 (166)") for b in bad), bad
+    # each reason alone
+    ok, _, bad = P.menu_framerate(_menu_log(cap_lines=[(8, "[FPSCAP] deep idle (60s+ unfocused, out of room): target=15")]))
+    assert not ok and len(bad) == 1 and bad[0].startswith("an [FPSCAP] line between the hold and menu_done"), bad
+    ok, _, bad = P.menu_framerate(_menu_log(cap_lines=[(8, "[FPSCAP] hold released")]))
+    assert not ok and len(bad) == 1 and "hold released" in bad[0], bad
+    ok, _, bad = P.menu_framerate(_menu_log(closing_target=15))
+    assert not ok and len(bad) == 1 and bad[0].startswith("the closing settled line's target=15"), bad
+    ok, _, bad = P.menu_framerate(_menu_log(slow_from=30))
+    assert not ok and len(bad) == 1 and bad[0].startswith("segments below one tenth"), bad
+    ok, _, bad = P.menu_framerate(_menu_log(hold=False))
+    assert not ok and len(bad) == 1 and "the hold is not proven reached" in bad[0], bad
+    ok, _, bad = P.menu_framerate(_menu_log(armfile=False))
+    assert not ok and bad == ["no startup settled line with armfile=1 (the arm)"], bad
+    # a cap line before the hold, and a hold after menu_done
+    ok, _, bad = P.menu_framerate(_menu_log(hold_after_seg=4, cap_lines=[(2, "[FPSCAP] engaged unfocused cap: "
+                                                                             "target=120")]))
+    assert not ok and any(b.startswith("an [FPSCAP] line between the arm and the hold") for b in bad), bad
+    ok, _, bad = P.menu_framerate(_menu_log(hold=False) + "\n" + FPSCAP_HOLD_LINE)
+    assert not ok and len(bad) == 1 and bad[0].startswith("the hold line (log line ") and "is not between" in bad[0], bad
 
 
 def test_menu_check_fails_an_aa_shift_either_way():
@@ -1483,20 +1577,47 @@ def test_menu_check_fails_an_aa_shift_either_way():
 
 
 def test_menu_check_fails_a_level_with_low_exposure():
-    ok, lines, bad = P.menu_check(P.read(_menu_log(ec={"1.5": 0.3})))
-    assert not ok and any(b.startswith("level 1.5 percent: e_C interval") for b in bad), bad
-    assert any(b.startswith("level 1.5 percent: e_C 0.") and "not within 0.10 of 1" in b for b in bad), bad
-    ok, _, bad = P.menu_check(P.read(_menu_log(ec={"1.5": 0.95})))
+    # decision 21'' (ruling FRAME-TIME-ROUND-R6-A3.2): an interval that does not contain 1 fails at either level
+    ok, lines, bad = P.menu_check(P.read(_menu_log(ec={"5": 0.3})))
+    assert not ok and bad == [b for b in bad if b.startswith("level 5 percent: e_C interval 0.")] and \
+        any(b.endswith("does not contain 1") for b in bad), bad
+    ok, lines, bad = P.menu_check(P.read(_menu_log(ec={"3": 0.3})))
+    assert not ok and any(b.startswith("level 3 percent: e_C interval 0.") and b.endswith("does not contain 1")
+                          for b in bad), bad
+    assert any(b.startswith("level 3 percent: e_C_lo 0.") and b.endswith("below 0.5") for b in bad), bad
+    ok, _, bad = P.menu_check(P.read(_menu_log(ec={"5": 1.0})))
     assert ok, bad
+
+
+def test_menu_check_e_c_lo_bar_at_3_percent_only():
+    # decision 21'': e_C_lo >= 0.5 is judged at 3 percent (VR2's criterion rehearsed); a wide interval that contains 1
+    # and excludes 0 passes at 5 percent with its lower end below 0.5, and fails at 3 percent on the lower end alone
+    ok, lines, bad = P.menu_check(P.read(_menu_log(ec_noise={"3": 0.5})))
+    assert not ok and len(bad) == 1 and bad[0].startswith("level 3 percent: e_C_lo 0.") and \
+        bad[0].endswith("below 0.5"), (bad, lines)
+    ok, lines, bad = P.menu_check(P.read(_menu_log(segs=58, ec_noise={"5": 0.5})))
+    lo5 = [ln for ln in lines if ln.startswith("menu e_C level 5 percent:")]
+    assert ok and lo5 and float(lo5[0].split("lower end ")[1].split(",")[0]) < 0.5, (bad, lo5)
+    # an interval that contains 0 fails on the exclusion, named
+    ok, lines, bad = P.menu_check(P.read(_menu_log(ec={"5": 0.2}, ec_noise={"5": 4.0})))
+    assert not ok and any(b.startswith("level 5 percent: e_C interval") and b.endswith("does not exclude 0")
+                          for b in bad), (bad, lines)
+
+
+def test_menu_check_names_a_level_outside_the_pattern():
+    # a log from a build that still plants 0.5 and 1.5 percent is not this check's
+    ok, _, bad = P.menu_check(P.read(_menu_log(levels=("0.5", "1.5", "3", "5"))))
+    assert not ok and "segments planted at levels outside 3, 5: 0.5, 1.5" in bad, bad
 
 
 def test_menu_check_fails_a_tenfold_exposure():
     # round-1 MEDIUM (ft_parse:771): e_C about 10 passed a lower-only bar; the declared band is two-sided
     ok, _, bad = P.menu_check(P.read(_menu_log(ec={"3": 10.0})))
-    assert not ok and any(b.startswith("level 3 percent: e_C interval") for b in bad), bad
-    assert any(b.startswith("level 3 percent: e_C 10") for b in bad), bad
+    assert not ok and any(b.startswith("level 3 percent: e_C interval 9.") and b.endswith("does not contain 1")
+                          for b in bad), bad
     ok, _, bad = P.menu_check(P.read(_menu_log(ec={"3": 1.3})))
-    assert not ok and "level 3 percent: e_C 1.3000 not within 0.10 of 1" in bad, bad
+    assert not ok and any(b.startswith("level 3 percent: e_C interval 1.2") and b.endswith("does not contain 1")
+                          for b in bad), bad
 
 
 def test_menu_check_fails_fhat_spread_and_an_unstamped_frame():
@@ -1522,7 +1643,7 @@ def test_menu_check_refuses_without_its_lines():
     with pytest.raises(P.Refused):
         P.menu_check(P.read(_menu_log(segs=6)))
     rep = _report("\n".join(ln for ln in log.splitlines() if "kind=fhat" not in ln))
-    assert rep.endswith("MENU not computable: no menu calibration line"), rep
+    assert "MENU not computable: no menu calibration line" in rep.splitlines(), rep
 
 
 def test_vr2_flags_span_depth_and_cycle_failures():

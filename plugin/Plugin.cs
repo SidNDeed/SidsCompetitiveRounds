@@ -2531,6 +2531,11 @@ namespace CompetitiveRounds
         private static bool fpsExternalOverride = false;
         private static float fpsReassertLogRt = -999f;
         private static float unfocusedSinceRt = -1f;
+#if SCR_FRAMETIME
+        // FrameTime builds only (ruling FRAME-TIME-ROUND-R6-A3): true while the frame-time calibration's armfile
+        // is present (FtConfig.Present); the cap then wants nothing at every stage. Edge-logged.
+        private static bool fpsFtHeld = false;
+#endif
 
         // Ranked queue room joining — now handled by Plugin.Update()
         // (Plugin's MonoBehaviour survives scene changes via BepInEx)
@@ -3413,6 +3418,27 @@ namespace CompetitiveRounds
                     }
                 }
 
+#if SCR_FRAMETIME
+                // ── Frame-time calibration hold (ruling FRAME-TIME-ROUND-R6-A3). A frame-time sitting measures the
+                // game's own frame loop. A sitting whose window is unfocused (the VM seat's menu sittings were) met
+                // the unfocused cap (120) and then deep idle (15, unfocused 60 s out of a room), and with the director
+                // active the broadcast-seat caps would apply too; the calibrations, planted segments and A/A pairs
+                // then measured the capped loop. While FtConfig.Present holds (set from the armfile in Awake by
+                // FtConfig.Load; cleared, never set again, by FtConfig.Refresh once the file is gone, a stat at most
+                // every 250 ms from each frame boundary) every stage's wish is overridden to "no cap": the desired==0
+                // path below releases a cap we own (value-checked, the player's values win as always) on the hold's
+                // first tick and writes nothing while held. The stages above still decide from the base values (M3);
+                // only their result is set aside. Only FrameTime builds carry this, and only with the armfile; a
+                // player's build has neither. ──
+                bool ftHold = FtConfig.Present;
+                if (ftHold != fpsFtHeld)
+                {
+                    fpsFtHeld = ftHold;
+                    Plugin.Log.LogInfo(ftHold ? "[FPSCAP] held by frame-time calibration"
+                                              : "[FPSCAP] hold released");
+                }
+                if (ftHold) { desired = 0; why = null; }
+#endif
                 if (desired == 0)
                 {
                     if (fpsOwning)

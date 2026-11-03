@@ -8,7 +8,9 @@ param([Parameter(Mandatory = $true)][ValidateSet('menu', 'match')][string]$Mode,
       [Parameter(Mandatory = $true)][string]$Out)
 function St { (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
 $log = 'C:\Program Files (x86)\Steam\steamapps\common\ROUNDS\BepInEx\LogOutput.log'
-$polls = if ($Mode -eq 'menu') { 120 } else { 600 }        # 30 min; 150 min (17 games and the settle)
+# menu: 200 polls of 15 s = 50 min for the 200-segment menu check of about 34.4 min plus the game's start (ruling
+# FRAME-TIME-ROUND-R6-A3.2 (1), FtMenu's summary); match: 150 min (17 games and the settle)
+$polls = if ($Mode -eq 'menu') { 200 } else { 600 }
 function ReadShared($p) {
     $fs = [System.IO.File]::Open($p, 'Open', 'Read', 'ReadWrite')
     try { $sr = New-Object System.IO.StreamReader($fs); return $sr.ReadToEnd() } finally { $fs.Close() }
