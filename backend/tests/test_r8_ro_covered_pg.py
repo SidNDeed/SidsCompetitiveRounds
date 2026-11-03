@@ -2,10 +2,12 @@
 REHEARSAL-FOUR-R7-A1 M1, R7-A2).
 
 1. Enumeration. Both walks run (the whole a1 file, the gate file's source
-   walks) under the ro_spy plugin; every SQL position S classifies inside a
-   walked span of backend/api is collected, and the set must equal the
-   frozen lists ro_covered.COVERED ('read') and ro_covered.WRITERS ('lock')
-   exactly, both ways; no position may be ambiguous.
+   walks) under the ro_spy plugin; every execute position the walks ask the
+   frozen lookup about inside backend/api is collected (round 8, M1: the S
+   analysis is retired), and the set must equal the frozen lists
+   ro_covered.COVERED and ro_covered.WRITERS together, exactly, both ways:
+   a visited position in neither table is a finding. No position may be
+   ambiguous, every answer is the read table's, and the walks must pass.
 
 2. Execution. A clone of scr_seat_ro_tmpl is built by the harness under the
    admin DSN (the production schema, cf_pg.case, and the fixture rows) and
@@ -68,27 +70,29 @@ def _enumeration():
     if cached:
         with open(cached, encoding="utf-8") as fh:
             data = json.load(fh)
-        return ({tuple(p) for p in data["positions"]}, data["ambiguous"],
+        return ({tuple(p) for p in data["positions"]}, data["ambiguous"], (0, ""),
                 "RO8_ENUM_FROM=%s (a recorded enumeration, not a live walk run)" % cached)
     pos, amb, _syn, rc = ro_covered.enumerate_positions()
-    assert rc[0] == 0, ("the walks failed under the spy", rc)
-    return pos, amb, "live walk run"
+    return pos, amb, rc, "live walk run"
 
 
 def test_covered_set_is_the_enumeration_both_ways():
-    pos, amb, source = _enumeration()
-    assert amb == [], ("ambiguous positions", source, amb)
-    got_read = {p[:5] for p in pos if p[5] == "read"}
-    got_lock = {p[:5] for p in pos if p[5] == "lock"}
+    pos, amb, rc, source = _enumeration()
     frozen_read, frozen_lock = set(ro_covered.COVERED), set(ro_covered.WRITERS)
     assert len(frozen_read) == len(ro_covered.COVERED), "a duplicate covered entry"
     assert len(frozen_lock) == len(ro_covered.WRITERS), "a duplicate writer entry"
-    assert got_read - frozen_read == set(), (source, "enumerated, not frozen",
-                                             sorted(got_read - frozen_read))
-    assert frozen_read - got_read == set(), (source, "frozen, not enumerated",
-                                             sorted(frozen_read - got_read))
-    assert got_lock == frozen_lock, (source, sorted(got_lock ^ frozen_lock))
     assert not (frozen_read & frozen_lock)
+    visited = {p[:5] for p in pos}
+    frozen = frozen_read | frozen_lock
+    # every difference reported at once: the visited set both ways, the
+    # unplaceable or inconsistent answers, and the walks' own outcome
+    problems = {
+        "visited, in neither table": sorted(visited - frozen),
+        "frozen, not visited": sorted(frozen - visited),
+        "ambiguous or not the table's answer": amb,
+        "the walks failed under the spy": [] if rc[0] == 0 else [rc],
+    }
+    assert not any(problems.values()), (source, problems)
 
 
 # ------------------------------------------------------------- 2. execution

@@ -1,14 +1,16 @@
 """The covered set of the read-only bound and its role harness (ruling
 REHEARSAL-FOUR-R7-A1 M1).
 
-COVERED is the frozen list of every SQL position the S analysis (closed_walk
-sql_tokens / sql_kind / sql_text / execute_kind / local_sql, through
-Bindings.execute_kind) classifies as 'read' inside a span the a1 walk or the
-gate walk walks, enumerated mechanically at 3130bb9d by the ro_spy plugin
-while those walks ran (test_r8_ro_covered_pg re-enumerates and asserts
-equality both ways). WRITERS is the same enumeration's 'lock' positions:
-S itself calls them locks, and a lock is a writer, so none is in the
-read-only claim. Each entry: (walk, file, line, end_line, span).
+COVERED is the frozen list of every SQL position the (since retired) S
+analysis classified as 'read' inside a span the a1 walk or the gate walk
+walks, enumerated mechanically at 3130bb9d by the ro_spy plugin while those
+walks ran. WRITERS is the same enumeration's 'lock' positions: a lock is a
+writer, so none is in the read-only claim. Each entry: (walk, file, line,
+end_line, span). Round 8 (M1): the walks classify an execute by a frozen
+lookup over these tables (an execute reads only at a COVERED position whose
+OUTCOME is 'ok'); test_r8_ro_covered_pg re-enumerates every position the
+walks ask the lookup about and asserts that set equals COVERED and WRITERS
+together, both ways.
 
 The harness: a role engine whose every new connection asserts SELECT
 current_user, session_user equals the role before any statement, and a
@@ -165,13 +167,21 @@ WRITER_OUTCOME = {
     ('gate', 'match_hold.py', 569, 569, '_hold_row'): '25006',
 }
 
+SKIP_TESTS = ("::test_r8_sr_the_lookup_reads_only_the_covered_ok_positions",)
+
+
 def enumerate_positions(python=sys.executable, timeout=7200):
     """Run both walks under the ro_spy plugin (a subprocess pytest in this
     directory) and return (positions, ambiguous, synthetic_count, rc):
     positions the set of (walk, file, line, end_line, span, kind) of every
-    'real' record whose module is under backend/api and whose kind S gave
-    is 'read' or 'lock'; ambiguous the 'ambiguous' records under
-    backend/api."""
+    'real' record whose module is under backend/api, whatever the lookup
+    answered; ambiguous the 'ambiguous' records under backend/api and every
+    record whose kind is not the read table's answer for its position
+    ('read' exactly when the position is in the table the walk passed).
+    The lookup's own unit test (SKIP_TESTS) asks about every table position
+    by construction and walks nothing; its records are left out.
+    RO8_ENUM_SAVE names a file the enumeration is also written to (the
+    mutant runs read it back through RO8_ENUM_FROM)."""
     fd, out = tempfile.mkstemp(prefix="ro_spy_", suffix=".json")
     os.close(fd)
     env = dict(os.environ, RO_SPY_OUT=out)
@@ -198,9 +208,16 @@ def enumerate_positions(python=sys.executable, timeout=7200):
             if under_api:
                 ambiguous.append(r)
             continue
-        if under_api and r["kind"] in ("read", "lock"):
-            positions.add((walk, os.path.basename(path), r["line"], r["end"], r["span"],
-                           r["kind"]))
+        if not under_api or test.split("[")[0].endswith(SKIP_TESTS):
+            continue
+        if r["kind"] != ("read" if r["in_reads"] else "write"):
+            ambiguous.append(r)
+        positions.add((walk, os.path.basename(path), r["line"], r["end"], r["span"],
+                       r["kind"]))
+    save = os.environ.get("RO8_ENUM_SAVE")
+    if save:
+        with open(save, "w", encoding="utf-8") as fh:
+            json.dump({"positions": sorted(positions), "ambiguous": ambiguous}, fh)
     return positions, ambiguous, synthetic, (proc.returncode, proc.stdout[-2000:])
 
 

@@ -602,6 +602,7 @@ def _outer_jumps(node):
 from closed_walk import Unclassified  # noqa: E402
 import closed_walk as _cw  # noqa: E402
 import grammar_shapes_a1 as _gs  # noqa: E402
+import ro_covered as _ro  # noqa: E402
 import match_hold as _a1_match_hold  # noqa: E402
 import match_report_window as _a1_mrw  # noqa: E402
 import tournaments as _a1_tournaments  # noqa: E402
@@ -665,32 +666,15 @@ def _admit_handler(tree, scope, src):
     _admit_source(tree.body[0], scope, src)
 
 
-# The allow-lists are positive and named; the classification itself is
-# closed_walk's (rehearsal-four round 3, ruling REHEARSAL-FOUR-R3: one shared
-# default-deny visitor, every concrete ast class in its NODE_TABLE, SQL
-# classified from migration_table_ddl's lexer tokens). Each list holds only
-# what main's real spans met, verified by count (round 3: every entry with a
-# count of zero was removed).
-#
-# Functions a reading statement may call: each reads, computes or casts and
-# writes nothing. Anything else in a SELECT (lo_create, nextval, setval,
-# pg_advisory_*, a user function) is unclassified.
-_SQL_READ_FUNCS = frozenset({"abs", "any", "cast", "clock_timestamp",
-    "coalesce", "count", "current_setting", "exists", "extract",
-    "hashtextextended", "in", "least", "make_interval", "max", "now", "nullif",
-    "string_to_array", "unnest", "values"})
-# Functions that take a transaction-scoped lock or change a transaction-local
-# setting and nothing else (`set_config(<name>, <value>, true)`,
-# `pg_advisory_xact_lock(<key>)`, released at the transaction's end): such a
-# statement is read as 'lock', never as a plain read.
-_SQL_SETTING_FUNCS = frozenset({"pg_advisory_xact_lock", "set_config"})
-# Functions a writing statement may call besides the reading ones.
-_SQL_WRITE_FUNCS = frozenset()
-# Words followed by "(" that are SQL syntax, not function calls.
-_SQL_SYNTAX = frozenset({"and", "conflict", "from", "materialized", "not",
-    "where"})
-_SQL_LISTS = _cw.SqlLists(_SQL_READ_FUNCS, _SQL_SETTING_FUNCS, _SQL_WRITE_FUNCS,
-                          _SQL_SYNTAX)
+# The frozen read table (round 8, ruling REHEARSAL-FOUR-R7-A1, M1; rule
+# (1)(c)): an execute is 'read' only at a position (file, line, end line) of
+# ro_covered.COVERED whose OUTCOME under the read-only role is 'ok'
+# (closed_walk.Bindings.execute_kind); every other execute, a writer, a
+# covered position the role did not reach (ruling (a)) and a position in
+# neither table included, is 'write'. The static S analysis (the SQL lexer
+# and its allow-lists) is retired.
+_A1_READS = frozenset((f, ln, end) for f, ln, end in (
+    e[1:4] for e in _ro.COVERED if _ro.OUTCOME[e] == "ok"))
 
 # Plain calls a step may make that touch no session: builtins and the clock,
 # id and log functions the spans use.
@@ -717,7 +701,7 @@ def _policy(scope=None):
     key = id(scope)
     if key not in _POLICIES:
         _POLICIES[key] = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS,
-                                    _PURE_AWAITS, _SQL_LISTS)
+                                    _PURE_AWAITS, _A1_READS)
         _POLICIES[key].grammar = _A1_GRAMMAR
     return _POLICIES[key]
 
@@ -746,21 +730,8 @@ def structural_only(monkeypatch):
     monkeypatch.setattr(me, "_POLICIES", {})
 
 
-def _sql_kind(sql):
-    """'read', 'lock' or 'write' (closed_walk.sql_kind under the a1 lists)."""
-    return _cw.sql_kind(sql, _SQL_LISTS)
-
-
-def _local_sql(tree, scope):
-    return _cw.local_sql(tree, scope)
-
-
 def _is_db_call(call, attr):
     return _cw.is_db_call(call, attr)
-
-
-def _execute_kind(call, scope, local_sql=None, guarded=frozenset()):
-    return _cw.execute_kind(call, scope, _SQL_LISTS, local_sql, guarded)
 
 
 def _helper_effects(fn, scope=None):
@@ -768,36 +739,12 @@ def _helper_effects(fn, scope=None):
     return _cw.helper_effects(fn, _policy(scope))
 
 
-def expr_effects(node, scope=None, local_sql=None, opaque=frozenset(),
-                 bindings=None):
+def expr_effects(node, scope=None, opaque=frozenset(), bindings=None):
     """closed_walk.expr_effects under the a1 policy: the (shape, effect) list
     of evaluating `node` under `bindings`, the handler's Bindings; raises
     Unclassified naming the construct and its line."""
-    return _cw.expr_effects(node, _policy(scope), local_sql, opaque=opaque,
+    return _cw.expr_effects(node, _policy(scope), opaque=opaque,
                             bindings=bindings)
-
-
-def _plain_read(call):
-    """Whether `call` is `db.execute(text(<sql>), ...)` whose SQL _sql_kind
-    reads as 'read': one SELECT or WITH statement, no lock, no write, every
-    function on the read allow-list."""
-    if not _is_db_call(call, "execute"):
-        return False
-    try:
-        return _execute_kind(call, main) == "read"
-    except Unclassified:
-        return False
-
-
-def _only_plain_reads(node):
-    """Every await in `node` is a plain read (_plain_read). That is what a
-    gather site may run after its rollback: the rediscovery
-    _ffa_queue_poll_inner makes there ("The rollback above is what makes the
-    rediscovery legal"), and the searching counts its no-match exits answer
-    with. It takes no lock and writes nothing, so the next attempt's barrier
-    still runs with no row held."""
-    return all(_plain_read(n.value) for n in _ast.walk(node)
-               if isinstance(n, _ast.Await))
 
 
 def _block_holding(tree, node):
@@ -1093,18 +1040,13 @@ def formation_loop_exits(fn_src, form="return", shapes=None, scope=None):
     def ended(state):
         return ", ".join(kind for kind, _ln in state) or None
 
-    try:
-        local_sql = b.local_sql(tree.body[0])
-    except Unclassified as e:
-        return [], 0, 0, (set(), set()), [e.args[0]]
-
     def effects_of(node, line, opaque=frozenset()):
         # An unclassified construct is reported where it stands; if it
         # awaits, it also counts as an await on the path, so a path that
         # ended the transaction still reports it. Its names resolve through
         # the handler's bindings (finding a1:665).
         try:
-            return expr_effects(node, scope, local_sql, opaque, bindings=b)
+            return expr_effects(node, scope, opaque, bindings=b)
         except Unclassified as e:
             problems.append((e.args[0][0] or line, e.args[0][1]))
             return [("unclassified", "await")] if _awaits(node) else []
@@ -2456,7 +2398,7 @@ def _round2_a1_programs():
                '    raise HTTPException(status_code=503, '
                'detail="admission_contended")']
     g_after = (["if not _formed:", "    await db.rollback()",
-                '    n = (await db.execute(text("SELECT COUNT(*) FROM q"))).scalar()',
+                '    n = 0',
                 "    return n",
                 'await db.execute(text("INSERT INTO s VALUES (1)"))'] + acquire)
     head = ["_mine = await mine(db)", "still = await recheck(db)"]
@@ -2503,8 +2445,11 @@ def _round2_a1_programs():
          team(head + pred + size + ["others = still", "break"], t_after,
               spend=("_form_left -= 1", "_form_left = max(_form_left, 1)"))),
         # finding 5 (a1:590): a function that writes, inside a SELECT after
-        # the rollback
-        ("gather", "a SQL function off the read allow-list: lo_create", gather(
+        # the rollback. Round 8 (M1): no SQL text is read; the planted
+        # execute stands at no frozen read position, so the lookup makes it
+        # a write and allowed() (after a gather rollback only plain reads
+        # and plain calls) refuses it
+        ("gather", "awaits after rollback", gather(
             ["if await drifted(db):", "    await db.rollback()",
              '    rows = (await db.execute(text("SELECT lo_create(0)"))).all()',
              "    if not rows:", "        break", "    continue"] + g_win,
@@ -2525,7 +2470,8 @@ def _round2_a1_programs():
 def test_the_closed_walk_refuses_round_2s_programs(structural_only):
     """Rehearsal-four round 2 (ruling REHEARSAL-FOUR-R2): the exit walk is
     closed. Every statement in a walked span is classified into a named
-    shape (expr_effects, _helper_effects, _sql_kind) or the walk fails
+    shape (expr_effects, _helper_effects, the frozen execute lookup) or
+    the walk fails
     naming it. Each of the reviewer's programs for findings 1 to 5, and one
     construct of each kind the walk has never met (a lambda call, a match
     statement, an assignment expression), is refused for its own reason,
@@ -2571,12 +2517,15 @@ def test_the_gather_exit_oracle_can_fail(structural_only):
                '    raise HTTPException(status_code=503, '
                'detail="admission_contended")']
     after = (["if not _formed:", "    await db.rollback()",
-              '    n = (await db.execute(text("SELECT COUNT(*) FROM q"))).scalar()',
+              '    n = 0',
               "    return n",
               'await db.execute(text("INSERT INTO s VALUES (1)"))']
              + acquire)
     assert bad_of(gather(drift + win, after)) == []
-    assert bad_of(gather(rediscover + win, after)) == []
+    # round 8 (M1): the planted rediscovery stands at no frozen read
+    # position, so it is a write after the drift rollback (allowed())
+    assert bad_of(gather(rediscover + win, after)) == [
+        "line 8: awaits after rollback"]
 
     planted = [
         # finding 6: the drift rollback deleted
@@ -3715,8 +3664,6 @@ def _round3_a1_programs():
 
     barrier = "        await _identity_lock_many(db, [cand])"
     assert q.count(barrier) == 1
-    sql = '"SELECT COUNT(*) FROM q"'
-    assert g.count(sql) == 1
     drop = "            others = []" + NL + "            break"
     assert t.count(drop) == 1
     out = [
@@ -3755,15 +3702,6 @@ def _round3_a1_programs():
          before_drift(q, "f = (lambda x=(await db.commit()): x)")),
         ("return", "a transaction end in a spelling this walk does not read",
          before_drift(q, "xs = [await db.commit() for _ in [1]]")),
-        # a1:672 and probe P2: SQL after the gather rollback, lexer-first
-        ("gather", "a SQL function off the read allow-list: lo_create",
-         g.replace(sql, repr('SELECT "lo_create"(0)'))),
-        ("gather", "a SQL function off the read allow-list: lo_create",
-         g.replace(sql, repr("SELECT '/*' || lo_create(0)::text || '*/'"))),
-        ("gather", "awaits after rollback",
-         g.replace(sql, repr("SELECT 1 INTO tmp_probe"))),
-        ("gather", "awaits after rollback",
-         g.replace(sql, repr("CREATE TEMP TABLE p AS SELECT 1"))),
     ]
     # probe P1 and ruling item (b): a mutating method on a carried name
     for m in ("append(still)", "extend(still)", "update(still)", "clear()",
@@ -4019,11 +3957,6 @@ _R4_CW_CONTROLS = [
     ("shadow_by_parameter", "a name the function binds"),
     ("shadow_module_function", "a name the function binds"),
     ("local_sql_masked", {"write"}),
-    # the guard's name stored again: refused by the one-binding bound
-    # (ruling REHEARSAL-FOUR-R5, fix 1) before any guard reading
-    ("guard_then_rebind", "a name bound more than once: name"),
-    ("guard_after_use", "an execute whose SQL the walk cannot read"),
-    ("guard_in_loop", {"read"}),
     ("plain_helper_writes", "a plain call of plain_add, which takes write"),
     ("plain_helper_reads_nothing", set()),
     ("annotation_writes", {"write"}),
@@ -4033,13 +3966,13 @@ _R4_CW_CONTROLS = [
     # REHEARSAL-FOUR-R5 fix 3 a builder of no parameters is called (its
     # whole domain) and its true text classified, a write
     ("builder_masked", {"write"}),
-    ("template_masked", "an execute whose SQL the walk cannot read"),
     # finding closed_walk:825 (class C): a rollback-then-raise propagates to
     # the helper that awaits it, and none is caught inside the walked helper
     ("outer_catches", "awaited inside a try that catches"),
     ("nested_handler_caught", "ends the transaction (.rollback)"),
-    ("outer_propagates", {"read", "await", "rollback-then-raise"}),
-    ("inner_ends", {"read", "rollback-then-raise"}),
+    # round 8 (M1): a planted read is no frozen read position, a write
+    ("outer_propagates", {"write", "await", "rollback-then-raise"}),
+    ("inner_ends", {"write", "rollback-then-raise"}),
 ]
 
 
@@ -4061,7 +3994,7 @@ def test_r4_closed_walk_names_resolve_through_the_function(helper, want):
     fn = getattr(scope, helper)
     # .format added for the template program, so it reaches the SQL read
     policy = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS | {"format"},
-                        _PURE_AWAITS, _SQL_LISTS)
+                        _PURE_AWAITS, _A1_READS)
     if isinstance(want, str):
         with pytest.raises(Unclassified) as e:
             _cw.helper_effects(fn, policy)
@@ -4226,18 +4159,9 @@ _R5_CW_CONTROLS = [
     ("finally_returns", "a return inside a finally"),
     ("finally_breaks", "a break inside a finally"),
     ("finally_continues", "a continue inside a finally"),
-    ("guard_else_rebinds", "a name bound more than once: name"),
-    ("guard_collection_mutated", "an execute whose SQL the walk cannot read"),
-    ("guard_mutable_list", "an execute whose SQL the walk cannot read"),
-    ("table_mutated", "an execute whose SQL the walk cannot read"),
-    ("table_kept", {"read"}),
-    ("guarded_function_name", "a SQL function off the read allow-list: lo_create"),
-    ("builder_sampled", "an execute whose SQL the walk cannot read"),
     ("builder_union", {"write"}),
-    ("guard_kept", {"read"}),
-    ("builder_kept", {"read"}),
     ("local_def_kept", set()),
-    ("finally_kept", {"read"}),
+    ("finally_kept", {"write"}),  # round 8 (M1): a planted read is a write
 ]
 
 
@@ -4255,7 +4179,7 @@ def test_r5_closed_walk_round_5s_programs(helper, want):
     scope = _r5_cw_scope()
     fn = getattr(scope, helper)
     policy = _cw.Policy(scope, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS,
-                        _SQL_LISTS)
+                        _A1_READS)
     if isinstance(want, str):
         with pytest.raises(Unclassified) as e:
             _cw.helper_effects(fn, policy)
@@ -4268,47 +4192,6 @@ def test_r5_closed_walk_round_5s_programs(helper, want):
 class _R5Scope(_SampleScope):
     """_SampleScope with a module SQL constant the planted handler masks."""
     Q = "SELECT 1"
-
-
-def test_r5_a1_formation_expressions_resolve_the_handlers_bindings(structural_only):
-    """Ruling REHEARSAL-FOUR-R5, fix 0, finding a1:665: the formation walk's
-    expressions resolve names through the handler's own bindings. A module
-    `Q = 'SELECT 1'` must not stand for the handler's local
-    `Q = 'UPDATE ...'` executed after the rollback, beside the same handler
-    reading the module's Q, which passes."""
-    NL = chr(10)
-    spent = ["await db.rollback()",
-             'raise HTTPException(status_code=503, detail="queue_contended")']
-    acquire = ["if (await _lease_acquire_many(db, rows)) is False:",
-               "    await db.rollback()",
-               '    raise HTTPException(status_code=503, '
-               'detail="admission_contended")']
-
-    def gather(after):
-        return NL.join(
-            ["async def ovt_queue_poll(db):", "    _formed = False",
-             "    for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):",
-             "        rows = await discover(db)",
-             "        await _identity_lock_many(db, rows)",
-             "        if await drifted(db):", "            await db.rollback()",
-             "            continue",
-             "        _formed = True", "        break"]
-            + ["    else:"] + ["        " + ln for ln in spent]
-            + ["    " + ln for ln in after])
-
-    tail = ["    return n",
-            'await db.execute(text("INSERT INTO s VALUES (1)"))'] + acquire
-    kept = gather(["if not _formed:", "    await db.rollback()",
-                   "    n = (await db.execute(text(Q))).scalar()"] + tail)
-    masked = gather(["if not _formed:", "    await db.rollback()",
-                     "    Q = 'UPDATE t SET x = 1'",
-                     "    n = (await db.execute(text(Q))).scalar()"] + tail)
-    scope = _R5Scope()
-    assert formation_exit_violations(kept, "gather", scope=scope) == [], (
-        formation_exit_violations(kept, "gather", scope=scope))
-    got = formation_exit_violations(masked, "gather", scope=scope)
-    # the local Q is the handler's (an UPDATE), read after the rollback
-    assert "line 17: awaits after rollback" in got, got
 
 
 # The resolution-site census (ruling REHEARSAL-FOUR-R5, fix 1, a BOUND): in
@@ -4952,8 +4835,8 @@ _R8_SCOPE_CONTROLS = [
 ]
 
 
-@pytest.mark.parametrize("case", [c[0] for c in _R8_SCOPE_CONTROLS])
-def test_r8_the_definition_scope_refuses_a_store_by_shape(case):
+@pytest.mark.parametrize("scope_row", [c[0] for c in _R8_SCOPE_CONTROLS])
+def test_r8_the_definition_scope_refuses_a_store_by_shape(scope_row):
     """M5: a copy of region_pick.py with a store to its constructor-pure
     class appended (or inside the walked function) is refused BY SHAPE when
     the real function _pick is walked over the copy; the unchanged copy
@@ -4989,7 +4872,7 @@ def test_r8_the_definition_scope_refuses_a_store_by_shape(case):
     plain = planted("unchanged", "")
     _cw.plain_effects(plain._pick, _policy(plain))       # negative control
     for f, where, extra, text in _R8_SCOPE_CONTROLS:
-        if f != case:
+        if f != scope_row:
             continue
         mod = planted(tag[f], extra, inside=(where == "inside"))
         with pytest.raises(Unclassified) as e:
@@ -5022,3 +4905,116 @@ def test_r8_frozen_callee_picks_one_name_of_a_frozen_statement():
     assert _cw._frozen_callee(g, one, "a") is fa
     assert _cw._frozen_callee(g, other, "a") is None
     assert _cw._frozen_callee(None, one, "a") is None
+
+
+# --- round 8, M1: the static S analysis retired; a frozen execute lookup ----
+# Ruling REHEARSAL-FOUR-R7-A1 M1 and W30b's rulings (a) and (b): an execute
+# is 'read' only at a ro_covered.COVERED position whose OUTCOME is 'ok';
+# WRITERS (main.py:16839 and :51703 included: grammar/lookup writers, not
+# role-bound), the covered positions the role did not reach, and every
+# position in neither table are 'write'.
+
+_SR_RETIRED = ("SqlLists", "_SQL_END_WORDS", "_SQL_OTHER_COMMANDS", "_DML",
+               "SQL_COMBINATIONS", "sql_texts", "_formatted", "guards",
+               "local_sql", "builder_texts", "_builder_domain_texts",
+               "_combine", "sql_tokens", "sql_kind", "sql_text",
+               "guarded_names", "_lex_tokens", "_lex_views", "_LexError",
+               "migration_table_ddl")
+
+
+def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
+    """The lookup, position by position: every COVERED position whose
+    OUTCOME is 'ok' reads; every other COVERED position (ruling (a): the reads
+    the role did not reach: 22 positions in this COVERED) and every WRITERS position (ruling (b):
+    main.py:16839 and :51703 named) is a write; a real execute in neither
+    table is a write; the key holds the file (a WRITERS line under another
+    file's name in the table is still a write)."""
+    def _sr_modules():
+        import match_hold as _mh
+        import match_report_window as _mrw
+        import tournaments as _t
+        return {"main.py": main, "match_hold.py": _mh,
+                "match_report_window.py": _mrw, "tournaments.py": _t}
+
+
+    def _sr_placed(entry):
+        """(the walked definition's Bindings, the execute call node) standing
+        at ro_covered `entry`'s position, read from the real span's source."""
+        _w, f, ln, end, span = entry
+        mod = _sr_modules()[f]
+        d = _ast.parse(_textwrap.dedent(_inspect.getsource(getattr(mod, span)))).body[0]
+        b = _cw.Bindings(mod, d)
+        hits = [c for c in _ast.walk(d) if _cw._is_execute(c)
+                and _cw._position(b, c) == (f, ln, end)]
+        assert len(hits) == 1, (entry, len(hits))
+        return b, hits[0]
+
+    ok = {e[1:4] for e in _ro.COVERED if _ro.OUTCOME[e] == "ok"}
+    assert _A1_READS == ok and len(ok) == 13, sorted(_A1_READS ^ ok)
+    unreached = [e for e in _ro.COVERED if _ro.OUTCOME[e] != "ok"]
+    assert len(unreached) == 22, len(unreached)
+    for e in _ro.COVERED + _ro.WRITERS:
+        b, c = _sr_placed(e)
+        want = "read" if e[1:4] in ok else "write"
+        assert b.execute_kind(c, _A1_READS) == want, (e, want)
+    for ln in (16839, 51703):
+        e = [w for w in _ro.WRITERS if w[1] == "main.py" and w[2] == ln][0]
+        b, c = _sr_placed(e)
+        assert b.execute_kind(c, _A1_READS) == "write", e
+        # the key holds the file: the same line and end under another file
+        assert b.execute_kind(c, frozenset({("tournaments.py",) + e[2:4]})
+                              ) == "write", e
+        assert b.execute_kind(c, frozenset({e[1:4]})) == "read", e
+    known = {e[1:4] for e in _ro.COVERED + _ro.WRITERS}
+    d = _ast.parse(_textwrap.dedent(_inspect.getsource(main.queue_poll))).body[0]
+    b = _cw.Bindings(main, d)
+    other = [c for c in _ast.walk(d) if _cw._is_execute(c)
+             and _cw._position(b, c) is not None
+             and _cw._position(b, c) not in known]
+    assert other, "queue_poll has no execute in neither table"
+    assert {b.execute_kind(c, _A1_READS) for c in other} == {"write"}
+    # a planted copy of a covered 'ok' call cannot be placed: a write
+    e = [x for x in _ro.COVERED if _ro.OUTCOME[x] == "ok"][0]
+    _b, c = _sr_placed(e)
+    planted = _cw.Bindings(main, _ast.parse(
+        "async def _sr_planted(db):\n    await " + _ast.unparse(c) + "\n").body[0])
+    call = [x for x in _ast.walk(planted.where) if _cw._is_execute(x)][0]
+    assert _cw._position(planted, call) is None
+    assert planted.execute_kind(call, _A1_READS) == "write"
+
+
+def test_r8_sr_every_walked_execute_is_classified_by_the_lookup(monkeypatch):
+    """Every execute the real a1 walks visit is classified by the frozen
+    lookup and by nothing else: each recorded kind is 'read' exactly when
+    its position is in _A1_READS; the walks visit at least one read and one
+    write; and closed_walk holds no S symbol (each retired name occurs in
+    its source 0 times)."""
+    import pathlib
+    import sys as _sys
+    me = _sys.modules[__name__]
+    monkeypatch.setattr(me, "_A1_GRAMMAR", _a1_grammar())
+    monkeypatch.setattr(me, "_POLICIES", {})
+    seen = []
+    orig = _cw.Bindings.execute_kind
+
+    def spy(self, call, reads):
+        got = orig(self, call, reads)
+        seen.append((_cw._position(self, call), got, reads is _A1_READS))
+        return got
+
+    monkeypatch.setattr(_cw.Bindings, "execute_kind", spy)
+    _a1_real_walks()
+    assert seen and all(t for _p, _k, t in seen), seen[:3]
+    assert all(k == ("read" if p in _A1_READS else "write")
+               for p, k, _t in seen), [x for x in seen
+                                       if x[1] != ("read" if x[0] in _A1_READS
+                                                   else "write")]
+    kinds = {k for _p, k, _t in seen}
+    assert kinds == {"read", "write"}, kinds
+    text = (pathlib.Path(__file__).resolve().parent / "closed_walk.py"
+            ).read_text(encoding="utf-8")
+    left = {n: len(_re.findall(r"\b" + _re.escape(n) + r"\b", text))
+            for n in _SR_RETIRED}
+    assert all(v == 0 for v in left.values()), {k: v for k, v in left.items() if v}
+    for n in _SR_RETIRED:
+        assert not hasattr(_cw, n) and not hasattr(_cw.Bindings, n), n
