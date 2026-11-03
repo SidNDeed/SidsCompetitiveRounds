@@ -1,10 +1,20 @@
 """The read-only role as the effect bound of B2 binding soundness and S SQL
-positions (ruling REHEARSAL-FOUR-R6 (1)(a), (2), (3)).
+positions (rulings REHEARSAL-FOUR-R6 (1)(a), (2), (3); R7-A1 M2; R7-A2).
 
-Runs under CF_TEST_PG_DSN naming an ADMIN (superuser) DSN. The module
-creates its own scratch database and role (ro_role.provision), runs every
-control there, and drops both. It never skips: an unset DSN, or a refused
-CREATE DATABASE / CREATE ROLE, fails the module.
+Runs under CF_TEST_PG_DSN naming an ADMIN DSN: a superuser, or a LOGIN
+CREATEDB role that is not one (a seat's scr_gate). No role is created,
+altered or dropped and no pg_catalog ACL is changed: the standing role
+scr_seat_ro and template scr_seat_ro_tmpl are read from the cluster
+(ro_role.read_cluster; absent or wrong, the module FAILS with the sentence
+naming it). The module clones the template as the admin user, builds its
+fixture there as that user, runs ro_role.grant inside the clone as its
+owner, runs every control as the role, and drops the clone. A second clone,
+of template1, carries the same fixture for the admin's validity controls
+(the large-object writers are not executable by PUBLIC in the role's
+template, so a non-superuser admin could not show them to be writes there).
+It never skips: an unset DSN or a refused CREATE DATABASE fails the module.
+Every role connection asserts SELECT current_user, session_user equals the
+role before its body runs.
 
 Each write class runs under the role in two layers:
   provisioned  the role as provisioned (default_transaction_read_only on);
@@ -21,9 +31,9 @@ The sixteen prior-finding programs (rounds 2 to 6) run as Python against a
 real SQLAlchemy/asyncpg session under the role, the route the walker missed
 being the route executed.
 
-The DSN census (brief item 4) counts, by AST over a frozen file list, every
-site where the covered files read a DSN from the environment or open a
-connection from one.
+The DSN census (brief item 4, R7-A1 M2) is default-deny over the import,
+opener, identity-argument and DSN-text forms of a frozen file list
+(ro_census; the freeze in ro_census_frozen).
 """
 
 import ast
@@ -46,6 +56,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
 
+import ro_census  # noqa: E402
+import ro_census_frozen  # noqa: E402
 import ro_role  # noqa: E402
 
 ADMIN_DSN = ro_role.pg_dsn(os.environ.get("CF_TEST_PG_DSN") or "")
@@ -75,6 +87,12 @@ FIXTURE_SQL = [
     "CREATE TABLE rf_s.t (id int, x int)",
     "INSERT INTO rf_s.t VALUES (1, 1)",
     "GRANT USAGE, CREATE ON SCHEMA rf_s TO PUBLIC",
+    # A schema PUBLIC holds nothing on: the role reaches it only through
+    # the grant step's own USAGE (public and rf_s carry PUBLIC's USAGE, so
+    # without this schema the schema_usage step would be unobserved).
+    "CREATE SCHEMA rf_priv",
+    "CREATE TABLE rf_priv.t (id int)",
+    "INSERT INTO rf_priv.t VALUES (1)",
     "CREATE FUNCTION public.rf_secdef_write() RETURNS int LANGUAGE sql "
     "SECURITY DEFINER AS 'INSERT INTO public.rf_t VALUES (100, 100) RETURNING id'",
     # The tables the real admission path locks (main.py _lease_admission_gate
@@ -93,36 +111,65 @@ def _stamp():
         + "_" + os.urandom(2).hex()
 
 
+async def _fixture(dsn, name):
+    conn = await asyncpg.connect(ro_role.dsn_for(dsn, name))
+    try:
+        for s in FIXTURE_SQL:
+            await conn.execute(s)
+        await conn.execute('GRANT CREATE ON DATABASE "%s" TO PUBLIC' % name)
+    finally:
+        await conn.close()
+
+
 @pytest.fixture(scope="module")
 def env():
     if not ADMIN_DSN:
-        pytest.fail("CF_TEST_PG_DSN is unset: name an admin (superuser) DSN on the "
-                    "local cluster; this module never skips")
-    name = "rf7_ro_" + _stamp()
-    out = {"db": name, "role": name}
+        pytest.fail("CF_TEST_PG_DSN is unset: name an admin DSN (a superuser, or a "
+                    "LOGIN CREATEDB role) on the local cluster; this module never skips")
+    missing = run(ro_role.read_cluster(ADMIN_DSN))
+    if missing:
+        pytest.fail("the cluster is not provisioned for the read-only bound: "
+                    + "; ".join(missing))
+    name = "rf8_ro_" + _stamp()
+    out = {"db": name, "role": ro_role.ROLE}
+    made = []
 
     async def setup():
-        admin = await asyncpg.connect(ADMIN_DSN)
-        try:
-            await admin.execute('CREATE DATABASE "%s"' % name)
-        finally:
-            await admin.close()
-        conn = await asyncpg.connect(ro_role.dsn_for(ADMIN_DSN, name))
-        try:
-            for s in FIXTURE_SQL:
-                await conn.execute(s)
-            await conn.execute('GRANT CREATE ON DATABASE "%s" TO PUBLIC' % name)
-        finally:
-            await conn.close()
-        out["report"] = await ro_role.provision(ADMIN_DSN, name, name)
-        out["admin_db_dsn"] = ro_role.dsn_for(ADMIN_DSN, name)
+        await ro_role.clone(ADMIN_DSN, name)
+        made.append(name)
+        await _fixture(ADMIN_DSN, name)
+        out["report"] = await ro_role.grant(ADMIN_DSN, name)
+        out["admin_ro_db_dsn"] = ro_role.dsn_for(ADMIN_DSN, name)
         out["ro_dsn"] = out["report"]["dsn"]
 
     try:
         run(setup())
         yield out
     finally:
-        run(ro_role.drop(ADMIN_DSN, name, name))
+        for db in made:
+            run(ro_role.drop_clone(ADMIN_DSN, db))
+
+
+@pytest.fixture(scope="module")
+def plain():
+    """A clone of template1 carrying the same fixture, as the admin owns it:
+    where the admin's validity controls run (every privilege present)."""
+    if not ADMIN_DSN:
+        pytest.fail("CF_TEST_PG_DSN is unset; this module never skips")
+    name = "rf8_ro_plain_" + _stamp()
+    made = []
+
+    async def setup():
+        await ro_role.clone(ADMIN_DSN, name, template="template1")
+        made.append(name)
+        await _fixture(ADMIN_DSN, name)
+
+    try:
+        run(setup())
+        yield {"admin_db_dsn": ro_role.dsn_for(ADMIN_DSN, name)}
+    finally:
+        for db in made:
+            run(ro_role.drop_clone(ADMIN_DSN, db))
 
 
 # ---------------------------------------------------------------- runners
@@ -136,11 +183,26 @@ def _sqlstate(exc):
     raise AssertionError("no SQLSTATE on %r" % (exc,))
 
 
-async def raw_attempt(dsn, layer, body):
+WHO_SQL = "SELECT current_user, session_user"
+
+
+def assert_identity(row, expect):
+    """The connection's effective identity (R7-A1 M2): current_user and
+    session_user both `expect`."""
+    got = (row[0], row[1])
+    assert got == (expect, expect), (
+        "a connection of the read-only bound runs as current_user=%s "
+        "session_user=%s, not as %s" % (got[0], got[1], expect))
+
+
+async def raw_attempt(dsn, layer, body, expect=None):
     """`body(conn)` on a fresh asyncpg connection, in a transaction that is
-    always rolled back; 'OK' or the SQLSTATE PostgreSQL returned."""
+    always rolled back; 'OK' or the SQLSTATE PostgreSQL returned. With
+    `expect`, the connection's identity is asserted first."""
     conn = await asyncpg.connect(dsn)
     try:
+        if expect is not None:
+            assert_identity(await conn.fetchrow(WHO_SQL), expect)
         if layer == GRANT_ONLY:
             await conn.execute("SET default_transaction_read_only = off")
         tr = conn.transaction()
@@ -172,9 +234,10 @@ class RfRow(_Base):
     x: Mapped[int]
 
 
-async def orm_attempt(dsn, layer, prog):
+async def orm_attempt(dsn, layer, prog, expect=None):
     """`prog(db)` on a SQLAlchemy AsyncSession over asyncpg (the repo's
-    driver), always rolled back; 'OK' or the SQLSTATE."""
+    driver), always rolled back; 'OK' or the SQLSTATE. With `expect`, the
+    session's identity is asserted first."""
     engine = create_async_engine(dsn.replace("postgresql://", "postgresql+asyncpg://"),
                                  poolclass=NullPool)
     if layer == GRANT_ONLY:
@@ -188,6 +251,8 @@ async def orm_attempt(dsn, layer, prog):
             try:
                 if layer == GRANT_ONLY:
                     await db.execute(text("SET TRANSACTION READ WRITE"))
+                if expect is not None:
+                    assert_identity((await db.execute(text(WHO_SQL))).one(), expect)
                 ro = (await db.execute(text("SHOW transaction_read_only"))).scalar()
                 assert ro == ("on" if layer == PROVISIONED else "off"), (layer, ro)
                 try:
@@ -296,9 +361,9 @@ for _c in ("lo_create", "lo_from_bytea", "formatted_function", "secdef_call",
     EXPECTED[(_c, PROVISIONED)] = "42501"
 
 
-async def _attempt(dsn, layer, cls):
+async def _attempt(dsn, layer, cls, expect=None):
     kind, body = CLASSES[cls]
-    return await (raw_attempt if kind == RAW else orm_attempt)(dsn, layer, body)
+    return await (raw_attempt if kind == RAW else orm_attempt)(dsn, layer, body, expect)
 
 
 def test_expected_table_is_whole_and_never_ok():
@@ -309,17 +374,17 @@ def test_expected_table_is_whole_and_never_ok():
 @pytest.mark.parametrize("layer", LAYERS)
 @pytest.mark.parametrize("cls", list(CLASSES))
 def test_write_class_refused_under_role(env, cls, layer):
-    got = run(_attempt(env["ro_dsn"], layer, cls))
+    got = run(_attempt(env["ro_dsn"], layer, cls, ro_role.ROLE))
     assert got == EXPECTED[(cls, layer)], (
         "write class %s, layer %s: PostgreSQL returned %s, expected %s"
         % (cls, layer, got, EXPECTED[(cls, layer)]))
 
 
 @pytest.mark.parametrize("cls", list(CLASSES))
-def test_write_class_succeeds_under_admin(env, cls):
+def test_write_class_succeeds_under_admin(plain, cls):
     """The control is a real write: valid, and applied where the privilege
     exists (rolled back)."""
-    assert run(_attempt(env["admin_db_dsn"], GRANT_ONLY, cls)) == "OK"
+    assert run(_attempt(plain["admin_db_dsn"], GRANT_ONLY, cls)) == "OK"
 
 
 @pytest.mark.parametrize("layer", LAYERS)
@@ -330,22 +395,54 @@ def test_role_reads(env, layer):
         assert await conn.fetchval("SELECT count(*) FROM public.rf_t") == 2
         assert await conn.fetchval("SELECT count(*) FROM public.rf_v") == 2
         assert await conn.fetchval("SELECT count(*) FROM rf_s.t") == 1
+        assert await conn.fetchval("SELECT count(*) FROM rf_priv.t") == 1
         # nextval/setval are not rolled back, so the admin controls move it.
         assert await conn.fetchval("SELECT last_value FROM public.rf_seq") >= 1
         assert await conn.fetchval("SELECT abs(-3)") == 3
-    assert run(raw_attempt(env["ro_dsn"], layer, body)) == "OK"
+    assert run(raw_attempt(env["ro_dsn"], layer, body, ro_role.ROLE)) == "OK"
 
 
 def test_privilege_census_is_empty(env):
     rep = env["report"]
-    assert rep["lo_unclassified"] == [], rep["lo_unclassified"]
-    revoked = {s.split("(", 1)[0] for s in rep["lo_revoked"]}
-    assert revoked == set(ro_role.LO_WRITERS), sorted(revoked)
     assert any(s.startswith("rf_secdef_write") or ".rf_secdef_write" in s
                for s in rep["secdef_revoked"]), rep["secdef_revoked"]
-    assert set(rep["schemas"]) == {"public", "rf_s"}, rep["schemas"]
+    assert set(rep["schemas"]) == {"public", "rf_s", "rf_priv"}, rep["schemas"]
+    # The template's large-object revokes, carried into the clone: every
+    # overload of every writer (12 on PostgreSQL 16), none executable.
+    writers, executable = run(ro_role.template_lo_state(ADMIN_DSN, env["db"]))
+    assert writers >= len(ro_role.LO_WRITERS) and executable == 0, (writers, executable)
     found = run(ro_role.privilege_census(ADMIN_DSN, env["db"], env["role"]))
     assert found == [], found
+
+
+def test_cluster_read_names_what_is_missing():
+    """read_cluster's sentences are the module's failure text: an absent
+    role or template is named (nothing is created to show it)."""
+    got = run(ro_role.read_cluster(ADMIN_DSN, role="rf8_ro_absent_role",
+                                   template="rf8_ro_absent_tmpl"))
+    assert got == [
+        "the role rf8_ro_absent_role does not exist on this cluster (provision.sql "
+        "step 1 has not run here)",
+        "the template database rf8_ro_absent_tmpl does not exist on this cluster "
+        "(provision.sql step 2 has not run here)"], got
+    # template1 exists and is a template, but PUBLIC may CONNECT to it and
+    # (on a superuser-initialised cluster) it is owned by the bootstrap user.
+    got = run(ro_role.read_cluster(ADMIN_DSN, template="template1"))
+    assert "the template template1 has public_connect=True, provisioned as False" in got, got
+
+
+def test_identity_assertion_refuses_another_role(env):
+    """Control (R7-A1 M2): the identity assertion on a covered path, with the
+    connection opened as the admin role, fails."""
+    async def body(conn):
+        await conn.fetchval("SELECT count(*) FROM public.rf_t")
+    with pytest.raises(AssertionError, match="not as scr_seat_ro"):
+        run(raw_attempt(env["admin_ro_db_dsn"], GRANT_ONLY,
+                        body, ro_role.ROLE))
+    with pytest.raises(AssertionError, match="not as scr_seat_ro"):
+        run(orm_attempt(env["admin_ro_db_dsn"], GRANT_ONLY, _gate_lock, ro_role.ROLE))
+    # ...and the role's own connection passes it.
+    assert run(raw_attempt(env["ro_dsn"], PROVISIONED, body, ro_role.ROLE)) == "OK"
 
 
 def test_lock_texts_are_main_py_verbatim():
@@ -519,16 +616,16 @@ def test_findings_cover_the_sixteen():
 @pytest.mark.parametrize("fid", list(FINDINGS))
 def test_prior_finding_program_refused_under_role(env, fid, layer):
     rnd, where, prog, effect = FINDINGS[fid]
-    got = run(orm_attempt(env["ro_dsn"], layer, prog))
+    got = run(orm_attempt(env["ro_dsn"], layer, prog, ro_role.ROLE))
     assert got == FINDING_EXPECTED[(effect, layer)], (
         "%s %s (%s), layer %s: PostgreSQL returned %s" % (rnd, where, fid, layer, got))
 
 
 @pytest.mark.parametrize("fid", list(FINDINGS))
-def test_prior_finding_program_writes_under_admin(env, fid):
+def test_prior_finding_program_writes_under_admin(plain, fid):
     """The program really writes: under the admin DSN it succeeds (rolled
     back), so the role's refusal is the only thing stopping it."""
-    assert run(orm_attempt(env["admin_db_dsn"], GRANT_ONLY, FINDINGS[fid][2])) == "OK"
+    assert run(orm_attempt(plain["admin_db_dsn"], GRANT_ONLY, FINDINGS[fid][2])) == "OK"
 
 
 # ---------------------------------------------------------- DSN census
@@ -559,149 +656,74 @@ CENSUS_FILES = (
     "tests/test_title_ladders.py", "tests/title_ladders_lane_schema.py",
 )
 
-# A site: (a) an environment read -- os.environ.get / os.getenv / environ.get
-# call or os.environ[...] subscript -- whose key is a string constant
-# containing DSN or DATABASE_URL, or a Name ending in DSN_VAR; (b) a call
-# whose callee's dotted name ends in one of OPENERS, or equals one of
-# OPENER_DOTTED. Nothing else is resolved (rule (1)(c)).
-OPENERS = ("create_async_engine", "create_engine", "bound_engine", "connect_bound",
-           "CaseSchema", "fresh_database", "create_pool", "make_asm_engine")
-OPENER_DOTTED = ("asyncpg.connect", "_asyncpg.connect", "cf_pg.case",
-                 "cf_pool.checkout")
-ENV_CALLS = ("os.environ.get", "os.getenv", "environ.get")
+# The census (ruling REHEARSAL-FOUR-R7-A1 M2): default-deny over import and
+# opener forms, ro_census.forms per file, equal to the frozen multiset
+# ro_census_frozen.FROZEN (taken once at 3130bb9d, never regenerated). A
+# form the freeze lacks is refused by its shape; the refusal names it.
 
-
-def _dotted(node):
-    parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-        return ".".join(reversed(parts))
-    return None
-
-
-def _env_key(node):
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value if ("DSN" in node.value or "DATABASE_URL" in node.value) else None
-    if isinstance(node, ast.Name) and node.id.endswith("DSN_VAR"):
-        return node.id
-    return None
-
-
-def census_sites(path, source):
-    sites = []
-    for node in ast.walk(ast.parse(source, filename=path)):
-        if isinstance(node, ast.Call):
-            d = _dotted(node.func)
-            if d in ENV_CALLS and node.args and _env_key(node.args[0]):
-                sites.append((node.lineno, "env", _env_key(node.args[0])))
-            elif d is not None and (d.split(".")[-1] in OPENERS or d in OPENER_DOTTED):
-                arg = node.args[0] if node.args else None
-                for kw in node.keywords:
-                    if kw.arg == "dsn":
-                        arg = kw.value
-                sites.append((node.lineno, "open:" + d,
-                              ast.unparse(arg) if arg is not None else ""))
-        elif isinstance(node, ast.Subscript) and _dotted(node.value) == "os.environ":
-            if _env_key(node.slice):
-                sites.append((node.lineno, "env", _env_key(node.slice)))
-    return sorted(sites)
-
-
-def census(root=BACKEND):
-    out = {}
-    for rel in CENSUS_FILES:
-        with open(os.path.join(root, rel), encoding="utf-8") as fh:
-            out[rel] = census_sites(rel, fh.read())
-    return out
-
-
-# Frozen: per file, the (kind, DSN expression) of every site. A file with
-# no site is absent.
-CENSUS_FROZEN = {'api/database.py': [('env', 'DATABASE_URL'),
-                     ('open:create_async_engine', 'DATABASE_URL'),
-                     ('open:create_async_engine', 'DATABASE_URL'),
-                     ('open:create_async_engine', 'url'),
-                     ('open:make_asm_engine', '')],
- 'tests/cf_pg.py': [('env', 'DSN_VAR'),
-                    ('open:_asyncpg.connect', 'DSN'),
-                    ('open:_asyncpg.connect', 'DSN'),
-                    ('open:cf_pool.checkout', ''),
-                    ('open:harness.CaseSchema', 'dsn or DSN'),
-                    ('open:harness.bound_engine', 'dsn or DSN'),
-                    ('open:harness.bound_engine', 'dsn or DSN')],
- 'tests/cf_pool.py': [('open:asyncpg.connect', 'cf_pg.DSN'),
-                      ('open:asyncpg.connect', 'dsn'),
-                      ('open:asyncpg.connect', 'dsn'),
-                      ('open:asyncpg.connect', 'dsn'),
-                      ('open:harness.bound_engine', 'dsn'),
-                      ('open:harness.connect_bound', 'dsn'),
-                      ('open:harness.connect_bound', 'dsn'),
-                      ('open:harness.connect_bound', 'dsn'),
-                      ('open:harness.connect_bound', 'dsn'),
-                      ('open:harness.connect_bound', 'self.dsn')],
- 'tests/ladder_pg_harness.py': [('open:_asyncpg.connect',
-                                 "dsn.replace('postgresql+asyncpg://', 'postgresql://')"),
-                                ('open:connect_bound', 'self.dsn'),
-                                ('open:create_async_engine', 'async_dsn(dsn)')],
- 'tests/test_a1_formation_concurrency.py': [('env', 'A1_TEST_PG_DSN'),
-                                            ('open:create_async_engine', 'DSN')],
- 'tests/test_a1_predicate_sql.py': [('env', 'A1_TEST_PG_DSN'),
-                                    ('open:create_async_engine', 'DSN')],
- 'tests/test_match_hold_admission_gate_pg.py': [('open:cf_pg.case', "'h3gate'")],
- 'tests/test_match_hold_pg.py': [('open:cf_pg.case', 'prefix'),
-                                 ('open:cf_pg.harness.connect_bound', 'env.c.dsn'),
-                                 ('open:cf_pg.harness.connect_bound', 'env.c.dsn'),
-                                 ('open:cf_pg.harness.connect_bound', 'env.c.dsn')],
- 'tests/test_title_ladder_hooks_live.py': [('env', 'DSN_VAR'),
-                                           ('open:harness.CaseSchema', 'DSN'),
-                                           ('open:harness.bound_engine', 'DSN'),
-                                           ('open:harness.bound_engine', 'DSN'),
-                                           ('open:harness.bound_engine', 'DSN'),
-                                           ('open:harness.bound_engine', 'DSN'),
-                                           ('open:harness.bound_engine', 'DSN'),
-                                           ('open:harness.connect_bound', 'DSN'),
-                                           ('open:harness.connect_bound', 'DSN'),
-                                           ('open:harness.connect_bound', 'DSN'),
-                                           ('open:harness.connect_bound', 'DSN'),
-                                           ('open:harness.connect_bound', 'DSN')],
- 'tests/test_title_ladders.py': [('env', 'DSN_VAR'),
-                                 ('env', 'LADDER_DSN_VAR'),
-                                 ('open:_asyncpg.connect', 'LADDER_DSN'),
-                                 ('open:_asyncpg.connect', 'LADDER_DSN'),
-                                 ('open:_asyncpg.connect', 'LADDER_DSN'),
-                                 ('open:_asyncpg.connect', 'LADDER_DSN'),
-                                 ('open:_asyncpg.connect', 'LADDER_DSN'),
-                                 ('open:_asyncpg.connect', 'LADDER_DSN'),
-                                 ('open:asyncpg.connect',
-                                  "DSN.replace('postgresql+asyncpg://', 'postgresql://')"),
-                                 ('open:create_async_engine',
-                                  "LADDER_DSN.replace('postgresql://', "
-                                  "'postgresql+asyncpg://')")]}
-CENSUS_COUNT = 56
-
-
-def _frozen_view(c):
-    return {f: sorted((k, e) for _, k, e in s) for f, s in c.items() if s}
+def _census_diff(root=BACKEND):
+    return ro_census.diff(ro_census.census(root, CENSUS_FILES), ro_census_frozen.FROZEN)
 
 
 def test_dsn_census_is_closed():
     root = os.environ.get("RF7RO_CENSUS_ROOT") or BACKEND
-    got = census(root)
-    view = _frozen_view(got)
-    total = sum(len(s) for s in got.values())
-    assert total == CENSUS_COUNT, (total, view)
-    assert view == CENSUS_FROZEN, view
+    got = ro_census.census(root, CENSUS_FILES)
+    assert sum(len(v) for v in got.values()) == ro_census_frozen.FROZEN_COUNT
+    assert ro_census.diff(got, ro_census_frozen.FROZEN) == []
+    # No identity-changing SQL text anywhere in the closure, frozen or not.
+    assert not [f for v in ro_census_frozen.FROZEN.values() for f in v
+                if f[0] == "identity"]
 
 
-def test_dsn_census_negative_control():
-    """A site added to a covered file changes the count."""
+# Each census refusal rule, with the program that exercises it planted into a
+# covered file's text (cf_pg.py, the file the round-7 report's example
+# names); the census of the planted text must refuse exactly the planted
+# forms. The first row is the report's own example.
+PLANTED = (
+    ("aliased_import",
+     "\nimport asyncpg as pg\n\nasync def _planted():\n    return await pg.connect(DSN)\n",
+     {("import", "import asyncpg as pg"), ("opener", "Load pg.connect")}),
+    ("bare_connect",
+     "\nfrom asyncpg import connect\n\nasync def _planted():\n"
+     "    return await connect(DSN)\n",
+     {("import", "from asyncpg import connect"), ("opener", "alias connect"),
+      ("opener", "Load connect")}),
+    ("user_kwarg",
+     "\nasync def _planted():\n    return await _asyncpg.connect(DSN, user='postgres')\n",
+     {("opener", "Load _asyncpg.connect"), ("kwarg", "_asyncpg.connect user='postgres'"),
+      ("dsntext", "postgres")}),
+    ("rebuilt_dsn",
+     "\nasync def _planted(who):\n    return DSN.replace('//', '//%s@' % who)\n",
+     {("dsntext", "//%s@")}),
+    ("set_role",
+     "\nasync def _planted(conn):\n    await conn.execute('SET ROLE scr_gate')\n",
+     {("identity", "SET ROLE scr_gate")}),
+    ("session_authorization",
+     "\nasync def _planted(conn):\n"
+     "    await conn.execute('SET SESSION AUTHORIZATION scr_gate')\n",
+     {("identity", "SET SESSION AUTHORIZATION scr_gate")}),
+    ("options_role",
+     "\nasync def _planted():\n"
+     "    return await harness.connect_bound(DSN, 's', options='-c role=scr_gate')\n",
+     {("opener", "Load harness.connect_bound"),
+      ("kwarg", "harness.connect_bound options='-c role=scr_gate'"),
+      ("identity", "-c role=scr_gate")}),
+    ("getattr_opener",
+     "\nasync def _planted():\n    return await getattr(_asyncpg, 'connect')(DSN)\n",
+     {("opener", "str connect")}),
+)
+
+
+@pytest.mark.parametrize("name", [p[0] for p in PLANTED])
+def test_dsn_census_refuses_unfrozen_form(name):
+    _n, program, want = next(p for p in PLANTED if p[0] == name)
     rel = "tests/cf_pg.py"
     with open(os.path.join(BACKEND, rel), encoding="utf-8") as fh:
         src = fh.read()
-    planted = src + "\n\nasync def _planted():\n    return await _asyncpg.connect(DSN)\n"
-    assert len(census_sites(rel, planted)) == len(census_sites(rel, src)) + 1
-    planted_env = src + "\n\nX = os.environ.get('OTHER_PG_DSN')\n"
-    assert len(census_sites(rel, planted_env)) == len(census_sites(rel, src)) + 1
+    got = {rel: ro_census.forms(rel, src + program)}
+    frozen = {rel: ro_census_frozen.FROZEN[rel]}
+    refused = ro_census.diff(got, frozen)
+    assert refused and all(r[1] == "+" for r in refused), refused
+    assert {r[2:] for r in refused} == want, refused
+    # Unplanted, the same file is clean (the refusal is the program's).
+    assert ro_census.diff({rel: ro_census.forms(rel, src)}, frozen) == []
