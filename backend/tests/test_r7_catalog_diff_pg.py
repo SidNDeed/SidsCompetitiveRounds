@@ -886,17 +886,17 @@ ROUTE_CONTROLS = [
      "TO SQL WITH FUNCTION d2r_tf_to(internal))", "transform", "TRANSFORM|-|TRANSFORM FOR integer LANGUAGE d2r_lang",
      SU),
     ("rt_fdw", "CREATE FOREIGN DATA WRAPPER d2r_fdw", "fdw", "FOREIGN DATA WRAPPER|-|d2r_fdw", SU),
-    ("rt_server", "CREATE SERVER d2r_srv FOREIGN DATA WRAPPER d2r_fdw", "server", "SERVER|-|d2r_srv", SU),
+    ("rt_server", "CREATE SERVER d2r_srv FOREIGN DATA WRAPPER d2r_fdw", "server", "SERVER|-|d2r_srv", SU + "<rt_fdw"),
     ("rt_user_mapping", "CREATE USER MAPPING FOR PUBLIC SERVER d2r_srv", "user_mapping",
-     "USER MAPPING|-|USER MAPPING public SERVER d2r_srv", SU),
+     "USER MAPPING|-|USER MAPPING public SERVER d2r_srv", SU + "<rt_server"),
     ("rt_foreign_table", "CREATE FOREIGN TABLE d2r_ft (a int) SERVER d2r_srv", "class",
-     "FOREIGN TABLE|public|d2r_ft", SU),
+     "FOREIGN TABLE|public|d2r_ft", SU + "<rt_server"),
     ("rt_access_method", "CREATE ACCESS METHOD d2r_am TYPE TABLE HANDLER heap_tableam_handler", "access_method",
      "ACCESS METHOD|-|d2r_am", SU),
     ("rt_subscription", "CREATE SUBSCRIPTION d2r_sub CONNECTION 'dbname=postgres' PUBLICATION d2r_pub "
      "WITH (connect = false)", "subscription", "SUBSCRIPTION|-|d2r_sub", SU),
     ("rt_subscription_drop", "ALTER SUBSCRIPTION d2r_sub DISABLE; ALTER SUBSCRIPTION d2r_sub SET (slot_name = NONE); "
-     "DROP SUBSCRIPTION d2r_sub", "subscription", "SUBSCRIPTION|-|d2r_sub", SU),
+     "DROP SUBSCRIPTION d2r_sub", "subscription", "SUBSCRIPTION|-|d2r_sub", SU + "<rt_subscription"),
     # an owner change rewrites the Owner field of the comment block's header
     # and not its text: that block is not a changed object
     # a column under a UNIQUE constraint widened in place: the constraint's
@@ -945,10 +945,19 @@ async def _route_run(dsn, pg_dump, controls, me, superuser, wrap=None):
     return out
 
 
-def _route_verdict(r, superuser):
-    """'ok' or the reason the control failed."""
+def _route_verdict(r, superuser, accepted=frozenset()):
+    """'ok' or the reason the control failed. Under an admin role that is not
+    a superuser, a superuser-only control (SU) is accepted when PostgreSQL
+    refuses it for privilege (42501); a control that needs a superuser-only
+    control's object (SU + "<" + that control) is accepted when it is
+    refused because the object is missing (42704) AND that control's own
+    refusal was accepted (accepted: the names of accepted refusals, earlier
+    in the run). Under a superuser no refusal is accepted."""
     if r["refused"]:
-        if r["su"] == SU and not superuser and r["refused"] == "42501":
+        if not superuser and r["su"] == SU and r["refused"] == "42501":
+            return "ok"
+        if (not superuser and r["su"] and r["su"].startswith(SU + "<") and r["refused"] == "42704"
+                and r["su"][len(SU) + 1:] in accepted):
             return "ok"
         return "refused %s: %s" % (r["refused"], r["error"])
     if r["catalog_only"] or r["dump_only"]:
@@ -997,6 +1006,28 @@ def _route_out():
     return out
 
 
+def test_route_verdict_accepts_only_privilege_refusals_and_their_dependents():
+    """The refusal rule of _route_verdict, without a database: what it
+    accepts under a non-superuser admin role, and everything it rejects."""
+    base = {"control": "c", "error": "e", "object": None, "kind": None, "matched": [],
+            "catalog_only": {}, "dump_only": [], "kinds": []}
+    v = lambda refused, su, superuser, accepted=(): _route_verdict(
+        dict(base, refused=refused, su=su), superuser, set(accepted))
+    assert v("42501", SU, False) == "ok"
+    assert v("42704", SU + "<p", False, {"p"}) == "ok"
+    rejected = [
+        v("42501", SU, True),                      # a superuser is never refused
+        v("42704", SU + "<p", True, {"p"}),
+        v("42704", SU + "<p", False),              # its prerequisite was not refused-and-accepted
+        v("42704", SU + "<p", False, {"q"}),
+        v("42501", SU + "<p", False, {"p"}),       # a dependent is accepted only as missing-object
+        v("42704", SU, False),                     # a plain SU control only for privilege
+        v("42501", None, False),                   # a control not marked SU
+        v("42704", None, False, {"p"}),
+    ]
+    assert all(x != "ok" for x in rejected), rejected
+
+
 def test_route_controls_match_object_sets(route_db):
     """M9's route controls: every arm of CATALOG_SQL has a control whose
     change pg_dump renders as the named object and the catalog diff holds
@@ -1005,7 +1036,12 @@ def test_route_controls_match_object_sets(route_db):
     assert pg_dump, "the object-set controls need pg_dump (D2_TEST_PG_DUMP or PATH)"
     who = asyncio.run(_whoami())
     res = asyncio.run(_route_run(_dsn(route_db), pg_dump, ROUTE_CONTROLS, who["admin_user"], who["superuser"]))
-    verdicts = [(r["control"], _route_verdict(r, who["superuser"])) for r in res]
+    verdicts, accepted = [], set()
+    for r in res:
+        v = _route_verdict(r, who["superuser"], accepted)
+        if r["refused"] and v == "ok":
+            accepted.add(r["control"])
+        verdicts.append((r["control"], v))
     out = _route_out()
     if out:
         _write(out, "route_controls.json", json.dumps(
