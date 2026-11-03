@@ -1934,7 +1934,8 @@ COMPLETE_FROZEN = {'api/admin_evidence.py#complete': [],
                                ('call', 'harness.connect_bound(dsn, schema)'),
                                ('call', 'harness.connect_bound(self.dsn, self.schema)'),
                                ('dynamic', 'sys.modules')],
- 'tests/closed_walk.py#complete': [('dynamic', 'getattr(self.scope, name, _MISSING)'),
+ 'tests/closed_walk.py#complete': [('dynamic', 'getattr(p, f)'),
+                                   ('dynamic', 'getattr(self.scope, name, _MISSING)'),
                                    ('dynamic', 'getattr(st, field, None)')],
  'tests/ladder_pg_harness.py#complete': [('call',
                                           "_asyncpg.connect(dsn.replace('postgresql+asyncpg://', "
@@ -2006,7 +2007,8 @@ COMPLETE_FROZEN = {'api/admin_evidence.py#complete': [],
                                                   ('dynamic', 'mod.__dict__'),
                                                   ('dynamic', 'mod.__dict__'),
                                                   ('dynamic', 'mod.__dict__'),
-                                                  ('dynamic', 'vars(main)')],
+                                                  ('dynamic', 'vars(main)'),
+                                                  ('dynamic', 'getattr(blk, field, None)')],
  'tests/test_a1_predicate_sql.py#complete': [('call', 'create_async_engine(DSN)')],
  'tests/test_match_hold_admission_gate_pg.py#complete': [('call', "cf_pg.case('h3gate')"),
                                                          ('dynamic',
@@ -2103,6 +2105,14 @@ COMPLETE_FROZEN = {'api/admin_evidence.py#complete': [],
                                           ('dynamic', 'self.__dict__')],
  'tests/title_ladders_lane_schema.py#complete': []}
 COARSE_COUNT = 363
-COMPLETE_COUNT = 216
+COMPLETE_COUNT = 218
+# Hand edit at the round-9 merge (W30b; the ro child's question 1; reviewed
+# in the round-9 notes): two dynamic forms the gr child's G2/G3 code adds,
+# each reading an AST node's own field named by the field the walk stands in
+# (closed_walk._index_path: `getattr(p, f)`, f from shape_grammar.visit) or
+# by a literal tuple (test_a1_identity_formation, the queue_poll ends test:
+# `getattr(blk, field, None)` over ("body", "orelse")). Neither reaches a
+# module or an opener. 216 forms were derived at effc36c6; these two are
+# frozen by hand, not by a re-derivation.
 FROZEN.update(COMPLETE_FROZEN)
 FROZEN_COUNT = COARSE_COUNT + COMPLETE_COUNT
