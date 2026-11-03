@@ -20056,7 +20056,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         # the client's next 3s poll re-enters cleanly; a 5xx leaves client state
         # untouched, whereas any 200 body would be acted on.
         print(f"[QUEUE-POLL] {steam_id} pair kept changing under lock acquisition; asking for a retry")
-        await db.commit()
+        await db.rollback()
         raise HTTPException(status_code=503, detail="queue_contended")
 
     now = datetime.now(timezone.utc)
@@ -20443,7 +20443,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             # honest answer is a retry: the client's next 3 s poll enters it
             # cleanly. Same precedent, and same status, as the pair-inversion
             # give-up above; any 200 body would be acted on instead.
-            await db.commit()
+            await db.rollback()
             raise HTTPException(status_code=503, detail="queue_contended")
 
         wait_seconds = int((datetime.now(timezone.utc)

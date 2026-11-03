@@ -2768,6 +2768,9 @@ def _gate_calls_inside_a_swallowing_scope(src):
     nested cases that matter.
     """
     tree = _ast.parse(src)
+    # round 9 (G3): the callee read through the handler's resolver
+    b = _handler_bindings(tree, None)
+    lease = "_formation_lease_conflict"
     bad = []
 
     class V(_ast.NodeVisitor):
@@ -2789,8 +2792,10 @@ def _gate_calls_inside_a_swallowing_scope(src):
                 self.generic_visit(node)
 
         def visit_Call(self, node):
-            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-            if name == "_formation_lease_conflict" and self.depth:
+            hit = b.spelled(node.func, lease)
+            if isinstance(node.func, _ast.Attribute) and node.func.attr == lease:
+                hit = True
+            if self.depth and hit is True:
                 bad.append(node.lineno)
             self.generic_visit(node)
 
@@ -3477,10 +3482,12 @@ def test_the_identity_barrier_bounds_its_wait_and_answers_contended():
 # --- merged fix 1b: rated-FFA proximity admission -------------------------
 
 def _fix1b_calls(function_name, callee):
-    tree = _ast.parse(_inspect.getsource(getattr(main, function_name)))
+    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(
+        getattr(main, function_name))))
+    # round 9 (G3): the callee read through the handler's resolver
+    b = _handler_bindings(tree, None)
     return [node for node in _ast.walk(tree)
-            if isinstance(node, _ast.Call)
-            and getattr(node.func, "id", None) == callee]
+            if isinstance(node, _ast.Call) and b.spelled(node.func, callee)]
 
 
 def test_fix1b_r1_floor_is_independent_inert_and_complete():
@@ -4206,6 +4213,12 @@ _CENSUS_EXEMPT = {
     # spelling is a meaningful one: the grammar's own rule over the frozen
     # A1_MEANINGFUL, deciding no name's binding.
     ("closed_walk", "_anchored_node"): 1,
+    # formation_loop_exits.decide (round 9, G3: every comparison operator
+    # counts) evaluates a test only when every name it reads is a local the
+    # path bound to a literal (`names <= set(env) | {"len"}`); a name outside
+    # env leaves the test undecided (None), the walk's refusing direction,
+    # and the check decides no binding the walk reads as the module's.
+    ("test_a1_identity_formation", "formation_loop_exits.decide"): 1,
 }
 # One bypassing site per walker, each put where the census must count it:
 # (module, the exact text replaced, its replacement, the span it lands in).
@@ -4231,8 +4244,12 @@ _CENSUS_MUTANTS = [
 
 def _census_problems(sources):
     """(span, sites) for every walker span whose resolution sites do not all
-    go through the resolver (resolution_sites.census), the exempt spans held
-    to their pinned counts; empty when the bound holds."""
+    go through the resolver (resolution_sites.census; round 9, G2: a call
+    is the resolver's only on the frozen receiver its span admits), the
+    exempt spans held to their pinned counts; empty when the bound holds.
+    The census's own forms and the receiver chain are checked by the tests
+    (_r9_form_problems: this span is walker code, held to the frozen
+    walker grammar, so it gains no call the grammar does not hold)."""
     import resolution_sites as _rs
     methods = _rs.resolver_methods(_ast.parse(sources["closed_walk"]))
     out = []
@@ -4259,6 +4276,8 @@ def test_r5_every_resolution_site_goes_through_the_resolver():
         "test_match_hold_admission_gate_pg")}
     assert _census_problems(sources) == []
     import resolution_sites as _rs
+    for mod, text in sorted(sources.items()):
+        assert _rs.form_problems(_ast.parse(text)) == [], mod
     methods = _rs.resolver_methods(_ast.parse(sources["closed_walk"]))
     for (q, _ln) in _rs.census(_ast.parse(sources["test_a1_identity_formation"]),
                                methods):
@@ -4416,6 +4435,16 @@ def _r7_src(name):
     return _textwrap.dedent(_inspect.getsource(getattr(main, name)))
 
 
+# Round 9 (G2, G3): queue_poll's admission refusal (main.py:20552), its
+# success commit (:20554) and the lease acquire both stand under.
+_R9_Q_ADMISSION = ("            await db.rollback()\n"
+                   "            raise HTTPException(status_code=503, "
+                   "detail=\"admission_contended\")\n")
+_R9_Q_SUCCESS = "        await db.commit()\n\n        return QueuePollResponse(\n"
+_R9_Q_ACQUIRE = ("        if (await _lease_acquire_many(\n"
+                 "                db, [my_pid, opp[\"player_id\"]], \"ranked\",\n")
+
+
 def _r7_helper(tag, lines, classes=()):
     """The real handler queue_poll over a scope whose _R7_H, the real
     helper it awaits in its formation loop, carries `lines` (statements at
@@ -4526,6 +4555,23 @@ def _r7_programs():
              "class Meta(type):\n    def __call__(cls, *a):\n"
              "        return None\n\n\n"
              "class Evil(tuple, metaclass=Meta):\n    __new__ = _Nt.__new__\n",))),
+        # round 9 (ruling REHEARSAL-R8-A1, G2): the reviewer's live mutant, a
+        # commit in place of the admission refusal's rollback (main.py:20552)
+        ("r8 grammar_shapes_a1:2106 a commit in place of the admission "
+         "refusal's rollback", "return",
+         _r7_put(q, _R9_Q_ADMISSION, _R9_Q_ADMISSION.replace(
+             "rollback()", "commit()"), replace=True), plain),
+        # round 9, G3: the position rule, one control per node class
+        ("r9 G3 the success commit moved above the lease acquire", "return",
+         _r7_put(_r7_put(q, _R9_Q_SUCCESS, _R9_Q_SUCCESS.replace(
+             "        await db.commit()\n", ""), replace=True),
+                 _R9_Q_ACQUIRE, "        await db.commit()\n"), plain),
+        ("r9 G3 the drift rollback moved below its continue", "return",
+         _r7_put(q, _R7_Q_DRIFT, "            opp = None\n            continue\n"
+                 "            await db.rollback()\n", replace=True), plain),
+        ("r9 G3 a refusal's detail changed", "return",
+         _r7_put(q, _R9_Q_ADMISSION, _R9_Q_ADMISSION.replace(
+             "admission_contended", "queue_contended"), replace=True), plain),
     ]
 
 
@@ -4619,6 +4665,21 @@ R7_A1_WANT = {
     "r6 cw:670 a copied namedtuple __new__ under a writing metaclass":
         ("scope", "Evil: a shape outside the definition scope at "
                   "<r7_meta>:", ()),
+    # round 9 (G2): the committing-refusal anchor is gone, so the commit is
+    # refused by its anchor, the reviewer's program itself
+    "r8 grammar_shapes_a1:2106 a commit in place of the admission refusal's rollback":
+        ("anchored", "a transaction end, commit, at "
+                     "Await.value>Call(func=Attribute,args=[],keywords=[])", ()),
+    # round 9 (G3): the position rule
+    "r9 G3 the success commit moved above the lease acquire":
+        ("anchored", "a transaction end, commit, outside its frozen position, "
+                     "in queue_poll at", ()),
+    "r9 G3 the drift rollback moved below its continue":
+        ("anchored", "outside its frozen position, ", ()),
+    "r9 G3 a refusal's detail changed":
+        ("anchored", "a constant outside its frozen position, "
+                     "keyword.value>Constant(value=str)#'queue_contended', "
+                     "in queue_poll at", ()),
 }
 _R7_MARK = {"shape": _GRAMMAR, "anchored": "the anchored rule at ",
             "scope": "a shape outside the definition scope at "}
@@ -4650,7 +4711,7 @@ def test_r7_every_owned_finding_has_its_control():
 
 
 @pytest.mark.parametrize("finding", sorted(R7_A1_WANT))
-def test_r7_a1_findings_are_refused_under_the_frozen_grammar(finding):
+def test_r7_a1_findings_are_refused_under_the_frozen_grammar(finding, monkeypatch):
     """Ruling REHEARSAL-FOUR-R6 (3): every finding of rounds 1 to 6 this
     child owns is a control under the new mechanism. Each reviewer's
     program, planted into the real span it was about, is walked by the a1
@@ -4658,7 +4719,18 @@ def test_r7_a1_findings_are_refused_under_the_frozen_grammar(finding):
     the rule and the text R7_A1_WANT pins; where a construct sits inside a
     container shape, the construct's own shape is among the grammar's
     refusals of the program too. The real spans the programs were planted
-    in are admitted and pass (test_r7_the_grammar_checks_...)."""
+    in are admitted and pass (test_r7_the_grammar_checks_...).
+
+    Round 9 (G2, G3): the position rule (closed_walk.positions) refuses a
+    planted program that shifts a frozen position, often first. So every
+    program is refused BY SHAPE under the full frozen grammar (its first
+    problem carries one of the three marks), AND the rule each earlier
+    round's row pins still refuses it on its own: rows before round 9 are
+    checked under the frozen grammar less the position marker; the round-9
+    rows (the reviewer's commit in place of rollback, the position
+    controls) under the full grammar."""
+    import sys as _sys
+    me = _sys.modules[__name__]
     for f, form, prog, scope in _r7_programs():
         if f != finding:
             continue
@@ -4666,6 +4738,15 @@ def test_r7_a1_findings_are_refused_under_the_frozen_grammar(finding):
         got = _r7_outcome(form, prog, scope)
         # round 8: every control is refused BY SHAPE (a shape, an anchor's
         # shape, a definition-scope shape), never by a walk's sentence
+        assert got and any(m in got[0] for m in _R7_MARK.values()), (
+            finding, got[:2])
+        if not finding.startswith(("r8 grammar_shapes_a1:2106", "r9 ")):
+            monkeypatch.setattr(me, "_A1_GRAMMAR", _cw.Grammar(
+                _gs.A1_SHAPES, _gs.A1_MEANINGFUL,
+                _gs.A1_BINDINGS - {_cw.POSITIONED}, _A1_CALLEES,
+                _gs.A1_NAMEDTUPLES))
+            monkeypatch.setattr(me, "_POLICIES", {})
+            got = _r7_outcome(form, prog, scope)
         assert got and _R7_MARK[rule] in got[0] and text in got[0], (
             finding, got[:2])
         refused = _r7_program_refusals(form, prog, scope)
@@ -4746,7 +4827,38 @@ _R7_CENSUS_CONTROLS = [
     ("r7 closed_walk:755 a callee through the accessor route",
      "def _r7_probe(b, fn):\n    return b.module_accessor(fn)\n", None,
      "Call.func>Attribute(value=Name,attr='module_accessor',ctx=Load)"),
+    # round 9 (ruling REHEARSAL-R8-A1, G2; finding resolution_sites:65): the
+    # report's own example, `b.b` an ordinary object; its receiver is not
+    # closed_walk's frozen one (`self` in a Visitor method), so the call is
+    # an ordinary expression and the comparison is a site
+    ("r8 resolution_sites:65 the resolver form on an ordinary receiver",
+     "def _r7_probe(b, n):\n    return b.b.named(n.id) == 'db'\n", True, None),
+    # `self.b` in a class that is not Visitor
+    ("r9 G2 the resolver form on another class's self",
+     "class _R9Probe:\n    def _r7_probe(self, n):\n"
+     "        return self.b.named(n.id) == 'db'\n", "_R9Probe._r7_probe", None),
+    # `self` rebound inside a Visitor method's span is no longer the receiver
+    ("r9 G2 the receiver rebound in a Visitor method",
+     None, "Visitor._r9_probe", None),
+    # round 9, G3: the census's own forms
+    ("r9 G3 a decision inside a lambda",
+     "def _r7_probe(n):\n    return (lambda: n.id == 'db')()\n", True, None),
+    ("r9 G3 hasattr with a walked identifier",
+     "def _r7_probe(o, n):\n    return hasattr(o, n.id)\n", True, None),
+    ("r9 G3 getattr with unpacked arguments",
+     "def _r7_probe(o, a):\n    return getattr(*a)\n", True, None),
+    ("r9 G3 the site spelling aliased",
+     "def _r7_probe(o, n):\n    g = getattr\n    return g(o, n.id)\n",
+     "form", None),
+    ("r9 G3 the site method read as a value",
+     "def _r7_probe(t, n):\n    g = t.get\n    return g(n.id)\n", "form", None),
+    ("r9 G3 a second store to .b",
+     "def _r7_probe(v, x):\n    v.b = x\n", "form", None),
 ]
+# The Visitor method the receiver-rebinding control adds (G2): `self` bound
+# a second time, so the span admits no receiver and the call is counted.
+_R9_REBOUND = ("    def _r9_probe(self, n):\n        self = n\n"
+               "        return self.b.named(n.id) == 'db'\n")
 
 
 def test_r7_census_controls_are_refused():
@@ -4763,17 +4875,57 @@ def test_r7_census_controls_are_refused():
     base = {m: (here / f"{m}.py").read_text(encoding="utf-8") for m in (
         "closed_walk", "test_a1_identity_formation",
         "test_match_hold_admission_gate_pg")}
+    assert _census_problems(base) == []
+    assert not [m for m in base if _rs.form_problems(_ast.parse(base[m]))]
     for finding, prog, counted, shape in _R7_CENSUS_CONTROLS:
-        mutated = dict(base, closed_walk=base["closed_walk"] + "\n\n" + prog)
-        census = [s for s, _sites in _census_problems(mutated)]
+        if prog is None:
+            # the rebinding control lands inside class Visitor (G2)
+            head = "class Visitor:"
+            assert base["closed_walk"].count(head) == 1, finding
+            at = base["closed_walk"].index("    def __init__(self, policy,")
+            text = base["closed_walk"][:at] + _R9_REBOUND + "\n" + base[
+                "closed_walk"][at:]
+            assert text.count(_R9_REBOUND) == 1, finding
+            mutated = dict(base, closed_walk=text)
+        else:
+            mutated = dict(base, closed_walk=base["closed_walk"] + "\n\n" + prog)
+        census = [s for s, _sites in _census_problems(mutated)] + [
+            f"{m}:form" for m in sorted(mutated)
+            if _rs.form_problems(_ast.parse(mutated[m]))]
         grammar = [sh for _f, _l, sh in _rs.grammar_refusals(
             _ast.parse(mutated["closed_walk"]), _gs.WALKER_SHAPES,
             "closed_walk") if _l > len(base["closed_walk"].splitlines())]
         assert counted or shape, finding
-        if counted:
+        if counted is True:
             assert census == ["closed_walk:_r7_probe"], (finding, census)
+        elif counted:
+            assert census == [f"closed_walk:{counted}"], (finding, census)
         if shape:
             assert any(s.startswith(shape) for s in grammar), (finding, grammar)
+
+
+def test_r9_the_gate_receiver_chain_is_checked():
+    """Round 9 (ruling REHEARSAL-R8-A1, G2): the gate walks' receiver `w` is
+    the resolver's only through the chain resolution_sites.receiver_problems
+    checks. Controls: a call passing an ordinary object as `w`, a gate
+    function taking `w` handed on as a value, and a second store to `.b`,
+    each refused; the real file holds the chain."""
+    import pathlib
+    import resolution_sites as _rs
+    here = pathlib.Path(__file__).resolve().parent
+    mod = "test_match_hold_admission_gate_pg"
+    text = (here / f"{mod}.py").read_text(encoding="utf-8")
+    assert _rs.receiver_problems(_ast.parse(text)) == []
+    for prog, want in (
+            ("def _r9_probe(n):\n    return _resolve(n, n.func)\n",
+             "a call of _resolve passes n as `w`"),
+            ("def _r9_probe(n):\n    return list(map(_resolve, [n]))\n",
+             "_resolve, which takes `w`, is named other than as a callee"),
+            ("def _r9_probe(n):\n    n.b = n\n",
+             "the stores to `.b` are not exactly _Walk.__init__'s")):
+        got = [why for _ln, why in _rs.receiver_problems(
+            _ast.parse(text + "\n\n" + prog))]
+        assert any(want in g for g in got), (prog, got)
 
 
 # --- round 8: the callee table and the definition scope ---------------------
@@ -4782,6 +4934,61 @@ def test_r7_census_controls_are_refused():
 # form (grammar_shapes_a1.A1_CALLEES, bound by _A1_CALLEES); a class is
 # constructor-pure only inside a complete frozen definition scope
 # (grammar_shapes_a1.A1_NAMEDTUPLES, every spelled shape of region_pick.py).
+
+
+def test_r9_queue_poll_refusals_roll_back():
+    """Production conformation (round 9, ruling REHEARSAL-R8-A1, G2; finding
+    grammar_shapes_a1:2106). queue_poll's two committing refusals, the
+    pair-inversion give-up (main.py:20059) and the formation loop's
+    status re-read (:20446), each `await db.commit()` then `raise
+    HTTPException(503, "queue_contended")`, now roll back: their
+    transactions hold only reads and locks since the last end (the
+    discovery and identity locks of the inversion loop; the loop's own
+    re-read after the preflight commit or the previous attempt's
+    rollback), so both ends release the same locks and keep the same rows.
+    Every `raise` in queue_poll whose block ends a transaction first ends
+    it by a rollback; the two conformed sites are among them; and the
+    committing-refusal anchors are gone from the frozen anchors, which are
+    the round-8 set less exactly those two (69, pinned by digest), the
+    position rule's 2322 positions pinned beside them."""
+    import hashlib
+    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(main.queue_poll)))
+    off = main.queue_poll.__code__.co_firstlineno - 1
+    ends = []
+    for blk in _ast.walk(tree):
+        for field in ("body", "orelse"):
+            stmts = getattr(blk, field, None)
+            if not isinstance(stmts, list):
+                continue
+            for a, b in zip(stmts, stmts[1:]):
+                call = getattr(getattr(a, "value", None), "value", None)
+                if (isinstance(b, _ast.Raise) and isinstance(a, _ast.Expr)
+                        and isinstance(call, _ast.Call)
+                        and isinstance(call.func, _ast.Attribute)
+                        and call.func.attr in ("commit", "rollback")):
+                    ends.append((a.lineno + off, call.func.attr))
+    assert ends and all(e == "rollback" for _ln, e in ends), ends
+    lines = {ln for ln, _e in ends}
+    src = _inspect.getsource(main.queue_poll).splitlines()
+    for want in ('pair kept changing under lock acquisition',
+                 'Same precedent, and same status, as the pair-inversion'):
+        at = next(i for i, s in enumerate(src) if want in s)
+        nxt = next(i for i in range(at, len(src))
+                   if src[i].strip() in ("await db.rollback()", "await db.commit()"))
+        assert src[nxt].strip() == "await db.rollback()", (want, src[nxt])
+        assert nxt + off + 1 in lines, (want, nxt + off + 1, sorted(lines))
+    pos = _gs.A1_POSITIONS
+    anchors = frozenset(b for b in _gs.A1_BINDINGS
+                        if b not in pos and b != _cw.POSITIONED)
+    for lit, size, want in ((anchors, 69, "419ade3900e75191"),
+                            (pos, 2322, "f9f0a2e4dbae2cd3")):
+        digest = hashlib.sha256(repr(sorted(lit, key=repr)).encode(
+            "utf-8")).hexdigest()[:16]
+        assert (len(lit), digest) == (size, want), (len(lit), digest)
+    assert _cw.POSITIONED in _gs.A1_BINDINGS
+    raise_chains = [k for k in anchors if len(k) == 3 and k[0] == "commit"
+                    and any("body=[Expr|Raise]" in c for c in k[2])]
+    assert raise_chains == [], raise_chains
 
 
 def test_r8_the_callee_table_is_the_frozen_one():

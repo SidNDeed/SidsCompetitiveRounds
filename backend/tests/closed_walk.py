@@ -250,7 +250,97 @@ def anchored_refusals(d, meaningful, allowed, filename):
         if (s in meaningful and how not in ("store", "del")
                 and pair not in allowed):
             out.append((filename, ln, f"binds {s} ({how})"))
+    for key, ln, shape in positions(d, meaningful, allowed):
+        if key not in allowed:
+            out.append((filename, ln, _position_sentence(key, shape)))
     return out
+
+
+# Round 9 (ruling REHEARSAL-R8-A1, G2 and G3): the POSITION rule. An anchor
+# (above) binds a node's shape chain but not WHICH of the equal chains it
+# stands at, nor where among its siblings: a commit at the place of the
+# rollback at main.py:20552 matched the committing refusal at :20446
+# (finding grammar_shapes_a1:2106), and a commit moved up its block kept
+# its chain. A constant's shape binds its type, not its value. When
+# `allowed` holds POSITIONED, every anchored node and every constant of a
+# span stands at a frozen POSITION: (spelling, how, the span's name, the
+# index path from the span's root down to the node), how being "store" or
+# "end" as for an anchor, or "const" with the constant's repr as its
+# spelling. Taken once from the real spans (grammar_shapes_a1.A1_POSITIONS).
+POSITIONED = ("<positions>",)
+
+
+def positions(d, meaningful, allowed):
+    """[(key, line, shape)] for every anchored node and every constant
+    under definition `d`, in visit order, when `allowed` holds POSITIONED
+    (the position rule); empty otherwise."""
+    paths = {}
+    for n, p, f in _sg.visit(d):
+        if p is not None:
+            paths[id(n)] = _index_path(paths, n, p, f)
+    out = []
+    for n, p, f in _sg.visit(d):
+        if _positioned_node(n, meaningful, allowed):
+            out.append(_position_key(n, d, paths.get(id(n)), _line(n, p),
+                                     _sg.shape(n, p, f)))
+    return out
+
+
+def _positioned_node(n, meaningful, allowed):
+    """Whether the position rule reads node `n`."""
+    if POSITIONED not in allowed:
+        return False
+    if isinstance(n, _ast.Constant):
+        return True
+    return _anchored_node(n, meaningful)
+
+
+def _position_key(n, d, path, line, shape):
+    """(key, line, shape) of a positioned node (positions)."""
+    key = (_ast.unparse(n), "store", d.name, tuple(path))
+    if _is_end(n):
+        key = (_end_attr(n), "end", d.name, tuple(path))
+    if isinstance(n, _ast.Constant):
+        key = (repr(n.value), "const", d.name, tuple(path))
+    return (key, line, shape)
+
+
+def _index_path(paths, n, p, f):
+    """The places from the root's child down to `n` (_place)."""
+    path = []
+    if id(p) in paths:
+        path.extend(paths.get(id(p)))
+    path.append(_place(n, f, getattr(p, f)))
+    return path
+
+
+def _place(n, f, kids):
+    """`n`'s place in its parent: the field `f` it sits in, with its index
+    when the field is the list `kids`."""
+    at = str(f)
+    if isinstance(kids, list):
+        at = f"{f}[{_index_of(n, kids)}]"
+    return at
+
+
+def _index_of(n, kids):
+    """`n`'s index in the list `kids` (by identity)."""
+    for i, k in enumerate(kids):
+        if k is n:
+            return i
+    return None
+
+
+def _position_sentence(key, shape):
+    """The refusal of a node outside its frozen position."""
+    spelling, how, name, path = key
+    if how == "const":
+        return (f"a constant outside its frozen position, {shape}#{spelling}, "
+                f"in {name} at {path}")
+    if how == "end":
+        return (f"a transaction end, {spelling}, outside its frozen position, "
+                f"in {name} at {path}")
+    return f"a {how} of {spelling} outside its frozen position, in {name} at {path}"
 
 
 def _anchor_sentence(key):

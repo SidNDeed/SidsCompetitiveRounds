@@ -554,6 +554,185 @@ SHAPES = SHAPES - NARROWED
 # is appended as (file, line, col, node type) (nodes(), after its check).
 ADMITTED = {"sink": None}
 
+# Round 9 (ruling REHEARSAL-R8-A1, G2): two nodes the shapes above leave
+# free are bound.
+#
+# ORDER. A shape is one node's; the order of a span's statements was a
+# sentence of the walk (finding gate:1981: `n = int(req.n)` between the
+# gate and `if not admitted:` was admitted by every shape and refused only
+# by "the gate's answer is not refused at once"). An ADMISSION SPAN is a
+# site span whose first statement calls an admission callee (ADMISSION:
+# the gate and its two acquirers, by the spellings MEANINGFUL binds); its
+# SEQUENCE (sequence()) is the shape of each of its statements in order,
+# then the shape of the first statement of its refusal branch (the span's
+# last statement when that is an `if`, else "-"). SEQUENCES holds the
+# sequences of the real admission spans, one per design form: shared
+# (`if (await <acquirer>(...)) is False:` opening with `await
+# db.rollback()`), direct, acquirer and hold (the gate's unpacked answer
+# followed AT ONCE by `if not admitted:`, opening with its refusal). Any
+# other order, an inserted statement included, refuses by the shape at
+# which it leaves every frozen sequence.
+#
+# SQL TEXT. A `text(...)` argument was `Constant(value=str)` whatever the
+# statement (finding gate:1808: COMMIT and ROLLBACK as the text of a real
+# read were shape-admitted and refused only by "writes before the gate").
+# Every call of `text` under a checked node takes exactly one argument: a
+# string constant whose value is one of SQL_TEXTS, the complete statements
+# the real walked spans and bodies execute (any other value refuses as the
+# spelled shape `Call.args>Constant(value=str)#<value>`), or a name of
+# SQL_NAMES whose every binding inside the checked node is one of its
+# frozen statements (the two real ones: main._rdm_attempt's module
+# constant `_RDM_ATTEMPT_SQL`, bound by no statement of the body, and
+# match_hold._hold_row's `sql`, bound by its f-string and its `+=`); any
+# other argument refuses, naming the name and the binding.
+#
+# Both literals were taken ONCE from the real walks at effc36c6 by
+# RF/r9/gr/gen_gate_r9.py (R9_RECORD) and frozen; each sequence was read
+# against its form's design sentence (the walk's docstring). Never
+# regenerated: code is conformed to them.
+ADMISSION = frozenset({"_lease_admission_gate", "_lease_acquire",
+                       "_lease_acquire_many"})
+SEQUENCES = frozenset({
+    (
+        '<root>>Assign(targets=[Tuple],value=Await,type_comment=-)',
+        '<root>>If(test=UnaryOp,body=[Assign|Expr|If|Return],orelse=[])',
+        'If.body>Expr(value=Await)',
+    ),
+    (
+        '<root>>Assign(targets=[Tuple],value=Await,type_comment=-)',
+        '<root>>If(test=UnaryOp,body=[Return],orelse=[])',
+        'If.body>Return(value=Await)',
+    ),
+    (
+        '<root>>Assign(targets=[Tuple],value=Await,type_comment=-)',
+        '<root>>If(test=UnaryOp,body=[Return],orelse=[])',
+        'If.body>Return(value=Constant)',
+    ),
+    (
+        '<root>>If(test=Compare,body=[Expr|Raise],orelse=[])',
+        'If.body>Expr(value=Await)',
+    ),
+})
+SQL_TEXTS = frozenset({
+    "\n        UPDATE ffa_lobbies\n           SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)),\n               departure_causes = CASE WHEN CAST(:cause AS text) = ''\n                                       THEN departure_causes\n                                       ELSE jsonb_build_object(CAST(:pidt AS text),\n                                                               CAST(:cause AS text))\n                                            || departure_causes END\n         WHERE id = :lid AND status = 'active'\n        RETURNING cardinality(departed_ids)\n                  >= COALESCE(player_count, cardinality(member_ids)) - 1\n    ",
+    'DELETE FROM ffa_queue WHERE series_id = :lid AND player_id != :pid',
+    "DELETE FROM queue_leases WHERE mode = 'ffa' AND group_id = :lid AND player_id != :pid",
+    'INSERT INTO match_hold_open_attempts (request_id, room_name, game_id,        held_player_id, opener_player_id, at, outcome, reason, hold_id) VALUES (CAST(:rid AS varchar), CAST(:room AS varchar), CAST(:g AS uuid),         CAST(:held AS uuid), CAST(:opener AS uuid), CAST(:now AS timestamptz),         CAST(:outcome AS varchar), CAST(:reason AS varchar), CAST(:hid AS uuid)) ON CONFLICT (request_id) DO NOTHING RETURNING request_id',
+    'SELECT * FROM ffa_seat_readmissions WHERE lobby_id = :lid AND player_id = :pid AND n = CAST(:n AS smallint)',
+    'SELECT clock_timestamp()',
+    'SELECT id, steam_id FROM players WHERE steam_id = ANY(CAST(:steams AS varchar[])) AND deleted_at IS NULL',
+    'SELECT mode, group_id FROM queue_leases WHERE player_id = :pid AND expires_at > CAST(:now AS timestamptz)',
+    'SELECT pg_advisory_xact_lock(hashtext(:sid))',
+    'SELECT room_name, game_id, held_player_id, opener_player_id, outcome, reason, hold_id  FROM match_hold_open_attempts WHERE request_id = CAST(:rid AS varchar)',
+    'SELECT status, series_id FROM ffa_queue WHERE player_id = :pid FOR UPDATE',
+    'UPDATE ffa_assembly_seats SET hold_n = NULL, hold_anchor_at = NULL, hold_until = NULL WHERE lobby_id = :lid AND player_id = :pid AND hold_n = CAST(:n AS smallint) RETURNING left_at, left_cause, slot',
+    'UPDATE ffa_seat_readmissions SET lapsed_at = CAST(:now AS timestamptz) WHERE lobby_id = :lid AND player_id = :pid AND n = CAST(:n AS smallint)   AND lapsed_at IS NULL AND refused_at IS NULL AND bound_at IS NULL',
+    "UPDATE ffa_seat_readmissions SET refused_at = CAST(:now AS timestamptz),       refused_reason = 'declined' WHERE lobby_id = :lid AND player_id = :pid AND n = CAST(:n AS smallint)   AND lapsed_at IS NULL AND refused_at IS NULL AND bound_at IS NULL",
+})
+SQL_NAMES = {
+    '_RDM_ATTEMPT_SQL': frozenset({
+    }),
+    'sql': frozenset({
+        "sql += ' FOR NO KEY UPDATE'",
+        "sql = f'SELECT {_HOLD_COLS} FROM match_seat_holds WHERE id = CAST(:hid AS uuid)'",
+    }),
+}
+# The one-time generator's sink: while a dict, sequences and texts are
+# collected into it and nothing is refused by these two rules.
+R9_RECORD = {"sink": None}
+
+
+def sequence(stmts):
+    """The admission-to-refusal sequence of span `stmts`."""
+    last = stmts[-1]
+    first = "-"
+    if isinstance(last, ast.If) and last.body:
+        first = _sg.shape(last.body[0], last, "body")
+    return tuple(_sg.shape(st) for st in stmts) + (first,)
+
+
+def sequence_problem(stmts, filename, offset):
+    """None, or the refusal of admission span `stmts` whose sequence is
+    not a frozen one, naming the line and shape at which it leaves every
+    frozen sequence; None for a span that is not an admission span."""
+    if not ADMISSION & callees(stmts[:1]):
+        return None
+    seq = sequence(stmts)
+    sink = R9_RECORD.get("sink")
+    if sink is not None:
+        sink["sequences"].add(seq)
+        return None
+    if seq in SEQUENCES:
+        return None
+    at = 0
+    while any(s[:at + 1] == seq[:at + 1] for s in SEQUENCES):
+        at += 1
+    last = stmts[-1]
+    nodes_at = list(stmts) + [last.body[0] if isinstance(last, ast.If)
+                              and last.body else last]
+    line = getattr(nodes_at[min(at, len(nodes_at) - 1)], "lineno", 0) + offset
+    return (f"grammar {filename}:{line}: the admission-to-refusal sequence "
+            f"at {seq[min(at, len(seq) - 1)]}")
+
+
+def name_bindings(root, spelling):
+    """The frozen form of every binding of `spelling` inside root: the
+    text of each statement that stores or deletes it, and `<how>
+    <spelling>` for any other binding (a parameter, an import, ...)."""
+    parent = {id(n): p for n, p, _f in _sg.visit(root)}
+    out = set()
+    for n, _p, _f in _sg.visit(root):
+        if (isinstance(n, ast.Name) and n.id == spelling
+                and not isinstance(n.ctx, ast.Load)):
+            st = n
+            while st is not None and not isinstance(st, ast.stmt):
+                st = parent.get(id(st))
+            out.add(ast.unparse(st) if st is not None else spelling)
+    for _ln, s, how in _sg.bindings(root):
+        if s == spelling and how not in ("store", "del"):
+            out.add(f"{how} {s}")
+    return frozenset(out)
+
+
+def sql_problem(root, filename, offset):
+    """None, or the refusal of the first call of `text` under root whose
+    argument is not exactly one frozen SQL text (SQL_TEXTS) or one frozen
+    name bound only by its frozen statements (SQL_NAMES)."""
+    sink = R9_RECORD.get("sink")
+    for n, _p, _f in _sg.visit(root):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "text"):
+            continue
+        arg = n.args[0] if len(n.args) == 1 and not n.keywords else None
+        value = arg.value if isinstance(arg, ast.Constant) else None
+        name = arg.id if isinstance(arg, ast.Name) else None
+        if sink is not None:
+            if isinstance(value, str):
+                sink["texts"].add(value)
+            elif name is not None:
+                sink["names"].setdefault(name, set()).update(
+                    name_bindings(root, name))
+            else:
+                sink["texts"].add(None)
+            continue
+        if isinstance(value, str) and value in SQL_TEXTS:
+            continue
+        if name is not None and name in SQL_NAMES:
+            extra = sorted(name_bindings(root, name) - SQL_NAMES[name])
+            if not extra:
+                continue
+            what = (f"Call.args>Name(id=str,ctx=Load)#{name} bound by an "
+                    f"unlisted statement: {extra[0][:80]}")
+        elif name is not None:
+            what = f"Call.args>Name(id=str,ctx=Load)#{name}"
+        elif isinstance(value, str):
+            what = f"Call.args>Constant(value=str)#{value!r}"
+        else:
+            what = (f"a text() argument that is not one string constant "
+                    f"or frozen name: {ast.unparse(n)[:60]}")
+        return f"grammar {filename}:{n.lineno + offset}: {what}"
+    return None
+
 
 def callees(nodes):
     """The plain-name callees under `nodes` (a list of trees)."""
@@ -599,6 +778,9 @@ def nodes(root, filename, offset, record=None):
     except _sg.Refused as e:
         f, line, shape = e.args[0]
         raise Refusal(f"grammar {f}:{line + offset}: {shape}") from None
+    sql = sql_problem(root, filename, offset)
+    if sql is not None:
+        raise Refusal(sql)
     sink = ADMITTED.get("sink")
     if sink is not None:
         sink.extend(node_key(filename, x) for x, _p, _f in _sg.visit(root))
@@ -676,6 +858,10 @@ def check_site(fn, stmts, filename, offset, record=None):
             raise Refusal(f"grammar {filename}:{node.lineno + offset}: {s}")
     for st in stmts:
         count += nodes(st, filename, offset, record)
+    if record is None:
+        order = sequence_problem(stmts, filename, offset)
+        if order is not None:
+            raise Refusal(order)
     _bind(fn, "site", stmts, filename, offset, record)
     return count
 

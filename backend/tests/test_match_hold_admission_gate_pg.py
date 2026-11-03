@@ -1752,6 +1752,15 @@ _UPDATE = ('await ctx.db.execute(text("UPDATE ffa_seat_readmissions SET claimed_
 _LAPSE = '''        await _rdm_end_hold(ctx, me, "lapsed", depart=True)
 '''
 _ROW_DEF = "async def _rdm_row(ctx, pid, n):" + chr(10)
+# Round 9 (ruling REHEARSAL-R8-A1, G2; finding gate:1808): the COMPLETE text
+# of the claim prefix's real lease read, both of its source lines, so a
+# gate:417 row replaces the whole statement (round 8 replaced its first
+# literal only and kept the concatenated WHERE clause).
+_LEASE_SQL = ('"SELECT mode, group_id FROM queue_leases"' + chr(10)
+              + '        " WHERE player_id = :pid AND expires_at > '
+              'CAST(:now AS timestamptz)"')
+_LEASE_TEXT = ("SELECT mode, group_id FROM queue_leases WHERE player_id = :pid"
+               " AND expires_at > CAST(:now AS timestamptz)")
 
 
 # Finding gate:1140's program (round 7 report): a statement after the claim
@@ -1806,12 +1815,14 @@ R7_CONTROLS = [
      PREFIX_CLAIM, [(_D_GATE, '    await ctx.db.execute(text("COMMIT"), {"pid": pid})'
                      + chr(10) + _D_GATE)], (), (),
      'grammar <planted _rdm_claim>:36: <root>>Expr(value=Await)'),
-    ("r2 gate:417", "SQL COMMIT as the text of a real read before the gate",
-     PREFIX_CLAIM, [('"SELECT mode, group_id FROM queue_leases"', '"COMMIT"')], (), (),
-     "line 15: writes before the gate"),
-    ("r2 gate:417", "SQL ROLLBACK as the text of a real read before the gate",
-     PREFIX_CLAIM, [('"SELECT mode, group_id FROM queue_leases"', '"ROLLBACK"')], (), (),
-     "line 15: writes before the gate"),
+    # round 9 (finding gate:1808): the complete statement replaced, refused
+    # by the frozen SQL text binding (grammar_shapes_gate.SQL_TEXTS)
+    ("r2 gate:417", "SQL COMMIT as the complete text of a real read before the gate",
+     PREFIX_CLAIM, [(_LEASE_SQL, '"COMMIT"')], (), (),
+     "grammar <planted _rdm_claim>:15: Call.args>Constant(value=str)#'COMMIT'"),
+    ("r2 gate:417", "SQL ROLLBACK as the complete text of a real read before the gate",
+     PREFIX_CLAIM, [(_LEASE_SQL, '"ROLLBACK"')], (), (),
+     "grammar <planted _rdm_claim>:15: Call.args>Constant(value=str)#'ROLLBACK'"),
     ("r2 gate:417", "SQL ROLLBACK as a statement before the gate",
      PREFIX_CLAIM, [(_D_GATE, '    await ctx.db.execute(text("ROLLBACK"), {"pid": pid})'
                      + chr(10) + _D_GATE)], (), (),
@@ -1969,17 +1980,21 @@ R7_CONTROLS = [
     ("r7 count", "admitted bound twice in a shared site", SHARED,
      [(_S_BRANCH, "    admitted = 1" + chr(10) + "    admitted = 2" + chr(10)
        + _S_BRANCH)], (), (), 'binding <planted _lobby_enroll_caller>:145: binds admitted (store) 2 times, frozen at most 1'),
-    ("generic", "SELECT lo_create(0) as the text of a real read (the lookup: no frozen read)",
-     PREFIX_CLAIM, [('"SELECT mode, group_id FROM queue_leases"',
-                     '"SELECT lo_create(0)"')], (), (), 'line 15: writes before the gate'),
+    ("generic", "SELECT lo_create(0) as the complete text of a real read",
+     PREFIX_CLAIM, [(_LEASE_SQL, '"SELECT lo_create(0)"')], (), (),
+     "grammar <planted _rdm_claim>:15: Call.args>Constant(value=str)#'SELECT lo_create(0)'"),
     # the round-1 oracle's planted refusals (#391), on the real spans
     ("oracle", "the shared branch does not end in a raise", SHARED,
      [(_S_BRANCH, _S_BRANCH.split(chr(10) + "        raise")[0])], (), (), 'grammar <planted _lobby_enroll_caller>:145: <root>>If(test=Compare,body=[Expr],orelse=[])'),
     ("oracle", "the shared acquisition tested `is not False`", SHARED,
      [(_S_BRANCH, _S_BRANCH.replace(")) is False:", ")) is not False:"))], (), (),
      'grammar <planted _lobby_enroll_caller>:145: If.test>Compare(left=Await,ops=[IsNot],comparators=[Constant])'),
+    # round 9 (finding gate:1981): refused by the frozen admission-to-refusal
+    # sequence (grammar_shapes_gate.SEQUENCES), no longer by a sentence
     ("oracle", "a statement between the gate and its refusal", DIRECT,
-     [(_D_GATE, _D_GATE + chr(10) + "    n = int(req.n)")], (), (), "the gate's answer is not refused at once by `if not admitted:`"),
+     [(_D_GATE, _D_GATE + chr(10) + "    n = int(req.n)")], (), (),
+     "grammar <planted _rdm_claim>:37: the admission-to-refusal sequence at "
+     "<root>>Assign(targets=[Name],value=Call,type_comment=-)"),
     ("oracle", "the acquirer's refusal does not return False", ACQUIRER,
      [("        if not admitted:" + chr(10) + "            return False",
        "        if not admitted:" + chr(10) + "            return True")], (), (),
@@ -2078,6 +2093,9 @@ def test_r7_grammar_covers_every_walked_span_and_body():
             assert _gg.ancestor_shape(node, parent, field) in _gg.ANCESTORS, key
         for t in trees:
             assert _sg.refusals(t, _gg.SHAPES, "<real>") == [], (key, t.lineno)
+            assert _gg.sql_problem(t, "<real>", 0) is None, (key, t.lineno)
+        if role == "site":
+            assert _gg.sequence_problem(trees, "<real>", 0) is None, key
         assert _gg.binding_problems(
             fn, role, _gg.MEANINGFUL | _gg.callees(trees), "<real>", 0) == [], key
     assert checked == recount, (checked, recount)
@@ -2168,6 +2186,95 @@ def test_r8_gate_callee_table_is_the_frozen_imports():
         _admitted_body(unread, "<unread>", 0)
     read = _body(main._asm_id8, "helper")  # a helper body the claim prefix reads
     assert _admitted_body(read, "<read>", 0) is None
+
+
+def test_r9_admission_order_and_sql_text_are_bound():
+    """Round 9 (ruling REHEARSAL-R8-A1, G2): two nodes the gate shapes left
+    free are bound by frozen literals taken once from the real walks
+    (RF/r9/gr/gen_gate_r9.py at effc36c6), pinned here by size and digest.
+
+    ORDER (finding gate:1981): every real admission span's sequence is
+    frozen, one per form; controls, one per form route: a statement
+    between the gate and its refusal (direct, the report's own program,
+    and acquirer), the shared branch's raise before its rollback, the hold
+    branch opening with another statement; each refused by the sequence,
+    naming the shape.
+
+    SQL TEXT (finding gate:1808): controls, one per route: the claim's
+    lease read replaced whole by COMMIT (the constant route), the module
+    constant of _rdm_attempt rebound in its body and _hold_row's local
+    rebound (the two name routes), and a computed argument; each refused,
+    naming the spelled shape."""
+    def _r9_sequence_of(module, name, edits=()):
+        """The admission-to-refusal refusal (grammar_shapes_gate.
+        sequence_problem) of the edited real `module`.`name`'s admission span,
+        or None."""
+        src = _edited(module, name, edits)
+        fn = ast.parse(src).body[0]
+        call = next(n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name) and n.func.id in _gg.ADMISSION)
+        stmt = _statement_of(fn, call)
+        form = "shared" if isinstance(stmt, ast.If) else "gate"
+        return _gg.sequence_problem(_branch_span(fn, stmt, form), "<r9>", 0)
+
+    import hashlib
+    for lit, size, want in (
+            (_gg.SEQUENCES, 4, "ebe69dc9"), (_gg.SQL_TEXTS, 14, "6a02f4a2"),
+            (frozenset((k, v) for k, vs in _gg.SQL_NAMES.items() for v in vs)
+             | frozenset(_gg.SQL_NAMES), 4, "c5288c0b")):
+        digest = hashlib.sha256(repr(sorted(lit, key=repr)).encode(
+            "utf-8")).hexdigest()[:8]
+        assert (len(lit), digest) == (size, want), (len(lit), digest)
+    for base in (SHARED, DIRECT, ACQUIRER, HOLD):
+        assert _r9_sequence_of(_R7_MODULES[base[0]], base[1]) is None, base
+    gate = "the admission-to-refusal sequence at "
+    for module, name, edits, want in (
+            (main, "_rdm_claim", [(_D_GATE, _D_GATE + chr(10) + "    n = int(req.n)")],
+             gate + "<root>>Assign(targets=[Name],value=Call,type_comment=-)"),
+            (main, "_lease_acquire", [(_A_GATE, "        n = 0" + chr(10) + _A_GATE)],
+             None),
+            (main, "_lease_acquire", [("        if not admitted:" + chr(10),
+                                       "        n = 0" + chr(10)
+                                       + "        if not admitted:" + chr(10))],
+             gate + "<root>>Assign(targets=[Name],value=Constant,type_comment=-)"),
+            (main, "_lobby_enroll_caller",
+             [(_S_BRANCH.split("is False:" + chr(10))[1],
+               _S_BRANCH.split("is False:" + chr(10))[1].replace(
+                   "        await db.rollback()" + chr(10), "")
+               + chr(10) + "        await db.rollback()")],
+             gate + "If.body>Raise(exc=Call,cause=-)"),
+            (match_hold, "match_hold_claim",
+             [("        await db.rollback()" + chr(10) + "        await _install_database_timeouts(db)",
+               "        hold_id = hold_id" + chr(10) + "        await db.rollback()" + chr(10)
+               + "        await _install_database_timeouts(db)")],
+             gate + "If.body>Assign(targets=[Name],value=Name,type_comment=-)")):
+        got = _r9_sequence_of(module, name, edits)
+        if want is None:
+            assert got is None, (name, got)
+        else:
+            assert got is not None and want in got, (name, want, got)
+    attempt = textwrap.dedent(inspect.getsource(main._rdm_attempt))
+    hold_row = textwrap.dedent(inspect.getsource(match_hold._hold_row))
+    lease = _edited(main, "_rdm_claim", [(_LEASE_SQL, '"COMMIT"')])
+    assert _LEASE_TEXT in _gg.SQL_TEXTS
+    computed = _edited(main, "_rdm_claim", [(_LEASE_SQL, '"SELECT 1 " + "FOR UPDATE"')])
+    for src, want in (
+            (attempt, None), (hold_row, None),
+            (lease, "Call.args>Constant(value=str)#'COMMIT'"),
+            (attempt.replace('    await db.execute(text(_RDM_ATTEMPT_SQL), {',
+                             '    _RDM_ATTEMPT_SQL = "COMMIT"' + chr(10)
+                             + '    await db.execute(text(_RDM_ATTEMPT_SQL), {'),
+             "Call.args>Name(id=str,ctx=Load)#_RDM_ATTEMPT_SQL bound by an unlisted "
+             "statement: _RDM_ATTEMPT_SQL = 'COMMIT'"),
+            (hold_row.replace('    if lock:', '    sql = "COMMIT"' + chr(10) + '    if lock:'),
+             "Call.args>Name(id=str,ctx=Load)#sql bound by an unlisted statement: "
+             "sql = 'COMMIT'"),
+            (computed, "a text() argument that is not one string constant or frozen name")):
+        got = _gg.sql_problem(ast.parse(src).body[0], "<r9>", 0)
+        if want is None:
+            assert got is None, got
+        else:
+            assert got is not None and want in got, (want, got)
 
 
 def test_r8_refusal_commit_is_the_modules_fresh_commit(monkeypatch):
