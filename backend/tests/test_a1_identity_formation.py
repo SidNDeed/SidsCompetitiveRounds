@@ -4464,6 +4464,10 @@ def _r7_programs():
         "team_queue_poll")
     rel = [_r7_src(n) for n in _REAL_TEAM_RELOCK]
     plain = _r7_scope("plain")
+    # round 9, G3: the success commit removed (the first of two edits of one
+    # control, bound here so the case list holds no nested edit)
+    q_no_success = _r7_put(q, _R9_Q_SUCCESS, _R9_Q_SUCCESS.replace(
+        "        await db.commit()\n", ""), replace=True)
     # main's own committing helper, called with a name the span binds (its
     # call shape is the grammar's; its body commits)
     commit = "await _report_commit(db, {})"
@@ -4563,9 +4567,8 @@ def _r7_programs():
              "rollback()", "commit()"), replace=True), plain),
         # round 9, G3: the position rule, one control per node class
         ("r9 G3 the success commit moved above the lease acquire", "return",
-         _r7_put(_r7_put(q, _R9_Q_SUCCESS, _R9_Q_SUCCESS.replace(
-             "        await db.commit()\n", ""), replace=True),
-                 _R9_Q_ACQUIRE, "        await db.commit()\n"), plain),
+         _r7_put(q_no_success, _R9_Q_ACQUIRE, "        await db.commit()\n",
+                 replace=False), plain),
         ("r9 G3 the drift rollback moved below its continue", "return",
          _r7_put(q, _R7_Q_DRIFT, "            opp = None\n            continue\n"
                  "            await db.rollback()\n", replace=True), plain),
