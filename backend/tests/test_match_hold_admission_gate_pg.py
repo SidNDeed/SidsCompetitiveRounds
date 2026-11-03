@@ -2104,6 +2104,39 @@ def test_r7_grammar_covers_every_walked_span_and_body():
           f"{len(_gg.SHAPES)} shapes, {len(_gg.ANCESTORS)} ancestor shapes")
 
 
+# Round 9 (W30b, the merge): the exact partition of the prefix controls, frozen in place
+# of round 8's count floor (compared >= 4). Round 9's SQL-text binding (G2) refuses by
+# shape the three SQL-text controls round 8 compared; a row moving between the two
+# lists fails the test.
+R9_PREFIX_COMPARED = (
+    'the real _asm_readmit_work (prefix)',
+    'the real _rdm_claim (prefix)',
+    'return None after _rdm_end_hold in a refusal-only helper',
+)
+R9_PREFIX_REFUSED_FIRST = (
+    'an UPDATE before _rdm_claim in its dispatch branch',
+    'a commit before _rdm_claim in its dispatch branch',
+    'SQL COMMIT as a statement before the gate',
+    'SQL COMMIT as the complete text of a real read before the gate',
+    'SQL ROLLBACK as the complete text of a real read before the gate',
+    'SQL ROLLBACK as a statement before the gate',
+    'a match statement in a refusing helper',
+    'a with around the claim target',
+    'the claim target rebound',
+    'both arms of an if reach _rdm_claim, an UPDATE in the else',
+    'both arms of a conditional expression reach _rdm_claim',
+    'a second statement reaching _rdm_claim after an UPDATE',
+    'a later dispatch branch reaching _rdm_claim through a computed callee',
+    'an UPDATE in a later dispatch branch, then a computed reach',
+    "a session effect in _rdm_claim's arguments",
+    'an assert in a body closed_walk descends into (_rdm_row)',
+    'SELECT lo_create(0) as the complete text of a real read',
+    'a lambda call before the gate',
+    'a walrus before the gate',
+    'SELECT lo_create(0) before the gate (a shape outside the grammar)',
+)
+
+
 def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
     """Finding gate:1140 (round 7 M6): the set of nodes the prefix walk
     reads (_calls, every node of every statement it is given) equals the set
@@ -2120,6 +2153,7 @@ def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
         counts[name] = _PREFIX_NODES["last"]
         assert counts[name][0] == counts[name][1] > 0, counts
     compared = 0
+    compared_rows, refused_rows = [], []
     for row in R7_KEPT + R7_CONTROLS:
         modname, name, entry, target = row[2]
         if entry != "prefix":
@@ -2129,11 +2163,15 @@ def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
         got = claim_prefix_violations(fn, target, scope, name, at)[0]
         if _PREFIX_NODES["last"] is None:
             assert got and got[0].startswith("grammar "), (row[1], got)
+            refused_rows.append(row[1])
             continue
         compared += 1
+        compared_rows.append(row[1])
         assert not [p for p in got if " nodes inspected but not admitted" in p
                     or " nodes admitted but not inspected" in p], (row[1], got)
-    assert compared >= 4, compared
+    assert tuple(compared_rows) == R9_PREFIX_COMPARED, compared_rows
+    assert tuple(refused_rows) == R9_PREFIX_REFUSED_FIRST, refused_rows
+    assert compared == len(R9_PREFIX_COMPARED) == 3, compared
 
     def round7_span(fn, stop):
         out = []
