@@ -1,100 +1,64 @@
 """A pytest plugin (`-p ro_spy`) that records, while the a1 and gate walks
-run, every SQL position closed_walk's S analysis classifies: each call of
-closed_walk.Bindings.execute_kind, with the walked function's module file,
-the call's line in that file, the innermost enclosing function, and the kind
-S returned ('read', 'lock', 'write') or the exception it raised.
+run, every execute position the walks ask closed_walk's frozen lookup
+about (round 8, M1: the static S analysis is retired): each call of
+closed_walk.Bindings.execute_kind, with the position the lookup itself
+places the call at (closed_walk._position: the walked function's module
+file, the call's line and end line), the innermost enclosing function of
+that module, the answer the table the walk passed holds for the position
+('write' when absent), and the kind the lookup returned ('read', 'lock' or
+'write') or the exception it raised.
 
-The position's line is found by its AST, never by a name: the call node's
-dump is looked up among the Call nodes of its module's parsed source; when
-the dump occurs more than once, the walked function's own definition (equal
-by dump) gives the line offset. A position that resolves to no line or to
-more than one is recorded with line None and status 'ambiguous'; a call
-of a planted or synthetic program (its walked definition in no definition
-of the module) has status 'synthetic'.
+A call the lookup cannot place is recorded with line None: status
+'synthetic' when the walked definition is in no definition of its module
+(a planted or synthetic program), 'ambiguous' otherwise (a real definition
+whose call the lookup cannot place uniquely).
 
-Used by test_r8_ro_covered_pg (the enumeration of the covered set,
+Used by test_r8_ro_covered_pg (the enumeration of the visited set,
 ruling REHEARSAL-FOUR-R7-A1 M1). Output: JSON at $RO_SPY_OUT.
 """
 
-import ast
-import inspect
 import json
 import os
 
 import closed_walk as _cw
 
 RECORDS = []
-_TREES = {}
 _STATE = {"test": None}
-
-
-def _tree(mod):
-    key = id(mod)
-    if key not in _TREES:
-        try:
-            _TREES[key] = (mod, ast.parse(inspect.getsource(mod)))
-        except (OSError, TypeError):
-            _TREES[key] = (mod, None)
-    return _TREES[key][1]
-
-
-_ORIG_INIT = _cw.Bindings.__init__
 _ORIG_KIND = _cw.Bindings.execute_kind
 
 
-def _init(self, scope, fn=None, *args, **kwargs):
-    _ORIG_INIT(self, scope, fn, *args, **kwargs)
-    self._ro_spy_fn = fn
+def _status(bindings):
+    """'ambiguous' when the walked definition is exactly one definition of
+    its module (so the call is real code the lookup could not place),
+    'synthetic' otherwise."""
+    tree = _cw._module_tree(bindings.scope)
+    d = getattr(bindings, "where", None)
+    if tree is None or d is None:
+        return "synthetic"
+    top = [x for x in _cw._defs(tree) if _cw._named_as(x, d) and _cw._same(x, d)]
+    return "ambiguous" if len(top) == 1 else "synthetic"
 
 
-def _defs(tree, fn):
-    return [d for d in ast.walk(tree)
-            if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and d.name == fn.name and ast.dump(d) == ast.dump(fn)]
-
-
-def _locate(bindings, call):
-    """(path, line, end_line, span, status): status 'real' when the call is
-    one node of its module's source (the walked definition, when there is
-    one, equal by dump to exactly one definition of the module); 'synthetic'
-    when the walked definition, or the call, is in no definition of the
-    module (a planted or synthetic program); 'ambiguous' otherwise."""
-    mod = bindings.scope
-    path = getattr(mod, "__file__", None) or getattr(mod, "__name__", "?")
-    tree = _tree(mod)
-    if tree is None:
-        return path, None, None, None, "synthetic"
-    want = ast.dump(call)
-    hits = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.dump(n) == want]
-    fn = getattr(bindings, "_ro_spy_fn", None)
-    if fn is not None:
-        defs = _defs(tree, fn)
-        if not defs:
-            return path, None, None, None, "synthetic"
-        if len(defs) > 1:
-            return path, None, None, None, "ambiguous"
-        off = defs[0].lineno - fn.lineno
-        hits = [h for h in hits if h.lineno == call.lineno + off]
-    if not hits:
-        return path, None, None, None, "synthetic"
-    if len(hits) != 1:
-        return path, None, None, None, "ambiguous"
-    line, end = hits[0].lineno, hits[0].end_lineno
+def _span(bindings, line):
+    """The innermost definition of the module enclosing `line`."""
     best = None
-    for d in ast.walk(tree):
-        if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
-                d.lineno <= line <= d.end_lineno):
-            if best is None or d.lineno > best.lineno:
-                best = d
-    return path, line, end, (best.name if best is not None else None), "real"
+    for d in _cw._defs(_cw._module_tree(bindings.scope)):
+        if d.lineno <= line <= d.end_lineno and (best is None or d.lineno > best.lineno):
+            best = d
+    return best.name if best is not None else None
 
 
-def _kind(self, call, lists, *args, **kwargs):
-    path, line, end, span, status = _locate(self, call)
-    rec = {"test": _STATE["test"], "path": os.path.abspath(path) if line else path,
-           "line": line, "end": end, "span": span, "status": status}
+def _kind(self, call, reads, *args, **kwargs):
+    pos = _cw._position(self, call)
+    mod = self.scope
+    path = getattr(mod, "__file__", None) or getattr(mod, "__name__", "?")
+    rec = {"test": _STATE["test"], "path": os.path.abspath(path) if pos else path,
+           "line": pos[1] if pos else None, "end": pos[2] if pos else None,
+           "span": _span(self, pos[1]) if pos else None,
+           "status": "real" if pos else _status(self),
+           "table_kind": reads.get(pos, "write") if pos is not None else "write"}
     try:
-        kind = _ORIG_KIND(self, call, lists, *args, **kwargs)
+        kind = _ORIG_KIND(self, call, reads, *args, **kwargs)
     except Exception as e:
         rec["kind"] = "raised " + type(e).__name__
         RECORDS.append(rec)
@@ -102,10 +66,6 @@ def _kind(self, call, lists, *args, **kwargs):
     rec["kind"] = kind
     RECORDS.append(rec)
     return kind
-
-
-_cw.Bindings.__init__ = _init
-_cw.Bindings.execute_kind = _kind
 
 
 def pytest_runtest_setup(item):
@@ -117,3 +77,6 @@ def pytest_sessionfinish(session, exitstatus):
     if out:
         with open(out, "w", encoding="utf-8") as fh:
             json.dump({"exitstatus": int(exitstatus), "records": RECORDS}, fh)
+
+
+_cw.Bindings.execute_kind = _kind

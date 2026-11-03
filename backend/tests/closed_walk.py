@@ -5,8 +5,8 @@ Users: test_a1_identity_formation.py (the formation exit walk, the barrier,
 the resolver and family-pick checks) and test_match_hold_admission_gate_pg.py
 (the refusal and claim-prefix walks). Each file keeps its own statement
 STRUCTURE (which exits a path takes, which branch refuses), but every
-expression it meets, every helper body it descends into, and every SQL text
-it executes is classified HERE, by one visitor, so a construct cannot be
+expression it meets, every helper body it descends into, and every execute
+it runs is classified HERE, by one visitor, so a construct cannot be
 accepted by omission in a walk written separately.
 
 The rules:
@@ -34,12 +34,12 @@ The rules:
   * A helper body is walked statement by statement through the same table.
     Its parameter defaults are visited. No fallback of either polarity: a
     construct the walk cannot classify raises, whatever the helper is for.
-  * SQL is classified from the tokens of migration_table_ddl's lexer, the
-    one lexer of the two files: string literals and quoted identifiers are
-    single tokens (a comment marker inside a literal is literal text), a
-    quoted function name is classified by its resolved name, dollar quoting,
-    E'' strings and U& forms are refused, SELECT ... INTO and CREATE TABLE
-    ... AS are writes.
+  * An execute is classified by a FROZEN LOOKUP, not an analysis (round
+    8, ruling REHEARSAL-FOUR-R7-A1, M1, rule (1)(c)): 'read' only at a
+    position (file, line, end line) of the walk's frozen read table, the
+    covered positions the read-only role ran 'ok' (ro_covered); every
+    other execute is 'write'. No SQL text is read; the static S analysis
+    (lexer, allow-lists, local SQL names, builders) is retired.
 """
 import ast as _ast
 import collections as _collections
@@ -51,9 +51,6 @@ import os as _os
 
 import shape_grammar as _sg
 
-from migration_table_ddl import MigrationDdlError as _LexError
-from migration_table_ddl import _tokens as _lex_tokens
-from migration_table_ddl import _views as _lex_views
 
 
 class Unclassified(Exception):
@@ -489,21 +486,6 @@ def stores(node):
     return out
 
 
-# --- SQL, lexer-first -----------------------------------------------------
-
-SqlLists = _collections.namedtuple("SqlLists", "read setting write syntax")
-
-_SQL_END_WORDS = frozenset({"commit", "rollback", "begin", "savepoint",
-                            "release", "abort", "end", "prepare", "start"})
-_SQL_OTHER_COMMANDS = frozenset({
-    "merge", "truncate", "copy", "call", "lock", "grant", "revoke", "alter",
-    "drop", "vacuum", "analyze", "notify", "listen", "unlisten", "reset",
-    "discard", "refresh", "cluster", "reindex", "comment", "security",
-    "import", "load", "checkpoint", "execute", "deallocate",
-})
-_DML = frozenset({"insert", "update", "delete"})
-
-
 def bound_names(fn):
     """Every name function definition `fn` binds, in any form other than a
     mutation of its value (Bindings): a bound name is never the module's
@@ -525,9 +507,6 @@ def _root_through(expr):
 
 
 _MISSING = object()
-# The most SQL texts one statement may stand for (every combination of its
-# formatted values); more is refused.
-SQL_COMBINATIONS = 256
 
 
 def _arg_names(a):
@@ -561,13 +540,6 @@ class Bindings:
     store). Nested definitions, lambdas and comprehensions are counted with
     the function: a superset, so more refusals and never fewer.
 
-    One recorded deviation from "exactly one": a local SQL name may be
-    extended by `+=` outside any loop (real spans do: match_hold's
-    `sql += " FOR NO KEY UPDATE"`, main's `_sql += " AND ..."`). local_sql
-    reads EVERY binding of such a name (each assignment's arms, each
-    suffix) and refuses the name when any binding is not one it reads, so
-    the texts it gives are a superset of every path's.
-
     test_r5_every_resolution_site_goes_through_the_resolver counts, in each
     function span of the walkers, the sites that look a walked name up (a
     getattr keyed by a name read from the tree, a comparison of a walked
@@ -585,6 +557,8 @@ class Bindings:
         self.grammar = grammar
         self.sites = {}
         self.has_fn = fn is not None
+        # the walked definition: an execute's position offset (_position)
+        self.where = fn
         self._enumerated = set()
         nodes = []
         if fn is not None:
@@ -984,299 +958,113 @@ class Bindings:
             return None
         return obj
 
-    # --- SQL --------------------------------------------------------------
+    # --- the frozen execute lookup (round 8, M1) -------------------------
 
-    def sql_texts(self, node, guarded=None):
-        """Every SQL text a `text(...)` argument can hold, or None: a string
-        constant; a module string the function does not bind; an f-string
-        whose formatted values are each a module string, a guarded name (its
-        collection's values) or a module table's item (the table's values),
-        in every combination (finding closed_walk:326: a placeholder hid a
-        guarded name in a function position, so the real value is
-        classified instead); or a `+` of these."""
-        guarded = guarded or {}
-        if isinstance(node, _ast.Constant) and isinstance(node.value, str):
-            return [node.value]
-        if isinstance(node, _ast.Name):
-            if self.count(node.id):
-                # the function's own name: read with every one of its
-                # bindings by local_sql, never as the module's
-                return None
-            v = self.module(node.id, node.lineno)
-            return [v] if isinstance(v, str) else None
-        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
-            return _combine([self.sql_texts(node.left, guarded),
-                             self.sql_texts(node.right, guarded)])
-        if isinstance(node, _ast.JoinedStr):
-            parts = []
-            for v in node.values:
-                if isinstance(v, _ast.Constant):
-                    parts.append([v.value])
-                elif isinstance(v, _ast.FormattedValue):
-                    if v.format_spec is not None or v.conversion != -1:
-                        return None
-                    parts.append(self._formatted(v.value, guarded))
-                else:
-                    return None
-            return _combine(parts)
+    def execute_kind(self, call, table):
+        """The answer the walk's frozen table gives for the execute `call`'s
+        position (round 8, ruling REHEARSAL-FOUR-R7-A1 M1, revised by R-A):
+        'read' at a position of ro_covered.COVERED measured green under the
+        read-only role, 'lock' at a position of ro_covered.WRITERS, and
+        'write' for every other execute, one at a position in no table, or
+        one the walk cannot place (edited, planted, ambiguous), included.
+        No SQL text is read: the static S analysis is retired."""
+        pos = _position(self, call)
+        if pos in table:
+            return table[pos]
+        return "write"
+
+
+_EXECUTES = {}
+_DEFS = {}
+
+
+def _position(b, call):
+    """(file, line, end line) of execute `call` in the source of module
+    b.scope, found by AST identity and never by a name: `call`'s dump among
+    the module's execute calls and, when the walked definition b.where is
+    known, that definition equal by dump to exactly one of the module's
+    (its line offset). None when `call` is in no module source or in not
+    exactly one place (a planted or synthetic program)."""
+    scope = getattr(b, "scope")
+    d = getattr(b, "where")
+    tree = _module_tree(scope)
+    if tree is None:
         return None
-
-    def _formatted(self, inner, guarded):
-        if isinstance(inner, _ast.Name) and inner.id in guarded:
-            return list(guarded[inner.id])
-        if isinstance(inner, _ast.Name):
-            held = self.module(inner.id, inner.lineno)
-            return [held] if isinstance(held, str) else None
-        if isinstance(inner, _ast.Subscript) and isinstance(inner.value, _ast.Name):
-            table = self.module(inner.value.id, inner.lineno)
-            if isinstance(table, dict) and table and all(
-                    isinstance(x, str) and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
-                    for x in table.values()):
-                return sorted(set(table.values()))
+    hits = _executes(tree)
+    if d is not None:
+        top = [x for x in _defs(tree) if _named_as(x, d)]
+        top = [x for x in top if _same(x, d)]
+        if len(top) != 1:
+            return None
+        t = top[0]
+        hits = [x for x in hits if _at(x, call, t, d)]
+    hits = [x for x in hits if _same(x, call)]
+    if len(hits) != 1:
         return None
-
-    def guards(self, tree):
-        """{name: (ids of the nodes its guard proves it at, the values it may
-        hold)} for the names the function guards as identifiers before use:
-        a statement `if <name> not in <COLLECTION>: raise ...` (every path
-        of its body raises), where <name> is bound exactly once by the
-        function and never in the guard's own branches, and <COLLECTION> a
-        module tuple or frozenset the function does not bind or mutate,
-        holding only lower-case identifiers (finding closed_walk:501: a
-        rebinding in the guard's else, and a mutated list, kept their
-        proof). The proof covers the statements after the guard in its own
-        block, up to (not including) the first that stores the name
-        (finding closed_walk:345)."""
-        out = {}
-        blocks = []
-        for n in _ast.walk(tree):
-            for field in ("body", "orelse", "finalbody"):
-                b = getattr(n, field, None)
-                if isinstance(b, list) and b and isinstance(b[0], _ast.stmt):
-                    blocks.append(b)
-        for b in blocks:
-            for i, n in enumerate(b):
-                test = getattr(n, "test", None)
-                if not (isinstance(n, _ast.If) and isinstance(test, _ast.Compare)
-                        and isinstance(test.left, _ast.Name) and len(test.ops) == 1
-                        and isinstance(test.ops[0], _ast.NotIn)
-                        and isinstance(test.comparators[0], _ast.Name)
-                        and all_paths_raise(n.body)):
-                    continue
-                name = test.left.id
-                if self.count(name) != 1 or self.sites[name][0][0] not in (
-                        "param", "local"):
-                    continue
-                coll = self.module(test.comparators[0].id, n.lineno)
-                if not (isinstance(coll, (frozenset, tuple)) and coll
-                        and all(isinstance(x, str)
-                                and _re.fullmatch(r"[a-z_][a-z_0-9]*", x)
-                                for x in coll)):
-                    continue
-                ids, _vals = out.setdefault(name, (set(), tuple(sorted(set(coll)))))
-                for later in b[i + 1:]:
-                    if name in _body_bindings([later]):
-                        break
-                    ids.update(id(x) for x in _ast.walk(later))
-        return {k: (frozenset(ids), vals) for k, (ids, vals) in out.items()}
-
-    def local_sql(self, tree):
-        """{local name: [SQL texts]} for each name EVERY binding of which
-        is one this reads: an assignment of SQL sql_texts reads (directly,
-        as either arm of a conditional expression, or as
-        `<MODULE_TEMPLATE>.format(k=<sql or a conditional>)`, every
-        combination), or `<name> += <sql>` outside any loop (every text with
-        and without each suffix). A name with any other binding (a
-        parameter, a loop target, a mutation, a second kind) is left out,
-        so a local SQL name stands for a superset of every path's text."""
-        binds, suffixes, seen = {}, {}, {}
-        looped = {id(x) for lp in _ast.walk(tree)
-                  if isinstance(lp, (_ast.For, _ast.While, _ast.AsyncFor))
-                  for x in _ast.walk(lp)}
-
-        def arms(v):
-            if isinstance(v, _ast.IfExp):
-                a, b = self.sql_texts(v.body), self.sql_texts(v.orelse)
-                return None if a is None or b is None else a + b
-            return self.sql_texts(v)
-
-        for n in _ast.walk(tree):
-            if (isinstance(n, _ast.Assign) and len(n.targets) == 1
-                    and isinstance(n.targets[0], _ast.Name)):
-                name, v = n.targets[0].id, n.value
-                seen[name] = seen.get(name, 0) + 1
-                tmpl = (self.module(v.func.value.id, n.lineno)
-                        if isinstance(v, _ast.Call)
-                        and isinstance(v.func, _ast.Attribute)
-                        and v.func.attr == "format"
-                        and isinstance(v.func.value, _ast.Name) else None)
-                if isinstance(tmpl, str) and not v.args and all(
-                        k.arg for k in v.keywords):
-                    combos = [{}]
-                    for k in v.keywords:
-                        opts = arms(k.value)
-                        if opts is None:
-                            combos = None
-                            break
-                        combos = [dict(c, **{k.arg: o}) for c in combos for o in opts]
-                    texts = (None if combos is None
-                             else [tmpl.format(**c) for c in combos])
-                else:
-                    texts = arms(v)
-                binds.setdefault(name, []).append(texts)
-            elif (isinstance(n, _ast.AugAssign) and isinstance(n.op, _ast.Add)
-                  and isinstance(n.target, _ast.Name)):
-                name = n.target.id
-                seen[name] = seen.get(name, 0) + 1
-                s = self.sql_texts(n.value)
-                if id(n) in looped or s is None or len(s) != 1:
-                    binds.setdefault(name, []).append(None)
-                else:
-                    suffixes.setdefault(name, []).append(
-                        (n.lineno, n.col_offset, s[0]))
-        out = {}
-        for name in set(binds) | set(suffixes):
-            if seen.get(name) != self.count(name):
-                continue        # a binding this does not read
-            assigned = binds.get(name, [])
-            if not assigned or any(t is None for t in assigned):
-                continue
-            texts = [x for t in assigned for x in t]
-            for _line, _col, s in sorted(suffixes.get(name, [])):
-                texts = texts + [x + s for x in texts]
-            if len(texts) <= SQL_COMBINATIONS:
-                out[name] = texts
-        return out
-
-    def builder_texts(self, func, line=0, call=None, pure=None):
-        """The SQL texts a plain builder function can return, or [None].
-
-        First, read: every `return` of it read by sql_texts through its own
-        bindings (a name the builder binds is read as none), the builder
-        standing for the union of them all (finding closed_walk:441: a
-        builder was read by calling it on sampled keys, so an unsampled
-        branch was missed).
-
-        Otherwise, its whole argument domain, proved: the call `call` passes
-        one positional argument per parameter (no defaults, nothing else),
-        each parameter is bound once and read ONLY as the key of a module
-        dict (`_SERIES_TABLE[mode]`), so the builder can depend on it only
-        through those lookups and can return without raising only for a key
-        all of its tables hold; `pure(fn)` (the walk's plain_effects) finds
-        no effect in its body; and the builder is called on every
-        combination of those keys, each answer a str. Anything else is
-        [None]."""
-        fn = self.callee(func, line)
-        if fn is None or _inspect.iscoroutinefunction(fn):
-            return [None]
-        d = _helper_tree(fn)
-        if self.grammar is not None:
-            self.grammar.admit(d, *source_of(fn))
-        b = Bindings(_inspect.getmodule(fn), d, session=self.session,
-                     grammar=self.grammar)
-        out = []
-        for r in _own_nodes(d, _ast.Return):
-            texts = b.sql_texts(r.value) if r.value is not None else None
-            if texts is None:
-                out = None
-                break
-            out.extend(texts)
-        if out:
-            return out
-        return b._builder_domain_texts(fn, d, call, pure) or [None]
-
-    def _builder_domain_texts(self, fn, d, call, pure):
-        a = d.args
-        params = [x.arg for x in a.posonlyargs + a.args]
-        if (call is None or pure is None or a.vararg or a.kwarg
-                or a.kwonlyargs or a.defaults or call.keywords
-                or len(call.args) != len(params)
-                or any(isinstance(x, _ast.Starred) for x in call.args)):
-            return None
-        keys = {p: None for p in params}
-        subs = {}
-        for x in _ast.walk(d):
-            if (isinstance(x, _ast.Subscript) and isinstance(x.slice, _ast.Name)
-                    and x.slice.id in keys):
-                subs[id(x.slice)] = x
-        for x in _ast.walk(d):
-            if not (isinstance(x, _ast.Name) and x.id in keys):
-                continue
-            if self.count(x.id) != 1 or not self.is_param(x.id):
-                return None
-            sub = subs.get(id(x))
-            table = (self.module(sub.value.id) if sub is not None
-                     and isinstance(sub.value, _ast.Name) else None)
-            # a plain dict: a subclass (a defaultdict) answers keys it
-            # does not hold
-            if not (isinstance(x.ctx, _ast.Load) and type(table) is dict):
-                return None
-            got = frozenset(table)
-            keys[x.id] = got if keys[x.id] is None else keys[x.id] & got
-        if any(v is None for v in keys.values()) or pure(fn):
-            return None
-        combos = [[]]
-        for p in params:
-            combos = [c + [k] for c in combos for k in sorted(keys[p], key=repr)]
-            if len(combos) > SQL_COMBINATIONS:
-                return None
-        out = []
-        for c in combos:
-            got = fn(*c)
-            if not isinstance(got, str):
-                return None
-            out.append(got)
-        return out
-
-    def execute_kind(self, call, lists, local=None, guarded=frozenset(),
-                     pure=None):
-        """'read', 'lock' or 'write' when `call` is `<session>.execute(
-        text(<sql>), <binds>)` with SQL sql_texts (or a local SQL name, or a
-        builder) reads in every combination and sql_kind classifies each;
-        raises Unclassified otherwise."""
-        first = call.args[0] if call.args else None
-        if not (isinstance(first, _ast.Call) and len(first.args) == 1
-                and not first.keywords and self.spelled(first.func, "text")):
-            raise Unclassified((call.lineno, "an execute of something other "
-                                             "than text(<sql>)"))
-        if any(isinstance(a, _ast.Starred) for a in call.args) or any(
-                k.arg is None for k in call.keywords):
-            raise Unclassified((call.lineno, "an execute with unpacked arguments"))
-        arg = first.args[0]
-        if isinstance(guarded, dict):
-            guarded = {n: vals for n, (ids, vals) in guarded.items()
-                       if id(call) in ids}
-        else:
-            guarded = {}
-        sqls = self.sql_texts(arg, guarded)
-        if sqls is None and isinstance(arg, _ast.Name) and local is not None:
-            sqls = local.get(arg.id) if self.count(arg.id) else None
-        elif (sqls is None and isinstance(arg, _ast.Call)
-              and isinstance(arg.func, _ast.Name) and not arg.keywords
-              and not any(isinstance(a, _ast.Starred) for a in arg.args)):
-            sqls = self.builder_texts(arg.func, call.lineno, arg, pure)
-        if not sqls or None in sqls:
-            raise Unclassified((call.lineno, "an execute whose SQL the walk "
-                                             "cannot read"))
-        try:
-            kinds = {sql_kind(s, lists) for s in sqls}
-        except Unclassified as e:
-            raise Unclassified((call.lineno, e.args[0][1])) from None
-        return ("write" if "write" in kinds else "lock" if "lock" in kinds
-                else "read")
+    x = hits[0]
+    a = getattr(x, "lineno")
+    e = getattr(x, "end_lineno")
+    f = _os.path.basename(getattr(scope, "__file__", "?"))
+    return f, a, e
 
 
-def _combine(parts):
-    """Every concatenation of one text from each list in `parts`; None when
-    any part is None or there are more than SQL_COMBINATIONS."""
-    out = [""]
-    for p in parts:
-        if p is None:
-            return None
-        out = [a + b for a in out for b in p]
-        if len(out) > SQL_COMBINATIONS:
-            return None
-    return out
+def _same(a, b):
+    """Whether nodes `a` and `b` are equal by dump."""
+    p = _ast.dump(a)
+    q = _ast.dump(b)
+    if p == q:
+        return True
+    return False
+
+
+def _at(x, call, top, d):
+    """Whether module node `x` stands where `call` of definition `d` stands
+    in `top`, d's equal in the module."""
+    p = getattr(x, "lineno")
+    q = getattr(top, "lineno")
+    r = getattr(call, "lineno")
+    t = getattr(d, "lineno")
+    u = p + t
+    w = r + q
+    if u == w:
+        return True
+    return False
+
+
+def _executes(tree):
+    """Every call of a method named `execute` in module `tree`, cached by
+    the tree."""
+    key = id(tree)
+    if key not in _EXECUTES:
+        got = [x for x in _ast.walk(tree) if _is_execute(x)]
+        _EXECUTES[key] = tree, got
+    return _EXECUTES.get(key)[1]
+
+
+def _defs(tree):
+    """Every function definition of module `tree`, cached by the tree."""
+    key = id(tree)
+    if key not in _DEFS:
+        got = [x for x in _ast.walk(tree) if isinstance(
+            x, (_ast.FunctionDef, _ast.AsyncFunctionDef))]
+        _DEFS[key] = tree, got
+    return _DEFS.get(key)[1]
+
+
+def _named_as(x, d):
+    """Whether definitions `x` and `d` carry one name (a cheap filter
+    before the dump comparison)."""
+    p = getattr(x, "name")
+    q = getattr(d, "name")
+    if p == q:
+        return True
+    return False
+
+
+def _is_execute(x):
+    """Whether node `x` calls a method named `execute`."""
+    return (isinstance(x, _ast.Call) and isinstance(x.func, _ast.Attribute)
+            and x.func.attr == "execute")
 
 
 def _own_nodes(d, cls):
@@ -1332,111 +1120,6 @@ def _root(expr):
     return expr.id if isinstance(expr, _ast.Name) else None
 
 
-def sql_tokens(sql):
-    """The lexer's tokens of `sql` as (kind, value, start, end), kind
-    'ident' (lower-cased), 'qident' (as written), 'string', 'dollar' or
-    'punct'; raises Unclassified for SQL the lexer refuses, dollar quoting,
-    a prefixed string (E'', U&'', B'', X'', N''), or a U& identifier."""
-    try:
-        code, mask, bodies = _lex_views(sql)
-        toks = _lex_tokens(code, mask)
-    except _LexError as e:
-        raise Unclassified((0, f"SQL the lexer refuses: {e}")) from None
-    if bodies or any(t[0] == "dollar" for t in toks):
-        raise Unclassified((0, "dollar quoting in walked SQL"))
-    for a, b in zip(toks, toks[1:]):
-        if a[0] == "ident" and a[3] == b[2] and a[1] in (
-                "e", "u", "b", "x", "n") and b[0] == "string":
-            raise Unclassified((0, f"a {a[1].upper()}'' string in walked SQL"))
-        if a[0] == "ident" and a[1] == "u" and a[3] == b[2] and b[1] == "&":
-            raise Unclassified((0, "a U& form in walked SQL"))
-    return toks
-
-
-def sql_kind(sql, lists):
-    """'read', 'lock' or 'write' for ONE statement of SQL text, from its
-    lexer tokens; raises Unclassified for a transaction command, more than
-    one statement, a head off the list, a command off the list, a function
-    off the allow-lists, or any form sql_tokens refuses."""
-    toks = sql_tokens(sql)
-    while toks and toks[-1][1] == ";":
-        toks = toks[:-1]
-    if any(t[0] == "punct" and t[1] == ";" for t in toks):
-        raise Unclassified((0, "more than one SQL statement"))
-    if not toks or toks[0][0] != "ident":
-        raise Unclassified((0, "SQL with no command word"))
-    words = [t[1] if t[0] == "ident" else None for t in toks]
-    head = words[0]
-    if head in _SQL_END_WORDS:
-        raise Unclassified((0, f"a transaction command in SQL text ({head.upper()})"))
-    # Row-lock clauses: FOR UPDATE, FOR NO KEY UPDATE, FOR SHARE, FOR KEY
-    # SHARE. Their UPDATE is the clause's, not a command.
-    lock, clause = False, set()
-    for i, w in enumerate(words):
-        if w == "for":
-            for seq in (("update",), ("no", "key", "update"), ("share",),
-                        ("key", "share")):
-                if tuple(words[i + 1:i + 1 + len(seq)]) == seq:
-                    lock = True
-                    clause.update(range(i, i + 1 + len(seq)))
-    # ON CONFLICT ... DO UPDATE / DO NOTHING belongs to an INSERT.
-    for i, w in enumerate(words):
-        if w == "do" and i > 0 and head == "insert":
-            clause.add(i)
-            if i + 1 < len(words) and words[i + 1] == "update":
-                clause.add(i + 1)
-    funcs = []
-    for i, t in enumerate(toks[:-1]):
-        if t[0] in ("ident", "qident") and toks[i + 1][1] == "(":
-            prev = words[i - 1] if i else None
-            if prev in ("into", "table", "exists") and t[0] in ("ident", "qident"):
-                if prev == "into" or (prev in ("table", "exists") and head == "create"):
-                    continue        # a table and its column list
-            name = t[1]
-            if t[0] == "ident" and name in lists.syntax:
-                continue
-            funcs.append((name, t[0] == "qident"))
-    named = {n for n, _q in funcs}
-    present = {w for k, w in enumerate(words) if w and k not in clause}
-    if present & _SQL_OTHER_COMMANDS:
-        raise Unclassified((0, "a SQL command off the allow-list: "
-                               + ", ".join(sorted(present & _SQL_OTHER_COMMANDS))))
-    if head == "create":
-        # CREATE [TEMP|TEMPORARY|UNLOGGED] TABLE ... AS ...: a write.
-        rest = [w for w in words[1:4] if w]
-        if "table" in rest and "as" in present:
-            bad = named - lists.read - lists.write
-            if bad:
-                raise Unclassified((0, "a SQL function off the write allow-list: "
-                                       + ", ".join(sorted(bad))))
-            return "write"
-        raise Unclassified((0, "a SQL command off the allow-list: create"))
-    if head in ("select", "with") and not (present & _DML) and "into" not in present:
-        bad = named - lists.read - lists.setting
-        if bad:
-            raise Unclassified((0, "a SQL function off the read allow-list: "
-                                   + ", ".join(sorted(bad))))
-        return "lock" if lock or named & lists.setting else "read"
-    if head in ("select", "with", "insert", "update", "delete"):
-        if head == "select" and "into" in present and not (present & _DML):
-            pass                # SELECT ... INTO creates a table: a write
-        bad = named - lists.read - lists.write
-        if bad:
-            raise Unclassified((0, "a SQL function off the write allow-list: "
-                                   + ", ".join(sorted(bad))))
-        return "write"
-    raise Unclassified((0, f"a SQL statement head off the allow-list ({head!r})"))
-
-
-# --- SQL text a call executes: wrappers over the resolver ----------------
-
-def sql_text(node, scope, guarded=frozenset(), bound=frozenset()):
-    """The one SQL text a `text(...)` argument holds read in module `scope`
-    (Bindings.sql_texts), or None when it holds none or more than one."""
-    texts = Bindings(scope).sql_texts(node)
-    return texts[0] if texts and len(texts) == 1 else None
-
-
 def all_paths_raise(stmts):
     """Whether every path through `stmts` ends in a raise, with no await,
     return, break or continue on the way."""
@@ -1451,25 +1134,6 @@ def all_paths_raise(stmts):
             and all_paths_raise(last.orelse))
 
 
-def guarded_names(tree, scope):
-    """Bindings.guards of function `tree` (a definition, or a module of one)
-    in `scope`."""
-    fn = tree.body[0] if (isinstance(tree, _ast.Module)
-                          and len(tree.body) == 1) else tree
-    return Bindings(scope, fn if isinstance(
-        fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)) else None).guards(tree)
-
-
-def local_sql(tree, scope):
-    """Bindings.local_sql of function `tree` (a definition, or a module of
-    one) in `scope`."""
-    fn = tree.body[0] if (isinstance(tree, _ast.Module)
-                          and len(tree.body) == 1) else tree
-    if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-        return Bindings(scope, fn).local_sql(tree)
-    return Bindings(scope, stmts=getattr(tree, "body", [])).local_sql(tree)
-
-
 def is_session(expr, session="db"):
     """Whether expression `expr` spells the session: `session` is one
     spelling ('db') or a tuple of them (('db', 'ctx.db'))."""
@@ -1480,13 +1144,6 @@ def is_db_call(call, attr, session="db"):
     return (isinstance(call, _ast.Call) and isinstance(call.func, _ast.Attribute)
             and is_session(call.func.value, session)
             and call.func.attr == attr)
-
-
-def execute_kind(call, scope, lists, local=None, guarded=frozenset(),
-                 bindings=None):
-    """Bindings.execute_kind under `bindings` (the walked function's), or
-    module `scope`'s when none is given."""
-    return (bindings or Bindings(scope)).execute_kind(call, lists, local, guarded)
 
 
 module_accessor = Bindings.module_accessor
@@ -1533,8 +1190,9 @@ class Accepted:
 class Policy:
     """What one test file lets the visitor accept, all positive and named:
     the plain calls and methods that touch no session, the awaited library
-    calls that touch none, the SQL allow-lists, and the scope names resolve
-    in."""
+    calls that touch none, the frozen read table (`sql`: the positions an
+    execute is 'read' at, Bindings.execute_kind; round 8, M1), and the
+    scope names resolve in."""
 
     def __init__(self, scope, pure_calls, pure_methods, pure_awaits, sql,
                  session="db"):
@@ -1610,15 +1268,12 @@ class Visitor:
     the walked function's Bindings (one binding per name, ruling
     REHEARSAL-FOUR-R5 item 2)."""
 
-    def __init__(self, policy, local=None, guarded=frozenset(), params=(),
-                 permitted=frozenset(), helper=None, opaque=frozenset(),
-                 bindings=None):
+    def __init__(self, policy, params=(), permitted=frozenset(), helper=None,
+                 opaque=frozenset(), bindings=None):
         self.p = policy
         self.b = (bindings if bindings is not None
                   else Bindings(policy.scope, session=policy.session,
                                 grammar=getattr(policy, "grammar", None)))
-        self.local = local
-        self.guarded = guarded
         self.params = tuple(params)
         self.permitted = permitted
         self.helper = helper
@@ -1925,9 +1580,12 @@ class Visitor:
         if is_db_call(call, "execute", s):
             for _kind, a in call_arguments(call):
                 self.visit(a)
-            self.effects.append(("sql", self._check(
-                n, self.b.execute_kind, call, self.p.sql, self.local,
-                self.guarded, lambda f: plain_effects(f, self.p))))
+            kind = self._check(n, self.b.execute_kind, call, self.p.sql)
+            if kind not in ("read", "lock"):
+                # the frozen table answers read, lock or write; anything
+                # else is a write
+                kind = "write"
+            self.effects.append(("sql", kind))
             self.p.met["execute"] += 1
             return
         name = _ast.unparse(call.func)
@@ -1996,13 +1654,12 @@ class Visitor:
                              else "read" if "read" in kinds else "pure"))
 
 
-def expr_effects(node, policy, local=None, guarded=frozenset(),
-                 opaque=frozenset(), bindings=None):
+def expr_effects(node, policy, opaque=frozenset(), bindings=None):
     """The (shape, effect) list of evaluating `node` (Visitor) under
     `bindings`, the enclosing function's (finding a1:665: the formation
     walk's expressions resolved names in the module); raises Unclassified
     naming the construct and its line."""
-    return list(Visitor(policy, local, guarded, opaque=opaque,
+    return list(Visitor(policy, opaque=opaque,
                         bindings=bindings).accept(node).effects)
 
 
@@ -2091,8 +1748,6 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
     params = [a.arg for a in d.args.posonlyargs + d.args.args + d.args.kwonlyargs]
     if d.args.vararg or d.args.kwarg:
         raise Unclassified((0, f"{fn.__name__} takes *args or **kwargs"))
-    guarded = b.guards(d)
-    local = b.local_sql(d)
     permitted = set()
     s = policy.session
     caught = frozenset(id(x) for t in _ast.walk(d)
@@ -2122,8 +1777,7 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
         raise Unclassified((0, f"{fn.__name__}: a named end that is not an "
                                "awaited commit or rollback of its body"))
     permitted.update(named_ends)
-    v = Visitor(sub, local, guarded, params, frozenset(permitted), fn,
-                opaque, bindings=b)
+    v = Visitor(sub, params, frozenset(permitted), fn, opaque, bindings=b)
     v.caught = caught
     effects = set()
     named = d.args.posonlyargs + d.args.args

@@ -30,6 +30,7 @@ from gate_lane import gate_lane  # noqa: E402,F401  (the live tests' fixture)
 import main  # noqa: E402
 import test_match_hold_pg as hold_test  # noqa: E402
 import closed_walk as _cw  # noqa: E402
+import ro_covered  # noqa: E402
 import grammar_shapes_gate as _gg  # noqa: E402
 from grammar_shapes_gate import (  # noqa: E402
     ADMITTED, Refusal, check_body, check_site, node_key, path_to, prefix_span)
@@ -156,8 +157,8 @@ def _is_db_rollback(stmt, b):
 # in those statements, and every helper body they await, is classified by
 # closed_walk's one shared visitor (ruling REHEARSAL-FOUR-R3): its NODE_TABLE
 # names every concrete ast class, a call is classified by its callee shape and
-# by every argument kind, and SQL is read from migration_table_ddl's lexer
-# tokens.  No other walker reads a span, and nothing falls back to one.  The
+# by every argument kind, and an execute is 'read' only at a frozen read
+# position (round 8, M1 and R-A; _GATE_TABLE).  No other walker reads a span, and nothing falls back to one.  The
 # lists below are positive: an entry is here because a real span of main.py or
 # match_hold.py, or the design, needs it.  SHAPES_MET counts the statement
 # shapes a walk met, per walked function, and each policy's `met` counts the
@@ -179,19 +180,13 @@ _PLAIN_AWAITS = frozenset()
 _SESSIONS = ("db", "ctx.db")
 # The one exception a refusal raises.
 _REFUSAL_EXCEPTIONS = frozenset({"HTTPException"})
-# SQL, read from the lexer's tokens by closed_walk.sql_kind: a read names
-# only the functions on the read list (CAST, what the real reads name); a
-# write names only those; any other word before a parenthesis, a keyword
-# included, is refused until a real statement needs it.  Two entries no real
-# span names, kept for the controls' own programs: now() (round 2's F6
-# UPDATE, so it is read as the write it is) and the VALUES row constructor
-# (round 1's planted INSERT); every other entry is met by the real spans,
-# by count.
-_SQL_LISTS = _cw.SqlLists(read=frozenset({"cast", "coalesce", "max", "cardinality",
-                                         "jsonb_build_object", "unnest",
-                                         "clock_timestamp", "now"}),
-                          setting=frozenset(),
-                          write=frozenset(), syntax=frozenset({"array", "values"}))
+# The frozen lookup table (round 8, ruling REHEARSAL-FOUR-R7-A1 M1, revised
+# by R-A; closed_walk.Bindings.execute_kind): 'read' at a position of
+# ro_covered.COVERED green under the read-only role, 'lock' at a position of
+# ro_covered.WRITERS (a locking read is accepted before the gate, the
+# design's own order), 'write' for every other execute. The static S
+# analysis is retired.
+_GATE_TABLE = ro_covered.lookup_table()
 # A hold refusal may instead answer the request id another transaction
 # already recorded, from that record alone (match_hold._open_replay: "Acts
 # on nothing and writes nothing"): a replay on this list, whose own walk by
@@ -332,7 +327,7 @@ def _gate_policy(scope):
     key = id(scope)
     if key not in _GATE_POLICIES:
         p = _cw.Policy(scope, _PLAIN_CALLS, _PLAIN_METHODS, _PLAIN_AWAITS,
-                       _SQL_LISTS, session=_SESSIONS)
+                       _GATE_TABLE, session=_SESSIONS)
         p.gate_kinds = {}
         p.helper_hook = lambda fn, p=p: _helper_kind(fn, p)
         p.grammar = _GATE_GRAMMAR
@@ -1601,8 +1596,11 @@ def test_h3_common_gate_serializes_every_mode_in_both_target_orders(mode, first)
 # real spans, so every node but the planted ones is a real node, and the
 # refusal lands on the program. Each is pinned to the refusal it meets: a
 # grammar shape (`grammar <file>:<line>: <shape>`), the binding rule
-# (`binding <file>:<line>: <what>`), or a walk's exit or branch sentence (and,
-# for the SQL-text programs, closed_walk's retained S lexer sentence). The
+# (`binding <file>:<line>: <what>`), or a walk's exit or branch sentence.
+# Round 8 (M1): an execute reads only at a frozen read position of the real
+# module, so a span planted with nothing and no helpers is walked against
+# its real module (its executes placed at their real lines); any edited
+# span is no production definition, every execute in it a write. The
 # unplanted bases are kept (test_r7_planting_bases_are_kept).
 
 
@@ -1617,6 +1615,10 @@ def _planted(module, name, edits=(), helpers=(), helper_edits=()):
     for edit in helper_edits:
         lines.extend(_helper_lines(module, edit))
     mod = _planted_module(module, name, lines)
+    if len(lines) == 0:
+        # nothing planted beside it: the real module, so the lookup places
+        # the span's executes (an edited span still matches no definition)
+        mod = module
     at = (f"<planted {name}>", 0)
     tree = ast.parse(src)
     first = tree.body[0]
@@ -1806,10 +1808,10 @@ R7_CONTROLS = [
      'grammar <planted _rdm_claim>:36: <root>>Expr(value=Await)'),
     ("r2 gate:417", "SQL COMMIT as the text of a real read before the gate",
      PREFIX_CLAIM, [('"SELECT mode, group_id FROM queue_leases"', '"COMMIT"')], (), (),
-     "a transaction command in SQL text (COMMIT)"),
+     "line 15: writes before the gate"),
     ("r2 gate:417", "SQL ROLLBACK as the text of a real read before the gate",
      PREFIX_CLAIM, [('"SELECT mode, group_id FROM queue_leases"', '"ROLLBACK"')], (), (),
-     "a transaction command in SQL text (ROLLBACK)"),
+     "line 15: writes before the gate"),
     ("r2 gate:417", "SQL ROLLBACK as a statement before the gate",
      PREFIX_CLAIM, [(_D_GATE, '    await ctx.db.execute(text("ROLLBACK"), {"pid": pid})'
                      + chr(10) + _D_GATE)], (), (),
@@ -1967,9 +1969,9 @@ R7_CONTROLS = [
     ("r7 count", "admitted bound twice in a shared site", SHARED,
      [(_S_BRANCH, "    admitted = 1" + chr(10) + "    admitted = 2" + chr(10)
        + _S_BRANCH)], (), (), 'binding <planted _lobby_enroll_caller>:145: binds admitted (store) 2 times, frozen at most 1'),
-    ("generic", "SELECT lo_create(0) as the text of a real read (the S lexer rule)",
+    ("generic", "SELECT lo_create(0) as the text of a real read (the lookup: no frozen read)",
      PREFIX_CLAIM, [('"SELECT mode, group_id FROM queue_leases"',
-                     '"SELECT lo_create(0)"')], (), (), 'line 15: a SQL function off the read allow-list: lo_create (in an expression)'),
+                     '"SELECT lo_create(0)"')], (), (), 'line 15: writes before the gate'),
     # the round-1 oracle's planted refusals (#391), on the real spans
     ("oracle", "the shared branch does not end in a raise", SHARED,
      [(_S_BRANCH, _S_BRANCH.split(chr(10) + "        raise")[0])], (), (), 'grammar <planted _lobby_enroll_caller>:145: <root>>If(test=Compare,body=[Expr],orelse=[])'),
@@ -1994,7 +1996,7 @@ R7_CONTROLS = [
     ("generic", "a walrus before the gate", PREFIX_CLAIM,
      [(_D_GATE, "    if (q := ctx.row) is None:" + chr(10) + "        return q"
        + chr(10) + _D_GATE)], (), (), 'grammar <planted _rdm_claim>:36: If.test>Compare(left=NamedExpr,ops=[Is],comparators=[Constant])'),
-    ("generic", "SELECT lo_create(0) before the gate (the S lexer rule)",
+    ("generic", "SELECT lo_create(0) before the gate (a shape outside the grammar)",
      PREFIX_CLAIM, [(_D_GATE, '    await ctx.db.execute(text("SELECT lo_create(0)"), '
                      '{"pid": pid})' + chr(10) + _D_GATE)], (), (), 'grammar <planted _rdm_claim>:36: <root>>Expr(value=Await)'),
 ]
