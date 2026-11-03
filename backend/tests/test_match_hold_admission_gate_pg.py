@@ -26,6 +26,7 @@ sys.path.insert(0, API)
 sys.path.insert(0, HERE)
 
 import cf_pg  # noqa: E402
+from gate_lane import gate_lane  # noqa: E402,F401  (the live tests' fixture)
 import main  # noqa: E402
 import test_match_hold_pg as hold_test  # noqa: E402
 import closed_walk as _cw  # noqa: E402
@@ -34,6 +35,8 @@ from grammar_shapes_gate import (  # noqa: E402
     ADMITTED, Refusal, check_body, check_site, node_key, path_to, prefix_span)
 import shape_grammar as _sg  # noqa: E402
 from closed_walk import Unclassified  # noqa: E402
+from main import (  # noqa: E402
+    LEASE_TTL_ASSEMBLY, _lease_acquire, _lease_admission_gate, _lease_release)
 # The match_hold the hold suite loaded: the MATCH_HOLD_SRC copy when set
 # (a plain import here would bind the tracked copy main cached).
 match_hold = hold_test.match_hold
@@ -211,7 +214,7 @@ _GATE_POLICIES = {}
 # <what>`. _G["record"] is the one-time generator's collector (no test sets
 # it); _G["trace"], while set, lists every span and body checked.
 
-_G = {"record": None, "trace": None, "hooks": []}
+_G = {"record": None, "trace": None, "hooks": [], "bodies": {}}
 _ORIG_HELPER_TREE = _cw._helper_tree
 _MAIN_AT = (inspect.getsourcefile(main), 0)
 
@@ -235,10 +238,45 @@ def _body(fn, role):
     d = _ORIG_HELPER_TREE(fn)
     filename, offset = _source_at(fn)
     n = check_body(d, role, filename, offset, _G["record"])
+    bodies = _G["bodies"]
+    bodies[id(d)] = d
     key = (fn.__module__, fn.__qualname__)
     trees = [d]
     _traced(role, key, trees, n, None, d)
     return d
+
+
+def _admitted_body(d, filename, offset):
+    """closed_walk's Grammar.admit for the gate walks: every body a gate
+    walk reads was checked whole by the gate grammar when it was read
+    (_body, closed_walk._helper_tree's hook while a walk runs); a body that
+    no such check read is refused as closed_walk's admit refuses,
+    Unclassified((line, sentence))."""
+    bodies = _G["bodies"]
+    sentence = f"{filename}:{offset}: a body no gate check read"
+    if id(d) not in bodies:
+        raise Unclassified((offset, sentence))
+
+
+# Round 8 (closed_walk M4): a Bindings resolves a callee outside the walked
+# function's own module namespace only through its grammar's FROZEN callee
+# table, {import statement text: {bound name: object}}. The gate walks' table
+# holds the two `from main import` statements grammar_shapes_gate.IMPORTS
+# freezes (match_hold's late imports of the gate), each name bound to the
+# object this file's own static import of main binds
+# (test_r8_gate_callee_table_is_the_frozen_imports). The gate grammar keeps
+# no definition scope, so no class call is constructor-pure.
+_GATE_CALLEES = {
+    "from main import _lease_acquire, _lease_admission_gate, LEASE_TTL_ASSEMBLY": {
+        "_lease_acquire": _lease_acquire,
+        "_lease_admission_gate": _lease_admission_gate,
+        "LEASE_TTL_ASSEMBLY": LEASE_TTL_ASSEMBLY},
+    "from main import _lease_admission_gate, _lease_release": {
+        "_lease_admission_gate": _lease_admission_gate,
+        "_lease_release": _lease_release},
+}
+_GATE_GRAMMAR = types.SimpleNamespace(
+    imports=_GATE_CALLEES, namedtuples=frozenset(), admit=_admitted_body)
 
 
 def _check_site(fn, stmts, at):
@@ -297,6 +335,7 @@ def _gate_policy(scope):
                        _SQL_LISTS, session=_SESSIONS)
         p.gate_kinds = {}
         p.helper_hook = lambda fn, p=p: _helper_kind(fn, p)
+        p.grammar = _GATE_GRAMMAR
         _GATE_POLICIES[key] = (scope, p)
     return _GATE_POLICIES[key][1]
 
@@ -329,7 +368,8 @@ class _Walk:
         # function binds is never the module's (finding closed_walk:699).
         self.b = _cw.Bindings(self.scope, fn,
                               stmts=[] if fn is None and stmts is None
-                              else stmts, session=self.policy.session)
+                              else stmts, session=self.policy.session,
+                              grammar=_GATE_GRAMMAR)
         self.where = where
         self.problems, self.seen = [], []
 
@@ -1439,6 +1479,7 @@ def test_h3_real_hold_replay_is_read_and_classified():
         ":8: Call.func>Attribute(value=Name,attr='commit',ctx=Load)"), got
 
 
+@pytest.mark.usefixtures("gate_lane")
 def test_h3_hold_open_and_claim_reject_another_live_commitment(monkeypatch):
     async def body(env):
         series, game, _ = await hold_test.opened_series(env, "team", held=1)
@@ -1498,6 +1539,7 @@ def test_h3_hold_open_and_claim_reject_another_live_commitment(monkeypatch):
     hold_test.run_env(monkeypatch, body, "h3hold")
 
 
+@pytest.mark.usefixtures("gate_lane")
 @pytest.mark.parametrize("mode", ["ranked", "team", "ovt", "ffa"])
 @pytest.mark.parametrize("first", [0, 1])
 def test_h3_common_gate_serializes_every_mode_in_both_target_orders(mode, first):
@@ -2090,6 +2132,40 @@ def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
                             for p in problems), problems
     print(f"r8 M6 inspected/admitted: {counts}, prefix controls compared {compared}; "
           f"round-7 span on the report's program: {problems[0]}")
+
+
+def test_r8_gate_callee_table_is_the_frozen_imports():
+    """The gate walks' frozen callee table (_GATE_CALLEES) holds exactly the
+    `from main import` statements of grammar_shapes_gate.IMPORTS, in their
+    own name order, each name bound to main's own object; a walk resolves
+    the gate through it (the real match_hold_claim hold branch), and a
+    Bindings with no grammar does not."""
+    froms = set()
+    for kind, mod, level, names in _gg.IMPORTS:
+        if kind == "from":
+            assert level == 0, (mod, names)
+            froms.add(f"from {mod} import " + ", ".join(n for n, _a in names))
+    assert set(_GATE_CALLEES) == froms
+    for text, table in _GATE_CALLEES.items():
+        imp = ast.parse(text).body[0]
+        assert [a.name for a in imp.names] == list(table), text
+        for name, obj in table.items():
+            assert obj is getattr(main, name), (text, name)
+    for real in (match_hold.match_hold_open, match_hold.match_hold_claim):
+        fn = _ORIG_HELPER_TREE(real)
+        func = next(n.func for n in ast.walk(fn) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name)
+                    and n.func.id == "_lease_admission_gate")
+        scope = inspect.getmodule(real)
+        got = _cw.Bindings(scope, fn, grammar=_GATE_GRAMMAR).callee(func)
+        assert got is _lease_admission_gate, real.__name__
+        assert _cw.Bindings(scope, fn).callee(func) is None, real.__name__
+    # the table's grammar admits only a body a gate check read
+    unread = ast.parse("def f():" + chr(10) + "    pass").body[0]
+    with pytest.raises(Unclassified):
+        _admitted_body(unread, "<unread>", 0)
+    read = _body(main._asm_id8, "helper")  # a helper body the claim prefix reads
+    assert _admitted_body(read, "<read>", 0) is None
 
 
 def test_r8_refusal_commit_is_the_modules_fresh_commit(monkeypatch):
