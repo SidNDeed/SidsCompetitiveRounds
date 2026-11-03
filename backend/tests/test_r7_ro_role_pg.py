@@ -219,6 +219,17 @@ def _effect(before, after):
     return "CATALOG:" + ",".join(k) if k else "OK"
 
 
+def _harness_open(still_open, where):
+    """A rollback harness's transaction must still be open after the body it
+    ran. A body that ends it (COMMIT, ROLLBACK, END, a session commit) has
+    committed or discarded outside the harness, and the harness's rollback
+    undoes nothing it committed: refused, by the harness's name (round 9,
+    the class of the catalog test's _measure)."""
+    if not still_open:
+        raise AssertionError("%s: the program ended the harness transaction; "
+                             "nothing it committed is rolled back" % where)
+
+
 async def raw_attempt(dsn, layer, body, expect=None):
     """`body(conn)` on a fresh asyncpg connection, in a transaction that is
     always rolled back; 'OK' or the SQLSTATE PostgreSQL returned. With
@@ -243,6 +254,7 @@ async def raw_attempt(dsn, layer, body, expect=None):
                 await body(conn)
             except asyncpg.PostgresError as e:
                 return e.sqlstate
+            _harness_open(conn.is_in_transaction(), "raw_attempt")
             return _effect(before, await _catalog(conn)) if expect is not None else "OK"
         finally:
             await tr.rollback()
@@ -293,6 +305,7 @@ async def orm_attempt(dsn, layer, prog, expect=None):
                     await prog(db)
                 except DBAPIError as e:
                     return _sqlstate(e)
+                _harness_open(db.in_transaction(), "orm_attempt")
                 return _effect(before, await _catalog(driver)) if driver is not None else "OK"
             finally:
                 await db.rollback()
@@ -511,6 +524,24 @@ def test_role_reads_through_the_orm_change_no_catalog(env, layer):
     async def prog(db):
         assert (await db.execute(text("SELECT count(*) FROM public.rf_t"))).scalar() == 2
     assert run(orm_attempt(env["ro_dsn"], layer, prog, ro_role.ROLE)) == "OK"
+
+
+def test_r9_role_harness_refuses_a_program_that_ends_it(env):
+    """raw_attempt and orm_attempt (round 9, the class of the catalog test's
+    _measure): a body that ends the harness transaction is refused by the
+    harness's name, on both routes and both layers. The bodies commit an
+    empty transaction: nothing reaches the database."""
+    async def raw_body(conn):
+        await conn.execute("COMMIT")
+
+    async def orm_prog(db):
+        await db.commit()
+
+    for layer in (PROVISIONED, GRANT_ONLY):
+        with pytest.raises(AssertionError, match="^raw_attempt: the program ended the harness transaction"):
+            run(raw_attempt(env["ro_dsn"], layer, raw_body))
+        with pytest.raises(AssertionError, match="^orm_attempt: the program ended the harness transaction"):
+            run(orm_attempt(env["ro_dsn"], layer, orm_prog))
 
 
 def test_privilege_census_is_empty(env):

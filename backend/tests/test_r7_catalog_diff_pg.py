@@ -1326,6 +1326,7 @@ async def _in_schema(dsn, schema, sql):
     try:
         await conn.execute("CREATE SCHEMA %s; SET LOCAL search_path = %s, public" % (schema, schema))
         await conn.execute(sql)
+        _harness_open(conn, "_in_schema")
         await conn.execute("SET LOCAL search_path = public")
         return await cd.snapshot(conn)
     finally:
@@ -1511,8 +1512,40 @@ REFUSED_SQLSTATE = {
 }
 
 
+def _harness_open(conn, where):
+    """A rollback harness's transaction must still be open after the program
+    it ran. A program that ends it (COMMIT, ROLLBACK, END) has committed or
+    discarded outside the harness, and the harness's rollback undoes nothing
+    it committed: refused, by the harness's name (round 9)."""
+    if not conn.is_in_transaction():
+        raise AssertionError("%s: the program ended the harness transaction; "
+                             "nothing it committed is rolled back" % where)
+
+
+_MEASURE_CLONES = [0]
+
+
 async def _measure(dsn, program, schema=None):
-    """program run in one transaction (rolled back), catalog before and after."""
+    """program run on a throwaway clone of the database `dsn` names, in one
+    transaction that is rolled back, catalog before and after; the clone is
+    dropped after. A migration file carries its own transaction control
+    (373 ends with COMMIT), and that COMMIT ends this transaction: what the
+    program runs after it commits, and the rollback undoes nothing the
+    program committed. The clone keeps the measured database unchanged
+    whatever the program does (round 9: the two DISABLE TRIGGER ALL
+    controls, appended after 373's COMMIT, persisted in the chain database
+    under a superuser and changed every later reading of it)."""
+    base = dsn.rsplit("/", 1)[1]
+    _MEASURE_CLONES[0] += 1
+    clone = "%s_m%d" % (base[:52], _MEASURE_CLONES[0])
+    await _clone(clone, base)
+    try:
+        return await _measure_in(_dsn(clone), program, schema)
+    finally:
+        await _drop_db(clone)
+
+
+async def _measure_in(dsn, program, schema):
     conn = await _connect(dsn)
     logs = []
     conn.add_log_listener(lambda _c, msg: logs.append(msg.message))
@@ -1596,6 +1629,7 @@ async def _language(dsn, extension, program):
         except asyncpg.PostgresError as exc:
             res["refused"] = exc.sqlstate
             res["error"] = (res.get("error") or "") + " | " + str(exc).splitlines()[0][:200]
+        _harness_open(conn, "_language")
         res["diff"] = cd.diff(before, await cd.snapshot(conn))
         return res
     finally:
@@ -1913,6 +1947,69 @@ def test_every_pg_catalog_relation_is_measured_or_declared(route_db):
 def _reads_whole(meta, rel):
     """True when the session may read every column of rel."""
     return all(m["can"] for m in meta if m["rel"] == rel)
+
+
+R9_PROBE = "r9_measure_probe"
+
+
+async def _r9_probe_in(dsn):
+    conn = await _connect(dsn)
+    try:
+        return await conn.fetchval("SELECT pg_catalog.to_regclass($1)::text", "public." + R9_PROBE)
+    finally:
+        await conn.close()
+
+
+async def _r9_drop_probe(dsn):
+    conn = await _connect(dsn)
+    try:
+        await conn.execute("DROP TABLE IF EXISTS public.%s" % R9_PROBE)
+    finally:
+        await conn.close()
+
+
+async def _r9_databases():
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        return [r[0] for r in await conn.fetch("SELECT datname::text FROM pg_catalog.pg_database")]
+    finally:
+        await conn.close()
+
+
+def test_r9_measure_leaves_the_measured_database_unchanged(chain):
+    """_measure's clone (round 9). A program that ends the measuring
+    transaction, as 373's own COMMIT does, and then creates a table commits
+    into the clone only: the table is in the measured diff (the program
+    ran), absent from the chain database afterwards, and no clone of the
+    chain database is left. The probe table exists for this test alone."""
+    result = asyncio.run(_measure(chain.dsn, "COMMIT;\nCREATE TABLE public.%s (x int);\n" % R9_PROBE))
+    try:
+        assert result["refused"] is None, result
+        assert R9_PROBE in repr(result["diff"]), "the probe program did not run"
+        assert asyncio.run(_r9_probe_in(chain.dsn)) is None, (
+            "the program's committed table reached the measured database")
+        left = [n for n in asyncio.run(_r9_databases())
+                if re.match(re.escape(chain.db[:52]) + r"_m\d+$", n)]
+        assert left == [], left
+    finally:
+        asyncio.run(_r9_drop_probe(chain.dsn))
+
+
+def test_r9_rollback_harnesses_refuse_a_program_that_ends_them(chain):
+    """_in_schema and _language (round 9, the class of _measure's defect):
+    each refuses, by name, a program that ends its transaction. Run on a
+    clone of the chain database dropped after, so what the ended
+    transaction committed lands there and not in the chain."""
+    clone = "%s_h" % chain.db[:52]
+    asyncio.run(_clone(clone, chain.db))
+    try:
+        dsn = _dsn(clone)
+        with pytest.raises(AssertionError, match="^_in_schema: the program ended the harness transaction"):
+            asyncio.run(_in_schema(dsn, "d2_r9h", "COMMIT"))
+        with pytest.raises(AssertionError, match="^_language: the program ended the harness transaction"):
+            asyncio.run(_language(dsn, "plpgsql", "COMMIT"))
+    finally:
+        asyncio.run(_drop_db(clone))
 
 
 # --- the files outside the chain --------------------------------------------
