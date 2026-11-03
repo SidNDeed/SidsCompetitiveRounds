@@ -28,6 +28,8 @@ syntax, a binding is a spelling and how it is bound, an import is its text.
 """
 import ast
 import collections
+import hashlib
+import os
 
 import shape_grammar as _sg
 
@@ -637,6 +639,62 @@ SQL_NAMES = {
         "sql = f'SELECT {_HOLD_COLS} FROM match_seat_holds WHERE id = CAST(:hid AS uuid)'",
     }),
 }
+# The module constants among SQL_NAMES (W30b at the round-9 merge, the gr
+# child's question 1): a name the checked body reads but binds nowhere is
+# bound in its module, and that binding is frozen too. The module's source
+# (read from its file, never imported) must hold exactly ONE binding of the
+# name of any kind shape_grammar.bindings reads (store, del, parameter,
+# def, import, except, global, nonlocal, match), and it must be a top-level
+# `NAME = <one string constant>` whose value is the frozen text; and no
+# attribute store of the name and no string constant spelling it (the
+# setattr, getattr and globals() routes) anywhere in the module. The value
+# was taken once from main.py at 70d7a8e0 by
+# RF/r9/tip/bind_module_sql.py and frozen. It does not bound writes from
+# other modules (none of the walked code imports main's constants).
+MODULE_SQL = {
+    '_RDM_ATTEMPT_SQL': ("api/main.py", 'INSERT INTO ffa_readmit_attempts (lobby_id, player_id, n, attempt_no, kind, at, outcome,                                  reason) SELECT CAST(:lid AS uuid), CAST(:pid AS uuid), CAST(:n AS smallint),        COALESCE(MAX(a.attempt_no), 0) + 1, CAST(:kind AS varchar),        CAST(:at AS timestamptz), CAST(:outcome AS varchar), CAST(:reason AS varchar)   FROM ffa_readmit_attempts a  WHERE a.lobby_id = CAST(:lid AS uuid) AND a.player_id = CAST(:pid AS uuid)    AND a.n = CAST(:n AS smallint)'),
+}
+_MODULE_SQL_SEEN = {}
+
+
+def module_sql_problem(name, src=None):
+    """None, or why the module binding of MODULE_SQL name `name` is not
+    exactly its one frozen top-level assignment. `src` replaces the
+    module's file text (the controls); results are cached by text digest."""
+    rel, want = MODULE_SQL[name]
+    if src is None:
+        path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), *rel.split("/"))
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+    key = (name, hashlib.sha256(src.encode("utf-8")).hexdigest())
+    if key not in _MODULE_SQL_SEEN:
+        _MODULE_SQL_SEEN[key] = _module_sql_problem(name, rel, want, src)
+    return _MODULE_SQL_SEEN[key]
+
+
+def _module_sql_problem(name, rel, want, src):
+    tree = ast.parse(src)
+    found = [(ln, how) for ln, s, how in _sg.bindings(tree) if s == name]
+    if len(found) != 1:
+        return f"bound {len(found)} times in {rel}: {found[:3]}"
+    top = [st for st in tree.body if isinstance(st, ast.Assign)
+           and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name)
+           and st.targets[0].id == name]
+    if len(top) != 1:
+        return f"its one binding in {rel} is not a top-level assignment: {found[0]}"
+    value = top[0].value
+    if not (isinstance(value, ast.Constant) and value.value == want):
+        return (f"its {rel} value is not the frozen text: "
+                f"{ast.unparse(value)[:60]}")
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and n.attr == name:
+            return f"{rel}:{n.lineno} names it as an attribute"
+        if isinstance(n, ast.Constant) and n.value == name:
+            return f"{rel}:{n.lineno} spells it as a string"
+    return None
+
+
 # The one-time generator's sink: while a dict, sequences and texts are
 # collected into it and nothing is refused by these two rules.
 R9_RECORD = {"sink": None}
@@ -694,10 +752,12 @@ def name_bindings(root, spelling):
     return frozenset(out)
 
 
-def sql_problem(root, filename, offset):
+def sql_problem(root, filename, offset, module_src=None):
     """None, or the refusal of the first call of `text` under root whose
     argument is not exactly one frozen SQL text (SQL_TEXTS) or one frozen
-    name bound only by its frozen statements (SQL_NAMES)."""
+    name bound only by its frozen statements (SQL_NAMES) and, for a module
+    constant (MODULE_SQL), by its one frozen module assignment
+    (`module_src` replaces the module's text: the controls)."""
     sink = R9_RECORD.get("sink")
     for n, _p, _f in _sg.visit(root):
         if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
@@ -719,9 +779,13 @@ def sql_problem(root, filename, offset):
             continue
         if name is not None and name in SQL_NAMES:
             extra = sorted(name_bindings(root, name) - SQL_NAMES[name])
-            if not extra:
+            mod = None
+            if not extra and name in MODULE_SQL:
+                mod = module_sql_problem(name, module_src)
+            if not extra and mod is None:
                 continue
-            what = (f"Call.args>Name(id=str,ctx=Load)#{name} bound by an "
+            what = (f"Call.args>Name(id=str,ctx=Load)#{name} {mod}" if mod else
+                    f"Call.args>Name(id=str,ctx=Load)#{name} bound by an "
                     f"unlisted statement: {extra[0][:80]}")
         elif name is not None:
             what = f"Call.args>Name(id=str,ctx=Load)#{name}"

@@ -2315,6 +2315,51 @@ def test_r9_admission_order_and_sql_text_are_bound():
             assert got is not None and want in got, (want, got)
 
 
+def test_r9_module_sql_constant_is_bound():
+    """Round 9 (the gr child's question 1, bound by W30b at the merge): the
+    module constant _rdm_attempt reads (`_RDM_ATTEMPT_SQL`, a SQL_NAMES name
+    its body never binds) is bound by its one frozen top-level assignment in
+    main.py (grammar_shapes_gate.MODULE_SQL, pinned here by digest). The
+    real module is admitted; controls, one per binding route, each through
+    sql_problem on _rdm_attempt's real body with main.py's real text edited:
+    the value replaced whole by COMMIT, a second top-level assignment of the
+    same value, a `global` rebinding in a function, a setattr spelling the
+    name, an attribute store; each refused, naming the route."""
+    import hashlib
+    lit = sorted((k, v) for k, v in _gg.MODULE_SQL.items())
+    digest = hashlib.sha256(repr(lit).encode("utf-8")).hexdigest()[:8]
+    assert (len(lit), digest) == (1, "20593845"), (len(lit), digest)
+    attempt = ast.parse(textwrap.dedent(inspect.getsource(main._rdm_attempt))).body[0]
+    src = open(inspect.getsourcefile(main), encoding="utf-8").read()
+    tree = ast.parse(src)
+    (st,) = [s for s in tree.body if isinstance(s, ast.Assign)
+             and isinstance(s.targets[0], ast.Name)
+             and s.targets[0].id == "_RDM_ATTEMPT_SQL"]
+    lines = src.split(chr(10))
+    value_commit = chr(10).join(lines[:st.lineno - 1] + ['_RDM_ATTEMPT_SQL = "COMMIT"']
+                                + lines[st.end_lineno:])
+    frozen = _gg.MODULE_SQL["_RDM_ATTEMPT_SQL"][1]
+    head = "Call.args>Name(id=str,ctx=Load)#_RDM_ATTEMPT_SQL "
+    for edited, want in (
+            (None, None),
+            (value_commit, head + "its api/main.py value is not the frozen text: 'COMMIT'"),
+            (src + chr(10) + "_RDM_ATTEMPT_SQL = " + repr(frozen) + chr(10),
+             head + "bound 2 times in api/main.py"),
+            (src + chr(10) + "def _r9_rebind():" + chr(10)
+             + "    global _RDM_ATTEMPT_SQL" + chr(10)
+             + "    _RDM_ATTEMPT_SQL = 'COMMIT'" + chr(10),
+             head + "bound 3 times in api/main.py"),
+            (src + chr(10) + "setattr(sys.modules[__name__], '_RDM_ATTEMPT_SQL', 'COMMIT')"
+             + chr(10), head + "spells it as a string"),
+            (src + chr(10) + "sys.modules[__name__]._RDM_ATTEMPT_SQL = 'COMMIT'" + chr(10),
+             head + "names it as an attribute")):
+        got = _gg.sql_problem(attempt, "<r9>", 0, module_src=edited)
+        if want is None:
+            assert got is None, got
+        else:
+            assert got is not None and want in got, (want, got)
+
+
 def test_r8_refusal_commit_is_the_modules_fresh_commit(monkeypatch):
     """Production conformation (round 8, M3 finding gate:136): the refusal
     audit row's transaction is committed by match_hold._commit_fresh (a
