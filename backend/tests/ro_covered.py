@@ -108,13 +108,24 @@ WRITERS = (
 # scr_seat_ro_tmpl): 'ok', or ('not reached', <the statement that the role
 # refused first on the driven path>, SQLSTATE). A 'not reached' position
 # leaves the read-only claim (a QUESTION in the hand-back).
+# Ruling REHEARSAL-R8-A1 E2: 'ok' also requires that the lock read inside
+# the transaction at the end of every run of the position found no row
+# beyond the declared expected ones (unexpected_locks); a position that ran
+# but whose read found one is ('lock', rows) and leaves the claim: measured
+# at 51761 (the advisory transaction lock 51703 took earlier in the same
+# transaction; r9-ro-measure1, RF/r9/ro). A position read under a grant whose
+# read found one keeps its role outcome here and its grant outcome in
+# GRANT_OUTCOME ('lock under grant'): 16871, 16886, 16897, 16924 (the
+# FOR NO KEY UPDATE of 16851), 51793 (51768's FOR UPDATE), 65184 (an
+# advisory lock and ffa_queue row locks) and match_hold.py:381 (380's
+# UPDATE).
 OUTCOME = {
     ('a1', 'main.py', 16828, 16828, '_lease_admission_gate'): 'ok',
     ('a1', 'main.py', 16868, 16868, '_lease_admission_gate'): ('not reached', 'main.py:16851', '25006'),
-    ('a1', 'main.py', 16871, 16871, '_lease_admission_gate'): ('ok-under-grant', ('UPDATE players',), 0, ('not reached', 'main.py:16851', '25006')),
-    ('a1', 'main.py', 16886, 16891, '_lease_admission_gate'): ('ok-under-grant', ('UPDATE players',), 0, ('not reached', 'main.py:16851', '25006')),
-    ('a1', 'main.py', 16897, 16909, '_lease_admission_gate'): ('ok-under-grant', ('UPDATE players',), 0, ('not reached', 'main.py:16851', '25006')),
-    ('a1', 'main.py', 16924, 16934, '_lease_admission_gate'): ('ok-under-grant', ('UPDATE players',), 0, ('not reached', 'main.py:16851', '25006')),
+    ('a1', 'main.py', 16871, 16871, '_lease_admission_gate'): ('not reached', 'main.py:16851', '25006'),
+    ('a1', 'main.py', 16886, 16891, '_lease_admission_gate'): ('not reached', 'main.py:16851', '25006'),
+    ('a1', 'main.py', 16897, 16909, '_lease_admission_gate'): ('not reached', 'main.py:16851', '25006'),
+    ('a1', 'main.py', 16924, 16934, '_lease_admission_gate'): ('not reached', 'main.py:16851', '25006'),
     ('a1', 'main.py', 17433, 17436, '_lease_live_claim_strict'): 'ok',
     ('a1', 'main.py', 18718, 18721, '_group_region'): 'ok',
     ('a1', 'main.py', 20479, 20481, 'queue_poll'): ('not reached', 'main.py:19936', '25006'),
@@ -125,19 +136,19 @@ OUTCOME = {
     ('a1', 'main.py', 49951, 49952, 'team_queue_poll'): ('not reached', 'main.py:16393', '25006'),
     ('a1', 'main.py', 50001, 50003, 'team_queue_poll'): ('ok-under-grant', ('UPDATE team_queue',), 0, ('not reached', 'main.py:16393', '25006')),
     ('a1', 'main.py', 51115, 51119, '_reconcile_team_series_bets'): ('not reached', 'main.py:51089', '25006'),
-    ('a1', 'main.py', 51761, 51763, '_team_lock_family_pick'): 'ok',
-    ('a1', 'main.py', 51793, 51793, '_team_lock_family_pick'): ('ok-under-grant', ('UPDATE team_series',), 0, ('not reached', 'main.py:51768', '25006')),
+    ('a1', 'main.py', 51761, 51763, '_team_lock_family_pick'): ('lock', ('advisory ExclusiveLock',)),
+    ('a1', 'main.py', 51793, 51793, '_team_lock_family_pick'): ('not reached', 'main.py:51768', '25006'),
     ('a1', 'main.py', 51859, 51861, '_team_resolve_live_family'): ('not reached', 'main.py:51768', '25006'),
     ('a1', 'main.py', 53768, 53770, 'ovt_queue_poll'): ('not reached', 'main.py:16396', '25006'),
     ('a1', 'main.py', 53808, 53811, 'ovt_queue_poll'): ('ok-under-grant', ('DELETE ovt_queue', 'UPDATE ovt_queue'), 0, ('not reached', 'main.py:16396', '25006')),
     ('a1', 'main.py', 56363, 56368, '_rules_members'): 'ok',
     ('a1', 'main.py', 57195, 57201, '_player_body_color'): 'ok',
-    ('a1', 'main.py', 65184, 65186, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:17406', '25006')),
+    ('a1', 'main.py', 65184, 65186, '_ffa_queue_poll_inner'): ('not reached', 'main.py:17406', '25006'),
     ('a1', 'main.py', 65206, 65208, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:17406', '25006')),
     ('a1', 'main.py', 65249, 65253, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:17406', '25006')),
     ('a1', 'main.py', 65263, 65265, '_ffa_queue_poll_inner'): ('not reached', 'main.py:17406', '25006'),
     ('a1', 'main.py', 73522, 73525, '_service_player_uuids'): 'ok',
-    ('a1', 'match_hold.py', 381, 384, '_hold_latch'): ('ok-under-grant', ('UPDATE team_series',), 0, ('not reached', 'match_hold.py:380', '25006')),
+    ('a1', 'match_hold.py', 381, 384, '_hold_latch'): ('not reached', 'match_hold.py:380', '25006'),
     ('a1', 'match_report_window.py', 87, 89, 'series_holds'): 'ok',
     ('a1', 'tournaments.py', 301, 307, '_region_candidate_volumes'): 'ok',
     ('gate', 'main.py', 63623, 63626, '_rdm_row'): 'ok',
@@ -157,7 +168,10 @@ OUTCOME = {
 # 16851) and 51112 (after 51089); and for main.py:16839 (a transaction-local
 # set_config of lock_timeout) and main.py:51703 (pg_advisory_xact_lock),
 # 'ok' under the role, so their bound is the walk's lock rule alone (a
-# QUESTION for the reviewer).
+# QUESTION for the reviewer). Round 9 (E2): the lock read now measures the
+# writers too: 51703 is ('lock', ('advisory ExclusiveLock',)), its advisory
+# lock measured; 16839 holds no lock beyond the expected rows ('ok': a
+# transaction-local setting, a 'lock' by the lookup, not by a lock row).
 WRITER_OUTCOME = {
     ('a1', 'main.py', 16390, 16391, '_lock_queue_rows_ordered'): '25006',
     ('a1', 'main.py', 16393, 16394, '_lock_queue_rows_ordered'): '25006',
@@ -169,7 +183,7 @@ WRITER_OUTCOME = {
     ('a1', 'main.py', 17406, 17409, '_lock_snapshot_rows'): '25006',
     ('a1', 'main.py', 51089, 51093, '_reconcile_team_series_bets'): '25006',
     ('a1', 'main.py', 51112, 51114, '_reconcile_team_series_bets'): ('not reached', 'main.py:51089', '25006'),
-    ('a1', 'main.py', 51703, 51705, '_team_quartet_lock'): 'ok',
+    ('a1', 'main.py', 51703, 51705, '_team_quartet_lock'): ('lock', ('advisory ExclusiveLock',)),
     ('a1', 'main.py', 51768, 51783, '_team_lock_family_pick'): '25006',
     ('gate', 'main.py', 63719, 63721, '_rdm_claim'): '25006',
     ('gate', 'match_hold.py', 569, 569, '_hold_row'): '25006',
@@ -218,7 +232,12 @@ def green(outcome):
     """Whether a COVERED position's OUTCOME admits it as a read: 'ok' under
     the read-only role, or ('ok-under-grant', grants, delta) measured with
     the path's refusing statements granted and a zero write delta around the
-    position (ruling R-B)."""
+    position (ruling R-B). Both are measured outcomes that already carry the
+    lock read (ruling REHEARSAL-R8-A1 E2): 'ok' and 'ok-under-grant' are
+    given only when every run of the position was followed by a lock read
+    inside its transaction that found no row beyond the declared expected
+    ones (unexpected_locks); a position whose read found one is ('lock',
+    rows) or ('lock under grant', grants, rows), never green."""
     return outcome == "ok" or (isinstance(outcome, tuple) and outcome[0] == "ok-under-grant"
                                and outcome[2] == 0)
 
@@ -242,8 +261,29 @@ def role_outcome(entry):
 
 # Ruling R-B: the grant run's measured outcome at every position the role
 # did not reach that stays a write (not reached, refused, or a nonzero
-# delta under its grants): the reason, as measured.
+# delta under its grants): the reason, as measured. Ruling REHEARSAL-R8-A1
+# E2: or reached with a zero delta but holding, at the end of the position
+# inside its transaction, a lock beyond the declared expected rows ('lock
+# under grant', grants, the unexpected rows as measured on PostgreSQL 16.9:
+# a row-locking SELECT holds RowShareLock on the table AND on every index of
+# it, plus the transaction id the row lock assigned; no tuple row appears
+# without a waiter). The first seven entries were 'ok-under-grant' in
+# round 8 and leave the read-only claim (r9-ro-measure1, RF/r9/ro).
 GRANT_OUTCOME = {
+    ('a1', 'main.py', 16871, 16871, '_lease_admission_gate'):
+        ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 16886, 16891, '_lease_admission_gate'):
+        ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 16897, 16909, '_lease_admission_gate'):
+        ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 16924, 16934, '_lease_admission_gate'):
+        ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 51793, 51793, '_team_lock_family_pick'):
+        ('lock under grant', ('UPDATE team_series',), ('relation RowShareLock idx_team_series_dc_fallback_at', 'relation RowShareLock idx_team_series_dc_grace', 'relation RowShareLock idx_team_series_status', 'relation RowShareLock idx_team_series_t1a', 'relation RowShareLock idx_team_series_t1b', 'relation RowShareLock idx_team_series_t2a', 'relation RowShareLock idx_team_series_t2b', 'relation RowShareLock team_series', 'relation RowShareLock team_series_pkey', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 65184, 65186, '_ffa_queue_poll_inner'):
+        ('lock under grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), ('advisory ExclusiveLock', 'relation RowShareLock ffa_queue', 'relation RowShareLock ffa_queue_pkey', 'relation RowShareLock idx_ffa_queue_held_until', 'relation RowShareLock idx_ffa_queue_lobby', 'relation RowShareLock idx_ffa_queue_status', 'transactionid ExclusiveLock')),
+    ('a1', 'match_hold.py', 381, 384, '_hold_latch'):
+        ('lock under grant', ('UPDATE team_series',), ('relation RowExclusiveLock idx_team_series_dc_fallback_at', 'relation RowExclusiveLock idx_team_series_dc_grace', 'relation RowExclusiveLock idx_team_series_status', 'relation RowExclusiveLock idx_team_series_t1a', 'relation RowExclusiveLock idx_team_series_t1b', 'relation RowExclusiveLock idx_team_series_t2a', 'relation RowExclusiveLock idx_team_series_t2b', 'relation RowExclusiveLock team_series', 'relation RowExclusiveLock team_series_pkey', 'transactionid ExclusiveLock')),
     ('a1', 'main.py', 16868, 16868, '_lease_admission_gate'):
         ('not reached under grant', ('UPDATE players',), None),
     ('a1', 'main.py', 20479, 20481, 'queue_poll'):
@@ -375,8 +415,62 @@ def _sqlstate(exc):
     return None
 
 
+# Ruling REHEARSAL-R8-A1 E2: the locks the backend holds, read inside the
+# transaction at the end of every measured position (after its statement,
+# before the transaction ends).
+LOCKS_SQL = (
+    "SELECT locktype, mode, granted, relation::pg_catalog.regclass::text,"
+    " virtualxid, virtualtransaction"
+    " FROM pg_catalog.pg_locks WHERE pid = pg_catalog.pg_backend_pid()")
+
+# The declared expected rows, one by one with the reason; every other row
+# refuses the read classification (the direction rule: refuse by default):
+#   virtualxid ExclusiveLock on the backend's OWN virtual transaction id
+#       (virtualxid = virtualtransaction): every transaction holds it from
+#       its first statement; it locks nothing another session uses;
+#   relation AccessShareLock (granted): the lock every plain SELECT takes on
+#       each relation it reads (pg_locks itself included); it conflicts only
+#       with ACCESS EXCLUSIVE.
+# Refused, among the rest: RowShareLock (SELECT FOR UPDATE / FOR NO KEY
+# UPDATE / FOR SHARE / FOR KEY SHARE), RowExclusiveLock and stronger
+# relation locks, tuple and transactionid locks (a row lock assigns the
+# transaction an id), advisory locks (pg_advisory_lock and
+# pg_advisory_xact_lock, either key form), object, page and extend locks,
+# another backend's virtualxid, and any row not granted.
+
+
+def unexpected_locks(rows):
+    """The rows of a LOCKS_SQL read that refuse a read classification, each
+    as 'locktype mode[ relation][ waiting]', sorted and distinct."""
+    out = set()
+    for locktype, mode, granted, rel, vxid, vtx in rows:
+        if (granted and locktype == "virtualxid" and mode == "ExclusiveLock"
+                and vxid is not None and vxid == vtx):
+            continue
+        if granted and locktype == "relation" and mode == "AccessShareLock":
+            continue
+        desc = "%s %s" % (locktype, mode)
+        if rel is not None:
+            desc += " " + rel
+        if locktype == "virtualxid":
+            desc += " (another backend's)"
+        if not granted:
+            desc += " waiting"
+        out.add(desc)
+    return tuple(sorted(out))
+
+
+def _in(site, spans):
+    return site[0] is not None and site[1] is not None and any(
+        site[0] == t[0] and t[1] <= site[1] <= t[2] for t in spans)
+
+
 class RecordingSession(AsyncSession):
-    """Every execute records (file, line, outcome) in self.info['log']."""
+    """Every execute records (file, line, outcome) in self.info['log']; at a
+    statement whose production site is in one of self.info['lock_targets']
+    ((file, line, end) spans) that succeeded, the backend's locks are read
+    inside the transaction and (file, line, unexpected_locks) is appended to
+    self.info['locks'] (ruling REHEARSAL-R8-A1 E2)."""
 
     async def execute(self, statement, params=None, **kw):
         site = _site()
@@ -387,7 +481,14 @@ class RecordingSession(AsyncSession):
             log.append((site[0], site[1], _sqlstate(e) or "error"))
             raise
         log.append((site[0], site[1], "ok"))
+        if _in(site, self.info.get("lock_targets", ())):
+            await self.lock_read(site)
         return res
+
+    async def lock_read(self, site):
+        rows = (await AsyncSession.execute(self, text(LOCKS_SQL))).all()
+        self.info.setdefault("locks", []).append(
+            (site[0], site[1], unexpected_locks(rows)))
 
 
 def role_sessionmaker(engine, cls=None):
@@ -461,16 +562,43 @@ REFUSER_GRANTS = {
 }
 
 
-def under_grant(log, deltas, entry, grants):
+def locks_at(locks, entry):
+    """The lock reads recorded at the position `entry`: one tuple of
+    unexpected rows per successful run of it."""
+    _walk, f, line, end, _span = entry
+    return [u for (lf, ll, u) in locks if lf == f and ll is not None and line <= ll <= end]
+
+
+def ran_outcome(outs, reads):
+    """The outcome of a position every run of which succeeded (`outs`, all
+    'ok'), from its lock reads (`reads`, one per run; ruling REHEARSAL-R8-A1
+    E2): 'ok' only when every run was read and no read found an unexpected
+    row; ('lock', rows) when a read found one; ('lock unmeasured', reads,
+    runs) when a run has no lock read."""
+    if len(reads) != len(outs):
+        return ("lock unmeasured", len(reads), len(outs))
+    held = tuple(sorted({row for u in reads for row in u}))
+    return ("lock", held) if held else "ok"
+
+
+def under_grant(log, deltas, entry, grants, locks=()):
     """The grant run's outcome at `entry`: ('ok-under-grant', grants, delta)
-    when every run of the position succeeded, delta the largest write delta
-    measured around it; otherwise ('not reached under grant', grants, the
-    first refused statement 'file:line sqlstate' of the run, or None)."""
+    when every run of the position succeeded and every run's lock read found
+    only expected rows, delta the largest write delta measured around it;
+    ('lock under grant', grants, rows) when a lock read found an unexpected
+    row (or ('lock under grant', grants, ('unmeasured', reads, runs)));
+    otherwise ('refused under grant', grants, sqlstate) when a run of it was
+    refused, or ('not reached under grant', grants, the first refused
+    statement 'file:line sqlstate' of the run, or None)."""
     _walk, f, line, end, _span = entry
     outs = outcome_at(log, entry)
     ds = [d for (df, dl, d) in deltas if df == f and line <= dl <= end]
     if outs and all(o == "ok" for o in outs) and len(ds) == len(outs):
-        return ("ok-under-grant", tuple(grants), max(ds))
+        ran = ran_outcome(outs, locks_at(locks, entry))
+        if ran == "ok":
+            return ("ok-under-grant", tuple(grants), max(ds))
+        rows = ran[1] if ran[0] == "lock" else ("unmeasured",) + ran[1:]
+        return ("lock under grant", tuple(grants), rows)
     if outs:
         return ("refused under grant", tuple(grants), sorted(set(outs))[0])
     refused = [(lf, ll, o) for (lf, ll, o) in log if o != "ok"]

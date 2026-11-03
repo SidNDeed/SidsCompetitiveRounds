@@ -293,7 +293,7 @@ def _prepare(mp):
 
 
 async def _run_all(admin_dsn, clone, mp, only=None):
-    out = {"logs": {}, "errors": {}, "checked": [], "identity_control": None,
+    out = {"logs": {}, "locks": {}, "errors": {}, "checked": [], "identity_control": None,
            "grant": None, "census": None, "harness_sites": []}
     clone_dsn = ro_role.dsn_for(admin_dsn, clone)
     async with cf_pg.case("rf8ro", dsn=clone_dsn) as (c, sm):
@@ -312,6 +312,9 @@ async def _run_all(admin_dsn, clone, mp, only=None):
                 rsm = ro_covered.role_sessionmaker(engine)
                 try:
                     async with rsm() as db:
+                        # E2: every covered and writer position is followed
+                        # by a lock read inside its transaction.
+                        db.info["lock_targets"] = LOCK_TARGETS
                         try:
                             await drive(db, s, mp)
                         except BaseException as e:   # noqa: BLE001 -- recorded
@@ -319,6 +322,7 @@ async def _run_all(admin_dsn, clone, mp, only=None):
                                                               str(e).splitlines()[0][:200])
                         finally:
                             out["logs"][name] = list(db.info.get("log", []))
+                            out["locks"][name] = list(db.info.get("locks", []))
                             await db.rollback()
                 finally:
                     await engine.dispose()
@@ -343,7 +347,58 @@ async def _run_all(admin_dsn, clone, mp, only=None):
 # ------------------------------------------------------------- 3. grant run
 
 UNREACHED = [e for e in ro_covered.COVERED
-             if ro_covered.role_outcome(e) != "ok"]
+             if isinstance(ro_covered.role_outcome(e), tuple)
+             and ro_covered.role_outcome(e)[0] == "not reached"]
+
+# E2: the spans after whose statements the role run reads the locks.
+LOCK_TARGETS = frozenset(e[1:4] for e in ro_covered.COVERED + ro_covered.WRITERS)
+
+
+class _Planting:
+    """A control's session: at a production site named in
+    self.info['plant'] ({(file, line): sql}) the statement is replaced by the
+    planted SQL text (no parameters), the way the round-8 report changed
+    main.py:16871 and :16828; everything after (record, lock read, delta) is
+    the measuring session's own."""
+
+    async def execute(self, statement, params=None, **kw):
+        sql = self.info.get("plant", {}).get(ro_covered._site())
+        if sql is not None:
+            statement, params = text(sql), None
+        return await super().execute(statement, params, **kw)
+
+
+class PlantedRecording(_Planting, ro_covered.RecordingSession):
+    pass
+
+
+class PlantedCounting(_Planting, ro_covered.CountingSession):
+    pass
+
+
+def _entry(f, line):
+    return next(e for e in ro_covered.COVERED if e[1] == f and e[2] == line)
+
+
+E_16828 = _entry("main.py", 16828)
+E_16871 = _entry("main.py", 16871)
+FOR_UPDATE = "SELECT clock_timestamp() FROM players LIMIT 1 FOR UPDATE"
+ADVISORY = ("SELECT clock_timestamp() FROM (SELECT pg_catalog.pg_advisory_xact_lock(808))"
+            " AS planted")
+# Each E2 control: (name, driver, entry, planted SQL or None, grants or None
+# for the read-only role session). The first two are the round-8 report's
+# own examples; the third plants FOR UPDATE at a position whose unplanted
+# run under the same grant is lock-clean (the fourth, its negative control).
+LOCK_CONTROLS = (
+    ("for_update_at_16871_under_grant", "main._lease_admission_gate", E_16871,
+     FOR_UPDATE, ("UPDATE players",)),
+    ("advisory_at_16828_under_role", "main._lease_admission_gate empty", E_16828,
+     ADVISORY, None),
+    ("for_update_at_16828_under_grant", "main._lease_admission_gate empty", E_16828,
+     FOR_UPDATE, ("UPDATE players",)),
+    ("unplanted_16828_under_grant", "main._lease_admission_gate empty", E_16828,
+     None, ("UPDATE players",)),
+)
 
 
 async def _grants(admin, schema, grants, verb):
@@ -354,12 +409,22 @@ async def _grants(admin, schema, grants, verb):
             "TO" if verb == "GRANT" else "FROM", ro_role._q(ro_role.ROLE)))
 
 
-async def _counted(role_dsn, schema, checked, drive, s, mp, targets):
+async def _counted(role_dsn, schema, checked, drive, s, mp, targets, plant=None,
+                   read_write=True):
+    """One driver on a role session: READ WRITE with the write counters and
+    the lock read at `targets` (the grant run), or, with read_write False,
+    the read-only role session with the lock read alone; `plant` replaces
+    statements at named sites (the E2 controls)."""
     engine = ro_covered.role_engine(role_dsn, schema, ro_role.ROLE, checked,
-                                    read_write=True)
+                                    read_write=read_write)
+    cls = ((PlantedCounting if read_write else PlantedRecording) if plant
+           else (ro_covered.CountingSession if read_write else ro_covered.RecordingSession))
     try:
-        async with ro_covered.role_sessionmaker(engine, ro_covered.CountingSession)() as db:
+        async with ro_covered.role_sessionmaker(engine, cls)() as db:
             db.info["targets"] = targets
+            db.info["lock_targets"] = targets
+            if plant:
+                db.info["plant"] = plant
             try:
                 await drive(db, s, mp)
             except BaseException:   # noqa: BLE001 -- the log holds the outcome
@@ -367,24 +432,33 @@ async def _counted(role_dsn, schema, checked, drive, s, mp, targets):
             finally:
                 log = list(db.info.get("log", []))
                 deltas = list(db.info.get("deltas", []))
+                locks = list(db.info.get("locks", []))
                 await db.rollback()
     finally:
         await engine.dispose()
-    return log, deltas
+    return log, deltas, locks
+
+
+MERGE_ORDER = {"refused under grant": 0, "lock under grant": 1}
 
 
 def _merge(results):
-    """One position held by several drivers: a run that reached it green
-    wins (with the largest delta of those runs), then a refusal at it, then
-    the first run that did not reach it."""
+    """One position held by several drivers (ruling REHEARSAL-R8-A1 E3): a
+    reached execution is green only when EVERY driver that reached it
+    succeeded with zero measured effects. A refusal at it in any driver is
+    the merged outcome (unproven, never green), then a lock found by any
+    driver's lock read, then any other outcome this merge does not name;
+    only when none occurred does a green run stand, with the largest delta
+    of the runs that reached it; a position no driver reached keeps the
+    first run's reason."""
     ok = [r for r in results if r[0] == "ok-under-grant"]
+    bad = [r for r in results if r[0] not in ("ok-under-grant", "not reached under grant")]
+    if bad:
+        return min(bad, key=lambda r: MERGE_ORDER.get(r[0], len(MERGE_ORDER)))
     if ok:
         return ("ok-under-grant", ok[0][1], max(r[2] for r in ok))
-    for kind in ("refused under grant", "not reached under grant"):
-        got = [r for r in results if r[0] == kind]
-        if got:
-            return got[0]
-    return None
+    got = [r for r in results if r[0] == "not reached under grant"]
+    return got[0] if got else None
 
 
 async def _grant_runs(admin_dsn, clone, schema, s, mp):
@@ -405,14 +479,36 @@ async def _grant_runs(admin_dsn, clone, schema, s, mp):
             out["plan"][name] = sorted(grants)
             await _grants(admin, schema, grants, "GRANT")
             try:
-                log, deltas = await _counted(role_dsn, schema, out["checked"],
-                                             DRIVERS[name], s, mp,
-                                             {e[1:4] for e in entries})
+                log, deltas, locks = await _counted(role_dsn, schema, out["checked"],
+                                                    DRIVERS[name], s, mp,
+                                                    {e[1:4] for e in entries})
             finally:
                 await _grants(admin, schema, grants, "REVOKE")
             for e in entries:
-                results[e].append(ro_covered.under_grant(log, deltas, e, sorted(grants)))
+                results[e].append(ro_covered.under_grant(log, deltas, e, sorted(grants),
+                                                         locks))
+        out["results"] = {e: list(r) for e, r in results.items()}
         out["outcomes"] = {e: _merge(r) for e, r in results.items()}
+        # E2 controls: a planted locking statement at a read position.
+        out["lock_controls"] = {}
+        for cname, driver, entry, sql, grants in LOCK_CONTROLS:
+            plant = {entry[1:3]: sql} if sql else None
+            if grants:
+                await _grants(admin, schema, set(grants), "GRANT")
+            try:
+                log, deltas, locks = await _counted(
+                    role_dsn, schema, out["checked"], DRIVERS[driver], s, mp,
+                    {entry[1:4]}, plant=plant, read_write=bool(grants))
+            finally:
+                if grants:
+                    await _grants(admin, schema, set(grants), "REVOKE")
+            if grants:
+                got = ro_covered.under_grant(log, deltas, entry, list(grants), locks)
+            else:
+                outs = ro_covered.outcome_at(log, entry)
+                got = (ro_covered.ran_outcome(outs, ro_covered.locks_at(locks, entry))
+                       if outs and all(o == "ok" for o in outs) else ("ran", outs))
+            out["lock_controls"][cname] = {"outcome": got, "log": log}
         save = os.environ.get("RO8_GRANT_SAVE")
         if save:
             with open(save, "w", encoding="utf-8") as fh:
@@ -463,23 +559,42 @@ def runs():
     run(ro_role.clone(ADMIN_DSN, clone))
     try:
         with pytest.MonkeyPatch.context() as mp:
-            yield run(_run_all(ADMIN_DSN, clone, mp))
+            got = run(_run_all(ADMIN_DSN, clone, mp))
+            save = os.environ.get("RO9_MEASURE_SAVE")
+            if save:
+                # The measured tables (role run, grant run, controls), for
+                # the freeze and the notes; never read back by a test.
+                with open(save, "w", encoding="utf-8") as fh:
+                    json.dump({
+                        "role": [[list(e), measured(got, e)]
+                                 for e in ro_covered.COVERED + ro_covered.WRITERS],
+                        "grant": [[list(e), o] for e, o in got["grant_runs"]["outcomes"].items()],
+                        "grant_results": [[list(e), r] for e, r in
+                                          got["grant_runs"]["results"].items()],
+                        "lock_controls": {k: v["outcome"] for k, v in
+                                          got["grant_runs"]["lock_controls"].items()},
+                    }, fh, indent=1, default=list)
+            yield got
     finally:
         run(ro_role.drop_clone(ADMIN_DSN, clone))
 
 
 def measured(runs, entry):
-    """'ok' when the position ran and every run of it succeeded; the
+    """'ok' when the position ran, every run of it succeeded and every run's
+    lock read found only the expected rows (('lock', rows) when one found
+    more; ruling REHEARSAL-R8-A1 E2); the
     position's SQLSTATE when it ran and was refused; ('not reached', site,
     sqlstate) naming the first refused statement of the drivers that hold
     the position's span; ('not reached', None, error) when no refusal
     explains it."""
-    outs = []
+    outs, reads = [], []
     for name, log in runs["logs"].items():
         outs += ro_covered.outcome_at(log, entry)
+        reads += ro_covered.locks_at(runs["locks"].get(name, []), entry)
     if outs:
         bad = sorted({o for o in outs if o != "ok"})
-        return "ok" if not bad else bad[0]
+        # E2: every run succeeded; its lock reads decide 'ok' or ('lock', rows)
+        return ro_covered.ran_outcome(outs, reads) if not bad else bad[0]
     _walk, f, _line, _end, span = entry
     unexplained = None
     for name in DRIVERS:
@@ -521,7 +636,10 @@ def test_covered_position_under_the_role(runs, entry):
     want = ro_covered.role_outcome(entry)
     got = measured(runs, entry)
     assert got == want, (entry, got, want, runs["errors"])
-    if want != "ok":
+    if want != "ok" and want[0] == "lock":
+        # E2: it ran, and its lock read found rows beyond the expected ones.
+        assert got[1], got
+    elif want != "ok":
         # A covered position the role did not reach is a writer path: the
         # statement that stopped it was a refusal by the role.
         assert got[1] is not None and got[2] in ("25006", "42501"), got
@@ -561,6 +679,163 @@ def test_outcome_tables_are_whole():
     assert set(ro_covered.WRITER_OUTCOME) == set(ro_covered.WRITERS)
     # The read-only claim holds only the green positions; a position whose
     # outcome is a refusal or a lock is not in COVERED's 'ok' set.
-    assert all(v == "ok" or (isinstance(v, tuple) and v[0] in ("not reached",
+    assert all(v == "ok" or (isinstance(v, tuple) and v[0] in ("not reached", "lock",
                                                                "ok-under-grant"))
                for v in ro_covered.OUTCOME.values())
+    # E2: a lock outcome is never green, so never 'read' in the lookup.
+    table = ro_covered.lookup_table()
+    for e, v in ro_covered.OUTCOME.items():
+        if isinstance(v, tuple) and v[0] == "lock":
+            assert not ro_covered.green(v) and table.get(e[1:4]) != "read", e
+
+
+# ------------------------------------------------- E2: locks refuse a read
+
+@pytest.mark.parametrize("name", [c[0] for c in LOCK_CONTROLS])
+def test_lock_control(runs, name):
+    """Ruling REHEARSAL-R8-A1 E2: a locking statement planted at a read
+    position is refused as a read by the lock read (its outcome names the
+    lock and is not green); the unplanted run under the same grant is green
+    (the negative control)."""
+    got = runs["grant_runs"]["lock_controls"][name]["outcome"]
+    _n, _d, _e, sql, grants = next(c for c in LOCK_CONTROLS if c[0] == name)
+    if sql is None:
+        assert got == ("ok-under-grant", tuple(grants), 0), got
+        return
+    if grants:
+        assert got[0] == "lock under grant" and got[1] == tuple(grants), got
+        rows = got[2]
+    else:
+        assert got[0] == "lock", got
+        rows = got[1]
+    assert not ro_covered.green(got), got
+    want = ({"relation RowShareLock players", "transactionid ExclusiveLock"}
+            if "FOR UPDATE" in sql else {"advisory ExclusiveLock"})
+    assert want <= set(rows), (got, want)
+
+
+# ---------------------------------------------- E3: a refusal is never merged away
+
+def test_merge_keeps_a_refusal_unproven():
+    """Ruling REHEARSAL-R8-A1 E3: one driver green with a zero delta, another
+    refused 42501 at the same position: the merged outcome is the refusal
+    (never green), in either order; likewise a lock found by one driver."""
+    g = ("UPDATE players",)
+    ok = ("ok-under-grant", g, 0)
+    refused = ("refused under grant", g, "42501")
+    lock = ("lock under grant", g, ("advisory ExclusiveLock",))
+    unreached = ("not reached under grant", g, None)
+    for results in ([ok, refused], [refused, ok], [unreached, ok, refused]):
+        got = _merge(results)
+        assert got == refused and not ro_covered.green(got), (results, got)
+    for results in ([ok, lock], [lock, ok]):
+        assert _merge(results) == lock, results
+    assert _merge([ok, unreached]) == ok
+    assert _merge([("ok-under-grant", g, 0), ("ok-under-grant", g, 2)]) == (
+        "ok-under-grant", g, 2)
+
+
+def test_merge_of_the_measured_runs(runs):
+    """E3 on the measured runs: every position whose merged grant outcome is
+    green was reached green by every driver that reached it."""
+    for e, results in runs["grant_runs"]["results"].items():
+        merged = runs["grant_runs"]["outcomes"][e]
+        if merged and merged[0] == "ok-under-grant":
+            assert all(r[0] in ("ok-under-grant", "not reached under grant")
+                       for r in results), (e, results)
+            assert merged[2] == 0, (e, merged)
+
+
+# ------------------------------------------ G1: complete opener forms
+
+CENSUS_REL = "tests/cf_pg.py"
+CENSUS_CALL = "admin = await _asyncpg.connect(DSN)"
+# Each row: (name, change of tests/cf_pg.py's text: ('replace', old, new) on
+# the first occurrence, or ('append', program), the complete-layer forms the
+# change must add, refused). The first two are the round-8 report's forms;
+# with them the coarse layer is unchanged (the finding), and the complete
+# layer refuses each.
+G1_PLANTED = (
+    ("keyword_unpacking",
+     ("replace", CENSUS_CALL, 'admin = await _asyncpg.connect(DSN, **{"user": "scr_gate"})'),
+     {("refuse", "_asyncpg.connect(DSN, **{'user': 'scr_gate'})")}, True),
+    ("constructed_getattr",
+     ("append", "\nasync def _planted(driver):\n"
+                "    return await getattr(driver, 'con' + 'nect')(DSN)\n"),
+     {("dynamic", "getattr(driver, 'con' + 'nect')")}, True),
+    ("positional_dsn",
+     ("replace", CENSUS_CALL, "admin = await _asyncpg.connect(ADMIN_DSN)"),
+     {("call", "_asyncpg.connect(ADMIN_DSN)")}, True),
+    ("starred_args",
+     ("replace", CENSUS_CALL, "admin = await _asyncpg.connect(*ARGS)"),
+     {("refuse", "_asyncpg.connect(*ARGS)")}, True),
+    ("unbound_receiver",
+     ("append", "\nasync def _planted(make):\n    return await make().connect(DSN)\n"),
+     {("refuse", "make().connect(DSN)")}, False),
+    ("alias_capture",
+     ("append", "\n_planted = _asyncpg.connect\n"),
+     {("ref", "_planted = _asyncpg.connect")}, False),
+    ("module_table",
+     ("append", "\nasync def _planted():\n"
+                "    return await sys.modules['asyncpg'].connect(DSN)\n"),
+     {("dynamic", "sys.modules"), ("refuse", "sys.modules['asyncpg'].connect(DSN)")}, False),
+    ("vars_lookup",
+     ("append", "\nasync def _planted():\n"
+                "    return await vars(_asyncpg)['con' + 'nect'](DSN)\n"),
+     {("dynamic", "vars(_asyncpg)")}, True),
+)
+
+
+def _census_src():
+    with open(os.path.join(HERE, "..", CENSUS_REL), encoding="utf-8") as fh:
+        return fh.read()
+
+
+@pytest.mark.parametrize("name", [p[0] for p in G1_PLANTED])
+def test_census_refuses_incomplete_opener_form(name):
+    """Ruling REHEARSAL-R8-A1 G1: each planted form is refused by the
+    complete layer: the census diff of the planted text against the frozen
+    layer adds exactly the row's forms; where the row says so, the coarse
+    layer is unchanged (it alone would have accepted the form)."""
+    import ro_census
+    import ro_census_frozen
+    _n, change, want, coarse_same = next(p for p in G1_PLANTED if p[0] == name)
+    src = _census_src()
+    if change[0] == "replace":
+        assert src.count(change[1]) >= 1, change[1]
+        planted = src.replace(change[1], change[2], 1)
+    else:
+        planted = src + change[1]
+    key = CENSUS_REL + ro_census.COMPLETE
+    frozen = {k: ro_census_frozen.FROZEN[k] for k in (CENSUS_REL, key)}
+    refused = ro_census.diff(ro_census.file_forms(CENSUS_REL, planted), frozen)
+    added = {r[2:] for r in refused if r[0] == key and r[1] == "+"}
+    assert added == want, ("the planted form is not refused as the row requires",
+                           refused, want)
+    coarse = [r for r in refused if r[0] == CENSUS_REL]
+    if coarse_same:
+        assert coarse == [], coarse
+    # Unplanted, the file is the freeze (both layers): the refusal is the plant's.
+    assert ro_census.diff(ro_census.file_forms(CENSUS_REL, src), frozen) == []
+
+
+def test_census_complete_layer_frozen_whole():
+    """G1: the complete layer is frozen for every census file, holds no
+    refuse form, and each declared FORWARDING exception is frozen exactly
+    once as a call; the count is the coarse 363 plus the complete layer."""
+    import ro_census
+    import ro_census_frozen as fz
+    import test_r7_ro_role_pg as r7
+    coarse = {k for k in fz.FROZEN if not k.endswith(ro_census.COMPLETE)}
+    complete = {k for k in fz.FROZEN if k.endswith(ro_census.COMPLETE)}
+    # every census file has a complete layer (empty or not); the coarse
+    # freeze lists only the files with a coarse form
+    assert complete == {k + ro_census.COMPLETE for k in r7.CENSUS_FILES}
+    assert coarse <= set(r7.CENSUS_FILES)
+    assert sum(len(fz.FROZEN[k]) for k in coarse) == fz.COARSE_COUNT == 363
+    assert sum(len(fz.FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT
+    assert fz.FROZEN_COUNT == fz.COARSE_COUNT + fz.COMPLETE_COUNT
+    assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
+    for (rel, call) in ro_census.FORWARDING:
+        assert list(map(tuple, fz.FROZEN[rel + ro_census.COMPLETE])).count(
+            ("call", call)) == 1, (rel, call)
