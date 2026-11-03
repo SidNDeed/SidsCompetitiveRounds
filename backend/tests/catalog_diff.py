@@ -42,12 +42,25 @@ rows render in, dump_objects() reduces a pg_dump diff to the objects whose
 block text changed, and match() returns every object one side changed and
 the other did not. The one column pg_dump cannot print is the oid, so rows
 that differ ONLY in oid are listed apart (oid_only()) and are not objects.
+
+The object measurement is an enumeration of the catalogs pg_dump renders
+(ruling REHEARSAL-R8-A1, E1: a role default, the enabled state of an
+internal trigger changed unseen). snapshot() therefore ALSO returns the rows
+of catalog_all: every pg_catalog relation of kind 'r', taken at run time,
+read whole except the exclusions it declares one by one ('raw' rows). The
+raw rows carry the relations they name, so rows_on() and changers() see
+them; match() holds them to the object set: every changed raw row of a step
+must be accounted for by an object change of that step on a relation the
+row names, of a kind catalog_all.EXPLAINS lists for its catalog, or it is
+returned as unmatched beside the objects (catalog_all.unexplained()).
 """
 
 import os
 import re
 import shutil
 import subprocess
+
+import catalog_all
 
 PROBE_SCHEMA = "d2_probe"
 
@@ -656,15 +669,17 @@ def client(env_var, name):
 async def snapshot(conn):
     """The catalog as a frozenset of (kind, rel, ident, def, oid, cand) rows,
     read with search_path '' (as pg_dump reads) and the caller's
-    search_path restored."""
+    search_path restored: the object rows of CATALOG_SQL and the raw rows
+    of every pg_catalog relation (catalog_all.snapshot, kind 'raw')."""
     local = conn.is_in_transaction()
     old = await conn.fetchval("SELECT current_setting('search_path')")
     await conn.execute("SELECT set_config('search_path', '', $1)", local)
     try:
         rows = await conn.fetch(CATALOG_SQL)
+        every = await catalog_all.snapshot(conn)
     finally:
         await conn.execute("SELECT set_config('search_path', $1, $2)", old, local)
-    return frozenset(tuple(tuple(v) if isinstance(v, list) else v for v in r) for r in rows)
+    return frozenset(tuple(tuple(v) if isinstance(v, list) else v for v in r) for r in rows) | every
 
 
 def diff(before, after):
@@ -705,9 +720,11 @@ def changers(steps, rel):
 
 
 def touched(d):
-    """The relations (and, for rows on no relation, 'kind:ident') a diff
-    changes, sorted."""
-    return sorted({r[1] if r[1] else "%s:%s" % (r[0], r[2]) for r in d["added"] + d["removed"]})
+    """The relations (and, for rows on no relation, 'kind:ident') a diff's
+    OBJECT rows change, sorted. The raw rows are held to these by match()
+    (catalog_all.unexplained) and seen by rows_on()/changers()."""
+    return sorted({r[1] if r[1] else "%s:%s" % (r[0], r[2]) for r in d["added"] + d["removed"]
+                   if r[0] != "raw"})
 
 
 def changes(d):
@@ -879,22 +896,34 @@ def resolve(cand, present, changed=frozenset()):
 
 def catalog_objects(d, present, changed=frozenset()):
     """{object: [rows]}: the pg_dump objects the changed rows of catalog
-    diff d render in (rows differing only in oid are excluded: oid_only)."""
-    add = {_noid(r) for r in d["added"]}
-    rem = {_noid(r) for r in d["removed"]}
+    diff d render in (rows differing only in oid are excluded: oid_only).
+    The raw rows are not pg_dump objects: unexplained_raw() holds them."""
+    add = {_noid(r) for r in d["added"] if r[0] != "raw"}
+    rem = {_noid(r) for r in d["removed"] if r[0] != "raw"}
     out = {}
     for r in sorted(add ^ rem):
         out.setdefault(resolve(r[4], present, changed), []).append(list(r[:4]))
     return out
 
 
+def unexplained_raw(d):
+    """{'RAW|<catalog key>': [[side, row text, relations named]]}: the changed
+    raw rows of d no object change of d accounts for (catalog_all)."""
+    out = {}
+    for side, key, text, refs in catalog_all.unexplained(d):
+        out.setdefault("RAW|" + key, []).append([side, text, refs])
+    return out
+
+
 def match(d, before_dump, after_dump):
     """Compare one step's catalog diff with its pg_dump diff as object sets:
     {"catalog_only": {object: rows}, "dump_only": [object], "matched": [object]}.
-    Every changed object on either side must be on the other."""
+    Every changed object on either side must be on the other, and every
+    changed raw row must be accounted for (unexplained_raw(), returned under
+    catalog_only as 'RAW|<catalog key>')."""
     present = set(dump_objects_text(before_dump)) | set(dump_objects_text(after_dump))
     dmp = set(dump_objects(before_dump, after_dump))
     cat = catalog_objects(d, present, dmp)
-    return {"catalog_only": {k: v for k, v in cat.items() if k not in dmp},
+    return {"catalog_only": dict({k: v for k, v in cat.items() if k not in dmp}, **unexplained_raw(d)),
             "dump_only": sorted(dmp - set(cat)),
             "matched": sorted(dmp & set(cat))}

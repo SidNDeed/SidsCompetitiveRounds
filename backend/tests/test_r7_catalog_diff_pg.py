@@ -40,6 +40,16 @@ measured step labelled "<prereq FILE>", so that EVERY numbered file runs to
 its end (rc 0, every statement). There are no declared failures. After the
 last file the ORM's create_all and the widen step run, also measured.
 
+Ruling REHEARSAL-R8-A1 (E1): the snapshot also reads every pg_catalog
+relation of kind 'r', taken at run time (catalog_all), whole except what
+catalog_all declares one by one. Every changed raw row of every step must be
+accounted for by an object change of that step (match(), so the per-step
+agreement test refuses the rest), no step may change a cluster row (a role,
+its defaults, the database), the probe is read again after the chain, and
+the steps whose command log names mail_inbox_rev are attributed beside the
+catalog rows. The E1 controls carry the report's two examples in a
+migration.
+
 Run (fails, never skips, without a server, the template and psql):
     CF_TEST_PG_DSN=postgresql+asyncpg://<admin>@127.0.0.1:55432/postgres \
     D2_TEST_PSQL=<psql> D2_TEST_PG_DUMP=<pg_dump> \
@@ -68,6 +78,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
 sys.path.insert(0, HERE)
 
+import catalog_all as ca  # noqa: E402
 import catalog_diff as cd  # noqa: E402
 import d2_seed  # noqa: E402
 import models  # noqa: E402
@@ -248,6 +259,27 @@ def _dsn(name):
 
 async def _connect(dsn):
     return await asyncpg.connect(dsn, server_settings={"search_path": "public"})
+
+
+INTERNAL_NOT_ENABLED_SQL = ("SELECT t.tgrelid::pg_catalog.regclass::text AS rel, t.tgname::text AS name, "
+                            "t.tgenabled::text AS enabled FROM pg_catalog.pg_trigger t "
+                            "WHERE t.tgisinternal AND t.tgenabled <> 'O' ORDER BY 1, 2")
+
+
+async def _internal_not_enabled(dsn=None, conn=None):
+    """[[relation, trigger, tgenabled]] of every internal trigger that is not
+    enabled ('O'). catalog_all accounts for an internal trigger row CREATED
+    with its relation or constraint by that creation, whatever its enabled
+    state; this reading closes that state for the whole database (ruling
+    R8-A1, E1: no object, and no pg_dump block, renders it)."""
+    own = conn is None
+    if own:
+        conn = await _connect(dsn)
+    try:
+        return [[r["rel"], r["name"], r["enabled"]] for r in await conn.fetch(INTERNAL_NOT_ENABLED_SQL)]
+    finally:
+        if own:
+            await conn.close()
 
 
 async def _snap(dsn):
@@ -432,6 +464,7 @@ async def _build(dsn, out, psql, pg_dump, pre_db):
     async def record(label, kind, outcome):
         cur = await _snap(dsn)
         d = cd.diff(state["prev"], cur)
+        outcome = dict(outcome, internal_not_enabled=await _internal_not_enabled(dsn))
         dd = mt = None
         if pg_dump:
             now = cd.dump(pg_dump, dsn)
@@ -447,7 +480,7 @@ async def _build(dsn, out, psql, pg_dump, pre_db):
             "sqlstate": outcome["sqlstate"], "error": outcome["error"],
             "error_line": outcome.get("error_line"),
             "added": len(added), "removed": len(removed), "changed": len(changed),
-            "touched": cd.touched(d), "commands": outcome["commands"],
+            "touched": cd.touched(d), "raw": ca.keys(d), "commands": outcome["commands"],
             "dump": dd, "match": mt}) + "\n")
         if not cd.empty(d):
             _write(out, os.path.join("diffs", "%04d_%s.json" % (
@@ -570,6 +603,10 @@ def chain(tmp_path_factory):
                     "steps": [dict(s, diff=_jsonable(s["diff"])) for s in c.steps],
                     "kept": {k: sorted(v) for k, v in c.kept.items()}}))
         c.model = asyncio.run(_model_rows(c.dsn))
+        # the probe read again after the whole chain: a step that changed it
+        # (its functions, its event triggers) is named here, whatever else
+        # the step did (catalog_all accounts for the probe's rows by kind only)
+        c.probe_end = asyncio.run(_probe_problems(c.dsn))
         yield c
     finally:
         if not c.reused and os.environ.get("D2_KEEP_DB") != "1":
@@ -701,6 +738,37 @@ def test_only_the_declared_migration_changes_mail_inbox_rev(chain):
     assert sorted(set(got)) == DECLARED_CHANGERS, got
     # 300 changes it in one step: its one application, which creates it
     assert got == [M300], got
+    # ruling R8-A1 (catalog_diff.py:325): the recorded commands are
+    # attributed too. Every step whose command log names mail_inbox_rev
+    # (the relation, or one of its columns) is a declared changer.
+    named = [s["label"] for s in chain.steps
+             if [c for c in s["commands"] if c[2] == MAIL or c[2].startswith(MAIL + ".")]]
+    assert named == [M300], named
+
+
+def test_no_internal_trigger_is_disabled_after_any_step(chain):
+    """Ruling R8-A1 (catalog_diff.py:325): after every step of the chain
+    every internal trigger (the foreign keys' own triggers) is enabled."""
+    got = [(s["n"], s["label"], s.get("internal_not_enabled", "unmeasured")) for s in chain.steps
+           if s.get("internal_not_enabled", "unmeasured") != []]
+    assert got == [], got
+
+
+def test_the_probe_is_intact_after_the_chain(chain):
+    """catalog_all accounts for a changed row of the probe's functions or
+    event triggers by object kind only; the probe itself is read again after
+    the last step and must still be exactly PROBE_SQL's."""
+    assert chain.probe_end == [], chain.probe_end
+
+
+def test_no_step_changes_a_cluster_row(chain):
+    """Ruling R8-A1 (E1): no step of the chain changes a row of a shared
+    catalog within catalog_all.RESTRICT (a role, its defaults, its
+    memberships, the database, a shared comment or label, a tablespace, a
+    parameter ACL, a replication origin), other than pg_shdepend's rows for
+    the measured database's own objects."""
+    got = [(s["n"], s["label"], ca.cluster_rows(s["diff"])) for s in chain.steps if ca.cluster_rows(s["diff"])]
+    assert got == [], got
 
 
 def test_mail_inbox_rev_equals_the_model_after_300(chain):
@@ -1094,7 +1162,10 @@ M9_EXAMPLE = [
 
 
 def _without_default_acl(name, d, before, after):
-    keep = lambda rows: [r for r in rows if r[0] != "default_acl"]  # noqa: E731
+    # the catalog side without pg_default_acl: its object arm AND its raw
+    # rows (catalog_all reads every catalog)
+    keep = lambda rows: [r for r in rows if r[0] != "default_acl"  # noqa: E731
+                         and not (r[0] == "raw" and r[2] == "pg_default_acl")]
     return {"added": keep(d["added"]), "removed": keep(d["removed"])}, before, after
 
 
@@ -1461,7 +1532,8 @@ async def _measure(dsn, program, schema=None):
         await conn.execute("SET LOCAL search_path = public")
         after = await cd.snapshot(conn)
         return {"refused": None, "diff": cd.diff(before, after), "after": after,
-                "commands": cd.commands("\n".join(logs))}
+                "commands": cd.commands("\n".join(logs)),
+                "internal_not_enabled": await _internal_not_enabled(conn=conn)}
     finally:
         await tr.rollback()
         await conn.close()
@@ -1700,6 +1772,149 @@ def test_attribution_control(chain, name, finding, edit, expect):
     assert outcome == expect, (name, got)
 
 
+# --- ruling R8-A1 (E1): every pg_catalog relation ----------------------------
+#
+# The two report examples, each carried by a MIGRATION (373 with the
+# statement appended), run on the chain database in one transaction that is
+# rolled back, as the attribution controls run. "exposed" means the step's
+# diff holds the effect as raw rows AND the chain's own claims refuse it:
+# match() returns it as unmatched (catalog_diff.unexplained_raw), a role
+# default is a cluster row (test_no_step_changes_a_cluster_row), and a
+# disabled trigger of mail_inbox_rev makes 373 a changer beside 300. The
+# internal triggers of a table cannot be disabled by a role that is not a
+# superuser: under such an admin PostgreSQL refuses it (42501), the refusal
+# being the bound there. The ALTER ROLE control RESETs exactly its key in a
+# finally block (never the whole role) and the admin role's setconfig must
+# read the same before and after.
+
+E1_CONTROLS = [
+    # (name, finding, statement appended to 373, needs a superuser)
+    ("e1_role_default_work_mem", "r8 catalog_diff.py:153",
+     "ALTER ROLE CURRENT_USER SET work_mem = '63MB';", False),
+    ("e1_disable_trigger_all_mail", "r8 catalog_diff.py:325",
+     "ALTER TABLE public.mail_inbox_rev DISABLE TRIGGER ALL;", True),
+    ("e1_disable_trigger_all_other_table", "r8 catalog_diff.py:325 (the class, on another table)",
+     "ALTER TABLE public.mail_recipients DISABLE TRIGGER ALL;", True),
+    ("k_e1_373_accounted", "kept", "", False),
+]
+
+
+async def _fetchval(sql, *args):
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        return await conn.fetchval(sql, *args)
+    finally:
+        await conn.close()
+
+
+async def _own_setconfig():
+    got = await _fetchval("SELECT s.setconfig FROM pg_catalog.pg_db_role_setting s JOIN pg_catalog.pg_roles r "
+                          "ON r.oid = s.setrole WHERE s.setdatabase = 0 AND r.rolname = current_user")
+    return list(got) if got is not None else None
+
+
+@pytest.mark.parametrize("name,finding,stmt,su_only", E1_CONTROLS, ids=[c[0] for c in E1_CONTROLS])
+def test_e1_control(chain, name, finding, stmt, su_only):
+    superuser = chain.who["superuser"]
+    me_oid = asyncio.run(_fetchval("SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user"))
+    plants_role = stmt.startswith("ALTER ROLE")
+    if plants_role:
+        cfg_before = asyncio.run(_own_setconfig())
+        assert not [s for s in cfg_before or [] if s.startswith("work_mem=")], (
+            "%s already carries work_mem in its setconfig %s: the control does not plant over it"
+            % (chain.who["admin_user"], cfg_before))
+    try:
+        result = asyncio.run(_measure(chain.dsn, _read(M373) + "\n" + stmt + "\n"))
+    finally:
+        if plants_role:
+            asyncio.run(_admin("ALTER ROLE CURRENT_USER RESET work_mem"))
+            cfg_after = asyncio.run(_own_setconfig())
+    if plants_role:
+        assert cfg_after == cfg_before, (cfg_before, cfg_after)
+    label = M373 + " (" + name + ")"
+    if result["refused"]:
+        _record_control(chain, name, finding, result, "refused")
+        assert su_only and not superuser and result["refused"] == "42501", (name, result)
+        return
+    d = result["diff"]
+    unexplained = ca.unexplained(d)
+    changers = cd.changers(_attribution(chain.steps + [{"label": label, "diff": d}]), MAIL)
+    outcome = {"unexplained": unexplained, "cluster": ca.cluster_rows(d), "changers": changers,
+               "unmatched": sorted(cd.unexplained_raw(d))}
+    _record_control(chain, name, finding, dict(result, error=json.dumps(outcome)[:4000]), "measured")
+    assert not (su_only and not superuser), ("ran under an admin that is not a superuser", name)
+    if name == "k_e1_373_accounted":
+        assert unexplained == [] and outcome["cluster"] == [] and changers == [M300], outcome
+    elif name == "e1_role_default_work_mem":
+        # the row is the session role's own database-independent setting:
+        # inside catalog_all.RESTRICT's pg_db_role_setting predicate
+        want = [["added", "pg_db_role_setting", "(0,%d,{work_mem=63MB})" % me_oid, []]]
+        assert [u for u in unexplained if u[1] == "pg_db_role_setting"] == want, unexplained
+        assert outcome["cluster"] == [w[:3] for w in want], outcome["cluster"]
+        assert "RAW|pg_db_role_setting" in outcome["unmatched"], outcome
+    else:
+        table = "public.mail_inbox_rev" if name.endswith("_mail") else "public.mail_recipients"
+        internal = [u for u in unexplained if u[1] == "pg_trigger/internal"]
+        assert internal and all(table in u[3] for u in internal), unexplained
+        # changed IN PLACE: as many rows removed as added (the same triggers)
+        sides = [u[0] for u in internal]
+        assert sides.count("added") == sides.count("removed") > 0, internal
+        assert "RAW|pg_trigger/internal" in outcome["unmatched"], outcome
+        assert result["internal_not_enabled"] and all(
+            t[0] == table.split(".", 1)[1] and t[2] == "D" for t in result["internal_not_enabled"]), result
+        assert changers == ([M300, label] if table == MAIL else [M300]), changers
+
+
+def test_every_pg_catalog_relation_is_measured_or_declared(route_db):
+    """Ruling R8-A1 (E1): catalog_all's plan of this server, from the
+    relations pg_class lists at run time: their number equals the frozen
+    count for the major version, every declaration names a relation or
+    column the server has, and every relation is measured unless EXCLUDED
+    declares it whole (or UNREADABLE does, for a session that may not read
+    it and has no view to read it through). The plan refuses a catalog it
+    does not know: one more relation fails the frozen count and has no
+    EXPLAINS entry; one more unreadable column has no declaration."""
+    async def body():
+        conn = await _connect(_dsn(route_db))
+        try:
+            return (await conn.fetchrow(ca.SESSION_SQL), [dict(r) for r in await conn.fetch(ca.COLUMNS_SQL)])
+        finally:
+            await conn.close()
+    s, meta = asyncio.run(body())
+    p = ca.plan(meta, s["major"])
+    rels = sorted({m["rel"] for m in meta})
+    out = _route_out()
+    if out:
+        _write(out, "catalog_all_plan.json", json.dumps({
+            "major": s["major"], "count": p["count"], "measured": sorted(p["relations"]),
+            "not_measured": [r for r in rels if r not in p["relations"]],
+            "substituted": {r: e["source"] for r, e in p["relations"].items() if e["source"] != r},
+            "excluded": [list(e) for e in ca.EXCLUDED], "unreadable": [list(e) for e in ca.UNREADABLE],
+            "restrict": {k: list(v) for k, v in ca.RESTRICT.items()}}, indent=1))
+    assert p["problems"] == [], p["problems"]
+    assert p["count"] == ca.FROZEN_COUNT[s["major"]] == len(rels)
+    whole = {e[0] for e in ca.EXCLUDED if e[1] is None}
+    for r in rels:
+        if r in p["relations"]:
+            continue
+        assert r in whole or (not _reads_whole(meta, r) and r in {e[0] for e in ca.UNREADABLE if e[1] is None}), r
+    for r in ("pg_db_role_setting", "pg_authid", "pg_shdescription", "pg_shseclabel", "pg_trigger"):
+        assert r in p["relations"], r
+    assert all(e[2] for e in ca.EXCLUDED + ca.UNREADABLE) and all(v[1] for v in ca.RESTRICT.values())
+    # the plan's own refusals
+    extra = meta + [{"rel": "pg_rf9_new", "shared": False, "col": "x", "typ": "oid", "can": True}]
+    got = ca.plan(extra, s["major"])["problems"]
+    assert any("frozen at" in g for g in got) and any(g.startswith("pg_rf9_new has no EXPLAINS") for g in got), got
+    hidden = [dict(m, can=False) if (m["rel"], m["col"]) == ("pg_class", "relname") else m for m in meta]
+    got = ca.plan(hidden, s["major"])["problems"]
+    assert got == ["the session may not read pg_class.relname and no declaration names it"], got
+
+
+def _reads_whole(meta, rel):
+    """True when the session may read every column of rel."""
+    return all(m["can"] for m in meta if m["rel"] == rel)
+
+
 # --- the files outside the chain --------------------------------------------
 
 
@@ -1729,12 +1944,19 @@ def test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev(chain):
             prev = cur
             steps.append((name, d))
             rows.append({"file": name, "rc": outcome["rc"], "sqlstate": outcome["sqlstate"],
-                         "error": outcome["error"], "touched": cd.touched(d),
+                         "error": outcome["error"], "touched": cd.touched(d), "raw": ca.keys(d),
+                         "unexplained": ca.unexplained(d), "cluster": ca.cluster_rows(d),
+                         "internal_not_enabled": asyncio.run(_internal_not_enabled(dsn)),
                          "commands": outcome["commands"]})
         _write(chain.out, "aux_files.json", json.dumps(rows, indent=1))
         incomplete = [(r["file"], r["sqlstate"], r["error"]) for r in rows if r["rc"] != 0]
         assert incomplete == [], incomplete
         assert cd.changers(steps, MAIL) == []
+        # ruling R8-A1 (E1): every catalog row these files change is
+        # accounted for by an object change, and none is a cluster row
+        assert [(r["file"], r["unexplained"]) for r in rows if r.get("unexplained")] == []
+        assert [(r["file"], r["cluster"]) for r in rows if r.get("cluster")] == []
+        assert [(r["file"], r["internal_not_enabled"]) for r in rows if r.get("internal_not_enabled")] == []
         assert not [(r["file"], c) for r in rows for c in r["commands"] if "mail_inbox_rev" in c[2]]
     finally:
         asyncio.run(_drop_db(copy))
