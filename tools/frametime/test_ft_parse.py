@@ -346,6 +346,55 @@ def test_vr1_flags_a_cap():
     assert ok, bad
 
 
+def _mp_recs():
+    """Four games of two OFF points each: per point six unplanted windows whose means alternate +-100 us of C about a
+    base (sample SD 100 x sqrt(1.2) us) and two planted ones; game g's e values 0.1 x g."""
+    fh = 3000000000                      # 3000 cycles per us
+    recs = [{"kind": "plant", "c_plant": 80}]
+    for g in range(1, 5):
+        recs.append({"kind": "settled", "g": g, "f_hat": fh})
+        for pt in (1, 2):
+            n, pn = 720, 240
+            base = 2000.0 * 3000           # cycles per frame
+            e = 0.1 * g
+            recs.append({"kind": "p", "game": g, "round": 1, "point": pt, "arm": "OFF", "n": n, "pn": pn,
+                         "sC": base * n, "psC": (base + e * 80 * 3000) * pn})
+            for i in range(6):
+                m = base + (1 if i % 2 == 0 else -1) * 100.0 * 3000
+                recs.append({"kind": "w", "game": g, "round": 1, "point": pt, "arm": "OFF", "plant": 0,
+                             "partial": 0, "n": 120, "sC": m * 120})
+            for i in range(2):
+                recs.append({"kind": "w", "game": g, "round": 1, "point": pt, "arm": "OFF", "plant": 1,
+                             "partial": 0, "n": 120, "sC": base * 120})
+    return recs
+
+
+def test_match_power_reports_w_the_model_and_g_needed():
+    # ruling FRAME-TIME-ROUND-R6-A3.3 (2a): report only; w measured, the margin against the planning input, the G
+    # VR2 needs at the 1.6 margin and at the observed per-game SD
+    import math
+    import statistics
+    out = P.match_power(_mp_recs())
+    w = 100.0 * math.sqrt(1.2)
+    assert out[0] == "match power: w %.1f us over 8 OFF points (planning 293.2 us, measured margin %.2f)" % (w, w / 293.2), out
+    s = 1.6 * w * math.sqrt(1 / 2 + 1 / 6) / math.sqrt(2) / 80
+
+    def need(x):
+        return next(k for k in range(4, 100000) if (P.t_q(P.Z_END, k // 2 - 1) + 1.2816) * x / math.sqrt(k) <= 0.5)
+    assert out[1] == "match power: model per-game SE %.3f at margin 1.6 over 4 games: G needed %d" % (s, need(s)), out
+    so = statistics.stdev([0.1, 0.2, 0.3, 0.4])
+    assert out[2] == "match power: observed per-game SD of e_C %.3f over 4 games: G needed %d" % (so, need(so)), out
+    assert P.match_power([r for r in _mp_recs() if r["kind"] != "w"]) == [
+        "match power: no OFF point with three complete unplanted window lines, w not measured"]
+
+
+def test_report_carries_the_match_power_lines():
+    # every match sitting's report carries match_power beside VR2 (ruling FRAME-TIME-ROUND-R6-A3.3 (2a))
+    rep = _report(_log()).splitlines()
+    i = [k for k, ln in enumerate(rep) if ln.startswith("VR2 e_C_lo ")]
+    assert len(i) == 1 and rep[i[0] + 1].startswith("match power: w "), rep
+
+
 def test_vr4_bar():
     assert P.vr4(30.0, 2650.0) and not P.vr4(40.0, 2650.0)
 

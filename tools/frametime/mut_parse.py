@@ -71,6 +71,9 @@ MUTS = [
     ("B3 not guarded by VR6", '"B3": ("VR5", "VR6")', '"B3": ("VR5",)'),
     ("verdicts given on an incomplete sitting", 'if miss:\n            return "withheld: sitting incomplete"', 'if False:\n            pass'),
     ("SID band dropped", 'if u <= 0.05 * tref:\n        return "SID"', 'if False:\n        return "SID"'),
+    # ruling FRAME-TIME-ROUND-R6-A3.3 (2a): match_power
+    ("match power not reported", '        out += match_power(recs)\n', '        pass\n'),
+    ("match power margin dropped", 'per_game_se.append(margin * w *', 'per_game_se.append(w *'),
     # decision 21'' (ruling FRAME-TIME-ROUND-R6-A3.2), replacing R1-A1's band and nearness mutants
     ("menu e_C contains-1 upper end dropped", 'if not (m_ - h_ <= 1.0 <= m_ + h_):', 'if not (m_ - h_ <= 1.0):'),
     ("menu e_C excludes-0 dropped", 'if m_ - h_ <= 0.0 <= m_ + h_:', 'if False:'),
@@ -282,6 +285,10 @@ KILLS = {
         ['test_verdicts_need_the_complete_sitting'],
     'SID band dropped':
         ['test_report_carries_the_specified_figures'],
+    'match power not reported':
+        ['test_report_carries_the_match_power_lines'],
+    'match power margin dropped':
+        ['test_match_power_reports_w_the_model_and_g_needed'],
     'menu e_C contains-1 upper end dropped':
         ['test_menu_check_fails_a_level_with_low_exposure'],
     'menu e_C excludes-0 dropped':

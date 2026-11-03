@@ -1140,6 +1140,75 @@ def e_c(recs, z=Z_END, first_game=1):
     return m, hw, df, m - hw, len(es), missing
 
 
+MATCH_PLAN_W_US = 293.2               # R6-A3.2 (2): the menu's w x 2, the planning input until the match measures its own
+
+
+def match_power(recs, z=Z_END, first_game=1, margin=MENU_PLAN_MARGIN):
+    """Report only, never judged (ruling FRAME-TIME-ROUND-R6-A3.3 (2a)): the match scene's own window noise and the
+    game count VR2's e_C_lo >= 0.5 needs from it. w: the median over OFF points (at least three complete unplanted
+    windows) of the SD of the point's unplanted 120-frame window means of C, in us by the game's f_hat. Per game,
+    e_C is the mean of its OFF points' e values (e_c), so the model's per-game SE is
+    margin x w x sqrt(mean over the game's planted OFF points of (1/n_p + 1/n_u)) / sqrt(points) / c_plant, its
+    median over games used; the observed per-game SD is that of e_c's per-game values. G needed is the least G with
+    (t_q(z, floor(G/2) - 1) + MENU_PLAN_ZPOW) x s / sqrt(G) <= 0.5, at the model SE (the margin applied) and at the
+    observed SD. Returns report lines."""
+    cp = [r["c_plant"] for r in recs if r["kind"] == "plant"]
+    if len(cp) != 1 or cp[0] <= 0:
+        return ["match power: not computable (needs exactly one plant line with c_plant > 0, got %s)" % cp]
+    cpu = cp[0]
+    fh = {r["g"]: r["f_hat"] for r in recs if r["kind"] == "settled"}
+    games = games_of(recs, first_game)
+    wins = {}
+    for r in recs:
+        if r["kind"] == "w" and r.get("game", -1) >= first_game and r.get("arm") == "OFF" and not r.get("partial") \
+                and r.get("n", 0) > 0:
+            wins.setdefault((r["game"], r["round"], r["point"]), []).append(r)
+    sds = []
+    for (g, rd, pt), ws in wins.items():
+        u = [w["sC"] / w["n"] for w in ws if not w.get("plant")]
+        if len(u) >= 3 and fh.get(g, 0) > 0:
+            sds.append(statistics.stdev(u) / (fh[g] / 1e6))
+    if not sds:
+        return ["match power: no OFF point with three complete unplanted window lines, w not measured"]
+    w = statistics.median(sds)
+    per_game_se, per_game_e = [], []
+    for g in sorted(games):
+        if fh.get(g, 0) <= 0:
+            continue
+        unit = cpu * fh[g] / 1e6
+        inv, ev = [], []
+        for q in games[g]:
+            if q["arm"] != "OFF" or q.get("pn", 0) <= 0 or q["n"] <= 0:
+                continue
+            ws = wins.get((g, q["round"], q["point"]), [])
+            npl = sum(1 for x in ws if x.get("plant"))
+            nun = sum(1 for x in ws if not x.get("plant"))
+            if npl > 0 and nun > 0:
+                inv.append(1.0 / npl + 1.0 / nun)
+            ev.append((q["psC"] / q["pn"] - q["sC"] / q["n"]) / unit)
+        if inv:
+            per_game_se.append(margin * w * math.sqrt(sum(inv) / len(inv)) / math.sqrt(len(inv)) / cpu)
+        if ev:
+            per_game_e.append(sum(ev) / len(ev))
+
+    def g_need(s):
+        for k in range(4, 100000):
+            if (t_q(z, k // 2 - 1) + MENU_PLAN_ZPOW) * s / math.sqrt(k) <= 0.5:
+                return k
+        return -1
+    out = ["match power: w %.1f us over %d OFF points (planning %.1f us, measured margin %.2f)"
+           % (w, len(sds), MATCH_PLAN_W_US, w / MATCH_PLAN_W_US)]
+    if per_game_se:
+        s_model = statistics.median(per_game_se)
+        out.append("match power: model per-game SE %.3f at margin %.1f over %d games: G needed %d"
+                   % (s_model, margin, len(per_game_se), g_need(s_model)))
+    if len(per_game_e) >= 2:
+        s_obs = statistics.stdev(per_game_e)
+        out.append("match power: observed per-game SD of e_C %.3f over %d games: G needed %d"
+                   % (s_obs, len(per_game_e), g_need(s_obs)))
+    return out
+
+
 def vr5(recs, first_game=0, last_game=None):
     """VR5 (V4 3.7): the expected records present (vr5_records) and the census rules hold (vr5_points)."""
     ok1, bad1 = vr5_records(recs, first_game, last_game)
@@ -1784,6 +1853,11 @@ def report(text, peer=None):
         out.append("VR2 e_C_lo %s (>= 0.5)" % ("PASS" if elo >= 0.5 else "FAIL"))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("e_C not computable: %s" % e)
+    # ruling FRAME-TIME-ROUND-R6-A3.3 (2a): the measured w and the G VR2 needs, beside VR2, reported either way
+    try:
+        out += match_power(recs)
+    except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
+        out.append("match power not computable: %s" % e)
     if elo is not None:
         vr["VR2"] = ok2 and elo >= 0.5
     zok, g0v, g0n, meas, empty = zero_state(recs)
