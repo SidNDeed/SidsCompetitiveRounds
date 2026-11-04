@@ -22,6 +22,55 @@ namespace CompetitiveRounds
         internal const string FT_REGION = "us";
 
         internal static bool Armed { get; private set; }
+
+        /// <summary>F7 (ruling R6-A3.9 (1a)): every seat publishes its own DLL sha8 as this player property before
+        /// joining, beside the cr_ staging; the arm requires every other fighter to carry the same value, so a seat
+        /// with a fighter of unknown provenance in its room never arms and never spawns.</summary>
+        internal const string DLL_PROP = "ft_dll";
+        private static string _peerSaid = "";
+
+        /// <summary>The own value (the room's sha8), or null before the DLL digest is known.</summary>
+        internal static string OwnDll()
+        {
+            string want = ExpectedRoom();
+            return want == null ? null : want.Substring(3);
+        }
+
+        /// <summary>Stage (outside a room: delivered with the join, lesson 287) or re-publish (in this build's own
+        /// room, if missing) the own DLL_PROP; idempotent, so it writes only when the value differs.</summary>
+        internal static void StageOwnDll()
+        {
+            try
+            {
+                string v = OwnDll();
+                var local = PhotonNetwork.LocalPlayer;
+                if (v == null || local == null) return;
+                object cur = null;
+                if (local.CustomProperties != null && local.CustomProperties.TryGetValue(DLL_PROP, out cur)
+                    && string.Equals(cur as string, v, StringComparison.Ordinal)) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable { { DLL_PROP, v } });
+                Plugin.Log.LogInfo("[FRAME-TIME] staged " + DLL_PROP + "=" + v + (PhotonNetwork.InRoom ? " in-room" : " pre-join"));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] " + DLL_PROP + " staging failed: " + ex.Message); }
+        }
+
+        /// <summary>Null when every other fighter carries the own DLL_PROP value, else the first one that does not.</summary>
+        private static string UnknownPeer(out string known)
+        {
+            known = "";
+            string own = OwnDll();
+            var others = RoomActors.OtherActiveFighters();
+            if (own == null || others == null || others.Length == 0) return "none";
+            foreach (var p in others)
+            {
+                object v = null;
+                bool ok = p != null && p.CustomProperties != null && p.CustomProperties.TryGetValue(DLL_PROP, out v)
+                          && string.Equals(v as string, own, StringComparison.Ordinal);
+                if (!ok) return p == null ? "null" : p.ActorNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                known += (known.Length > 0 ? "," : "") + p.ActorNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            return null;
+        }
         internal static bool Latched { get; private set; }
         internal static string Why = "not evaluated";
 
@@ -87,7 +136,7 @@ namespace CompetitiveRounds
             if (FenceExemptCurrent())
             {
                 // in this build's own room: the joined line once per join, on both seats
-                if (_joined.Length == 0) { _joined = PhotonNetwork.CurrentRoom.Name; LogJoined(); }
+                if (_joined.Length == 0) { _joined = PhotonNetwork.CurrentRoom.Name; _peerSaid = ""; LogJoined(); StageOwnDll(); }
             }
             else _joined = "";
             bool armed = why == null;
@@ -159,6 +208,16 @@ namespace CompetitiveRounds
                 if (!string.Equals(PhotonNetwork.CurrentRoom.Name, want, StringComparison.Ordinal)) return "room_name";
                 if (!string.Equals(Region(), FT_REGION, StringComparison.OrdinalIgnoreCase)) return "region";
                 if (RoomActors.ActiveFighterCount() != 2) return "fighters";
+                string known;
+                string unknown = UnknownPeer(out known);
+                if (unknown != null)
+                {
+                    string said = "unknown actor=" + unknown;
+                    if (said != _peerSaid) { _peerSaid = said; Plugin.Log.LogInfo("[FRAME-TIME] peer " + said + " (no matching " + DLL_PROP + ")"); }
+                    return "peer";
+                }
+                string ok = "known actor=" + known + " " + DLL_PROP + "=" + OwnDll();
+                if (ok != _peerSaid) { _peerSaid = ok; Plugin.Log.LogInfo("[FRAME-TIME] peer " + ok); }
                 return null;
             }
             catch (Exception ex) { return "error_" + ex.GetType().Name; }

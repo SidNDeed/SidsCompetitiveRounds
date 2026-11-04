@@ -64,6 +64,7 @@ namespace CompetitiveRounds
             if (_flushAt > 0 && System.Diagnostics.Stopwatch.GetTimestamp() >= _flushAt) FlushGame("settle");
             FtRematch.Poll();
             FtDrive.JoinTick();
+            FtDrive.SpawnTick();
             if (!FtArm.Armed && FtGate.Off) FtGate.Off = false;   // a disarm opens the gate at this boundary
             if (FtMenu.Boundary()) return;   // the menu self-check owns this frame (menu=1, no room)
             if (live && !Live) StartPoint();

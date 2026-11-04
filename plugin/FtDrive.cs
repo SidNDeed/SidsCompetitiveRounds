@@ -72,7 +72,7 @@ namespace CompetitiveRounds
         /// The sentinel key join=0 suppresses it (the menu self-check runs with no second seat).</summary>
         internal static void JoinTick()
         {
-            if (!FtConfig.Present || Escaped || Complete || FtRematch.TimedOut) return;
+            if (!FtConfig.Present || Escaped || Complete || FtRematch.TimedOut || FtArm.Latched) return;   // F6: a latched disarm stops the joins
             double now = Now;
             if (now < _nextJoinS) return;
             _nextJoinS = now + 30.0;
@@ -83,10 +83,73 @@ namespace CompetitiveRounds
                 if (!string.IsNullOrEmpty(Plugin.PendingRankedRoom)) return;
                 string room = FtArm.ExpectedRoom();
                 if (room == null) return;
+                FtArm.StageOwnDll();   // F7: the own DLL marker rides the join (lesson 287)
                 Plugin.Log.LogInfo("[FRAME-TIME] self-drive join room=" + room + " region=" + FtArm.FT_REGION);
                 Plugin.SetPendingRoom(room, FtArm.FT_REGION);
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] self-drive join failed: " + ex.Message); }
+        }
+
+        private static int _spawnPa;
+        private static int _spawnTries;
+        private static double _spawnSince = -1, _nextSpawnS;
+        private static string _spawnSaid = "";
+
+        private static void SpawnSay(string what)
+        {
+            if (what == _spawnSaid) return;
+            _spawnSaid = what;
+            if (what.StartsWith("spawn gave up", StringComparison.Ordinal) || what.StartsWith("spawn refused", StringComparison.Ordinal))
+                Plugin.Log.LogWarning("[FRAME-TIME] self-drive " + what);
+            else Log(what);
+        }
+
+        /// <summary>The self-drive's second act (ruling R6-A3.7, DESIGN-R6A37-JOIN.md): in the armed room, create the
+        /// local fighter through the same direct vanilla call the join press reaches (PlayerAssigner.CreatePlayer(null),
+        /// the keyboard player; DanceStep0Probe.cs and the 2v2 auto-spawn make the same call), never synthetic input
+        /// (lesson 420). It runs from FtSchedule.Boundary every frame because the GeneralInput postfix exists only once
+        /// a body does. The moment, read live every frame: armed, in the room with both actors, the game mode awake
+        /// (playersCanJoin, set by GM_ArmsRace.OnEnable), vanilla's own not-created and not-full refusals clear, the
+        /// game not yet playing, all held 1.0 s on Stopwatch time. Once per seat by vanilla's hasCreatedLocalPlayer on
+        /// this PlayerAssigner instance; a call that leaves it false is retried at most 5 times, 2 s apart, then the
+        /// tick warns "spawn gave up" once. A rematch keeps the bodies (lesson 138), so the tick does nothing then.</summary>
+        internal static void SpawnTick()
+        {
+            if (!FtArm.Armed || Escaped || Complete || FtRematch.TimedOut)
+            {
+                _spawnSince = -1;
+                if (FtArm.Why == "peer") SpawnSay("spawn waiting why=peer");
+                return;
+            }
+            try
+            {
+                var pa = PlayerAssigner.instance;
+                if (pa == null) { _spawnSince = -1; SpawnSay("spawn waiting why=assigner actors=-1"); return; }
+                int id = pa.GetInstanceID();
+                if (id != _spawnPa) { _spawnPa = id; _spawnTries = 0; _spawnSince = -1; _spawnSaid = ""; }
+                if (pa.hasCreatedLocalPlayer) return;
+                var room = Photon.Pun.PhotonNetwork.CurrentRoom;
+                int actors = Photon.Pun.PhotonNetwork.InRoom && room != null ? room.PlayerCount : -1;
+                string why = actors != 2 ? "actors"
+                    : !pa.playersCanJoin ? "join-closed"
+                    : pa.players != null && pa.players.Count >= pa.maxPlayers ? "full"
+                    : GameManager.instance == null ? "game-manager"
+                    : GameManager.instance.isPlaying ? "playing"
+                    : null;
+                if (why != null) { _spawnSince = -1; SpawnSay("spawn waiting why=" + why + " actors=" + actors); return; }
+                if (SpectatorSession.IsLocalSpectator) { SpawnSay("spawn refused why=spectator"); return; }
+                double now = Now;
+                if (_spawnSince < 0) _spawnSince = now;
+                if (now - _spawnSince < 1.0 || now < _nextSpawnS) return;
+                if (_spawnTries >= 5) { SpawnSay("spawn gave up tries=" + _spawnTries); return; }
+                _spawnTries++;
+                _nextSpawnS = now + 2.0;
+                Log("spawn try=" + _spawnTries + " master=" + (Photon.Pun.PhotonNetwork.IsMasterClient ? 1 : 0) + " actors=" + actors);
+                try { pa.CreatePlayer(null); }
+                catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] self-drive spawn threw: " + ex.Message); }
+                Log("spawn result created=" + (pa.hasCreatedLocalPlayer ? 1 : 0) + " players=" + (pa.players != null ? pa.players.Count : -1));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] self-drive spawn tick failed: " + ex.Message); }
         }
 
         /// <summary>FtSchedule.GameOver: after the last measured game the sitting ends.</summary>

@@ -7965,7 +7965,7 @@ namespace CompetitiveRounds
                 // Mod-issued rooms ONLY — see the KNOWN ISSUE in the class
                 // comment before widening this (r4 pre-committed cut).
 #if SCR_FRAMETIME
-                if (FtArm.InFtRoom() && FtConfig.Present) { FtRematch.Hold(functionToCall); return false; }
+                if (FtArm.FenceExemptCurrent()) { FtRematch.Hold(functionToCall); return false; }
 #endif
                 if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return true;
                 Plugin.Log.LogInfo("[POPUP] Auto-confirming Continue prompt (competitive room bypass)");
