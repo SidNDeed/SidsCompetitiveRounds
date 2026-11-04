@@ -4,6 +4,9 @@
 # "flushed g=16", the last game's lines written after its settle), copies the whole log to -Out, then quits gracefully
 # (C:\broadcast\quit_game.ps1); Stop-Process by the captured PID only if the graceful quit fails.
 # Exit: 0 end line seen and log copied; 3 refused (ROUNDS already running); 4 no process; 5 end line not seen.
+# The moment the pid is captured it writes <dir of -Out>\launch-<Mode>.pid, one line
+# "FT-VM-LAUNCH-PID pid=<pid> epoch=<launch epoch s> stamp=<utc>" (temp file, then rename): the signal a watcher
+# starts from (ruling R6-A3.11.4; this script's stdout reaches its caller through a buffered pipe).
 param([Parameter(Mandatory = $true)][ValidateSet('menu', 'match')][string]$Mode,
       [Parameter(Mandatory = $true)][string]$Out)
 function St { (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
@@ -33,6 +36,13 @@ for ($i = 0; $i -lt 60 -and -not $procId; $i++) {
 }
 if (-not $procId) { echo "$(St) FT-VM-LAUNCH no ROUNDS process within 180 s"; exit 4 }
 echo "$(St) FT-VM-LAUNCH captured ROUNDS pid $procId"
+$pidFile = Join-Path (Split-Path -Parent $Out) "launch-$Mode.pid"
+try {
+    $epoch = ([DateTimeOffset]$t0).ToUnixTimeSeconds()
+    Set-Content -LiteralPath ($pidFile + '.tmp') -Value ("FT-VM-LAUNCH-PID pid={0} epoch={1} stamp={2}" -f $procId, $epoch, (St)) -Encoding ASCII
+    Move-Item -LiteralPath ($pidFile + '.tmp') -Destination $pidFile -Force
+    echo "$(St) FT-VM-LAUNCH pid file written: $pidFile"
+} catch { echo "$(St) FT-VM-LAUNCH pid file FAILED: $($_.Exception.Message)" }
 $seen = $false
 for ($i = 1; $i -le $polls; $i++) {
     Start-Sleep -Seconds 15
