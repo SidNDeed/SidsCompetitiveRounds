@@ -292,6 +292,12 @@ class Env:
         self.engine = sm.kw["bind"]
         self.sm = async_sessionmaker(self.engine, expire_on_commit=False, class_=RecSession)
         self.mp = mp
+        # Decision A7 made ADM_PRODUCTION_ENABLED True in main.py. Every case
+        # here was written for the False position (its queue rows carry
+        # ffa_adm1 by default, so the switch would turn every lock and re-form
+        # into an admission lobby); the case pins it, never the module default
+        # deciding. S57 sets each position itself.
+        mp.setattr(main, "ADM_PRODUCTION_ENABLED", False)
         self.now = None
         # Far past process start, so _in_match_evidence_trustworthy() holds and
         # no young-process veto depends on when the test runs.
