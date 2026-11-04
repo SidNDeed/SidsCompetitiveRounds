@@ -22,10 +22,19 @@ REHEARSAL-FOUR-R7-A1 M1, R7-A2).
    production path refuses earlier (those positions leave the read-only
    claim; each is a QUESTION in the hand-back). Each WRITERS position the
    drivers reach must equal WRITER_OUTCOME: refused (25006), the writer
-   proof by the role, or, for the two statements the role cannot refuse
-   (main.py:16839, a transaction-local set_config of lock_timeout, and
-   main.py:51703, pg_advisory_xact_lock), 'ok' as measured: writers by S
-   whose bound the role does not measure.
+   proof by the role, or, for the two statements the role cannot refuse,
+   the effect the harness measures: main.py:16839, a transaction-local
+   set_config of lock_timeout, ('continuity', the changed setting) by the
+   round-10 residue reading, and main.py:51703, pg_advisory_xact_lock,
+   ('lock', advisory) by the lock read.
+
+4. Transaction continuity (ruling REHEARSAL-R9-A1 (B)): every measured
+   position runs inside ro_covered's continuity bracket (a position token
+   and the virtual transaction id read at both ends, the session residue
+   compared); a position that is not the same transaction is an effect.
+   The controls plant every transaction-ending form, a changed token, a
+   restored token after a chain, residue, and a later position after a
+   chain (test_continuity_control).
 
 3. Grant run (ruling R-B). Each driver holding a COVERED position the
    role did not reach runs again on a READ WRITE session as the role, with
@@ -293,8 +302,8 @@ def _prepare(mp):
 
 
 async def _run_all(admin_dsn, clone, mp, only=None):
-    out = {"logs": {}, "locks": {}, "errors": {}, "checked": [], "identity_control": None,
-           "grant": None, "census": None, "harness_sites": []}
+    out = {"logs": {}, "locks": {}, "conts": {}, "pids": {}, "errors": {}, "checked": [],
+           "identity_control": None, "grant": None, "census": None, "harness_sites": []}
     clone_dsn = ro_role.dsn_for(admin_dsn, clone)
     async with cf_pg.case("rf8ro", dsn=clone_dsn) as (c, sm):
         env = cf_asm.Env(c, sm, mp)
@@ -323,6 +332,9 @@ async def _run_all(admin_dsn, clone, mp, only=None):
                         finally:
                             out["logs"][name] = list(db.info.get("log", []))
                             out["locks"][name] = list(db.info.get("locks", []))
+                            # REHEARSAL-R9-A1 (B): every position's continuity
+                            out["conts"][name] = list(db.info.get("continuity", []))
+                            out["pids"][name] = sorted(db.info.get("pids", ()))
                             await db.rollback()
                 finally:
                     await engine.dispose()
@@ -356,16 +368,28 @@ LOCK_TARGETS = frozenset(e[1:4] for e in ro_covered.COVERED + ro_covered.WRITERS
 
 class _Planting:
     """A control's session: at a production site named in
-    self.info['plant'] ({(file, line): sql}) the statement is replaced by the
-    planted SQL text (no parameters), the way the round-8 report changed
-    main.py:16871 and :16828; everything after (record, lock read, delta) is
-    the measuring session's own."""
+    self.info['plant'] ({(file, line): plant}) the statement the position
+    runs is the planted one, the way the round-8 report changed main.py:16871
+    and :16828 (main.py itself is never changed: the program a position runs
+    is the harness's input). A plant is SQL text (run with no parameters in
+    place of the production statement), or a planted PROGRAM: an async
+    callable (ex, statement, params) whose statements run at the position,
+    in its place, through `ex(sql_or_clause, params=None)`, and whose result
+    is the position's (round 10: COMMIT AND CHAIN, then the production
+    statement itself, so the program continues as written). Everything
+    around it (the continuity bracket, record, counters, lock read) is the
+    measuring session's own."""
 
-    async def execute(self, statement, params=None, **kw):
-        sql = self.info.get("plant", {}).get(ro_covered._site())
-        if sql is not None:
-            statement, params = text(sql), None
-        return await super().execute(statement, params, **kw)
+    async def run_statement(self, site, statement, params=None, **kw):
+        plant = self.info.get("plant", {}).get(site)
+        if plant is None:
+            return await super().run_statement(site, statement, params, **kw)
+        if callable(plant):
+            async def ex(sql, p=None):
+                return await AsyncSession.execute(
+                    self, text(sql) if isinstance(sql, str) else sql, p)
+            return await plant(ex, statement, params)
+        return await super().run_statement(site, text(plant), None)
 
 
 class PlantedRecording(_Planting, ro_covered.RecordingSession):
@@ -401,6 +425,120 @@ LOCK_CONTROLS = (
 )
 
 
+# ---- ruling REHEARSAL-R9-A1 (B): transaction continuity controls ----------
+#
+# Route (main.py unchanged): the planted statement or planted program runs at
+# the position through _Planting.run_statement, inside the measuring
+# session's continuity bracket. A planted program `_then_own(sql)` runs `sql`
+# and then the position's own production statement, so the program continues
+# exactly as written (the round-9 report's case: COMMIT AND CHAIN at
+# main.py:16828, the drivers then return normally).
+
+def _then_own(sql):
+    async def program(ex, statement, params):
+        await ex(sql)
+        return await ex(statement, params)
+    program.planted = sql
+    return program
+
+
+async def _token_restored(ex, statement, params):
+    """A program that reads the position token, ends the transaction with
+    COMMIT AND CHAIN, writes the token back into the new transaction, then
+    runs the production statement: the token reads back unchanged, so only
+    the virtual transaction id can refuse it."""
+    token = (await ex("SELECT pg_catalog.current_setting('rf10.position')")).scalar()
+    await ex("COMMIT AND CHAIN")
+    await ex(text("SELECT pg_catalog.set_config('rf10.position', :t, true)"), {"t": token})
+    return await ex(statement, params)
+
+
+async def _token_overwritten(ex, statement, params):
+    """A program that changes the position token in the SAME transaction:
+    only the token check can refuse it."""
+    await ex("SELECT pg_catalog.set_config('rf10.position', 'planted', true)")
+    return await ex(statement, params)
+
+
+PREPARED_GID = "rf10_ro_" + os.urandom(4).hex()
+E_16886 = _entry("main.py", 16886)
+LEASE_GRANT_TARGETS = [e for e in ro_covered.COVERED if e[4] == "_lease_admission_gate"
+                       and e[2] >= 16868]
+
+# Each control: (name, driver, entry, plant, grants or None, want). want is
+# 'continuity' (the run stayed 'ok' and the bracket refused it, with
+# `parts` all among the refusal's detail), or 'sqlstate' (the planted
+# statement was refused by the server; never green either way). Every
+# transaction-ending form of PostgreSQL 16 (COMMIT / END / ROLLBACK / ABORT,
+# each with WORK or TRANSACTION, AND CHAIN or AND NO CHAIN; PREPARE
+# TRANSACTION; COMMIT PREPARED and a DO block that commits, both refused
+# inside a transaction block) and the residue routes.
+CONTINUITY_CONTROLS = (
+    # the round-9 report's case, both drivers
+    ("commit_and_chain_at_16828_under_role", "main._lease_admission_gate empty", E_16828,
+     _then_own("COMMIT AND CHAIN"), None, ("continuity", {"token", "virtualxid"})),
+    ("commit_and_chain_at_16828_under_grant", "main._lease_admission_gate empty", E_16828,
+     _then_own("COMMIT AND CHAIN"), ("UPDATE players",), ("continuity", {"token", "virtualxid"})),
+    # the same case by the round-9 controls' own route: the position's
+    # statement replaced by the planted text (the program then fails on the
+    # result it expected; the position itself ran 'ok')
+    ("commit_and_chain_replaces_16828_under_role", "main._lease_admission_gate empty",
+     E_16828, "COMMIT AND CHAIN", None, ("continuity", {"token", "virtualxid"})),
+    ("commit_and_chain_replaces_16828_under_grant", "main._lease_admission_gate empty",
+     E_16828, "COMMIT AND CHAIN", ("UPDATE players",), ("continuity", {"token", "virtualxid"})),
+    # every ending form
+    ("commit_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("COMMIT"), None, ("continuity", {"token", "virtualxid"})),
+    ("commit_work_and_no_chain_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("COMMIT WORK AND NO CHAIN"), None, ("continuity", {"token", "virtualxid"})),
+    ("end_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("END"), None, ("continuity", {"token", "virtualxid"})),
+    ("end_transaction_and_chain_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("END TRANSACTION AND CHAIN"), None, ("continuity", {"token", "virtualxid"})),
+    ("rollback_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("ROLLBACK"), None, ("continuity", {"token", "virtualxid"})),
+    ("rollback_and_chain_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("ROLLBACK AND CHAIN"), None, ("continuity", {"token", "virtualxid"})),
+    ("abort_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("ABORT"), None, ("continuity", {"token", "virtualxid"})),
+    ("abort_work_and_chain_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("ABORT WORK AND CHAIN"), None, ("continuity", {"token", "virtualxid"})),
+    ("prepare_transaction_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("PREPARE TRANSACTION '%s'" % PREPARED_GID), None, ("continuity or sqlstate", set())),
+    ("commit_prepared_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("COMMIT PREPARED 'rf10_ro_absent'"), None, ("sqlstate", set())),
+    ("do_block_commit_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("DO $$ BEGIN COMMIT; END $$"), None, ("sqlstate", set())),
+    # each identity part decides alone
+    ("token_overwritten_at_16828", "main._lease_admission_gate empty", E_16828,
+     _token_overwritten, None, ("continuity", {"token"})),
+    ("token_restored_after_chain_at_16828", "main._lease_admission_gate empty", E_16828,
+     _token_restored, None, ("continuity", {"virtualxid"})),
+    # session residue, measured
+    ("plain_set_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("SET application_name = 'rf10_ro'"), None,
+     ("continuity", {"setting application_name=rf10_ro"})),
+    ("sql_prepare_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("PREPARE rf10_ro_p AS SELECT 1"), None, ("continuity", {"prepared 0->1"})),
+    ("holdable_cursor_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("DECLARE rf10_ro_c CURSOR WITH HOLD FOR SELECT 1"), None,
+     ("continuity", {"holdable cursors 0->1"})),
+    # a later position on a session an earlier position broke (under grant:
+    # 16871 ends the transaction 16851 locked; 16886 then runs, lock-clean
+    # and with a zero delta, in the replacement transaction)
+    ("chain_at_16871_then_16886_under_grant", "main._lease_admission_gate", E_16886,
+     _then_own("COMMIT AND CHAIN"), ("UPDATE players",),
+     ("continuity", {"after txn ended at main.py:16871"})),
+    # the negative control: the same bracket, nothing planted
+    ("unplanted_16828_under_role", "main._lease_admission_gate empty", E_16828,
+     None, None, ("ok", set())),
+)
+# The plant's site when it is not the measured entry's own; the measured
+# targets when they are more than the entry (the grant driver's positions).
+PLANT_AT = {"chain_at_16871_then_16886_under_grant": E_16871}
+CONTROL_TARGETS = {"chain_at_16871_then_16886_under_grant": LEASE_GRANT_TARGETS}
+
+
 async def _grants(admin, schema, grants, verb):
     for g in sorted(grants):
         priv, table = g.split()
@@ -433,13 +571,45 @@ async def _counted(role_dsn, schema, checked, drive, s, mp, targets, plant=None,
                 log = list(db.info.get("log", []))
                 deltas = list(db.info.get("deltas", []))
                 locks = list(db.info.get("locks", []))
-                await db.rollback()
+                conts = list(db.info.get("continuity", []))
+                try:
+                    await db.rollback()
+                except BaseException:   # noqa: BLE001 -- a planted end left no transaction
+                    pass
     finally:
         await engine.dispose()
-    return log, deltas, locks
+    return log, deltas, locks, conts
 
 
-MERGE_ORDER = {"refused under grant": 0, "lock under grant": 1}
+MERGE_ORDER = {"refused under grant": 0, "continuity under grant": 1, "lock under grant": 2}
+
+
+def _control_outcome(log, deltas, locks, conts, entry, grants):
+    """A control run's outcome at `entry`: under_grant's on a grant run;
+    on the read-only role session, ran_outcome's when every run of it
+    succeeded, else ('ran', outcomes)."""
+    if grants:
+        return ro_covered.under_grant(log, deltas, entry, list(grants), locks, conts)
+    outs = ro_covered.outcome_at(log, entry)
+    if outs and all(o == "ok" for o in outs):
+        return ro_covered.ran_outcome(outs, ro_covered.locks_at(locks, entry),
+                                      ro_covered.continuity_at(conts, entry))
+    return ("ran", outs)
+
+
+async def _prepared_left(role_dsn):
+    """A prepared transaction the PREPARE TRANSACTION control left (only on a
+    cluster with max_prepared_transactions > 0): rolled back on a role
+    connection (its owner), and reported."""
+    conn = await asyncpg.connect(role_dsn)
+    try:
+        left = await conn.fetchval(
+            "SELECT count(*) FROM pg_catalog.pg_prepared_xacts WHERE gid = $1", PREPARED_GID)
+        if left:
+            await conn.execute("ROLLBACK PREPARED '%s'" % PREPARED_GID)
+        return int(left)
+    finally:
+        await conn.close()
 
 
 def _merge(results):
@@ -479,14 +649,15 @@ async def _grant_runs(admin_dsn, clone, schema, s, mp):
             out["plan"][name] = sorted(grants)
             await _grants(admin, schema, grants, "GRANT")
             try:
-                log, deltas, locks = await _counted(role_dsn, schema, out["checked"],
-                                                    DRIVERS[name], s, mp,
-                                                    {e[1:4] for e in entries})
+                log, deltas, locks, conts = await _counted(
+                    role_dsn, schema, out["checked"], DRIVERS[name], s, mp,
+                    {e[1:4] for e in entries})
             finally:
                 await _grants(admin, schema, grants, "REVOKE")
+            out.setdefault("conts", {})[name] = conts
             for e in entries:
                 results[e].append(ro_covered.under_grant(log, deltas, e, sorted(grants),
-                                                         locks))
+                                                         locks, conts))
         out["results"] = {e: list(r) for e, r in results.items()}
         out["outcomes"] = {e: _merge(r) for e, r in results.items()}
         # E2 controls: a planted locking statement at a read position.
@@ -496,19 +667,33 @@ async def _grant_runs(admin_dsn, clone, schema, s, mp):
             if grants:
                 await _grants(admin, schema, set(grants), "GRANT")
             try:
-                log, deltas, locks = await _counted(
+                log, deltas, locks, conts = await _counted(
                     role_dsn, schema, out["checked"], DRIVERS[driver], s, mp,
                     {entry[1:4]}, plant=plant, read_write=bool(grants))
             finally:
                 if grants:
                     await _grants(admin, schema, set(grants), "REVOKE")
-            if grants:
-                got = ro_covered.under_grant(log, deltas, entry, list(grants), locks)
-            else:
-                outs = ro_covered.outcome_at(log, entry)
-                got = (ro_covered.ran_outcome(outs, ro_covered.locks_at(locks, entry))
-                       if outs and all(o == "ok" for o in outs) else ("ran", outs))
+            got = _control_outcome(log, deltas, locks, conts, entry, grants)
             out["lock_controls"][cname] = {"outcome": got, "log": log}
+        # REHEARSAL-R9-A1 (B): the continuity controls, same route.
+        out["continuity_controls"] = {}
+        for cname, driver, entry, prog, grants, _want in CONTINUITY_CONTROLS:
+            at = PLANT_AT.get(cname, entry)
+            plant = {at[1:3]: prog} if prog else None
+            targets = {e[1:4] for e in CONTROL_TARGETS.get(cname, [entry])}
+            if grants:
+                await _grants(admin, schema, set(grants), "GRANT")
+            try:
+                log, deltas, locks, conts = await _counted(
+                    role_dsn, schema, out["checked"], DRIVERS[driver], s, mp,
+                    targets, plant=plant, read_write=bool(grants))
+            finally:
+                if grants:
+                    await _grants(admin, schema, set(grants), "REVOKE")
+            got = _control_outcome(log, deltas, locks, conts, entry, grants)
+            out["continuity_controls"][cname] = {
+                "outcome": got, "log": log, "conts": conts,
+                "prepared_left": await _prepared_left(role_dsn)}
         save = os.environ.get("RO8_GRANT_SAVE")
         if save:
             with open(save, "w", encoding="utf-8") as fh:
@@ -573,6 +758,10 @@ def runs():
                                           got["grant_runs"]["results"].items()],
                         "lock_controls": {k: v["outcome"] for k, v in
                                           got["grant_runs"]["lock_controls"].items()},
+                        "continuity_controls": {
+                            k: {"outcome": v["outcome"], "conts": v["conts"]} for k, v in
+                            got["grant_runs"]["continuity_controls"].items()},
+                        "conts": got["conts"], "pids": got["pids"],
                     }, fh, indent=1, default=list)
             yield got
     finally:
@@ -587,14 +776,16 @@ def measured(runs, entry):
     sqlstate) naming the first refused statement of the drivers that hold
     the position's span; ('not reached', None, error) when no refusal
     explains it."""
-    outs, reads = [], []
+    outs, reads, conts = [], [], []
     for name, log in runs["logs"].items():
         outs += ro_covered.outcome_at(log, entry)
         reads += ro_covered.locks_at(runs["locks"].get(name, []), entry)
+        conts += ro_covered.continuity_at(runs["conts"].get(name, []), entry)
     if outs:
         bad = sorted({o for o in outs if o != "ok"})
-        # E2: every run succeeded; its lock reads decide 'ok' or ('lock', rows)
-        return ro_covered.ran_outcome(outs, reads) if not bad else bad[0]
+        # E2: every run succeeded; its continuity (REHEARSAL-R9-A1 (B)) and
+        # its lock reads decide 'ok', ('continuity', ...) or ('lock', rows)
+        return ro_covered.ran_outcome(outs, reads, conts) if not bad else bad[0]
     _walk, f, _line, _end, span = entry
     unexplained = None
     for name in DRIVERS:
@@ -714,6 +905,105 @@ def test_lock_control(runs, name):
     assert want <= set(rows), (got, want)
 
 
+# ------------------------------- REHEARSAL-R9-A1 (B): transaction continuity
+
+def _refused_parts(got):
+    """The continuity refusal's detail of a control outcome, or None when
+    the outcome is not a continuity refusal."""
+    if got and got[0] == "continuity":
+        return set(got[1])
+    if got and got[0] == "continuity under grant":
+        return set(got[2])
+    return None
+
+
+@pytest.mark.parametrize("name", [c[0] for c in CONTINUITY_CONTROLS])
+def test_continuity_control(runs, name):
+    """Ruling REHEARSAL-R9-A1 (B): a statement planted at a read position
+    that ends the transaction (every ending form), changes the position
+    token, or leaves session residue is refused as an effect by the
+    continuity bracket (the run itself succeeded: the refusal is the
+    bracket's), or is refused by the server; never green. Each identity
+    part refuses alone (token_overwritten: the token only;
+    token_restored_after_chain: the virtual transaction id only). A later
+    position on a session an earlier position broke is refused too. The
+    unplanted run is 'ok' (the negative control). No prepared transaction
+    is left behind."""
+    rec = runs["grant_runs"]["continuity_controls"][name]
+    got = rec["outcome"]
+    _n, _d, _e, _p, grants, (want, parts) = next(c for c in CONTINUITY_CONTROLS if c[0] == name)
+    assert rec["prepared_left"] == 0, rec
+    if want == "ok":
+        assert got == "ok" and ro_covered.green(got), got
+        assert rec["conts"] and all(c[2] for c in rec["conts"]), rec["conts"]
+        return
+    assert not ro_covered.green(got), got
+    refused = _refused_parts(got)
+    if want == "sqlstate":
+        assert got[0] == "ran" and got[1] and all(o != "ok" for o in got[1]), got
+        return
+    if want == "continuity or sqlstate":
+        assert refused is not None or (got[0] == "ran" and "55000" in got[1]), got
+        return
+    assert refused is not None, got
+    if grants:
+        assert got[1] == tuple(grants), got
+    assert parts <= refused, (got, parts)
+    if name in ("token_overwritten_at_16828", "token_restored_after_chain_at_16828"):
+        assert refused == parts, (got, parts)
+
+
+@pytest.mark.parametrize("driver", ["role", "grant", "replaces_role", "replaces_grant"])
+def test_r10_n_ro_covered_488_commit_and_chain_at_16828_refused(runs, driver):
+    """The round-9 report's case (ro_covered.py:488): `COMMIT AND CHAIN` at
+    main.py:16828 must not classify as a read; the lock and counter
+    measurements must not read the replacement transaction. Executed at the
+    control's route (a planted program at the position: COMMIT AND CHAIN,
+    then the position's own statement; main.py unchanged), under the
+    read-only role and under a grant: refused by the continuity bracket
+    (token and virtual transaction id both changed), never green, and the
+    lookup can never answer 'read' for it. The side control (RF/r10/ro,
+    r10-ro-neg-side-*.log) runs the same case on the round-9 harness:
+    admitted there ('ok' / ('ok-under-grant', grants, 0))."""
+    name = {"role": "commit_and_chain_at_16828_under_role",
+            "grant": "commit_and_chain_at_16828_under_grant",
+            "replaces_role": "commit_and_chain_replaces_16828_under_role",
+            "replaces_grant": "commit_and_chain_replaces_16828_under_grant"}[driver]
+    got = runs["grant_runs"]["continuity_controls"][name]["outcome"]
+    assert not ro_covered.green(got), got
+    assert {"token", "virtualxid"} <= (_refused_parts(got) or set()), got
+    # the same position unplanted stays a read: the refusal is the plant's
+    assert ro_covered.green(ro_covered.OUTCOME[E_16828])
+
+
+def test_r10_driver_connections_discarded(runs):
+    """REHEARSAL-R9-A1 (B), session residue: every driver ran its positions
+    on connections of its own (its NullPool engine is disposed after it),
+    never one another driver used: a connection a position ran on (its
+    backend pid with that backend's start time) is discarded, not reused."""
+    seen = {}
+    for name, pids in runs["pids"].items():
+        for pid in pids:
+            assert pid not in seen, (name, seen.get(pid), pid)
+            seen[pid] = name
+    assert seen, "no driver measured a position"
+
+
+def test_r10_every_position_is_bracketed(runs):
+    """Every successful run of every measured position on the role run has a
+    continuity record (a run with none is never 'ok': ran_outcome's
+    'unmeasured'), and every position the walks may read ('ok' in OUTCOME)
+    kept its transaction in every run."""
+    for name, log in runs["logs"].items():
+        conts = runs["conts"].get(name, [])
+        oks = [e for e in log if e[2] == "ok" and ro_covered._in(e[:2], LOCK_TARGETS)]
+        assert len(conts) == len(oks), (name, len(conts), len(oks))
+    for e in ro_covered.COVERED:
+        if ro_covered.OUTCOME[e] == "ok":
+            got = [c for n in runs["conts"] for c in ro_covered.continuity_at(runs["conts"][n], e)]
+            assert got and all(same for same, _d in got), (e, got)
+
+
 # ---------------------------------------------- E3: a refusal is never merged away
 
 def test_merge_keeps_a_refusal_unproven():
@@ -762,7 +1052,9 @@ G1_PLANTED = (
     ("constructed_getattr",
      ("append", "\nasync def _planted(driver):\n"
                 "    return await getattr(driver, 'con' + 'nect')(DSN)\n"),
-     {("dynamic", "getattr(driver, 'con' + 'nect')")}, True),
+     {("dynamic", "getattr(driver, 'con' + 'nect')"),
+      # round 10: the call of getattr's result is a constructed callee
+      ("constructed", "getattr(driver, 'con' + 'nect')(DSN)")}, True),
     ("positional_dsn",
      ("replace", CENSUS_CALL, "admin = await _asyncpg.connect(ADMIN_DSN)"),
      {("call", "_asyncpg.connect(ADMIN_DSN)")}, True),
@@ -782,7 +1074,9 @@ G1_PLANTED = (
     ("vars_lookup",
      ("append", "\nasync def _planted():\n"
                 "    return await vars(_asyncpg)['con' + 'nect'](DSN)\n"),
-     {("dynamic", "vars(_asyncpg)")}, True),
+     {("dynamic", "vars(_asyncpg)"),
+      # round 10: the call of a subscript is a constructed callee
+      ("constructed", "vars(_asyncpg)['con' + 'nect'](DSN)")}, True),
 )
 
 
@@ -828,14 +1122,254 @@ def test_census_complete_layer_frozen_whole():
     import test_r7_ro_role_pg as r7
     coarse = {k for k in fz.FROZEN if not k.endswith(ro_census.COMPLETE)}
     complete = {k for k in fz.FROZEN if k.endswith(ro_census.COMPLETE)}
+    # round 10: the R10 kinds join each file's complete layer
+    assert set(fz.R10_FROZEN) == complete
     # every census file has a complete layer (empty or not); the coarse
     # freeze lists only the files with a coarse form
     assert complete == {k + ro_census.COMPLETE for k in r7.CENSUS_FILES}
     assert coarse <= set(r7.CENSUS_FILES)
     assert sum(len(fz.FROZEN[k]) for k in coarse) == fz.COARSE_COUNT == 363
-    assert sum(len(fz.FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT
-    assert fz.FROZEN_COUNT == fz.COARSE_COUNT + fz.COMPLETE_COUNT
+    assert sum(len(fz.COMPLETE_FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT == 218
+    assert sum(len(fz.R10_FROZEN[k]) for k in complete) == fz.R10_COUNT == 114
+    assert sum(len(fz.FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT + fz.R10_COUNT
+    assert fz.FROZEN_COUNT == fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
+    assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
+    # the declared forwarding wrapper is bound whole, exactly once
+    assert [f for f in fz.FROZEN["api/database.py" + ro_census.COMPLETE]
+            if f[0] == "wrapper" and f[1].startswith(
+                "def create_async_engine(url, **options):")] == [
+        ("wrapper", "def create_async_engine(url, **options):\n"
+                    "    return _sqlalchemy_create_async_engine(url, hide_parameters=True,"
+                    " **options)")]
     for (rel, call) in ro_census.FORWARDING:
         assert list(map(tuple, fz.FROZEN[rel + ro_census.COMPLETE])).count(
             ("call", call)) == 1, (rel, call)
+
+
+# ------------------------- REHEARSAL-R9-A1 (C): refuse by default, the census
+
+R10_KINDS = ("constructed", "alias", "wrapper", "argdef")
+DB_REL = "api/database.py"
+LADDER_REL = "tests/ladder_pg_harness.py"
+POOL_REL = "tests/cf_pool.py"
+WRAPPER_HEAD = "def create_async_engine(url, **options):\n    return _sqlalchemy"
+ASM_UPDATE = "    args.update(connect_args)\n"
+ASM_DEF = "def make_asm_engine(url=DATABASE_URL, **connect_args):"
+
+
+def _wrapper_of(rel, name):
+    """The frozen wrapper form of function `name` in `rel`."""
+    import ro_census
+    import ro_census_frozen as fz
+    heads = ("def %s(" % name, "async def %s(" % name)
+    got = [f for f in fz.FROZEN[rel + ro_census.COMPLETE]
+           if f[0] == "wrapper" and any(line.startswith(heads)
+                                        for line in f[1].split("\n")[:3])]
+    assert len(got) == 1, (rel, name, got)
+    return tuple(got[0])
+
+
+# Each row: (name, file, change (('replace', old, new) once, or ('append',
+# program)), the complete-layer forms the change must ADD, the forms it must
+# REMOVE, whether the coarse layer stays unchanged). An added wrapper is
+# written ('wrapper', '~' + a text the one added wrapper must contain).
+R10_PLANTED = (
+    # (C) constructed callees: each refuses unless its exact form is frozen
+    ("constructed_call_result", CENSUS_REL,
+     ("append", "\nasync def _planted(factory):\n    return await factory()(DSN)\n"),
+     {("constructed", "factory()(DSN)")}, set(), True),
+    ("constructed_subscript", CENSUS_REL,
+     ("append", "\nasync def _planted(table):\n    return await table['pg'](DSN)\n"),
+     {("constructed", "table['pg'](DSN)")}, set(), True),
+    ("constructed_dunder_call", CENSUS_REL,
+     ("append", "\nasync def _planted(opener):\n    return await opener.__call__(DSN)\n"),
+     {("constructed", "opener.__call__(DSN)")}, set(), True),
+    ("constructed_boolean", CENSUS_REL,
+     ("append", "\nasync def _planted(a, b):\n    return await (a or b)(DSN)\n"),
+     {("constructed", "(a or b)(DSN)")}, set(), True),
+    # (C) aliases of a dynamic-access name or of an opener
+    ("alias_import_from_builtins", CENSUS_REL,
+     ("append", "\nfrom builtins import getattr as pick\n"),
+     {("alias", "from builtins import getattr as pick")}, set(), True),
+    ("alias_import_builtins", CENSUS_REL,
+     ("append", "\nimport builtins\n"),
+     {("alias", "import builtins")}, set(), True),
+    ("alias_assign_getattr", CENSUS_REL,
+     ("append", "\npick = getattr\n"),
+     {("alias", "pick = getattr")}, set(), True),
+    ("alias_attribute_getattr", CENSUS_REL,
+     ("append", "\npick = builtins_mod.getattr\n"),
+     {("alias", "pick = builtins_mod.getattr")}, set(), True),
+    ("alias_builtins_table", CENSUS_REL,
+     ("append", "\nasync def _planted():\n"
+                "    return await __builtins__['getattr'](_asyncpg, 'con' + 'nect')(DSN)\n"),
+     {("alias", "__builtins__['getattr']"), ("alias", "str getattr"),
+      ("constructed", "__builtins__['getattr'](_asyncpg, 'con' + 'nect')"),
+      ("constructed", "__builtins__['getattr'](_asyncpg, 'con' + 'nect')(DSN)")}, set(), True),
+    ("alias_globals_key", CENSUS_REL,
+     ("append", "\nasync def _planted():\n"
+                "    return await globals()['getattr'](_asyncpg, 'con' + 'nect')(DSN)\n"),
+     {("dynamic", "globals()"), ("alias", "str getattr"),
+      ("constructed", "globals()['getattr'](_asyncpg, 'con' + 'nect')"),
+      ("constructed", "globals()['getattr'](_asyncpg, 'con' + 'nect')(DSN)")}, set(), True),
+    ("alias_attribute_vars", CENSUS_REL,
+     ("append", "\nasync def _planted(b):\n"
+                "    return await b.vars(_asyncpg)['con' + 'nect'](DSN)\n"),
+     {("alias", "b.vars(_asyncpg)"),
+      ("constructed", "b.vars(_asyncpg)['con' + 'nect'](DSN)")}, set(), True),
+    ("alias_rebinding_def", CENSUS_REL,
+     ("append", "\ndef getattr(o, n):\n    return o\n"),
+     {("alias", "def getattr")}, set(), True),
+    ("alias_parameter", CENSUS_REL,
+     ("append", "\ndef _planted(getattr=None):\n    return getattr\n"),
+     {("alias", "arg getattr"), ("alias", "return getattr")}, set(), True),
+    # (C) the forwarding wrapper bound whole, and a forwarded argument's
+    # local definition
+    ("wrapper_local_definition", DB_REL,
+     ("replace", ASM_UPDATE, ASM_UPDATE + "    args['user'] = 'scr_gate'\n"),
+     {("wrapper", "~args['user'] = 'scr_gate'")}, {"make_asm_engine"}, True),
+    ("wrapper_signature_default", DB_REL,
+     ("replace", ASM_DEF, ASM_DEF.replace("DATABASE_URL", "ADMIN_URL")),
+     {("wrapper", "~def make_asm_engine(url=ADMIN_URL, **connect_args):")},
+     {"make_asm_engine"}, True),
+    # (C) the definitions of a forwarded module-scope name
+    ("argdef_module_rebinding", CENSUS_REL,
+     ("append", "\nDSN = DSN_ALT\n"),
+     {("argdef", "DSN <- DSN = DSN_ALT")}, set(), True),
+    ("argdef_augmented", DB_REL,
+     ("append", "\nDATABASE_URL += '?options=x'\n"),
+     {("argdef", "DATABASE_URL <- DATABASE_URL += '?options=x'")}, set(), True),
+    ("argdef_mutated_definition", LADDER_REL,
+     ("append", "\nasync_dsn.__defaults__ = ('x',)\n"),
+     {("argdef", "async_dsn <- async_dsn.__defaults__ = ('x',)")}, set(), True),
+    ("argdef_global_function", CENSUS_REL,
+     ("append", "\ndef _planted(x):\n    global DSN\n    DSN = x\n"),
+     {("argdef", "DSN <- def _planted(x):\n    global DSN\n    DSN = x")}, set(), True),
+    ("argdef_method_mutation", POOL_REL,
+     ("append", "\ncf_pg.DSN_PARTS.update(host='h')\n"),
+     {("argdef", "cf_pg <- cf_pg.DSN_PARTS.update(host='h')")}, set(), False),
+)
+
+
+def _r10_planted_diff(rel, change):
+    """(added, removed, coarse diff, unplanted diff) of one planted change
+    against the frozen census of `rel`."""
+    import ro_census
+    import ro_census_frozen
+    with open(os.path.join(HERE, "..", rel), encoding="utf-8") as fh:
+        src = fh.read()
+    if change[0] == "replace":
+        assert src.count(change[1]) == 1, change[1]
+        planted = src.replace(change[1], change[2], 1)
+    else:
+        planted = src + change[1]
+    key = rel + ro_census.COMPLETE
+    frozen = {k: ro_census_frozen.FROZEN[k] for k in (rel, key) if k in ro_census_frozen.FROZEN}
+    frozen.setdefault(rel, [])
+    refused = ro_census.diff(ro_census.file_forms(rel, planted), frozen)
+    added = {r[2:] for r in refused if r[0] == key and r[1] == "+"}
+    removed = {r[2:] for r in refused if r[0] == key and r[1] == "-"}
+    coarse = [r for r in refused if r[0] == rel]
+    clean = ro_census.diff(ro_census.file_forms(rel, src), frozen)
+    return added, removed, coarse, clean
+
+
+@pytest.mark.parametrize("name", [p[0] for p in R10_PLANTED])
+def test_r10_census_refuses_by_default(name):
+    """Ruling REHEARSAL-R9-A1 (C): each planted form adds exactly the row's
+    round-10 forms to the complete layer (refused: the freeze lacks them) and
+    removes exactly the row's frozen wrappers; where the row says so, the
+    coarse layer is unchanged (it alone would have accepted the form)."""
+    _n, rel, change, want_add, want_removed, coarse_same = next(
+        p for p in R10_PLANTED if p[0] == name)
+    added, removed, coarse, clean = _r10_planted_diff(rel, change)
+    exact = {f for f in want_add if not (f[0] == "wrapper" and f[1].startswith("~"))}
+    loose = [f[1][1:] for f in want_add if f[0] == "wrapper" and f[1].startswith("~")]
+    got_loose = [f for f in added if f[0] == "wrapper"]
+    rest = added - set(got_loose) if loose else added
+    assert rest == exact, ("the planted form is not refused as the row requires",
+                           added, want_add)
+    if loose:
+        assert len(got_loose) == len(loose) and all(
+            any(t in f[1] for f in got_loose) for t in loose), (got_loose, loose)
+    assert removed == {_wrapper_of(rel, n) for n in want_removed}, (removed, want_removed)
+    if coarse_same:
+        assert coarse == [], coarse
+    assert clean == [], clean
+
+
+def test_r10_n_ro_census_199_dynamic_alias_opener():
+    """The round-9 report's case (ro_census.py:199): `from builtins import
+    getattr as pick` followed by `await pick(_asyncpg, 'con' + 'nect')(DSN,
+    **{'user':'scr_gate'})` must refuse as an unfrozen opener. Planted into
+    tests/cf_pg.py's text: the coarse layer is unchanged (the finding: no
+    form at round 9 in either layer) and the complete layer adds exactly the
+    import alias and the constructed callee, both refused. The side control
+    (r10-ro-neg-side-census-*.log) records the case admitted by the round-9
+    census (no form in either layer)."""
+    program = ("\nfrom builtins import getattr as pick\n\nasync def _planted():\n"
+               "    return await pick(_asyncpg, 'con' + 'nect')(DSN, **{'user':'scr_gate'})\n")
+    added, removed, coarse, clean = _r10_planted_diff(CENSUS_REL, ("append", program))
+    assert added == {
+        ("alias", "from builtins import getattr as pick"),
+        ("constructed", "pick(_asyncpg, 'con' + 'nect')(DSN, **{'user': 'scr_gate'})")}, added
+    assert removed == set() and coarse == [] and clean == [], (removed, coarse, clean)
+
+
+def test_r10_n_ro_census_193_forwarding_connect_args():
+    """The round-9 report's case (ro_census.py:193): adding
+    `options['connect_args']={'user':'scr_gate'}` inside
+    `database.create_async_engine` must refuse. Planted into
+    api/database.py's text: the coarse layer is unchanged and the FORWARDING
+    call keeps its frozen `call` form (the finding), but the wrapper bound
+    whole changes: its frozen form is missing and the changed one is added,
+    both refused. The side control records it admitted by the round-9
+    census."""
+    planted = WRAPPER_HEAD.replace(
+        ":\n    return", ":\n    options['connect_args']={'user':'scr_gate'}\n    return")
+    added, removed, coarse, clean = _r10_planted_diff(DB_REL, ("replace", WRAPPER_HEAD, planted))
+    assert removed == {_wrapper_of(DB_REL, "create_async_engine")}, removed
+    assert len(added) == 1 and next(iter(added))[0] == "wrapper" and (
+        "options['connect_args'] = {'user': 'scr_gate'}" in next(iter(added))[1]), added
+    assert coarse == [] and clean == [], (coarse, clean)
+
+# ---- SWEEP (E), round 10 child ro: the counted operation sites ----
+#
+# Ruling REHEARSAL-R9-A1 (E): every presence check of a transaction in
+# ro_covered.py and in this file above this mark (every lock read, counter
+# read, continuity read, catalog read, outcome computed from a read, and
+# every transaction end or presence test), and every callee classification
+# site and forwarding binding in ro_census.py, counted by its operation
+# (comments excluded). Each site and its disposition (fixed, or hold with the
+# reason) is listed in RF/r10/ro/NOTES-r10-ro.md (the sweep table); a new
+# site changes a count and fails here until the table and these counts are
+# changed together by a reviewed edit.
+SWEEP_TXN = {'lock read': 'LOCKS_SQL|lock_read\\(', 'counter read': 'WRITES_SQL|\\.writes\\(\\)', 'continuity read': 'POSITION_(?:START|END)_SQL|RESIDUE_SQL|position_(?:start|end)\\(|\\.residue\\(\\)', 'catalog read': 'pg_locks|pg_stat_xact|pg_settings|pg_prepared_statements|pg_cursors|pg_listening_channels|pg_my_temp_schema|pg_prepared_xacts', 'outcome from a read': 'ran_outcome\\(|lock_outcome\\(|under_grant\\(|broken_continuity\\(|continuity_at\\(|locks_at\\(', 'transaction end or presence': 'rollback\\(|commit\\(|in_transaction|get_transaction|\\.begin\\('}
+SWEEP_CALLEE = {'callee read': '\\.func\\b', 'callee name': '_name_of\\(|_dotted\\(', 'callee class': '_constructed\\(|_classified_callee\\(|CLASSIFIED_(?:NAME|ATTR)_CALLS', 'call node': 'ast\\.Call\\b', 'forwarding binding': 'FORWARDING|_forwarding\\(|_arg_names\\(|_binds\\(|_stmt_binds\\(|_stmt_mutates\\(|_module_statements\\(|_own_nodes\\('}
+SWEEP_COUNTS = {'ro_covered.py': {'lock read': 5, 'counter read': 4, 'continuity read': 12, 'catalog read': 11, 'outcome from a read': 12, 'transaction end or presence': 0}, 'test_r8_ro_covered_pg.py': {'lock read': 0, 'counter read': 2, 'continuity read': 0, 'catalog read': 1, 'outcome from a read': 10, 'transaction end or presence': 3}, 'ro_census.py': {'callee read': 10, 'callee name': 9, 'callee class': 10, 'call node': 5, 'forwarding binding': 17}}
+
+
+def _sweep_code(name):
+    import io
+    import tokenize
+    with open(os.path.join(HERE, name), encoding="utf-8") as fh:
+        src = fh.read()
+    if SWEEP_MARK in src:
+        src = src[:src.index(SWEEP_MARK)]
+    toks = [t for t in tokenize.generate_tokens(io.StringIO(src).readline)
+            if t.type != tokenize.COMMENT]
+    return tokenize.untokenize(toks)
+
+
+SWEEP_MARK = "# ---- SWEEP (E), round 10 child ro: " + "the counted operation sites ----"
+
+
+@pytest.mark.parametrize("name", sorted(SWEEP_COUNTS))
+def test_r10_sweep_counts(name):
+    """(E): the operation counts equal the swept table's."""
+    import re
+    pats = SWEEP_CALLEE if name == "ro_census.py" else SWEEP_TXN
+    text = _sweep_code(name)
+    got = {k: len(re.findall(v, text)) for k, v in pats.items()}
+    assert got == SWEEP_COUNTS[name], (name, got, SWEEP_COUNTS[name])
