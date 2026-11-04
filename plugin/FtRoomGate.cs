@@ -22,8 +22,9 @@ namespace CompetitiveRounds
     /// - NetworkConnectionHandler: QuickMatch and JoinRandomRoom (void), PlayOnBestActiveRegion and DoRetry
     ///   (coroutines). The coroutines are refused at entry, so the LeaveRoom each one starts with never runs.
     /// Patch-time signal: one line, "[FRAME-TIME] FT-GATE patched N entry points expected=E", where N is
-    /// counted from Harmony's own patch table (a prefix owned by this plugin on each target), not from the list.
-    /// The timer half (ii) is FtChurnFreezePatch below.</summary>
+    /// counted from Harmony's own patch table: a target counts only when that table lists the gate's own prefix
+    /// method for it, by identity (R6-A3.11.1 (4)). The same line carries the leave gate's count
+    /// (FtRoomGateNchLeavePatch, R6-A3.11.1 (1)). The timer half (ii) is FtChurnFreezePatch below.</summary>
     internal static class FtRoomGate
     {
         /// <summary>The names the sweep returns that enter no room, kept out of the gate on purpose.</summary>
@@ -91,37 +92,72 @@ namespace CompetitiveRounds
         /// plugin's Harmony id in Harmony's own table, and logs the one patch-time line.</summary>
         internal static void ReportPatched()
         {
-            int expected = 0, patched = 0;
+            // Each target is paired with the ONE prefix method that must guard it, and it counts only when Harmony's
+            // patch table lists that very method (same module, same metadata token) among its prefixes. Any other
+            // prefix on the same target (VanillaFixes, the quickplay guards, all owned by this plugin's id) does
+            // not count (ruling R6-A3.11.1 (4)).
             var missing = new List<string>();
-            var all = new List<MethodBase>();
-            List<string> excluded;
-            try { all.AddRange(SweepPun(out excluded)); } catch (Exception ex) { excluded = new List<string>(); missing.Add("sweep: " + ex.Message); }
-            foreach (var names in new[] { NchVoid, NchRoutine })
-                foreach (var n in names)
-                {
-                    var m = AccessTools.Method(typeof(NetworkConnectionHandler), n);
-                    if (m == null) missing.Add("NCH." + n + " (absent)"); else all.Add(m);
-                }
-            foreach (var m in all)
+            var entry = new List<KeyValuePair<MethodBase, MethodInfo>>();
+            var leave = new List<KeyValuePair<MethodBase, MethodInfo>>();
+            List<string> excluded = new List<string>();
+            MethodInfo punPre = PrefixOf(typeof(FtRoomGatePunPatch)), voidPre = PrefixOf(typeof(FtRoomGateNchVoidPatch)),
+                routinePre = PrefixOf(typeof(FtRoomGateNchRoutinePatch)), leavePre = PrefixOf(typeof(FtRoomGateNchLeavePatch));
+            try { foreach (var m in SweepPun(out excluded)) entry.Add(new KeyValuePair<MethodBase, MethodInfo>(m, punPre)); }
+            catch (Exception ex) { missing.Add("sweep: " + ex.Message); }
+            foreach (var n in NchVoid) AddNamed(entry, n, voidPre, missing);
+            foreach (var n in NchRoutine) AddNamed(entry, n, routinePre, missing);
+            try { foreach (var m in LeaveTargets()) leave.Add(new KeyValuePair<MethodBase, MethodInfo>(m, leavePre)); }
+            catch (Exception ex) { missing.Add("leave: " + ex.Message); }
+            int patched = CountGuarded(entry, missing), leaveGuarded = CountGuarded(leave, missing);
+            Plugin.Log.LogInfo("[FRAME-TIME] FT-GATE patched " + patched + " entry points expected=" + entry.Count
+                + " leave=" + leaveGuarded + " expected_leave=" + leave.Count
+                + " excluded=" + string.Join(",", excluded.ToArray())
+                + (missing.Count == 0 ? "" : " missing=" + string.Join(",", missing.ToArray())));
+        }
+
+        private static MethodInfo PrefixOf(Type t)
+        {
+            return t.GetMethod("Prefix", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly);
+        }
+
+        private static void AddNamed(List<KeyValuePair<MethodBase, MethodInfo>> list, string n, MethodInfo pre, List<string> missing)
+        {
+            var m = AccessTools.Method(typeof(NetworkConnectionHandler), n);
+            if (m == null) missing.Add("NCH." + n + " (absent)"); else list.Add(new KeyValuePair<MethodBase, MethodInfo>(m, pre));
+        }
+
+        private static int CountGuarded(List<KeyValuePair<MethodBase, MethodInfo>> list, List<string> missing)
+        {
+            int n = 0;
+            foreach (var kv in list)
             {
-                expected++;
                 bool ours = false;
                 try
                 {
-                    var info = Harmony.GetPatchInfo(m);
+                    MethodInfo want = kv.Value;
+                    var info = want != null ? Harmony.GetPatchInfo(kv.Key) : null;
                     if (info != null)
                         foreach (var p in info.Prefixes)
-                            if (p.owner == Plugin.ModId && p.PatchMethod != null
-                                && p.PatchMethod.DeclaringType != null
-                                && p.PatchMethod.DeclaringType.Name.StartsWith("FtRoomGate", StringComparison.Ordinal))
+                            if (p.PatchMethod != null && p.PatchMethod.Module == want.Module
+                                && p.PatchMethod.MetadataToken == want.MetadataToken)
                             { ours = true; break; }
                 }
                 catch { }
-                if (ours) patched++; else missing.Add(m.DeclaringType.Name + "." + m.Name);
+                if (ours) n++; else missing.Add(kv.Key.DeclaringType.Name + "." + kv.Key.Name);
             }
-            Plugin.Log.LogInfo("[FRAME-TIME] FT-GATE patched " + patched + " entry points expected=" + expected
-                + " excluded=" + string.Join(",", excluded.ToArray())
-                + (missing.Count == 0 ? "" : " missing=" + string.Join(",", missing.ToArray())));
+            return n;
+        }
+
+        /// <summary>The leave points ruled in by the R6-A3.11.1 sweep: NetworkConnectionHandler.DoDisconnect (both
+        /// overloads). OnPlayerLeftRoom (NCH:556) starts it with no action by this seat, and it reaches
+        /// NetworkRestart, whose WaitForRestart leaves the room (NCH:630) and disconnects (NCH:638).</summary>
+        internal static List<MethodBase> LeaveTargets()
+        {
+            var list = new List<MethodBase>();
+            foreach (var m in AccessTools.GetDeclaredMethods(typeof(NetworkConnectionHandler)))
+                if (m.Name == "DoDisconnect") list.Add(m);
+            if (list.Count == 0) throw new MissingMethodException("NetworkConnectionHandler", "DoDisconnect");
+            return list;
         }
 
         internal static IEnumerator Empty() { yield break; }
@@ -181,6 +217,28 @@ namespace CompetitiveRounds
             if (!FtConfig.Present) return true;
             try { if (__instance != null) __instance.untilTryOtherRegionCounter = float.MaxValue; } catch { }
             FtRoomGate.Admit("NCH." + __originalMethod.Name, null);
+            __result = FtRoomGate.Empty();
+            return false;
+        }
+    }
+
+    /// <summary>F8 leave gate (ruling R6-A3.11.1 (1)): while a sitting runs and the seat is in a room, vanilla's
+    /// DoDisconnect is refused at entry. OnPlayerLeftRoom starts it when another actor leaves, and it ends in
+    /// NetworkRestart's LeaveRoom and Disconnect. So the seat stays in its room; the sitting's own NetworkRestart
+    /// (FtDrive.GameOver) is not touched. Out of a room (OnDisconnected after a drop) vanilla runs unchanged: there
+    /// is no room to leave and it only returns to the menu.</summary>
+    [HarmonyPatch]
+    internal static class FtRoomGateNchLeavePatch
+    {
+        private static IEnumerable<MethodBase> TargetMethods() { return FtRoomGate.LeaveTargets(); }
+
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix(MethodBase __originalMethod, ref IEnumerator __result)
+        {
+            if (!FtConfig.Present || !PhotonNetwork.InRoom) return true;
+            string room = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null;
+            FtRoomGate.Admit("NCH." + __originalMethod.Name, room == null ? null : "leave:" + room);
             __result = FtRoomGate.Empty();
             return false;
         }
