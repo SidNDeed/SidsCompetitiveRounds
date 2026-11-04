@@ -1617,7 +1617,7 @@ async def _measure_in(dsn, program, schema):
                "internal_not_enabled": await _internal_not_enabled(conn=conn),
                "ended": ended, "xid": seen["xid"], "outside": None}
         if not ended:
-            out["outside"] = sorted(ca.keys(cd.diff(shared, await ca.outside(conn))))
+            out["outside"] = sorted(ca.keys(ca.outside_diff(shared, await ca.outside(conn))))
         return out
     finally:
         await tr.rollback()
@@ -2198,9 +2198,15 @@ def test_r10_plant_decision_admits_any_rf10_role_and_skips_a_seat_admin():
     a seat administrator (not a superuser, not rf10_*) is skipped with the
     stated reason; a superuser with no rf10_* R10_CAT_ROLE fails; no seat
     object, administrator or other role is ever returned."""
-    assert _plant_decision("rf10_w30b_gate", False, "") == "rf10_w30b_gate"
-    assert _plant_decision("rf10_cat_gate", False, "rf10_cat_pw_1") == "rf10_cat_gate"
-    assert _plant_decision("postgres", True, "rf10_w30b_pw_1") == "rf10_w30b_pw_1"
+    def admitted(me, superuser, named):
+        try:
+            return _plant_decision(me, superuser, named)
+        except pytest.skip.Exception as e:
+            pytest.fail("an admitted case was skipped as a seat administrator: %s" % e)
+
+    assert admitted("rf10_w30b_gate", False, "") == "rf10_w30b_gate"
+    assert admitted("rf10_cat_gate", False, "rf10_cat_pw_1") == "rf10_cat_gate"
+    assert admitted("postgres", True, "rf10_w30b_pw_1") == "rf10_w30b_pw_1"
     for seat_admin in ("scr_gate", "scr_seat_ro"):
         with pytest.raises(pytest.skip.Exception) as e:
             _plant_decision(seat_admin, False, "rf10_w30b_pw_1")
@@ -2345,7 +2351,10 @@ def _r10_identity_cases(chain, alone):
       in place: the row changed in a listed column (indisclustered) with
         players_pkey's own index object unchanged: unexplained; with that
         object changed too: explained (control);
-      whole: the row added with no object of its identity: unexplained."""
+      whole: the row added with no object of its identity: unexplained;
+      unlisted: the row changed in place in a column IN_PLACE lists for no
+        kind (indislive), with players_pkey's own object changed too:
+        unexplained (no object renders that column)."""
     pk = asyncio.run(_r10_pk_oid(chain.dsn))
     mine = [r for r in alone["after"] if r[0] == "raw" and r[2] == "pg_index" and r[5][1] == pk]
     assert mine, ("no pg_index raw row of players_pkey", pk)
@@ -2368,11 +2377,22 @@ def _r10_identity_cases(chain, alone):
                                                        + [("removed", "pg_index")] * rows), got
     control = {"added": in_place["added"] + obj, "removed": in_place["removed"]}
     assert ca.unexplained(control) == [], ca.unexplained(control)
+    j = cols.index("indislive")
+    live = []
+    for r in mine:
+        f = ca.fields(r[3])
+        f[j] = "f" if f[j] == "t" else "t"
+        live.append(r[:3] + (_r10_row_text(f),) + r[4:])
+    assert ca.changed_columns("pg_index", mine[0][3], live[0][3]) == ["indislive"]
+    unlisted = {"added": base["added"] + live + obj, "removed": base["removed"] + mine}
+    got = ca.unexplained(unlisted)
+    assert sorted((u[0], u[1]) for u in got) == sorted([("added", "pg_index")] * rows
+                                                       + [("removed", "pg_index")] * rows), got
     whole = {"added": base["added"] + mine, "removed": base["removed"]}
     got = ca.unexplained(whole)
     assert sorted((u[0], u[1]) for u in got) == [("added", "pg_index")] * rows, got
-    print("r10 catalog_all.py:532 identity cases: in place %d unexplained, control 0, whole %d unexplained"
-          % (2 * rows, rows))
+    print("r10 catalog_all.py:532 identity cases: in place %d unexplained, control 0, unlisted %d "
+          "unexplained, whole %d unexplained" % (2 * rows, 2 * rows, rows))
 
 
 def test_r10_n_catalog_all_532_explanation_bound_to_identity(chain):
@@ -2427,6 +2447,51 @@ def test_r10_routes_state_this_run(chain):
     else:
         assert "rolpassword" not in q, q[:400]
     assert rows and not [x for x in rows if "SCRAM-SHA-256$" in x], len(rows)
+
+
+async def _r10_outside_across_drop(db, program):
+    """One REPEATABLE READ position on the admin database: outside() read,
+    the position's program run, database <db> dropped by ANOTHER backend,
+    outside() read again. (the plain set difference's catalogs,
+    outside_diff()'s catalogs)."""
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        async with conn.transaction(isolation="repeatable_read"):
+            before = await ca.outside(conn)
+            if program:
+                await conn.execute(program)
+            await _drop_db(db)
+            after = await ca.outside(conn)
+            plain = sorted(ca.keys({"added": sorted(after - before), "removed": sorted(before - after)}))
+            return plain, sorted(ca.keys(ca.outside_diff(before, after)))
+    finally:
+        await conn.close()
+
+
+@pytest.mark.parametrize("program", ("", "ALTER DATABASE {other} CONNECTION LIMIT 7"))
+def test_r10_outside_discounts_another_backends_drop_database(program):
+    """PostgreSQL 16 DROP DATABASE marks the row invalid (datconnlimit -2) by
+    an in-place update, visible inside the position's REPEATABLE READ
+    snapshot; the record run of a5d71da0 read a concurrent lane's drop as the
+    position's own 'SHARED:pg_database'. outside() leaves invalid rows out
+    and outside_diff() discounts the removal that leaves; a change the
+    position makes to another database's row (the second case, an ALTER
+    DATABASE on a database it owns) is still reported."""
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
+    prefix = os.environ.get("D2_DB_PREFIX", "d2catalog")
+    db = ("%s_inplace_%s_%d" % (prefix, stamp, os.getpid())).lower()
+    other = ("%s_other_%s_%d" % (prefix, stamp, os.getpid())).lower()
+    asyncio.run(_admin('CREATE DATABASE "%s"' % db))
+    asyncio.run(_admin('CREATE DATABASE "%s"' % other))
+    try:
+        plain, got = asyncio.run(_r10_outside_across_drop(db, program.format(other='"%s"' % other)))
+    finally:
+        asyncio.run(_drop_db(db))
+        asyncio.run(_drop_db(other))
+    print("r10 outside across another backend's DROP DATABASE, program %r: set difference %s, "
+          "outside_diff %s" % (program, plain, got))
+    assert plain == ["pg_database"], plain
+    assert got == (["pg_database"] if program else []), got
 
 
 # --- the files outside the chain --------------------------------------------
