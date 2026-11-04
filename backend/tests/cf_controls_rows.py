@@ -1748,50 +1748,30 @@ row("S57", "test_s57_the_g3_server_gate", [
      note="the queue rows' CTE comes first so the statement still reads ffa_queue first"))
 
 
-# -- S58: structural, both states ----------------------------------------------
-_G3_FLAG = ("ADM_PRODUCTION_ENABLED = False    # while False, admission_v1 also needs every"
-            " member in ffa_g3_seats\n")
-# The readmission lane rewrapped _ffa_asm_gates' docstring; this is the line
-# that now names the table (the mutants below replace it with the same words
-# less the table name).
-_G3_DOC = '    ffa_g3_seats enrolment. readmit_v1: admission_v1 and every member carries\n'
-_G3_DOC_GONE = '    G3 enrolment. readmit_v1: admission_v1 and every member carries\n'
-_G3_INS = '        "INSERT INTO ffa_g3_seats (player_id, added_at, expires_at)"\n'
+# -- S58: structural, both switch positions ------------------------------------
+# Decision A7 (2026-11-04) kept the enrolment as the server's rollback, so the
+# clause, the route and the G3 configuration exist in both positions; the
+# pre-A7 rows (the production release with the clause, the route or the
+# configuration still in) planted a True switch and are retired with that reading.
 _G3_ROUTE = '@app.post("/api/v1/admin/ffa-g3-seats", tags=["Admin"])\n'
+_G3_CLAUSE = '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"\n'
 _S58_ASSERTS = (
-    '        assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \\\n'
-    '            in src, "S58 clause"\n'
-    '        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n')
+    '    assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \\\n'
+    '        in src, "S58 clause"\n'
+    '    assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n')
 row("S58", "test_s58_the_g3_fence", [
-    M("clause_left_in_production", "S58 production query",
-      E(MAIN, _G3_FLAG, "ADM_PRODUCTION_ENABLED = True\n"),
-      note="the production release with the enrolment clause (and the route) still in"),
-    M("route_left_in_production", "S58 production route",
-      E(MAIN, _G3_FLAG, "ADM_PRODUCTION_ENABLED = True\n"),
-      E(MAIN, _G3_DOC, _G3_DOC_GONE),
-      E(MAIN, _G3_Q, '        "SELECT q.player_id, q.caps, FALSE AS enrolled"\n'
-                     '        "  FROM ffa_queue q"\n'
-                     '        " WHERE q.player_id = ANY(:ids)"), {"ids": ids})).mappings().all()\n'),
-      E(MAIN, _G3_INS, '        "INSERT INTO ffa_g3_enrolment (player_id, added_at, expires_at)"\n'),
-      note="the clause and every ffa_g3_seats query gone, the route path still registered"),
-    M("route_deleted_before_it", "S58 route", E(MAIN, _G3_ROUTE, "")),
-    M("configuration_kept_after_release", "S58 production configuration",
-      E(MAIN, _G3_FLAG, "ADM_PRODUCTION_ENABLED = True\n"),
-      E(MAIN, _G3_DOC, _G3_DOC_GONE),
-      E(MAIN, _G3_Q, '        "SELECT q.player_id, q.caps, FALSE AS enrolled"\n'
-                     '        "  FROM ffa_queue q"\n'
-                     '        " WHERE q.player_id = ANY(:ids)"), {"ids": ids})).mappings().all()\n'),
-      E(MAIN, _G3_INS, '        "INSERT INTO ffa_g3_enrolment (player_id, added_at, expires_at)"\n'),
-      E(MAIN, _G3_ROUTE, ""),
-      E("backend/sql/355_ffa_assembly.sql", "\nCOMMIT;\n",
-        "\nCOMMIT;\n-- planted by the S58 control: the release's DROP TABLE IF EXISTS ffa_g3_seats;\n"),
-      note="K46's post-release mutant, paired with S58 (V11:2944): the production release with no"
-           " ffa_g3_seats query, no route and a drop, and the csproj's G3 configuration kept"),
+    M("clause_without_expiry", "S58 clause",
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note="the rollback's clause no longer reads expires_at"),
+    M("route_deleted", "S58 route", E(MAIN, _G3_ROUTE, "")),
+    M("configuration_deleted", "S58 G3 configuration",
+      E("plugin/CompetitiveRounds.csproj",
+        "    <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants>\n", "")),
 ], T("assertions_reordered",
      E(TST, _S58_ASSERTS,
-       '        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n'
-       '        assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \\\n'
-       '            in src, "S58 clause"\n'),
+       '    assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n'
+       '    assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \\\n'
+       '        in src, "S58 clause"\n'),
      note="a structural test: the twin reorders its assertions (V11's twin)"),
     extra=("plugin",))
 

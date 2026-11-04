@@ -4965,15 +4965,16 @@ def _write_facts(facts):
 
 
 _CSPROJ = os.path.join(HERE, "..", "..", "plugin", "CompetitiveRounds.csproj")
-_SQL_DIR = os.path.join(HERE, "..", "sql")
 
 
 def test_s58_the_g3_fence():
-    """S58 (structural, both states): while ADM_PRODUCTION_ENABLED is False
-    the enrolment clause, the route and the csproj's G3 configuration exist;
-    once it is True, ffa_g3_seats is in no route, predicate or query of
-    main.py, no route path names ffa-g3-seats, a migration drops the table,
-    and the csproj has no G3 configuration."""
+    """S58 (structural, both switch positions): the enrolment clause, the
+    route and the csproj's G3 configuration exist whatever
+    ADM_PRODUCTION_ENABLED is. Decision A7 (2026-11-04) made 1.41.0 the
+    production-enabling release and kept the enrolment as the server's
+    rollback: setting the switch False again admits only enrolled rooms,
+    which needs the clause and the route. The pre-A7 reading (the release
+    deletes them, the table and the configuration) is retired."""
     src = open(main.__file__, encoding="utf-8").read()
     csproj = open(_CSPROJ, encoding="utf-8").read()
     paths = [getattr(r, "path", "") for r in main.app.routes]
@@ -4982,19 +4983,10 @@ def test_s58_the_g3_fence():
     _write_facts({"production": bool(main.ADM_PRODUCTION_ENABLED), "g3_config": g3_config,
                   "clause": "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" in src,
                   "route": "/api/v1/admin/ffa-g3-seats" in paths})
-    if not main.ADM_PRODUCTION_ENABLED:
-        assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \
-            in src, "S58 clause"
-        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"
-        assert g3_config, "S58 G3 configuration"
-    else:
-        assert "ffa_g3_seats" not in src, "S58 production query"
-        assert not any("ffa-g3-seats" in p for p in paths), "S58 production route"
-        drops = [f for f in os.listdir(_SQL_DIR) if f.endswith(".sql") and _re.search(
-            r"DROP\s+TABLE\s+(IF\s+EXISTS\s+)?ffa_g3_seats",
-            open(os.path.join(_SQL_DIR, f), encoding="utf-8").read(), _re.I)]
-        assert drops, "S58 production drop"
-        assert not g3_config and "SCR_G3" not in csproj, "S58 production configuration"
+    assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \
+        in src, "S58 clause"
+    assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"
+    assert g3_config, "S58 G3 configuration"
 
 
 # -- writer 7 (d) and the gone record (S64), the release (S66), section 12's
