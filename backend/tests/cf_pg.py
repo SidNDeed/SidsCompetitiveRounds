@@ -230,8 +230,10 @@ async def fresh_database(prefix="cfdb"):
 
 
 # The standing invariants (evidence V11:2985-3007), each a count that must be
-# 0. The g3 row is the pre-production form (the table exists until the
-# production-enabling release drops it).
+# 0. The g3 row holds while the table exists. The plan for the
+# production-enabling release to drop the table is superseded by ruling
+# A7-R1-PRE (2026-11-04): 1.41.0 keeps it as the server-side rollback for
+# ADM_PRODUCTION_ENABLED False, and the drop is a post-release cleanup item.
 STANDING_INVARIANTS = (
     ("started_canceled",
      "SELECT count(*) FROM ffa_lobbies WHERE start_granted_at IS NOT NULL "
