@@ -23,8 +23,8 @@ namespace CompetitiveRounds
     ///   (coroutines). The coroutines are refused at entry, so the LeaveRoom each one starts with never runs.
     /// Patch-time signal: one line, "[FRAME-TIME] FT-GATE patched N entry points expected=E", where N is
     /// counted from Harmony's own patch table: a target counts only when that table lists the gate's own prefix
-    /// method for it, by identity (R6-A3.11.1 (4)). The same line carries the leave gate's count
-    /// (FtRoomGateNchLeavePatch, R6-A3.11.1 (1)). The timer half (ii) is FtChurnFreezePatch below.</summary>
+    /// method for it, by identity (R6-A3.11.1 (4)). The timer half (ii) is FtChurnFreezePatch below. Leaves are not
+    /// gated (R6-A3.11.2): a leave enters no room, and every entry after one is refused here by name.</summary>
     internal static class FtRoomGate
     {
         /// <summary>The names the sweep returns that enter no room, kept out of the gate on purpose.</summary>
@@ -98,19 +98,15 @@ namespace CompetitiveRounds
             // not count (ruling R6-A3.11.1 (4)).
             var missing = new List<string>();
             var entry = new List<KeyValuePair<MethodBase, MethodInfo>>();
-            var leave = new List<KeyValuePair<MethodBase, MethodInfo>>();
             List<string> excluded = new List<string>();
             MethodInfo punPre = PrefixOf(typeof(FtRoomGatePunPatch)), voidPre = PrefixOf(typeof(FtRoomGateNchVoidPatch)),
-                routinePre = PrefixOf(typeof(FtRoomGateNchRoutinePatch)), leavePre = PrefixOf(typeof(FtRoomGateNchLeavePatch));
+                routinePre = PrefixOf(typeof(FtRoomGateNchRoutinePatch));
             try { foreach (var m in SweepPun(out excluded)) entry.Add(new KeyValuePair<MethodBase, MethodInfo>(m, punPre)); }
             catch (Exception ex) { missing.Add("sweep: " + ex.Message); }
             foreach (var n in NchVoid) AddNamed(entry, n, voidPre, missing);
             foreach (var n in NchRoutine) AddNamed(entry, n, routinePre, missing);
-            try { foreach (var m in LeaveTargets()) leave.Add(new KeyValuePair<MethodBase, MethodInfo>(m, leavePre)); }
-            catch (Exception ex) { missing.Add("leave: " + ex.Message); }
-            int patched = CountGuarded(entry, missing), leaveGuarded = CountGuarded(leave, missing);
+            int patched = CountGuarded(entry, missing);
             Plugin.Log.LogInfo("[FRAME-TIME] FT-GATE patched " + patched + " entry points expected=" + entry.Count
-                + " leave=" + leaveGuarded + " expected_leave=" + leave.Count
                 + " excluded=" + string.Join(",", excluded.ToArray())
                 + (missing.Count == 0 ? "" : " missing=" + string.Join(",", missing.ToArray())));
         }
@@ -146,18 +142,6 @@ namespace CompetitiveRounds
                 if (ours) n++; else missing.Add(kv.Key.DeclaringType.Name + "." + kv.Key.Name);
             }
             return n;
-        }
-
-        /// <summary>The leave points ruled in by the R6-A3.11.1 sweep: NetworkConnectionHandler.DoDisconnect (both
-        /// overloads). OnPlayerLeftRoom (NCH:556) starts it with no action by this seat, and it reaches
-        /// NetworkRestart, whose WaitForRestart leaves the room (NCH:630) and disconnects (NCH:638).</summary>
-        internal static List<MethodBase> LeaveTargets()
-        {
-            var list = new List<MethodBase>();
-            foreach (var m in AccessTools.GetDeclaredMethods(typeof(NetworkConnectionHandler)))
-                if (m.Name == "DoDisconnect") list.Add(m);
-            if (list.Count == 0) throw new MissingMethodException("NetworkConnectionHandler", "DoDisconnect");
-            return list;
         }
 
         internal static IEnumerator Empty() { yield break; }
@@ -217,28 +201,6 @@ namespace CompetitiveRounds
             if (!FtConfig.Present) return true;
             try { if (__instance != null) __instance.untilTryOtherRegionCounter = float.MaxValue; } catch { }
             FtRoomGate.Admit("NCH." + __originalMethod.Name, null);
-            __result = FtRoomGate.Empty();
-            return false;
-        }
-    }
-
-    /// <summary>F8 leave gate (ruling R6-A3.11.1 (1)): while a sitting runs and the seat is in a room, vanilla's
-    /// DoDisconnect is refused at entry. OnPlayerLeftRoom starts it when another actor leaves, and it ends in
-    /// NetworkRestart's LeaveRoom and Disconnect. So the seat stays in its room; the sitting's own NetworkRestart
-    /// (FtDrive.GameOver) is not touched. Out of a room (OnDisconnected after a drop) vanilla runs unchanged: there
-    /// is no room to leave and it only returns to the menu.</summary>
-    [HarmonyPatch]
-    internal static class FtRoomGateNchLeavePatch
-    {
-        private static IEnumerable<MethodBase> TargetMethods() { return FtRoomGate.LeaveTargets(); }
-
-        [HarmonyPrefix]
-        [HarmonyPriority(Priority.First)]
-        private static bool Prefix(MethodBase __originalMethod, ref IEnumerator __result)
-        {
-            if (!FtConfig.Present || !PhotonNetwork.InRoom) return true;
-            string room = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null;
-            FtRoomGate.Admit("NCH." + __originalMethod.Name, room == null ? null : "leave:" + room);
             __result = FtRoomGate.Empty();
             return false;
         }
