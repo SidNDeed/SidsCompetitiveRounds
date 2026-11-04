@@ -4965,6 +4965,43 @@ def _write_facts(facts):
 
 
 _CSPROJ = os.path.join(HERE, "..", "..", "plugin", "CompetitiveRounds.csproj")
+_G3_CLAUSE_SQL = "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"
+
+
+def _s58_clause_in_sql():
+    """Whether a string constant of _ffa_asm_gates' own code (its docstring
+    excluded) carries the enrolment clause. Read through the AST, so a
+    comment or the docstring naming the clause cannot satisfy it (A7-R1)."""
+    import inspect
+    import textwrap
+    node = _ast.parse(textwrap.dedent(inspect.getsource(main._ffa_asm_gates))).body[0]
+    doc = None
+    if node.body and isinstance(node.body[0], _ast.Expr) \
+            and isinstance(getattr(node.body[0], "value", None), _ast.Constant):
+        doc = node.body[0].value
+    return any(isinstance(x, _ast.Constant) and isinstance(x.value, str) and x is not doc
+               and _G3_CLAUSE_SQL in x.value for x in _ast.walk(node))
+
+
+def _s58_g3_configuration():
+    """Whether the csproj declares the G3 configuration as MSBuild reads it:
+    a PropertyGroup whose Condition is '$(Configuration)' == 'G3' and whose
+    DefineConstants defines SCR_G3. Read through the parsed XML, where a
+    comment is not an element, so a comment naming either cannot satisfy
+    it (A7-R1)."""
+    import xml.etree.ElementTree as ET
+    with open(_CSPROJ, "rb") as fh:
+        root = ET.fromstring(fh.read())
+    for el in root.iter():
+        if not isinstance(el.tag, str) or el.tag.rsplit("}", 1)[-1] != "PropertyGroup":
+            continue
+        if _re.sub(r"\s+", "", el.get("Condition", "")) != "'$(Configuration)'=='G3'":
+            continue
+        for d in el:
+            if isinstance(d.tag, str) and d.tag.rsplit("}", 1)[-1] == "DefineConstants" \
+                    and "SCR_G3" in [t.strip() for t in (d.text or "").split(";")]:
+                return True
+    return False
 
 
 def test_s58_the_g3_fence():
@@ -4974,17 +5011,15 @@ def test_s58_the_g3_fence():
     production-enabling release and kept the enrolment as the server's
     rollback: setting the switch False again admits only enrolled rooms,
     which needs the clause and the route. The pre-A7 reading (the release
-    deletes them, the table and the configuration) is retired."""
-    src = open(main.__file__, encoding="utf-8").read()
-    csproj = open(_CSPROJ, encoding="utf-8").read()
+    deletes them, the table and the configuration) is retired. The clause
+    is read from the gate's own SQL constant and the configuration from the
+    parsed csproj, so no comment or docstring satisfies either (A7-R1)."""
     paths = [getattr(r, "path", "") for r in main.app.routes]
-    g3_config = bool(_re.search(r"'\$\(Configuration\)'\s*==\s*'G3'", csproj)) and \
-        "SCR_G3" in csproj
+    clause = _s58_clause_in_sql()
+    g3_config = _s58_g3_configuration()
     _write_facts({"production": bool(main.ADM_PRODUCTION_ENABLED), "g3_config": g3_config,
-                  "clause": "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" in src,
-                  "route": "/api/v1/admin/ffa-g3-seats" in paths})
-    assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \
-        in src, "S58 clause"
+                  "clause": clause, "route": "/api/v1/admin/ffa-g3-seats" in paths})
+    assert clause, "S58 clause"
     assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"
     assert g3_config, "S58 G3 configuration"
 

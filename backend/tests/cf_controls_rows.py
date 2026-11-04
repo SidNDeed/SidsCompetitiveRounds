@@ -1756,22 +1756,31 @@ row("S57", "test_s57_the_g3_server_gate", [
 _G3_ROUTE = '@app.post("/api/v1/admin/ffa-g3-seats", tags=["Admin"])\n'
 _G3_CLAUSE = '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"\n'
 _S58_ASSERTS = (
-    '    assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \\\n'
-    '        in src, "S58 clause"\n'
+    '    assert clause, "S58 clause"\n'
     '    assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n')
+_G3_DEFINE = "    <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants>\n"
+_G3_GROUP = "  <PropertyGroup Condition=\"'$(Configuration)' == 'G3'\">\n"
 row("S58", "test_s58_the_g3_fence", [
     M("clause_without_expiry", "S58 clause",
       E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
       note="the rollback's clause no longer reads expires_at"),
+    M("clause_only_in_a_comment", "S58 clause",
+      E(MAIN, _G3_CLAUSE, '        # "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"\n'),
+      note="A7-R1 finding 2's class: the clause survives only as a comment beside the SQL"),
     M("route_deleted", "S58 route", E(MAIN, _G3_ROUTE, "")),
     M("configuration_deleted", "S58 G3 configuration",
-      E("plugin/CompetitiveRounds.csproj",
-        "    <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants>\n", "")),
+      E("plugin/CompetitiveRounds.csproj", _G3_DEFINE, ""),
+      note="A7-R1 finding 2: survived the raw-text check, which the csproj comment satisfied"),
+    M("configuration_only_in_a_comment", "S58 G3 configuration",
+      E("plugin/CompetitiveRounds.csproj", _G3_DEFINE,
+        "    <!-- <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants> -->\n")),
+    M("configuration_condition_renamed", "S58 G3 configuration",
+      E("plugin/CompetitiveRounds.csproj", _G3_GROUP,
+        "  <PropertyGroup Condition=\"'$(Configuration)' == 'G3x'\">\n")),
 ], T("assertions_reordered",
      E(TST, _S58_ASSERTS,
        '    assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n'
-       '    assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \\\n'
-       '        in src, "S58 clause"\n'),
+       '    assert clause, "S58 clause"\n'),
      note="a structural test: the twin reorders its assertions (V11's twin)"),
     extra=("plugin",))
 

@@ -746,6 +746,15 @@ row("K46", N("k46"), [
     M("release_defines_g3", "K46 SCR_G3 only in G3", B(CSPROJ, (), _G3GROUP, _RELGROUP)),
     M("g3_marker_standalone", "K46 marker", RR(AC, '"SCR_BUILD_VARIANT=G3";', '"SCR_BUILD_VARIANT=STANDALONE";')),
     M("copy_includes_g3", "K46 copy exclusion", R(CSPROJ, (), "and '$(Configuration)' != 'G3'", "")),
+    M("g3_define_commented", "K46 SCR_G3 only in G3",
+      RR(CSPROJ, "    <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants>\n",
+         "    <!-- <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants> -->\n"),
+      note="A7-R1 finding 2's class: the define survives only as a commented-out element"),
+    M("configurations_drop_g3", "K46 configuration",
+      RR(CSPROJ, "<Configurations>Debug;Release;Thunderstore;G3</Configurations>",
+         "<!-- <Configurations>Debug;Release;Thunderstore;G3</Configurations> -->"
+         "<Configurations>Debug;Release;Thunderstore</Configurations>"),
+      note="A7-R1 finding 2's class: the configuration list's G3 survives only in a comment ahead of the element"),
 ], T("renamed_control_and_swapped_branches", E(GATE, "$okOdd", "$oddOk", 2), RR(AC, _MARKERS, _MARKERS_SWAPPED)),
     extra=XT)
 
@@ -1403,6 +1412,10 @@ row("WP11", N("wp7"), [
       R(FLR, ("internal static string ValidateStamp(",), 'bool raises = s.Result == "commit" ||',
         'bool raises = s.Result == "commited" ||')),
     M("lag_step_renamed", "WP11 lag step", R(FLE, (), 'FfaAssembly.Receipt(lobby, "lag",', 'FfaAssembly.Receipt(lobby, "lagged",')),
+    M("server_lag_check_only_in_a_comment", "WP11 lag step",
+      RR(MAINPY, '    if s in ("entered", "lag") and req.game is None:\n',
+         '    if s in ("entered",) and req.game is None:  # if s in ("entered", "lag") and req.game is None\n'),
+      note="A7-R1 finding 2's class: the server's lag check survives only as a comment"),
     M("stamp_parse_shifted", "WP11 parse order",
       R(FLE, ("void OnStamp(",), "Chain = S(a, 4), Result = S(a, 5),", "Chain = S(a, 4), Result = S(a, 4),")),
 ], T("callin_payload_split",

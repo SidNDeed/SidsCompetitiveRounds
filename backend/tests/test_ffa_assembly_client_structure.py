@@ -1077,23 +1077,37 @@ def _gate_fixture(path, marker, offset):
     path.write_bytes(bytes(data))
 
 
+def csproj_xml():
+    """The plugin csproj as MSBuild reads it: the parsed XML, where a
+    comment is not an element, so neither a comment nor a commented-out
+    element satisfies a search over it (A7-R1)."""
+    import xml.etree.ElementTree as ET
+    return ET.fromstring((PLUGIN / "CompetitiveRounds.csproj").read_bytes())
+
+
+def xml_local(el):
+    return el.tag.rsplit("}", 1)[-1] if isinstance(el.tag, str) else ""
+
+
 def test_k46_g3_build_and_gate():
     """K46: the csproj declares G3, only it defines SCR_G3, CopyToPlugins
     excludes it; the marker branch returns the G3 literal under SCR_G3; the
     tracked gate refuses a G3 marker at an odd and at an even offset (exit 1),
     passes a STANDALONE DLL with both controls (exit 0), refuses as void with
-    one control suppressed (exit 3), and a missing path (exit 2)."""
-    proj = (PLUGIN / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
-    groups = re.findall(r"<PropertyGroup Condition=\"([^\"]*)\">(.*?)</PropertyGroup>", proj, re.S)
-    defines = sorted(c for c, body in groups if "SCR_G3" in body)
-    configs = re.search(r"<Configurations>([^<]*)</Configurations>", proj)
-    copy = re.search(r"<Target Name=\"CopyToPlugins\"[^>]*Condition=\"([^\"]*)\"", proj)
+    one control suppressed (exit 3), and a missing path (exit 2). The
+    csproj is read as parsed XML, so a comment satisfies none of it (A7-R1)."""
+    proj = csproj_xml()
+    defines = sorted(g.get("Condition", "") for g in proj.iter() if xml_local(g) == "PropertyGroup"
+                     and any(xml_local(d) == "DefineConstants"
+                             and "SCR_G3" in [t.strip() for t in (d.text or "").split(";")] for d in g))
+    configs = next((e.text or "" for e in proj.iter() if xml_local(e) == "Configurations"), None)
+    copy = next((e.get("Condition") for e in proj.iter()
+                 if xml_local(e) == "Target" and e.get("Name") == "CopyToPlugins"), None)
     api = src("ApiClient.cs")
     marker = {sym: re.search(r"BuildVariantMarker\s*=\s*\"([^\"]*)\"", cs.strip_comments_only(api, sym))
               for sym in (frozenset(), frozenset({"SCR_G3"}), frozenset({"THUNDERSTORE"}))}
     marker = {",".join(sorted(k)) or "release": (v.group(1) if v else None) for k, v in marker.items()}
-    facts = {"configs": configs.group(1) if configs else None, "defines": defines,
-             "copy": copy.group(1) if copy else None, "marker": marker}
+    facts = {"configs": configs, "defines": defines, "copy": copy, "marker": marker}
     # The static half runs FIRST, on every seat: its facts are traced, then
     # asserted, before anything needs an interpreter. Only the gate runs need
     # Windows PowerShell; a seat without it (the LXC suite seats, learning
@@ -2370,7 +2384,8 @@ def test_wp7_wp10_wp11_events():
     """WP7/WP10/WP11: the event codes 53-58, distinct from 51 and 52; each
     sender's payload order and each receiver's parse order; the stamp's
     result literals at the master's send and ValidateStamp's reader; the lag
-    step and its game key on both sides."""
+    step and its game key on both sides (the server's check read through
+    the AST, so a comment naming it cannot satisfy it, A7-R1)."""
     le = kept(src("FfaLateEntry.cs"))
     lr = kept(src("FfaLateRules.cs"))
     decl = r"(?:(?:internal|public|const|static)\s+)+byte\s+(EVT_\w+)\s*=\s*(\d+)\s*;"
@@ -2403,11 +2418,13 @@ def test_wp7_wp10_wp11_events():
     lag_client = bool(re.search(r'FfaAssembly\.Receipt\(lobby, "lag", "\\"game\\":"', kept(src("FfaLateEntry.cs"))))
     steps = server_const("_ASM_STEPS") or frozenset()
     handler = server_def("_asm_connect_problem")
-    htxt = ast.get_source_segment(MAIN_PY.read_text(encoding="utf-8"), handler) if handler else ""
+    lag_server = bool(handler) and any(
+        isinstance(n, ast.If) and ast.unparse(n.test) == "s in ('entered', 'lag') and req.game is None"
+        for n in ast.walk(handler))
     facts = {"codes": codes, "spec": spec, "payload": payload, "dispatch": dispatch, "parse": parse,
              "result_send": send, "result_read": reader, "scale_senders": scale_senders,
              "raise_scale": raise_scale, "lag": [lag_client, "lag" in steps,
-                                                 'if s in ("entered", "lag") and req.game is None' in (htxt or "")]}
+                                                 lag_server]}
     trace(facts)
     assert codes == {"EVT_READY": 53, "EVT_EPOCH": 54, "EVT_SCALE": 55, "EVT_EPOCH_ACK": 56, "EVT_CALLIN": 57,
                      "EVT_MASTER": 58} and spec.get("EVT_REQUEST") == 51 and spec.get("EVT_SNAPSHOT") == 52, \
