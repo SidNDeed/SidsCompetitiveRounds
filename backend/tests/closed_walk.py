@@ -48,6 +48,12 @@ import re as _re
 import textwrap as _textwrap
 import types as _types
 import os as _os
+# The frozen providers of PLAIN_BODY_CALLS (round 10, ruling REHEARSAL-R9-A1
+# (D)): bound by this module's own static imports.
+import builtins as _builtins
+import datetime as _cw_datetime
+import json as _cw_json
+import math as _cw_math
 
 import shape_grammar as _sg
 from shape_grammar import header_digest as _header_digest
@@ -858,9 +864,30 @@ class Bindings:
 
     def listed(self, node, table, line=0):
         """The spelling of callee `node` when `table` lists it (a pure
-        call, a pure await, an opaque helper) and the walked function does
-        not bind its root, so it is the module's; None when `table` does
-        not list it; refused when it does and the function binds the root."""
+        call, a pure await) and the walked function does not bind its root,
+        so it is the module's; None when `table` does not list it; refused
+        when it does and the function binds the root.
+
+        Round 10 (ruling REHEARSAL-R9-A1 (D); finding closed_walk:859: a
+        module binding `int = writer` left `int(...)` pure): a listed
+        spelling is admitted only when the scope's binding of it IS its
+        frozen provider. `table` maps each spelling to its provider
+        objects, one per component of the spelling, bound by the calling
+        file's own static imports (`"int": (builtins.int,)`,
+        `"_json.loads": (json, json.loads)`). The root resolves as Python
+        resolves it: the module's own binding; else, when the module binds
+        no such name, its `__builtins__` entry; else, for a root the
+        function binds once by its frozen local import, the provider the
+        import statement names (`import uuid as uuid_mod`: the provider
+        module's own name). The root must be the provider's first object
+        by identity, and a dotted spelling's attribute, read off that
+        object, its second (by identity; a method bound fresh on each read
+        is the same method of the same object). Any other binding refuses,
+        and so does a table that gives no provider for the spelling.
+        A Policy holds its tables as Providers; the opaque-helper table a
+        caller passes (`opaque`) is not one, and keeps the round-9 rule:
+        the walk then reads the helper through opaque_callee, the scope's
+        own object or the definition the caller maps."""
         name = _ast.unparse(node)
         if name not in table:
             return None
@@ -869,6 +896,52 @@ class Bindings:
         if root is None or not self._module_object(root, line):
             raise Unclassified((line, f"a call of {name}, a name the "
                                       "function binds"))
+        # (D) provider identity: every Policy table is a Providers; the
+        # one other table, a caller's opaque helpers, names helpers whose
+        # body the caller reads from the definition the walk resolves
+        pt = isinstance(table, Providers)
+        if pt is False:
+            return name
+        want = table[name]
+        parts = name.split(".")
+        if len(want) != len(parts):
+            raise Unclassified((line, f"a call of {name}, which has no frozen "
+                                      "provider"))
+        w0 = want[0]
+        kind, got = self.resolve(root, line)
+        bi = self.module("__builtins__", line)
+        pb = Bindings(bi)
+        fallback = pb.module(root, line)
+        if isinstance(bi, dict):
+            fallback = bi.get(root, _MISSING)
+        if kind == "module" and got is _MISSING:
+            got = fallback
+        if kind == "import":
+            imp, alias = got
+            got = _MISSING
+            wname = getattr(w0, "__name__", _MISSING)
+            iname = alias.name
+            plain = isinstance(imp, _ast.Import)
+            if plain is False:
+                iname = None
+            if iname == wname:
+                got = w0
+        if got is not w0:
+            raise Unclassified((line, f"a call of {name}, whose {root} is "
+                                      "not its frozen provider"))
+        lb = Bindings(got)
+        wl = want[-1]
+        leaf = want[-1]
+        last = parts[-1]
+        if len(want) == 2:
+            leaf = lb.module(last, line)
+        bound = getattr(leaf, "__self__", _MISSING)
+        wbound = getattr(wl, "__self__", _MISSING)
+        lname = getattr(leaf, "__name__", None)
+        method = bound is got and wbound is got and lname in (last,)
+        if leaf is not wl and method is not True:
+            raise Unclassified((line, f"a call of {name}, whose {last} is "
+                                      "not its frozen provider"))
         return name
 
     def _module_object(self, name, line=0):
@@ -1337,6 +1410,13 @@ class Accepted:
         raise TypeError("an Accepted outcome is not changed after the walk")
 
 
+class Providers(dict):
+    """A pure-callee table: {spelling: its frozen provider objects, one per
+    component of the spelling} (round 10, ruling REHEARSAL-R9-A1 (D)).
+    Bindings.listed admits a spelling of a Providers table only on its
+    provider; every Policy holds its pure tables as Providers."""
+
+
 class Policy:
     """What one test file lets the visitor accept, all positive and named:
     the plain calls and methods that touch no session, the awaited library
@@ -1347,9 +1427,11 @@ class Policy:
     def __init__(self, scope, pure_calls, pure_methods, pure_awaits, sql,
                  session="db"):
         self.scope = scope
-        self.pure_calls = frozenset(pure_calls)
+        # {spelling: its frozen provider objects} (round 10, (D):
+        # Bindings.listed admits a listed call only on its provider)
+        self.pure_calls = Providers(pure_calls)
         self.pure_methods = frozenset(pure_methods)
-        self.pure_awaits = frozenset(pure_awaits)
+        self.pure_awaits = Providers(pure_awaits)
         self.sql = sql
         self.session = session
         # An awaited helper's effect, when a file names its own reading of
@@ -1371,10 +1453,27 @@ class Policy:
 # builtins and library calls, and the methods on local values, that the real
 # plain callees' bodies make. None of them takes a session; a session method
 # is read by the session branch first, whatever its name.
-PLAIN_BODY_CALLS = frozenset({
-    "Counter", "_json.dumps", "_json.loads", "abs", "all", "any", "dict",
-    "float", "getattr", "id", "isinstance", "len", "math.ceil", "max", "min", "repr",
-    "hasattr", "set", "sorted", "sum", "timedelta", "tuple", "zip"})
+#
+# Round 10 (ruling REHEARSAL-R9-A1 (D)): each spelling maps to its frozen
+# provider, one object per component of the spelling, bound by this module's
+# own static imports; Bindings.listed admits a call only when the scope's
+# binding of the spelling IS that provider (a module binding `max = writer`
+# refuses). grammar_providers.PROVIDERS names each provider by (module,
+# qualified name); the test asserts the two agree.
+PLAIN_BODY_CALLS = {
+    "Counter": (_collections.Counter,),
+    "_json.dumps": (_cw_json, _cw_json.dumps),
+    "_json.loads": (_cw_json, _cw_json.loads),
+    "abs": (_builtins.abs,), "all": (_builtins.all,), "any": (_builtins.any,),
+    "dict": (_builtins.dict,), "float": (_builtins.float,),
+    "getattr": (_builtins.getattr,), "id": (_builtins.id,),
+    "isinstance": (_builtins.isinstance,), "len": (_builtins.len,),
+    "math.ceil": (_cw_math, _cw_math.ceil), "max": (_builtins.max,),
+    "min": (_builtins.min,), "repr": (_builtins.repr,),
+    "hasattr": (_builtins.hasattr,), "set": (_builtins.set,),
+    "sorted": (_builtins.sorted,), "sum": (_builtins.sum,),
+    "timedelta": (_cw_datetime.timedelta,), "tuple": (_builtins.tuple,),
+    "zip": (_builtins.zip,)}
 PLAIN_BODY_METHODS = frozenset({
     "_asdict", "add", "isoformat", "items", "join", "lstrip", "pop", "sort", "split",
     "strip", "time", "total_seconds", "values"})

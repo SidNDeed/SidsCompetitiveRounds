@@ -55,6 +55,27 @@ holds it; a walker span that names a `test_*` function of its module
 refuses (a test function is outside the census only because no walk
 reaches it).
 
+Round 10 (ruling REHEARSAL-R9-A1 (C)) binds the receiver by IDENTITY, not
+by presence (finding resolution_sites:202: selecting `policy` instead of
+`bindings` in Visitor.__init__ kept a `Bindings(...)` call in the unused
+alternative, and the check passed). The receiver's complete store
+statement is frozen (RECEIVER_STORES: shape_grammar.header_digest of the
+whole `self.b = ...` statement, every alternative of its value included);
+every alternative of the value is a frozen source (a construction of the
+resolver class through its one provider binding in the module, or a
+parameter of `__init__`); and the parameter's own sources, across the
+census modules, are a frozen chain (receiver_sources, RECEIVER_SOURCES):
+every call that constructs the class, every function that hands the value
+on, every local and every return it passes through, each ending in a
+resolver construction, the None default, or a frozen receiver's `.b`. Any
+other value refuses.
+Round 10 also bounds comparison ARITY (finding resolution_sites:431:
+`name is not 'db' is not None` matched the admitted Compare shape, whose
+lists are sets of classes, and the None exemption suppressed the whole
+chain): a chained comparison in a walker span is a form problem, and the
+None exemption covers exactly one comparison, `<x> is None` or
+`<x> is not None`, with the single comparator the None constant.
+
 Round 7 (ruling REHEARSAL-FOUR-R6 (1)(b)): the census is DEFAULT-DENY.
 Before any site is counted, every node of every walker span is checked
 against WALKER_SHAPES (grammar_shapes_a1.py), the frozen shapes of the
@@ -85,6 +106,42 @@ _RECEIVER = {"spelling": None}
 # The spellings and methods a site is recognised by (form_problems).
 SITE_NAMES = frozenset({"getattr", "hasattr", "__import__"})
 SITE_METHODS = frozenset({"get", "unparse", "import_module"})
+# The module that defines the resolver class (round 10): a resolver
+# construction outside it is `<X>.Bindings(...)` with X bound once, at the
+# top level, by `import closed_walk as X`.
+RESOLVER_HOME = "closed_walk"
+# The frozen complete store statement of each receiver class (round 10,
+# finding resolution_sites:202): shape_grammar.header_digest of the whole
+# `self.b = ...` statement of its `__init__`, taken once at 0b317394.
+RECEIVER_STORES = {
+    "Visitor": "deb50a21d5de8fad",
+    "_Walk": "36214a5241768ebf",
+}
+# The frozen value chain of the receivers' parameter sources (round 10,
+# receiver_sources over closed_walk, the a1 file and the gate file), taken
+# once at 0b317394 and never regenerated: (kind, module, qualname, detail),
+# detail the header digest of the statement holding the hop or end (a
+# parameter's name; a function's number of returns). Visitor's `bindings`
+# reaches it from closed_walk.def_effects's own construction, from
+# closed_walk.expr_effects's parameter (the a1 file's wrapper's parameter,
+# given the a1 handler's `b = _handler_bindings(...)`, whose one return is a
+# construction) and from the gate's `_effects` as `w.b`.
+RECEIVER_SOURCES = frozenset({
+    ("construction", "closed_walk", "def_effects", "2c400d7bf7ef4eb1"),
+    ("construction", "test_a1_identity_formation", "_handler_bindings",
+     "0d4a073ae0f9221c"),
+    ("local", "closed_walk", "def_effects", "2c400d7bf7ef4eb1"),
+    ("local", "test_a1_identity_formation", "formation_loop_exits",
+     "119f72d4d9c5532c"),
+    ("local", "test_a1_identity_formation", "formation_loop_exits.effects_of",
+     "119f72d4d9c5532c"),
+    ("parameter", "closed_walk", "Visitor.__init__", "bindings"),
+    ("parameter", "closed_walk", "expr_effects", "bindings"),
+    ("parameter", "test_a1_identity_formation", "expr_effects", "bindings"),
+    ("receiver", "test_match_hold_admission_gate_pg", "_effects",
+     "988d63c501bd7bf9"),
+    ("returns", "test_a1_identity_formation", "_handler_bindings", 1),
+})
 
 
 def resolver_methods(tree):
@@ -191,16 +248,39 @@ def receiver_problems(tree):
 def _chain_problems(tree, cls, spelling):
     out = []
     par = _parents(tree)
+    # round 10 (the sweep of finding resolution_sites:202's class): the
+    # receiver class is the module's by identity, its one binding the
+    # class statement, so `_Walk(...)` (the `w` route's store, its callers'
+    # argument) and `self` in its methods are THE class's
+    st = _top_binder(tree, cls)
+    if not (isinstance(st, ast.ClassDef) and st.name == cls):
+        out.append((getattr(st, "lineno", 0), f"the receiver class {cls} is not "
+                                              "bound once, by its class statement"))
     stores = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)
               and n.attr == "b" and not isinstance(n.ctx, ast.Load)]
     init = [d for c in tree.body if isinstance(c, ast.ClassDef) and c.name == cls
             for d in c.body if isinstance(d, ast.FunctionDef)
             and d.name == "__init__"]
-    good = [n for n in stores if init and isinstance(n.value, ast.Name)
-            and n.value.id == "self" and isinstance(par.get(id(n)), ast.Assign)
-            and any(n is x for x in ast.walk(init[0]))
-            and any(isinstance(c, ast.Call) and ast.unparse(c.func).split(".")[-1]
-                    == RESOLVER_CLASS for c in ast.walk(par[id(n)].value))]
+    good = []
+    for n in stores:
+        st = par.get(id(n))
+        if not (init and isinstance(n.value, ast.Name) and n.value.id == "self"
+                and isinstance(st, ast.Assign) and len(st.targets) == 1
+                and st.targets[0] is n
+                and any(n is x for x in ast.walk(init[0]))):
+            continue
+        # round 10: the complete statement, then every alternative of its
+        # value (finding resolution_sites:202: a Bindings call anywhere in
+        # the value was enough)
+        if _sg.header_digest(st) != RECEIVER_STORES.get(cls):
+            out.append((st.lineno, f"{cls}.__init__'s store to `.b` is not "
+                                   "its frozen statement"))
+            continue
+        bad = [why for alt in _alternatives(st.value)
+               for why in (_store_source(tree, init[0], alt),) if why]
+        out.extend((st.lineno, why) for why in bad)
+        if not bad:
+            good.append(n)
     if len(stores) != 1 or len(good) != 1:
         out.append((stores[0].lineno if stores else 0,
                     f"the stores to `.b` are not exactly {cls}.__init__'s "
@@ -236,6 +316,320 @@ def _chain_problems(tree, cls, spelling):
     return out
 
 
+def _alternatives(e):
+    """Every value expression `e` can evaluate to, through conditional
+    expressions (round 10)."""
+    if isinstance(e, ast.IfExp):
+        return _alternatives(e.body) + _alternatives(e.orelse)
+    return [e]
+
+
+def _top_binder(tree, name):
+    """The one top-level statement of module tree that binds `name`, when
+    the module binds it exactly once anywhere; None otherwise."""
+    if sum(1 for _l, s, _h in _sg.bindings(tree) if s == name) != 1:
+        return None
+    hits = [st for st in tree.body
+            if any(s == name for _l, s, _h in _sg.bindings(st))]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _resolver_construction(tree, e):
+    """Whether `e` constructs the resolver class through its one provider
+    binding in module tree: `Bindings(...)` where the module binds the name
+    once, by its top-level class statement; or `<X>.Bindings(...)` where
+    the module binds X once, by a top-level `import closed_walk as X`."""
+    if not isinstance(e, ast.Call):
+        return False
+    f = e.func
+    if isinstance(f, ast.Name) and f.id == RESOLVER_CLASS:
+        st = _top_binder(tree, f.id)
+        return isinstance(st, ast.ClassDef) and st.name == RESOLVER_CLASS
+    if (isinstance(f, ast.Attribute) and f.attr == RESOLVER_CLASS
+            and isinstance(f.value, ast.Name)):
+        st = _top_binder(tree, f.value.id)
+        return (isinstance(st, ast.Import) and len(st.names) == 1
+                and st.names[0].name == RESOLVER_HOME
+                and st.names[0].asname == f.value.id)
+    return False
+
+
+def _store_source(tree, init, alt):
+    """None when the alternative `alt` of a receiver store in `init` is a
+    frozen source (a resolver construction, or a parameter of `init` bound
+    there once, defaulting to None if it has a default); the sentence
+    otherwise."""
+    if _resolver_construction(tree, alt):
+        return None
+    if isinstance(alt, ast.Name):
+        binds = [h for _l, s, h in _sg.bindings(init) if s == alt.id]
+        a = init.args
+        pos = a.posonlyargs + a.args
+        names = [x.arg for x in pos]
+        defaults = dict(zip(names[len(names) - len(a.defaults):], a.defaults))
+        defaults.update({x.arg: d for x, d in zip(a.kwonlyargs, a.kw_defaults)
+                         if d is not None})
+        dflt = defaults.get(alt.id)
+        if binds == ["parameter"] and (dflt is None or (
+                isinstance(dflt, ast.Constant) and dflt.value is None)):
+            return None
+    return (f"the receiver's value alternative `{ast.unparse(alt)}` is no "
+            "frozen source")
+
+
+def _def_info(tree):
+    """{id(node): (qualname, chain)} for every node of module tree: the
+    qualified name and the enclosing function definitions (outermost
+    first) of the innermost definition holding it ('<module>', [] at the
+    top level)."""
+    out = {}
+
+    def go(node, qual, chain):
+        for c in ast.iter_child_nodes(node):
+            out[id(c)] = (qual, chain)
+            if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                q = f"{qual}.{c.name}" if qual != "<module>" else c.name
+                go(c, q, chain if isinstance(c, ast.ClassDef) else chain + [c])
+            else:
+                go(c, qual, chain)
+    go(tree, "<module>", [])
+    return out
+
+
+def _own_binds(d, name):
+    """The bindings of `name` in definition d's own span: 'parameter' for
+    each parameter, else the binding node (a store outside nested
+    definitions, a nested definition's name, an import alias, an except
+    name, a global or nonlocal declaration)."""
+    out = ["parameter" for a in _params(d) if a.arg == name]
+    todo = list(ast.iter_child_nodes(d))
+    while todo:
+        n = todo.pop()
+        if isinstance(n, ast.arguments):
+            continue
+        if isinstance(n, ast.Name) and n.id == name and not isinstance(n.ctx, ast.Load):
+            out.append(n)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if n.name == name:
+                out.append(n)
+            continue
+        elif isinstance(n, ast.alias) and (n.asname or n.name.split(".")[0]) == name:
+            out.append(n)
+        elif isinstance(n, ast.ExceptHandler) and n.name == name:
+            out.append(n)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+            out.append(n)
+        todo.extend(ast.iter_child_nodes(n))
+    return out
+
+
+def _call_arg(call, d, p, skip):
+    """(kind, expression) of the argument `call` gives parameter p of
+    definition d (`skip` leading parameters not passed, a method's self):
+    ('arg', e), ('default', None), or ('unpacked', None)."""
+    if any(isinstance(a, ast.Starred) for a in call.args) or any(
+            k.arg is None for k in call.keywords):
+        return ("unpacked", None)
+    for k in call.keywords:
+        if k.arg == p:
+            return ("arg", k.value)
+    pos = [a.arg for a in d.args.posonlyargs + d.args.args][skip:]
+    if p in pos and pos.index(p) < len(call.args):
+        return ("arg", call.args[pos.index(p)])
+    return ("default", None)
+
+
+def _callers(trees, home, name):
+    """([(module, call)], [(module, line)]): every call of module-level
+    `name` of module `home` (`name(...)` in home, `<X>.name(...)` in a
+    module binding X once, at the top level, by `import <home> as X`), and
+    every other reference to it."""
+    calls, other = [], []
+    for m, t in sorted(trees.items()):
+        par = _parents(t)
+        alias = None
+        if m != home:
+            for st in t.body:
+                if (isinstance(st, ast.Import) and len(st.names) == 1
+                        and st.names[0].name == home):
+                    alias = st.names[0].asname or home
+            if alias is not None and _top_binder(t, alias) is None:
+                other.append((m, 0))
+                alias = None
+        for n in ast.walk(t):
+            hit = ((m == home and isinstance(n, ast.Name) and n.id == name
+                    and isinstance(n.ctx, ast.Load))
+                   or (alias is not None and isinstance(n, ast.Attribute)
+                       and n.attr == name and isinstance(n.value, ast.Name)
+                       and n.value.id == alias))
+            if not hit:
+                continue
+            up = par.get(id(n))
+            if isinstance(up, ast.Call) and up.func is n:
+                calls.append((m, up))
+            else:
+                other.append((m, n.lineno))
+    return calls, other
+
+
+def _stmt_of(par, n):
+    while n is not None and not isinstance(n, ast.stmt):
+        n = par.get(id(n))
+    return n
+
+
+def receiver_sources(trees):
+    """(sources, problems) of the frozen receivers' value sources across
+    the census modules `trees` ({module: tree}; round 10, ruling
+    REHEARSAL-R9-A1 (C), finding resolution_sites:202). For each receiver
+    class whose store takes a parameter of `__init__` (Visitor's
+    `bindings`), every call constructing the class gives that parameter a
+    value; each value is followed through a frozen chain only: a parameter
+    of a module-level function (to every call of it), a local bound once
+    by a plain assignment (to its value), a call of a module-level
+    function of the same module (to each of its returns). The chain ends
+    in a resolver construction (_resolver_construction), the None
+    constant or an absent argument (the store's own `is not None` test
+    then takes the construction), or `<w>.b` with w the frozen receiver of
+    its span. `sources` is the set of every hop and end, as (kind, module,
+    qualname, detail); any other form is a problem. The census test
+    asserts `sources` equals RECEIVER_SOURCES. A call inside a module-level
+    `test_*` function is not followed: like walker_spans, the census reads
+    a test function as an oracle over fixed code, not a walk."""
+    found, problems = set(), []
+    info = {m: _def_info(t) for m, t in trees.items()}
+    pars = {m: _parents(t) for m, t in trees.items()}
+    seen = set()
+
+    def oracle(m, call):
+        chain = info[m].get(id(call), ("", []))[1]
+        return bool(chain) and chain[0].name.startswith("test_") and any(
+            chain[0] is d for d in trees[m].body)
+
+    def follow(m, e, chain, depth, at):
+        q = info[m].get(id(at), ("<module>", []))[0]
+        st = _stmt_of(pars[m], at)
+        dg = _sg.header_digest(st) if st is not None else "-"
+        if depth > 40:
+            problems.append((m, q, "the value chain is too long"))
+            return
+        if e is None or (isinstance(e, ast.Constant) and e.value is None):
+            found.add(("none", m, q, dg))
+            return
+        if _resolver_construction(trees[m], e):
+            found.add(("construction", m, q, dg))
+            return
+        if (isinstance(e, ast.Attribute) and e.attr == "b"
+                and isinstance(e.value, ast.Name) and chain):
+            top = chain[0]
+            rec = span_receiver(module_receivers(trees[m]), top.name, top)
+            if rec is not None and rec == e.value.id:
+                found.add(("receiver", m, q, dg))
+                return
+        if isinstance(e, ast.Name):
+            for d in reversed(chain):
+                binds = _own_binds(d, e.id)
+                if not binds:
+                    continue
+                if len(binds) != 1:
+                    problems.append((m, q, f"{e.id} is bound {len(binds)} times"))
+                    return
+                if binds[0] == "parameter":
+                    if d is not chain[0] or info[m].get(id(d), ("?",))[0] != "<module>":
+                        problems.append((m, q, f"{e.id} is a parameter of a "
+                                               "nested definition"))
+                        return
+                    key = (m, id(d), e.id)
+                    if key in seen:
+                        return
+                    seen.add(key)
+                    found.add(("parameter", m, d.name, e.id))
+                    calls, other = _callers(trees, m, d.name)
+                    for om, ln in other:
+                        problems.append((om, d.name, f"{d.name} is named other "
+                                                     f"than as a callee (line {ln})"))
+                    for cm, call in calls:
+                        if oracle(cm, call):
+                            continue
+                        kind, a = _call_arg(call, d, e.id, 0)
+                        if kind == "unpacked":
+                            problems.append((cm, d.name, "a call with unpacked "
+                                                         "arguments"))
+                            continue
+                        follow(cm, a if kind == "arg" else None,
+                               info[cm].get(id(call), ("", []))[1], depth + 1,
+                               call)
+                    return
+                sst = pars[m].get(id(binds[0]))
+                if (isinstance(sst, ast.Assign) and len(sst.targets) == 1
+                        and sst.targets[0] is binds[0]):
+                    found.add(("local", m, q, _sg.header_digest(sst)))
+                    follow(m, sst.value, chain, depth + 1, sst.value)
+                    return
+                problems.append((m, q, f"{e.id} is bound other than by a plain "
+                                       "assignment"))
+                return
+            problems.append((m, q, f"{e.id} is no binding of its span"))
+            return
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and not any(
+                _own_binds(d, e.func.id) for d in chain):
+            g = _top_binder(trees[m], e.func.id)
+            if isinstance(g, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                rets = [n for n in _own(g) if isinstance(n, ast.Return)]
+                found.add(("returns", m, g.name, len(rets)))
+                if not rets:
+                    problems.append((m, g.name, "returns no value"))
+                for r in rets:
+                    follow(m, r.value, [g], depth + 1, r)
+                return
+        problems.append((m, q, f"the value `{ast.unparse(e)}` is no frozen source"))
+
+    for home, tree in sorted(trees.items()):
+        for cls in sorted(module_receivers(tree)):
+            cdef = [c for c in tree.body if isinstance(c, ast.ClassDef) and c.name == cls]
+            init = [d for d in cdef[0].body if isinstance(d, ast.FunctionDef)
+                    and d.name == "__init__"] if cdef else []
+            if not init:
+                continue
+            stores = [n for n in ast.walk(init[0]) if isinstance(n, ast.Attribute)
+                      and n.attr == "b" and not isinstance(n.ctx, ast.Load)]
+            par = pars[home]
+            for n in stores:
+                st = par.get(id(n))
+                alts = _alternatives(st.value) if isinstance(st, ast.Assign) else []
+                for alt in alts:
+                    if not isinstance(alt, ast.Name):
+                        continue
+                    found.add(("parameter", home, f"{cls}.__init__", alt.id))
+                    calls, other = _callers(trees, home, cls)
+                    for om, ln in other:
+                        problems.append((om, cls, f"{cls} is named other than as "
+                                                  f"a callee (line {ln})"))
+                    for cm, call in calls:
+                        if oracle(cm, call):
+                            continue
+                        kind, a = _call_arg(call, init[0], alt.id, 1)
+                        if kind == "unpacked":
+                            problems.append((cm, cls, "a call with unpacked "
+                                                      "arguments"))
+                            continue
+                        follow(cm, a if kind == "arg" else None,
+                               info[cm].get(id(call), ("", []))[1], 0, call)
+    return found, problems
+
+
+def receiver_source_problems(trees):
+    """[sentence] of the receivers' value chain over the census modules
+    `trees` (receiver_sources): every problem it meets, and every hop or
+    end that differs from the frozen RECEIVER_SOURCES; empty when the
+    chain is the frozen one."""
+    found, problems = receiver_sources(trees)
+    out = [f"{m}:{q}: {why}" for m, q, why in problems]
+    out += [f"an unfrozen source {x!r}" for x in sorted(found - RECEIVER_SOURCES, key=repr)]
+    out += [f"a frozen source missing {x!r}" for x in sorted(RECEIVER_SOURCES - found, key=repr)]
+    return out
+
+
 def form_problems(tree, walkers_only=True):
     """[(line, sentence)] of the census's own forms over every walker span
     of module tree (round 9, G3): a site spelling (SITE_NAMES) named other
@@ -263,6 +657,13 @@ def form_problems(tree, walkers_only=True):
             elif (isinstance(n, ast.Name) and n.id in tests
                   and walkers_only):
                 out.append((n.lineno, f"a walker names the test function {n.id}"))
+            if isinstance(n, ast.Compare) and (
+                    len(n.ops) != 1 or len(n.comparators) != 1):
+                # round 10 (finding resolution_sites:431): a frozen Compare
+                # shape lists its operators and comparators as sets of
+                # classes, so a chain keeps the shape of one comparison
+                out.append((n.lineno, f"a chained comparison of {len(n.ops)} "
+                                      "operators"))
     return out
 
 
@@ -428,10 +829,16 @@ def sites(fn):
             # orderings included (round 8 counted ==, !=, in, not in only,
             # so `n.id is 'db'` decided a spelling and counted nothing)
             ops = [n.left] + n.comparators
-            if all(isinstance(op, (ast.Is, ast.IsNot)) for op in n.ops) and any(
-                    isinstance(x, ast.Constant) and x.value is None for x in ops):
+            if (len(n.ops) == 1 and len(n.comparators) == 1
+                    and isinstance(n.ops[0], (ast.Is, ast.IsNot))
+                    and isinstance(n.comparators[0], ast.Constant)
+                    and n.comparators[0].value is None
+                    and not isinstance(n.left, ast.Constant)):
                 # `x is None` / `x is not None` decides presence, never a
-                # spelling (a spelling is a str, never the None singleton)
+                # spelling (a spelling is a str, never the None singleton).
+                # Round 10 (finding resolution_sites:431): exactly one
+                # comparison whose single comparator is the None constant;
+                # a chain, or None on the left, is read like any other.
                 continue
             if any(_reads(x, keyed) for x in ops):
                 out.append(("spelling", n.lineno))
