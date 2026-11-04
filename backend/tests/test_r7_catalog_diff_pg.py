@@ -2494,6 +2494,48 @@ def test_r10_outside_discounts_another_backends_drop_database(program):
     assert got == (["pg_database"] if program else []), got
 
 
+async def _r10_inplace_bound(other):
+    """One REPEATABLE READ position on the admin database, as the measurer
+    that owns <other>; each statement under its own savepoint. Returns
+    {statement: SQLSTATE or "ok"}, in statement order."""
+    out = {}
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        async with conn.transaction(isolation="repeatable_read"):
+            for sql in ('DROP DATABASE "%s"' % other,
+                        'ALTER DATABASE "%s" CONNECTION LIMIT -2' % other,
+                        'ALTER DATABASE "%s" CONNECTION LIMIT -1' % other):
+                try:
+                    async with conn.transaction():
+                        await conn.execute(sql)
+                    out[sql] = "ok"
+                except asyncpg.PostgresError as e:
+                    out[sql] = e.sqlstate
+    finally:
+        await conn.close()
+    return out
+
+
+def test_r10_outside_inplace_bound_refusals():
+    """The bound outside_diff() rests on (its OUTSIDE_INPLACE discount does
+    not check that the row's last value was -2): a position can neither
+    remove a pg_database row nor write datconnlimit -2. Executed inside a
+    position: DROP DATABASE is refused (25001, it cannot run in a transaction
+    block) and CONNECTION LIMIT -2 is refused (22023, below -1); the control,
+    the same statement with -1, runs, so the refusal is the value's and not
+    the statement's or the privilege's."""
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
+    prefix = os.environ.get("D2_DB_PREFIX", "d2catalog")
+    other = ("%s_bound_%s_%d" % (prefix, stamp, os.getpid())).lower()
+    asyncio.run(_admin('CREATE DATABASE "%s"' % other))
+    try:
+        got = asyncio.run(_r10_inplace_bound(other))
+    finally:
+        asyncio.run(_drop_db(other))
+    print("r10 OUTSIDE_INPLACE bound inside a position: %s" % got)
+    assert list(got.values()) == ["25001", "22023", "ok"], got
+
+
 # --- the files outside the chain --------------------------------------------
 
 
