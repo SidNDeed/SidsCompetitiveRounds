@@ -31,10 +31,15 @@ namespace CompetitiveRounds
         /// writer and its reader name this constant.</summary>
         internal const string PropAsmHint = "cr_asm_hint";
 
-        /// <summary>False in every build until the production-enabling release
-        /// (sec8.4 G3); only the G3 configuration's SCR_G3 advertises the
-        /// admission token before it.</summary>
-        internal const bool AdmProductionEnabled = false;
+        /// <summary>True from 1.41.0 (sec8.4 G3's production-enabling release,
+        /// decision A7 of 2026-11-04): every build advertises the admission
+        /// token whenever Caps() admits it, so the G3 configuration's G3Build
+        /// no longer changes what is advertised. The token is a claim, not a
+        /// grant: the server's ADM_PRODUCTION_ENABLED decides whether a room
+        /// that advertises it locks as an admission lobby (while that is
+        /// False, only a room whose every member is enrolled in
+        /// ffa_g3_seats).</summary>
+        internal const bool AdmProductionEnabled = true;
 #if SCR_G3
         internal const bool G3Build = true;
 #else

@@ -1013,8 +1013,9 @@ def test_k13_label_reaches_only_its_parameter():
 def test_k11_wp1_caps():
     """K11: ffa_asm1 needs all six conditions (the sixth: item 13's patches);
     ffa_adm1 needs the admission list and AdvertiseAdm, which is
-    AdmProductionEnabled || G3Build; AdmProductionEnabled is false; G3Build is
-    true only under SCR_G3. WP1: the tokens equal the server's."""
+    AdmProductionEnabled || G3Build; AdmProductionEnabled is true (the
+    production-enabling release, decision A7); G3Build is true only under
+    SCR_G3. WP1: the tokens equal the server's."""
     fa = src("FfaAssembly.cs")
     caps = kept(block("FfaAssembly.cs", "internal static string Caps("))
     adm = re.search(r"bool\s+adm\s*=\s*([^;]*);", caps)
@@ -1037,7 +1038,7 @@ def test_k11_wp1_caps():
         "returns": re.findall(r"if \(([^)]*)\) return ([^;]*);",
                               kept(block("FfaReadmitEntryRules.cs", "internal static string CapsList("))),
         "rdm_token": re.findall(r"const string RdmCapsToken = \"([^\"]*)\";", kept(src("FfaReadmitEntryRules.cs"))),
-        "adm_production": bool(re.search(r"const bool AdmProductionEnabled = false;", kept(fa))),
+        "adm_production": bool(re.search(r"const bool AdmProductionEnabled = true;", kept(fa))),
         "advertise": bool(re.search(r"bool AdvertiseAdm => AdmProductionEnabled \|\| G3Build;", kept(fa))),
         "g3_release": rel.group(1) if rel else None, "g3_g3": g3.group(1) if g3 else None,
         "enroll_calls": calls(src("ApiClient.cs"), r"FfaAssembly\.Caps"),

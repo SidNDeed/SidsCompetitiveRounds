@@ -35,8 +35,11 @@
        returns SCR_BUILD_VARIANT=G3 (a marker that exists only to be probed, #306) and
        FfaAssembly.AdvertiseAdm holds. Optimized like Release. It never installs to
        this seat (the CopyToPlugins condition below), and tools/g3-publish-gate.ps1
-       refuses its DLL for every publish destination. The production-enabling
-       release deletes this group, the marker branch and the exclusion. -->
+       refuses its DLL for every publish destination. Since 1.41.0 (decision A7)
+       Release advertises the admission token too (FfaAssembly.AdmProductionEnabled
+       is true), so this configuration differs from Release only in its marker; the
+       group, the marker branch and the exclusion stay until a change of their own
+       removes them. -->
   <PropertyGroup Condition="'$(Configuration)' == 'G3'">
     <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants>
     <Optimize>true</Optimize>
