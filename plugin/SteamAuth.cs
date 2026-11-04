@@ -26,6 +26,9 @@ namespace CompetitiveRounds
         private static Callback<GetTicketForWebApiResponse_t> _webTicketCb;
         private static float _lastAttemptAt = -999f;
         private static bool _loggedUnavailable;
+#if SCR_FRAMETIME
+        private static bool _ftWithheldSaid;
+#endif
 
         // One Steam web-API ticket at a time (board row 27 round 2, the
         // no-token residual). A ticket is HELD from the request until its
@@ -114,6 +117,17 @@ namespace CompetitiveRounds
                 float backoff = string.IsNullOrEmpty(SessionToken) ? 4f : 60f;
                 if (Time.realtimeSinceStartup - _lastAttemptAt < backoff) return;
                 _lastAttemptAt = Time.realtimeSinceStartup;
+#if SCR_FRAMETIME
+                // F8 (iv), ruling R6-A3.11: no Steam web ticket is minted while FtRoute would refuse its exchange;
+                // the question is FtRoute's own, asked of the exact request PostSteamAuth would send, at the
+                // ticket cadence above (the attempt stamp is taken first), so it is asked once per backoff, not
+                // per frame. One line, the first time.
+                if (!FtRoute.Allow("POST", ApiClient.BaseUrl + "/api/v1/auth/steam", out string ftRoute))
+                {
+                    if (!_ftWithheldSaid) { _ftWithheldSaid = true; Plugin.Log.LogInfo("[FRAME-TIME] steam ticket withheld route=" + ftRoute); }
+                    return;
+                }
+#endif
                 if (_webTicketCb == null)
                     _webTicketCb = Callback<GetTicketForWebApiResponse_t>.Create(OnWebTicket);
                 _ticket = SteamUser.GetAuthTicketForWebApi("competitive-rounds");

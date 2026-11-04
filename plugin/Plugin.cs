@@ -1442,6 +1442,9 @@ namespace CompetitiveRounds
                 // calibration table is built only from here on (ruling FRAME-TIME-ROUND-R6-A1).
                 try { FtCalib.OwnPatchesApplied(); }
                 catch (Exception ex) { Log.LogWarning("[FRAME-TIME] cal i=-1 why=patches kind=entries failed: " + ex.Message); }
+                // F8 (ruling R6-A3.11): the room gate's one patch-time line, counted from Harmony's patch table.
+                try { FtRoomGate.ReportPatched(); }
+                catch (Exception ex) { Log.LogWarning("[FRAME-TIME] FT-GATE report failed: " + ex.Message); }
 #endif
                 // Card draw evidence (B4): one line naming its six patches as attached.
                 try { CardDrawEvidence.BootLine(); } catch { }
@@ -2304,6 +2307,16 @@ namespace CompetitiveRounds
                     try { PhotonNetwork.LocalPlayer?.SetCustomProperties(FfaAssembly.StagedPrejoin); }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] staged pre-join SetCustomProperties: {ex.Message}"); }
                 }
+#if SCR_FRAMETIME
+                // F8 (iii), ruling R6-A3.11: the sitting's own room seats its two fighters and nobody else, and is
+                // never listed. Every other name is refused by FtRoomGate before it reaches Photon.
+                if (FtConfig.Present && string.Equals(capturedRoom, FtArm.ExpectedRoom(), StringComparison.Ordinal))
+                {
+                    roomOptions.MaxPlayers = 2;
+                    roomOptions.IsVisible = false;
+                    Plugin.Log.LogInfo("[FRAME-TIME] ft room options max=2 visible=0 room=" + capturedRoom);
+                }
+#endif
                 JoinTimeline.Step("join_issued", "max=" + roomOptions.MaxPlayers.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 bool accepted = PhotonNetwork.JoinOrCreateRoom(capturedRoom, roomOptions, lobby);
                 JoinTimeline.Step("join_result", accepted ? "ok" : "false offline=" + (PhotonNetwork.OfflineMode ? "true" : "false"));
