@@ -238,8 +238,7 @@ def _effect(before, after, shared_before, shared_after, xid):
     k = catalog_all.keys({"added": sorted(after - before), "removed": sorted(before - after)})
     if k:
         return "CATALOG:" + ",".join(k)
-    s = catalog_all.keys({"added": sorted(shared_after - shared_before),
-                          "removed": sorted(shared_before - shared_after)})
+    s = catalog_all.keys(catalog_all.outside_diff(shared_before, shared_after))
     if s:
         return "SHARED:" + ",".join(s)
     return "WRITE:xid" if xid else "OK"

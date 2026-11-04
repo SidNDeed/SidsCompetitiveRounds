@@ -153,6 +153,20 @@ RESTRICT = {
                               "origin not named that way are compared"),
 }
 
+# Rows outside RESTRICT that another backend changes IN PLACE, which one
+# REPEATABLE READ snapshot does not hold still: {relation: (predicate over t,
+# reason)}. outside() leaves them out, and outside_diff() discounts the one
+# difference that leaves (a row present at the start, absent at the end,
+# with no row of its identity added).
+OUTSIDE_INPLACE = {
+    "pg_database": ("t.datconnlimit = -2",
+                    "DROP DATABASE (PostgreSQL 16) marks the row invalid (datconnlimit -2) by an in-place "
+                    "update, visible inside any snapshot; a position can never write that value (ALTER "
+                    "DATABASE refuses a limit below -1) nor remove a pg_database row (DROP DATABASE cannot "
+                    "run inside a transaction block, 25001); the rows of invalid databases (being dropped, "
+                    "or left invalid by an interrupted drop) are therefore not measured outside RESTRICT"),
+}
+
 # Columns the session may not SELECT: (relation, column or WHOLE, reason).
 # Any other unreadable column fails the snapshot.
 UNREADABLE = (
@@ -662,6 +676,8 @@ def query(p, outside=False):
         if rel in RESTRICT:
             pred = RESTRICT[rel][0].format(db="$1", me="$2")
             where = (" WHERE (%s) IS NOT TRUE" % pred) if outside else (" WHERE " + pred)
+            if outside and rel in OUTSIDE_INPLACE:
+                where += " AND (%s) IS NOT TRUE" % OUTSIDE_INPLACE[rel][0]
         parts.append("SELECT %s::text AS rel, %s::text AS scope, %s AS shared, ROW(%s)::text AS body, "
                      "%s AS own, %s AS system, %s AS refs, %s AS ident, %s AS selves FROM pg_catalog.%s t%s"
                      % ("'%s'" % rel, SCOPE.get(rel, "''"), "true" if e["shared"] else "false",
@@ -771,6 +787,25 @@ async def outside(conn):
     return frozenset(rows_from(rows, names, temp))
 
 
+def outside_diff(before, after):
+    """{'added', 'removed'} of two outside() readings of one position, less
+    the removal OUTSIDE_INPLACE explains: a row of an OUTSIDE_INPLACE
+    relation present at the start and absent at the end, with no row of the
+    same identity ('@' marks) added (another backend marked it in place;
+    the position cannot remove such a row). A row of that identity added at
+    the end (the position changed it) keeps both sides."""
+    added, removed = sorted(after - before), sorted(before - after)
+
+    def ident(r):
+        return (r[2], frozenset(c for c in r[5][3:] if c[:1] == "@"))
+
+    def inplace(r):
+        return r[0] == "raw" and r[2] in OUTSIDE_INPLACE and any(c[:1] == "@" for c in r[5][3:])
+
+    back = {ident(r) for r in added if inplace(r)}
+    return {"added": added, "removed": [r for r in removed if not (inplace(r) and ident(r) not in back)]}
+
+
 async def routes(conn):
     """What this run's measurer measures, by field (ruling R9-A1 (A)):
     {"measurer", "superuser", "rolpassword", "outside_restrict", "unmeasured"}.
@@ -785,11 +820,14 @@ async def routes(conn):
         for c in e["masked"]:
             unmeasured.append((rel, c, "read through %s, which masks it; the measurer %s may not read %s"
                                % (e["source"], s["measurer"], rel)))
+    for rel, (pred, why) in sorted(OUTSIDE_INPLACE.items()):
+        unmeasured.append((rel, "rows outside RESTRICT where %s" % pred, why))
     pw = p["relations"].get("pg_authid", {})
     return {"measurer": s["measurer"], "superuser": bool(s["superuser"]),
             "rolpassword": "unmeasured" if "rolpassword" in pw.get("masked", ()) else "digest",
             "outside_restrict": ("measured in every harness position (outside(), one REPEATABLE READ "
-                                 "snapshot at both ends of the position); not measured between two chain "
+                                 "snapshot at both ends of the position; rows another backend changes in "
+                                 "place, OUTSIDE_INPLACE, left out); not measured between two chain "
                                  "readings, which are separate transactions"),
             "unmeasured": unmeasured}
 

@@ -33,7 +33,7 @@ FROZEN = {
     ("presence", "test_r7_catalog_diff_pg.py"): 1, ("presence", "test_r7_ro_role_pg.py"): 1,
     ("explanation", "catalog_all.py"): 12, ("explanation", "catalog_diff.py"): 0,
     ("explanation", "test_r7_catalog_diff_pg.py"): 0, ("explanation", "test_r7_ro_role_pg.py"): 0,
-    ("shared", "catalog_all.py"): 17, ("shared", "catalog_diff.py"): 1,
+    ("shared", "catalog_all.py"): 18, ("shared", "catalog_diff.py"): 1,
     ("shared", "test_r7_catalog_diff_pg.py"): 8, ("shared", "test_r7_ro_role_pg.py"): 2,
 }
 

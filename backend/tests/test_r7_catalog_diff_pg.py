@@ -1617,7 +1617,7 @@ async def _measure_in(dsn, program, schema):
                "internal_not_enabled": await _internal_not_enabled(conn=conn),
                "ended": ended, "xid": seen["xid"], "outside": None}
         if not ended:
-            out["outside"] = sorted(ca.keys(cd.diff(shared, await ca.outside(conn))))
+            out["outside"] = sorted(ca.keys(ca.outside_diff(shared, await ca.outside(conn))))
         return out
     finally:
         await tr.rollback()
@@ -2427,6 +2427,51 @@ def test_r10_routes_state_this_run(chain):
     else:
         assert "rolpassword" not in q, q[:400]
     assert rows and not [x for x in rows if "SCRAM-SHA-256$" in x], len(rows)
+
+
+async def _r10_outside_across_drop(db, program):
+    """One REPEATABLE READ position on the admin database: outside() read,
+    the position's program run, database <db> dropped by ANOTHER backend,
+    outside() read again. (the plain set difference's catalogs,
+    outside_diff()'s catalogs)."""
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        async with conn.transaction(isolation="repeatable_read"):
+            before = await ca.outside(conn)
+            if program:
+                await conn.execute(program)
+            await _drop_db(db)
+            after = await ca.outside(conn)
+            plain = sorted(ca.keys({"added": sorted(after - before), "removed": sorted(before - after)}))
+            return plain, sorted(ca.keys(ca.outside_diff(before, after)))
+    finally:
+        await conn.close()
+
+
+@pytest.mark.parametrize("program", ("", "ALTER DATABASE {other} CONNECTION LIMIT 7"))
+def test_r10_outside_discounts_another_backends_drop_database(program):
+    """PostgreSQL 16 DROP DATABASE marks the row invalid (datconnlimit -2) by
+    an in-place update, visible inside the position's REPEATABLE READ
+    snapshot; the record run of a5d71da0 read a concurrent lane's drop as the
+    position's own 'SHARED:pg_database'. outside() leaves invalid rows out
+    and outside_diff() discounts the removal that leaves; a change the
+    position makes to another database's row (the second case, an ALTER
+    DATABASE on a database it owns) is still reported."""
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
+    prefix = os.environ.get("D2_DB_PREFIX", "d2catalog")
+    db = ("%s_inplace_%s_%d" % (prefix, stamp, os.getpid())).lower()
+    other = ("%s_other_%s_%d" % (prefix, stamp, os.getpid())).lower()
+    asyncio.run(_admin('CREATE DATABASE "%s"' % db))
+    asyncio.run(_admin('CREATE DATABASE "%s"' % other))
+    try:
+        plain, got = asyncio.run(_r10_outside_across_drop(db, program.format(other='"%s"' % other)))
+    finally:
+        asyncio.run(_drop_db(db))
+        asyncio.run(_drop_db(other))
+    print("r10 outside across another backend's DROP DATABASE, program %r: set difference %s, "
+          "outside_diff %s" % (program, plain, got))
+    assert plain == ["pg_database"], plain
+    assert got == (["pg_database"] if program else []), got
 
 
 # --- the files outside the chain --------------------------------------------
