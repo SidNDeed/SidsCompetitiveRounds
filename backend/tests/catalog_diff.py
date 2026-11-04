@@ -687,8 +687,14 @@ async def snapshot(conn):
     scope no longer depends on whether a transaction was open)."""
     if conn.is_in_transaction():
         return await _snapshot_in(conn)
-    async with conn.transaction(isolation="repeatable_read", readonly=True):
+    # its own transaction by statement: after a program ended a harness
+    # transaction, asyncpg still holds that transaction object and would nest
+    # conn.transaction() as a SAVEPOINT outside any transaction block
+    await conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+    try:
         return await _snapshot_in(conn)
+    finally:
+        await conn.execute("ROLLBACK")
 
 
 async def _snapshot_in(conn):

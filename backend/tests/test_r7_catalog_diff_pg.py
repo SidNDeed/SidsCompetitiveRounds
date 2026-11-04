@@ -1521,6 +1521,18 @@ REFUSED_SQLSTATE = {
 }
 
 
+async def _after_ended(conn):
+    """A position the program ended may leave the program's own transaction
+    in the failed state (its error after a COMMIT; BEGIN, or a refused
+    return to the harness savepoint): rolled back, so the diff can be read.
+    Nothing in a failed transaction can commit; what the program committed
+    before it stays committed and is in the diff."""
+    try:
+        await conn.fetchval("SELECT 1")
+    except asyncpg.InFailedSQLTransactionError:
+        await conn.execute("ROLLBACK")
+
+
 def _ended(seen):
     """'ENDED:<what changed>' for a position whose transaction the program
     ended (catalog_position.check), else None."""
@@ -1596,6 +1608,8 @@ async def _measure_in(dsn, program, schema):
                     "outside": None}
         seen = await catalog_position.check(conn, pos, dsn)
         ended = _ended(seen)
+        if ended:
+            await _after_ended(conn)
         await conn.execute("SELECT pg_catalog.set_config('search_path', 'public', false)")
         after = await cd.snapshot(conn)
         out = {"refused": None, "diff": cd.diff(before, after), "after": after,
@@ -1675,6 +1689,8 @@ async def _language(dsn, extension, program):
             res["refused"] = exc.sqlstate
             res["error"] = (res.get("error") or "") + " | " + str(exc).splitlines()[0][:200]
         res["ended"] = _ended(await catalog_position.check(conn, pos, dsn))
+        if res["ended"]:
+            await _after_ended(conn)
         res["diff"] = cd.diff(before, await cd.snapshot(conn))
         return res
     finally:
@@ -2090,11 +2106,17 @@ R10_ENDING = [
 R10_HARNESSES = ("_in_schema", "_language", "_measure")
 
 
+_R10_SCHEMAS = [0]
+
+
 async def _r10_harness(harness, dsn, program):
-    """The harness's report for program: 'ENDED:...', or 'kept'."""
+    """The harness's report for program: 'ENDED:...', or 'kept'. Each call
+    uses a schema of its own: a program that ended the transaction has
+    committed the schema the harness created before it."""
     if harness == "_in_schema":
+        _R10_SCHEMAS[0] += 1
         try:
-            await _in_schema(dsn, "d2_r10h", program)
+            await _in_schema(dsn, "d2_r10h_%d" % _R10_SCHEMAS[0], program)
         except AssertionError as exc:
             if str(exc).startswith("_in_schema: ENDED:"):
                 return str(exc).split(": ", 1)[1]
@@ -2296,17 +2318,18 @@ def _r10_identity_cases(chain, alone):
         flipped.append(r[:3] + (_r10_row_text(f),) + r[4:])
     assert ca.changed_columns("pg_index", mine[0][3], flipped[0][3]) == ["indisclustered"]
     base = alone["diff"]
+    rows = len({(r[2], r[3], r[5]) for r in mine})   # one per row, whatever relations it names
     in_place = {"added": base["added"] + flipped, "removed": base["removed"] + mine}
     got = ca.unexplained(in_place)
-    assert sorted((u[0], u[1]) for u in got) == sorted([("added", "pg_index")] * len(mine)
-                                                       + [("removed", "pg_index")] * len(mine)), got
+    assert sorted((u[0], u[1]) for u in got) == sorted([("added", "pg_index")] * rows
+                                                       + [("removed", "pg_index")] * rows), got
     control = {"added": in_place["added"] + obj, "removed": in_place["removed"]}
     assert ca.unexplained(control) == [], ca.unexplained(control)
     whole = {"added": base["added"] + mine, "removed": base["removed"]}
     got = ca.unexplained(whole)
-    assert sorted((u[0], u[1]) for u in got) == [("added", "pg_index")] * len(mine), got
+    assert sorted((u[0], u[1]) for u in got) == [("added", "pg_index")] * rows, got
     print("r10 catalog_all.py:532 identity cases: in place %d unexplained, control 0, whole %d unexplained"
-          % (2 * len(mine), len(mine)))
+          % (2 * rows, rows))
 
 
 def test_r10_n_catalog_all_532_explanation_bound_to_identity(chain):

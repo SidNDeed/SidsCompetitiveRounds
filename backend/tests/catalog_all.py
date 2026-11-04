@@ -268,6 +268,8 @@ SELF = {
 # {relation: extra SQL identity expressions} beside SELF (conditional forms).
 SELF_SQL = {
     "pg_attribute": ("CASE WHEN t.attnum < 0 THEN t.attrelid::pg_catalog.oid::text END",),
+    # a subscription's origin is named pg_<subscription oid>
+    "pg_replication_origin": ("CASE WHEN t.roname ~ '^pg_[0-9]+$' THEN pg_catalog.substr(t.roname, 4) END",),
 }
 
 ALL = "*"
@@ -289,7 +291,10 @@ EXPLAINS = {
     "pg_am": {"access_method"},
     "pg_amop": {"opfamily", "opclass"},
     "pg_amproc": {"opfamily", "opclass"},
-    "pg_attrdef": {"default"},
+    # ALTER COLUMN TYPE rebuilds a column's default (a new row, a new stored
+    # tree) whose rendered text can stay the same: bound to that column's
+    # attribute (adrelid.adnum), the object whose change rebuilt it
+    "pg_attrdef": {"default", "attribute"},
     # a system column (attnum < 0) is created and dropped with its relation and
     # rendered by no object row: it alone carries the relation's identity
     # (SELF_SQL), so only it can be bound to the class row
@@ -359,10 +364,13 @@ EXPLAINS = {
 # these kinds on the table the toast relation belongs to ('^' mark).
 TOAST_KINDS = ("attribute", "class")
 
-S, R = "self", "rel"   # binding modes: the object row's identity is one of
-#                        the row's '@' identities (S), or the object row's
-#                        relation is the relation the row's identity lies
-#                        in ('%' mark; R)
+S, R, O = "self", "rel", "owner"   # binding modes: the object row's
+#                        identity is one of the row's '@' identities (S); or
+#                        the object row's relation is the relation the row's
+#                        identity is in ('%' mark; R); or the object row's
+#                        relation is a relation the row names through its
+#                        oid-typed columns, an index's or toast relation's
+#                        owning table included (O)
 _CLASS = (("class", S),)
 # {key: {column: ((object kind, mode), ...)}}: the columns whose change IN
 # PLACE an object change accounts for, and how that change must be bound. A
@@ -371,9 +379,14 @@ _CLASS = (("class", S),)
 IN_PLACE = {
     "pg_class": dict(
         {c: _CLASS for c in ("relname", "relnamespace", "relkind", "relpersistence", "relforcerowsecurity",
-                             "reloptions", "relowner", "relreplident", "relam", "reltablespace", "reloftype")},
+                             "reloptions", "relreplident", "relam", "reltablespace", "reloftype")},
+        # ALTER TABLE OWNER changes the owner of the table's indexes and toast
+        # relation too; pg_dump renders only the table's
+        relowner=(("class", S), ("class", O)),
         relrowsecurity=(("rls", S),), relispartition=(("partition", S),), relpartbound=(("partition", S),),
-        relacl=(("acl", S),),
+        # an owner change rewrites the grantor of every grant on the relation,
+        # which no ACL object renders: bound to the relation's own class object
+        relacl=(("acl", S), ("class", S)),
         # a column added or dropped changes the table's column count, and a
         # toastable one creates its toast relation
         relnatts=(("attribute", R),), reltoastrelid=(("attribute", R),),
@@ -388,7 +401,9 @@ IN_PLACE = {
         # column, cleared when the table is rewritten by another column's change
         atthasmissing=(("default", S), ("attribute", S), ("attribute", R)),
         attmissingval=(("default", S), ("attribute", S), ("attribute", R)),
-        attacl=(("acl", S),), attinhcount=(("inherits", R),), attislocal=(("inherits", R),)),
+        # an owner change rewrites the grantor of every column grant: bound to
+        # the class object of the relation the column is in
+        attacl=(("acl", S), ("class", R)), attinhcount=(("inherits", R),), attislocal=(("inherits", R),)),
     "pg_attrdef": {"adbin": (("default", S),)},
     "pg_constraint": dict(
         {c: (("constraint", S),) for c in ("conname", "contype", "condeferrable", "condeferred", "convalidated",
@@ -919,8 +934,10 @@ def unexplained(d):
             same[side].add((key, _blank_own_oid(text, cand[1])))
     other = {"added": "removed", "removed": "added"}
 
-    def bound(kind, mode, ids, rels):
-        return bool(ids & ids_of.get(kind, set())) if mode == S else bool(rels & rels_of.get(kind, set()))
+    def bound(kind, mode, ids, rels, refs):
+        if mode == S:
+            return bool(ids & ids_of.get(kind, set()))
+        return bool((rels if mode == R else refs) & rels_of.get(kind, set()))
 
     def in_place_ok(key, ident):
         decl = IN_PLACE.get(key, {})
@@ -928,7 +945,7 @@ def unexplained(d):
             for b in by_ident["removed"][(key, ident)]:
                 ra, ia, la, ta = marks[a]
                 rb, ib, lb, tb = marks[b]
-                ids, rels = ia | ib, la | lb
+                ids, rels, named = ia | ib, la | lb, ra | rb
                 changed = changed_columns(key, a[2], b[2])
                 if changed is None:
                     return False
@@ -938,9 +955,28 @@ def unexplained(d):
                         return False
                     continue
                 for c in changed:
-                    if not any(bound(kind, mode, ids, rels) for kind, mode in decl.get(c, ())):
+                    if not any(bound(kind, mode, ids, rels, named) for kind, mode in decl.get(c, ())):
                         return False
         return True
+
+    # a dependency row changed in d links its dependent object (objid) to the
+    # object it depends on (refobjid): a whole row whose identity is a
+    # dependent there is bound to that object (the operators and support
+    # functions CREATE OPERATOR CLASS makes depend on the class)
+    linked = {"added": {}, "removed": {}}
+    for side in linked:
+        for r in d[side]:
+            if r[0] == "raw" and r[2] == "pg_depend":
+                f = fields(r[3])
+                if len(f) == 7 and f[1] and f[4]:
+                    linked[side].setdefault(f[1], set()).add(f[4])
+    # an inheritance link (relid.seqno) is a part of its relation: it explains
+    # the relation's own dependency rows (ALTER TABLE INHERIT)
+    inherits_of = {i.split(".", 1)[0] for i in ids_of.get("inherits", set())}
+    # rows with no key identity whose text is the same on both sides
+    by_text = {"added": {}, "removed": {}}
+    for k in g:
+        by_text[k[0]].setdefault((k[1], k[2]), []).append(k)
 
     verdict = {}
     out = []
@@ -953,13 +989,26 @@ def unexplained(d):
                 verdict[(key, cand[1])] = in_place_ok(key, cand[1])
             ok = verdict[(key, cand[1])]
         elif kinds == DEPENDS:
-            ok = bool(ids & (every_id | raw_ids))
+            ok = bool(ids & (every_id | raw_ids | inherits_of))
         else:
             ok = any(ids & ids_of.get(kk, set()) for kk in kinds)
             if not ok and kinds and toast:
                 ok = any(toast & rels_of.get(kk, set()) for kk in TOAST_KINDS)
             if not ok and kinds and cand[1]:
                 ok = (key, _blank_own_oid(text, cand[1])) in same[other[side]]
+            if not ok and kinds:
+                ok = any(ref in ids_of.get(kk, set()) for i in ids for ref in linked[side].get(i, ())
+                         for kk in kinds)
+        if not ok and not cand[1]:
+            # the same text on both sides, the same identities: only relation
+            # names it carries differ, and they are names a renamed class row
+            # changed between
+            for o in by_text[other[side]].get((key, text), ()):
+                ro, io, lo, to = marks[o]
+                names = (refs ^ ro) | (_rels ^ lo) | (toast ^ to)
+                if io == ids and names and names <= renamed:
+                    ok = True
+                    break
         if not ok:
             out.append([side, key, text, sorted(refs)])
     return out
