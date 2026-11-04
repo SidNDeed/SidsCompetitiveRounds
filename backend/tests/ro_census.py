@@ -161,8 +161,57 @@ FORWARDING = {
         "(def create_async_engine(url, **options)); every keyword it forwards "
         "comes from a call of create_async_engine, and each such call is "
         "itself a complete `call` form here (literal keyword names, frozen), "
-        "so the forwarded keywords are bound at their call sites",
+        "so the forwarded keywords are bound at their call sites; round 10: "
+        "the wrapper itself is bound whole (its `wrapper` form: signature, "
+        "body and every local statement that builds what it forwards), so a "
+        "change inside it refuses",
 }
+
+
+# Round 10 (ruling REHEARSAL-R9-A1 (C), refuse by default). Four more kinds
+# of the complete layer, each frozen at the round-9 tip 0b317394 (the literal
+# R10_FROZEN in ro_census_frozen; never regenerated):
+#
+#   constructed  every Call whose callee is CONSTRUCTED: not a Name and not an
+#                Attribute (a call's result called, a subscript, a lambda, an
+#                await, a conditional, ...), or an Attribute named __call__
+#                on any receiver: the whole call as written. Its callee has no
+#                name the census could bind, so the exact form must be frozen.
+#   alias        every ALIAS of a dynamic-access name or of an opener: an
+#                import statement that names one (as its name or its asname)
+#                or that imports from the builtins module; a Name spelling a
+#                DYNAMIC_NAMES entry anywhere except as the bare callee of a
+#                call (an assignment, an argument, a default, a store, a
+#                rebinding); an Attribute spelling one anywhere except as a
+#                callee the round-9 dynamic rule classifies (CLASSIFIED_*:
+#                f = builtins.getattr, builtins.vars(m), x.getattr_static);
+#                a Name or Attribute builtins / __builtins__ / __builtin__ in
+#                any context; a
+#                def, class or parameter named a DYNAMIC_NAMES entry; a string
+#                constant equal to one of those names (globals()['getattr']).
+#                Each as its parent node as written.
+#   wrapper      every FORWARDING WRAPPER, whole: the innermost function (def
+#                or lambda) that holds an opener call one of whose arguments
+#                reads a name a function around the call binds (a parameter
+#                or a local), and the function that binds it (a closure):
+#                the definition as written, once per function. Any change
+#                to the body, the signature, the defaults or the local
+#                assignments and mutations that build a forwarded argument
+#                changes this form.
+#   argdef       the DEFINITIONS of every module-scope name an opener call
+#                forwards (a Name read by an argument, bound by no function
+#                around the call): every module-scope statement that binds it
+#                (assignment, import, def, class, for, with, del), every
+#                statement anywhere that stores into it or deletes from it (a
+#                subscript or attribute target rooted at it, an augmented
+#                assignment), every expression statement that calls a method
+#                on it (the mutating call shape, n.update(...)), and every
+#                function that declares it global, whole: as
+#                'name <- statement', once per statement per file.
+DYNAMIC_NAMES = (DYNAMIC_ATTR_CALLS | DYNAMIC_BUILTINS | DYNAMIC_CALLS
+                 | frozenset({"getattr_static"}))
+DYNAMIC_MODULES = frozenset({"builtins", "__builtins__", "__builtin__"})
+_FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 
 
 def _name_of(func):
@@ -174,6 +223,227 @@ def _name_of(func):
     return None
 
 
+def _constructed(func):
+    """Whether a callee is constructed (round 10): not a Name, not an
+    Attribute, or an Attribute named __call__."""
+    if isinstance(func, ast.Name):
+        return False
+    if isinstance(func, ast.Attribute):
+        return func.attr == "__call__"
+    return True
+
+
+def _root(node):
+    """The Name at the root of an Attribute / Subscript chain, or None."""
+    while isinstance(node, (ast.Attribute, ast.Subscript, ast.Starred)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _own_nodes(fn):
+    """The nodes of function `fn`'s own scope: its body (or lambda body),
+    not descending into nested functions or classes (whose own node is
+    included)."""
+    body = fn.body if isinstance(fn.body, list) else [fn.body]
+    stack, out = list(body), []
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        if isinstance(n, _FUNCS + (ast.ClassDef,)):
+            continue
+        stack.extend(ast.iter_child_nodes(n))
+    return out
+
+
+def _binds(fn):
+    """The names function `fn` binds: its parameters and every name its own
+    scope stores, deletes, imports or defines, less those it declares
+    global or nonlocal."""
+    a = fn.args
+    out = {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs}
+    out |= {x.arg for x in (a.vararg, a.kwarg) if x is not None}
+    declared = set()
+    for n in _own_nodes(fn):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            out.add(n.id)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            out |= {(al.asname or al.name).split(".")[0] for al in n.names}
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            declared |= set(n.names)
+    return out - declared
+
+
+def _arg_names(call):
+    """The Names a call's arguments read: every Name anywhere in a
+    positional or keyword argument (unpacked ones included), so the root
+    Name of every attribute or subscript chain there too."""
+    out = set()
+    for a in list(call.args) + [k.value for k in call.keywords]:
+        for n in ast.walk(a):
+            if isinstance(n, ast.Name):
+                out.add(n.id)
+    return out
+
+
+def _module_statements(tree):
+    """Every statement of module scope: the module body, descending into
+    compound statements (if, try, with, for, while, match) but not into a
+    def or class body (their own statement is included)."""
+    stack, out = list(tree.body), []
+    while stack:
+        s = stack.pop()
+        out.append(s)
+        if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody", "handlers", "cases"):
+            for c in getattr(s, field, None) or []:
+                stack.extend(c.body if isinstance(c, (ast.ExceptHandler, ast.match_case))
+                             else [c])
+    return out
+
+
+def _stmt_binds(s, name):
+    """Whether module-scope statement `s` binds `name` itself."""
+    if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return s.name == name
+    if isinstance(s, (ast.Import, ast.ImportFrom)):
+        return any((al.asname or al.name).split(".")[0] == name for al in s.names)
+    targets = []
+    if isinstance(s, ast.Assign):
+        targets = s.targets
+    elif isinstance(s, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+        targets = [s.target]
+    elif isinstance(s, (ast.With, ast.AsyncWith)):
+        targets = [i.optional_vars for i in s.items if i.optional_vars is not None]
+    elif isinstance(s, ast.Delete):
+        targets = s.targets
+    return any(isinstance(n, ast.Name) and n.id == name
+               for t in targets for n in ast.walk(t))
+
+
+def _stmt_mutates(s, name):
+    """Whether statement `s` (anywhere) stores into, deletes from or calls a
+    method on `name` (its targets' chain root, or an expression statement
+    whose callee is an attribute chain rooted at it)."""
+    targets = []
+    if isinstance(s, ast.Assign):
+        targets = s.targets
+    elif isinstance(s, (ast.AnnAssign, ast.AugAssign)):
+        targets = [s.target]
+    elif isinstance(s, ast.Delete):
+        targets = s.targets
+    for t in targets:
+        for n in ast.walk(t):
+            if isinstance(n, (ast.Attribute, ast.Subscript)) and _root(n) == name:
+                return True
+        if isinstance(s, ast.AugAssign) and isinstance(t, ast.Name) and t.id == name:
+            return True
+    if isinstance(s, ast.Expr):
+        v = s.value.value if isinstance(s.value, ast.Await) else s.value
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) \
+                and _root(v.func) == name:
+            return True
+    return False
+
+
+def _forwarding(tree, parent, opener_calls):
+    """The wrapper and argdef forms (round 10) of the opener calls of one
+    module, once per function and once per definition statement."""
+    wrappers, argdefs, module_names = {}, set(), set()
+    for call in opener_calls:
+        chain = []
+        p = parent.get(call)
+        while p is not None:
+            if isinstance(p, _FUNCS):
+                chain.append(p)
+            p = parent.get(p)
+        for name in sorted(_arg_names(call)):
+            owner = next((fn for fn in chain if name in _binds(fn)), None)
+            if owner is not None:
+                # the innermost function holding the call is a wrapper, and
+                # so is the function that binds the name (a closure)
+                for fn in (chain[0], owner):
+                    wrappers[id(fn)] = fn
+            else:
+                module_names.add(name)
+    statements = [n for n in ast.walk(tree) if isinstance(n, ast.stmt)]
+    module_stmts = _module_statements(tree)
+    for name in module_names:
+        for s in module_stmts:
+            if _stmt_binds(s, name):
+                argdefs.add("%s <- %s" % (name, ast.unparse(s)))
+        for s in statements:
+            if _stmt_mutates(s, name):
+                argdefs.add("%s <- %s" % (name, ast.unparse(s)))
+            if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                    isinstance(g, ast.Global) and name in g.names for g in _own_nodes(s)):
+                argdefs.add("%s <- %s" % (name, ast.unparse(s)))
+    out = [("wrapper", ast.unparse(fn)) for fn in wrappers.values()]
+    out += [("argdef", a) for a in sorted(argdefs)]
+    return out
+
+
+# The callees the round-9 dynamic rule already classifies, so the alias kind
+# leaves them to it: a bare Name callee of any of the three round-9 sets
+# (getattr/setattr/delattr/hasattr by the literal-name rule, the rest always
+# `dynamic`), and an Attribute callee of the attribute-call and call sets
+# (builtins.getattr(m, n) is `dynamic` unless n is a string literal, whose
+# opener name the coarse `str` form binds; operator.attrgetter(...) is always
+# `dynamic`). Every other spelling of a dynamic name is an alias form: an
+# Attribute callee of vars/globals/locals/__import__/eval/exec (the round-9
+# rule reads those as bare Names only) and getattr_static in any spelling.
+CLASSIFIED_NAME_CALLS = DYNAMIC_ATTR_CALLS | DYNAMIC_BUILTINS | DYNAMIC_CALLS
+CLASSIFIED_ATTR_CALLS = DYNAMIC_ATTR_CALLS | DYNAMIC_CALLS
+
+
+def _classified_callee(node, up):
+    """Whether `node` is the callee of call `up` and the round-9 dynamic
+    rule classifies that call (see CLASSIFIED_*)."""
+    if not (isinstance(up, ast.Call) and up.func is node):
+        return False
+    if isinstance(node, ast.Name):
+        return node.id in CLASSIFIED_NAME_CALLS
+    return isinstance(node, ast.Attribute) and node.attr in CLASSIFIED_ATTR_CALLS
+
+
+def _aliases(tree, parent):
+    """The alias forms (round 10) of one module."""
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mod = (getattr(node, "module", None) or "").split(".")[0]
+            hit = isinstance(node, ast.ImportFrom) and mod in DYNAMIC_MODULES
+            for al in node.names:
+                last = al.name.split(".")[-1]
+                if (al.name.split(".")[0] in DYNAMIC_MODULES or last in DYNAMIC_NAMES
+                        or last in OPENER_NAMES or (al.asname or "") in DYNAMIC_NAMES
+                        or (al.asname or "") in OPENER_NAMES):
+                    hit = True
+            if hit:
+                out.append(("alias", ast.unparse(node)))
+        elif isinstance(node, ast.Name) and (node.id in DYNAMIC_NAMES
+                                             or node.id in DYNAMIC_MODULES):
+            up = parent.get(node)
+            if not (_classified_callee(node, up) and isinstance(node.ctx, ast.Load)):
+                out.append(("alias", ast.unparse(up) if up is not None else node.id))
+        elif isinstance(node, ast.Attribute) and (node.attr in DYNAMIC_NAMES
+                                                  or node.attr in DYNAMIC_MODULES):
+            up = parent.get(node)
+            if not (_classified_callee(node, up) and node.attr in CLASSIFIED_ATTR_CALLS):
+                out.append(("alias", ast.unparse(up) if up is not None else ast.unparse(node)))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                and node.name in DYNAMIC_NAMES:
+            out.append(("alias", "def " + node.name))
+        elif isinstance(node, ast.arg) and node.arg in DYNAMIC_NAMES:
+            out.append(("alias", "arg " + node.arg))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and (
+                node.value in DYNAMIC_NAMES or node.value in DYNAMIC_MODULES):
+            out.append(("alias", "str " + node.value))
+    return out
+
+
 def complete_forms(path, source):
     """The sorted list of (kind, spelling) forms of the complete layer of
     `source` (`path` relative to backend/, as in the census)."""
@@ -183,10 +453,14 @@ def complete_forms(path, source):
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parent[child] = node
+    opener_calls = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = _name_of(node.func)
+            if _constructed(node.func):
+                out.append(("constructed", ast.unparse(node)))
             if name in OPENER_NAMES:
+                opener_calls.append(node)
                 text = ast.unparse(node)
                 unpacked = any(k.arg is None for k in node.keywords) or any(
                     isinstance(a, ast.Starred) for a in node.args)
@@ -215,6 +489,8 @@ def complete_forms(path, source):
         if isinstance(node, ast.Attribute) and (
                 node.attr in DYNAMIC_ATTRS or _dotted(node) == "sys.modules"):
             out.append(("dynamic", ast.unparse(node)))
+    out += _aliases(tree, parent)
+    out += _forwarding(tree, parent, opener_calls)
     return sorted(out)
 
 

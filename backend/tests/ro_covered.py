@@ -170,14 +170,19 @@ OUTCOME = {
 # 'ok' under the role, so their bound is the walk's lock rule alone (a
 # QUESTION for the reviewer). Round 9 (E2): the lock read now measures the
 # writers too: 51703 is ('lock', ('advisory ExclusiveLock',)), its advisory
-# lock measured; 16839 holds no lock beyond the expected rows ('ok': a
-# transaction-local setting, a 'lock' by the lookup, not by a lock row).
+# lock measured; 16839 holds no lock beyond the expected rows. Round 10
+# (REHEARSAL-R9-A1 (B)): its transaction-local set_config of lock_timeout
+# is now MEASURED as an effect by the continuity bracket's residue reading
+# (pg_settings lock_timeout 0 -> 1000 across the position; r10-ro-measure1,
+# RF/r10/ro), so its bound is a measurement, no longer the walk's lock rule
+# alone; it stays 'lock' in the lookup (every WRITERS position does).
 WRITER_OUTCOME = {
     ('a1', 'main.py', 16390, 16391, '_lock_queue_rows_ordered'): '25006',
     ('a1', 'main.py', 16393, 16394, '_lock_queue_rows_ordered'): '25006',
     ('a1', 'main.py', 16396, 16397, '_lock_queue_rows_ordered'): '25006',
     ('a1', 'main.py', 16399, 16400, '_lock_queue_rows_ordered'): '25006',
-    ('a1', 'main.py', 16839, 16849, '_lease_admission_gate'): 'ok',
+    ('a1', 'main.py', 16839, 16849, '_lease_admission_gate'):
+        ('continuity', ('setting lock_timeout=0', 'setting lock_timeout=1000')),
     ('a1', 'main.py', 16851, 16853, '_lease_admission_gate'): '25006',
     ('a1', 'main.py', 16857, 16859, '_lease_admission_gate'): ('not reached', 'main.py:16851', '25006'),
     ('a1', 'main.py', 17406, 17409, '_lock_snapshot_rows'): '25006',
@@ -465,25 +470,167 @@ def _in(site, spans):
         site[0] == t[0] and t[1] <= site[1] <= t[2] for t in spans)
 
 
+# Ruling REHEARSAL-R9-A1 (B), transaction continuity: IDENTITY, never
+# presence. A measured position is one production statement at a site in
+# self.info['lock_targets'] or self.info['targets']. Inside its transaction,
+# before the statement, the harness sets a position token the program cannot
+# know (a transaction-local setting, POSITION_GUC, to a fresh random value)
+# and reads the backend's own virtual transaction id (pg_locks, locktype
+# virtualxid, this pid, virtualxid = virtualtransaction) and the session's
+# residue; after the statement and after every measurement read of the
+# position (the write counters, the lock read), still before any harness
+# rollback, it reads all three again. The position is the SAME transaction
+# only when the token reads back unchanged AND exactly one own virtualxid row
+# was read at each end AND they are equal. A transaction-local setting ends
+# with its transaction, and every transaction has a new virtual transaction
+# id, so COMMIT, COMMIT AND CHAIN, ROLLBACK, ROLLBACK AND CHAIN, END, ABORT,
+# PREPARE TRANSACTION (and any other form that ends the transaction) all fail
+# it, whatever the program does next. Such a position is an EFFECT
+# (('txn ended', ...) / ('txn ended under grant', ...)), never a read and
+# never 'ok'.
+# Session residue: each driver runs on its own NullPool engine, disposed
+# after the driver (the connection a driver's positions ran on is never
+# reused by another driver: discarded). Within one driver the residue is
+# MEASURED at both ends of every position and a difference refuses it
+# ('residue'): every server setting (pg_settings: a SET, SET LOCAL or
+# set_config by the program, RESET), SQL-level prepared statements, holdable
+# cursors, LISTEN channels and objects in the session's temporary schema;
+# session-level advisory locks are the lock read's. And once a position on a
+# session failed continuity or left residue, every later measured position
+# on that session is refused too ('after txn ended', the first failing site):
+# whatever it ran in is no longer the transaction the driver began.
+POSITION_GUC = "rf10.position"
+POSITION_START_SQL = (
+    "SELECT pg_catalog.set_config('rf10.position', :token, true),"
+    " ARRAY(SELECT virtualxid FROM pg_catalog.pg_locks"
+    " WHERE pid = pg_catalog.pg_backend_pid() AND locktype = 'virtualxid'"
+    " AND virtualxid = virtualtransaction AND granted ORDER BY 1),"
+    " pg_catalog.pg_backend_pid() || ' ' || (SELECT backend_start::text"
+    " FROM pg_catalog.pg_stat_activity WHERE pid = pg_catalog.pg_backend_pid())")
+POSITION_END_SQL = (
+    "SELECT pg_catalog.current_setting('rf10.position', true),"
+    " ARRAY(SELECT virtualxid FROM pg_catalog.pg_locks"
+    " WHERE pid = pg_catalog.pg_backend_pid() AND locktype = 'virtualxid'"
+    " AND virtualxid = virtualtransaction AND granted ORDER BY 1)")
+RESIDUE_SQL = (
+    "SELECT ARRAY(SELECT name || '=' || setting FROM pg_catalog.pg_settings ORDER BY 1),"
+    " (SELECT count(*) FROM pg_catalog.pg_prepared_statements WHERE from_sql),"
+    " (SELECT count(*) FROM pg_catalog.pg_cursors WHERE is_holdable),"
+    " (SELECT count(*) FROM pg_catalog.pg_listening_channels()),"
+    " (SELECT count(*) FROM pg_catalog.pg_class"
+    "  WHERE relnamespace = pg_catalog.pg_my_temp_schema())")
+
+
+def same_transaction(start, end):
+    """Continuity of one position from its two readings, each (token,
+    [own virtualxid rows]): (same, detail). `same` only when the token read
+    at the end is the one set at the start and the own virtualxid was read
+    exactly once at each end and is equal."""
+    token_ok = end[0] == start[0]
+    vxid_ok = len(start[1]) == 1 and len(end[1]) == 1 and start[1] == end[1]
+    detail = tuple(n for n, ok in (("token", token_ok), ("virtualxid", vxid_ok)) if not ok)
+    return token_ok and vxid_ok, detail
+
+
+def residue_changes(start, end):
+    """The residue a position left: every pg_settings row that differs and
+    every residue count that differs, sorted ('setting name=value' for a
+    changed or added setting, 'prepared'/'holdable cursors'/'listen'/'temp
+    objects' for a count)."""
+    out = set()
+    s0, s1 = set(start[0]), set(end[0])
+    out |= {"setting " + r for r in s1 ^ s0}
+    for name, a, b in zip(("prepared", "holdable cursors", "listen", "temp objects"),
+                          start[1:], end[1:]):
+        if a != b:
+            out.add("%s %s->%s" % (name, a, b))
+    return tuple(sorted(out))
+
+
 class RecordingSession(AsyncSession):
-    """Every execute records (file, line, outcome) in self.info['log']; at a
-    statement whose production site is in one of self.info['lock_targets']
-    ((file, line, end) spans) that succeeded, the backend's locks are read
-    inside the transaction and (file, line, unexpected_locks) is appended to
-    self.info['locks'] (ruling REHEARSAL-R8-A1 E2)."""
+    """Every execute records (file, line, outcome) in self.info['log']. At a
+    measured position (a statement whose production site is in one of
+    self.info['lock_targets'] or, on a COUNTING session, self.info['targets'],
+    (file, line, end) spans) the statement runs inside the continuity bracket
+    (ruling REHEARSAL-R9-A1 (B)): position start, then (COUNTING, at a
+    target) the write counters, the statement, the counters again
+    (self.info['deltas'] gets (file, line, delta)), then (at a lock target)
+    the lock read (self.info['locks'] gets (file, line, unexpected_locks);
+    ruling REHEARSAL-R8-A1 E2), then the position end: self.info['continuity']
+    gets (file, line, same, detail), detail the failed identity parts, the
+    residue changes, or ('after txn ended', first failing site). A statement
+    that fails records its SQLSTATE and no measurement."""
+
+    COUNTING = False
 
     async def execute(self, statement, params=None, **kw):
         site = _site()
         log = self.info.setdefault("log", [])
+        lock_at = _in(site, self.info.get("lock_targets", ()))
+        count_at = self.COUNTING and _in(site, self.info.get("targets", ()))
+        start = None
+        if lock_at or count_at:
+            try:
+                start = await self.position_start()
+            except DBAPIError as e:
+                # the transaction refuses any statement (an earlier refusal
+                # aborted it): the position cannot be bracketed, so it is
+                # unmeasured and never 'ok' (the statement itself is run
+                # and recorded as the program issued it)
+                start = ("unmeasured", "unmeasured " + (_sqlstate(e) or "error"))
+                count_at = False
+        before = await self.writes() if count_at else None
         try:
-            res = await super().execute(statement, params, **kw)
+            res = await self.run_statement(site, statement, params, **kw)
         except DBAPIError as e:
             log.append((site[0], site[1], _sqlstate(e) or "error"))
             raise
         log.append((site[0], site[1], "ok"))
-        if _in(site, self.info.get("lock_targets", ())):
+        if count_at:
+            self.info.setdefault("deltas", []).append(
+                (site[0], site[1], await self.writes() - before))
+        if lock_at:
             await self.lock_read(site)
+        if start is not None:
+            await self.position_end(site, start)
         return res
+
+    async def run_statement(self, site, statement, params=None, **kw):
+        """The production statement itself (a control's session plants here)."""
+        return await AsyncSession.execute(self, statement, params, **kw)
+
+    async def position_start(self):
+        token = os.urandom(16).hex()
+        row = (await AsyncSession.execute(self, text(POSITION_START_SQL),
+                                          {"token": token})).one()
+        # the connections a session's positions ran on (backend pid and its
+        # start time: a connection's identity), never one another driver's
+        # (test_r10_driver_connections_discarded)
+        self.info.setdefault("pids", set()).add(row[2])
+        return (token, list(row[1])), await self.residue()
+
+    async def residue(self):
+        row = (await AsyncSession.execute(self, text(RESIDUE_SQL))).one()
+        return (tuple(row[0]),) + tuple(int(x) for x in row[1:])
+
+    async def position_end(self, site, start):
+        if start[0] == "unmeasured":
+            same, detail, left = False, (start[1],), ()
+        else:
+            try:
+                row = (await AsyncSession.execute(self, text(POSITION_END_SQL))).one()
+                same, detail = same_transaction(start[0], (row[0], list(row[1])))
+                left = residue_changes(start[1], await self.residue())
+            except DBAPIError as e:
+                same, detail, left = False, ("unmeasured " + (_sqlstate(e) or "error"),), ()
+        tainted = self.info.get("tainted")
+        if tainted is not None and same and not left:
+            same, detail = False, ("after txn ended at " + tainted,)
+        elif not same or left:
+            same, detail = False, detail + left
+        if not same and tainted is None:
+            self.info["tainted"] = "%s:%s" % site
+        self.info.setdefault("continuity", []).append((site[0], site[1], same, detail))
 
     async def lock_read(self, site):
         rows = (await AsyncSession.execute(self, text(LOCKS_SQL))).all()
@@ -509,22 +656,14 @@ class CountingSession(RecordingSession):
     """A RecordingSession that, at a statement whose production site is in
     one of self.info['targets'] ((file, line, end) spans), records the write
     delta of the transaction around it in self.info['deltas'] as (file,
-    line, delta); a statement that fails records no delta."""
+    line, delta), inside the position's continuity bracket (the delta is
+    admitted only with a 'same' continuity record); a statement that fails
+    records no delta."""
+
+    COUNTING = True
 
     async def writes(self):
         return int((await AsyncSession.execute(self, text(WRITES_SQL))).scalar())
-
-    async def execute(self, statement, params=None, **kw):
-        site = _site()
-        hit = [t for t in self.info.get("targets", ()) if site[0] == t[0]
-               and site[1] is not None and t[1] <= site[1] <= t[2]]
-        if not hit:
-            return await super().execute(statement, params, **kw)
-        before = await self.writes()
-        res = await super().execute(statement, params, **kw)
-        after = await self.writes()
-        self.info.setdefault("deltas", []).append((site[0], site[1], after - before))
-        return res
 
 
 # Ruling R-B: the table privileges of each statement that refused first on a
@@ -569,21 +708,62 @@ def locks_at(locks, entry):
     return [u for (lf, ll, u) in locks if lf == f and ll is not None and line <= ll <= end]
 
 
-def ran_outcome(outs, reads):
+def continuity_at(conts, entry):
+    """The continuity records at the position `entry`: one (same, detail)
+    per successful run of it (ruling REHEARSAL-R9-A1 (B))."""
+    _walk, f, line, end, _span = entry
+    return [(same, d) for (cf, cl, same, d) in conts
+            if cf == f and cl is not None and line <= cl <= end]
+
+
+def broken_continuity(conts, runs):
+    """None when every one of `runs` successful runs has a continuity record
+    and each says the SAME transaction; otherwise the refusal's detail: the
+    sorted failed parts of every record, or ('unmeasured', records, runs)."""
+    if len(conts) != runs:
+        return ("unmeasured", len(conts), runs)
+    broken = tuple(sorted({x for same, d in conts if not same for x in d}))
+    if any(not same for same, _d in conts):
+        return broken or ("not the same transaction",)
+    return None
+
+
+def ran_outcome(outs, reads, conts):
     """The outcome of a position every run of which succeeded (`outs`, all
-    'ok'), from its lock reads (`reads`, one per run; ruling REHEARSAL-R8-A1
-    E2): 'ok' only when every run was read and no read found an unexpected
-    row; ('lock', rows) when a read found one; ('lock unmeasured', reads,
-    runs) when a run has no lock read."""
+    'ok'), from its continuity records (`conts`, one per run; ruling
+    REHEARSAL-R9-A1 (B)) and its lock reads (`reads`, one per run; ruling
+    REHEARSAL-R8-A1 E2): ('continuity', detail) when a run did not stay in
+    the transaction it began in (a transaction-ending statement, a replaced
+    token, residue, or a session a previous position already broke): an
+    effect, checked FIRST because a lock read of a replacement transaction
+    measures nothing about the position; then 'ok' only when every run was
+    read and no read found an unexpected row; ('lock', rows) when a read
+    found one; ('lock unmeasured', reads, runs) when a run has no lock
+    read."""
+    broken = broken_continuity(conts, len(outs))
+    if broken is not None:
+        return ("continuity", broken)
+    return lock_outcome(outs, reads)
+
+
+def lock_outcome(outs, reads):
+    """The lock decision of a position whose runs all succeeded and stayed
+    in their transaction (ruling REHEARSAL-R8-A1 E2): 'ok' only when every
+    run was read and no read found an unexpected row; ('lock', rows) when a
+    read found one; ('lock unmeasured', reads, runs) when a run has no lock
+    read. Callers decide continuity first (ran_outcome, under_grant)."""
     if len(reads) != len(outs):
         return ("lock unmeasured", len(reads), len(outs))
     held = tuple(sorted({row for u in reads for row in u}))
     return ("lock", held) if held else "ok"
 
 
-def under_grant(log, deltas, entry, grants, locks=()):
-    """The grant run's outcome at `entry`: ('ok-under-grant', grants, delta)
-    when every run of the position succeeded and every run's lock read found
+def under_grant(log, deltas, entry, grants, locks, conts):
+    """The grant run's outcome at `entry`: ('continuity under grant', grants,
+    detail) when every run succeeded but a run did not stay in the
+    transaction it began in (ruling REHEARSAL-R9-A1 (B); see ran_outcome);
+    ('ok-under-grant', grants, delta) when every run of the position
+    succeeded, stayed in its transaction and every run's lock read found
     only expected rows, delta the largest write delta measured around it;
     ('lock under grant', grants, rows) when a lock read found an unexpected
     row (or ('lock under grant', grants, ('unmeasured', reads, runs)));
@@ -593,8 +773,14 @@ def under_grant(log, deltas, entry, grants, locks=()):
     _walk, f, line, end, _span = entry
     outs = outcome_at(log, entry)
     ds = [d for (df, dl, d) in deltas if df == f and line <= dl <= end]
+    if outs and all(o == "ok" for o in outs):
+        # REHEARSAL-R9-A1 (B): continuity first; a delta or a lock read of a
+        # replacement transaction measures nothing about the position
+        broken = broken_continuity(continuity_at(conts, entry), len(outs))
+        if broken is not None:
+            return ("continuity under grant", tuple(grants), broken)
     if outs and all(o == "ok" for o in outs) and len(ds) == len(outs):
-        ran = ran_outcome(outs, locks_at(locks, entry))
+        ran = lock_outcome(outs, locks_at(locks, entry))
         if ran == "ok":
             return ("ok-under-grant", tuple(grants), max(ds))
         rows = ran[1] if ran[0] == "lock" else ("unmeasured",) + ran[1:]

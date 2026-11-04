@@ -2115,4 +2115,1337 @@ COMPLETE_COUNT = 218
 # module or an opener. 216 forms were derived at effc36c6; these two are
 # frozen by hand, not by a re-derivation.
 FROZEN.update(COMPLETE_FROZEN)
-FROZEN_COUNT = COARSE_COUNT + COMPLETE_COUNT
+
+# Round 10 (ruling REHEARSAL-R9-A1 (C), refuse by default): the four round-10
+# kinds of the complete layer (constructed, alias, wrapper, argdef; see
+# ro_census), derived ONCE at the round-9 tip 0b317394 by
+# RF/r10/ro/derive_r10.py from the census files of that tree: a judgement
+# against the never-regenerated standard, recorded in the round-10 notes
+# (child ro). COMPLETE_FROZEN and FROZEN above are unchanged; each key's
+# round-10 forms join its complete layer. Never regenerated: a form the
+# freeze lacks is refused until a reviewed edit freezes it here by hand.
+R10_FROZEN = {'api/admin_evidence.py#complete': [],
+ 'api/auto_logs.py#complete': [],
+ 'api/build_manifest.py#complete': [],
+ 'api/card_evidence.py#complete': [],
+ 'api/card_measures.py#complete': [('constructed', '_FIELD[key](rec[key])')],
+ 'api/combat_evidence.py#complete': [],
+ 'api/combat_measures.py#complete': [('constructed',
+                                      'cmeasure(name, subject, consts=consts, field=[sub, key, '
+                                      'clock])(fn)')],
+ 'api/conn_ranges.py#complete': [],
+ 'api/database.py#complete': [('alias',
+                               'from sqlalchemy.ext.asyncio import create_async_engine as '
+                               '_sqlalchemy_create_async_engine'),
+                              ('argdef', 'ASM_POOL_OVERFLOW <- ASM_POOL_OVERFLOW = 4'),
+                              ('argdef', 'ASM_POOL_SIZE <- ASM_POOL_SIZE = 4'),
+                              ('argdef', 'ASM_POOL_TIMEOUT_S <- ASM_POOL_TIMEOUT_S = 3'),
+                              ('argdef',
+                               "DATABASE_URL <- DATABASE_URL = os.getenv('DATABASE_URL', "
+                               "'postgresql+asyncpg://comp_rounds:changeme@localhost:5432/competitive_rounds')"),
+                              ('argdef', 'RELEASE_POOL_OVERFLOW <- RELEASE_POOL_OVERFLOW = 2'),
+                              ('argdef', 'RELEASE_POOL_SIZE <- RELEASE_POOL_SIZE = 3'),
+                              ('wrapper',
+                               'def create_async_engine(url, **options):\n'
+                               '    return _sqlalchemy_create_async_engine(url, '
+                               'hide_parameters=True, **options)'),
+                              ('wrapper',
+                               'def make_asm_engine(url=DATABASE_URL, **connect_args):\n'
+                               '    """An engine with the assembly pool\'s arguments. The api '
+                               'builds exactly\n'
+                               '    one (asm_engine); a test builds its own with the same '
+                               'arguments against\n'
+                               '    its database (extra connect_args, such as server_settings, '
+                               'merge in)."""\n'
+                               "    args = {'timeout': ASM_CONNECT_TIMEOUT_S}\n"
+                               '    args.update(connect_args)\n'
+                               '    return create_async_engine(url, echo=False, '
+                               'pool_size=ASM_POOL_SIZE, max_overflow=ASM_POOL_OVERFLOW, '
+                               'pool_timeout=ASM_POOL_TIMEOUT_S, pool_pre_ping=True, '
+                               'pool_recycle=1800, connect_args=args)')],
+ 'api/flag_evidence.py#complete': [],
+ 'api/glicko2.py#complete': [],
+ 'api/identity_clock_evidence.py#complete': [],
+ 'api/identity_clock_measures.py#complete': [],
+ 'api/log_redaction.py#complete': [],
+ 'api/mail_discord.py#complete': [],
+ 'api/main.py#complete': [('alias', 'from sqlalchemy import and_, case, func, or_, select, text'),
+                          ('alias', 'str __builtins__'),
+                          ('alias', 'str __builtins__'),
+                          ('alias', 'str __import__'),
+                          ('alias', 'str eval'),
+                          ('alias', 'str exec'),
+                          ('alias', 'str globals'),
+                          ('alias', 'str import_module'),
+                          ('alias', 'str locals'),
+                          ('alias', 'str setattr'),
+                          ('alias', 'str setattr'),
+                          ('alias', 'str vars'),
+                          ('constructed', '_pc_motion_sessions()()'),
+                          ('constructed', '_pc_motion_sessions()()'),
+                          ('constructed',
+                           "app.middleware('http')(_admin_evidence.evidence_key_gate)"),
+                          ('wrapper',
+                           "@app.websocket('/api/v1/ws/chat')\n"
+                           'async def ws_chat(ws: WebSocket):\n'
+                           '    """Mod <-> server chat channel. Messages are broadcast fan-out '
+                           'style."""\n'
+                           "    expected_internal_key = os.getenv('API_SECRET_KEY', '')\n"
+                           '    is_internal = bool(expected_internal_key and '
+                           "ws.headers.get('x-internal-key') == expected_internal_key)\n"
+                           '    if not is_internal:\n'
+                           "        sent = ws.headers.get('x-mod-version')\n"
+                           '        if not sent and REQUIRE_MOD_VERSION:\n'
+                           "            await ws.close(code=1008, reason='outdated')\n"
+                           '            return\n'
+                           '        if sent and _parse_version(sent) < '
+                           '_parse_version(MIN_MOD_VERSION_EFFECTIVE):\n'
+                           "            await ws.close(code=1008, reason='outdated')\n"
+                           '            return\n'
+                           '    if not _ws_chat_charge(ws):\n'
+                           '        await ws.accept()\n'
+                           "        await ws.close(code=1013, reason='rate_limited')\n"
+                           '        return\n'
+                           '    await chat_manager.connect(ws)\n'
+                           "    print(f'[CHAT] subscriber connected "
+                           "(total={chat_manager.count})')\n"
+                           '    await read_gate.count_socket(ws)\n'
+                           '    try:\n'
+                           '        _locked_now = await _chat_lockdown_active()\n'
+                           '        await ws.send_text(\'{"type":"lock","locked":\' + (\'1\' if '
+                           "_locked_now else '0') + '}')\n"
+                           '    except Exception:\n'
+                           '        pass\n'
+                           '    verified_sid: str | None = None\n'
+                           '    try:\n'
+                           '        while True:\n'
+                           '            raw = await ws.receive_text()\n'
+                           '            try:\n'
+                           '                data = _json.loads(raw)\n'
+                           '            except Exception:\n'
+                           '                continue\n'
+                           '            if not isinstance(data, dict):\n'
+                           '                continue\n'
+                           "            if data.get('type') == 'ping':\n"
+                           '                continue\n'
+                           "            if data.get('type') == 'auth':\n"
+                           "                claim = str(data.get('steam_id', ''))[:20]\n"
+                           "                token = str(data.get('token', ''))[:128]\n"
+                           '                if claim and token and _ws_chat_charge(ws):\n'
+                           '                    try:\n'
+                           '                        from database import async_session\n'
+                           '                        async with async_session() as _adb:\n'
+                           "                            row = (await _adb.execute(text('SELECT "
+                           'steam_id, verified, expires_at FROM steam_sessions WHERE token_hash = '
+                           ":th'), {'th': "
+                           'hashlib.sha256(token.encode()).hexdigest()})).mappings().first()\n'
+                           "                        if row is not None and row['steam_id'] == "
+                           "claim and bool(row['verified']) and (row['expires_at'] is None or "
+                           "row['expires_at'] > datetime.now(timezone.utc)):\n"
+                           '                            verified_sid = claim\n'
+                           "                            print(f'[CHAT] socket authenticated as "
+                           "{claim}')\n"
+                           '                    except Exception as _aex:\n'
+                           "                        print(f'[CHAT] ws auth check failed: {_aex}')\n"
+                           '                continue\n'
+                           "            if data.get('type') == 'subscribe':\n"
+                           '                got = chat_manager.subscribe(ws, '
+                           "data.get('channels'))\n"
+                           "                print(f'[CHAT] subscriber channels -> {sorted(got)}')\n"
+                           '                continue\n'
+                           "            message = str(data.get('message', ''))[:500].strip()\n"
+                           "            steam_id = str(data.get('steam_id', ''))[:20]\n"
+                           "            display_name = str(data.get('display_name', ''))[:64]\n"
+                           '            if not message or not steam_id:\n'
+                           '                continue\n'
+                           "            if _is_broadcast_account(verified_sid or '') or "
+                           '_is_broadcast_account(steam_id):\n'
+                           '                continue\n'
+                           '            if await _chat_lockdown_active():\n'
+                           '                try:\n'
+                           '                    await '
+                           'ws.send_text(\'{"type":"lock","locked":1}\')\n'
+                           '                except Exception:\n'
+                           '                    pass\n'
+                           '                continue\n'
+                           '            _presence_touch(steam_id)\n'
+                           "            client_msg_id = str(data.get('client_msg_id', ''))[:64]\n"
+                           '            if client_msg_id and (not _claim_chat_nonce(steam_id, '
+                           'client_msg_id)):\n'
+                           "                print(f'[CHAT] dropped resend (nonce "
+                           "{client_msg_id[:12]}) from {display_name}')\n"
+                           '                continue\n'
+                           "            channel = str(data.get('channel', 'global')).lower()\n"
+                           '            if channel not in CHAT_CHANNELS_ALLOWED:\n'
+                           "                channel = 'global'\n"
+                           '            if not _chat_spam_ok(id(ws), message):\n'
+                           "                print(f'[CHAT] rate-limited {display_name} "
+                           "({steam_id})')\n"
+                           '                continue\n'
+                           '            if not _ws_chat_charge(ws):\n'
+                           "                print(f'[CHAT] address rate-limited {display_name} "
+                           "({steam_id})')\n"
+                           '                continue\n'
+                           '            if await _is_banned_via_session(steam_id):\n'
+                           '                continue\n'
+                           '            if await _is_chat_muted(steam_id, channel):\n'
+                           "                print(f'[CHAT-MOD] dropped muted {display_name} "
+                           "({steam_id}) in [{channel}]')\n"
+                           '                continue\n'
+                           '            _hit = _chat_censor_hit(message)\n'
+                           '            if _hit is not None:\n'
+                           '                if verified_sid is not None and verified_sid == '
+                           'steam_id:\n'
+                           '                    minutes = await _chat_censor_strike(steam_id, '
+                           "display_name, channel, message, _hit, 'ingame')\n"
+                           '                    try:\n'
+                           "                        await ws.send_text(_json.dumps({'type': "
+                           "'muted', 'minutes': int(minutes or _CHAT_MUTE_BASE_MINUTES)}))\n"
+                           '                    except Exception:\n'
+                           '                        pass\n'
+                           '                else:\n'
+                           "                    print(f'[CHAT-MOD] censored UNVERIFIED socket "
+                           "(claim={steam_id}) — dropped, no strike')\n"
+                           '                continue\n'
+                           '            meta = await _lookup_chat_meta(steam_id=steam_id)\n'
+                           "            out = {'source': 'ingame', 'steam_id': steam_id, "
+                           "'display_name': display_name, 'rating': meta['rating'], 'title': "
+                           "meta['title'], 'title_color': meta['title_color'], 'message': message, "
+                           "'channel': channel}\n"
+                           '            mid, created_iso = await _persist_chat(out, '
+                           'author_verified=verified_sid is not None and verified_sid == '
+                           'steam_id)\n'
+                           "            out['timestamp'] = created_iso or "
+                           'datetime.now(timezone.utc).isoformat()\n'
+                           '            if mid is not None:\n'
+                           "                out['id'] = mid\n"
+                           '            print(f"[CHAT] <- ingame '
+                           '{display_name}({meta[\'rating\']}) [{channel}]: {message[:80]}")\n'
+                           '            await chat_manager.broadcast(out, exclude=ws, '
+                           'channel=channel)\n'
+                           '    except WebSocketDisconnect:\n'
+                           "        print(f'[CHAT] subscriber disconnected')\n"
+                           '        chat_manager.disconnect(ws)\n'
+                           '    except Exception as e:\n'
+                           "        print(f'[CHAT] WS error: {e}')\n"
+                           '        chat_manager.disconnect(ws)')],
+ 'api/match_hold.py#complete': [('alias', 'str vars')],
+ 'api/match_report_window.py#complete': [],
+ 'api/models.py#complete': [],
+ 'api/pc_face.py#complete': [],
+ 'api/pc_motion.py#complete': [],
+ 'api/pc_portrait.py#complete': [],
+ 'api/pc_signature.py#complete': [],
+ 'api/pc_steam.py#complete': [],
+ 'api/pc_strip.py#complete': [],
+ 'api/player_cards.py#complete': [],
+ 'api/read_gate.py#complete': [],
+ 'api/region_pick.py#complete': [],
+ 'api/review_boot.py#complete': [('alias', 'str exec')],
+ 'api/review_measures.py#complete': [],
+ 'api/review_rules.py#complete': [('constructed', 'core.impl[0](self, records, budget)'),
+                                  ('constructed', 'core.impl[0](self, records, regs, budget)'),
+                                  ('constructed', 'entry.impl[-1](self, case, budget)'),
+                                  ('constructed', 'entry.impl[0](*vals)'),
+                                  ('constructed', 'entry.impl[0](args, _bound_lookup(refs), mode)'),
+                                  ('constructed', 'entry.impl[0](out, _bound_lookup(refs), mode)'),
+                                  ('constructed', 'entry.impl[0](self, subjects, budget)'),
+                                  ('constructed', 'm.impl[0](ctx, fam)'),
+                                  ('constructed',
+                                   "self.core['core.game'].impl[-1](self, cases, deadline)"),
+                                  ('constructed',
+                                   "self.core['core.game'].impl[0](self, records, match, registry, "
+                                   'budget)'),
+                                  ('constructed', "self.core['core.render'].impl[0](rule, items)"),
+                                  ('constructed', "self.core['core.sitting'].impl[-1](self)"),
+                                  ('constructed', "self.core['core.sitting'].impl[0](rule, rows)"),
+                                  ('constructed', "self.core['core.sitting'].impl[1](rule, mode)"),
+                                  ('constructed',
+                                   'self.core[COMBAT_CORE].impl[-1](self, cases, deadline)'),
+                                  ('constructed',
+                                   'self.core[IDENTITY_CORE].impl[-1](self, cases, deadline)')],
+ 'api/schemas.py#complete': [],
+ 'api/seat_evidence.py#complete': [],
+ 'api/steamid64.py#complete': [],
+ 'api/title_ladders.py#complete': [('constructed', '_CONDITIONS[kind](row)')],
+ 'api/tournament_bracket.py#complete': [],
+ 'api/tournaments.py#complete': [],
+ 'tests/cf_pg.py#complete': [('argdef',
+                              'DSN <- DSN = (os.environ.get(DSN_VAR) or '
+                              "'').replace('postgresql+asyncpg://', 'postgresql://')"),
+                             ('wrapper',
+                              '@contextlib.asynccontextmanager\n'
+                              "async def case(prefix='cf', *, with_355=True, dsn=None, "
+                              'faithful=False):\n'
+                              '    """A built case schema; yields (case, sessionmaker). The case '
+                              'seals its\n'
+                              '    schema through `await c.seal()` before the first handler call '
+                              'when it\n'
+                              '    runs DDL of its own; otherwise the context seals it on entry. '
+                              '`dsn`\n'
+                              '    names another database on the same server (fresh_database). A '
+                              'case\n'
+                              '    with 355 applied and no dsn of its own comes from cf_pool when '
+                              'POOL is\n'
+                              '    on; a case that applies 355 itself always builds its own '
+                              'schema."""\n'
+                              '    if POOL and with_355 and (dsn is None):\n'
+                              '        import cf_pool\n'
+                              '        async with cf_pool.checkout(faithful=faithful) as got:\n'
+                              '            yield got\n'
+                              '        return\n'
+                              '    async with harness.CaseSchema(dsn or DSN, prefix) as c:\n'
+                              '        await build(c, with_355=with_355, dsn=dsn, '
+                              'faithful=faithful)\n'
+                              '        if with_355:\n'
+                              '            await c.seal()\n'
+                              '        engine = harness.bound_engine(dsn or DSN, c.schema)\n'
+                              '        try:\n'
+                              '            yield (c, async_sessionmaker(engine, '
+                              'expire_on_commit=False))\n'
+                              '        finally:\n'
+                              '            await engine.dispose()'),
+                             ('wrapper',
+                              'async def build(case, *, with_355=True, dsn=None, faithful=False):\n'
+                              '    """Into case.schema, on case.conn: replay, ORM, widen, replay, '
+                              '331, 365,\n'
+                              '    and 355 when asked. Not sealed: the caller seals after its own '
+                              'DDL.\n'
+                              '\n'
+                              '    faithful=True replays every statement ONCE where it can run: '
+                              'the second\n'
+                              '    pass re-runs only the statements the first pass refused (the '
+                              'ones that\n'
+                              '    alter tables only the ORM makes). The default second pass '
+                              're-runs them\n'
+                              '    all, which re-adds a column a later migration renamed away '
+                              "(208's\n"
+                              "    live_top_points after 209's rename) -- harmless to a handler, "
+                              'wrong for\n'
+                              '    a check that reads the table\'s column list."""\n'
+                              '    conn, schema = (case.conn, case.schema)\n'
+                              '    statements = ddl_statements()\n'
+                              '    refused = await _replay_refused(conn, statements) if faithful '
+                              'else await lh._replay(conn, statements)\n'
+                              '    engine = harness.bound_engine(dsn or DSN, schema)\n'
+                              '    try:\n'
+                              '        async with engine.begin() as c:\n'
+                              '            await c.run_sync(models.Base.metadata.create_all)\n'
+                              '    finally:\n'
+                              '        await engine.dispose()\n'
+                              '    await lh._widen(conn, schema)\n'
+                              '    if faithful:\n'
+                              '        for _ in range(3):\n'
+                              '            if not refused:\n'
+                              '                break\n'
+                              '            refused = await _replay_refused(conn, refused)\n'
+                              '    else:\n'
+                              '        second = await lh._replay(conn, statements)\n'
+                              '        unexpected = [f for f in second if f[1] not in lh._ALREADY '
+                              'and (f[0], f[1]) not in lh.REPLAY_KNOWN]\n'
+                              "        assert not unexpected, 'the second DDL pass failed on "
+                              "statements outside REPLAY_KNOWN: %r' % unexpected[:5]\n"
+                              "    await conn.execute(io.open(M331, encoding='utf-8').read())\n"
+                              "    await conn.execute(io.open(M365, encoding='utf-8').read())\n"
+                              '    if with_355:\n'
+                              '        await apply_355(conn)\n'
+                              '        await apply_378(conn)')],
+ 'tests/cf_pool.py#complete': [('argdef',
+                                'cf_pg <- await cf_pg.build(types.SimpleNamespace(conn=conn, '
+                                'schema=schema), with_355=True, dsn=dsn, faithful=faithful)'),
+                               ('argdef', 'cf_pg <- import cf_pg'),
+                               ('wrapper',
+                                '@contextlib.asynccontextmanager\n'
+                                'async def checkout(faithful=False):\n'
+                                '    """A pristine, positively registered schema for one case."""\n'
+                                '    dsn = await _faithful_dsn() if faithful else cf_pg.DSN\n'
+                                '    key = build_key(faithful)\n'
+                                '    meta = await asyncpg.connect(dsn)\n'
+                                '    try:\n'
+                                "        _phase('pool_lock', 'start')\n"
+                                "        await meta.execute('SELECT pg_advisory_lock($1)', "
+                                'LOCK_KEY)\n'
+                                "        _phase('pool_lock', 'end')\n"
+                                '        await _ensure_meta(meta)\n'
+                                '        state = await _owner(meta)\n'
+                                "        owner = state['owner']\n"
+                                "        if state['unverified'] and "
+                                "os.environ.get('CF_POOL_ACTIVE_TOKEN') != state['active_token']:\n"
+                                "            raise harness.CensusRefusal('registry database is "
+                                "unverified')\n"
+                                "        row = await meta.fetchrow('SELECT key, schema_name, "
+                                "pristine, owner FROM %s.entries WHERE key=$1' % META, key)\n"
+                                '        schema = pristine = None\n'
+                                '        if row is not None:\n'
+                                "            if row['owner'] != owner:\n"
+                                "                raise harness.CensusRefusal('pool schema belongs "
+                                "to another run')\n"
+                                "            schema, pristine = (row['schema_name'], "
+                                "json.loads(row['pristine']))\n"
+                                '            if pristine is None:\n'
+                                '                await _drop_registered(meta, dsn, row, owner)\n'
+                                '                schema = None\n'
+                                '            else:\n'
+                                '                conn = await harness.connect_bound(dsn, schema)\n'
+                                '                try:\n'
+                                "                    _phase('reset', 'start', schema=schema)\n"
+                                '                    why = await reset(conn, schema, pristine)\n'
+                                "                    _phase('reset', 'end', schema=schema, "
+                                'pristine=why is None)\n'
+                                '                except Exception as exc:\n'
+                                "                    why = 'reset raised %s' % type(exc).__name__\n"
+                                '                finally:\n'
+                                '                    await conn.close()\n'
+                                '                if why is not None:\n'
+                                "                    _log('retire %s key=%s: %s' % (schema, key, "
+                                'why))\n'
+                                '                    await _drop_registered(meta, dsn, row, '
+                                'owner)\n'
+                                '                    schema = pristine = None\n'
+                                '        if schema is None:\n'
+                                "            for old in await meta.fetch('SELECT key, schema_name, "
+                                "pristine, owner FROM %s.entries WHERE key<>$1' % META, key):\n"
+                                '                await _drop_registered(meta, dsn, old, owner)\n'
+                                '            schema, pristine = await _build(dsn, faithful, key, '
+                                'owner)\n'
+                                "            _log('built %s key=%s' % (schema, key))\n"
+                                "            _phase('registration_complete', 'start', "
+                                'schema=schema)\n'
+                                "            await meta.execute('UPDATE %s.entries SET pristine=$1 "
+                                "WHERE key=$2 AND schema_name=$3 AND owner=$4' % META, "
+                                'json.dumps(pristine, sort_keys=True), key, schema, owner)\n'
+                                "            _phase('registration_complete', 'end', "
+                                'schema=schema)\n'
+                                "        await meta.execute('UPDATE %s.entries SET used_at=now(), "
+                                "uses=uses+1 WHERE key=$1' % META, key)\n"
+                                "        c = PoolCase(dsn, schema, pristine['own'])\n"
+                                '        await c.open()\n'
+                                '        engine = harness.bound_engine(dsn, schema)\n'
+                                '        try:\n'
+                                "            _phase('case', 'start', schema=schema)\n"
+                                '            yield (c, async_sessionmaker(engine, '
+                                'expire_on_commit=False))\n'
+                                '        finally:\n'
+                                "            _phase('case', 'end', schema=schema)\n"
+                                "            _phase('case_cleanup', 'start', schema=schema)\n"
+                                '            await engine.dispose()\n'
+                                '            await c.close()\n'
+                                '            if c.declared:\n'
+                                '                why = await _drop_declared(dsn, schema, '
+                                'c.declared)\n'
+                                '                if why is None:\n'
+                                "                    _log('dropped declared %s' % schema)\n"
+                                '                else:\n'
+                                "                    row = await meta.fetchrow('SELECT key, "
+                                "schema_name, pristine, owner FROM %s.entries WHERE key=$1' % "
+                                'META, key)\n'
+                                '                    await _drop_registered(meta, dsn, row, owner, '
+                                'sorted(c.own | c.declared))\n'
+                                "            _phase('case_cleanup', 'end', schema=schema)\n"
+                                '    finally:\n'
+                                '        await meta.close()'),
+                               ('wrapper',
+                                'async def _build(dsn, faithful, key, owner):\n'
+                                '    """A new pool schema: the harness\'s create-under-census, the '
+                                'build, the\n'
+                                '    outside census, the pristine record."""\n'
+                                '    import types\n'
+                                "    schema = harness.case_schema('cfpool')\n"
+                                '    conn = await harness.connect_bound(dsn, schema)\n'
+                                '    created = False\n'
+                                '    try:\n'
+                                '        others = [r[0] for r in await conn.fetch("SELECT '
+                                'n.nspname::text FROM pg_catalog.pg_class c JOIN '
+                                'pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE '
+                                'c.relname = \'ffa_lobbies\' AND c.relkind = \'r\'")]\n'
+                                '        if others:\n'
+                                "            raise harness.CensusRefusal('refusing to build %s: "
+                                "schema(s) %r already hold ffa_lobbies in this database' % "
+                                '(schema, others))\n'
+                                "        _phase('reserve', 'start', schema=schema)\n"
+                                '        async with conn.transaction():\n'
+                                '            await conn.execute("INSERT INTO %s.entries (key, '
+                                'schema_name, pristine, owner) VALUES ($1, $2, \'null\', $3)" % '
+                                'META, key, schema, owner)\n'
+                                '            await harness.create_case_schema(conn, schema)\n'
+                                '        created = True\n'
+                                "        _phase('reserve', 'end', schema=schema)\n"
+                                "        _phase('build', 'start', schema=schema)\n"
+                                '        outside = await harness.outside_objects(conn, schema)\n'
+                                '        await cf_pg.build(types.SimpleNamespace(conn=conn, '
+                                'schema=schema), with_355=True, dsn=dsn, faithful=faithful)\n'
+                                '        after = await harness.outside_objects(conn, schema)\n'
+                                '        if after != outside:\n'
+                                '            changed = sorted(set(after) ^ set(outside))\n'
+                                "            raise harness.CensusRefusal('the build of %s changed "
+                                "%d object(s) outside it: %r' % (schema, len(changed), "
+                                'changed[:5]))\n'
+                                "        _phase('capture', 'start', schema=schema)\n"
+                                '        pristine = await capture(conn, schema)\n'
+                                "        _phase('capture', 'end', schema=schema)\n"
+                                "        _phase('build', 'end', schema=schema)\n"
+                                '    except BaseException:\n'
+                                '        if created:\n'
+                                '            try:\n'
+                                '                await harness.drop_case_schema(conn, schema, '
+                                'None)\n'
+                                '                assert not await conn.fetchval(_NSP, schema), '
+                                "'owned failed build remains'\n"
+                                "                await conn.execute('DELETE FROM %s.entries WHERE "
+                                "key=$1 AND schema_name=$2 AND owner=$3' % META, key, schema, "
+                                'owner)\n'
+                                '            finally:\n'
+                                '                await conn.close()\n'
+                                '        else:\n'
+                                '            await conn.close()\n'
+                                '        raise\n'
+                                '    await conn.close()\n'
+                                '    return (schema, pristine)'),
+                               ('wrapper',
+                                'async def _drop(dsn, schema, own):\n'
+                                '    conn = await harness.connect_bound(dsn, schema)\n'
+                                '    try:\n'
+                                '        await harness.drop_case_schema(conn, schema, None if own '
+                                'is None else {tuple(x) for x in own})\n'
+                                '    finally:\n'
+                                '        await conn.close()'),
+                               ('wrapper',
+                                'async def _drop_declared(dsn, schema, declared):\n'
+                                '    """Drop the objects a case declared through seal(), relations '
+                                'first\n'
+                                '    (their row types go with them), then routines (CASCADE takes '
+                                'a trigger\n'
+                                '    that calls one). Returns None when none of them is left, else '
+                                'why."""\n'
+                                '    conn = await harness.connect_bound(dsn, schema)\n'
+                                '    try:\n'
+                                '        await conn.execute("SET lock_timeout = \'10s\'")\n'
+                                '        order = sorted(declared, key=lambda kn: (kn[0] == '
+                                "'routine', kn[0] == 'type', kn))\n"
+                                '        for kind, name in order:\n'
+                                '            what = _DECLARED_DROP.get(kind)\n'
+                                '            if what is None:\n'
+                                '                continue\n'
+                                "            if kind == 'routine':\n"
+                                "                fname, _, args = name.partition('(')\n"
+                                "                target = '%s(%s' % (_q(fname), args)\n"
+                                '            else:\n'
+                                '                target = _q(name)\n'
+                                "            await conn.execute('DROP %s IF EXISTS %s.%s CASCADE' "
+                                '% (what, _q(schema), target))\n'
+                                '        left = {tuple(x) for x in await '
+                                'harness.schema_objects(conn, schema)} & set(declared)\n'
+                                "        return None if not left else 'declared object(s) left: "
+                                "%r' % sorted(left)[:5]\n"
+                                '    except Exception as exc:\n'
+                                "        return 'dropping the declared objects raised %r' % "
+                                '(exc,)\n'
+                                '    finally:\n'
+                                '        await conn.close()'),
+                               ('wrapper',
+                                'async def open(self):\n'
+                                '    self.conn = await harness.connect_bound(self.dsn, '
+                                'self.schema)\n'
+                                '    self._outside = await harness.outside_objects(self.conn, '
+                                'self.schema)'),
+                               ('wrapper',
+                                'async def registry_database(dsn, *, action, pooled=True, '
+                                "reason='', active_token=None):\n"
+                                '    """Persist in-flight ownership; recover only this run\'s '
+                                'exact registrations.\n'
+                                '\n'
+                                '    A timed-out triage child needs explicit database recreation: '
+                                'public triage\n'
+                                '    tables are outside the positively registered pool resources.\n'
+                                '    """\n'
+                                "    dsn = dsn.replace('postgresql+asyncpg://', 'postgresql://')\n"
+                                '    meta = await asyncpg.connect(dsn, timeout=10, '
+                                'command_timeout=15)\n'
+                                '    try:\n'
+                                '        await _ensure_meta(meta)\n'
+                                '        state = await _owner(meta)\n'
+                                "        owner = state['owner']\n"
+                                "        if not await meta.fetchval('SELECT "
+                                "pg_try_advisory_lock($1)', LOCK_KEY):\n"
+                                "            raise harness.CensusRefusal('pool is still owned by a "
+                                "live connection')\n"
+                                '        gone_deadline = time.monotonic() + 5\n'
+                                '        while True:\n'
+                                '            sessions = await meta.fetchval("SELECT count(*) FROM '
+                                'pg_catalog.pg_stat_activity WHERE datname=current_database() AND '
+                                'pid<>pg_backend_pid() AND backend_type=\'client backend\'")\n'
+                                '            if not sessions:\n'
+                                '                break\n'
+                                '            if time.monotonic() >= gone_deadline:\n'
+                                "                raise harness.CensusRefusal('lane database still "
+                                "has client connections')\n"
+                                '            await asyncio.sleep(0.05)\n'
+                                "        rows = await meta.fetch('SELECT key, schema_name, "
+                                "pristine, owner FROM %s.entries ORDER BY key' % META)\n"
+                                "        if any((r['owner'] != owner or not "
+                                "re.fullmatch('cfpool_[0-9a-f]{10}', r['schema_name']) for r in "
+                                'rows)):\n'
+                                "            raise harness.CensusRefusal('lane has pool "
+                                "registrations not owned by this run')\n"
+                                '        recovered = []\n'
+                                "        if action == 'begin' and state['unverified']:\n"
+                                '            if not pooled:\n'
+                                "                raise harness.CensusRefusal('triage timeout "
+                                "requires verified database recreation')\n"
+                                '            for row in rows:\n'
+                                '                await _drop_registered(meta, dsn, row, owner)\n'
+                                "                recovered.append(row['schema_name'])\n"
+                                '            rows = []\n'
+                                '        if pooled:\n'
+                                '            app_schemas = await meta.fetch("SELECT DISTINCT '
+                                'n.nspname::text FROM pg_catalog.pg_class c JOIN '
+                                'pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE '
+                                'c.relname=\'ffa_lobbies\' AND c.relkind=\'r\'")\n'
+                                '            app_schemas = {r[0] for r in app_schemas}\n'
+                                "            registered = {r['schema_name'] for r in rows}\n"
+                                '            if app_schemas - registered:\n'
+                                "                raise harness.CensusRefusal('unregistered "
+                                "application schema prevents reuse')\n"
+                                "            if any((json.loads(r['pristine']) is None for r in "
+                                'rows)):\n'
+                                "                raise harness.CensusRefusal('incomplete pool "
+                                "build prevents reuse')\n"
+                                "        if action == 'begin':\n"
+                                '            token = uuid.uuid4().hex\n'
+                                "            await meta.execute('UPDATE %s.registry_state SET "
+                                "unverified=true, active_token=$1, reason=$2 WHERE singleton' % "
+                                'META, token, reason)\n'
+                                "            return {'owner': owner, 'active_token': token, "
+                                "'recovered': recovered, 'verified': True, 'client_connections': "
+                                '0}\n'
+                                "        if action != 'finish' or state['active_token'] != "
+                                'active_token:\n'
+                                "            raise harness.CensusRefusal('registry completion "
+                                "token does not own this child')\n"
+                                '        await meta.execute("UPDATE %s.registry_state SET '
+                                'unverified=false, active_token=NULL, reason=\'\' WHERE singleton" '
+                                '% META)\n'
+                                "        return {'owner': owner, 'verified': True, "
+                                "'client_connections': 0}\n"
+                                '    finally:\n'
+                                '        await meta.close()'),
+                               ('wrapper',
+                                'async def require_registry_verified(dsn):\n'
+                                '    """Read-only refusal control: no child may bypass persisted '
+                                'quarantine."""\n'
+                                '    meta = await asyncpg.connect(dsn, timeout=10, '
+                                'command_timeout=10)\n'
+                                '    try:\n'
+                                "        row = await meta.fetchrow('SELECT unverified FROM "
+                                "%s.registry_state WHERE singleton' % META)\n"
+                                "        if row is None or row['unverified']:\n"
+                                "            raise harness.CensusRefusal('registry database is "
+                                "unverified')\n"
+                                '    finally:\n'
+                                '        await meta.close()')],
+ 'tests/closed_walk.py#complete': [('alias', 'str getattr'), ('alias', 'str hasattr')],
+ 'tests/ladder_pg_harness.py#complete': [('alias',
+                                          'from sqlalchemy.ext.asyncio import create_async_engine'),
+                                         ('argdef',
+                                          'NullPool <- from sqlalchemy.pool import NullPool'),
+                                         ('argdef',
+                                          'async_dsn <- def async_dsn(dsn):\n'
+                                          "    return dsn.replace('postgresql://', "
+                                          "'postgresql+asyncpg://')"),
+                                         ('argdef',
+                                          'quoted <- def quoted(schema):\n'
+                                          "    if not (schema.replace('_', '').isalnum() and "
+                                          'schema == schema.lower()):\n'
+                                          "        raise CensusRefusal('not a harness schema name: "
+                                          "%r' % schema)\n"
+                                          '    return \'"%s"\' % schema'),
+                                         ('wrapper',
+                                          'async def __aenter__(self):\n'
+                                          '    self.conn = await connect_bound(self.dsn, '
+                                          'self.schema)\n'
+                                          '    try:\n'
+                                          '        await create_case_schema(self.conn, '
+                                          'self.schema)\n'
+                                          '        self._created = True\n'
+                                          '        self._outside = await '
+                                          'outside_objects(self.conn, self.schema)\n'
+                                          '    except BaseException:\n'
+                                          '        try:\n'
+                                          '            if self._created:\n'
+                                          '                await drop_case_schema(self.conn, '
+                                          'self.schema, None)\n'
+                                          '        finally:\n'
+                                          '            await self.conn.close()\n'
+                                          '        raise\n'
+                                          '    return self'),
+                                         ('wrapper',
+                                          'async def connect_bound(dsn, schema):\n'
+                                          '    """An asyncpg connection whose search_path is '
+                                          '`schema` alone."""\n'
+                                          '    return await '
+                                          "_asyncpg.connect(dsn.replace('postgresql+asyncpg://', "
+                                          "'postgresql://'), server_settings={'search_path': "
+                                          'quoted(schema)})'),
+                                         ('wrapper',
+                                          'def bound_engine(dsn, schema):\n'
+                                          '    """A SQLAlchemy async engine whose every connection '
+                                          'has search_path\n'
+                                          '    `schema` alone; NullPool, so no connection outlives '
+                                          'its use."""\n'
+                                          '    return create_async_engine(async_dsn(dsn), '
+                                          "poolclass=NullPool, connect_args={'server_settings': "
+                                          "{'search_path': quoted(schema)}})")],
+ 'tests/migration_table_ddl.py#complete': [],
+ 'tests/pc_themes_data.py#complete': [],
+ 'tests/resolution_sites.py#complete': [('alias', 'str __import__'),
+                                        ('alias', 'str __import__'),
+                                        ('alias', 'str getattr'),
+                                        ('alias', 'str getattr'),
+                                        ('alias', 'str getattr'),
+                                        ('alias', 'str getattr'),
+                                        ('alias', 'str hasattr'),
+                                        ('alias', 'str hasattr'),
+                                        ('alias', 'str import_module'),
+                                        ('alias', 'str import_module')],
+ 'tests/test_a1_formation_concurrency.py#complete': [('alias',
+                                                      'from sqlalchemy.ext.asyncio import '
+                                                      'async_sessionmaker, create_async_engine'),
+                                                     ('argdef',
+                                                      'DSN <- DSN = '
+                                                      "os.environ.get('A1_TEST_PG_DSN')")],
+ 'tests/test_a1_identity_formation.py#complete': [('alias', 'str __builtins__'),
+                                                  ('alias', 'str eval'),
+                                                  ('alias', 'str exec'),
+                                                  ('alias', 'str exec'),
+                                                  ('alias', 'str exec'),
+                                                  ('alias', 'str exec'),
+                                                  ('alias', 'str exec'),
+                                                  ('alias', 'str setattr'),
+                                                  ('constructed',
+                                                   'getattr(_cw, _ACC)(object(), _ast.Constant(1), '
+                                                   '())'),
+                                                  ('constructed',
+                                                   "type('_orig', (Exception,), {'sqlstate': "
+                                                   'self.sqlstate})()')],
+ 'tests/test_a1_predicate_sql.py#complete': [('alias',
+                                              'from sqlalchemy.ext.asyncio import '
+                                              'async_sessionmaker, create_async_engine'),
+                                             ('argdef',
+                                              "DSN <- DSN = os.environ.get('A1_TEST_PG_DSN')")],
+ 'tests/test_match_hold_admission_gate_pg.py#complete': [('alias', 'str exec'),
+                                                         ('alias', 'str exec')],
+ 'tests/test_match_hold_pg.py#complete': [('wrapper',
+                                           'async def _concurrent_opens(env, series_rows, calls):\n'
+                                           '    """Hold the series rows until both request '
+                                           'backends join the blocking chain.\n'
+                                           '\n'
+                                           '    Observe both contenders, including a contender '
+                                           'queued on the earlier\n'
+                                           '    identity advisory guard. Release the series locks '
+                                           'before collecting\n'
+                                           '    responses, and close every task on a failed '
+                                           'observation or request.\n'
+                                           '    """\n'
+                                           '    blocker = await '
+                                           'cf_pg.harness.connect_bound(env.c.dsn, env.c.schema)\n'
+                                           '    transaction = blocker.transaction()\n'
+                                           '    tasks = []\n'
+                                           '    try:\n'
+                                           '        await transaction.start()\n'
+                                           '        try:\n'
+                                           '            for sid in series_rows:\n'
+                                           "                await blocker.execute('SELECT 1 FROM "
+                                           "team_series WHERE id = $1 FOR NO KEY UPDATE', sid)\n"
+                                           '            tasks = [asyncio.ensure_future(c) for c in '
+                                           'calls]\n'
+                                           '            observed = await _lock_waiters(env, '
+                                           'blocker.get_server_pid(), len(tasks))\n'
+                                           '            assert len(observed) == len(set(observed)) '
+                                           "== len(tasks) == 2, ('FIX2 M2 both contenders', "
+                                           'observed, len(tasks))\n'
+                                           '        finally:\n'
+                                           '            await transaction.rollback()\n'
+                                           '        return await asyncio.gather(*tasks)\n'
+                                           '    finally:\n'
+                                           '        try:\n'
+                                           '            await blocker.close()\n'
+                                           '        finally:\n'
+                                           '            for task in tasks:\n'
+                                           '                if not task.done():\n'
+                                           '                    task.cancel()\n'
+                                           '            if tasks:\n'
+                                           '                await asyncio.gather(*tasks, '
+                                           'return_exceptions=True)'),
+                                          ('wrapper',
+                                           'async def body(env):\n'
+                                           '    from sqlalchemy import text\n'
+                                           '    async with env.sm() as clock_db:\n'
+                                           '        transaction_at = (await '
+                                           "clock_db.execute(text('SELECT now()'))).scalar()\n"
+                                           "        await clock_db.execute(text('SELECT "
+                                           "pg_sleep(0.05)'))\n"
+                                           '        lower = await dbclock(env)\n'
+                                           '        observed = await '
+                                           'match_hold._ctx_now(clock_db)\n'
+                                           '        upper = await dbclock(env)\n'
+                                           '        assert transaction_at < lower <= observed <= '
+                                           "upper, ('FIX3 M2 context clock follows PostgreSQL "
+                                           "wait', transaction_at, lower, observed, upper)\n"
+                                           '        await clock_db.rollback()\n'
+                                           '    s, g, pres = await opened_series(env)\n'
+                                           '    await env.conn.execute("INSERT INTO queue_leases '
+                                           '(player_id, mode, group_id, generation, acquired_at,  '
+                                           "renewed_at, expires_at) VALUES ($1, 'team', $2, "
+                                           'gen_random_uuid(),  clock_timestamp(), '
+                                           "clock_timestamp(), clock_timestamp() + interval '10 "
+                                           'minutes\')", s.pid(1), s.sid)\n'
+                                           '    blk = await cf_pg.harness.connect_bound(env.c.dsn, '
+                                           'env.c.schema)\n'
+                                           '    tr = blk.transaction()\n'
+                                           '    await tr.start()\n'
+                                           "    await blk.execute('SELECT 1 FROM team_series WHERE "
+                                           "id = $1 FOR NO KEY UPDATE', s.sid)\n"
+                                           '    t0 = await dbclock(env)\n'
+                                           '    task = asyncio.ensure_future(open_hold(env, s, 1, '
+                                           "0, g, rid='req-first-open'))\n"
+                                           '    await asyncio.sleep(2.0)\n'
+                                           "    released = await blk.fetchval('SELECT "
+                                           "clock_timestamp()')\n"
+                                           '    await tr.rollback()\n'
+                                           '    await blk.close()\n'
+                                           '    r = await task\n'
+                                           '    t1 = await dbclock(env)\n'
+                                           '    out = r.json()\n'
+                                           "    assert (r.status_code, out['status'], "
+                                           "out['repeat']) == (200, 'opened', False), out\n"
+                                           "    h = await hold_db(env, out['hold_id'])\n"
+                                           "    assert h['held_anchor_at'] == pres, "
+                                           "(h['held_anchor_at'], pres)\n"
+                                           "    assert h['held_until'] == pres + "
+                                           'timedelta(seconds=120)\n'
+                                           "    assert released <= h['held_at'] <= t1 and t0 <= "
+                                           "h['held_at'], (released, h['held_at'])\n"
+                                           "    assert (h['n'], h['slot'], h['team'], h['seq'], "
+                                           "h['closed_at']) == (1, 1, 0, 0, None)\n"
+                                           "    assert h['opener_player_id'] == s.pid(0) and "
+                                           "h['game_id'] == uuid.UUID(g)\n"
+                                           "    assert 85 <= out['deadline_s'] <= 90, out\n"
+                                           "    assert await env.conn.fetchval('SELECT count(*) "
+                                           "FROM queue_leases WHERE player_id = $1', s.pid(1)) == "
+                                           '0\n'
+                                           '    rep = (await open_hold(env, s, 1, 2, g)).json()\n'
+                                           "    assert (rep['status'], rep['repeat'], "
+                                           "rep['hold_id']) == ('opened', True, out['hold_id'])\n"
+                                           "    assert await env.conn.fetchval('SELECT count(*) "
+                                           "FROM match_seat_holds WHERE room_name = $1', s.room) "
+                                           '== 1\n'
+                                           '    assert await sweep(env) == {}\n'
+                                           '    assert (await hold_db(env, '
+                                           "out['hold_id']))['held_until'] == h['held_until']\n"
+                                           "    await shift_hold(env, out['hold_id'], 200)\n"
+                                           '    lapsed_until = (await hold_db(env, '
+                                           "out['hold_id']))['held_until']\n"
+                                           '    late = (await open_hold(env, s, 1, 2, g)).json()\n'
+                                           "    assert (late['status'], late['reason']) == "
+                                           "('refused', 'duplicate_game'), late\n"
+                                           "    hh = await hold_db(env, out['hold_id'])\n"
+                                           "    assert (hh['held_until'], hh['closed_at'], "
+                                           "hh['closed_reason']) == (lapsed_until, lapsed_until, "
+                                           "'lapsed')\n"
+                                           '    assert await sweep(env) == {}\n'
+                                           '\n'
+                                           '    async def refusal(r):\n'
+                                           '        assert r.status_code == 200, r.text\n'
+                                           '        j = r.json()\n'
+                                           "        assert 'status' in j and j['status'] == "
+                                           "'refused', ('FIX3 M2.6 open must refuse', j)\n"
+                                           "        assert 'reason' in j, ('FIX3 M2.6 refusal "
+                                           "names reason', j)\n"
+                                           "        return j['reason']\n"
+                                           '    assert await refusal(await open_hold(env, s, 1, 0, '
+                                           "g)) == 'duplicate_game'\n"
+                                           '    busy, gb, _ = await opened_series(env)\n'
+                                           '    assert (await open_hold(env, busy, 1, 0, '
+                                           "gb)).json()['status'] == 'opened'\n"
+                                           '    await beat(env, busy, 2)\n'
+                                           '    assert await refusal(await open_hold(env, busy, 2, '
+                                           "0, gb)) == 'room_busy'\n"
+                                           '    nm, gn, _ = await opened_series(env)\n'
+                                           '    stranger = (await seed_players(env.conn, 1))[0]\n'
+                                           '    assert await refusal(await open_hold(env, nm, 1, '
+                                           "0, gn, held_steam_id=stranger[1])) == 'not_member'\n"
+                                           '    assert await refusal(await open_hold(env, nm, 1, '
+                                           "1, gn)) == 'not_member'\n"
+                                           '    assert await refusal(await open_hold(env, nm, 1, '
+                                           "0, gn, team=1)) == 'not_member'\n"
+                                           '    assert await refusal(await open_hold(env, nm, 1, '
+                                           "0, gn, slot=3)) == 'not_member'\n"
+                                           "    cl, gc, _ = await opened_series(env, 'ovt')\n"
+                                           '    await env.conn.execute("UPDATE ovt_series SET '
+                                           'status = \'completed\' WHERE id = $1", cl.sid)\n'
+                                           '    assert await refusal(await open_hold(env, cl, 1, '
+                                           "0, gc)) == 'series_closed'\n"
+                                           '    nf, gf, _ = await opened_series(env)\n'
+                                           '    await env.conn.execute("UPDATE team_series SET '
+                                           'hold_room = \'elsewhere\' WHERE id = $1", nf.sid)\n'
+                                           '    assert await refusal(await open_hold(env, nf, 1, '
+                                           "0, gf)) == 'not_flagged'\n"
+                                           '    nc, g1, _ = await opened_series(env)\n'
+                                           '    await game_start(env, nc, 0, prev=g1)\n'
+                                           '    assert await refusal(await open_hold(env, nc, 1, '
+                                           "0, g1)) == 'not_current_game'\n"
+                                           '    assert await refusal(await open_hold(env, nc, 1, '
+                                           "0, uuid.uuid4())) == 'not_current_game'\n"
+                                           "    npz = await seed_series(env.conn, 'ovt')\n"
+                                           "    gp = (await game_start(env, npz, 0))['game_id']\n"
+                                           '    assert await refusal(await open_hold(env, npz, 2, '
+                                           "0, gp)) == 'no_presence'\n"
+                                           '    ws, gw, _ = await opened_series(env, back=110)\n'
+                                           '    assert await refusal(await open_hold(env, ws, 1, '
+                                           "0, gw)) == 'window_spent'\n"
+                                           '    bad = await open_hold(env, ws, 1, 0, gw, '
+                                           'sign=False)\n'
+                                           '    assert bad.status_code == 403\n'
+                                           "    assert await env.conn.fetchval('SELECT count(*) "
+                                           'FROM match_seat_holds WHERE room_name = '
+                                           "ANY($1::text[])', [nm.room, cl.room, nf.room, nc.room, "
+                                           'npz.room, ws.room]) == 0'),
+                                          ('wrapper',
+                                           'async def body(env):\n'
+                                           '    s, g, _ = await opened_series(env)\n'
+                                           '    await env.conn.execute("INSERT INTO queue_leases '
+                                           '(player_id, mode, group_id, generation, acquired_at, '
+                                           "renewed_at, expires_at) VALUES ($1, 'team', $2, "
+                                           'gen_random_uuid(), clock_timestamp(), '
+                                           "clock_timestamp(), clock_timestamp() + interval '10 "
+                                           'minutes\')", s.pid(1), s.sid)\n'
+                                           '    blocker = await '
+                                           'cf_pg.harness.connect_bound(env.c.dsn, env.c.schema)\n'
+                                           '    transaction = blocker.transaction()\n'
+                                           '    await transaction.start()\n'
+                                           "    await blocker.execute('SELECT 1 FROM team_series "
+                                           "WHERE id = $1 FOR NO KEY UPDATE', s.sid)\n"
+                                           '    started = asyncio.get_running_loop().time()\n'
+                                           '    try:\n'
+                                           '        response = await open_hold(env, s, 1, 0, g, '
+                                           "rid='req-m2-lock-timeout')\n"
+                                           '        elapsed = asyncio.get_running_loop().time() - '
+                                           'started\n'
+                                           '        assert response.status_code == 503, '
+                                           'response.text\n'
+                                           "        assert response.json() == {'detail': "
+                                           "'database_deadline'}\n"
+                                           '        assert 4.0 <= elapsed < 7.0, elapsed\n'
+                                           "        assert await env.conn.fetchval('SELECT "
+                                           "count(*) FROM match_seat_holds WHERE room_name = $1', "
+                                           's.room) == 0\n'
+                                           "        assert await env.conn.fetchval('SELECT "
+                                           'count(*) FROM match_hold_open_attempts WHERE '
+                                           "request_id = $1', 'req-m2-lock-timeout') == 0\n"
+                                           "        assert await env.conn.fetchval('SELECT "
+                                           "count(*) FROM queue_leases WHERE player_id = $1', "
+                                           's.pid(1)) == 1\n'
+                                           '    finally:\n'
+                                           '        await transaction.rollback()\n'
+                                           '        await blocker.close()\n'
+                                           '    await asyncio.sleep(0.1)\n'
+                                           "    assert await env.conn.fetchval('SELECT count(*) "
+                                           "FROM match_seat_holds WHERE room_name = $1', s.room) "
+                                           '== 0\n'
+                                           "    assert await env.conn.fetchval('SELECT count(*) "
+                                           "FROM queue_leases WHERE player_id = $1', s.pid(1)) == "
+                                           '1'),
+                                          ('wrapper',
+                                           'async def inside():\n'
+                                           '    async with cf_pg.case(prefix) as (c, sm):\n'
+                                           '        await body(Env(c, sm, monkeypatch))'),
+                                          ('wrapper',
+                                           "def run_env(monkeypatch, body, prefix='rjs2'):\n"
+                                           '    cf_pg.require_live_pg()\n'
+                                           '\n'
+                                           '    async def inside():\n'
+                                           '        async with cf_pg.case(prefix) as (c, sm):\n'
+                                           '            await body(Env(c, sm, monkeypatch))\n'
+                                           '    _run(inside())')],
+ 'tests/test_pc_routes.py#complete': [],
+ 'tests/test_pc_sept12.py#complete': [],
+ 'tests/test_player_cards_server.py#complete': [],
+ 'tests/test_title_ladder_hooks_live.py#complete': [('alias', 'str exec'),
+                                                    ('argdef',
+                                                     'DSN <- DSN = (os.environ.get(DSN_VAR) or '
+                                                     "'').replace('postgresql+asyncpg://', "
+                                                     "'postgresql://')"),
+                                                    ('wrapper',
+                                                     '@contextlib.asynccontextmanager\n'
+                                                     'async def _app(schema):\n'
+                                                     '    """An httpx client on main.app, every '
+                                                     'request on a session of its own\n'
+                                                     '    bound to `schema`; an exception the app '
+                                                     'does not handle comes back as\n'
+                                                     "    the 500 a player's client would get, not "
+                                                     'raised into the test."""\n'
+                                                     '    engine = harness.bound_engine(DSN, '
+                                                     'schema)\n'
+                                                     '    session = async_sessionmaker(engine, '
+                                                     'expire_on_commit=False)\n'
+                                                     '\n'
+                                                     '    async def _db():\n'
+                                                     '        async with session() as db:\n'
+                                                     '            yield db\n'
+                                                     '    '
+                                                     'main.app.dependency_overrides[database.get_db] '
+                                                     '= _db\n'
+                                                     '    try:\n'
+                                                     '        transport = '
+                                                     'httpx.ASGITransport(app=main.app, '
+                                                     'raise_app_exceptions=False)\n'
+                                                     '        async with '
+                                                     'httpx.AsyncClient(transport=transport, '
+                                                     "base_url='http://ladder.test', "
+                                                     "headers={'X-Mod-Version': "
+                                                     'main.MIN_MOD_VERSION_EFFECTIVE}) as client:\n'
+                                                     '            yield client\n'
+                                                     '    finally:\n'
+                                                     '        '
+                                                     'main.app.dependency_overrides.pop(database.get_db, '
+                                                     'None)\n'
+                                                     '        await engine.dispose()'),
+                                                    ('wrapper',
+                                                     '@contextlib.asynccontextmanager\n'
+                                                     'async def _case(extra_ddl=None):\n'
+                                                     '    """A built, sealed case schema and a '
+                                                     'session factory bound to it.\n'
+                                                     '\n'
+                                                     '    The 1v1 podium cache '
+                                                     '(main._podium_cache, a 60 s process-wide '
+                                                     'copy) is\n'
+                                                     '    emptied for the case and put back after '
+                                                     'it: a podium read from another\n'
+                                                     "    case's players answers about a different "
+                                                     'database, and the series-gold\n'
+                                                     '    "Podium beaten x2" of two runs compared '
+                                                     'here then depended on which ran\n'
+                                                     "    first (the v1.41.0 beta's refresh reads "
+                                                     'the case\'s own podium)."""\n'
+                                                     '    saved = dict(main._podium_cache)\n'
+                                                     "    main._podium_cache.update({'at': 0.0, "
+                                                     "'ok': False, 'ids': [], 'map': {}})\n"
+                                                     '    try:\n'
+                                                     '        async with harness.CaseSchema(DSN, '
+                                                     "'ladder_hooks') as case:\n"
+                                                     '            await _build(case, extra_ddl)\n'
+                                                     '            engine = '
+                                                     'harness.bound_engine(DSN, case.schema)\n'
+                                                     '            try:\n'
+                                                     '                yield (case.schema, '
+                                                     'async_sessionmaker(engine, '
+                                                     'expire_on_commit=False))\n'
+                                                     '            finally:\n'
+                                                     '                await engine.dispose()\n'
+                                                     '    finally:\n'
+                                                     '        main._podium_cache.clear()\n'
+                                                     '        main._podium_cache.update(saved)'),
+                                                    ('wrapper',
+                                                     'async def _build(case, extra_ddl=None):\n'
+                                                     '    """Into case.schema, on case.conn (bound '
+                                                     'to it): replay, ORM, widen,\n'
+                                                     '    replay, 331 then 365 run and confirmed, '
+                                                     'the case\'s own change, sealed."""\n'
+                                                     '    conn, schema = (case.conn, case.schema)\n'
+                                                     '    statements = _ddl_statements()\n'
+                                                     '    await _replay(conn, statements)\n'
+                                                     '    engine = harness.bound_engine(DSN, '
+                                                     'schema)\n'
+                                                     '    try:\n'
+                                                     '        async with engine.begin() as c:\n'
+                                                     '            await '
+                                                     'c.run_sync(models.Base.metadata.create_all)\n'
+                                                     '    finally:\n'
+                                                     '        await engine.dispose()\n'
+                                                     '    await _widen(conn, schema)\n'
+                                                     '    second = await _replay(conn, '
+                                                     'statements)\n'
+                                                     '    unexpected = [f for f in second if f[1] '
+                                                     'not in _ALREADY and (f[0], f[1]) not in '
+                                                     'REPLAY_KNOWN]\n'
+                                                     "    assert not unexpected, 'the second DDL "
+                                                     'pass failed on statements outside '
+                                                     "REPLAY_KNOWN: %r' % unexpected[:5]\n"
+                                                     '    await conn.execute(io.open(MIGRATION, '
+                                                     "encoding='utf-8').read())\n"
+                                                     '    await '
+                                                     'conn.execute(io.open(MIGRATION_365, '
+                                                     "encoding='utf-8').read())\n"
+                                                     "    rungs = await conn.fetchval('SELECT "
+                                                     "count(*) FROM title_ladders')\n"
+                                                     "    items = await conn.fetchval('SELECT "
+                                                     'count(*) FROM shop_items WHERE sku = '
+                                                     "ANY($1::text[])', list(tl.ALL_SKUS))\n"
+                                                     "    tables = [await conn.fetchval('SELECT "
+                                                     "to_regclass($1)::text', t) for t in "
+                                                     "('title_ladder_credits', "
+                                                     "'title_ladder_progress')]\n"
+                                                     '    assert rungs == items == '
+                                                     'len(tl.ALL_SKUS) and None not in tables, '
+                                                     "'331 and 365 did not land: %d rungs, %d shop "
+                                                     "rows, tables %r' % (rungs, items, tables)\n"
+                                                     '    if extra_ddl is not None:\n'
+                                                     '        await extra_ddl(conn, schema)\n'
+                                                     '    await case.seal()'),
+                                                    ('wrapper',
+                                                     'async def _get_ladders(schema, steams):\n'
+                                                     '    """GET each player\'s ladders from '
+                                                     'main.app, each request on a session of\n'
+                                                     '    its own bound to `schema`. Returns '
+                                                     '{steam: (status, body)}."""\n'
+                                                     '    engine = harness.bound_engine(DSN, '
+                                                     'schema)\n'
+                                                     '    session = async_sessionmaker(engine, '
+                                                     'expire_on_commit=False)\n'
+                                                     '\n'
+                                                     '    async def _db():\n'
+                                                     '        async with session() as db:\n'
+                                                     '            yield db\n'
+                                                     '    out = {}\n'
+                                                     '    '
+                                                     'main.app.dependency_overrides[database.get_db] '
+                                                     '= _db\n'
+                                                     '    try:\n'
+                                                     '        transport = '
+                                                     'httpx.ASGITransport(app=main.app)\n'
+                                                     '        async with '
+                                                     'httpx.AsyncClient(transport=transport, '
+                                                     "base_url='http://ladder.test') as c:\n"
+                                                     '            for steam in steams:\n'
+                                                     '                r = await '
+                                                     "c.get('/api/v1/players/%s/title-ladders' % "
+                                                     "steam, headers={'X-Mod-Version': "
+                                                     'main.MIN_MOD_VERSION_EFFECTIVE})\n'
+                                                     '                out[steam] = (r.status_code, '
+                                                     'r.json())\n'
+                                                     '    finally:\n'
+                                                     '        '
+                                                     'main.app.dependency_overrides.pop(database.get_db, '
+                                                     'None)\n'
+                                                     '        await engine.dispose()\n'
+                                                     '    return out'),
+                                                    ('wrapper',
+                                                     'async def _look(schema):\n'
+                                                     '    conn = await harness.connect_bound(DSN, '
+                                                     'schema)\n'
+                                                     '    try:\n'
+                                                     '        return (await _ladder(conn), await '
+                                                     '_economy(conn))\n'
+                                                     '    finally:\n'
+                                                     '        await conn.close()'),
+                                                    ('wrapper',
+                                                     'async def _on_disk(schema):\n'
+                                                     '    """What another connection sees at this '
+                                                     'moment: the match rows, the\n'
+                                                     '    completed series and the rating_history '
+                                                     'rows."""\n'
+                                                     '    conn = await harness.connect_bound(DSN, '
+                                                     'schema)\n'
+                                                     '    try:\n'
+                                                     "        return (await conn.fetchval('SELECT "
+                                                     "COUNT(*) FROM matches'), await "
+                                                     'conn.fetchval("SELECT COUNT(*) FROM '
+                                                     'ranked_series WHERE status = '
+                                                     '\'completed\'"), await '
+                                                     "conn.fetchval('SELECT COUNT(*) FROM "
+                                                     "rating_history'))\n"
+                                                     '    finally:\n'
+                                                     '        await conn.close()'),
+                                                    ('wrapper',
+                                                     'async def _per_game(schema, lobbies):\n'
+                                                     '    """What stays per game: each lobby\'s '
+                                                     'ffa_matches ids in game order, the\n'
+                                                     '    FFA games each player has been rated in, '
+                                                     'and the ffa_placement gold rows\n'
+                                                     '    as {reference id: sorted steam ids}."""\n'
+                                                     '    conn = await harness.connect_bound(DSN, '
+                                                     'schema)\n'
+                                                     '    try:\n'
+                                                     '        matches = {}\n'
+                                                     '        for lobby in lobbies:\n'
+                                                     '            matches[str(lobby)] = '
+                                                     "[str(r['id']) for r in await "
+                                                     "conn.fetch('SELECT id FROM ffa_matches WHERE "
+                                                     "lobby_id = $1 ORDER BY game_number', "
+                                                     'lobby)]\n'
+                                                     "        played = {r['steam_id']: "
+                                                     "r['games_played'] for r in await "
+                                                     "conn.fetch('SELECT p.steam_id, "
+                                                     'g.games_played FROM glicko_ratings_ffa g   '
+                                                     'JOIN players p ON p.id = g.player_id WHERE '
+                                                     "g.games_played > 0')}\n"
+                                                     '        placed = {}\n'
+                                                     '        for r in await conn.fetch("SELECT '
+                                                     'g.reference_id, p.steam_id FROM '
+                                                     'gold_transactions g   JOIN players p ON p.id '
+                                                     '= g.player_id WHERE g.reason = '
+                                                     '\'ffa_placement\'"):\n'
+                                                     '            '
+                                                     "placed.setdefault(r['reference_id'], "
+                                                     "[]).append(r['steam_id'])\n"
+                                                     '        return (matches, played, {k: '
+                                                     'sorted(v) for k, v in placed.items()})\n'
+                                                     '    finally:\n'
+                                                     '        await conn.close()'),
+                                                    ('wrapper',
+                                                     'async def _play_ledger(schema):\n'
+                                                     '    conn = await harness.connect_bound(DSN, '
+                                                     'schema)\n'
+                                                     '    try:\n'
+                                                     "        rows = await conn.fetch('SELECT "
+                                                     'p.steam_id, g.reason, g.amount FROM '
+                                                     'gold_transactions g   JOIN players p ON p.id '
+                                                     "= g.player_id WHERE g.amount > 0')\n"
+                                                     '    finally:\n'
+                                                     '        await conn.close()\n'
+                                                     '    play, ach = ({}, {})\n'
+                                                     '    for r in rows:\n'
+                                                     "        if r['reason'] in PLAY_REASONS:\n"
+                                                     "            play[r['steam_id']] = "
+                                                     "play.get(r['steam_id'], 0) + r['amount']\n"
+                                                     "        if r['reason'] == 'achievement':\n"
+                                                     "            ach[r['steam_id']] = "
+                                                     "ach.get(r['steam_id'], 0) + r['amount']\n"
+                                                     '    return (play, ach)'),
+                                                    ('wrapper',
+                                                     'async def _r3_run(how, tag, armed=None):\n'
+                                                     '    """A 1v1 series to completion with the '
+                                                     'deciding report forced one way;\n'
+                                                     "    game 1 runs on the case's own sessions. "
+                                                     'For `how` == "fail", `armed`\n'
+                                                     "    holds the switch of the test's "
+                                                     'rating-calculation fault: the deciding\n'
+                                                     '    report is sent once with the fault armed '
+                                                     'and, after the state is read,\n'
+                                                     '    once more with it lifted. For `how` == '
+                                                     '"one_commit", the deciding report\n'
+                                                     '    runs on a session that counts its '
+                                                     'commits and, before each, reads from\n'
+                                                     '    another connection what the database '
+                                                     'holds at that moment.\n'
+                                                     '\n'
+                                                     '    Either way the one write submit_match '
+                                                     'makes in a session of its own --\n'
+                                                     "    the podium holders' sync (bug 325), "
+                                                     'which fires from a cold podium copy,\n'
+                                                     '    and _case leaves the copy cold -- is '
+                                                     'routed to the case schema and\n'
+                                                     '    counted: the copy is warmed on the '
+                                                     "case's own players before the state\n"
+                                                     '    is read and held past the reports '
+                                                     "whatever the seat's load (_case puts\n"
+                                                     '    the cache back), so a commit on that '
+                                                     'session during the reports is a\n'
+                                                     '    finding, and one commit of this '
+                                                     'function\'s own proves the count live."""\n'
+                                                     '    async with _case() as (schema, sm):\n'
+                                                     '        ids = await _seed(sm)\n'
+                                                     '        seeded, _ = await _look(schema)\n'
+                                                     '        g1 = await _submit(sm, '
+                                                     'main.submit_match, '
+                                                     "_report_1v1('ranked_lh%s_000001_r1' % tag))\n"
+                                                     '        assert g1[1] is None and '
+                                                     "g1[0].series_status == 'active', g1\n"
+                                                     '        seen, other = ([], [])\n'
+                                                     '\n'
+                                                     '        class _Counting(AsyncSession):\n'
+                                                     '\n'
+                                                     '            async def commit(self):\n'
+                                                     '                seen.append(await '
+                                                     '_on_disk(schema))\n'
+                                                     '                await super().commit()\n'
+                                                     '\n'
+                                                     '        class _Elsewhere(AsyncSession):\n'
+                                                     '\n'
+                                                     '            async def commit(self):\n'
+                                                     '                other.append(await '
+                                                     '_on_disk(schema))\n'
+                                                     '                await super().commit()\n'
+                                                     '        engine = harness.bound_engine(DSN, '
+                                                     'schema)\n'
+                                                     "        deciding = sm if how != 'one_commit' "
+                                                     'else async_sessionmaker(engine, '
+                                                     'expire_on_commit=False, class_=_Counting)\n'
+                                                     '        saved = database.async_session\n'
+                                                     '        database.async_session = '
+                                                     'async_sessionmaker(engine, '
+                                                     'expire_on_commit=False, class_=_Elsewhere)\n'
+                                                     '        try:\n'
+                                                     '            async with sm() as db:\n'
+                                                     '                await '
+                                                     'main._podium_player_ids(db)\n'
+                                                     "            main._podium_cache['at'] = "
+                                                     'time.monotonic() + 3600\n'
+                                                     '            del other[:]\n'
+                                                     '            mid, mid_econ = await '
+                                                     '_look(schema)\n'
+                                                     "            room = 'ranked_lh%s_000002_r2' % "
+                                                     'tag\n'
+                                                     '            g2 = await _submit(deciding, '
+                                                     'main.submit_match, _report_1v1(room))\n'
+                                                     '            refused, refused_econ = await '
+                                                     '_look(schema)\n'
+                                                     '            g3 = None\n'
+                                                     "            if how == 'fail':\n"
+                                                     '                armed[0] = False\n'
+                                                     '                g3 = await _submit(deciding, '
+                                                     'main.submit_match, _report_1v1(room))\n'
+                                                     '            other_during = len(other)\n'
+                                                     '            async with '
+                                                     'database.async_session() as probe:\n'
+                                                     '                await '
+                                                     "probe.execute(text('SELECT 1'))\n"
+                                                     '                await probe.commit()\n'
+                                                     '            other_probe = len(other)\n'
+                                                     '            conn = await '
+                                                     'harness.connect_bound(DSN, schema)\n'
+                                                     '            try:\n'
+                                                     "                disk = [str(r['id']) for r "
+                                                     "in await conn.fetch('SELECT id FROM matches "
+                                                     "WHERE photon_room_id = $1', room)]\n"
+                                                     '            finally:\n'
+                                                     '                await conn.close()\n'
+                                                     '        finally:\n'
+                                                     '            database.async_session = saved\n'
+                                                     '            await engine.dispose()\n'
+                                                     '        after, econ = await _look(schema)\n'
+                                                     '        refs = [str(g[0].match_id) for g in '
+                                                     '(g1, g2, g3) if g is not None and g[1] is '
+                                                     'None]\n'
+                                                     '        return dict(seeded=seeded, mid=mid, '
+                                                     'mid_econ=mid_econ, g2=g2, g3=g3, '
+                                                     'refused=refused, refused_econ=refused_econ, '
+                                                     'after=after, econ=econ, seen=seen, '
+                                                     'other=other, other_during=other_during, '
+                                                     'other_probe=other_probe, disk=disk, '
+                                                     'refs=refs)')],
+ 'tests/test_title_ladders.py#complete': [('alias',
+                                           'from sqlalchemy.ext.asyncio import async_sessionmaker, '
+                                           'create_async_engine'),
+                                          ('alias', 'str getattr'),
+                                          ('argdef', 'DSN <- DSN = os.environ.get(DSN_VAR)'),
+                                          ('argdef',
+                                           'LADDER_DSN <- LADDER_DSN = '
+                                           '(os.environ.get(LADDER_DSN_VAR) or '
+                                           "'').replace('postgresql+asyncpg://', 'postgresql://')"),
+                                          ('wrapper',
+                                           'def _ladder_engine(schema):\n'
+                                           '    from sqlalchemy.ext.asyncio import '
+                                           'async_sessionmaker, create_async_engine\n'
+                                           '    engine = '
+                                           "create_async_engine(LADDER_DSN.replace('postgresql://', "
+                                           "'postgresql+asyncpg://'), "
+                                           "connect_args={'server_settings': {'search_path': "
+                                           'schema}}, poolclass=None)\n'
+                                           '    return (engine, async_sessionmaker(engine, '
+                                           'expire_on_commit=False))')],
+ 'tests/title_ladders_lane_schema.py#complete': []}
+R10_COUNT = 114
+for _k, _v in R10_FROZEN.items():
+    FROZEN[_k] = list(FROZEN[_k]) + list(_v)
+FROZEN_COUNT = COARSE_COUNT + COMPLETE_COUNT + R10_COUNT
