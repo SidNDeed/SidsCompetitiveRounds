@@ -2030,23 +2030,37 @@ def test_r7_prior_findings_are_refused(row):
     branch sentence, each pinned (R7_CONTROLS' last column); the first
     refusal a walk meets is the one pinned. The kept rows: every real span
     the controls plant into, planted with nothing, is admitted, so a
-    control's refusal is its program's, never the harness's."""
+    control's refusal is its program's, never the harness's.
+    Round 9 (ruling REHEARSAL-R9-PRE): the gate ORDER rule refuses a planted
+    statement at a site span's check, before a walk's later branch checks
+    and a planted helper's own grammar, so the pinned sentence is read with
+    the ORDER marker off (the rules it pins, alone); with the marker on the
+    control is refused too and the kept row admitted."""
     finding, label, base, edits, helpers, helper_edits, want = row
     modname, name, entry, target = base
     fn, scope, at = _planted(_R7_MODULES[modname], name, edits, helpers,
                              helper_edits)
-    if entry == "prefix":
-        got = claim_prefix_violations(fn, target, scope, name, at)[0]
-        got = got[0] if got else None
-    else:
+
+    def read():
+        if entry == "prefix":
+            got = claim_prefix_violations(fn, target, scope, name, at)[0]
+            return got[0] if got else None
         # the planted function's one call of `target`, by its spelling
         call = next(n for n in ast.walk(fn) if isinstance(n, ast.Call)
                     and isinstance(n.func, ast.Name) and n.func.id == target)
-        got = refusal_branch_violation(fn, call, entry.split(":")[1], scope, at)
+        return refusal_branch_violation(fn, call, entry.split(":")[1], scope, at)
+
+    _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+    try:
+        got = read()
+    finally:
+        _gg.ORDER_SWITCH["bindings"] = None
+    on = read()
     if want is None:
-        assert got is None, (label, got)
+        assert got is None and on is None, (label, got, on)
     else:
         assert got is not None and want in got, (finding, label, want, got)
+        assert on is not None, (finding, label, on)
 
 
 def test_r7_grammar_covers_every_walked_span_and_body():
@@ -2144,7 +2158,11 @@ def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
     prefix_span), compared as (file, line, col, node type), on both real
     prefix walks and on every prefix control the grammar admits; and a
     control where the two differ (the round-7 span, to the first target
-    only, on the report's program) is a problem of the walk."""
+    only, on the report's program) is a problem of the walk. Round 9
+    (ruling REHEARSAL-R9-PRE): the controls are read with the gate ORDER
+    marker off, so the frozen partition is the one of the rules it froze
+    (the ORDER rule refuses a planted statement first; with the marker on
+    every prefix control is refused, test_r7_prior_findings_are_refused)."""
     counts = {}
     for name, stop in (("_asm_readmit_work", "_rdm_claim"), ("_rdm_claim", GATE)):
         problems, _ = claim_prefix_violations(
@@ -2160,7 +2178,11 @@ def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
             continue
         fn, scope, at = _planted(_R7_MODULES[modname], name, row[3], row[4], row[5])
         _PREFIX_NODES["last"] = None
-        got = claim_prefix_violations(fn, target, scope, name, at)[0]
+        _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+        try:
+            got = claim_prefix_violations(fn, target, scope, name, at)[0]
+        finally:
+            _gg.ORDER_SWITCH["bindings"] = None
         if _PREFIX_NODES["last"] is None:
             assert got and got[0].startswith("grammar "), (row[1], got)
             refused_rows.append(row[1])
@@ -2184,8 +2206,12 @@ def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
     row = next(r for r in R7_CONTROLS if r[1] == _R8_SUFFIX_LABEL)
     fn, scope, at = _planted(main, "_asm_readmit_work", row[3])
     monkeypatch.setattr(sys.modules[__name__], "prefix_span", round7_span)
-    problems, _ = claim_prefix_violations(fn, "_rdm_claim", scope,
-                                          "_asm_readmit_work", at)
+    _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+    try:
+        problems, _ = claim_prefix_violations(fn, "_rdm_claim", scope,
+                                              "_asm_readmit_work", at)
+    finally:
+        _gg.ORDER_SWITCH["bindings"] = None
     assert problems and all(" nodes inspected but not admitted" in p
                             for p in problems), problems
     print(f"r8 M6 inspected/admitted: {counts}, prefix controls compared {compared}; "
