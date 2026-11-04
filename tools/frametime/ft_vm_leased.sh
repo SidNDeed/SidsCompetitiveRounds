@@ -5,7 +5,9 @@
 # RESTORATION sit inside the lease, and VR6's file inventories are written into <outdir>. Order:
 #   1. lease acquired as holder frame-time, verified by pause.ps1 -Status (never by an exit code);
 #   2. the leased shutdown: the bot's game quit (quit_game.ps1), then ROUNDS proven not running;
-#   3. the VM launch gate under the lease (s0_gate.ps1, two disk-queue pairs);
+#   3. the VM launch gate under the lease: first the settle window (ft_settle_diskq.ps1, R6-A3.11.10 FIX-8: the disk
+#      queue every 10 s for up to 120 s after the bot's game has exited, passing on two consecutive readings < 3 and
+#      refusing only at the window's end), then s0_gate.ps1, unchanged (two disk-queue pairs);
 #   4. the PRE inventory (<outdir>/inventory-pre.txt): sha256 of every file in the plugins folder and the config
 #      folder and of the five logs (LogOutput.log, LogOutput-prev.log, output_log.txt, Player.log, Player-prev.log);
 #      pre-image copies of the cfg and of each present log into <outdir>/pre/, each proven by digest;
@@ -130,6 +132,10 @@ powershell -NoProfile -File C:/broadcast/quit_game.ps1 -Holder frame-time | tr -
 for i in $(seq 1 20); do running || break; sleep 3; done
 if running; then echo "$(st) FT-VM-LEASED ROUNDS still running after the leased shutdown; nothing installed"; exit 21; fi
 echo "$(st) FT-VM-LEASED leased shutdown: ROUNDS not running"
+# FIX-8 (R6-A3.11.10): a reading right after the quit measures the quit's own writes; settle first
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$HERE/ft_settle_diskq.ps1")" | tr -d '\r'
+sg=${PIPESTATUS[0]}
+if [ "$sg" -ne 0 ]; then echo "$(st) FT-VM-LEASED settle window refused (rc=$sg); nothing launched"; exit 10; fi
 powershell -NoProfile -File "$R/ai-collab/frame-time/s0_gate.ps1" -Launch "$N" -Pairs 2 | tr -d '\r'
 g=${PIPESTATUS[0]}
 if [ "$g" -ne 0 ]; then echo "$(st) FT-VM-LEASED under-lease gate refused (rc=$g); nothing launched"; exit 10; fi
