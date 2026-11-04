@@ -3449,3 +3449,33 @@ R10_COUNT = 114
 for _k, _v in R10_FROZEN.items():
     FROZEN[_k] = list(FROZEN[_k]) + list(_v)
 FROZEN_COUNT = COARSE_COUNT + COMPLETE_COUNT + R10_COUNT
+
+# Hand edit at the round-10 merge (W30b; the ro child's question 4; reviewed in
+# the round-10 notes): fifteen forms the gr child's round-10 code adds (ruling
+# REHEARSAL-R9-A1 (D), every pure callee bound to its frozen provider). Each
+# is a reference to the builtins module or a module's __builtins__ entry: the
+# provider tables bind a pure name to the builtins object itself
+# (closed_walk._builtins, test_a1_identity_formation._a1_builtins,
+# test_match_hold_admission_gate_pg._gate_builtins), Bindings.listed reads a
+# module's '__builtins__' to compare identity, and the a1 and gate controls
+# rebind main.__builtins__ or a module name (monkeypatch, restored) to prove
+# the identity check refuses; the a1 predicate evaluator passes an empty
+# '__builtins__' mapping to eval. None reaches an opener, a DSN, a role or an
+# identity statement. Frozen by hand at the merge, not by a re-derivation.
+R10_MERGE_FROZEN = {
+    'tests/closed_walk.py#complete': [
+        ('alias', '(_builtins.getattr,)'), ('alias', '(_builtins.hasattr,)'),
+        ('alias', 'import builtins as _builtins'), ('alias', 'str __builtins__')],
+    'tests/test_a1_identity_formation.py#complete': [
+        ('alias', 'builtins.int'), ('alias', 'import builtins'), ('alias', 'import builtins'),
+        ('alias', 'import builtins as _a1_builtins'),
+        ('alias', "m.setattr(main, '__builtins__', builtins)"),
+        ('alias', 'str __builtins__'), ('alias', 'str __builtins__'), ('alias', 'str eval')],
+    'tests/test_match_hold_admission_gate_pg.py#complete': [
+        ('alias', 'import builtins as _gate_builtins'), ('alias', 'str eval'),
+        ('dynamic', 'm.setattr(main, name, writer, raising=False)')],
+}
+R10_MERGE_COUNT = 15
+for _k, _v in R10_MERGE_FROZEN.items():
+    FROZEN[_k] = list(FROZEN[_k]) + list(_v)
+FROZEN_COUNT = COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT

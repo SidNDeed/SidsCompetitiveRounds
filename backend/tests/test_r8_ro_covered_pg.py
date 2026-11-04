@@ -1131,8 +1131,14 @@ def test_census_complete_layer_frozen_whole():
     assert sum(len(fz.FROZEN[k]) for k in coarse) == fz.COARSE_COUNT == 363
     assert sum(len(fz.COMPLETE_FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT == 218
     assert sum(len(fz.R10_FROZEN[k]) for k in complete) == fz.R10_COUNT == 114
-    assert sum(len(fz.FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT + fz.R10_COUNT
-    assert fz.FROZEN_COUNT == fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
+    # round 10's merge: the hand-frozen block (W30b), fifteen forms of the gr child's providers
+    assert sum(len(v) for v in fz.R10_MERGE_FROZEN.values()) == fz.R10_MERGE_COUNT == 15
+    assert set(fz.R10_MERGE_FROZEN) <= complete
+    assert {f[0] for v in fz.R10_MERGE_FROZEN.values() for f in v} <= {"alias", "dynamic"}
+    assert sum(len(fz.FROZEN[k]) for k in complete) == (fz.COMPLETE_COUNT + fz.R10_COUNT
+                                                        + fz.R10_MERGE_COUNT)
+    assert fz.FROZEN_COUNT == (fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
+                               + fz.R10_MERGE_COUNT)
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once
