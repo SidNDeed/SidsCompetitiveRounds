@@ -5438,6 +5438,22 @@ def test_r10_receiver_store_and_sources_are_frozen():
              "the receiver class _Walk is not bound once")):
         got = [why for _ln, why in _rs.form_problems(_ast.parse(base[mod] + prog))]
         assert any(g.startswith(want) for g in got), (mod, got)
+    # the store route: the complete statement changed while each of its
+    # alternatives is still a frozen source (only the pinned digest
+    # refuses it)
+    for mod, old, new, cls in (
+            ("closed_walk", "        self.b = (bindings if bindings is not None",
+             "        self.b = (bindings if bindings is None", "Visitor"),
+            ("test_match_hold_admission_gate_pg",
+             "                              else stmts, session=self.policy.session,",
+             "                              else stmts, session=None,", "_Walk")):
+        assert base[mod].count(old) == 1, (mod, old)
+        tree = _ast.parse(base[mod].replace(old, new))
+        got = [why for _ln, why in _rs.form_problems(tree)]
+        assert (f"{cls}.__init__'s store to `.b` is not its frozen statement"
+                in got), (mod, got)
+        trees = dict(real, **{mod: tree})
+        assert _rs.receiver_source_problems(trees) == [], (mod, new)
     # the chain route
     for mod, old, new, want in (
             ("closed_walk", "bindings=bindings).accept(node).effects)",
