@@ -4847,7 +4847,13 @@ def test_s56_the_late_body_rule_and_the_lone_report(monkeypatch):
 def test_s57_the_g3_server_gate(monkeypatch):
     """S57: while ADM_PRODUCTION_ENABLED is False a lock is an admission
     lobby only when every member advertises ffa_adm1 and holds an unexpired
-    ffa_g3_seats row; patched True, the rows are not needed. The admin route:
+    ffa_g3_seats row; patched True, the rows are not needed. The case sets
+    the switch itself in both positions and never reads the module default
+    (decision A7: the server switch is the authority whatever the client
+    advertises). A room of 1.41.0 production clients (ffa_asm1, ffa_adm1,
+    ffa_rdm1, nobody enrolled) locks with admission_v1 and readmit_v1 false
+    while the switch is False and true once it is True; with the switch True
+    a member without ffa_adm1 still makes admission_v1 false. The admin route:
     403 for a non-admin, a bad signature, or a signature over another
     duration; 422 for hours 73; hours 0 expires the row; a valid call upserts
     expires_at = now + hours."""
@@ -4861,25 +4867,35 @@ def test_s57_the_g3_server_gate(monkeypatch):
                     " ON CONFLICT (player_id) DO UPDATE SET expires_at = EXCLUDED.expires_at",
                     p, p in expired)
 
-        async def lock(pick, expired=()):
-            lob = await _open_lobby(env, 4, ["ffa_asm1,ffa_adm1"] * 4)
+        prod = "ffa_asm1,ffa_adm1,ffa_rdm1"   # what a 1.41.0 Release client advertises
+
+        async def lock(pick, expired=(), caps=("ffa_asm1,ffa_adm1",) * 4):
+            lob = await _open_lobby(env, 4, list(caps))
             await enrol(pick(lob), [lob.pids[i] for i in expired])
             a = await _start(env, main, lob)
             assert a.status == 200, ("S57 lock", a)
             row = await env.lobby_row(lob)
-            return row["assembly_v1"], row["admission_v1"]
+            return row["assembly_v1"], row["admission_v1"], row["readmit_v1"]
 
-        assert main.ADM_PRODUCTION_ENABLED is False, "S57 constant"
+        env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", False)
         got = await lock(lambda lob: lob.pids)
-        assert got == (True, True), ("S57 enrolled", got)
+        assert got == (True, True, False), ("S57 enrolled", got)
         got = await lock(lambda lob: lob.pids[:3])
-        assert got == (True, False), ("S57 unenrolled", got)
+        assert got == (True, False, False), ("S57 unenrolled", got)
         got = await lock(lambda lob: lob.pids, expired=(2,))
-        assert got == (True, False), ("S57 expired", got)
+        assert got == (True, False, False), ("S57 expired", got)
+        got = await lock(lambda lob: [], caps=(prod,) * 4)
+        assert got == (True, False, False), ("S57 off: production clients refused", got)
+        got = await lock(lambda lob: lob.pids, caps=(prod,) * 4)
+        assert got == (True, True, True), ("S57 off: production clients enrolled", got)
         env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", True)
         got = await lock(lambda lob: [])
+        assert got == (True, True, False), ("S57 production", got)
+        got = await lock(lambda lob: [], caps=(prod,) * 4)
+        assert got == (True, True, True), ("S57 on: production clients admitted", got)
+        got = await lock(lambda lob: [], caps=(prod,) * 3 + ("ffa_asm1",))
+        assert got == (True, False, False), ("S57 on: the token still required", got)
         env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", False)
-        assert got == (True, True), ("S57 production", got)
 
         secret = "cf-g3-secret"
         env.mp.setattr(main, "ADMIN_HMAC_SECRET", secret)
