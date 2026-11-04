@@ -1235,6 +1235,96 @@ import re as _re  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 
+
+def _sql_code(sql):
+    """SQL as the server parses it, without its comments (A7-R2): `--` to the
+    end of the line and `/* */` blocks (nested, as PostgreSQL nests them) are
+    removed outside single-quoted literals, double-quoted identifiers and
+    dollar-quoted bodies, which are kept whole (standard-conforming strings:
+    a quote inside a literal is doubled). Each comment becomes one space and
+    runs of whitespace collapse to one, so a check on the result reads the
+    statement's code and never a comment beside it."""
+    out = []
+    i, n = 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c in ("'", '"'):
+            j = i + 1
+            while j < n:
+                if sql[j] == c:
+                    if j + 1 < n and sql[j + 1] == c:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            out.append(sql[i:j + 1])
+            i = j + 1
+            continue
+        if c == "$":
+            m = _re.match(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$", sql[i:])
+            if m:
+                tag = m.group(0)
+                end = sql.find(tag, i + len(tag))
+                end = n if end < 0 else end + len(tag)
+                out.append(sql[i:end])
+                i = end
+                continue
+        if sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j
+            out.append(" ")
+            continue
+        if sql.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if sql.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif sql.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            out.append(" ")
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return " ".join("".join(out).split())
+
+
+def test_sql_code_strips_comments_and_keeps_literals():
+    """The probe for _sql_code: comments of both forms go, nested blocks go
+    whole, and a comment marker inside a literal, an identifier or a
+    dollar-quoted body is code, not a comment."""
+    assert _sql_code("SELECT a, -- b\n c FROM t") == "SELECT a, c FROM t"
+    assert _sql_code("SELECT a /* b /* c */ d */ FROM t") == "SELECT a FROM t"
+    assert _sql_code("SELECT '--x', '/*y*/', 'it''s' FROM t") == "SELECT '--x', '/*y*/', 'it''s' FROM t"
+    assert _sql_code('SELECT "a--b" FROM t') == 'SELECT "a--b" FROM t'
+    assert _sql_code("SELECT $q$ -- kept $q$, $1 -- gone\n FROM t") == "SELECT $q$ -- kept $q$, $1 FROM t"
+    assert _sql_code("  LEFT JOIN g\n   ON x  ") == "LEFT JOIN g ON x"
+
+
+async def _executed(env, run):
+    """The statements `run()` sends to the server through the case's engine,
+    as SQLAlchemy hands them to the driver (before_cursor_execute), and the
+    exception it raised, if any. A7-R2: a check of SQL reads what executes;
+    the statement is recorded before the server sees it, so one the server
+    refuses is still in the list."""
+    from sqlalchemy import event
+    seen = []
+
+    def before(conn, cursor, statement, parameters, context, executemany):
+        seen.append(statement)
+
+    event.listen(env.engine.sync_engine, "before_cursor_execute", before)
+    err = None
+    try:
+        await run()
+    except Exception as exc:  # recorded for the caller's facts; its asserts decide
+        err = exc
+    finally:
+        event.remove(env.engine.sync_engine, "before_cursor_execute", before)
+    return seen, err
+
 BASE_COMMIT = "9a1dd9d"
 _BET_SECRET = "cf-bet-secret"
 
@@ -1246,7 +1336,7 @@ def _sig(msg):
 def _new_lobby_columns():
     """The ffa_lobbies columns migration 355 adds."""
     return set(_re.findall(r"ALTER TABLE ffa_lobbies ADD COLUMN IF NOT EXISTS\s+(\w+)",
-                           cf_pg.read_355()))
+                           _sql_code(cf_pg.read_355())))
 
 
 _PRE = {}
@@ -2143,7 +2233,7 @@ def test_s26_the_reform_copies_every_field(monkeypatch):
 
 def _insert_columns():
     import re as _r
-    head = main._ASM_REFORM_INSERT_SQL.split("VALUES")[0]
+    head = _sql_code(main._ASM_REFORM_INSERT_SQL).split("VALUES")[0]
     return [c.strip() for c in _r.sub(r"^.*?\(", "", head, count=1, flags=_r.S)
             .rstrip().rstrip(")").split(",") if c.strip()]
 
@@ -4968,19 +5058,26 @@ _CSPROJ = os.path.join(HERE, "..", "..", "plugin", "CompetitiveRounds.csproj")
 _G3_CLAUSE_SQL = "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"
 
 
-def _s58_clause_in_sql():
-    """Whether a string constant of _ffa_asm_gates' own code (its docstring
-    excluded) carries the enrolment clause. Read through the AST, so a
-    comment or the docstring naming the clause cannot satisfy it (A7-R1)."""
-    import inspect
-    import textwrap
-    node = _ast.parse(textwrap.dedent(inspect.getsource(main._ffa_asm_gates))).body[0]
-    doc = None
-    if node.body and isinstance(node.body[0], _ast.Expr) \
-            and isinstance(getattr(node.body[0], "value", None), _ast.Constant):
-        doc = node.body[0].value
-    return any(isinstance(x, _ast.Constant) and isinstance(x.value, str) and x is not doc
-               and _G3_CLAUSE_SQL in x.value for x in _ast.walk(node))
+async def _s58_clause_executed(env):
+    """Whether the statement _ffa_asm_gates sends to the server carries the
+    enrolment clause in its code, in each switch position (A7-R2): recorded
+    as it executes, its comments removed, so neither a Python comment, a
+    docstring nor an SQL comment naming the clause can satisfy it."""
+    want = _sql_code(_G3_CLAUSE_SQL)
+    got = {}
+    env.mp.setattr(main, "FFA_ASSEMBLY_ENABLED", True)
+    for production in (False, True):
+        env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", production)
+
+        async def gate():
+            async with env.sm() as db:
+                await main._ffa_asm_gates(db, [uuid.uuid4()])
+
+        seen, err = await _executed(env, gate)
+        got[production] = {"clause": any(want in _sql_code(s) for s in seen),
+                           "statements": len(seen), "error": repr(err) if err else None}
+    env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", False)
+    return all(v["clause"] for v in got.values()), got
 
 
 def _s58_g3_configuration():
@@ -5004,7 +5101,7 @@ def _s58_g3_configuration():
     return False
 
 
-def test_s58_the_g3_fence():
+def test_s58_the_g3_fence(monkeypatch):
     """S58 (structural, both switch positions): the enrolment clause, the
     route and the csproj's G3 configuration exist whatever
     ADM_PRODUCTION_ENABLED is. Decision A7 (2026-11-04) made 1.41.0 the
@@ -5012,16 +5109,21 @@ def test_s58_the_g3_fence():
     rollback: setting the switch False again admits only enrolled rooms,
     which needs the clause and the route. The pre-A7 reading (the release
     deletes them, the table and the configuration) is retired. The clause
-    is read from the gate's own SQL constant and the configuration from the
-    parsed csproj, so no comment or docstring satisfies either (A7-R1)."""
+    is read from the statement the gate executes, comments removed (A7-R2),
+    and the configuration from the parsed csproj (A7-R1), so no comment,
+    SQL comment or docstring satisfies either."""
     paths = [getattr(r, "path", "") for r in main.app.routes]
-    clause = _s58_clause_in_sql()
     g3_config = _s58_g3_configuration()
-    _write_facts({"production": bool(main.ADM_PRODUCTION_ENABLED), "g3_config": g3_config,
-                  "clause": clause, "route": "/api/v1/admin/ffa-g3-seats" in paths})
-    assert clause, "S58 clause"
-    assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"
-    assert g3_config, "S58 G3 configuration"
+
+    async def body(env):
+        clause, by_position = await _s58_clause_executed(env)
+        _write_facts({"production": bool(main.ADM_PRODUCTION_ENABLED), "g3_config": g3_config,
+                      "clause": clause, "by_position": {str(k): v for k, v in by_position.items()},
+                      "route": "/api/v1/admin/ffa-g3-seats" in paths})
+        assert clause, "S58 clause"
+        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"
+        assert g3_config, "S58 G3 configuration"
+    run_env(monkeypatch, body)
 
 
 # -- writer 7 (d) and the gone record (S64), the release (S66), section 12's
@@ -5684,25 +5786,84 @@ def test_fix2_s2_stored_reasons_comparison_and_triage():
                                           stored_reasons={ghost.steam_id: ["asm_a"]}) is None
 
 
-def test_fix2_s2_snapshot_sources_are_complete():
-    """S2: every reader carries the stored set and never rebuilds assembly state."""
-    import ast
+def _code_of(fn):
+    """A function's code as the interpreter runs it (A7-R2): the names it
+    calls and its string constants, every docstring excluded (the leading
+    string of the function and of each nested def or class)."""
     import inspect
     import textwrap
+    tree = _ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    docs = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef, _ast.Module)) \
+                and node.body and isinstance(node.body[0], _ast.Expr) \
+                and isinstance(node.body[0].value, _ast.Constant) \
+                and isinstance(node.body[0].value.value, str):
+            docs.add(id(node.body[0].value))
+    called = set()
+    strings = []
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Call):
+            f = node.func
+            called.add(f.id if isinstance(f, _ast.Name) else getattr(f, "attr", ""))
+        elif isinstance(node, _ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+            strings.append(node.value)
+    return called, strings
 
-    for fn in (main._ffa_report_contradiction, main._ffa_prior_field_disagreement,
-               main._triage_row_verdict, main._triage_capture_verdict):
-        source = inspect.getsource(fn)
-        assert source.count("_asm_report_rules(") == 0, fn.__name__
-        assert source.count("ffa_assembly_seats") == 0, fn.__name__
-    for sql in (main._FFA_PRIOR_VECTOR_SQL, main._TRIAGE_SQL_V2_VECTORS):
-        assert sql.count("exclusion_reasons") == 1
-    tree = ast.parse(textwrap.dedent(inspect.getsource(main.submit_ffa_match)))
-    inserts = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
-               and isinstance(n.value, str) and "INSERT INTO ffa_match_players" in n.value]
-    assert len(inserts) == 1
-    assert inserts[0].count("exclusion_reasons") == 1
-    assert inserts[0].count("CAST(:er AS text[])") == 1
+
+def test_fix2_s2_snapshot_sources_are_complete(monkeypatch):
+    """S2: every reader carries the stored set and never rebuilds assembly
+    state. Read through what executes (A7-R2): the readers' code through the
+    AST with docstrings excluded and SQL comments removed; the two vector
+    reads executed, their result columns and rows as the server returns
+    them; the stored set's INSERT recorded as a real report sends it. So an
+    SQL comment, a Python comment or a docstring satisfies none of it."""
+    async def body(env):
+        for fn in (main._ffa_report_contradiction, main._ffa_prior_field_disagreement,
+                   main._triage_row_verdict, main._triage_capture_verdict):
+            called, strings = _code_of(fn)
+            assert "_asm_report_rules" not in called, ("S2 reader rebuilds", fn.__name__)
+            assert not any("ffa_assembly_seats" in _sql_code(s) for s in strings), \
+                ("S2 reader reads seats", fn.__name__)
+        reads = (("S2 prior projection", main._FFA_PRIOR_VECTOR_SQL, lambda m: {"m": m}),
+                 ("S2 triage projection", main._TRIAGE_SQL_V2_VECTORS, lambda m: {"ids": [m]}))
+
+        async def columns(sql, params):
+            from sqlalchemy import text
+            async with env.sm() as db:
+                res = await db.execute(text(sql), params)
+                return list(res.keys()), [dict(r) for r in res.mappings().all()]
+
+        for tag, sql, params in reads:
+            keys, _rows = await columns(sql, params(uuid.uuid4()))
+            assert keys.count("exclusion_reasons") == 1, (tag, keys)
+
+        lob = await _s64_lobby(env)
+        res = _s64_res(lob)
+        box = {}
+
+        async def report():
+            box["r"] = await env.report(lob, 1, res, reporter=lob.sids[0])
+
+        seen, err = await _executed(env, report)
+        r = box.get("r")
+        inserts = [c for c in (_sql_code(s) for s in seen)
+                   if c.startswith("INSERT INTO ffa_match_players ")]
+        assert inserts, ("S2 insert", r, repr(err))
+        for c in inserts:
+            cols = [x.strip() for x in c[c.index("(") + 1:c.index(")")].split(",")]
+            assert cols.count("exclusion_reasons") == 1, ("S2 insert reasons", cols)
+            assert len(_re.findall(r"CAST\(\$\d+(?:::[A-Za-z ]+)? AS text\[\]\)", c)) == 1, \
+                ("S2 insert cast", c)
+        assert err is None and r is not None and r.status == 200, ("S2 report", r, repr(err))
+        rows = await _mp(env, lob, 1)
+        assert rows and all(row["exclusion_reasons"] is not None for row in rows.values()), \
+            ("S2 stored", rows)
+        mid = next(iter(rows.values()))["match_id"]
+        for tag, sql, params in reads:
+            _keys, got = await columns(sql, params(mid))
+            assert got and all(g["exclusion_reasons"] is not None for g in got), (tag + " rows", got)
+    run_env(monkeypatch, body)
 
 
 def test_fix2_s2_assembly_reason_recording_includes_ghosts():
@@ -6880,7 +7041,7 @@ def test_the_census_fresh_literal_is_the_constant():
     """The closers' record fragment cannot name the Python constant, so its
     four literal intervals must equal ASM_CENSUS_FRESH_S."""
     found = _re.findall(r"census_at >= NOW\(\) - interval '(\d+) seconds'",
-                        main._FFA_CLOSE_RECORD_SET)
+                        _sql_code(main._FFA_CLOSE_RECORD_SET))
     _write_facts({"found": found, "constant": main.ASM_CENSUS_FRESH_S})
     assert len(found) == 4 and all(int(x) == main.ASM_CENSUS_FRESH_S for x in found), \
         ("census literal", found)

@@ -1756,8 +1756,8 @@ row("S57", "test_s57_the_g3_server_gate", [
 _G3_ROUTE = '@app.post("/api/v1/admin/ffa-g3-seats", tags=["Admin"])\n'
 _G3_CLAUSE = '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"\n'
 _S58_ASSERTS = (
-    '    assert clause, "S58 clause"\n'
-    '    assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n')
+    '        assert clause, "S58 clause"\n'
+    '        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n')
 _G3_DEFINE = "    <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants>\n"
 _G3_GROUP = "  <PropertyGroup Condition=\"'$(Configuration)' == 'G3'\">\n"
 row("S58", "test_s58_the_g3_fence", [
@@ -1767,6 +1767,10 @@ row("S58", "test_s58_the_g3_fence", [
     M("clause_only_in_a_comment", "S58 clause",
       E(MAIN, _G3_CLAUSE, '        # "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"\n'),
       note="A7-R1 finding 2's class: the clause survives only as a comment beside the SQL"),
+    M("clause_in_an_sql_comment", "S58 clause",
+      E(MAIN, _G3_CLAUSE,
+        '        "  /* LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now() */"\n'),
+      note="A7-R2: the JOIN only inside an SQL comment of the executed string"),
     M("route_deleted", "S58 route", E(MAIN, _G3_ROUTE, "")),
     M("configuration_deleted", "S58 G3 configuration",
       E("plugin/CompetitiveRounds.csproj", _G3_DEFINE, ""),
@@ -1779,10 +1783,46 @@ row("S58", "test_s58_the_g3_fence", [
         "  <PropertyGroup Condition=\"'$(Configuration)' == 'G3x'\">\n")),
 ], T("assertions_reordered",
      E(TST, _S58_ASSERTS,
-       '    assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n'
-       '    assert clause, "S58 clause"\n'),
+       '        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n'
+       '        assert clause, "S58 clause"\n'),
      note="a structural test: the twin reorders its assertions (V11's twin)"),
     extra=("plugin",))
+
+# -- FIX2-S2: the stored exclusion set's sources, read through what executes
+# (A7-R2): the two vector reads executed, the INSERT recorded as a real report
+# sends it. The two mutants are the A7-R2 finding's reproductions.
+_PRIOR_PROJ = "           fmp.left_early, fmp.absent, fmp.exclusion_reasons\n"
+_TRIAGE_PROJ = "           fmp.kills, fmp.left_early, fmp.absent, fmp.exclusion_reasons\n"
+_FMP_INSERT = (
+    '        await db.execute(text("""\n'
+    '            INSERT INTO ffa_match_players (match_id, player_id, slot, rounds_won, points_total,\n'
+    '                kills, placement, left_early, rating_before, rating_after, rating_change,\n'
+    '                xp_gained, gold_gained, fps_avg, ping_avg, bullets_fired, bullets_hit,\n'
+    '                blocks_activated, blocks_successful, keys_pressed, active_seconds,\n'
+    '                fps_timeline, ping_timeline, hit_timeline, block_timeline,\n'
+    '                damage_dealt, damage_dealt_timeline, kill_timeline, absent, exclusion_reasons, end_stats,\n'
+    '                game_points_at_leave, left_early_involuntary)\n'
+    '            VALUES (:m, :p, :slot, :rw, :pt, :k, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,\n'
+    '                    :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt,\n'
+    '                    :dmg, :dmgtl, :killtl, :absent, CAST(:er AS text[]), :estats, :gpal, :lei)\n'
+    '        """), {"m": match_id,')
+_SUBMIT_DOC = '    """Record one FFA game and apply pairwise Glicko + XP/gold inline (an FFA\n'
+_FMP_INSERT_SQL = _FMP_INSERT[len('        await db.execute(text("""\n'):-len('        """), {"m": match_id,')]
+row("FIX2-S2", "test_fix2_s2_snapshot_sources_are_complete", [
+    M("projections_in_sql_comments", "S2 prior projection",
+      E(MAIN, _PRIOR_PROJ, "           fmp.left_early, fmp.absent -- , fmp.exclusion_reasons\n"),
+      E(MAIN, _TRIAGE_PROJ,
+        "           fmp.kills, fmp.left_early, fmp.absent -- , fmp.exclusion_reasons\n"),
+      note="A7-R2: both exclusion_reasons projections only in -- comments"),
+    M("insert_as_select_one_original_in_docstring", "S2 insert",
+      E(MAIN, _FMP_INSERT, '        await db.execute(text("SELECT 1"), {"m": match_id,'),
+      E(MAIN, _SUBMIT_DOC, '    """' + _FMP_INSERT_SQL + "\n" + _SUBMIT_DOC[len('    """'):]),
+      note="A7-R2: the executed INSERT is SELECT 1, the original survives in submit_ffa_match's docstring"),
+], T("comments_beside_the_real_statements",
+     E(MAIN, _PRIOR_PROJ, "           fmp.left_early, fmp.absent, /* the stored set */ fmp.exclusion_reasons\n"),
+     E(MAIN, _TRIAGE_PROJ,
+       "           fmp.kills, fmp.left_early, fmp.absent, fmp.exclusion_reasons -- the stored set\n"),
+     note="the positive control: comments beside the real projections leave every check green"))
 
 # -- S59 -------------------------------------------------------------------
 _B_LINE = '        elif some and t >= ASM_BASE_S and not spawning and not hold_adm:\n'
