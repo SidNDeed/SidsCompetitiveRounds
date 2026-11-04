@@ -781,9 +781,15 @@ def test_r10_plant_decision_admits_any_rf10_role_and_skips_a_seat_admin():
     a seat administrator (not a superuser, not rf10_*) is skipped with the
     stated reason; a superuser with no rf10_* R10_CAT_ROLE fails; no seat
     object, administrator or other role is ever returned."""
-    assert _plant_decision("rf10_w30b_gate", False, "") == "rf10_w30b_gate"
-    assert _plant_decision("rf10_cat_gate", False, "rf10_cat_pw_1") == "rf10_cat_gate"
-    assert _plant_decision("postgres", True, "rf10_w30b_pw_1") == "rf10_w30b_pw_1"
+    def admitted(me, superuser, named):
+        try:
+            return _plant_decision(me, superuser, named)
+        except pytest.skip.Exception as e:
+            pytest.fail("an admitted case was skipped as a seat administrator: %s" % e)
+
+    assert admitted("rf10_w30b_gate", False, "") == "rf10_w30b_gate"
+    assert admitted("rf10_cat_gate", False, "rf10_cat_pw_1") == "rf10_cat_gate"
+    assert admitted("postgres", True, "rf10_w30b_pw_1") == "rf10_w30b_pw_1"
     for seat_admin in ("scr_gate", "scr_seat_ro"):
         with pytest.raises(pytest.skip.Exception) as e:
             _plant_decision(seat_admin, False, "rf10_w30b_pw_1")
