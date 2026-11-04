@@ -31,6 +31,8 @@ import main  # noqa: E402
 import test_match_hold_pg as hold_test  # noqa: E402
 import closed_walk as _cw  # noqa: E402
 import ro_covered  # noqa: E402
+import builtins as _gate_builtins  # noqa: E402
+from fastapi import HTTPException as _gate_HTTPException  # noqa: E402
 import grammar_shapes_gate as _gg  # noqa: E402
 from grammar_shapes_gate import (  # noqa: E402
     ADMITTED, Refusal, check_body, check_site, node_key, path_to, prefix_span)
@@ -168,14 +170,24 @@ SHAPES_MET = collections.Counter()
 
 # Plain calls with no database effect, by callee spelling (text() builds the
 # statement an execute runs).
-_PLAIN_CALLS = frozenset({"bool", "int", "str", "list", "text", "HTTPException"})
+# Round 10 (ruling REHEARSAL-R9-A1 (D); finding closed_walk:859): each
+# spelling maps to its frozen provider, bound HERE by this file's own static
+# imports (`text` through ro_covered's import of it: this file's import forms
+# are frozen by the DSN census); closed_walk.Bindings.listed admits a call
+# only when the walked scope's binding of the spelling IS that provider.
+# grammar_providers.PROVIDERS names each one by (module, qualified name);
+# test_r10_gate_pure_providers_are_the_frozen_ones asserts they agree.
+_PLAIN_CALLS = {"bool": (_gate_builtins.bool,), "int": (_gate_builtins.int,),
+                "str": (_gate_builtins.str,), "list": (_gate_builtins.list,),
+                "text": (ro_covered.text,),
+                "HTTPException": (_gate_HTTPException,)}
 # Methods with no database effect, by attribute name (the result accessors of
 # an executed statement, a mapping read, and seat_of, the assembly context's
 # in-memory seat lookup).
 _PLAIN_METHODS = frozenset({"get", "seat_of", "mappings", "first", "scalar", "append",
                             "update", "log"})
 # Awaited library calls with no database effect.
-_PLAIN_AWAITS = frozenset()
+_PLAIN_AWAITS = {}
 # The spellings of the walked spans' session.
 _SESSIONS = ("db", "ctx.db")
 # The one exception a refusal raises.
@@ -2550,3 +2562,54 @@ def test_r8_readmit_work_dispatches_every_step(monkeypatch):
         got = asyncio.run(main._asm_readmit_work(Ctx(), "p", req))
         assert got == {"step": "_rdm_" + st}, (st, got)
         assert seen == [("_rdm_" + st, "p", ("seat", "p"), st)], (st, seen)
+
+
+# --- round 10 (ruling REHEARSAL-R9-A1 (D)): the gate walks' pure callees --
+# bound to their frozen providers (finding closed_walk:859, the gate route).
+
+
+def test_r10_gate_pure_callee_bound_to_its_provider(monkeypatch):
+    """Round 10 (D), the gate route of finding 10's fix: the gate walks'
+    shared visitor admits a listed call only when main's binding of the
+    spelling IS its frozen provider (_PLAIN_CALLS, bound by this file's
+    static imports). Each of `int(x)`, `text(x)` and `HTTPException(x)` is
+    admitted as written and refused once main binds the name to a writer
+    (the module binding the report names, `int = writer`, on the gate's
+    own table)."""
+    def writer(*a, **k):
+        return None
+    for src, name in (("int(x)", "int"), ("text(x)", "text"),
+                      ("HTTPException(x)", "HTTPException")):
+        node = ast.parse(src, mode="eval").body
+        w = _Walk(main, "r10 provider", stmts=[])
+        assert _effects(w, node) == [] and w.problems == [], (src, w.problems)
+        with monkeypatch.context() as m:
+            m.setattr(main, name, writer, raising=False)
+            w = _Walk(main, "r10 provider", stmts=[])
+            _effects(w, node)
+        want = f"a call of {name}, whose {name} is not its frozen provider"
+        assert any(want in p for p in w.problems), (src, w.problems)
+
+
+def test_r10_gate_pure_providers_are_the_frozen_ones():
+    """Round 10 (D): the gate's pure tables map exactly round 9's spellings
+    (grammar_providers.FAMILIES) to providers whose descriptions are the
+    frozen ones (grammar_providers.PROVIDERS), and the gate policy holds
+    them as closed_walk.Providers, the one table type the provider rule
+    reads."""
+    import grammar_providers as _gp
+    for fam, table in (("gate._PLAIN_CALLS", _PLAIN_CALLS),
+                       ("gate._PLAIN_AWAITS", _PLAIN_AWAITS)):
+        assert set(table) == set(_gp.FAMILIES[fam]), fam
+        for spelling, objs in table.items():
+            got = []
+            for o in objs:
+                if isinstance(o, types.ModuleType):
+                    got.append(("<module>", o.__name__))
+                    continue
+                got.append((getattr(o, "__module__", None),
+                            getattr(o, "__qualname__", None)))
+            assert tuple(got) == _gp.PROVIDERS[spelling], (fam, spelling, got)
+    p = _gate_policy(main)
+    assert isinstance(p.pure_calls, _cw.Providers) and p.pure_calls == _PLAIN_CALLS
+    assert isinstance(p.pure_awaits, _cw.Providers) and p.pure_awaits == {}

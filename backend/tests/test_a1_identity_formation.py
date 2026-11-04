@@ -604,6 +604,21 @@ import closed_walk as _cw  # noqa: E402
 import grammar_shapes_a1 as _gs  # noqa: E402
 import ro_covered as _ro  # noqa: E402
 import match_hold as _a1_match_hold  # noqa: E402
+# The frozen providers of the pure tables (round 10, ruling REHEARSAL-R9-A1
+# (D)), bound by these static imports.
+import builtins as _a1_builtins  # noqa: E402
+import datetime as _a1_datetime  # noqa: E402
+import json as _a1_json  # noqa: E402
+import random as _a1_random  # noqa: E402
+import time as _a1_time  # noqa: E402
+import uuid as _a1_uuid  # noqa: E402
+from fastapi import HTTPException as _a1_HTTPException  # noqa: E402
+import models as _a1_models  # noqa: E402
+import schemas as _a1_schemas  # noqa: E402
+# The planted sample helpers below (_sample_read and its siblings) call
+# `text`; round 9 left the name unbound in this module and the walk accepted
+# the spelling. It is SQLAlchemy's, through ro_covered's own import.
+from ro_covered import text  # noqa: E402
 import match_report_window as _a1_mrw  # noqa: E402
 import tournaments as _a1_tournaments  # noqa: E402
 
@@ -676,21 +691,52 @@ _A1_TABLE = _ro.lookup_table()
 _A1_READS = frozenset(p for p, k in _A1_TABLE.items() if k == "read")
 
 # Plain calls a step may make that touch no session: builtins and the clock,
-# id and log functions the spans use.
-_PURE_CALLS = frozenset({"GoldTransaction", "HTTPException",
-    "QueuePollResponse", "StakeRefundRefused", "TeamQueuePollResponse",
-    "ValueError", "_json.loads", "all", "any", "bool", "datetime.now", "dict",
-    "enumerate", "float", "int", "isinstance", "len", "list", "min", "next",
-    "print", "random.choice", "round", "set", "sorted", "str", "text",
-    "time.monotonic", "time.time", "type", "uuid.UUID", "uuid.uuid4",
-    "uuid_mod.uuid4"})
+# id and log functions the spans use. Round 10 (ruling REHEARSAL-R9-A1 (D);
+# finding closed_walk:859): each spelling maps to its frozen provider, one
+# object per component of the spelling, bound HERE by this file's own static
+# imports; closed_walk.Bindings.listed admits a call only when the walked
+# scope's binding of the spelling IS that provider, so a module binding
+# `int = writer` refuses every `int(...)` the walk meets.
+# grammar_providers.PROVIDERS names each provider by (module, qualified
+# name), and test_r10_pure_providers_are_the_frozen_ones asserts they agree.
+# `text` is SQLAlchemy's, read through ro_covered's own import of it (this
+# file's import forms are frozen by the DSN census); StakeRefundRefused is
+# main's own class, bound here by its static import and pinned by the test
+# to main's one top-level class statement of that name.
+_PURE_CALLS = {
+    "GoldTransaction": (_a1_models.GoldTransaction,),
+    "HTTPException": (_a1_HTTPException,),
+    "QueuePollResponse": (_a1_schemas.QueuePollResponse,),
+    "StakeRefundRefused": (main.StakeRefundRefused,),
+    "TeamQueuePollResponse": (_a1_schemas.TeamQueuePollResponse,),
+    "ValueError": (_a1_builtins.ValueError,),
+    "_json.loads": (_a1_json, _a1_json.loads),
+    "all": (_a1_builtins.all,), "any": (_a1_builtins.any,),
+    "bool": (_a1_builtins.bool,),
+    "datetime.now": (_a1_datetime.datetime, _a1_datetime.datetime.now),
+    "dict": (_a1_builtins.dict,), "enumerate": (_a1_builtins.enumerate,),
+    "float": (_a1_builtins.float,), "int": (_a1_builtins.int,),
+    "isinstance": (_a1_builtins.isinstance,), "len": (_a1_builtins.len,),
+    "list": (_a1_builtins.list,), "min": (_a1_builtins.min,),
+    "next": (_a1_builtins.next,), "print": (_a1_builtins.print,),
+    "random.choice": (_a1_random, _a1_random.choice),
+    "round": (_a1_builtins.round,), "set": (_a1_builtins.set,),
+    "sorted": (_a1_builtins.sorted,), "str": (_a1_builtins.str,),
+    "text": (_ro.text,),
+    "time.monotonic": (_a1_time, _a1_time.monotonic),
+    "time.time": (_a1_time, _a1_time.time),
+    "type": (_a1_builtins.type,),
+    "uuid.UUID": (_a1_uuid, _a1_uuid.UUID),
+    "uuid.uuid4": (_a1_uuid, _a1_uuid.uuid4),
+    "uuid_mod.uuid4": (_a1_uuid, _a1_uuid.uuid4)}
 # Methods a step may call on a local value (rows, lists, dicts, strings).
 _PURE_METHODS = frozenset({"add", "all", "append", "extend", "fetchall",
     "first", "get", "intersection", "items", "join", "lower", "lstrip",
     "mappings", "one", "replace", "scalar", "scalar_one", "scalars", "sort",
     "strip", "timestamp", "update", "values"})
-# Awaited library calls a helper may make that touch no session.
-_PURE_AWAITS = frozenset({"asyncio.sleep"})
+# Awaited library calls a helper may make that touch no session (round 10:
+# with their frozen providers, as _PURE_CALLS).
+_PURE_AWAITS = {"asyncio.sleep": (asyncio, asyncio.sleep)}
 
 
 def _policy(scope=None):
@@ -3164,7 +3210,7 @@ def _owner_index():
     def owner(ln):
         best = None
         for a, b, name in spans:
-            if a <= ln <= b and (best is None or a > best[0]):
+            if a <= ln and ln <= b and (best is None or a > best[0]):
                 best = (a, b, name)
         return (best[2], best[0], best[1]) if best else ("<module>", 1, 1)
     return owner
@@ -5304,3 +5350,327 @@ def test_r8_sr_every_walked_execute_is_classified_by_the_lookup(monkeypatch):
     assert all(v == 0 for v in left.values()), {k: v for k, v in left.items() if v}
     for n in _SR_RETIRED:
         assert not hasattr(_cw, n) and not hasattr(_cw.Bindings, n), n
+
+
+# --- round 10 (ruling REHEARSAL-R9-A1): identity, never presence ----------
+# Child gr's findings 8 (C, resolution_sites:202), 9 (C, resolution_sites:431)
+# and 10 (D, closed_walk:859). Each negative is the report's own case,
+# refused here; the side control (RF/r10/gr/neg_side.py) runs the same case
+# on the 0b317394 harness and records that it was admitted there.
+
+# The Visitor method each receiver negative adds: the report's own form.
+_R10_PROBE_METHOD = ("    def _r10_probe(self, n):\n"
+                     "        return self.b.named(n.id) == 'db'\n")
+_R10_POLICY_FOR_BINDINGS = (
+    "        self.b = (bindings if bindings is not None",
+    "        self.b = (policy if bindings is not None")
+
+
+def test_r10_n_resolution_sites_202_policy_selected_for_bindings():
+    """Finding 8 (resolution_sites:202), the report's case: selecting
+    `policy` instead of `bindings` in Visitor.__init__ and adding
+    `self.b.named(n.id) == 'db'` in a Visitor method. Round 9 admitted it:
+    the unused alternative's `Bindings(...)` call satisfied the presence
+    check and the method's comparison counted no site. Now the store is
+    refused by IDENTITY: its complete statement is not the frozen one
+    (resolution_sites.RECEIVER_STORES), and the parameter the chosen
+    alternative names reaches no frozen source (receiver_sources)."""
+    import pathlib
+    import resolution_sites as _rs
+    here = pathlib.Path(__file__).resolve().parent
+    base = {m: (here / f"{m}.py").read_text(encoding="utf-8") for m in (
+        "closed_walk", "test_a1_identity_formation",
+        "test_match_hold_admission_gate_pg")}
+    old, new = _R10_POLICY_FOR_BINDINGS
+    text = base["closed_walk"]
+    assert text.count(old) == 1
+    text = text.replace(old, new)
+    at = text.index("    def __init__(self, policy,")
+    text = text[:at] + _R10_PROBE_METHOD + "\n" + text[at:]
+    assert text.count(_R10_PROBE_METHOD) == 1
+    tree = _ast.parse(text)
+    got = [why for _ln, why in _rs.form_problems(tree)]
+    assert "Visitor.__init__'s store to `.b` is not its frozen statement" in got, got
+    trees = {m: _ast.parse(t) for m, t in dict(base, closed_walk=text).items()}
+    chain = _rs.receiver_source_problems(trees)
+    assert any("is no frozen source" in g for g in chain), chain
+    # the real files hold the frozen statement and chain
+    real = {m: _ast.parse(t) for m, t in base.items()}
+    assert all(_rs.form_problems(t) == [] for t in real.values())
+    assert _rs.receiver_source_problems(real) == []
+
+
+def test_r10_receiver_store_and_sources_are_frozen():
+    """Round 10 (C), the receiver bound by identity, one control per route:
+    the store's complete statement (pinned digests); each alternative's
+    source (a resolver construction only through the module's one class
+    statement, or `<X>.Bindings` through the one `import closed_walk as X`;
+    a second binding of either refuses although the statement is
+    unchanged); and the parameter's value chain across the three census
+    modules (a caller handing on another value, a new caller, the class
+    named other than as a callee), each refused, the real chain frozen."""
+    import hashlib
+    import pathlib
+    import resolution_sites as _rs
+    here = pathlib.Path(__file__).resolve().parent
+    base = {m: (here / f"{m}.py").read_text(encoding="utf-8") for m in (
+        "closed_walk", "test_a1_identity_formation",
+        "test_match_hold_admission_gate_pg")}
+    assert _rs.RECEIVER_STORES == {"Visitor": "deb50a21d5de8fad",
+                                   "_Walk": "36214a5241768ebf"}
+    rows = sorted(repr(x) for x in _rs.RECEIVER_SOURCES)
+    assert (len(rows), hashlib.sha256("\n".join(rows).encode("utf-8"))
+            .hexdigest()[:16]) == (10, "3cdfac8bc1d0f4ed"), rows
+    real = {m: _ast.parse(t) for m, t in base.items()}
+    assert _rs.receiver_source_problems(real) == []
+    # the alternative-source route: the statement unchanged, its provider
+    # binding doubled
+    for mod, prog, want in (
+            ("closed_walk", "\n\nBindings = dict\n",
+             "the receiver's value alternative `Bindings("),
+            ("test_match_hold_admission_gate_pg", "\n\n_cw = types\n",
+             "the receiver's value alternative `_cw.Bindings("),
+            # the sweep of the class: the receiver class itself, bound once
+            # by its class statement
+            ("closed_walk", "\n\nVisitor = dict\n",
+             "the receiver class Visitor is not bound once"),
+            ("test_match_hold_admission_gate_pg", "\n\n_Walk = dict\n",
+             "the receiver class _Walk is not bound once")):
+        got = [why for _ln, why in _rs.form_problems(_ast.parse(base[mod] + prog))]
+        assert any(g.startswith(want) for g in got), (mod, got)
+    # the store route: the complete statement changed while each of its
+    # alternatives is still a frozen source (only the pinned digest
+    # refuses it)
+    for mod, old, new, cls in (
+            ("closed_walk", "        self.b = (bindings if bindings is not None",
+             "        self.b = (bindings if bindings is None", "Visitor"),
+            ("test_match_hold_admission_gate_pg",
+             "                              else stmts, session=self.policy.session,",
+             "                              else stmts, session=None,", "_Walk")):
+        assert base[mod].count(old) == 1, (mod, old)
+        tree = _ast.parse(base[mod].replace(old, new))
+        got = [why for _ln, why in _rs.form_problems(tree)]
+        assert (f"{cls}.__init__'s store to `.b` is not its frozen statement"
+                in got), (mod, got)
+        trees = dict(real, **{mod: tree})
+        assert _rs.receiver_source_problems(trees) == [], (mod, new)
+    # the chain route
+    for mod, old, new, want in (
+            ("closed_walk", "bindings=bindings).accept(node).effects)",
+             "bindings=policy).accept(node).effects)", "is no frozen source"),
+            ("test_a1_identity_formation",
+             "            return expr_effects(node, scope, opaque, " "bindings=b)",
+             "            return expr_effects(node, scope, opaque, " "bindings=scope)",
+             None),
+            ("test_match_hold_admission_gate_pg",
+             "    v = _cw.Visitor(w.policy, permitted=ends, bindings=w.b)",
+             "    v = _cw.Visitor(w.policy, permitted=ends, bindings=w.policy)",
+             "is no frozen source"),
+            ("closed_walk", None,
+             "\n\ndef _r10_probe(p):\n    return Visitor(p, bindings=p)\n",
+             "an unfrozen source"),
+            ("closed_walk", None, "\n\n_R10V = Visitor\n",
+             "Visitor is named other than as a callee")):
+        if old is None:
+            text = base[mod] + new
+        else:
+            assert base[mod].count(old) == 1, (mod, old)
+            text = base[mod].replace(old, new)
+        trees = dict(real, **{mod: _ast.parse(text)})
+        got = _rs.receiver_source_problems(trees)
+        assert got and (want is None or any(want in g for g in got)), (
+            mod, new, got)
+
+
+# Finding 9's case, as the report states it: `name is not 'db' is not None`.
+_R10_CHAINED = ("def _r7_probe(n):\n    name = n.id\n"
+                "    if name is not 'db' is not None:\n        return 1\n"
+                "    return 0\n")
+
+
+def test_r10_n_resolution_sites_431_chained_is_not_none():
+    """Finding 9 (resolution_sites:431), the report's case: `name is not 'db'
+    is not None` with `name` bound from `n.id`. Round 9 admitted it: the
+    chain matched the admitted one-comparison shape (a Compare's lists are
+    sets of classes) and the None exemption suppressed the whole chain, so
+    the spelling decision counted nothing. Now it is refused both ways: the
+    chain is a form problem (comparison arity), and the census counts the
+    span's spelling decision (the exemption covers one comparison with a
+    single None comparator only)."""
+    import pathlib
+    import warnings
+    import resolution_sites as _rs
+    here = pathlib.Path(__file__).resolve().parent
+    base = {m: (here / f"{m}.py").read_text(encoding="utf-8") for m in (
+        "closed_walk", "test_a1_identity_formation",
+        "test_match_hold_admission_gate_pg")}
+    mutated = dict(base, closed_walk=base["closed_walk"] + "\n\n" + _R10_CHAINED)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        tree = _ast.parse(mutated["closed_walk"])
+        census = [s for s, _sites in _census_problems(mutated)]
+    assert census == ["closed_walk:_r7_probe"], census
+    form = [why for _ln, why in _rs.form_problems(tree)]
+    assert "a chained comparison of 2 operators" in form, form
+
+
+def test_r10_comparison_arity_and_none_exemption():
+    """Round 10 (C), one control per route of finding 9's fix. The arity
+    route: a chained comparison with no walked identifier in it is still a
+    form problem, and a two-operand one is not. The exemption route: a
+    single `<key> is None` / `is not None` is exempt; `None is <key>` (None
+    on the left) and `<key> is None is None` (two comparisons) are counted,
+    each read alone (no form route involved for the first)."""
+    import resolution_sites as _rs
+    import warnings
+    for prog, form in (
+            ("def _r7_probe(a, b, c):\n    return a < b < c\n", True),
+            ("def _r7_probe(a, b):\n    return a < b\n", False)):
+        got = [w for _l, w in _rs.form_problems(_ast.parse(prog), False)]
+        assert (("a chained comparison of 2 operators" in got) is form), (prog, got)
+    for cmp, counted in (("name is None", False), ("name is not None", False),
+                         ("None is name", True), ("name is None is None", True),
+                         ("name == None", True)):
+        prog = f"def f(n):\n    name = n.id\n    return {cmp}\n"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            fn = _ast.parse(prog).body[0]
+        got = [k for k, _ln in _rs.sites(fn)]
+        assert (got == ["spelling"]) is counted, (cmp, got)
+
+
+def test_r10_n_closed_walk_859_int_rebound_by_the_module(monkeypatch):
+    """Finding 10 (closed_walk:859), the report's case: a module binding
+    `int = writer` in main, where writer changes observable state before
+    returning builtins.int, under the unchanged `_ffa_gather_decide`.
+    Round 9 kept its purity claim (the frozen span admitted, no effect
+    reported): `int` was accepted by its spelling. Now the walk refuses:
+    the scope's binding of `int` is not its frozen provider
+    (closed_walk.Bindings.listed, the a1 table bound to builtins.int)."""
+    import builtins
+    marks = []
+
+    def writer(x=0, *rest):
+        marks.append(x)
+        return builtins.int(x, *rest)
+    fresh = _cw.Policy(main, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS, _A1_TABLE)
+    fresh.grammar = _A1_GRAMMAR
+    assert _cw.plain_effects(main._ffa_gather_decide, fresh) == frozenset()
+    monkeypatch.setattr(main, "int", writer, raising=False)
+    main._ffa_gather_decide(main.FFA_MIN_PLAYERS, 0.0, 0.0)
+    assert marks, "the planted writer changed no state"
+    again = _cw.Policy(main, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS, _A1_TABLE)
+    again.grammar = _A1_GRAMMAR
+    with pytest.raises(Unclassified) as e:
+        _cw.plain_effects(main._ffa_gather_decide, again)
+    assert "a call of int, whose int is not its frozen provider" in e.value.args[0][1], e.value.args
+
+
+def test_r10_provider_identity_routes(monkeypatch):
+    """Round 10 (D), one control per route of the provider rule, each
+    admitted unchanged and refused when its provider is replaced: a dotted
+    spelling's root (main's `_json` replaced), its attribute (`json.loads`
+    itself replaced), an awaited listed call (main's `asyncio` replaced),
+    the builtins route (main's `__builtins__` replaced by a mapping that
+    holds a writer), and a root the function binds by its frozen local
+    import (`import uuid as uuid_mod`; the same import of another module
+    refuses)."""
+    import builtins
+    import types
+
+    def writer(*a, **k):
+        return None
+
+    def effects(src, fn_src=None):
+        policy = _cw.Policy(main, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS,
+                            _A1_TABLE)
+        policy.grammar = _A1_GRAMMAR
+        d = _ast.parse(fn_src or "def f(x):\n    pass\n").body[0]
+        b = _cw.Bindings(main, d, grammar=_A1_GRAMMAR)
+        node = _ast.parse(src, mode="eval").body
+        try:
+            return _cw.expr_effects(node, policy, bindings=b)
+        except Unclassified as exc:
+            return exc.args[0][1]
+    ok = [("call", "pure")]
+    assert effects("_json.loads(x)") == ok
+    assert effects("int(x)") == ok
+    imp = "def f(x):\n    import uuid as uuid_mod\n    return uuid_mod.uuid4()\n"
+    assert effects("uuid_mod.uuid4()", imp) == ok
+    bad = "def f(x):\n    import json as uuid_mod\n    return uuid_mod.uuid4()\n"
+    assert effects("uuid_mod.uuid4()", bad) == (
+        "a call of uuid_mod.uuid4, whose uuid_mod is not its frozen provider")
+    with monkeypatch.context() as m:
+        m.setattr(main, "_json", types.SimpleNamespace(loads=_a1_json.loads))
+        assert effects("_json.loads(x)") == (
+            "a call of _json.loads, whose _json is not its frozen provider")
+    with monkeypatch.context() as m:
+        m.setattr(_a1_json, "loads", writer)
+        assert effects("_json.loads(x)") == (
+            "a call of _json.loads, whose loads is not its frozen provider")
+    with monkeypatch.context() as m:
+        m.setattr(main, "__builtins__", {"int": writer}, raising=False)
+        assert effects("int(x)") == (
+            "a call of int, whose int is not its frozen provider")
+    with monkeypatch.context() as m:
+        m.setattr(main, "__builtins__", builtins)
+        assert effects("int(x)") == ok
+    policy = _cw.Policy(main, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS, _A1_TABLE)
+    policy.grammar = _A1_GRAMMAR
+    d = _ast.parse("async def f(x):\n    await asyncio.sleep(0)\n").body[0]
+    node = d.body[0].value
+    b = _cw.Bindings(main, d, grammar=_A1_GRAMMAR)
+    assert _cw.expr_effects(node, policy, bindings=b) == ok
+    with monkeypatch.context() as m:
+        m.setattr(main, "asyncio", types.SimpleNamespace(sleep=asyncio.sleep))
+        with pytest.raises(Unclassified) as e:
+            _cw.expr_effects(node, policy, bindings=b)
+        assert "whose asyncio is not its frozen provider" in e.value.args[0][1]
+
+
+def test_r10_pure_providers_are_the_frozen_ones():
+    """Round 10 (D): every pure table the a1 walks and closed_walk's plain
+    bodies read maps exactly round 9's spellings (grammar_providers
+    .FAMILIES) to providers whose descriptions are the frozen ones
+    (grammar_providers.PROVIDERS: per component, a module's name, else the
+    object's module and qualified name), so a provider rebound before the
+    tables were built fails here; the policies the walks build hold these
+    tables; StakeRefundRefused, main's own class, is bound by main's one
+    top-level statement of that name, its class statement."""
+    import types
+    import grammar_providers as _gp
+    tables = {"closed_walk.PLAIN_BODY_CALLS": _cw.PLAIN_BODY_CALLS,
+              "a1._PURE_CALLS": _PURE_CALLS, "a1._PURE_AWAITS": _PURE_AWAITS}
+    for fam, table in tables.items():
+        assert set(table) == set(_gp.FAMILIES[fam]), fam
+        for spelling, objs in table.items():
+            got = []
+            for o in objs:
+                if isinstance(o, types.ModuleType):
+                    got.append(("<module>", o.__name__))
+                    continue
+                mod = getattr(o, "__module__", None) or getattr(
+                    getattr(o, "__self__", None), "__module__", None)
+                got.append((mod, getattr(o, "__qualname__", None)))
+            assert tuple(got) == _gp.PROVIDERS[spelling], (fam, spelling, got)
+    p = _policy()
+    assert p.pure_calls == _PURE_CALLS and p.pure_awaits == _PURE_AWAITS
+    sub = _cw.Policy(main, {}, (), {}, {})
+    assert sub.pure_calls == {} and sub.pure_awaits == {}
+    st = _cw._one_top_binding(_main_tree(), "StakeRefundRefused")
+    assert isinstance(st, _ast.ClassDef) and st.name == "StakeRefundRefused"
+
+
+def test_r10_sweep_sites_are_counted():
+    """Round 10 (E), child gr's sweep of the class: every hit of the three
+    operations (a receiver trusted by a test, a comparison-shape admission
+    or constant-keyed exemption, a callee accepted by name) over the files
+    the child owns is listed with its disposition in the round-10 notes;
+    the counts per (operation, file) are frozen in grammar_sweep_r10.COUNTS,
+    so a new site fails here until it is listed and judged."""
+    import pathlib
+    import grammar_sweep_r10 as _gsw
+    here = pathlib.Path(__file__).resolve().parent
+    _hits, counts = _gsw.sweep(str(here))
+    assert counts == _gsw.COUNTS, sorted(
+        set(counts.items()) ^ set(_gsw.COUNTS.items()))
