@@ -12,12 +12,13 @@ owner, runs every control as the role, and drops the clone. A second clone,
 of template1, carries the same fixture for the admin's validity controls
 (the large-object writers are not executable by PUBLIC in the role's
 template, so a non-superuser admin could not show them to be writes there).
-It never skips: an unset DSN or a refused CREATE DATABASE fails the module.
+Its fixture never skips: an unset DSN or a refused CREATE DATABASE fails the module.
 Every role connection asserts SELECT current_user, session_user equals the
 role before its body runs. The round-10 controls of catalog_all.py:99
-and :138 plant a setting and a password only on an rf10_cat_* role the
-run created (the stand-in measurer, or R10_CAT_ROLE under a superuser),
-inside the rolled-back harness transaction, undone again in finally.
+and :138 plant a setting and a password only on an rf10_* role a run
+created (the stand-in measurer, or R10_CAT_ROLE under a superuser),
+inside the rolled-back harness transaction, undone again in finally; under
+a seat administrator (neither) they skip with a stated reason (55432 only).
 
 Every harness position is bound to its transaction at both ends
 (catalog_position: a token, a transaction-level advisory lock and the
@@ -144,7 +145,7 @@ async def _fixture(dsn, name):
 def env():
     if not ADMIN_DSN:
         pytest.fail("CF_TEST_PG_DSN is unset: name an admin DSN (a superuser, or a "
-                    "LOGIN CREATEDB role) on the local cluster; this module never skips")
+                    "LOGIN CREATEDB role) on the local cluster; this fixture never skips")
     missing = run(ro_role.read_cluster(ADMIN_DSN))
     if missing:
         pytest.fail("the cluster is not provisioned for the read-only bound: "
@@ -174,7 +175,7 @@ def plain():
     """A clone of template1 carrying the same fixture, as the admin owns it:
     where the admin's validity controls run (every privilege present)."""
     if not ADMIN_DSN:
-        pytest.fail("CF_TEST_PG_DSN is unset; this module never skips")
+        pytest.fail("CF_TEST_PG_DSN is unset; this fixture never skips")
     name = "rf8_ro_plain_" + _stamp()
     made = []
 
@@ -732,12 +733,65 @@ def test_r10_prepare_transaction_outcome_on_this_cluster(env):
 
 # Round 10, reports catalog_all.py:99 (the measured role's settings in another
 # database) and catalog_all.py:138 (a stored password). These plant only on an
-# rf10_cat_* role this run created: the stand-in measurer itself
-# (rf10_cat_gate), or, under a superuser, the role R10_CAT_ROLE names. Every
+# rf10_* role a run created: the stand-in measurer itself (rf10_cat_gate,
+# rf10_w30b_gate), or, under a superuser, the role R10_CAT_ROLE names. Every
 # plant runs inside the harness transaction, which is rolled back, and is
 # undone again in a finally block (RESET, PASSWORD NULL).
 
 PLANT_VALUE = "rf10_cat_fixed_value"
+# Round-10 plants run only on a role whose name starts with PLANT_PREFIX: a
+# role created for a run, by any lane (rf10_cat_*, rf10_w30b_*). The seat
+# objects and the administrators are never one; NEVER_PLANTED names them
+# again so a refusal states them. A measurer that is neither a superuser nor
+# an rf10_* stand-in (a seat's scr_gate: CREATEDB, not a superuser, not
+# CREATEROLE) could plant only on its own role, so these cases SKIP there
+# with SEAT_SKIP and run on 55432 only.
+PLANT_PREFIX = "rf10_"
+NEVER_PLANTED = ("postgres", "scr_gate", "scr_seat_ro", "scr_seat_ro_tmpl", "scr_seat_d2_tmpl")
+SEAT_SKIP = ("round-10 plant: the measurer %s is neither a superuser nor an rf10_* stand-in, so the only role "
+             "it could plant on is its own (a seat administrator's); this case runs on 55432 only, as an "
+             "rf10_* stand-in or as a superuser with R10_CAT_ROLE naming an rf10_* role")
+
+
+def _plant_decision(me, superuser, named):
+    """The role a round-10 case plants on: an rf10_* measurer (a stand-in)
+    plants on itself; a superuser plants only on the rf10_* role
+    R10_CAT_ROLE names, and fails when it names none; any other measurer is
+    skipped with SEAT_SKIP, never failed and never planted on."""
+    if me.startswith(PLANT_PREFIX) and me not in NEVER_PLANTED:
+        return me
+    if not superuser:
+        pytest.skip(SEAT_SKIP % me)
+    if not named.startswith(PLANT_PREFIX) or named in NEVER_PLANTED:
+        pytest.fail("round-10 plants run only on an rf10_* role created for the run: the measurer %s is a "
+                    "superuser and R10_CAT_ROLE=%r does not name one" % (me, named))
+    return named
+
+
+def _other_role(me):
+    """Under a stand-in, the rf10_* role R10_CAT_ROLE names, other than the
+    stand-in (the target of the 42501 case)."""
+    other = os.environ.get("R10_CAT_ROLE") or ""
+    assert other.startswith(PLANT_PREFIX) and other not in NEVER_PLANTED and other != me, (
+        "R10_CAT_ROLE must name an rf10_* role other than the stand-in: %r" % other)
+    return other
+
+
+def test_r10_plant_decision_admits_any_rf10_role_and_skips_a_seat_admin():
+    """W30b's form: any lane's rf10_* stand-in or planted role is admitted;
+    a seat administrator (not a superuser, not rf10_*) is skipped with the
+    stated reason; a superuser with no rf10_* R10_CAT_ROLE fails; no seat
+    object, administrator or other role is ever returned."""
+    assert _plant_decision("rf10_w30b_gate", False, "") == "rf10_w30b_gate"
+    assert _plant_decision("rf10_cat_gate", False, "rf10_cat_pw_1") == "rf10_cat_gate"
+    assert _plant_decision("postgres", True, "rf10_w30b_pw_1") == "rf10_w30b_pw_1"
+    for seat_admin in ("scr_gate", "scr_seat_ro"):
+        with pytest.raises(pytest.skip.Exception) as e:
+            _plant_decision(seat_admin, False, "rf10_w30b_pw_1")
+        assert "55432 only" in str(e.value) and seat_admin in str(e.value), e.value
+    for named in ("", "scr_seat_ro", "postgres", "scr_gate", "scr_seat_d2_tmpl", "rf9_x", "RF10_x", "xrf10_"):
+        with pytest.raises(pytest.fail.Exception):
+            _plant_decision("postgres", True, named)
 
 
 async def _who(dsn):
@@ -750,16 +804,10 @@ async def _who(dsn):
 
 
 def _plant_role(dsn):
-    """(measurer, planted role, superuser): the stand-in measures itself;
-    a superuser measures R10_CAT_ROLE, an rf10_cat_* role the run created."""
+    """(measurer, planted role, superuser), by _plant_decision."""
     w = run(_who(dsn))
-    if w["me"].startswith("rf10_cat_"):
-        return w["me"], w["me"], bool(w["su"])
-    role = os.environ.get("R10_CAT_ROLE") or ""
-    if not (w["su"] and role.startswith("rf10_cat_")):
-        pytest.fail("round-10 plants run only on an rf10_cat_* role: the measurer %s is not one, and "
-                    "R10_CAT_ROLE=%r does not name one under a superuser" % (w["me"], role))
-    return w["me"], role, True
+    role = _plant_decision(w["me"], bool(w["su"]), os.environ.get("R10_CAT_ROLE") or "")
+    return w["me"], role, bool(w["su"])
 
 
 def _ident(role):
@@ -842,12 +890,12 @@ def test_r10_n_ro_role_catalog_all_138_other_role(env):
     this case is the digest route above."""
     dsn = env["admin_ro_db_dsn"]
     w = run(_who(dsn))
-    other = os.environ.get("R10_CAT_ROLE") or ""
     if w["su"]:
         print("r10 catalog_all.py:138 other role: measurer %s is a superuser; the digest route covers it" % w["me"])
         return
-    assert other.startswith("rf10_cat_") and other != w["me"], (
-        "R10_CAT_ROLE must name an rf10_cat_* role other than the stand-in: %r" % other)
+    if not w["me"].startswith(PLANT_PREFIX):
+        pytest.skip(SEAT_SKIP % w["me"])
+    other = _other_role(w["me"])
     got = run(raw_attempt(dsn, GRANT_ONLY, _sql("ALTER ROLE %s PASSWORD '%s'" % (_ident(other), PLANT_VALUE)),
                           w["me"]))
     print("r10 catalog_all.py:138 other role %s under %s: %s" % (other, w["me"], got))

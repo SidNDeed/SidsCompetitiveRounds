@@ -2155,20 +2155,65 @@ def test_r10_ro_role_257_catalog_harness_negative_control(r10_clone, harness):
 
 
 PLANT_VALUE = "rf10_cat_fixed_value"
+# Round-10 plants run only on a role whose name starts with PLANT_PREFIX: a
+# role created for a run, by any lane (rf10_cat_*, rf10_w30b_*). The seat
+# objects and the administrators are never one; NEVER_PLANTED names them
+# again so a refusal states them. A measurer that is neither a superuser nor
+# an rf10_* stand-in (a seat's scr_gate: CREATEDB, not a superuser, not
+# CREATEROLE) could plant only on its own role, so these cases SKIP there
+# with SEAT_SKIP and run on 55432 only.
+PLANT_PREFIX = "rf10_"
+NEVER_PLANTED = ("postgres", "scr_gate", "scr_seat_ro", "scr_seat_ro_tmpl", "scr_seat_d2_tmpl")
+SEAT_SKIP = ("round-10 plant: the measurer %s is neither a superuser nor an rf10_* stand-in, so the only role "
+             "it could plant on is its own (a seat administrator's); this case runs on 55432 only, as an "
+             "rf10_* stand-in or as a superuser with R10_CAT_ROLE naming an rf10_* role")
+
+
+def _plant_decision(me, superuser, named):
+    """The role a round-10 case plants on: an rf10_* measurer (a stand-in)
+    plants on itself; a superuser plants only on the rf10_* role
+    R10_CAT_ROLE names, and fails when it names none; any other measurer is
+    skipped with SEAT_SKIP, never failed and never planted on."""
+    if me.startswith(PLANT_PREFIX) and me not in NEVER_PLANTED:
+        return me
+    if not superuser:
+        pytest.skip(SEAT_SKIP % me)
+    if not named.startswith(PLANT_PREFIX) or named in NEVER_PLANTED:
+        pytest.fail("round-10 plants run only on an rf10_* role created for the run: the measurer %s is a "
+                    "superuser and R10_CAT_ROLE=%r does not name one" % (me, named))
+    return named
+
+
+def _other_role(me):
+    """Under a stand-in, the rf10_* role R10_CAT_ROLE names, other than the
+    stand-in (the target of the 42501 case)."""
+    other = os.environ.get("R10_CAT_ROLE") or ""
+    assert other.startswith(PLANT_PREFIX) and other not in NEVER_PLANTED and other != me, (
+        "R10_CAT_ROLE must name an rf10_* role other than the stand-in: %r" % other)
+    return other
+
+
+def test_r10_plant_decision_admits_any_rf10_role_and_skips_a_seat_admin():
+    """W30b's form: any lane's rf10_* stand-in or planted role is admitted;
+    a seat administrator (not a superuser, not rf10_*) is skipped with the
+    stated reason; a superuser with no rf10_* R10_CAT_ROLE fails; no seat
+    object, administrator or other role is ever returned."""
+    assert _plant_decision("rf10_w30b_gate", False, "") == "rf10_w30b_gate"
+    assert _plant_decision("rf10_cat_gate", False, "rf10_cat_pw_1") == "rf10_cat_gate"
+    assert _plant_decision("postgres", True, "rf10_w30b_pw_1") == "rf10_w30b_pw_1"
+    for seat_admin in ("scr_gate", "scr_seat_ro"):
+        with pytest.raises(pytest.skip.Exception) as e:
+            _plant_decision(seat_admin, False, "rf10_w30b_pw_1")
+        assert "55432 only" in str(e.value) and seat_admin in str(e.value), e.value
+    for named in ("", "scr_seat_ro", "postgres", "scr_gate", "scr_seat_d2_tmpl", "rf9_x", "RF10_x", "xrf10_"):
+        with pytest.raises(pytest.fail.Exception):
+            _plant_decision("postgres", True, named)
 
 
 def _r10_plant_role(chain):
-    """(measurer, planted role): a stand-in rf10_cat_* measurer plants on
-    itself; a superuser plants only on the rf10_cat_* role R10_CAT_ROLE names
-    (created for the run). Never scr_seat_ro, postgres or any other role."""
+    """(measurer, planted role), by _plant_decision."""
     me = chain.who["admin_user"]
-    if me.startswith("rf10_cat_"):
-        return me, me
-    role = os.environ.get("R10_CAT_ROLE") or ""
-    if not (chain.who["superuser"] and role.startswith("rf10_cat_")):
-        pytest.fail("round-10 plants run only on an rf10_cat_* role: the measurer %s is not one, and "
-                    "R10_CAT_ROLE=%r does not name one under a superuser" % (me, role))
-    return me, role
+    return me, _plant_decision(me, chain.who["superuser"], os.environ.get("R10_CAT_ROLE") or "")
 
 
 async def _r10_settings(role):
@@ -2258,9 +2303,7 @@ def test_r10_n_catalog_all_138_stored_password(chain):
     else:
         assert rows == [] and result["outside"] == [] and result["xid"], (rows, result["outside"])
         assert ("pg_authid", "rolpassword") in [(u[0], u[1]) for u in routes["unmeasured"]], routes
-        other = os.environ.get("R10_CAT_ROLE") or ""
-        assert other.startswith("rf10_cat_") and other != me, (
-            "R10_CAT_ROLE must name an rf10_cat_* role other than the stand-in: %r" % other)
+        other = _other_role(me)
         refused = asyncio.run(_measure(chain.dsn, "ALTER ROLE \"%s\" PASSWORD '%s';" % (other, PLANT_VALUE)))
         assert refused["refused"] == "42501", refused
 
