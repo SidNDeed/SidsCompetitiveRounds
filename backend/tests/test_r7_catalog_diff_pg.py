@@ -80,6 +80,7 @@ sys.path.insert(0, HERE)
 
 import catalog_all as ca  # noqa: E402
 import catalog_diff as cd  # noqa: E402
+import catalog_position  # noqa: E402
 import d2_seed  # noqa: E402
 import models  # noqa: E402
 from migration_table_ddl import table_ddl  # noqa: E402
@@ -1318,15 +1319,23 @@ def test_m11_alter_behind_the_former_refusal_is_measured(chain):
 
 
 async def _in_schema(dsn, schema, sql):
-    """sql run in a fresh schema inside a transaction that is rolled back;
-    returns the catalog after it."""
+    """sql run in a fresh schema inside a REPEATABLE READ transaction that is
+    rolled back; returns the catalog after it. The position is bound to its
+    transaction at both ends (catalog_position, round 10): a program that
+    ends it raises 'AssertionError: _in_schema: ENDED:...', on the success
+    path and the error path alike. The connection is closed after it."""
     conn = await _connect(dsn)
-    tr = conn.transaction()
+    tr = conn.transaction(isolation="repeatable_read")
     await tr.start()
     try:
+        pos = await catalog_position.start(conn)
         await conn.execute("CREATE SCHEMA %s; SET LOCAL search_path = %s, public" % (schema, schema))
-        await conn.execute(sql)
-        _harness_open(conn, "_in_schema")
+        try:
+            await conn.execute(sql)
+        except asyncpg.PostgresError as exc:
+            await _position_kept(conn, pos, dsn, "_in_schema", exc)
+            raise
+        await _position_kept(conn, pos, dsn, "_in_schema")
         await conn.execute("SET LOCAL search_path = public")
         return await cd.snapshot(conn)
     finally:
@@ -1512,14 +1521,23 @@ REFUSED_SQLSTATE = {
 }
 
 
-def _harness_open(conn, where):
-    """A rollback harness's transaction must still be open after the program
-    it ran. A program that ends it (COMMIT, ROLLBACK, END) has committed or
-    discarded outside the harness, and the harness's rollback undoes nothing
-    it committed: refused, by the harness's name (round 9)."""
-    if not conn.is_in_transaction():
-        raise AssertionError("%s: the program ended the harness transaction; "
-                             "nothing it committed is rolled back" % where)
+def _ended(seen):
+    """'ENDED:<what changed>' for a position whose transaction the program
+    ended (catalog_position.check), else None."""
+    return catalog_position.ended_effect(seen["ended"]) if seen["ended"] else None
+
+
+async def _position_kept(conn, pos, monitor_dsn, where, exc=None):
+    """The rollback harness's position must still be in the transaction that
+    opened it (round 10, report test_r7_ro_role_pg.py:257: round 9 checked
+    only that SOME transaction was open, conn.is_in_transaction(), so
+    COMMIT; BEGIN passed). A program that ended it has committed or
+    discarded outside the harness: reported by the harness's name, an
+    effect, never a read."""
+    seen = await catalog_position.check(conn, pos, monitor_dsn)
+    if seen["ended"]:
+        raise AssertionError("%s: %s" % (where, _ended(seen))) from exc
+    return seen
 
 
 _MEASURE_CLONES = [0]
@@ -1546,27 +1564,47 @@ async def _measure(dsn, program, schema=None):
 
 
 async def _measure_in(dsn, program, schema):
+    """program in one REPEATABLE READ transaction, rolled back. The position
+    is bound to its transaction at both ends (catalog_position, round 10):
+    'ended' is 'ENDED:...' when the program ended it (an effect, reported on
+    the success and the error path; the diff is still returned, read after
+    the program in whatever transaction it left), else None. When the
+    position kept its transaction, 'outside' lists the shared catalogs whose
+    rows outside catalog_all.RESTRICT differ (catalog_all.outside, one
+    snapshot at both ends); when it ended, they are not comparable and
+    'outside' is None. 'xid' is the transaction's xid when one was assigned.
+    The connection is closed after it."""
     conn = await _connect(dsn)
     logs = []
     conn.add_log_listener(lambda _c, msg: logs.append(msg.message))
-    tr = conn.transaction()
+    tr = conn.transaction(isolation="repeatable_read")
     await tr.start()
     try:
+        pos = await catalog_position.start(conn)
         if schema:
             await conn.execute("CREATE SCHEMA %s" % schema)
         before = await cd.snapshot(conn)
+        shared = await ca.outside(conn)
         if schema:
             await conn.execute("SET LOCAL search_path = %s, public" % schema)
         try:
             await conn.execute(program)
         except asyncpg.PostgresError as exc:
+            seen = await catalog_position.check(conn, pos, dsn)
             return {"refused": exc.sqlstate, "error": str(exc).splitlines()[0][:200],
-                    "commands": cd.commands("\n".join(logs))}
-        await conn.execute("SET LOCAL search_path = public")
+                    "commands": cd.commands("\n".join(logs)), "ended": _ended(seen), "xid": seen["xid"],
+                    "outside": None}
+        seen = await catalog_position.check(conn, pos, dsn)
+        ended = _ended(seen)
+        await conn.execute("SELECT pg_catalog.set_config('search_path', 'public', false)")
         after = await cd.snapshot(conn)
-        return {"refused": None, "diff": cd.diff(before, after), "after": after,
-                "commands": cd.commands("\n".join(logs)),
-                "internal_not_enabled": await _internal_not_enabled(conn=conn)}
+        out = {"refused": None, "diff": cd.diff(before, after), "after": after,
+               "commands": cd.commands("\n".join(logs)),
+               "internal_not_enabled": await _internal_not_enabled(conn=conn),
+               "ended": ended, "xid": seen["xid"], "outside": None}
+        if not ended:
+            out["outside"] = sorted(ca.keys(cd.diff(shared, await ca.outside(conn))))
+        return out
     finally:
         await tr.rollback()
         await conn.close()
@@ -1583,6 +1621,8 @@ def _record_control(chain, name, finding, result, outcome):
 
 
 def _guard_outcome(result):
+    if result.get("ended"):
+        return "ended"
     if result["refused"]:
         return "refused"
     return "caught" if cd.changers([("control", result["diff"])], MAIL) else "clean"
@@ -1611,12 +1651,17 @@ LANGUAGE_CONTROLS = [
 
 
 async def _language(dsn, extension, program):
+    """The extension and the program, each in its own savepoint, inside one
+    REPEATABLE READ transaction rolled back after. The position is bound to
+    its transaction (catalog_position, round 10): res['ended'] is
+    'ENDED:...' when the program ended it, else None."""
     conn = await _connect(dsn)
-    tr = conn.transaction()
+    tr = conn.transaction(isolation="repeatable_read")
     await tr.start()
     try:
+        pos = await catalog_position.start(conn)
         before = await cd.snapshot(conn)
-        res = {"extension": None, "refused": None}
+        res = {"extension": None, "refused": None, "ended": None}
         try:
             async with conn.transaction():
                 await conn.execute("CREATE EXTENSION IF NOT EXISTS %s" % extension)
@@ -1629,7 +1674,7 @@ async def _language(dsn, extension, program):
         except asyncpg.PostgresError as exc:
             res["refused"] = exc.sqlstate
             res["error"] = (res.get("error") or "") + " | " + str(exc).splitlines()[0][:200]
-        _harness_open(conn, "_language")
+        res["ended"] = _ended(await catalog_position.check(conn, pos, dsn))
         res["diff"] = cd.diff(before, await cd.snapshot(conn))
         return res
     finally:
@@ -1646,6 +1691,7 @@ def test_language_control(chain, name, finding, extension, program):
     no third outcome. No language is lexed: the walker's language lexing is
     deleted."""
     res = asyncio.run(_language(chain.dsn, extension, program))
+    assert res["ended"] is None, res
     if res["extension"] is None:
         outcome = "caught" if cd.rows_on(res["diff"], MAIL) else "clean"
         _record_control(chain, name, finding, res, outcome)
@@ -1854,6 +1900,9 @@ def test_e1_control(chain, name, finding, stmt, su_only):
     plants_role = stmt.startswith("ALTER ROLE")
     if plants_role:
         cfg_before = asyncio.run(_own_setconfig())
+        # round 10 (report catalog_all.py:99, swept by class): the role's
+        # settings in every database, not only the database-independent ones
+        every_before = asyncio.run(_r10_settings(chain.who["admin_user"]))
         assert not [s for s in cfg_before or [] if s.startswith("work_mem=")], (
             "%s already carries work_mem in its setconfig %s: the control does not plant over it"
             % (chain.who["admin_user"], cfg_before))
@@ -1863,9 +1912,14 @@ def test_e1_control(chain, name, finding, stmt, su_only):
         if plants_role:
             asyncio.run(_admin("ALTER ROLE CURRENT_USER RESET work_mem"))
             cfg_after = asyncio.run(_own_setconfig())
+            every_after = asyncio.run(_r10_settings(chain.who["admin_user"]))
     if plants_role:
         assert cfg_after == cfg_before, (cfg_before, cfg_after)
+        assert every_after == every_before, (every_before, every_after)
     label = M373 + " (" + name + ")"
+    # 373 carries its own COMMIT: the measuring position is reported ENDED
+    # (round 10), and the diff, read after the program, is still measured
+    assert result["ended"] and result["ended"].startswith("ENDED:"), (name, result["ended"])
     if result["refused"]:
         _record_control(chain, name, finding, result, "refused")
         assert su_only and not superuser and result["refused"] == "42501", (name, result)
@@ -1924,7 +1978,8 @@ def test_every_pg_catalog_relation_is_measured_or_declared(route_db):
             "not_measured": [r for r in rels if r not in p["relations"]],
             "substituted": {r: e["source"] for r, e in p["relations"].items() if e["source"] != r},
             "excluded": [list(e) for e in ca.EXCLUDED], "unreadable": [list(e) for e in ca.UNREADABLE],
-            "restrict": {k: list(v) for k, v in ca.RESTRICT.items()}}, indent=1))
+            "restrict": {k: list(v) for k, v in ca.RESTRICT.items()},
+            "routes": asyncio.run(_r10_routes())}, indent=1, default=list))
     assert p["problems"] == [], p["problems"]
     assert p["count"] == ca.FROZEN_COUNT[s["major"]] == len(rels)
     whole = {e[0] for e in ca.EXCLUDED if e[1] is None}
@@ -1985,6 +2040,9 @@ def test_r9_measure_leaves_the_measured_database_unchanged(chain):
     result = asyncio.run(_measure(chain.dsn, "COMMIT;\nCREATE TABLE public.%s (x int);\n" % R9_PROBE))
     try:
         assert result["refused"] is None, result
+        # round 10: the program ended the measuring transaction, reported as
+        # an effect; its diff is still returned
+        assert result["ended"] and result["ended"].startswith("ENDED:"), result["ended"]
         assert R9_PROBE in repr(result["diff"]), "the probe program did not run"
         assert asyncio.run(_r9_probe_in(chain.dsn)) is None, (
             "the program's committed table reached the measured database")
@@ -1995,21 +2053,314 @@ def test_r9_measure_leaves_the_measured_database_unchanged(chain):
         asyncio.run(_r9_drop_probe(chain.dsn))
 
 
-def test_r9_rollback_harnesses_refuse_a_program_that_ends_them(chain):
-    """_in_schema and _language (round 9, the class of _measure's defect):
-    each refuses, by name, a program that ends its transaction. Run on a
-    clone of the chain database dropped after, so what the ended
-    transaction committed lands there and not in the chain."""
+def test_r9_rollback_harnesses_report_a_program_that_ends_them(chain):
+    """_in_schema and _language (round 9's refusal, restated in round 10):
+    each reports, by name, a program that ends its transaction, as
+    'ENDED:...'. Run on a clone of the chain database dropped after, so what
+    the ended transaction committed lands there and not in the chain."""
     clone = "%s_h" % chain.db[:52]
     asyncio.run(_clone(clone, chain.db))
     try:
         dsn = _dsn(clone)
-        with pytest.raises(AssertionError, match="^_in_schema: the program ended the harness transaction"):
+        with pytest.raises(AssertionError, match="^_in_schema: ENDED:"):
             asyncio.run(_in_schema(dsn, "d2_r9h", "COMMIT"))
-        with pytest.raises(AssertionError, match="^_language: the program ended the harness transaction"):
-            asyncio.run(_language(dsn, "plpgsql", "COMMIT"))
+        res = asyncio.run(_language(dsn, "plpgsql", "COMMIT"))
+        assert res["ended"] and res["ended"].startswith("ENDED:"), res
     finally:
         asyncio.run(_drop_db(clone))
+
+
+# --- round 10 (ruling REHEARSAL-R9-A1): identity and continuity -------------
+#
+# Report test_r7_ro_role_pg.py:257, carried to this file's harness family:
+# each program below ends the harness transaction; every harness reports it,
+# on the success path and on the error path. The harnesses run on a clone of
+# the chain database, dropped after.
+
+R10_ENDING = [
+    ("commit_begin", "SET application_name = 'r9_probe'; COMMIT; BEGIN; RESET application_name"),
+    ("commit_and_chain", "COMMIT AND CHAIN"),
+    ("rollback_and_chain", "ROLLBACK AND CHAIN"),
+    ("rollback", "ROLLBACK"),
+    ("end_begin", "END; BEGIN"),
+    ("abort_begin", "ABORT; BEGIN"),
+    ("prepare_transaction", "PREPARE TRANSACTION 'rf10_cat_prep'"),
+    ("commit_begin_error", "COMMIT; BEGIN; SELECT 1 / 0"),
+]
+R10_HARNESSES = ("_in_schema", "_language", "_measure")
+
+
+async def _r10_harness(harness, dsn, program):
+    """The harness's report for program: 'ENDED:...', or 'kept'."""
+    if harness == "_in_schema":
+        try:
+            await _in_schema(dsn, "d2_r10h", program)
+        except AssertionError as exc:
+            if str(exc).startswith("_in_schema: ENDED:"):
+                return str(exc).split(": ", 1)[1]
+            raise
+        except asyncpg.PostgresError:
+            return "kept"
+        return "kept"
+    if harness == "_language":
+        return (await _language(dsn, "plpgsql", program))["ended"] or "kept"
+    return (await _measure_in(dsn, program, None))["ended"] or "kept"
+
+
+@pytest.fixture(scope="module")
+def r10_clone(chain):
+    clone = "%s_r10" % chain.db[:52]
+    asyncio.run(_clone(clone, chain.db))
+    try:
+        yield _dsn(clone)
+    finally:
+        asyncio.run(_drop_db(clone))
+
+
+@pytest.mark.parametrize("harness", R10_HARNESSES)
+@pytest.mark.parametrize("name,program", R10_ENDING, ids=[c[0] for c in R10_ENDING])
+def test_r10_n_ro_role_257_catalog_harness(r10_clone, harness, name, program):
+    got = asyncio.run(_r10_harness(harness, r10_clone, program))
+    assert got.startswith("ENDED:"), (harness, name, got)
+
+
+@pytest.mark.parametrize("harness", R10_HARNESSES)
+def test_r10_ro_role_257_catalog_harness_negative_control(r10_clone, harness):
+    """The same harnesses, programs that keep their transaction (one of them
+    failing inside it): 'kept'."""
+    for program in ("SELECT 1; SELECT 2", "SELECT 1 / 0"):
+        assert asyncio.run(_r10_harness(harness, r10_clone, program)) == "kept", (harness, program)
+
+
+PLANT_VALUE = "rf10_cat_fixed_value"
+
+
+def _r10_plant_role(chain):
+    """(measurer, planted role): a stand-in rf10_cat_* measurer plants on
+    itself; a superuser plants only on the rf10_cat_* role R10_CAT_ROLE names
+    (created for the run). Never scr_seat_ro, postgres or any other role."""
+    me = chain.who["admin_user"]
+    if me.startswith("rf10_cat_"):
+        return me, me
+    role = os.environ.get("R10_CAT_ROLE") or ""
+    if not (chain.who["superuser"] and role.startswith("rf10_cat_")):
+        pytest.fail("round-10 plants run only on an rf10_cat_* role: the measurer %s is not one, and "
+                    "R10_CAT_ROLE=%r does not name one under a superuser" % (me, role))
+    return me, role
+
+
+async def _r10_settings(role):
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        rows = await conn.fetch(
+            "SELECT s.setdatabase::int8 AS db, s.setconfig::text AS cfg FROM pg_catalog.pg_db_role_setting s "
+            "JOIN pg_catalog.pg_roles r ON r.oid = s.setrole WHERE r.rolname = $1 ORDER BY 1", role)
+        return [(r["db"], r["cfg"]) for r in rows]
+    finally:
+        await conn.close()
+
+
+async def _r10_authid_reading():
+    """(the outside() query text, the pg_authid row texts it returns)."""
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            p, rows, _names, _temp, _s = await ca.read(conn, outside=True)
+            return ca.query(p, True), [r["body"] for r in rows if r["rel"] == "pg_authid"]
+    finally:
+        await conn.close()
+
+
+async def _r10_routes():
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        return await ca.routes(conn)
+    finally:
+        await conn.close()
+
+
+def test_r10_n_catalog_all_99_role_setting_in_another_database(chain):
+    """ALTER ROLE <role> IN DATABASE postgres SET application_name, measured
+    by _measure on a clone of the chain database. Round 9 kept only this
+    database's and the database-independent settings, so the row was in no
+    reading. Now the measurer's own settings in every database are in the
+    diff (stand-in: the row is unexplained and a cluster row); another
+    role's are among the shared rows outside RESTRICT (superuser:
+    result['outside'] names pg_db_role_setting)."""
+    me, role = _r10_plant_role(chain)
+    target = "CURRENT_USER" if role == me else '"%s"' % role
+    before = asyncio.run(_r10_settings(role))
+    try:
+        result = asyncio.run(_measure(chain.dsn, "ALTER ROLE %s IN DATABASE postgres SET application_name = "
+                                                 "'r9_probe';" % target))
+    finally:
+        asyncio.run(_admin("ALTER ROLE %s IN DATABASE postgres RESET application_name" % target))
+    assert asyncio.run(_r10_settings(role)) == before, before
+    assert result["refused"] is None and result["ended"] is None, result
+    rows = [u for u in ca.unexplained(result["diff"]) if u[1] == "pg_db_role_setting"]
+    print("r10 catalog_all.py:99 measurer %s planted %s: unexplained %s outside %s"
+          % (me, role, rows, result["outside"]))
+    if role == me:
+        assert len(rows) == 1 and rows[0][0] == "added" and "application_name=r9_probe" in rows[0][2], rows
+        assert [c for c in ca.cluster_rows(result["diff"]) if c[1] == "pg_db_role_setting"], result["diff"]
+    else:
+        assert rows == [] and result["outside"] == ["pg_db_role_setting"], (rows, result["outside"])
+
+
+def test_r10_n_catalog_all_138_stored_password(chain):
+    """ALTER ROLE <role> PASSWORD '<fixed value>', measured by _measure.
+    Superuser (rolpassword route 'digest'): the planted role's stored value
+    is compared as its md5 among the shared rows outside RESTRICT, so
+    result['outside'] names pg_authid; the value itself is printed nowhere.
+    Stand-in (route 'unmeasured': pg_roles masks it): the measurer's own
+    password change reaches no catalog reading (no unexplained row, nothing
+    outside), and the route is stated; another role's password is out of
+    reach (42501). Round 9 read pg_authid through pg_roles under every
+    measurer, so the change was in no reading under a superuser either."""
+    me, role = _r10_plant_role(chain)
+    routes = asyncio.run(_r10_routes())
+    su = chain.who["superuser"]
+    assert routes["rolpassword"] == ("digest" if su else "unmeasured"), routes
+    target = "CURRENT_USER" if role == me else '"%s"' % role
+    try:
+        result = asyncio.run(_measure(chain.dsn, "ALTER ROLE %s PASSWORD '%s';" % (target, PLANT_VALUE)))
+    finally:
+        asyncio.run(_admin("ALTER ROLE %s PASSWORD NULL" % target))
+    assert PLANT_VALUE not in repr(result), "the planted value reached the result"
+    rows = [u for u in ca.unexplained(result["diff"]) if u[1] == "pg_authid"]
+    print("r10 catalog_all.py:138 measurer %s rolpassword route %s planted %s: unexplained %s outside %s xid %s"
+          % (me, routes["rolpassword"], role, rows, result["outside"], bool(result["xid"])))
+    assert result["refused"] is None and result["ended"] is None, result
+    if su:
+        assert rows == [] and result["outside"] == ["pg_authid"], (rows, result["outside"])
+    else:
+        assert rows == [] and result["outside"] == [] and result["xid"], (rows, result["outside"])
+        assert ("pg_authid", "rolpassword") in [(u[0], u[1]) for u in routes["unmeasured"]], routes
+        other = os.environ.get("R10_CAT_ROLE") or ""
+        assert other.startswith("rf10_cat_") and other != me, (
+            "R10_CAT_ROLE must name an rf10_cat_* role other than the stand-in: %r" % other)
+        refused = asyncio.run(_measure(chain.dsn, "ALTER ROLE \"%s\" PASSWORD '%s';" % (other, PLANT_VALUE)))
+        assert refused["refused"] == "42501", refused
+
+
+R10_INDEX_PLANT = ("CREATE INDEX r9_cover ON public.players (id); "
+                   "UPDATE pg_catalog.pg_index SET indislive = false WHERE indexrelid = "
+                   "(SELECT c.conindid FROM pg_catalog.pg_constraint c "
+                   "WHERE c.conrelid = 'public.players'::pg_catalog.regclass AND c.contype = 'p');")
+R10_INDEX_ONLY = "CREATE INDEX r9_cover ON public.players (id);"
+
+
+async def _r10_pk_oid(dsn):
+    conn = await _connect(dsn)
+    try:
+        return str(await conn.fetchval(
+            "SELECT c.conindid::pg_catalog.oid FROM pg_catalog.pg_constraint c "
+            "WHERE c.conrelid = 'public.players'::pg_catalog.regclass AND c.contype = 'p'"))
+    finally:
+        await conn.close()
+
+
+def _r10_row_text(values):
+    """A ROW text of field values (record_out's quoting for the values these
+    cases carry)."""
+    def q(v):
+        if v is None:
+            return ""
+        if v == "" or any(ch in v for ch in ',()" ' + chr(92)):
+            return '"' + v.replace(chr(92), chr(92) * 2).replace('"', '""') + '"'
+        return v
+    return "(" + ",".join(q(v) for v in values) + ")"
+
+
+def _r10_identity_cases(chain, alone):
+    """Report catalog_all.py:532, the binding itself, on the measured rows of
+    the index-only control (round 9 explained a row by the KIND of any
+    changed object). Built from players_pkey's own pg_index raw row in the
+    clone's catalog, beside the added index r9_cover:
+      in place: the row changed in a listed column (indisclustered) with
+        players_pkey's own index object unchanged: unexplained; with that
+        object changed too: explained (control);
+      whole: the row added with no object of its identity: unexplained."""
+    pk = asyncio.run(_r10_pk_oid(chain.dsn))
+    mine = [r for r in alone["after"] if r[0] == "raw" and r[2] == "pg_index" and r[5][1] == pk]
+    assert mine, ("no pg_index raw row of players_pkey", pk)
+    obj = [r for r in alone["after"] if r[0] == "index" and r[4] == pk]
+    assert len(obj) == 1, obj
+    cols = ca.BODY_COLUMNS["pg_index"]
+    k = cols.index("indisclustered")
+    flipped = []
+    for r in mine:
+        f = ca.fields(r[3])
+        assert ca.changed_columns("pg_index", r[3], _r10_row_text(f)) == [], (r[3], _r10_row_text(f))
+        f[k] = "f" if f[k] == "t" else "t"
+        flipped.append(r[:3] + (_r10_row_text(f),) + r[4:])
+    assert ca.changed_columns("pg_index", mine[0][3], flipped[0][3]) == ["indisclustered"]
+    base = alone["diff"]
+    in_place = {"added": base["added"] + flipped, "removed": base["removed"] + mine}
+    got = ca.unexplained(in_place)
+    assert sorted((u[0], u[1]) for u in got) == sorted([("added", "pg_index")] * len(mine)
+                                                       + [("removed", "pg_index")] * len(mine)), got
+    control = {"added": in_place["added"] + obj, "removed": in_place["removed"]}
+    assert ca.unexplained(control) == [], ca.unexplained(control)
+    whole = {"added": base["added"] + mine, "removed": base["removed"]}
+    got = ca.unexplained(whole)
+    assert sorted((u[0], u[1]) for u in got) == [("added", "pg_index")] * len(mine), got
+    print("r10 catalog_all.py:532 identity cases: in place %d unexplained, control 0, whole %d unexplained"
+          % (2 * len(mine), len(mine)))
+
+
+def test_r10_n_catalog_all_532_explanation_bound_to_identity(chain):
+    """An added index explains only its own rows (round 10, report
+    catalog_all.py:532: round 9 explained every pg_index row by the KIND of
+    an added object). The planted change of another index's indislive
+    (superuser: a direct catalog UPDATE in the rolled-back transaction of a
+    throwaway clone) is unexplained beside the added index; under the
+    stand-in PostgreSQL refuses the UPDATE (42501). The index alone is
+    explained (negative control)."""
+    alone = asyncio.run(_measure(chain.dsn, R10_INDEX_ONLY))
+    assert alone["refused"] is None and alone["ended"] is None, alone
+    assert ca.unexplained(alone["diff"]) == [], ca.unexplained(alone["diff"])
+    _r10_identity_cases(chain, alone)
+    result = asyncio.run(_measure(chain.dsn, R10_INDEX_PLANT))
+    print("r10 catalog_all.py:532 superuser %s: refused %s unexplained %s"
+          % (chain.who["superuser"], result["refused"],
+             ca.unexplained(result["diff"]) if result.get("diff") else None))
+    if not chain.who["superuser"]:
+        assert result["refused"] == "42501", result
+        return
+    assert result["refused"] is None and result["ended"] is None, result
+    u = ca.unexplained(result["diff"])
+    assert sorted(x[0] for x in u) == ["added", "removed"] and {x[1] for x in u} == {"pg_index"}, u
+
+
+def test_r10_sweep_counts():
+    """Ruling R9-A1 (E): the sites of each class in the four files of the
+    lane, counted per file, equal the frozen counts (catalog_r10_sweep); a
+    new site fails here until it is fixed or held with a reason."""
+    import catalog_r10_sweep as sw
+    got = {k: len(v) for k, v in sw.sweep(HERE).items()}
+    assert got == sw.FROZEN, {k: (got.get(k), sw.FROZEN.get(k)) for k in set(got) | set(sw.FROZEN)
+                              if got.get(k) != sw.FROZEN.get(k)}
+
+
+def test_r10_routes_state_this_run(chain):
+    """The measurer and its routes for the log of record (catalog_all.routes):
+    rolpassword 'digest' under a superuser, else 'unmeasured' with
+    pg_authid.rolpassword listed; the shared rows outside RESTRICT measured
+    in every harness position, not between chain readings."""
+    r = asyncio.run(_r10_routes())
+    print("r10 routes: measurer %s superuser %s rolpassword %s; outside RESTRICT: %s; unmeasured: %s"
+          % (r["measurer"], r["superuser"], r["rolpassword"], r["outside_restrict"], r["unmeasured"]))
+    assert r["measurer"] == chain.who["admin_user"] and r["superuser"] == chain.who["superuser"], r
+    assert r["rolpassword"] == ("digest" if r["superuser"] else "unmeasured"), r
+    assert (("pg_authid", "rolpassword") in [(u[0], u[1]) for u in r["unmeasured"]]) == (not r["superuser"]), r
+    # the digest route reads the stored value as its md5 and never the value
+    q, rows = asyncio.run(_r10_authid_reading())
+    if r["superuser"]:
+        assert "pg_catalog.md5(t.rolpassword)" in q, q[:400]
+    else:
+        assert "rolpassword" not in q, q[:400]
+    assert rows and not [x for x in rows if "SCRAM-SHA-256$" in x], len(rows)
 
 
 # --- the files outside the chain --------------------------------------------

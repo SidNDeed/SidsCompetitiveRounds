@@ -223,11 +223,11 @@ WITH ns AS (
       LEFT JOIN pg_depend di ON di.classid = 'pg_proc'::regclass AND di.objid = p.oid
                             AND di.refclassid = 'pg_type'::regclass AND di.deptype = 'i'
 )
-SELECT 'namespace', '', quote_ident(n.nspname), 'owner=' || pg_get_userbyid(p.nspowner), '',
+SELECT 'namespace', '', quote_ident(n.nspname), 'owner=' || pg_get_userbyid(p.nspowner), p.oid::text,
        ARRAY['SCHEMA|-|' || n.nspname]
   FROM ns n JOIN pg_namespace p ON p.oid = n.oid
 UNION ALL
-SELECT 'acl', '', 'SCHEMA ' || quote_ident(n.nspname), @ACL(coalesce(p.nspacl, acldefault('n'::"char", p.nspowner)); p.nspowner)@, '',
+SELECT 'acl', '', 'SCHEMA ' || quote_ident(n.nspname), @ACL(coalesce(p.nspacl, acldefault('n'::"char", p.nspowner)); p.nspowner)@, p.oid::text,
        ARRAY['ACL|-|SCHEMA ' || quote_ident(n.nspname)]
   FROM ns n JOIN pg_namespace p ON p.oid = n.oid
   LEFT JOIN ip ON ip.classoid = 'pg_namespace'::regclass AND ip.objoid = p.oid AND ip.objsubid = 0
@@ -248,16 +248,16 @@ SELECT 'class', r.name, c.relkind::text,
        c.oid::text, r.cand
   FROM pg_class c JOIN rel r ON r.oid = c.oid LEFT JOIN pg_am am ON am.oid = c.relam
 UNION ALL
-SELECT 'rls', r.name, 'rls', 'rls=true', '', ARRAY['ROW SECURITY|' || r.nsp || '|' || r.relname]
+SELECT 'rls', r.name, 'rls', 'rls=true', c.oid::text, ARRAY['ROW SECURITY|' || r.nsp || '|' || r.relname]
   FROM pg_class c JOIN rel r ON r.oid = c.oid WHERE c.relrowsecurity
 UNION ALL
-SELECT 'partition', r.name, 'bound', pg_get_expr(c.relpartbound, c.oid), '',
+SELECT 'partition', r.name, 'bound', pg_get_expr(c.relpartbound, c.oid), c.oid::text,
        ARRAY[CASE WHEN c.relkind IN ('i', 'I') THEN 'INDEX ATTACH' ELSE 'TABLE ATTACH' END
              || '|' || r.nsp || '|' || r.relname]
   FROM pg_class c JOIN rel r ON r.oid = c.oid WHERE c.relispartition
 UNION ALL
 SELECT 'acl', r.name, CASE WHEN c.relkind = 'S' THEN 'SEQUENCE ' ELSE 'TABLE ' END || quote_ident(c.relname),
-       @ACL(coalesce(c.relacl, acldefault((CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END)::"char", c.relowner)); c.relowner)@, '',
+       @ACL(coalesce(c.relacl, acldefault((CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END)::"char", c.relowner)); c.relowner)@, c.oid::text,
        ARRAY['ACL|' || r.nsp || '|' || CASE WHEN c.relkind = 'S' THEN 'SEQUENCE ' ELSE 'TABLE ' END
              || quote_ident(c.relname)]
   FROM pg_class c JOIN rel r ON r.oid = c.oid
@@ -275,7 +275,7 @@ SELECT 'attribute', r.name,
             'storage=' || a.attstorage::text, 'compression=' || a.attcompression::text,
             'options=' || coalesce(a.attoptions::text, ''),
             'fdwoptions=' || coalesce(a.attfdwoptions::text, '')) END,
-       '',
+       a.attrelid::text || '.' || a.attnum,
        -- an index column that is a plain table column (indkey[n] <> 0)
        -- mirrors that column: it belongs to its index/constraint, and ALSO to
        -- the table when the table's rendering changed in the same step (a
@@ -290,12 +290,12 @@ SELECT 'attribute', r.name,
  WHERE a.attnum > 0
 UNION ALL
 SELECT 'acl', r.name, 'COLUMN ' || quote_ident(r.relname) || '.' || quote_ident(a.attname),
-       @ACL(a.attacl; (SELECT k.relowner FROM pg_class k WHERE k.oid = a.attrelid))@, '',
+       @ACL(a.attacl; (SELECT k.relowner FROM pg_class k WHERE k.oid = a.attrelid))@, a.attrelid::text || '.' || a.attnum,
        ARRAY['ACL|' || r.nsp || '|COLUMN ' || quote_ident(r.relname) || '.' || quote_ident(a.attname)]
   FROM pg_attribute a JOIN rel r ON r.oid = a.attrelid
  WHERE a.attnum > 0 AND coalesce(a.attacl, '{}') <> '{}'
 UNION ALL
-SELECT 'default', r.name, quote_ident(a.attname), pg_get_expr(d.adbin, d.adrelid), '',
+SELECT 'default', r.name, quote_ident(a.attname), pg_get_expr(d.adbin, d.adrelid), d.adrelid::text || '.' || d.adnum,
        ARRAY['DEFAULT|' || r.nsp || '|' || r.relname || ' ' || a.attname] || r.cand
   FROM pg_attrdef d JOIN rel r ON r.oid = d.adrelid
   JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
@@ -307,7 +307,7 @@ SELECT 'constraint',
        concat_ws(' ', 'type=' || k.contype::text, pg_get_constraintdef(k.oid),
                  'deferrable=' || k.condeferrable, 'deferred=' || k.condeferred,
                  'validated=' || k.convalidated, 'noinherit=' || k.connoinherit),
-       '',
+       k.oid::text,
        CASE WHEN r.cand[1] LIKE 'EXTENSION|%' THEN r.cand
             WHEN k.conrelid <> 0 THEN
                  CASE k.contype WHEN 'f' THEN ARRAY['FK CONSTRAINT|' || r.nsp || '|' || r.relname || ' ' || k.conname]
@@ -327,12 +327,12 @@ SELECT 'index', r.name, quote_ident(ic.relname),
                  'valid=' || i.indisvalid, 'clustered=' || i.indisclustered,
                  'replident=' || i.indisreplident, 'nullsnotdistinct=' || i.indnullsnotdistinct,
                  regexp_replace(pg_get_indexdef(i.indexrelid), ' ON (ONLY )?\S+ USING ', ' ON \1<rel> USING ')),
-       '', ri.cand
+       i.indexrelid::text, ri.cand
   FROM pg_index i JOIN rel r ON r.oid = i.indrelid JOIN pg_class ic ON ic.oid = i.indexrelid
   JOIN rel ri ON ri.oid = i.indexrelid
 UNION ALL
 SELECT 'trigger', r.name, quote_ident(t.tgname),
-       concat_ws(' ', 'enabled=' || t.tgenabled::text, pg_get_triggerdef(t.oid)), '',
+       concat_ws(' ', 'enabled=' || t.tgenabled::text, pg_get_triggerdef(t.oid)), t.oid::text,
        ARRAY['TRIGGER|' || r.nsp || '|' || r.relname || ' ' || t.tgname]
   FROM pg_trigger t JOIN rel r ON r.oid = t.tgrelid
  WHERE NOT t.tgisinternal AND t.tgconstraint = 0
@@ -340,12 +340,12 @@ UNION ALL
 SELECT 'policy', r.name, quote_ident(p.polname),
        concat_ws(' ', 'cmd=' || p.polcmd::text, 'permissive=' || p.polpermissive, 'roles=' || p.polroles::text,
                  'using=' || coalesce(pg_get_expr(p.polqual, p.polrelid), ''),
-                 'check=' || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '')), '',
+                 'check=' || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '')), p.oid::text,
        ARRAY['POLICY|' || r.nsp || '|' || r.relname || ' ' || p.polname]
   FROM pg_policy p JOIN rel r ON r.oid = p.polrelid
 UNION ALL
 SELECT 'rule', r.name, quote_ident(w.rulename),
-       concat_ws(' ', 'enabled=' || w.ev_enabled::text, 'def=' || md5(pg_get_ruledef(w.oid))), '',
+       concat_ws(' ', 'enabled=' || w.ev_enabled::text, 'def=' || md5(pg_get_ruledef(w.oid))), w.oid::text,
        CASE WHEN w.rulename = '_RETURN' THEN r.cand
             ELSE ARRAY['RULE|' || r.nsp || '|' || r.relname || ' ' || w.rulename] END
   FROM pg_rewrite w JOIN rel r ON r.oid = w.ev_class
@@ -358,11 +358,11 @@ SELECT 'proc', '', quote_ident(f.nsp) || '.' || f.ident,
                  'src=' || md5(coalesce(p.prosrc, '')), 'bin=' || coalesce(p.probin, ''),
                  'result=' || coalesce(pg_get_function_result(p.oid), ''),
                  'volatile=' || p.provolatile::text, 'secdef=' || p.prosecdef, 'strict=' || p.proisstrict,
-                 'config=' || coalesce(p.proconfig::text, ''), 'owner=' || pg_get_userbyid(p.proowner)), '',
+                 'config=' || coalesce(p.proconfig::text, ''), 'owner=' || pg_get_userbyid(p.proowner)), p.oid::text,
        coalesce(f.owner_cand, ARRAY[f.word || '|' || f.nsp || '|' || f.sig])
   FROM pg_proc p JOIN prc f ON f.oid = p.oid JOIN pg_language l ON l.oid = p.prolang
 UNION ALL
-SELECT 'acl', '', f.aclword || ' ' || f.ident, @ACL(coalesce(p.proacl, acldefault('f'::"char", p.proowner)); p.proowner)@, '',
+SELECT 'acl', '', f.aclword || ' ' || f.ident, @ACL(coalesce(p.proacl, acldefault('f'::"char", p.proowner)); p.proowner)@, p.oid::text,
        ARRAY['ACL|' || f.nsp || '|' || f.aclword || ' ' || f.ident]
   FROM pg_proc p JOIN prc f ON f.oid = p.oid
   LEFT JOIN ip ON ip.classoid = 'pg_proc'::regclass AND ip.objoid = p.oid AND ip.objsubid = 0
@@ -376,14 +376,14 @@ SELECT 'type', coalesce(r.name, re.name, ''), quote_ident(n.nspname) || '.' || q
                  'labels=' || coalesce((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
                                           FROM pg_enum e WHERE e.enumtypid = t.oid), ''),
                  'range=' || coalesce((SELECT g::text FROM pg_range g WHERE g.rngtypid = t.oid), ''),
-                 'owner=' || pg_get_userbyid(t.typowner)), '',
+                 'owner=' || pg_get_userbyid(t.typowner)), t.oid::text,
        y.cand
   FROM pg_type t JOIN ns n ON n.oid = t.typnamespace JOIN typ y ON y.oid = t.oid
   LEFT JOIN rel r ON r.oid = t.typrelid
   LEFT JOIN pg_type et ON et.oid = t.typelem AND t.typcategory = 'A'
   LEFT JOIN rel re ON re.oid = et.typrelid
 UNION ALL
-SELECT 'acl', '', 'TYPE ' || quote_ident(t.typname), @ACL(coalesce(t.typacl, acldefault('T'::"char", t.typowner)); t.typowner)@, '',
+SELECT 'acl', '', 'TYPE ' || quote_ident(t.typname), @ACL(coalesce(t.typacl, acldefault('T'::"char", t.typowner)); t.typowner)@, t.oid::text,
        ARRAY['ACL|' || n.nspname || '|TYPE ' || quote_ident(t.typname)]
   FROM pg_type t JOIN ns n ON n.oid = t.typnamespace
   LEFT JOIN ip ON ip.classoid = 'pg_type'::regclass AND ip.objoid = t.oid AND ip.objsubid = 0
@@ -392,17 +392,17 @@ SELECT 'acl', '', 'TYPE ' || quote_ident(t.typname), @ACL(coalesce(t.typacl, acl
 UNION ALL
 SELECT 'sequence', r.name, '',
        concat_ws(' ', format_type(s.seqtypid, NULL), s.seqstart, s.seqincrement, s.seqmax, s.seqmin,
-                 s.seqcache, s.seqcycle), '', r.cand
+                 s.seqcache, s.seqcycle), s.seqrelid::text, r.cand
   FROM pg_sequence s JOIN rel r ON r.oid = s.seqrelid
 UNION ALL
-SELECT 'owned', rt.name, quote_ident(sc.relname), coalesce(a.attname::text, '') || ' deptype=' || d.deptype::text, '',
+SELECT 'owned', rt.name, quote_ident(sc.relname), coalesce(a.attname::text, '') || ' deptype=' || d.deptype::text, d.objid::text,
        CASE WHEN d.deptype = 'i' THEN rs.cand ELSE ARRAY['SEQUENCE OWNED BY|' || rs.nsp || '|' || rs.relname] END
   FROM pg_depend d JOIN rel rs ON rs.oid = d.objid JOIN rel rt ON rt.oid = d.refobjid
   JOIN pg_class sc ON sc.oid = d.objid AND sc.relkind = 'S'
   LEFT JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
  WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
 UNION ALL
-SELECT 'inherits', r.name, rp.name, s.inhseqno::text, '',
+SELECT 'inherits', r.name, rp.name, s.inhseqno::text, s.inhrelid::text || '.' || s.inhseqno,
        CASE WHEN c.relispartition THEN ARRAY[CASE WHEN c.relkind IN ('i', 'I') THEN 'INDEX ATTACH'
                                                  ELSE 'TABLE ATTACH' END || '|' || r.nsp || '|' || r.relname]
             ELSE r.cand END
@@ -410,18 +410,18 @@ SELECT 'inherits', r.name, rp.name, s.inhseqno::text, '',
   JOIN pg_class c ON c.oid = s.inhrelid
 UNION ALL
 SELECT 'statistics', r.name, quote_ident(x.stxname),
-       concat_ws(' ', pg_get_statisticsobjdef(x.oid), 'target=' || coalesce(x.stxstattarget::text, '')), '',
+       concat_ws(' ', pg_get_statisticsobjdef(x.oid), 'target=' || coalesce(x.stxstattarget::text, '')), x.oid::text,
        ARRAY['STATISTICS|' || xn.nspname || '|' || x.stxname]
   FROM pg_statistic_ext x JOIN rel r ON r.oid = x.stxrelid JOIN pg_namespace xn ON xn.oid = x.stxnamespace
 UNION ALL
 SELECT 'extension', '', quote_ident(x.extname),
-       concat_ws(' ', x.extversion, x.extnamespace::regnamespace::text), '',
+       concat_ws(' ', x.extversion, x.extnamespace::regnamespace::text), x.oid::text,
        ARRAY['EXTENSION|-|' || x.extname]
   FROM pg_extension x
 UNION ALL
 SELECT 'event_trigger', '', quote_ident(e.evtname),
        concat_ws(' ', e.evtevent, e.evtfoid::regproc::text, e.evtenabled::text, coalesce(e.evttags::text, ''),
-                 'owner=' || pg_get_userbyid(e.evtowner)), '',
+                 'owner=' || pg_get_userbyid(e.evtowner)), e.oid::text,
        ARRAY['EVENT TRIGGER|-|' || e.evtname]
   FROM pg_event_trigger e
  WHERE e.evtname NOT LIKE 'd2\_probe\_%'
@@ -430,7 +430,7 @@ SELECT 'default_acl', '',
        concat_ws(' ', pg_get_userbyid(d.defaclrole),
                  CASE WHEN d.defaclnamespace = 0 THEN '-' ELSE d.defaclnamespace::regnamespace::text END,
                  d.defaclobjtype::text),
-       d.defaclacl::text, '',
+       d.defaclacl::text, d.oid::text,
        ARRAY['DEFAULT ACL|' || coalesce(dn.nspname, '-') || '|DEFAULT PRIVILEGES FOR '
              || CASE d.defaclobjtype WHEN 'r' THEN 'TABLES' WHEN 'S' THEN 'SEQUENCES' WHEN 'f' THEN 'FUNCTIONS'
                      WHEN 'T' THEN 'TYPES' WHEN 'n' THEN 'SCHEMAS' END
@@ -440,20 +440,20 @@ UNION ALL
 SELECT 'collation', '', quote_ident(n.nspname) || '.' || quote_ident(c.collname),
        concat_ws(' ', c.collprovider::text, c.collisdeterministic, coalesce(c.collcollate, ''),
                  coalesce(c.collctype, ''), coalesce(c.colliculocale, ''), coalesce(c.collicurules, ''),
-                 'owner=' || pg_get_userbyid(c.collowner)), '',
+                 'owner=' || pg_get_userbyid(c.collowner)), c.oid::text,
        ARRAY['COLLATION|' || n.nspname || '|' || c.collname]
   FROM pg_collation c JOIN ns n ON n.oid = c.collnamespace
 UNION ALL
 SELECT 'conversion', '', quote_ident(n.nspname) || '.' || quote_ident(c.conname),
        concat_ws(' ', c.conforencoding, c.contoencoding, c.conproc::text, c.condefault,
-                 'owner=' || pg_get_userbyid(c.conowner)), '',
+                 'owner=' || pg_get_userbyid(c.conowner)), c.oid::text,
        ARRAY['CONVERSION|' || n.nspname || '|' || c.conname]
   FROM pg_conversion c JOIN ns n ON n.oid = c.connamespace
 UNION ALL
 SELECT 'operator', '', quote_ident(n.nspname) || '.' || o.oprname || '(' || format_type(o.oprleft, NULL) || ','
        || format_type(o.oprright, NULL) || ')',
        concat_ws(' ', o.oprcode::text, o.oprrest::text, o.oprjoin::text, o.oprcom::text, o.oprnegate::text,
-                 o.oprcanmerge, o.oprcanhash, 'owner=' || pg_get_userbyid(o.oprowner)), '',
+                 o.oprcanmerge, o.oprcanhash, 'owner=' || pg_get_userbyid(o.oprowner)), o.oid::text,
        ARRAY['OPERATOR|' || n.nspname || '|' || o.oprname]
   FROM pg_operator o JOIN ns n ON n.oid = o.oprnamespace
 UNION ALL
@@ -466,7 +466,7 @@ SELECT 'opfamily', '', quote_ident(n.nspname) || '.' || quote_ident(f.opfname) |
                  (SELECT string_agg(a.amprocnum || ':' || a.amproc::text, ',' ORDER BY a.amprocnum)
                     FROM pg_amproc a WHERE a.amprocfamily = f.oid AND NOT EXISTS (
                          SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_amproc'::regclass AND d.objid = a.oid
-                            AND d.refclassid = 'pg_opclass'::regclass))), '',
+                            AND d.refclassid = 'pg_opclass'::regclass))), f.oid::text,
        ARRAY['OPERATOR FAMILY|' || n.nspname || '|' || f.opfname]
   FROM pg_opfamily f JOIN ns n ON n.oid = f.opfnamespace JOIN pg_am am ON am.oid = f.opfmethod
 UNION ALL
@@ -478,12 +478,12 @@ SELECT 'opclass', '', quote_ident(n.nspname) || '.' || quote_ident(c.opcname) ||
                    WHERE d.refclassid = 'pg_opclass'::regclass AND d.refobjid = c.oid),
                  (SELECT string_agg(a.amprocnum || ':' || a.amproc::text, ',' ORDER BY a.amprocnum)
                     FROM pg_amproc a JOIN pg_depend d ON d.classid = 'pg_amproc'::regclass AND d.objid = a.oid
-                   WHERE d.refclassid = 'pg_opclass'::regclass AND d.refobjid = c.oid)), '',
+                   WHERE d.refclassid = 'pg_opclass'::regclass AND d.refobjid = c.oid)), c.oid::text,
        ARRAY['OPERATOR CLASS|' || n.nspname || '|' || c.opcname]
   FROM pg_opclass c JOIN ns n ON n.oid = c.opcnamespace JOIN pg_am am ON am.oid = c.opcmethod
 UNION ALL
 SELECT 'cast', '', format_type(c.castsource, NULL) || ' AS ' || format_type(c.casttarget, NULL),
-       concat_ws(' ', c.castfunc::text, c.castcontext::text, c.castmethod::text), '',
+       concat_ws(' ', c.castfunc::text, c.castcontext::text, c.castmethod::text), c.oid::text,
        coalesce((SELECT y.cand FROM pg_depend d JOIN typ y ON y.oid = d.refobjid
                   WHERE d.classid = 'pg_cast'::regclass AND d.objid = c.oid AND d.deptype = 'i'
                     AND d.refclassid = 'pg_type'::regclass LIMIT 1),
@@ -497,28 +497,28 @@ SELECT 'ts_config', '', quote_ident(n.nspname) || '.' || quote_ident(c.cfgname),
        concat_ws(' ', c.cfgparser::text, 'owner=' || pg_get_userbyid(c.cfgowner),
                  (SELECT string_agg(m.maptokentype || ':' || m.mapseqno || ':' || m.mapdict::text, ','
                                     ORDER BY m.maptokentype, m.mapseqno)
-                    FROM pg_ts_config_map m WHERE m.mapcfg = c.oid)), '',
+                    FROM pg_ts_config_map m WHERE m.mapcfg = c.oid)), c.oid::text,
        ARRAY['TEXT SEARCH CONFIGURATION|' || n.nspname || '|' || c.cfgname]
   FROM pg_ts_config c JOIN ns n ON n.oid = c.cfgnamespace
 UNION ALL
 SELECT 'ts_dict', '', quote_ident(n.nspname) || '.' || quote_ident(d.dictname),
        concat_ws(' ', d.dicttemplate::text, coalesce(d.dictinitoption, ''), 'owner=' || pg_get_userbyid(d.dictowner)),
-       '', ARRAY['TEXT SEARCH DICTIONARY|' || n.nspname || '|' || d.dictname]
+       d.oid::text, ARRAY['TEXT SEARCH DICTIONARY|' || n.nspname || '|' || d.dictname]
   FROM pg_ts_dict d JOIN ns n ON n.oid = d.dictnamespace
 UNION ALL
 SELECT 'ts_parser', '', quote_ident(n.nspname) || '.' || quote_ident(p.prsname),
        concat_ws(' ', p.prsstart::text, p.prstoken::text, p.prsend::text, p.prsheadline::text, p.prslextype::text),
-       '', ARRAY['TEXT SEARCH PARSER|' || n.nspname || '|' || p.prsname]
+       p.oid::text, ARRAY['TEXT SEARCH PARSER|' || n.nspname || '|' || p.prsname]
   FROM pg_ts_parser p JOIN ns n ON n.oid = p.prsnamespace
 UNION ALL
 SELECT 'ts_template', '', quote_ident(n.nspname) || '.' || quote_ident(t.tmplname),
-       concat_ws(' ', t.tmplinit::text, t.tmpllexize::text), '',
+       concat_ws(' ', t.tmplinit::text, t.tmpllexize::text), t.oid::text,
        ARRAY['TEXT SEARCH TEMPLATE|' || n.nspname || '|' || t.tmplname]
   FROM pg_ts_template t JOIN ns n ON n.oid = t.tmplnamespace
 UNION ALL
 SELECT 'language', '', quote_ident(l.lanname),
        concat_ws(' ', l.lanpltrusted, l.lanplcallfoid::text, l.laninline::text, l.lanvalidator::text,
-                 'owner=' || pg_get_userbyid(l.lanowner), 'acl=' || coalesce(l.lanacl::text, '')), '',
+                 'owner=' || pg_get_userbyid(l.lanowner), 'acl=' || coalesce(l.lanacl::text, '')), l.oid::text,
        coalesce((SELECT ARRAY['EXTENSION|-|' || x.extname] FROM ext x
                   WHERE x.classid = 'pg_language'::regclass AND x.objid = l.oid),
                 ARRAY['PROCEDURAL LANGUAGE|-|' || l.lanname])
@@ -526,56 +526,56 @@ SELECT 'language', '', quote_ident(l.lanname),
 UNION ALL
 SELECT 'fdw', '', quote_ident(w.fdwname),
        concat_ws(' ', w.fdwhandler::text, w.fdwvalidator::text, coalesce(w.fdwoptions::text, ''),
-                 'owner=' || pg_get_userbyid(w.fdwowner), 'acl=' || coalesce(w.fdwacl::text, '')), '',
+                 'owner=' || pg_get_userbyid(w.fdwowner), 'acl=' || coalesce(w.fdwacl::text, '')), w.oid::text,
        ARRAY['FOREIGN DATA WRAPPER|-|' || w.fdwname]
   FROM pg_foreign_data_wrapper w
 UNION ALL
 SELECT 'server', '', quote_ident(s.srvname),
        concat_ws(' ', s.srvfdw::text, coalesce(s.srvtype, ''), coalesce(s.srvversion, ''),
                  coalesce(s.srvoptions::text, ''), 'owner=' || pg_get_userbyid(s.srvowner),
-                 'acl=' || coalesce(s.srvacl::text, '')), '',
+                 'acl=' || coalesce(s.srvacl::text, '')), s.oid::text,
        ARRAY['SERVER|-|' || s.srvname]
   FROM pg_foreign_server s
 UNION ALL
-SELECT 'user_mapping', '', u.usename || ' ' || u.srvname, coalesce(u.umoptions::text, ''), '',
+SELECT 'user_mapping', '', u.usename || ' ' || u.srvname, coalesce(u.umoptions::text, ''), u.umid::text,
        ARRAY['USER MAPPING|-|USER MAPPING ' || CASE WHEN u.umuser = 0 THEN 'public' ELSE u.usename END
              || ' SERVER ' || u.srvname]
   FROM pg_user_mappings u
 UNION ALL
 SELECT 'publication', '', quote_ident(p.pubname),
        concat_ws(' ', p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
-                 'owner=' || pg_get_userbyid(p.pubowner)), '',
+                 'owner=' || pg_get_userbyid(p.pubowner)), p.oid::text,
        ARRAY['PUBLICATION|-|' || p.pubname]
   FROM pg_publication p
 UNION ALL
 SELECT 'publication_rel', r.name, quote_ident(p.pubname),
-       concat_ws(' ', coalesce(pg_get_expr(pr.prqual, pr.prrelid), ''), coalesce(pr.prattrs::text, '')), '',
+       concat_ws(' ', coalesce(pg_get_expr(pr.prqual, pr.prrelid), ''), coalesce(pr.prattrs::text, '')), pr.oid::text,
        ARRAY['PUBLICATION TABLE|' || r.nsp || '|' || p.pubname || ' ' || r.relname]
   FROM pg_publication_rel pr JOIN pg_publication p ON p.oid = pr.prpubid JOIN rel r ON r.oid = pr.prrelid
 UNION ALL
-SELECT 'publication_ns', '', quote_ident(p.pubname) || ' ' || quote_ident(n.nspname), '', '',
+SELECT 'publication_ns', '', quote_ident(p.pubname) || ' ' || quote_ident(n.nspname), '', pn.oid::text,
        ARRAY['PUBLICATION TABLES IN SCHEMA|' || n.nspname || '|' || p.pubname || ' ' || n.nspname]
   FROM pg_publication_namespace pn JOIN pg_publication p ON p.oid = pn.pnpubid JOIN ns n ON n.oid = pn.pnnspid
 UNION ALL
 SELECT 'subscription', '', quote_ident(s.subname),
        concat_ws(' ', s.subenabled, coalesce(s.subslotname::text, ''), s.subpublications::text,
-                 'owner=' || pg_get_userbyid(s.subowner)), '',
+                 'owner=' || pg_get_userbyid(s.subowner)), s.oid::text,
        ARRAY['SUBSCRIPTION|-|' || s.subname]
   FROM pg_subscription s WHERE s.subdbid = (SELECT oid FROM pg_database WHERE datname = current_database())
 UNION ALL
-SELECT 'access_method', '', quote_ident(a.amname), concat_ws(' ', a.amtype::text, a.amhandler::text), '',
+SELECT 'access_method', '', quote_ident(a.amname), concat_ws(' ', a.amtype::text, a.amhandler::text), a.oid::text,
        coalesce((SELECT ARRAY['EXTENSION|-|' || x.extname] FROM ext x
                   WHERE x.classid = 'pg_am'::regclass AND x.objid = a.oid),
                 ARRAY['ACCESS METHOD|-|' || a.amname])
   FROM pg_am a WHERE a.oid >= 16384
 UNION ALL
 SELECT 'transform', '', format_type(t.trftype, NULL) || ' ' || l.lanname,
-       concat_ws(' ', t.trffromsql::text, t.trftosql::text), '',
+       concat_ws(' ', t.trffromsql::text, t.trftosql::text), t.oid::text,
        ARRAY['TRANSFORM|-|TRANSFORM FOR ' || format_type(t.trftype, NULL) || ' LANGUAGE ' || l.lanname]
   FROM pg_transform t JOIN pg_language l ON l.oid = t.trflang
 UNION ALL
 SELECT 'comment', coalesce(r.name, ''), pg_describe_object(d.classoid, d.objoid, d.objsubid),
-       md5(d.description), '',
+       md5(d.description), CASE WHEN d.objsubid <> 0 THEN d.objoid::text || '.' || d.objsubid ELSE d.objoid::text END,
        ARRAY['COMMENT|' || coalesce(
            CASE d.classoid
                 WHEN 'pg_class'::regclass THEN r.nsp
@@ -667,18 +667,38 @@ def client(env_var, name):
 
 
 async def snapshot(conn):
-    """The catalog as a frozenset of (kind, rel, ident, def, oid, cand) rows,
+    """The catalog as a frozenset of (kind, rel, ident, def, id, cand) rows,
     read with search_path '' (as pg_dump reads) and the caller's
     search_path restored: the object rows of CATALOG_SQL and the raw rows
-    of every pg_catalog relation (catalog_all.snapshot, kind 'raw')."""
-    local = conn.is_in_transaction()
+    of every pg_catalog relation (catalog_all.snapshot, kind 'raw').
+
+    `id` (the fifth column) is the identity of the object the row renders:
+    its oid, '<relation oid>.<column number>' for a column (attribute,
+    default, column ACL, column comment), '<relation oid>.<seqno>' for an
+    inheritance link. catalog_all.unexplained() binds a raw row's
+    explanation to it (ruling REHEARSAL-R9-A1 (A)); pg_dump prints no oid,
+    so catalog_objects() and oid_only() set it aside (_noid).
+
+    Every reading is ONE snapshot: inside the caller's transaction when it
+    has one (the caller's position, whose identity the caller checks), else
+    inside a REPEATABLE READ read-only transaction of its own, so the object
+    rows and the raw rows are read at the same moment either way. The
+    search_path change is transaction-local in both cases (round 10: the
+    scope no longer depends on whether a transaction was open)."""
+    if conn.is_in_transaction():
+        return await _snapshot_in(conn)
+    async with conn.transaction(isolation="repeatable_read", readonly=True):
+        return await _snapshot_in(conn)
+
+
+async def _snapshot_in(conn):
     old = await conn.fetchval("SELECT current_setting('search_path')")
-    await conn.execute("SELECT set_config('search_path', '', $1)", local)
+    await conn.execute("SELECT set_config('search_path', '', true)")
     try:
         rows = await conn.fetch(CATALOG_SQL)
         every = await catalog_all.snapshot(conn)
     finally:
-        await conn.execute("SELECT set_config('search_path', $1, $2)", old, local)
+        await conn.execute("SELECT set_config('search_path', $1, true)", old)
     return frozenset(tuple(tuple(v) if isinstance(v, list) else v for v in r) for r in rows) | every
 
 
@@ -691,6 +711,7 @@ def empty(d):
 
 
 def _noid(r):
+    """The row without its identity column (what pg_dump can see of it)."""
     return tuple(r[:4]) + tuple(r[5:])
 
 

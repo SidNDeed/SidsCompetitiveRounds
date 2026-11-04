@@ -14,7 +14,15 @@ of template1, carries the same fixture for the admin's validity controls
 template, so a non-superuser admin could not show them to be writes there).
 It never skips: an unset DSN or a refused CREATE DATABASE fails the module.
 Every role connection asserts SELECT current_user, session_user equals the
-role before its body runs.
+role before its body runs. The round-10 controls of catalog_all.py:99
+and :138 plant a setting and a password only on an rf10_cat_* role the
+run created (the stand-in measurer, or R10_CAT_ROLE under a superuser),
+inside the rolled-back harness transaction, undone again in finally.
+
+Every harness position is bound to its transaction at both ends
+(catalog_position: a token, a transaction-level advisory lock and the
+vxid; round 10, report test_r7_ro_role_pg.py:257): a body that ends the
+harness transaction returns 'ENDED:...', an effect, whatever it does next.
 
 Each write class runs under the role in two layers:
   provisioned  the role as provisioned (default_transaction_read_only on);
@@ -66,6 +74,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
 
 import catalog_all  # noqa: E402
+import catalog_position  # noqa: E402
 import ro_census  # noqa: E402
 import ro_census_frozen  # noqa: E402
 import ro_role  # noqa: E402
@@ -212,50 +221,76 @@ async def _catalog(conn):
     return await catalog_all.snapshot(conn)
 
 
-def _effect(before, after):
-    """'OK' when the two readings are equal; otherwise 'CATALOG:' and the
-    catalogs whose rows differ."""
+async def _shared(conn):
+    """The shared rows catalog_all.RESTRICT leaves out (catalog_all.outside),
+    read in the position's REPEATABLE READ transaction (ruling R9-A1 (A))."""
+    return await catalog_all.outside(conn)
+
+
+def _effect(before, after, shared_before, shared_after, xid):
+    """The effect of a position that kept its transaction: 'CATALOG:' and the
+    catalogs whose measured rows differ; else 'SHARED:' and the shared
+    catalogs whose rows outside RESTRICT differ; else 'WRITE:xid' when the
+    transaction was assigned an xid (it wrote something no catalog reading
+    shows: a stored password, which pg_roles masks; round 10, report
+    catalog_all.py:138); else 'OK'."""
     k = catalog_all.keys({"added": sorted(after - before), "removed": sorted(before - after)})
-    return "CATALOG:" + ",".join(k) if k else "OK"
+    if k:
+        return "CATALOG:" + ",".join(k)
+    s = catalog_all.keys({"added": sorted(shared_after - shared_before),
+                          "removed": sorted(shared_before - shared_after)})
+    if s:
+        return "SHARED:" + ",".join(s)
+    return "WRITE:xid" if xid else "OK"
 
 
-def _harness_open(still_open, where):
-    """A rollback harness's transaction must still be open after the body it
-    ran. A body that ends it (COMMIT, ROLLBACK, END, a session commit) has
-    committed or discarded outside the harness, and the harness's rollback
-    undoes nothing it committed: refused, by the harness's name (round 9,
-    the class of the catalog test's _measure)."""
-    if not still_open:
-        raise AssertionError("%s: the program ended the harness transaction; "
-                             "nothing it committed is rolled back" % where)
+async def _verdict(conn, pos, monitor_dsn):
+    """The position's transaction identity at its end (catalog_position):
+    'ENDED:<token,vxid>' when the program ended the harness transaction
+    (an effect, whatever else it did: round 10, report
+    test_r7_ro_role_pg.py:257), else None; with the reading."""
+    seen = await catalog_position.check(conn, pos, monitor_dsn)
+    return (catalog_position.ended_effect(seen["ended"]) if seen["ended"] else None), seen
 
 
 async def raw_attempt(dsn, layer, body, expect=None):
-    """`body(conn)` on a fresh asyncpg connection, in a transaction that is
-    always rolled back; 'OK' or the SQLSTATE PostgreSQL returned. With
-    `expect`, the connection's identity is asserted first, and the catalogs
-    are read before and after the body (_effect: a body that succeeds and
-    changes any catalog row returns 'CATALOG:...', not 'OK')."""
+    """`body(conn)` on a fresh asyncpg connection, in a REPEATABLE READ
+    transaction that is always rolled back; 'OK' or the SQLSTATE PostgreSQL
+    returned. The position is bound to its transaction at both ends
+    (catalog_position): a body that ends it returns 'ENDED:...' on the
+    success and on the error path alike. With `expect`, the connection's
+    identity is asserted first, and the catalogs (and the shared rows
+    outside RESTRICT) are read before and after the body (_effect: a body
+    that succeeds and changes anything returns 'CATALOG:...', 'SHARED:...'
+    or 'WRITE:xid', not 'OK'). The connection is closed after the attempt:
+    no session state a body leaves reaches another attempt."""
     conn = await asyncpg.connect(dsn)
     try:
         if expect is not None:
             assert_identity(await conn.fetchrow(WHO_SQL), expect)
         if layer == GRANT_ONLY:
             await conn.execute("SET default_transaction_read_only = off")
-        tr = conn.transaction()
+        tr = conn.transaction(isolation="repeatable_read")
         await tr.start()
         try:
             if layer == GRANT_ONLY:
                 await conn.execute("SET TRANSACTION READ WRITE")
             ro = await conn.fetchval("SHOW transaction_read_only")
             assert ro == ("on" if layer == PROVISIONED else "off"), (layer, ro)
+            pos = await catalog_position.start(conn)
             before = await _catalog(conn) if expect is not None else None
+            shared = await _shared(conn) if expect is not None else None
             try:
                 await body(conn)
             except asyncpg.PostgresError as e:
-                return e.sqlstate
-            _harness_open(conn.is_in_transaction(), "raw_attempt")
-            return _effect(before, await _catalog(conn)) if expect is not None else "OK"
+                ended, _seen = await _verdict(conn, pos, dsn)
+                return ended or e.sqlstate
+            ended, seen = await _verdict(conn, pos, dsn)
+            if ended:
+                return ended
+            if expect is None:
+                return "OK"
+            return _effect(before, await _catalog(conn), shared, await _shared(conn), seen["xid"])
         finally:
             await tr.rollback()
     finally:
@@ -275,12 +310,33 @@ class RfRow(_Base):
 
 async def orm_attempt(dsn, layer, prog, expect=None):
     """`prog(db)` on a SQLAlchemy AsyncSession over asyncpg (the repo's
-    driver), always rolled back; 'OK' or the SQLSTATE. With `expect`, the
-    session's identity is asserted first, and the catalogs are read before
-    and after the program on the session's own driver connection, inside
-    its transaction (_effect)."""
+    driver), in a REPEATABLE READ transaction always rolled back; 'OK' or
+    the SQLSTATE. The position is bound to its transaction at both ends on
+    the session's own driver connection (catalog_position; 'ENDED:...' when
+    the program ended it, a session commit included). With `expect`, the
+    session's identity is asserted first, and the catalogs and the shared
+    rows outside RESTRICT are read before and after the program, inside its
+    transaction (_effect). The engine has no pool and is disposed after the
+    attempt: its connection is never reused.
+
+    On the error path the position is read when the error is raised, in the
+    engine's handle_error event, before SQLAlchemy's own error handling runs:
+    a failed flush makes the session roll back its transaction, and a
+    position read after that would report the session's rollback as the
+    program ending the transaction."""
     engine = create_async_engine(dsn.replace("postgresql://", "postgresql+asyncpg://"),
-                                 poolclass=NullPool)
+                                 poolclass=NullPool, isolation_level="REPEATABLE READ")
+    held, at_error = [], []
+
+    @event.listens_for(engine.sync_engine, "handle_error")
+    def _position_at_error(ctx):
+        if not held or at_error:
+            return
+        try:
+            at_error.append(ctx.connection.connection.dbapi_connection.run_async(
+                lambda c: catalog_position.check(c, held[0], dsn)))
+        except Exception as exc:  # the reading itself failed: never admitted
+            at_error.append({"ended": ["unread:%s" % type(exc).__name__], "xid": None, "via": "error"})
     if layer == GRANT_ONLY:
         @event.listens_for(engine.sync_engine, "connect")
         def _rw(dbapi_conn, _rec):
@@ -296,17 +352,26 @@ async def orm_attempt(dsn, layer, prog, expect=None):
                     assert_identity((await db.execute(text(WHO_SQL))).one(), expect)
                 ro = (await db.execute(text("SHOW transaction_read_only"))).scalar()
                 assert ro == ("on" if layer == PROVISIONED else "off"), (layer, ro)
-                driver = None
-                if expect is not None:
-                    driver = (await (await db.connection()).get_raw_connection()).driver_connection
-                    assert driver.is_in_transaction(), "the ORM session's transaction is not open"
-                before = await _catalog(driver) if driver is not None else None
+                driver = (await (await db.connection()).get_raw_connection()).driver_connection
+                pos = await catalog_position.start(driver)
+                before = await _catalog(driver) if expect is not None else None
+                shared = await _shared(driver) if expect is not None else None
+                held.append(pos)
                 try:
                     await prog(db)
                 except DBAPIError as e:
-                    return _sqlstate(e)
-                _harness_open(db.in_transaction(), "orm_attempt")
-                return _effect(before, await _catalog(driver)) if driver is not None else "OK"
+                    if at_error:
+                        seen = at_error[0]
+                        ended = catalog_position.ended_effect(seen["ended"]) if seen["ended"] else None
+                    else:
+                        ended, _seen = await _verdict(driver, pos, dsn)
+                    return ended or _sqlstate(e)
+                ended, seen = await _verdict(driver, pos, dsn)
+                if ended:
+                    return ended
+                if expect is None:
+                    return "OK"
+                return _effect(before, await _catalog(driver), shared, await _shared(driver), seen["xid"])
             finally:
                 await db.rollback()
     finally:
@@ -502,6 +567,9 @@ def _alter_own_default(route, key, value):
 def test_role_default_change_is_exposed_by_the_write_bound(env, key, value, route, layer):
     before = run(_role_setconfig(env["admin_ro_db_dsn"], ro_role.ROLE))
     assert before is not None and "default_transaction_read_only=on" in before, before
+    # round 10 (report catalog_all.py:99, swept by class): the role's
+    # settings in every database, not only the database-independent ones
+    every_before = run(_role_settings(env["admin_ro_db_dsn"], ro_role.ROLE))
     assert not [s for s in before if s.startswith(key + "=")], (
         "%s already carries %s in its setconfig %s: the control does not plant over it"
         % (ro_role.ROLE, key, before))
@@ -511,7 +579,9 @@ def test_role_default_change_is_exposed_by_the_write_bound(env, key, value, rout
     finally:
         run(_reset_own_key(env["ro_dsn"], key))
         after = run(_role_setconfig(env["admin_ro_db_dsn"], ro_role.ROLE))
+        every_after = run(_role_settings(env["admin_ro_db_dsn"], ro_role.ROLE))
     assert after == before, (before, after)
+    assert every_after == every_before, (every_before, every_after)
     assert got == ROLE_DEFAULT_EXPECTED[layer], (
         "ALTER ROLE CURRENT_USER SET %s, route %s, layer %s: %s, expected %s"
         % (key, route, layer, got, ROLE_DEFAULT_EXPECTED[layer]))
@@ -526,10 +596,11 @@ def test_role_reads_through_the_orm_change_no_catalog(env, layer):
     assert run(orm_attempt(env["ro_dsn"], layer, prog, ro_role.ROLE)) == "OK"
 
 
-def test_r9_role_harness_refuses_a_program_that_ends_it(env):
-    """raw_attempt and orm_attempt (round 9, the class of the catalog test's
-    _measure): a body that ends the harness transaction is refused by the
-    harness's name, on both routes and both layers. The bodies commit an
+def test_r9_role_harness_reports_a_program_that_ends_it(env):
+    """raw_attempt and orm_attempt (round 9's refusal, restated in round 10):
+    a body that ends the harness transaction is reported as an effect,
+    'ENDED:...', on both routes and both layers, with and without the
+    catalog reading; never 'OK' and never a SQLSTATE. The bodies commit an
     empty transaction: nothing reaches the database."""
     async def raw_body(conn):
         await conn.execute("COMMIT")
@@ -538,10 +609,268 @@ def test_r9_role_harness_refuses_a_program_that_ends_it(env):
         await db.commit()
 
     for layer in (PROVISIONED, GRANT_ONLY):
-        with pytest.raises(AssertionError, match="^raw_attempt: the program ended the harness transaction"):
-            run(raw_attempt(env["ro_dsn"], layer, raw_body))
-        with pytest.raises(AssertionError, match="^orm_attempt: the program ended the harness transaction"):
-            run(orm_attempt(env["ro_dsn"], layer, orm_prog))
+        for got in (run(raw_attempt(env["ro_dsn"], layer, raw_body)),
+                    run(orm_attempt(env["ro_dsn"], layer, orm_prog)),
+                    run(raw_attempt(env["ro_dsn"], layer, raw_body, ro_role.ROLE)),
+                    run(orm_attempt(env["ro_dsn"], layer, orm_prog, ro_role.ROLE))):
+            assert got.startswith("ENDED:"), (layer, got)
+
+
+# Round 10, report test_r7_ro_role_pg.py:257: round 9 checked only that SOME
+# transaction was open when the program returned, so a program that ended the
+# harness transaction and began another one passed as unchanged. Each body
+# here ends the harness transaction; every one must come back 'ENDED:...',
+# on the success path and on the error path alike.
+R10_ENDING_RAW = collections.OrderedDict([
+    ("commit_begin", "SET application_name = 'r9_probe'; COMMIT; BEGIN; RESET application_name"),
+    ("commit_and_chain", "COMMIT AND CHAIN"),
+    ("rollback_and_chain", "ROLLBACK AND CHAIN"),
+    ("rollback", "ROLLBACK"),
+    ("end_begin", "END; BEGIN"),
+    ("abort_begin", "ABORT; BEGIN"),
+    ("prepare_transaction", "PREPARE TRANSACTION 'rf10_cat_prep'"),
+    ("commit_begin_error", "COMMIT; BEGIN; SELECT 1 / 0"),
+])
+
+
+async def _orm_commit_begin(db):
+    await db.execute(text("SET application_name = 'r9_probe'"))
+    await db.commit()
+    await db.execute(text("RESET application_name"))
+
+
+async def _orm_commit_begin_error(db):
+    await db.commit()
+    await db.execute(text("SELECT 1 / 0"))
+
+
+def _orm_text(stmt):
+    async def prog(db):
+        await db.execute(text(stmt))
+    return prog
+
+
+def _orm_text_pair(first, second):
+    async def prog(db):
+        await db.execute(text(first))
+        await db.execute(text(second))
+    return prog
+
+
+def _orm_text_then_flush(stmt):
+    """stmt, then a flush that fails (a duplicate key): SQLAlchemy rolls its
+    session back after the failed flush, after the position is read."""
+    async def prog(db):
+        await db.execute(text(stmt))
+        await db.execute(text("BEGIN"))
+        db.add(RfRow(id=1, x=1))
+        await db.flush()
+    return prog
+
+
+R10_ENDING_ORM = collections.OrderedDict([
+    ("commit_begin", _orm_commit_begin),
+    ("text_commit_then_begin", _orm_text_pair("COMMIT", "BEGIN")),
+    ("text_commit_then_flush_error", _orm_text_then_flush("COMMIT")),
+    ("commit_and_chain", _orm_text("COMMIT AND CHAIN")),
+    ("rollback_and_chain", _orm_text("ROLLBACK AND CHAIN")),
+    ("rollback", _orm_text("ROLLBACK")),
+    ("prepare_transaction", _orm_text("PREPARE TRANSACTION 'rf10_cat_prep'")),
+    ("commit_begin_error", _orm_commit_begin_error),
+])
+
+
+@pytest.mark.parametrize("layer", LAYERS)
+@pytest.mark.parametrize("name", list(R10_ENDING_RAW))
+def test_r10_n_ro_role_257_raw(env, name, layer):
+    got = run(raw_attempt(env["ro_dsn"], layer, _sql(R10_ENDING_RAW[name]), ro_role.ROLE))
+    assert got.startswith("ENDED:"), (name, layer, got)
+
+
+@pytest.mark.parametrize("layer", LAYERS)
+@pytest.mark.parametrize("name", list(R10_ENDING_ORM))
+def test_r10_n_ro_role_257_orm(env, name, layer):
+    got = run(orm_attempt(env["ro_dsn"], layer, R10_ENDING_ORM[name], ro_role.ROLE))
+    assert got.startswith("ENDED:"), (name, layer, got)
+
+
+def test_r10_ro_role_257_negative_control(env):
+    """The same harness, a body that keeps its transaction: 'OK'."""
+    for layer in LAYERS:
+        assert run(raw_attempt(env["ro_dsn"], layer, _sql("SELECT 1; SELECT 2"), ro_role.ROLE)) == "OK"
+        assert run(orm_attempt(env["ro_dsn"], layer, _orm_text("SELECT 1"), ro_role.ROLE)) == "OK"
+
+
+def test_r10_prepare_transaction_outcome_on_this_cluster(env):
+    """PREPARE TRANSACTION on the measured cluster: with max_prepared_transactions
+    0 it returns 55000 and the transaction is gone (PostgreSQL ends a
+    transaction whose PREPARE fails); the harness reports that position
+    ENDED (test_r10_n_ro_role_257_*[prepare_transaction])."""
+    async def probe():
+        conn = await asyncpg.connect(env["ro_dsn"])
+        try:
+            limit = await conn.fetchval("SHOW max_prepared_transactions")
+            await conn.execute("BEGIN; SET LOCAL application_name = 'rf10_inside'")
+            try:
+                await conn.execute("PREPARE TRANSACTION 'rf10_cat_prep'")
+                state = "prepared"
+            except asyncpg.PostgresError as e:
+                state = e.sqlstate
+            # the next statement runs (no 25P02) and no longer sees the
+            # transaction's SET LOCAL: the transaction ended with the failure
+            name = await conn.fetchval("SHOW application_name")
+            return limit, state, conn.is_in_transaction(), name
+        finally:
+            await conn.close()
+    limit, state, open_after, name = run(probe())
+    print("r10 PREPARE TRANSACTION: max_prepared_transactions=%s, outcome %s, transaction open after: %s, "
+          "application_name after: %r" % (limit, state, open_after, name))
+    assert limit == "0", limit
+    assert state == "55000", state
+    assert open_after is False and name != "rf10_inside", (open_after, name)
+
+
+# Round 10, reports catalog_all.py:99 (the measured role's settings in another
+# database) and catalog_all.py:138 (a stored password). These plant only on an
+# rf10_cat_* role this run created: the stand-in measurer itself
+# (rf10_cat_gate), or, under a superuser, the role R10_CAT_ROLE names. Every
+# plant runs inside the harness transaction, which is rolled back, and is
+# undone again in a finally block (RESET, PASSWORD NULL).
+
+PLANT_VALUE = "rf10_cat_fixed_value"
+
+
+async def _who(dsn):
+    conn = await asyncpg.connect(dsn)
+    try:
+        return await conn.fetchrow("SELECT current_user::text AS me, "
+                                   "(SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) AS su")
+    finally:
+        await conn.close()
+
+
+def _plant_role(dsn):
+    """(measurer, planted role, superuser): the stand-in measures itself;
+    a superuser measures R10_CAT_ROLE, an rf10_cat_* role the run created."""
+    w = run(_who(dsn))
+    if w["me"].startswith("rf10_cat_"):
+        return w["me"], w["me"], bool(w["su"])
+    role = os.environ.get("R10_CAT_ROLE") or ""
+    if not (w["su"] and role.startswith("rf10_cat_")):
+        pytest.fail("round-10 plants run only on an rf10_cat_* role: the measurer %s is not one, and "
+                    "R10_CAT_ROLE=%r does not name one under a superuser" % (w["me"], role))
+    return w["me"], role, True
+
+
+def _ident(role):
+    return '"%s"' % role
+
+
+async def _admin_exec(dsn, stmt):
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(stmt)
+    finally:
+        await conn.close()
+
+
+async def _role_settings(dsn, role):
+    conn = await asyncpg.connect(dsn)
+    try:
+        rows = await conn.fetch(
+            "SELECT s.setdatabase::int8 AS db, s.setconfig::text AS cfg FROM pg_catalog.pg_db_role_setting s "
+            "JOIN pg_catalog.pg_roles r ON r.oid = s.setrole WHERE r.rolname = $1 ORDER BY 1", role)
+        return [(r["db"], r["cfg"]) for r in rows]
+    finally:
+        await conn.close()
+
+
+def _prog(route, stmt):
+    return _sql(stmt) if route == RAW else _orm_text(stmt)
+
+
+@pytest.mark.parametrize("route", (RAW, ORM))
+def test_r10_n_ro_role_catalog_all_99(env, route):
+    """ALTER ROLE <measured or planted role> IN DATABASE postgres SET, in the
+    grant_only layer: the stand-in sees its own row (RESTRICT now keys
+    pg_db_role_setting on the role in every database: 'CATALOG:...'); a
+    superuser sees the planted role's row among the shared rows outside
+    RESTRICT ('SHARED:...'). Round 9 filtered the row to this database and
+    returned 'OK'."""
+    dsn = env["admin_ro_db_dsn"]
+    me, role, su = _plant_role(dsn)
+    target = "CURRENT_USER" if role == me else _ident(role)
+    before = run(_role_settings(dsn, role))
+    try:
+        got = run((raw_attempt if route == RAW else orm_attempt)(
+            dsn, GRANT_ONLY, _prog(route, "ALTER ROLE %s IN DATABASE postgres SET application_name = 'r9_probe'"
+                                   % target), me))
+    finally:
+        run(_admin_exec(dsn, "ALTER ROLE %s IN DATABASE postgres RESET application_name" % target))
+    assert run(_role_settings(dsn, role)) == before, before
+    want = "SHARED:pg_db_role_setting" if role != me else "CATALOG:pg_db_role_setting"
+    print("r10 catalog_all.py:99 route %s, measurer %s, planted %s: %s" % (route, me, role, got))
+    assert got == want, (route, me, role, got)
+
+
+@pytest.mark.parametrize("route", (RAW, ORM))
+def test_r10_n_ro_role_catalog_all_138(env, route):
+    """ALTER ROLE <role> PASSWORD '<fixed value>' in the grant_only layer.
+    Under a superuser (rolpassword route 'digest') the planted role's stored
+    value is compared as its md5 among the shared rows outside RESTRICT:
+    'SHARED:pg_authid'. Under the stand-in (route 'unmeasured': pg_roles masks
+    it) the change to its own password reaches no catalog reading and is
+    reported by its xid: 'WRITE:xid'. Round 9 returned 'OK' on both."""
+    dsn = env["admin_ro_db_dsn"]
+    me, role, su = _plant_role(dsn)
+    route_name = run(_routes(dsn))["rolpassword"]
+    assert route_name == ("digest" if su else "unmeasured"), (su, route_name)
+    try:
+        got = run((raw_attempt if route == RAW else orm_attempt)(
+            dsn, GRANT_ONLY, _prog(route, "ALTER ROLE %s PASSWORD '%s'" % (_ident(role), PLANT_VALUE)), me))
+    finally:
+        run(_admin_exec(dsn, "ALTER ROLE %s PASSWORD NULL" % _ident(role)))
+    print("r10 catalog_all.py:138 route %s, measurer %s (rolpassword %s), planted %s: %s"
+          % (route, me, route_name, role, got))
+    assert got == ("SHARED:pg_authid" if su else "WRITE:xid"), (route, me, role, got)
+
+
+def test_r10_n_ro_role_catalog_all_138_other_role(env):
+    """Under the stand-in, another role's password is out of reach: ALTER ROLE
+    on R10_CAT_ROLE returns 42501 (no CREATEROLE), so the unmeasured field
+    cannot be changed for any role but the measurer's own. Under a superuser
+    this case is the digest route above."""
+    dsn = env["admin_ro_db_dsn"]
+    w = run(_who(dsn))
+    other = os.environ.get("R10_CAT_ROLE") or ""
+    if w["su"]:
+        print("r10 catalog_all.py:138 other role: measurer %s is a superuser; the digest route covers it" % w["me"])
+        return
+    assert other.startswith("rf10_cat_") and other != w["me"], (
+        "R10_CAT_ROLE must name an rf10_cat_* role other than the stand-in: %r" % other)
+    got = run(raw_attempt(dsn, GRANT_ONLY, _sql("ALTER ROLE %s PASSWORD '%s'" % (_ident(other), PLANT_VALUE)),
+                          w["me"]))
+    print("r10 catalog_all.py:138 other role %s under %s: %s" % (other, w["me"], got))
+    assert got == "42501", got
+
+
+async def _routes(dsn):
+    conn = await asyncpg.connect(dsn)
+    try:
+        return await catalog_all.routes(conn)
+    finally:
+        await conn.close()
+
+
+def test_r10_routes_state_this_run(env):
+    """The run's measurer and its routes (catalog_all.routes), printed for the
+    log of record: rolpassword 'digest' under a superuser, else
+    'unmeasured', with pg_authid.rolpassword in the unmeasured list."""
+    r = run(_routes(env["admin_ro_db_dsn"]))
+    print("r10 routes: measurer %s superuser %s rolpassword %s; outside RESTRICT: %s; unmeasured: %s"
+          % (r["measurer"], r["superuser"], r["rolpassword"], r["outside_restrict"], r["unmeasured"]))
+    assert r["rolpassword"] == ("digest" if r["superuser"] else "unmeasured"), r
+    assert (("pg_authid", "rolpassword") in [(u[0], u[1]) for u in r["unmeasured"]]) == (not r["superuser"]), r
 
 
 def test_privilege_census_is_empty(env):
