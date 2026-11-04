@@ -11,7 +11,8 @@
 #      pre-image copies of the cfg and of each present log into <outdir>/pre/, each proven by digest;
 #   5. the install (ft_vm_install.sh install: the lane DLL, its digest equal to the lanes folder's), the sentinel
 #      armed, ft_vm_launch.ps1;
-#   6. in every outcome after step 4 (trap, the lease still held): ROUNDS quit if it still runs; the sentinel removed;
+#   6. in every outcome after step 4 (trap, the lease still held): a ROUNDS still running is closed by identity
+#      (ft_close_leased.ps1, R6-A3.11.9 FIX-6b; quit_game.ps1 only when its identity is not shown); the sentinel removed;
 #      VR6's second listing (<outdir>/inventory-sitting.txt: the config folder and LogOutput-prev.log as the sitting
 #      left them, compared with PRE: any change fails VR6); the install reverted (ft_vm_install.sh revert); the
 #      sitting's logs moved into <outdir>/sitting/ and the pre-images put back; the cfg put back; the POST inventory
@@ -62,8 +63,14 @@ finish() {
   if [ "$LEASED" = "1" ]; then
     if [ "$INVENTORIED" = "1" ]; then
       bad=0
+      if running && [ -f "$OUT/launch-$MODE.pid" ]; then
+        # FIX-6b (R6-A3.11.9): the leased game is closed by identity, never through the rig's quit lever
+        echo "$(st) FT-VM-LEASED ROUNDS still running at cleanup: close by identity ($OUT/launch-$MODE.pid)"
+        powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$HERE/ft_close_leased.ps1")" -PidFile "$(cygpath -w "$OUT/launch-$MODE.pid")" | tr -d '\r'
+        echo "$(st) FT-VM-LEASED close by identity rc=${PIPESTATUS[0]}"
+      fi
       if running; then
-        echo "$(st) FT-VM-LEASED ROUNDS still running at cleanup: quit_game.ps1 -Holder frame-time"
+        echo "$(st) FT-VM-LEASED ROUNDS still running at cleanup, identity not shown: quit_game.ps1 -Holder frame-time"
         powershell -NoProfile -File C:/broadcast/quit_game.ps1 -Holder frame-time | tr -d '\r'
         for i in $(seq 1 20); do running || break; sleep 3; done
       fi

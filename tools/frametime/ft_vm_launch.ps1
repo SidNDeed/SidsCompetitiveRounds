@@ -1,8 +1,11 @@
 # ft_vm_launch.ps1 -Mode menu|match -Out <file>: one FrameTime launch on the VM seat (ruling FRAME-TIME-ROUND-R4),
 # run UNDER the broadcast pause lease by ft_vm_leased.sh, never alone. Launches ROUNDS, captures the new PID, polls
 # BepInEx\LogOutput.log every 15 s for the run's end line (menu: the terminal settled line after menu_done; match:
-# "flushed g=16", the last game's lines written after its settle), copies the whole log to -Out, then quits gracefully
-# (C:\broadcast\quit_game.ps1); Stop-Process by the captured PID only if the graceful quit fails.
+# "flushed g=16", the last game's lines written after its settle), copies the whole log to -Out, then closes the game
+# it launched BY IDENTITY through ft_close_lib.ps1 (ruling R6-A3.11.9, FIX-6b): the pid file below must name the
+# running ROUNDS (pid, and a start inside [launch epoch, stamp]); a graceful close request (CloseMainWindow) first,
+# Stop-Process on that pid only at the lib's named bound. It never calls C:\broadcast\quit_game.ps1: that lever is the
+# broadcast rig's and keeps its full refusal.
 # Exit: 0 end line seen and log copied; 3 refused (ROUNDS already running); 4 no process; 5 end line not seen.
 # The moment the pid is captured it writes <dir of -Out>\launch-<Mode>.pid, one line
 # "FT-VM-LAUNCH-PID pid=<pid> epoch=<launch epoch s> stamp=<utc>" (temp file, then rename): the signal a watcher
@@ -56,11 +59,10 @@ Start-Sleep -Seconds 5
 try { $t = ReadShared $log; [System.IO.File]::WriteAllText($Out, $t); echo "$(St) FT-VM-LAUNCH log copied: $Out" }
 catch { echo "$(St) FT-VM-LAUNCH log copy FAILED: $($_.Exception.Message)"; $seen = $false }
 if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
-    & powershell -NoProfile -File 'C:\broadcast\quit_game.ps1' -Holder frame-time | ForEach-Object { "quit_game: $_" }
-    for ($i = 0; $i -lt 20 -and (Get-Process -Id $procId -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Seconds 3 }
-    if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
-        Stop-Process -Id $procId -Force; echo "$(St) FT-VM-LAUNCH quit: stopped pid $procId"
-    } else { echo "$(St) FT-VM-LAUNCH quit: graceful" }
+    . (Join-Path $PSScriptRoot 'ft_close_lib.ps1')
+    # the emitter writes to the console directly: a Write-Output inside it would join the function's return value
+    $crc = Close-FtLeasedGame $pidFile { param($s) [Console]::Out.WriteLine("$(St) FT-VM-LAUNCH $s") }
+    echo "$(St) FT-VM-LAUNCH close by identity rc=$crc (0 graceful, 2 stopped at the bound, 3 still running, 7 identity not shown)"
 }
 echo "$(St) FT-VM-LAUNCH $Mode end line seen: $(if ($seen) { 'yes' } else { 'no' })"
 if ($seen) { exit 0 } else { exit 5 }
