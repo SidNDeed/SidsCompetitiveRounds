@@ -2315,6 +2315,100 @@ def test_r9_admission_order_and_sql_text_are_bound():
             assert got is not None and want in got, (want, got)
 
 
+def test_r9_gate_statement_order_is_bound():
+    """The ORDER rule over the gate walks (ruling REHEARSAL-R9-PRE (1), W30b).
+    SEQUENCES binds the order of an admission span; every other statement a
+    gate check reads stood at no frozen place, so a swap of two statements
+    keeping every shape, binding and SQL text was admitted. Now every
+    statement of every checked unit stands at its frozen order key
+    (grammar_shapes_gate.GATE_ORDERS, pinned here by size and digest). The
+    class sweep: over the units the real walks check (their trace), every
+    adjacent pair of statements of one list (a site span's own statements
+    included) with different headers is swapped in a copy. With the marker
+    off (the round-8 grammar plus SEQUENCES and the SQL-text binding) the
+    swaps no other rule refuses are the free pairs, counted and frozen here
+    (185 before the rule); with the marker on each of them is refused, by the
+    order rule (it runs after every other check of a unit). The real units are
+    admitted with the marker on (test_r7_grammar_covers_every_walked_span_and_body)."""
+    import copy
+    import hashlib
+    orders = sorted(_gg.GATE_ORDERS)
+    digest = hashlib.sha256(repr(orders).encode("utf-8")).hexdigest()[:16]
+    assert (len(orders), digest) == (259, "d11b1fefc69ad25c"), (len(orders), digest)
+    assert _gg.ORDERED in _gg.ORDER_BINDINGS
+    assert _gg.GATE_ORDERS <= _gg.ORDER_BINDINGS
+    on = _gg.ORDER_BINDINGS
+    off = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+    trace = []
+    admission_sites()
+    _GATE_POLICIES.clear()
+    _G["trace"] = trace
+    try:
+        test_h3_every_admission_site_uses_shared_gate_recheck_and_rollback()
+        test_h3_direct_refusal_is_the_claims_first_write()
+        assert _hold_replay_problem(_Walk(match_hold, "replay"),
+                                    match_hold._open_replay) is None
+    finally:
+        _G["trace"] = None
+        _GATE_POLICIES.clear()
+
+    def check(role, fn, stmts, bindings):
+        _gg.ORDER_SWITCH["bindings"] = bindings
+        try:
+            if role == "site":
+                _gg.check_site(fn, stmts, "<r9>", 0)
+            else:
+                _gg.check_body(fn, role, "<r9>", 0)
+        except _gg.Refusal as e:
+            return e.args[0]
+        finally:
+            _gg.ORDER_SWITCH["bindings"] = None
+        return None
+
+    units = {}
+    for role, _key, trees, _n, _path, fn in trace:
+        units[(role, id(fn), tuple(id(x) for x in trees))] = (role, fn, trees)
+    free = 0
+    for role, fn0, trees0 in units.values():
+        fn = copy.deepcopy(fn0)
+        m = {id(a): b for a, b in zip(ast.walk(fn0), ast.walk(fn))}
+        trees = [m[id(x)] for x in trees0]
+        pairs = []
+        roots = [fn]
+        if role == "site":
+            roots = trees
+            for x in ast.walk(fn):
+                for _fld, v in ast.iter_fields(x):
+                    if isinstance(v, list) and any(s is trees[0] for s in v):
+                        j = [k for k, s in enumerate(v) if s is trees[0]][0]
+                        assert all(v[j + k] is trees[k] for k in range(len(trees))), fn.name
+                        pairs += [(v, j + i, i) for i in range(len(trees) - 1)]
+        for r in roots:
+            for x, _p, _f in _sg.visit(r):
+                for _fld, v in ast.iter_fields(x):
+                    if isinstance(v, list) and len(v) > 1 and all(
+                            isinstance(s, ast.stmt) for s in v):
+                        pairs += [(v, i, None) for i in range(len(v) - 1)]
+        for v, i, at in pairs:
+            if _sg.header(v[i]) == _sg.header(v[i + 1]):
+                continue
+            v[i], v[i + 1] = v[i + 1], v[i]
+            if at is not None:
+                trees[at], trees[at + 1] = trees[at + 1], trees[at]
+            got_off = check(role, fn, trees, off)
+            got_on = check(role, fn, trees, on)
+            v[i], v[i + 1] = v[i + 1], v[i]
+            if at is not None:
+                trees[at], trees[at + 1] = trees[at + 1], trees[at]
+            if got_off is not None:
+                continue
+            assert got_on is not None and "outside its frozen order" in got_on, (
+                role, fn.name, i, got_on)
+            free += 1
+    assert free == 185, free
+    print(f"r9 gate order: {len(orders)} keys, {len(units)} units, {free} free pairs refused")
+
+
 def test_r9_module_sql_constant_is_bound():
     """Round 9 (the gr child's question 1, bound by W30b at the merge): the
     module constant _rdm_attempt reads (`_RDM_ATTEMPT_SQL`, a SQL_NAMES name

@@ -700,6 +700,337 @@ def _module_sql_problem(name, rel, want, src):
 R9_RECORD = {"sink": None}
 
 
+# Round 9 (ruling REHEARSAL-R9-PRE (1), W30b): the ORDER rule over the gate
+# walks, as closed_walk's over the a1 spans. SEQUENCES binds the order of
+# an admission span; the order of every other statement a gate check reads
+# was free: a swap of two statements keeping every shape, binding and SQL
+# text was admitted. Every statement of every checked unit (a body checked
+# whole: its definition and everything under it; a site span: each of its
+# statements and everything under them) now stands at a frozen key:
+# (shape_grammar.header_digest of the statement, 'order', the function's
+# name, the index path from the function's definition, the definition at
+# ()). GATE_ORDERS was TAKEN ONCE from the real gate walks at the round-9
+# tip by RF/r9/tip/gate_order_rule.py (259 keys; the ORDER_RECORD sink over
+# test_r7_grammar_covers_every_walked_span_and_body) and frozen; never
+# regenerated: code is conformed to it. ORDER_BINDINGS carries the marker
+# ORDERED that switches the rule on, and every key. ORDER_SWITCH lets a test
+# read a unit with another set (the free-pair sweep reads each swap with the
+# marker off as well); None means ORDER_BINDINGS.
+ORDERED = ("<orders>",)
+ORDER_RECORD = {"sink": None}
+ORDER_SWITCH = {"bindings": None}
+GATE_ORDERS = frozenset({
+    ('01602505519dd810', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[3]')),
+    ('01b611593461db74', 'order', '_rdm_live_or_lapse', ('body[3]', 'body[0]')),
+    ('01efad3d5d1a4363', 'order', '_asm_readmit_work', ('body[2]', 'body[0]')),
+    ('0285a3a6b995edd0', 'order', '_rdm_end_hold', ('body[8]',)),
+    ('02e78a62449d41d3', 'order', '_lease_acquire_many', ('body[2]',)),
+    ('06def6e6593affac', 'order', '_open_replay', ('body[1]',)),
+    ('073c60e955e4ee16', 'order', 'queue_poll', ('body[24]', 'body[9]', 'body[9]')),
+    ('0970dabd40eb750b', 'order', '_guard_open_identities', ('body[0]',)),
+    ('09f2af94401bfe9e', 'order', '_ffa_lobby_enroll_caller', ('body[10]', 'body[0]')),
+    ('0a452f6f408b906d', 'order', '_open_attempt_row', ('body[0]',)),
+    ('0af48c051f0e9ea9', 'order', '_open_replay', ('body[4]', 'body[1]')),
+    ('100d4920fee326c3', 'order', '_asm_readmit_work', ('body[3]', 'body[0]')),
+    ('13b5fd7b9f466b05', 'order', '_rdm_hold_s', ('body[1]',)),
+    ('149b70a756c9fb62', 'order', '_ffa_queue_poll_inner', ('body[45]',)),
+    ('14af1e2626555d3e', 'order', '_state_payload', ('body[1]',)),
+    ('14e759b1d07fbb49', 'order', '_guard_identities', ('body[2]', 'body[0]')),
+    ('1632fd61e9b3c47f', 'order', '_rdm_claim', ('body[4]',)),
+    ('1738b034ed3d760d', 'order', '_deadline_s', ('body[1]',)),
+    ('17dfb7fef862bc50', 'order', '_asm_readmit_work', ('body[1]',)),
+    ('1855bf517d05136e', 'order', '_rdm_end_hold', ('body[6]', 'body[0]')),
+    ('188c5c1f1ab2b71b', 'order', 'queue_ready', ('body[21]', 'body[7]')),
+    ('18f9d8951afe8f7b', 'order', '_asm_readmit_work', ('body[4]', 'body[0]')),
+    ('1a4dc3784d69d5ca', 'order', '_asm_readmit_work', ('body[5]', 'body[0]')),
+    ('1b810938cdf5b427', 'order', '_open_replay', ('body[2]', 'body[1]')),
+    ('1b810938cdf5b427', 'order', '_open_replay', ('body[8]', 'body[0]')),
+    ('1cfb6f48946ee882', 'order', '_effective_closure', ('body[4]', 'body[0]')),
+    ('1fe9d8f52423d2a0', 'order', 'match_hold_claim', ('body[8]',)),
+    ('207a510bf2b01335', 'order', 'ovt_lobby_start', ('body[19]',)),
+    ('20b57da30230db3b', 'order', '_deadline_s', ('body[0]', 'body[0]')),
+    ('20b57da30230db3b', 'order', '_rdm_hold_s', ('body[0]', 'body[0]')),
+    ('21e2082a9a179ffd', 'order', '_refuse_attempt', ('body[0]',)),
+    ('249fb8accf1dbd94', 'order', 'queue_poll', ('body[28]', 'body[19]')),
+    ('273baed0047df662', 'order', '_state_payload', ()),
+    ('2755ab340b6d3b1c', 'order', '_state_word', ('body[1]', 'body[0]')),
+    ('2a8fbe34c0daf72e', 'order', '_asm_id8', ('body[0]',)),
+    ('2baf99fa85f964c9', 'order', '_guard_open_identities', ('body[2]', 'body[0]')),
+    ('2cb73e40988e5602', 'order', '_asm_readmit_work', ('body[0]',)),
+    ('30518193bab3ffc9', 'order', '_rdm_end_hold', ('body[6]', 'orelse[0]')),
+    ('3160a6848c805f44', 'order', '_asm_readmit_work', ('body[6]', 'body[0]')),
+    ('3175005fc289a31b', 'order', '_persistable_exit_cause', ('body[1]',)),
+    ('32f0209e5a272d36', 'order', '_ffa_lobby_enroll_caller', ('body[10]', 'body[0]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', '_ffa_lock_roster', ('body[23]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', '_ffa_queue_poll_inner', ('body[45]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', '_lobby_enroll_caller', ('body[17]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', '_open_replay', ('body[2]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', '_open_replay', ('body[3]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', '_open_replay', ('body[4]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', '_open_replay', ('body[7]',)),
+    ('32f0209e5a272d36', 'order', '_team_relock_existing_series', ('body[4]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'match_hold_claim', ('body[9]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'ovt_lobby_start', ('body[19]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'ovt_queue_poll', ('body[35]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'ovt_series_continuation', ('body[31]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'queue_poll', ('body[24]', 'body[9]', 'body[9]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'queue_poll', ('body[28]', 'body[19]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'queue_ready', ('body[21]', 'body[12]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'queue_ready', ('body[21]', 'body[7]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'team_lobby_start', ('body[22]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[12]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'team_queue_poll', ('body[61]', 'body[0]')),
+    ('32f0209e5a272d36', 'order', 'team_series_continuation', ('body[37]', 'body[0]')),
+    ('33e560871ba313cf', 'order', '_hold_row', ('body[2]',)),
+    ('343fe0abaea0220d', 'order', '_effective_closure', ('body[3]', 'body[1]', 'body[0]')),
+    ('353bf5581ceb3bb4', 'order', 'match_hold_claim', ('body[9]', 'body[2]')),
+    ('360cdaf27bbdcd17', 'order', '_effective_closure', ('body[3]',)),
+    ('36658cdc38c2de5b', 'order', 'match_hold_open', ('body[12]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', '_ffa_lock_roster', ('body[23]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', '_ffa_queue_poll_inner', ('body[45]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', '_team_relock_existing_series', ('body[4]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', 'ovt_queue_poll', ('body[35]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', 'ovt_series_continuation', ('body[31]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', 'queue_poll', ('body[24]', 'body[9]', 'body[9]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', 'queue_poll', ('body[28]', 'body[19]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', 'queue_ready', ('body[21]', 'body[12]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', 'queue_ready', ('body[21]', 'body[7]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[12]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', 'team_queue_poll', ('body[61]', 'body[1]')),
+    ('38bdc57d3c7f2b95', 'order', 'team_series_continuation', ('body[37]', 'body[1]')),
+    ('38fd3b1df621f55b', 'order', '_rdm_claim', ('body[12]', 'body[0]')),
+    ('38fd3b1df621f55b', 'order', '_rdm_claim', ('body[7]', 'body[0]')),
+    ('39448462a084066c', 'order', '_rdm_refuse', ('body[3]',)),
+    ('3cb907f6b61ffde0', 'order', '_asm_deferred_departure', ('body[0]',)),
+    ('3d0e9a3e29bf2d38', 'order', '_effective_closure', ('body[4]',)),
+    ('4153e2e9d38eee07', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[12]')),
+    ('42d2654c559a78b7', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[3]', 'body[0]')),
+    ('437861ab4f76c62e', 'order', '_refuse_attempt', ('body[1]',)),
+    ('437861ab4f76c62e', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[4]')),
+    ('4440b86db5eca746', 'order', '_open_replay', ()),
+    ('44e39627747e087a', 'order', '_state_word', ('body[2]',)),
+    ('458fdd4cb4ef5f36', 'order', '_asm_readmit_work', ('body[3]',)),
+    ('46ac4bb6d046d2c7', 'order', '_rdm_claim', ('body[5]',)),
+    ('46c5f84f245f4103', 'order', '_rdm_end_hold', ('body[7]',)),
+    ('4930537aa94026a3', 'order', '_asm_deferred_departure', ('body[1]',)),
+    ('4a6e89450c96f0c0', 'order', 'team_queue_poll', ('body[61]',)),
+    ('4b2f4d8a1d014f4a', 'order', '_state_payload', ('body[2]',)),
+    ('4cac6da5be4115b5', 'order', '_ctx_now', ()),
+    ('4cbc17ac7d07d104', 'order', '_rdm_live_or_lapse', ('body[1]',)),
+    ('4de3fc17b25a82a6', 'order', '_open_replay', ('body[9]',)),
+    ('4f1bfe707c91236d', 'order', 'match_hold_claim', ('body[9]', 'body[1]')),
+    ('4f1bfe707c91236d', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[1]')),
+    ('500bdc02b389e4b5', 'order', '_rdm_end_hold', ('body[3]',)),
+    ('50be41abee9be671', 'order', '_rdm_claim', ('body[10]', 'body[0]')),
+    ('50be41abee9be671', 'order', '_rdm_claim', ('body[8]', 'body[0]')),
+    ('51db60ce9de08f3b', 'order', '_write_open_attempt', ('body[0]',)),
+    ('52d43e89028fe5b4', 'order', '_rdm_claim', ('body[10]',)),
+    ('567ea7e76c605e78', 'order', '_asm_id8', ()),
+    ('58461a246e8068e8', 'order', '_rdm_live_or_lapse', ('body[4]', 'body[0]')),
+    ('59de7ad571458349', 'order', '_rdm_line', ()),
+    ('5b1822e561aac657', 'order', '_rdm_live_or_lapse', ('body[1]', 'body[0]')),
+    ('5be61eace831bbf9', 'order', '_rdm_refuse', ('body[2]',)),
+    ('5d6663953fa01c90', 'order', '_asm_readmit_work', ('body[6]',)),
+    ('5d694f85194f4e57', 'order', '_rdm_end_hold', ()),
+    ('5dffcf1359ee79e2', 'order', '_rdm_row', ('body[0]',)),
+    ('5f0eaeb5ce5e59ef', 'order', '_asm_readmit_on', ('body[0]',)),
+    ('5f166bb4e1e20daa', 'order', 'ovt_series_continuation', ('body[31]',)),
+    ('5f170cb691897e0d', 'order', '_deadline_s', ()),
+    ('5f1c994a1d822836', 'order', '_guard_open_identities', ()),
+    ('5f205137b6829b82', 'order', '_rdm_attempt', ('body[1]',)),
+    ('5fe8bc750f8c74a1', 'order', '_state_word', ()),
+    ('60d1f2fcdf2f78e3', 'order', '_rdm_end_hold', ('body[1]',)),
+    ('60fa549bfb6b7b5b', 'order', '_refused', ()),
+    ('622fd094ed5ce1e5', 'order', '_persistable_exit_cause', ()),
+    ('63b0c8d5c2955121', 'order', '_hold_row', ('body[1]',)),
+    ('669653b114bc6008', 'order', '_rdm_refuse', ('body[4]',)),
+    ('66b9a4850f3473d2', 'order', 'queue_ready', ('body[21]', 'body[12]')),
+    ('68316dda8e82622b', 'order', '_asm_readmit_on', ()),
+    ('693d07d51fd26069', 'order', '_rdm_claim', ('body[5]', 'body[0]')),
+    ('6a286114150d06da', 'order', '_asm_readmit_work', ('body[5]',)),
+    ('6a321cd17b2f2594', 'order', '_state_word', ('body[3]',)),
+    ('6aef2b57f2f5fd5a', 'order', '_effective_closure', ('body[1]',)),
+    ('6b29d59c3be4e7c2', 'order', '_rdm_live_or_lapse', ('body[3]',)),
+    ('6c367b8e9c869eea', 'order', 'match_hold_claim', ('body[9]', 'body[4]', 'body[0]')),
+    ('6f50ec3f71fa40a3', 'order', '_open_attempt_row', ()),
+    ('6fa79ea6bb64bf63', 'order', 'ovt_queue_poll', ('body[35]',)),
+    ('7087b9d2bdf2d1a5', 'order', '_ctx_now', ('body[0]',)),
+    ('71374d76546e7ada', 'order', '_rdm_claim', ('body[6]',)),
+    ('72a39f1ba2d93d57', 'order', '_rdm_end_hold', ('body[9]',)),
+    ('7455c67c8f665afb', 'order', '_write_open_attempt', ()),
+    ('75146ec0a8e5a4af', 'order', '_deadline_s', ('body[0]',)),
+    ('766f98a81b978d6c', 'order', '_rdm_end_hold', ('body[4]',)),
+    ('77964683923e6efb', 'order', 'match_hold_open', ('body[12]', 'body[0]')),
+    ('78811599e5bb13e5', 'order', '_guard_identities', ('body[4]',)),
+    ('7c4f2b739751f105', 'order', '_rdm_end_hold', ('body[10]',)),
+    ('7c9e736cfa26ce1f', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[5]')),
+    ('7e206cbd71468270', 'order', '_rdm_claim', ('body[3]',)),
+    ('7fa21dadf27fd79e', 'order', '_asm_readmit_work', ('body[2]',)),
+    ('8408260602f49455', 'order', '_rdm_claim', ('body[7]',)),
+    ('863771d1d2ca2b20', 'order', '_rdm_live_or_lapse', ('body[2]', 'body[0]')),
+    ('869701453a77254a', 'order', '_effective_closure', ('body[2]',)),
+    ('869e8dd2c5aa1541', 'order', '_open_replay', ('body[8]',)),
+    ('869e8dd2c5aa1541', 'order', 'match_hold_claim', ('body[9]', 'body[4]')),
+    ('87685f018d74456e', 'order', '_rdm_line', ('body[1]',)),
+    ('879c8d57cd63322d', 'order', 'team_lobby_start', ('body[22]',)),
+    ('87c4edab35692981', 'order', '_lease_acquire', ('body[1]', 'body[0]')),
+    ('87ce5985143ac2d2', 'order', '_guard_identities', ('body[1]',)),
+    ('8867c14ec37fd70f', 'order', '_asm_deferred_departure', ('body[3]',)),
+    ('89cac1cfd9654255', 'order', '_state_word', ('body[3]', 'body[0]')),
+    ('8b58ec50a9f68fba', 'order', '_effective_closure', ('body[3]', 'body[1]')),
+    ('8d285fbc22b21022', 'order', '_asm_deferred_departure', ('body[4]',)),
+    ('8e1289f815a35ac1', 'order', '_hold_row', ('body[0]',)),
+    ('8e73a14836918d24', 'order', '_rdm_hold_s', ()),
+    ('8eef984770ea9a23', 'order', 'match_hold_claim', ('body[9]',)),
+    ('91f8f5c09312148f', 'order', '_asm_deferred_departure', ()),
+    ('9240a369a88bd328', 'order', '_deadline_s', ('body[2]',)),
+    ('92fcd9ed453b49c6', 'order', '_state_payload', ('body[0]',)),
+    ('92fcd9ed453b49c6', 'order', '_state_word', ('body[0]',)),
+    ('9317339c2d90ecd2', 'order', '_write_open_attempt', ('body[3]',)),
+    ('9509088dda41dc08', 'order', '_hold_live', ('body[0]',)),
+    ('955302b79446a1e3', 'order', '_refuse_attempt', ('body[2]',)),
+    ('958080a51325d9b8', 'order', '_effective_closure', ('body[3]', 'body[0]')),
+    ('960830ae832c2209', 'order', '_state_word', ('body[1]',)),
+    ('9625dbece5e0725f', 'order', '_rdm_live_or_lapse', ('body[2]',)),
+    ('99fb332ea9597af1', 'order', '_team_relock_existing_series', ('body[4]',)),
+    ('9b7d84624a9893a7', 'order', '_guard_identities', ()),
+    ('9c1df66bab560ded', 'order', '_rdm_claim', ('body[9]',)),
+    ('9d63eb3574ea65fd', 'order', '_hold_row', ('body[1]', 'body[0]')),
+    ('9dab59895133d1c0', 'order', '_open_attempt_matches', ('body[0]',)),
+    ('9e11a85977e0c12d', 'order', '_effective_closure', ('body[5]',)),
+    ('9e11a85977e0c12d', 'order', '_rdm_live_or_lapse', ('body[5]',)),
+    ('9f407da70b9c9ba2', 'order', '_rdm_end_hold', ('body[6]', 'orelse[1]')),
+    ('9f559c7ab4cf2ab2', 'order', 'match_hold_claim', ('body[9]', 'body[3]')),
+    ('a005df6e598a76a7', 'order', '_open_replay', ('body[3]', 'body[1]')),
+    ('a0568a9263f109d9', 'order', '_guard_identities', ('body[3]',)),
+    ('a2421f3bd0c1b171', 'order', '_rdm_attempt', ('body[0]',)),
+    ('a6769c7937bb30a3', 'order', '_asm_deferred_departure', ('body[4]', 'body[0]')),
+    ('a79de91c9d3ccd78', 'order', '_effective_closure', ('body[1]', 'body[0]')),
+    ('a8cf9f705b14cd5d', 'order', '_rdm_refuse', ('body[1]',)),
+    ('ac91a8c835c81668', 'order', '_hold_live', ()),
+    ('ae594a029845dfa7', 'order', '_rdm_end_hold', ('body[5]',)),
+    ('aeb958fe10ef0f97', 'order', '_write_open_attempt', ('body[2]',)),
+    ('af000a0479640433', 'order', '_lobby_enroll_caller', ('body[17]',)),
+    ('afdbe6aae189bc2a', 'order', '_refused', ('body[0]',)),
+    ('b3092c0e61db74d1', 'order', '_rdm_claim', ('body[2]',)),
+    ('b3614d60954e03d4', 'order', '_write_open_attempt', ('body[1]',)),
+    ('b3883a9c80d3b4ac', 'order', '_rdm_row', ()),
+    ('b3bc4788edb22c98', 'order', '_guard_identities', ('body[3]', 'body[0]')),
+    ('b3fa1f92fe3c70fe', 'order', '_refuse_attempt', ()),
+    ('b4300867b4f7facb', 'order', '_ffa_lock_roster', ('body[23]',)),
+    ('b6962c41f3a87399', 'order', '_open_replay', ('body[11]',)),
+    ('b73b327ecac0a63a', 'order', '_effective_closure', ()),
+    ('b7de5a4ffbf927ea', 'order', '_open_replay', ('body[5]',)),
+    ('b8b7efa7c5151ee3', 'order', '_guard_identities', ('body[5]',)),
+    ('ba2edf6032f13fd3', 'order', '_open_replay', ('body[6]',)),
+    ('ba2edf6032f13fd3', 'order', 'match_hold_claim', ('body[9]', 'body[5]')),
+    ('ba2edf6032f13fd3', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[2]')),
+    ('ba71e2d76e038fb7', 'order', '_rdm_refuse', ('body[5]',)),
+    ('bab6aad476a83821', 'order', '_open_replay', ('body[2]',)),
+    ('bf559244136fbdb1', 'order', '_ctx_now', ('body[1]',)),
+    ('bfe17bbbb0eed018', 'order', '_effective_closure', ('body[0]',)),
+    ('bfe50eec50917ac0', 'order', '_rdm_live_or_lapse', ('body[4]',)),
+    ('c06fea40be3595ac', 'order', 'match_hold_claim', ('body[9]', 'body[6]')),
+    ('c5bd5106707fc145', 'order', 'team_series_continuation', ('body[37]',)),
+    ('c912c1b060aebf03', 'order', '_rdm_refuse', ()),
+    ('c9c00c438708e045', 'order', '_asm_deferred_departure', ('body[4]', 'body[1]')),
+    ('cc30324b02bc9e57', 'order', '_open_replay', ('body[10]',)),
+    ('ce1a372c972a3ea5', 'order', '_guard_open_identities', ('body[1]',)),
+    ('cf9f93c8a7dc3e3e', 'order', '_persistable_exit_cause', ('body[0]',)),
+    ('d11a82af8c4f6441', 'order', '_asm_readmit_work', ('body[4]',)),
+    ('d12a3c27800ef440', 'order', '_guard_open_identities', ('body[2]',)),
+    ('d77731014c5071fb', 'order', '_rdm_line', ('body[0]',)),
+    ('d827e6fedcbadf65', 'order', '_rdm_live_or_lapse', ('body[4]', 'body[1]')),
+    ('d9a5bfaa018a1c64', 'order', '_state_word', ('body[2]', 'body[0]')),
+    ('da9f6bc8530ffc51', 'order', 'ovt_lobby_start', ('body[19]', 'body[1]')),
+    ('da9f6bc8530ffc51', 'order', 'team_lobby_start', ('body[22]', 'body[1]')),
+    ('db5b3c51fda6b7f7', 'order', '_rdm_attempt', ()),
+    ('df29f2c413ea33bd', 'order', '_rdm_claim', ('body[3]', 'body[0]')),
+    ('e1225e7088a811a4', 'order', '_rdm_claim', ('body[1]',)),
+    ('e1afb8d8257af380', 'order', '_hold_row', ()),
+    ('e1e6c6cf8f157d7d', 'order', '_open_replay', ('body[4]',)),
+    ('e3d3cc901629eae3', 'order', '_rdm_live_or_lapse', ('body[0]',)),
+    ('e43093924623c2fb', 'order', '_guard_identities', ('body[2]',)),
+    ('e57324ba8da176e7', 'order', '_rdm_claim', ('body[11]',)),
+    ('e653e90929d323fe', 'order', '_state_word', ('body[4]',)),
+    ('e66d0f4d34a5bed2', 'order', '_rdm_live_or_lapse', ()),
+    ('e693c09a4c2a8864', 'order', '_rdm_end_hold', ('body[2]',)),
+    ('e7fcb2ee77c333ca', 'order', '_ffa_lobby_enroll_caller', ('body[10]', 'body[0]', 'body[1]')),
+    ('e7fcb2ee77c333ca', 'order', '_lobby_enroll_caller', ('body[17]', 'body[1]')),
+    ('e8454a3603a9e564', 'order', '_rdm_refuse', ('body[0]',)),
+    ('e9ce09cc0af4cb59', 'order', '_rdm_end_hold', ('body[6]',)),
+    ('eb4cb428904c4725', 'order', '_lease_acquire', ('body[1]', 'body[1]')),
+    ('eb4cb428904c4725', 'order', '_lease_acquire_many', ('body[3]',)),
+    ('eb4cb428904c4725', 'order', '_rdm_claim', ('body[12]',)),
+    ('ec058f7266552caf', 'order', '_open_attempt_matches', ()),
+    ('ed97fcb9c02d9c22', 'order', '_rdm_hold_s', ('body[0]',)),
+    ('ede5d2543428e070', 'order', '_lease_acquire', ('body[1]', 'body[1]', 'body[0]')),
+    ('ede5d2543428e070', 'order', '_lease_acquire_many', ('body[3]', 'body[0]')),
+    ('ede5d2543428e070', 'order', '_rdm_end_hold', ('body[2]', 'body[0]')),
+    ('ede5d2543428e070', 'order', '_rdm_end_hold', ('body[5]', 'body[0]')),
+    ('f0b8ea40c4c35f0c', 'order', '_rdm_claim', ('body[8]',)),
+    ('f2938ab26c127d25', 'order', '_open_replay', ('body[3]',)),
+    ('f3f3a69eff4a7873', 'order', '_rdm_refuse', ('body[4]', 'body[0]')),
+    ('f47cb393519d074e', 'order', '_asm_readmit_on', ('body[1]',)),
+    ('f4f48073876cbf3d', 'order', '_rdm_end_hold', ('body[0]',)),
+    ('f59f9c6d64e94edd', 'order', '_open_replay', ('body[0]',)),
+    ('f739fbe1b8396449', 'order', '_guard_identities', ('body[0]',)),
+    ('fa0eabe6a2b1186e', 'order', '_rdm_end_hold', ('body[9]', 'body[0]')),
+    ('fea6c3c144da7325', 'order', '_asm_deferred_departure', ('body[2]',)),
+    ('febe184bf0f7444a', 'order', '_rdm_claim', ('body[0]',)),
+})
+ORDER_BINDINGS = GATE_ORDERS | frozenset({ORDERED})
+
+
+def _order_place(node, field, kids):
+    """node's place in its parent: the field, with the index in a list."""
+    if isinstance(kids, list):
+        for i, k in enumerate(kids):
+            if k is node:
+                return f"{field}[{i}]"
+    return str(field)
+
+
+def order_keys(fn, units):
+    """[(key, node, shape)] for every statement under each of `units` (fn
+    itself, or statements of fn), in visit order; the index path runs from
+    fn's definition."""
+    paths = {id(fn): ()}
+    for n, p, f in _sg.visit(fn):
+        if p is not None:
+            paths[id(n)] = paths.get(id(p), ()) + (_order_place(n, f, getattr(p, f)),)
+    out = []
+    for u in units:
+        for n, p, f in _sg.visit(u):
+            if isinstance(n, ast.stmt):
+                key = (_sg.header_digest(n), "order", fn.name, paths.get(id(n), ()))
+                out.append((key, n, _sg.shape(n, p, f)))
+    return out
+
+
+def order_problem(fn, units, filename, offset):
+    """None, or the refusal naming the first statement under `units` whose
+    order key is not frozen, when the bindings in force hold ORDERED; with
+    the ORDER_RECORD sink set, the keys are collected instead."""
+    sink = ORDER_RECORD.get("sink")
+    if sink is not None:
+        sink.update(k for k, _n, _s in order_keys(fn, units))
+        return None
+    allowed = ORDER_SWITCH.get("bindings")
+    if allowed is None:
+        allowed = ORDER_BINDINGS
+    if ORDERED not in allowed:
+        return None
+    for key, node, shape in order_keys(fn, units):
+        if key not in allowed:
+            digest, how, name, path = key
+            line = getattr(node, "lineno", 0) + offset
+            return (f"grammar {filename}:{line}: a statement, {shape}, outside "
+                    f"its frozen {how} (header {digest}), in {name} at {path}")
+    return None
+
+
 def sequence(stmts):
     """The admission-to-refusal sequence of span `stmts`."""
     last = stmts[-1]
@@ -902,6 +1233,10 @@ def check_body(d, role, filename, offset, record=None):
     binding rule; the node count."""
     n = nodes(d, filename, offset, record)
     _bind(d, role, [d], filename, offset, record)
+    if record is None:
+        order = order_problem(d, [d], filename, offset)
+        if order is not None:
+            raise Refusal(order)
     return n
 
 
@@ -927,6 +1262,10 @@ def check_site(fn, stmts, filename, offset, record=None):
         if order is not None:
             raise Refusal(order)
     _bind(fn, "site", stmts, filename, offset, record)
+    if record is None:
+        order = order_problem(fn, stmts, filename, offset)
+        if order is not None:
+            raise Refusal(order)
     return count
 
 
