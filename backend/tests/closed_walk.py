@@ -1866,6 +1866,36 @@ def _returned(call, b, policy, d, awaited):
         return None
     if fn is None or _inspect.iscoroutinefunction(fn) is not awaited:
         return None
+    memo = b.__dict__.setdefault("_ret_memo", {})
+    got = memo.get(id(fn.__code__))
+    if got is not None and got[0] is fn.__code__:
+        j = got[1]
+    else:
+        j = _returns_join(fn, b, policy, d)
+        memo[id(fn.__code__)] = (fn.__code__, j)
+    if not _is_p(j):
+        return j
+    params = list(_inspect.signature(fn).parameters)
+    if any(isinstance(a, _ast.Starred) for a in call.args) or any(
+            k.arg is None for k in call.keywords):
+        return None
+    out = []
+    for name in j[1]:
+        if name not in params:
+            return None
+        at = params.index(name)
+        arg = call.args[at] if at < len(call.args) else next(
+            (k.value for k in call.keywords if k.arg == name), None)
+        if arg is None:
+            return None
+        a = receiver_provenance(arg, b, policy, d)
+        out.append(_derive(a) if j[2] else a)
+    return _join(out)
+
+
+def _returns_join(fn, b, policy, d):
+    """The join of the provenances of every value trusted function `fn`
+    returns (the implicit None included), read in its own bindings."""
     hit = _RET_TREES.get(id(fn.__code__))
     if hit is None or hit[0] is not fn.__code__:
         try:
@@ -1889,25 +1919,7 @@ def _returned(call, b, policy, d, awaited):
         todo.extend(_ast.iter_child_nodes(n))
     provs = ["B" if r is None else receiver_provenance(r, cb, policy, d)
              for r in rets] + (["B"] if falls else [])
-    j = _join(provs)
-    if not _is_p(j):
-        return j
-    params = list(_inspect.signature(fn).parameters)
-    if any(isinstance(a, _ast.Starred) for a in call.args) or any(
-            k.arg is None for k in call.keywords):
-        return None
-    out = []
-    for name in j[1]:
-        if name not in params:
-            return None
-        at = params.index(name)
-        arg = call.args[at] if at < len(call.args) else next(
-            (k.value for k in call.keywords if k.arg == name), None)
-        if arg is None:
-            return None
-        a = receiver_provenance(arg, b, policy, d)
-        out.append(_derive(a) if j[2] else a)
-    return _join(out)
+    return _join(provs)
 
 
 def _name_provenance(name, b, policy, d):
@@ -1922,9 +1934,15 @@ def _name_provenance(name, b, policy, d):
     # a name reached again while its own bindings are being read (`x = x +
     # 1`): the cycle adds nothing to the join ("B" is the join's identity
     # among builtin values; a non-builtin binding still decides it)
+    memo = b.__dict__.setdefault("_prov_memo", {})
+    if name in memo:
+        return memo[name]
     visiting = b.__dict__.setdefault("_prov_visiting", set())
+    hits = b.__dict__.setdefault("_prov_hits", [])
     if name in visiting:
+        hits.append(name)
         return "B"
+    at = len(hits)
     visiting.add(name)
     try:
         provs, ins = [], []
@@ -1937,9 +1955,14 @@ def _name_provenance(name, b, policy, d):
         visiting.discard(name)
     base = _join(provs)
     if not ins or all(p == "B" for p in ins):
-        return base
-    # a mutation changes what the value holds, never its own type
-    return "C" if base in ("B", "C") else None
+        out = base
+    else:
+        # a mutation changes what the value holds, never its own type
+        out = "C" if base in ("B", "C") else None
+    if all(h == name for h in hits[at:]):
+        memo[name] = out                    # no other name's provisional value
+    hits[at:] = [h for h in hits[at:] if h != name]   # an ancestor's stay
+    return out
 
 
 def _inserted(name, node, b, policy, d):
