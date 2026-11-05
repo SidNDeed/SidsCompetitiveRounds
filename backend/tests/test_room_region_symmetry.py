@@ -176,6 +176,25 @@ def test_a_home_region_nothing_confirms_ranks_below_a_live_snapshot():
     assert main._pick_room_region("us", "asia", "", "asia", "r") == "asia"
 
 
+def test_a_home_both_live_snapshots_name_is_read_before_the_other_home():
+    """Both clients were connected to one region at join and one of them
+    calls it home: that region, ahead of the other seat's home even when
+    that one is confirmed and would win the tie between the two (here two
+    reporters have been seen on eu and none on asia). The ladder answered
+    this shape the same way before 2026-11-05, when the snapshots were read
+    before any home that did not agree. The controls keep the rung narrow:
+    one snapshot alone (either seat's), two snapshots that differ, and two
+    that agree on a region NEITHER seat calls home all leave the confirmed
+    home first."""
+    _corroborate("eu")
+    assert main._pick_room_region("asia", "eu", "asia", "asia", "r") == "asia"
+    assert main._pick_room_region("asia", "asia", "asia", "eu", "r") == "asia"
+    assert main._pick_room_region("asia", "eu", "", "asia", "r") == "eu"
+    assert main._pick_room_region("", "eu", "asia", "asia", "r") == "eu"
+    assert main._pick_room_region("asia", "eu", "us", "asia", "r") == "eu"
+    assert main._pick_room_region("us", "eu", "us", "asia", "r") == "eu"
+
+
 # ── corroboration ────────────────────────────────────────────────────────────
 
 def test_a_disagreement_goes_to_the_region_that_has_been_seen_live():
