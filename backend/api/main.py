@@ -18418,12 +18418,19 @@ def _region_agreed(a, b):
 # measured at the reference regions, plus 20 ms. The reference regions are
 # the two seats' HOMES (_region_home_refs) and the ladder's answer; a seat's
 # home is the home token it sent, else the region its own map measures
-# lowest. So a seat's own data names ONE reference region, its home, and
-# that is all it adds to the other seat's bound: the other seat is never
-# sent, on its own numbers, to a region worse than the worst it measured
-# among the references by more than 20 ms. Naming a region through the map
-# obtains at most what sending it as the home token obtains, and a home
-# token is a region the ladder can already answer outright. Inside the
+# lowest. Whenever either seat sent a home token the ladder's answer is one
+# of those tokens, so a seat's own data names ONE reference region, its
+# home. When neither sent one the ladder's answer is read from the live
+# snapshots (else the default), and a seat reports its own snapshot too, so
+# its data can name a second: the region the pair gets when the rung
+# declines. That is all a seat adds to the other seat's bound: the other
+# seat is never sent, on its own numbers, to a region worse than the worst
+# it measured among the references by more than 20 ms. Naming a region
+# through the map obtains at most what sending it as the home token beside
+# the same map obtains, and a home token is a region the ladder can already
+# answer outright: a map that measures only its sender's home can obtain
+# that home for the room when the other seat measured it too, and the other
+# seat is then at its own measured ping there. Inside the
 # bounds the pick is made from both maps together and may be a shared region
 # neither seat calls home — that is the purpose. Withholding the map, or
 # measuring none of the references, gets the ladder exactly. This code
@@ -18872,9 +18879,10 @@ def _pick_region_by_pings(p1, p2, ladder_pick, refs=()):
         ("bound"). So a seat is never sent, on its own numbers, to a region
         worse than the worst it measured among the two homes and L by more
         than the margin. The NUMBERS a seat is judged on come from that
-        seat's map alone; what the other seat contributes is one reference
-        region, its home (the #283 note above REGION_PINGS_MAX_ENTRIES says
-        what that obtains). The pick inside the bounds is made from both maps
+        seat's map alone; what the other seat contributes is reference
+        regions: its home, and L when L was read from one of its signals
+        (the #283 note above REGION_PINGS_MAX_ENTRIES says what that
+        obtains). The pick inside the bounds is made from both maps
         together, and it may be a region neither seat calls home — a shared
         compromise region is the purpose.
       * c must beat L's worst ping by more than the margin ("margin" when it
@@ -19057,7 +19065,9 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     # Rung 0 (Sept 7 item 3): the pair's own ping maps, judged AFTER the ladder
     # has answered — see _pick_region_by_pings for the acceptance rule. The two
     # seats' HOMES ride along as the references that bound how far each seat
-    # may be moved (_region_home_refs); the live snapshots are not among them.
+    # may be moved (_region_home_refs). A live snapshot is not among them; it
+    # reaches the reference set only as the ladder's answer, which it is only
+    # when neither seat sent a home.
     # This overrules design review d2 of 2026-09-09 ("only the active rung's
     # candidates may bound a seat"): with one snapshot as the only candidate,
     # the other seat's bound left no shared region reachable (bug 457,

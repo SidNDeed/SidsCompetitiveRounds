@@ -181,6 +181,10 @@
 - Ranked 1v1: when both players' ping maps arrive in time, the room moves to
   the shared region with the lowest worst ping for the pair, within each
   player's own limit, if that beats the usual region by more than 20 ms.
+- Ranked 1v1 rooms start from the two players' home regions. The region your
+  game was last connected to, for example after quick play, decides a room
+  only when neither player sent a home region. Before, it could keep a pair
+  on a region far from one of them whatever their ping maps said (bug 457).
 
 **Connection trouble explains itself**
 

@@ -2506,7 +2506,7 @@
           ],
           "main",
           "queue_poll",
-          "55b62e82144602b00c8ab78eb9a3189145451ab2"
+          "7bb0d70081fd7b2cf0d130c7ad1b9581c655a029"
         ],
         [
           "/api/v1/queue/ready",
@@ -2515,7 +2515,7 @@
           ],
           "main",
           "queue_ready",
-          "11e697d8d8509993de2ae5968c1d39a069767693"
+          "f7717cf3b96058bd6f81403c78b61e2ebf0bfbab"
         ],
         [
           "/api/v1/queue/recent-joins",
