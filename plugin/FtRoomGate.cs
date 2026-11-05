@@ -164,7 +164,16 @@ namespace CompetitiveRounds
         private static bool Prefix(MethodBase __originalMethod, object[] __args, ref bool __result)
         {
             if (!FtConfig.Present) return true;
-            string name = __args != null && __args.Length > 0 ? __args[0] as string : null;
+            // Finding 12 (F8 read r1): the name is the argument whose PARAMETER is named roomName, wherever it sits
+            // (JoinRandomOrCreateRoom carries a Hashtable first and its roomName later); an operation with no such
+            // parameter carries no name. The name only reaches the refusal line for the NoName operations.
+            string name = null;
+            if (__args != null)
+            {
+                ParameterInfo[] ps = __originalMethod.GetParameters();
+                for (int i = 0; i < ps.Length && i < __args.Length; i++)
+                    if (string.Equals(ps[i].Name, "roomName", StringComparison.Ordinal)) { name = __args[i] as string; break; }
+            }
             if (FtRoomGate.Admit(__originalMethod.Name, name)) return true;
             __result = false;
             return false;
@@ -216,6 +225,17 @@ namespace CompetitiveRounds
         private static void Postfix(NetworkConnectionHandler __instance)
         {
             if (!FtConfig.Present || __instance == null) return;
+            // Finding 8 (F8 read r1): the room identity line. One per join, the name read from
+            // PhotonNetwork.CurrentRoom.Name (never the ROOM_CODE property vanilla prints) and running to the end of
+            // the line, so a reader compares the WHOLE name. offline=1 marks an offline room, for which vanilla
+            // prints no Unity "Joined room:" line; the bar compares the offline=0 count with the Unity count.
+            try
+            {
+                var cur = PhotonNetwork.CurrentRoom;
+                Plugin.Log.LogInfo("[FRAME-TIME] FT-ROOM joined offline=" + (PhotonNetwork.OfflineMode ? "1" : "0")
+                    + " name=" + (cur != null ? cur.Name : "(none)"));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] FT-ROOM read failed: " + ex.Message); }
             try
             {
                 __instance.untilTryOtherRegionCounter = float.MaxValue;
