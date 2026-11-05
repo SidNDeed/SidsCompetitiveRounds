@@ -1619,11 +1619,12 @@ def call_arguments(call):
 #   "R"     a session result (`await <session>.execute(...)`, and its
 #           .mappings()/.scalars()), whose methods are the result methods;
 #   "ROW"   a row a session result yields; "ROWS" a list of rows;
-#   ("P", p, deep)  derived from the walked function's own parameter p:
-#           p itself (deep False), or a value read from it (deep True: an
-#           attribute, a subscript, a method result, an element, an
-#           operation with builtin operands). The verdict is CONDITIONAL,
-#           the effect "receiver:<p>:<group>" (group "deep" when derived:
+#   ("P", ps, deep)  derived from the walked function's own parameters
+#           ps (a sorted tuple of names): one of them itself (deep False),
+#           or a value read from them (deep True: an attribute, a subscript,
+#           a method result, an element, an operation over them and builtin
+#           operands). The verdict is CONDITIONAL, one effect
+#           "receiver:<p>:<group>" per parameter (group "deep" when derived:
 #           p must then be builtin whole), discharged at every walked call
 #           site by the argument's provenance there (discharge_receivers),
 #           carried up through the callers' own parameters, refused in a
@@ -1632,9 +1633,12 @@ def call_arguments(call):
 #           result, a name bound to either): the call site is refused.
 #
 # Every rule is a bound on the value's TYPE that holds whatever path
-# reaches the read (a name bound more than once, or mutated, takes the join
-# of every binding and every insertion; a name met again while its own
-# bindings are read adds nothing to the join).
+# reaches the read (a name bound more than once takes the join of every
+# binding; a name met again while its own bindings are read adds nothing to
+# the join). A display or a listed container constructor is an exact
+# container whatever its elements ("B" only when they all are); a mutation
+# (an insertion, a store into the value) never changes the name's own type,
+# so an exact container stays one, "B" only while every insertion is.
 RESULT_METHODS = frozenset({"all", "fetchall", "first", "mappings", "one",
                             "scalar", "scalar_one", "scalars"})
 ROW_METHODS = frozenset({"get", "items", "values", "keys", "_asdict"})
@@ -1674,7 +1678,7 @@ def _derive(p):
         return "B"
     if _is_p(p):
         return ("P", p[1], True)
-    return None
+    return None                             # "C": its elements are unproven
 
 
 def _elements(p):
@@ -1694,11 +1698,11 @@ def _join(ps):
     ps = list(ps)
     if not ps or any(p is None for p in ps):
         return None
-    params = {p[1] for p in ps if _is_p(p)}
+    params = sorted({n for p in ps if _is_p(p) for n in p[1]})
     rest = [p for p in ps if not _is_p(p)]
     if params:
-        if len(params) == 1 and all(p == "B" for p in rest):
-            return ("P", params.pop(), any(p[2] for p in ps if _is_p(p)))
+        if all(p == "B" for p in rest):
+            return ("P", tuple(params), any(p[2] for p in ps if _is_p(p)))
         return None
     if all(p == "B" for p in rest):
         return "B"
@@ -1708,11 +1712,10 @@ def _join(ps):
 
 
 def _container(elts):
-    """An exact builtin container holding elements of provenances `elts`."""
-    j = _join(elts) if elts else "B"
-    if j == "B" or _is_p(j):
-        return "B" if j == "B" else ("P", j[1], True)
-    return "C"
+    """An exact builtin container holding elements of provenances `elts`:
+    "B" when every element is, else "C" (its own type exact, its elements
+    unproven: one read from it is None, never a parameter's)."""
+    return "B" if (_join(elts) if elts else "B") == "B" else "C"
 
 
 def _comp_element(expr, b, policy, d):
@@ -1724,7 +1727,7 @@ def _comp_element(expr, b, policy, d):
 
 def receiver_provenance(expr, b, policy=None, depth=0):
     """The provenance of expression `expr` in the function `b` resolves
-    (see above): "B", "C", "R", "ROW", "ROWS", ("P", name, deep) or
+    (see above): "B", "C", "R", "ROW", "ROWS", ("P", names, deep) or
     None."""
     if depth > _PROV_DEPTH:
         return None
@@ -1890,15 +1893,21 @@ def _returned(call, b, policy, d, awaited):
     if not _is_p(j):
         return j
     params = list(_inspect.signature(fn).parameters)
-    if j[1] not in params or any(isinstance(a, _ast.Starred) for a in call.args):
+    if any(isinstance(a, _ast.Starred) for a in call.args) or any(
+            k.arg is None for k in call.keywords):
         return None
-    at = params.index(j[1])
-    arg = call.args[at] if at < len(call.args) else next(
-        (k.value for k in call.keywords if k.arg == j[1]), None)
-    if arg is None:
-        return None
-    a = receiver_provenance(arg, b, policy, d)
-    return _derive(a) if j[2] else a
+    out = []
+    for name in j[1]:
+        if name not in params:
+            return None
+        at = params.index(name)
+        arg = call.args[at] if at < len(call.args) else next(
+            (k.value for k in call.keywords if k.arg == name), None)
+        if arg is None:
+            return None
+        a = receiver_provenance(arg, b, policy, d)
+        out.append(_derive(a) if j[2] else a)
+    return _join(out)
 
 
 def _name_provenance(name, b, policy, d):
@@ -1918,22 +1927,25 @@ def _name_provenance(name, b, policy, d):
         return "B"
     visiting.add(name)
     try:
-        provs = []
+        provs, ins = [], []
         for kind, node in got:
             if kind == "mutated":
-                provs.extend(_inserted(name, node, b, policy, d))
+                ins.extend(_inserted(name, node, b, policy, d))
             else:
                 provs.append(_binding_provenance(name, kind, node, b, policy, d))
     finally:
         visiting.discard(name)
-    return _join(provs)
+    base = _join(provs)
+    if not ins or all(p == "B" for p in ins):
+        return base
+    # a mutation changes what the value holds, never its own type
+    return "C" if base in ("B", "C") else None
 
 
 def _inserted(name, node, b, policy, d):
     """The provenances of what mutation site `node` puts into `name`'s
-    value (a store into it, or an inserting method), as values that the
-    name's value may now yield: a container that received only builtin
-    values stays builtin."""
+    value (a store into it, or an inserting method): a container that
+    received only builtin values stays builtin (_name_provenance)."""
     if isinstance(node, _ast.Call):
         m = node.func.attr if isinstance(node.func, _ast.Attribute) else None
         if m in _INSERTING:
@@ -1956,7 +1968,7 @@ def _inserted(name, node, b, policy, d):
 def _binding_provenance(name, kind, node, b, policy, d):
     if kind == "param":
         if node is b.where:
-            return ("P", name, False)
+            return ("P", (name,), False)
         return None
     if kind != "local" or not isinstance(node, _ast.Name):
         return None
@@ -2050,10 +2062,12 @@ def discharge_receivers(call, fn, effects, line, visitor):
                 raise Unclassified((line, f"a call of {fn.__code__.co_name} "
                                           f"whose {p}, a receiver, is "
                                           f"{_ast.unparse(arg)}, read from the "
-                                          f"parameter {prov[1]}, which no "
-                                          "walked call site discharges"))
+                                          f"parameter {', '.join(prov[1])}, "
+                                          "which no walked call site "
+                                          "discharges"))
             g = "deep" if (prov[2] or group == "deep") else group
-            visitor.effects.append((f"receiver:{prov[1]}:{g}", "pure"))
+            for q in prov[1]:
+                visitor.effects.append((f"receiver:{q}:{g}", "pure"))
             continue
         if not receiver_meets(prov, group):
             raise Unclassified((line, f"a call of {fn.__code__.co_name} whose "
@@ -2349,10 +2363,10 @@ class Visitor:
                         # the condition, so it is refused here, never
                         # dropped by a consumer that reads other shapes
                         self.fail(n, f"a method call {name} on the parameter "
-                                     f"{prov[1]}, a receiver no walked call "
-                                     "site discharges")
-                    self.effects.append(
-                        (f"receiver:{prov[1]}:{group}", "pure"))
+                                     f"{', '.join(prov[1])}, a receiver no "
+                                     "walked call site discharges")
+                    for q in prov[1]:
+                        self.effects.append((f"receiver:{q}:{group}", "pure"))
                 elif not receiver_meets(prov, group):
                     self.fail(n, f"a method call {name} whose receiver the "
                                  "walk cannot prove builtin")

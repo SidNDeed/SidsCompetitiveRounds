@@ -5862,6 +5862,10 @@ def planted_literal():
 
 def planted_json(text):
     return _rules_normalize(_json.loads(text))
+
+
+def planted_unproven():
+    return _rules_normalize(type("x"))
 '''
 
 
@@ -5897,6 +5901,20 @@ def test_r11_n_closed_walk_1775_a_receiver_proven_by_provenance():
     with pytest.raises(Unclassified) as e:
         _cw.expr_effects(d.body[0].value, _r11_policy(grammar=False), bindings=b)
     assert "which no walked call site discharges" in e.value.args[0][1], e.value.args
+    # the discharge route's own refusal: a listed provider the walk admits,
+    # whose result's provenance it cannot prove builtin
+    with pytest.raises(Unclassified) as e:
+        _cw.plain_effects(mod.planted_unproven, _r11_policy(mod, grammar=False))
+    assert ("a receiver of its row methods, is type('x'), which the walk "
+            "cannot prove builtin") in e.value.args[0][1], e.value.args
+    # the method branch's span-level refusal: a parameter's method walked on
+    # its own, with no def_effects walk to carry the condition
+    d = _ast.parse("def f(x):\n    return x.get('ff')\n").body[0]
+    b = _cw.Bindings(main, d, grammar=None)
+    with pytest.raises(Unclassified) as e:
+        _cw.expr_effects(d.body[0].value, _r11_policy(grammar=False), bindings=b)
+    assert "a receiver no walked call site discharges" in e.value.args[0][1], (
+        e.value.args)
     assert _a1_ib.trusted(mod.WriterDict.get, "builtins", "dict.get") is False
     assert _a1_ib.trusted(dict.get, "builtins", "dict.get") is True
     mod.planted_writer_dict()

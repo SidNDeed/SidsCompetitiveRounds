@@ -2683,3 +2683,38 @@ def test_r11_n_gate_842_http_exception_rebound(monkeypatch):
             assert ("HTTPException, which the walk reads as the module's, is "
                     "not the definition it names") in e.value.args[0][1], e.value.args
     assert len(marks) == 2, "the planted constructors changed no state"
+
+
+
+def test_r11_gate_hook_discharges_receivers():
+    """F10 (ruling FOUR-R11-A1 (3)), the gate's route: an awaited helper
+    whose purity rests on a method of its parameter `rules` is read by the
+    policy's hook (_helper_kind), which leaves the receiver condition to
+    the call site; closed_walk's hook branch discharges it there by the
+    argument's provenance. A display argument is admitted; text('x'), a
+    listed provider whose result the walk cannot prove builtin, refuses at
+    the call."""
+    lines = ["async def _r11_h(db, rules):",
+             "    return rules.get('x')",
+             "",
+             "",
+             "async def _r11_ok(db):",
+             "    return await _r11_h(db, {'x': 1})",
+             "",
+             "",
+             "async def _r11_bad(db):",
+             "    return await _r11_h(db, text('x'))"]
+    mod = _scope_of_lines(lines, {"text": ro_covered.text})
+    tree = ast.parse(chr(10).join(lines) + chr(10))
+    defs = {d.name: d for d in tree.body}
+    w = _Walk(mod, "r11 F10 hook", fn=defs["_r11_ok"])
+    eff = _cw.expr_effects(defs["_r11_ok"].body[0].value, w.policy,
+                           bindings=w.b)
+    assert ("helper:_r11_h", w.policy.helper_hook(mod._r11_h)) in eff, eff
+    w = _Walk(mod, "r11 F10 hook", fn=defs["_r11_bad"])
+    with pytest.raises(Unclassified) as e:
+        _cw.expr_effects(defs["_r11_bad"].body[0].value, w.policy,
+                         bindings=w.b)
+    assert ("a call of _r11_h whose rules, a receiver of its row methods, "
+            "is text('x'), which the walk cannot prove builtin"
+            ) in e.value.args[0][1], e.value.args

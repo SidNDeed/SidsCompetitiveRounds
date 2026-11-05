@@ -36,13 +36,17 @@ OPS = {
         r"|_frozen_callee\(|\bpure_(calls|awaits)\b|_REFUSAL_EXCEPTIONS"
         r"|_HOLD_REPLAYS"),
 }
-# The counts at the round-10 tip, (operation, file): hits.
+# The counts at the round-10 tip, (operation, file): hits; round 11
+# (FIX-R11-ID) re-freezes closed_walk's byname 23 -> 28 (Bindings.named's
+# frozen-callee identity check; _listed_kind's Providers read and listed
+# call; _returned's callee) and compare 1 -> 3 (receiver_provenance's
+# reading of a Compare's operands), each hit judged in the round-11 NOTES.
 COUNTS = {
-    ("byname", "closed_walk.py"): 23,
+    ("byname", "closed_walk.py"): 28,
     ("byname", "resolution_sites.py"): 3,
     ("byname", "test_a1_identity_formation.py"): 38,
     ("byname", "test_match_hold_admission_gate_pg.py"): 23,
-    ("compare", "closed_walk.py"): 1,
+    ("compare", "closed_walk.py"): 3,
     ("compare", "resolution_sites.py"): 8,
     ("compare", "test_a1_identity_formation.py"): 5,
     ("compare", "test_match_hold_admission_gate_pg.py"): 3,
