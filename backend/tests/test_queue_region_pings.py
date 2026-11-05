@@ -457,6 +457,26 @@ def test_a_seat_without_a_home_token_is_represented_by_its_maps_lowest_region(ca
     assert main._region_home_refs("", "", None, None) == ()
 
 
+def test_with_no_home_sent_the_ladders_answer_is_a_reference_too(capsys):
+    """Neither seat sent a home token: the ladder's answer is read from the
+    live snapshots (ru, ru) and joins the two stand-in homes (usw, eu) in the
+    reference set, because it is the room the pair gets when the rung
+    declines. Seat 1 measured ru at 147, so its bound is 167 and us (64/90)
+    lies within it; us beats ru (147/40) by 57 ms and is taken. With the
+    stand-in homes alone seat 1's bound would be 39 (usw 19 + 20), us would
+    lie outside it, and the pair would stay on ru at 147/40, a region that
+    same bound calls too far for seat 1."""
+    main._REGION_SEEN.clear()
+    now = _now()
+    assert main._pick_room_region("ru", "", "ru", "", "r", **_fresh_pair(now)) == "us"
+    assert _region_lines(capsys)[0] == (
+        "[QUEUE-REGION] room=r pick=us rung=pings worst=90 ladder=ru cand=us cand_ms=64/90 "
+        "ladder_ms=147/40 bound=167/170 refs=usw,eu")
+    # whichever seat's request issued the room
+    assert main._pick_room_region("ru", "", "ru", "", "r", **_fresh_pair(now, SPIRIT_MAP, SID_MAP)) == "us"
+    assert _region_lines(capsys)[0].endswith("bound=170/167 refs=eu,usw")
+
+
 def test_a_home_outranks_a_live_snapshot_in_the_ladder(capsys):
     """Without maps the ladder decides alone. A home token is read before any
     live snapshot, a lone one included: the snapshots (both ru) decide only
