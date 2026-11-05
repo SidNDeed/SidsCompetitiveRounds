@@ -5627,10 +5627,15 @@ def test_r10_provider_identity_routes(monkeypatch):
     def writer(*a, **k):
         return None
 
+    # round 11 (FIX-R11-ID): the one policy, its tables built BEFORE any
+    # provider is rebound below (a provider rebound before a table is built
+    # refuses the table itself: test_r11_n_a1_5655_json_loads_wrapper_
+    # before_the_table); the routes rebind after it, listed()'s case
+    policy = _cw.Policy(main, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS,
+                        _A1_TABLE)
+    policy.grammar = _A1_GRAMMAR
+
     def effects(src, fn_src=None):
-        policy = _cw.Policy(main, _PURE_CALLS, _PURE_METHODS, _PURE_AWAITS,
-                            _A1_TABLE)
-        policy.grammar = _A1_GRAMMAR
         d = _ast.parse(fn_src or "def f(x):\n    pass\n").body[0]
         b = _cw.Bindings(main, d, grammar=_A1_GRAMMAR)
         node = _ast.parse(src, mode="eval").body

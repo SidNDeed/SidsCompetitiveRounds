@@ -390,41 +390,58 @@ def trusted_class(cls, _seen=None):
     return True
 
 
-_TREES = {}
+_CONSTS = {}
+
+
+def _top_constants(mod):
+    """{name: the constant} for every name module `mod`'s own top-level
+    code binds exactly once, by a constant loaded straight into that one
+    store (`NAME = <literal>`, `NAME: T = <literal>`), and that no nested
+    code of the module writes (STORE_GLOBAL, DELETE_GLOBAL). Read from the
+    module's fresh code objects (_fresh: compiled once per path, size and
+    md5), never from an AST kept in memory (round 11: main.py's AST held
+    for this outgrew the seats' memory bound). Memoised by the identity of
+    the fresh code list."""
+    codes = _fresh(mod)
+    if not codes:
+        return {}
+    hit = _CONSTS.get(id(codes))
+    if hit is not None and hit[0] is codes:
+        return hit[1]
+    import dis as _dis
+    top = codes[0]
+    stores, out, prev = {}, {}, None
+    for ins in _dis.get_instructions(top):
+        if ins.opname in ("STORE_NAME", "DELETE_NAME", "STORE_GLOBAL",
+                          "DELETE_GLOBAL"):
+            stores[ins.argval] = stores.get(ins.argval, 0) + 1
+            if (ins.opname == "STORE_NAME" and prev is not None
+                    and prev.opname == "LOAD_CONST"):
+                out.setdefault(ins.argval, []).append(prev.argval)
+        prev = ins
+    nested = set()
+    for c in codes[1:]:
+        for ins in _dis.get_instructions(c):
+            if ins.opname in ("STORE_GLOBAL", "DELETE_GLOBAL"):
+                nested.add(ins.argval)
+    table = {k: v[0] for k, v in out.items()
+             if len(v) == 1 and stores.get(k) == 1 and k not in nested}
+    _CONSTS[id(codes)] = (codes, table)
+    return table
 
 
 def trusted_constant(v, mod, name):
     """Whether data value `v` is the literal module `mod`'s own source binds
-    `name` to: exactly one top-level assignment of `name` in the file its
-    spec names, whose value is a literal of exactly v's type and equal to
-    it."""
+    `name` to: exactly one binding of `name` in the module's code, a
+    constant stored straight into it, of exactly v's type and equal to it,
+    and no function of the module writes `name` (_top_constants)."""
     origin = _origin(mod)
     if origin is None or origin == "frozen":
         return False
-    if isinstance(origin, tuple):
-        reg = _registered(mod)
-        reg[3] = True
-        tree = _ast.parse(reg[2], reg[1])
-    else:
-        if origin not in _TREES:
-            with open(origin, "rb") as f:
-                _TREES[origin] = _ast.parse(f.read(), origin)
-        tree = _TREES[origin]
-    hits = []
-    for st in tree.body:
-        if isinstance(st, _ast.Assign):
-            names = [t.id for t in st.targets if isinstance(t, _ast.Name)]
-            if name in names:
-                hits.append(st.value)
-        elif (isinstance(st, _ast.AnnAssign) and isinstance(st.target, _ast.Name)
-                and st.target.id == name and st.value is not None):
-            hits.append(st.value)
-    if len(hits) != 1:
+    table = _top_constants(mod)
+    if name not in table:
         return False
-    try:
-        lit = _ast.literal_eval(hits[0])
-    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-        return False
+    lit = table[name]
     return type(v) is type(lit) and v == lit
 
 
@@ -433,6 +450,15 @@ def trusted(obj, module, qualname):
     module "<module>" addresses a module named `qualname`."""
     if module == "<module>":
         return type(obj) is _MODULE and _module(qualname) is obj
+    if isinstance(obj, _C_DESCRIPTORS):
+        # a method of a type defined in C (dict.get): its defining type,
+        # read-only on the descriptor, is immutable and named by the
+        # description, and the name is the descriptor's own
+        owner = getattr(obj, "__objclass__", None)
+        cls_q, _, leaf = qualname.rpartition(".")
+        return (isinstance(owner, type) and bool(owner.__flags__ & _IMMUTABLETYPE)
+                and owner.__module__ == module and owner.__qualname__ == cls_q
+                and obj.__name__ == leaf and vars(owner).get(leaf) is obj)
     if type(obj) is _BUILTIN_FN:
         owner = obj.__self__
         leaf = qualname.split(".")[-1]
