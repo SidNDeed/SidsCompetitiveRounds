@@ -1755,6 +1755,7 @@ row("S57", "test_s57_the_g3_server_gate", [
 # configuration still in) planted a True switch and are retired with that reading.
 _G3_ROUTE = '@app.post("/api/v1/admin/ffa-g3-seats", tags=["Admin"])\n'
 _G3_CLAUSE = '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"\n'
+_G3_SELECT = '        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled"\n'
 _S58_ASSERTS = (
     '        assert clause, "S58 clause"\n'
     '        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n')
@@ -1771,6 +1772,13 @@ row("S58", "test_s58_the_g3_fence", [
       E(MAIN, _G3_CLAUSE,
         '        "  /* LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now() */"\n'),
       note="A7-R2: the JOIN only inside an SQL comment of the executed string"),
+    M("clause_after_a_sentinel_identifier", "S58 clause",
+      E(MAIN, _G3_SELECT,
+        '        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled, 1 AS sentinel$q$"\n'
+        '        " /* LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now() */"\n'),
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note="A7-R3 finding 1: the identifier sentinel$q$ is no dollar-quote opener, so the "
+           "clause after it is a comment; the executed JOIN reads no expiry"),
     M("route_deleted", "S58 route", E(MAIN, _G3_ROUTE, "")),
     M("configuration_deleted", "S58 G3 configuration",
       E("plugin/CompetitiveRounds.csproj", _G3_DEFINE, ""),
@@ -1806,6 +1814,8 @@ _FMP_INSERT = (
     '                    :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt,\n'
     '                    :dmg, :dmgtl, :killtl, :absent, CAST(:er AS text[]), :estats, :gpal, :lei)\n'
     '        """), {"m": match_id,')
+_FMP_VALUES = "                    :dmg, :dmgtl, :killtl, :absent, CAST(:er AS text[]), :estats, :gpal, :lei)\n"
+_FMP_ER = '               "er": sorted(_exclusion_reasons[p.steam_id]),\n'
 _SUBMIT_DOC = '    """Record one FFA game and apply pairwise Glicko + XP/gold inline (an FFA\n'
 _FMP_INSERT_SQL = _FMP_INSERT[len('        await db.execute(text("""\n'):-len('        """), {"m": match_id,')]
 row("FIX2-S2", "test_fix2_s2_snapshot_sources_are_complete", [
@@ -1818,11 +1828,73 @@ row("FIX2-S2", "test_fix2_s2_snapshot_sources_are_complete", [
       E(MAIN, _FMP_INSERT, '        await db.execute(text("SELECT 1"), {"m": match_id,'),
       E(MAIN, _SUBMIT_DOC, '    """' + _FMP_INSERT_SQL + "\n" + _SUBMIT_DOC[len('    """'):]),
       note="A7-R2: the executed INSERT is SELECT 1, the original survives in submit_ffa_match's docstring"),
+    M("dead_cast_in_a_case", "S2 insert cast",
+      E(MAIN, _FMP_VALUES,
+        "                    :dmg, :dmgtl, :killtl, :absent,"
+        " CASE WHEN FALSE THEN CAST(:er AS text[]) ELSE ARRAY[]::text[] END, :estats, :gpal, :lei)\n"),
+      note="A7-R3 finding 2: a cast in the INSERT that never supplies the column's value"),
+    M("reasons_bound_empty", "S2 insert bound",
+      E(MAIN, _FMP_ER, '               "er": [],\n'),
+      note="the cast intact, the bound value a constant: the bound and stored values differ "
+           "from the distinct reasons"),
+    M("prior_reader_placeholder", "S2 prior projection rows",
+      E(MAIN, _PRIOR_PROJ, "           fmp.left_early, fmp.absent, ARRAY['x']::text[] AS exclusion_reasons\n"),
+      note="A7-R3 finding 2: the prior reader returns a non-null placeholder, not the stored set"),
+    M("triage_reader_placeholder", "S2 triage projection rows",
+      E(MAIN, _TRIAGE_PROJ,
+        "           fmp.kills, fmp.left_early, fmp.absent, ARRAY['x']::text[] AS exclusion_reasons\n"),
+      note="the triage reader returns a non-null placeholder, not the stored set"),
 ], T("comments_beside_the_real_statements",
      E(MAIN, _PRIOR_PROJ, "           fmp.left_early, fmp.absent, /* the stored set */ fmp.exclusion_reasons\n"),
      E(MAIN, _TRIAGE_PROJ,
        "           fmp.kills, fmp.left_early, fmp.absent, fmp.exclusion_reasons -- the stored set\n"),
      note="the positive control: comments beside the real projections leave every check green"))
+
+# -- WP11-X: the missing-game guard, executed (A7-R3 finding 3) ---------------
+_WP11_GUARD = ('    if s in ("entered", "lag") and req.game is None:\n'
+               '        return "game"\n')
+row("WP11-X", "test_wp11_a_game_step_without_a_game_is_refused", [
+    M("guard_inside_if_false", "WP11 refused",
+      E(MAIN, _WP11_GUARD, '    if False:\n'
+                           '        if s in ("entered", "lag") and req.game is None:\n'
+                           '            return "game"\n'),
+      note="A7-R3 finding 3: the guard is present in the AST and never runs; the structural "
+           "WP11 check stays green on it"),
+], T("guard_split_in_two",
+     E(MAIN, _WP11_GUARD, '    if s == "entered" and req.game is None:\n'
+                          '        return "game"\n'
+                          '    if s == "lag" and req.game is None:\n'
+                          '        return "game"\n'),
+     note="the same refusal written as two guards"))
+
+# -- WP34-X: the payload and answer keys, executed (A7-R3 sweep) -------------
+_WP3_FENCE = '        "fence_s": ASM_FENCE_S,\n    }\n'
+row("WP34-X", "test_wp3_wp4_keys_are_sent", [
+    M("payload_key_in_dead_code", "WP3 sent",
+      E(MAIN, _WP3_FENCE, '    }\n    if False:\n        out["fence_s"] = ASM_FENCE_S\n'),
+      note="the key named in the builder's AST, never sent; the structural WP3 check stays "
+           "green on it"),
+], T("payload_keys_reordered",
+     E(MAIN, '        "stamp_wait_s": ASM_STAMP_WAIT_S,\n' + _WP3_FENCE,
+       '        "fence_s": ASM_FENCE_S,\n        "stamp_wait_s": ASM_STAMP_WAIT_S,\n    }\n'),
+     note="the same payload with two entries in the other order"))
+
+# -- SQL-TOKENS: the one tokenizer's probe (A7-R3 findings 1 and 4) -----------
+_CFA = "backend/tests/cf_asm.py"
+row("SQL-TOKENS", "test_sql_code_strips_comments_and_keeps_literals", [
+    M("dollar_opens_after_an_identifier", "probe boundary",
+      E(_CFA, '        if c == "$" and prev not in _IDENT_CHARS:\n', '        if c == "$":\n'),
+      note="A7-R3 finding 1: the round 3 tokenizer's opener"),
+    M("quoted_whitespace_collapsed", "probe dollar body",
+      E(_CFA, '    return "".join(parts).strip()\n', '    return " ".join("".join(parts).split())\n'),
+      note="A7-R3 finding 1: the round 3 collapse of whitespace inside quoted spans"),
+    M("shape_on_raw_sql", "probe shape update",
+      E(_CFA, "    whole = sql_code(sql, mask_literals=True)\n", "    whole = sql.strip()\n"),
+      note="A7-R3 finding 4: shape() classifying the raw statement"),
+], T("dollar_tag_group_unnamed",
+     E(_CFA, '_DOLLAR_TAG = re.compile(r"\\$([A-Za-z_][A-Za-z0-9_]*)?\\$")\n',
+       '_DOLLAR_TAG = re.compile(r"\\$(?:[A-Za-z_][A-Za-z0-9_]*)?\\$")\n'),
+     note="the same delimiter pattern with a non-capturing group"))
 
 # -- S59 -------------------------------------------------------------------
 _B_LINE = '        elif some and t >= ASM_BASE_S and not spawning and not hold_adm:\n'
@@ -1973,6 +2045,11 @@ row("S63", "test_s63_the_kept_epoch", [
                      '            " ORDER BY epoch_no DESC LIMIT 1"), {"lid": ctx.lid})).mappings().first())\n'),
       note="both concurrent admissions read no row before the lobby lock; the second one's "
            "epoch_no 1 is refused by the primary key"),
+    M("update_behind_a_block_comment", "S63 iii",
+      E(MAIN, _EPI, _EPI + '            await ctx.db.execute(text(\n'
+                           '                "UPDATE /* note */ ffa_kept_epochs SET chain = chain"\n'
+                           '                " WHERE lobby_id = :lid"), {"lid": ctx.lid})\n'),
+      note="A7-R3 finding 4: the comment after the verb hid the table from the raw-text shape"),
 ], T("chain_through_a_helper",
      E(MAIN, _CHAIN, '            chain = _asm_next_chain(prev, ctx.lid, n, p["slot"], claim[0])\n'),
      E(MAIN, "\n\nasync def _ffa_admission_check(ctx) -> list:\n",

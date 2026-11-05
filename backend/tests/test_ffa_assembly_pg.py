@@ -1237,58 +1237,13 @@ import tempfile  # noqa: E402
 
 
 def _sql_code(sql):
-    """SQL as the server parses it, without its comments (A7-R2): `--` to the
-    end of the line and `/* */` blocks (nested, as PostgreSQL nests them) are
-    removed outside single-quoted literals, double-quoted identifiers and
-    dollar-quoted bodies, which are kept whole (standard-conforming strings:
-    a quote inside a literal is doubled). Each comment becomes one space and
-    runs of whitespace collapse to one, so a check on the result reads the
-    statement's code and never a comment beside it."""
-    out = []
-    i, n = 0, len(sql)
-    while i < n:
-        c = sql[i]
-        if c in ("'", '"'):
-            j = i + 1
-            while j < n:
-                if sql[j] == c:
-                    if j + 1 < n and sql[j + 1] == c:
-                        j += 2
-                        continue
-                    break
-                j += 1
-            out.append(sql[i:j + 1])
-            i = j + 1
-            continue
-        if c == "$":
-            m = _re.match(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$", sql[i:])
-            if m:
-                tag = m.group(0)
-                end = sql.find(tag, i + len(tag))
-                end = n if end < 0 else end + len(tag)
-                out.append(sql[i:end])
-                i = end
-                continue
-        if sql.startswith("--", i):
-            j = sql.find("\n", i)
-            i = n if j < 0 else j
-            out.append(" ")
-            continue
-        if sql.startswith("/*", i):
-            depth, j = 1, i + 2
-            while j < n and depth:
-                if sql.startswith("/*", j):
-                    depth, j = depth + 1, j + 2
-                elif sql.startswith("*/", j):
-                    depth, j = depth - 1, j + 2
-                else:
-                    j += 1
-            out.append(" ")
-            i = j
-            continue
-        out.append(c)
-        i += 1
-    return " ".join("".join(out).split())
+    """SQL as the server parses it (A7-R2), through cf_asm.sql_tokens, the one
+    tokenizer of these tests (A7-R3): `--` and nested `/* */` comments
+    removed, each quoted span (literal, quoted identifier, dollar-quoted body)
+    kept byte for byte, whitespace outside them collapsed. cf_asm.shape
+    classifies through the same tokenizer, so a check here and the recorder
+    read one statement the same way."""
+    return cf_asm.sql_code(sql)
 
 
 def test_sql_code_strips_comments_and_keeps_literals():
@@ -1301,19 +1256,42 @@ def test_sql_code_strips_comments_and_keeps_literals():
     assert _sql_code('SELECT "a--b" FROM t') == 'SELECT "a--b" FROM t'
     assert _sql_code("SELECT $q$ -- kept $q$, $1 -- gone\n FROM t") == "SELECT $q$ -- kept $q$, $1 FROM t"
     assert _sql_code("  LEFT JOIN g\n   ON x  ") == "LEFT JOIN g ON x"
+    # A7-R3: a dollar-quote delimiter opens only at a token boundary, so the
+    # identifier sentinel$q$ opens nothing and the comment after it goes.
+    probe = "SELECT 1 AS sentinel$q$ -- " + _G3_CLAUSE_SQL
+    assert _sql_code(probe) == "SELECT 1 AS sentinel$q$", "probe boundary"
+    assert _G3_CLAUSE_SQL not in _sql_code(probe), "probe boundary clause"
+    assert _sql_code("SELECT x, $q$ a  -- b $q$ /* c */ FROM t") == "SELECT x, $q$ a  -- b $q$ FROM t", \
+        "probe dollar body"
+    # A7-R3: quoted spans are kept byte for byte; only code whitespace collapses.
+    assert _sql_code("SELECT 'a  b',  \"c\n d\"   FROM t") == "SELECT 'a  b', \"c\n d\" FROM t", \
+        "probe quoted bytes"
+    assert _sql_code("SELECT E'it\\'s -- kept' -- gone") == "SELECT E'it\\'s -- kept'", "probe E string"
+    assert cf_asm.sql_split_top("a, f(b, c), 'x,y)', d") == ["a", "f(b, c)", "'x,y)'", "d"], \
+        "probe split"
+    # The recorder's shape reads the same tokens (A7-R3 finding 4).
+    assert cf_asm.shape("UPDATE /* note */ ffa_kept_epochs SET chain = chain")[:3] == \
+        ["UPDATE", "ffa_kept_epochs", ["chain"]], "probe shape update"
+    assert cf_asm.shape("SELECT 1 /* UPDATE ffa_kept_epochs SET chain = chain */")[:3] == \
+        ["SELECT", "", []], "probe shape mention"
+    assert cf_asm.shape("SELECT 'UPDATE x FROM ffa_kept_epochs' AS a FROM players")[1] == "players", \
+        "probe shape literal"
 
 
-async def _executed(env, run):
+async def _executed(env, run, binds=None):
     """The statements `run()` sends to the server through the case's engine,
     as SQLAlchemy hands them to the driver (before_cursor_execute), and the
     exception it raised, if any. A7-R2: a check of SQL reads what executes;
     the statement is recorded before the server sees it, so one the server
-    refuses is still in the list."""
+    refuses is still in the list. A list passed as `binds` receives each
+    statement's driver parameters, index for index with the statements."""
     from sqlalchemy import event
     seen = []
 
     def before(conn, cursor, statement, parameters, context, executemany):
         seen.append(statement)
+        if binds is not None:
+            binds.append(parameters)
 
     event.listen(env.engine.sync_engine, "before_cursor_execute", before)
     err = None
@@ -1809,7 +1787,7 @@ def test_s12b_reform_is_one_transaction(monkeypatch):
         await env.wager(lob, b1, lob.pids[0])
 
         def carry_fault(conn, cursor, statement, parameters, context, executemany):
-            if statement.lstrip().startswith("UPDATE ffa_bets SET lobby_id"):
+            if _sql_code(statement).startswith("UPDATE ffa_bets SET lobby_id"):
                 raise RuntimeError("cf fault at the carry")
         _event.listen(env.engine.sync_engine, "before_cursor_execute", carry_fault)
         try:
@@ -2089,7 +2067,7 @@ def test_s25_lobby_phase_wagers_after_a_reform(monkeypatch):
         seen = []
 
         def spy(conn, cursor, statement, parameters, context, executemany):
-            if "lobby_bets" in statement:
+            if "lobby_bets" in _sql_code(statement):
                 seen.append(statement)
         _event.listen(env.engine.sync_engine, "before_cursor_execute", spy)
         try:
@@ -5839,31 +5817,116 @@ def test_fix2_s2_snapshot_sources_are_complete(monkeypatch):
             assert keys.count("exclusion_reasons") == 1, (tag, keys)
 
         lob = await _s64_lobby(env)
-        res = _s64_res(lob)
+        s, res = lob.sids, _s64_res(lob)
+        res[s[5]] = res[s[6]] = (0, 0)
+        await env.ready_all(lob, list(range(7)))
+        # Distinct, non-empty reasons (A7-R3): seat 5 a ghost, seat 6 graced,
+        # every other seat none, so no constant the INSERT or a reader could
+        # substitute equals the stored set.
+        want = {sid: [] for sid in s}
+        want[s[5]], want[s[6]] = ["ghost"], ["grace"]
         box = {}
 
         async def report():
-            box["r"] = await env.report(lob, 1, res, reporter=lob.sids[0])
+            box["r"] = await env.report(lob, 1, res, reporter=s[0], left={s[5], s[6]},
+                                        absent={s[5]}, gp_leave={s[6]: 0})
 
-        seen, err = await _executed(env, report)
+        binds = []
+        seen, err = await _executed(env, report, binds)
         r = box.get("r")
-        inserts = [c for c in (_sql_code(s) for s in seen)
+        inserts = [(c, b) for c, b in ((_sql_code(st), b) for st, b in zip(seen, binds))
                    if c.startswith("INSERT INTO ffa_match_players ")]
         assert inserts, ("S2 insert", r, repr(err))
-        for c in inserts:
-            cols = [x.strip() for x in c[c.index("(") + 1:c.index(")")].split(",")]
-            assert cols.count("exclusion_reasons") == 1, ("S2 insert reasons", cols)
-            assert len(_re.findall(r"CAST\(\$\d+(?:::[A-Za-z ]+)? AS text\[\]\)", c)) == 1, \
-                ("S2 insert cast", c)
+        sid_of = {str(pid): sid for pid, sid in zip(lob.pids, s)}
+        bound = {}
+        for c, b in inserts:
+            head, _sep, tail = c.partition(" VALUES ")
+            cols = cf_asm.sql_split_top(head[head.index("(") + 1:head.rindex(")")])
+            vals = cf_asm.sql_split_top(tail.strip()[1:-1])
+            assert cols.count("exclusion_reasons") == 1 and len(vals) == len(cols), \
+                ("S2 insert reasons", cols, vals)
+            # The value expression bound to the column, as a whole: the cast
+            # of one parameter, nothing around it (A7-R3 finding 2).
+            expr = vals[cols.index("exclusion_reasons")]
+            m = _re.fullmatch(r"CAST\(\$(\d+)(?:::[A-Za-z ]+(?:\[\])?)? AS text\[\]\)", expr)
+            assert m, ("S2 insert cast", expr)
+            pm = _re.fullmatch(r"\$(\d+)(?:::[A-Za-z ]+)?", vals[cols.index("player_id")])
+            assert pm, ("S2 insert player", vals[cols.index("player_id")])
+            bound[sid_of.get(str(b[int(pm.group(1)) - 1]))] = list(b[int(m.group(1)) - 1])
+        assert bound == want, ("S2 insert bound", bound, want)
         assert err is None and r is not None and r.status == 200, ("S2 report", r, repr(err))
         rows = await _mp(env, lob, 1)
-        assert rows and all(row["exclusion_reasons"] is not None for row in rows.values()), \
-            ("S2 stored", rows)
+        stored = {s[slot]: row["exclusion_reasons"] for slot, row in rows.items()}
+        assert stored == want, ("S2 stored", stored, want)
         mid = next(iter(rows.values()))["match_id"]
         for tag, sql, params in reads:
             _keys, got = await columns(sql, params(mid))
-            assert got and all(g["exclusion_reasons"] is not None for g in got), (tag + " rows", got)
+            read = {g["steam_id"]: g["exclusion_reasons"] for g in got}
+            assert len(read) == len(got) and read == stored, (tag + " rows", read, stored)
     run_env(monkeypatch, body)
+
+
+def test_wp11_a_game_step_without_a_game_is_refused(monkeypatch):
+    """WP11, executed (A7-R3 finding 3): the connect route refuses a lag or an
+    entered step that names no game with a 422 naming the game field, before
+    any statement and with no seat row changed; the same lag step naming its
+    game is accepted, so the refusal is the guard's and not the fixture's."""
+    async def body(env):
+        lob = await _short(env, 6)
+        await env.at(lob, 50.0)
+        await _admit(env, lob, 4, 5, 0, [0, 1, 2, 3])
+        await env.at(lob, 55.0)
+        a = await env.connect(lob, 1, "lock_seen")
+        assert a.status == 200, ("WP11 prime", a)
+        before = await env.seats(lob)
+        for step, kw in (("lag", {"k": 1, "why": "timeout"}), ("entered", {})):
+            box = {}
+
+            async def go():
+                box["a"] = await env.connect(lob, 1, step, **kw)
+
+            seen, err = await _executed(env, go)
+            a = box.get("a")
+            assert err is None and a is not None and \
+                (a.status, a.body) == (422, "invalid connect field: game"), \
+                ("WP11 refused", step, a, repr(err))
+            assert seen == [], ("WP11 no statement", step, seen)
+        assert await env.seats(lob) == before, "WP11 no write"
+        a = await env.connect(lob, 1, "lag", game=1, k=1, why="timeout")
+        assert a.status == 200, ("WP11 accepted", a)
+    run_env(monkeypatch, body)
+
+
+def _answer_keys(o, out):
+    """Every dict key at any depth of an answer body."""
+    if isinstance(o, dict):
+        for k, v in o.items():
+            out.add(k)
+            _answer_keys(v, out)
+    elif isinstance(o, (list, tuple)):
+        for v in o:
+            _answer_keys(v, out)
+    return out
+
+
+def test_wp3_wp4_keys_are_sent(monkeypatch):
+    """WP3/WP4, executed (A7-R3 sweep): the keys the client reads, which the
+    client-structure file finds named in the server's builders, are in the
+    answers the routes send. The answer tour drives every answer shape and
+    the poll's lock payload: WP3's keys are read from the payload answers,
+    WP4's (and the entry keys) from the connect and assembly answers."""
+    import test_ffa_assembly_client_structure as cst
+
+    async def body(env):
+        tour = await _answer_tour(env, monkeypatch)
+        payload, answers = set(), set()
+        for label, a, _t, _kind, _st in tour:
+            _answer_keys(a.body, payload if label.startswith("payload") else answers)
+        lacking3 = sorted(set(cst.WP3_KEYS) - payload)
+        lacking4 = sorted(set(cst.WP4_KEYS + cst.WP4_ENTRY) - answers)
+        assert lacking3 == [], ("WP3 sent", lacking3, sorted(payload))
+        assert lacking4 == [], ("WP4 sent", lacking4, sorted(answers))
+    run_env(monkeypatch, body, skip=("reform_rows_left",))
 
 
 def test_fix2_s2_assembly_reason_recording_includes_ghosts():

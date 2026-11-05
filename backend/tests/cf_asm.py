@@ -135,7 +135,122 @@ class RecSession(AsyncSession):
         await super().commit()
 
 
-_VERB = re.compile(r"^\s*(?:/\*.*?\*/\s*)?(\w+)", re.S)
+_IDENT_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$")
+_DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def sql_tokens(sql):
+    """The one SQL tokenizer of these tests (A7-R3): [(kind, text)] with kind
+    "quoted" for a single-quoted literal (E'' strings honour backslash
+    escapes), a double-quoted identifier or a dollar-quoted body, each kept
+    byte for byte; "code" for everything else, comments removed. `--` runs to
+    the end of the line and `/* */` blocks nest, as PostgreSQL lexes them. A
+    dollar-quote delimiter opens only at a token boundary: after an
+    identifier character (letters, digits, `_`, `$`), `$` continues the
+    identifier, so `sentinel$q$` is one name and opens nothing."""
+    toks, code = [], []
+    i, n = 0, len(sql)
+
+    def flush():
+        if code:
+            toks.append(("code", "".join(code)))
+            code.clear()
+
+    while i < n:
+        c = sql[i]
+        prev = sql[i - 1] if i else ""
+        if c in ("'", '"'):
+            esc = c == "'" and prev in ("E", "e") and (i < 2 or sql[i - 2] not in _IDENT_CHARS)
+            j = i + 1
+            while j < n:
+                if esc and sql[j] == "\\":
+                    j += 2
+                    continue
+                if sql[j] == c:
+                    if j + 1 < n and sql[j + 1] == c:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            flush()
+            toks.append(("quoted", sql[i:j + 1]))
+            i = j + 1
+            continue
+        if c == "$" and prev not in _IDENT_CHARS:
+            m = _DOLLAR_TAG.match(sql, i)
+            if m:
+                tag = m.group(0)
+                end = sql.find(tag, m.end())
+                end = n if end < 0 else end + len(tag)
+                flush()
+                toks.append(("quoted", sql[i:end]))
+                i = end
+                continue
+        if sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j
+            code.append(" ")
+            continue
+        if sql.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if sql.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif sql.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            code.append(" ")
+            i = j
+            continue
+        code.append(c)
+        i += 1
+    flush()
+    return toks
+
+
+def sql_code(sql, *, mask_literals=False):
+    """A statement as the server parses it, from sql_tokens: comments removed,
+    each a single space; runs of whitespace OUTSIDE quoted spans collapse to
+    one space and the ends are trimmed; every quoted span is kept byte for
+    byte. mask_literals=True writes each single-quoted literal and
+    dollar-quoted body as '' (a double-quoted identifier stays), so a
+    classifier reading the result never reads a literal's contents."""
+    parts = []
+    for kind, text in sql_tokens(sql):
+        if kind == "code":
+            parts.append(re.sub(r"\s+", " ", text))
+        elif mask_literals and not text.startswith('"'):
+            parts.append("''")
+        else:
+            parts.append(text)
+    return "".join(parts).strip()
+
+
+def sql_split_top(code, sep=","):
+    """sql_code output split at `sep` where parentheses are balanced and
+    outside every quoted span (through sql_tokens, so a quoted comma or
+    parenthesis never splits), each part stripped."""
+    parts, cur, depth = [], [], 0
+    for kind, text in sql_tokens(code):
+        if kind == "quoted":
+            cur.append(text)
+            continue
+        for ch in text:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if ch == sep and depth == 0:
+                parts.append("".join(cur).strip())
+                cur = []
+            else:
+                cur.append(ch)
+    parts.append("".join(cur).strip())
+    return parts
+
+
+_VERB = re.compile(r"^\s*(\w+)", re.S)
 _UPD = re.compile(r"^\s*UPDATE\s+(\w+)\s+SET\s+(.*?)(?:\sWHERE\s|\sRETURNING\s|$)", re.S | re.I)
 _INS = re.compile(r"^\s*INSERT\s+INTO\s+(\w+)\s*\(([^)]*)\)", re.S | re.I)
 _DEL = re.compile(r"^\s*DELETE\s+FROM\s+(\w+)", re.S | re.I)
@@ -192,8 +307,11 @@ def shape(sql):
     statement wrapped in a WITH list has the shape of the statement the list
     prefixes (its verb, and for a SELECT the first table its text reads), so
     a twin that moves a predicate into a named CTE "inside the same
-    statement" (evidence section 8) leaves the shape unchanged."""
-    whole = sql.strip()
+    statement" (evidence section 8) leaves the shape unchanged. Classified
+    after sql_tokens (A7-R3), the one tokenizer: comments removed and
+    literals masked, so a comment beside or inside a statement changes no
+    field of its shape and a literal's text is never read as a table."""
+    whole = sql_code(sql, mask_literals=True)
     s = _main_statement(whole)
     verb = (_VERB.match(s).group(1) if _VERB.match(s) else "?").upper()
     table, cols = "", []

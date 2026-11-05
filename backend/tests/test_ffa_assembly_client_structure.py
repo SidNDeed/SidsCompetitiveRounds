@@ -2385,7 +2385,11 @@ def test_wp7_wp10_wp11_events():
     sender's payload order and each receiver's parse order; the stamp's
     result literals at the master's send and ValidateStamp's reader; the lag
     step and its game key on both sides (the server's check read through
-    the AST, so a comment naming it cannot satisfy it, A7-R1)."""
+    the AST, so a comment naming it cannot satisfy it, A7-R1). The AST read
+    is the secondary, structural check: that the guard RUNS, a lag or an
+    entered step without a game refused with a 422 and no write, is executed
+    by test_wp11_a_game_step_without_a_game_is_refused in
+    test_ffa_assembly_pg.py (A7-R3 finding 3)."""
     le = kept(src("FfaLateEntry.cs"))
     lr = kept(src("FfaLateRules.cs"))
     decl = r"(?:(?:internal|public|const|static)\s+)+byte\s+(EVT_\w+)\s*=\s*(\d+)\s*;"
