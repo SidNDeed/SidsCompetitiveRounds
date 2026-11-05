@@ -1725,6 +1725,10 @@ def _join(ps):
         if len(es) != len(rest):
             es.append("B")                  # a builtin value's own parts
         return ("C", _join(es))
+    if all(p in ("B", "ROW") for p in rest):
+        # a row or a builtin value: "ROW" admits no use that "B" does not
+        # (the join is the narrower of the two)
+        return "ROW"
     return rest[0] if all(p == rest[0] for p in rest) else None
 
 
@@ -2045,15 +2049,16 @@ def _binding_provenance(name, kind, node, b, policy, d):
     if kind != "local" or not isinstance(node, _ast.Name):
         return None
     par = b.parent.get(id(node))
-    if isinstance(par, _ast.Assign) and len(par.targets) == 1:
-        if par.targets[0] is node:
+    if isinstance(par, _ast.Assign):
+        # one target, or a chain (`a = b = None`): each target is the value
+        if any(t is node for t in par.targets):
             return receiver_provenance(par.value, b, policy, d)
         return None
     if isinstance(par, _ast.Tuple):
         top = b.parent.get(id(par))
         if isinstance(top, (_ast.For, _ast.comprehension)) and top.target is par:
             return _derive(_arg_elements(top.iter, b, policy, d))
-        if isinstance(top, _ast.Assign) and top.targets == [par]:
+        if isinstance(top, _ast.Assign) and any(t is par for t in top.targets):
             if (isinstance(top.value, _ast.Tuple)
                     and len(top.value.elts) == len(par.elts)):
                 return receiver_provenance(
