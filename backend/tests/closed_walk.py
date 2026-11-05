@@ -56,6 +56,9 @@ import json as _cw_json
 import math as _cw_math
 
 import shape_grammar as _sg
+# Round 11 (ruling FOUR-R10-A2, FIX-R11-ID): the one identity binder.
+import grammar_providers as _gp
+import identity_binder as _ib
 from shape_grammar import header_digest as _header_digest
 
 
@@ -795,7 +798,42 @@ class Bindings:
             raise Unclassified((line, f"a name bound more than once: {name}"))
         if got:
             return got[0]
-        return ("module", getattr(self.scope, name, _MISSING))
+        v = getattr(self.scope, name, _MISSING)
+        # Round 11 (FIX-R11-ID): every module-scope read is reported to the
+        # identity binder, so a cached walk is honoured only while it still
+        # binds the same object (identity_binder.Deps.valid).
+        _ib.observe(self.scope, name, v)
+        return ("module", v)
+
+    def bound_identity(self, name, line=0):
+        """Round 11 (ruling FOUR-R10-A2, FIX-R11-ID; finding gate:842): the
+        object the module scope binds `name` to (its own binding, else its
+        __builtins__ entry) must BE the definition the name addresses, proven
+        by identity_binder.trusted: for a provider of
+        grammar_providers.PROVIDERS, the provider at its description; for any
+        other name, the scope module's own definition of that name. The
+        spelling only chose `name` (a filter); this is the guarantee. A
+        rebinding (`main.HTTPException = writer`, a functools.wraps wrapper,
+        a subclass carrying the description) refuses."""
+        v = getattr(self.scope, name, _MISSING)
+        _ib.observe(self.scope, name, v)
+        if v is _MISSING:
+            bi = getattr(self.scope, "__builtins__", _MISSING)
+            if isinstance(bi, dict):
+                v = bi.get(name, _MISSING)
+            else:
+                v = getattr(bi, name, _MISSING)
+            _ib.observe(bi, name, v)
+        desc = _gp.PROVIDERS.get(name)
+        if desc is not None and len(desc) == 1:
+            ok = _ib.trusted(v, desc[0][0], desc[0][1])
+        else:
+            ok = _ib.trusted(v, getattr(self.scope, "__name__", None), name)
+        if ok is not True:
+            raise Unclassified((line, f"{name}, which the walk reads as the "
+                                      "module's, is not the definition it "
+                                      "names"))
+        return v
 
     def module(self, name, line=0):
         """The module's value of `name` when the function does not bind it;
@@ -814,6 +852,7 @@ class Bindings:
         if kind != "module":
             raise Unclassified((line, f"{name}, a name the walk reads as the "
                                       "module's, is bound by the function"))
+        self.bound_identity(name, line)
         return True
 
     def named(self, node, names, line=0):
@@ -828,12 +867,21 @@ class Bindings:
         line = line or getattr(node, "lineno", 0)
         kind, v = self.resolve(node.id, line)
         if kind == "module":
+            self.bound_identity(node.id, line)
             return node.id
         if kind == "import":
             imp, alias = v
             if self.grammar is not None:
-                # the grammar admitted this import's exact statement shape
+                # the grammar admitted this import's exact statement shape;
+                # round 11 (FIX-R11-ID): the object its frozen callee table
+                # holds for it must be a trusted definition
                 if isinstance(imp, _ast.ImportFrom) and alias.name == node.id:
+                    obj = _frozen_callee(self.grammar, imp, node.id)
+                    if obj is None or not (_ib.trusted_function(obj)
+                                           or _ib.trusted_class(obj)):
+                        raise Unclassified((line, f"{node.id}, imported by "
+                                                  "the function, is not a "
+                                                  "frozen definition"))
                     return node.id
             elif (isinstance(imp, _ast.ImportFrom) and imp.module
                     and not imp.level and alias.name == node.id):
@@ -914,6 +962,7 @@ class Bindings:
         fallback = pb.module(root, line)
         if isinstance(bi, dict):
             fallback = bi.get(root, _MISSING)
+        _ib.observe(bi, root, fallback)
         if kind == "module" and got is _MISSING:
             got = fallback
         if kind == "import":
@@ -1122,8 +1171,16 @@ class Bindings:
               and not func.value.keywords):
             mod = self.module(func.value.func.id, line)
             obj = _frozen_callee(self.grammar, func) if mod is not None else None
-        obj = _inspect.unwrap(obj) if callable(obj) else None
-        return obj if _inspect.isfunction(obj) else None
+        # Round 11 (FIX-R11-ID; finding closed_walk:1125): the walk reads
+        # the ACTUAL callable. inspect.unwrap discarded every wrapper layer's
+        # body; now a callee is admitted only when it is a plain function
+        # defined by its own module's source, with no __wrapped__ layer and
+        # no closure (identity_binder.trusted_function), and its chain is
+        # recorded for any cached walk that reads it.
+        if obj is None or not callable(obj):
+            return None
+        _ib.observe_chain(obj)
+        return obj if _ib.trusted_function(obj) else None
 
     @staticmethod
     def module_accessor(fn, grammar=None):
@@ -1414,7 +1471,27 @@ class Providers(dict):
     """A pure-callee table: {spelling: its frozen provider objects, one per
     component of the spelling} (round 10, ruling REHEARSAL-R9-A1 (D)).
     Bindings.listed admits a spelling of a Providers table only on its
-    provider; every Policy holds its pure tables as Providers."""
+    provider; every Policy holds its pure tables as Providers.
+
+    Round 11 (ruling FOUR-R10-A2, FIX-R11-ID; finding a1:5655): a table is
+    admitted only when every provider object IS the definition
+    grammar_providers.PROVIDERS addresses for its component, proven by
+    identity_binder.trusted (code identity, C names, immutable types), never
+    by the object's writable __module__ and __qualname__. A provider rebound
+    before the table was built (`json.loads` replaced by a functools.wraps
+    wrapper at import) refuses the table here."""
+
+    def __init__(self, table=(), **kw):
+        super().__init__(table, **kw)
+        for spelling, objs in self.items():
+            desc = _gp.PROVIDERS.get(spelling)
+            if desc is None or len(desc) != len(objs):
+                raise Unclassified((0, f"{spelling}: no frozen provider "
+                                       "description"))
+            for o, (m, q) in zip(objs, desc):
+                if _ib.trusted(o, m, q) is not True:
+                    raise Unclassified((0, f"{spelling}: its provider is not "
+                                           f"the definition {m}.{q}"))
 
 
 class Policy:
@@ -1443,7 +1520,7 @@ class Policy:
         # when set, every helper body def_effects reads is admitted by it
         # first. None for a file that has no grammar of its own yet.
         self.grammar = None
-        self.helpers = {}           # (module, qualname) -> effects
+        self.helpers = {}           # id(fn) -> (fn, effects, Deps); round 11
         self.walking = set()        # helpers being walked now
         self.met = _collections.Counter()
 
@@ -1935,7 +2012,9 @@ def checked_callbacks(call, fn, effects, line):
 
 
 def _helper_tree(fn):
-    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(fn)))
+    # Round 11 (FIX-R11-ID): the source of the function's OWN code object
+    # (inspect.getsource(fn) follows __wrapped__ to another body).
+    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(fn.__code__)))
     defs = [n for n in tree.body if isinstance(n, (_ast.AsyncFunctionDef,
                                                    _ast.FunctionDef))]
     if len(defs) != 1:
@@ -1944,21 +2023,41 @@ def _helper_tree(fn):
 
 
 def helper_effects(fn, policy, stack=()):
-    """helper_effects of a function object (cached per policy)."""
-    key = (fn.__module__, fn.__qualname__)
-    if key in policy.helpers:
-        return policy.helpers[key]
+    """helper_effects of a function object (cached per policy).
+
+    Round 11 (ruling FOUR-R10-A2, FIX-R11-ID; finding closed_walk:1949): the
+    cache is keyed by the function OBJECT, never by its writable
+    __module__/__qualname__, and an entry holds the identity_binder.Deps of
+    its walk: every module-scope binding and every callee chain the walk
+    read. A hit is honoured only while every one still binds the recorded
+    object (`main.int = writer` after the cache is warm drops the entry and
+    the body is walked again); a hit also carries its Deps into every
+    enclosing recording. The scope is the module whose namespace IS the
+    function's globals."""
+    key = id(fn)
+    hit = policy.helpers.get(key)
+    if hit is not None:
+        if hit[0] is fn and hit[2].valid():
+            _ib.carry(hit[2])
+            return hit[1]
+        del policy.helpers[key]
     if key in policy.walking:
         # A helper that awaits itself: its effects are the ones its other
         # statements give, which the outer walk of it is collecting.
         return frozenset()
+    scope = _ib._owner_module(fn) if isinstance(fn, _types.FunctionType) else None
+    if scope is None:
+        raise Unclassified((0, f"{getattr(fn, '__name__', fn)!r}: not a "
+                               "function of a module"))
     policy.walking.add(key)
     try:
-        out = def_effects(_helper_tree(fn), _inspect.getmodule(fn), policy,
-                          fn.__name__, source=source_of(fn))
+        with _ib.recording() as deps:
+            _ib.observe_chain(fn)
+            out = def_effects(_helper_tree(fn), scope, policy,
+                              fn.__name__, source=source_of(fn))
     finally:
         policy.walking.discard(key)
-    policy.helpers[key] = out
+    policy.helpers[key] = (fn, out, deps)
     return out
 
 

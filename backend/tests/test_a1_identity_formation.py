@@ -601,6 +601,41 @@ def _outer_jumps(node):
 
 from closed_walk import Unclassified  # noqa: E402
 import closed_walk as _cw  # noqa: E402
+import identity_binder as _a1_ib  # noqa: E402
+
+
+class _A1OwnSource:
+    """Round 11 (ruling FOUR-R10-A2, FIX-R11-ID; the class of finding
+    closed_walk:1125): the a1 walks' one source reader. inspect.getsource
+    and inspect.getsourcelines unwrap __wrapped__ and return ANOTHER body
+    than the one that runs; here a function's source is the source of its
+    OWN code object, and the function must be the definition its module's
+    source makes (identity_binder.trusted_function: no wrapper layer, no
+    closure, its code equal to a fresh compile). Every other attribute is
+    the inspect module's."""
+
+    def __getattr__(self, name):
+        return getattr(_a1_real_inspect, name)
+
+    @staticmethod
+    def _own(obj):
+        if isinstance(obj, _a1_real_inspect.types.FunctionType):
+            if not _a1_ib.trusted_function(obj):
+                raise Unclassified((0, f"{obj.__code__.co_name}: not the "
+                                       "definition its module's source "
+                                       "makes"))
+            return obj.__code__
+        return obj
+
+    def getsource(self, obj):
+        return _a1_real_inspect.getsource(self._own(obj))
+
+    def getsourcelines(self, obj):
+        return _a1_real_inspect.getsourcelines(self._own(obj))
+
+
+_a1_real_inspect = _inspect
+_inspect = _A1OwnSource()
 import grammar_shapes_a1 as _gs  # noqa: E402
 import ro_covered as _ro  # noqa: E402
 import match_hold as _a1_match_hold  # noqa: E402
@@ -2058,7 +2093,9 @@ def _attempt_budgets(fn_src):
     _admit_handler(tree, None, fn_src)
     # the constant read through the handler's resolver as the module's
     # (ruling REHEARSAL-FOUR-R5, fix 1)
-    b = _handler_bindings(tree, None)
+    # round 11 (FIX-R11-ID): resolved in main, the module whose handlers
+    # these are; a walk with no scope bound its names by spelling alone
+    b = _handler_bindings(tree, main)
     openings, counters, loops = [], set(), []
     for node in _ast.walk(tree):
         if isinstance(node, _ast.For) and b.reads(
@@ -2815,7 +2852,9 @@ def _gate_calls_inside_a_swallowing_scope(src):
     """
     tree = _ast.parse(src)
     # round 9 (G3): the callee read through the handler's resolver
-    b = _handler_bindings(tree, None)
+    # round 11 (FIX-R11-ID): resolved in main, the module whose handlers
+    # these are; a walk with no scope bound its names by spelling alone
+    b = _handler_bindings(tree, main)
     lease = "_formation_lease_conflict"
     bad = []
 
@@ -3531,7 +3570,9 @@ def _fix1b_calls(function_name, callee):
     tree = _ast.parse(_textwrap.dedent(_inspect.getsource(
         getattr(main, function_name))))
     # round 9 (G3): the callee read through the handler's resolver
-    b = _handler_bindings(tree, None)
+    # round 11 (FIX-R11-ID): resolved in main, the module whose handlers
+    # these are; a walk with no scope bound its names by spelling alone
+    b = _handler_bindings(tree, main)
     return [node for node in _ast.walk(tree)
             if isinstance(node, _ast.Call) and b.spelled(node.func, callee)]
 
@@ -3690,6 +3731,7 @@ def _r3_scope():
                                       _R3_HELPER_SRC.splitlines(True), mod.__file__)
     import sys as _sys
     _sys.modules[mod.__name__] = mod
+    _a1_ib.register_source(mod, _R3_HELPER_SRC, mod.__file__)
     exec(compile(_R3_HELPER_SRC, mod.__file__, "exec"), mod.__dict__)
     mod.sync_state = _sample_commits
 
@@ -3999,6 +4041,7 @@ def _r4_cw_scope():
     _linecache.cache[mod.__file__] = (len(_R4_CW_SRC), None,
                                       _R4_CW_SRC.splitlines(True), mod.__file__)
     _sys.modules[mod.__name__] = mod
+    _a1_ib.register_source(mod, _R4_CW_SRC, mod.__file__)
     exec(compile(_R4_CW_SRC, mod.__file__, "exec"), mod.__dict__)
     return mod
 
@@ -4197,6 +4240,7 @@ def _r5_cw_scope():
     _linecache.cache[mod.__file__] = (len(_R5_CW_SRC), None,
                                       _R5_CW_SRC.splitlines(True), mod.__file__)
     _sys.modules[mod.__name__] = mod
+    _a1_ib.register_source(mod, _R5_CW_SRC, mod.__file__)
     exec(compile(_R5_CW_SRC, mod.__file__, "exec"), mod.__dict__)
     return mod
 
@@ -4450,6 +4494,7 @@ def _r7_scope(tag, sources=()):
     mod.__dict__.update({k: v for k, v in vars(main).items()
                          if not k.startswith("__")})
     _sys.modules[mod.__name__] = mod
+    _a1_ib.register_source(mod, text, mod.__file__)
     exec(compile(text, mod.__file__, "exec"), mod.__dict__)
     return mod
 
@@ -5200,6 +5245,7 @@ def test_r8_the_definition_scope_refuses_a_store_by_shape(scope_row):
         linecache.cache[mod.__file__] = (len(text), None,
                                          text.splitlines(True), mod.__file__)
         _sys.modules[mod.__name__] = mod
+        _a1_ib.register_source(mod, text, mod.__file__)
         exec(compile(text, mod.__file__, "exec"), mod.__dict__)
         return mod
 
@@ -5644,15 +5690,13 @@ def test_r10_pure_providers_are_the_frozen_ones():
     for fam, table in tables.items():
         assert set(table) == set(_gp.FAMILIES[fam]), fam
         for spelling, objs in table.items():
-            got = []
-            for o in objs:
-                if isinstance(o, types.ModuleType):
-                    got.append(("<module>", o.__name__))
-                    continue
-                mod = getattr(o, "__module__", None) or getattr(
-                    getattr(o, "__self__", None), "__module__", None)
-                got.append((mod, getattr(o, "__qualname__", None)))
-            assert tuple(got) == _gp.PROVIDERS[spelling], (fam, spelling, got)
+            # round 11 (FIX-R11-ID, finding a1:5655): each provider IS the
+            # definition its frozen description addresses (identity_binder
+            # .trusted), never the object's writable __module__/__qualname__
+            desc = _gp.PROVIDERS[spelling]
+            assert len(objs) == len(desc), (fam, spelling)
+            for o, (m, q) in zip(objs, desc):
+                assert _a1_ib.trusted(o, m, q) is True, (fam, spelling, m, q)
     p = _policy()
     assert p.pure_calls == _PURE_CALLS and p.pure_awaits == _PURE_AWAITS
     sub = _cw.Policy(main, {}, (), {}, {})

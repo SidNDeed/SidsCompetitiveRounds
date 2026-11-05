@@ -30,6 +30,7 @@ from gate_lane import gate_lane  # noqa: E402,F401  (the live tests' fixture)
 import main  # noqa: E402
 import test_match_hold_pg as hold_test  # noqa: E402
 import closed_walk as _cw  # noqa: E402
+import identity_binder as _ib  # noqa: E402
 import ro_covered  # noqa: E402
 import builtins as _gate_builtins  # noqa: E402
 from fastapi import HTTPException as _gate_HTTPException  # noqa: E402
@@ -235,7 +236,9 @@ def _source_file(fn):
     """The file inspect reads fn's source from, else its module's."""
     path = inspect.getsourcefile(fn)
     if path is None:
-        path = getattr(inspect.getmodule(fn), "__file__")
+        # round 11 (FIX-R11-ID): the module whose namespace IS fn's
+        # globals, never inspect.getmodule (fn's writable __module__)
+        path = getattr(_ib._owner_module(fn), "__file__")
     return path
 
 
@@ -247,7 +250,9 @@ def _body(fn, role):
     n = check_body(d, role, filename, offset, _G["record"])
     bodies = _G["bodies"]
     bodies[id(d)] = d
-    key = (fn.__module__, fn.__qualname__)
+    # round 11 (FIX-R11-ID): the trace keys a body by the function
+    # OBJECT, never by its writable __module__/__qualname__
+    key = fn
     trees = [d]
     _traced(role, key, trees, n, None, d)
     return d
@@ -483,24 +488,34 @@ def _helper_kind(fn, p):
       None       anything else, with why: the visitor's refusal, an
                  exception handler that rolls back, a savepoint, or a
                  callback parameter."""
-    key = (fn.__module__, fn.__qualname__)
-    if key in p.gate_kinds:
-        known = p.gate_kinds[key]
-        if known is not None:
-            return known
-    p.gate_kinds[key] = (None, f"{fn.__name__} awaits itself")
-    result = None
+    # Round 11 (ruling FOUR-R10-A2, FIX-R11-ID; finding closed_walk:1949,
+    # the same cache here): keyed by the function OBJECT, never by its
+    # writable __module__/__qualname__; a recorded kind is honoured only
+    # while every binding and callee chain its reading read still binds the
+    # recorded object (identity_binder.Deps), else it is read again.
+    key = id(fn)
+    known = p.gate_kinds.get(key)
+    if known is not None:
+        kfn, kres, kdeps = known
+        if kfn is fn and (kdeps is None or kdeps.valid()):
+            if kdeps is not None:
+                _ib.carry(kdeps)
+            return kres
+        del p.gate_kinds[key]
+    p.gate_kinds[key] = (fn, (None, f"{fn.__name__} awaits itself"), None)
+    result = deps = None
     try:
-        result = _helper_kind_read(fn, p)
+        with _ib.recording() as deps:
+            result = _helper_kind_read(fn, p)
     finally:
-        _helper_kind_settle(p, key, result)
+        _helper_kind_settle(p, key, fn, result, deps)
     return result
 
 
-def _helper_kind_settle(p, key, result):
-    """The helper's kind recorded; None (read again next time) when its
-    read raised, a grammar refusal."""
-    p.gate_kinds[key] = result
+def _helper_kind_settle(p, key, fn, result, deps):
+    """The helper's kind recorded with the function and its Deps; None
+    (read again next time) when its read raised, a grammar refusal."""
+    p.gate_kinds[key] = None if result is None else (fn, result, deps)
 
 
 def _helper_kind_read(fn, p):
@@ -517,7 +532,7 @@ def _helper_kind_read(fn, p):
         elif "write" not in eff:
             result = ("reads" if eff & {"read", "lock"} else "pure"), None
         else:
-            scope = inspect.getmodule(fn)
+            scope = _ib._owner_module(fn)    # round 11: by identity
             d = _body(fn, "helper")
             w = _Walk(scope, fn.__name__, fn=d)
             state = {"refusals": 0}
@@ -719,7 +734,7 @@ def _replay_effects(fn, policy):
     """The shared visitor's effects of replay fn's body, read through
     _body (rollbacks permitted)."""
     d = _body(fn, "answer")
-    return _cw.def_effects(d, inspect.getmodule(fn), policy,
+    return _cw.def_effects(d, _ib._owner_module(fn), policy,
                            getattr(fn, "__name__"), rollbacks=True)
 
 
@@ -758,7 +773,7 @@ def _refusal_answer_problem(fn, call, seen, b):
     except Unclassified as e:
         return f"{fn.__name__} is not called with its caller's reason ({e.args[0][1]})"
     d = _body(fn, "answer")
-    w = _Walk(inspect.getmodule(fn), f"refusal answer {fn.__name__}", fn=d)
+    w = _Walk(_ib._owner_module(fn), f"refusal answer {fn.__name__}", fn=d)
     try:
         why = _answer_block(w, d.body, seen + (fn,), top=True)
     except Unclassified as e:
@@ -1120,6 +1135,7 @@ def _scope_of_lines(lines, consts=None):
     mod._refused = match_hold._refused
     mod._refuse_attempt = match_hold._refuse_attempt
     mod.__dict__.update(consts or {})
+    _ib.register_source(mod, src, mod.__file__)
     exec(compile(src, mod.__file__, "exec"), mod.__dict__)
     return mod
 
@@ -1686,6 +1702,7 @@ def _planted_module(module, name, lines):
     rows = text.splitlines(True)
     linecache.cache[filename] = (size, mtime, rows, filename)
     sys.modules[mod.__name__] = mod
+    _ib.register_source(mod, text, filename)
     exec(compile(text, filename, "exec"), mod.__dict__)
     return mod
 
@@ -2104,13 +2121,22 @@ def test_r7_grammar_covers_every_walked_span_and_body():
         _G["trace"] = None
         _GATE_POLICIES.clear()
     # Read only for the census's text assertions, never walked:
-    text_only = {("main", "_lease_admission_gate")}
-    bodies = {key for role, key, *_rest in trace if role != "site"}
-    sites = {key[1] for role, key, *_rest in trace if role == "site"}
+    # round 11 (FIX-R11-ID): by identity: a body by its function object, a
+    # site by its code object's own file and name, the text-only read by
+    # main's object; never by __module__/__qualname__/__name__
+    text_only = [main._lease_admission_gate]
+    bodies = [key for role, key, *_rest in trace if role != "site"]
+    sites = {key for role, key, *_rest in trace if role == "site"}
     for obj in read:
-        if inspect.isfunction(obj):
-            key = (obj.__module__, obj.__qualname__)
-            assert key in bodies or key in text_only or obj.__name__ in sites, key
+        # a read through a function or through its code object (closed_walk
+        # ._helper_tree reads fn.__code__ since round 11) counts by the code
+        # object's identity
+        code = (obj.__code__ if inspect.isfunction(obj)
+                else obj if inspect.iscode(obj) else None)
+        if code is not None:
+            assert (any(code is b.__code__ for b in bodies)
+                    or any(code is t.__code__ for t in text_only)
+                    or (code.co_filename, code.co_name) in sites), code
     checked = recount = 0
     for role, key, trees, n, path, fn in trace:
         checked += n
@@ -2252,7 +2278,7 @@ def test_r8_gate_callee_table_is_the_frozen_imports():
         func = next(n.func for n in ast.walk(fn) if isinstance(n, ast.Call)
                     and isinstance(n.func, ast.Name)
                     and n.func.id == "_lease_admission_gate")
-        scope = inspect.getmodule(real)
+        scope = _ib._owner_module(real)    # round 11: by identity
         got = _cw.Bindings(scope, fn, grammar=_GATE_GRAMMAR).callee(func)
         assert got is _lease_admission_gate, real.__name__
         assert _cw.Bindings(scope, fn).callee(func) is None, real.__name__
@@ -2602,14 +2628,13 @@ def test_r10_gate_pure_providers_are_the_frozen_ones():
                        ("gate._PLAIN_AWAITS", _PLAIN_AWAITS)):
         assert set(table) == set(_gp.FAMILIES[fam]), fam
         for spelling, objs in table.items():
-            got = []
-            for o in objs:
-                if isinstance(o, types.ModuleType):
-                    got.append(("<module>", o.__name__))
-                    continue
-                got.append((getattr(o, "__module__", None),
-                            getattr(o, "__qualname__", None)))
-            assert tuple(got) == _gp.PROVIDERS[spelling], (fam, spelling, got)
+            # round 11 (FIX-R11-ID): each provider IS the definition its
+            # frozen description addresses (identity_binder.trusted), never
+            # the object's writable __module__/__qualname__
+            desc = _gp.PROVIDERS[spelling]
+            assert len(objs) == len(desc), (fam, spelling)
+            for o, (m, q) in zip(objs, desc):
+                assert _ib.trusted(o, m, q) is True, (fam, spelling, m, q)
     p = _gate_policy(main)
     assert isinstance(p.pure_calls, _cw.Providers) and p.pure_calls == _PLAIN_CALLS
     assert isinstance(p.pure_awaits, _cw.Providers) and p.pure_awaits == {}
