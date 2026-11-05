@@ -832,8 +832,15 @@ class Bindings:
         desc = _gp.PROVIDERS.get(name)
         if desc is not None and len(desc) == 1:
             ok = _ib.trusted(v, desc[0][0], desc[0][1])
+        elif type(self.scope) is _types.ModuleType:
+            ok = _ib.trusted(v, self.scope.__name__, name)
         else:
-            ok = _ib.trusted(v, getattr(self.scope, "__name__", None), name)
+            # a scope that is not a module (a test's composed scope) names
+            # where each of its names is defined only through its own
+            # class's declaration, never through a __name__ it answers
+            addr = vars(type(self.scope)).get("__binder_address__")
+            where = addr(self.scope, name) if callable(addr) else None
+            ok = where is not None and _ib.trusted(v, where[0], where[1])
         if ok is not True:
             raise Unclassified((line, f"{name}, which the walk reads as the "
                                       "module's, is not the definition it "
@@ -978,7 +985,9 @@ class Bindings:
             plain = isinstance(imp, _ast.Import)
             if plain is False:
                 iname = None
-            if iname == wname:
+            if iname == wname and _ib._module(iname) is w0:
+                # round 11 (FIX-R11-ID): the spelling chose the module; the
+                # binding is the frozen provider object itself
                 got = w0
         if got is not w0:
             raise Unclassified((line, f"a call of {name}, whose {root} is "
@@ -991,8 +1000,11 @@ class Bindings:
             leaf = lb.module(last, line)
         bound = getattr(leaf, "__self__", _MISSING)
         wbound = getattr(wl, "__self__", _MISSING)
-        lname = getattr(leaf, "__name__", None)
-        method = bound is got and wbound is got and lname in (last,)
+        # round 11 (FIX-R11-ID): a method read fresh off its object is the
+        # frozen one by its type and method equality (the same receiver and
+        # the same function), never by its writable __name__
+        method = (bound is got and wbound is got and type(leaf) is type(wl)
+                  and leaf == wl)
         if leaf is not wl and method is not True:
             raise Unclassified((line, f"a call of {name}, whose {last} is "
                                       "not its frozen provider"))
@@ -1595,34 +1607,42 @@ def call_arguments(call):
 # frozen type the method belongs to. The receiver's PROVENANCE inside the
 # walked function decides it (receiver_provenance), never its spelling:
 #
-#   "B"     builtin by construction, the whole value: a literal or a display
-#           of such values, a call of a frozen provider whose result is
-#           builtin (RESULT_BUILTIN), a method of such a value, a subscript
-#           or attribute read of one, a column value of a session row;
-#   "C"     an exact builtin container whose elements are not proven (a
-#           display or comprehension holding other values, list()/dict() of
-#           an unproven argument): its own methods run builtin code, the
-#           elements it yields are unproven;
+#   "B"     builtin by construction, the whole value: a literal, a display
+#           or comprehension of such values, a call of a frozen provider
+#           whose result is builtin (RESULT_BUILTIN), a method result,
+#           subscript or attribute of such a value, a column value of a
+#           session row, the return of a trusted function every return of
+#           which is such a value;
+#   "C"     an exact builtin container whose elements are not proven: its
+#           own methods run builtin code, the elements it yields do not
+#           count as proven;
 #   "R"     a session result (`await <session>.execute(...)`, and its
 #           .mappings()/.scalars()), whose methods are the result methods;
-#   "ROW"   a row a session result yields (.first(), .one(), an element of
-#           .all()/.fetchall() or of the result itself): its get, items,
-#           values, keys and _asdict are the row type's;
-#   "ROWS"  a list of rows (.all(), .fetchall());
-#   ("P", p) the walked function's own parameter p: the verdict is
-#           CONDITIONAL, the effect "receiver:<p>:<group>", discharged at
-#           every call site by the argument's provenance there
-#           (discharge_receivers), recursively through the callers' own
-#           parameters within the walked closure;
+#   "ROW"   a row a session result yields; "ROWS" a list of rows;
+#   ("P", p, deep)  derived from the walked function's own parameter p:
+#           p itself (deep False), or a value read from it (deep True: an
+#           attribute, a subscript, a method result, an element, an
+#           operation with builtin operands). The verdict is CONDITIONAL,
+#           the effect "receiver:<p>:<group>" (group "deep" when derived:
+#           p must then be builtin whole), discharged at every walked call
+#           site by the argument's provenance there (discharge_receivers),
+#           carried up through the callers' own parameters, refused in a
+#           span walked on its own;
 #   None    anything else (a user class instance, an unknown callable's
 #           result, a name bound to either): the call site is refused.
+#
+# Every rule is a bound on the value's TYPE that holds whatever path
+# reaches the read (a name bound more than once, or mutated, takes the join
+# of every binding and every insertion; a name met again while its own
+# bindings are read adds nothing to the join).
 RESULT_METHODS = frozenset({"all", "fetchall", "first", "mappings", "one",
                             "scalar", "scalar_one", "scalars"})
 ROW_METHODS = frozenset({"get", "items", "values", "keys", "_asdict"})
 # Frozen providers (by the spelling the pure tables list, resolved through
-# Bindings.listed against the policy's frozen table) whose result is builtin
-# by construction: "B" a whole builtin value, "C" an exact builtin container
-# of its argument's elements (B when the argument is B).
+# Bindings.listed against the policy's Providers table) whose result is
+# builtin by construction: "B" a whole builtin value, "C" an exact builtin
+# container of its argument's elements (B when they are), "E" one of its
+# arguments' elements (min, max).
 RESULT_BUILTIN = {
     "str": "B", "int": "B", "float": "B", "bool": "B", "len": "B",
     "repr": "B", "round": "B", "abs": "B", "id": "B", "isinstance": "B",
@@ -1632,11 +1652,29 @@ RESULT_BUILTIN = {
     "uuid_mod.uuid4": "B", "uuid.UUID": "B", "time.time": "B",
     "time.monotonic": "B", "datetime.now": "B", "datetime.utcnow": "B",
     "datetime.datetime.now": "B", "datetime.datetime.utcnow": "B",
+    "sum": "B", "any": "B", "all": "B",
     "list": "C", "tuple": "C", "set": "C", "dict": "C", "sorted": "C",
-    "frozenset": "C", "min": "E", "max": "E", "sum": "B", "zip": None,
+    "frozenset": "C", "min": "E", "max": "E",
 }
 _DISPLAYS = (_ast.List, _ast.Tuple, _ast.Set)
-_COMPS = (_ast.ListComp, _ast.SetComp, _ast.DictComp)
+_INSERTING = {"append": (0,), "add": (0,), "insert": (1,),
+              "setdefault": (0, 1)}
+_INSERTING_ALL = frozenset({"extend", "update"})
+_PROV_DEPTH = 40
+
+
+def _is_p(p):
+    return isinstance(p, tuple) and p[0] == "P"
+
+
+def _derive(p):
+    """The provenance of a value READ from a value of provenance `p` (an
+    attribute, a subscript, a method result)."""
+    if p in ("B", "ROW"):
+        return "B"
+    if _is_p(p):
+        return ("P", p[1], True)
+    return None
 
 
 def _elements(p):
@@ -1645,20 +1683,50 @@ def _elements(p):
         return "B"
     if p in ("R", "ROWS"):
         return "ROW"
+    if _is_p(p):
+        return ("P", p[1], True)
     return None
 
 
 def _join(ps):
+    """The provenance of a value that is one of values of provenances
+    `ps`."""
     ps = list(ps)
-    if ps and all(p == "B" for p in ps):
+    if not ps or any(p is None for p in ps):
+        return None
+    params = {p[1] for p in ps if _is_p(p)}
+    rest = [p for p in ps if not _is_p(p)]
+    if params:
+        if len(params) == 1 and all(p == "B" for p in rest):
+            return ("P", params.pop(), any(p[2] for p in ps if _is_p(p)))
+        return None
+    if all(p == "B" for p in rest):
         return "B"
-    return None
+    if all(p in ("B", "C") for p in rest):
+        return "C"
+    return rest[0] if len(set(rest)) == 1 else None
+
+
+def _container(elts):
+    """An exact builtin container holding elements of provenances `elts`."""
+    j = _join(elts) if elts else "B"
+    if j == "B" or _is_p(j):
+        return "B" if j == "B" else ("P", j[1], True)
+    return "C"
+
+
+def _comp_element(expr, b, policy, d):
+    if isinstance(expr, _ast.DictComp):
+        return _join([receiver_provenance(expr.key, b, policy, d),
+                      receiver_provenance(expr.value, b, policy, d)])
+    return receiver_provenance(expr.elt, b, policy, d)
 
 
 def receiver_provenance(expr, b, policy=None, depth=0):
     """The provenance of expression `expr` in the function `b` resolves
-    (see above): "B", "C", "R", "ROW", "ROWS", ("P", name) or None."""
-    if depth > 40:
+    (see above): "B", "C", "R", "ROW", "ROWS", ("P", name, deep) or
+    None."""
+    if depth > _PROV_DEPTH:
         return None
     d = depth + 1
     if isinstance(expr, _ast.Constant):
@@ -1666,45 +1734,44 @@ def receiver_provenance(expr, b, policy=None, depth=0):
     if isinstance(expr, _ast.JoinedStr):
         return "B"                          # a str, whatever it formats
     if isinstance(expr, _DISPLAYS):
-        return _join(receiver_provenance(e, b, policy, d) for e in expr.elts) or "C"
+        return _container([receiver_provenance(e, b, policy, d)
+                           for e in expr.elts])
     if isinstance(expr, _ast.Dict):
         if any(k is None for k in expr.keys):
             return "C"
-        return _join([receiver_provenance(x, b, policy, d)
-                      for x in list(expr.keys) + list(expr.values)]) or "C"
-    if isinstance(expr, _COMPS):
-        return "C"
-    if isinstance(expr, _ast.BinOp):
-        l = receiver_provenance(expr.left, b, policy, d)
-        r = receiver_provenance(expr.right, b, policy, d)
-        return "B" if l == "B" and r == "B" else None
-    if isinstance(expr, _ast.UnaryOp):
-        return "B" if receiver_provenance(expr.operand, b, policy, d) == "B" else None
-    if isinstance(expr, (_ast.Compare,)):
-        return "B" if all(receiver_provenance(x, b, policy, d) == "B"
-                          for x in [expr.left] + list(expr.comparators)) else None
-    if isinstance(expr, _ast.BoolOp):
-        return _join(receiver_provenance(x, b, policy, d) for x in expr.values)
+        return _container([receiver_provenance(x, b, policy, d)
+                           for x in list(expr.keys) + list(expr.values)])
+    if isinstance(expr, (_ast.ListComp, _ast.SetComp, _ast.DictComp)):
+        e = _comp_element(expr, b, policy, d)
+        return _container([e]) if e is not None else "C"
+    if isinstance(expr, (_ast.BinOp, _ast.BoolOp, _ast.Compare,
+                         _ast.UnaryOp)):
+        parts = ([expr.left, expr.right] if isinstance(expr, _ast.BinOp)
+                 else list(expr.values) if isinstance(expr, _ast.BoolOp)
+                 else [expr.left] + list(expr.comparators)
+                 if isinstance(expr, _ast.Compare) else [expr.operand])
+        j = _join(receiver_provenance(x, b, policy, d) for x in parts)
+        if isinstance(expr, _ast.BoolOp):
+            return j                        # one of the operands
+        return "B" if j == "B" else ("P", j[1], True) if _is_p(j) else None
     if isinstance(expr, _ast.IfExp):
-        a = receiver_provenance(expr.body, b, policy, d)
-        c = receiver_provenance(expr.orelse, b, policy, d)
-        return a if a == c else None
+        return _join([receiver_provenance(expr.body, b, policy, d),
+                      receiver_provenance(expr.orelse, b, policy, d)])
     if isinstance(expr, _ast.Await):
         call = expr.value
-        if (isinstance(call, _ast.Call) and isinstance(call.func, _ast.Attribute)
+        if not isinstance(call, _ast.Call):
+            return None
+        if (isinstance(call.func, _ast.Attribute)
                 and call.func.attr == "execute" and b.is_session(call.func.value)):
             return "R"
-        return None
+        return _returned(call, b, policy, d, awaited=True)
     if isinstance(expr, _ast.Subscript):
         v = receiver_provenance(expr.value, b, policy, d)
-        if v == "B" or v == "ROW":
-            return "B"
         if v == "ROWS":
             return "ROW" if not isinstance(expr.slice, _ast.Slice) else "ROWS"
-        return None
+        return _derive(v)
     if isinstance(expr, _ast.Attribute):
-        v = receiver_provenance(expr.value, b, policy, d)
-        return "B" if v in ("B", "ROW") else None
+        return _derive(receiver_provenance(expr.value, b, policy, d))
     if isinstance(expr, _ast.Call):
         return _call_provenance(expr, b, policy, d)
     if isinstance(expr, _ast.Name):
@@ -1715,54 +1782,123 @@ def receiver_provenance(expr, b, policy=None, depth=0):
 def _call_provenance(call, b, policy, d):
     f = call.func
     if isinstance(f, _ast.Attribute):
-        if b.is_session(f.value) or (isinstance(f.value, _ast.Name)
-                                     and f.value.id in b.roots()):
+        if b.session_value(f.value):        # the session, or its root name
             return None
-        r = receiver_provenance(f.value, b, policy, d)
-        m = f.attr
-        if r == "R":
-            if m in ("mappings", "scalars"):
-                return "R"
-            if m in ("first", "one", "scalar", "scalar_one"):
-                return "ROW"
-            if m in ("all", "fetchall"):
-                return "ROWS"
-            return None
-        if r == "ROW" and m in ROW_METHODS:
-            return "B" if m in ("get",) else "C" if m == "_asdict" else "C"
-        if r == "B":
-            if m == "get" and len(call.args) > 1:
-                return _join([receiver_provenance(call.args[1], b, policy, d)])
-            if m in ("get", "pop") and call.keywords:
+        listed = _listed_kind(f, b, policy)
+        if listed is None:
+            r = receiver_provenance(f.value, b, policy, d)
+            m = f.attr
+            if r == "R":
+                if m in ("mappings", "scalars"):
+                    return "R"
+                if m in ("first", "one", "scalar", "scalar_one"):
+                    return "ROW"
+                if m in ("all", "fetchall"):
+                    return "ROWS"
                 return None
+            if r == "ROW":
+                return "B" if m in ROW_METHODS else None
+            if r == "B" or _is_p(r):
+                if m in ("get", "pop", "setdefault") and len(call.args) > 1:
+                    return _join([_derive(r), receiver_provenance(
+                        call.args[1], b, policy, d)])
+                return _derive(r)
+            if r == "C" and m in ("join", "copy", "keys"):
+                return "B" if m == "join" else "C"
+            return None
+    kind = _listed_kind(f, b, policy)
+    if kind is None:
+        return _returned(call, b, policy, d, awaited=False)
+    if kind == "B":
+        return "B"
+    if kind == "E":                         # min/max: one of the elements
+        if len(call.args) == 1:
+            return _elements(_arg_elements(call.args[0], b, policy, d))
+        return _join(receiver_provenance(a, b, policy, d) for a in call.args)
+    if kind == "C":
+        if not call.args:
             return "B"
-        if r == "C" and m in ("join", "copy", "keys"):
-            return "B" if m == "join" else "C"
-    spelled = _ast.unparse(f)
-    kind = RESULT_BUILTIN.get(spelled)
-    if kind is None or policy is None:
-        return None
-    # the policy's own table, a Providers (identity-checked by listed; a
-    # plain dict would be read by spelling alone)
-    if not isinstance(policy.pure_calls, Providers):
+        return _container([_arg_elements(a, b, policy, d) for a in call.args])
+    return None
+
+
+def _arg_elements(a, b, policy, d):
+    """The provenance of the elements an iterable argument `a` yields."""
+    if isinstance(a, (_ast.GeneratorExp, _ast.ListComp, _ast.SetComp,
+                      _ast.DictComp)):
+        return _comp_element(a, b, policy, d)
+    return _elements(receiver_provenance(a, b, policy, d))
+
+
+def _listed_kind(f, b, policy):
+    """RESULT_BUILTIN's kind for callee `f` when the policy's own Providers
+    table lists it at its frozen provider (identity-checked by listed; a
+    plain dict would be read by spelling alone), else None."""
+    kind = RESULT_BUILTIN.get(_ast.unparse(f))
+    if kind is None or policy is None or not isinstance(
+            policy.pure_calls, Providers):
         return None
     try:
         if b.listed(f, policy.pure_calls) is None:
             return None
     except Unclassified:
         return None
-    if kind == "B":
-        return "B"
-    args = [receiver_provenance(a, b, policy, d) for a in call.args]
-    if kind == "E":                         # min/max: one of the elements
-        if len(args) == 1:
-            return _elements(args[0])
-        return _join(args)
-    if kind == "C":
-        if not call.args:
-            return "B"
-        return "B" if all(a == "B" for a in args) else "C"
-    return None
+    return kind
+
+
+_RET_TREES = {}
+
+
+def _returned(call, b, policy, d, awaited):
+    """The provenance of what a call of a walked function returns: the
+    callee resolved by the resolver (a trusted definition, Bindings.callee),
+    its own body's every return value (and the implicit None) read in its
+    own bindings, a parameter-derived result mapped to this call's
+    argument."""
+    if not isinstance(call.func, _ast.Name) or d > _PROV_DEPTH // 2:
+        return None
+    try:
+        fn = b.callee(call.func)
+    except Unclassified:
+        return None
+    if fn is None or _inspect.iscoroutinefunction(fn) is not awaited:
+        return None
+    hit = _RET_TREES.get(id(fn.__code__))
+    if hit is None or hit[0] is not fn.__code__:
+        try:
+            tree = _helper_tree(fn)
+        except (Unclassified, OSError, TypeError, SyntaxError):
+            return None
+        hit = _RET_TREES[id(fn.__code__)] = (fn.__code__, tree)
+    tree = hit[1]
+    scope = _ib._owner_module(fn)
+    if scope is None:
+        return None
+    cb = Bindings(scope, tree, session=b.session, grammar=b.grammar)
+    rets, todo, falls = [], list(tree.body), True
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                          _ast.Lambda, _ast.ClassDef)):
+            continue
+        if isinstance(n, _ast.Return):
+            rets.append(n.value)
+        todo.extend(_ast.iter_child_nodes(n))
+    provs = ["B" if r is None else receiver_provenance(r, cb, policy, d)
+             for r in rets] + (["B"] if falls else [])
+    j = _join(provs)
+    if not _is_p(j):
+        return j
+    params = list(_inspect.signature(fn).parameters)
+    if j[1] not in params or any(isinstance(a, _ast.Starred) for a in call.args):
+        return None
+    at = params.index(j[1])
+    arg = call.args[at] if at < len(call.args) else next(
+        (k.value for k in call.keywords if k.arg == j[1]), None)
+    if arg is None:
+        return None
+    a = receiver_provenance(arg, b, policy, d)
+    return _derive(a) if j[2] else a
 
 
 def _name_provenance(name, b, policy, d):
@@ -1774,40 +1910,53 @@ def _name_provenance(name, b, policy, d):
                 and _ib.trusted_constant(v, mod, name)):
             return "B"
         return None
-    mutated = any(kind == "mutated" for kind, _n in got)
     # a name reached again while its own bindings are being read (`x = x +
-    # 1`): each binding is read under the assumption that the name holds
-    # what its other bindings give, so the cycle adds nothing ("B" is the
-    # join's identity; a non-builtin binding still decides the join)
+    # 1`): the cycle adds nothing to the join ("B" is the join's identity
+    # among builtin values; a non-builtin binding still decides it)
     visiting = b.__dict__.setdefault("_prov_visiting", set())
     if name in visiting:
         return "B"
     visiting.add(name)
     try:
-        provs = [_binding_provenance(name, kind, node, b, policy, d)
-                 for kind, node in got if kind != "mutated"]
+        provs = []
+        for kind, node in got:
+            if kind == "mutated":
+                provs.extend(_inserted(name, node, b, policy, d))
+            else:
+                provs.append(_binding_provenance(name, kind, node, b, policy, d))
     finally:
         visiting.discard(name)
-    if not provs or any(p is None for p in provs):
-        return None
-    params = {p for p in provs if isinstance(p, tuple)}
-    rest = [p for p in provs if not isinstance(p, tuple)]
-    if params:
-        # the parameter's condition holds for every binding only when each
-        # other binding is a whole builtin value
-        return params.pop() if len(params) == 1 and all(
-            p == "B" for p in rest) else None
-    if all(p == "B" for p in rest):
-        return "C" if mutated else "B"
-    if all(p in ("B", "C") for p in rest):
-        return "C"
-    return rest[0] if len(set(rest)) == 1 and not mutated else None
+    return _join(provs)
+
+
+def _inserted(name, node, b, policy, d):
+    """The provenances of what mutation site `node` puts into `name`'s
+    value (a store into it, or an inserting method), as values that the
+    name's value may now yield: a container that received only builtin
+    values stays builtin."""
+    if isinstance(node, _ast.Call):
+        m = node.func.attr if isinstance(node.func, _ast.Attribute) else None
+        if m in _INSERTING:
+            return [receiver_provenance(node.args[i], b, policy, d)
+                    if i < len(node.args) else None for i in _INSERTING[m]]
+        if m in _INSERTING_ALL:
+            out = [_arg_elements(a, b, policy, d) for a in node.args]
+            out += [receiver_provenance(k.value, b, policy, d)
+                    for k in node.keywords]
+            return out or ["B"]
+        return ["B"]                        # pop, remove, sort, clear ...
+    if isinstance(node, (_ast.Assign, _ast.AugAssign, _ast.AnnAssign)):
+        v = node.value
+        return [receiver_provenance(v, b, policy, d) if v is not None else "B"]
+    if isinstance(node, _ast.Delete):
+        return ["B"]
+    return [None]
 
 
 def _binding_provenance(name, kind, node, b, policy, d):
     if kind == "param":
         if node is b.where:
-            return ("P", name)
+            return ("P", name, False)
         return None
     if kind != "local" or not isinstance(node, _ast.Name):
         return None
@@ -1819,22 +1968,20 @@ def _binding_provenance(name, kind, node, b, policy, d):
     if isinstance(par, _ast.Tuple):
         top = b.parent.get(id(par))
         if isinstance(top, (_ast.For, _ast.comprehension)) and top.target is par:
-            v = _elements(receiver_provenance(top.iter, b, policy, d))
-            return "B" if v in ("B", "ROW") else None
+            return _derive(_arg_elements(top.iter, b, policy, d))
         if isinstance(top, _ast.Assign) and top.targets == [par]:
             if (isinstance(top.value, _ast.Tuple)
                     and len(top.value.elts) == len(par.elts)):
                 return receiver_provenance(
                     top.value.elts[par.elts.index(node)], b, policy, d)
-            v = receiver_provenance(top.value, b, policy, d)
-            return "B" if v in ("B", "ROW") else None
+            return _derive(receiver_provenance(top.value, b, policy, d))
         return None
     if isinstance(par, _ast.AnnAssign) and par.target is node and par.value is not None:
         return receiver_provenance(par.value, b, policy, d)
     if isinstance(par, _ast.NamedExpr) and par.target is node:
         return receiver_provenance(par.value, b, policy, d)
     if isinstance(par, (_ast.For, _ast.comprehension)) and par.target is node:
-        return _elements(receiver_provenance(par.iter, b, policy, d))
+        return _arg_elements(par.iter, b, policy, d)
     return None
 
 
@@ -1849,11 +1996,14 @@ def receiver_group(method):
 
 
 def receiver_meets(p, group):
-    """Whether provenance `p` discharges a receiver of type group `group`."""
+    """Whether provenance `p` discharges a receiver of type group `group`
+    ("deep": the parameter is read from, so it must be builtin whole)."""
     if group == "result":
         return p == "R"
     if group == "row":
         return p in ("B", "C", "ROW", "ROWS")
+    if group == "deep":
+        return p in ("B", "ROW", "ROWS", "R")
     return p in ("B", "C", "ROWS")
 
 
@@ -1862,9 +2012,11 @@ def discharge_receivers(call, fn, effects, line, visitor):
     conditions ("receiver:<param>:<group>"), each discharged here by the
     provenance of the argument the call binds to that parameter (its
     default when the call passes none: a None or immutable builtin
-    constant); an argument that is the caller's own parameter carries the
-    condition on to the caller's verdict; any other provenance refuses the
-    call site (ruling FOUR-R11-A1 (3))."""
+    constant); an argument derived from the caller's own parameter carries
+    the condition on to the caller's verdict ("deep" when derived); any
+    other provenance refuses the call site (ruling FOUR-R11-A1 (3)).
+    `visitor` supplies the caller's bindings (.b), policy (.p), whether a
+    def_effects walk encloses it (.helper) and its effect list (.effects)."""
     conds = [e for e in effects if e.startswith("receiver:")]
     if not conds:
         return effects
@@ -1875,8 +2027,9 @@ def discharge_receivers(call, fn, effects, line, visitor):
         at = names.index(p)
         if any(isinstance(a, _ast.Starred) for a in call.args) or any(
                 k.arg is None for k in call.keywords):
-            raise Unclassified((line, f"a call of {fn.__name__} with unpacked "
-                                      f"arguments, whose {p} is a receiver"))
+            raise Unclassified((line, f"a call of {fn.__code__.co_name} with "
+                                      f"unpacked arguments, whose {p} is a "
+                                      "receiver"))
         arg = None
         if at < len(call.args):
             arg = call.args[at]
@@ -1887,24 +2040,26 @@ def discharge_receivers(call, fn, effects, line, visitor):
             dft = params[at].default
             if dft is _inspect.Parameter.empty or type(dft) not in (
                     type(None), str, int, float, bool, tuple, frozenset, bytes):
-                raise Unclassified((line, f"{fn.__name__}'s receiver parameter "
-                                          f"{p} has a default the walk cannot "
-                                          "prove builtin"))
+                raise Unclassified((line, f"{fn.__code__.co_name}'s receiver "
+                                          f"parameter {p} has a default the "
+                                          "walk cannot prove builtin"))
             continue
         prov = receiver_provenance(arg, visitor.b, visitor.p)
-        if isinstance(prov, tuple) and prov[0] == "P":
+        if _is_p(prov):
             if visitor.helper is None:
-                raise Unclassified((line, f"a call of {fn.__name__} whose {p}, "
-                                          f"a receiver, is the parameter "
-                                          f"{prov[1]}, which no walked call "
-                                          "site discharges"))
-            visitor.effects.append((f"receiver:{prov[1]}:{group}", "pure"))
+                raise Unclassified((line, f"a call of {fn.__code__.co_name} "
+                                          f"whose {p}, a receiver, is "
+                                          f"{_ast.unparse(arg)}, read from the "
+                                          f"parameter {prov[1]}, which no "
+                                          "walked call site discharges"))
+            g = "deep" if (prov[2] or group == "deep") else group
+            visitor.effects.append((f"receiver:{prov[1]}:{g}", "pure"))
             continue
         if not receiver_meets(prov, group):
-            raise Unclassified((line, f"a call of {fn.__name__} whose {p}, a "
-                                      f"receiver of its {group} methods, is "
-                                      f"{_ast.unparse(arg)}, which the walk "
-                                      "cannot prove builtin"))
+            raise Unclassified((line, f"a call of {fn.__code__.co_name} whose "
+                                      f"{p}, a receiver of its {group} "
+                                      f"methods, is {_ast.unparse(arg)}, which "
+                                      "the walk cannot prove builtin"))
     return frozenset(x for x in effects if not x.startswith("receiver:"))
 
 
@@ -2185,7 +2340,9 @@ class Visitor:
                 # be exactly the type the method belongs to, by provenance
                 group = receiver_group(n.func.attr)
                 prov = receiver_provenance(n.func.value, self.b, self.p)
-                if isinstance(prov, tuple) and prov[0] == "P":
+                if _is_p(prov):
+                    if prov[2]:
+                        group = "deep"
                     if self.helper is None:
                         # a span walked on its own (no def_effects around
                         # it): no call site of it is walked to discharge
@@ -2307,22 +2464,27 @@ class Visitor:
             self.fail(n, f"an awaited call this walk does not classify: {name}")
         self._helper_args(n, call, fn)
         if self.p.helper_hook is not None and self.helper is None:
+            # round 11 (F10): the helper's receiver conditions are
+            # discharged at this call before its hook reads its kind
+            discharge_receivers(call, fn, helper_effects(fn, self.p),
+                                n.lineno, self)
             self.p.met["helper by the policy's hook"] += 1
-            self.effects.append((f"helper:{fn.__name__}", self.p.helper_hook(fn)))
+            self.effects.append((f"helper:{fn.__code__.co_name}",
+                                 self.p.helper_hook(fn)))
             return
         eff = discharge_receivers(call, fn, checked_callbacks(
             call, fn, helper_effects(fn, self.p), n.lineno), n.lineno, self)
         ends = eff & {"rollback-then-raise", "rollback"}
         if ends and id(n) in self.caught:
             self.fail(n, f"a helper that ends the transaction and raises "
-                         f"({fn.__name__}), awaited inside a try that catches")
+                         f"({fn.__code__.co_name}), awaited inside a try that catches")
         if ends:
             # Propagated (finding closed_walk:825): the caller's effects carry
             # the end its helper takes.
-            self.effects.append((f"helper-end:{fn.__name__}",
+            self.effects.append((f"helper-end:{fn.__code__.co_name}",
                                  sorted(ends)[0]))
         kinds = eff & {"read", "lock", "write"}
-        self.effects.append((f"helper:{fn.__name__}",
+        self.effects.append((f"helper:{fn.__code__.co_name}",
                              "write" if "write" in kinds else "lock" if "lock" in kinds
                              else "read" if "read" in kinds else "pure"))
 

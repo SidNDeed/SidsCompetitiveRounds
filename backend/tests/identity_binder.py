@@ -412,6 +412,8 @@ def _top_constants(mod):
     top = codes[0]
     stores, out, prev = {}, {}, None
     for ins in _dis.get_instructions(top):
+        if ins.opname in ("EXTENDED_ARG", "CACHE", "NOP"):
+            continue                       # an argument prefix, not a step
         if ins.opname in ("STORE_NAME", "DELETE_NAME", "STORE_GLOBAL",
                           "DELETE_GLOBAL"):
             stores[ins.argval] = stores.get(ins.argval, 0) + 1

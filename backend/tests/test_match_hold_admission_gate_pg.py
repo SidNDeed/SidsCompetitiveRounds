@@ -525,7 +525,10 @@ def _helper_kind_read(fn, p):
     except Unclassified as e:
         result = (None, f"{fn.__name__}: {e.args[0][1]}")
     else:
-        other = sorted(e for e in eff if e not in _KEEPS)
+        # round 11 (F10): receiver conditions are discharged at the call
+        # site (closed_walk's hook branch) before this kind is read
+        other = sorted(e for e in eff if e not in _KEEPS
+                       and not e.startswith("receiver:"))
         if other:
             result = (None, f"{fn.__name__}: {', '.join(other)}, which a span "
                             "that keeps its transaction does not take")
@@ -582,6 +585,11 @@ def _refusal_exit_problem(w, st, call):
     else:
         try:
             eff = _cw.helper_effects(fn, w.policy)
+            # round 11 (F10): its receiver conditions discharged at this call
+            eff = _cw.discharge_receivers(call, fn, eff, st.lineno,
+                                          types.SimpleNamespace(
+                                              b=w.b, p=w.policy, helper=None,
+                                              effects=[]))
             other = sorted(e for e in eff if e not in _KEEPS)
             why = f"it takes {', '.join(other)}" if other else None
         except Unclassified as e:

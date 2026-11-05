@@ -1640,6 +1640,19 @@ class _SampleScope:
             return _sample_stale
         return getattr(main, name)
 
+    def __binder_address__(self, name):
+        """Round 11 (FIX-R11-ID): where each name this scope answers is
+        defined, for the identity binder: (module, qualified name)."""
+        if name in self._reads:
+            return (__name__, "_sample_read")
+        if name in ("settle", "write"):
+            return (__name__, "_sample_write")
+        if name == "sync_state":
+            return (__name__, "_sample_commits")
+        if name == "stale":
+            return (__name__, "_sample_stale")
+        return ("main", name)
+
 
 _SAMPLE = _SampleScope()
 
@@ -3739,6 +3752,14 @@ def _r3_scope():
         def __getattr__(self, name):
             return getattr(mod, name) if hasattr(mod, name) else getattr(_SAMPLE, name)
 
+        def __binder_address__(self, name):
+            # round 11 (FIX-R11-ID): the binder's address of each name
+            if name == "sync_state":
+                return (__name__, "_sample_commits")
+            if hasattr(mod, name):
+                return (mod.__name__, name)
+            return _SAMPLE.__binder_address__(name)
+
     return Scope()
 
 
@@ -5824,6 +5845,13 @@ def planted_attribute(obj):
     return _rules_normalize(obj.payload)
 
 
+HOLDER = WriterDict(ff=True)
+
+
+def planted_attribute_site():
+    return planted_attribute(HOLDER)
+
+
 def planted_parameter(rules):
     return _rules_normalize(rules)
 
@@ -5854,14 +5882,21 @@ def test_r11_n_closed_walk_1775_a_receiver_proven_by_provenance():
                              _r11_policy(mod, grammar=False)) == frozenset()
     assert _cw.plain_effects(mod.planted_parameter, _r11_policy(
         mod, grammar=False)) == frozenset({"receiver:rules:row"})
-    for fn in (mod.planted_attribute, mod.planted_writer_dict):
+    # a value READ from the parameter: the parameter must be builtin whole
+    assert _cw.plain_effects(mod.planted_attribute, _r11_policy(
+        mod, grammar=False)) == frozenset({"receiver:obj:deep"})
+    for fn in (mod.planted_attribute_site, mod.planted_writer_dict):
         with pytest.raises(Unclassified) as e:
             _cw.plain_effects(fn, _r11_policy(mod, grammar=False))
         assert "cannot prove builtin" in e.value.args[0][1] or (
-            "does not classify" in e.value.args[0][1]), e.value.args
+            "does not classify" in e.value.args[0][1]) or (
+            "is not the definition it names" in e.value.args[0][1]), e.value.args
+    # a span walked on its own: no walked call site discharges its parameter
+    d = _ast.parse("def f(x):\n    return _rules_normalize(x)\n").body[0]
+    b = _cw.Bindings(main, d, grammar=None)
     with pytest.raises(Unclassified) as e:
-        _cw.plain_effects(mod.planted_attribute, _r11_policy(mod, grammar=False))
-    assert "obj.payload, which the walk cannot prove builtin" in e.value.args[0][1]
+        _cw.expr_effects(d.body[0].value, _r11_policy(grammar=False), bindings=b)
+    assert "which no walked call site discharges" in e.value.args[0][1], e.value.args
     assert _a1_ib.trusted(mod.WriterDict.get, "builtins", "dict.get") is False
     assert _a1_ib.trusted(dict.get, "builtins", "dict.get") is True
     mod.planted_writer_dict()
