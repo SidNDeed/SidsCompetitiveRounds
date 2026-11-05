@@ -1867,17 +1867,17 @@ row("WP11-X", "test_wp11_a_game_step_without_a_game_is_refused", [
                           '        return "game"\n'),
      note="the same refusal written as two guards"))
 
-# -- WP34-X: the payload and answer keys, executed (A7-R3 sweep) -------------
+# -- WP34-X: the lock-answer and answer keys, executed (A7-R3 sweep) ---------
 _WP3_FENCE = '        "fence_s": ASM_FENCE_S,\n    }\n'
 row("WP34-X", "test_wp3_wp4_keys_are_sent", [
-    M("payload_key_in_dead_code", "WP3 sent",
+    M("lock_key_in_dead_code", "WP3 sent",
       E(MAIN, _WP3_FENCE, '    }\n    if False:\n        out["fence_s"] = ASM_FENCE_S\n'),
       note="the key named in the builder's AST, never sent; the structural WP3 check stays "
            "green on it"),
-], T("payload_keys_reordered",
+], T("lock_keys_reordered",
      E(MAIN, '        "stamp_wait_s": ASM_STAMP_WAIT_S,\n' + _WP3_FENCE,
        '        "fence_s": ASM_FENCE_S,\n        "stamp_wait_s": ASM_STAMP_WAIT_S,\n    }\n'),
-     note="the same payload with two entries in the other order"))
+     note="the same lock answer with two entries in the other order"))
 
 # -- SQL-TOKENS: the one tokenizer's probe (A7-R3 findings 1 and 4) -----------
 _CFA = "backend/tests/cf_asm.py"
