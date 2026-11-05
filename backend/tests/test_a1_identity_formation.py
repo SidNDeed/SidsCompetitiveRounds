@@ -2247,14 +2247,38 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
     # a1:2481: an awaited helper that commits, inserted into the real
     # resolver, passed this read). The relock helper's own body is read
     # below; at its one call only its arguments are classified.
-    for fn in (resolve, pick):
+    # Round 11 (F10): the two opaque helpers' receiver conditions are read
+    # from their bodies FIRST and declared on the policy, so the resolver's
+    # walk discharges each at the helper's call (closed_walk's opaque
+    # branch); the pick is walked before the resolver for the same reason.
+    pol = _policy(scope)
+    declared = pol.__dict__.setdefault("opaque_receivers", {})
+    rbody = [st for st in relock.body if not (
+        isinstance(st, _ast.Expr) and isinstance(st.value, _ast.Constant))]
+    rcommit = [st for st in rbody if _txn_end(st, lb) == "commit"]
+    rroll = [x for x in _ast.walk(relock) if _txn_end(x, lb) == "rollback"]
+    if len(rcommit) == 1 and len(rroll) == 1:
+        try:
+            reff = _cw.def_effects(relock, main if scope is None else scope,
+                                   pol, relock.name, receivers=True,
+                                   ends=frozenset({id(rcommit[0].value),
+                                                   id(rroll[0].value)}))
+        except Unclassified:
+            pass                            # reported by the read below
+        else:
+            declared[id(relock)] = (relock, frozenset(
+                e for e in reff if e.startswith("receiver:")))
+    for fn in (pick, resolve):
         try:
             eff = _cw.def_effects(fn, main if scope is None else scope,
-                                  _policy(scope), fn.name,
+                                  pol, fn.name, receivers=fn is pick,
                                   opaque={relock.name: relock, pick.name: pick})
         except Unclassified as e:
             out.append(f"{fn.name}: {e.args[0][1]} (line {e.args[0][0]})")
             continue
+        if fn is pick:
+            declared[id(pick)] = (pick, frozenset(
+                e for e in eff if e.startswith("receiver:")))
         if eff & {"rollback-then-raise", "savepoint"}:
             out.append(f"{fn.name} ends the transaction itself")
     for st in _ast.walk(pick):
@@ -2346,14 +2370,19 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
         # rows re-formed).
         try:
             eff = _cw.def_effects(relock, main if scope is None else scope,
-                                  _policy(scope), relock.name,
+                                  _policy(scope), relock.name, receivers=True,
                                   ends=frozenset({id(body[commits[0]].value),
                                                   id(rollbacks[0].value)}))
         except Unclassified as e:
             out.append(f"{relock.name}: {e.args[0][1]} (line {e.args[0][0]})")
         else:
-            other = sorted(eff - {"read", "lock", "write", "await", "commit",
-                                  "rollback-then-raise", "savepoint"})
+            # its receiver conditions: discharged at its call in the
+            # resolver's walk above (declared before that walk)
+            other = sorted(e for e in eff - {
+                "read", "lock", "write", "await", "commit",
+                "rollback-then-raise", "savepoint"}
+                if not (e.startswith("receiver:") and declared.get(
+                    id(relock), (None,))[0] is relock))
             if other:
                 out.append(f"{relock.name} takes {', '.join(other)}")
     return out

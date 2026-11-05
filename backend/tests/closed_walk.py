@@ -495,8 +495,11 @@ _MODULE_TREES = {}
 
 
 def _module_tree(scope):
-    """The parsed source of module `scope` (cached), or None."""
-    key = getattr(scope, "__name__", None)
+    """The parsed source of module `scope` (cached), or None. Keyed by the
+    scope OBJECT (round 11): a composed scope answers `__name__` with its
+    module's, and a key by name made the two evict each other, so main.py
+    was parsed again at every alternation (run 8's MemoryError, probe 3)."""
+    key = id(scope)
     if key in _MODULE_TREES and _MODULE_TREES[key][0] is scope:
         return _MODULE_TREES[key][1]
     try:
@@ -1130,6 +1133,13 @@ class Bindings:
         if fn is None and isinstance(opaque, dict):
             fn = opaque.get(func.id)
         return fn
+
+    def opaque_def(self, func, opaque, line=0):
+        """Round 11 (F10): the definition `opaque` maps plain name `func`
+        to (the one the caller reads separately), or None."""
+        if isinstance(opaque, dict) and isinstance(func, _ast.Name):
+            return opaque.get(func.id)
+        return None
 
     def session_argument(self, call, arg, fn, line=0):
         """A session value passed as an argument of call `call` of function
@@ -1887,10 +1897,20 @@ def _returned(call, b, policy, d, awaited):
     its own body's every return value (and the implicit None) read in its
     own bindings, a parameter-derived result mapped to this call's
     argument."""
-    if not isinstance(call.func, _ast.Name) or d > _PROV_DEPTH // 2:
+    if d > _PROV_DEPTH // 2:
         return None
+    f = call.func
     try:
-        fn = b.callee(call.func)
+        if isinstance(f, _ast.Name):
+            fn = b.callee(f)
+        elif (isinstance(f, _ast.Attribute) and isinstance(f.value, _ast.Call)
+              and isinstance(f.value.func, _ast.Name) and not f.value.args
+              and not f.value.keywords
+              and b.module_accessor(b.callee(f.value.func), b.grammar)
+              is not None):
+            fn = b.callee(f)                # `<accessor>().f(...)`
+        else:
+            return None
     except Unclassified:
         return None
     if fn is None or _inspect.iscoroutinefunction(fn) is not awaited:
@@ -2096,6 +2116,27 @@ def receiver_meets(p, group):
     return p == "B" or _is_c(p)
 
 
+_NOT_CONSTANT = object()
+
+
+def _param_table(fn):
+    """([names], [defaults]) of function object or definition `fn`'s
+    parameters in order; a missing default is Parameter.empty, a definition's
+    default that is not a constant is _NOT_CONSTANT (never provable)."""
+    if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+        a = fn.args
+        pos = a.posonlyargs + a.args
+        dfl = [_inspect.Parameter.empty] * (len(pos) - len(a.defaults)) + [
+            x.value if isinstance(x, _ast.Constant) else _NOT_CONSTANT
+            for x in a.defaults]
+        kw = [x.value if isinstance(x, _ast.Constant) else
+              (_inspect.Parameter.empty if x is None else _NOT_CONSTANT)
+              for x in a.kw_defaults]
+        return [x.arg for x in pos + a.kwonlyargs], dfl + kw
+    params = list(_inspect.signature(fn).parameters.values())
+    return [q.name for q in params], [q.default for q in params]
+
+
 def discharge_receivers(call, fn, effects, line, visitor):
     """`effects` of callee `fn` at call `call` without its receiver
     conditions ("receiver:<param>:<group>"), each discharged here by the
@@ -2109,14 +2150,15 @@ def discharge_receivers(call, fn, effects, line, visitor):
     conds = [e for e in effects if e.startswith("receiver:")]
     if not conds:
         return effects
-    params = list(_inspect.signature(fn).parameters.values())
-    names = [q.name for q in params]
+    co = (fn.name if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+          else fn.__code__.co_name)
+    names, defaults = _param_table(fn)
     for e in conds:
         _r, p, group = e.split(":", 2)
         at = names.index(p)
         if any(isinstance(a, _ast.Starred) for a in call.args) or any(
                 k.arg is None for k in call.keywords):
-            raise Unclassified((line, f"a call of {fn.__code__.co_name} with "
+            raise Unclassified((line, f"a call of {co} with "
                                       f"unpacked arguments, whose {p} is a "
                                       "receiver"))
         arg = None
@@ -2126,17 +2168,17 @@ def discharge_receivers(call, fn, effects, line, visitor):
             if k.arg == p:
                 arg = k.value
         if arg is None:
-            dft = params[at].default
+            dft = defaults[at]
             if dft is _inspect.Parameter.empty or type(dft) not in (
                     type(None), str, int, float, bool, tuple, frozenset, bytes):
-                raise Unclassified((line, f"{fn.__code__.co_name}'s receiver "
+                raise Unclassified((line, f"{co}'s receiver "
                                           f"parameter {p} has a default the "
                                           "walk cannot prove builtin"))
             continue
         prov = receiver_provenance(arg, visitor.b, visitor.p)
         if _is_p(prov):
             if visitor.helper is None:
-                raise Unclassified((line, f"a call of {fn.__code__.co_name} "
+                raise Unclassified((line, f"a call of {co} "
                                           f"whose {p}, a receiver, is "
                                           f"{_ast.unparse(arg)}, read from the "
                                           f"parameter {', '.join(prov[1])}, "
@@ -2147,7 +2189,7 @@ def discharge_receivers(call, fn, effects, line, visitor):
                 visitor.effects.append((f"receiver:{q}:{g}", "pure"))
             continue
         if not receiver_meets(prov, group):
-            raise Unclassified((line, f"a call of {fn.__code__.co_name} whose "
+            raise Unclassified((line, f"a call of {co} whose "
                                       f"{p}, a receiver of its {group} "
                                       f"methods, is {_ast.unparse(arg)}, which "
                                       "the walk cannot prove builtin"))
@@ -2548,6 +2590,12 @@ class Visitor:
             # its body there.
             self._helper_args(n, call, self._check(
                 n, self.b.opaque_callee, call.func, self.opaque))
+            # round 11 (F10): the conditions its consumer declared, read
+            # from its body first, discharged at this call
+            odef = self._check(n, self.b.opaque_def, call.func, self.opaque)
+            got = self.p.__dict__.get("opaque_receivers", {}).get(id(odef))
+            if got is not None and got[0] is odef and got[1]:
+                discharge_receivers(call, odef, got[1], n.lineno, self)
             self.effects.append((f"helper:{name}", "opaque"))
             return
         fn = self._check(n, self.b.callee, call.func)
@@ -2654,7 +2702,8 @@ def helper_effects(fn, policy, stack=()):
         with _ib.recording() as deps:
             _ib.observe_chain(fn)
             out = def_effects(_helper_tree(fn), scope, policy,
-                              fn.__name__, source=source_of(fn))
+                              fn.__name__, source=source_of(fn),
+                              receivers=True)
     finally:
         policy.walking.discard(key)
     policy.helpers[key] = (fn, out, deps)
@@ -2662,7 +2711,7 @@ def helper_effects(fn, policy, stack=()):
 
 
 def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
-                ends=frozenset(), source=None):
+                ends=frozenset(), source=None, receivers=False):
     """The effects of an awaited helper, read from its own body statement by
     statement through the table: a frozenset drawn from 'read', 'lock',
     'write', 'await', 'savepoint', 'rollback-then-raise' and
@@ -2673,7 +2722,14 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
     any callback parameter with a default other than None. With
     `rollbacks`, every awaited `<session>.rollback()` is permitted and read
     as the effect 'rollback' (a caller that names such a helper decides what
-    a rollback means for it)."""
+    a rollback means for it).
+
+    Round 11 (F10): a receiver condition on one of the helper's parameters
+    ("receiver:<p>:<group>") is in the result only with `receivers`, which
+    a caller passes when it discharges each at the helper's walked call
+    sites (helper_effects, whose results only Visitor's call branches
+    read); otherwise the walk refuses, so a consumer that reads named
+    effects can never drop one."""
     fn = _types.SimpleNamespace(__name__=label)
     if policy.grammar is not None:
         # Admitted by the grammar BEFORE any reading below (ruling
@@ -2687,6 +2743,8 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
     sub.helpers = policy.helpers
     sub.walking = policy.walking
     sub.met = policy.met
+    sub._ret_joins = policy.__dict__.setdefault("_ret_joins", {})
+    sub.opaque_receivers = policy.__dict__.setdefault("opaque_receivers", {})
     for n in _ast.walk(d):
         if isinstance(n, _ast.ImportFrom) and (not n.module or n.level):
             raise Unclassified((0, f"{fn.__name__}: a relative import"))
@@ -2765,6 +2823,10 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
         elif sh == "savepoint":
             effects.add("savepoint")
         elif sh.startswith("receiver:"):
+            if not receivers:
+                raise Unclassified((0, f"{fn.__name__}: {sh}, a receiver "
+                                       "condition no walked call site "
+                                       "discharges"))
             effects.add(sh)
     return frozenset(effects)
 

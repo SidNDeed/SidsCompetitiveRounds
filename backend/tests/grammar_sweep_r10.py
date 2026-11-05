@@ -37,12 +37,13 @@ OPS = {
         r"|_HOLD_REPLAYS"),
 }
 # The counts at the round-10 tip, (operation, file): hits; round 11
-# (FIX-R11-ID) re-freezes closed_walk's byname 23 -> 28 (Bindings.named's
+# (FIX-R11-ID) re-freezes closed_walk's byname 23 -> 30 (Bindings.named's
 # frozen-callee identity check; _listed_kind's Providers read and listed
-# call; _returned's callee) and compare 1 -> 3 (receiver_provenance's
+# call; _returned's callee, plain and through a module accessor, 3) and
+# compare 1 -> 3 (receiver_provenance's
 # reading of a Compare's operands), each hit judged in the round-11 NOTES.
 COUNTS = {
-    ("byname", "closed_walk.py"): 28,
+    ("byname", "closed_walk.py"): 30,
     ("byname", "resolution_sites.py"): 3,
     ("byname", "test_a1_identity_formation.py"): 38,
     ("byname", "test_match_hold_admission_gate_pg.py"): 23,
