@@ -2638,3 +2638,40 @@ def test_r10_gate_pure_providers_are_the_frozen_ones():
     p = _gate_policy(main)
     assert isinstance(p.pure_calls, _cw.Providers) and p.pure_calls == _PLAIN_CALLS
     assert isinstance(p.pure_awaits, _cw.Providers) and p.pure_awaits == {}
+
+
+# --- round 11 (ruling FOUR-R10-A2, FIX-R11-ID) ------------------------------
+def test_r11_n_gate_842_http_exception_rebound(monkeypatch):
+    """F7 (gate:842): a refusal's `raise HTTPException(...)` is admitted
+    only while main's binding of HTTPException IS the definition it names
+    (identity_binder.trusted, through Bindings.named); a subclass carrying
+    the description (its __module__ and __qualname__ copied) whose
+    constructor changes state, and a plain writer, each refuse. Unchanged,
+    the raise is admitted."""
+    st = ast.parse("raise HTTPException(status_code=409, detail='x')").body[0]
+    w = _Walk(main, "r11 F7", stmts=[st])
+    _raise_problem(w, st)
+    assert w.problems == [], w.problems
+    marks = []
+    real = main.HTTPException
+
+    class Spoof(real):
+        def __init__(self, *a, **k):
+            marks.append(a)
+            super().__init__(*a, **k)
+    Spoof.__module__ = real.__module__
+    Spoof.__qualname__ = real.__qualname__
+
+    def writer(*a, **k):
+        marks.append(a)
+        return real(*a, **k)
+    for planted in (Spoof, writer):
+        with monkeypatch.context() as m:
+            m.setattr(main, "HTTPException", planted)
+            main.HTTPException(status_code=409, detail="x")
+            w = _Walk(main, "r11 F7", stmts=[st])
+            with pytest.raises(Unclassified) as e:
+                _raise_problem(w, st)
+            assert ("HTTPException, which the walk reads as the module's, is "
+                    "not the definition it names") in e.value.args[0][1], e.value.args
+    assert len(marks) == 2, "the planted constructors changed no state"

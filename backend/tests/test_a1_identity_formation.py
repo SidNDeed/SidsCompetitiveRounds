@@ -5718,3 +5718,203 @@ def test_r10_sweep_sites_are_counted():
     _hits, counts = _gsw.sweep(str(here))
     assert counts == _gsw.COUNTS, sorted(
         set(counts.items()) ^ set(_gsw.COUNTS.items()))
+
+
+# --- round 11 (ruling FOUR-R10-A2, FIX-R11-ID; ruling FOUR-R11-A1) ---------
+# Identity is the evidence and spelling only a filter: one negative per
+# round-10 finding of the class (F8 closed_walk:1949, F9 closed_walk:1125,
+# F10 closed_walk:1775, F11 a1:5655; F7 gate:842 is in the gate file), each
+# with its positive control in the same test.
+
+
+def _r11_policy(scope=None, grammar=True):
+    p = _cw.Policy(main if scope is None else scope, _PURE_CALLS,
+                   _PURE_METHODS, _PURE_AWAITS, _A1_TABLE)
+    p.grammar = _A1_GRAMMAR if grammar else None
+    return p
+
+
+def _r11_planted(tag, text):
+    """A module r11_<tag> holding main's names, then `text` executed over
+    it; its text registered with the identity binder first (GROUP 1)."""
+    import linecache
+    import sys as _sys
+    import types as _types
+    mod = _types.ModuleType(f"r11_{tag}")
+    mod.__file__ = f"<r11_{tag}>"
+    linecache.cache[mod.__file__] = (len(text), None, text.splitlines(True),
+                                     mod.__file__)
+    mod.__dict__.update({k: v for k, v in vars(main).items()
+                         if not k.startswith("__")})
+    _sys.modules[mod.__name__] = mod
+    _a1_ib.register_source(mod, text, mod.__file__)
+    exec(compile(text, mod.__file__, "exec"), mod.__dict__)
+    return mod
+
+
+def test_r11_n_closed_walk_1949_int_rebound_after_the_cache_is_warm(monkeypatch):
+    """F8: the SAME policy, its cache warm with _ffa_gather_decide's empty
+    effects, then `main.int = writer` (a writer that changes state): the
+    cache hit is revalidated by the binder's Deps and dropped, and the walk
+    refuses. Round 10 returned the cached empty effects."""
+    import builtins
+    marks = []
+
+    def writer(x=0, *rest):
+        marks.append(x)
+        return builtins.int(x, *rest)
+    p = _r11_policy()
+    assert _cw.plain_effects(main._ffa_gather_decide, p) == frozenset()
+    assert _cw.plain_effects(main._ffa_gather_decide, p) == frozenset()
+    monkeypatch.setattr(main, "int", writer, raising=False)
+    main._ffa_gather_decide(main.FFA_MIN_PLAYERS, 0.0, 0.0)
+    assert marks, "the planted writer changed no state"
+    with pytest.raises(Unclassified) as e:
+        _cw.plain_effects(main._ffa_gather_decide, p)
+    assert "int" in e.value.args[0][1], e.value.args
+
+
+def test_r11_n_closed_walk_1125_a_wraps_wrapper_over_the_callee(monkeypatch):
+    """F9: `_ffa_gather_decide` replaced by a functools.wraps wrapper whose
+    own body changes state: the callee route reads the ACTUAL callable and
+    refuses it (a __wrapped__ layer), and the a1 source reader refuses to
+    read the wrapped body in its place. Unchanged, both admit."""
+    marks = []
+    orig = main._ffa_gather_decide
+
+    @_functools.wraps(orig)
+    def wrapper(*a, **k):
+        marks.append(a)
+        return orig(*a, **k)
+    d = _ast.parse("def f(n, a, b):\n    return _ffa_gather_decide(n, a, b)\n").body[0]
+    node = d.body[0].value
+    b = _cw.Bindings(main, d, grammar=_A1_GRAMMAR)
+    assert _cw.expr_effects(node, _r11_policy(), bindings=b) == [("call", "pure")]
+    assert "def _ffa_gather_decide" in _inspect.getsource(main._ffa_gather_decide)
+    monkeypatch.setattr(main, "_ffa_gather_decide", wrapper)
+    main._ffa_gather_decide(main.FFA_MIN_PLAYERS, 0.0, 0.0)
+    assert marks, "the wrapper changed no state"
+    b = _cw.Bindings(main, d, grammar=_A1_GRAMMAR)
+    with pytest.raises(Unclassified) as e:
+        _cw.expr_effects(node, _r11_policy(), bindings=b)
+    assert "_ffa_gather_decide" in e.value.args[0][1], e.value.args
+    with pytest.raises(Unclassified):
+        _inspect.getsource(main._ffa_gather_decide)
+
+
+_R11_F10_SRC = '''class WriterDict(dict):
+    def get(self, k, d=None):
+        R11_MARKS.append(k)
+        return dict.get(self, k, d)
+
+
+R11_MARKS = []
+
+
+def planted_writer_dict():
+    return _rules_normalize(WriterDict(ff=True))
+
+
+def planted_attribute(obj):
+    return _rules_normalize(obj.payload)
+
+
+def planted_parameter(rules):
+    return _rules_normalize(rules)
+
+
+def planted_literal():
+    return _rules_normalize({"ff": True, "src": "lobby"})
+
+
+def planted_json(text):
+    return _rules_normalize(_json.loads(text))
+'''
+
+
+def test_r11_n_closed_walk_1775_a_receiver_proven_by_provenance():
+    """F10 (ruling FOUR-R11-A1 (3)): _rules_normalize's purity rests on
+    `raw.get`, a method of its parameter: its verdict is CONDITIONAL
+    ("receiver:raw:row"), discharged at each call site by the argument's
+    provenance. A display and a json.loads result discharge it (GREEN); a
+    parameter carries it to the caller; an attribute of an unproven value
+    and the report's WriterDict refuse. WriterDict's .get is not the frozen
+    dict.get (the binder), and running the report's call changes state."""
+    mod = _r11_planted("f10", _R11_F10_SRC)
+    eff = _cw.plain_effects(main._rules_normalize, _r11_policy(grammar=False))
+    assert eff == frozenset({"receiver:raw:row"}), eff
+    assert _cw.plain_effects(mod.planted_literal,
+                             _r11_policy(mod, grammar=False)) == frozenset()
+    assert _cw.plain_effects(mod.planted_json,
+                             _r11_policy(mod, grammar=False)) == frozenset()
+    assert _cw.plain_effects(mod.planted_parameter, _r11_policy(
+        mod, grammar=False)) == frozenset({"receiver:rules:row"})
+    for fn in (mod.planted_attribute, mod.planted_writer_dict):
+        with pytest.raises(Unclassified) as e:
+            _cw.plain_effects(fn, _r11_policy(mod, grammar=False))
+        assert "cannot prove builtin" in e.value.args[0][1] or (
+            "does not classify" in e.value.args[0][1]), e.value.args
+    with pytest.raises(Unclassified) as e:
+        _cw.plain_effects(mod.planted_attribute, _r11_policy(mod, grammar=False))
+    assert "obj.payload, which the walk cannot prove builtin" in e.value.args[0][1]
+    assert _a1_ib.trusted(mod.WriterDict.get, "builtins", "dict.get") is False
+    assert _a1_ib.trusted(dict.get, "builtins", "dict.get") is True
+    mod.planted_writer_dict()
+    assert mod.R11_MARKS, "the report's call changed no state"
+
+
+def test_r11_n_a1_5655_json_loads_wrapper_before_the_table(monkeypatch):
+    """F11: `json.loads` replaced by a functools.wraps wrapper (which copies
+    __module__, __qualname__ and __name__) BEFORE a provider table is
+    built: the table refuses at construction (closed_walk.Providers, by
+    identity_binder.trusted), and the provider assertion refuses it.
+    Unchanged, the same construction is admitted."""
+    marks = []
+    orig = _a1_json.loads
+
+    @_functools.wraps(orig)
+    def loads(*a, **k):
+        marks.append(a)
+        return orig(*a, **k)
+    built = _cw.Providers({"_json.loads": (_a1_json, _a1_json.loads)})
+    assert built["_json.loads"][1] is orig
+    monkeypatch.setattr(_a1_json, "loads", loads)
+    assert (loads.__module__, loads.__qualname__) == ("json", "loads")
+    _a1_json.loads("1")
+    assert marks, "the wrapper changed no state"
+    with pytest.raises(Unclassified) as e:
+        _cw.Providers({"_json.loads": (_a1_json, _a1_json.loads)})
+    assert "not the definition json.loads" in e.value.args[0][1], e.value.args
+    assert _a1_ib.trusted(_a1_json.loads, "json", "loads") is False
+
+
+def test_r11_binder_registration_closes_at_freeze():
+    """GROUP 1 (ruling FOUR-R11-A1 (2)): a registered module's definitions
+    are proven by code equality against a fresh compile of the registered
+    text; a re-registration refuses, a registration after the module's
+    first proof refuses, and a definition the text does not make is not
+    trusted."""
+    import types as _types
+    text = "def f(x):\n    return x\n"
+    mod = _r11_planted("reg", text)
+    assert _a1_ib.trusted_function(mod.f) is True
+    with pytest.raises(_a1_ib.RegistrationRefused):
+        _a1_ib.register_source(mod, text, mod.__file__)
+    import sys as _sys
+    other = _types.ModuleType("r11_other")
+    other.__file__ = "<r11_other>"
+    _sys.modules[other.__name__] = other
+    exec(compile("def f(x):\n    return x\n", other.__file__, "exec"),
+         other.__dict__)
+    assert _a1_ib.trusted_function(other.f) is False      # never registered
+    late = _types.ModuleType("r11_late")
+    late.__file__ = "<r11_late>"
+    _sys.modules[late.__name__] = late
+    _a1_ib.register_source(late, "def g():\n    return 1\n", late.__file__)
+    exec(compile("def g():\n    return 2\n", late.__file__, "exec"),
+         late.__dict__)
+    assert _a1_ib.trusted_function(late.g) is False       # another text
+    with pytest.raises(_a1_ib.RegistrationRefused):
+        _a1_ib.register_source(late, "def g():\n    return 2\n", late.__file__)
+    with pytest.raises(_a1_ib.RegistrationRefused):
+        _a1_ib.register_source(main, "x = 1\n", main.__file__)
