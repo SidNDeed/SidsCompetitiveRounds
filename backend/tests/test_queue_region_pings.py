@@ -13,7 +13,9 @@ room issuance both seats' maps are re-read under the ordered locks and
 region that minimises the pair's WORST ping (bounded minimax since
 2026-09-09: taken when it beats the ladder's worst by more than 20 ms and
 lies within each seat's own bound, the worst that seat measured among the
-candidates the ladder's active rung was choosing between, plus 20 ms;
+two seats' homes and the ladder's answer, plus 20 ms — the homes since
+2026-11-05 (bug 457, learning #1112); before that the references were the
+ladder's active-rung candidates;
 learning #597 records why the earlier "costs neither seat more than 20 ms"
 test moved none of the cross-region pairs observed on 2026-09-09).
 
@@ -61,9 +63,18 @@ def _now():
 # ── rung 0: pure function ────────────────────────────────────────────────────
 
 def _rung(p1, p2, ladder, refs=()):
-    """`refs` are the candidates the ladder's active rung was choosing between
-    (what `_region_ladder_refs` returns). The ladder's answer is always one."""
+    """`refs` are the two seats' homes (what `_region_home_refs` returns); the
+    rung adds the ladder's answer to them itself."""
     return main._pick_region_by_pings(p1, p2, ladder, refs=refs)
+
+
+def _home(token, pings):
+    """This file's OWN reading of a seat's home (the token it sent, else its
+    map's lowest entry, ties by code), kept independent of main's helper so
+    the bound test below does not trust the code it judges."""
+    if token:
+        return token
+    return min(sorted(pings), key=lambda r: pings[r]) if pings else None
 
 
 def _tokens(rng, codes):
@@ -87,84 +98,82 @@ def test_rung0_is_swap_invariant():
         p1 = {c: rng.randint(1, 400) for c in codes if rng.random() < 0.7}
         p2 = {c: rng.randint(1, 400) for c in codes if rng.random() < 0.7}
         mr, orr, mh, oh = _tokens(rng, codes)
-        refs_a = main._region_ladder_refs(mr, orr, mh, oh)
-        refs_b = main._region_ladder_refs(orr, mr, oh, mh)
+        refs_a = main._region_home_refs(mh, oh, p1, p2)
+        refs_b = main._region_home_refs(oh, mh, p2, p1)
         assert set(refs_a) == set(refs_b)
-        for ladder in refs_a:
+        for ladder in (*refs_a, "us"):
             a = _rung(p1, p2, ladder, refs=refs_a)
             b = _rung(p2, p1, ladder, refs=refs_b)
             assert a[:3] == b[:3], f"{p1} / {p2} ladder={ladder}: {a} vs {b}"
             assert len(a) == 4 and len(b) == 4
 
 
-def test_a_seat_is_never_moved_beyond_the_ladders_candidates_on_its_own_numbers():
-    """The bound (design v2, reference set narrowed by d2): whenever the rung
-    moves the room, each seat's ping at the pick, read from its OWN map, is at
-    most its worst ping among the candidates the ladder's active rung was
-    choosing between, plus 20 ms. Fuzzed over maps, live tokens and homes; the
-    reference set comes from the caller's helper and the ladder's OWN answer
-    (the picker run without maps) must be among it — the oracle is the picker,
-    not the helper (impl review: a helper ranking the lives above agreeing
-    homes passed every test that trusted the helper); positive controls that
-    rooms do move and that every rung (agreeing homes, lives, homes, the
-    default) is exercised."""
+def test_a_seat_is_never_moved_beyond_the_homes_and_the_ladder_on_its_own_numbers(capsys):
+    """The bound (2026-11-05): whenever rung 0 moves the room, each seat's
+    ping at the pick, read from its OWN map, is at most the worst it measured
+    among the two seats' homes and the ladder's answer, plus 20 ms. Fuzzed
+    over maps, live tokens and homes, END TO END through _pick_room_region:
+    the ladder's answer is the picker run without maps and the homes are this
+    file's own reading (_home), so neither oracle is the helper under test
+    (impl review of 2026-09-09: a helper that ranked its inputs wrongly passed
+    every test that trusted the helper). Positive controls: rooms do move,
+    every ladder rung comes up, and some moves rest on a stand-in home."""
     rng = random.Random(23)
     codes = ["us", "eu", "asia", "sa", "jp", "au", "kr", "ru"]
-    moved, rungs = 0, set()
+    now = _now()
+    fresh = now - timedelta(seconds=30)
+    moved, standins, rungs = 0, 0, set()
     main._REGION_SEEN.clear()
     for _ in range(4000):
         p1 = {c: rng.randint(1, 400) for c in codes if rng.random() < 0.7}
         p2 = {c: rng.randint(1, 400) for c in codes if rng.random() < 0.7}
         mr, orr, mh, oh = _tokens(rng, codes)
-        refs = main._region_ladder_refs(mr, orr, mh, oh)
-        rungs.add("agree" if mh and mh == oh else "live" if (mr or orr) else "home" if (mh or oh) else "default")
+        rungs.add("agree" if mh and mh == oh else "home" if (mh or oh) else "live" if (mr or orr) else "default")
         ladder = main._pick_room_region(mr, mh, orr, oh, "fuzz")
-        assert ladder in refs, (mr, orr, mh, oh, ladder, refs)
-        pick, why, worst, detail = _rung(p1, p2, ladder, refs=refs)
-        if why != "pings" or pick == ladder:
+        pick = main._pick_room_region(mr, mh, orr, oh, "fuzz", p1_pings=p1 or None, p2_pings=p2 or None,
+                                      p1_pings_at=fresh, p2_pings_at=fresh, now=now)
+        capsys.readouterr()
+        if pick == ladder:
             continue
         moved += 1
+        standins += 0 if (mh and oh) else 1
+        refs = {t for t in (_home(mh, p1), _home(oh, p2), ladder) if t}
         for p in (p1, p2):
             allowed = max(p[r] for r in refs if r in p) + main.REGION_PINGS_MARGIN_MS
-            assert p[pick] <= allowed, f"{p} moved to {pick} ({p[pick]}) beyond {allowed}: refs={refs} {detail}"
-        assert worst == max(p1[pick], p2[pick])
+            assert p[pick] <= allowed, f"{p} moved to {pick} ({p[pick]}) beyond {allowed}: refs={refs}"
     assert moved > 200, moved
-    assert rungs == {"agree", "live", "home", "default"}, rungs
+    assert standins > 20, standins
+    assert rungs == {"agree", "home", "live", "default"}, rungs
 
 
-def test_only_the_active_rungs_candidates_bound_a_seat(capsys):
-    """Design review d2: a signal the ladder outranked is not a candidate and
-    must not widen a bound. The live regions agree on eu, so the ladder can
-    only answer eu; seat 2's cached home asia is one rung lower. With every
-    ladder input as a reference, asia would have raised seat 1's bound from 40
-    to 320 and moved it from 20 to 300 ms; with the active rung's candidates
-    only, the room stays on eu. `_region_ladder_refs` is the one place that
-    knows the ladder's precedence, and the caller must use it."""
+def test_the_homes_bound_a_seat_and_the_live_snapshots_do_not(capsys):
+    """The references are the two seats' HOMES (and the ladder's answer, a
+    home whenever one was sent); a live snapshot is not one. Both snapshots
+    read eu while both homes are asia: the ladder answers asia and asia alone
+    bounds the seats, so seat 1 stays at 20 ms — with the snapshots as
+    references eu would have raised seat 1's bound from 40 to 320 and moved
+    it from 20 to 300 ms. `_region_home_refs` is the one place that knows what
+    a home is, and the caller must use it."""
+    main._REGION_SEEN.clear()
     now = _now()
     fresh = now - timedelta(seconds=30)
-    assert main._pick_room_region("eu", "", "eu", "asia", "r", p1_pings={"eu": 20, "asia": 300},
-                                  p2_pings={"eu": 500, "asia": 20}, p1_pings_at=fresh, p2_pings_at=fresh,
-                                  now=now) == "eu"
-    lines = [line for line in capsys.readouterr().out.splitlines() if "[QUEUE-REGION]" in line]
-    assert lines[0] == "[QUEUE-REGION] room=r pick=eu rung=pings worst=500 ladder=eu cand=eu cand_ms=20/500 ladder_ms=20/500 bound=40/520"
-    assert "_region_ladder_refs(mr, orr, mh, oh)" in inspect.getsource(main._pick_room_region)
-    # the helper mirrors the ladder's rungs exactly: agreeing homes, lives, homes, default
-    assert main._region_ladder_refs("", "", "eu", "eu") == ("eu",)
-    assert main._region_ladder_refs("eu", "", "us", "asia") == ("eu",)
-    assert main._region_ladder_refs("eu", "eu", "us", "asia") == ("eu",)
-    assert main._region_ladder_refs("eu", "us", "", "") == ("eu", "us")
-    assert main._region_ladder_refs("", "", "ru", "rue") == ("ru", "rue")
-    assert main._region_ladder_refs("", "", "", "asia") == ("asia",)
-    assert main._region_ladder_refs("", "", "", "") == ("us",)
-    assert main._region_ladder_refs("eu", "eu", "asia", "asia") == ("asia",)
-    assert main._region_ladder_refs("eu", "us", "asia", "asia") == ("asia",)
-    # end to end: agreeing homes outrank the lives, so the ladder answers asia and only asia
-    # bounds the seats — a helper ranking the lives first would move seat 1 to eu at 300 ms
     assert main._pick_room_region("eu", "asia", "eu", "asia", "r", p1_pings={"asia": 20, "eu": 300},
                                   p2_pings={"asia": 500, "eu": 20}, p1_pings_at=fresh, p2_pings_at=fresh,
                                   now=now) == "asia"
     lines = [line for line in capsys.readouterr().out.splitlines() if "[QUEUE-REGION]" in line]
-    assert lines[0] == "[QUEUE-REGION] room=r pick=asia rung=pings worst=500 ladder=asia cand=asia cand_ms=20/500 ladder_ms=20/500 bound=40/520"
+    assert lines[0] == ("[QUEUE-REGION] room=r pick=asia rung=pings worst=500 ladder=asia cand=asia "
+                        "cand_ms=20/500 ladder_ms=20/500 bound=40/520 refs=asia")
+    assert "_region_home_refs(mh, oh, m1, m2)" in inspect.getsource(main._pick_room_region)
+    assert "_region_ladder_refs" not in inspect.getsource(main)
+    # one home sent (asia, seat 2): seat 1 is represented by its map's lowest region (eu), so
+    # both regions are references and the pair's least-worst region is taken — asia at 300/20,
+    # where the snapshots alone (eu, eu) kept the pair on eu at 20/500 until 2026-11-05
+    assert main._pick_room_region("eu", "", "eu", "asia", "r", p1_pings={"eu": 20, "asia": 300},
+                                  p2_pings={"eu": 500, "asia": 20}, p1_pings_at=fresh, p2_pings_at=fresh,
+                                  now=now) == "asia"
+    lines = [line for line in capsys.readouterr().out.splitlines() if "[QUEUE-REGION]" in line]
+    assert lines[0] == ("[QUEUE-REGION] room=r pick=asia rung=pings worst=300 ladder=asia cand=asia "
+                        "cand_ms=300/20 ladder_ms=300/20 bound=320/520 refs=eu,asia")
 
 
 def test_missing_maps_and_no_overlap_leave_the_ladder():
@@ -263,7 +272,7 @@ def test_a_synthetic_sept_9_pairing_lands_on_a_shared_region():
               "in": 181, "ru": 34, "rue": 246, "kr": 298, "za": 191, "tr": 85, "uae": 202, "ussc": 129, "hk": 276}
     opp = {"rue": 30, "jp": 60, "kr": 80, "hk": 90, "asia": 110, "usw": 110, "au": 130, "ussc": 140, "us": 150,
            "cae": 160, "in": 170, "uae": 200, "tr": 230, "eu": 250, "ru": 251, "sa": 260, "za": 280}
-    refs = main._region_ladder_refs("", "", "rue", "ru")
+    refs = main._region_home_refs("rue", "ru", opp, spirit)
     assert refs == ("rue", "ru")
     assert _rung(opp, spirit, "ru", refs=refs) == (
         "ussc", "pings", 140, "cand=ussc cand_ms=140/129 ladder_ms=251/34 bound=271/266")
@@ -298,7 +307,7 @@ def test_fresh_maps_replace_the_ladder_and_stale_or_absent_ones_do_not(capsys):
     assert main._pick_room_region("us", "us", "us", "us", "r", p1_pings_at=fresh, p2_pings_at=fresh, **kw) == "eu"
     out = capsys.readouterr().out
     rung, ladder = [line for line in out.splitlines() if "[QUEUE-REGION]" in line][:2]
-    assert rung == "[QUEUE-REGION] room=r pick=eu rung=pings worst=30 ladder=us cand=eu cand_ms=30/25 ladder_ms=100/90 bound=120/110"
+    assert rung == "[QUEUE-REGION] room=r pick=eu rung=pings worst=30 ladder=us cand=eu cand_ms=30/25 ladder_ms=100/90 bound=120/110 refs=us"
     assert "chosen=eu" in ladder and "seen=" in ladder, "the existing line reports the FINAL pick"
     # one stale stamp -> ladder
     assert main._pick_room_region("us", "us", "us", "us", "r", p1_pings_at=fresh, p2_pings_at=stale, **kw) == "us"
@@ -327,17 +336,16 @@ def test_the_refusal_line_records_the_candidate_and_both_seats_numbers(capsys):
                                   p2_pings={"us": 60, "eu": 75}, p1_pings_at=fresh, p2_pings_at=fresh,
                                   now=now) == "us"
     lines = [line for line in capsys.readouterr().out.splitlines() if "[QUEUE-REGION]" in line]
-    assert lines[0] == "[QUEUE-REGION] room=r pick=us rung=ladder why=margin cand=eu cand_ms=90/75 ladder_ms=100/60 bound=120/80"
-    # the active rung's candidates are the reference set: with homes (us, eu)
-    # and no live signal the ladder is choosing between us and eu (the
-    # alphabet answers eu once corroboration is cold), so eu lies inside BOTH
-    # seats' bounds and the maps confirm it as the pair's least-worst
+    assert lines[0] == "[QUEUE-REGION] room=r pick=us rung=ladder why=margin cand=eu cand_ms=90/75 ladder_ms=100/60 bound=120/80 refs=us"
+    # the two homes are the reference set: with homes (us, eu) the ladder
+    # answers eu once corroboration is cold (the alphabet), so eu lies inside
+    # BOTH seats' bounds and the maps confirm it as the pair's least-worst
     main._REGION_SEEN.clear()
     assert main._pick_room_region("", "us", "", "eu", "r", p1_pings={"us": 10, "eu": 80},
                                   p2_pings={"us": 100, "eu": 30}, p1_pings_at=fresh, p2_pings_at=fresh,
                                   now=now) == "eu"
     lines = [line for line in capsys.readouterr().out.splitlines() if "[QUEUE-REGION]" in line]
-    assert lines[0] == "[QUEUE-REGION] room=r pick=eu rung=pings worst=80 ladder=eu cand=eu cand_ms=80/30 ladder_ms=80/30 bound=100/120"
+    assert lines[0] == "[QUEUE-REGION] room=r pick=eu rung=pings worst=80 ladder=eu cand=eu cand_ms=80/30 ladder_ms=80/30 bound=100/120 refs=us,eu"
     # the no-maps branch has nothing to record and says nothing extra
     assert main._pick_room_region("us", "us", "us", "us", "r") == "us"
     lines = [line for line in capsys.readouterr().out.splitlines() if "[QUEUE-REGION]" in line]
@@ -367,6 +375,95 @@ def test_pick_room_region_stays_swap_invariant_with_maps():
         a = main._pick_room_region("", h1, "", h2, "r", p1_pings=m1, p2_pings=m2, p1_pings_at=t1, p2_pings_at=t2, now=now)
         b = main._pick_room_region("", h2, "", h1, "r", p1_pings=m2, p2_pings=m1, p1_pings_at=t2, p2_pings_at=t1, now=now)
         assert a == b
+
+
+# ── the home-referenced rule of 2026-11-05 (bug 457, learning #1112) ────────
+#
+# SID_MAP holds the three regions the lane's design reads from bug 457's log.
+# SPIRIT_MAP is the opponent's map as that design states it from earlier
+# sweeps, NOT from that day's log (his upload could not be read), so the
+# replays below are a constructed pair in the 4 Nov shape, not a recording:
+# seat 1's live snapshot was left on ru by quick play while its home is usw.
+
+SID_MAP = {"usw": 19, "us": 64, "ru": 147}
+SPIRIT_MAP = {"ru": 40, "eu": 25, "us": 90, "usw": 150}
+
+
+def _fresh_pair(now, p1=SID_MAP, p2=SPIRIT_MAP):
+    at = now - timedelta(seconds=30)
+    return dict(p1_pings=p1, p2_pings=p2, p1_pings_at=at, p2_pings_at=at, now=now)
+
+
+def _region_lines(capsys):
+    return [line for line in capsys.readouterr().out.splitlines() if "[QUEUE-REGION]" in line]
+
+
+def test_replay_of_4_november_lands_on_the_shared_region(capsys):
+    """Both live snapshots read ru (seat 1's left there by quick play); the
+    homes are usw and ru. The references are the two HOMES, so seat 2's bound
+    is its usw ping plus 20 (170) and us at 64/90 is reachable; it beats the
+    ladder's ru (147/40) by 57 ms and is taken. Under the rule this replaced
+    the live rung answered ru and ru was the only reference: seat 2's bound
+    was 40 + 20, every US region lay outside it, and the room stayed on ru."""
+    main._REGION_SEEN.clear()
+    now = _now()
+    assert main._pick_room_region("ru", "usw", "ru", "ru", "r", **_fresh_pair(now)) == "us"
+    assert _region_lines(capsys)[0] == (
+        "[QUEUE-REGION] room=r pick=us rung=pings worst=90 ladder=ru cand=us cand_ms=64/90 "
+        "ladder_ms=147/40 bound=167/170 refs=usw,ru")
+    # whichever seat's request issued the room
+    assert main._pick_room_region("ru", "ru", "ru", "usw", "r", **_fresh_pair(now, SPIRIT_MAP, SID_MAP)) == "us"
+    assert _region_lines(capsys)[0].endswith("bound=170/167 refs=ru,usw")
+
+
+def test_replay_of_3_november_is_unchanged():
+    """The same pair with seat 1's snapshot on its own region: us before this
+    change (the live rung carried usw, so both regions were references) and
+    us after it."""
+    main._REGION_SEEN.clear()
+    assert main._pick_room_region("usw", "usw", "ru", "ru", "r", **_fresh_pair(_now())) == "us"
+
+
+def test_a_seat_without_a_home_token_is_represented_by_its_maps_lowest_region(capsys):
+    """No home token from seat 1: its map's lowest entry (usw at 19) stands
+    in, so the references and the pick are those of the replay. The ladder,
+    which reads tokens only, answers the lone home ru."""
+    main._REGION_SEEN.clear()
+    assert main._pick_room_region("ru", "", "ru", "ru", "r", **_fresh_pair(_now())) == "us"
+    assert _region_lines(capsys)[0].endswith(
+        "ladder=ru cand=us cand_ms=64/90 ladder_ms=147/40 bound=167/170 refs=usw,ru")
+    assert main._region_home_refs("", "ru", SID_MAP, SPIRIT_MAP) == ("usw", "ru")
+    assert main._region_home_refs("", "", {"us": 30, "eu": 30}, {"us": 5}) == ("eu", "us"), "tie: code order"
+    assert main._region_home_refs("", "eu", {"eu": 1}, None) == ("eu",), "duplicates collapse"
+    assert main._region_home_refs("", "", None, None) == ()
+
+
+def test_a_home_outranks_a_live_snapshot_in_the_ladder(capsys):
+    """Without maps the ladder decides alone. A home token is read before any
+    live snapshot, a lone one included: the snapshots (both ru) decide only
+    when neither seat sent a home."""
+    main._REGION_SEEN.clear()
+    assert main._pick_room_region("ru", "usw", "ru", "", "r") == "usw"
+    assert main._pick_room_region("ru", "", "ru", "usw", "r") == "usw"
+    assert main._pick_room_region("ru", "usw", "ru", "usw", "r") == "usw"
+    assert main._pick_room_region("ru", "", "ru", "", "r") == "ru"
+    picks = _region_lines(capsys)[::2]
+    assert len(picks) == 4 and all("rung=ladder why=no-maps" in line for line in picks)
+
+
+def test_a_one_entry_map_obtains_that_seats_home_and_no_more():
+    """The #283 note in main.py, executed. Seat 1 names sa as its home and
+    sends a map holding sa alone: the only shared region is sa, seat 2
+    measured it (180), and seat 2's bound is the worst it measured among the
+    homes sa and eu plus 20, so sa is taken. Seat 2 lands at its OWN
+    measurement of seat 1's home and nowhere beyond it. A seat 2 that never
+    measured sa shares no region with that map and gets the ladder."""
+    main._REGION_SEEN.clear()
+    now = _now()
+    other = {"sa": 180, "eu": 20, "us": 90}
+    assert main._pick_room_region("", "sa", "", "eu", "r", **_fresh_pair(now, {"sa": 1}, other)) == "sa"
+    assert main._pick_room_region("", "sa", "", "eu", "r",
+                                  **_fresh_pair(now, {"sa": 1}, {"eu": 20, "us": 90})) == "eu"
 
 
 # ── the validator and the header parser ──────────────────────────────────────

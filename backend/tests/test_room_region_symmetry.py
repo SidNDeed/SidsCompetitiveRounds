@@ -140,8 +140,14 @@ def test_one_signal_is_used_whichever_seat_it_came_from():
     assert main._pick_room_region("", "", "", "asia", "r") == "asia"
 
 
-def test_a_live_snapshot_outranks_a_cached_home_region():
-    assert main._pick_room_region("us", "asia", "", "eu", "r") == "us"
+def test_a_cached_home_region_outranks_a_live_snapshot():
+    """Reversed on 2026-11-05 (bug 457, learning #1112): a live snapshot is
+    where the client was connected at join, which after quick play is
+    wherever the vanilla sweep left it. The homes are read first, a lone one
+    included; the snapshots decide only when neither seat sent a home."""
+    assert main._pick_room_region("us", "asia", "", "eu", "r") == "asia"
+    assert main._pick_room_region("us", "", "", "eu", "r") == "eu"
+    assert main._pick_room_region("us", "", "eu", "", "r") == "eu"
 
 
 # ── corroboration ────────────────────────────────────────────────────────────
