@@ -16,13 +16,17 @@
 #   6. in every outcome after step 4 (trap, the lease still held): a ROUNDS still running is closed by identity
 #      (ft_close_leased.ps1, R6-A3.11.9 FIX-6b; quit_game.ps1 only when its identity is not shown); the sentinel removed;
 #      VR6's second listing (<outdir>/inventory-sitting.txt: the config folder and LogOutput-prev.log as the sitting
-#      left them, compared with PRE: any change fails VR6); the install reverted (ft_vm_install.sh revert); the
-#      sitting's logs moved into <outdir>/sitting/ and the pre-images put back; the cfg put back; the POST inventory
-#      (<outdir>/inventory-post.txt) compared with PRE line for line; then the lease released and the status printed.
+#      left them, compared with PRE: any change fails VR6); the install reverted (ft_vm_install.sh revert); every file
+#      the restoration replaces (the five logs whenever present, the cfg when it differs from its pre-image) MOVED,
+#      mtime kept and never over an existing file, into <outdir>/sitting/<run stamp>/ (R6-A3.11.14 FIX-10 (c)), then
+#      the pre-images put back, each proven; the POST inventory (<outdir>/inventory-post.txt) compared with PRE line
+#      for line; then the lease released and the status printed. The checks and the restoration live in
+#      ft_vm_restore.sh so its dry harness runs them unchanged.
 # --dry stops after the gate (s0_gate -Dry; nothing inventoried, installed, armed or launched).
 # Exit: 0 the launch saw its end line and every check after it held; 10 gate refused; 20 lease not held; 21 ROUNDS
 # still running after the leased shutdown; 22 the install refused; 30 VR6 or a restoration or the POST inventory
-# failed; otherwise the launch script's code.
+# failed, whatever the launch script's code was (FIX-10 (a): 30 wins over 5 and every other launch code); otherwise
+# the launch script's code.
 set -u
 MODE="${1:?menu|match}"; OUT="${2:?outdir}"; DLL="${3:-}"; LANES="${4:-}"; DRY="${5:-}"
 case "$MODE" in menu) N=1;; match) N=2;; *) echo "usage: ft_vm_leased.sh <menu|match> <outdir> <dll> <lanes> [--dry]"; exit 2;; esac
@@ -42,18 +46,10 @@ PL="$LOW/Landfall Games/ROUNDS"
 for pub in "Landfall Games" "Landfall"; do [ -f "$LOW/$pub/ROUNDS/Player.log" ] && { PL="$LOW/$pub/ROUNDS"; break; }; done
 LOGN=(LogOutput.log LogOutput-prev.log output_log.txt Player.log Player-prev.log)
 LOGP=("$BEP/LogOutput.log" "$BEP/LogOutput-prev.log" "$GAME/output_log.txt" "$PL/Player.log" "$PL/Player-prev.log")
-st() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-sha() { if [ -f "$1" ]; then sha256sum "$1" | cut -c1-64; else echo absent; fi; }
+RUNSTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+# st, sha, inventory, ft_vr6_check, ft_restore_check, ft_rc_verdict (FIX-10, R6-A3.11.14)
+. "$(cd "$(dirname "$0")" && pwd)/ft_vm_restore.sh" || { echo "ft_vm_leased.sh: ft_vm_restore.sh not loaded"; exit 2; }
 running() { /c/Windows/System32/tasklist.exe 2>/dev/null | grep -i -q 'ROUNDS.exe'; }
-# inventory <file>: one line per file, "<area> <path> <sha256>", sorted; the plugins and config folders whole and
-# recursive (paths relative to each folder, e.g. "plugins CompetitiveRounds/CompetitiveRounds.dll"), then the five logs
-inventory() {
-  {
-    find "$BEP/plugins" -type f | while IFS= read -r f; do echo "plugins ${f#"$BEP/plugins/"} $(sha "$f")"; done
-    find "$CONFDIR" -type f | while IFS= read -r f; do echo "config ${f#"$CONFDIR/"} $(sha "$f")"; done
-    for i in 0 1 2 3 4; do echo "log ${LOGN[$i]} $(sha "${LOGP[$i]}")"; done
-  } | LC_ALL=C sort > "$1"
-}
 [ -e "$OUT" ] && { echo "$(st) FT-VM-LEASED REFUSED: $OUT exists (a fresh folder per run)"; exit 2; }
 mkdir -p "$OUT" || exit 2
 PRE="$OUT/pre"
@@ -77,42 +73,16 @@ finish() {
         for i in $(seq 1 20); do running || break; sleep 3; done
       fi
       bash "$HERE/ft_vm_install.sh" disarm
-      # VR6's second listing: the config folder and LogOutput-prev.log as the sitting left them
-      inventory "$OUT/inventory-sitting.txt"
-      grep -E "^config |^log LogOutput-prev.log " "$OUT/inventory-pre.txt" > "$OUT/vr6-pre.txt"
-      grep -E "^config |^log LogOutput-prev.log " "$OUT/inventory-sitting.txt" > "$OUT/vr6-sitting.txt"
-      if cmp -s "$OUT/vr6-pre.txt" "$OUT/vr6-sitting.txt"; then
-        echo "$(st) FT-VM-VR6 files PASS (config folder and LogOutput-prev.log unchanged by the sitting)"
-      else
-        echo "$(st) FT-VM-VR6 files FAIL: $(diff "$OUT/vr6-pre.txt" "$OUT/vr6-sitting.txt" | grep '^[<>]' | tr '\n' ';')"; bad=1
-      fi
+      ft_vr6_check
       if [ "$INSTALLED" = "1" ]; then bash "$HERE/ft_vm_install.sh" revert || bad=1; fi
-      # the logs restored like the cfg: the sitting's copies moved aside, the pre-images put back, each proven
-      mkdir -p "$OUT/sitting"
-      for i in 0 1 2 3 4; do
-        n=${LOGN[$i]}; p=${LOGP[$i]}; want=$(grep -E "^log $n " "$OUT/inventory-pre.txt" | awk '{print $3}')
-        [ -f "$p" ] && mv -f "$p" "$OUT/sitting/$n"
-        [ "$want" != "absent" ] && cp -p "$PRE/$n" "$p"
-        got=$(sha "$p")
-        if [ "$got" = "$want" ]; then echo "$(st) FT-VM-RESTORE log $n $got equal"
-        else echo "$(st) FT-VM-RESTORE log $n $got pre $want DIFFERENT"; bad=1; fi
-      done
-      cp -p "$PRE/com.competitiverounds.mod.cfg" "$CFG"
-      if cmp -s "$CFG" "$PRE/com.competitiverounds.mod.cfg"; then echo "$(st) FT-VM-LEASED cfg restored: byte-identical (cmp)"
-      else echo "$(st) FT-VM-LEASED CFG RESTORE MISMATCH"; bad=1; fi
-      inventory "$OUT/inventory-post.txt"
-      if cmp -s "$OUT/inventory-pre.txt" "$OUT/inventory-post.txt"; then
-        echo "$(st) FT-VM-INVENTORY post equals pre: yes ($(wc -l < "$OUT/inventory-post.txt") files, md5 $(md5sum < "$OUT/inventory-post.txt" | cut -c1-32))"
-      else
-        echo "$(st) FT-VM-INVENTORY post equals pre: NO: $(diff "$OUT/inventory-pre.txt" "$OUT/inventory-post.txt" | grep '^[<>]' | tr '\n' ';')"; bad=1
-      fi
-      [ "$bad" = "1" ] && [ "$rc" = "0" ] && rc=30
+      ft_restore_check
+      ft_rc_verdict
     fi
     echo "$(st) FT-VM-LEASED lease release resume.ps1 -Holder frame-time"
     powershell -NoProfile -File C:/broadcast/resume.ps1 -Holder frame-time | tr -d '\r'
     powershell -NoProfile -File C:/broadcast/pause.ps1 -Status | tr -d '\r'
   fi
-  echo "$(st) FT-VM-LEASED $MODE end rc=$rc"
+  ft_end_line
   exit "$rc"
 }
 trap finish EXIT
