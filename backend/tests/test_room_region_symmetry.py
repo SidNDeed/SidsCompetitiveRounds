@@ -18,8 +18,11 @@ The tie-break asks which region this process has evidence two players have
 actually played in. That is corroboration, not an allowlist — a static list was
 refused with a good argument (`hk` and `uae` are in this project's own match
 history and the game's own selector does not offer them) — and it only ever
-breaks a tie between two candidates already in play, so it cannot reject a
-region outright.
+ORDERS candidates already in play, so it cannot reject a region outright: it
+breaks a tie between two signals of the same kind, and since 2026-11-05 it is
+one of the signs that a cached home region is still in service (the others
+are a live snapshot naming the region and a fresh ping map that measured
+it), which is what lets a home be read ahead of the live snapshots.
 
 WHERE THAT EVIDENCE COMES FROM has been rewritten twice, and the current answer
 is the only one that is not a client's word for it. First it was the join-time
@@ -41,22 +44,23 @@ bias (learning #597) that rung 0 exists to correct. A test below pins that the
 changelog describes the fallback as the fixed order it is.
 
 What none of this claims: that the chosen region is the BEST one for a
-cross-region pair. Steering on a stored home region was refused because an
-untimestamped best-region cache steers a player who relocated by where they
-used to be. A real measurement now exists as rung 0
+cross-region pair. A home is an untimestamped best-region cache: it places a
+player who relocated by where they used to be, and a confirmed home is only
+a region still in service. A real measurement exists as rung 0
 (`_pick_region_by_pings`): when BOTH seats have sent a ping map no older
-than 180 s it may replace the ladder's answer with the region that minimises
-the pair's WORST ping, taken when it beats the ladder's worst by more than
-20 ms and lies within each seat's own bound -- the worst that seat measured
-among the candidates the ladder's active rung was choosing between, plus
-20 ms (bounded minimax since 2026-09-09; the earlier "costs neither seat more
-than 20 ms over its own baseline" test left every cross-region pair observed
-that day on one seat's home, learning #597). Whenever either map is absent, stale or malformed (a client
-without the ping sweep sends none at all), whenever the two maps share no
-region, whenever a seat measured none of the ladder's candidates or every
-shared region lies above a bound, and whenever the gain is inside the
-margin, the ladder decides the room by itself, which is why the ladder is
-what every test in this file is about. Rung 0 has its own file,
+than 900 s (180 s until 2026-11-05) it may replace the ladder's answer with
+the region that minimises the pair's WORST ping, taken when it beats the
+ladder's worst by more than 20 ms and lies within each seat's own bound --
+the worst that seat measured among the two seats' homes and the ladder's
+answer, plus 20 ms (bounded minimax since 2026-09-09; the earlier "costs
+neither seat more than 20 ms over its own baseline" test left every
+cross-region pair observed that day on one seat's home, learning #597; the
+homes as the references since 2026-11-05, learning #1112). Whenever either
+map is absent, stale or malformed (a client without the ping sweep sends
+none at all), whenever the two maps share no region, whenever every shared
+region lies above a bound, and whenever the gain is inside the margin, the
+ladder decides the room by itself, which is why the ladder is what every
+test in this file is about. Rung 0 has its own file,
 test_queue_region_pings.py.
 """
 
@@ -140,14 +144,36 @@ def test_one_signal_is_used_whichever_seat_it_came_from():
     assert main._pick_room_region("", "", "", "asia", "r") == "asia"
 
 
-def test_a_cached_home_region_outranks_a_live_snapshot():
+def test_a_confirmed_home_region_outranks_a_live_snapshot():
     """Reversed on 2026-11-05 (bug 457, learning #1112): a live snapshot is
     where the client was connected at join, which after quick play is
-    wherever the vanilla sweep left it. The homes are read first, a lone one
-    included; the snapshots decide only when neither seat sent a home."""
+    wherever the vanilla sweep left it. A home that something confirms is
+    still in service is read first, a lone one included. Here two reporters
+    have been seen on asia and on eu; in the last line the map is empty and a
+    live snapshot names the home's own region."""
+    _corroborate("asia")
+    _corroborate("eu")
     assert main._pick_room_region("us", "asia", "", "eu", "r") == "asia"
     assert main._pick_room_region("us", "", "", "eu", "r") == "eu"
+    assert main._pick_room_region("us", "eu", "", "", "r") == "eu"
+    main._REGION_SEEN.clear()
+    assert main._pick_room_region("us", "us", "asia", "", "r") == "us"
+    assert main._pick_room_region("asia", "us", "us", "", "r") == "us"
+
+
+def test_a_home_region_nothing_confirms_ranks_below_a_live_snapshot():
+    """A home token is an untimestamped cache and can name a region since
+    retired; a room issued there is one neither client can reach. On an empty
+    corroboration map, with no ping map and no snapshot naming it, nothing
+    says the region is still in service, so the live snapshots are read
+    first, as they were before 2026-11-05. The home is still a candidate: it
+    decides when there is no snapshot, and two homes that agree win
+    outright."""
+    assert main._pick_room_region("us", "asia", "", "eu", "r") == "us"
+    assert main._pick_room_region("us", "", "", "eu", "r") == "us"
     assert main._pick_room_region("us", "", "eu", "", "r") == "eu"
+    assert main._pick_room_region("", "asia", "", "eu", "r") == "asia"
+    assert main._pick_room_region("us", "asia", "", "asia", "r") == "asia"
 
 
 # ── corroboration ────────────────────────────────────────────────────────────
@@ -173,10 +199,11 @@ def test_with_both_sides_corroborated_the_tie_is_still_stable():
     assert main._pick_room_region("", "asia", "", "us", "r") == "asia"
 
 
-def test_corroboration_never_rejects_a_region_it_only_breaks_a_tie():
-    """The bound on what this mechanism can do. A region nobody has been seen
-    in is still used when it is the only signal — otherwise a cold process
-    would move every pair to the default."""
+def test_corroboration_never_rejects_a_region_it_only_orders_candidates():
+    """The bound on what this mechanism can do, in both of its uses (the
+    tie-break, and confirming a home). A region nobody has been seen in is
+    still used when it is the only signal — otherwise a cold process would
+    move every pair to the default."""
     _corroborate("us")
     assert main._pick_room_region("", "asia", "", "", "r") == "asia"
     assert main._pick_room_region("asia", "", "", "", "r") == "asia"

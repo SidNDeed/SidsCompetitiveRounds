@@ -18161,10 +18161,14 @@ def _region_token(value):
 # This is built instead from the region on an ACCEPTED MATCH REPORT — a game
 # that was played, submitted and recorded. A region ROUNDS adds tomorrow
 # qualifies the first time somebody finishes a game there, and one that is
-# retired stops appearing and ages out on its own. It is used ONLY to break a
-# tie between two candidates that are already in play — never to reject a
-# region outright, and never to introduce one — so the worst it can do is
-# choose the same way the code without it would have.
+# retired stops appearing and ages out on its own. It only ORDERS candidates
+# that are already in play: it breaks a tie between two signals of the same
+# kind (_region_agreed) and, since 2026-11-05, it is one of the signs that a
+# cached home region is still in service, which lets that home be read ahead
+# of the live snapshots (_region_home_confirmed). It never rejects a region
+# outright and never introduces one: with it or without it, the ladder
+# answers with one of the tokens the two clients sent, or with the default
+# when they sent none.
 #
 # IT IS NOT READ FROM THE REPORT, which is the design. Neither the join-time
 # CloudRegion snapshot (what this read first) nor the match report's `region`
@@ -18417,26 +18421,29 @@ def _region_agreed(a, b):
 # seat's bound — how far that seat may be moved — from that seat's map alone,
 # measured at the reference regions, plus 20 ms. The reference regions are
 # the two seats' HOMES (_region_home_refs) and the ladder's answer; a seat's
-# home is the home token it sent, else the region its own map measures
-# lowest. Whenever either seat sent a home token the ladder's answer is one
-# of those tokens, so a seat's own data names ONE reference region, its
-# home. When neither sent one the ladder's answer is read from the live
-# snapshots (else the default), and a seat reports its own snapshot too, so
-# its data can name a second: the region the pair gets when the rung
-# declines. That is all a seat adds to the other seat's bound: the other
-# seat is never sent, on its own numbers, to a region worse than the worst
-# it measured among the references by more than 20 ms. Naming a region
-# through the map obtains at most what sending it as the home token beside
-# the same map obtains, and a home token is a region the ladder can already
-# answer outright: a map that measures only its sender's home can obtain
-# that home for the room when the other seat measured it too, and the other
-# seat is then at its own measured ping there. Inside the
-# bounds the pick is made from both maps together and may be a shared region
-# neither seat calls home — that is the purpose. Withholding the map, or
-# measuring none of the references, gets the ladder exactly. This code
-# writes no match result, rating or gold; what a map can change is the
-# pair's room region, so a seat's ping in that room can be anywhere up to
-# its own bound, whichever map put it there.
+# home is a region its OWN MAP measured: the home token it sent when the map
+# holds that region, else the region the map measures lowest. So a seat's
+# own data names at most TWO reference regions: its home, and the ladder's
+# answer when that was read from its home token or its live snapshot — the
+# region the pair gets when the rung declines. That is all a seat adds to
+# the other seat's bound: the other seat is never sent, on its own numbers,
+# to a region worse than the worst it measured among the references by more
+# than 20 ms. Naming a region through the map obtains at most what sending
+# it as the home token beside the same map obtains, and such a token is a
+# region the ladder can already answer outright: a map that measures only
+# its sender's home can obtain that home for the room when the other seat
+# measured it too, and the other seat is then at its own measured ping
+# there. A map is also one of the signs that a home token names a region
+# still in service (_region_home_confirmed), which puts that home in the
+# ladder's first rung, ahead of the live snapshots; a live snapshot naming
+# the same region obtains the same place. Inside the bounds the pick is made
+# from both maps together and may be a shared region neither seat calls
+# home — that is the purpose. Withholding the map leaves the room to the
+# ladder, read without that map. This code writes no match result, rating
+# or gold; what a map can change is the pair's room region: through the
+# rung, a seat's ping in that room can be anywhere up to its own bound,
+# whichever map put it there; through a confirmation, the room can be a home
+# that the ladder would otherwise have read after the live snapshots.
 
 REGION_PINGS_MAX_ENTRIES = 24
 REGION_PINGS_MAX_MS = 5000
@@ -18874,7 +18881,9 @@ def _pick_region_by_pings(p1, p2, ladder_pick, refs=()):
 
       * Each seat has a bound: the worst it measured among the reference
         set, plus REGION_PINGS_MARGIN_MS. A seat that measured none of it has
-        no bound and the rung declines ("unbounded"). A region a seat measured
+        no bound and the rung declines ("unbounded"); the 1v1 room picker
+        never gets there, because each seat's home in `refs` is a region its
+        own map holds (_region_home_refs). A region a seat measured
         above its bound is not a candidate; with none left the rung declines
         ("bound"). So a seat is never sent, on its own numbers, to a region
         worse than the worst it measured among the two homes and L by more
@@ -18966,11 +18975,18 @@ def _region_pings_at_issuance(pings, pings_at, now):
 def _region_home_refs(my_home, opp_home, p1, p2):
     """The two seats' HOME regions: the references rung 0 reads each seat's
     bound against (the ladder's answer joins them in _pick_region_by_pings).
-    A seat's home is the home token it sent; a seat that sent none is
-    represented by the region its own map measures lowest (tie: fixed order
-    by code). The live snapshots are not read here: a snapshot is where the
-    client was connected at join, and after quick play that is wherever the
-    vanilla sweep left it (learning #1112).
+    A seat's home is a region its OWN MAP measured: the home token it sent
+    when the map holds that region, else the region the map measures lowest
+    (tie: fixed order by code). The second arm covers a seat that sent no
+    token and a seat whose token names a region its map never measured. A
+    bound is read from a seat's own numbers, so read as a reference such a
+    token gives its own seat no number, and gives the other seat one only if
+    that seat measured it: the ladder's answer can then be the one reference
+    with numbers, which is bug 457's shape, or a seat can be left with no
+    bound at all. With this rule every seat that sent a map has a reference
+    its own map holds. The live snapshots are not read here: a snapshot is
+    where the client was connected at join, and after quick play that is
+    wherever the vanilla sweep left it (learning #1112).
 
     Until 2026-11-05 the references were the candidates of the ladder's
     active rung, and the live rung came first, so one snapshot on a far
@@ -18979,15 +18995,49 @@ def _region_home_refs(my_home, opp_home, p1, p2):
     and the pair stayed on the far region whatever the maps said (bug 457).
 
     Tokens are assumed validated and the maps clean (what
-    _region_pings_at_issuance returns for a fresh map); a seat with neither a
-    token nor a map contributes nothing; order is the caller's (my, opp) and
-    duplicates collapse, so the SET is the same whichever seat asked."""
+    _region_pings_at_issuance returns for a fresh map). A seat without a map
+    contributes its token as sent (the room picker calls this only when both
+    seats have one); a seat with neither a token nor a map contributes
+    nothing; order is the caller's (my, opp) and duplicates collapse, so the
+    SET is the same whichever seat asked."""
     out = []
     for home, pings in ((my_home, p1), (opp_home, p2)):
-        token = home or (min(pings, key=lambda r: (pings[r], r)) if pings else None)
+        if pings and home not in pings:
+            token = min(pings, key=lambda r: (pings[r], r))
+        else:
+            token = home
         if token and token not in out:
             out.append(token)
     return tuple(out)
+
+
+def _region_home_confirmed(home, lives, maps, mono):
+    """Whether anything besides the token itself says the region a home token
+    names is still IN SERVICE: a live snapshot of either seat names the same
+    region (a client was connected there at join), a fresh ping map of
+    either seat measured it (it answered within the room window), or two
+    reporters have been seen connected to it (_region_corroborated).
+
+    A home token is Photon's best-region cache: persistent, untimestamped
+    and accepted here by shape, so by itself it can name a region that has
+    since been retired, and a room issued there is one neither client can
+    reach. Two homes that agree win outright as they always have; a home
+    that does not is read ahead of the live snapshots only when it is
+    confirmed (_pick_room_region). Confirmation only ORDERS the ladder's
+    rungs: a home nothing confirms stays a candidate, below the snapshots,
+    where a home that did not agree with the other ranked before
+    2026-11-05. It says nothing about where the player is now, and it is
+    not a check on what a client names: every sign but the corroboration
+    map is the two clients' own data (the #283 note above
+    REGION_PINGS_MAX_ENTRIES says what that obtains). `lives` are the two
+    live tokens, `maps` the two fresh maps (None where a seat has none), and
+    `mono` one reading of the monotonic clock, passed in so both homes are
+    judged against the same one."""
+    if not home:
+        return False
+    if home in lives or any(home in m for m in maps if m):
+        return True
+    return _region_corroborated(home, mono)
 
 
 def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
@@ -19002,24 +19052,32 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     at join (menu after Sandbox, #122; mid-reconnect) — so a both-Asian
     pair could land on "us" with 200ms ping for BOTH seats.
 
-    The ladder, in order (the homes first since 2026-11-05):
+    The ladder, in order (confirmed homes ahead of the snapshots since
+    2026-11-05):
       1. The HOME regions (Photon best-region ping cache, sent by 1.38.7+
          clients). When they agree, that region: same-region pairs always
          land home no matter what either client was connected to at join
          time. When they differ, or only one seat sent one, _region_agreed
-         over the two.
-      2. Otherwise the live snapshots, resolved the same way. A snapshot is
-         read only when NEITHER seat sent a home: after quick play it is
-         wherever the vanilla sweep left the client (learning #1112), and
-         until 2026-11-05 it outranked two homes that differed. ANY region
-         signal beats the "us" default (empty+empty previously fell straight
-         through to us). Each rung is resolved SYMMETRICALLY: this function's
-         argument order is "whichever seat's request triggered issuance", i.e.
-         whichever client polled first, which correlates with having the
-         better connection to this API. The old chain
-         `my_region or opp_region or mh or oh` therefore put the room wherever
-         the faster poller was, handing the seat that was already ahead the
-         region as well.
+         over the homes that something CONFIRMS are still in service
+         (_region_home_confirmed: a live snapshot names the same region, a
+         fresh ping map of either seat measured it, or two reporters have
+         been seen there).
+      2. Otherwise the live snapshots, resolved the same way. After quick
+         play a snapshot is wherever the vanilla sweep left the client
+         (learning #1112), and until 2026-11-05 it outranked every home
+         that did not agree with the other. It still outranks a home nothing
+         confirms: a snapshot is a region a client was connected to at join,
+         and a bare home token is an untimestamped cache that can name a
+         region since retired.
+      3. Otherwise the homes nothing confirms, resolved the same way.
+    ANY region signal beats the "us" default (empty+empty previously fell
+    straight through to us). Each rung is resolved SYMMETRICALLY: this
+    function's argument order is "whichever seat's request triggered
+    issuance", i.e. whichever client polled first, which correlates with
+    having the better connection to this API. The old chain
+    `my_region or opp_region or mh or oh` therefore put the room wherever
+    the faster poller was, handing the seat that was already ahead the
+    region as well.
     A signal that is not a well-formed region token counts as ABSENT rather
     than being pinned: it would be handed to both clients to connect to, and
     there is no recovery from a room neither of them can reach.
@@ -19027,12 +19085,15 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     without a repro. It carries the corroboration state of whatever was
     chosen, because "both cached regions disagree and neither has been seen
     live" is the case that strands a pair behind a series that already exists,
-    and it is invisible otherwise.
+    and it is invisible otherwise. It also says, for each home token sent,
+    whether anything confirmed it (home_ok=: y or n, - where a seat sent
+    none), which is what put that home ahead of the snapshots or behind them.
 
     What the ladder does NOT claim: that its answer is the best one for a
-    cross-region pair. Steering on a stored home region was refused for good
-    reasons — a persistent, untimestamped best-region cache steers a player who
-    relocated by where they used to be. Since Sept 7 (item 3) the measurement
+    cross-region pair. A home is a persistent, untimestamped best-region
+    cache: it places a player who relocated by where they used to be, and a
+    confirmed home is only a region still in service, not a region the
+    player is still near. Since Sept 7 (item 3) the measurement
     that settles it exists as RUNG 0, run after the ladder has answered: both
     seats' own ping maps (the kwargs; each with its stamp), taken within the
     last 900 s (REGION_PINGS_ROOM_MAX_AGE_S; 180 s until 2026-11-05), may
@@ -19044,8 +19105,9 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     earlier "costs neither seat more than 20 ms over its own baseline" test
     left every cross-region pair observed that day on one seat's home,
     learning #597). A missing, stale or malformed map on either side leaves
-    the ladder's answer exactly as it was. The positional signature is
-    unchanged; `now` is injectable for tests only.
+    the room to the ladder; a fresh map on the other side still counts as a
+    sign that a home is in service. The positional signature is unchanged;
+    `now` is injectable for tests only.
     """
     mr, orr = _region_token(my_region), _region_token(opp_region)
     mh, oh = _region_token(my_home), _region_token(opp_home)
@@ -19057,26 +19119,41 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     # refreshing a token's timestamp from the pick would keep a region the
     # picker itself chose looking recent forever, so a retired one could never
     # age out of the map that is there to notice exactly that.
-    # The ladder: the homes, then the live snapshots, then the default.
-    # _region_agreed answers a lone signal with itself and two equal ones with
-    # that region, so agreeing homes still win outright and a lone home is
-    # read before any snapshot.
-    ladder = _region_agreed(mh, oh) or _region_agreed(mr, orr) or "us"
+    # Both maps are read BEFORE the ladder answers: a fresh map is one of the
+    # signs that a home is still in service, and it is also what rung 0
+    # judges below.
+    if now is None:
+        now = datetime.now(timezone.utc)
+    m1, s1 = _region_pings_at_issuance(p1_pings, p1_pings_at, now)
+    m2, s2 = _region_pings_at_issuance(p2_pings, p2_pings_at, now)
+    # The ladder: two homes that agree, outright; then the homes something
+    # confirms (_region_home_confirmed); then the live snapshots; then the
+    # homes nothing confirms; then the default. _region_agreed answers a lone
+    # signal with itself, two equal ones with that region and none with an
+    # empty value, so each rung is passed over only when it holds no signal.
+    # Both homes are judged against one clock reading, the same two snapshots
+    # and the same two maps, so the answer does not depend on which seat
+    # asked.
+    mono = time.monotonic()
+    lives, maps = (mr, orr), (m1, m2)
+    mh_ok = _region_home_confirmed(mh, lives, maps, mono)
+    oh_ok = _region_home_confirmed(oh, lives, maps, mono)
+    if mh and mh == oh:
+        ladder = mh
+    else:
+        ladder = (_region_agreed(mh if mh_ok else "", oh if oh_ok else "")
+                  or _region_agreed(mr, orr) or _region_agreed(mh, oh) or "us")
     # Rung 0 (Sept 7 item 3): the pair's own ping maps, judged AFTER the ladder
     # has answered — see _pick_region_by_pings for the acceptance rule. The two
     # seats' HOMES ride along as the references that bound how far each seat
     # may be moved (_region_home_refs). A live snapshot is not among them; it
     # reaches the reference set only as the ladder's answer, which it is only
-    # when neither seat sent a home.
+    # when the homes neither agree nor include a confirmed one.
     # This overrules design review d2 of 2026-09-09 ("only the active rung's
     # candidates may bound a seat"): with one snapshot as the only candidate,
     # the other seat's bound left no shared region reachable (bug 457,
     # learning #1112). Both seats are treated identically, so the verdict
     # stays swap-invariant.
-    if now is None:
-        now = datetime.now(timezone.utc)
-    m1, s1 = _region_pings_at_issuance(p1_pings, p1_pings_at, now)
-    m2, s2 = _region_pings_at_issuance(p2_pings, p2_pings_at, now)
     refs = ()
     if m1 is None or m2 is None:
         chosen, why, worst, detail = ladder, ("stale" if "absent" not in (s1, s2) else "no-maps"), None, ""
@@ -19095,9 +19172,12 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
         print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=pings worst={worst} ladder={ladder}{tail}")
     else:
         print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=ladder why={why}{tail}")
+    # home_ok: for each home token sent, whether anything confirmed it (y or
+    # n; - where the seat sent none), in the caller's seat order like home=.
+    home_ok = ",".join("-" if not h else ("y" if ok else "n") for h, ok in ((mh, mh_ok), (oh, oh_ok)))
     print(f"[QUEUE-REGION] room={room_name} chosen={chosen} "
           f"seen={'y' if _region_corroborated(chosen) else 'n'} "
-          f"live=({mr},{orr}) home=({mh},{oh})")
+          f"live=({mr},{orr}) home=({mh},{oh}) home_ok=({home_ok})")
     return chosen
 
 

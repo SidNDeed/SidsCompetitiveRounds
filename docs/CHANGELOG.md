@@ -183,8 +183,9 @@
   player's own limit, if that beats the usual region by more than 20 ms.
 - Ranked 1v1 rooms start from the two players' home regions. The region your
   game was last connected to, for example after quick play, decides a room
-  only when neither player sent a home region. Before, it could keep a pair
-  on a region far from one of them whatever their ping maps said (bug 457).
+  only when no home region was sent, or none that the server can confirm is
+  still in service. Before, it could keep a pair on a region far from one of
+  them whatever their ping maps said (bug 457).
 
 **Connection trouble explains itself**
 
