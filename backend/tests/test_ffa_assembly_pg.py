@@ -5914,7 +5914,9 @@ def test_wp3_wp4_keys_are_sent(monkeypatch):
     client-structure file finds named in the server's builders, are in the
     answers the routes send. The answer tour drives every answer shape and
     the poll's lock payload: WP3's keys are read from the payload answers,
-    WP4's (and the entry keys) from the connect and assembly answers."""
+    WP4's (and the entry keys) from the connect and assembly answers. The
+    tour polls no reformed lobby, so one more poll reads reformed_from from
+    a lobby whose row names its predecessor (the 355 invariants test's write)."""
     import test_ffa_assembly_client_structure as cst
 
     async def body(env):
@@ -5922,6 +5924,14 @@ def test_wp3_wp4_keys_are_sent(monkeypatch):
         payload, answers = set(), set()
         for label, a, _t, _kind, _st in tour:
             _answer_keys(a.body, payload if label.startswith("payload") else answers)
+        lob = await env.lobby(5, admission=True, t=12.5)
+        await env.conn.execute(
+            "UPDATE ffa_lobbies SET reformed_from = gen_random_uuid() WHERE id = $1", lob.lid)
+        p = await env.poll(lob, 0)
+        assert p.status == 200 and p["status"] == "ready_join", ("WP3 reformed poll", p)
+        _answer_keys(p.body, payload)
+        print("WP3/WP4 census", sorted(set(cst.WP3_KEYS) - payload),
+              sorted(set(cst.WP4_KEYS + cst.WP4_ENTRY) - answers))
         lacking3 = sorted(set(cst.WP3_KEYS) - payload)
         lacking4 = sorted(set(cst.WP4_KEYS + cst.WP4_ENTRY) - answers)
         assert lacking3 == [], ("WP3 sent", lacking3, sorted(payload))
