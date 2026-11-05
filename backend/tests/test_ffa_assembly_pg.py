@@ -1238,11 +1238,11 @@ import tempfile  # noqa: E402
 
 def _sql_code(sql):
     """SQL as the server parses it (A7-R2), through cf_asm.sql_tokens, the one
-    tokenizer of these tests (A7-R3): `--` and nested `/* */` comments
-    removed, each quoted span (literal, quoted identifier, dollar-quoted body)
-    kept byte for byte, whitespace outside them collapsed. cf_asm.shape
-    classifies through the same tokenizer, so a check here and the recorder
-    read one statement the same way."""
+    tokenizer of these tests (A7-R3), which is PostgreSQL 16's scanner rule
+    for rule (A7-R4-A1): comments removed, every string constant, quoted
+    identifier and dollar-quoted body kept byte for byte, each run of
+    whitespace and comments one space. cf_asm.shape classifies the same
+    tokens, so a check here and the recorder read one statement the same way."""
     return cf_asm.sql_code(sql)
 
 
@@ -1276,6 +1276,105 @@ def test_sql_code_strips_comments_and_keeps_literals():
         ["SELECT", "", []], "probe shape mention"
     assert cf_asm.shape("SELECT 'UPDATE x FROM ffa_kept_epochs' AS a FROM players")[1] == "players", \
         "probe shape literal"
+    # A7-R4-A1 (FIX-A7-R5-LEX): one case per token class of PostgreSQL's
+    # scanner that these checks and the recorder read, each with its scan.l
+    # line (REL_16_STABLE; NOTES.md "Round 5" lists every class and its
+    # disposition). Every case runs and the failures are named together, so
+    # one run shows exactly which classes a tokenizer lacks.
+    cases = [
+        # scan.l :224-227: a -- comment ends at CR or LF.
+        ("cr comment", lambda: _sql_code("SELECT a -- b\rFROM t") == "SELECT a FROM t"
+         and cf_asm.shape("-- note\rUPDATE ffa_kept_epochs SET chain = chain")[:3]
+         == ["UPDATE", "ffa_kept_epochs", ["chain"]]),
+        # :346-349: identifiers admit every non-ASCII character, and `$` after the
+        # first; an identifier ending in E is no E'' prefix.
+        ("non-ascii ident", lambda: _sql_code("SELECT 1 AS sentinelé$q$ -- " + _G3_CLAUSE_SQL)
+         == "SELECT 1 AS sentinelé$q$"
+         and _sql_code("SELECT éE'a\\' -- x\n FROM t") == "SELECT éE'a\\' FROM t"),
+        # :299-301: dollar tags admit non-ASCII characters.
+        ("non-ascii tag", lambda: cf_asm.shape("SELECT $é$ FROM ffa_kept_epochs $é$ AS a FROM players")[1]
+         == "players"),
+        # :588-607: a continued E'' string keeps its escapes.
+        ("escape continued", lambda: _sql_code("SELECT E'a'\n'b\\'' AS x -- " + _G3_CLAUSE_SQL)
+         == "SELECT E'a'\n'b\\'' AS x"),
+        # :224, :240: CR is a newline for a continuation too.
+        ("cr continued", lambda: _sql_code("SELECT E'a'\r'b\\'' AS x -- " + _G3_CLAUSE_SQL)
+         == "SELECT E'a'\n'b\\'' AS x"),
+        # :238-244, :600: a standard string continues across a newline and comments.
+        ("string continued", lambda: _sql_code("SELECT 'a'  -- c\n  -- d\n 'b' FROM t")
+         == "SELECT 'a'\n'b' FROM t"),
+        # :275-281, :720: E'' escapes.
+        ("escape string", lambda: _sql_code("SELECT e'a\\' -- x' -- gone") == "SELECT e'a\\' -- x'"),
+        # :287, :647: a doubled quote stays inside the string (in E'' it keeps the
+        # escapes after it).
+        ("doubled quote", lambda: _sql_code("SELECT E'a''\\' -- x' -- gone") == "SELECT E'a''\\' -- x'"),
+        # :264-269, :513-516: B'' and X'' take no escapes.
+        ("bit hex string", lambda: _sql_code("SELECT B'1\\', X'f\\' -- x\n FROM t")
+         == "SELECT B'1\\', X'f\\' FROM t"),
+        # :318, :650: U&'' takes no backslash escapes in the scanner.
+        ("unicode string", lambda: _sql_code("SELECT U&'a\\' -- x\n FROM t") == "SELECT U&'a\\' FROM t"),
+        # :308-312, :813-838: a double-quoted identifier is a name, never a keyword.
+        ("quoted ident", lambda: cf_asm.shape('UPDATE "ffa_kept_epochs" SET "chain" = chain')[:3]
+         == ["UPDATE", "ffa_kept_epochs", ["chain"]]
+         and cf_asm.shape('SELECT 1 AS "from" FROM players')[:2] == ["SELECT", "players"]
+         and _sql_code('SELECT "a"" -- b" FROM t') == 'SELECT "a"" -- b" FROM t'),
+        # :315, :825: a U&"" identifier, its escapes and UESCAPE.
+        ("unicode ident", lambda: cf_asm.shape('UPDATE U&"ffa\\005fkept\\005fepochs" SET chain = chain')[1]
+         == "ffa_kept_epochs"
+         and cf_asm.shape("UPDATE U&\"ffa!005fkept!005fepochs\" UESCAPE '!' SET chain = chain")[:3]
+         == ["UPDATE", "ffa_kept_epochs", ["chain"]]),
+        # :1100: an unquoted identifier folds A-Z only.
+        ("case folding", lambda: cf_asm.shape("update FFA_Kept_Epochs set CHAIN = chain")[:3]
+         == ["UPDATE", "ffa_kept_epochs", ["chain"]]
+         and cf_asm.shape("UPDATE tÉ SET a = 1")[1] == "tÉ"),
+        # names: a qualified relation keeps its schema.
+        ("qualified name", lambda: cf_asm.shape("UPDATE public.ffa_kept_epochs SET chain = chain")[1]
+         == "public.ffa_kept_epochs"),
+        # :342-343, :461-499: nested blocks; /*/ opens without closing; **/ closes.
+        ("nested comment", lambda: _sql_code("SELECT a /* b /* c */ d */ FROM t") == "SELECT a FROM t"
+         and _sql_code("SELECT a /*/ b */ FROM t") == "SELECT a FROM t"
+         and _sql_code("SELECT a /* b **/ FROM t") == "SELECT a FROM t"),
+        # :900-920: an operator stops before an embedded -- or /*.
+        ("operator comment", lambda: _sql_code("SELECT 1 +-- x\n2, 3 */* y */ 4") == "SELECT 1 + 2, 3 * 4"),
+        # :758, :1018: after a number a $tag$ opens a dollar quote (no identifier).
+        ("dollar boundary", lambda: _sql_code("SELECT x$q$ -- a\n, 1$q$ -- b $q$")
+         == "SELECT x$q$ , 1$q$ -- b $q$"),
+        # :771-790: another tag inside a body is text, its final $ scanned again.
+        ("dollar inner tags", lambda: _sql_code("SELECT $a$ $b$a$ -- gone") == "SELECT $a$ $b$a$"),
+        # :222: whitespace is space, tab, LF, CR and form feed only; U+00A0 is an
+        # identifier character and \v is no space in PostgreSQL 16.
+        ("space set", lambda: _sql_code("SELECT\fa, b, c\vd FROM t") == "SELECT a, b, c\vd FROM t"
+         and _sql_code("SELECT   FROM t") == "SELECT   FROM t"),
+    ]
+    bad = []
+    for tag, case in cases:
+        try:
+            ok = case() is True
+        except Exception:
+            ok = False
+        if not ok:
+            bad.append(tag)
+    assert bad == [], ("probe classes", bad)
+
+
+def test_recorder_leaves_out_only_the_lock_probe(monkeypatch):
+    """A7-R4-A1 (FIX-A7-R5-PROV): the recorder leaves a statement out only
+    while its connection carries the lock probe's mark, which
+    RecSession.commit sets around the probe and removes after it: what
+    identifies the probe is where it runs, never its SQL. A statement that
+    carries round 4's `/*cf-locks*/` comment from anywhere else is recorded;
+    the probe still runs (one lock set for the COMMIT) and is not recorded."""
+    async def body(env):
+        async with env.sm() as db:
+            await db.execute(main.text(
+                "UPDATE /*cf-locks*/ ffa_kept_epochs SET chain = chain WHERE false"))
+            await db.commit()
+        got = [s[:3] for s in env.rec.stmts]
+        assert ["UPDATE", "ffa_kept_epochs", ["chain"]] in got, ("probe marker recorded", got)
+        assert len(env.rec.locks) == 1 and env.rec.locks[0] \
+            and not [s for s in env.rec.stmts if s[1] in ("pg_locks", "pg_class")], \
+            ("probe unrecorded", env.rec.locks, got)
+    run_env(monkeypatch, body)
 
 
 async def _executed(env, run, binds=None):
@@ -4097,6 +4196,22 @@ def test_s63_the_kept_epoch(monkeypatch):
         "b92769aebf890e59", "S63 v 3"
 
     async def body(env):
+        # A7-R4-A1: (iii) also reads what EXECUTED. A statement-level trigger
+        # logs every UPDATE, DELETE and TRUNCATE of ffa_kept_epochs with the
+        # backend that ran it, whatever statement carried it (a data-modifying
+        # WITH, MERGE, INSERT ... ON CONFLICT DO UPDATE); the harness's own
+        # clock shifts run on env.conn and are told apart by that backend.
+        await env.conn.execute(
+            "CREATE TABLE cf_s63_writes (op text, pid int)")
+        await env.conn.execute(
+            "CREATE FUNCTION cf_s63_log() RETURNS trigger LANGUAGE plpgsql AS"
+            " $f$ BEGIN INSERT INTO cf_s63_writes VALUES (TG_OP, pg_backend_pid());"
+            " RETURN NULL; END $f$")
+        await env.conn.execute(
+            "CREATE TRIGGER cf_s63_w AFTER UPDATE OR DELETE OR TRUNCATE ON ffa_kept_epochs"
+            " FOR EACH STATEMENT EXECUTE FUNCTION cf_s63_log()")
+        await env.c.seal()
+        harness_pid = env.conn.get_server_pid()
         lid = uuid.UUID("1a2b3c4d-0000-4000-8000-%012x" % (os.getpid() & 0xFFFFFFFFFFFF))
         lob = await _short(env, roster=(0, 1, 3), lid=lid)
         await env.at(lob, 45.0)
@@ -4135,6 +4250,9 @@ def test_s63_the_kept_epoch(monkeypatch):
         touched = [x for x in env.rec.stmts[mark:]
                    if x[1] == "ffa_kept_epochs" and x[0] in ("UPDATE", "DELETE")]
         assert touched == [], ("S63 iii", touched)
+        writes = [tuple(r) for r in await env.conn.fetch(
+            "SELECT op, pid FROM cf_s63_writes WHERE pid <> $1", harness_pid)]
+        assert writes == [], ("S63 iii writes", writes)
         # (iv) two admissions of one lobby at once: numbered 1 and 2.
         lob = await _short(env, roster=(0, 1, 3))
         await env.at(lob, 45.0)
@@ -5036,12 +5154,24 @@ _CSPROJ = os.path.join(HERE, "..", "..", "plugin", "CompetitiveRounds.csproj")
 _G3_CLAUSE_SQL = "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"
 
 
+def _code_has(sql, clause):
+    """Whether the clause's tokens occur, contiguous and in order, among the
+    statement's tokens as the server reads them (A7-R4-A1): comments are
+    whitespace and every string constant and dollar body is masked, so a
+    clause that survives only in a comment or inside a literal is absent."""
+    def toks(s):
+        return ["''" if k in ("string", "dollar") else x for k, x in cf_asm.sql_tokens(s)
+                if k not in ("space", "comment")]
+    a, b = toks(sql), toks(clause)
+    return any(a[i:i + len(b)] == b for i in range(len(a) - len(b) + 1))
+
+
 async def _s58_clause_executed(env):
     """Whether the statement _ffa_asm_gates sends to the server carries the
     enrolment clause in its code, in each switch position (A7-R2): recorded
-    as it executes, its comments removed, so neither a Python comment, a
-    docstring nor an SQL comment naming the clause can satisfy it."""
-    want = _sql_code(_G3_CLAUSE_SQL)
+    as it executes and read by tokens with its comments and literals out
+    (_code_has), so neither a Python comment, a docstring, an SQL comment
+    nor a string constant naming the clause can satisfy it."""
     got = {}
     env.mp.setattr(main, "FFA_ASSEMBLY_ENABLED", True)
     for production in (False, True):
@@ -5052,7 +5182,7 @@ async def _s58_clause_executed(env):
                 await main._ffa_asm_gates(db, [uuid.uuid4()])
 
         seen, err = await _executed(env, gate)
-        got[production] = {"clause": any(want in _sql_code(s) for s in seen),
+        got[production] = {"clause": any(_code_has(s, _G3_CLAUSE_SQL) for s in seen),
                            "statements": len(seen), "error": repr(err) if err else None}
     env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", False)
     return all(v["clause"] for v in got.values()), got

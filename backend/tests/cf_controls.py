@@ -10,7 +10,10 @@ the named assertion red: the test's first failure is an AssertionError whose
 message's first element is the tag the registry names. Anything else - a
 pass, another assertion, an exception, an error in setup - is recorded as
 what it is and never counted. A twin must pass, and the trace it writes
-(CF_TRACE_DIR) must equal the baseline's byte for byte.
+(CF_TRACE_DIR) must equal the baseline's byte for byte. A CLASS control
+(cf_controls_rows.C, A7-R4-A1) is a near miss of a mutant that must leave
+the test green; it executes something the baseline does not, so its trace
+is not compared.
 
 Every mutant and twin is a list of exact text replacements applied to a
 scratch copy of the tree. Each replacement asserts how many times its old
@@ -20,7 +23,7 @@ running an unmutated copy.
 Usage (absolute paths; one lane database per concurrent run):
   python cf_controls.py check
   python cf_controls.py baseline --db cf_lane_w1 --out DIR [--rows S1,S2]
-  python cf_controls.py run --db cf_lane_w2 --out DIR [--rows S1,S2] [--only mutants|twins]
+  python cf_controls.py run --db cf_lane_w2 --out DIR [--rows S1,S2] [--only mutants|twins|classes]
   python cf_controls.py table --out DIR
 """
 
@@ -229,7 +232,7 @@ def cmd_check(args):
     jobs = []
     try:
         for r in selected(args.rows):
-            for m in r["mutants"] + ([r["twin"]] if r["twin"] else []):
+            for m in r["mutants"] + ([r["twin"]] if r["twin"] else []) + list(r.get("classes", ())):
                 d = tempfile.mkdtemp(prefix="cfchk_")
                 try:
                     shutil.copytree(src_dir, os.path.join(d, "_src"))
@@ -262,7 +265,8 @@ def cmd_check(args):
     finally:
         if pool is not None:
             pool.shutdown()
-    total = sum(len(r["mutants"]) + (1 if r["twin"] else 0) for r in selected(args.rows))
+    total = sum(len(r["mutants"]) + (1 if r["twin"] else 0) + len(r.get("classes", ()))
+                for r in selected(args.rows))
     print("checked %d edit set(s), %d stale%s"
           % (total, bad, ", %d compile(s)" % len(jobs) if pool is not None else ""))
     return 1 if bad else 0
@@ -302,6 +306,8 @@ def cmd_run(args):
             parts += [("mutant", m) for m in r["mutants"]]
         if args.only in (None, "twins") and r["twin"]:
             parts.append(("twin", r["twin"]))
+        if args.only in (None, "classes"):
+            parts += [("class", m) for m in r.get("classes", ())]
         for kind, m in parts:
             line = {"row": r["row"], "kind": kind, "id": m["id"], "head": head, "tree": state,
                     "db": args.db, "note": m.get("note", "")}
@@ -326,6 +332,14 @@ def cmd_run(args):
                                                m["tag"])
                     line.update(verdict=v, detail=detail, want=m["tag"], seconds=round(dt, 1),
                                 node=node_name(nodes[0]))
+                elif kind == "class":
+                    res, dt, tail = run_pytest(d, nodes, args.db, None, "class",
+                                               os.path.join(d, "_src"))
+                    kinds = {node_name(n): res.get(node_name(n), ("missing", ""))[0]
+                             for n in nodes}
+                    ok = all(k == "passed" for k in kinds.values())
+                    line.update(verdict="GREEN" if ok else "NOT-GREEN", detail={"nodes": kinds},
+                                seconds=round(dt, 1))
                 else:
                     tdir = os.path.join(args.out, "twin_%s" % r["row"])
                     shutil.rmtree(tdir, ignore_errors=True)
@@ -385,7 +399,7 @@ def main():
     ap.add_argument("--db", default="cf_lane_w1")
     ap.add_argument("--out", default=None)
     ap.add_argument("--rows", default=None)
-    ap.add_argument("--only", choices=("mutants", "twins"), default=None)
+    ap.add_argument("--only", choices=("mutants", "twins", "classes"), default=None)
     ap.add_argument("--compile", action="store_true",
                     help="check: also compile every edited .py file (a process pool)")
     ap.add_argument("--workers", type=int, default=6)

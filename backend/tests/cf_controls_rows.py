@@ -30,11 +30,22 @@ def T(mid, *edits, note="", nodes=None):
     return {"id": mid, "tag": None, "edits": list(edits), "note": note, "nodes": nodes}
 
 
-def row(rid, nodes, mutants, twin, extra=()):
+def C(cid, *edits, note="", nodes=None):
+    """A class control (A7-R4-A1): an edit under which the row's test must
+    stay GREEN (a near miss of a mutant, such as the mutant's text in a
+    comment). cf_controls.py checks its edits with the rest and runs it with
+    --only classes; unlike a twin, it is not compared with the baseline's
+    trace, because it executes something the baseline does not."""
+    return {"id": cid, "tag": None, "edits": list(edits), "note": note, "nodes": nodes,
+            "kind": "class"}
+
+
+def row(rid, nodes, mutants, twin, extra=(), classes=()):
     if isinstance(nodes, str):
         nodes = [nodes]
     ROWS.append({"row": rid, "nodes": [PG + n if "::" not in n else n for n in nodes],
-                 "mutants": mutants, "twin": twin, "extra": tuple(extra)})
+                 "mutants": mutants, "twin": twin, "extra": tuple(extra),
+                 "classes": list(classes)})
     ORDER[rid] = len(ORDER)
 
 
@@ -1779,6 +1790,22 @@ row("S58", "test_s58_the_g3_fence", [
       E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
       note="A7-R3 finding 1: the identifier sentinel$q$ is no dollar-quote opener, so the "
            "clause after it is a comment; the executed JOIN reads no expiry"),
+    M('clause_after_a_non_ascii_sentinel', "S58 clause",
+      E(MAIN, _G3_SELECT,
+        ('        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled, 1 AS sentinelé$q$"\n'
+         '        " -- LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()\\n"\n')),
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note='A7-R4 finding 1: a non-ASCII identifier continues through $q$, so the clause after it is a comment; the executed JOIN reads no expiry'),
+    M('clause_after_a_continued_escape_string', "S58 clause",
+      E(MAIN, _G3_SELECT,
+        '        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled, E\'a\'\\n\'b\\\\\'\' AS x -- LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()\\n"\n'),
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note="A7-R4 finding 2: the continued E'' string keeps its escapes, so the clause after it is a comment; the executed JOIN reads no expiry"),
+    M('clause_inside_a_literal', "S58 clause",
+      E(MAIN, _G3_SELECT,
+        '        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled, \'LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()\' AS note"\n'),
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note='A7-R4-A1 class sweep: the clause only inside a string constant of the executed statement; the executed JOIN reads no expiry'),
     M("route_deleted", "S58 route", E(MAIN, _G3_ROUTE, "")),
     M("configuration_deleted", "S58 G3 configuration",
       E("plugin/CompetitiveRounds.csproj", _G3_DEFINE, ""),
@@ -1879,22 +1906,314 @@ row("WP34-X", "test_wp3_wp4_keys_are_sent", [
        '        "fence_s": ASM_FENCE_S,\n        "stamp_wait_s": ASM_STAMP_WAIT_S,\n    }\n'),
      note="the same lock answer with two entries in the other order"))
 
-# -- SQL-TOKENS: the one tokenizer's probe (A7-R3 findings 1 and 4) -----------
+# -- SQL-TOKENS: the one tokenizer's probe (A7-R3 findings 1 and 4; A7-R4-A1) ---
+# Each class mutant takes one rule of scan.l away from cf_asm's lexer; the
+# probe's class table must then name exactly the classes that rule carries
+# (the note's "expect"). round_4_tokenizer puts round 4's tokenizer back over
+# the new one (later definitions win), and the table must name the twelve
+# classes round 4 lacked.
 _CFA = "backend/tests/cf_asm.py"
+_R4_TOKENIZER = ('_IDENT_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$")\n'
+                '_DOLLAR_TAG = re.compile(r"\\$([A-Za-z_][A-Za-z0-9_]*)?\\$")\n'
+                '\n'
+                '\n'
+                'def sql_tokens(sql):\n'
+                '    """The one SQL tokenizer of these tests (A7-R3): [(kind, text)] with kind\n'
+                '    "quoted" for a single-quoted literal (E\'\' strings honour backslash\n'
+                '    escapes), a double-quoted identifier or a dollar-quoted body, each kept\n'
+                '    byte for byte; "code" for everything else, comments removed. `--` runs to\n'
+                '    the end of the line and `/* */` blocks nest, as PostgreSQL lexes them. A\n'
+                '    dollar-quote delimiter opens only at a token boundary: after an\n'
+                '    identifier character (letters, digits, `_`, `$`), `$` continues the\n'
+                '    identifier, so `sentinel$q$` is one name and opens nothing."""\n'
+                '    toks, code = [], []\n'
+                '    i, n = 0, len(sql)\n'
+                '\n'
+                '    def flush():\n'
+                '        if code:\n'
+                '            toks.append(("code", "".join(code)))\n'
+                '            code.clear()\n'
+                '\n'
+                '    while i < n:\n'
+                '        c = sql[i]\n'
+                '        prev = sql[i - 1] if i else ""\n'
+                '        if c in ("\'", \'"\'):\n'
+                '            esc = c == "\'" and prev in ("E", "e") and (i < 2 or sql[i - 2] not in _IDENT_CHARS)\n'
+                '            j = i + 1\n'
+                '            while j < n:\n'
+                '                if esc and sql[j] == "\\\\":\n'
+                '                    j += 2\n'
+                '                    continue\n'
+                '                if sql[j] == c:\n'
+                '                    if j + 1 < n and sql[j + 1] == c:\n'
+                '                        j += 2\n'
+                '                        continue\n'
+                '                    break\n'
+                '                j += 1\n'
+                '            flush()\n'
+                '            toks.append(("quoted", sql[i:j + 1]))\n'
+                '            i = j + 1\n'
+                '            continue\n'
+                '        if c == "$" and prev not in _IDENT_CHARS:\n'
+                '            m = _DOLLAR_TAG.match(sql, i)\n'
+                '            if m:\n'
+                '                tag = m.group(0)\n'
+                '                end = sql.find(tag, m.end())\n'
+                '                end = n if end < 0 else end + len(tag)\n'
+                '                flush()\n'
+                '                toks.append(("quoted", sql[i:end]))\n'
+                '                i = end\n'
+                '                continue\n'
+                '        if sql.startswith("--", i):\n'
+                '            j = sql.find("\\n", i)\n'
+                '            i = n if j < 0 else j\n'
+                '            code.append(" ")\n'
+                '            continue\n'
+                '        if sql.startswith("/*", i):\n'
+                '            depth, j = 1, i + 2\n'
+                '            while j < n and depth:\n'
+                '                if sql.startswith("/*", j):\n'
+                '                    depth, j = depth + 1, j + 2\n'
+                '                elif sql.startswith("*/", j):\n'
+                '                    depth, j = depth - 1, j + 2\n'
+                '                else:\n'
+                '                    j += 1\n'
+                '            code.append(" ")\n'
+                '            i = j\n'
+                '            continue\n'
+                '        code.append(c)\n'
+                '        i += 1\n'
+                '    flush()\n'
+                '    return toks\n'
+                '\n'
+                '\n'
+                'def sql_code(sql, *, mask_literals=False):\n'
+                '    """A statement as the server parses it, from sql_tokens: comments removed,\n'
+                '    each a single space; runs of whitespace OUTSIDE quoted spans collapse to\n'
+                '    one space and the ends are trimmed; every quoted span is kept byte for\n'
+                '    byte. mask_literals=True writes each single-quoted literal and\n'
+                "    dollar-quoted body as '' (a double-quoted identifier stays), so a\n"
+                '    classifier reading the result never reads a literal\'s contents."""\n'
+                '    parts = []\n'
+                '    for kind, text in sql_tokens(sql):\n'
+                '        if kind == "code":\n'
+                '            parts.append(re.sub(r"\\s+", " ", text))\n'
+                '        elif mask_literals and not text.startswith(\'"\'):\n'
+                '            parts.append("\'\'")\n'
+                '        else:\n'
+                '            parts.append(text)\n'
+                '    return "".join(parts).strip()\n'
+                '\n'
+                '\n'
+                'def sql_split_top(code, sep=","):\n'
+                '    """sql_code output split at `sep` where parentheses are balanced and\n'
+                '    outside every quoted span (through sql_tokens, so a quoted comma or\n'
+                '    parenthesis never splits), each part stripped."""\n'
+                '    parts, cur, depth = [], [], 0\n'
+                '    for kind, text in sql_tokens(code):\n'
+                '        if kind == "quoted":\n'
+                '            cur.append(text)\n'
+                '            continue\n'
+                '        for ch in text:\n'
+                '            if ch == "(":\n'
+                '                depth += 1\n'
+                '            elif ch == ")":\n'
+                '                depth -= 1\n'
+                '            if ch == sep and depth == 0:\n'
+                '                parts.append("".join(cur).strip())\n'
+                '                cur = []\n'
+                '            else:\n'
+                '                cur.append(ch)\n'
+                '    parts.append("".join(cur).strip())\n'
+                '    return parts\n'
+                '\n'
+                '\n'
+                '_VERB = re.compile(r"^\\s*(\\w+)", re.S)\n'
+                '_UPD = re.compile(r"^\\s*UPDATE\\s+(\\w+)\\s+SET\\s+(.*?)(?:\\sWHERE\\s|\\sRETURNING\\s|$)", re.S | re.I)\n'
+                '_INS = re.compile(r"^\\s*INSERT\\s+INTO\\s+(\\w+)\\s*\\(([^)]*)\\)", re.S | re.I)\n'
+                '_DEL = re.compile(r"^\\s*DELETE\\s+FROM\\s+(\\w+)", re.S | re.I)\n'
+                '_FROM = re.compile(r"\\sFROM\\s+(\\w+)", re.S | re.I)\n'
+                '_LOCKCL = re.compile(r"FOR\\s+(?:NO\\s+KEY\\s+)?(?:UPDATE|SHARE)(?:\\s+SKIP\\s+LOCKED|\\s+NOWAIT)?", re.I)\n'
+                '\n'
+                '\n'
+                'def _set_columns(body):\n'
+                '    """The column names a SET list assigns, at parenthesis depth 0."""\n'
+                '    cols, depth, cur = [], 0, []\n'
+                '    for ch in body:\n'
+                '        if ch == "(":\n'
+                '            depth += 1\n'
+                '        elif ch == ")":\n'
+                '            depth -= 1\n'
+                '        if ch == "," and depth == 0:\n'
+                '            cols.append("".join(cur))\n'
+                '            cur = []\n'
+                '        else:\n'
+                '            cur.append(ch)\n'
+                '    cols.append("".join(cur))\n'
+                '    out = []\n'
+                '    for c in cols:\n'
+                '        m = re.match(r"\\s*(\\w+)\\s*=", c)\n'
+                '        if m:\n'
+                '            out.append(m.group(1).lower())\n'
+                '    return sorted(out)\n'
+                '\n'
+                '\n'
+                'def _main_statement(s):\n'
+                '    """The statement a leading WITH list prefixes: the text from the first\n'
+                '    SELECT/INSERT/UPDATE/DELETE at parenthesis depth 0 after the WITH, or s\n'
+                '    itself when it has no WITH list."""\n'
+                '    if not re.match(r"^\\s*WITH\\b", s, re.I):\n'
+                '        return s\n'
+                '    depth = 0\n'
+                '    i = re.match(r"^\\s*WITH\\b", s, re.I).end()\n'
+                '    while i < len(s):\n'
+                '        ch = s[i]\n'
+                '        if ch == "(":\n'
+                '            depth += 1\n'
+                '        elif ch == ")":\n'
+                '            depth -= 1\n'
+                '        elif depth == 0:\n'
+                '            m = re.match(r"(SELECT|INSERT|UPDATE|DELETE)\\b", s[i:], re.I)\n'
+                '            if m and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] == "_")):\n'
+                '                return s[i:]\n'
+                '        i += 1\n'
+                '    return s\n'
+                '\n'
+                '\n'
+                'def shape(sql):\n'
+                '    """verb, table, written columns, lock clause: a statement\'s shape. A\n'
+                '    statement wrapped in a WITH list has the shape of the statement the list\n'
+                '    prefixes (its verb, and for a SELECT the first table its text reads), so\n'
+                '    a twin that moves a predicate into a named CTE "inside the same\n'
+                '    statement" (evidence section 8) leaves the shape unchanged. Classified\n'
+                '    after sql_tokens (A7-R3), the one tokenizer: comments removed and\n'
+                '    literals masked, so a comment beside or inside a statement changes no\n'
+                '    field of its shape and a literal\'s text is never read as a table."""\n'
+                '    whole = sql_code(sql, mask_literals=True)\n'
+                '    s = _main_statement(whole)\n'
+                '    verb = (_VERB.match(s).group(1) if _VERB.match(s) else "?").upper()\n'
+                '    table, cols = "", []\n'
+                '    m = _UPD.match(s)\n'
+                '    if m:\n'
+                '        table, cols = m.group(1).lower(), _set_columns(m.group(2))\n'
+                '    else:\n'
+                '        m = _INS.match(s)\n'
+                '        if m:\n'
+                '            table = m.group(1).lower()\n'
+                '            cols = sorted(c.strip().lower() for c in m.group(2).split(","))\n'
+                '        else:\n'
+                '            m = _DEL.match(s) or _FROM.search(whole)\n'
+                '            if m:\n'
+                '                table = m.group(1).lower()\n'
+                '    lk = _LOCKCL.search(whole)\n'
+                '    return [verb, table, cols, re.sub(r"\\s+", " ", lk.group(0).upper()) if lk else ""]\n')
 row("SQL-TOKENS", "test_sql_code_strips_comments_and_keeps_literals", [
     M("dollar_opens_after_an_identifier", "probe boundary",
-      E(_CFA, '        if c == "$" and prev not in _IDENT_CHARS:\n', '        if c == "$":\n'),
-      note="A7-R3 finding 1: the round 3 tokenizer's opener"),
+      E(_CFA, '_ID = "[A-Za-z_%s][A-Za-z0-9_$%s]*" % (_HI, _HI)', '_ID = "[A-Za-z_%s][A-Za-z0-9_%s]*" % (_HI, _HI)'),
+      note="A7-R3 finding 1: `$` no longer continues an identifier"),
     M("quoted_whitespace_collapsed", "probe dollar body",
-      E(_CFA, '    return "".join(parts).strip()\n', '    return " ".join("".join(parts).split())\n'),
-      note="A7-R3 finding 1: the round 3 collapse of whitespace inside quoted spans"),
+      E(_CFA, '    return "".join(parts).strip(" ")\n', '    return " ".join("".join(parts).split())\n'),
+      note="A7-R3 finding 1: whitespace collapsed inside quoted spans"),
     M("shape_on_raw_sql", "probe shape update",
-      E(_CFA, "    whole = sql_code(sql, mask_literals=True)\n", "    whole = sql.strip()\n"),
-      note="A7-R3 finding 4: shape() classifying the raw statement"),
-], T("dollar_tag_group_unnamed",
-     E(_CFA, '_DOLLAR_TAG = re.compile(r"\\$([A-Za-z_][A-Za-z0-9_]*)?\\$")\n',
-       '_DOLLAR_TAG = re.compile(r"\\$(?:[A-Za-z_][A-Za-z0-9_]*)?\\$")\n'),
-     note="the same delimiter pattern with a non-capturing group"))
+      E(_CFA, '    toks = [t for t in sql_tokens(sql) if t[0] not in ("space", "comment")]\n',
+        '    toks = [t for t in sql_tokens(sql) if t[0] != "space"]\n'),
+      note="A7-R3 finding 4: shape() reading comments as words"),
+    M("round_4_tokenizer", "probe classes",
+      E(_CFA, "\n\nclass Recorder:\n", "\n\n" + _R4_TOKENIZER + "\n\nclass Recorder:\n"),
+      note="A7-R4-A1: the round 4 tokenizer; expect ['cr comment', 'non-ascii ident', 'non-ascii tag', 'escape continued', 'cr continued', 'string continued', 'quoted ident', 'unicode ident', 'case folding', 'qualified name', 'dollar boundary', 'space set']"),
+    M('comment_ends_at_lf_only', "probe classes",
+      E(_CFA, '("whitespace", r"[ \\t\\n\\r\\f]+|--[^\\n\\r]*"),',
+        '("whitespace", r"[ \\t\\n\\r\\f]+|--[^\\n]*"),'),
+      E(_CFA, '    ends = [e for e in (sql.find("\\n", i), sql.find("\\r", i)) if e >= 0]\n',
+        '    ends = [e for e in (sql.find("\\n", i),) if e >= 0]\n'),
+      note="A7-R4-A1 class: expect ['cr comment']"),
+    M('identifier_ascii_only', "probe classes",
+      E(_CFA, '_ID = "[A-Za-z_%s][A-Za-z0-9_$%s]*" % (_HI, _HI)',
+        '_ID = "[A-Za-z_][A-Za-z0-9_$]*"'),
+      note="A7-R4-A1 class: expect ['non-ascii ident', 'case folding']"),
+    M('dollar_tag_ascii_only', "probe classes",
+      E(_CFA, '_DQ = "[A-Za-z_%s][A-Za-z0-9_%s]*" % (_HI, _HI)',
+        '_DQ = "[A-Za-z_][A-Za-z0-9_]*"'),
+      note="A7-R4-A1 class: expect ['non-ascii tag']"),
+    M('continuation_drops_escapes', "probe classes",
+      E(_CFA, '        seg0, j = k, k + 1\n',
+        '        seg0, j, state = k, k + 1, "xq"\n'),
+      note="A7-R4-A1 class: expect ['escape continued', 'cr continued']"),
+    M('newline_is_lf_only', "probe classes",
+      E(_CFA, '_NEWLINE = "\\n\\r"',
+        '_NEWLINE = "\\n"'),
+      note="A7-R4-A1 class: expect ['cr continued']"),
+    M('no_continuation', "probe classes",
+      E(_CFA, '        if k >= n or sql[k] not in _NEWLINE:\n',
+        '        if True:\n'),
+      note="A7-R4-A1 class: expect ['escape continued', 'cr continued', 'string continued']"),
+    M('no_escapes', "probe classes",
+      E(_CFA, '            if c == "\\\\" and state == "xe":\n',
+        '            if False:\n'),
+      note="A7-R4-A1 class: expect ['escape continued', 'cr continued', 'escape string', 'doubled quote']"),
+    M('no_doubled_quote', "probe classes",
+      E(_CFA, '                if state in ("xq", "xe", "xus") and sql.startswith("\'\'", j):\n',
+        '                if False and sql.startswith("\'\'", j):\n'),
+      note="A7-R4-A1 class: expect ['doubled quote']"),
+    M('bit_hex_take_escapes', "probe classes",
+      E(_CFA, '            if c == "\\\\" and state == "xe":\n',
+        '            if c == "\\\\" and state in ("xe", "xb", "xh"):\n'),
+      note="A7-R4-A1 class: expect ['bit hex string']"),
+    M('unicode_string_takes_escapes', "probe classes",
+      E(_CFA, '            if c == "\\\\" and state == "xe":\n',
+        '            if c == "\\\\" and state in ("xe", "xus"):\n'),
+      note="A7-R4-A1 class: expect ['unicode string']"),
+    M('quoted_identifier_no_name', "probe classes",
+      E(_CFA, '        elif kind == "qident":\n',
+        '        elif False:\n'),
+      note="A7-R4-A1 class: expect ['quoted ident', 'unicode ident']"),
+    M('unicode_escapes_unresolved', "probe classes",
+      E(_CFA, '            name = _truncate(_uident(body, esc) if text[0] in "uU" else body)\n',
+        '            name = _truncate(body)\n'),
+      note="A7-R4-A1 class: expect ['unicode ident']"),
+    M('folding_beyond_ascii', "probe classes",
+      E(_CFA, '            name = _truncate(text.translate(_ASCII_LOWER))\n',
+        '            name = _truncate(text.lower())\n'),
+      note="A7-R4-A1 class: expect ['case folding']"),
+    M('qualified_name_cut', "probe classes",
+      E(_CFA, '    while k + 1 < len(ws) and _is_op(ws[k], ".") and ws[k + 1][2] is not None:\n',
+        '    while False:\n'),
+      note="A7-R4-A1 class: expect ['qualified name']"),
+    M('block_comments_flat', "probe classes",
+      E(_CFA, '        if sql.startswith("/*", j):\n            depth += 1\n',
+        '        if sql.startswith("/*", j):\n            depth += 0\n'),
+      note="A7-R4-A1 class: expect ['nested comment']"),
+    M('operator_keeps_comment_start', "probe classes",
+      E(_CFA, '    cut = [p for p in (text.find("/*"), text.find("--")) if p >= 0]\n',
+        '    cut = []\n'),
+      note="A7-R4-A1 class: expect ['operator comment']"),
+    M('dollar_never_after_a_digit', "probe classes",
+      E(_CFA, '("dolqdelim", r"\\$(?:%s)?\\$" % _DQ),',
+        '("dolqdelim", r"(?<![0-9])\\$(?:%s)?\\$" % _DQ),'),
+      note="A7-R4-A1 class: expect ['dollar boundary']"),
+    M('dollar_final_sign_consumed', "probe classes",
+      E(_CFA, '                    j = m.end() - 1',
+        '                    j = m.end()'),
+      note="A7-R4-A1 class: expect ['dollar inner tags']"),
+    M('python_whitespace', "probe classes",
+      E(_CFA, '("whitespace", r"[ \\t\\n\\r\\f]+|--[^\\n\\r]*"),',
+        '("whitespace", r"\\s+|--[^\\n\\r]*"),'),
+      note="A7-R4-A1 class: expect ['space set']"),
+], T("dollar_delimiter_group_capturing",
+     E(_CFA, '_DOLQ = re.compile(r"\\$(?:%s)?\\$" % _DQ)\n', '_DOLQ = re.compile(r"\\$(%s)?\\$" % _DQ)\n'),
+     note="the same delimiter pattern with a capturing group"))
+
+# -- REC-PROBE: the recorder leaves out the lock probe by where it runs --------
+row("REC-PROBE", "test_recorder_leaves_out_only_the_lock_probe", [
+    M("probe_unmarked", "probe unrecorded",
+      E(_CFA, "            info[_PROBE_MARK] = True\n", "            pass\n"),
+      note="A7-R4-A1 FIX-A7-R5-PROV: the probe runs without its mark"),
+    M("exemption_by_the_comment", "probe marker recorded",
+      E(_CFA, "        if conn.info.get(_PROBE_MARK):\n", '        if "/*cf-locks*/" in statement:\n'),
+      note="A7-R4 finding 4: round 4's exemption, by the SQL's text"),
+], T("mark_through_update",
+     E(_CFA, "            info[_PROBE_MARK] = True\n", "            info.update({_PROBE_MARK: True})\n"),
+     note="the same mark set through dict.update"))
 
 # -- S59 -------------------------------------------------------------------
 _B_LINE = '        elif some and t >= ASM_BASE_S and not spawning and not hold_adm:\n'
@@ -2050,13 +2369,33 @@ row("S63", "test_s63_the_kept_epoch", [
                            '                "UPDATE /* note */ ffa_kept_epochs SET chain = chain"\n'
                            '                " WHERE lobby_id = :lid"), {"lid": ctx.lid})\n'),
       note="A7-R3 finding 4: the comment after the verb hid the table from the raw-text shape"),
+    M('update_after_a_cr_comment', 'S63 iii',
+      E(MAIN, _EPI, _EPI + ('            await ctx.db.execute(text(\n'
+                            '                "-- note\\rUPDATE ffa_kept_epochs SET chain = chain"\n'
+                            '                " WHERE lobby_id = :lid"), {"lid": ctx.lid})\n')),
+      note='A7-R4 finding 3: a line comment ends at CR, so the UPDATE after it executes'),
+    M('update_carrying_the_old_probe_marker', 'S63 iii',
+      E(MAIN, _EPI, _EPI + ('            await ctx.db.execute(text(\n'
+                            '                "UPDATE /*cf-locks*/ ffa_kept_epochs SET chain = chain"\n'
+                            '                " WHERE lobby_id = :lid"), {"lid": ctx.lid})\n')),
+      note="A7-R4 finding 4: round 4's probe comment on an UPDATE the server executes"),
+    M('update_in_a_writable_cte', 'S63 iii writes',
+      E(MAIN, _EPI, _EPI + ('            await ctx.db.execute(text(\n'
+                            '                "WITH u AS (UPDATE ffa_kept_epochs SET chain = chain"\n'
+                            '                " WHERE lobby_id = :lid RETURNING 1) SELECT count(*) FROM u"),\n'
+                            '                {"lid": ctx.lid})\n')),
+      note='A7-R4-A1 class sweep: an UPDATE inside a data-modifying WITH, whose statement shape is its SELECT; the write log reads it'),
 ], T("chain_through_a_helper",
      E(MAIN, _CHAIN, '            chain = _asm_next_chain(prev, ctx.lid, n, p["slot"], claim[0])\n'),
      E(MAIN, "\n\nasync def _ffa_admission_check(ctx) -> list:\n",
        "\n\ndef _asm_next_chain(prev, lid, n, slot, actor) -> str:\n"
        "    return _ffa_epoch_chain(prev[\"chain\"] if prev is not None else \"0\",\n"
        "                            _asm_id8(lid), n, int(slot), int(actor))\n"
-       "\n\nasync def _ffa_admission_check(ctx) -> list:\n")))
+       "\n\nasync def _ffa_admission_check(ctx) -> list:\n")),
+    classes=[C("comment_only_mention", E(MAIN, _EPI, _EPI + ('            await ctx.db.execute(text(\n'
+                                          '                "SELECT 1 /* UPDATE ffa_kept_epochs SET chain = chain */"))\n')),
+               note="A7-R4 job 045 (tree e6883e84), registered by A7-R4-A1: the UPDATE's text "
+                    "only inside a block comment of an executed SELECT; S63 stays green")])
 
 # -- S64: one node per fixture test --------------------------------------------
 _S64 = ["test_s64_i_ii_the_false_mark_and_the_refuted_tally",
