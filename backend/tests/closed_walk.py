@@ -1866,13 +1866,7 @@ def _returned(call, b, policy, d, awaited):
         return None
     if fn is None or _inspect.iscoroutinefunction(fn) is not awaited:
         return None
-    memo = b.__dict__.setdefault("_ret_memo", {})
-    got = memo.get(id(fn.__code__))
-    if got is not None and got[0] is fn.__code__:
-        j = got[1]
-    else:
-        j = _returns_join(fn, b, policy, d)
-        memo[id(fn.__code__)] = (fn.__code__, j)
+    j = _returns_cached(fn, b, policy)
     if not _is_p(j):
         return j
     params = list(_inspect.signature(fn).parameters)
@@ -1891,6 +1885,34 @@ def _returned(call, b, policy, d, awaited):
         a = receiver_provenance(arg, b, policy, d)
         out.append(_derive(a) if j[2] else a)
     return _join(out)
+
+
+_RET_READING = set()
+
+
+def _returns_cached(fn, b, policy):
+    """_returns_join of `fn`, one entry per function object on the policy
+    (or none without one), honoured only while its recorded Deps hold."""
+    memo = (policy.__dict__.setdefault("_ret_joins", {})
+            if policy is not None else {})
+    hit = memo.get(id(fn))
+    if hit is not None:
+        if hit[0] is fn and hit[2].valid():
+            _ib.carry(hit[2])
+            return hit[1]
+        del memo[id(fn)]
+    key = (id(fn), id(policy))
+    if key in _RET_READING:
+        return None                         # its own returns, being read
+    _RET_READING.add(key)
+    try:
+        with _ib.recording() as deps:
+            _ib.observe_chain(fn)
+            j = _returns_join(fn, b, policy, 0)
+    finally:
+        _RET_READING.discard(key)
+    memo[id(fn)] = (fn, j, deps)
+    return j
 
 
 def _returns_join(fn, b, policy, d):
