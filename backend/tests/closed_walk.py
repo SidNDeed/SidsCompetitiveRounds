@@ -1613,12 +1613,12 @@ def call_arguments(call):
 #           subscript or attribute of such a value, a column value of a
 #           session row, the return of a trusted function every return of
 #           which is such a value;
-#   "C"     an exact builtin container whose elements are not proven: its
-#           own methods run builtin code, the elements it yields do not
-#           count as proven;
+#   ("C", e)  an exact builtin container (a display, a comprehension, a
+#           listed constructor's result) whose elements have provenance e:
+#           its own methods run builtin code; what it yields is e;
 #   "R"     a session result (`await <session>.execute(...)`, and its
 #           .mappings()/.scalars()), whose methods are the result methods;
-#   "ROW"   a row a session result yields; "ROWS" a list of rows;
+#   "ROW"   a row a session result yields (a list of rows is ("C", "ROW"));
 #   ("P", ps, deep)  derived from the walked function's own parameters
 #           ps (a sorted tuple of names): one of them itself (deep False),
 #           or a value read from them (deep True: an attribute, a subscript,
@@ -1637,8 +1637,8 @@ def call_arguments(call):
 # binding; a name met again while its own bindings are read adds nothing to
 # the join). A display or a listed container constructor is an exact
 # container whatever its elements ("B" only when they all are); a mutation
-# (an insertion, a store into the value) never changes the name's own type,
-# so an exact container stays one, "B" only while every insertion is.
+# (an insertion, a store into the value) never changes the name's own type:
+# what it inserts joins the container's elements.
 RESULT_METHODS = frozenset({"all", "fetchall", "first", "mappings", "one",
                             "scalar", "scalar_one", "scalars"})
 ROW_METHODS = frozenset({"get", "items", "values", "keys", "_asdict"})
@@ -1646,7 +1646,7 @@ ROW_METHODS = frozenset({"get", "items", "values", "keys", "_asdict"})
 # Bindings.listed against the policy's Providers table) whose result is
 # builtin by construction: "B" a whole builtin value, "C" an exact builtin
 # container of its argument's elements (B when they are), "E" one of its
-# arguments' elements (min, max).
+# arguments' elements (min, max, random.choice).
 RESULT_BUILTIN = {
     "str": "B", "int": "B", "float": "B", "bool": "B", "len": "B",
     "repr": "B", "round": "B", "abs": "B", "id": "B", "isinstance": "B",
@@ -1658,7 +1658,7 @@ RESULT_BUILTIN = {
     "datetime.datetime.now": "B", "datetime.datetime.utcnow": "B",
     "sum": "B", "any": "B", "all": "B",
     "list": "C", "tuple": "C", "set": "C", "dict": "C", "sorted": "C",
-    "frozenset": "C", "min": "E", "max": "E",
+    "frozenset": "C", "min": "E", "max": "E", "random.choice": "E",
 }
 _DISPLAYS = (_ast.List, _ast.Tuple, _ast.Set)
 _INSERTING = {"append": (0,), "add": (0,), "insert": (1,),
@@ -1671,6 +1671,14 @@ def _is_p(p):
     return isinstance(p, tuple) and p[0] == "P"
 
 
+def _is_c(p):
+    """An exact builtin container ("C", element provenance)."""
+    return isinstance(p, tuple) and p[0] == "C"
+
+
+ROWS = ("C", "ROW")                         # a list of session rows
+
+
 def _derive(p):
     """The provenance of a value READ from a value of provenance `p` (an
     attribute, a subscript, a method result)."""
@@ -1678,15 +1686,19 @@ def _derive(p):
         return "B"
     if _is_p(p):
         return ("P", p[1], True)
-    return None                             # "C": its elements are unproven
+    if _is_c(p):
+        return p[1]                         # one of its elements
+    return None
 
 
 def _elements(p):
     """The provenance of an element a value of provenance `p` yields."""
     if p == "B":
         return "B"
-    if p in ("R", "ROWS"):
+    if p == "R":
         return "ROW"
+    if _is_c(p):
+        return p[1]
     if _is_p(p):
         return ("P", p[1], True)
     return None
@@ -1694,7 +1706,9 @@ def _elements(p):
 
 def _join(ps):
     """The provenance of a value that is one of values of provenances
-    `ps`."""
+    `ps`: equal provenances are themselves; parameters join with builtin
+    values; exact containers join with builtin values and with each other,
+    their elements joined."""
     ps = list(ps)
     if not ps or any(p is None for p in ps):
         return None
@@ -1706,16 +1720,19 @@ def _join(ps):
         return None
     if all(p == "B" for p in rest):
         return "B"
-    if all(p in ("B", "C") for p in rest):
-        return "C"
-    return rest[0] if len(set(rest)) == 1 else None
+    if all(p == "B" or _is_c(p) for p in rest):
+        es = [p[1] for p in rest if _is_c(p)]
+        if len(es) != len(rest):
+            es.append("B")                  # a builtin value's own parts
+        return ("C", _join(es))
+    return rest[0] if all(p == rest[0] for p in rest) else None
 
 
 def _container(elts):
     """An exact builtin container holding elements of provenances `elts`:
-    "B" when every element is, else "C" (its own type exact, its elements
-    unproven: one read from it is None, never a parameter's)."""
-    return "B" if (_join(elts) if elts else "B") == "B" else "C"
+    "B" when every element is, else ("C", their join)."""
+    j = _join(elts) if elts else "B"
+    return "B" if j == "B" else ("C", j)
 
 
 def _comp_element(expr, b, policy, d):
@@ -1727,7 +1744,7 @@ def _comp_element(expr, b, policy, d):
 
 def receiver_provenance(expr, b, policy=None, depth=0):
     """The provenance of expression `expr` in the function `b` resolves
-    (see above): "B", "C", "R", "ROW", "ROWS", ("P", names, deep) or
+    (see above): "B", ("C", element), "R", "ROW", ("P", names, deep) or
     None."""
     if depth > _PROV_DEPTH:
         return None
@@ -1741,12 +1758,11 @@ def receiver_provenance(expr, b, policy=None, depth=0):
                            for e in expr.elts])
     if isinstance(expr, _ast.Dict):
         if any(k is None for k in expr.keys):
-            return "C"
+            return ("C", None)
         return _container([receiver_provenance(x, b, policy, d)
                            for x in list(expr.keys) + list(expr.values)])
     if isinstance(expr, (_ast.ListComp, _ast.SetComp, _ast.DictComp)):
-        e = _comp_element(expr, b, policy, d)
-        return _container([e]) if e is not None else "C"
+        return _container([_comp_element(expr, b, policy, d)])
     if isinstance(expr, (_ast.BinOp, _ast.BoolOp, _ast.Compare,
                          _ast.UnaryOp)):
         parts = ([expr.left, expr.right] if isinstance(expr, _ast.BinOp)
@@ -1770,8 +1786,8 @@ def receiver_provenance(expr, b, policy=None, depth=0):
         return _returned(call, b, policy, d, awaited=True)
     if isinstance(expr, _ast.Subscript):
         v = receiver_provenance(expr.value, b, policy, d)
-        if v == "ROWS":
-            return "ROW" if not isinstance(expr.slice, _ast.Slice) else "ROWS"
+        if _is_c(v) and isinstance(expr.slice, _ast.Slice):
+            return v                        # a slice of a list is one
         return _derive(v)
     if isinstance(expr, _ast.Attribute):
         return _derive(receiver_provenance(expr.value, b, policy, d))
@@ -1797,26 +1813,35 @@ def _call_provenance(call, b, policy, d):
                 if m in ("first", "one", "scalar", "scalar_one"):
                     return "ROW"
                 if m in ("all", "fetchall"):
-                    return "ROWS"
+                    return ROWS
                 return None
             if r == "ROW":
                 return "B" if m in ROW_METHODS else None
+            if _is_c(r):
+                if m in ("get", "pop", "setdefault") and len(call.args) > 1:
+                    return _join([r[1], receiver_provenance(
+                        call.args[1], b, policy, d)])
+                if m in ("get", "pop", "setdefault"):
+                    return _join([r[1], "B"])       # or None
+                if m in ("copy", "keys", "values", "items"):
+                    return r
+                if m == "join":
+                    return "B"
+                return None
             if r == "B" or _is_p(r):
                 if m in ("get", "pop", "setdefault") and len(call.args) > 1:
                     return _join([_derive(r), receiver_provenance(
                         call.args[1], b, policy, d)])
                 return _derive(r)
-            if r == "C" and m in ("join", "copy", "keys"):
-                return "B" if m == "join" else "C"
             return None
     kind = _listed_kind(f, b, policy)
     if kind is None:
         return _returned(call, b, policy, d, awaited=False)
     if kind == "B":
         return "B"
-    if kind == "E":                         # min/max: one of the elements
+    if kind == "E":                         # min/max/choice: one element
         if len(call.args) == 1:
-            return _elements(_arg_elements(call.args[0], b, policy, d))
+            return _arg_elements(call.args[0], b, policy, d)
         return _join(receiver_provenance(a, b, policy, d) for a in call.args)
     if kind == "C":
         if not call.args:
@@ -1978,9 +2003,11 @@ def _name_provenance(name, b, policy, d):
     base = _join(provs)
     if not ins or all(p == "B" for p in ins):
         out = base
-    else:
+    elif base == "B" or _is_c(base):
         # a mutation changes what the value holds, never its own type
-        out = "C" if base in ("B", "C") else None
+        out = ("C", _join([base[1] if _is_c(base) else "B"] + ins))
+    else:
+        out = None
     if all(h == name for h in hits[at:]):
         memo[name] = out                    # no other name's provisional value
     hits[at:] = [h for h in hits[at:] if h != name]   # an ancestor's stay
@@ -2058,10 +2085,10 @@ def receiver_meets(p, group):
     if group == "result":
         return p == "R"
     if group == "row":
-        return p in ("B", "C", "ROW", "ROWS")
+        return p in ("B", "ROW") or _is_c(p)
     if group == "deep":
-        return p in ("B", "ROW", "ROWS", "R")
-    return p in ("B", "C", "ROWS")
+        return p in ("B", "ROW", "R") or (_is_c(p) and receiver_meets(p[1], "deep"))
+    return p == "B" or _is_c(p)
 
 
 def discharge_receivers(call, fn, effects, line, visitor):
