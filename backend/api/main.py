@@ -18406,7 +18406,7 @@ def _region_agreed(a, b):
 # `region_pings_age_s`) and, while it keeps polling, as the request header
 # `X-Region-Pings: us=42,eu=31;age=12` on every poll while the map is young
 # enough to be worth sending (the client stopped counting sends; it now caps on
-# age instead, mirroring the issuance window below).
+# age instead, mirroring REGION_PINGS_ISSUANCE_MAX_AGE_S below).
 # Both arrive through ONE validator; a map that fails it is stored as NULL at
 # join and ignored at poll (a poll never clears the columns). The columns are
 # deliberately NOT declared on the RankedQueue ORM model — raw SQL on both
@@ -18434,7 +18434,11 @@ def _region_agreed(a, b):
 REGION_PINGS_MAX_ENTRIES = 24
 REGION_PINGS_MAX_MS = 5000
 REGION_PINGS_MAX_AGE_S = 900           # accepted at join / poll
-REGION_PINGS_ISSUANCE_MAX_AGE_S = 180  # fresh enough to decide a room (7/3-1)
+REGION_PINGS_ISSUANCE_MAX_AGE_S = 180  # the group picker's window; the client's poll-header cap mirrors it (7/3-1)
+# A stored map may decide a 1v1 room for as long as the join would have
+# accepted it. Until 2026-11-05 this path read the 180 s window above, so a
+# pair matched on a join-body map older than that got the ladder.
+REGION_PINGS_ROOM_MAX_AGE_S = REGION_PINGS_MAX_AGE_S
 REGION_PINGS_MARGIN_MS = 20            # the candidate must beat the ladder's worst ping by more
 _REGION_PINGS_DIGITS_RE = _re.compile(r"^[0-9]{1,6}$")
 
@@ -18933,9 +18937,9 @@ def _pick_region_by_pings(p1, p2, ladder_pick, refs=()):
 
 
 def _region_pings_at_issuance(pings, pings_at, now):
-    """A queue row's stored map when it may decide a room: well-formed and
-    stamped within the issuance window. Returns (map or None, state) with
-    state in "absent" / "stale" / "fresh"."""
+    """A queue row's stored map when it may decide a 1v1 room: well-formed and
+    stamped within REGION_PINGS_ROOM_MAX_AGE_S. Returns (map or None, state)
+    with state in "absent" / "stale" / "fresh"."""
     if isinstance(pings, (str, bytes)):
         try:
             pings = _json.loads(pings)
@@ -18946,7 +18950,7 @@ def _region_pings_at_issuance(pings, pings_at, now):
         return None, "absent"
     if pings_at.tzinfo is None:
         pings_at = pings_at.replace(tzinfo=timezone.utc)
-    if now - pings_at > timedelta(seconds=REGION_PINGS_ISSUANCE_MAX_AGE_S):
+    if now - pings_at > timedelta(seconds=REGION_PINGS_ROOM_MAX_AGE_S):
         return None, "stale"
     return clean, "fresh"
 
@@ -19023,7 +19027,8 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     relocated by where they used to be. Since Sept 7 (item 3) the measurement
     that settles it exists as RUNG 0, run after the ladder has answered: both
     seats' own ping maps (the kwargs; each with its stamp), taken within the
-    last 180 s, may replace the ladder's answer with the region that minimises
+    last 900 s (REGION_PINGS_ROOM_MAX_AGE_S; 180 s until 2026-11-05), may
+    replace the ladder's answer with the region that minimises
     the pair's WORST ping, taken when it beats the ladder's worst by more than
     20 ms and lies within each seat's own bound — the worst that seat measured
     among the two seats' homes and the ladder's answer, plus

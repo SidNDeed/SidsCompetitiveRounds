@@ -302,7 +302,7 @@ def test_pick_room_region_positional_signature_is_unchanged():
 def test_fresh_maps_replace_the_ladder_and_stale_or_absent_ones_do_not(capsys):
     now = _now()
     fresh = now - timedelta(seconds=60)
-    stale = now - timedelta(seconds=main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 1)
+    stale = now - timedelta(seconds=main.REGION_PINGS_ROOM_MAX_AGE_S + 1)
     kw = dict(p1_pings=FRESH_MAP, p2_pings=FRESH_MAP_PARTNER, now=now)
     assert main._pick_room_region("us", "us", "us", "us", "r", p1_pings_at=fresh, p2_pings_at=fresh, **kw) == "eu"
     out = capsys.readouterr().out
@@ -321,6 +321,25 @@ def test_fresh_maps_replace_the_ladder_and_stale_or_absent_ones_do_not(capsys):
     assert main._pick_room_region("us", "us", "us", "us", "r", p1_pings=None, p2_pings=FRESH_MAP_PARTNER,
                                   p1_pings_at=stale, p2_pings_at=stale, now=now) == "us"
     assert "rung=ladder why=no-maps" in capsys.readouterr().out
+
+
+def test_a_map_the_join_accepted_still_decides_the_room(capsys):
+    """The room window is the acceptance bound (REGION_PINGS_ROOM_MAX_AGE_S,
+    2026-11-05). A map measured 200 s ago, past the 180 s this path read until
+    then, decides the room; the bound itself is inclusive; one second past it
+    the map is stale and the ladder answers."""
+    now = _now()
+    kw = dict(p1_pings=FRESH_MAP, p2_pings=FRESH_MAP_PARTNER, now=now)
+    assert main.REGION_PINGS_ROOM_MAX_AGE_S == main.REGION_PINGS_MAX_AGE_S == 900
+    at = now - timedelta(seconds=200)
+    assert main._pick_room_region("us", "us", "us", "us", "r", p1_pings_at=at, p2_pings_at=at, **kw) == "eu"
+    assert "rung=pings" in capsys.readouterr().out
+    edge = now - timedelta(seconds=900)
+    assert main._pick_room_region("us", "us", "us", "us", "r", p1_pings_at=edge, p2_pings_at=edge, **kw) == "eu"
+    capsys.readouterr()
+    past = now - timedelta(seconds=901)
+    assert main._pick_room_region("us", "us", "us", "us", "r", p1_pings_at=at, p2_pings_at=past, **kw) == "us"
+    assert "rung=ladder why=stale" in capsys.readouterr().out
 
 
 def test_the_refusal_line_records_the_candidate_and_both_seats_numbers(capsys):
@@ -845,7 +864,7 @@ def test_queue_poll_issues_the_room_from_the_projected_maps(issuance):
 def test_queue_poll_control_without_maps_or_with_stale_maps_takes_the_ladder(issuance):
     session = FakeIssuanceSession(_pair(None, None, None, None), ME_STEAM)
     assert _poll(session).photon_region == "us"
-    stale = _now() - timedelta(seconds=main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 5)
+    stale = _now() - timedelta(seconds=main.REGION_PINGS_ROOM_MAX_AGE_S + 5)
     session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, stale, stale), ME_STEAM)
     assert _poll(session).photon_region == "us"
     assert [s[3] for s in issuance] == ["us", "us"]
@@ -909,7 +928,7 @@ def test_queue_ready_reacquires_the_lease_on_the_room_it_issues(issuance):
 def test_queue_ready_control_without_maps_or_with_stale_maps_takes_the_ladder(issuance):
     session = FakeIssuanceSession(_pair(None, None, None, None), ME_STEAM)
     assert _ready(session)["photon_region"] == "us"
-    stale = _now() - timedelta(seconds=main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 5)
+    stale = _now() - timedelta(seconds=main.REGION_PINGS_ROOM_MAX_AGE_S + 5)
     session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, stale, stale), ME_STEAM)
     assert _ready(session)["photon_region"] == "us"
     assert [s[3] for s in issuance] == ["us", "us"]
@@ -993,7 +1012,7 @@ def test_a_valid_header_refreshes_the_stale_map_issuance_sees_in_the_same_poll(i
     both ready, and A polls with a fresh header. The heartbeat has just replaced
     A's map, so the room goes by the pair's pings — the pre-heartbeat snapshot
     alone would have said stale and handed the pair to the ladder."""
-    stale = _now() - timedelta(seconds=main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 1)
+    stale = _now() - timedelta(seconds=main.REGION_PINGS_ROOM_MAX_AGE_S + 1)
     fresh = _now() - timedelta(seconds=10)
     session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, stale, fresh), ME_STEAM)
     resp = _poll(session, {"x-region-pings": "us=100,eu=30;age=0"})
@@ -1012,13 +1031,17 @@ def test_a_valid_header_replaces_the_stored_map_issuance_sees_in_the_same_poll(i
     assert [s[3] for s in issuance] == ["eu"]
 
 
-def test_the_header_stamp_is_what_the_issuance_window_judges(issuance):
+def test_the_header_stamp_is_what_the_issuance_window_judges(issuance, monkeypatch):
     """The stamp half: the UPDATE binds the row's stamp as now - age, so a valid
     header whose age is past the window leaves A stale although the STORED stamp
-    was fresh — issuance agrees with what the row now holds, not with the snapshot."""
+    was fresh — issuance agrees with what the row now holds, not with the snapshot.
+    The room window equals the validator's bound since 2026-11-05, so no VALID
+    header can lie past it; the window is narrowed here to 180 s (its value
+    until then) so that a valid header still falls on the far side of it."""
+    monkeypatch.setattr(main, "REGION_PINGS_ROOM_MAX_AGE_S", 180)
     fresh = _now() - timedelta(seconds=10)
     session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, fresh, fresh), ME_STEAM)
-    age = main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 1
+    age = main.REGION_PINGS_ROOM_MAX_AGE_S + 1
     assert _poll(session, {"x-region-pings": f"us=100,eu=30;age={age}"}).photon_region == "us"
     assert [s[3] for s in issuance] == ["us"]
 
@@ -1027,7 +1050,7 @@ def test_the_header_stamp_is_what_the_issuance_window_judges(issuance):
 def test_control_a_stale_snapshot_stays_stale_without_a_valid_header(issuance, headers):
     """Negative control (#391): an absent or refused header overlays nothing —
     the stale stored map stays stale and the ladder answers."""
-    stale = _now() - timedelta(seconds=main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 1)
+    stale = _now() - timedelta(seconds=main.REGION_PINGS_ROOM_MAX_AGE_S + 1)
     fresh = _now() - timedelta(seconds=10)
     session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, stale, fresh), ME_STEAM)
     resp = _poll(session, headers)
@@ -1053,7 +1076,7 @@ def test_the_persisted_stamp_is_the_stamp_issuance_judges(issuance, monkeypatch)
     monkeypatch.setattr(main, "_pick_room_region", spy)
     fresh = _now() - timedelta(seconds=10)
     session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, fresh, fresh), ME_STEAM)
-    age = main.REGION_PINGS_ISSUANCE_MAX_AGE_S - 1
+    age = main.REGION_PINGS_ROOM_MAX_AGE_S - 1
     before = _now()
     resp = _poll(session, {"x-region-pings": f"us=100,eu=30;age={age}"})
     after = _now()
