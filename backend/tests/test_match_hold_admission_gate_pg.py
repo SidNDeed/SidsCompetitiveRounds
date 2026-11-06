@@ -2322,9 +2322,9 @@ def test_r11_d_r8_a_plant_that_changes_parameters_is_refused(label, pairs):
     parameter renamed, or one added, planted by _planted, is refused at
     admission by (3)(b) with its own sentence; its derived record passes
     (3)(a) (the text is the real helper's with the recorded edit), so only
-    (3)(b) refuses it. Read at the admission: through the prefix walk the
-    gate grammar's frozen ORDER header of the helper's definition refuses a
-    changed signature first (measured at fb9de924, NOTES-r11-d)."""
+    (3)(b) refuses it. Read at the admission; through the prefix walk see
+    test_r11_d_a18_a_changed_signature_through_the_walk (ruling
+    FOUR-R11-A18 (4))."""
     _fn, scope, _at = _planted(main, "_rdm_claim", (), (),
                                [("_rdm_live_or_lapse", pairs)])
     planted = vars(scope)["_rdm_live_or_lapse"]
@@ -2344,6 +2344,7 @@ def test_r11_d_r8_a_plant_that_changes_parameters_is_refused(label, pairs):
 # default; (4): which check refuses a changed signature first through the walk.
 _R11_D_ORDER_HEAD = "outside its frozen order (header"
 _R11_D_LINE_15 = "line 15: writes before the gate"
+_R11_D_LINE_8 = "line 8: an awaited call before the gate this check does not read"
 
 
 @pytest.mark.parametrize("base", [PREFIX_CLAIM, DIRECT],
@@ -2383,25 +2384,33 @@ def test_r11_d_a18_the_unedited_helper_planted_gives_the_real_span(base):
 
 def test_r11_d_a18_an_unregistered_definition_reads_as_a_write():
     """FOUR-R11-A18 (2)(e): the cautious default stays. _rdm_claim's span
-    walked in a module whose _rdm_claim has no registered source (its code
-    bound in a fresh module that nothing registered, so the binder cannot
-    prove it) has no defining module; every execute in it reads as a write,
-    and the walk refuses at line 15 with its sentence, ORDER marker off;
-    with the marker on it is refused too."""
+    walked in a module whose _rdm_claim has no registered source (the real
+    text compiled under a file name nothing registered, so the binder cannot
+    prove it) has no defining module and no execute of it is placed (in
+    main every one is); the walk then reads them as writes and refuses at
+    line 15 with its sentence, ORDER marker off; with the marker on it is
+    refused too."""
     modname, name, _entry, target = PREFIX_CLAIM
     module = _R7_MODULES[modname]
+    src = _edited(module, name, [])
     _synth_next()
     scope = types.ModuleType(f"gate_unregistered_{_SYNTH[0]}")
     scope.__dict__.update({k: v for k, v in module.__dict__.items()
                            if not k.startswith("__")})
     sys.modules[scope.__name__] = scope
-    unproven = types.FunctionType(getattr(module, name).__code__,
-                                  scope.__dict__, name)
-    setattr(scope, name, unproven)
+    exec(compile(src, f"<unregistered {name}>", "exec"), scope.__dict__)
+    unproven = vars(scope)[name]
     assert _ib._owner_module(unproven) is scope
     assert not _ib.trusted_function(unproven)
-    fn = ast.parse(_edited(module, name, [])).body[0]
+    fn = ast.parse(src).body[0]
     at = (f"<planted {name}>", 0)
+    calls = [c for c in ast.walk(fn) if _cw._is_execute(c)]
+    unplaced = _cw.Bindings(scope, fn)
+    placed = _cw.Bindings(module, fn)
+    assert _cw._defining_module(unplaced) is None
+    assert _cw._defining_module(placed) is module
+    assert calls and all(_cw._position(unplaced, c) is None for c in calls)
+    assert all(_cw._position(placed, c) is not None for c in calls)
 
     def read():
         got = claim_prefix_violations(fn, target, scope, name, at)[0]
@@ -2419,12 +2428,12 @@ def test_r11_d_a18_an_unregistered_definition_reads_as_a_write():
 
 @pytest.mark.parametrize("label,pairs", [("renames step", _R11_D_RENAME),
                                          ("adds a parameter", _R11_D_ADD)])
-def test_r11_d_a18_a_changed_signature_is_refused_first_by_the_order_header(label, pairs):
-    """FOUR-R11-A18 (4): through the prefix walk, the 456 plant's helper with
-    a parameter renamed or added is refused first by the gate grammar's
-    frozen ORDER header of the helper's definition, with the ORDER marker
-    off; with it on it is refused too; in neither state is (3)(b)'s sentence
-    the first refusal: (3)(b) is a second line, shown at the admission."""
+def test_r11_d_a18_a_changed_signature_through_the_walk(label, pairs):
+    """FOUR-R11-A18 (4): (3)(b) IS reached through the walk. Through the
+    prefix walk, the 456 plant's helper with a parameter renamed or added
+    is refused first at line 8 by (3)(b)'s sentence with the ORDER marker
+    off; with the marker on, the gate grammar's frozen ORDER header of the
+    helper's definition refuses first."""
     modname, name, _entry, target = PREFIX_CLAIM
     fn, scope, at = _planted(_R7_MODULES[modname], name, (), (),
                              [("_rdm_live_or_lapse", pairs)])
@@ -2439,10 +2448,10 @@ def test_r11_d_a18_a_changed_signature_is_refused_first_by_the_order_header(labe
     finally:
         _gg.ORDER_SWITCH["bindings"] = None
     on = read()
-    assert got is not None and _R11_D_ORDER_HEAD in got, (label, got)
-    assert "in _rdm_live_or_lapse at ()" in got, (label, got)
-    assert on is not None, (label, on)
-    assert _R11_D_B not in got and _R11_D_B not in on, (label, got, on)
+    assert got is not None and got.startswith(_R11_D_LINE_8), (label, got)
+    assert _R11_D_B in got, (label, got)
+    assert on is not None and _R11_D_ORDER_HEAD in on, (label, on)
+    assert "in _rdm_live_or_lapse at ()" in on, (label, on)
 
 
 def test_r11_d_r8_only_the_plant_harness_hands_another_functions_roots():
