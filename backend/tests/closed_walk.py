@@ -3043,6 +3043,20 @@ def receiver_meets(p, group):
 _NOT_CONSTANT = object()
 
 
+class _CondOrder:
+    """Sort key of receiver conditions ("receiver:<param>[.<attr>...]:<group>"):
+    the named parameter's position in `names`, then the condition's text; a
+    parameter not in `names` sorts last (the loop then refuses it by its own
+    message)."""
+
+    def __init__(self, names):
+        self.names = names
+
+    def __call__(self, e):
+        p = e.split(":", 2)[1].split(".")[0]
+        return (self.names.index(p) if p in self.names else len(self.names), e)
+
+
 def _param_table(fn):
     """([names], [defaults]) of function object or definition `fn`'s
     parameters in order; a missing default is Parameter.empty, a definition's
@@ -3077,6 +3091,13 @@ def discharge_receivers(call, fn, effects, line, visitor):
     co = (fn.name if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef))
           else fn.__code__.co_name)
     names, defaults = _param_table(fn)
+    # round 11 (ruling FOUR-R11-A10 (C)): `effects` may be a set, whose
+    # iteration order is the process's string-hash order (PYTHONHASHSEED 1, 2
+    # and 3 named `members`, `volumes`, `volumes` first at _group_region's
+    # call of the group picker, RULES NOTES); the conditions are refused in
+    # the callee's parameter order, then by their text, so the first refusal
+    # does not depend on the hash seed.
+    conds = sorted(conds, key=_CondOrder(names))
     for e in conds:
         # round 11 (rule K's A5 clause): a condition may name a path of the
         # parameter ("receiver:<param>.<attr>...:<group>")
