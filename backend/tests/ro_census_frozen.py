@@ -3479,3 +3479,99 @@ R10_MERGE_COUNT = 15
 for _k, _v in R10_MERGE_FROZEN.items():
     FROZEN[_k] = list(FROZEN[_k]) + list(_v)
 FROZEN_COUNT = COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+
+
+# Round 11 (ruling FOUR-R10-A2 (3) FIX-R11-OPEN; child OPEN of W30e). Two
+# blocks, each derived ONCE at the round-11 base 5b18949a by
+# RF11/open/freeze_r11.py (it refuses unless the census files equal
+# 5b18949a and this file equals its pre-image md5 77b307f3), never
+# regenerated:
+#
+# R11_ID_FROZEN: the 33 forms the ROUND-10 grammar already finds at
+# 5b18949a beyond FROZEN, all from FIX-R11-ID's code (closed_walk.py, the
+# identity binder's reads of module and builtins namespaces, and
+# test_a1_identity_formation.py, its controls). Not this child's forms:
+# frozen here so the census is green at 5b18949a; the integrator reviews or
+# replaces this block at the merge (the round-10 precedent: R10_MERGE_FROZEN).
+#
+# R11_OPEN_FROZEN: the 33 forms the ROUND-11 grammar adds at 5b18949a, every
+# one a reflective literal (a string constant spelled __x__, finding F5).
+# The round-11 binding forms (finding F6) add no form at 5b18949a.
+R11_ID_FROZEN = {'tests/closed_walk.py#complete': [('alias', 'str __builtins__'),
+                                   ('alias', 'str hasattr'),
+                                   ('dynamic', 'b.__dict__'),
+                                   ('dynamic', 'b.__dict__'),
+                                   ('dynamic', 'b.__dict__'),
+                                   ('dynamic', 'b.__dict__'),
+                                   ('dynamic', 'getattr(bi, name, _MISSING)'),
+                                   ('dynamic', 'getattr(self.scope, name, _MISSING)'),
+                                   ('dynamic', 'hasattr(_builtins, d.name)'),
+                                   ('dynamic', 'policy.__dict__'),
+                                   ('dynamic', 'policy.__dict__'),
+                                   ('dynamic', 'policy.__dict__'),
+                                   ('dynamic', 'self.p.__dict__'),
+                                   ('dynamic', 'vars(mod)'),
+                                   ('dynamic', 'vars(type(self.scope))')],
+ 'tests/test_a1_identity_formation.py#complete': [('alias', 'builtins.int'),
+                                                  ('alias', 'import builtins'),
+                                                  ('alias', 'str builtins'),
+                                                  ('alias', 'str builtins'),
+                                                  ('alias', 'str exec'),
+                                                  ('alias', 'str exec'),
+                                                  ('alias', 'str exec'),
+                                                  ('dynamic',
+                                                   "exec(compile('def f(x):\\n    return "
+                                                   "x\\n', other.__file__, 'exec'), "
+                                                   'other.__dict__)'),
+                                                  ('dynamic',
+                                                   "exec(compile('def g():\\n    return 2\\n', "
+                                                   "late.__file__, 'exec'), late.__dict__)"),
+                                                  ('dynamic',
+                                                   "exec(compile(text, mod.__file__, 'exec'), "
+                                                   'mod.__dict__)'),
+                                                  ('dynamic',
+                                                   'getattr(_a1_real_inspect, name)'),
+                                                  ('dynamic', 'hasattr(mod, name)'),
+                                                  ('dynamic', 'late.__dict__'),
+                                                  ('dynamic', 'mod.__dict__'),
+                                                  ('dynamic', 'mod.__dict__'),
+                                                  ('dynamic', 'other.__dict__'),
+                                                  ('dynamic', 'pol.__dict__'),
+                                                  ('dynamic', 'vars(main)')]}
+R11_ID_COUNT = 33
+R11_OPEN_FROZEN = {'api/build_manifest.py#complete': [('alias', 'str __main__')],
+ 'api/conn_ranges.py#complete': [('alias', 'str __main__')],
+ 'api/log_redaction.py#complete': [('alias', 'str __main__')],
+ 'api/main.py#complete': [('alias', 'str __cause__'),
+                          ('alias', 'str __dict__'),
+                          ('alias', 'str __globals__'),
+                          ('alias', 'str __module__'),
+                          ('alias', 'str __qualname__')],
+ 'api/match_hold.py#complete': [('alias', 'str __cause__'), ('alias', 'str __context__')],
+ 'api/pc_face.py#complete': [('alias', 'str __pycache__')],
+ 'api/review_boot.py#complete': [('alias', 'str __file__'),
+                                 ('alias', 'str __main__'),
+                                 ('alias', 'str __main__')],
+ 'api/review_rules.py#complete': [('alias', 'str __main__'), ('alias', 'str __main__')],
+ 'api/tournament_bracket.py#complete': [('alias', 'str __main__')],
+ 'tests/closed_walk.py#complete': [('alias', 'str __binder_address__'),
+                                   ('alias', 'str __file__'),
+                                   ('alias', 'str __file__'),
+                                   ('alias', 'str __name__'),
+                                   ('alias', 'str __name__'),
+                                   ('alias', 'str __name__'),
+                                   ('alias', 'str __name__'),
+                                   ('alias', 'str __name__'),
+                                   ('alias', 'str __self__'),
+                                   ('alias', 'str __self__')],
+ 'tests/resolution_sites.py#complete': [('alias', 'str __init__'),
+                                        ('alias', 'str __init__'),
+                                        ('alias', 'str __main__')],
+ 'tests/test_a1_identity_formation.py#complete': [('alias', 'str __file__')],
+ 'tests/test_match_hold_admission_gate_pg.py#complete': [('alias', 'str __file__'),
+                                                         ('alias', 'str __name__')]}
+R11_OPEN_COUNT = 33
+for _k, _v in list(R11_ID_FROZEN.items()) + list(R11_OPEN_FROZEN.items()):
+    FROZEN[_k] = list(FROZEN[_k]) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT)
