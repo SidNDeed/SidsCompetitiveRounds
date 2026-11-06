@@ -70,6 +70,7 @@ import itertools
 import io
 import math
 import re
+import sys
 import tokenize
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -871,30 +872,83 @@ _FRACTION_SHAPES = [
 ]
 
 
-def _wrong(monkeypatch, capsys, case, shape, distort=None):
+class _Recorder:
+    """Installed as the profile function for one pick, it records every call
+    of the leaf (_region_corroborated) and of the two functions that hand it
+    the reading: (the callee, where it was called from, where that caller was
+    called from, what it received for the reading). A place is (function,
+    line, column) of the call, read from the calling frame's own instruction.
+    It hands every event on to the profile function it replaced."""
+
+    def __init__(self):
+        self.codes = {getattr(main, name).__code__: name for name in _READING_CALLEES}
+        self.calls = []
+
+    @staticmethod
+    def _place(frame):
+        if frame is None:
+            return None
+        line, _, col, _ = list(frame.f_code.co_positions())[frame.f_lasti // 2]
+        return frame.f_code.co_name, line, col
+
+    def __call__(self, frame, event, arg):
+        name = self.codes.get(frame.f_code) if event == "call" else None
+        if name is not None:
+            caller = frame.f_back
+            self.calls.append((name, self._place(caller), self._place(caller.f_back),
+                               frame.f_locals.get(_READING_CALLEES[name])))
+        if self.previous is not None:
+            self.previous(frame, event, arg)
+
+    def __enter__(self):
+        self.previous = sys.getprofile()
+        sys.setprofile(self)
+        return self
+
+    def __exit__(self, *exc):
+        sys.setprofile(self.previous)
+        return False
+
+
+def _same_bits(received, reading):
+    """`received` is a float with the bits of `reading`."""
+    return type(received) is float and type(reading) is float and received.hex() == reading.hex()
+
+
+def _wrong(monkeypatch, capsys, case, shape, distort=None, record=None):
     """One pick of `shape`, its sighting stamped as `case` says and the clock
     answering `case`'s reading (what `distort` makes of it, when given).
     Returns what the pick got wrong, an empty list when nothing: the room,
-    where it is not the one the shape expects for that case; the pick's
-    second log line, where it lacks a field the shape expects; the count of
-    clock reads, where it is not one."""
+    where it is not the one the shape expects for that case; the count of log
+    lines, where it is not two; the second log line, where it lacks a field
+    the shape expects; the count of clock reads, where it is not one; every
+    call of the leaf that received, for the reading, anything but the one
+    value the clock gave, bit for bit (ruling RP-5 (3)(b)). `record`, a list
+    when given, gets the pick's recorded calls appended."""
     label, stamp, reading, is_live = case
     args, sighted, live, expired = shape
     main._REGION_SEEN.clear()
     main._REGION_SEEN[sighted] = {
         f"7656119800000010{i}": stamp for i in range(main._REGION_SEEN_MIN_PLAYERS)}
     stand_in = _FixedClock(main.time, reading if distort is None else distort(reading))
-    with monkeypatch.context() as patch:
+    with monkeypatch.context() as patch, _Recorder() as recorder:
         patch.setattr(main, "time", stand_in)
-        got, (first, second) = _pick(capsys, *args, "r")
+        got, lines = _pick(capsys, *args, "r")
+    if record is not None:
+        record.append(recorder.calls)
     region, seen, home_ok = live if is_live else expired
     wrong = []
     if got != region:
         wrong.append(("room", got))
-    if f"chosen={region} " not in second or seen not in second or home_ok not in second:
-        wrong.append(("line", second))
+    if len(lines) != 2:
+        wrong.append(("lines", lines))
+    elif f"chosen={region} " not in lines[1] or seen not in lines[1] or home_ok not in lines[1]:
+        wrong.append(("line", lines[1]))
     if stand_in.reads != 1:
         wrong.append(("reads", stand_in.reads))
+    leaf = [call for call in recorder.calls if call[0] == _LEAF and not _same_bits(call[3], stand_in.at)]
+    if leaf:
+        wrong.append(("leaf", leaf))
     return wrong
 
 
@@ -904,8 +958,69 @@ def test_a_sighting_expires_at_its_own_instant_and_not_at_a_whole_second(monkeyp
     """Nine shapes of a pick, each asked at the float before the last instant
     its sighting counts, at that instant and at the float after it, with three
     stamps: the pick answers as the shape says for a sighting that counts at
-    the first two and not at the third, and reads the clock once."""
+    the first two and not at the third, reads the clock once, and hands the
+    leaf that one reading, bit for bit, at every call."""
     assert _wrong(monkeypatch, capsys, case, shape) == []
+
+
+def test_every_site_of_the_census_is_reached_by_the_cases(monkeypatch, capsys):
+    """Over the cases around expiry, the places the recorder sees calls come
+    from are exactly the census's sites: every call of the leaf in the three
+    functions, and every call of the two between in the pick, is reached by
+    some case, and no recorded call comes from anywhere else. In one case at
+    least the pick enters _region_agreed three times."""
+    record = []
+    for case in _AROUND_EXPIRY:
+        for shape in _FRACTION_SHAPES:
+            assert _wrong(monkeypatch, capsys, case, shape, record=record) == [], (case[0], shape[0])
+    reached = {call[1] for calls in record for call in calls}
+    sites = {(fn, line, col) for name in _CENSUS for fn, _, line, col in _census_of(name)[1]}
+    assert reached == sites, (sorted(sites - reached), sorted(reached - sites))
+    assert max(sum(1 for call in calls if call[0] == "_region_agreed") for calls in record) == 3
+
+
+# Codex round REGION-R4's scenario: two us reporters stamped 1814400.5 and the
+# clock at 2419200.75, a quarter of a second after their sighting expired,
+# asked with the seventh shape (two homes that differ, no snapshot).
+_REGION_R4_CASE = ("REGION-R4", 1814400.5, 2419200.75, False)
+
+
+def _planted_pick(label):
+    """The function of _PLANTED's source `label`, compiled from that source
+    with main.py's line numbers and run in main's own globals; and the (line,
+    column) of each call in it whose reading argument is not a bare name."""
+    _, name, edits, _ = next(planted for planted in _PLANTED if planted[0] == label)
+    source, first = _source_of(name)
+    for old, new in edits:
+        source = source.replace(old, new)
+    tree = ast.parse(source)
+    ast.increment_lineno(tree, first - 1)
+    changed = [(c.lineno, c.col_offset) for c in ast.walk(tree)
+               if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in _READING_CALLEES
+               and not isinstance(_reading_argument(c), ast.Name)]
+    namespace = {}
+    exec(compile(tree, str(MAIN_PY), "exec"), main.__dict__, namespace)
+    return namespace[name], changed
+
+
+def test_the_leaf_refuses_the_rounding_of_codex_round_region_r4(monkeypatch, capsys):
+    """Main's own pick gets nothing wrong in the reviewer's scenario. The pick
+    whose third weighing is handed the reading rounded on a grid of whole
+    seconds that starts at a half (the first planted source of the census,
+    compiled) hands the leaf 2419200.5 where the clock gave 2419200.75, and
+    _wrong reports each of those calls, every one from the third weighing."""
+    shape = _FRACTION_SHAPES[6]
+    assert shape[:2] == (("", "eu", "", "us"), "us")
+    assert _wrong(monkeypatch, capsys, _REGION_R4_CASE, shape) == []
+    planted, changed = _planted_pick(_PLANTED[0][0])
+    assert len(changed) == 1
+    with monkeypatch.context() as patch:
+        patch.setattr(main, "_pick_room_region", planted)
+        wrong = dict(_wrong(monkeypatch, capsys, _REGION_R4_CASE, shape))
+    leaf = wrong.get("leaf")
+    assert leaf, wrong
+    assert {call[2][1:] for call in leaf} == set(changed), leaf
+    assert {call[3] for call in leaf} == {2419200.5}, leaf
 
 
 def test_a_helper_that_reads_the_clock_itself_reads_it_to_the_fraction(monkeypatch):
