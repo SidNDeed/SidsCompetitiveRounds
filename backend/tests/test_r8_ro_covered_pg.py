@@ -76,6 +76,7 @@ import cf_pg  # noqa: E402
 import main  # noqa: E402
 import match_hold  # noqa: E402
 import match_report_window  # noqa: E402
+import ro_census  # noqa: E402
 import ro_covered  # noqa: E402
 import ro_role  # noqa: E402
 import tournaments  # noqa: E402
@@ -328,9 +329,38 @@ async def _proc_census(clone_dsn, schema):
     return {"rows": rows, "planted": planted, "after": after, "schema": schema}
 
 
-async def _run_all(admin_dsn, clone, mp, only=None):
+async def _role_run(role_dsn, schema, s, mp, only, out):
+    for name, drive in DRIVERS.items():
+        if only is not None and name not in only:
+            continue
+        engine = ro_covered.role_engine(role_dsn, schema, ro_role.ROLE, out["checked"])
+        rsm = ro_covered.role_sessionmaker(engine)
+        try:
+            async with rsm() as db:
+                # E2: every covered and writer position is followed
+                # by a lock read inside its transaction.
+                db.info["lock_targets"] = LOCK_TARGETS
+                try:
+                    await drive(db, s, mp)
+                except BaseException as e:   # noqa: BLE001 -- recorded
+                    out["errors"][name] = "%s: %s" % (type(e).__name__,
+                                                      str(e).splitlines()[0][:200])
+                finally:
+                    out["logs"][name] = list(db.info.get("log", []))
+                    out["locks"][name] = list(db.info.get("locks", []))
+                    # REHEARSAL-R9-A1 (B): every position's continuity
+                    out["conts"][name] = list(db.info.get("continuity", []))
+                    out["pids"][name] = sorted(db.info.get("pids", ()))
+                    # FIX-R11-RES: every position's RESET ALL proof
+                    out["gone"][name] = list(db.info.get("gone", []))
+                    await db.rollback()
+        finally:
+            await engine.dispose()
+
+
+async def _run_all(admin_dsn, clone, mp, rec, only=None):
     out = {"logs": {}, "locks": {}, "conts": {}, "pids": {}, "gone": {}, "errors": {},
-           "checked": [],
+           "checked": [], "window": None,
            "identity_control": None, "grant": None, "census": None, "harness_sites": []}
     clone_dsn = ro_role.dsn_for(admin_dsn, clone)
     async with cf_pg.case("rf8ro", dsn=clone_dsn) as (c, sm):
@@ -344,36 +374,35 @@ async def _run_all(admin_dsn, clone, mp, only=None):
             out["census"] = await ro_role.privilege_census(admin_dsn, clone)
             _prepare(mp)
             role_dsn = ro_role.dsn_for(admin_dsn, clone, user=ro_role.ROLE)
-            for name, drive in DRIVERS.items():
-                if only is not None and name not in only:
-                    continue
-                engine = ro_covered.role_engine(role_dsn, c.schema, ro_role.ROLE,
-                                                out["checked"])
-                rsm = ro_covered.role_sessionmaker(engine)
+            # Ruling FOUR-R11-A8: the measured run (the role run and the grant
+            # runs with their controls) carries the open recorder. Every open
+            # of another identity precedes the freeze: the admin opens above
+            # and the grant runs' admin connection here, which grants and
+            # revokes over the connection it already holds.
+            admin = await asyncpg.connect(clone_dsn)
+            try:
+                rec.freeze(role_dsn, [None, {"search_path": '"%s"' % c.schema}])
                 try:
-                    async with rsm() as db:
-                        # E2: every covered and writer position is followed
-                        # by a lock read inside its transaction.
-                        db.info["lock_targets"] = LOCK_TARGETS
-                        try:
-                            await drive(db, s, mp)
-                        except BaseException as e:   # noqa: BLE001 -- recorded
-                            out["errors"][name] = "%s: %s" % (type(e).__name__,
-                                                              str(e).splitlines()[0][:200])
-                        finally:
-                            out["logs"][name] = list(db.info.get("log", []))
-                            out["locks"][name] = list(db.info.get("locks", []))
-                            # REHEARSAL-R9-A1 (B): every position's continuity
-                            out["conts"][name] = list(db.info.get("continuity", []))
-                            out["pids"][name] = sorted(db.info.get("pids", ()))
-                            # FIX-R11-RES: every position's RESET ALL proof
-                            out["gone"][name] = list(db.info.get("gone", []))
-                            await db.rollback()
+                    try:
+                        await _role_run(role_dsn, c.schema, s, mp, only, out)
+                        out["grant_runs"] = await _grant_runs(admin, role_dsn, c.schema, s, mp)
+                    finally:
+                        # every task the run left ends INSIDE the window, so
+                        # an open it was making is recorded
+                        pending = [t for t in asyncio.all_tasks()
+                                   if t is not asyncio.current_task()]
+                        out["pending_tasks"] = len(pending)
+                        for t in pending:
+                            t.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        out["window"] = rec.report()
                 finally:
-                    await engine.dispose()
-            out["grant_runs"] = await _grant_runs(admin_dsn, clone, c.schema, s, mp)
+                    rec.thaw()
+            finally:
+                await admin.close()
             # Control: the identity assertion on a covered path, the
-            # connection opened as the admin role.
+            # connection opened as the admin role (after the thaw: its purpose
+            # is an open that is not the frozen identity).
             engine = ro_covered.role_engine(clone_dsn, c.schema, ro_role.ROLE, [])
             try:
                 async with ro_covered.role_sessionmaker(engine)() as db:
@@ -713,9 +742,10 @@ def _merge(results):
     return got[0] if got else None
 
 
-async def _grant_runs(admin_dsn, clone, schema, s, mp):
+async def _grant_runs(admin, role_dsn, schema, s, mp):
+    """The grant runs on `role_dsn`; `admin` is the admin connection on the
+    clone, opened by the caller before the open recorder's freeze."""
     out = {"outcomes": {}, "control": {}, "checked": [], "plan": {}}
-    role_dsn = ro_role.dsn_for(admin_dsn, clone, user=ro_role.ROLE)
     plan = collections.OrderedDict()
     for e in UNREACHED:
         grants = ro_covered.REFUSER_GRANTS[ro_covered.role_outcome(e)[1]]
@@ -725,90 +755,86 @@ async def _grant_runs(admin_dsn, clone, schema, s, mp):
                 g.update(grants)
                 es.append(e)
     results = collections.defaultdict(list)
-    admin = await asyncpg.connect(ro_role.dsn_for(admin_dsn, clone))
-    try:
-        for name, (grants, entries) in plan.items():
-            out["plan"][name] = sorted(grants)
-            await _grants(admin, schema, grants, "GRANT")
-            try:
-                log, deltas, locks, conts = await _counted(
-                    role_dsn, schema, out["checked"], DRIVERS[name], s, mp,
-                    {e[1:4] for e in entries})
-            finally:
-                await _grants(admin, schema, grants, "REVOKE")
-            out.setdefault("conts", {})[name] = conts
-            for e in entries:
-                results[e].append(ro_covered.under_grant(log, deltas, e, sorted(grants),
-                                                         locks, conts))
-        out["results"] = {e: list(r) for e, r in results.items()}
-        out["outcomes"] = {e: _merge(r) for e, r in results.items()}
-        # E2 controls: a planted locking statement at a read position.
-        out["lock_controls"] = {}
-        for cname, driver, entry, sql, grants in LOCK_CONTROLS:
-            plant = {entry[1:3]: sql} if sql else None
-            if grants:
-                await _grants(admin, schema, set(grants), "GRANT")
-            try:
-                log, deltas, locks, conts = await _counted(
-                    role_dsn, schema, out["checked"], DRIVERS[driver], s, mp,
-                    {entry[1:4]}, plant=plant, read_write=bool(grants))
-            finally:
-                if grants:
-                    await _grants(admin, schema, set(grants), "REVOKE")
-            got = _control_outcome(log, deltas, locks, conts, entry, grants)
-            out["lock_controls"][cname] = {"outcome": got, "log": log}
-        # REHEARSAL-R9-A1 (B): the continuity controls, same route.
-        out["continuity_controls"] = {}
-        for cname, driver, entry, prog, grants, _want in CONTINUITY_CONTROLS:
-            at = PLANT_AT.get(cname, entry)
-            plant = {at[1:3]: prog} if prog else None
-            targets = {e[1:4] for e in CONTROL_TARGETS.get(cname, [entry])}
-            if grants:
-                await _grants(admin, schema, set(grants), "GRANT")
-            try:
-                log, deltas, locks, conts = await _counted(
-                    role_dsn, schema, out["checked"], DRIVERS[driver], s, mp,
-                    targets, plant=plant, read_write=bool(grants))
-            finally:
-                if grants:
-                    await _grants(admin, schema, set(grants), "REVOKE")
-            got = _control_outcome(log, deltas, locks, conts, entry, grants)
-            out["continuity_controls"][cname] = {
-                "outcome": got, "log": log, "conts": conts, "gone": GONE[-1][2],
-                "prepared_left": await _prepared_left(role_dsn)}
-        save = os.environ.get("RO8_GRANT_SAVE")
-        if save:
-            with open(save, "w", encoding="utf-8") as fh:
-                json.dump([[list(e), list(o) if o else o]
-                           for e, o in out["outcomes"].items()], fh)
-        # Control: a write planted under a grant is counted (its table
-        # granted) or refused by the grant layer (its table not granted).
-        ctl = out["control"]
-        await _grants(admin, schema, {"UPDATE players"}, "GRANT")
+    for name, (grants, entries) in plan.items():
+        out["plan"][name] = sorted(grants)
+        await _grants(admin, schema, grants, "GRANT")
         try:
-            engine = ro_covered.role_engine(role_dsn, schema, ro_role.ROLE,
-                                            out["checked"], read_write=True)
-            try:
-                async with ro_covered.role_sessionmaker(
-                        engine, ro_covered.CountingSession)() as db:
-                    before = await db.writes()
-                    await AsyncSession.execute(db, text(
-                        "UPDATE players SET display_name = display_name"
-                        " WHERE id = CAST(:p AS uuid)"), {"p": str(s.lob.pids[0])})
-                    ctl["granted_delta"] = await db.writes() - before
-                    try:
-                        await AsyncSession.execute(db, text(
-                            "DELETE FROM ranked_queue WHERE false"))
-                        ctl["ungranted"] = "ran"
-                    except DBAPIError as e:
-                        ctl["ungranted"] = ro_covered._sqlstate(e)
-                    await db.rollback()
-            finally:
-                await engine.dispose()
+            log, deltas, locks, conts = await _counted(
+                role_dsn, schema, out["checked"], DRIVERS[name], s, mp,
+                {e[1:4] for e in entries})
         finally:
-            await _grants(admin, schema, {"UPDATE players"}, "REVOKE")
+            await _grants(admin, schema, grants, "REVOKE")
+        out.setdefault("conts", {})[name] = conts
+        for e in entries:
+            results[e].append(ro_covered.under_grant(log, deltas, e, sorted(grants),
+                                                     locks, conts))
+    out["results"] = {e: list(r) for e, r in results.items()}
+    out["outcomes"] = {e: _merge(r) for e, r in results.items()}
+    # E2 controls: a planted locking statement at a read position.
+    out["lock_controls"] = {}
+    for cname, driver, entry, sql, grants in LOCK_CONTROLS:
+        plant = {entry[1:3]: sql} if sql else None
+        if grants:
+            await _grants(admin, schema, set(grants), "GRANT")
+        try:
+            log, deltas, locks, conts = await _counted(
+                role_dsn, schema, out["checked"], DRIVERS[driver], s, mp,
+                {entry[1:4]}, plant=plant, read_write=bool(grants))
+        finally:
+            if grants:
+                await _grants(admin, schema, set(grants), "REVOKE")
+        got = _control_outcome(log, deltas, locks, conts, entry, grants)
+        out["lock_controls"][cname] = {"outcome": got, "log": log}
+    # REHEARSAL-R9-A1 (B): the continuity controls, same route.
+    out["continuity_controls"] = {}
+    for cname, driver, entry, prog, grants, _want in CONTINUITY_CONTROLS:
+        at = PLANT_AT.get(cname, entry)
+        plant = {at[1:3]: prog} if prog else None
+        targets = {e[1:4] for e in CONTROL_TARGETS.get(cname, [entry])}
+        if grants:
+            await _grants(admin, schema, set(grants), "GRANT")
+        try:
+            log, deltas, locks, conts = await _counted(
+                role_dsn, schema, out["checked"], DRIVERS[driver], s, mp,
+                targets, plant=plant, read_write=bool(grants))
+        finally:
+            if grants:
+                await _grants(admin, schema, set(grants), "REVOKE")
+        got = _control_outcome(log, deltas, locks, conts, entry, grants)
+        out["continuity_controls"][cname] = {
+            "outcome": got, "log": log, "conts": conts, "gone": GONE[-1][2],
+            "prepared_left": await _prepared_left(role_dsn)}
+    save = os.environ.get("RO8_GRANT_SAVE")
+    if save:
+        with open(save, "w", encoding="utf-8") as fh:
+            json.dump([[list(e), list(o) if o else o]
+                       for e, o in out["outcomes"].items()], fh)
+    # Control: a write planted under a grant is counted (its table
+    # granted) or refused by the grant layer (its table not granted).
+    ctl = out["control"]
+    await _grants(admin, schema, {"UPDATE players"}, "GRANT")
+    try:
+        engine = ro_covered.role_engine(role_dsn, schema, ro_role.ROLE,
+                                        out["checked"], read_write=True)
+        try:
+            async with ro_covered.role_sessionmaker(
+                    engine, ro_covered.CountingSession)() as db:
+                before = await db.writes()
+                await AsyncSession.execute(db, text(
+                    "UPDATE players SET display_name = display_name"
+                    " WHERE id = CAST(:p AS uuid)"), {"p": str(s.lob.pids[0])})
+                ctl["granted_delta"] = await db.writes() - before
+                try:
+                    await AsyncSession.execute(db, text(
+                        "DELETE FROM ranked_queue WHERE false"))
+                    ctl["ungranted"] = "ran"
+                except DBAPIError as e:
+                    ctl["ungranted"] = ro_covered._sqlstate(e)
+                await db.rollback()
+        finally:
+            await engine.dispose()
     finally:
-        await admin.close()
+        await _grants(admin, schema, {"UPDATE players"}, "REVOKE")
     return out
 
 
@@ -824,9 +850,10 @@ def runs():
     clone = "rf8_ro_cov_" + datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y%m%d%H%M%S") + "_" + os.urandom(2).hex()
     run(ro_role.clone(ADMIN_DSN, clone))
+    rec = ro_census.OpenRecorder()
     try:
         with pytest.MonkeyPatch.context() as mp:
-            got = run(_run_all(ADMIN_DSN, clone, mp))
+            got = run(_run_all(ADMIN_DSN, clone, mp, rec))
             save = os.environ.get("RO9_MEASURE_SAVE")
             if save:
                 # The measured tables (role run, grant run, controls), for
@@ -847,7 +874,57 @@ def runs():
                     }, fh, indent=1, default=list)
             yield got
     finally:
+        rec.thaw()
         run(ro_role.drop_clone(ADMIN_DSN, clone))
+
+
+# ------------------------------------------- FOUR-R11-A8: the open recorder
+
+def _window_refusal(w):
+    """None when the window report `w` (OpenRecorder.report, read at the thaw)
+    shows the bound held: the recorder was active, recorded at least one
+    open and built at least one connection, and found no violation.
+    Otherwise the sentence naming what failed (an installed recorder that
+    saw nothing is refused, not passed)."""
+    if not w or not w["active"]:
+        return "the open recorder was not active at the thaw of the role and grant runs: %r" % (w,)
+    if w["opens"] < 1 or w["built"] < 1:
+        return "the open recorder of the role and grant runs recorded no open: %r" % (w,)
+    if w["violations"]:
+        return "the role and grant runs broke the open bound: %r" % (w["violations"],)
+    return None
+
+
+def test_r11_open_window_holds(runs):
+    """Ruling FOUR-R11-A8 (2): in the role and grant runs, which carry the
+    recorder, every connection that was built was opened to the frozen DSN
+    (the role DSN of the clone)."""
+    assert _window_refusal(runs["window"]) is None, _window_refusal(runs["window"])
+
+
+def test_r11_open_window_control():
+    """Ruling FOUR-R11-A8 (2), the control: an open to another DSN inside a
+    window installed as _run_all installs it is refused by the module's own
+    assertion, with the recorder's message."""
+    if not ADMIN_DSN:
+        pytest.fail("CF_TEST_PG_DSN is unset: name an admin DSN; this module never skips")
+    rec = ro_census.OpenRecorder()
+    frozen = ro_role.dsn_for(ADMIN_DSN, "rf8_ro_r11rec_never_opened", user=ro_role.ROLE)
+
+    async def planted():
+        rec.freeze(frozen, [None])
+        try:
+            conn = await asyncpg.connect(ADMIN_DSN)   # the planted open: another DSN
+            await conn.close()
+            return rec.report()
+        finally:
+            rec.thaw()
+
+    w = run(planted())
+    refusal = _window_refusal(w)
+    assert refusal is not None and "open not the frozen DSN" in refusal, (refusal, w)
+    assert (w["opens"], w["built"]) == (1, 1), w
+    assert asyncpg.connect is asyncpg.connection.connect, "the thaw did not restore connect"
 
 
 def measured(runs, entry):
@@ -1365,10 +1442,18 @@ def test_census_complete_layer_frozen_whole():
     assert sum(len(v) for v in fz.R10_MERGE_FROZEN.values()) == fz.R10_MERGE_COUNT == 15
     assert set(fz.R10_MERGE_FROZEN) <= complete
     assert {f[0] for v in fz.R10_MERGE_FROZEN.values() for f in v} <= {"alias", "dynamic"}
+    # round 11: the two derived blocks (R11_ID_FROZEN, R11_OPEN_FROZEN) join
+    # the complete layer only, with alias and dynamic forms only
+    r11 = list(fz.R11_ID_FROZEN.items()) + list(fz.R11_OPEN_FROZEN.items())
+    assert {k for k, _v in r11} <= complete
+    assert {f[0] for _k, v in r11 for f in v} <= {"alias", "dynamic"}
+    assert sum(len(v) for v in fz.R11_ID_FROZEN.values()) == fz.R11_ID_COUNT
+    assert sum(len(v) for v in fz.R11_OPEN_FROZEN.values()) == fz.R11_OPEN_COUNT
     assert sum(len(fz.FROZEN[k]) for k in complete) == (fz.COMPLETE_COUNT + fz.R10_COUNT
-                                                        + fz.R10_MERGE_COUNT)
+                                                        + fz.R10_MERGE_COUNT
+                                                        + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT)
     assert fz.FROZEN_COUNT == (fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
-                               + fz.R10_MERGE_COUNT)
+                               + fz.R10_MERGE_COUNT + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT)
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once

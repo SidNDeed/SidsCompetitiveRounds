@@ -6149,3 +6149,20 @@ def test_r11_binder_registration_closes_at_freeze():
         _a1_ib.register_source(late, "def g():\n    return 2\n", late.__file__)
     with pytest.raises(_a1_ib.RegistrationRefused):
         _a1_ib.register_source(main, "x = 1\n", main.__file__)
+
+
+# ---------------------------------------------------------------------------
+# Rulings FOUR-R11-A8 and FOUR-R11-A11 (2): the open recorder over this
+# module. One freeze before its first id and one thaw after its last, on
+# ro_census.OpenRecorder frozen at production's own URL
+# (database.DATABASE_URL, in the form asyncpg resolves). No id of this module
+# reaches an open (the census in test_r11_rec_pg), so the thaw requires the
+# recorder active, zero connections built and zero opens recorded: an open,
+# if one ever appears, fails the run. The control (test_r11_rec_pg) plants an
+# open inside a window frozen by r11_open_window.a1_freeze and is refused by
+# r11_open_window.a1_window_refusal with the recorder's own message. The
+# fixture is defined in r11_open_window (every non-test function of this
+# module is walker code its walker grammar must admit) and is this module's
+# by this import.
+
+from r11_open_window import _a1_open_window  # noqa: E402,F401

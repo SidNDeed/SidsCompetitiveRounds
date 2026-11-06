@@ -669,6 +669,7 @@ class OpenRecorder:
         self.frozen = None
         self.allowed = None
         self._undo = []
+        self._recorder = None
 
     @staticmethod
     def _modules():
@@ -739,6 +740,7 @@ class OpenRecorder:
             return init(conn, *a, **k)
 
         apg.connect = recorder
+        self._recorder = recorder
         self._undo.append(lambda: setattr(apg, "connect", real))
         connection.Connection.__init__ = counting_init
         self._undo.append(lambda: setattr(connection.Connection, "__init__", init))
@@ -746,6 +748,21 @@ class OpenRecorder:
     def thaw(self):
         while self._undo:
             self._undo.pop()()
+        self._recorder = None
+
+    def installed(self):
+        """True while this freeze's recorder is the asyncpg module attribute
+        `connect` (frozen, not thawed, not replaced since)."""
+        apg, _connection, _cu = self._modules()
+        return self._recorder is not None and apg.connect is self._recorder
+
+    def report(self):
+        """The window as read at its thaw, before thaw(): active (installed()),
+        the opens recorded, the connections built, and violations() (None
+        when the recorder is not active)."""
+        active = self.installed()
+        return {"active": active, "opens": len(self.opens), "built": len(self.built),
+                "violations": self.violations() if active else None}
 
     def violations(self):
         """Every way the run broke the bound, as (kind, detail) rows."""
