@@ -1172,6 +1172,28 @@ class Bindings:
             self.bound_identity(d.name, line)
         return True
 
+    def nested_def(self, f, at):
+        """Round 11 (run 18: region_pick._pick's `state(s)`): the plain (not
+        async) definition nested in the walked function that plain name `f`
+        denotes at node `at`, or None: its one binding (resolve; a name
+        bound more than once is unproven), a `def` statement inside the
+        walked function that binds in a scope the read at `at` sees (run
+        20: the resolver decides it, the census counting a lookup of the
+        spelling outside the resolver)."""
+        if not isinstance(f, _ast.Name):
+            return None
+        try:
+            kind, node = self.resolve(f.id, getattr(at, "lineno", 0))
+        except Unclassified:
+            return None
+        if not (kind == "def" and isinstance(node, _ast.FunctionDef)
+                and node is not self.where):
+            return None
+        home = _binding_scope(kind, node, self)
+        if not any(home is s for s in _scope_chain(at, self) + [None]):
+            return None
+        return node
+
     def session_argument(self, call, arg, fn, line=0):
         """A session value passed as an argument of call `call` of function
         `fn` is classified only when it binds `fn`'s parameter of the same
@@ -1932,7 +1954,7 @@ def _call_provenance(call, b, policy, d):
             return _container([receiver_provenance(a, b, policy, d)
                                for a in list(call.args)
                                + [k.value for k in call.keywords]])
-        nested = _nested_def(f, b, call)
+        nested = b.nested_def(f, call)
         if nested is not None:
             return _nested_returns(nested, b, policy, d)
         return _returned(call, b, policy, d, awaited=False)
@@ -1953,22 +1975,6 @@ def _call_provenance(call, b, policy, d):
         return _container([_container(parts)])
     return None
 
-
-def _nested_def(f, b, at):
-    """The plain (not async) definition nested in the walked function that
-    plain name `f` denotes at node `at` by Python's scoping (its one
-    visible binding, a `def` statement inside the walked function), or
-    None (round 11, run 18: region_pick._pick's `state(s)`)."""
-    if not isinstance(f, _ast.Name):
-        return None
-    got, _sc = _visible_sites(f.id, b, at)
-    if len(got) != 1:
-        return None
-    kind, node = got[0]
-    if (kind == "def" and isinstance(node, _ast.FunctionDef)
-            and node is not b.where):
-        return node
-    return None
 
 
 def _nested_returns(fn, b, policy, d):
@@ -2109,7 +2115,7 @@ def _returned(call, b, policy, d, awaited):
         elif (isinstance(f, _ast.Attribute) and isinstance(f.value, _ast.Call)
               and isinstance(f.value.func, _ast.Name) and not f.value.args
               and not f.value.keywords
-              and b.module_accessor(b.callee(f.value.func), b.grammar)
+              and module_accessor(b.callee(f.value.func), b.grammar)
               is not None):
             fn = b.callee(f)                # `<accessor>().f(...)`
         else:

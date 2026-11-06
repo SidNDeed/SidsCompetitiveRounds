@@ -4958,11 +4958,11 @@ def test_r8_the_walker_grammar_is_the_round_7_freeze_less_three():
         "utf-8")).hexdigest()
     assert digest == ("073ed1959c7a09552e6d372d62988636"
                       "c8c77e90fe0d1157f57e276279648822"), digest
-    assert len(r11) == 361, len(r11)
+    assert len(r11) == 364, len(r11)
     digest = hashlib.sha256("\n".join(sorted(r11)).encode(
         "utf-8")).hexdigest()
-    assert digest == ("e5f34a6b2edcb472a76e7c81fd7ce36c"
-                      "249042fc42a532c2eed0523267618a33"), digest
+    assert digest == ("75e1c16e8268643bd8499e2ed54a3e27"
+                      "d49480130697404bbebde8448b799378"), digest
     assert not (r7 & r11) and _gs.WALKER_SHAPES == r7 | r11
 
 
@@ -6021,6 +6021,26 @@ def test_r11_supplied_helper_bound_by_the_function():
         _calls_supplied(bad.body[1].value, pick, b)
     assert "a supplied helper the walk reads separately, is bound by the " in (
         e.value.args[0][1]), e.value.args
+
+
+def test_r11_nested_def_through_the_resolver():
+    """Round 11 (run 20): a nested definition's call is read through the
+    resolver (Bindings.nested_def): its one binding, a `def` that binds in
+    a scope the call sees; a def bound inside another nested scope, or a
+    name bound twice, is unproven (None)."""
+    def at(src):
+        d = _ast.parse(src).body[0]
+        call = d.body[-1].value
+        return _cw.Bindings(main, d, grammar=None).nested_def(call.func, call), d
+    got, d = at("def f(db):\n    def state():\n        return 1\n"
+                "    return state()\n")
+    assert got is d.body[0], got
+    got, _d = at("def f(db):\n    def g():\n        def state():\n"
+                 "            return 1\n        return 0\n    return state()\n")
+    assert got is None, got
+    got, _d = at("def f(db, k):\n    def state():\n        return 1\n"
+                 "    state = k\n    return state()\n")
+    assert got is None, got
 
 
 def test_r11_binder_deps_hold_nested_reads():
