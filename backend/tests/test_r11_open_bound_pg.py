@@ -67,7 +67,7 @@ import ro_census  # noqa: E402
 import ro_covered  # noqa: E402
 import ro_role  # noqa: E402
 import test_r8_ro_covered_pg as t8  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
 ADMIN_DSN = ro_role.pg_dsn(os.environ.get("CF_TEST_PG_DSN") or "")
 
