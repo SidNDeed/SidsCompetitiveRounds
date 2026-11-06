@@ -192,7 +192,7 @@ def _measure(dsn, program):
 def _old_ident(dsn):
     relid = asyncio.run(_val(dsn, "SELECT 'public.rf11_t'::pg_catalog.regclass::pg_catalog.oid::text"))
     num = asyncio.run(_val(dsn, "SELECT attnum FROM pg_catalog.pg_attribute WHERE attrelid = $1::oid "
-                                "AND attname = 'rf11_old'", relid))
+                                "AND attname = 'rf11_old'", int(relid)))
     return relid, "%s.%s" % (relid, num)
 
 
