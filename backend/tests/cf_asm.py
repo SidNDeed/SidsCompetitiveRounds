@@ -470,18 +470,24 @@ _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrst
 # scanner, never from a statement's text. The value of an identifier is the
 # name PostgreSQL resolves (A-Z folded to a-z only, as downcase_identifier
 # does for UTF-8, cut to 63 bytes); of a quoted identifier its body with
-# doubled quotes undoubled, cut to 63 bytes; of a string constant or dollar
-# body its exact source text; of every other token its text. Comments and
-# whitespace are not tokens of the model.
+# doubled quotes undoubled, cut to 63 bytes; of every other token its
+# text. A string constant's value is the VALUE the
+# server makes from it (_string_value: each form of string constant is read
+# so or refused by name, A7-R6-PRE (2)); a dollar-quoted constant's value
+# is its body. Comments and whitespace are not tokens of the model. A value
+# built by an operator or a function ('started' || '_at', concat(), chr())
+# is no constant and is outside the model: no reader here evaluates one.
 #
 # THE BOUND (A7-R5-A1 (2)(b)): a form the model does not read exactly is
 # never resolved approximately. The model raises Unmodelled naming it, and
 # the assertion that reads the statement fails with that name: any U& token
 # (identifier or string: no UESCAPE decoding, no surrogate pairs, no next
-# form), the "other" token, an unterminated string, dollar body, quoted
+# form), an E'' string holding a backslash escape, a B'' or X'' bit string,
+# the "other" token, an unterminated string, dollar body, quoted
 # identifier or block comment, and a second statement after a `;` where one
-# statement is read. The Recorder counts what it met (Recorder.unmodelled)
-# and run_env asserts the count is 0 in the test itself.
+# statement is read. The Recorder counts what it met among the recorded
+# product statements (Recorder.unmodelled), and run_env asserts the count
+# is 0 in every test it runs (test_ffa_assembly_pg.py run_env).
 
 class Unmodelled(Exception):
     """A form the token model does not read exactly: `form` names it."""
@@ -489,6 +495,43 @@ class Unmodelled(Exception):
     def __init__(self, form, text=""):
         Exception.__init__(self, form, text[:120])
         self.form = form
+
+
+def _string_value(text):
+    """The value PostgreSQL 16 makes from a string constant (its token text
+    from sql_tokens), each form of scan.l read by value or refused by name
+    (A7-R6-PRE (2)); standard_conforming_strings is on (the server default,
+    which main.py never sets; run_env asserts it):
+      '...'  xq (:559): the body, each '' one quote (xqdouble :287, :647);
+      N'...' xn (:533): the keyword NCHAR (sql_tokens gives the N as an
+             identifier), then an xq constant, read as above;
+      continued (:238-244, :600): each segment read so, the segments
+             joined with NOTHING between them;
+      E'...' xe (:569): read as xq when it holds no backslash; with one,
+             Unmodelled("E'' escape"): an escape writes any character;
+      B'...', X'...' xb, xh (:501, :519): Unmodelled("bit string"): the
+             value is bits, not characters;
+      U&'...' xus (:576): Unmodelled("U& string") (_model raises it first).
+    A dollar-quoted constant is no string token: _dollar_body reads it."""
+    if text[:2] in ("U&", "u&"):
+        raise Unmodelled("U& string", text)
+    if text[:1] in "bBxX":
+        raise Unmodelled("bit string", text)
+    state = "xq"
+    if text[:1] in "eE":
+        if "\\" in text:
+            raise Unmodelled("E'' escape", text)
+        state = "xe"
+    q = text.index("'")
+    _e, segs, _closed = _string_end(text, q + 1, state)
+    return "".join(s[1:-1].replace("''", "'") for s in segs)
+
+
+def _dollar_body(text):
+    """A dollar-quoted constant's value: its body, the text between its two
+    delimiters, byte for byte (xdolq :758-801 applies no escape)."""
+    tag = _DOLQ.match(text).group(0)
+    return text[len(tag):len(text) - len(tag)]
 
 
 def _model(sql):
@@ -508,6 +551,10 @@ def _model(sql):
             name = _truncate(text.translate(_ASCII_LOWER))
         elif kind == "qident":
             name = _truncate(text[1:-1].replace('""', '"'))
+        elif kind == "string":
+            name = _string_value(text)
+        elif kind == "dollar":
+            name = _dollar_body(text)
         else:
             name = text
         out.append((kind, name))
@@ -630,31 +677,33 @@ def insert_parts(toks):
 
 
 def mentions(sql, name):
-    """Whether sql (a statement, a script or a fragment) names `name`,
-    read conservatively for a check that it must NOT: an identifier or
-    quoted identifier whose value is `name`, or `name` inside any string
-    constant, dollar body or comment, compared case-insensitively. Under the
-    bound (above) plus one more form: an E'' string holding a backslash
-    escape raises Unmodelled, since an escape can spell any character.
-    A text holding neither `name` in any letter case, nor U& in any case,
-    nor a backslash is False without being read: every token value of the
-    model is a part of the text (an identifier folded A-Z only, a quoted
-    identifier undoubled, strings, dollar bodies and comments exact), so
-    only a U& or backslash escape can spell `name` without its letters; a
+    """Whether sql (a statement, a script or a fragment) names `name` (a
+    name without quotes), read conservatively for a check that it must
+    NOT: an identifier or quoted identifier whose value is `name`, or
+    `name` inside the VALUE of a string constant or dollar body or inside a
+    comment's text, compared case-insensitively. A form the model refuses
+    (the bound, above) raises Unmodelled.
+    A text holding none of these is False without being read: `name` in
+    any letter case, U& in any case, a backslash, a quote together with a
+    line break. Then a value holding `name` means a text holding it: an
+    identifier is folded A-Z only and cut; undoubling a quoted identifier
+    or a string constant drops one quote of a pair and keeps the other, so
+    a quote-free run of a value is a run of the text; only a continued
+    string constant joins runs of the text into one value, and its
+    segments stand on different lines (a quote and a line break); only a
+    U& or backslash escape writes a character without the character. A
     route path or message is then no refusal (the S49 constants)."""
     low = name.lower()
     t = sql.lower()
     if low not in t and "u&" not in t and "\\" not in sql:
-        return False
-    statements(sql)                                 # the bound, by name
-    for kind, text in sql_tokens(sql):
-        if kind in ("ident", "qident") and name_of(_model(text)[0]) == name:
+        if "'" not in sql or ("\n" not in sql and "\r" not in sql):
+            return False
+    for kind, value in _model(sql):                 # the bound, by name
+        if kind in ("ident", "qident") and value == name:
             return True
-        if kind == "string" and text[:1] in "eE" and "\\" in text:
-            raise Unmodelled("E'' escape", text)
-        if kind in ("string", "dollar", "comment") and low in text.lower():
+        if kind in ("string", "dollar") and low in value.lower():
             return True
-    return False
+    return any(kind == "comment" and low in text.lower() for kind, text in sql_tokens(sql))
 
 
 def _words(sql):
