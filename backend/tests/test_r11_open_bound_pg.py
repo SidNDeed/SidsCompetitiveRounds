@@ -87,7 +87,8 @@ def _require_cluster():
 
 
 def _clone_name(tag):
-    return "rf11_%s_%s_%s" % (tag, datetime.datetime.now(datetime.timezone.utc).strftime(
+    # ro_role.clone admits only rf8_ro_* names (its DB_RE)
+    return "rf8_ro_r11%s_%s_%s" % (tag, datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y%m%d%H%M%S"), os.urandom(2).hex())
 
 
@@ -303,11 +304,23 @@ CONTROLS = (
 )
 
 
-@pytest.mark.parametrize("kind", [c[0] for c in CONTROLS])
-def test_r11_bound_controls(kind):
+@pytest.fixture(scope="module")
+def control_clone():
+    """The controls' frozen DSN is the admin on a clone of their own; the
+    other identity is the admin DSN as given (its own database), which the
+    admin can always open."""
     _require_cluster()
+    clone = _clone_name("ctl")
+    run(ro_role.clone(ADMIN_DSN, clone))
+    try:
+        yield ro_role.dsn_for(ADMIN_DSN, clone)
+    finally:
+        run(ro_role.drop_clone(ADMIN_DSN, clone))
+
+
+@pytest.mark.parametrize("kind", [c[0] for c in CONTROLS])
+def test_r11_bound_controls(kind, control_clone):
     want, opens, built = next(c[1:] for c in CONTROLS if c[0] == kind)
-    other = ro_role.dsn_for(ADMIN_DSN, "template1")
-    got = run(_control(kind, ADMIN_DSN, other))
+    got = run(_control(kind, control_clone, ADMIN_DSN))
     assert got == (want, opens, built), got
     assert asyncpg.connect is asyncpg.connection.connect, "the thaw did not restore connect"
