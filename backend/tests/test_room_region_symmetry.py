@@ -454,8 +454,12 @@ def _is_fallback(stmt, name):
 
 
 def _binders(fn, name):
-    """Every node inside `fn` that binds `name`, in any form Python has,
-    other than `fn`'s own parameters."""
+    """Every node inside `fn`, other than `fn`'s own parameters, that binds
+    `name`: the name stored to or deleted (which is how =, augmented and
+    annotated assignment, :=, unpacking, del, and for, with and comprehension
+    targets bind), a parameter or type parameter of a nested function, a
+    nested def or class, an import, an except clause, a match capture, a
+    global or nonlocal declaration. _PLANTED has a source for each form."""
     a = fn.args
     own = {p for p in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg] if p is not None}
     found = []
@@ -468,7 +472,8 @@ def _binders(fn, name):
             hit = node is not fn and node.name == name
         elif isinstance(node, ast.alias):
             hit = (node.asname or node.name.split(".")[0]) == name
-        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar,
+                               ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
             hit = node.name == name
         elif isinstance(node, ast.MatchMapping):
             hit = node.rest == name
@@ -568,8 +573,8 @@ def _is_name(node, name):
 
 
 def _census_of_the_leaf(fn, parents, refuse):
-    """The leaf's own census (ruling RP-5a (3)(b)), so that it treats every
-    code alike. Its code parameter is never bound and is read only as the key
+    """The leaf's own census (ruling RP-5a (3)(b)), so that the code never
+    enters its arithmetic. Its code parameter is never bound and is read only as the key
     of the lookup, folded: `_REGION_SEEN.get(_region_token(<code>))` (code).
     Its reading is bound at most once, where none was handed in (binding), and
     is read only in that fallback's test or as `<reading> - <stamp>` compared
@@ -687,6 +692,44 @@ _PLANTED = [
      [(_BIND, "    mono = round(time.monotonic())\n")], {"binding"}),
     ("the reading taken inside a branch", "_pick_room_region",
      [(_BIND, "    if True:\n        mono = time.monotonic()\n")], {"binding"}),
+    ("the reading bound by an annotated assignment", "_pick_room_region",
+     [(_RETURN, "    mono: float = 0.0\n" + _RETURN)], {"binding"}),
+    ("the reading bound by unpacking", "_pick_room_region",
+     [(_RETURN, "    (mono, other) = (0.0, 0.0)\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a for loop", "_pick_room_region",
+     [(_RETURN, "    for mono in ():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a with statement", "_pick_room_region",
+     [(_RETURN, "    with open(room_name) as mono:\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by an except clause", "_pick_room_region",
+     [(_RETURN, "    try:\n        pass\n    except ValueError as mono:\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by an import", "_pick_room_region",
+     [(_RETURN, "    import time as mono\n" + _RETURN)], {"binding"}),
+    ("the reading declared global", "_pick_room_region",
+     [(_RETURN, "    global mono\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a match capture", "_pick_room_region",
+     [(_RETURN, "    match chosen:\n        case mono:\n            pass\n" + _RETURN)], {"binding"}),
+    ("the reading declared nonlocal", "_pick_room_region",
+     [(_RETURN, "    nonlocal mono\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a starred match capture", "_pick_room_region",
+     [(_RETURN, "    match chosen:\n        case [*mono]:\n            pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a mapping match's rest", "_pick_room_region",
+     [(_RETURN, "    match chosen:\n        case {**mono}:\n            pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function", "_pick_room_region",
+     [(_RETURN, "    def mono():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function's starred type parameter", "_pick_room_region",
+     [(_RETURN, "    def later[*mono]():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function's ** type parameter", "_pick_room_region",
+     [(_RETURN, "    def later[**mono]():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested class", "_pick_room_region",
+     [(_RETURN, "    class mono:\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function's parameter", "_pick_room_region",
+     [(_RETURN, "    def later(mono=None):\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function's type parameter", "_pick_room_region",
+     [(_RETURN, "    def later[mono]():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a comprehension's target", "_pick_room_region",
+     [(_RETURN, "    [0 for mono in ()]\n" + _RETURN)], {"binding", "nested"}),
+    ("the reading handed to the weighing starred", "_pick_room_region",
+     [(_SECOND, "_region_agreed(*(mr, orr, mono))")], {"argument", "use"}),
     ("a weighing that leaves the reading out", "_pick_room_region",
      [(_SECOND, "_region_agreed(mr, orr)")], {"argument"}),
     ("the wall-clock instant handed in its place", "_pick_room_region",
@@ -952,8 +995,7 @@ class _Recorder:
     of the leaf (_region_corroborated) and of the two functions that hand it
     the reading: (the callee, where it was called from, where that caller was
     called from, what it received for the reading). A place is (function,
-    line, column) of the call, read from the calling frame's own instruction.
-    It hands every event on to the profile function it replaced."""
+    line, column) of the call, read from the calling frame's own instruction."""
 
     def __init__(self):
         self.codes = {getattr(main, name).__code__: name for name in _READING_CALLEES}
@@ -1133,6 +1175,7 @@ def test_the_leaf_counts_a_sighting_to_its_last_instant_for_every_code_asked():
     the census's (test_the_census_of_mains_own_functions_refuses_nothing)."""
     assert len(tournaments.ROUNDS_REGIONS) == 15
     assert [len(main._region_token(c)) for c in ("qz", "qzqzq")] == [2, 5]
+    assert not {"hk", "uae", "qz", "qzqzq", "qzq"} & tournaments.ROUNDS_REGIONS
     assert main._region_token(" QzQ ") == "qzq"
     for code in _LEAF_CODES:
         key = main._region_token(code)
