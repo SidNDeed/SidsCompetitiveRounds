@@ -2685,15 +2685,17 @@ namespace CompetitiveRounds
                     $" rpcSwallow=+{_rpcSwallows - _lastRpcSwallows}" +
                     $" rpcReraise=+{_rpcReraises - _lastRpcReraises}" +
                     $" poolSwallow=+{_poolSwallows - _lastPoolSwallows}" +
-                    $" orphanSer=+{_orphanSkips - _lastOrphanSkips}"
 #if SCR_FRAMETIME
                     // Frame-time lane only (rulings R6-A3.11.19 Q3, R6-A3.11.20): the sample's own wall-clock UTC
                     // time, read with its actor count, so the F8 bar can judge that the hold span is covered (no
                     // stretch longer than G between samples). Always last; "unread" when the count was not read.
+                    // The production line is the #else branch, unchanged (the proof's hunk check compares it).
+                    $" orphanSer=+{_orphanSkips - _lastOrphanSkips}"
                     + " ft_utc=" + (ftUtc == default(DateTime) ? "unread"
-                        : ftUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture))
+                        : ftUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture)));
+#else
+                    $" orphanSer=+{_orphanSkips - _lastOrphanSkips}");
 #endif
-                    );
             }
             // Baselines re-sync every interval, in-room or not, so the first
             // in-room line after a menu stretch spans at most one interval.
