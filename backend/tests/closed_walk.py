@@ -1713,6 +1713,10 @@ RESULT_BUILTIN = {
     # own class (a dict whose methods are dict's or the frozen stdlib
     # class's own), counting its argument's elements
     "Counter": "C", "collections.Counter": "C",
+    # round 11 (run 17): iterators of their arguments' elements: zip's
+    # elements are tuples of one element of each argument, enumerate's a
+    # count and an element, reversed's an element
+    "zip": "Z", "enumerate": "N", "reversed": "C",
 }
 _DISPLAYS = (_ast.List, _ast.Tuple, _ast.Set)
 _INSERTING = {"append": (0,), "add": (0,), "insert": (1,),
@@ -1939,6 +1943,11 @@ def _call_provenance(call, b, policy, d):
         if not call.args:
             return "B"
         return _container([_arg_elements(a, b, policy, d) for a in call.args])
+    if kind in ("Z", "N"):
+        parts = [_arg_elements(a, b, policy, d) for a in call.args[:1 if kind == "N" else None]]
+        if kind == "N":
+            parts = ["B"] + parts
+        return _container([_container(parts)])
     return None
 
 
