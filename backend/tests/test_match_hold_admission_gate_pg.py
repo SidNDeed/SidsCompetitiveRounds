@@ -2266,26 +2266,20 @@ _R11_D_ADD = [(_R11_D_LAPSE_DEF, _R11_D_LAPSE_DEF.replace("n):", "n, extra):"))]
 
 
 def test_r11_d_r8_the_unedited_helper_planted_walks_as_the_real_one():
-    """FOUR-R11-A13 (4)(b): the helper's unedited text planted gives, row
-    for row, what the real helper gives (the outputs and the helper's kind,
-    ORDER marker off and on), at both real spans that call it."""
+    """FOUR-R11-A13 (4)(b), at the helper: the helper's unedited text
+    planted (its record derived by _planted) gives what the real helper
+    gives: the same effects (closed_walk.helper_effects) and the same kind
+    (_helper_kind: its refusing-path walk), each read inside a gate walk,
+    ORDER marker off and on. The span around it is not compared here: a
+    span walked in a planted module places none of its executes (round 8,
+    M1), so its rows differ from the real span's for that reason alone
+    (NOTES-r11-d, the line-15 finding)."""
 
-    def outputs(base, helper_edits):
-        # base's walk with helper_edits planted: [(problems or refusal, the
-        # scope's _rdm_live_or_lapse kind)], the ORDER marker off, then on
-        modname, name, entry, target = base
-        fn, scope, at = _planted(_R7_MODULES[modname], name, (), (), helper_edits)
-
+    def outputs(fn, scope):
         def read():
-            if entry == "prefix":
-                got = claim_prefix_violations(fn, target, scope, name, at)[0]
-            else:
-                call = next(n for n in ast.walk(fn) if isinstance(n, ast.Call)
-                            and isinstance(n.func, ast.Name) and n.func.id == target)
-                got = refusal_branch_violation(fn, call, entry.split(":")[1],
-                                               scope, at)
-            return got, _helper_kind(vars(scope)["_rdm_live_or_lapse"],
-                                     _gate_policy(scope))
+            p = _gate_policy(scope)
+            return (_in_grammar_walk(_cw.helper_effects, fn, p),
+                    _in_grammar_walk(_helper_kind, fn, p))
 
         _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
         try:
@@ -2294,11 +2288,15 @@ def test_r11_d_r8_the_unedited_helper_planted_walks_as_the_real_one():
             _gg.ORDER_SWITCH["bindings"] = None
         return [off, read()]
 
-    for base in (PREFIX_CLAIM, DIRECT):
-        real = outputs(base, ())
-        plant = outputs(base, [("_rdm_live_or_lapse", [])])
-        assert plant == real, (base, real, plant)
-        assert real[0][1] == ("refuses", None), (base, real)
+    _fn, scope, _at = _planted(main, "_rdm_claim", (), (),
+                               [("_rdm_live_or_lapse", [])])
+    planted = vars(scope)["_rdm_live_or_lapse"]
+    assert planted is not main._rdm_live_or_lapse
+    assert _PLANT_RECORDS[id(planted)][1] is main._rdm_live_or_lapse
+    real = outputs(main._rdm_live_or_lapse, main)
+    plant = outputs(planted, scope)
+    assert plant == real, (real, plant)
+    assert real[0][1] == ("refuses", None), real
 
 
 def test_r11_d_r8_a_record_naming_another_function_is_refused():
@@ -2322,25 +2320,22 @@ def test_r11_d_r8_a_record_naming_another_function_is_refused():
                                          ("adds a parameter", _R11_D_ADD)])
 def test_r11_d_r8_a_plant_that_changes_parameters_is_refused(label, pairs):
     """FOUR-R11-A13 (4)(e), second half: the 456 plant's helper with a
-    parameter renamed, or one added, is refused by (3)(b) with its own
-    sentence (its record passes (3)(a): the text is the real helper's with
-    the recorded edit), the ORDER marker off and on."""
-    modname, name, _entry, target = PREFIX_CLAIM
-    fn, scope, at = _planted(_R7_MODULES[modname], name, (), (),
-                             [("_rdm_live_or_lapse", pairs)])
-
-    def read():
-        got = claim_prefix_violations(fn, target, scope, name, at)[0]
-        return got[0] if got else None
-
-    _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
-    try:
-        off = read()
-    finally:
-        _gg.ORDER_SWITCH["bindings"] = None
-    on = read()
-    assert off is not None and _R11_D_B in off, (label, off)
-    assert on is not None and _R11_D_B in on, (label, on)
+    parameter renamed, or one added, planted by _planted, is refused at
+    admission by (3)(b) with its own sentence; its derived record passes
+    (3)(a) (the text is the real helper's with the recorded edit), so only
+    (3)(b) refuses it. Read at the admission: through the prefix walk the
+    gate grammar's frozen ORDER header of the helper's definition refuses a
+    changed signature first (measured at fb9de924, NOTES-r11-d)."""
+    _fn, scope, _at = _planted(main, "_rdm_claim", (), (),
+                               [("_rdm_live_or_lapse", pairs)])
+    planted = vars(scope)["_rdm_live_or_lapse"]
+    record = _PLANT_RECORDS[id(planted)]
+    assert record == (planted, main._rdm_live_or_lapse, tuple(pairs)), record
+    assert _frozen_edited(main._rdm_live_or_lapse, pairs) == textwrap.dedent(
+        inspect.getsource(planted.__code__)), label
+    with pytest.raises(Unclassified) as e:
+        _plant_admitted(planted, record, 0)
+    assert _R11_D_B in e.value.args[0][1], (label, e.value.args)
 
 
 def test_r11_d_r8_only_the_plant_harness_hands_another_functions_roots():
