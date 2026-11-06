@@ -32,7 +32,8 @@ OPS = {
         r"\b_?ast\.Compare\b|\.value is None\b|_plain_text\(|_CENSUS_EXEMPT\b"),
     "byname": re.compile(
         r"\.(listed|named|spelled|spelled_any|spelled_once|spelled_in"
-        r"|namedtuple_class|callee|opaque_callee|_module_object)\("
+        r"|namedtuple_class|callee|opaque_callee|_module_object|supplied"
+        r"|opaque_def)\("
         r"|_frozen_callee\(|\bpure_(calls|awaits)\b|_REFUSAL_EXCEPTIONS"
         r"|_HOLD_REPLAYS"),
 }
@@ -42,10 +43,14 @@ OPS = {
 # call; _returned's callee, plain and through a module accessor, 3) and
 # compare 1 -> 3 (receiver_provenance's
 # reading of a Compare's operands), each hit judged in the round-11 NOTES.
+# Later in round 11 the operation gains the supplied-helper reads
+# (Bindings.supplied, opaque_def): closed_walk 30 -> 32 (supplied's
+# opaque_def; _call_provenance's namedtuple_class), a1 38 -> 39 (the two
+# relock reads moved from spelled to supplied, _calls_supplied's one).
 COUNTS = {
-    ("byname", "closed_walk.py"): 30,
+    ("byname", "closed_walk.py"): 32,
     ("byname", "resolution_sites.py"): 3,
-    ("byname", "test_a1_identity_formation.py"): 38,
+    ("byname", "test_a1_identity_formation.py"): 39,
     ("byname", "test_match_hold_admission_gate_pg.py"): 23,
     ("compare", "closed_walk.py"): 3,
     ("compare", "resolution_sites.py"): 8,
