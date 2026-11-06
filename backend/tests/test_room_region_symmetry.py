@@ -588,8 +588,10 @@ _FRACTION_SHAPES = [
 def _wrong(monkeypatch, capsys, case, shape, distort=None):
     """One pick of `shape`, its sighting stamped as `case` says and the clock
     answering `case`'s reading (what `distort` makes of it, when given).
-    Returns what the pick got wrong against the shape's expectation for that
-    case: an empty list when nothing."""
+    Returns what the pick got wrong, an empty list when nothing: the room,
+    where it is not the one the shape expects for that case; the pick's
+    second log line, where it lacks a field the shape expects; the count of
+    clock reads, where it is not one."""
     label, stamp, reading, is_live = case
     args, sighted, live, expired = shape
     main._REGION_SEEN.clear()
