@@ -539,8 +539,8 @@ class _FixedClock:
 # float after it. There are three stamps, A, B and C; what distinguishes them,
 # and that the readings are the floats this note says they are, is asserted by
 # test_the_cases_around_expiry_are_adjacent_floats_and_exact_ages.
-# test_no_moved_or_rounded_reading_passes_the_cases runs the same cases with
-# readings that have been moved or rounded, and
+# test_every_listed_moved_or_rounded_reading_gets_a_case_wrong runs the same
+# cases with readings that have been moved or rounded, and
 # test_the_third_stamp_is_what_catches_a_half_going_to_the_odd_step shows what
 # the third stamp is for.
 _TTL = main._REGION_SEEN_TTL_SECONDS
@@ -706,7 +706,7 @@ _MOVED_OR_ROUNDED = [
 ]
 
 
-def test_no_moved_or_rounded_reading_passes_the_cases(monkeypatch, capsys):
+def test_every_listed_moved_or_rounded_reading_gets_a_case_wrong(monkeypatch, capsys):
     """With the reading left as it was read, every shape gets every case
     right. With any reading of _MOVED_OR_ROUNDED in its place, every shape
     gets some case wrong."""
