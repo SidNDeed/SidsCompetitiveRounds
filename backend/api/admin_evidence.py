@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from array import array
 from dataclasses import dataclass, field
@@ -76,6 +77,14 @@ AER_CONTRACT_BOUNDS = {
     "RATE_MAX": 20,
     "RATE_WINDOW_S": 600,
     "ACTOR_ID_MAX_DIGITS": 32,
+    # Evidence sections (phase 2, B10): the per-statement row limits of the
+    # card, combat and identity-clock reads, the contribution rows shown per
+    # seat of a game, and the longest fact name.
+    "SECTION_KEYS_MAX": 64,
+    "SECTION_ROWS_MAX": 512,
+    "SECTION_CONTRIB_MAX": 4,
+    "SECTION_DAILY_ROWS_MAX": 512,
+    "FACT_NAME_MAX": 48,
 }
 
 DISPLAY_DEFAULTS = {
@@ -1605,7 +1614,7 @@ SELECT f.id, f.match_id, f.flag_reason, f.flag_details, f.reviewed_at, f.created
  WHERE f.match_id = ANY(CAST(:ids AS uuid[]))
  ORDER BY f.id"""
 
-GAME_ROWS_SQL = ("SELECT %s, m.p1_rounds_won, m.p2_rounds_won FROM matches m "
+GAME_ROWS_SQL = ("SELECT %s, m.p1_rounds_won, m.p2_rounds_won, m.photon_room_id FROM matches m "
                  "WHERE m.id = ANY(CAST(:ids AS uuid[]))" % _SELECT_LIST)
 
 AUDIT_SQL = """
@@ -1885,6 +1894,405 @@ async def _summary_page(rep, shape, rows, requested, subjects, accounts):
     return windows, summary, win_at
 
 
+# ── Evidence sections (phase 2, B10) ───────────────────────────────────────
+#
+# The report also reads the card-draw, combat and identity-clock evidence
+# tables and shows what they store, under the stored column names (a combat
+# sums entry under its stored key). Uncolored, as 1a: no class, no rank, no
+# rule, and no rules revision id is shown. Each source is read inside its own
+# SAVEPOINT, so a failed read leaves that section `unavailable` and the
+# transaction usable for the rest of the page (a caught asyncpg error would
+# otherwise end it, lesson 235).
+
+# A page carries sections only when the caller asks for them: a 1a caller
+# (an older bot) receives the 1a body byte for byte, so either deploy order
+# of the api and the bot serves every page.
+SECTIONS_HEADER = "X-Evidence-Sections"
+SECTIONS_PHASE = "2"
+SECTION_SOURCES = ("card", "combat", "identity_clock")
+SECTION_STATES = ("ok", "no_record", "unavailable")
+SECTION_SEAT_STATES = ("ok", "no_record", "conflict", "purged")
+SECTION_SWITCHES = ("accept", "worker", "purge")
+_CARD_COUNTERS = ("hands", "slots", "notrun_hands") + tuple(
+    "%s_%s" % (m, r) for m in ("obs", "exp", "var") for r in ("common", "uncommon", "rare"))
+_SECTION_SPEC = {
+    "card": {"ev": "card_evidence", "games": "card_games", "contrib": "card_contrib",
+             "daily": "card_player_daily", "day": "day", "by_match": True,
+             "seat": ("pool_state", "deal_profile", "header_mod_version", "received_at"),
+             "game": ("series_sc", "processed_at", "finalized_at", "derive_fault",
+                      "fault_attempts", "parked_at", "retry_at"),
+             "contrib_cols": ("deal_profile",) + _CARD_COUNTERS,
+             "daily_cols": ("games",) + _CARD_COUNTERS},
+    "combat": {"ev": "combat_evidence", "games": "combat_games", "contrib": "combat_contrib",
+               "daily": "combat_player_daily", "day": "utc_day", "by_match": True,
+               "seat": ("consts_version", "header_mod_version", "received_at"),
+               "game": ("coverage", "records_n", "record_faults", "processed_at",
+                        "finalized_at"),
+               "contrib_cols": ("consts_version", "sums"),
+               "daily_cols": ("games", "sums")},
+    "identity_clock": {"ev": "identity_clock_evidence", "games": "identity_clock_games",
+                       "contrib": None, "daily": None, "day": None, "by_match": False,
+                       "seat": ("consts_version", "post_clock", "post_proc", "post_sw_ms",
+                                "post_unity_ms", "post_photon_ts", "conn_class",
+                                "conn_ranges", "received_at"),
+                       "game": ("records_n", "paired_points", "processed_at", "finalized_at"),
+                       "contrib_cols": (), "daily_cols": ()},
+}
+# A stored jsonb key or a stored word shown as part of a fact name.
+_FACT_KEY = re.compile(r"[a-z0-9_]{1,24}")
+FACT_NAME = re.compile(r"[a-z0-9_.]{1,%d}" % AER_CONTRACT_BOUNDS["FACT_NAME_MAX"])
+
+
+def section_sql(src):
+    """One source's statements. Each is keyed (an index prefix) and LIMITed
+    by a bound, every bind typed by CAST; no LATERAL."""
+    s = _SECTION_SPEC[src]
+    out = {
+        "keys": ("SELECT DISTINCT e.stable_game_key FROM %s e "
+                 "WHERE e.attach_key = ANY(CAST(:rooms AS varchar[])) "
+                 "AND e.seat_player_id = ANY(CAST(:pids AS uuid[])) "
+                 "LIMIT CAST(:n AS integer)" % s["ev"]),
+        "records": ("SELECT e.stable_game_key, e.attach_key, e.seat_player_id, "
+                    "e.other_player_id, e.conflict_at, e.conflict_kind, e.lists_purged_at, %s "
+                    "FROM %s e WHERE e.stable_game_key = ANY(CAST(:keys AS varchar[])) "
+                    "ORDER BY e.stable_game_key, e.seat_player_id LIMIT CAST(:n AS integer)"
+                    % (", ".join("e." + c for c in s["seat"]), s["ev"])),
+        "games": ("SELECT g.stable_game_key, g.pair_lo, g.pair_hi, g.match_id, %s "
+                  "FROM %s g WHERE g.stable_game_key = ANY(CAST(:keys AS varchar[])) "
+                  "ORDER BY g.stable_game_key, g.pair_lo, g.pair_hi LIMIT CAST(:n AS integer)"
+                  % (", ".join("g." + c for c in s["game"]), s["games"])),
+        "switches": ("SELECT r.key, r.value FROM runtime_settings r "
+                     "WHERE r.key = ANY(CAST(:keys AS varchar[])) ORDER BY r.key "
+                     "LIMIT CAST(:n AS integer)"),
+    }
+    if s["by_match"]:
+        out["by_match"] = ("SELECT g.stable_game_key FROM %s g "
+                           "WHERE g.match_id = ANY(CAST(:ids AS uuid[])) "
+                           "ORDER BY g.stable_game_key LIMIT CAST(:n AS integer)" % s["games"])
+    if s["contrib"]:
+        out["contrib"] = (
+            "SELECT c.stable_game_key, c.subject_player_id, c.source, c.coverage, "
+            "c.computed_at, %s FROM %s c WHERE c.stable_game_key = ANY(CAST(:keys AS varchar[])) "
+            "ORDER BY c.stable_game_key, c.subject_player_id, c.computed_at DESC, c.source "
+            "LIMIT CAST(:n AS integer)"
+            % (", ".join("c." + c for c in s["contrib_cols"]), s["contrib"]))
+        out["daily"] = (
+            "SELECT d.source, d.coverage, %s FROM %s d "
+            "WHERE d.subject_player_id = CAST(:s AS uuid) AND d.%s >= CAST(:d0 AS date) "
+            "ORDER BY d.%s DESC, d.source, d.coverage LIMIT CAST(:n AS integer)"
+            % (", ".join("d." + c for c in s["daily_cols"]), s["daily"], s["day"], s["day"]))
+    return out
+
+
+SECTION_SQL = {src: section_sql(src) for src in SECTION_SOURCES}
+
+
+def _jsonb(raw):
+    """A jsonb value as a dict: a text() read returns JSONB as text."""
+    if isinstance(raw, str):
+        raw = json.loads(raw) if raw else {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _section_day0():
+    """The first UTC day of the account's `pop_days` days, today included."""
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    return today - _dt.timedelta(days=DISPLAY_DEFAULTS["pop_days"] - 1)
+
+
+async def _section_read(db, src, games, accounts, day0):
+    """One source's stored rows for the page's games and, on a summary page,
+    the subjects' daily rows. `truncated` is set when a statement returned
+    exactly its LIMIT."""
+    sql, b = SECTION_SQL[src], AER_CONTRACT_BOUNDS
+    data = {"records": [], "games": [], "contrib": [], "daily": {}, "switches": {},
+            "truncated": False}
+    rooms = sorted({g["room"] for g in games if g["room"]})
+    pids = sorted({p for g in games for p in (g["p1"], g["p2"])})
+    keys = set()
+    if rooms:
+        found = await _aer_rows(db, sql["keys"], {"rooms": rooms, "pids": pids,
+                                                  "n": b["SECTION_KEYS_MAX"]})
+        keys.update(r["stable_game_key"] for r in found)
+        data["truncated"] |= len(found) == b["SECTION_KEYS_MAX"]
+    if "by_match" in sql:
+        found = await _aer_rows(db, sql["by_match"], {"ids": [g["id"] for g in games],
+                                                      "n": b["SECTION_KEYS_MAX"]})
+        keys.update(r["stable_game_key"] for r in found)
+        data["truncated"] |= len(found) == b["SECTION_KEYS_MAX"]
+    if keys:
+        for part in ("records", "games") + (("contrib",) if "contrib" in sql else ()):
+            rows = await _aer_rows(db, sql[part], {"keys": sorted(keys),
+                                                   "n": b["SECTION_ROWS_MAX"]})
+            data[part] = rows
+            data["truncated"] |= len(rows) == b["SECTION_ROWS_MAX"]
+    names = ["%s_evidence_%s" % (src, w) for w in SECTION_SWITCHES]
+    data["switches"] = {r["key"]: r["value"] for r in await _aer_rows(
+        db, sql["switches"], {"keys": names, "n": len(names)})}
+    if "daily" in sql:
+        for acc in accounts:
+            rows = await _aer_rows(db, sql["daily"], {"s": acc, "d0": day0,
+                                                      "n": b["SECTION_DAILY_ROWS_MAX"]})
+            data["daily"][acc] = rows
+            data["truncated"] |= len(rows) == b["SECTION_DAILY_ROWS_MAX"]
+    return data
+
+
+async def read_sections(db, games, accounts=()):
+    """Every source's data for `games` (`_section_games` dicts), or None for a
+    source whose read failed: that section alone reads `unavailable`."""
+    day0 = _section_day0()
+    out = {}
+    for src in SECTION_SOURCES:
+        try:
+            async with db.begin_nested():
+                out[src] = await _section_read(db, src, games, [str(a) for a in accounts], day0)
+        except Exception as exc:  # noqa: BLE001 -- the section says so; the page answers
+            _aer_log.warning("admin_evidence section %s unavailable: %s", src,
+                             type(exc).__name__)
+            out[src] = None
+    return out
+
+
+def _section_games(rows):
+    return [{"id": str(r["id"]), "room": r.get("photon_room_id"),
+             "p1": str(r["player1_id"]), "p2": str(r["player2_id"])} for r in rows]
+
+
+def _fact(name, value):
+    """One `[name, value]` fact: None stays None (not recorded), a bool is
+    yes or no, a number its decimal text, a time its ISO text, text encoded."""
+    if value is None:
+        return [name, None]
+    if isinstance(value, bool):
+        return [name, "yes" if value else "no"]
+    if isinstance(value, int):
+        return [name, "%d" % value]
+    if isinstance(value, float):
+        return [name, "%r" % value]
+    if isinstance(value, (_dt.datetime, _dt.date)):
+        return [name, value.isoformat()]
+    return [name, _text("%s" % value)]
+
+
+def _pair_of(row, a, b):
+    return {str(row[a]), str(row[b])}
+
+
+def _game_records(data, game):
+    """The source's records and games rows that belong to `game`: those under
+    a games row the pairing worker attached to it; when none is attached yet,
+    the records for the same two seats whose attach key is the game's room
+    (`waiting`). A games row attached to another match whose records name
+    this room is that match's, counted in `other`."""
+    pair = {game["p1"], game["p2"]}
+    recs = [r for r in data["records"] if _pair_of(r, "seat_player_id", "other_player_id") == pair]
+    attached = {g["stable_game_key"] for g in data["games"]
+                if g["match_id"] is not None and str(g["match_id"]) == game["id"]
+                and _pair_of(g, "pair_lo", "pair_hi") == pair}
+    elsewhere = {g["stable_game_key"] for g in data["games"]
+                 if g["match_id"] is not None and str(g["match_id"]) != game["id"]}
+    roomed = {r["stable_game_key"] for r in recs
+              if game["room"] is not None and r["attach_key"] == game["room"]}
+    if attached:
+        keys, paired = attached, "attached"
+    else:
+        keys = roomed - elsewhere
+        paired = "waiting" if keys else None
+    rows = [g for g in data["games"] if g["stable_game_key"] in keys
+            and _pair_of(g, "pair_lo", "pair_hi") == pair]
+    return paired, [r for r in recs if r["stable_game_key"] in keys], rows, len(
+        (roomed & elsewhere) - keys)
+
+
+def _seat_state(rec):
+    if rec["conflict_at"] is not None or rec["conflict_kind"] is not None:
+        return "conflict"
+    if rec["lists_purged_at"] is not None:
+        return "purged"
+    return "ok"
+
+
+def _sums_facts(prefix, raw):
+    """A stored sums object: per admitted key its bin count and plain total,
+    then the count of keys or values that are not a named list of numbers."""
+    sums = _jsonb(raw)
+    out, unnamed = [], 0
+    for k in sorted(sums):
+        v = sums[k]
+        if (_FACT_KEY.fullmatch(k) and isinstance(v, list) and all(
+                isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)):
+            out += [_fact("%s%s.bins" % (prefix, k), len(v)),
+                    _fact("%s%s.total" % (prefix, k), sum(v))]
+        else:
+            unnamed += 1
+    if unnamed:
+        out.append(_fact(prefix + "unnamed", unnamed))
+    return out
+
+
+def _contrib_facts(src, rows):
+    spec = _SECTION_SPEC[src]
+    if spec["contrib"] is None:
+        return []
+    if not rows:
+        return [_fact("contrib", "not_derived")]
+    cap = AER_CONTRACT_BOUNDS["SECTION_CONTRIB_MAX"]
+    out = []
+    for i, c in enumerate(rows[:cap]):
+        prefix = "contrib%d." % (i + 1)
+        out += [_fact(prefix + "source", c["source"]), _fact(prefix + "coverage", c["coverage"])]
+        for col in spec["contrib_cols"]:
+            if col == "sums":
+                out += _sums_facts(prefix, c[col])
+            else:
+                out.append(_fact(prefix + col, c[col]))
+    if rows[cap:]:
+        out.append(_fact("contrib_more", len(rows[cap:])))
+    return out
+
+
+def _fault_words(raw):
+    words = sorted(k for k in _jsonb(raw) if _FACT_KEY.fullmatch(k))
+    return ",".join(words) if words else "none"
+
+
+def _seat_section(src, account, recs, contrib):
+    mine = [r for r in recs if str(r["seat_player_id"]) == account]
+    if not mine:
+        return "no_record", []
+    rec = mine[0]
+    facts = [_fact("conflict_kind", rec["conflict_kind"]),
+             _fact("lists_purged", rec["lists_purged_at"] is not None)]
+    facts += [_fact(c, rec[c]) for c in _SECTION_SPEC[src]["seat"]]
+    if mine[1:]:
+        facts.append(_fact("records", len(mine)))
+    keys = {r["stable_game_key"] for r in mine}
+    facts += _contrib_facts(src, [c for c in contrib if str(c["subject_player_id"]) == account
+                                  and c["stable_game_key"] in keys])
+    return _seat_state(rec), facts
+
+
+def _game_facts(src, data, paired, rows, other):
+    sw = data["switches"]
+    facts = [_fact("paired", paired)]
+    facts += [_fact(w, sw.get("%s_evidence_%s" % (src, w))) for w in SECTION_SWITCHES]
+    if other:
+        facts.append(_fact("other_game", other))
+    if rows[1:]:
+        facts.append(_fact("games_rows", len(rows)))
+    if rows:
+        g = rows[0]
+        for c in _SECTION_SPEC[src]["game"]:
+            facts.append(_fact(c, _fault_words(g[c]) if c == "record_faults" else g[c]))
+    return facts
+
+
+def game_section(src, data, game, index):
+    """One game's section for one source (B10 phase 2): the game facts, then
+    per seat (p1, p2) its state word and facts."""
+    if data is None:
+        return {"src": src, "state": "unavailable", "truncated": False, "game": [],
+                "seats": []}
+    paired, recs, rows, other = _game_records(data, game)
+    seats = []
+    for account in (game["p1"], game["p2"]):
+        state, facts = _seat_section(src, account, recs, data["contrib"])
+        seats.append({"subject": index[account], "state": state, "facts": facts})
+    return {"src": src, "state": "ok" if recs else "no_record",
+            "truncated": data["truncated"], "game": _game_facts(src, data, paired, rows, other),
+            "seats": seats}
+
+
+def _contrib_add(src, totals, row, extra=()):
+    """Add one contribution or daily row into `totals`, by stored source."""
+    source = row["source"] if _FACT_KEY.fullmatch(row["source"] or "") else "unnamed"
+    if src == "card":
+        for col in tuple(extra) + _CARD_COUNTERS:
+            totals["%s.%s" % (source, col)] += row[col] or 0
+        return
+    for col in extra:
+        totals["%s.%s" % (source, col)] += row[col] or 0
+    for k, v in _jsonb(row["sums"]).items():
+        if _FACT_KEY.fullmatch(k) and isinstance(v, list) and all(
+                isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+            totals["%s.%s.total" % (source, k)] += sum(v)
+
+
+def summary_section(src, data, games, account, oi):
+    """One window subject's section over the window's covered games (B10
+    phase 2): counts, contribution totals, and the account's daily totals over
+    its last `pop_days` UTC days."""
+    if data is None:
+        return {"oi": oi, "src": src, "state": "unavailable", "truncated": False,
+                "facts": [], "days30": []}
+    counts, totals = collections.Counter(), collections.Counter()
+    for game in games:
+        paired, recs, _rows, _other = _game_records(data, game)
+        mine = [r for r in recs if str(r["seat_player_id"]) == account]
+        counts["games"] += 1
+        if paired:
+            counts[paired] += 1
+        if not mine:
+            continue
+        counts["with_record"] += 1
+        state = _seat_state(mine[0])
+        if state != "ok":
+            counts[state] += 1
+        if src == "identity_clock":
+            for col in ("post_clock", "conn_class"):
+                word = mine[0][col]
+                if word and _FACT_KEY.fullmatch(word):
+                    counts["%s.%s" % (col, word)] += 1
+        keys = {r["stable_game_key"] for r in mine}
+        for c in data["contrib"]:
+            if str(c["subject_player_id"]) == account and c["stable_game_key"] in keys:
+                _contrib_add(src, totals, c)
+    facts = [_fact(k, counts[k]) for k in ("games", "with_record", "attached", "waiting",
+                                           "conflict", "purged")]
+    facts += [_fact(k, counts[k]) for k in sorted(counts) if "." in k]
+    if _SECTION_SPEC[src]["contrib"] is not None:
+        facts += [_fact(k, totals[k]) for k in sorted(totals)] or [
+            _fact("contrib", "not_derived")]
+    days = []
+    if _SECTION_SPEC[src]["daily"] is not None:
+        daily = collections.Counter()
+        for row in data["daily"].get(account, ()):
+            _contrib_add(src, daily, row, ("games",))
+        days = [_fact(k, daily[k]) for k in sorted(daily)] or [_fact("daily", "not_derived")]
+    return {"oi": oi, "src": src, "state": "ok" if counts["with_record"] else "no_record",
+            "truncated": data["truncated"], "facts": facts, "days30": days}
+
+
+async def _page_sections(db, body, rows, subjects, accounts, summary_page):
+    """Add the page's evidence sections to `body` (each game's `sections`, or
+    page 1's `sections_summary`) and return the audit's state counts."""
+    games = _section_games(rows)
+    index = {pid: s["i"] for pid, s in subjects.items()}
+    if summary_page:
+        data = await read_sections(db, games, accounts)
+        body["sections_summary"] = [summary_section(src, data[src], games, str(acc), oi)
+                                    for oi, acc in enumerate(accounts)
+                                    for src in SECTION_SOURCES]
+        return section_audit(body["sections_summary"])
+    data = await read_sections(db, games)
+    by_id = {g["id"]: g for g in games}
+    made = []
+    for g in body["games"]:
+        g["sections"] = [game_section(src, data[src], by_id[g["match_id"]], index)
+                         for src in SECTION_SOURCES]
+        made += g["sections"]
+    return section_audit(made)
+
+
+def section_audit(sections):
+    """The audit's per-source state counts of a page's sections."""
+    out = {src: {} for src in SECTION_SOURCES}
+    for s in sections:
+        out[s["src"]][s["state"]] = out[s["src"]].get(s["state"], 0) + 1
+    return out
+
+
 async def _audit(db, actor, shape, target, details):
     """The one `admin_actions` row (design 4.4), in its own short transaction.
     A failed insert is `503 audit_unavailable`, no body."""
@@ -1920,6 +2328,7 @@ async def _aer_serve(shape, request, db, actor):
                 - AER_CONTRACT_BOUNDS["AUDIT_RESERVE_S"])
     gmax = AER_CONTRACT_BOUNDS["GAMES_MAX"]
     page = _aer_int(request, "page", 1, 1, 10 ** 6)
+    sections_on = request.headers.get(SECTIONS_HEADER) == SECTIONS_PHASE
     games_arg = None
     if shape in ("game", "series"):
         ident = _aer_ident(request.path_params.get("code"))
@@ -2005,15 +2414,21 @@ async def _aer_serve(shape, request, db, actor):
                                             if e.ranked else None)
                                for e in REPORT_REGISTRY if not e.is_window]
             body["games"] = await _game_page(rep, rows, ids, subjects, game_set)
+        audit_sections = None
+        if sections_on:
+            audit_sections = await _page_sections(db, body, rows, subjects, accounts,
+                                                  summary_page)
         encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         if len(encoded) > AER_CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]:
             _aer_fail(500, "too_large")
-        details = {"schema": "1a", "shape": shape, "games": games_arg if games_arg else c,
+        details = {"schema": SECTIONS_PHASE if sections_on else "1a", "shape": shape, "games": games_arg if games_arg else c,
                    "page": page, "pages": pages, "b_pid": b_pid,
                    "rules": dict(body["rules"]),
                    "registry": body["registry"]["fingerprint"],
                    "pop_computed_at": body["population"]["computed_at"],
                    "codes": [_code(i) for i in (page_ids or ids)], "via": "discord"}
+        if sections_on:
+            details["sections"] = audit_sections
         if _aer_clock() > deadline:
             _aer_fail(503, "deadline")
         await _audit(db, actor, shape, target, details)

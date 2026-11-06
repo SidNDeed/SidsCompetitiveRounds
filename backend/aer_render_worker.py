@@ -29,7 +29,8 @@ TEXT_COLOR = "#e6e6e6"
 FONT_FAMILY = "DejaVu Sans Mono"
 FONT_SIZES = {"title": 13, "status": 9, "subject": 9, "game": 11, "seat": 10, "cell": 9,
               "flag": 9, "window": 10, "summary_head": 10, "summary": 9, "label": 8,
-              "population": 9, "baseline": 9, "census": 8, "legend": 8, "footer": 8}
+              "population": 9, "baseline": 9, "census": 8, "legend": 8, "footer": 8,
+              "section": 10, "facts": 9}
 FILLED_KINDS = frozenset({"cell", "summary"})
 LINE_H = 0.22                  # inches per plan line
 WIDTH_IN = 14.0
