@@ -112,10 +112,12 @@ SITE_METHODS = frozenset({"get", "unparse", "import_module"})
 RESOLVER_HOME = "closed_walk"
 # The frozen complete store statement of each receiver class (round 10,
 # finding resolution_sites:202): shape_grammar.header_digest of the whole
-# `self.b = ...` statement of its `__init__`, taken once at 0b317394.
+# `self.b = ...` statement of its `__init__`, taken once at 0b317394; re-frozen
+# once (ruling FOUR-R11-A19 (1)) for R8's one new argument `param_roots=`
+# (_Walk, and def_effects's construction below), derived by token comparison.
 RECEIVER_STORES = {
     "Visitor": "deb50a21d5de8fad",
-    "_Walk": "36214a5241768ebf",
+    "_Walk": "23ee8cbc2100af4b",
 }
 # The frozen value chain of the receivers' parameter sources (round 10,
 # receiver_sources over closed_walk, the a1 file and the gate file), taken
@@ -127,10 +129,10 @@ RECEIVER_STORES = {
 # given the a1 handler's `b = _handler_bindings(...)`, whose one return is a
 # construction) and from the gate's `_effects` as `w.b`.
 RECEIVER_SOURCES = frozenset({
-    ("construction", "closed_walk", "def_effects", "2c400d7bf7ef4eb1"),
+    ("construction", "closed_walk", "def_effects", "e1a14ac50d0b16fc"),
     ("construction", "test_a1_identity_formation", "_handler_bindings",
      "0d4a073ae0f9221c"),
-    ("local", "closed_walk", "def_effects", "2c400d7bf7ef4eb1"),
+    ("local", "closed_walk", "def_effects", "e1a14ac50d0b16fc"),
     ("local", "test_a1_identity_formation", "formation_loop_exits",
      "119f72d4d9c5532c"),
     ("local", "test_a1_identity_formation", "formation_loop_exits.effects_of",

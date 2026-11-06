@@ -4965,13 +4965,17 @@ def test_r8_the_walker_grammar_is_the_round_7_freeze_less_three():
     # -> 693 with rule T (FOUR-R11-A5, A14 (1)): 40 shapes of rule T's
     # code and 8 of the order key at the group picker's call (FOUR-R11-A10
     # (C)), which the 645 block did not hold
+    # -> 689 at the ONE re-freeze (FOUR-R11-A19, after D's R8 and placement
+    # rule): 5 shapes of R8's param_roots added; the 8 of 1279ffc5's order
+    # key (replaced by C's _in_param_order) and 1 at closed_walk 2024 no
+    # longer in the walker code, so not frozen (NOTES r11 w30h, section 2)
     # (history and each shape's line: NOTES r11 rules, "walker shapes";
     # NOTES r11 t, "Walker shapes")
-    assert len(r11) == 693, len(r11)
+    assert len(r11) == 689, len(r11)
     digest = hashlib.sha256("\n".join(sorted(r11)).encode(
         "utf-8")).hexdigest()
-    assert digest == ("cbd4c6575fd282b3b2f9a23f1de49970"
-                      "7b255d8bf9cc99b11ca6b2e9bb407fba"), digest
+    assert digest == ("445fc4df4fa715e9b9298d3f5e562fb4"
+                      "70fab9a37d7cc0cd1e482e47640bb5ae"), digest
     assert not (r7 & r11) and _gs.WALKER_SHAPES == r7 | r11
 
 
