@@ -4943,17 +4943,27 @@ def test_r8_the_walker_grammar_is_the_round_7_freeze_less_three():
     """The boundary (round 8, ruling REHEARSAL-FOUR-R7-A1, M8): WALKER_SHAPES
     is ga1's round-7 freeze (51d4faf2), never regenerated from the code it
     bounds, less the three shapes M4 and M7 removed; pinned by its size and
-    the digest of its sorted members, so any shape added fails."""
+    the digest of its sorted members, so any shape added fails. Round 11
+    (ruling FOUR-R11-A1 (2), GROUP 2): the hand re-freeze block
+    R11_ID_WALKER_SHAPES is pinned the same way, by its own size and digest,
+    and WALKER_SHAPES is exactly the two, disjoint."""
     import hashlib
     removed = {"Call.func>Attribute(value=Name,attr='import_module',ctx=Load)",
                "Call.func>Attribute(value=Name,attr='module_accessor',ctx=Load)",
                "Call.func>Attribute(value=Name,attr='named',ctx=Load)"}
+    r7, r11 = _gs.R7_LESS_THREE_WALKER_SHAPES, _gs.R11_ID_WALKER_SHAPES
     assert not removed & _gs.WALKER_SHAPES
-    assert len(_gs.WALKER_SHAPES) == 2850, len(_gs.WALKER_SHAPES)
-    digest = hashlib.sha256("\n".join(sorted(_gs.WALKER_SHAPES)).encode(
+    assert len(r7) == 2850, len(r7)
+    digest = hashlib.sha256("\n".join(sorted(r7)).encode(
         "utf-8")).hexdigest()
     assert digest == ("073ed1959c7a09552e6d372d62988636"
                       "c8c77e90fe0d1157f57e276279648822"), digest
+    assert len(r11) == 361, len(r11)
+    digest = hashlib.sha256("\n".join(sorted(r11)).encode(
+        "utf-8")).hexdigest()
+    assert digest == ("e5f34a6b2edcb472a76e7c81fd7ce36c"
+                      "249042fc42a532c2eed0523267618a33"), digest
+    assert not (r7 & r11) and _gs.WALKER_SHAPES == r7 | r11
 
 
 # The census findings of rounds 6 and 7: (finding, the program added to
