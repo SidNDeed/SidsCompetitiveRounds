@@ -41,11 +41,13 @@ API = os.path.join(HERE, "..", "api")
 sys.path.insert(0, API)
 sys.path.insert(0, HERE)
 
+import r11_open_window as ow  # noqa: E402
 import ro_census  # noqa: E402
 import ro_role  # noqa: E402
 import test_a1_identity_formation as a1  # noqa: E402
 
 A1_REL = "tests/test_a1_identity_formation.py"
+MODULE = "<module>"
 BACKEND = os.path.normpath(os.path.join(HERE, ".."))
 # The census kinds that name or build an open. dynamic, alias and
 # constructed forms are counted and listed apart (the recorder covers them).
@@ -144,8 +146,11 @@ class Reach:
         return self.mods[name]
 
     def defs_of(self, name):
+        """Every top-level function and class of the module, and MODULE, its
+        module-level statements (calls made at import or in a module-level
+        expression)."""
         m = self.mod(name)
-        return {(name, n) for n in m.defs} if m else set()
+        return ({(name, n) for n in m.defs} | {(name, MODULE)}) if m else set()
 
     def _resolve(self, m, node, local_imports):
         """The (module, name) a Name or Attribute chain refers to, or None."""
@@ -186,9 +191,15 @@ class Reach:
                 sites.append(key + (0, "%s.%s" % (mod, name)))
                 continue
             m = self.mod(mod)
-            if m is None or name not in m.defs:
+            if m is None:
                 continue
-            fn = m.defs[name]
+            if name == MODULE:
+                fn = ast.Module(body=[s for s in m.tree.body if not isinstance(
+                    s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))], type_ignores=[])
+            elif name in m.defs:
+                fn = m.defs[name]
+            else:
+                continue
             local = _imports(fn)
             for node in ast.walk(fn):
                 if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(
@@ -247,8 +258,11 @@ def test_r11_a1_module_census_control():
 
 def test_r11_a1_fixtures_have_no_opener_site():
     """A11 (1), the fixtures it uses: its own are in its text (above);
-    conftest.py's autouse fixtures hold no opener form."""
+    conftest.py's autouse fixtures and the module's window fixture
+    (r11_open_window.py, which reaches asyncpg only through
+    ro_census.OpenRecorder) hold no opener form."""
     assert _opener_sites("tests/conftest.py", _read("tests/conftest.py")) == []
+    assert _opener_sites("tests/r11_open_window.py", _read("tests/r11_open_window.py")) == []
 
 
 A1_MOD = "test_a1_identity_formation"
@@ -256,7 +270,8 @@ A1_MOD = "test_a1_identity_formation"
 
 def _a1_reach(overrides=None, skipped=None):
     r = Reach(overrides)
-    seeds = r.defs_of(A1_MOD) | r.defs_of("conftest")
+    # the module, conftest.py's fixtures, and the module's own window fixture
+    seeds = r.defs_of(A1_MOD) | r.defs_of("conftest") | r.defs_of("r11_open_window")
     reached, sites = r.run(seeds)
     if skipped is not None:
         skipped.update(r.skipped)
@@ -319,12 +334,13 @@ def test_r11_database_openers_are_databases_own():
 
 def test_r11_a1_window_control():
     """A8 (2) and A11 (2), the control: inside a window frozen by the
-    module's own _a1_freeze, an open to another DSN (the frozen URL with
-    another database) is refused by the module's own _a1_window_refusal,
-    and the refusal carries the recorder's message."""
-    rec = a1._a1_freeze()
-    frozen = "".join(a1._a1_database.DATABASE_URL.split("+asyncpg", 1))
-    planted = ro_role.dsn_for(frozen, "rf11rec_planted_" + os.urandom(3).hex())
+    module's own window (r11_open_window.a1_freeze, the fixture the module
+    imports), an open to another DSN (the frozen URL with another database)
+    is refused by r11_open_window.a1_window_refusal, and the refusal carries
+    the recorder's message."""
+    assert a1._a1_open_window is ow._a1_open_window
+    rec = ow.a1_freeze()
+    planted = ro_role.dsn_for(ow.a1_frozen_dsn(), "rf11rec_planted_" + os.urandom(3).hex())
 
     async def plant():
         try:
@@ -339,7 +355,7 @@ def test_r11_a1_window_control():
         w = rec.report()
     finally:
         rec.thaw()
-    refusal = a1._a1_window_refusal(w)
+    refusal = ow.a1_window_refusal(w)
     assert refusal is not None and "open not the frozen DSN" in refusal, (refusal, w, err)
     assert w["active"] and w["opens"] == 1, w
     assert asyncpg.connect is asyncpg.connection.connect, "the thaw did not restore connect"

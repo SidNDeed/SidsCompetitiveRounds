@@ -6159,37 +6159,10 @@ def test_r11_binder_registration_closes_at_freeze():
 # reaches an open (the census in test_r11_rec_pg), so the thaw requires the
 # recorder active, zero connections built and zero opens recorded: an open,
 # if one ever appears, fails the run. The control (test_r11_rec_pg) plants an
-# open inside a window frozen by _a1_freeze and is refused by
-# _a1_window_refusal with the recorder's own message.
+# open inside a window frozen by r11_open_window.a1_freeze and is refused by
+# r11_open_window.a1_window_refusal with the recorder's own message. The
+# fixture is defined in r11_open_window (every non-test function of this
+# module is walker code its walker grammar must admit) and is this module's
+# by this import.
 
-import database as _a1_database  # noqa: E402
-import ro_census as _a1_ro_census  # noqa: E402
-
-
-def _a1_freeze():
-    rec = _a1_ro_census.OpenRecorder()
-    rec.freeze("".join(_a1_database.DATABASE_URL.split("+asyncpg", 1)), [None])
-    return rec
-
-
-def _a1_window_refusal(w):
-    """None when the window report `w` (OpenRecorder.report, read at the
-    thaw) shows the recorder active with no open and no connection;
-    otherwise the sentence naming what failed."""
-    if not w or not w["active"]:
-        return "the a1 arm's open recorder was not active at its thaw: %r" % (w,)
-    if w["opens"] or w["built"] or w["violations"]:
-        return "the a1 arm opened a connection; it is required to open none: %r" % (w,)
-    return None
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _a1_open_window():
-    rec = _a1_freeze()
-    try:
-        yield rec
-        window = rec.report()
-    finally:
-        rec.thaw()
-    refusal = _a1_window_refusal(window)
-    assert refusal is None, refusal
+from r11_open_window import _a1_open_window  # noqa: E402,F401
