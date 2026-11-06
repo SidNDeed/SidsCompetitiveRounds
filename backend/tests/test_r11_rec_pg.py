@@ -380,7 +380,8 @@ import re  # noqa: E402
 import r11_cat_window as cw  # noqa: E402
 
 CAT = os.path.join(HERE, "test_r7_catalog_diff_pg.py")
-CAT_OPENERS = frozenset({"asyncpg.connect", "create_async_engine", "catalog_position.check"})
+CAT_OPENERS = frozenset({"asyncpg.connect", "create_async_engine", "catalog_position.check",
+                         "catalog_position.check_from"})
 CAT_STARTS = {"cd.apply_file": "psql", "cd.dump": "pg_dump"}
 CAT_MAKER_CALLS = frozenset({"_clone", "_clone_with_oid", "_scratch_clone"})
 CAT_OTHER_ENTRIES = frozenset({
@@ -388,7 +389,7 @@ CAT_OTHER_ENTRIES = frozenset({
     "subprocess.getoutput", "subprocess.getstatusoutput", "os.system", "os.popen",
     "os.execv", "os.execvp", "os.spawnv", "os.spawnvp", "os.posix_spawn", "os.posix_spawnp"})
 CAT_CREATE = re.compile(r'\s*CREATE\s+DATABASE\s+"', re.I)
-HELPER_SITES = {("catalog_position.py", "check", "asyncpg.connect"),
+HELPER_SITES = {("catalog_position.py", "check_from", "asyncpg.connect"),
                 ("catalog_diff.py", "apply_file", "subprocess.run"),
                 ("catalog_diff.py", "dump", "subprocess.run"),
                 ("r11_cat_window.py", "_cluster", "asyncpg.connect")}
