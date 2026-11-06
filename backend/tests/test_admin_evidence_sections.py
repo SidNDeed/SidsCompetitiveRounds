@@ -510,3 +510,17 @@ def test_s5_the_new_bot_asks_for_sections_by_header():
     asyncio.run(ns["_aer_fetch"]("/x", 42))
     assert calls[0][ae.SECTIONS_HEADER] == ae.SECTIONS_PHASE
     assert calls[0]["X-Actor-Discord-Id"] == "42"
+
+
+def test_s1_section_reads_use_their_own_reader():
+    """The section reads go through `_section_rows` only, never the shared
+    `_aer_rows` (whose analysed summary the 1a display slots read)."""
+    with open(ae.__file__, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    funcs = {f.name: f for f in tree.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    called = {n.func.id for n in ast.walk(funcs["_section_read"])
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_section_rows" in called and "_aer_rows" not in called, called
+    for name in ("read_sections", "_page_sections", "game_section", "summary_section"):
+        names = {n.id for n in ast.walk(funcs[name]) if isinstance(n, ast.Name)}
+        assert "_aer_rows" not in names, name

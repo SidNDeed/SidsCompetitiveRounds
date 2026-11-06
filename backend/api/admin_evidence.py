@@ -2000,6 +2000,16 @@ def _section_day0():
     return today - _dt.timedelta(days=DISPLAY_DEFAULTS["pop_days"] - 1)
 
 
+async def _section_rows(db, sql, params):
+    """The sections' row reader: the body of `_aer_rows`, kept as its own
+    function so the privacy pass's joined summary of `_aer_rows`, whose rows
+    the 1a display slots show, never takes on the sections' calling context
+    (a condition on the page's game rows)."""
+    from sqlalchemy import text
+    result = await db.execute(text(sql), params)
+    return [dict(r) for r in result.mappings().all()]
+
+
 async def _section_read(db, src, games, accounts, day0):
     """One source's stored rows for the page's games and, on a summary page,
     the subjects' daily rows. `truncated` is set when a statement returned
@@ -2011,27 +2021,27 @@ async def _section_read(db, src, games, accounts, day0):
     pids = sorted({p for g in games for p in (g["p1"], g["p2"])})
     keys = set()
     if rooms:
-        found = await _aer_rows(db, sql["keys"], {"rooms": rooms, "pids": pids,
+        found = await _section_rows(db, sql["keys"], {"rooms": rooms, "pids": pids,
                                                   "n": b["SECTION_KEYS_MAX"]})
         keys.update(r["stable_game_key"] for r in found)
         data["truncated"] |= len(found) == b["SECTION_KEYS_MAX"]
     if "by_match" in sql:
-        found = await _aer_rows(db, sql["by_match"], {"ids": [g["id"] for g in games],
+        found = await _section_rows(db, sql["by_match"], {"ids": [g["id"] for g in games],
                                                       "n": b["SECTION_KEYS_MAX"]})
         keys.update(r["stable_game_key"] for r in found)
         data["truncated"] |= len(found) == b["SECTION_KEYS_MAX"]
     if keys:
         for part in ("records", "games") + (("contrib",) if "contrib" in sql else ()):
-            rows = await _aer_rows(db, sql[part], {"keys": sorted(keys),
+            rows = await _section_rows(db, sql[part], {"keys": sorted(keys),
                                                    "n": b["SECTION_ROWS_MAX"]})
             data[part] = rows
             data["truncated"] |= len(rows) == b["SECTION_ROWS_MAX"]
     names = ["%s_evidence_%s" % (src, w) for w in SECTION_SWITCHES]
-    data["switches"] = {r["key"]: r["value"] for r in await _aer_rows(
+    data["switches"] = {r["key"]: r["value"] for r in await _section_rows(
         db, sql["switches"], {"keys": names, "n": len(names)})}
     if "daily" in sql:
         for acc in accounts:
-            rows = await _aer_rows(db, sql["daily"], {"s": acc, "d0": day0,
+            rows = await _section_rows(db, sql["daily"], {"s": acc, "d0": day0,
                                                       "n": b["SECTION_DAILY_ROWS_MAX"]})
             data["daily"][acc] = rows
             data["truncated"] |= len(rows) == b["SECTION_DAILY_ROWS_MAX"]
