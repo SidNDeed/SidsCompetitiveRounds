@@ -1979,10 +1979,11 @@ def section_sql(src):
                            "ORDER BY g.stable_game_key LIMIT CAST(:n AS integer)" % s["games"])
     if s["contrib"]:
         out["contrib"] = (
-            "SELECT c.stable_game_key, c.subject_player_id, c.source, c.coverage, "
-            "c.computed_at, %s FROM %s c WHERE c.stable_game_key = ANY(CAST(:keys AS varchar[])) "
-            "ORDER BY c.stable_game_key, c.subject_player_id, c.computed_at DESC, c.source "
-            "LIMIT CAST(:n AS integer)"
+            "SELECT c.stable_game_key, c.pair_lo, c.pair_hi, c.subject_player_id, c.source, "
+            "c.coverage, c.computed_at, %s FROM %s c "
+            "WHERE c.stable_game_key = ANY(CAST(:keys AS varchar[])) "
+            "ORDER BY c.stable_game_key, c.pair_lo, c.pair_hi, c.subject_player_id, "
+            "c.computed_at DESC, c.source LIMIT CAST(:n AS integer)"
             % (", ".join("c." + c for c in s["contrib_cols"]), s["contrib"]))
         out["daily"] = (
             "SELECT d.source, d.coverage, %s FROM %s d "
@@ -2116,45 +2117,52 @@ def _section_enc(value):
     return "".join(out)
 
 
-def _pair_of(row, a, b):
-    return {str(row[a]), str(row[b])}
+def _ident(row, a, b):
+    """A row's stored game identity: (stable_game_key, pair_lo, pair_hi), the
+    games and contribution tables' key prefix. A record's pair is its two
+    seats, the lower first, as the workers key it (LEAST/GREATEST)."""
+    lo, hi = sorted((str(row[a]), str(row[b])))
+    return row["stable_game_key"], lo, hi
 
 
 def _game_records(data, game):
-    """The source's records and games rows that belong to `game`: those under
-    a games row the pairing worker attached to it; when none is attached yet,
-    the records for the same two seats whose attach key is the game's room
-    (`waiting`). Of the selected keys' records, only those whose OWN attach
-    key is the game's room are the game's (the workers' rule,
-    seat_evidence.attached_records: a record is never evidence about a match
-    its own key does not name). `other` counts the records that are another
-    attachment's: under a selected key but naming another room, or naming
-    this room under a key whose games row is attached to another match. The
-    contributions are the ones stored under the selected keys, whichever
-    seat's record they were derived from."""
-    pair = {game["p1"], game["p2"]}
-    recs = [r for r in data["records"] if _pair_of(r, "seat_player_id", "other_player_id") == pair]
-    attached = {g["stable_game_key"] for g in data["games"]
-                if g["match_id"] is not None and str(g["match_id"]) == game["id"]
-                and _pair_of(g, "pair_lo", "pair_hi") == pair}
-    elsewhere = {g["stable_game_key"] for g in data["games"]
-                 if g["match_id"] is not None and str(g["match_id"]) != game["id"]}
-    roomed = {r["stable_game_key"] for r in recs
-              if game["room"] is not None and r["attach_key"] == game["room"]}
-    if attached:
-        keys, paired = attached, "attached"
-    else:
-        keys = roomed - elsewhere
-        paired = "waiting" if keys else None
-    rows = [g for g in data["games"] if g["stable_game_key"] in keys
-            and _pair_of(g, "pair_lo", "pair_hi") == pair]
+    """The source's records, games rows and contributions that belong to
+    `game`, associated by stored identity (stable_game_key, pair_lo,
+    pair_hi) with the game's own pair, never by stable key alone (one stable
+    key can carry several pairs): the identities whose games row the pairing
+    worker attached to this match; when none is attached yet, the identities
+    under which a record names the game's room and whose games row is not
+    attached to another match (`waiting`). Of the selected identities'
+    records, only those whose OWN attach key is the game's room are the
+    game's (the workers' rule, seat_evidence.attached_records: a record is
+    never evidence about a match its own key does not name). `other` counts
+    the pair's records that are another attachment's: under a selected
+    identity but naming another room, or naming this room under an identity
+    whose games row is attached to another match. The contributions are the
+    ones stored under the selected identities, whichever seat's record they
+    were derived from; each seat takes those whose subject it is."""
+    pair = tuple(sorted((game["p1"], game["p2"])))
     room = game["room"]
-    shown = [r for r in recs if r["stable_game_key"] in keys and r["attach_key"] == room]
-    other = [r for r in recs if (r["stable_game_key"] in keys and r["attach_key"] != room)
-             or (r["stable_game_key"] in (roomed & elsewhere) - keys
-                 and r["attach_key"] == room)]
-    return paired, shown, rows, len(other), [c for c in data["contrib"]
-                                             if c["stable_game_key"] in keys]
+    recs = [(_ident(r, "seat_player_id", "other_player_id"), r) for r in data["records"]]
+    recs = [(i, r) for i, r in recs if i[1:] == pair]
+    allrows = [(_ident(g, "pair_lo", "pair_hi"), g) for g in data["games"]]
+    grows = [(i, g) for i, g in allrows if i[1:] == pair]
+    attached = {i for i, g in grows
+                if g["match_id"] is not None and str(g["match_id"]) == game["id"]}
+    elsewhere = {i for i, g in grows
+                 if g["match_id"] is not None and str(g["match_id"]) != game["id"]}
+    roomed = {i for i, r in recs if r["attach_key"] == room}
+    if attached:
+        idents, paired = attached, "attached"
+    else:
+        idents = roomed - elsewhere
+        paired = "waiting" if idents else None
+    rows = [g for i, g in grows if i in idents]
+    shown = [r for i, r in recs if i in idents and r["attach_key"] == room]
+    other = [r for i, r in recs if (i in idents and r["attach_key"] != room)
+             or (i in (roomed & elsewhere) - idents and r["attach_key"] == room)]
+    contrib = [c for c in data["contrib"] if _ident(c, "pair_lo", "pair_hi") in idents]
+    return paired, shown, rows, len(other), contrib
 
 
 def _seat_state(rec):
@@ -2282,7 +2290,8 @@ def summary_section(src, data, games, account, oi):
     games by their pairing state (a record of either seat); `with_record`,
     `conflict` and `purged` count the account's own records. The
     contribution totals add every contribution about the account stored
-    under a covered game's keys, with or without the account's own record."""
+    under a covered game's identities (`_game_records`), with or without the
+    account's own record."""
     if data is None:
         return {"oi": oi, "src": src, "state": "unavailable", "truncated": False,
                 "facts": [], "days30": []}

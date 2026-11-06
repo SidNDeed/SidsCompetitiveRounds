@@ -150,3 +150,59 @@ def test_h3_a_record_naming_another_room_is_excluded_and_counted(src, attached):
     tb = ae.summary_section(src, data, [g], b, 1)
     assert _facts(ta["facts"])["with_record"] == "1"
     assert _facts(tb["facts"])["with_record"] == "0" and tb["state"] == "no_record"
+
+
+# ── H4: the pair is part of every stored identity ─────────────────────────
+
+def _four():
+    ids = sorted(str(uuid.uuid4()) for _ in range(4))
+    return ids
+
+
+@pytest.mark.parametrize("src", ae.SECTION_SOURCES)
+def test_h4_another_pairs_attached_row_does_not_hold_back_this_pairs_records(src):
+    """Under one stable key K: A/B's records name this game's room and their
+    games row is not attached yet; C/D's games row under K is attached to
+    another match. A/B's records are waiting for this game."""
+    a, b, c, d = _four()
+    g = _game(a, b, room="room-ab")
+    data = _data(records=[_rec(src, "K", a, b, "room-ab"), _rec(src, "K", b, a, "room-ab"),
+                          _rec(src, "K", c, d, "room-cd"), _rec(src, "K", d, c, "room-cd")],
+                 games=[_grow(src, "K", a, b, None),
+                        _grow(src, "K", c, d, str(uuid.uuid4()))],
+                 switches=_on(src))
+    s = ae.game_section(src, data, g, {a: 0, b: 1})
+    gf = _facts(s["game"])
+    assert (s["state"], gf["paired"]) == ("ok", "waiting"), (s["state"], gf)
+    assert "other_game" not in gf
+    assert [x["state"] for x in s["seats"]] == ["ok", "ok"]
+    t = ae.summary_section(src, data, [g], a, 0)
+    assert _facts(t["facts"])["waiting"] == "1"
+
+
+@pytest.mark.parametrize("src", ("card", "combat"))
+def test_h4_another_pairs_contribution_about_the_same_subject_is_not_this_games(src):
+    """Under one stable key K: A's own A/B contribution, and C's measurement
+    of A in pair A/C (C's record under K names A; A's one record under K is
+    in A/B). A/B's game shows only the first, in the seat facts and in the
+    window totals."""
+    a, b, c, _d = _four()
+    g = _game(a, b, room="room-ab")
+    other = str(uuid.uuid4())
+    mine = {"hands": 5} if src == "card" else {"sums": '{"a1s": [5]}'}
+    theirs = {"hands": 7} if src == "card" else {"sums": '{"a1s": [7]}'}
+    data = _data(records=[_rec(src, "K", a, b, "room-ab"), _rec(src, "K", b, a, "room-ab"),
+                          _rec(src, "K", c, a, "room-ac")],
+                 games=[_grow(src, "K", a, b, g["id"]), _grow(src, "K", a, c, other)],
+                 contrib=[_crow(src, "K", a, b, a, **mine),
+                          _crow(src, "K", a, c, a, source="meas", **theirs)],
+                 switches=_on(src))
+    s = ae.game_section(src, data, g, {a: 0, b: 1})
+    _sa, fa = _seat(s, 0)
+    assert fa["contrib1.source"] == "self" and "contrib2.source" not in fa, fa
+    assert "games_rows" not in _facts(s["game"])
+    f = _facts(ae.summary_section(src, data, [g], a, 0)["facts"])
+    if src == "card":
+        assert f["self.hands"] == "5" and "meas.hands" not in f, f
+    else:
+        assert f["self.a1s.total"] == "5" and "meas.a1s.total" not in f, f

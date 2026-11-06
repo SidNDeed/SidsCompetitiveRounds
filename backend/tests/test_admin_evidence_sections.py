@@ -75,9 +75,10 @@ def _grow(src, key, a, b, match_id, **cols):
     return row
 
 
-def _contrib(src, key, subject, **cols):
-    row = {"stable_game_key": key, "subject_player_id": subject, "source": "self",
-           "coverage": "one", "computed_at": T0}
+def _contrib(src, key, a, b, subject, **cols):
+    lo, hi = sorted((a, b))
+    row = {"stable_game_key": key, "pair_lo": lo, "pair_hi": hi, "subject_player_id": subject,
+           "source": "self", "coverage": "one", "computed_at": T0}
     row.update({c: 0 for c in ae._SECTION_SPEC[src]["contrib_cols"]})
     if src == "combat":
         row["sums"] = "{}"
@@ -111,7 +112,7 @@ def test_s1_card_values_land_at_their_seat_under_their_names():
                       deal_profile="prof-b")],
         games=[_grow("card", "k1", a, b, g["id"], series_sc="1-0", processed_at=T0,
                      derive_fault="ValueError", fault_attempts=2, parked_at=T0)],
-        contrib=[_contrib("card", "k1", a, hands=5, slots=12, obs_rare=1, exp_rare=3,
+        contrib=[_contrib("card", "k1", a, b, a, hands=5, slots=12, obs_rare=1, exp_rare=3,
                           deal_profile="prof-a")],
         switches=dict(_on("card"), card_evidence_accept="0"))
     s = ae.game_section("card", data, g, {a: 0, b: 1})
@@ -138,7 +139,7 @@ def test_s1_combat_sums_show_bins_and_totals_by_stored_key():
     data = _data(records=[_rec("combat", "k1", a, b, "room-1", consts_version=3)],
                  games=[_grow("combat", "k1", a, b, g["id"], coverage="one", records_n=1,
                               record_faults='{"derive": 1, "BAD KEY": 2}')],
-                 contrib=[_contrib("combat", "k1", a, consts_version=3,
+                 contrib=[_contrib("combat", "k1", a, b, a, consts_version=3,
                                    sums='{"a1s": [1, 2, 3], "a1p": [], "x y": [1], '
                                         '"p3dp0": [1, "no"]}')],
                  switches=_on("combat"))
@@ -258,7 +259,7 @@ def test_s2_contribution_rows_beyond_the_cap_are_counted():
     cap = ae.AER_CONTRACT_BOUNDS["SECTION_CONTRIB_MAX"]
     data = _data(records=[_rec("card", "k1", a, b, "room-1")],
                  games=[_grow("card", "k1", a, b, g["id"])],
-                 contrib=[_contrib("card", "k1", a, hands=i, source="meas")
+                 contrib=[_contrib("card", "k1", a, b, a, hands=i, source="meas")
                           for i in range(cap + 2)])
     fa = _facts(ae.game_section("card", data, g, {a: 0, b: 1})["seats"][0]["facts"])
     assert ("contrib%d.hands" % cap) in fa and ("contrib%d.hands" % (cap + 1)) not in fa
@@ -275,8 +276,8 @@ def test_s3_summary_counts_totals_and_days():
                                                       conflict_kind="payload"),
                  _rec("card", "k3", b, a, "r3")],
         games=[_grow("card", "k1", a, b, g1["id"]), _grow("card", "k2", a, b, None)],
-        contrib=[_contrib("card", "k1", a, hands=4, slots=10),
-                 _contrib("card", "k2", a, hands=1, source="meas")],
+        contrib=[_contrib("card", "k1", a, b, a, hands=4, slots=10),
+                 _contrib("card", "k2", a, b, a, hands=1, source="meas")],
         daily={a: [{"source": "self", "coverage": "one", "games": 2, "hands": 7,
                     **{c: 0 for c in ae._CARD_COUNTERS if c != "hands"}}]})
     s = ae.summary_section("card", data, [g1, g2, g3], a, 0)
@@ -329,7 +330,7 @@ def _sections_for(body, a, b):
         "card": _data(records=[_rec("card", "k1", a, b, "room-1", pool_state="ok",
                                     received_at=T0)],
                       games=[_grow("card", "k1", a, b, g["id"], processed_at=T0)],
-                      contrib=[_contrib("card", "k1", a, hands=3)], switches=_on("card")),
+                      contrib=[_contrib("card", "k1", a, b, a, hands=3)], switches=_on("card")),
         "combat": None,
         "identity_clock": _data(records=[_rec("identity_clock", "k1", b, a, "room-1",
                                               post_clock="ok", conflict_kind="dup")],
