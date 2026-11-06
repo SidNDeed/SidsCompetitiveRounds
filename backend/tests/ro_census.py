@@ -28,6 +28,7 @@ frozen is refused by its shape, whatever it does:
 
 import ast
 import collections
+import contextlib
 import hashlib
 import os
 import re
@@ -670,6 +671,8 @@ class OpenRecorder:
         self.allowed = None
         self._undo = []
         self._recorder = None
+        self.planted = []
+        self.planting = False
 
     @staticmethod
     def _modules():
@@ -789,3 +792,368 @@ class OpenRecorder:
                 "constructed, not recorded": len(outside),
                 "recorded, not constructed": len(unbuilt)}))
         return out
+
+    # ---- set-aware mode (ruling FOUR-R11-A17) ---------------------------
+    # One window over a module whose opens go to several databases: the admin
+    # DSN at NAMED SITES, and databases the run made itself (by a listed
+    # MAKER). The rule by which a site is taken: the co_qualname of the
+    # innermost frame on the stack whose code file is the site file, read at
+    # the start of the replaced asyncpg.connect's body (a coroutine's f_back
+    # is its awaiter while it runs). The maker of a database: the innermost
+    # frame in the site file whose qualname is not plumbing, read when
+    # Connection.execute runs 'CREATE DATABASE "<name>"'. Every subprocess.run
+    # start is checked the same way BEFORE it starts: its command line and
+    # environment (target) first, then its site. A refusal is recorded and
+    # raised before the open or start. planted() collects the entries a
+    # control makes in a bucket of their own, outside the run's verdict.
+
+    def freeze_set(self, admin_dsn, sites, makers, plumbing, site_file, cluster,
+                   starts, programs, psql, env_allowed):
+        import subprocess
+        import sys
+        apg, connection, _cu = self._modules()
+        if self._undo:
+            raise RuntimeError("the recorder is already installed")
+        real = apg.connect
+        if real is not connection.connect:
+            raise RuntimeError("asyncpg.connect is not asyncpg.connection.connect at the "
+                               "freeze: something replaced it first")
+        self.frozen = self.identity((admin_dsn,), {})
+        self.sites, self.makers, self.plumbing = dict(sites), frozenset(makers), frozenset(plumbing)
+        self.site_file = os.path.normcase(os.path.abspath(site_file))
+        self.cluster = {"port": int(cluster["port"]),
+                        "system_identifier": str(cluster["system_identifier"])}
+        self.starts_allowed, self.programs = dict(starts), dict(programs)
+        self.psql, self.env_allowed = psql, dict(env_allowed)
+        self.made, self.creates, self.starts, self.id_lines = {}, [], [], []
+        self._identified, self._files = set(), {}
+        rec = self
+
+        async def recorder(*args, **kwargs):
+            entry = {"kind": "open", "site": rec.site_of(sys._getframe().f_back),
+                     "conn": None, "error": None, "refusal": None, "line": None}
+            (rec.planted if rec.planting else rec.opens).append(entry)
+            try:
+                entry["identity"] = rec.identity(args, kwargs)
+            except Exception as e:   # noqa: BLE001 -- an unresolvable call is refused
+                entry["identity"] = ("unresolved", repr(e))
+            entry["refusal"] = rec.open_refusal(entry["site"], entry["identity"])
+            if entry["refusal"]:
+                raise AssertionError("%s: %s" % entry["refusal"])
+            try:
+                conn = await real(*args, **kwargs)
+            except BaseException as e:
+                entry["error"] = repr(e)
+                raise
+            entry["conn"] = conn
+            member = _database_of(entry["identity"])
+            if rec.planting or member not in rec._identified:
+                line = await rec.identity_line(conn)
+                entry["line"] = line
+                if not rec.planting:
+                    rec._identified.add(member)
+                    rec.id_lines.append(dict(line, via="asyncpg", member=member,
+                                             site=entry["site"]))
+                refusal = rec.identity_refusal(line, member)
+                if refusal:
+                    entry["refusal"] = refusal
+                    await conn.close()
+                    raise AssertionError("%s: %s" % refusal)
+            return conn
+
+        init = connection.Connection.__dict__["__init__"]
+        execute = connection.Connection.__dict__["execute"]
+
+        def counting_init(conn, *a, **k):
+            rec.built.append(conn)
+            return init(conn, *a, **k)
+
+        async def tracking_execute(conn, query, *args, **kwargs):
+            maker = rec.maker_of(sys._getframe().f_back)
+            result = await execute(conn, query, *args, **kwargs)
+            m = _CREATE_DB.match(query) if isinstance(query, str) else None
+            if m:
+                rec.made[m.group(1)] = maker
+                (rec.planted if rec.planting else rec.creates).append(
+                    {"kind": "create", "name": m.group(1), "maker": maker, "refusal": None})
+            return result
+
+        real_run = subprocess.run
+        self._real_run = real_run
+
+        def checking_run(*args, **kwargs):
+            argv = args[0] if args else kwargs.get("args")
+            env = kwargs.get("env")
+            env = os.environ if env is None else env
+            entry = {"kind": "start", "site": rec.site_of(sys._getframe().f_back),
+                     "program": argv[0] if isinstance(argv, (list, tuple)) and argv else None,
+                     "refusal": None, "line": None,
+                     "env_present": sorted(v for v in LIBPQ_VARS if v in env)}
+            (rec.planted if rec.planting else rec.starts).append(entry)
+            entry["refusal"], dsn = rec.start_refusal(entry["site"], argv, env)
+            if entry["refusal"]:
+                raise AssertionError("%s: %s" % entry["refusal"])
+            if dsn is not None:
+                member = (dsn, tuple((v, env[v]) for v in entry["env_present"]))
+                if rec.planting or member not in rec._identified:
+                    line = rec.psql_identity(dsn, env)
+                    entry["line"] = line
+                    db = _database_of(rec.identity((dsn,), {}))
+                    if not rec.planting:
+                        rec._identified.add(member)
+                        rec.id_lines.append(dict(line, via="psql", member=db, site=entry["site"]))
+                    refusal = rec.identity_refusal(line, db)
+                    if refusal:
+                        entry["refusal"] = refusal
+                        raise AssertionError("%s: %s" % refusal)
+            return real_run(*args, **kwargs)
+
+        apg.connect = recorder
+        self._recorder = recorder
+        self._undo.append(lambda: setattr(apg, "connect", real))
+        connection.Connection.__init__ = counting_init
+        self._undo.append(lambda: setattr(connection.Connection, "__init__", init))
+        connection.Connection.execute = tracking_execute
+        self._tracking = tracking_execute
+        self._undo.append(lambda: setattr(connection.Connection, "execute", execute))
+        subprocess.run = checking_run
+        self._checking = checking_run
+        self._undo.append(lambda: setattr(subprocess, "run", real_run))
+
+    def _in_site_file(self, code):
+        f = code.co_filename
+        if f not in self._files:
+            self._files[f] = os.path.normcase(os.path.abspath(f)) == self.site_file
+        return self._files[f]
+
+    def site_of(self, frame, skip=()):
+        """(qualname, line) of the innermost frame in the site file whose
+        qualname is not in skip; None when the stack has none."""
+        while frame is not None:
+            if self._in_site_file(frame.f_code) and frame.f_code.co_qualname not in skip:
+                return (frame.f_code.co_qualname, frame.f_lineno)
+            frame = frame.f_back
+        return None
+
+    def maker_of(self, frame):
+        site = self.site_of(frame, self.plumbing)
+        return site[0] if site else None
+
+    def site_here(self):
+        """The site rule applied to the caller of this method (a frame in this
+        file, never the site file): the rule's own control reads it."""
+        import sys
+        return self.site_of(sys._getframe().f_back)
+
+    def site_here_into(self, out):
+        out.append(self.site_here())
+
+    @contextlib.contextmanager
+    def planted_entries(self):
+        start = len(self.planted)
+        self.planting = True
+        try:
+            yield lambda: self.planted[start:]
+        finally:
+            self.planting = False
+
+    def _target(self, ident, kind, what, where):
+        """None when ident is in the set for a site of this kind ('admin':
+        the admin DSN; 'clone': the admin DSN's server and user on a database
+        a listed maker made in this run), else (what, detail)."""
+        if not isinstance(ident, dict):
+            return ("unresolved open", ident[1])
+        drop = () if kind == "admin" else ("database",)
+        if _strip(ident, drop) != _strip(self.frozen, drop):
+            return (what, "%s: the target is not %s" % (
+                where, "the admin DSN" if kind == "admin" else "a database on the admin DSN's server and user"))
+        if kind == "admin":
+            return None
+        db = _database_of(ident)
+        if db not in self.made:
+            return (what, "database %r at %s was not made in this run" % (db, where))
+        if self.made[db] not in self.makers:
+            return (what, "database %r was made by %s, not a listed maker" % (db, self.made[db]))
+        return None
+
+    def open_refusal(self, site, ident):
+        where = "%s line %d" % site if site else "no frame in the site file"
+        if not isinstance(ident, dict):
+            return ("unresolved open", ident[1])
+        # the target first: is it in the set at all (admin, or a made clone)?
+        if self._target(ident, "admin", "x", where) and self._target(ident, "clone", "x", where):
+            return self._target(ident, "clone", "open not in the set", where)
+        if site is None:
+            return ("open with no frame in the site file", self.site_file)
+        kind = self.sites.get(site[0])
+        if kind is None:
+            return ("open at a site off the list", where)
+        return self._target(ident, kind, "open not in the set", where)
+
+    def start_refusal(self, site, argv, env):
+        """(refusal or None, the database DSN or None): the command line,
+        then its environment, then its target, then its site."""
+        where = "%s line %d" % site if site else "no frame in the site file"
+        if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(a, str) for a in argv):
+            return ("start the check cannot read", repr(argv)[:200]), None
+        if argv[0] == self.programs.get("git"):
+            if site is None or self.starts_allowed.get(site[0]) != "git":
+                return ("start at a site off the list", "%s (git)" % where), None
+            return None, None
+        dsn, bad = _db_argv(argv[1:])
+        if bad:
+            return ("start with a command line the check does not admit", bad), None
+        bad = _env_refusal(dsn, env, self.env_allowed)
+        if bad:
+            return ("start whose environment carries a connection variable the command line "
+                    "does not override", bad), None
+        try:
+            ident = self.identity((dsn,), {})
+        except Exception as e:   # noqa: BLE001
+            return ("start with a target outside the set", "unresolvable target %r" % e), None
+        r = self._target(ident, "clone", "start with a target outside the set", where)
+        if r:
+            return r, None
+        if site is None:
+            return ("start with no frame in the site file", argv[0]), None
+        kind = self.starts_allowed.get(site[0])
+        if kind is None:
+            return ("start at a site off the list", where), None
+        if argv[0] != self.programs.get(kind):
+            return ("start of a program its site does not list",
+                    "%s starts %r, its site lists %s %r" % (where, argv[0], kind, self.programs.get(kind))), None
+        return None, dsn
+
+    async def identity_line(self, conn):
+        row = await conn.fetchrow(IDENTITY_SQL)
+        return {"database": row["database"], "port": row["port"],
+                "system_identifier": str(row["system_identifier"])}
+
+    def psql_identity(self, dsn, env):
+        """The identity line through the start's own connection arguments: psql
+        on the same DSN with the same environment."""
+        proc = self._real_run([self.psql, "-X", "-q", "-A", "-t", "-F", "|", "-d", dsn,
+                               "-c", IDENTITY_SQL], capture_output=True, env=env, timeout=120)
+        out = proc.stdout.decode("utf-8", "replace").strip().split("|")
+        if proc.returncode or len(out) != 3:
+            return {"database": None, "port": None, "system_identifier": None,
+                    "error": proc.stderr.decode("utf-8", "replace")[-300:]}
+        return {"database": out[0], "port": int(out[1]), "system_identifier": out[2]}
+
+    def identity_refusal(self, line, member):
+        if line.get("database") != member:
+            return ("identity line from another database",
+                    "the line reads database %r; the member is %r" % (line.get("database"), member))
+        if (line["port"], line["system_identifier"]) != (self.cluster["port"],
+                                                         self.cluster["system_identifier"]):
+            return ("identity line from another cluster",
+                    "port %r system identifier %r; the run named port %r system identifier %r" % (
+                        line["port"], line["system_identifier"], self.cluster["port"],
+                        self.cluster["system_identifier"]))
+        return None
+
+    def set_installed(self):
+        """(opens, starts): whether each installation is in place now."""
+        import subprocess
+        apg, connection, _cu = self._modules()
+        opens = (self._recorder is not None and apg.connect is self._recorder
+                 and connection.Connection.__dict__.get("execute") is getattr(self, "_tracking", None))
+        starts = getattr(self, "_checking", None) is not None and subprocess.run is self._checking
+        return opens, starts
+
+    def set_violations(self):
+        out = [(e["refusal"][0], (e["kind"], e["site"], e["refusal"][1]))
+               for e in self.opens + self.starts if e["refusal"]]
+        returned = [e["conn"] for e in self.opens + self.planted
+                    if e["kind"] == "open" and e.get("conn") is not None]
+        outside = [c for c in self.built if not any(c is r for r in returned)]
+        unbuilt = [r for r in returned if not any(r is c for c in self.built)]
+        if outside or unbuilt or len(self.built) != len(returned):
+            out.append(("open outside the recorder", {
+                "constructed": len(self.built), "recorded": len(returned),
+                "constructed, not recorded": len(outside),
+                "recorded, not constructed": len(unbuilt)}))
+        return out
+
+    def set_report(self):
+        """The window as read at its thaw, before thaw()."""
+        opens_active, starts_active = self.set_installed()
+        count = lambda es: dict(sorted(collections.Counter(
+            e["site"][0] if e["site"] else None for e in es).items(), key=str))
+        members = collections.Counter(
+            _database_of(e["identity"]) for e in self.opens if isinstance(e.get("identity"), dict))
+        return {"active": opens_active, "starts_active": starts_active,
+                "opens": len(self.opens), "starts": len(self.starts), "built": len(self.built),
+                "open_counts": count(self.opens), "start_counts": count(self.starts),
+                "members": dict(sorted(members.items())),
+                "makers": dict(sorted(collections.Counter(c["maker"] for c in self.creates).items(), key=str)),
+                "env_present": sorted({v for e in self.starts for v in e["env_present"]}),
+                "id_lines": list(self.id_lines), "planted": len(self.planted),
+                "violations": self.set_violations()}
+
+
+_CREATE_DB = re.compile(r'\s*CREATE\s+DATABASE\s+"([^"]+)"', re.I)
+IDENTITY_SQL = ("SELECT pg_catalog.current_database() AS database, "
+                "pg_catalog.inet_server_port() AS port, "
+                "(SELECT s.system_identifier FROM pg_catalog.pg_control_system() s)::text "
+                "AS system_identifier")
+# libpq's environment variables (PostgreSQL 16, libpq "Environment Variables")
+LIBPQ_VARS = ("PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD",
+              "PGPASSFILE", "PGREQUIREAUTH", "PGCHANNELBINDING", "PGSERVICE", "PGSERVICEFILE",
+              "PGOPTIONS", "PGAPPNAME", "PGSSLMODE", "PGREQUIRESSL", "PGSSLCOMPRESSION",
+              "PGSSLCERT", "PGSSLKEY", "PGSSLCERTMODE", "PGSSLROOTCERT", "PGSSLCRL",
+              "PGSSLCRLDIR", "PGSSLSNI", "PGREQUIREPEER", "PGSSLMINPROTOCOLVERSION",
+              "PGSSLMAXPROTOCOLVERSION", "PGGSSENCMODE", "PGKRBSRVNAME", "PGGSSLIB",
+              "PGGSSDELEGATION", "PGCONNECT_TIMEOUT", "PGCLIENTENCODING",
+              "PGTARGETSESSIONATTRS", "PGLOADBALANCEHOSTS", "PGDATESTYLE", "PGTZ", "PGGEQO",
+              "PGSYSCONFDIR", "PGLOCALEDIR")
+# a variable the command line's URI overrides when the URI carries that part
+URI_PARTS = {"PGHOST": "hostname", "PGPORT": "port", "PGDATABASE": "path", "PGUSER": "username"}
+# the argument shapes of catalog_diff.apply_file (psql) and dump (pg_dump)
+_VALUE_OPTS = frozenset({"-v", "-d", "-f"})
+_FLAGS = frozenset({"-X", "-q", "--schema-only"})
+
+
+def _database_of(ident):
+    if not isinstance(ident, dict):
+        return None
+    return ast.literal_eval(dict(ident["params"])["database"])
+
+
+def _strip(ident, drop):
+    return (ident["addrs"], tuple(p for p in ident["params"] if p[0] not in drop), ident["classes"])
+
+
+def _db_argv(args):
+    """(the one -d value, None) or (None, why): every argument is one of the
+    admitted options or flags, and exactly one -d names the database."""
+    dsn, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in _VALUE_OPTS and i + 1 < len(args):
+            if a == "-d":
+                dsn.append(args[i + 1])
+            i += 2
+        elif a in _FLAGS:
+            i += 1
+        else:
+            return None, "argument %r is not one the check admits" % a
+    if len(dsn) != 1:
+        return None, "%d -d arguments" % len(dsn)
+    import urllib.parse
+    u = urllib.parse.urlsplit(dsn[0])
+    if u.scheme not in ("postgresql", "postgres") or u.query or u.fragment:
+        return None, "the -d value is not a plain postgresql URI"
+    return dsn[0], None
+
+
+def _env_refusal(dsn, env, allowed):
+    """The libpq variables present in env that the URI does not override and
+    that are not allowed at their stated value (names only, never values)."""
+    import urllib.parse
+    u = urllib.parse.urlsplit(dsn)
+    carried = {v: getattr(u, part) for v, part in URI_PARTS.items()}
+    carried["PGDATABASE"] = u.path.lstrip("/") or None
+    bad = [v for v in LIBPQ_VARS if v in env and not carried.get(v)
+           and not (v in allowed and env[v] == allowed[v])]
+    return sorted(bad) or None

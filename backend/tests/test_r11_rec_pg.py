@@ -359,3 +359,222 @@ def test_r11_a1_window_control():
     assert refusal is not None and "open not the frozen DSN" in refusal, (refusal, w, err)
     assert w["active"] and w["opens"] == 1, w
     assert asyncpg.connect is asyncpg.connection.connect, "the thaw did not restore connect"
+
+
+# ---- ruling FOUR-R11-A17: the catalog window's lists are the module's census
+# r11_cat_window.SITES, MAKERS and STARTS against an AST reading of
+# test_r7_catalog_diff_pg.py: every function holding an opener call (its
+# kind: admin when asyncpg.connect's first argument is the name ADMIN, else
+# clone), every maker (a caller of the clone plumbing, or a function holding
+# a 'CREATE DATABASE "' literal, outside the plumbing), every start site
+# (cd.apply_file: psql, cd.dump: pg_dump, subprocess.run of a 'git' argv).
+# A form the census cannot resolve (an opener or start referenced other than
+# as a call's callee, a start of an unread argv, a site at module level, a
+# function holding both kinds, another subprocess or os entry) refuses. The
+# helpers the module imports from this directory open and start only where
+# HELPER_SITES says (ro_census, the recorder itself, is not walked; api
+# modules are not walked: an open through them meets the window at run time).
+
+import re  # noqa: E402
+
+import r11_cat_window as cw  # noqa: E402
+
+CAT = os.path.join(HERE, "test_r7_catalog_diff_pg.py")
+CAT_OPENERS = frozenset({"asyncpg.connect", "create_async_engine", "catalog_position.check"})
+CAT_STARTS = {"cd.apply_file": "psql", "cd.dump": "pg_dump"}
+CAT_MAKER_CALLS = frozenset({"_clone", "_clone_with_oid", "_scratch_clone"})
+CAT_OTHER_ENTRIES = frozenset({
+    "subprocess.Popen", "subprocess.call", "subprocess.check_call", "subprocess.check_output",
+    "subprocess.getoutput", "subprocess.getstatusoutput", "os.system", "os.popen",
+    "os.execv", "os.execvp", "os.spawnv", "os.spawnvp", "os.posix_spawn", "os.posix_spawnp"})
+CAT_CREATE = re.compile(r'\s*CREATE\s+DATABASE\s+"', re.I)
+HELPER_SITES = {("catalog_position.py", "check", "asyncpg.connect"),
+                ("catalog_diff.py", "apply_file", "subprocess.run"),
+                ("catalog_diff.py", "dump", "subprocess.run"),
+                ("r11_cat_window.py", "_cluster", "asyncpg.connect")}
+
+
+def _cat_dotted(node):
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        head = _cat_dotted(node.value)
+        return head + "." + node.attr if head else None
+    return None
+
+
+def _cat_argv_head(node):
+    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+        return node.elts[0]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _cat_argv_head(node.left)
+    return None
+
+
+def _cat_census_source(src, plumbing=cw.PLUMBING, helper=False):
+    """(sites, makers, starts, unresolved, entries) of one source text;
+    entries lists (qualname, spelling) of every opener and start call (a
+    helper's subprocess.run is listed whatever its argv)."""
+    tree = ast.parse(src)
+    callees = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    sites, makers, starts, unresolved, entries = {}, set(), {}, [], []
+
+    def merge(table, qual, kind, node, what):
+        if qual is None:
+            unresolved.append(("%s at module level" % what, node.lineno))
+        elif table.get(qual, kind) != kind:
+            unresolved.append(("%s of two kinds in %s" % (what, qual), node.lineno))
+        else:
+            table[qual] = kind
+
+    def check(node, qual):
+        if isinstance(node, ast.Call):
+            name = _cat_dotted(node.func)
+            if name in CAT_OPENERS:
+                admin = (name == "asyncpg.connect" and node.args
+                         and isinstance(node.args[0], ast.Name) and node.args[0].id == "ADMIN")
+                merge(sites, qual, "admin" if admin else "clone", node, "an open")
+                entries.append((qual, name))
+            elif name in CAT_STARTS:
+                merge(starts, qual, CAT_STARTS[name], node, "a start")
+                entries.append((qual, name))
+            elif name == "subprocess.run":
+                head = _cat_argv_head(node.args[0]) if node.args else None
+                if helper:
+                    entries.append((qual, name))
+                elif isinstance(head, ast.Constant) and head.value == "git":
+                    merge(starts, qual, "git", node, "a start")
+                    entries.append((qual, name))
+                else:
+                    unresolved.append(("a subprocess.run whose argv the census cannot read", node.lineno))
+            elif name == "getattr" and node.args and _cat_dotted(node.args[0]) in (
+                    "asyncpg", "subprocess", "os", "cd", "catalog_position"):
+                unresolved.append(("a getattr on an opener's module", node.lineno))
+            if name in CAT_MAKER_CALLS and qual is not None and qual not in plumbing:
+                makers.add(qual)
+        elif isinstance(node, (ast.Attribute, ast.Name)) and id(node) not in callees:
+            name = _cat_dotted(node)
+            if name in CAT_OPENERS or name in CAT_STARTS or name == "subprocess.run":
+                if not (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)):
+                    unresolved.append(("%s referenced other than as a callee" % name, node.lineno))
+        if isinstance(node, (ast.Attribute, ast.Name)) and _cat_dotted(node) in CAT_OTHER_ENTRIES:
+            unresolved.append(("%s" % _cat_dotted(node), node.lineno))
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and CAT_CREATE.match(node.value) and qual is not None and qual not in plumbing):
+            makers.add(qual)
+
+    def visit(node, qual, in_class=False):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                name = "<lambda>" if isinstance(child, ast.Lambda) else child.name
+                if not isinstance(child, ast.Lambda):
+                    for d in child.decorator_list:
+                        check(d, qual)
+                        visit(d, qual)
+                inner = (name if qual is None else
+                         qual + "." + name if in_class else qual + ".<locals>." + name)
+                visit(child, inner, isinstance(child, ast.ClassDef))
+                continue
+            check(child, qual)
+            visit(child, qual, False)
+
+    visit(tree, None)
+    return sites, makers, starts, unresolved, entries
+
+
+def _cat_census(path=CAT):
+    with open(path, encoding="utf-8") as fh:
+        return _cat_census_source(fh.read())
+
+
+def _cat_helpers():
+    """The modules of this directory the catalog module imports, transitively
+    (ro_census excepted), and every opener or start call in each."""
+    seen, todo, found, unresolved = set(), ["test_r7_catalog_diff_pg"], set(), []
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        with open(os.path.join(HERE, name + ".py"), encoding="utf-8") as fh:
+            src = fh.read()
+        tree = ast.parse(src)
+        for n in ast.walk(tree):
+            mods = ([a.name for a in n.names] if isinstance(n, ast.Import)
+                    else [n.module] if isinstance(n, ast.ImportFrom) and n.module else [])
+            for m in mods:
+                if m != "ro_census" and os.path.isfile(os.path.join(HERE, m + ".py")):
+                    todo.append(m)
+        if name == "test_r7_catalog_diff_pg":
+            continue
+        _s, _m, _st, unres, entries = _cat_census_source(src, plumbing=frozenset(), helper=True)
+        found |= {(name + ".py", qual, spelling) for qual, spelling in entries}
+        unresolved += [(name, u) for u in unres]
+    return seen, found, unresolved
+
+
+def test_r11_cat_window_lists_are_the_module_census():
+    sites, makers, starts, unresolved, _e = _cat_census()
+    assert unresolved == [], "a site the census cannot resolve: %r" % unresolved
+    assert not set(cw.PLANT_SITES) & set(cw.SITES)
+    assert not cw.PLANT_MAKERS & cw.MAKERS
+    assert not set(cw.PLANT_STARTS) & set(cw.STARTS)
+    want_sites = dict(cw.SITES, **cw.PLANT_SITES)
+    assert sites == want_sites, {
+        "opener sites off the list": {k: v for k, v in sites.items() if want_sites.get(k) != v},
+        "listed, not in the module": sorted(set(want_sites) - set(sites))}
+    assert makers == cw.MAKERS | cw.PLANT_MAKERS, {
+        "makers off the list": sorted(makers - cw.MAKERS - cw.PLANT_MAKERS),
+        "listed, not in the module": sorted((cw.MAKERS | cw.PLANT_MAKERS) - makers)}
+    want_starts = dict(cw.STARTS, **cw.PLANT_STARTS)
+    assert starts == want_starts, {
+        "start sites off the list": {k: v for k, v in starts.items() if want_starts.get(k) != v},
+        "listed, not in the module": sorted(set(want_starts) - set(starts))}
+
+
+def test_r11_cat_helpers_open_and_start_only_where_listed():
+    seen, found, unresolved = _cat_helpers()
+    assert {"catalog_diff", "catalog_position", "r11_cat_window"} <= seen, seen
+    assert unresolved == [], unresolved
+    assert found == HELPER_SITES, (sorted(found - HELPER_SITES), sorted(HELPER_SITES - found))
+
+
+def test_r11_cat_census_control():
+    """The census sees what it must: an admin open in a new function (an
+    opener site off the list), a new maker, a new start site, and refuses an
+    opener referenced other than as a callee and a git argv it cannot read."""
+    with open(CAT, encoding="utf-8") as fh:
+        src = fh.read()
+    s, m, st, u, _e = _cat_census_source(
+        src + "\n\nasync def _r11_census_planted():\n    return await asyncpg.connect(ADMIN)\n")
+    assert s.get("_r11_census_planted") == "admin" and u == []
+    s, m, st, u, _e = _cat_census_source(
+        src + "\n\nasync def _r11_census_maker():\n    await _clone('x')\n")
+    assert "_r11_census_maker" in m
+    s, m, st, u, _e = _cat_census_source(
+        src + "\n\ndef _r11_census_start(p, d):\n    return cd.dump(p, d)\n")
+    assert st.get("_r11_census_start") == "pg_dump"
+    s, m, st, u, _e = _cat_census_source(src + "\n\n_r11_opener = asyncpg.connect\n")
+    assert u and "asyncpg.connect referenced other than as a callee" in u[0][0], u
+    s, m, st, u, _e = _cat_census_source(
+        src + "\n\ndef _r11_census_run(argv):\n    return subprocess.run(argv)\n")
+    assert u and "argv the census cannot read" in u[0][0], u
+    assert _cat_census_source(src)[3] == []
+
+
+def test_r11_cat_window_refusal_reuse_and_partial():
+    """(g): with D2_REUSE_DB set the window refuses whatever the report says;
+    a selection asserts the set and the sites only; a whole run with no
+    frozen table refuses."""
+    ok = {"active": True, "starts_active": True, "violations": [], "opens": 3,
+          "open_counts": {"_admin": 3}, "start_counts": {}}
+    assert cw.window_refusal(ok, [], "d2catalog_kept") == cw.REUSE_REFUSAL
+    assert cw.window_refusal(ok, ["-k"], None) is None
+    bad = dict(ok, violations=[("open at a site off the list", ("open", ("f", 1), "f line 1"))])
+    assert "broke the open bound" in cw.window_refusal(bad, ["-k"], None)
+    off = dict(ok, starts_active=False)
+    assert "not active" in cw.window_refusal(off, ["-k"], None)
+    if cw.OPEN_COUNTS is None:
+        assert "not frozen" in cw.window_refusal(ok, [], None)
+    else:
+        assert "differ from the frozen table" in cw.window_refusal(ok, [], None)
