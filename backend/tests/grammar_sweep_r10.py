@@ -49,12 +49,16 @@ OPS = {
 # relock reads moved from spelled to supplied, _calls_supplied's one), and
 # compare closed_walk 3 -> 4 (_operated: an identity test's result is a
 # bool, the Compare read to see that every operator is `is`/`is not`).
+# Round 11, rules W, P and K (ruling FOUR-R11-A4): compare closed_walk
+# 4 -> 5 (Bindings._inert_string reads a comprehension's Compare tests to
+# see that a string spelling a function's name is only the left operand
+# of `in`/`not in`, compared and never looked up).
 COUNTS = {
     ("byname", "closed_walk.py"): 32,
     ("byname", "resolution_sites.py"): 3,
     ("byname", "test_a1_identity_formation.py"): 39,
     ("byname", "test_match_hold_admission_gate_pg.py"): 23,
-    ("compare", "closed_walk.py"): 4,
+    ("compare", "closed_walk.py"): 5,
     ("compare", "resolution_sites.py"): 8,
     ("compare", "test_a1_identity_formation.py"): 5,
     ("compare", "test_match_hold_admission_gate_pg.py"): 3,
