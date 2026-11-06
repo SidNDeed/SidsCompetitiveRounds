@@ -373,27 +373,92 @@ def _plan_nodes(plan):
     return out
 
 
+DISTRACTORS = 5000
+# The index each evidence statement must plan on (acceptance bar h4), by the
+# statement's key: the attachment index for the keys read, the one-per-seat
+# unique index for the records, the primary key for the games and the
+# contributions (stable_game_key, pair_lo, pair_hi prefix), the match index
+# for the by-match read, the primary key (subject, day prefix) for the daily
+# rows.
+EXPECTED_INDEX = {
+    "keys": "ix_%(ev)s_attach", "records": "%(ev)s_one_per_seat", "games": "%(games)s_pk",
+    "by_match": "ix_%(games)s_match", "contrib": "%(contrib)s_pk", "daily": "%(daily)s_pk"}
+PERMITTED_SCANS = frozenset({"Index Scan", "Index Only Scan", "Bitmap Index Scan",
+                             "Bitmap Heap Scan"})
+_DISTRACT_SQL = {
+    "card_evidence": (
+        "INSERT INTO card_evidence (stable_game_key, attach_key, seat_player_id, "
+        "other_player_id, deal_profile, payload, payload_sha256) "
+        "SELECT 'd' || lpad(i::text, 5, '0'), 'room-d' || lpad(i::text, 5, '0'), "
+        "%(seat)s, %(other)s, 'prof', CAST('{}' AS jsonb), repeat('0', 64) %(rows)s"),
+    "combat_evidence": (
+        "INSERT INTO combat_evidence (stable_game_key, attach_key, seat_player_id, "
+        "other_player_id, payload, payload_sha256) "
+        "SELECT 'd' || lpad(i::text, 5, '0'), 'room-d' || lpad(i::text, 5, '0'), "
+        "%(seat)s, %(other)s, CAST('{}' AS jsonb), repeat('0', 64) %(rows)s"),
+    "identity_clock_evidence": (
+        "INSERT INTO identity_clock_evidence (stable_game_key, attach_key, seat_player_id, "
+        "other_player_id, payload, payload_sha256) "
+        "SELECT 'd' || lpad(i::text, 5, '0'), 'room-d' || lpad(i::text, 5, '0'), "
+        "%(seat)s, %(other)s, CAST('{}' AS jsonb), repeat('0', 64) %(rows)s"),
+    "card_games": (
+        "INSERT INTO card_games (stable_game_key, pair_lo, pair_hi, match_id) "
+        "SELECT 'd' || lpad(i::text, 5, '0'), %(lo)s, %(hi)s, gen_random_uuid() %(rows)s"),
+    "combat_games": (
+        "INSERT INTO combat_games (stable_game_key, pair_lo, pair_hi, match_id) "
+        "SELECT 'd' || lpad(i::text, 5, '0'), %(lo)s, %(hi)s, gen_random_uuid() %(rows)s"),
+    "identity_clock_games": (
+        "INSERT INTO identity_clock_games (stable_game_key, pair_lo, pair_hi, match_id) "
+        "SELECT 'd' || lpad(i::text, 5, '0'), %(lo)s, %(hi)s, gen_random_uuid() %(rows)s"),
+    "card_contrib": (
+        "INSERT INTO card_contrib (stable_game_key, pair_lo, pair_hi, recorder_player_id, "
+        "subject_player_id, source, coverage, deal_profile, rules_rev, utc_day) "
+        "SELECT 'd' || lpad(i::text, 5, '0'), %(lo)s, %(hi)s, %(seat)s, %(seat)s, 'self', "
+        "'one', 'prof', 'r1', CAST(:day AS date) %(rows)s"),
+    "combat_contrib": (
+        "INSERT INTO combat_contrib (stable_game_key, pair_lo, pair_hi, subject_player_id, "
+        "source, coverage, utc_day) "
+        "SELECT 'd' || lpad(i::text, 5, '0'), %(lo)s, %(hi)s, %(seat)s, 'self', 'one', "
+        "CAST(:day AS date) %(rows)s"),
+    "card_player_daily": (
+        "INSERT INTO card_player_daily (subject_player_id, day, source, coverage, "
+        "deal_profile, rules_rev) "
+        "SELECT %(seat)s, CAST(:day AS date) - i, 'self', 'one', 'prof', 'r' || i %(rows)s"),
+    "combat_player_daily": (
+        "INSERT INTO combat_player_daily (subject_player_id, utc_day, source, coverage, "
+        "consts_version) "
+        "SELECT %(seat)s, CAST(:day AS date) - i, 'self', 'one', i %% 100 %(rows)s"),
+}
+_DISTRACT_PARTS = {
+    "seat": "CASE WHEN i %% 2 = 0 THEN CAST(:x AS uuid) ELSE CAST(:y AS uuid) END",
+    "other": "CASE WHEN i %% 2 = 0 THEN CAST(:y AS uuid) ELSE CAST(:x AS uuid) END",
+    "lo": "LEAST(CAST(:x AS uuid), CAST(:y AS uuid))",
+    "hi": "GREATEST(CAST(:x AS uuid), CAST(:y AS uuid))",
+    "rows": "FROM generate_series(0, CAST(:n AS integer) - 1) AS i",
+}
+
+
+async def _distract(rig, x, y, n):
+    """`n` distractor rows in each evidence table for players x and y (the
+    seat alternating), one INSERT ... SELECT over generate_series each."""
+    from sqlalchemy import text
+    parts = {k: v.replace("%%", "%") for k, v in _DISTRACT_PARTS.items()}
+    for table, sql in _DISTRACT_SQL.items():
+        await rig.conn.execute(text(sql % parts), {"x": str(x), "y": str(y), "n": n,
+                                                   "day": NOW.date()})
+    counts = {}
+    for table in _DISTRACT_SQL:
+        counts[table] = (await rig.conn.execute(text("SELECT count(*) FROM %s" % table))).scalar()
+    return counts
+
+
 def test_p2_evidence_statements_plan_index_scans_on_a_distractor_fixture(rig):
     async def go():
         from sqlalchemy import text
         await _up(rig)
         players = [(await rig.player())[0] for _ in range(4)]
         a, b = players[0], players[1]
-        for i in range(2500):
-            x, y = players[2 + i % 2], players[3 - i % 2]
-            key, room = "d%05d" % i, "room-d%05d" % i
-            for src in ae.SECTION_SOURCES:
-                await rec(rig, src, key, x, y, room)
-                await grow(rig, src, key, x, y, uuid.uuid4())
-            await contrib(rig, "card", key, x, y, x)
-            await contrib(rig, "combat", key, x, y, x)
-            await _ins(rig, "card_player_daily", {
-                "subject_player_id": x, "day": NOW.date() - dt.timedelta(days=i),
-                "source": "self", "coverage": "one", "deal_profile": "prof",
-                "rules_rev": "r%d" % i})
-            await _ins(rig, "combat_player_daily", {
-                "subject_player_id": x, "utc_day": NOW.date() - dt.timedelta(days=i),
-                "source": "self", "coverage": "one", "consts_version": i % 100})
+        counts = await _distract(rig, players[2], players[3], DISTRACTORS)
         await rig.commit()
         for t in EVIDENCE_TABLES:
             await rig.conn.execute(text("ANALYZE %s" % t))
@@ -411,15 +476,90 @@ def test_p2_evidence_statements_plan_index_scans_on_a_distractor_fixture(rig):
                                               bind)).scalar()
                 plans[(src, name)] = row if not isinstance(row, str) else json.loads(row)
         await rig.conn.rollback()
-        return plans
+        return counts, plans
 
-    plans = rig.run(go())
+    counts, plans = rig.run(go())
+    assert counts == {t: DISTRACTORS for t in _DISTRACT_SQL}, counts
     assert len(plans) == sum(len(v) - 1 for v in ae.SECTION_SQL.values())
-    for key, plan in plans.items():
+    for (src, name), plan in plans.items():
+        spec = ae._SECTION_SPEC[src]
+        want = EXPECTED_INDEX[name] % spec
         nodes = _plan_nodes(plan[0]["Plan"])
-        scans = [n for n in nodes if n.get("Relation Name") in EVIDENCE_TABLES]
-        assert scans, key
-        assert not [n for n in scans if n["Node Type"] == "Seq Scan"], (key, [
-            (n["Node Type"], n.get("Relation Name")) for n in scans])
-    print("GATE p2-4 plans: %d evidence statements, index scans only, 2,500-game "
-          "distractors per table" % len(plans))
+        scans = [n for n in nodes if n["Node Type"].endswith("Scan")]
+        assert scans, (src, name)
+        assert all(n["Node Type"] in PERMITTED_SCANS for n in scans), (src, name, [
+            (n["Node Type"], n.get("Relation Name"), n.get("Index Name")) for n in scans])
+        used = {n["Index Name"] for n in scans if "Index Name" in n}
+        assert used == {want}, (src, name, used, want)
+    print("GATE p2-4 plans: %d evidence statements, each on its named index, index scan "
+          "nodes only, %d distractor rows per evidence table" % (len(plans), DISTRACTORS))
+
+
+# ── P2-2: the unheaded page and audit row against the base construction ────
+
+def _base_module():
+    """The base commit's admin_evidence (phase 1a, no sections), compiled from
+    git as its own module beside the current one."""
+    import subprocess
+    import types
+    from test_admin_evidence_sections import BASE, REPO
+    out = subprocess.run(["git", "-C", REPO, "show", BASE + ":backend/api/admin_evidence.py"],
+                         capture_output=True, timeout=60)
+    if out.returncode:
+        pytest.fail("the base api source is not readable here: %s"
+                    % out.stderr.decode("utf-8", "replace")[:200])
+    mod = types.ModuleType("admin_evidence_base")
+    mod.__file__ = os.path.join(HERE, "..", "api", "admin_evidence_base.py")
+    sys.modules[mod.__name__] = mod
+    try:
+        exec(compile(out.stdout.decode("utf-8"), mod.__file__, "exec"), mod.__dict__)
+    finally:
+        sys.modules.pop(mod.__name__, None)
+    assert not hasattr(mod, "SECTIONS_HEADER")
+    return mod
+
+
+async def _audit_rows(rig):
+    """Every admin_actions row, every column but the row's own id and time."""
+    from sqlalchemy import text
+    rows = (await rig.conn.execute(text(
+        "SELECT * FROM admin_actions ORDER BY created_at, id"))).mappings().all()
+    await rig.conn.commit()
+    return [{k: v for k, v in r.items() if k not in ("id", "created_at")} for r in rows]
+
+
+def test_p2_unheaded_pages_and_audit_rows_equal_the_base_construction(rig, monkeypatch):
+    """Without the header, every route answers the bytes the base commit's
+    code (phase 1a, no sections) builds from the same rows and writes the
+    same audit row, every column compared. The base module is the base
+    commit's file compiled beside this one; the routes reach it through
+    `_aer_serve`, and it shares this module's population cache, so both read
+    one population generation."""
+    base = _base_module()
+    monkeypatch.setattr(base, "_CACHE", ae._CACHE)
+    tip_serve = ae._aer_serve
+
+    async def go():
+        admin, _a, sa, _b, sb, s, g1 = await _world(rig)
+        out = {}
+        for shape, path in _paths(g1, s, sa, sb).items():
+            n0 = len(await _audit_rows(rig))
+            tip = await get(rig, path, admin)
+            monkeypatch.setattr(ae, "_aer_serve", base._aer_serve)
+            try:
+                old = await get(rig, path, admin)
+            finally:
+                monkeypatch.setattr(ae, "_aer_serve", tip_serve)
+            out[shape] = (tip, old, (await _audit_rows(rig))[n0:])
+        return out
+
+    out = rig.run(go())
+    for shape, ((ts, tc), (bs, bc), rows) in out.items():
+        assert (ts, bs) == (200, 200), (shape, tc[:200], bc[:200])
+        assert tc == bc, (shape, len(tc), len(bc))
+        assert len(rows) == 2 and rows[0] == rows[1], (shape, rows)
+        details = rows[0]["details"]
+        details = json.loads(details) if isinstance(details, str) else details
+        assert details["schema"] == "1a" and set(details) == AUDIT_KEYS, shape
+    print("GATE p2-2 base: %d unheaded routes, response bytes and complete audit rows "
+          "equal to the base commit's construction" % len(out))

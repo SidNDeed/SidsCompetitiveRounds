@@ -2021,8 +2021,10 @@ async def _section_rows(db, sql, params):
 
 async def _section_read(db, src, games, accounts, day0):
     """One source's stored rows for the page's games and, on a summary page,
-    the subjects' daily rows. `truncated` is set when a statement returned
-    exactly its LIMIT."""
+    the subjects' daily rows. `truncated` is set when one of the capped
+    reads (keys, by_match, records, games, contrib, daily) returned exactly
+    its LIMIT. The switch read is outside that rule: it asks for its three
+    named keys under LIMIT 3, so three rows are every switch, never a cut."""
     sql, b = SECTION_SQL[src], AER_CONTRACT_BOUNDS
     data = {"records": [], "games": [], "contrib": [], "daily": {}, "switches": {},
             "truncated": False}
@@ -2286,9 +2288,14 @@ def _contrib_add(src, totals, row, extra=()):
 def summary_section(src, data, games, account, oi):
     """One window subject's section over the window's covered games (B10
     phase 2): counts, contribution totals, and the account's daily totals over
-    its last `pop_days` UTC days. `attached`, `waiting` and `other` count the
-    games by their pairing state (a record of either seat); `with_record`,
-    `conflict` and `purged` count the account's own records. The
+    its last `pop_days` UTC days. The counts are `games` (the covered games),
+    `attached` and `waiting` (the games by their pairing state, from a
+    record of either seat; a game with neither, for want of records or
+    because its rows are another match's, is in neither count, and no
+    summary count names another match's rows: the game section's
+    `other_game` does), `with_record`, `conflict` and `purged` (the account's own
+    records), and on identity-clock the account's stored `post_clock` and
+    `conn_class` words. The
     contribution totals add every contribution about the account stored
     under a covered game's identities (`_game_records`), with or without the
     account's own record."""
