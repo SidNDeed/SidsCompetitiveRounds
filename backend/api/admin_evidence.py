@@ -2079,7 +2079,13 @@ def _section_games(rows):
 
 def _fact(name, value):
     """One `[name, value]` fact: None stays None (not recorded), a bool is
-    yes or no, a number its decimal text, a time its ISO text, text encoded."""
+    yes or no, a number its decimal text, a time its ISO text, text encoded
+    and whole. No section value is shortened: of the text columns the
+    sections show, the widest stored one is 64 characters (deal_profile,
+    VARCHAR(64) in card_evidence and card_contrib, migration 370), and the
+    two without a stored width (a switch's runtime_settings value, TEXT, and
+    `_fault_words`' joined words) are bounded only by RESPONSE_BYTES_MAX,
+    which refuses the whole report rather than cut a value."""
     if value is None:
         return [name, None]
     if isinstance(value, bool):
@@ -2090,7 +2096,7 @@ def _fact(name, value):
         return [name, "%r" % value]
     if isinstance(value, (_dt.datetime, _dt.date)):
         return [name, value.isoformat()]
-    return [name, _section_enc(("%s" % value)[:AER_CONTRACT_BOUNDS["TEXT_MAX"]])]
+    return [name, _section_enc("%s" % value)]
 
 
 def _section_enc(value):
