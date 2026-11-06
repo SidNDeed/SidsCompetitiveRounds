@@ -321,11 +321,14 @@ def test_r11_t_bound_site_is_observed(monkeypatch):
     table = sorted(f"R11-T-COUNT T {c['site']} at root={root} {tn} {n}"
                    for (root, tn), n in counts.items())
     warnings.warn("; ".join(table) or "R11-T-COUNT none", UserWarning)
-    assert not bad, bad[:10]
+    # condition (ii) speaks first: a reach of the pair makes the site see the
+    # replace result, which no root holds, so `bad` then carries that too;
+    # both are shown
     assert not reached, (
         f"rule T: the branch at main:{c['pair']} (at.replace) is live: it was "
         "reached on a measured flow; the derived alternative is observed and "
-        "must be listed as observed from now on", reached[:5])
+        "must be listed as observed from now on", reached[:5], bad[:10])
+    assert not bad, bad[:10]
     seen = {root for (root, _tn) in counts}
     missing = [x for x in _T_ROOTS if x not in seen]
     assert not missing, (f"rule T: the marked site main:{c['site']} has a root "
