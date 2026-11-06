@@ -1764,6 +1764,149 @@ class Bindings:
                                       "census does not read"))
         return census
 
+    # --- rule T (rulings FOUR-R11-A3 (3), FOUR-R11-A4 (5), FOUR-R11-A5) ---
+
+    def t_pair(self, m, line):
+        """Rule T's premise T1, by identity: datetime.datetime (this
+        module's own import) is an immutable C type whose type IS type,
+        named by its module and qualified name, and its attribute `m`, read
+        from the class object, is a method descriptor the identity binder
+        proves is the class's own."""
+        cls = _cw_datetime.datetime
+        desc = vars(cls).get(m, _MISSING)
+        if (type(cls) is not type
+                or not _ib.trusted(cls, "datetime", "datetime")
+                or type(desc) is not _types.MethodDescriptorType
+                or not _ib.trusted(desc, "datetime", "datetime." + m)):
+            raise Unclassified((line, f"rule T: datetime.datetime.{m} is not "
+                                      "a method descriptor of the immutable "
+                                      "class, read from the class object"))
+
+    def rule_t(self, call):
+        """Rule T at method call `call`, whose result no other rule proves:
+        None unless the call is `<name>.<m>()` with m the pair whose result
+        is builtin (timestamp); else "B" once the walk shows condition (i)
+        of FOUR-R11-A5 (2) in the walked definition (_t_condition), the
+        site marked in BOUND_MARKS for the recorder; refused otherwise. The
+        receiver's alternatives are not derived here: the recorder asserts
+        at the site that its type IS datetime.datetime and observes every
+        root (FOUR-R11-A4 (2)(d), (e))."""
+        f = call.func
+        if not (isinstance(f, _ast.Attribute)
+                and isinstance(f.value, _ast.Name)):
+            return None
+        if T_PAIRS.get(f.attr, "") != "B" or call.args or call.keywords:
+            return None
+        line = call.lineno
+        self.t_pair(f.attr, line)
+        span = self.span_function(line)
+        if span is None:
+            raise Unclassified((line, f"rule T: {f.value.id}.{f.attr}() in a "
+                                      "definition that is no module "
+                                      "function's body, whose code the "
+                                      "recorder cannot watch"))
+        F, d = span
+        off = F.__code__.co_firstlineno - d.lineno
+        root, pairs = self._t_condition(f.value.id, call, off)
+        BOUND_MARKS.append(("T", F, line + off, "." + f.attr, f.value.id,
+                            "datetime", _cw_datetime.datetime,
+                            root.lineno + off,
+                            tuple(sorted(p.value.lineno + off
+                                         for p in pairs))))
+        return "B"
+
+    def _t_condition(self, name, call, off):
+        """Condition (i) of FOUR-R11-A5 (2) for receiver `name` of rule T's
+        site `call` (`off` maps a walked line to its file line): every
+        binding of `name` is an assignment target in the function's own
+        scope; exactly one statement is not a pair (`name =
+        name.replace(...)`, the receiver the same name), the root; the
+        root and the site's statement stand in one statement list, the root
+        first; every pair statement stands between them, in that list or as
+        the one statement of an If between them with no else. (root
+        statement, [pair statements]), or refused."""
+        site = self._t_stmt(call)
+        roots, pairs = [], []
+        for kind, node in self.sites.get(name, ()):
+            stmt = self._t_stmt(node) if kind == "local" else None
+            if stmt is None or _scope_chain(node, self):
+                raise Unclassified((call.lineno, f"rule T: {name} has a {kind} "
+                                                 "binding other than an "
+                                                 "assignment in the function's"
+                                                 " own scope; condition (i) "
+                                                 "refuses"))
+            v = stmt.value if isinstance(stmt, _ast.Assign) else None
+            if (isinstance(v, _ast.Call) and len(stmt.targets) == 1
+                    and stmt.targets[0] is node
+                    and isinstance(v.func, _ast.Attribute)
+                    and isinstance(v.func.value, _ast.Name)
+                    and v.func.value.id == name):
+                if T_PAIRS.get(v.func.attr, "") != "datetime":
+                    raise Unclassified((call.lineno, f"rule T: {name} is bound "
+                                                     f"at line {stmt.lineno + off}"
+                                                     f" by {name}.{v.func.attr}"
+                                                     "(...), a method outside "
+                                                     "rule T's pairs"))
+                self.t_pair(v.func.attr, call.lineno)
+                pairs.append(stmt)
+            else:
+                roots.append(stmt)
+        if len(roots) != 1:
+            lines = ", ".join(str(s.lineno + off) for s in roots)
+            raise Unclassified((call.lineno, f"rule T: {name} is bound by "
+                                             f"{len(roots)} statements that are"
+                                             f" no pair of rule T (lines "
+                                             f"{lines}); condition (i) needs "
+                                             "exactly one root statement"))
+        root = roots[0]
+        held, i_root = self._t_place(root)
+        sheld, i_site = self._t_place(site)
+        if held is None or sheld is not held or i_root >= i_site:
+            raise Unclassified((call.lineno, f"rule T: the root statement of "
+                                             f"{name} (line {root.lineno + off})"
+                                             " and the site's statement (line "
+                                             f"{site.lineno + off}) are not one "
+                                             "statement list, the root first; "
+                                             "condition (i) refuses"))
+        for p in pairs:
+            plist, ip = self._t_place(p)
+            holder = self.parent.get(id(p))
+            if (plist is not held and isinstance(holder, _ast.If)
+                    and len(holder.body) == 1 and not holder.orelse):
+                plist, ip = self._t_place(holder)
+            if plist is not held or ip <= i_root or ip >= i_site:
+                raise Unclassified((call.lineno, f"rule T: the pair statement "
+                                                 f"of {name} at line "
+                                                 f"{p.lineno + off} does not "
+                                                 "stand between its root (line "
+                                                 f"{root.lineno + off}) and the "
+                                                 f"site (line {site.lineno + off})"
+                                                 "; condition (i) refuses"))
+        return root, pairs
+
+    def _t_stmt(self, node):
+        """The statement of the walked definition that holds `node` (node
+        itself when it is one), or None."""
+        n = node
+        while n is not None and not isinstance(n, _ast.stmt):
+            n = self.parent.get(id(n))
+        return n
+
+    def _t_place(self, stmt):
+        """(the statement list that holds `stmt`, its index there), by
+        identity; (None, -1) when no list of its parent holds it."""
+        par = self.parent.get(id(stmt))
+        if par is None:
+            par = self.where
+        if par is None:
+            return None, -1
+        for _f, kids in _ast.iter_fields(par):
+            if isinstance(kids, list):
+                i = _index_of(stmt, kids)
+                if i is not None:
+                    return kids, i
+        return None, -1
+
     def _name_index(self, tree):
         """{"name": {id: [(node, parent, top definition or None, nested)]},
         "attr": {attr: [line]}, "str": {text: [line]}} of a module tree."""
@@ -1894,6 +2037,15 @@ W_NAMED = {}
 BOUND_MARKS = []
 K_PROTOCOL = ("__setattr__", "__getattr__", "__getattribute__",
               "__delattr__", "__slots__")
+# Round 11, rule T (rulings FOUR-R11-A3 (3), FOUR-R11-A4 (5), FOUR-R11-A5):
+# its two named pairs on the class datetime.datetime, taken by identity
+# (Bindings.t_pair), keyed by the method's name: "B" for timestamp, whose
+# result is a float and whose call is a site the recorder observes;
+# "datetime" for replace, whose result derives an alternative of a site's
+# receiver under condition (i) (Bindings.rule_t). A rule T mark in
+# BOUND_MARKS is ("T", F, site line, ".timestamp", receiver name,
+# "datetime", datetime.datetime, root statement line, (pair call lines)).
+T_PAIRS = {"timestamp": "B", "replace": "datetime"}
 _BOUND_ROOTS = {}
 _BOUND_STACK = set()
 _NAME_INDEX = {}
@@ -2560,7 +2712,11 @@ def _call_provenance(call, b, policy, d):
         listed = _listed_kind(f, b, policy)
         if listed is None:
             r = receiver_provenance(f.value, b, policy, d)
-            return _over(lambda a: _method_result(a, f.attr, call, b, policy, d), r)
+            got = _over(lambda a: _method_result(a, f.attr, call, b, policy, d), r)
+            # round 11, rule T (rulings FOUR-R11-A3 (3), FOUR-R11-A5): a
+            # result no other rule proves, of a call of a named pair,
+            # discharged by its bound (Bindings.rule_t) or refused there
+            return got if got is not None else b.rule_t(call)
     kind = _listed_kind(f, b, policy)
     if kind is None:
         try:
