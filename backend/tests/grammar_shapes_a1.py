@@ -9766,181 +9766,182 @@ WALKER_SHAPES = frozenset({
 # own size and digest.
 R7_LESS_THREE_WALKER_SHAPES = WALKER_SHAPES
 R11_ID_WALKER_SHAPES = frozenset({
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|AugAssign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:2615
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|AugAssign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:2624
     '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|FunctionDef|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_match_hold_admission_gate_pg:2772
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return|While],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1755
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:2589
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return|While],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:1764
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:2598
     '<root>>FunctionDef(name=str,args=arguments,body=[If|Return],decorator_list=[Name],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:621
     "Assign.targets>Attribute(value=Attribute,attr='span_def',ctx=Store)",  # test_match_hold_admission_gate_pg:1411
-    "Assign.targets>Attribute(value=Name,attr='_plain_owner',ctx=Store)",  # closed_walk:2224
-    "Assign.targets>Attribute(value=Name,attr='_ret_joins',ctx=Store)",  # closed_walk:3818
-    "Assign.targets>Attribute(value=Name,attr='opaque_receivers',ctx=Store)",  # closed_walk:3819
+    "Assign.targets>Attribute(value=Name,attr='_plain_owner',ctx=Store)",  # closed_walk:2233
+    "Assign.targets>Attribute(value=Name,attr='_ret_joins',ctx=Store)",  # closed_walk:3827
+    "Assign.targets>Attribute(value=Name,attr='opaque_receivers',ctx=Store)",  # closed_walk:3828
     "Assign.targets>Attribute(value=Name,attr='param_values',ctx=Store)",  # closed_walk:741
     "Assign.targets>Attribute(value=Name,attr='parent',ctx=Store)",  # closed_walk:737
     "Assign.targets>Attribute(value=Name,attr='span_def',ctx=Store)",  # closed_walk:744
-    'Assign.targets>Subscript(value=Name,slice=Slice,ctx=Store)',  # closed_walk:2877
-    'Assign.targets>Subscript(value=Subscript,slice=Call,ctx=Store)',  # closed_walk:1767
-    'Assign.targets>Tuple(elts=[Name|Starred],ctx=Store)',  # closed_walk:3072
+    'Assign.targets>Subscript(value=Name,slice=Slice,ctx=Store)',  # closed_walk:2886
+    'Assign.targets>Subscript(value=Subscript,slice=Call,ctx=Store)',  # closed_walk:1776
+    'Assign.targets>Tuple(elts=[Name|Starred],ctx=Store)',  # closed_walk:3081
     "Assign.value>Attribute(value=Name,attr='__name__',ctx=Load)",  # closed_walk:1550
-    "Assign.value>Attribute(value=Name,attr='func',ctx=Load)",  # closed_walk:1851
+    "Assign.value>Attribute(value=Name,attr='func',ctx=Load)",  # closed_walk:1860
     "Assign.value>Attribute(value=Name,attr='id',ctx=Load)",  # closed_walk:1406
     "Assign.value>Attribute(value=Name,attr='monitoring',ctx=Load)",  # test_match_hold_admission_gate_pg:2779
     "Assign.value>Attribute(value=Name,attr='scope',ctx=Load)",  # closed_walk:1365
     "Assign.value>Attribute(value=Subscript,attr='id',ctx=Load)",  # closed_walk:1599
-    'Assign.value>BinOp(left=Constant,op=Add,right=Attribute)',  # closed_walk:3200
-    'Assign.value>BinOp(left=ListComp,op=Add,right=IfExp)',  # closed_walk:2830
-    'Assign.value>BinOp(left=SetComp,op=BitOr,right=IfExp)',  # closed_walk:2428
-    'Assign.value>BinOp(left=Subscript,op=Add,right=Name)',  # closed_walk:3232
-    'Assign.value>BoolOp(op=Or,values=[List|ListComp])',  # closed_walk:2630
+    'Assign.value>BinOp(left=Constant,op=Add,right=Attribute)',  # closed_walk:3209
+    'Assign.value>BinOp(left=ListComp,op=Add,right=IfExp)',  # closed_walk:2839
+    'Assign.value>BinOp(left=SetComp,op=BitOr,right=IfExp)',  # closed_walk:2437
+    'Assign.value>BinOp(left=Subscript,op=Add,right=Name)',  # closed_walk:3241
+    'Assign.value>BoolOp(op=Or,values=[List|ListComp])',  # closed_walk:2639
     'Assign.value>Call(func=Attribute,args=[Attribute|Call|Name],keywords=[])',  # test_match_hold_admission_gate_pg:596
     'Assign.value>Call(func=Attribute,args=[Attribute|IfExp|Name],keywords=[keyword])',  # test_a1_identity_formation:2271
-    'Assign.value>Call(func=Attribute,args=[Call|Constant],keywords=[])',  # closed_walk:2595
-    'Assign.value>Call(func=Attribute,args=[Constant|Dict],keywords=[])',  # closed_walk:2847
-    'Assign.value>Call(func=Attribute,args=[Constant|List],keywords=[])',  # closed_walk:2852
-    'Assign.value>Call(func=Attribute,args=[IfExp|Name],keywords=[])',  # test_a1_identity_formation:5805
+    'Assign.value>Call(func=Attribute,args=[Call|Constant],keywords=[])',  # closed_walk:2604
+    'Assign.value>Call(func=Attribute,args=[Constant|Dict],keywords=[])',  # closed_walk:2856
+    'Assign.value>Call(func=Attribute,args=[Constant|List],keywords=[])',  # closed_walk:2861
+    'Assign.value>Call(func=Attribute,args=[IfExp|Name],keywords=[])',  # test_a1_identity_formation:5807
     'Assign.value>Call(func=Attribute,args=[Name|Subscript],keywords=[])',  # closed_walk:854
     'Assign.value>Call(func=Name,args=[Attribute|Call],keywords=[])',  # closed_walk:1668
     'Assign.value>Call(func=Name,args=[Attribute|Constant|Name],keywords=[])',  # closed_walk:846
-    'Assign.value>Call(func=Name,args=[GeneratorExp|Name],keywords=[])',  # closed_walk:1733
-    'Assign.value>Call(func=Name,args=[Name|Tuple],keywords=[])',  # closed_walk:1772
-    'Assign.value>Dict(keys=[Constant],values=[Call|Name])',  # closed_walk:1871
-    'Assign.value>Dict(keys=[Constant],values=[Dict])',  # closed_walk:1761
+    'Assign.value>Call(func=Name,args=[GeneratorExp|Name],keywords=[])',  # closed_walk:1742
+    'Assign.value>Call(func=Name,args=[Name|Tuple],keywords=[])',  # closed_walk:1781
+    'Assign.value>Dict(keys=[Constant],values=[Call|Name])',  # closed_walk:1880
+    'Assign.value>Dict(keys=[Constant],values=[Dict])',  # closed_walk:1770
     'Assign.value>IfExp(test=Attribute,body=Attribute,orelse=Attribute)',  # closed_walk:1361
     'Assign.value>IfExp(test=Attribute,body=Compare,orelse=BoolOp)',  # closed_walk:1439
-    'Assign.value>IfExp(test=BoolOp,body=Constant,orelse=Name)',  # closed_walk:2363
+    'Assign.value>IfExp(test=BoolOp,body=Constant,orelse=Name)',  # closed_walk:2372
     'Assign.value>IfExp(test=BoolOp,body=Name,orelse=Call)',  # test_match_hold_admission_gate_pg:2827
-    'Assign.value>IfExp(test=Call,body=List,orelse=IfExp)',  # closed_walk:2509
-    'Assign.value>IfExp(test=Call,body=Name,orelse=Constant)',  # closed_walk:1836
-    'Assign.value>IfExp(test=Compare,body=Call,orelse=Dict)',  # closed_walk:2784
+    'Assign.value>IfExp(test=Call,body=List,orelse=IfExp)',  # closed_walk:2518
+    'Assign.value>IfExp(test=Call,body=Name,orelse=Constant)',  # closed_walk:1845
+    'Assign.value>IfExp(test=Compare,body=Call,orelse=Dict)',  # closed_walk:2793
     'Assign.value>IfExp(test=Compare,body=Constant,orelse=Tuple)',  # test_match_hold_admission_gate_pg:525
     'Assign.value>IfExp(test=Compare,body=Subscript,orelse=Call)',  # closed_walk:1504
-    'Assign.value>IfExp(test=Name,body=Constant,orelse=Call)',  # closed_walk:3531
-    'Assign.value>IfExp(test=Name,body=Constant,orelse=Name)',  # closed_walk:3228
-    'Assign.value>IfExp(test=Name,body=List,orelse=Call)',  # closed_walk:3534
-    'Assign.value>IfExp(test=Name,body=Name,orelse=Constant)',  # test_a1_identity_formation:5807
-    'Assign.value>IfExp(test=Subscript,body=Constant,orelse=Name)',  # closed_walk:3552
-    'Assign.value>ListComp(elt=Subscript,generators=[comprehension])',  # closed_walk:2437
+    'Assign.value>IfExp(test=Name,body=Constant,orelse=Call)',  # closed_walk:3540
+    'Assign.value>IfExp(test=Name,body=Constant,orelse=Name)',  # closed_walk:3237
+    'Assign.value>IfExp(test=Name,body=List,orelse=Call)',  # closed_walk:3543
+    'Assign.value>IfExp(test=Name,body=Name,orelse=Constant)',  # test_a1_identity_formation:5809
+    'Assign.value>IfExp(test=Subscript,body=Constant,orelse=Name)',  # closed_walk:3561
+    'Assign.value>ListComp(elt=Subscript,generators=[comprehension])',  # closed_walk:2446
     'Assign.value>ListComp(elt=Tuple,generators=[comprehension])',  # closed_walk:1407
-    'Assign.value>Tuple(elts=[Attribute|Name],ctx=Load)',  # closed_walk:2815
-    'Assign.value>Tuple(elts=[Call|Constant|List],ctx=Load)',  # closed_walk:2821
+    'Assign.value>Tuple(elts=[Attribute|Name],ctx=Load)',  # closed_walk:2824
+    'Assign.value>Tuple(elts=[Call|Constant|List],ctx=Load)',  # closed_walk:2830
     'Assign.value>Tuple(elts=[Call|Name],ctx=Load)',  # closed_walk:1469
-    'Assign.value>Tuple(elts=[Constant|List|Name],ctx=Load)',  # closed_walk:2893
+    'Assign.value>Tuple(elts=[Constant|List|Name],ctx=Load)',  # closed_walk:2902
     'Assign.value>Tuple(elts=[Constant|Name|Tuple],ctx=Load)',  # test_match_hold_admission_gate_pg:512
-    'Assign.value>Tuple(elts=[Dict|List],ctx=Load)',  # closed_walk:1832
-    "Attribute.value>Attribute(value=Attribute,attr='__dict__',ctx=Load)",  # closed_walk:3667
-    "Attribute.value>Attribute(value=Call,attr='parameters',ctx=Load)",  # closed_walk:3048
+    'Assign.value>Tuple(elts=[Dict|List],ctx=Load)',  # closed_walk:1841
+    "Attribute.value>Attribute(value=Attribute,attr='__dict__',ctx=Load)",  # closed_walk:3676
+    "Attribute.value>Attribute(value=Call,attr='parameters',ctx=Load)",  # closed_walk:3057
     "Attribute.value>Attribute(value=Name,attr='PROVIDERS',ctx=Load)",  # closed_walk:852
-    "Attribute.value>Attribute(value=Name,attr='Parameter',ctx=Load)",  # closed_walk:3041
+    "Attribute.value>Attribute(value=Name,attr='Parameter',ctx=Load)",  # closed_walk:3050
     "Attribute.value>Attribute(value=Name,attr='_cw_datetime',ctx=Load)",  # test_match_hold_admission_gate_pg:2763
-    "Attribute.value>Attribute(value=Name,attr='elts',ctx=Load)",  # closed_walk:2992
+    "Attribute.value>Attribute(value=Name,attr='elts',ctx=Load)",  # closed_walk:3001
     "Attribute.value>Attribute(value=Name,attr='events',ctx=Load)",  # test_match_hold_admission_gate_pg:2848
     "Attribute.value>Attribute(value=Name,attr='f_locals',ctx=Load)",  # test_match_hold_admission_gate_pg:2822
     "Attribute.value>Attribute(value=Name,attr='gate_kinds',ctx=Load)",  # test_match_hold_admission_gate_pg:504
-    "Attribute.value>Attribute(value=Name,attr='helpers',ctx=Load)",  # closed_walk:3757
+    "Attribute.value>Attribute(value=Name,attr='helpers',ctx=Load)",  # closed_walk:3766
     "Attribute.value>Attribute(value=Name,attr='parent',ctx=Load)",  # closed_walk:1414
     "Attribute.value>Attribute(value=Name,attr='scope',ctx=Load)",  # closed_walk:856
     "Attribute.value>Attribute(value=Name,attr='types',ctx=Load)",  # test_a1_identity_formation:622
-    'Attribute.value>Call(func=Attribute,args=[Attribute|List],keywords=[])',  # closed_walk:1766
-    'Attribute.value>Call(func=Attribute,args=[Constant|Dict],keywords=[])',  # closed_walk:3667
+    'Attribute.value>Call(func=Attribute,args=[Attribute|List],keywords=[])',  # closed_walk:1775
+    'Attribute.value>Call(func=Attribute,args=[Constant|Dict],keywords=[])',  # closed_walk:3676
     'Attribute.value>Call(func=Attribute,args=[Dict|Name],keywords=[])',  # closed_walk:1524
     'Attribute.value>Call(func=Name,args=[Call],keywords=[])',  # closed_walk:861
     'Attribute.value>Subscript(value=Attribute,slice=Name,ctx=Load)',  # closed_walk:1610
+    'Attribute.value>Subscript(value=Call,slice=Constant,ctx=Load)',  # closed_walk:1717
     'Attribute.value>Subscript(value=Name,slice=Attribute,ctx=Load)',  # test_match_hold_admission_gate_pg:2785
-    'AugAssign.value>ListComp(elt=Call,generators=[comprehension])',  # closed_walk:2957
-    'AugAssign.value>ListComp(elt=Tuple,generators=[comprehension])',  # closed_walk:2643
-    'AugAssign.value>Name(id=str,ctx=Load)',  # closed_walk:1809
+    'AugAssign.value>ListComp(elt=Call,generators=[comprehension])',  # closed_walk:2966
+    'AugAssign.value>ListComp(elt=Tuple,generators=[comprehension])',  # closed_walk:2652
+    'AugAssign.value>Name(id=str,ctx=Load)',  # closed_walk:1818
     "BinOp.left>Attribute(value=Attribute,attr='co_flags',ctx=Load)",  # closed_walk:1373
-    'BinOp.left>BinOp(left=List,op=Mult,right=BinOp)',  # closed_walk:3041
-    'BinOp.left>List(elts=[Attribute],ctx=Load)',  # closed_walk:2511
-    'BinOp.left>List(elts=[IfExp],ctx=Load)',  # closed_walk:2872
-    'BinOp.left>ListComp(elt=IfExp,generators=[comprehension])',  # closed_walk:2609
-    'BinOp.left>ListComp(elt=Subscript,generators=[comprehension])',  # closed_walk:2636
-    'BinOp.left>SetComp(elt=Name,generators=[comprehension])',  # closed_walk:2428
-    'BinOp.left>Tuple(elts=[Subscript],ctx=Load)',  # closed_walk:2364
-    'BinOp.op>FloorDiv()',  # closed_walk:2725
-    "BinOp.right>Attribute(value=Name,attr='lineno',ctx=Load)",  # closed_walk:3199
-    'BinOp.right>BinOp(left=Call,op=Sub,right=Call)',  # closed_walk:3041
-    'BinOp.right>Call(func=Attribute,args=[BinOp],keywords=[])',  # closed_walk:2364
-    'BinOp.right>IfExp(test=Compare,body=List,orelse=List)',  # closed_walk:2439
-    'BinOp.right>IfExp(test=Name,body=Call,orelse=Call)',  # closed_walk:2428
-    'BinOp.right>IfExp(test=Name,body=List,orelse=List)',  # closed_walk:2831
-    'BinOp.right>ListComp(elt=IfExp,generators=[comprehension])',  # closed_walk:3041
-    'BinOp.right>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # closed_walk:3211
+    'BinOp.left>BinOp(left=List,op=Mult,right=BinOp)',  # closed_walk:3050
+    'BinOp.left>List(elts=[Attribute],ctx=Load)',  # closed_walk:2520
+    'BinOp.left>List(elts=[IfExp],ctx=Load)',  # closed_walk:2881
+    'BinOp.left>ListComp(elt=IfExp,generators=[comprehension])',  # closed_walk:2618
+    'BinOp.left>ListComp(elt=Subscript,generators=[comprehension])',  # closed_walk:2645
+    'BinOp.left>SetComp(elt=Name,generators=[comprehension])',  # closed_walk:2437
+    'BinOp.left>Tuple(elts=[Subscript],ctx=Load)',  # closed_walk:2373
+    'BinOp.op>FloorDiv()',  # closed_walk:2734
+    "BinOp.right>Attribute(value=Name,attr='lineno',ctx=Load)",  # closed_walk:3208
+    'BinOp.right>BinOp(left=Call,op=Sub,right=Call)',  # closed_walk:3050
+    'BinOp.right>Call(func=Attribute,args=[BinOp],keywords=[])',  # closed_walk:2373
+    'BinOp.right>IfExp(test=Compare,body=List,orelse=List)',  # closed_walk:2448
+    'BinOp.right>IfExp(test=Name,body=Call,orelse=Call)',  # closed_walk:2437
+    'BinOp.right>IfExp(test=Name,body=List,orelse=List)',  # closed_walk:2840
+    'BinOp.right>ListComp(elt=IfExp,generators=[comprehension])',  # closed_walk:3050
+    'BinOp.right>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # closed_walk:3220
     'BoolOp.values>BinOp(left=Attribute,op=BitAnd,right=Constant)',  # closed_walk:1373
-    'BoolOp.values>BoolOp(op=Or,values=[BoolOp])',  # closed_walk:1856
+    'BoolOp.values>BoolOp(op=Or,values=[BoolOp])',  # closed_walk:1865
     'BoolOp.values>BoolOp(op=Or,values=[Call|Compare])',  # test_match_hold_admission_gate_pg:507
     'BoolOp.values>Call(func=Attribute,args=[Name|Subscript],keywords=[])',  # closed_walk:863
     'BoolOp.values>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:1471
-    'BoolOp.values>Call(func=Name,args=[Constant|Subscript],keywords=[])',  # closed_walk:3027
+    'BoolOp.values>Call(func=Name,args=[Constant|Subscript],keywords=[])',  # closed_walk:3036
     'BoolOp.values>Compare(left=Attribute,ops=[NotEq],comparators=[Attribute])',  # closed_walk:1371
-    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Call])',  # closed_walk:2990
-    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Constant])',  # closed_walk:2674
-    'BoolOp.values>Compare(left=Call,ops=[IsNot],comparators=[Attribute])',  # closed_walk:1734
-    'BoolOp.values>Compare(left=Call,ops=[IsNot],comparators=[Name])',  # closed_walk:1710
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Call])',  # closed_walk:2999
+    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Constant])',  # closed_walk:2683
+    'BoolOp.values>Compare(left=Call,ops=[IsNot],comparators=[Attribute])',  # closed_walk:1743
+    'BoolOp.values>Compare(left=Call,ops=[IsNot],comparators=[Name])',  # closed_walk:1711
     'BoolOp.values>Compare(left=Call,ops=[IsNot],comparators=[Subscript])',  # test_match_hold_admission_gate_pg:2827
     'BoolOp.values>Compare(left=Call,ops=[Is],comparators=[Call])',  # closed_walk:1026
     'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Subscript])',  # test_match_hold_admission_gate_pg:2813
-    'BoolOp.values>Compare(left=Call,ops=[NotIn],comparators=[Tuple])',  # closed_walk:3088
+    'BoolOp.values>Compare(left=Call,ops=[NotIn],comparators=[Tuple])',  # closed_walk:3097
     'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Name])',  # closed_walk:1008
     'BoolOp.values>Compare(left=Name,ops=[IsNot],comparators=[Attribute])',  # closed_walk:1197
     'BoolOp.values>Compare(left=Name,ops=[IsNot],comparators=[Subscript])',  # closed_walk:1618
-    'BoolOp.values>Compare(left=Name,ops=[Is],comparators=[Attribute])',  # closed_walk:2896
+    'BoolOp.values>Compare(left=Name,ops=[Is],comparators=[Attribute])',  # closed_walk:2905
     'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Name])',  # test_match_hold_admission_gate_pg:2790
-    'BoolOp.values>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # closed_walk:2424
-    'BoolOp.values>Compare(left=Subscript,ops=[IsNot],comparators=[Attribute])',  # closed_walk:2810
-    'BoolOp.values>Compare(left=Subscript,ops=[IsNot],comparators=[Name])',  # closed_walk:1711
+    'BoolOp.values>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # closed_walk:2433
+    'BoolOp.values>Compare(left=Subscript,ops=[IsNot],comparators=[Attribute])',  # closed_walk:2819
+    'BoolOp.values>Compare(left=Subscript,ops=[IsNot],comparators=[Name])',  # closed_walk:1712
     'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # closed_walk:1526
     'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # closed_walk:1374
     'BoolOp.values>IfExp(test=Attribute,body=Compare,orelse=UnaryOp)',  # closed_walk:1409
-    'BoolOp.values>ListComp(elt=Name,generators=[comprehension])',  # closed_walk:2630
+    'BoolOp.values>ListComp(elt=Name,generators=[comprehension])',  # closed_walk:2639
     "Call.args>Attribute(value=Attribute,attr='CALL',ctx=Load)",  # test_match_hold_admission_gate_pg:2848
     "Call.args>Attribute(value=Attribute,attr='FunctionType',ctx=Load)",  # test_a1_identity_formation:622
     "Call.args>Attribute(value=Attribute,attr='attr',ctx=Load)",  # closed_walk:1460
     "Call.args>Attribute(value=Attribute,attr='elts',ctx=Load)",  # closed_walk:1607
-    "Call.args>Attribute(value=Attribute,attr='opaque_def',ctx=Load)",  # closed_walk:3666
-    "Call.args>Attribute(value=Name,attr='AnnAssign',ctx=Load)",  # closed_walk:2995
-    "Call.args>Attribute(value=Name,attr='BoolOp',ctx=Load)",  # closed_walk:2510
-    "Call.args>Attribute(value=Name,attr='FunctionType',ctx=Load)",  # closed_walk:3149
-    "Call.args>Attribute(value=Name,attr='NamedExpr',ctx=Load)",  # closed_walk:2921
-    "Call.args>Attribute(value=Name,attr='Slice',ctx=Load)",  # closed_walk:2530
-    "Call.args>Attribute(value=Name,attr='__code__',ctx=Load)",  # closed_walk:2809
-    "Call.args>Attribute(value=Name,attr='comparators',ctx=Load)",  # closed_walk:2511
-    "Call.args>Attribute(value=Name,attr='defaults',ctx=Load)",  # closed_walk:3041
-    "Call.args>Attribute(value=Name,attr='elt',ctx=Load)",  # closed_walk:2483
+    "Call.args>Attribute(value=Attribute,attr='opaque_def',ctx=Load)",  # closed_walk:3675
+    "Call.args>Attribute(value=Name,attr='AnnAssign',ctx=Load)",  # closed_walk:3004
+    "Call.args>Attribute(value=Name,attr='BoolOp',ctx=Load)",  # closed_walk:2519
+    "Call.args>Attribute(value=Name,attr='FunctionType',ctx=Load)",  # closed_walk:3158
+    "Call.args>Attribute(value=Name,attr='NamedExpr',ctx=Load)",  # closed_walk:2930
+    "Call.args>Attribute(value=Name,attr='Slice',ctx=Load)",  # closed_walk:2539
+    "Call.args>Attribute(value=Name,attr='__code__',ctx=Load)",  # closed_walk:2818
+    "Call.args>Attribute(value=Name,attr='comparators',ctx=Load)",  # closed_walk:2520
+    "Call.args>Attribute(value=Name,attr='defaults',ctx=Load)",  # closed_walk:3050
+    "Call.args>Attribute(value=Name,attr='elt',ctx=Load)",  # closed_walk:2492
     "Call.args>Attribute(value=Name,attr='generators',ctx=Load)",  # closed_walk:1615
-    "Call.args>Attribute(value=Name,attr='key',ctx=Load)",  # closed_walk:2481
+    "Call.args>Attribute(value=Name,attr='key',ctx=Load)",  # closed_walk:2490
     "Call.args>Attribute(value=Subscript,attr='elts',ctx=Load)",  # closed_walk:1598
-    "Call.args>Attribute(value=Subscript,attr='targets',ctx=Load)",  # closed_walk:1817
-    'Call.args>BinOp(left=ListComp,op=Add,right=List)',  # closed_walk:2609
-    'Call.args>BinOp(left=Name,op=Add,right=IfExp)',  # closed_walk:2439
-    'Call.args>BinOp(left=Tuple,op=Add,right=Subscript)',  # closed_walk:2364
-    'Call.args>Call(func=Name,args=[Attribute|Call|Name],keywords=[])',  # closed_walk:3685
+    "Call.args>Attribute(value=Subscript,attr='targets',ctx=Load)",  # closed_walk:1826
+    'Call.args>BinOp(left=ListComp,op=Add,right=List)',  # closed_walk:2618
+    'Call.args>BinOp(left=Name,op=Add,right=IfExp)',  # closed_walk:2448
+    'Call.args>BinOp(left=Tuple,op=Add,right=Subscript)',  # closed_walk:2373
+    'Call.args>Call(func=Name,args=[Attribute|Call|Name],keywords=[])',  # closed_walk:3694
     'Call.args>Dict(keys=[Attribute],values=[Name])',  # closed_walk:1170
-    'Call.args>IfExp(test=Subscript,body=Call,orelse=Name)',  # closed_walk:2773
-    'Call.args>Lambda(args=arguments,body=IfExp)',  # closed_walk:2350
-    'Call.args>List(elts=[Call|Subscript],ctx=Load)',  # closed_walk:2675
-    'Call.args>List(elts=[Constant|Subscript],ctx=Load)',  # closed_walk:2678
-    'Call.args>ListComp(elt=Call,generators=[comprehension])',  # closed_walk:2369
-    'Call.args>SetComp(elt=Name,generators=[comprehension])',  # closed_walk:2440
-    'Call.args>Subscript(value=Attribute,slice=Call,ctx=Load)',  # closed_walk:2992
+    'Call.args>IfExp(test=Subscript,body=Call,orelse=Name)',  # closed_walk:2782
+    'Call.args>Lambda(args=arguments,body=IfExp)',  # closed_walk:2359
+    'Call.args>List(elts=[Call|Subscript],ctx=Load)',  # closed_walk:2684
+    'Call.args>List(elts=[Constant|Subscript],ctx=Load)',  # closed_walk:2687
+    'Call.args>ListComp(elt=Call,generators=[comprehension])',  # closed_walk:2378
+    'Call.args>SetComp(elt=Name,generators=[comprehension])',  # closed_walk:2449
+    'Call.args>Subscript(value=Attribute,slice=Call,ctx=Load)',  # closed_walk:3001
     'Call.args>Tuple(elts=[Attribute|Constant|Name],ctx=Load)',  # closed_walk:1537
     'Call.args>Tuple(elts=[Attribute|Constant|Name|Subscript],ctx=Load)',  # test_match_hold_admission_gate_pg:2840
     'Call.args>Tuple(elts=[Attribute|Constant|Subscript],ctx=Load)',  # test_match_hold_admission_gate_pg:2808
-    'Call.args>Tuple(elts=[BinOp|Constant|Name],ctx=Load)',  # closed_walk:3211
+    'Call.args>Tuple(elts=[BinOp|Constant|Name],ctx=Load)',  # closed_walk:3220
     'Call.args>Tuple(elts=[Constant|Subscript],ctx=Load)',  # test_match_hold_admission_gate_pg:2819
-    "Call.func>Attribute(value=Attribute,attr='bound_value',ctx=Load)",  # closed_walk:3195
-    "Call.func>Attribute(value=Attribute,attr='index',ctx=Load)",  # closed_walk:2992
-    "Call.func>Attribute(value=Attribute,attr='k_attr',ctx=Load)",  # closed_walk:3210
-    "Call.func>Attribute(value=Attribute,attr='values',ctx=Load)",  # closed_walk:3048
+    "Call.func>Attribute(value=Attribute,attr='bound_value',ctx=Load)",  # closed_walk:3204
+    "Call.func>Attribute(value=Attribute,attr='index',ctx=Load)",  # closed_walk:3001
+    "Call.func>Attribute(value=Attribute,attr='k_attr',ctx=Load)",  # closed_walk:3219
+    "Call.func>Attribute(value=Attribute,attr='values',ctx=Load)",  # closed_walk:3057
     "Call.func>Attribute(value=Call,attr='count',ctx=Load)",  # closed_walk:1568
     "Call.func>Attribute(value=Call,attr='get',ctx=Load)",  # closed_walk:861
     "Call.func>Attribute(value=Name,attr='__binder_address__',ctx=Load)",  # test_a1_identity_formation:3799
     "Call.func>Attribute(value=Name,attr='_call_sites',ctx=Load)",  # closed_walk:1492
-    "Call.func>Attribute(value=Name,attr='_const_names',ctx=Load)",  # closed_walk:1793
+    "Call.func>Attribute(value=Name,attr='_const_names',ctx=Load)",  # closed_walk:1802
     "Call.func>Attribute(value=Name,attr='_getframe',ctx=Load)",  # test_match_hold_admission_gate_pg:2817
     "Call.func>Attribute(value=Name,attr='_handed',ctx=Load)",  # closed_walk:1575
     "Call.func>Attribute(value=Name,attr='_inert_string',ctx=Load)",  # closed_walk:1556
-    "Call.func>Attribute(value=Name,attr='_k_census',ctx=Load)",  # closed_walk:1727
+    "Call.func>Attribute(value=Name,attr='_k_census',ctx=Load)",  # closed_walk:1736
     "Call.func>Attribute(value=Name,attr='_local_root',ctx=Load)",  # closed_walk:1388
     "Call.func>Attribute(value=Name,attr='_module',ctx=Load)",  # closed_walk:1008
     "Call.func>Attribute(value=Name,attr='_module_function',ctx=Load)",  # closed_walk:1567
@@ -9950,7 +9951,7 @@ R11_ID_WALKER_SHAPES = frozenset({
     "Call.func>Attribute(value=Name,attr='_param_calls',ctx=Load)",  # closed_walk:1651
     "Call.func>Attribute(value=Name,attr='_root_over_sites',ctx=Load)",  # closed_walk:1483
     "Call.func>Attribute(value=Name,attr='_rooted',ctx=Load)",  # closed_walk:1391
-    "Call.func>Attribute(value=Name,attr='_store_census',ctx=Load)",  # closed_walk:1748
+    "Call.func>Attribute(value=Name,attr='_store_census',ctx=Load)",  # closed_walk:1757
     "Call.func>Attribute(value=Name,attr='_w_root',ctx=Load)",  # closed_walk:1494
     "Call.func>Attribute(value=Name,attr='bound_identity',ctx=Load)",  # closed_walk:887
     "Call.func>Attribute(value=Name,attr='bound_root',ctx=Load)",  # closed_walk:1442
@@ -9964,9 +9965,9 @@ R11_ID_WALKER_SHAPES = frozenset({
     "Call.func>Attribute(value=Name,attr='getsourcelines',ctx=Load)",  # test_a1_identity_formation:634
     "Call.func>Attribute(value=Name,attr='k_class',ctx=Load)",  # closed_walk:1531
     "Call.func>Attribute(value=Name,attr='k_method',ctx=Load)",  # closed_walk:1460
-    "Call.func>Attribute(value=Name,attr='listed',ctx=Load)",  # closed_walk:2709
-    "Call.func>Attribute(value=Name,attr='namedtuple_class',ctx=Load)",  # closed_walk:2555
-    "Call.func>Attribute(value=Name,attr='nested_def',ctx=Load)",  # closed_walk:2566
+    "Call.func>Attribute(value=Name,attr='listed',ctx=Load)",  # closed_walk:2718
+    "Call.func>Attribute(value=Name,attr='namedtuple_class',ctx=Load)",  # closed_walk:2564
+    "Call.func>Attribute(value=Name,attr='nested_def',ctx=Load)",  # closed_walk:2575
     "Call.func>Attribute(value=Name,attr='observe',ctx=Load)",  # closed_walk:830
     "Call.func>Attribute(value=Name,attr='observe_chain',ctx=Load)",  # closed_walk:1269
     "Call.func>Attribute(value=Name,attr='opaque_def',ctx=Load)",  # closed_walk:1170
@@ -9978,395 +9979,398 @@ R11_ID_WALKER_SHAPES = frozenset({
     "Call.func>Attribute(value=Name,attr='supplied',ctx=Load)",  # test_a1_identity_formation:857
     "Call.func>Attribute(value=Name,attr='trusted',ctx=Load)",  # closed_walk:854
     "Call.func>Attribute(value=Name,attr='trusted_class',ctx=Load)",  # closed_walk:913
-    "Call.func>Attribute(value=Name,attr='trusted_constant',ctx=Load)",  # closed_walk:2841
+    "Call.func>Attribute(value=Name,attr='trusted_constant',ctx=Load)",  # closed_walk:2850
     "Call.func>Attribute(value=Name,attr='trusted_function',ctx=Load)",  # closed_walk:912
     "Call.func>Attribute(value=Name,attr='use_tool_id',ctx=Load)",  # test_match_hold_admission_gate_pg:2846
     "Call.func>Attribute(value=Name,attr='valid',ctx=Load)",  # test_match_hold_admission_gate_pg:507
     "Call.func>Attribute(value=Subscript,attr='append',ctx=Load)",  # test_match_hold_admission_gate_pg:2785
     "Call.func>Attribute(value=Subscript,attr='get',ctx=Load)",  # closed_walk:1555
-    "Call.func>Attribute(value=Subscript,attr='setdefault',ctx=Load)",  # closed_walk:1766
+    "Call.func>Attribute(value=Subscript,attr='setdefault',ctx=Load)",  # closed_walk:1775
     "Call.func>Attribute(value=Subscript,attr='split',ctx=Load)",  # test_match_hold_admission_gate_pg:2821
     "Call.func>Attribute(value=Subscript,attr='valid',ctx=Load)",  # closed_walk:1471
-    "Call.keywords>keyword(arg='awaited',value=Constant)",  # closed_walk:2527
+    "Call.keywords>keyword(arg='awaited',value=Constant)",  # closed_walk:2536
     "Call.keywords>keyword(arg='b',value=Attribute)",  # test_match_hold_admission_gate_pg:598
     "Call.keywords>keyword(arg='effects',value=List)",  # test_match_hold_admission_gate_pg:599
     "Call.keywords>keyword(arg='helper',value=Constant)",  # test_match_hold_admission_gate_pg:598
-    "Call.keywords>keyword(arg='outward',value=Name)",  # closed_walk:2925
+    "Call.keywords>keyword(arg='outward',value=Name)",  # closed_walk:2934
     "Call.keywords>keyword(arg='p',value=Attribute)",  # test_match_hold_admission_gate_pg:598
-    "Call.keywords>keyword(arg='param_values',value=Dict)",  # closed_walk:3174
+    "Call.keywords>keyword(arg='param_values',value=Dict)",  # closed_walk:3183
     "Call.keywords>keyword(arg='receivers',value=Compare)",  # test_a1_identity_formation:2283
-    "Call.keywords>keyword(arg='receivers',value=Constant)",  # closed_walk:3173
+    "Call.keywords>keyword(arg='receivers',value=Constant)",  # closed_walk:3182
     'ClassDef.body>FunctionDef(name=str,args=arguments,body=[If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_a1_identity_formation:3793
     "Compare.comparators>Attribute(value=Attribute,attr='datetime',ctx=Load)",  # test_match_hold_admission_gate_pg:2763
-    "Compare.comparators>Attribute(value=Attribute,attr='empty',ctx=Load)",  # closed_walk:3088
-    "Compare.comparators>Attribute(value=Name,attr='FunctionType',ctx=Load)",  # closed_walk:1734
+    "Compare.comparators>Attribute(value=Attribute,attr='empty',ctx=Load)",  # closed_walk:3097
+    "Compare.comparators>Attribute(value=Name,attr='FunctionType',ctx=Load)",  # closed_walk:1743
     "Compare.comparators>Attribute(value=Name,attr='ModuleType',ctx=Load)",  # closed_walk:855
-    "Compare.comparators>Attribute(value=Name,attr='__code__',ctx=Load)",  # closed_walk:2810
-    "Compare.comparators>Attribute(value=Name,attr='body',ctx=Load)",  # closed_walk:2896
-    "Compare.comparators>Attribute(value=Name,attr='iter',ctx=Load)",  # closed_walk:2904
+    "Compare.comparators>Attribute(value=Name,attr='__code__',ctx=Load)",  # closed_walk:2819
+    "Compare.comparators>Attribute(value=Name,attr='body',ctx=Load)",  # closed_walk:2905
+    "Compare.comparators>Attribute(value=Name,attr='iter',ctx=Load)",  # closed_walk:2913
     "Compare.comparators>Attribute(value=Name,attr='name',ctx=Load)",  # closed_walk:1371
-    "Compare.comparators>Attribute(value=Name,attr='param_values',ctx=Load)",  # closed_walk:2972
+    "Compare.comparators>Attribute(value=Name,attr='param_values',ctx=Load)",  # closed_walk:2981
     "Compare.comparators>Attribute(value=Name,attr='where',ctx=Load)",  # closed_walk:1197
-    'Compare.comparators>BinOp(left=Name,op=FloorDiv,right=Constant)',  # closed_walk:2725
+    'Compare.comparators>BinOp(left=Name,op=FloorDiv,right=Constant)',  # closed_walk:2734
     'Compare.comparators>List(elts=[Tuple],ctx=Load)',  # closed_walk:1409
     'Compare.comparators>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # closed_walk:1602
     'Compare.comparators>Subscript(value=Attribute,slice=Name,ctx=Load)',  # closed_walk:1618
     'Compare.comparators>Subscript(value=Call,slice=Constant,ctx=Load)',  # closed_walk:1374
     'Compare.comparators>Subscript(value=Subscript,slice=Slice,ctx=Load)',  # test_match_hold_admission_gate_pg:2813
-    'Compare.comparators>Tuple(elts=[Call|Name],ctx=Load)',  # closed_walk:2840
+    'Compare.comparators>Tuple(elts=[Call|Name],ctx=Load)',  # closed_walk:2849
     "Compare.left>Attribute(value=Attribute,attr='co_name',ctx=Load)",  # closed_walk:1371
     "Compare.left>Attribute(value=Name,attr='f_code',ctx=Load)",  # test_match_hold_admission_gate_pg:2818
     "Compare.left>Attribute(value=Name,attr='func',ctx=Load)",  # closed_walk:1571
     "Compare.left>Attribute(value=Name,attr='iter',ctx=Load)",  # closed_walk:1605
     "Compare.left>Attribute(value=Name,attr='left',ctx=Load)",  # closed_walk:1622
-    "Compare.left>Attribute(value=Name,attr='target',ctx=Load)",  # closed_walk:2986
+    "Compare.left>Attribute(value=Name,attr='target',ctx=Load)",  # closed_walk:2995
     'Compare.left>Call(func=Attribute,args=[Dict|Name],keywords=[])',  # closed_walk:1170
-    'Compare.left>Call(func=Name,args=[Attribute|Call],keywords=[])',  # closed_walk:2734
+    'Compare.left>Call(func=Name,args=[Attribute|Call],keywords=[])',  # closed_walk:2743
     'Compare.left>Call(func=Name,args=[Constant|Name],keywords=[])',  # test_match_hold_admission_gate_pg:2813
     'Compare.left>Subscript(value=Attribute,slice=Constant,ctx=Load)',  # closed_walk:1448
-    'Compare.left>Subscript(value=Attribute,slice=UnaryOp,ctx=Load)',  # closed_walk:1711
-    'Delete.targets>Subscript(value=Attribute,slice=Name,ctx=Del)',  # closed_walk:3762
-    'Delete.targets>Subscript(value=Name,slice=Call,ctx=Del)',  # closed_walk:2791
-    'Dict.values>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:1871
-    'Dict.values>Tuple(elts=[Constant|Name|Tuple],ctx=Load)',  # closed_walk:3174
-    'Expr.value>Call(func=Attribute,args=[Attribute|Name|Subscript],keywords=[])',  # closed_walk:3210
-    'Expr.value>Call(func=Attribute,args=[Name],keywords=[keyword])',  # closed_walk:2125
-    'Expr.value>Call(func=Name,args=[Attribute|Call|Name],keywords=[])',  # closed_walk:3679
-    'Expr.value>Call(func=Name,args=[Attribute|Name|Subscript],keywords=[])',  # closed_walk:3669
+    'Compare.left>Subscript(value=Attribute,slice=UnaryOp,ctx=Load)',  # closed_walk:1712
+    'Delete.targets>Subscript(value=Attribute,slice=Name,ctx=Del)',  # closed_walk:3771
+    'Delete.targets>Subscript(value=Name,slice=Call,ctx=Del)',  # closed_walk:2800
+    'Dict.values>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:1880
+    'Dict.values>Tuple(elts=[Constant|Name|Tuple],ctx=Load)',  # closed_walk:3183
+    'Expr.value>Call(func=Attribute,args=[Attribute|Name|Subscript],keywords=[])',  # closed_walk:3219
+    'Expr.value>Call(func=Attribute,args=[Name],keywords=[keyword])',  # closed_walk:2134
+    'Expr.value>Call(func=Name,args=[Attribute|Call|Name],keywords=[])',  # closed_walk:3688
+    'Expr.value>Call(func=Name,args=[Attribute|Name|Subscript],keywords=[])',  # closed_walk:3678
     'For.body>Assign(targets=[Subscript],value=Name,type_comment=-)',  # closed_walk:757
     'For.body>Assign(targets=[Tuple],value=Name,type_comment=-)',  # closed_walk:1496
-    'For.body>AugAssign(target=Name,op=BitOr,value=Name)',  # closed_walk:1809
-    'For.body>For(target=Name,iter=BinOp,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:3111
+    'For.body>AugAssign(target=Name,op=BitOr,value=Name)',  # closed_walk:1818
+    'For.body>For(target=Name,iter=BinOp,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:3120
     'For.body>For(target=Name,iter=Call,body=[Expr|For],orelse=[],type_comment=-)',  # closed_walk:754
     'For.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # closed_walk:1621
-    'For.body>For(target=Name,iter=Subscript,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:3137
-    'For.body>For(target=Tuple,iter=Call,body=[If],orelse=[],type_comment=-)',  # closed_walk:2131
-    'For.body>If(test=BoolOp,body=[Continue|For],orelse=[])',  # closed_walk:3116
+    'For.body>For(target=Name,iter=Subscript,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:3146
+    'For.body>For(target=Tuple,iter=Call,body=[If],orelse=[],type_comment=-)',  # closed_walk:2140
+    'For.body>If(test=BoolOp,body=[Continue|For],orelse=[])',  # closed_walk:3125
     'For.body>If(test=Call,body=[Raise],orelse=[])',  # closed_walk:1568
     'For.body>If(test=Compare,body=[Continue|If],orelse=[])',  # test_match_hold_admission_gate_pg:2802
-    'For.body>If(test=Compare,body=[Expr],orelse=[Expr])',  # closed_walk:2861
+    'For.body>If(test=Compare,body=[Expr],orelse=[Expr])',  # closed_walk:2870
     'For.body>If(test=Name,body=[Assign|If],orelse=[])',  # test_match_hold_admission_gate_pg:2823
-    'For.body>If(test=Name,body=[Return],orelse=[])',  # closed_walk:2941
+    'For.body>If(test=Name,body=[Return],orelse=[])',  # closed_walk:2950
     'For.body>If(test=UnaryOp,body=[Raise],orelse=[])',  # closed_walk:1654
-    'For.iter>BinOp(left=Call,op=Add,right=List)',  # closed_walk:2939
-    'For.iter>BinOp(left=Name,op=Add,right=Name)',  # closed_walk:3111
+    'For.iter>BinOp(left=Call,op=Add,right=List)',  # closed_walk:2948
+    'For.iter>BinOp(left=Name,op=Add,right=Name)',  # closed_walk:3120
     'For.iter>Call(func=Attribute,args=[Name|Tuple],keywords=[])',  # closed_walk:1562
-    'For.iter>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2764
-    'For.target>Tuple(elts=[Name|Tuple],ctx=Store)',  # closed_walk:2131
-    "FormattedValue.value>Attribute(value=Attribute,attr='co_name',ctx=Load)",  # closed_walk:3682
+    'For.iter>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2773
+    'For.target>Tuple(elts=[Name|Tuple],ctx=Store)',  # closed_walk:2140
+    "FormattedValue.value>Attribute(value=Attribute,attr='co_name',ctx=Load)",  # closed_walk:3691
     "FormattedValue.value>Attribute(value=Name,attr='__qualname__',ctx=Load)",  # closed_walk:1533
-    'FormattedValue.value>Call(func=Attribute,args=[Subscript],keywords=[])',  # closed_walk:3133
-    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=arg,defaults=[Tuple])',  # closed_walk:2124
+    "FormattedValue.value>Attribute(value=Subscript,attr='__qualname__',ctx=Load)",  # closed_walk:1717
+    'FormattedValue.value>Call(func=Attribute,args=[Subscript],keywords=[])',  # closed_walk:3142
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=arg,defaults=[Tuple])',  # closed_walk:2133
     'FunctionDef.body>Assign(targets=[Name],value=Name,type_comment=-)',  # test_match_hold_admission_gate_pg:255
     'FunctionDef.body>Assign(targets=[Subscript],value=IfExp,type_comment=-)',  # test_match_hold_admission_gate_pg:525
-    'FunctionDef.body>Assign(targets=[Subscript],value=ListComp,type_comment=-)',  # closed_walk:2877
-    'FunctionDef.body>AugAssign(target=Name,op=Add,value=ListComp)',  # closed_walk:2643
-    'FunctionDef.body>For(target=Name,iter=Attribute,body=[For],orelse=[],type_comment=-)',  # closed_walk:1834
-    'FunctionDef.body>For(target=Name,iter=BinOp,body=[Assign|If],orelse=[],type_comment=-)',  # closed_walk:2939
-    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign],orelse=[],type_comment=-)',  # closed_walk:2356
-    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:3068
-    'FunctionDef.body>For(target=Name,iter=Subscript,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # closed_walk:2764
-    'FunctionDef.body>For(target=Tuple,iter=Call,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:2126
+    'FunctionDef.body>Assign(targets=[Subscript],value=ListComp,type_comment=-)',  # closed_walk:2886
+    'FunctionDef.body>AugAssign(target=Name,op=Add,value=ListComp)',  # closed_walk:2652
+    'FunctionDef.body>For(target=Name,iter=Attribute,body=[For],orelse=[],type_comment=-)',  # closed_walk:1843
+    'FunctionDef.body>For(target=Name,iter=BinOp,body=[Assign|If],orelse=[],type_comment=-)',  # closed_walk:2948
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign],orelse=[],type_comment=-)',  # closed_walk:2365
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:3077
+    'FunctionDef.body>For(target=Name,iter=Subscript,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # closed_walk:2773
+    'FunctionDef.body>For(target=Tuple,iter=Call,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:2135
     'FunctionDef.body>For(target=Tuple,iter=Name,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:1601
-    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:2745
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # closed_walk:2754
     'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[For|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # test_match_hold_admission_gate_pg:2788
-    'FunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[Assign])',  # closed_walk:2635
-    'FunctionDef.body>If(test=BoolOp,body=[Assign|Return],orelse=[])',  # closed_walk:1795
-    'FunctionDef.body>If(test=BoolOp,body=[Assign|Try],orelse=[])',  # closed_walk:2810
-    'FunctionDef.body>If(test=BoolOp,body=[If|Return],orelse=[])',  # closed_walk:2684
-    'FunctionDef.body>If(test=Call,body=[Assign|If],orelse=[])',  # closed_walk:2545
-    'FunctionDef.body>If(test=Call,body=[If|Return],orelse=[])',  # closed_walk:2500
-    'FunctionDef.body>If(test=Compare,body=[Assign],orelse=[Assign])',  # closed_walk:2922
+    'FunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[Assign])',  # closed_walk:2644
+    'FunctionDef.body>If(test=BoolOp,body=[Assign|Return],orelse=[])',  # closed_walk:1804
+    'FunctionDef.body>If(test=BoolOp,body=[Assign|Try],orelse=[])',  # closed_walk:2819
+    'FunctionDef.body>If(test=BoolOp,body=[If|Return],orelse=[])',  # closed_walk:2693
+    'FunctionDef.body>If(test=Call,body=[Assign|If],orelse=[])',  # closed_walk:2554
+    'FunctionDef.body>If(test=Call,body=[If|Return],orelse=[])',  # closed_walk:2509
+    'FunctionDef.body>If(test=Compare,body=[Assign],orelse=[Assign])',  # closed_walk:2931
     'FunctionDef.body>If(test=Compare,body=[Assign],orelse=[Assign|If])',  # closed_walk:513
     'FunctionDef.body>If(test=Compare,body=[Assign|Delete|If],orelse=[])',  # test_match_hold_admission_gate_pg:505
-    'FunctionDef.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # closed_walk:3227
-    'FunctionDef.body>If(test=Compare,body=[Assign|If|Return|Try],orelse=[])',  # closed_walk:2553
-    'FunctionDef.body>If(test=Compare,body=[Delete|If],orelse=[])',  # closed_walk:2787
-    'FunctionDef.body>If(test=Compare,body=[If|Return],orelse=[])',  # closed_walk:2572
-    'FunctionDef.body>If(test=Name,body=[Assign],orelse=[Assign])',  # closed_walk:3233
-    'FunctionDef.body>If(test=Name,body=[If|Return],orelse=[])',  # closed_walk:2454
-    'FunctionDef.body>If(test=Subscript,body=[Assign|Raise],orelse=[])',  # closed_walk:1749
-    'FunctionDef.body>If(test=UnaryOp,body=[Assign|If|Return],orelse=[])',  # closed_walk:2837
-    'FunctionDef.body>Try(body=[Assign|For],handlers=[],orelse=[],finalbody=[Expr])',  # closed_walk:2858
-    'FunctionDef.body>Try(body=[Assign|Return|While],handlers=[],orelse=[],finalbody=[Expr])',  # closed_walk:2599
+    'FunctionDef.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # closed_walk:3236
+    'FunctionDef.body>If(test=Compare,body=[Assign|If|Return|Try],orelse=[])',  # closed_walk:2562
+    'FunctionDef.body>If(test=Compare,body=[Delete|If],orelse=[])',  # closed_walk:2796
+    'FunctionDef.body>If(test=Compare,body=[If|Return],orelse=[])',  # closed_walk:2581
+    'FunctionDef.body>If(test=Name,body=[Assign],orelse=[Assign])',  # closed_walk:3242
+    'FunctionDef.body>If(test=Name,body=[If|Return],orelse=[])',  # closed_walk:2463
+    'FunctionDef.body>If(test=Name,body=[Raise],orelse=[])',  # closed_walk:1722
+    'FunctionDef.body>If(test=Subscript,body=[Assign|Raise],orelse=[])',  # closed_walk:1758
+    'FunctionDef.body>If(test=UnaryOp,body=[Assign|If|Return],orelse=[])',  # closed_walk:2846
+    'FunctionDef.body>Try(body=[Assign|For],handlers=[],orelse=[],finalbody=[Expr])',  # closed_walk:2867
+    'FunctionDef.body>Try(body=[Assign|Return|While],handlers=[],orelse=[],finalbody=[Expr])',  # closed_walk:2608
     'FunctionDef.body>Try(body=[Expr|For],handlers=[],orelse=[],finalbody=[Expr|For])',  # test_match_hold_admission_gate_pg:2847
     'FunctionDef.body>Try(body=[With],handlers=[],orelse=[],finalbody=[Expr])',  # closed_walk:1481
-    'FunctionDef.body>While(test=BoolOp,body=[Assign|If],orelse=[])',  # closed_walk:2895
-    'FunctionDef.body>While(test=Name,body=[Assign|For|If],orelse=[])',  # closed_walk:1763
+    'FunctionDef.body>While(test=BoolOp,body=[Assign|If],orelse=[])',  # closed_walk:2904
+    'FunctionDef.body>While(test=Name,body=[Assign|For|If],orelse=[])',  # closed_walk:1772
     'GeneratorExp.elt>BoolOp(op=And,values=[BoolOp|Compare])',  # test_match_hold_admission_gate_pg:2766
-    'GeneratorExp.elt>BoolOp(op=Or,values=[Call])',  # closed_walk:3106
-    'GeneratorExp.elt>BoolOp(op=Or,values=[Call|Compare])',  # closed_walk:2434
+    'GeneratorExp.elt>BoolOp(op=Or,values=[Call])',  # closed_walk:3115
+    'GeneratorExp.elt>BoolOp(op=Or,values=[Call|Compare])',  # closed_walk:2443
     'GeneratorExp.elt>Compare(left=Call,ops=[In],comparators=[Name])',  # test_match_hold_admission_gate_pg:2767
-    'GeneratorExp.elt>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # closed_walk:2469
-    'GeneratorExp.elt>Compare(left=Name,ops=[In],comparators=[Call])',  # closed_walk:1712
-    'GeneratorExp.elt>Compare(left=Name,ops=[In],comparators=[Tuple])',  # closed_walk:2465
+    'GeneratorExp.elt>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # closed_walk:2478
+    'GeneratorExp.elt>Compare(left=Name,ops=[In],comparators=[Call])',  # closed_walk:1732
+    'GeneratorExp.elt>Compare(left=Name,ops=[In],comparators=[Tuple])',  # closed_walk:2474
     'GeneratorExp.elt>Compare(left=Name,ops=[NotEq],comparators=[Subscript])',  # closed_walk:1514
-    'GeneratorExp.elt>Subscript(value=Call,slice=Name,ctx=Load)',  # closed_walk:1733
-    'GeneratorExp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2442
-    'GeneratorExp.elt>UnaryOp(op=Not,operand=BoolOp)',  # closed_walk:2443
+    'GeneratorExp.elt>Subscript(value=Call,slice=Name,ctx=Load)',  # closed_walk:1742
+    'GeneratorExp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2451
+    'GeneratorExp.elt>UnaryOp(op=Not,operand=BoolOp)',  # closed_walk:2452
     'GeneratorExp.generators>comprehension(target=Name,iter=Attribute,ifs=[Compare],is_async=0)',  # closed_walk:1505
     'GeneratorExp.generators>comprehension(target=Name,iter=BinOp,ifs=[UnaryOp],is_async=0)',  # test_a1_identity_formation:2390
     'GeneratorExp.generators>comprehension(target=Name,iter=BinOp,ifs=[],is_async=0)',  # closed_walk:1200
-    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Call],is_async=0)',  # closed_walk:2442
-    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[UnaryOp],is_async=0)',  # closed_walk:3139
-    'If.body>Assign(targets=[Name|Subscript],value=Tuple,type_comment=-)',  # closed_walk:2815
-    'If.body>Assign(targets=[Tuple],value=Subscript,type_comment=-)',  # closed_walk:1750
-    'If.body>AugAssign(target=Name,op=Add,value=ListComp)',  # closed_walk:2957
-    'If.body>Delete(targets=[Subscript])',  # closed_walk:2791
-    'If.body>For(target=Name,iter=Attribute,body=[Assign|AugAssign|If],orelse=[],type_comment=-)',  # closed_walk:1805
-    'If.body>For(target=Name,iter=BinOp,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:3540
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Call],is_async=0)',  # closed_walk:2451
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[UnaryOp],is_async=0)',  # closed_walk:3148
+    'If.body>Assign(targets=[Name|Subscript],value=Tuple,type_comment=-)',  # closed_walk:2824
+    'If.body>Assign(targets=[Tuple],value=Subscript,type_comment=-)',  # closed_walk:1759
+    'If.body>AugAssign(target=Name,op=Add,value=ListComp)',  # closed_walk:2966
+    'If.body>Delete(targets=[Subscript])',  # closed_walk:2800
+    'If.body>For(target=Name,iter=Attribute,body=[Assign|AugAssign|If],orelse=[],type_comment=-)',  # closed_walk:1814
+    'If.body>For(target=Name,iter=BinOp,body=[Assign|For|If],orelse=[],type_comment=-)',  # closed_walk:3549
     'If.body>If(test=BoolOp,body=[Assign],orelse=[])',  # closed_walk:1008
-    'If.body>If(test=BoolOp,body=[If|Return],orelse=[])',  # closed_walk:2988
+    'If.body>If(test=BoolOp,body=[If|Return],orelse=[])',  # closed_walk:2997
     'If.body>If(test=Call,body=[Assign],orelse=[Assign])',  # closed_walk:847
-    'If.body>If(test=Compare,body=[Assign|AugAssign|Return],orelse=[])',  # closed_walk:2955
-    'If.body>If(test=Compare,body=[Assign|Return],orelse=[])',  # closed_walk:2549
-    'If.body>If(test=Compare,body=[Expr],orelse=[For])',  # closed_walk:1865
-    'If.body>If(test=Compare,body=[If|Return],orelse=[])',  # closed_walk:2971
-    'If.body>If(test=UnaryOp,body=[Assign|For|If],orelse=[])',  # closed_walk:3521
+    'If.body>If(test=Compare,body=[Assign|AugAssign|Return],orelse=[])',  # closed_walk:2964
+    'If.body>If(test=Compare,body=[Assign|Return],orelse=[])',  # closed_walk:2558
+    'If.body>If(test=Compare,body=[Expr],orelse=[For])',  # closed_walk:1874
+    'If.body>If(test=Compare,body=[If|Return],orelse=[])',  # closed_walk:2980
+    'If.body>If(test=UnaryOp,body=[Assign|For|If],orelse=[])',  # closed_walk:3530
     'If.body>If(test=UnaryOp,body=[Expr],orelse=[If])',  # test_match_hold_admission_gate_pg:2803
     'If.body>If(test=UnaryOp,body=[Raise],orelse=[])',  # closed_walk:1694
-    'If.body>Return(value=BoolOp)',  # closed_walk:2959
-    'If.body>Return(value=Compare)',  # closed_walk:3022
-    'If.body>Return(value=Set)',  # closed_walk:1791
+    'If.body>Return(value=BoolOp)',  # closed_walk:2968
+    'If.body>Return(value=Compare)',  # closed_walk:3031
+    'If.body>Return(value=Set)',  # closed_walk:1800
     'If.body>Try(body=[Assign],handlers=[ExceptHandler],orelse=[Assign],finalbody=[])',  # test_a1_identity_formation:2270
     'If.orelse>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # closed_walk:863
-    'If.orelse>Assign(targets=[Name],value=Constant,type_comment=-)',  # closed_walk:2638
-    'If.orelse>For(target=Name,iter=Name,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1869
-    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[Return])',  # closed_walk:2731
+    'If.orelse>Assign(targets=[Name],value=Constant,type_comment=-)',  # closed_walk:2647
+    'If.orelse>For(target=Name,iter=Name,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1878
+    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[Return])',  # closed_walk:2740
     'If.orelse>If(test=BoolOp,body=[Expr],orelse=[Raise])',  # closed_walk:1573
-    'If.orelse>If(test=Call,body=[Expr|If],orelse=[])',  # closed_walk:3900
+    'If.orelse>If(test=Call,body=[Expr|If],orelse=[])',  # closed_walk:3909
     'If.orelse>If(test=Compare,body=[Assign],orelse=[Assign])',  # closed_walk:855
     'If.orelse>If(test=Compare,body=[Expr|If],orelse=[])',  # test_match_hold_admission_gate_pg:2806
-    'If.orelse>If(test=Name,body=[Assign],orelse=[])',  # closed_walk:1778
+    'If.orelse>If(test=Name,body=[Assign],orelse=[])',  # closed_walk:1787
     'If.orelse>Raise(exc=Call,cause=-)',  # closed_walk:1577
-    'If.test>BoolOp(op=And,values=[BoolOp|Call|Compare])',  # closed_walk:1855
+    'If.test>BoolOp(op=And,values=[BoolOp|Call|Compare])',  # closed_walk:1864
     'If.test>BoolOp(op=And,values=[Compare|IfExp])',  # closed_walk:1409
-    'If.test>BoolOp(op=And,values=[Compare|Name|UnaryOp])',  # closed_walk:1775
-    'If.test>BoolOp(op=And,values=[Compare|Subscript])',  # closed_walk:3668
+    'If.test>BoolOp(op=And,values=[Compare|Name|UnaryOp])',  # closed_walk:1784
+    'If.test>BoolOp(op=And,values=[Compare|Subscript])',  # closed_walk:3677
     'If.test>BoolOp(op=Or,values=[Attribute|BinOp|Compare|UnaryOp])',  # closed_walk:1371
-    'If.test>BoolOp(op=Or,values=[BoolOp])',  # closed_walk:1845
-    'If.test>BoolOp(op=Or,values=[Call|Compare|UnaryOp])',  # closed_walk:1710
+    'If.test>BoolOp(op=Or,values=[BoolOp])',  # closed_walk:1854
     'If.test>BoolOp(op=Or,values=[Compare|Name|UnaryOp])',  # closed_walk:1563
     'If.test>BoolOp(op=Or,values=[Compare|Subscript])',  # closed_walk:1430
-    'If.test>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # closed_walk:3084
+    'If.test>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:1715
+    'If.test>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # closed_walk:3093
     'If.test>Compare(left=Attribute,ops=[IsNot],comparators=[Name])',  # test_match_hold_admission_gate_pg:2818
-    'If.test>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # closed_walk:3129
+    'If.test>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # closed_walk:3138
     'If.test>Compare(left=Call,ops=[IsNot],comparators=[Attribute])',  # closed_walk:1366
     'If.test>Compare(left=Call,ops=[IsNot],comparators=[Name])',  # closed_walk:1170
     'If.test>Compare(left=Call,ops=[IsNot],comparators=[Subscript])',  # test_match_hold_admission_gate_pg:2807
     'If.test>Compare(left=Call,ops=[Is],comparators=[Attribute])',  # closed_walk:855
     'If.test>Compare(left=Call,ops=[NotEq],comparators=[List])',  # closed_walk:1681
     'If.test>Compare(left=Name,ops=[GtE],comparators=[Call])',  # closed_walk:1647
-    'If.test>Compare(left=Name,ops=[Gt],comparators=[BinOp])',  # closed_walk:2725
-    'If.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # closed_walk:2490
-    'If.test>Compare(left=Name,ops=[Is],comparators=[Attribute])',  # closed_walk:2971
+    'If.test>Compare(left=Name,ops=[Gt],comparators=[BinOp])',  # closed_walk:2734
+    'If.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # closed_walk:2499
+    'If.test>Compare(left=Name,ops=[Is],comparators=[Attribute])',  # closed_walk:2980
     'If.test>Compare(left=Name,ops=[Is],comparators=[Subscript])',  # closed_walk:1602
-    'If.test>Compare(left=Name,ops=[Lt],comparators=[Call])',  # closed_walk:3081
-    'If.test>Compare(left=Subscript,ops=[Is],comparators=[Constant])',  # closed_walk:2753
+    'If.test>Compare(left=Name,ops=[Lt],comparators=[Call])',  # closed_walk:3090
+    'If.test>Compare(left=Subscript,ops=[Is],comparators=[Constant])',  # closed_walk:2762
     'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # test_match_hold_admission_gate_pg:2800
-    'If.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:1749
-    "IfExp.body>Attribute(value=Attribute,attr='attr',ctx=Load)",  # closed_walk:2951
-    "IfExp.body>Attribute(value=Attribute,attr='empty',ctx=Load)",  # closed_walk:3045
-    "IfExp.body>Attribute(value=Name,attr='name',ctx=Load)",  # closed_walk:3065
-    "IfExp.body>Attribute(value=Name,attr='scope',ctx=Load)",  # closed_walk:2838
+    'If.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:1758
+    "IfExp.body>Attribute(value=Attribute,attr='attr',ctx=Load)",  # closed_walk:2960
+    "IfExp.body>Attribute(value=Attribute,attr='empty',ctx=Load)",  # closed_walk:3054
+    "IfExp.body>Attribute(value=Name,attr='name',ctx=Load)",  # closed_walk:3074
+    "IfExp.body>Attribute(value=Name,attr='scope',ctx=Load)",  # closed_walk:2847
     "IfExp.body>Attribute(value=Name,attr='where',ctx=Load)",  # closed_walk:1361
-    'IfExp.body>BinOp(left=List,op=Add,right=Call)',  # closed_walk:2511
+    'IfExp.body>BinOp(left=List,op=Add,right=Call)',  # closed_walk:2520
     'IfExp.body>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:1402
-    'IfExp.body>Call(func=Attribute,args=[Call|Subscript],keywords=[])',  # closed_walk:1863
-    'IfExp.body>Call(func=Attribute,args=[Constant|Dict],keywords=[])',  # closed_walk:2784
-    'IfExp.body>Call(func=Name,args=[Call],keywords=[])',  # closed_walk:2428
-    'IfExp.body>Call(func=Name,args=[ListComp],keywords=[])',  # closed_walk:2369
-    'IfExp.body>Call(func=Name,args=[Name|Subscript],keywords=[])',  # closed_walk:2953
-    'IfExp.body>Call(func=Name,args=[Subscript],keywords=[keyword])',  # closed_walk:2336
+    'IfExp.body>Call(func=Attribute,args=[Call|Subscript],keywords=[])',  # closed_walk:1872
+    'IfExp.body>Call(func=Attribute,args=[Constant|Dict],keywords=[])',  # closed_walk:2793
+    'IfExp.body>Call(func=Name,args=[Call],keywords=[])',  # closed_walk:2437
+    'IfExp.body>Call(func=Name,args=[ListComp],keywords=[])',  # closed_walk:2378
+    'IfExp.body>Call(func=Name,args=[Name|Subscript],keywords=[])',  # closed_walk:2962
+    'IfExp.body>Call(func=Name,args=[Subscript],keywords=[keyword])',  # closed_walk:2345
     'IfExp.body>Compare(left=Name,ops=[Eq],comparators=[List])',  # closed_walk:1409
-    'IfExp.body>Constant(value=int)',  # closed_walk:2581
-    'IfExp.body>List(elts=[Constant],ctx=Load)',  # closed_walk:2439
+    'IfExp.body>Constant(value=int)',  # closed_walk:2590
+    'IfExp.body>List(elts=[Constant],ctx=Load)',  # closed_walk:2448
     'IfExp.body>Subscript(value=Attribute,slice=Name,ctx=Load)',  # closed_walk:1504
-    'IfExp.body>Tuple(elts=[BinOp|Constant|Subscript],ctx=Load)',  # closed_walk:2350
-    "IfExp.orelse>Attribute(value=Attribute,attr='co_name',ctx=Load)",  # closed_walk:3066
+    'IfExp.body>Tuple(elts=[BinOp|Constant|Subscript],ctx=Load)',  # closed_walk:2359
+    "IfExp.orelse>Attribute(value=Attribute,attr='co_name',ctx=Load)",  # closed_walk:3075
     "IfExp.orelse>Attribute(value=Name,attr='span_def',ctx=Load)",  # closed_walk:1361
-    'IfExp.orelse>BinOp(left=Name,op=BitOr,right=Name)',  # closed_walk:1794
+    'IfExp.orelse>BinOp(left=Name,op=BitOr,right=Name)',  # closed_walk:1803
     'IfExp.orelse>BoolOp(op=And,values=[Compare|UnaryOp])',  # closed_walk:1440
     'IfExp.orelse>Call(func=Attribute,args=[Subscript],keywords=[])',  # test_match_hold_admission_gate_pg:2827
-    'IfExp.orelse>Call(func=Name,args=[Attribute|Call|Name],keywords=[])',  # closed_walk:3466
+    'IfExp.orelse>Call(func=Name,args=[Attribute|Call|Name],keywords=[])',  # closed_walk:3475
     'IfExp.orelse>Call(func=Name,args=[Constant|GeneratorExp],keywords=[])',  # closed_walk:1504
-    'IfExp.orelse>Call(func=Name,args=[List],keywords=[])',  # closed_walk:2756
-    'IfExp.orelse>IfExp(test=Call,body=BinOp,orelse=List)',  # closed_walk:2511
-    'IfExp.orelse>IfExp(test=Call,body=Call,orelse=IfExp)',  # closed_walk:2510
-    'IfExp.orelse>IfExp(test=Compare,body=Attribute,orelse=Name)',  # closed_walk:3045
+    'IfExp.orelse>Call(func=Name,args=[List],keywords=[])',  # closed_walk:2765
+    'IfExp.orelse>IfExp(test=Call,body=BinOp,orelse=List)',  # closed_walk:2520
+    'IfExp.orelse>IfExp(test=Call,body=Call,orelse=IfExp)',  # closed_walk:2519
+    'IfExp.orelse>IfExp(test=Compare,body=Attribute,orelse=Name)',  # closed_walk:3054
     'IfExp.orelse>Tuple(elts=[Name],ctx=Load)',  # test_match_hold_admission_gate_pg:525
     'IfExp.orelse>UnaryOp(op=Not,operand=Name)',  # closed_walk:1410
-    'IfExp.test>BoolOp(op=And,values=[Call|Name])',  # closed_walk:2532
-    'IfExp.test>BoolOp(op=And,values=[Call|UnaryOp])',  # closed_walk:2351
-    'IfExp.test>BoolOp(op=Or,values=[Compare|Subscript])',  # closed_walk:2363
+    'IfExp.test>BoolOp(op=And,values=[Call|Name])',  # closed_walk:2541
+    'IfExp.test>BoolOp(op=And,values=[Call|UnaryOp])',  # closed_walk:2360
+    'IfExp.test>BoolOp(op=Or,values=[Compare|Subscript])',  # closed_walk:2372
     'IfExp.test>BoolOp(op=Or,values=[Compare|UnaryOp])',  # test_match_hold_admission_gate_pg:2827
-    'IfExp.test>Compare(left=Call,ops=[GtE],comparators=[Constant])',  # closed_walk:1864
-    'IfExp.test>Compare(left=Call,ops=[Gt],comparators=[Constant])',  # closed_walk:2644
-    'IfExp.test>Compare(left=Call,ops=[Is],comparators=[Attribute])',  # closed_walk:2838
-    'IfExp.test>Compare(left=Name,ops=[In],comparators=[Name])',  # closed_walk:2672
-    'IfExp.test>Compare(left=Name,ops=[Is],comparators=[Attribute])',  # closed_walk:2918
+    'IfExp.test>Compare(left=Call,ops=[GtE],comparators=[Constant])',  # closed_walk:1873
+    'IfExp.test>Compare(left=Call,ops=[Gt],comparators=[Constant])',  # closed_walk:2653
+    'IfExp.test>Compare(left=Call,ops=[Is],comparators=[Attribute])',  # closed_walk:2847
+    'IfExp.test>Compare(left=Name,ops=[In],comparators=[Name])',  # closed_walk:2681
+    'IfExp.test>Compare(left=Name,ops=[Is],comparators=[Attribute])',  # closed_walk:2927
     'IfExp.test>Compare(left=Name,ops=[Lt],comparators=[Call])',  # closed_walk:1504
-    'IfExp.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2773
-    'Lambda.body>IfExp(test=BoolOp,body=Name,orelse=Call)',  # closed_walk:2532
-    'Lambda.body>IfExp(test=BoolOp,body=Tuple,orelse=Call)',  # closed_walk:2350
-    "List.elts>Attribute(value=Attribute,attr='empty',ctx=Load)",  # closed_walk:3041
-    "List.elts>Attribute(value=Name,attr='left',ctx=Load)",  # closed_walk:2509
-    "List.elts>Attribute(value=Name,attr='operand',ctx=Load)",  # closed_walk:2512
-    "List.elts>Attribute(value=Name,attr='right',ctx=Load)",  # closed_walk:2509
-    'List.elts>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:2481
-    'List.elts>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:2506
-    'List.elts>Call(func=Name,args=[Name|Subscript],keywords=[])',  # closed_walk:2675
-    'List.elts>IfExp(test=Call,body=Subscript,orelse=Constant)',  # closed_walk:2872
-    'List.elts>IfExp(test=Compare,body=Call,orelse=Constant)',  # closed_walk:2963
-    'List.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2675
+    'IfExp.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2782
+    'Lambda.body>IfExp(test=BoolOp,body=Name,orelse=Call)',  # closed_walk:2541
+    'Lambda.body>IfExp(test=BoolOp,body=Tuple,orelse=Call)',  # closed_walk:2359
+    "List.elts>Attribute(value=Attribute,attr='empty',ctx=Load)",  # closed_walk:3050
+    "List.elts>Attribute(value=Name,attr='left',ctx=Load)",  # closed_walk:2518
+    "List.elts>Attribute(value=Name,attr='operand',ctx=Load)",  # closed_walk:2521
+    "List.elts>Attribute(value=Name,attr='right',ctx=Load)",  # closed_walk:2518
+    'List.elts>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:2490
+    'List.elts>Call(func=Name,args=[Name],keywords=[])',  # closed_walk:2515
+    'List.elts>Call(func=Name,args=[Name|Subscript],keywords=[])',  # closed_walk:2684
+    'List.elts>IfExp(test=Call,body=Subscript,orelse=Constant)',  # closed_walk:2881
+    'List.elts>IfExp(test=Compare,body=Call,orelse=Constant)',  # closed_walk:2972
+    'List.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2684
     'List.elts>Tuple(elts=[Constant|Name],ctx=Load)',  # closed_walk:1409
-    'List.elts>Tuple(elts=[Name],ctx=Load)',  # closed_walk:3234
-    "ListComp.elt>Attribute(value=Name,attr='default',ctx=Load)",  # closed_walk:3049
-    "ListComp.elt>Attribute(value=Name,attr='name',ctx=Load)",  # closed_walk:3049
-    'ListComp.elt>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:2957
-    'ListComp.elt>IfExp(test=Call,body=Attribute,orelse=IfExp)',  # closed_walk:3044
-    'ListComp.elt>IfExp(test=Call,body=Attribute,orelse=Name)',  # closed_walk:3042
-    'ListComp.elt>IfExp(test=Compare,body=Call,orelse=Constant)',  # closed_walk:2953
-    'ListComp.elt>IfExp(test=Compare,body=Constant,orelse=Call)',  # closed_walk:2609
-    'ListComp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2437
-    'ListComp.elt>Tuple(elts=[Call|Tuple],ctx=Load)',  # closed_walk:2937
-    'ListComp.elt>Tuple(elts=[Constant|Name],ctx=Load)',  # closed_walk:1762
-    'ListComp.elt>Tuple(elts=[Constant|Subscript],ctx=Load)',  # closed_walk:2643
+    'List.elts>Tuple(elts=[Name],ctx=Load)',  # closed_walk:3243
+    "ListComp.elt>Attribute(value=Name,attr='default',ctx=Load)",  # closed_walk:3058
+    "ListComp.elt>Attribute(value=Name,attr='name',ctx=Load)",  # closed_walk:3058
+    'ListComp.elt>Call(func=Name,args=[Attribute|Name],keywords=[])',  # closed_walk:2966
+    'ListComp.elt>IfExp(test=Call,body=Attribute,orelse=IfExp)',  # closed_walk:3053
+    'ListComp.elt>IfExp(test=Call,body=Attribute,orelse=Name)',  # closed_walk:3051
+    'ListComp.elt>IfExp(test=Compare,body=Call,orelse=Constant)',  # closed_walk:2962
+    'ListComp.elt>IfExp(test=Compare,body=Constant,orelse=Call)',  # closed_walk:2618
+    'ListComp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2446
+    'ListComp.elt>Tuple(elts=[Call|Tuple],ctx=Load)',  # closed_walk:2946
+    'ListComp.elt>Tuple(elts=[Constant|Name],ctx=Load)',  # closed_walk:1771
+    'ListComp.elt>Tuple(elts=[Constant|Subscript],ctx=Load)',  # closed_walk:2652
     'ListComp.elt>Tuple(elts=[Name],ctx=Load)',  # closed_walk:1407
     'ListComp.generators>comprehension(target=Name,iter=Attribute,ifs=[BoolOp],is_async=0)',  # closed_walk:1593
-    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[BoolOp],is_async=0)',  # closed_walk:2424
-    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # test_a1_identity_formation:2267
-    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[UnaryOp],is_async=0)',  # closed_walk:2453
-    'ListComp.generators>comprehension(target=Name,iter=Subscript,ifs=[Compare],is_async=0)',  # closed_walk:2877
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[BoolOp],is_async=0)',  # closed_walk:2433
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # closed_walk:1720
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[UnaryOp],is_async=0)',  # closed_walk:2462
+    'ListComp.generators>comprehension(target=Name,iter=Subscript,ifs=[Compare],is_async=0)',  # closed_walk:2886
     "Return.value>Attribute(value=Name,attr='__code__',ctx=Load)",  # test_a1_identity_formation:627
-    'Return.value>BinOp(left=BinOp,op=Add,right=Name)',  # closed_walk:2364
-    'Return.value>BoolOp(op=Or,values=[BoolOp|Compare])',  # closed_walk:3026
-    'Return.value>BoolOp(op=Or,values=[Call|Compare])',  # closed_walk:3024
-    'Return.value>BoolOp(op=Or,values=[List|Name])',  # closed_walk:2959
-    'Return.value>Call(func=Attribute,args=[Attribute|Constant],keywords=[])',  # closed_walk:1818
-    'Return.value>Call(func=Name,args=[Attribute|Call],keywords=[])',  # closed_walk:2534
-    'Return.value>Call(func=Name,args=[Call|Name],keywords=[])',  # closed_walk:2210
-    'Return.value>Call(func=Name,args=[Lambda|Name],keywords=[])',  # closed_walk:2350
-    'Return.value>Call(func=Name,args=[ListComp],keywords=[])',  # closed_walk:2498
+    'Return.value>BinOp(left=BinOp,op=Add,right=Name)',  # closed_walk:2373
+    'Return.value>BoolOp(op=Or,values=[BoolOp|Compare])',  # closed_walk:3035
+    'Return.value>BoolOp(op=Or,values=[Call|Compare])',  # closed_walk:3033
+    'Return.value>BoolOp(op=Or,values=[List|Name])',  # closed_walk:2968
+    'Return.value>Call(func=Attribute,args=[Attribute|Constant],keywords=[])',  # closed_walk:1827
+    'Return.value>Call(func=Name,args=[Attribute|Call],keywords=[])',  # closed_walk:2543
+    'Return.value>Call(func=Name,args=[Call|Name],keywords=[])',  # closed_walk:2219
+    'Return.value>Call(func=Name,args=[Lambda|Name],keywords=[])',  # closed_walk:2359
+    'Return.value>Call(func=Name,args=[ListComp],keywords=[])',  # closed_walk:2507
     'Return.value>Compare(left=Call,ops=[Is],comparators=[Attribute])',  # test_match_hold_admission_gate_pg:2763
     'Return.value>Compare(left=Call,ops=[Is],comparators=[Name])',  # test_match_hold_admission_gate_pg:2759
-    'Return.value>Compare(left=Name,ops=[In],comparators=[Tuple])',  # closed_walk:3022
-    'Return.value>IfExp(test=Call,body=Call,orelse=List)',  # closed_walk:2336
-    'Return.value>IfExp(test=Call,body=Subscript,orelse=Constant)',  # closed_walk:2469
-    'Return.value>IfExp(test=Compare,body=Call,orelse=Name)',  # closed_walk:2644
-    'Return.value>IfExp(test=Compare,body=Call,orelse=Tuple)',  # closed_walk:2429
-    'Return.value>IfExp(test=Compare,body=Constant,orelse=Call)',  # closed_walk:2756
-    'Return.value>IfExp(test=Compare,body=Constant,orelse=Constant)',  # closed_walk:2672
-    'Return.value>IfExp(test=Compare,body=Constant,orelse=Name)',  # closed_walk:2918
-    'Return.value>IfExp(test=Compare,body=Constant,orelse=Tuple)',  # closed_walk:2476
-    'Return.value>IfExp(test=Name,body=Subscript,orelse=Constant)',  # closed_walk:2926
-    'Return.value>List(elts=[IfExp],ctx=Load)',  # closed_walk:2963
-    'Return.value>ListComp(elt=IfExp,generators=[comprehension])',  # closed_walk:2953
-    'Return.value>Set(elts=[Attribute])',  # closed_walk:1791
+    'Return.value>Compare(left=Name,ops=[In],comparators=[Tuple])',  # closed_walk:3031
+    'Return.value>IfExp(test=Call,body=Call,orelse=List)',  # closed_walk:2345
+    'Return.value>IfExp(test=Call,body=Subscript,orelse=Constant)',  # closed_walk:2478
+    'Return.value>IfExp(test=Compare,body=Call,orelse=Name)',  # closed_walk:2653
+    'Return.value>IfExp(test=Compare,body=Call,orelse=Tuple)',  # closed_walk:2438
+    'Return.value>IfExp(test=Compare,body=Constant,orelse=Call)',  # closed_walk:2765
+    'Return.value>IfExp(test=Compare,body=Constant,orelse=Constant)',  # closed_walk:2681
+    'Return.value>IfExp(test=Compare,body=Constant,orelse=Name)',  # closed_walk:2927
+    'Return.value>IfExp(test=Compare,body=Constant,orelse=Tuple)',  # closed_walk:2485
+    'Return.value>IfExp(test=Name,body=Subscript,orelse=Constant)',  # closed_walk:2935
+    'Return.value>List(elts=[IfExp],ctx=Load)',  # closed_walk:2972
+    'Return.value>ListComp(elt=IfExp,generators=[comprehension])',  # closed_walk:2962
+    'Return.value>Set(elts=[Attribute])',  # closed_walk:1800
     'Return.value>Tuple(elts=[Attribute|Name],ctx=Load)',  # test_a1_identity_formation:3798
-    'Return.value>Tuple(elts=[BinOp|IfExp],ctx=Load)',  # closed_walk:2942
-    'Return.value>Tuple(elts=[BinOp|ListComp],ctx=Load)',  # closed_walk:3047
+    'Return.value>Tuple(elts=[BinOp|IfExp],ctx=Load)',  # closed_walk:2951
+    'Return.value>Tuple(elts=[BinOp|ListComp],ctx=Load)',  # closed_walk:3056
     'Return.value>Tuple(elts=[Call|Constant|Name],ctx=Load)',  # closed_walk:1673
     'Return.value>Tuple(elts=[Call|Name],ctx=Load)',  # closed_walk:1442
     'Return.value>Tuple(elts=[Constant|Name|Tuple],ctx=Load)',  # closed_walk:1538
-    'Return.value>Tuple(elts=[Constant|Subscript],ctx=Load)',  # closed_walk:2383
-    'Return.value>Tuple(elts=[Constant|Tuple],ctx=Load)',  # closed_walk:2974
-    'Return.value>Tuple(elts=[ListComp],ctx=Load)',  # closed_walk:3049
+    'Return.value>Tuple(elts=[Constant|Subscript],ctx=Load)',  # closed_walk:2392
+    'Return.value>Tuple(elts=[Constant|Tuple],ctx=Load)',  # closed_walk:2983
+    'Return.value>Tuple(elts=[ListComp],ctx=Load)',  # closed_walk:3058
     'Return.value>Tuple(elts=[Name|Subscript],ctx=Load)',  # closed_walk:1394
     'Return.value>Tuple(elts=[Subscript|Tuple],ctx=Load)',  # closed_walk:1433
-    "Set.elts>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:1791
-    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[Call],is_async=0)',  # closed_walk:2428
-    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # closed_walk:2433
-    'SetComp.generators>comprehension(target=Name,iter=Subscript,ifs=[],is_async=0)',  # closed_walk:2440
-    'Slice.upper>IfExp(test=Compare,body=Constant,orelse=Constant)',  # closed_walk:2581
-    'Starred.ctx>Store()',  # closed_walk:3072
-    'Starred.value>Name(id=str,ctx=Store)',  # closed_walk:3072
-    'Subscript.ctx>Del()',  # closed_walk:2791
+    "Set.elts>Attribute(value=Name,attr='value',ctx=Load)",  # closed_walk:1800
+    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[Call],is_async=0)',  # closed_walk:2437
+    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # closed_walk:2442
+    'SetComp.generators>comprehension(target=Name,iter=Subscript,ifs=[],is_async=0)',  # closed_walk:2449
+    'Slice.upper>IfExp(test=Compare,body=Constant,orelse=Constant)',  # closed_walk:2590
+    'Starred.ctx>Store()',  # closed_walk:3081
+    'Starred.value>Name(id=str,ctx=Store)',  # closed_walk:3081
+    'Subscript.ctx>Del()',  # closed_walk:2800
     "Subscript.slice>Attribute(value=Subscript,attr='__code__',ctx=Load)",  # test_match_hold_admission_gate_pg:2785
-    'Subscript.slice>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:2992
-    'Subscript.slice>Slice(lower=-,upper=IfExp,step=-)',  # closed_walk:2581
-    "Subscript.value>Attribute(value=Name,attr='__mro__',ctx=Load)",  # closed_walk:1711
-    "Subscript.value>Attribute(value=Name,attr='generators',ctx=Load)",  # closed_walk:2903
-    "Subscript.value>Attribute(value=Name,attr='param_values',ctx=Load)",  # closed_walk:2973
+    'Subscript.slice>Call(func=Attribute,args=[Name],keywords=[])',  # closed_walk:3001
+    'Subscript.slice>Slice(lower=-,upper=IfExp,step=-)',  # closed_walk:2590
+    "Subscript.value>Attribute(value=Name,attr='__mro__',ctx=Load)",  # closed_walk:1712
+    "Subscript.value>Attribute(value=Name,attr='generators',ctx=Load)",  # closed_walk:2912
+    "Subscript.value>Attribute(value=Name,attr='param_values',ctx=Load)",  # closed_walk:2982
     "Subscript.value>Attribute(value=Name,attr='parent',ctx=Load)",  # closed_walk:757
     'Subscript.value>Call(func=Attribute,args=[Call|Tuple],keywords=[])',  # test_a1_identity_formation:2393
-    'Subscript.value>Subscript(value=Subscript,slice=Name,ctx=Load)',  # closed_walk:1741
-    'Try.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # closed_walk:2600
+    'Subscript.value>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:1717
+    'Subscript.value>Subscript(value=Subscript,slice=Name,ctx=Load)',  # closed_walk:1750
+    'Try.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # closed_walk:2609
     'Try.body>For(target=Name,iter=Name,body=[Expr],orelse=[],type_comment=-)',  # test_match_hold_admission_gate_pg:2849
-    'Try.body>For(target=Tuple,iter=Name,body=[If],orelse=[],type_comment=-)',  # closed_walk:2860
-    'Try.body>If(test=Call,body=[Assign],orelse=[If])',  # closed_walk:2729
-    'Try.body>If(test=Compare,body=[Return],orelse=[])',  # closed_walk:2709
-    'Try.body>While(test=Name,body=[Assign|Expr|If],orelse=[])',  # closed_walk:2601
+    'Try.body>For(target=Tuple,iter=Name,body=[If],orelse=[],type_comment=-)',  # closed_walk:2869
+    'Try.body>If(test=Call,body=[Assign],orelse=[If])',  # closed_walk:2738
+    'Try.body>If(test=Compare,body=[Return],orelse=[])',  # closed_walk:2718
+    'Try.body>While(test=Name,body=[Assign|Expr|If],orelse=[])',  # closed_walk:2610
     'Try.body>With(items=[withitem],body=[Assign],type_comment=-)',  # closed_walk:1482
-    'Try.body>With(items=[withitem],body=[Assign|Expr],type_comment=-)',  # closed_walk:2797
+    'Try.body>With(items=[withitem],body=[Assign|Expr],type_comment=-)',  # closed_walk:2806
     'Try.finalbody>For(target=Name,iter=Name,body=[Expr],orelse=[],type_comment=-)',  # test_match_hold_admission_gate_pg:2854
     'Try.handlers>ExceptHandler(type=Name,name=-,body=[Pass])',  # test_a1_identity_formation:2275
     'Try.orelse>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # test_a1_identity_formation:2278
     "Tuple.elts>Attribute(value=Attribute,attr='attr',ctx=Load)",  # closed_walk:1461
     "Tuple.elts>Attribute(value=Call,attr='__name__',ctx=Load)",  # test_match_hold_admission_gate_pg:2809
-    "Tuple.elts>Attribute(value=Name,attr='BinOp',ctx=Load)",  # closed_walk:2507
-    "Tuple.elts>Attribute(value=Name,attr='DictComp',ctx=Load)",  # closed_walk:2505
+    "Tuple.elts>Attribute(value=Name,attr='BinOp',ctx=Load)",  # closed_walk:2516
+    "Tuple.elts>Attribute(value=Name,attr='DictComp',ctx=Load)",  # closed_walk:2514
     "Tuple.elts>Attribute(value=Name,attr='GeneratorExp',ctx=Load)",  # closed_walk:1613
     "Tuple.elts>Attribute(value=Name,attr='In',ctx=Load)",  # closed_walk:1623
-    "Tuple.elts>Attribute(value=Name,attr='Is',ctx=Load)",  # closed_walk:2624
-    "Tuple.elts>Attribute(value=Name,attr='IsNot',ctx=Load)",  # closed_walk:2624
+    "Tuple.elts>Attribute(value=Name,attr='Is',ctx=Load)",  # closed_walk:2633
+    "Tuple.elts>Attribute(value=Name,attr='IsNot',ctx=Load)",  # closed_walk:2633
     "Tuple.elts>Attribute(value=Name,attr='ListComp',ctx=Load)",  # closed_walk:1613
     "Tuple.elts>Attribute(value=Name,attr='NotIn',ctx=Load)",  # closed_walk:1623
     "Tuple.elts>Attribute(value=Name,attr='SetComp',ctx=Load)",  # closed_walk:1613
-    "Tuple.elts>Attribute(value=Name,attr='__code__',ctx=Load)",  # closed_walk:2815
+    "Tuple.elts>Attribute(value=Name,attr='__code__',ctx=Load)",  # closed_walk:2824
     "Tuple.elts>Attribute(value=Name,attr='__name__',ctx=Load)",  # test_a1_identity_formation:3798
     "Tuple.elts>Attribute(value=Name,attr='attr',ctx=Load)",  # closed_walk:1433
-    "Tuple.elts>Attribute(value=Name,attr='comprehension',ctx=Load)",  # closed_walk:2986
-    'Tuple.elts>BinOp(left=BinOp,op=Add,right=Subscript)',  # closed_walk:3121
-    'Tuple.elts>BinOp(left=Name,op=Add,right=Name)',  # closed_walk:2942
-    'Tuple.elts>BinOp(left=Subscript,op=Add,right=Tuple)',  # closed_walk:2350
-    'Tuple.elts>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:1793
-    'Tuple.elts>Call(func=Name,args=[GeneratorExp],keywords=[])',  # closed_walk:2442
-    'Tuple.elts>IfExp(test=Compare,body=Constant,orelse=Call)',  # closed_walk:2942
-    'Tuple.elts>ListComp(elt=Attribute,generators=[comprehension])',  # closed_walk:3047
-    'Tuple.elts>Starred(value=Name,ctx=Store)',  # closed_walk:3072
+    "Tuple.elts>Attribute(value=Name,attr='comprehension',ctx=Load)",  # closed_walk:2995
+    'Tuple.elts>BinOp(left=BinOp,op=Add,right=Subscript)',  # closed_walk:3130
+    'Tuple.elts>BinOp(left=Name,op=Add,right=Name)',  # closed_walk:2951
+    'Tuple.elts>BinOp(left=Subscript,op=Add,right=Tuple)',  # closed_walk:2359
+    'Tuple.elts>Call(func=Attribute,args=[Attribute|Name],keywords=[])',  # closed_walk:1802
+    'Tuple.elts>Call(func=Name,args=[GeneratorExp],keywords=[])',  # closed_walk:2451
+    'Tuple.elts>IfExp(test=Compare,body=Constant,orelse=Call)',  # closed_walk:2951
+    'Tuple.elts>ListComp(elt=Attribute,generators=[comprehension])',  # closed_walk:3056
+    'Tuple.elts>Starred(value=Name,ctx=Store)',  # closed_walk:3081
     'Tuple.elts>Tuple(elts=[Attribute],ctx=Load)',  # closed_walk:1433
     'Tuple.elts>Tuple(elts=[Attribute|Constant|Name],ctx=Load)',  # closed_walk:1461
     'Tuple.elts>Tuple(elts=[Constant|Subscript|Tuple],ctx=Load)',  # closed_walk:1433
     'Tuple.elts>Tuple(elts=[],ctx=Load)',  # closed_walk:1538
-    'UnaryOp.operand>BoolOp(op=Or,values=[Call|Compare])',  # closed_walk:2443
-    'While.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # closed_walk:1764
-    'While.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # closed_walk:1774
-    'While.body>For(target=Name,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1780
-    'While.body>If(test=BoolOp,body=[Assign],orelse=[If])',  # closed_walk:1775
-    'While.body>If(test=BoolOp,body=[Expr],orelse=[If])',  # closed_walk:2896
-    'While.body>If(test=Call,body=[Assign|Expr],orelse=[If])',  # closed_walk:1765
-    'While.test>BoolOp(op=And,values=[Compare])',  # closed_walk:2895
+    'UnaryOp.operand>BoolOp(op=Or,values=[Call|Compare])',  # closed_walk:2452
+    'While.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # closed_walk:1773
+    'While.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # closed_walk:1783
+    'While.body>For(target=Name,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # closed_walk:1789
+    'While.body>If(test=BoolOp,body=[Assign],orelse=[If])',  # closed_walk:1784
+    'While.body>If(test=BoolOp,body=[Expr],orelse=[If])',  # closed_walk:2905
+    'While.body>If(test=Call,body=[Assign|Expr],orelse=[If])',  # closed_walk:1774
+    'While.test>BoolOp(op=And,values=[Compare])',  # closed_walk:2904
     'With.body>Assign(targets=[Name],value=Call,type_comment=-)',  # closed_walk:1483
-    'With.body>Expr(value=Call)',  # closed_walk:2798
+    'With.body>Expr(value=Call)',  # closed_walk:2807
     'With.items>withitem(context_expr=Call,optional_vars=Name)',  # closed_walk:1482
-    'arguments.kwarg>arg(arg=str,annotation=-,type_comment=-)',  # closed_walk:2124
-    'comprehension.ifs>BoolOp(op=And,values=[Call|Compare|UnaryOp])',  # closed_walk:1815
-    'comprehension.ifs>Call(func=Attribute,args=[Constant],keywords=[])',  # closed_walk:3062
+    'arguments.kwarg>arg(arg=str,annotation=-,type_comment=-)',  # closed_walk:2133
+    'comprehension.ifs>BoolOp(op=And,values=[Call|Compare|UnaryOp])',  # closed_walk:1824
+    'comprehension.ifs>Call(func=Attribute,args=[Constant],keywords=[])',  # closed_walk:3071
     'comprehension.ifs>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # closed_walk:1505
-    'comprehension.ifs>Compare(left=Name,ops=[In],comparators=[Call])',  # closed_walk:1733
-    'comprehension.ifs>Compare(left=Name,ops=[In],comparators=[Tuple])',  # closed_walk:2433
+    'comprehension.ifs>Compare(left=Name,ops=[In],comparators=[Call])',  # closed_walk:1721
+    'comprehension.ifs>Compare(left=Name,ops=[In],comparators=[Tuple])',  # closed_walk:2442
     'comprehension.ifs>Compare(left=Name,ops=[Is],comparators=[Name])',  # closed_walk:1598
-    'comprehension.ifs>Compare(left=Name,ops=[NotEq],comparators=[Name])',  # closed_walk:2877
+    'comprehension.ifs>Compare(left=Name,ops=[NotEq],comparators=[Name])',  # closed_walk:2886
     "comprehension.iter>Attribute(value=Attribute,attr='elts',ctx=Load)",  # closed_walk:1593
-    "comprehension.iter>Attribute(value=Name,attr='__mro__',ctx=Load)",  # closed_walk:1723
-    "comprehension.iter>Attribute(value=Name,attr='defaults',ctx=Load)",  # closed_walk:3043
+    "comprehension.iter>Attribute(value=Name,attr='__mro__',ctx=Load)",  # closed_walk:1732
+    "comprehension.iter>Attribute(value=Name,attr='defaults',ctx=Load)",  # closed_walk:3052
     "comprehension.iter>Attribute(value=Name,attr='generators',ctx=Load)",  # closed_walk:1614
     "comprehension.iter>Attribute(value=Name,attr='ifs',ctx=Load)",  # closed_walk:1619
-    "comprehension.iter>Attribute(value=Name,attr='kw_defaults',ctx=Load)",  # closed_walk:3046
-    "comprehension.iter>Attribute(value=Name,attr='ops',ctx=Load)",  # closed_walk:2624
-    "comprehension.iter>Attribute(value=Name,attr='targets',ctx=Load)",  # closed_walk:1814
-    'comprehension.iter>BinOp(left=Call,op=Add,right=Call)',  # closed_walk:2504
+    "comprehension.iter>Attribute(value=Name,attr='kw_defaults',ctx=Load)",  # closed_walk:3055
+    "comprehension.iter>Attribute(value=Name,attr='ops',ctx=Load)",  # closed_walk:2633
+    "comprehension.iter>Attribute(value=Name,attr='targets',ctx=Load)",  # closed_walk:1823
+    'comprehension.iter>BinOp(left=Call,op=Add,right=Call)',  # closed_walk:2513
     'comprehension.iter>BinOp(left=Call,op=Add,right=List)',  # closed_walk:1200
-    'comprehension.iter>BinOp(left=Call,op=Add,right=ListComp)',  # closed_walk:2564
-    'comprehension.iter>BinOp(left=Name,op=Add,right=Attribute)',  # closed_walk:3047
+    'comprehension.iter>BinOp(left=Call,op=Add,right=ListComp)',  # closed_walk:2573
+    'comprehension.iter>BinOp(left=Name,op=Add,right=Attribute)',  # closed_walk:3056
     'comprehension.iter>BinOp(left=Name,op=Sub,right=Set)',  # test_a1_identity_formation:2390
-    'comprehension.iter>Subscript(value=Attribute,slice=Slice,ctx=Load)',  # closed_walk:1712
-    'comprehension.iter>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2440
-    'comprehension.iter>Subscript(value=Name,slice=Name,ctx=Load)',  # closed_walk:2954
+    'comprehension.iter>Subscript(value=Attribute,slice=Slice,ctx=Load)',  # closed_walk:1720
+    'comprehension.iter>Subscript(value=Name,slice=Constant,ctx=Load)',  # closed_walk:2449
+    'comprehension.iter>Subscript(value=Name,slice=Name,ctx=Load)',  # closed_walk:2963
     "keyword.value>Attribute(value=Name,attr='policy',ctx=Load)",  # test_match_hold_admission_gate_pg:598
     'keyword.value>Compare(left=Name,ops=[Is],comparators=[Name])',  # test_a1_identity_formation:2283
-    'keyword.value>Dict(keys=[Name],values=[Tuple])',  # closed_walk:3174
+    'keyword.value>Dict(keys=[Name],values=[Tuple])',  # closed_walk:3183
     'keyword.value>List(elts=[],ctx=Load)',  # test_match_hold_admission_gate_pg:599
     'withitem.context_expr>Call(func=Attribute,args=[],keywords=[])',  # closed_walk:1482
     'withitem.optional_vars>Name(id=str,ctx=Store)',  # closed_walk:1482

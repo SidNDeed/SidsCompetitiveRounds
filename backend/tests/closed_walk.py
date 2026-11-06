@@ -1707,13 +1707,22 @@ class Bindings:
         """K is an exact frozen class: a trusted class whose type IS type,
         with no subclass, and no class of its MRO but object defining the
         attribute protocol or __slots__ (read from the class objects)."""
+        name = getattr(K, "__qualname__", repr(K))
         if (type(K) is not type or not _ib.trusted_class(K)
-                or K.__subclasses__() or K.__mro__[-1] is not object
-                or any(p in vars(c) for c in K.__mro__[:-1]
-                       for p in K_PROTOCOL)):
-            raise Unclassified((line, f"{getattr(K, '__qualname__', K)!r} is "
-                                      "not an exact frozen class rule K "
-                                      "reads"))
+                or K.__mro__[-1] is not object):
+            raise Unclassified((line, f"{name} is not a trusted class whose "
+                                      "type IS type, the class rule K reads"))
+        if K.__subclasses__():
+            raise Unclassified((line, f"{name} has a subclass "
+                                      f"({K.__subclasses__()[0].__qualname__}), "
+                                      "so rule K cannot read its instances "
+                                      "by identity"))
+        got = [f"{c.__qualname__}.{p}" for c in K.__mro__[:-1]
+               for p in K_PROTOCOL if p in vars(c)]
+        if got:
+            raise Unclassified((line, f"{name}'s MRO defines {got[0]}, an "
+                                      "attribute protocol rule K does not "
+                                      "read"))
 
     def k_attr(self, K, mod, attr, line):
         """Rule K-a: `attr` is a plain instance attribute of K (no class of
