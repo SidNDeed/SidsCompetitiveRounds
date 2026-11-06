@@ -125,3 +125,28 @@ def test_h2_a_contribution_about_a_seat_with_no_record_is_shown(src):
                                        games=[_grow(src, "k1", a, b, g["id"])]),
                             g, {a: 0, b: 1})
     assert empty["seats"][1] == {"subject": 1, "state": "no_record", "facts": []}
+
+
+# ── H3: a record is the game's only when its own attach key is the room ───
+
+@pytest.mark.parametrize("src", ae.SECTION_SOURCES)
+@pytest.mark.parametrize("attached", (True, False))
+def test_h3_a_record_naming_another_room_is_excluded_and_counted(src, attached):
+    """A and B share stable key K; A names K_r8, B names K_r9; the games row
+    for (K, A, B) is attached to the K_r8 match (or not attached yet). B's
+    record is another attachment's: excluded, counted in `other_game`."""
+    a, b = _pair()
+    g = _game(a, b, room="K_r8")
+    data = _data(records=[_rec(src, "K", a, b, "K_r8", received_at=T0),
+                          _rec(src, "K", b, a, "K_r9", received_at=T0)],
+                 games=[_grow(src, "K", a, b, g["id"] if attached else None)],
+                 switches=_on(src))
+    s = ae.game_section(src, data, g, {a: 0, b: 1})
+    gf = _facts(s["game"])
+    assert gf["paired"] == ("attached" if attached else "waiting")
+    assert s["state"] == "ok" and gf.get("other_game") == "1", gf
+    assert _seat(s, 0)[0] == "ok" and _seat(s, 1) == ("no_record", {})
+    ta = ae.summary_section(src, data, [g], a, 0)
+    tb = ae.summary_section(src, data, [g], b, 1)
+    assert _facts(ta["facts"])["with_record"] == "1"
+    assert _facts(tb["facts"])["with_record"] == "0" and tb["state"] == "no_record"

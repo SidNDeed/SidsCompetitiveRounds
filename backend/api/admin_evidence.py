@@ -2124,10 +2124,14 @@ def _game_records(data, game):
     """The source's records and games rows that belong to `game`: those under
     a games row the pairing worker attached to it; when none is attached yet,
     the records for the same two seats whose attach key is the game's room
-    (`waiting`). A games row attached to another match whose records name
-    this room is that match's, counted in `other`. The contributions are the
-    ones stored under the selected keys, whichever seat's record they were
-    derived from."""
+    (`waiting`). Of the selected keys' records, only those whose OWN attach
+    key is the game's room are the game's (the workers' rule,
+    seat_evidence.attached_records: a record is never evidence about a match
+    its own key does not name). `other` counts the records that are another
+    attachment's: under a selected key but naming another room, or naming
+    this room under a key whose games row is attached to another match. The
+    contributions are the ones stored under the selected keys, whichever
+    seat's record they were derived from."""
     pair = {game["p1"], game["p2"]}
     recs = [r for r in data["records"] if _pair_of(r, "seat_player_id", "other_player_id") == pair]
     attached = {g["stable_game_key"] for g in data["games"]
@@ -2144,9 +2148,13 @@ def _game_records(data, game):
         paired = "waiting" if keys else None
     rows = [g for g in data["games"] if g["stable_game_key"] in keys
             and _pair_of(g, "pair_lo", "pair_hi") == pair]
-    return paired, [r for r in recs if r["stable_game_key"] in keys], rows, len(
-        (roomed & elsewhere) - keys), [c for c in data["contrib"]
-                                       if c["stable_game_key"] in keys]
+    room = game["room"]
+    shown = [r for r in recs if r["stable_game_key"] in keys and r["attach_key"] == room]
+    other = [r for r in recs if (r["stable_game_key"] in keys and r["attach_key"] != room)
+             or (r["stable_game_key"] in (roomed & elsewhere) - keys
+                 and r["attach_key"] == room)]
+    return paired, shown, rows, len(other), [c for c in data["contrib"]
+                                             if c["stable_game_key"] in keys]
 
 
 def _seat_state(rec):
