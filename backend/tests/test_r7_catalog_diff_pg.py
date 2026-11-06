@@ -284,9 +284,29 @@ async def _internal_not_enabled(dsn=None, conn=None):
 
 
 async def _snap(dsn):
+    """One chain reading, WHOLE (round 11, ruling FOUR-R10-A2 FIX-R11-CAT,
+    report test_r7_catalog_diff_pg.py:466): catalog_diff.snapshot (the
+    objects and the raw rows inside catalog_all.RESTRICT) and
+    catalog_all.complement (every shared row outside it: other roles, their
+    settings, other databases), in one REPEATABLE READ transaction. Round 10
+    read only the first part, so a migration's ALTER ROLE on another role
+    changed no reading."""
     conn = await _connect(dsn)
     try:
-        return await cd.snapshot(conn)
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            return (await cd.snapshot(conn)) | (await ca.complement(conn))
+    finally:
+        await conn.close()
+
+
+async def _clone_with_oid(name, template):
+    """CREATE DATABASE name TEMPLATE template, and the new database's oid
+    read back by the session that created it (the identity
+    catalog_all.not_of_database() binds the clone's rows to)."""
+    conn = await asyncpg.connect(ADMIN)
+    try:
+        await conn.execute('CREATE DATABASE "%s" TEMPLATE "%s"' % (name, template))
+        return await conn.fetchval("SELECT oid FROM pg_catalog.pg_database WHERE datname = $1", name)
     finally:
         await conn.close()
 
@@ -450,16 +470,28 @@ async def _build(dsn, out, psql, pg_dump, pre_db):
     numbered file preceded by its d2_seed prerequisites (each its own step,
     labelled '<prereq FILE>'), then the ORM's create_all and the widen step.
     Right before TAIL_FILE's prerequisites the database is cloned to pre_db
-    (the M11 control's starting state). Returns (steps, kept): steps are
-    dicts with the step's catalog diff and, with pg_dump, its object match;
-    kept maps a KEEP_FILES file (and '<end>') to the catalog rows of
-    KEEP_RELS right after it."""
+    (the M11 control's starting state). Returns (steps, kept, harness):
+    steps are dicts with the step's catalog diff and, with pg_dump, its
+    object match; kept maps a KEEP_FILES file (and '<end>') to the catalog
+    rows of KEEP_RELS right after it; harness lists this run's own clones
+    made between two readings (round 11: the readings are whole, so each
+    clone is read at once and every row it changed must be its own,
+    catalog_all.not_of_database(); 'stray' lists any other)."""
     numbered, _aux = _files()
     state = {"prev": await _snap(dsn), "dump": cd.dump(pg_dump, dsn) if pg_dump else None}
     if pg_dump:
         _write(out, "dump_base.sql", state["dump"])
     os.makedirs(os.path.join(out, "diffs"), exist_ok=True)
-    steps, kept = [], {}
+    steps, kept, harness = [], {}, []
+
+    async def own_clone(name):
+        oid = await _clone_with_oid(name, dsn.rsplit("/", 1)[1])
+        cur = await _snap(dsn)
+        d = cd.diff(state["prev"], cur)
+        stray = ca.not_of_database(d, oid)
+        harness.append({"label": "<clone %s>" % name, "oid": oid,
+                        "own": len(d["added"]) + len(d["removed"]) - len(stray), "stray": stray})
+        state["prev"] = cur
     log = open(os.path.join(out, "steps.jsonl"), "w", encoding="utf-8")
 
     async def record(label, kind, outcome):
@@ -499,9 +531,9 @@ async def _build(dsn, out, psql, pg_dump, pre_db):
     try:
         for name in numbered:
             if name == TAIL_FILE:
-                await _clone(pre_db, dsn.rsplit("/", 1)[1])
+                await own_clone(pre_db)
             if name == CRLF_FILE:
-                await _clone(_crlf_db(pre_db), dsn.rsplit("/", 1)[1])
+                await own_clone(_crlf_db(pre_db))
             for step in d2_seed.steps_for(name):
                 await record("<prereq %s>" % name, "prereq", await _prereq(dsn, step))
             outcome = run(name)
@@ -523,7 +555,8 @@ async def _build(dsn, out, psql, pg_dump, pre_db):
             _write(out, "dump_end.sql", state["dump"])
     finally:
         log.close()
-    return steps, kept
+    _write(out, "harness_clones.json", json.dumps(harness, indent=1, default=str))
+    return steps, kept, harness
 
 
 def _write(out, rel, text):
@@ -583,6 +616,7 @@ def chain(tmp_path_factory):
         c.pre_db = st["pre_db"]
         c.steps = [dict(s, diff=_undiff(s["diff"])) for s in st["steps"]]
         c.kept = {k: frozenset(_row(r) for r in v) for k, v in st["kept"].items()}
+        c.harness = st.get("harness")
     else:
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
         c.db = ("%s_%s_%d" % (os.environ.get("D2_DB_PREFIX", "d2catalog"), stamp, os.getpid())).lower()
@@ -597,12 +631,13 @@ def chain(tmp_path_factory):
     try:
         c.probe = asyncio.run(_probe_problems(c.dsn))
         if not c.reused:
-            c.steps, c.kept = asyncio.run(_build(c.dsn, out, psql, pg_dump, c.pre_db))
+            c.steps, c.kept, c.harness = asyncio.run(_build(c.dsn, out, psql, pg_dump, c.pre_db))
             if os.environ.get("D2_KEEP_DB") == "1":
                 _write(out, "state.json", json.dumps({
                     "pre_db": c.pre_db,
                     "steps": [dict(s, diff=_jsonable(s["diff"])) for s in c.steps],
-                    "kept": {k: sorted(v) for k, v in c.kept.items()}}))
+                    "kept": {k: sorted(v) for k, v in c.kept.items()},
+                    "harness": c.harness}, default=str))
         c.model = asyncio.run(_model_rows(c.dsn))
         # the probe read again after the whole chain: a step that changed it
         # (its functions, its event triggers) is named here, whatever else
@@ -763,13 +798,29 @@ def test_the_probe_is_intact_after_the_chain(chain):
 
 
 def test_no_step_changes_a_cluster_row(chain):
-    """Ruling R8-A1 (E1): no step of the chain changes a row of a shared
-    catalog within catalog_all.RESTRICT (a role, its defaults, its
-    memberships, the database, a shared comment or label, a tablespace, a
-    parameter ACL, a replication origin), other than pg_shdepend's rows for
+    """Ruling R8-A1 (E1), whole since round 11 (FIX-R11-CAT): no step of the
+    chain changes a row of a shared catalog (any role, its defaults in any
+    database, any membership, any database, a shared comment or label, a
+    tablespace, a parameter ACL, a replication origin; the rows outside
+    catalog_all.RESTRICT included, _snap), other than pg_shdepend's rows for
     the measured database's own objects."""
     got = [(s["n"], s["label"], ca.cluster_rows(s["diff"])) for s in chain.steps if ca.cluster_rows(s["diff"])]
     assert got == [], got
+
+
+def test_r11_chain_clones_change_only_their_own_rows(chain):
+    """Round 11 (FIX-R11-CAT): the chain's readings are whole, so the two
+    clones _build makes between readings (CRLF_FILE's and TAIL_FILE's
+    starting states) are read at once, each change bound to the clone's own
+    oid as its creating session read it back (catalog_all.not_of_database):
+    no stray row, and the clone's own pg_database row was seen (own >= 1:
+    the reading includes the rows outside RESTRICT)."""
+    assert chain.harness is not None, "the kept state carries no harness record (built before round 11)"
+    print("r11 chain clones: %s" % [(h["label"], h["oid"], h["own"], len(h["stray"])) for h in chain.harness])
+    assert [h["label"] for h in chain.harness] == ["<clone %s>" % _crlf_db(chain.pre_db),
+                                                   "<clone %s>" % chain.pre_db], chain.harness
+    assert [(h["label"], h["stray"]) for h in chain.harness if h["stray"]] == []
+    assert all(h["own"] >= 1 for h in chain.harness), chain.harness
 
 
 def test_mail_inbox_rev_equals_the_model_after_300(chain):
@@ -2422,18 +2473,23 @@ def test_r10_n_catalog_all_532_explanation_bound_to_identity(chain):
 def test_r10_sweep_counts():
     """Ruling R9-A1 (E): the sites of each class in the four files of the
     lane, counted per file, equal the frozen counts (catalog_r10_sweep); a
-    new site fails here until it is fixed or held with a reason."""
+    new site fails here until it is fixed or held with a reason. Round 11
+    (FIX-R11-CAT, its NOTES list each site): catalog_all gains one
+    explanation site (the owner event, bound by identity) and one shared
+    site (complement(), the chain's whole reading of the rows outside
+    RESTRICT)."""
     import catalog_r10_sweep as sw
+    frozen = dict(sw.FROZEN, **{("explanation", "catalog_all.py"): 13, ("shared", "catalog_all.py"): 19})
     got = {k: len(v) for k, v in sw.sweep(HERE).items()}
-    assert got == sw.FROZEN, {k: (got.get(k), sw.FROZEN.get(k)) for k in set(got) | set(sw.FROZEN)
-                              if got.get(k) != sw.FROZEN.get(k)}
+    assert got == frozen, {k: (got.get(k), frozen.get(k)) for k in set(got) | set(frozen)
+                           if got.get(k) != frozen.get(k)}
 
 
 def test_r10_routes_state_this_run(chain):
     """The measurer and its routes for the log of record (catalog_all.routes):
     rolpassword 'digest' under a superuser, else 'unmeasured' with
-    pg_authid.rolpassword listed; the shared rows outside RESTRICT measured
-    in every harness position, not between chain readings."""
+    pg_authid.rolpassword listed; the shared rows outside RESTRICT compared
+    whole in every harness position and between chain readings (round 11)."""
     r = asyncio.run(_r10_routes())
     print("r10 routes: measurer %s superuser %s rolpassword %s; outside RESTRICT: %s; unmeasured: %s"
           % (r["measurer"], r["superuser"], r["rolpassword"], r["outside_restrict"], r["unmeasured"]))
@@ -2473,10 +2529,12 @@ def test_r10_outside_discounts_another_backends_drop_database(program):
     """PostgreSQL 16 DROP DATABASE marks the row invalid (datconnlimit -2) by
     an in-place update, visible inside the position's REPEATABLE READ
     snapshot; the record run of a5d71da0 read a concurrent lane's drop as the
-    position's own 'SHARED:pg_database'. outside() leaves invalid rows out
-    and outside_diff() discounts the removal that leaves; a change the
-    position makes to another database's row (the second case, an ALTER
-    DATABASE on a database it owns) is still reported."""
+    position's own 'SHARED:pg_database'. Since round 11 outside() keeps the
+    row (no filter) with its ctid, and outside_diff() discounts only the
+    pair of one tuple changed in place to datconnlimit -2
+    (catalog_all.inplace_by_other); a change the position makes to another
+    database's row (the second case, an ALTER DATABASE on a database it
+    owns: a new tuple version) is still reported."""
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
     prefix = os.environ.get("D2_DB_PREFIX", "d2catalog")
     db = ("%s_inplace_%s_%d" % (prefix, stamp, os.getpid())).lower()
@@ -2517,9 +2575,10 @@ async def _r10_inplace_bound(other):
 
 
 def test_r10_outside_inplace_bound_refusals():
-    """The bound outside_diff() rests on (its OUTSIDE_INPLACE discount does
-    not check that the row's last value was -2): a position can neither
-    remove a pg_database row nor write datconnlimit -2. Executed inside a
+    """Two facts beside the bound outside_diff() rests on since round 11
+    (one tuple, the same ctid, datconnlimit -2 after: an in-place update,
+    which no statement of a position makes): a position can neither remove
+    a pg_database row nor write datconnlimit -2 by ALTER. Executed inside a
     position: DROP DATABASE is refused (25001, it cannot run in a transaction
     block) and CONNECTION LIMIT -2 is refused (22023, below -1); the control,
     the same statement with -1, runs, so the refusal is the value's and not
@@ -2532,7 +2591,7 @@ def test_r10_outside_inplace_bound_refusals():
         got = asyncio.run(_r10_inplace_bound(other))
     finally:
         asyncio.run(_drop_db(other))
-    print("r10 OUTSIDE_INPLACE bound inside a position: %s" % got)
+    print("r10 in-place bound inside a position: %s" % got)
     assert list(got.values()) == ["25001", "22023", "ok"], got
 
 
