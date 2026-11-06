@@ -7519,7 +7519,8 @@ def test_the_only_raw_sql_reader_is_the_scanner():
     outside = [f for f in sql if not f["expected"]]
     assert outside == [], "('raw sql sweep', %r)" % ([cf_controls.sweep_line(f) for f in outside],)
     # The sweep sees the scanner itself (the region and its probes), so it can find a reader.
-    assert {f["file"] for f in sql} == {"cf_asm.py", "test_ffa_assembly_pg.py"},         ("raw sql sweep sees the scanner", len(sql))
+    assert {f["file"] for f in sql} == {"cf_asm.py", "test_ffa_assembly_pg.py"}, \
+        ("raw sql sweep sees the scanner", len(sql))
     def sql_of(v):
         return v if isinstance(v, str) else getattr(v, "text", None)
     missed = sorted(n for n in main_names
