@@ -12,14 +12,17 @@ refusing direction:
     catalog is a failure, not a silent pass;
   * every column of every one of them is read, as the row's text, except
     what EXCLUDED declares one entry at a time with its reason;
-  * the shared (cluster-wide) catalogs are restricted to the rows this run
-    can own (RESTRICT, each entry with its reason): other lanes create
-    databases and roles on the same cluster while a run measures. The rows
-    OUTSIDE a restriction are measured too, by outside(), wherever the two
-    readings are taken in one REPEATABLE READ transaction (every harness
-    position: only the position's own writes can differ there); the chain's
-    readings are separate transactions, and routes() states for every run
-    that rows outside RESTRICT are not measured there;
+  * the shared (cluster-wide) catalogs are read WHOLE (round 11, ruling
+    FOUR-R10-A2 FIX-R11-CAT): RESTRICT is a partition, not a filter.
+    snapshot() reads the rows inside it (the measured database's and the
+    session role's), complement() and outside() the rows outside it, and
+    every comparison reads both parts on both sides: the chain (each
+    reading is snapshot() and complement() in one transaction; any
+    difference outside is a change, whoever made it) and every harness
+    position (outside(), one REPEATABLE READ snapshot at both ends). A row
+    that appears or disappears is a change; the one difference discounted
+    is an in-place update by another backend, bound to the tuple's physical
+    identity (INPLACE_BY_OTHER, outside_diff());
   * a column the session may not SELECT is a failure unless UNREADABLE
     declares it (with SUBSTITUTE naming the public view read instead); a
     column the view masks (pg_authid.rolpassword under a measurer that is
@@ -69,6 +72,8 @@ same table or anywhere, explains nothing (round 9: an index created on
 players accounted for players_pkey's pg_index.indislive changed in place).
 """
 
+import re
+
 FIRST_NORMAL_OID = 16384
 
 # relkind 'r' relations of pg_catalog, by server major version. A server
@@ -108,13 +113,17 @@ EXCLUDED = (
 
 # Shared catalogs: {relation: (predicate over t, reason)}. The predicate may
 # use {db} (the measured database's oid) and {me} (current_user's oid). A
-# shared catalog not listed here is compared WHOLE. The rows a predicate
-# leaves out are read by outside() (the complement, `(predicate) IS NOT
-# TRUE`) and compared in every harness position, where both readings share
-# one REPEATABLE READ snapshot and nothing but the position's own writes can
-# differ; the chain's readings cannot share a snapshot (each migration
-# commits, other lanes commit between them), and there they are not
-# measured: routes()["outside_restrict"] says so for every run.
+# shared catalog not listed here is read whole by snapshot(). Round 11: the
+# predicate PARTITIONS a catalog, it filters nothing out of a comparison.
+# snapshot() reads the rows it keeps (accounted for by object changes in
+# unexplained()), complement() and outside() the rows it leaves out (the
+# complement, `(predicate) IS NOT TRUE`), and both parts are compared in
+# every measurement: in each chain reading (complement(), the same
+# transaction as snapshot(); a difference there is a change whoever made
+# it, so the chain needs a cluster no other lane writes during the run:
+# routes()["outside_restrict"]) and in every harness position (outside(),
+# one REPEATABLE READ snapshot at both ends). The reasons below say why a
+# row is in which part, never why it is not compared.
 RESTRICT = {
     "pg_database": ("t.oid = {db}",
                     "other lanes create and drop databases on this cluster at any moment; the measured "
@@ -153,18 +162,24 @@ RESTRICT = {
                               "origin not named that way are compared"),
 }
 
-# Rows outside RESTRICT that another backend changes IN PLACE, which one
-# REPEATABLE READ snapshot does not hold still: {relation: (predicate over t,
-# reason)}. outside() leaves them out, and outside_diff() discounts the one
-# difference that leaves (a row present at the start, absent at the end,
-# with no row of its identity added).
-OUTSIDE_INPLACE = {
-    "pg_database": ("t.datconnlimit = -2",
+# In-place updates ANOTHER backend makes to a row that one REPEATABLE READ
+# snapshot still shows changed: {relation: ({column: the value the update
+# writes}, reason)}. Round 11 (FIX-R11-CAT, report catalog_all.py:806):
+# nothing is filtered out of a reading for them. outside() marks every row of
+# these relations with its physical tuple identity ('&<ctid>'), and
+# outside_diff() discounts exactly one shape: a removed and an added row of
+# the same '@' identity AND the same '&' ctid whose changed columns are all
+# listed here, each with the listed value after. An MVCC write (the
+# position's own UPDATE, ALTER or direct catalog UPDATE included) writes a
+# new tuple version at a new ctid, so it never has that shape; a row that
+# appears or disappears never has it either. The permitted transition set is
+# this table, one entry: datconnlimit (any) -> -2 on pg_database.
+INPLACE_BY_OTHER = {
+    "pg_database": ({"datconnlimit": "-2"},
                     "DROP DATABASE (PostgreSQL 16) marks the row invalid (datconnlimit -2) by an in-place "
-                    "update, visible inside any snapshot; a position can never write that value (ALTER "
-                    "DATABASE refuses a limit below -1) nor remove a pg_database row (DROP DATABASE cannot "
-                    "run inside a transaction block, 25001); the rows of invalid databases (being dropped, "
-                    "or left invalid by an interrupted drop) are therefore not measured outside RESTRICT"),
+                    "update before it deletes the row, and the update is visible inside any snapshot; the "
+                    "tuple keeps its ctid. A position cannot make an in-place update of pg_database itself "
+                    "(DROP DATABASE and VACUUM cannot run inside a transaction block, 25001)"),
 }
 
 # Columns the session may not SELECT: (relation, column or WHOLE, reason).
@@ -386,6 +401,46 @@ S, R, O = "self", "rel", "owner"   # binding modes: the object row's
 #                        oid-typed columns, an index's or toast relation's
 #                        owning table included (O)
 _CLASS = (("class", S),)
+# Round 11 (FIX-R11-CAT, report catalog_all.py:416): an explanation binds to
+# the changed object AND to its event. The modes below name the event; each
+# is checked on the objects of the same diff by identity (an oid, or the
+# relation the row's own identity lies in), never by a kind alone:
+OWNER = "owner_event"  # the class object of the row's identity changed its
+#                        'owner=' (ALTER ... OWNER, REASSIGN OWNED)
+OWNER_R = "owner_rel"  # that owner event on the relation the row's identity
+#                        lies in ('%')
+OWNER_O = "owner_of"   # that owner event on a relation the row names (an
+#                        index's or toast relation's owning table)
+ADDED_R = "added_rel"  # an object of the kind ADDED (its identity on the
+#                        added side only) on the relation the row's identity
+#                        lies in
+PM_R = "pm_rel"        # an object of the kind added or removed whole on that
+#                        relation (never one changed in place)
+NEW_REL = "new_rel"    # the column's value after names a pg_class row added
+#                        whole in the diff, or its value before one removed
+#                        whole (the toast relation created or dropped)
+REWRITE = "rewrite"    # the relation the row's identity lies in was
+#                        REWRITTEN in the diff: its relfilenode changed
+#                        (STORAGE_KEY rows, matched by the relation's oid)
+OWN_DROP = "own_drop"  # the row's own change sets attisdropped, and the
+#                        attribute object of its identity changed (S)
+# {(key, column): (before, after)}: the only transition a column may make in
+# place, whatever explains it. ANY_SET: any non-NULL value; None: NULL.
+# every binding mode is a distinct value (bound() tests them in order; a
+# repeated value makes the later mode unreachable: O and OWNER once shared
+# "owner", so an owner binding was read as O, by relation)
+_MODES = (S, R, O, OWNER, OWNER_R, OWNER_O, ADDED_R, PM_R, NEW_REL, REWRITE, OWN_DROP)
+assert len(set(_MODES)) == len(_MODES), _MODES
+ANY_SET = "<any value>"
+TRANSITIONS = {
+    # a column's stored missing value is set when the column is added (its
+    # row is ADDED whole, never changed in place to true) and cleared when
+    # the table is rewritten (finish_heap_swap clears every column's) or the
+    # column itself is dropped (RemoveAttributeById clears its own); no
+    # statement sets it on an existing column
+    ("pg_attribute", "atthasmissing"): ("t", "f"),
+    ("pg_attribute", "attmissingval"): (ANY_SET, None),
+}
 # {key: {column: ((object kind, mode), ...)}}: the columns whose change IN
 # PLACE an object change accounts for, and how that change must be bound. A
 # column not listed (and every column of a key not listed) is accounted for
@@ -395,29 +450,34 @@ IN_PLACE = {
         {c: _CLASS for c in ("relname", "relnamespace", "relkind", "relpersistence", "relforcerowsecurity",
                              "reloptions", "relreplident", "relam", "reltablespace", "reloftype")},
         # ALTER TABLE OWNER changes the owner of the table's indexes and toast
-        # relation too; pg_dump renders only the table's
-        relowner=(("class", S), ("class", O)),
+        # relation too; pg_dump renders only the table's: bound to the owner
+        # event of the relation itself or of the table it belongs to
+        relowner=(("class", OWNER), ("class", OWNER_O)),
         relrowsecurity=(("rls", S),), relispartition=(("partition", S),), relpartbound=(("partition", S),),
         # an owner change rewrites the grantor of every grant on the relation,
-        # which no ACL object renders: bound to the relation's own class object
-        relacl=(("acl", S), ("class", S)),
-        # a column added or dropped changes the table's column count, and a
-        # toastable one creates its toast relation
-        relnatts=(("attribute", R),), reltoastrelid=(("attribute", R),),
-        relchecks=(("constraint", R),)),
+        # which no ACL object renders: bound to the relation's own owner event
+        relacl=(("acl", S), ("class", OWNER)),
+        # a column added changes the table's column count (a drop keeps the
+        # dropped column's row and the count); a toastable column creates the
+        # toast relation, whose own pg_class row is added in the same diff
+        relnatts=(("attribute", ADDED_R),), reltoastrelid=((None, NEW_REL),),
+        # a check constraint added or dropped
+        relchecks=(("constraint", PM_R),)),
     "pg_attribute": dict(
         {c: (("attribute", S),) for c in ("attname", "atttypid", "attlen", "atttypmod", "attndims", "attbyval",
                                           "attalign", "attstorage", "attcompression", "attnotnull", "attidentity",
                                           "attgenerated", "attisdropped", "attstattarget", "attcollation",
                                           "attoptions", "attfdwoptions")},
         atthasdef=(("default", S), ("attribute", S)),
-        # the stored value of a column added with a default: set with the
-        # column, cleared when the table is rewritten by another column's change
-        atthasmissing=(("default", S), ("attribute", S), ("attribute", R)),
-        attmissingval=(("default", S), ("attribute", S), ("attribute", R)),
+        # the stored value of a column added with a default (TRANSITIONS):
+        # cleared in place only by a proven rewrite of its table or by the
+        # column's own drop; a sibling column added explains nothing here
+        # (its own rows are ADDED whole, bound by identity)
+        atthasmissing=((None, REWRITE), ("attribute", OWN_DROP)),
+        attmissingval=((None, REWRITE), ("attribute", OWN_DROP)),
         # an owner change rewrites the grantor of every column grant: bound to
-        # the class object of the relation the column is in
-        attacl=(("acl", S), ("class", R)), attinhcount=(("inherits", R),), attislocal=(("inherits", R),)),
+        # the owner event of the relation the column is in
+        attacl=(("acl", S), ("class", OWNER_R)), attinhcount=(("inherits", R),), attislocal=(("inherits", R),)),
     "pg_attrdef": {"adbin": (("default", S),)},
     "pg_constraint": dict(
         {c: (("constraint", S),) for c in ("conname", "contype", "condeferrable", "condeferred", "convalidated",
@@ -506,6 +566,24 @@ SELECT c.oid, pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident
 """
 
 TEMP_NS_SQL = "SELECT oid FROM pg_catalog.pg_namespace WHERE nspname ~ '^pg_(toast_)?temp_[0-9]+$'"
+
+# The proof channel of REWRITE (round 11): one row per relation of this
+# database that has storage, with its relfilenode, which EXCLUDED keeps out
+# of the compared pg_class text. snapshot() returns them as raw rows of key
+# STORAGE_KEY on no relation (rows_on() and changers() never see them);
+# unexplained() never returns one: a relfilenode changed in place is the
+# evidence that the relation was rewritten in that diff, matched to the
+# rows it explains by the relation's oid.
+STORAGE_KEY = "storage:pg_class.relfilenode"
+STORAGE_SQL = """
+SELECT c.oid, c.relfilenode::text AS filenode
+  FROM pg_catalog.pg_class c
+ WHERE c.oid >= %d AND c.relfilenode <> 0
+   AND c.relnamespace NOT IN (SELECT n.oid FROM pg_catalog.pg_namespace n
+                               WHERE n.nspname ~ '^pg_(toast_)?temp_[0-9]+$')
+""" % FIRST_NORMAL_OID
+# the oid of pg_database, as pg_shdepend's classid prints it
+DATABASE_CLASS_OID = "1262"
 
 ISOLATION_SQL = "SELECT pg_catalog.current_setting('transaction_isolation')"
 
@@ -609,6 +687,12 @@ def plan(meta, major, superuser=None):
     for rel in RESTRICT:
         if rel in rels and not rels[rel]["shared"]:
             problems.append("RESTRICT names %s, which is not a shared catalog" % rel)
+    for rel, (cols_after, _why) in INPLACE_BY_OTHER.items():
+        for c in cols_after:
+            if (rel, c) not in cols or _declared(EXCLUDED, rel, c):
+                problems.append("INPLACE_BY_OTHER names %s.%s, which is not compared" % (rel, c))
+        if rel not in RESTRICT:
+            problems.append("INPLACE_BY_OTHER names %s, which outside() does not read" % rel)
     keys = set()
     for rel in rels:
         if not _whole(EXCLUDED, rel):
@@ -657,10 +741,12 @@ def plan(meta, major, superuser=None):
     return {"relations": out, "problems": problems, "count": len(rels)}
 
 
-def query(p, outside=False):
+def query(p, outside=False, phys=False):
     """The one UNION ALL query reading every planned relation; with
     `outside`, the rows of the RESTRICT relations their predicate leaves out
-    (and nothing else)."""
+    (and nothing else), every one of them (round 11: no row is filtered out
+    of the complement). With `phys`, each row of an INPLACE_BY_OTHER
+    relation carries its ctid (column phys), else phys is NULL."""
     parts = []
     for rel, e in sorted(p["relations"].items()):
         if outside and rel not in RESTRICT:
@@ -676,25 +762,25 @@ def query(p, outside=False):
         if rel in RESTRICT:
             pred = RESTRICT[rel][0].format(db="$1", me="$2")
             where = (" WHERE (%s) IS NOT TRUE" % pred) if outside else (" WHERE " + pred)
-            if outside and rel in OUTSIDE_INPLACE:
-                where += " AND (%s) IS NOT TRUE" % OUTSIDE_INPLACE[rel][0]
+        ctid = "t.ctid::text" if phys and rel in INPLACE_BY_OTHER else "NULL::text"
         parts.append("SELECT %s::text AS rel, %s::text AS scope, %s AS shared, ROW(%s)::text AS body, "
-                     "%s AS own, %s AS system, %s AS refs, %s AS ident, %s AS selves FROM pg_catalog.%s t%s"
+                     "%s AS own, %s AS system, %s AS refs, %s AS ident, %s AS selves, %s AS phys "
+                     "FROM pg_catalog.%s t%s"
                      % ("'%s'" % rel, SCOPE.get(rel, "''"), "true" if e["shared"] else "false",
                         ", ".join(e["body"]),
-                        e["own"] or "NULL::pg_catalog.oid", system, refs, e["ident"], e["selves"],
+                        e["own"] or "NULL::pg_catalog.oid", system, refs, e["ident"], e["selves"], ctid,
                         _q(e["source"]), where))
     return "\nUNION ALL\n".join(parts)
 
 
-async def read(conn, outside=False):
+async def read(conn, outside=False, phys=False):
     """(plan, rows of query(), relation names, temporary schema oids, session)."""
     s = await conn.fetchrow(SESSION_SQL)
     p = plan(await conn.fetch(COLUMNS_SQL), s["major"])
     if p["problems"]:
         raise AssertionError("catalog_all cannot measure this server: " + "; ".join(p["problems"]))
     BODY_COLUMNS.update({rel: list(e["names"]) for rel, e in p["relations"].items()})
-    rows = await conn.fetch(query(p, outside), s["db"], s["me"])
+    rows = await conn.fetch(query(p, outside, phys), s["db"], s["me"])
     names = {r["oid"]: (r["name"], r["parent"]) for r in await conn.fetch(NAMES_SQL)}
     temp = {r["oid"] for r in await conn.fetch(TEMP_NS_SQL)}
     return p, rows, names, temp, s
@@ -722,8 +808,20 @@ def _lead_oid(ident):
     return int(head) if head.isdigit() else None
 
 
-def rows_from(rows, names, temp):
-    """The snapshot rows (module docstring) of query() rows."""
+OUTSIDE_MARK = "~outside"
+
+
+def rows_from(rows, names, temp, part=""):
+    """The snapshot rows (module docstring) of query() rows. `part` is
+    OUTSIDE_MARK for rows of the complement of RESTRICT (each row carries it,
+    so cluster_rows() reports every such row), else ''. A row read with its
+    physical identity carries '&<ctid>'. A row of the complement belongs
+    to another database or to none, so the measured database's relation
+    names and temporary relations neither name nor filter it (an oid there
+    is another database's: a clone's own rename re-marked its template's
+    pg_shdepend rows)."""
+    if part:
+        names, temp = {}, ()
     tempset = set(temp)
     grew = True
     while grew:
@@ -758,6 +856,10 @@ def rows_from(rows, names, temp):
             owner = _toast_owner(lead, names)
             if owner:
                 marks.append("^" + owner)
+        if r["phys"]:
+            marks.append("&" + r["phys"])
+        if part:
+            marks.append(part)
         cand = (("RAW", ident, "shared" if r["shared"] else "local") + tuple(sorted(named)) + tuple(marks))
         rels = sorted(n for n in named if not n.startswith("system:")) or [""]
         for rel in rels:
@@ -766,16 +868,37 @@ def rows_from(rows, names, temp):
 
 
 async def snapshot(conn):
-    """The raw rows of every measured catalog row (a frozenset)."""
+    """The raw rows of every measured catalog row inside RESTRICT, and the
+    STORAGE_KEY proof rows (a frozenset)."""
     _p, rows, names, temp, _s = await read(conn)
-    return frozenset(rows_from(rows, names, temp))
+    out = rows_from(rows, names, temp)
+    for r in await conn.fetch(STORAGE_SQL):
+        out.add(("raw", "", STORAGE_KEY, "(%s,%s)" % (r["oid"], r["filenode"]), "",
+                 ("RAW", str(r["oid"]), "local", "@%s" % r["oid"])))
+    return frozenset(out)
+
+
+async def complement(conn):
+    """The raw rows of the shared catalogs that RESTRICT leaves out, every
+    one of them (a frozenset), for the CHAIN (round 11, report
+    test_r7_catalog_diff_pg.py:466): each chain reading is snapshot() and
+    complement() in one transaction, and two readings are compared whole.
+    Between two chain readings other sessions commit, so a difference here
+    is a change whoever made it: the chain is measured on a cluster no other
+    lane writes while it runs (a seat holds its lock; on 55432, the
+    integrator's slot); this run's own harness actions between readings are
+    bound by identity (not_of_database())."""
+    _p, rows, names, temp, _s = await read(conn, outside=True)
+    return frozenset(rows_from(rows, names, temp, OUTSIDE_MARK))
 
 
 async def outside(conn):
-    """The raw rows of the shared catalogs that RESTRICT leaves out (a
-    frozenset), for a harness position: read only inside a REPEATABLE READ
-    (or SERIALIZABLE) transaction, where two readings share one snapshot
-    and differ only by the position's own writes. The caller binds the two
+    """The raw rows of the shared catalogs that RESTRICT leaves out, every
+    one of them (a frozenset), each row of an INPLACE_BY_OTHER relation with
+    its ctid ('&'), for a harness position: read only inside a REPEATABLE
+    READ (or SERIALIZABLE) transaction, where two readings share one
+    snapshot and differ only by the position's own writes and by another
+    backend's in-place updates (outside_diff()). The caller binds the two
     readings to the same transaction (catalog_position); this refuses a
     reading at any other isolation (each statement would see other lanes'
     commits)."""
@@ -783,27 +906,55 @@ async def outside(conn):
     if iso not in ("repeatable read", "serializable"):
         raise AssertionError("catalog_all.outside() reads the rows outside RESTRICT only inside one "
                              "REPEATABLE READ transaction; this reading is at %r" % iso)
-    _p, rows, names, temp, _s = await read(conn, outside=True)
-    return frozenset(rows_from(rows, names, temp))
+    _p, rows, names, temp, _s = await read(conn, outside=True, phys=True)
+    return frozenset(rows_from(rows, names, temp, OUTSIDE_MARK))
+
+
+def _phys(r):
+    marks = [c[1:] for c in r[5][3:] if c[:1] == "&"]
+    return marks[0] if len(marks) == 1 else None
+
+
+def inplace_by_other(removed_row, added_row):
+    """True when two raw rows are one tuple updated IN PLACE by another
+    backend, in the one shape INPLACE_BY_OTHER permits: the same key, the
+    same '@' identities, the same physical identity ('&' ctid, read inside
+    one snapshot), and every changed column listed for the relation with the
+    listed value after. Anything else (a new tuple version, a row that
+    appears or disappears, another column, another value) is False."""
+    a, b = removed_row, added_row
+    if a[0] != "raw" or b[0] != "raw" or a[1] != b[1] or a[2] != b[2] or a[2] not in INPLACE_BY_OTHER:
+        return False
+    if _phys(a) is None or _phys(a) != _phys(b):
+        return False
+    if {c for c in a[5][3:] if c[:1] == "@"} != {c for c in b[5][3:] if c[:1] == "@"} or a[5][1] != b[5][1]:
+        return False
+    changed = changed_columns(a[2], a[3], b[3])
+    allowed = INPLACE_BY_OTHER[a[2]][0]
+    if not changed or any(c not in allowed for c in changed):
+        return False
+    after = fields(b[3])
+    cols = BODY_COLUMNS[a[2]]
+    return all(after[cols.index(c)] == allowed[c] for c in changed)
 
 
 def outside_diff(before, after):
-    """{'added', 'removed'} of two outside() readings of one position, less
-    the removal OUTSIDE_INPLACE explains: a row of an OUTSIDE_INPLACE
-    relation present at the start and absent at the end, with no row of the
-    same identity ('@' marks) added (another backend marked it in place;
-    the position cannot remove such a row). A row of that identity added at
-    the end (the position changed it) keeps both sides."""
+    """{'added', 'removed'} of two outside() readings of one position. Every
+    row that appears or disappears stays (round 11, report
+    catalog_all.py:806: round 10 discounted a disappearance, and a filter on
+    the reading turned the position's own UPDATE of pg_database into one).
+    The one pair taken out is another backend's in-place update
+    (inplace_by_other(): one tuple, the same ctid, the permitted
+    transition)."""
     added, removed = sorted(after - before), sorted(before - after)
-
-    def ident(r):
-        return (r[2], frozenset(c for c in r[5][3:] if c[:1] == "@"))
-
-    def inplace(r):
-        return r[0] == "raw" and r[2] in OUTSIDE_INPLACE and any(c[:1] == "@" for c in r[5][3:])
-
-    back = {ident(r) for r in added if inplace(r)}
-    return {"added": added, "removed": [r for r in removed if not (inplace(r) and ident(r) not in back)]}
+    gone_a, gone_r = set(), set()
+    for r in removed:
+        for a in added:
+            if a not in gone_a and inplace_by_other(r, a):
+                gone_a.add(a)
+                gone_r.add(r)
+                break
+    return {"added": [a for a in added if a not in gone_a], "removed": [r for r in removed if r not in gone_r]}
 
 
 async def routes(conn):
@@ -820,15 +971,16 @@ async def routes(conn):
         for c in e["masked"]:
             unmeasured.append((rel, c, "read through %s, which masks it; the measurer %s may not read %s"
                                % (e["source"], s["measurer"], rel)))
-    for rel, (pred, why) in sorted(OUTSIDE_INPLACE.items()):
-        unmeasured.append((rel, "rows outside RESTRICT where %s" % pred, why))
     pw = p["relations"].get("pg_authid", {})
     return {"measurer": s["measurer"], "superuser": bool(s["superuser"]),
             "rolpassword": "unmeasured" if "rolpassword" in pw.get("masked", ()) else "digest",
-            "outside_restrict": ("measured in every harness position (outside(), one REPEATABLE READ "
-                                 "snapshot at both ends of the position; rows another backend changes in "
-                                 "place, OUTSIDE_INPLACE, left out); not measured between two chain "
-                                 "readings, which are separate transactions"),
+            "outside_restrict": ("compared whole, every row: between chain readings (complement(), in the "
+                                 "reading's transaction; a difference is a change whoever made it, so the "
+                                 "chain runs on a cluster no other lane writes meanwhile) and in every "
+                                 "harness position (outside(), one REPEATABLE READ snapshot at both ends; "
+                                 "the one discount is another backend's in-place update of the same tuple, "
+                                 "INPLACE_BY_OTHER)"),
+            "inplace_by_other": {rel: dict(cols) for rel, (cols, _why) in sorted(INPLACE_BY_OTHER.items())},
             "unmeasured": unmeasured}
 
 
@@ -852,6 +1004,8 @@ def _marks(cand):
             rels.add(c[1:])
         elif c[:1] == "^":
             toast.add(c[1:])
+        elif c[:1] in ("&", "~"):
+            continue                       # physical identity, partition
         else:
             refs.add(c)
     return refs, ids, rels, toast
@@ -949,16 +1103,45 @@ def unexplained(d):
     every_id = set()
     for v in ids_of.values():
         every_id |= v
+    # the objects of each kind by side: an identity on one side only was
+    # added (or removed) whole; on both, changed in place
+    side_ids = {"added": {}, "removed": {}}
+    for side in side_ids:
+        for o in d[side]:
+            if o[0] != "raw":
+                side_ids[side].setdefault(o[0], {}).setdefault(o[4], set()).add(o[1])
+    only = {"added": {}, "removed": {}}
+    for side, opp in (("added", "removed"), ("removed", "added")):
+        for kind, by in side_ids[side].items():
+            gone = side_ids[opp].get(kind, {})
+            only[side][kind] = set().union(*[n for i, n in by.items() if i not in gone]) if by else set()
     cls = {"added": {}, "removed": {}}
+    owner_of = {"added": {}, "removed": {}}
     for side in ("added", "removed"):
         for o in d[side]:
             if o[0] == "class":
                 cls[side].setdefault(o[4], set()).add(o[1])
+                m = re.search(r"(?:^| )owner=(.*?)(?: replident=|$)", o[3] or "")
+                owner_of[side].setdefault(o[4], set()).add(m.group(1) if m else None)
     renamed = set()
     for oid in set(cls["added"]) & set(cls["removed"]):
         if cls["added"][oid] != cls["removed"][oid]:
             renamed |= cls["added"][oid] | cls["removed"][oid]
+    # the owner event: a class object present on both sides whose owner differs
+    owner_ids, owner_names = set(), set()
+    for oid in set(owner_of["added"]) & set(owner_of["removed"]):
+        if owner_of["added"][oid] != owner_of["removed"][oid] and None not in owner_of["added"][oid]:
+            owner_ids.add(oid)
+            owner_names |= cls["added"][oid] | cls["removed"][oid]
     g = _groups(d)
+    # the STORAGE_KEY proof rows: taken out of the measured rows; a relation
+    # whose relfilenode differs between the sides was rewritten in d
+    storage = {"added": {}, "removed": {}}
+    for k in [k for k in g if k[1] == STORAGE_KEY]:
+        storage[k[0]][k[3][1]] = k[2]
+        del g[k]
+    rewritten = {i for i in set(storage["added"]) & set(storage["removed"])
+                 if storage["added"][i] != storage["removed"][i]}
     marks = {k: _marks(k[3]) for k in g}
     by_ident = {"added": {}, "removed": {}}
     for k in g:
@@ -966,24 +1149,56 @@ def unexplained(d):
             by_ident[k[0]].setdefault((k[1], k[3][1]), []).append(k)
     in_place = set(by_ident["added"]) & set(by_ident["removed"])
     raw_ids = {k[3][1] for k in g if k[3][1] and ":" not in k[3][1] and EXPLAINS.get(k[1]) != DEPENDS}
+    # pg_class rows added or removed whole (a relation created or dropped)
+    whole_class = {s: {i for (key, i) in by_ident[s] if key == "pg_class" and (key, i) not in in_place}
+                   for s in ("added", "removed")}
     same = {"added": set(), "removed": set()}
     for side, key, text, cand in g:
         if cand[1] and (key, cand[1]) not in in_place:
             same[side].add((key, _blank_own_oid(text, cand[1])))
     other = {"added": "removed", "removed": "added"}
 
-    def bound(kind, mode, ids, rels, refs):
+    def bound(kind, mode, ctx):
+        ids, rels, refs = ctx["ids"], ctx["rels"], ctx["refs"]
         if mode == S:
             return bool(ids & ids_of.get(kind, set()))
-        return bool((rels if mode == R else refs) & rels_of.get(kind, set()))
+        if mode in (R, O):
+            return bool((rels if mode == R else refs) & rels_of.get(kind, set()))
+        if mode == OWNER:
+            return bool(ids & owner_ids)
+        if mode == OWNER_R:
+            return bool(rels & owner_names)
+        if mode == OWNER_O:
+            return bool(refs & owner_names)
+        if mode == ADDED_R:
+            return bool(rels & only["added"].get(kind, set()))
+        if mode == PM_R:
+            return bool(rels & (only["added"].get(kind, set()) | only["removed"].get(kind, set())))
+        if mode == NEW_REL:
+            after, before = ctx["after"], ctx["before"]
+            return (after not in (None, "0") and after in whole_class["added"]) or \
+                (before not in (None, "0") and before in whole_class["removed"])
+        if mode == REWRITE:
+            return ctx["lead"] is not None and ctx["lead"] in rewritten
+        if mode == OWN_DROP:
+            return ctx["dropped"] and bool(ids & ids_of.get(kind, set()))
+        raise AssertionError("unknown binding mode %r" % (mode,))
+
+    def transition_ok(key, col, before, after):
+        want = TRANSITIONS.get((key, col))
+        if want is None:
+            return True
+        wb, wa = want
+        return (before is not None if wb == ANY_SET else before == wb) and \
+            (after is not None if wa == ANY_SET else after == wa)
 
     def in_place_ok(key, ident):
         decl = IN_PLACE.get(key, {})
+        cols = BODY_COLUMNS.get(key.split("/")[0], [])
         for a in by_ident["added"][(key, ident)]:
             for b in by_ident["removed"][(key, ident)]:
                 ra, ia, la, ta = marks[a]
                 rb, ib, lb, tb = marks[b]
-                ids, rels, named = ia | ib, la | lb, ra | rb
                 changed = changed_columns(key, a[2], b[2])
                 if changed is None:
                     return False
@@ -992,8 +1207,17 @@ def unexplained(d):
                     if not names or not names <= renamed:
                         return False
                     continue
+                fa, fb = fields(a[2]), fields(b[2])
+                lead = ident.split(".", 1)[0]
+                ctx = {"ids": ia | ib, "rels": la | lb, "refs": ra | rb,
+                       "lead": lead if lead.isdigit() else None,
+                       "dropped": "attisdropped" in changed and fa[cols.index("attisdropped")] == "t"}
                 for c in changed:
-                    if not any(bound(kind, mode, ids, rels, named) for kind, mode in decl.get(c, ())):
+                    i = cols.index(c)
+                    if not transition_ok(key, c, fb[i], fa[i]):
+                        return False
+                    ctx["after"], ctx["before"] = fa[i], fb[i]
+                    if not any(bound(kind, mode, ctx) for kind, mode in decl.get(c, ())):
                         return False
         return True
 
@@ -1054,11 +1278,44 @@ def unexplained(d):
 
 def cluster_rows(d):
     """The changed raw rows of diff d read from a SHARED catalog, other than
-    pg_shdepend's rows for the measured database's own objects."""
+    pg_shdepend's rows for the measured database's own objects (inside
+    RESTRICT: dbid is the measured database). A row of the complement
+    (OUTSIDE_MARK: another database's dependencies included) is always one."""
     out = []
     for (side, key, text, cand), _rels in sorted(_groups(d).items()):
-        if cand[2] == "shared" and key != "pg_shdepend/database":
+        if cand[2] == "shared" and (key != "pg_shdepend/database" or OUTSIDE_MARK in cand[3:]):
             out.append([side, key, text])
+    return out
+
+
+def not_of_database(d, oid):
+    """The changed rows of diff d that are NOT the rows CREATE DATABASE
+    writes for the database of oid `oid` (round 11: the chain's own clones,
+    created between two chain readings, are bound by the identity their
+    creating session read back, never by a name): its pg_database row
+    (identity oid), the pg_shdepend rows of its objects (dbid oid) and its
+    owner's dependency (classid pg_database, objid oid), each ADDED. Any
+    other row, any object row and any removal is returned."""
+    want = str(oid)
+    out = []
+    for r in d["removed"]:
+        out.append(["removed"] + list(r[:4]))
+    for r in d["added"]:
+        if r[0] == "raw":
+            key = r[2]
+            if key == "pg_database" and r[5][1] == want:
+                continue
+            if key.startswith("pg_shdepend/"):
+                f = fields(r[3])
+                cols = BODY_COLUMNS.get("pg_shdepend", [])
+                if len(f) == len(cols):
+                    v = dict(zip(cols, f))
+                    if key == "pg_shdepend/database" and v.get("dbid") == want:
+                        continue
+                    if key == "pg_shdepend/cluster" and v.get("classid") == DATABASE_CLASS_OID \
+                            and v.get("objid") == want:
+                        continue
+        out.append(["added"] + list(r[:4]))
     return out
 
 
