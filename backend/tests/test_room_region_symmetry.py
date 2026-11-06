@@ -422,6 +422,11 @@ _CENSUS = {
 # What the census refuses, one rule per word. test_the_census_refuses_each_planted_source
 # has, for each rule, a planted source that only that rule refuses.
 _RULES = ("binding", "use", "argument", "alias", "nested", "code", "reading")
+# The module-level names the rules read as main's own: the clock's module and,
+# in the leaf, the fold, the map and the time-to-live. A binding of any of
+# them inside a function the census reads is refused (binding). The callees
+# of _READING_CALLEES are held by the rule alias.
+_TRUSTED_NAMES = ("time", "_region_token", "_REGION_SEEN", "_REGION_SEEN_TTL_SECONDS")
 _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
                   ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
@@ -512,6 +517,12 @@ def _census(source, first_line=1):
 
     def refuse(rule, node):
         refusals.append((rule, node.lineno + first_line - 1, ast.unparse(node) if isinstance(node, ast.AST) else ""))
+
+    # binding: the module-level names the rules below read as main's own are
+    # not rebound inside the function
+    for trusted in _TRUSTED_NAMES:
+        for node in _binders(fn, trusted):
+            refuse("binding", node)
 
     if fn.name == _LEAF:
         _census_of_the_leaf(fn, parents, refuse)
@@ -686,6 +697,12 @@ _PLANTED = [
     ("the reading rebound inside an argument", "_pick_room_region",
      [(_SECOND, "_region_agreed(mr, orr, (mono := mono + 0.5))")], {"binding", "use", "argument"}),
     ("the reading deleted", "_pick_room_region", [(_RETURN, "    del mono\n" + _RETURN)], {"binding"}),
+    ("the clock's module rebound", "_pick_room_region",
+     [(_BIND, "    time = datetime\n" + _BIND)], {"binding"}),
+    ("the time-to-live rebound inside the leaf", _LEAF,
+     [(_LEAF_LIVE, "    _REGION_SEEN_TTL_SECONDS = 0\n" + _LEAF_LIVE)], {"binding"}),
+    ("the fold rebound inside the leaf", _LEAF,
+     [("    ids = ", "    _region_token = str\n    ids = ")], {"binding"}),
     ("the reading taken from another clock", "_pick_room_region",
      [(_BIND, "    mono = time.time()\n")], {"binding"}),
     ("the reading rounded where it is taken", "_pick_room_region",
@@ -730,6 +747,8 @@ _PLANTED = [
      [(_RETURN, "    [0 for mono in ()]\n" + _RETURN)], {"binding", "nested"}),
     ("the reading handed to the weighing starred", "_pick_room_region",
      [(_SECOND, "_region_agreed(*(mr, orr, mono))")], {"argument", "use"}),
+    ("the reading handed to the weighing in a ** mapping", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr, **{\"now\": mono})")], {"argument", "use"}),
     ("a weighing that leaves the reading out", "_pick_room_region",
      [(_SECOND, "_region_agreed(mr, orr)")], {"argument"}),
     ("the wall-clock instant handed in its place", "_pick_room_region",
