@@ -4,7 +4,7 @@
 # against a planted tree. The caller sets BEP CONFDIR CFG OUT PRE RUNSTAMP and the arrays LOGN LOGP.
 #   ft_vr6_check        VR6's second listing (the config folder and LogOutput-prev.log as the sitting left them)
 #                       compared with PRE; any change prints "FT-VM-VR6 files FAIL" and sets bad=1
-#                       (FIX-11, R6-A3.11.15: one proven comment-only cfg rewrite passes, recorded; see ft_cfg_known_rewrite)
+#                       (R6-A3.11.41: the cfg's RESTORED KIND passes, recorded; see ft_cfg_restored_kind)
 #   ft_restore_check    (c) every file the restoration replaces is first MOVED, mtime kept, into
 #                       <outdir>/sitting/<RUNSTAMP>/ (a file already there is never overwritten: refused, bad=1), then
 #                       the pre-image is put back and proven: the five logs (moved whenever present) and the cfg
@@ -52,56 +52,32 @@ ft_vr6_check() {
   grep -E "^config |^log LogOutput-prev.log " "$OUT/inventory-sitting.txt" > "$OUT/vr6-sitting.txt"
   if cmp -s "$OUT/vr6-pre.txt" "$OUT/vr6-sitting.txt"; then
     echo "$(st) FT-VM-VR6 files PASS (config folder and LogOutput-prev.log unchanged by the sitting)"
-  elif ft_cfg_known_rewrite; then
-    echo "$(st) FT-VM-VR6 files PASS with a known launch-time rewrite (R6-A3.11.15 FIX-11): com.competitiverounds.mod.cfg lost only the [Debug] ProfileCardParseSelfTest description block (the lazy bind, ProfileCard.cs:452; every launch's Bind-save writes it without one); sections, keys and values unchanged; diff (values masked): $FT_KNOWN_DIFF"
+  elif ft_cfg_restored_kind; then
+    echo "$(st) FT-VM-VR6 files PASS restored kind (R6-A3.11.41): com.competitiverounds.mod.cfg is the only changed file and only its comment lines differ (every key, value and the order equal to the pre-image; the restore below must still prove the pre-image back by cmp): $FT_KIND_LINE"
   else
-    echo "$(st) FT-VM-VR6 files FAIL: $(diff "$OUT/vr6-pre.txt" "$OUT/vr6-sitting.txt" | grep '^[<>]' | tr '\n' ';')"; bad=1
+    echo "$(st) FT-VM-VR6 files FAIL: $(diff "$OUT/vr6-pre.txt" "$OUT/vr6-sitting.txt" | grep '^[<>]' | tr '\n' ';') cfg: ${FT_KIND_LINE:-not compared}"; bad=1
   fi
 }
-# FIX-11 (R6-A3.11.15): the ONE proven launch-time rewrite. True only when (1) the cfg's inventory line is the only
-# VR6 difference, (2) the cfg's sections and "key = value" lines (comment and blank lines ignored) are identical, and
-# (3) the sitting's cfg is byte-identical to the pre-image with exactly the three-line description block of
-# [Debug] ProfileCardParseSelfTest removed (its "##" text, "# Setting type: Boolean", "# Default value: false",
-# directly above its key line). Any other comment-only shape is a difference and fails VR6 as before.
-# Finding 6 (R6-A3.11.18): the removed block is the COMPLETE proven three lines, each compared whole (==, never a
-# prefix test) once one trailing CR is set aside, and each with the same line ending as the key line; a description
-# that differs anywhere, after the accepted text included, is not the known rewrite.
-FT_PC_DESC="## Development only: once at startup, run the hover profile card's response parser over hostile display names and log a [CARD] verdict line."
-ft_semantic() { tr -d '\r' < "$1" | grep -vE '^#|^[[:space:]]*$'; }
-ft_cfg_known_rewrite() {
-  local pc="$PRE/com.competitiverounds.mod.cfg" exp="$OUT/vr6-cfg-known-form.cfg"
-  FT_KNOWN_DIFF=""
-  [ -f "$pc" ] && [ -f "$CFG" ] || return 1
-  [ "$(diff "$OUT/vr6-pre.txt" "$OUT/vr6-sitting.txt" | grep '^[<>]' | grep -vc ' com.competitiverounds.mod.cfg ')" = 0 ] || return 1
-  [ "$(ft_semantic "$pc" | md5sum)" = "$(ft_semantic "$CFG" | md5sum)" ] || return 1
-  awk -v d="$FT_PC_DESC" '
-    { raw[NR] = $0; s = $0; c[NR] = sub(/\r$/, "", s); t[NR] = s }
-    END {
-      sec = ""; hit = 0
-      for (i = 1; i <= NR; i++) {
-        if (substr(t[i], 1, 1) == "[") sec = t[i]
-        if (sec == "[Debug]" && index(t[i], "ProfileCardParseSelfTest = ") == 1 && i > 3 \
-            && t[i-3] == d && t[i-2] == "# Setting type: Boolean" && t[i-1] == "# Default value: false" \
-            && c[i-3] == c[i] && c[i-2] == c[i] && c[i-1] == c[i]) { hit++; k = i }
-      }
-      if (hit != 1) exit 1
-      print k
-    }' "$pc" > "$exp.line" || return 1
-  # the expected form is cut with head and tail, which copy bytes as they are (awk on this seat drops the CR of a
-  # CRLF line on output, so an awk-built form would accept a whole-file line-ending change: FIX-11 dry run 1)
-  local k; k=$(tr -d '\r' < "$exp.line"); [ -n "$k" ] && [ "$k" -gt 3 ] || return 1
-  # finding 6, byte for byte: awk on this seat drops a CR on INPUT too (measured 2026-11-05: "ab\r" has length 2), so
-  # the line endings are checked here on the bytes head and tail copy: the three removed lines must equal the proven
-  # block exactly, each ending as the key line ends (CRLF or LF)
-  local e=""
-  [ "$(head -n "$k" "$pc" | tail -n 1 | tail -c 2 | od -An -tx1 | tr -d ' \n')" = 0d0a ] && e=$'\r'
-  printf '%s\n' "$FT_PC_DESC$e" "# Setting type: Boolean$e" "# Default value: false$e" > "$OUT/vr6-cfg-known-block.want"
-  head -n $((k - 1)) "$pc" | tail -n 3 > "$OUT/vr6-cfg-known-block.got"
-  cmp -s "$OUT/vr6-cfg-known-block.want" "$OUT/vr6-cfg-known-block.got" || return 1
-  { head -n $((k - 4)) "$pc"; tail -n +"$k" "$pc"; } > "$exp"
-  cmp -s "$exp" "$CFG" || return 1
-  FT_KNOWN_DIFF=$(diff "$pc" "$CFG" | tr -d '\r' | awk '{ if ($0 ~ /^[<>] [A-Za-z0-9_ .-]+ = /) sub(/ = .*/, " = <masked>"); print }' | tr '\n' ';' | cut -c1-600)
-  return 0
+# R6-A3.11.41 (2): THE RESTORED KIND of VR6 for the mod cfg, which replaces FIX-11 (R6-A3.11.15). FIX-11 accepted one
+# text, whole, and that text lacked the description's last sentence, so it never matched the file the game writes
+# (control 2026-11-06T17:42Z: HELD). True only when (1) the cfg's inventory line is the ONLY difference among VR6's
+# lines (any other config file or LogOutput-prev.log changed: false), and (2) ft_cfg_compare.py, beside this file,
+# exits 0 with exactly one line "RESTORED-KIND ...": only comment lines differ, every other line of the file's
+# grammar byte-identical and in order; a line of no kind is refused. The restore (ft_restore_check) still puts the
+# pre-image back and proves it by cmp, and the POST inventory must equal PRE; either failing ends HELD.
+# FT_KIND_LINE carries the comparer's one line (key names only, never a value) into VR6's PASS or FAIL line.
+FT_CFG_COMPARE="$HERE/ft_cfg_compare.py"   # pinned beside this file, by the lane commit; no override
+ft_cfg_restored_kind() {
+  local pc="$PRE/com.competitiverounds.mod.cfg" out crc
+  FT_KIND_LINE=""
+  [ -f "$pc" ] && [ -f "$CFG" ] || { FT_KIND_LINE="a cfg absent"; return 1; }
+  [ "$(diff "$OUT/vr6-pre.txt" "$OUT/vr6-sitting.txt" | grep '^[<>]' | grep -vc '^[<>] config com\.competitiverounds\.mod\.cfg ')" = 0 ] || { FT_KIND_LINE="not compared: another file differs"; return 1; }
+  [ -f "$FT_CFG_COMPARE" ] || { FT_KIND_LINE="not compared: $FT_CFG_COMPARE absent"; return 1; }
+  out=$(python -I "$FT_CFG_COMPARE" "$pc" "$CFG" 2>&1); crc=$?
+  FT_KIND_LINE="$(printf '%s\n' "$out" | head -n 1 | tr -d '\r' | cut -c1-600) (compare rc $crc, md5 $(md5sum < "$FT_CFG_COMPARE" | cut -c1-8))"
+  [ "$crc" = 0 ] && [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || return 1
+  case "$out" in "RESTORED-KIND comment lines differ: "*) return 0;; esac
+  return 1
 }
 # ft_move_aside <file> <name>: move <file> into $SITDIR/<name>, never over an existing file; proven by digest
 ft_move_aside() {
