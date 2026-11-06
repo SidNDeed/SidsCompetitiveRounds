@@ -27,6 +27,7 @@ import asyncio
 import copy
 import datetime as dt
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -180,7 +181,7 @@ def test_s1_text_values_are_encoded_and_names_match_the_bot_pattern():
     fa = _facts(s["seats"][0]["facts"])
     assert fa["deal_profile"] == ae._aer_enc(evil) and chr(0x202E) not in fa["deal_profile"]
     for name, _v in s["game"] + s["seats"][0]["facts"]:
-        assert ae.FACT_NAME.fullmatch(name), name
+        assert re.fullmatch(ae.FACT_NAME_PATTERN, name), name
 
 
 def test_s1_the_section_encoder_agrees_with_the_display_encoder():
@@ -359,7 +360,7 @@ def test_s4_words_and_header_equal_the_api(bot):
     assert bot["AER_SECTION_STATES"] == ae.SECTION_STATES
     assert bot["AER_SECTION_SEAT_STATES"] == ae.SECTION_SEAT_STATES
     assert bot["AER_FACT_NAME_MAX"] == ae.AER_CONTRACT_BOUNDS["FACT_NAME_MAX"]
-    assert bot["_AER_FACT_NAME"].pattern == ae.FACT_NAME.pattern
+    assert bot["_AER_FACT_NAME"].pattern == ae.FACT_NAME_PATTERN
 
 
 @pytest.fixture(scope="module")
@@ -524,3 +525,13 @@ def test_s1_section_reads_use_their_own_reader():
     for name in ("read_sections", "_page_sections", "game_section", "summary_section"):
         names = {n.id for n in ast.walk(funcs[name]) if isinstance(n, ast.Name)}
         assert "_aer_rows" not in names, name
+
+
+def test_s1_the_fact_key_test_is_the_stored_key_pattern():
+    """`_fact_key` admits exactly `[a-z0-9_]{1,24}`."""
+    samples = ["", "a", "a_1", "A", "a.b", "a-b", "x" * 24, "x" * 25, "é", "a b",
+               "z9_", "_", "9", None, 7, "a" + chr(0x202E)]
+    samples += [chr(c) for c in range(0, 0x180)]
+    for w in samples:
+        want = isinstance(w, str) and re.fullmatch(r"[a-z0-9_]{1,24}", w) is not None
+        assert ae._fact_key(w) == want, repr(w)

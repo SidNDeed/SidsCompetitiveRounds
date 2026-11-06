@@ -28,7 +28,6 @@ import json
 import logging
 import math
 import os
-import re
 import time
 from array import array
 from dataclasses import dataclass, field
@@ -1938,9 +1937,18 @@ _SECTION_SPEC = {
                        "game": ("records_n", "paired_points", "processed_at", "finalized_at"),
                        "contrib_cols": (), "daily_cols": ()},
 }
-# A stored jsonb key or a stored word shown as part of a fact name.
-_FACT_KEY = re.compile(r"[a-z0-9_]{1,24}")
-FACT_NAME = re.compile(r"[a-z0-9_.]{1,%d}" % AER_CONTRACT_BOUNDS["FACT_NAME_MAX"])
+# A stored jsonb key or a stored word shown as part of a fact name: 1 to 24
+# of a-z, 0-9 and `_`. A character test, not a regular expression: importing
+# `re` into this module moved the route manifest pins of eleven routes outside
+# it (measured with repin_route_manifest.py). Every fact name matches
+# FACT_NAME_PATTERN, the bot's `_AER_FACT_NAME`.
+_FACT_KEY_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+FACT_NAME_PATTERN = "[a-z0-9_.]{1,%d}" % AER_CONTRACT_BOUNDS["FACT_NAME_MAX"]
+
+
+def _fact_key(word):
+    return isinstance(word, str) and 0 < len(word) <= 24 and all(
+        ch in _FACT_KEY_CHARS for ch in word)
 
 
 def section_sql(src):
@@ -2147,7 +2155,7 @@ def _sums_facts(prefix, raw):
     out, unnamed = [], 0
     for k in sorted(sums):
         v = sums[k]
-        if (_FACT_KEY.fullmatch(k) and isinstance(v, list) and all(
+        if (_fact_key(k) and isinstance(v, list) and all(
                 isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)):
             out += [_fact("%s%s.bins" % (prefix, k), len(v)),
                     _fact("%s%s.total" % (prefix, k), sum(v))]
@@ -2180,7 +2188,7 @@ def _contrib_facts(src, rows):
 
 
 def _fault_words(raw):
-    words = sorted(k for k in _jsonb(raw) if _FACT_KEY.fullmatch(k))
+    words = sorted(k for k in _jsonb(raw) if _fact_key(k))
     return ",".join(words) if words else "none"
 
 
@@ -2233,7 +2241,7 @@ def game_section(src, data, game, index):
 
 def _contrib_add(src, totals, row, extra=()):
     """Add one contribution or daily row into `totals`, by stored source."""
-    source = row["source"] if _FACT_KEY.fullmatch(row["source"] or "") else "unnamed"
+    source = row["source"] if _fact_key(row["source"]) else "unnamed"
     if src == "card":
         for col in tuple(extra) + _CARD_COUNTERS:
             totals["%s.%s" % (source, col)] += row[col] or 0
@@ -2241,7 +2249,7 @@ def _contrib_add(src, totals, row, extra=()):
     for col in extra:
         totals["%s.%s" % (source, col)] += row[col] or 0
     for k, v in _jsonb(row["sums"]).items():
-        if _FACT_KEY.fullmatch(k) and isinstance(v, list) and all(
+        if _fact_key(k) and isinstance(v, list) and all(
                 isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
             totals["%s.%s.total" % (source, k)] += sum(v)
 
@@ -2271,7 +2279,7 @@ def summary_section(src, data, games, account, oi):
         if src == "identity_clock":
             for col in ("post_clock", "conn_class"):
                 word = mine[0][col]
-                if word and _FACT_KEY.fullmatch(word):
+                if word and _fact_key(word):
                     counts["%s.%s" % (col, word)] += 1
         keys = {r["stable_game_key"] for r in mine}
         for c in data["contrib"]:
