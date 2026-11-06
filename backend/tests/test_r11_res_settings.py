@@ -315,14 +315,23 @@ def test_r11_res_server_setting_reset_by_reset_val_and_source():
             await conn.execute("SET lock_timeout = '1234ms'")
             kept = await _rows(conn, ["lock_timeout"])
             await conn.execute(ro_covered.RESET_SQL)
-            return kept, await _rows(conn, ["lock_timeout"])
+            reset = await _rows(conn, ["lock_timeout"])
+            # the source route alone: a session SET to the reset value itself
+            await conn.execute("SET lock_timeout = %d" % int(reset[0][3]))
+            same = await _rows(conn, ["lock_timeout"])
+            await conn.execute(ro_covered.RESET_SQL)
+            return kept, reset, same, await _rows(conn, ["lock_timeout"])
         finally:
             await conn.close()
-    kept, reset = _run(go())
+    kept, reset, same, again = _run(go())
     assert kept[0][5] == "session", kept
     assert ro_covered.not_reset(kept) == ("not reset lock_timeout=1234 (session)",), kept
     assert ro_covered.not_reset(reset) == (), reset
     assert reset[0][2] == reset[0][3] and reset[0][5] != "session", reset
+    assert same[0][2] == same[0][3] and same[0][5] == "session", same
+    assert ro_covered.not_reset(same) == (
+        "not reset lock_timeout=%s (session)" % same[0][2],), same
+    assert ro_covered.not_reset(again) == (), again
     texts = ["SET lock_timeout = '1s'",
              "SELECT set_config('rf10.position', 'p', false)",
              "SELECT set_config('rf11res.p', 'v', true)"]
