@@ -386,17 +386,303 @@ def test_eviction_drops_the_unevidenced_before_the_corroborated():
     )
 
 
+# ── the census of the pick's reading (ruling RP-5 (3)(a)) ────────────────────
+#
+# A pick takes ONE reading of the monotonic clock and hands it on to every
+# question it asks of the corroboration map. The cases further down ask that
+# at chosen readings, through the paths their shapes take. The census asks it
+# of the syntax tree of the functions that pass the reading on, whatever the
+# reading and whichever path: it reads the source it is handed, so the planted
+# sources of test_the_census_refuses_each_planted_source are read by the same
+# code as main's own.
+#
+# The callees that may be handed the reading, each with the parameter that
+# receives it. Where that argument sits in a call is read from the callee's
+# own signature. A callee that is not on this list and is handed the reading
+# is refused by the census until it is added here.
+_READING_CALLEES = {
+    "_region_home_confirmed": "mono",
+    "_region_agreed": "now",
+    "_region_corroborated": "now",
+}
+_LEAF = "_region_corroborated"
+# The functions that pass the reading on: the name the reading has in each,
+# how it may be bound there, and the callees it may be handed to there.
+# "clock": exactly once, a statement of the body itself (not inside a branch
+# or a loop) `<name> = time.monotonic()`. "fallback": at most once,
+# `if <name> is None: <name> = time.monotonic()`. "none": never.
+_CENSUS = {
+    "_pick_room_region": ("mono", "clock", tuple(_READING_CALLEES)),
+    "_region_home_confirmed": ("mono", "none", (_LEAF,)),
+    "_region_agreed": ("now", "fallback", (_LEAF,)),
+}
+# What the census refuses, one rule per word. test_the_census_refuses_each_planted_source
+# has, for each rule, a planted source that only that rule refuses.
+_RULES = ("binding", "use", "argument", "alias", "nested")
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                  ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _is_clock_read(node):
+    """`node` is `time.monotonic()`, with no argument."""
+    return (isinstance(node, ast.Call) and not node.args and not node.keywords
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "monotonic"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "time")
+
+
+def _reads_the_clock_into(stmt, name):
+    """`stmt` is `<name> = time.monotonic()` and nothing else."""
+    return (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id == name
+            and _is_clock_read(stmt.value))
+
+
+def _is_none_test(test, name):
+    """`test` is `<name> is None`."""
+    return (isinstance(test, ast.Compare) and isinstance(test.left, ast.Name) and test.left.id == name
+            and len(test.ops) == 1 and isinstance(test.ops[0], ast.Is) and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant) and test.comparators[0].value is None)
+
+
+def _is_fallback(stmt, name):
+    """`stmt` is `if <name> is None: <name> = time.monotonic()` and nothing else."""
+    return (isinstance(stmt, ast.If) and not stmt.orelse and len(stmt.body) == 1
+            and _is_none_test(stmt.test, name) and _reads_the_clock_into(stmt.body[0], name))
+
+
+def _binders(fn, name):
+    """Every node inside `fn` that binds `name`, in any form Python has,
+    other than `fn`'s own parameters."""
+    a = fn.args
+    own = {p for p in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg] if p is not None}
+    found = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name):
+            hit = node.id == name and not isinstance(node.ctx, ast.Load)   # every assignment form, del
+        elif isinstance(node, ast.arg):
+            hit = node.arg == name and node not in own                      # a nested function's parameter
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            hit = node is not fn and node.name == name
+        elif isinstance(node, ast.alias):
+            hit = (node.asname or node.name.split(".")[0]) == name
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            hit = node.name == name
+        elif isinstance(node, ast.MatchMapping):
+            hit = node.rest == name
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            hit = name in node.names
+        else:
+            hit = False
+        if hit:
+            found.append(node)
+    return found
+
+
+def _reading_argument(call):
+    """What a call to a callee of _READING_CALLEES passes for the reading: an
+    expression node, or None where the call leaves it out or passes a starred
+    or ** argument, from which the census cannot tell what it passes."""
+    callee = call.func.id
+    param = _READING_CALLEES[callee]
+    position = list(inspect.signature(getattr(main, callee)).parameters).index(param)
+    if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+        return None
+    if len(call.args) > position:
+        return call.args[position]
+    return next((k.value for k in call.keywords if k.arg == param), None)
+
+
+def _census(source, first_line=1):
+    """The census of the one function `source` defines: (refusals, sites).
+    A refusal is (rule, line, the code refused); a site is (the function, the
+    callee, line, column) of a call to a callee this function may hand the
+    reading to. Lines are main.py's when `first_line` is the line on which the
+    source starts there."""
+    fn = ast.parse(source).body[0]
+    parents = {child: node for node in ast.walk(fn) for child in ast.iter_child_nodes(node)}
+    refusals, sites = [], []
+
+    def refuse(rule, node):
+        refusals.append((rule, node.lineno + first_line - 1, ast.unparse(node) if isinstance(node, ast.AST) else ""))
+
+    if fn.name == _LEAF:
+        return _census_of_the_leaf(fn, parents, refuse), sites
+    reading, binding, callees = _CENSUS[fn.name]
+
+    # binding: the one binding the function is allowed, and no other
+    if binding == "clock":
+        allowed = [s.targets[0] for s in fn.body if _reads_the_clock_into(s, reading)][:1]
+        if not allowed:
+            refuse("binding", fn)
+    elif binding == "fallback":
+        allowed = [s.body[0].targets[0] for s in ast.walk(fn) if _is_fallback(s, reading)][:1]
+    else:
+        allowed = []
+    for node in _binders(fn, reading):
+        if node not in allowed:
+            refuse("binding", node)
+    none_tests = {parents[parents[t]].test.left for t in allowed if binding == "fallback"}
+
+    # argument: every call to a callee of the list hands it the bare name
+    handed = set()
+    for call in ast.walk(fn):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in _READING_CALLEES):
+            continue
+        arg = _reading_argument(call)
+        if not (isinstance(arg, ast.Name) and arg.id == reading):
+            refuse("argument", call)
+        elif call.func.id in callees:
+            handed.add(arg)
+        if call.func.id in callees:
+            sites.append((fn.name, call.func.id, call.lineno + first_line - 1, call.col_offset))
+
+    # use: every other mention of the name is that argument, or the fallback's test
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id == reading and isinstance(node.ctx, ast.Load):
+            if node not in handed and node not in none_tests:
+                refuse("use", node)
+
+    # alias: a callee of the list is named only to be called, by its own name
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id in _READING_CALLEES:
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                refuse("alias", node)
+        elif isinstance(node, ast.Attribute) and node.attr in _READING_CALLEES:
+            refuse("alias", node)
+
+    # nested: no nested function, lambda, class or comprehension mentions it
+    for node in ast.walk(fn):
+        if node is not fn and isinstance(node, _NESTED_SCOPES):
+            if any(isinstance(n, ast.Name) and n.id == reading for n in ast.walk(node)):
+                refuse("nested", node)
+    return refusals, sites
+
+
+def _census_of_the_leaf(fn, parents, refuse):
+    """Placeholder until the leaf's own rules exist: the leaf is not one of
+    the functions that pass the reading on."""
+    raise AssertionError("no census of the leaf yet")
+
+
+def _source_of(name):
+    """main.py's source of function `name` and the line it starts on."""
+    lines, first = inspect.getsourcelines(getattr(main, name))
+    return "".join(lines), first
+
+
+def _census_of(name):
+    return _census(*_source_of(name))
+
+
+def test_the_census_of_mains_own_functions_refuses_nothing():
+    """The pick binds its reading once, from the clock, and hands that name,
+    and nothing made from it, to every call of the homes' confirmation, of the
+    weighing and of the leaf; the two functions between hand their parameter
+    on to the leaf in the same way, the weighing binding it only when none was
+    handed in. Each function hands it to every callee it is allowed to."""
+    pairs = set()
+    for name in _CENSUS:
+        refusals, sites = _census_of(name)
+        assert refusals == [], (name, refusals)
+        pairs |= {(fn, callee) for fn, callee, _, _ in sites}
+    assert pairs == {(name, callee) for name, (_, _, callees) in _CENSUS.items() for callee in callees}
+    for callee, param in _READING_CALLEES.items():
+        assert param in inspect.signature(getattr(main, callee)).parameters, (callee, param)
+
+
 def test_both_candidates_are_judged_against_one_clock_reading():
     """Two separate time.monotonic() calls put the TTL boundary between the two
     comparisons, so at the moment both sightings expire, whichever is read first
-    can still be live and win a tie it should not have been in."""
-    agreed = inspect.getsource(main._region_agreed)
-    assert "now = time.monotonic()" in agreed
-    assert "_region_corroborated(a, now)" in agreed
-    assert "_region_corroborated(b, now)" in agreed
-    assert agreed.count("time.monotonic()") == 1, (
-        "the pair must be decided against a single reading"
-    )
+    can still be live and win a tie it should not have been in. Read by the
+    census: _region_agreed binds its reading at most once, only where none was
+    handed in, and hands that name to both of its questions to the leaf."""
+    refusals, sites = _census_of("_region_agreed")
+    assert refusals == []
+    assert [callee for _, callee, _, _ in sites] == [_LEAF, _LEAF]
+
+
+_BIND = "    mono = time.monotonic()\n"
+_RETURN = "    return chosen\n"
+_THIRD = "_region_agreed(mh, oh, mono) or"
+_SECOND = "_region_agreed(mr, orr, mono)"
+_SEEN = "_region_corroborated(chosen, mono)"
+_HOME_LEAF = "    return _region_corroborated(home, mono)\n"
+_AGREED_LEAF = "        ca, cb = _region_corroborated(a, now), _region_corroborated(b, now)\n"
+
+# (what was planted, the function, its edits as (old, new), the rules that refuse it)
+_PLANTED = [
+    ("the rounding at the third weighing of Codex round REGION-R4", "_pick_room_region",
+     [(_THIRD, "_region_agreed(mh, oh, round(mono - 0.5) + 0.5) or")], {"argument", "use"}),
+    ("a second reading", "_pick_room_region", [(_BIND, _BIND + _BIND)], {"binding"}),
+    ("the reading moved in place", "_pick_room_region", [(_BIND, _BIND + "    mono += 0.5\n")], {"binding"}),
+    ("the reading rebound inside an argument", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr, (mono := mono + 0.5))")], {"binding", "use", "argument"}),
+    ("the reading deleted", "_pick_room_region", [(_RETURN, "    del mono\n" + _RETURN)], {"binding"}),
+    ("the reading taken from another clock", "_pick_room_region",
+     [(_BIND, "    mono = time.time()\n")], {"binding"}),
+    ("the reading rounded where it is taken", "_pick_room_region",
+     [(_BIND, "    mono = round(time.monotonic())\n")], {"binding"}),
+    ("the reading taken inside a branch", "_pick_room_region",
+     [(_BIND, "    if True:\n        mono = time.monotonic()\n")], {"binding"}),
+    ("a weighing that leaves the reading out", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr)")], {"argument"}),
+    ("the wall-clock instant handed in its place", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr, now)")], {"argument"}),
+    ("the reading handed to the weighing by keyword", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr, now=mono)")], set()),
+    ("the reading handed to a home by keyword", "_pick_room_region",
+     [("_region_home_confirmed(mh, lives, maps, mono)", "_region_home_confirmed(mh, lives, maps, mono=mono)")], set()),
+    ("a weighing called through another name", "_pick_room_region",
+     [(_BIND, _BIND + "    weigh = _region_agreed\n"), (_SECOND, "weigh(mr, orr, mono)")], {"alias", "use"}),
+    ("a weighing called through the module", "_pick_room_region",
+     [(_SECOND, "sys.modules[__name__]._region_agreed(mr, orr, mono)")], {"alias", "use"}),
+    ("a weighing kept under another name", "_pick_room_region",
+     [(_BIND, _BIND + "    weigh = _region_agreed\n")], {"alias"}),
+    ("a lambda that mentions the reading", "_pick_room_region",
+     [(_THIRD, "(lambda: _region_agreed(mh, oh, mono))() or")], {"nested"}),
+    ("a nested function that mentions the reading", "_pick_room_region",
+     [(_BIND, _BIND + "    def later():\n        return mono\n")], {"nested", "use"}),
+    ("a comprehension that mentions the reading", "_pick_room_region",
+     [(_SEEN, "all(_region_corroborated(c, mono) for c in (chosen,))")], {"nested"}),
+    ("the reading handed to a callee that is not on the list", "_pick_room_region",
+     [(_SEEN, "_region_seen_at(chosen, mono)")], {"use"}),
+    ("the reading printed", "_pick_room_region", [(_RETURN, "    print(mono)\n" + _RETURN)], {"use"}),
+    ("a home's confirmation hands on an expression", "_region_home_confirmed",
+     [(_HOME_LEAF, "    return _region_corroborated(home, mono + 0.0)\n")], {"argument", "use"}),
+    ("a home's confirmation leaves the reading out", "_region_home_confirmed",
+     [(_HOME_LEAF, "    return _region_corroborated(home)\n")], {"argument"}),
+    ("a home's confirmation takes a reading of its own", "_region_home_confirmed",
+     [("    if not home:\n", "    mono = time.monotonic()\n    if not home:\n")], {"binding"}),
+    ("a home's confirmation hands the reading to the weighing", "_region_home_confirmed",
+     [(_HOME_LEAF, "    return _region_agreed(home, home, mono)\n")], {"use"}),
+    ("a second reading in the weighing", "_region_agreed",
+     [(_AGREED_LEAF, "        now = time.monotonic()\n" + _AGREED_LEAF)], {"binding"}),
+    ("the weighing asks about its second candidate at an expression", "_region_agreed",
+     [("_region_corroborated(b, now)", "_region_corroborated(b, float(now))")], {"argument", "use"}),
+    ("the weighing's own reading taken on any false value", "_region_agreed",
+     [("        if now is None:\n", "        if not now:\n")], {"binding", "use"}),
+    ("the weighing's own reading taken from another clock", "_region_agreed",
+     [("            now = time.monotonic()\n", "            now = time.perf_counter()\n")], {"binding", "use"}),
+]
+
+
+def test_the_census_refuses_each_planted_source():
+    """Each planted source is main's own function with the edits written
+    beside it, and the census refuses it by exactly the rules written there:
+    none for the two that hand the reading by keyword, which is the same
+    reading. Every rule is the only one to refuse at least one of them, so a
+    rule that stopped refusing would leave a source it alone refuses
+    accepted."""
+    for label, name, edits, refused in _PLANTED:
+        source, first = _source_of(name)
+        for old, new in edits:
+            assert source.count(old) == 1, (label, old)
+            source = source.replace(old, new)
+        got = {rule for rule, _, _ in _census(source, first)[0]}
+        assert got == refused, (label, got)
+    alone = {next(iter(refused)) for _, _, _, refused in _PLANTED if len(refused) == 1}
+    assert alone == set(_RULES), set(_RULES) - alone
 
 
 class _CountingClock:
