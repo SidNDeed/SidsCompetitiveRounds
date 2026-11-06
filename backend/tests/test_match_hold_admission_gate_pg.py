@@ -2735,21 +2735,26 @@ def test_r11_gate_hook_discharges_receivers():
             ) in e.value.args[0][1], e.value.args
 
 
-# Round 11, rule K (ruling FOUR-R11-A4 (2)(c)): the named builtin types a
-# bound discharge's value must have, by frame path, frozen before the code
-# (NOTES r11 rules, 08:14:12Z, premise K-v): "row" type IS dict; "list"
-# type IS list; "datetime" type IS datetime.datetime; "deep-row" type IS
-# dict with every value's type one of _R11_VALUE_TYPES and a list value's
-# elements of _R11_LIST_ELEMENTS. A marked path outside the table fails.
-_R11_VALUE_TYPES = frozenset({str, int, bool, type(None), uuid.UUID,
+# Round 11, rule K (ruling FOUR-R11-A4 (2)(c), read by FOUR-R11-A9 (1)(f)
+# as concrete classes named by identity): the classes a bound discharge's
+# value must have, by frame path, frozen before the code (NOTES r11 rules,
+# 08:14:12Z, premise K-v): "row" type IS dict; "list" type IS list;
+# "datetime" type IS datetime.datetime; "deep-row" type IS dict with every
+# value's type one of _R11_VALUE_TYPES or the driver's UUID class, and a
+# list value's elements of _R11_LIST_ELEMENTS. A marked path outside the
+# table fails.
+_R11_VALUE_TYPES = frozenset({str, int, bool, type(None),
                               _cw._cw_datetime.datetime, list})
 _R11_LIST_ELEMENTS = frozenset({int, type(None)})
-# The driver's UUID class (run 3: every PostgreSQL UUID value in a seat row
-# is asyncpg.pgproto.pgproto.UUID, a C subclass of uuid.UUID, which probe
-# P10 printed only by its short name). Named here by module and name, read
-# from the loaded module (never imported: the DSN census freezes import
-# forms), and admitted only as a direct subclass of uuid.UUID.
+# AMENDED AFTER A RUN (FOUR-R11-A9 (1); NOTES r11 rules, "K table
+# amendment"): the row uuid.UUID is replaced by the driver's own class,
+# asyncpg.pgproto.pgproto.UUID, the class every PostgreSQL UUID value of a
+# seat row has (run 3). Taken from the loaded driver module (never imported:
+# the DSN census freezes import forms) and held by the frozen module name,
+# qualified name and MRO; anything else there fails the run.
 _R11_DRIVER_UUID = ("asyncpg.pgproto.pgproto", "UUID")
+_R11_DRIVER_UUID_MRO = ("asyncpg.pgproto.pgproto.UUID", "uuid.UUID",
+                        "builtins.object")
 _R11_NAMED = {"ctx.lobby": "row", "ctx.prints": "list",
               "ctx.now": "datetime", "me": "deep-row"}
 # The measured flows that reach the marked sites through main's own path
@@ -2772,16 +2777,28 @@ def _r11_named_ok(kind, v):
     return False
 
 
-def _r11_value_types():
-    """_R11_VALUE_TYPES plus the driver's UUID class once its module is
-    loaded; a class there that is not a direct subclass of uuid.UUID fails."""
+def _r11_driver_uuid():
+    """The driver's UUID class, from the loaded driver module, held by the
+    frozen module name, qualified name and MRO (uuid.UUID its one base)."""
     mod = sys.modules.get(_R11_DRIVER_UUID[0])
     if mod is None:
-        return _R11_VALUE_TYPES
+        raise AssertionError(("the driver module is not loaded",
+                              _R11_DRIVER_UUID[0]))
     cls = vars(mod).get(_R11_DRIVER_UUID[1])
-    if type(cls) is not type or cls.__mro__ != (cls, uuid.UUID, object):
+    if type(cls) is not type:
         raise AssertionError(("the driver UUID class", cls))
-    return _R11_VALUE_TYPES | {cls}
+    names = tuple(c.__module__ + "." + c.__qualname__ for c in cls.__mro__)
+    got = (cls.__module__, cls.__qualname__)
+    if got != _R11_DRIVER_UUID or names != _R11_DRIVER_UUID_MRO:
+        raise AssertionError(("the driver UUID class moved", got, names))
+    if cls.__mro__[1] is not uuid.UUID:
+        raise AssertionError(("the driver UUID class's base", cls.__mro__))
+    return cls
+
+
+def _r11_value_types():
+    """_R11_VALUE_TYPES plus the driver's UUID class (_r11_driver_uuid)."""
+    return _R11_VALUE_TYPES | {_r11_driver_uuid()}
 
 
 def _r11_outside(v):
@@ -2821,6 +2838,7 @@ def _r11_record(marks, flows, monkeypatch):
     for m in marks:
         by_code[m[1].__code__].append(m)
     seen, bad = set(), []
+    counts = collections.Counter()
 
     def line_of(code, off):
         for s, e, ln in code.co_lines():
@@ -2841,6 +2859,7 @@ def _r11_record(marks, flows, monkeypatch):
                     bad.append(("W: an object outside the census called", m[2],
                                 repr(callee)))
                 elif callee is m[3]:
+                    counts[("W", m[2], m[4], "value", _r11_type_name(arg0))] += 1
                     if type(arg0) is not m[6]:
                         bad.append(("W: first argument type", m[2],
                                     type(arg0).__name__))
@@ -2872,6 +2891,7 @@ def _r11_record(marks, flows, monkeypatch):
                                 type(v).__name__))
                     continue
                 v = vars(v).get(path[0])
+            _r11_count(counts, m, v)
             kind = _R11_NAMED.get(m[4])
             if kind is None or not _r11_named_ok(kind, v):
                 bad.append(("named type", m[2], m[4], kind,
@@ -2892,7 +2912,21 @@ def _r11_record(marks, flows, monkeypatch):
             mon.set_local_events(_R11_TOOL, code, 0)
         mon.register_callback(_R11_TOOL, mon.events.CALL, None)
         mon.free_tool_id(_R11_TOOL)
-    return seen, bad
+    return seen, bad, counts
+
+
+def _r11_count(counts, m, v):
+    """One observation at mark m, by class identity (module and qualified
+    name): the value; for a dict, each item's value; for a list item, each
+    element."""
+    counts[(m[0], m[2], m[4], "value", _r11_type_name(v))] += 1
+    if type(v) is not dict:
+        return
+    for x in v.values():
+        counts[(m[0], m[2], m[4], "item", _r11_type_name(x))] += 1
+        if type(x) is list:
+            for y in x:
+                counts[(m[0], m[2], m[4], "element", _r11_type_name(y))] += 1
 
 
 def test_r11_rules_bound_sites_are_observed(monkeypatch):
@@ -2965,9 +2999,82 @@ def test_r11_rules_bound_sites_are_observed(monkeypatch):
         R.run_env(mp, body)
 
     flows = [getattr(R, n) for n in _R11_FLOWS] + [row_refused, queue_elsewhere]
-    seen, bad = _r11_record(marks, flows, monkeypatch)
+    seen, bad, counts = _r11_record(marks, flows, monkeypatch)
+    # FOUR-R11-A9 (1)(e): the observations by class identity, and every
+    # named class no observation had (shown by -rP; NOTES copy the table)
+    for line in _r11_table(marks, counts):
+        print(line)
     assert not bad, bad[:10]
     unreached = sorted({(m[0], m[1].__name__, m[2],
                          getattr(m[3], "__name__", m[3]), m[4])
                         for m in marks if m not in seen})
     assert not unreached, ("marked sites no flow observed", unreached)
+
+
+def _r11_names(classes):
+    return {c.__module__ + "." + c.__qualname__ for c in classes}
+
+
+def _r11_named_classes(m):
+    """The classes the table names at mark m, by part (value, item,
+    element), each by module and qualified name."""
+    if m[0] == "W":
+        return {"value": _r11_names([m[6]])}
+    kind = _R11_NAMED.get(m[4])
+    if kind == "deep-row":
+        return {"value": {"builtins.dict"},
+                "item": _r11_names(_r11_value_types()),
+                "element": _r11_names(_R11_LIST_ELEMENTS)}
+    one = {"row": dict, "list": list, "datetime": _cw._cw_datetime.datetime}
+    return {"value": _r11_names([one[kind]])} if kind in one else {}
+
+
+def _r11_table(marks, counts):
+    """R11-COUNT lines (rule, line, path, part, class, observations) and
+    R11-NAMED-NOT-OBSERVED lines for every class the table names at a
+    mark that no observation had."""
+    out = []
+    for m in sorted(set(marks), key=lambda m: (m[2], m[0], m[4])):
+        key = (m[0], m[2], m[4])
+        named = _r11_named_classes(m)
+        for (r, ln, p, part, cls), n in sorted(counts.items()):
+            if (r, ln, p) == key:
+                out.append(f"R11-COUNT {r} {ln} {p} {part} {cls} {n}")
+        for part in sorted(named):
+            for cls in sorted(named[part]):
+                if counts[key + (part, cls)] == 0:
+                    out.append(f"R11-NAMED-NOT-OBSERVED {m[0]} {m[2]} {m[4]} "
+                               f"{part} {cls}")
+    return sorted(set(out))
+
+
+def test_r11_driver_uuid_operations_match_uuid(monkeypatch):
+    """FOUR-R11-A9 (1)(c): the operations the S2 and S3 conditions use on a
+    UUID value of a seat row (NOTES r11 rules, "K table amendment"): str()
+    (_asm_deferred_departure's pidt) and binding as a statement parameter
+    through main's session (every seat["player_id"] bind). Each is executed
+    on a value read through main's own session from PostgreSQL (the
+    driver's class) and on a uuid.UUID of the same value, and must agree;
+    str() is the driver's own implementation (read from the class)."""
+    import test_ffa_readmit_pg as R
+    cls = _r11_driver_uuid()
+    assert "__str__" in vars(cls), sorted(vars(cls))
+    got = []
+
+    async def body(env):
+        lob = await R._held(env)
+        async with env.sm() as db:
+            v = (await db.execute(ro_covered.text(
+                "SELECT player_id FROM ffa_assembly_seats WHERE lobby_id = :lid"
+                " ORDER BY slot LIMIT 1"), {"lid": lob.lid})).scalar()
+            u = uuid.UUID(str(v))
+            got.append(("classes", type(v) is cls, type(u) is uuid.UUID))
+            got.append(("str", str(v), str(u)))
+            for x in (v, u):
+                t = (await db.execute(ro_covered.text(
+                    "SELECT CAST(:p AS uuid)::text AS t"), {"p": x})).scalar()
+                got.append(("bind", t))
+    R.run_env(monkeypatch, body)
+    assert got[0] == ("classes", True, True), got
+    assert got[1][1] == got[1][2], got
+    assert got[2][1] == got[3][1] and got[2][1] == got[1][2], got
