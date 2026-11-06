@@ -91,3 +91,37 @@ def test_h1_a_64_character_deal_profile_reaches_the_body_whole():
                   games=[_grow("combat", "k1", a, b, g["id"], record_faults=json.dumps(faults))])
     words = _facts(ae.game_section("combat", cdata, g, {a: 0, b: 1})["game"])["record_faults"]
     assert words == ",".join(sorted(faults)) and len(words) > 48, words
+
+
+# ── H2: contributions without the subject's own record ────────────────────
+
+@pytest.mark.parametrize("src", ("card", "combat"))
+def test_h2_a_contribution_about_a_seat_with_no_record_is_shown(src):
+    """A supplies the only record; it produced a stored `meas` contribution
+    about B. B's seat keeps `no_record` and shows that contribution; B's
+    window total carries it; A's seat shows none of it."""
+    a, b = _pair()
+    g = _game(a, b)
+    cols = {"hands": 4} if src == "card" else {"sums": '{"a1s": [1, 2, 3]}'}
+    data = _data(records=[_rec(src, "k1", a, b, "room-1")],
+                 games=[_grow(src, "k1", a, b, g["id"])],
+                 contrib=[_crow(src, "k1", a, b, b, source="meas", **cols)],
+                 switches=_on(src))
+    s = ae.game_section(src, data, g, {a: 0, b: 1})
+    sb, fb = _seat(s, 1)
+    sa, fa = _seat(s, 0)
+    assert (sa, sb) == ("ok", "no_record")
+    assert fb.get("contrib1.source") == "meas", fb
+    want = ("contrib1.hands", "4") if src == "card" else ("contrib1.a1s.total", "6")
+    assert fb.get(want[0]) == want[1], fb
+    assert "contrib1.source" not in fa and fa["contrib"] == "not_derived"
+    t = ae.summary_section(src, data, [g], b, 1)
+    f = _facts(t["facts"])
+    assert (t["state"], f["with_record"]) == ("no_record", "0")
+    total = ("meas.hands", "4") if src == "card" else ("meas.a1s.total", "6")
+    assert f.get(total[0]) == total[1] and "contrib" not in f, f
+    # a seat with neither a record nor a contribution about it stays empty
+    empty = ae.game_section(src, _data(records=[_rec(src, "k1", a, b, "room-1")],
+                                       games=[_grow(src, "k1", a, b, g["id"])]),
+                            g, {a: 0, b: 1})
+    assert empty["seats"][1] == {"subject": 1, "state": "no_record", "facts": []}

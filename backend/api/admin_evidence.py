@@ -2125,7 +2125,9 @@ def _game_records(data, game):
     a games row the pairing worker attached to it; when none is attached yet,
     the records for the same two seats whose attach key is the game's room
     (`waiting`). A games row attached to another match whose records name
-    this room is that match's, counted in `other`."""
+    this room is that match's, counted in `other`. The contributions are the
+    ones stored under the selected keys, whichever seat's record they were
+    derived from."""
     pair = {game["p1"], game["p2"]}
     recs = [r for r in data["records"] if _pair_of(r, "seat_player_id", "other_player_id") == pair]
     attached = {g["stable_game_key"] for g in data["games"]
@@ -2143,7 +2145,8 @@ def _game_records(data, game):
     rows = [g for g in data["games"] if g["stable_game_key"] in keys
             and _pair_of(g, "pair_lo", "pair_hi") == pair]
     return paired, [r for r in recs if r["stable_game_key"] in keys], rows, len(
-        (roomed & elsewhere) - keys)
+        (roomed & elsewhere) - keys), [c for c in data["contrib"]
+                                       if c["stable_game_key"] in keys]
 
 
 def _seat_state(rec):
@@ -2199,18 +2202,22 @@ def _fault_words(raw):
 
 
 def _seat_section(src, account, recs, contrib):
+    """One seat's state and facts. `contrib` is the game's contributions
+    (`_game_records`); the ones about `account` are shown whether or not the
+    account sent a record of its own (the other seat's record can produce a
+    `meas` contribution about it). The state is the account's own record's:
+    `no_record` without one, its facts then the contributions alone."""
     mine = [r for r in recs if str(r["seat_player_id"]) == account]
+    about = [c for c in contrib if str(c["subject_player_id"]) == account]
     if not mine:
-        return "no_record", []
+        return "no_record", (_contrib_facts(src, about) if about else [])
     rec = mine[0]
     facts = [_fact("conflict_kind", rec["conflict_kind"]),
              _fact("lists_purged", rec["lists_purged_at"] is not None)]
     facts += [_fact(c, rec[c]) for c in _SECTION_SPEC[src]["seat"]]
     if mine[1:]:
         facts.append(_fact("records", len(mine)))
-    keys = {r["stable_game_key"] for r in mine}
-    facts += _contrib_facts(src, [c for c in contrib if str(c["subject_player_id"]) == account
-                                  and c["stable_game_key"] in keys])
+    facts += _contrib_facts(src, about)
     return _seat_state(rec), facts
 
 
@@ -2235,10 +2242,10 @@ def game_section(src, data, game, index):
     if data is None:
         return {"src": src, "state": "unavailable", "truncated": False, "game": [],
                 "seats": []}
-    paired, recs, rows, other = _game_records(data, game)
+    paired, recs, rows, other, contrib = _game_records(data, game)
     seats = []
     for account in (game["p1"], game["p2"]):
-        state, facts = _seat_section(src, account, recs, data["contrib"])
+        state, facts = _seat_section(src, account, recs, contrib)
         seats.append({"subject": index[account], "state": state, "facts": facts})
     return {"src": src, "state": "ok" if recs else "no_record",
             "truncated": data["truncated"], "game": _game_facts(src, data, paired, rows, other),
@@ -2265,17 +2272,22 @@ def summary_section(src, data, games, account, oi):
     phase 2): counts, contribution totals, and the account's daily totals over
     its last `pop_days` UTC days. `attached`, `waiting` and `other` count the
     games by their pairing state (a record of either seat); `with_record`,
-    `conflict` and `purged` count the account's own records."""
+    `conflict` and `purged` count the account's own records. The
+    contribution totals add every contribution about the account stored
+    under a covered game's keys, with or without the account's own record."""
     if data is None:
         return {"oi": oi, "src": src, "state": "unavailable", "truncated": False,
                 "facts": [], "days30": []}
     counts, totals = collections.Counter(), collections.Counter()
     for game in games:
-        paired, recs, _rows, _other = _game_records(data, game)
+        paired, recs, _rows, _other, contrib = _game_records(data, game)
         mine = [r for r in recs if str(r["seat_player_id"]) == account]
         counts["games"] += 1
         if paired:
             counts[paired] += 1
+        for c in contrib:
+            if str(c["subject_player_id"]) == account:
+                _contrib_add(src, totals, c)
         if not mine:
             continue
         counts["with_record"] += 1
@@ -2287,10 +2299,6 @@ def summary_section(src, data, games, account, oi):
                 word = mine[0][col]
                 if word and _fact_key(word):
                     counts["%s.%s" % (col, word)] += 1
-        keys = {r["stable_game_key"] for r in mine}
-        for c in data["contrib"]:
-            if str(c["subject_player_id"]) == account and c["stable_game_key"] in keys:
-                _contrib_add(src, totals, c)
     facts = [_fact(k, counts[k]) for k in ("games", "with_record", "attached", "waiting",
                                            "conflict", "purged")]
     facts += [_fact(k, counts[k]) for k in sorted(counts) if "." in k]
