@@ -2078,15 +2078,24 @@ _DEFS = {}
 
 
 def _position(b, call):
-    """(file, line, end line) of execute `call` in the source of module
-    b.scope, found by AST identity and never by a name: `call`'s dump among
-    the module's execute calls and, when the walked definition b.where is
-    known, that definition equal by dump to exactly one of the module's
-    (its line offset). None when `call` is in no module source or in not
-    exactly one place (a planted or synthetic program)."""
-    scope = getattr(b, "scope")
+    """(file, line, end line) of execute `call` in the source of the module
+    that DEFINES the function whose body holds it (_defining_module), found
+    by AST identity and never by a name: `call`'s dump among the module's
+    execute calls and, when the walked definition b.where is known, that
+    definition equal by dump to exactly one of the module's (its line
+    offset). None when no defining module is known, or `call` is in no
+    module source or in not exactly one place (a planted or synthetic
+    program): the execute then reads as a write.
+
+    Round 11 (ruling FOUR-R11-A18 (2)): the rule is stated for every
+    function. For a real row the defining module is the scope module, so
+    nothing changes there (measured: every execute placement of every gate
+    and a1 row); a span walked in a planted module is placed in the module
+    that defines its function, and a planted helper's body in its planted
+    text."""
+    scope = _defining_module(b)
     d = getattr(b, "where")
-    tree = _module_tree(scope)
+    tree = _module_tree(scope) if scope is not None else None
     if tree is None:
         return None
     hits = _executes(tree)
@@ -2105,6 +2114,26 @@ def _position(b, call):
     e = getattr(x, "end_lineno")
     f = _os.path.basename(getattr(scope, "__file__", "?"))
     return f, a, e
+
+
+def _defining_module(b):
+    """The module that defines the function whose body b walks (b.where,
+    else the span's b.span_def), known by identity through the binder: the
+    walked scope's binding of the definition's name is a trusted function
+    (identity_binder: its code equals a fresh compile of its owner module's
+    own source) whose code bears that name, and the module is its owner,
+    the one whose namespace IS its globals. None when there is no such
+    function (no definition, a scope that is not a module, a name bound to
+    anything else)."""
+    d = b.where if b.has_fn else b.span_def
+    scope = getattr(b, "scope")
+    name = getattr(d, "name", None)
+    if name is None or type(scope) is not _types.ModuleType:
+        return None
+    F = vars(scope).get(name, _MISSING)
+    if not _ib.trusted_function(F) or F.__code__.co_name != d.name:
+        return None
+    return _ib._owner_module(F)
 
 
 def _same(a, b):

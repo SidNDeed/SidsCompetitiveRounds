@@ -2270,10 +2270,9 @@ def test_r11_d_r8_the_unedited_helper_planted_walks_as_the_real_one():
     planted (its record derived by _planted) gives what the real helper
     gives: the same effects (closed_walk.helper_effects) and the same kind
     (_helper_kind: its refusing-path walk), each read inside a gate walk,
-    ORDER marker off and on. The span around it is not compared here: a
-    span walked in a planted module places none of its executes (round 8,
-    M1), so its rows differ from the real span's for that reason alone
-    (NOTES-r11-d, the line-15 finding)."""
+    ORDER marker off and on. The span around it, row by row, is
+    test_r11_d_a18_the_unedited_helper_planted_gives_the_real_span (ruling
+    FOUR-R11-A18 (2)(c))."""
 
     def outputs(fn, scope):
         def read():
@@ -2323,9 +2322,9 @@ def test_r11_d_r8_a_plant_that_changes_parameters_is_refused(label, pairs):
     parameter renamed, or one added, planted by _planted, is refused at
     admission by (3)(b) with its own sentence; its derived record passes
     (3)(a) (the text is the real helper's with the recorded edit), so only
-    (3)(b) refuses it. Read at the admission: through the prefix walk the
-    gate grammar's frozen ORDER header of the helper's definition refuses a
-    changed signature first (measured at fb9de924, NOTES-r11-d)."""
+    (3)(b) refuses it. Read at the admission; through the prefix walk see
+    test_r11_d_a18_a_changed_signature_through_the_walk (ruling
+    FOUR-R11-A18 (4))."""
     _fn, scope, _at = _planted(main, "_rdm_claim", (), (),
                                [("_rdm_live_or_lapse", pairs)])
     planted = vars(scope)["_rdm_live_or_lapse"]
@@ -2336,6 +2335,129 @@ def test_r11_d_r8_a_plant_that_changes_parameters_is_refused(label, pairs):
     with pytest.raises(Unclassified) as e:
         _plant_admitted(planted, record, 0)
     assert _R11_D_B in e.value.args[0][1], (label, e.value.args)
+
+
+# Round 11 (ruling FOUR-R11-A18): an execute is placed by the source of the
+# module that DEFINES the function whose body holds it (closed_walk
+# _defining_module), so a span walked in a planted module is placed in main
+# when main defines it. (2)(c): the span row by row; (2)(e): the cautious
+# default; (4): which check refuses a changed signature first through the walk.
+_R11_D_ORDER_HEAD = "outside its frozen order (header"
+_R11_D_LINE_15 = "line 15: writes before the gate"
+_R11_D_LINE_8 = "line 8: an awaited call before the gate this check does not read"
+
+
+@pytest.mark.parametrize("base", [PREFIX_CLAIM, DIRECT],
+                         ids=["prefix _rdm_claim", "branch:direct _rdm_claim"])
+def test_r11_d_a18_the_unedited_helper_planted_gives_the_real_span(base):
+    """FOUR-R11-A18 (2)(c): the span around the helper, row by row: the real
+    span walked in a module holding the unedited helper planted (its record
+    derived by _planted) gives exactly what the real span gives in main (the
+    kept row): the whole list of prefix refusals, or the branch sentence,
+    with the ORDER marker off and on."""
+    modname, name, entry, target = base
+    module = _R7_MODULES[modname]
+
+    def outputs(helper_edits):
+        fn, scope, at = _planted(module, name, (), (), helper_edits)
+
+        def read():
+            if entry == "prefix":
+                return claim_prefix_violations(fn, target, scope, name, at)[0]
+            call = next(n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Name) and n.func.id == target)
+            return refusal_branch_violation(fn, call, entry.split(":")[1], scope, at)
+
+        _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+        try:
+            off = read()
+        finally:
+            _gg.ORDER_SWITCH["bindings"] = None
+        return [scope, off, read()]
+
+    real = outputs([])
+    plant = outputs([("_rdm_live_or_lapse", [])])
+    assert real[0] is module and plant[0] is not module, (real[0], plant[0])
+    assert plant[1:] == real[1:], (real[1:], plant[1:])
+    assert not real[1] and not real[2], real
+
+
+def test_r11_d_a18_an_unregistered_definition_reads_as_a_write():
+    """FOUR-R11-A18 (2)(e): the cautious default stays. _rdm_claim's span
+    walked in a module whose _rdm_claim has no registered source (the real
+    text compiled under a file name nothing registered, so the binder cannot
+    prove it) has no defining module and no execute of it is placed (in
+    main every one is); the walk then reads them as writes: line 15's
+    sentence is among its refusals (after line 8's receiver refusal), ORDER
+    marker off, and the same span walked in main has none; with the marker
+    on it is refused too."""
+    modname, name, _entry, target = PREFIX_CLAIM
+    module = _R7_MODULES[modname]
+    src = _edited(module, name, [])
+    _synth_next()
+    scope = types.ModuleType(f"gate_unregistered_{_SYNTH[0]}")
+    scope.__dict__.update({k: v for k, v in module.__dict__.items()
+                           if not k.startswith("__")})
+    sys.modules[scope.__name__] = scope
+    exec(compile(src, f"<unregistered {name}>", "exec"), scope.__dict__)
+    unproven = vars(scope)[name]
+    assert _ib._owner_module(unproven) is scope
+    assert not _ib.trusted_function(unproven)
+    fn = ast.parse(src).body[0]
+    at = (f"<planted {name}>", 0)
+    calls = [c for c in ast.walk(fn) if _cw._is_execute(c)]
+    unplaced = _cw.Bindings(scope, fn)
+    placed = _cw.Bindings(module, fn)
+    assert _cw._defining_module(unplaced) is None
+    assert _cw._defining_module(placed) is module
+    assert calls and all(_cw._position(unplaced, c) is None for c in calls)
+    assert all(_cw._position(placed, c) is not None for c in calls)
+
+    def read(where):
+        return claim_prefix_violations(fn, target, where, name, at)[0]
+
+    # The walk in the unproven module refuses first at line 8 (the receiver
+    # rule meets ctx before any execute), so the write reading of the
+    # unplaced execute is read where it stands in the whole list: line 15's
+    # sentence is in it, and the same span walked in main has none.
+    _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+    try:
+        got = read(scope)
+        in_main = read(module)
+    finally:
+        _gg.ORDER_SWITCH["bindings"] = None
+    on = read(scope)
+    assert any(_R11_D_LINE_15 in str(g) for g in got), (_R11_D_LINE_15, got)
+    assert not any(_R11_D_LINE_15 in str(g) for g in in_main), in_main
+    assert on, on
+
+
+@pytest.mark.parametrize("label,pairs", [("renames step", _R11_D_RENAME),
+                                         ("adds a parameter", _R11_D_ADD)])
+def test_r11_d_a18_a_changed_signature_through_the_walk(label, pairs):
+    """FOUR-R11-A18 (4): (3)(b) IS reached through the walk. Through the
+    prefix walk, the 456 plant's helper with a parameter renamed or added
+    is refused first at line 8 by (3)(b)'s sentence with the ORDER marker
+    off; with the marker on, the gate grammar's frozen ORDER header of the
+    helper's definition refuses first."""
+    modname, name, _entry, target = PREFIX_CLAIM
+    fn, scope, at = _planted(_R7_MODULES[modname], name, (), (),
+                             [("_rdm_live_or_lapse", pairs)])
+
+    def read():
+        got = claim_prefix_violations(fn, target, scope, name, at)[0]
+        return got[0] if got else None
+
+    _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+    try:
+        got = read()
+    finally:
+        _gg.ORDER_SWITCH["bindings"] = None
+    on = read()
+    assert got is not None and got.startswith(_R11_D_LINE_8), (label, got)
+    assert _R11_D_B in got, (label, got)
+    assert on is not None and _R11_D_ORDER_HEAD in on, (label, on)
+    assert "in _rdm_live_or_lapse at ()" in on, (label, on)
 
 
 def test_r11_d_r8_only_the_plant_harness_hands_another_functions_roots():
