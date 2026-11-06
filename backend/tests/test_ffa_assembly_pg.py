@@ -7327,7 +7327,10 @@ def test_m1b_a_release_racing_the_start_closes_under_the_lock(monkeypatch):
             # holds a lock on ffa_assembly_seats, so it read the seats in this
             # transaction before it began to wait; and it queues for a row of
             # ffa_lobbies in FOR NO KEY UPDATE's tuple mode (ExclusiveLock)
-            # under a RowShareLock on the table.
+            # under a RowShareLock on the table. The modes of its other relation
+            # locks are not read: a statement that changed no row (de70bb4's
+            # marking UPDATE, the M1b round_two control) takes RowExclusiveLock
+            # and still writes nothing, which the transaction id already shows.
             rel = sorted(await waiting_pids() - w1)
             facts = {"pids": rel, "ended": env.rec.txn - ended, "xid": "?", "locks": []}
             if len(rel) == 1:
@@ -7342,7 +7345,6 @@ def test_m1b_a_release_racing_the_start_closes_under_the_lock(monkeypatch):
             assert len(rel) == 1 and facts["ended"] == 0 and facts["xid"] is None \
                 and any(n == "ffa_assembly_seats" for _t, n, _m in rels) \
                 and ("relation", "ffa_lobbies", "RowShareLock") in rels \
-                and {m for _t, _n, m in rels} <= {"AccessShareLock", "RowShareLock"} \
                 and any(t == "tuple" and n == "ffa_lobbies" and m == "ExclusiveLock"
                         for t, n, m, _g in facts["locks"]), \
                 ("M1b premise pre-step", facts)
