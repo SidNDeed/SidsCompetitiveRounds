@@ -31,6 +31,7 @@ Three kinds of test, in the style of test_queue_pair_writers.py:
 
 import asyncio
 import inspect
+import json
 import random
 import re
 from datetime import datetime, timedelta, timezone
@@ -424,6 +425,85 @@ def test_a_stored_map_that_no_longer_validates_is_absent():
                                   p2_pings=FRESH_MAP_PARTNER, p1_pings_at=at, p2_pings_at=at, now=now) == "eu"
 
 
+REFUSED_MAPS = (
+    {"": 1, "eu": 90, "us": 50},          # an empty key beside good entries
+    {"": 1},                              # an empty key alone
+    {"EU": 10, "us": 50},                 # upper case
+    {" eu": 10, "us": 50},                # padded
+    {"e": 10, "us": 50},                  # too short
+    {"europe": 10, "us": 50},             # too long
+    {"eu": 0, "us": 50},                  # a value below 1
+    {"eu": 5001, "us": 50},               # a value above the cap
+    {"eu": True, "us": 50},               # a bool
+    {"eu": 10.5, "us": 50},               # a float
+    ["eu", 10],                           # not an object
+    '{"": 1, "eu": 90, "us": 50}',        # the JSON text of a refused map
+    "not json",                           # text that is no JSON
+    {},                                   # no entries
+)
+
+
+def test_maps_with_an_empty_key_decide_nothing_at_the_room_picker(capsys):
+    """The three pairs of Codex round REGION-R1. `_region_token` answers a
+    refusal with the empty string, so the key test `_region_token(k) == k`
+    admitted an empty key; a seat's lowest "region" could then be the empty
+    string, which the home references drop. With such maps the first pair got
+    eu at a worst ping of 90 where us was shared at 50, the second an EMPTY
+    room region, the third a rung that ran without a bound. Each map is
+    refused whole now, so each pair gets the ladder's answer, as objects and
+    as the JSON text a driver may hand back, whichever seat asked."""
+    now = _now()
+    at = now - timedelta(seconds=30)
+    cases = [
+        (("", ""), ("eu", "eu"), {"": 1, "eu": 90, "us": 50}, {"": 100, "eu": 1, "us": 50}, "eu"),
+        (("ru", "ru"), ("eu", "us"), {"": 1, "eu": 100, "us": 200}, {"": 1, "eu": 200, "us": 100}, "ru"),
+        (("", ""), ("", ""), {"": 1}, {"": 1}, "us"),
+    ]
+    for (mr, orr), (mh, oh), p1, p2, want in cases:
+        for a, b in ((p1, p2), (json.dumps(p1), json.dumps(p2))):
+            for swap in (False, True):
+                main._REGION_SEEN.clear()
+                args = (orr, oh, mr, mh) if swap else (mr, mh, orr, oh)
+                maps = (b, a) if swap else (a, b)
+                got = main._pick_room_region(*args, "r", p1_pings=maps[0], p2_pings=maps[1],
+                                             p1_pings_at=at, p2_pings_at=at, now=now)
+                first, second = _region_lines(capsys)
+                assert got == want, (mr, orr, mh, oh, swap, got)
+                assert "rung=ladder why=no-maps" in first and "refs=" not in first, first
+                assert f"chosen={want} " in second, second
+    # control: the first pair without the empty keys is decided by its maps
+    main._REGION_SEEN.clear()
+    assert main._pick_room_region("", "eu", "", "eu", "r", p1_pings={"eu": 90, "us": 50},
+                                  p2_pings={"eu": 1, "us": 50}, p1_pings_at=at, p2_pings_at=at, now=now) == "us"
+    assert "rung=pings worst=50" in _region_lines(capsys)[0]
+
+
+def test_a_map_the_validator_refuses_reads_as_no_map_at_either_seat(capsys):
+    """Whatever a stored map holds, the room picker reads it through the
+    validator, and a map the validator refuses is the same as no map: the room
+    and both printed lines equal those of the same pair with that seat's map
+    absent. The other seat's fresh map still counts as a sign that a home is
+    in service, in both readings alike."""
+    now = _now()
+    at = now - timedelta(seconds=30)
+    other = {"eu": 40, "us": 70, "asia": 200}
+    pairs = [(("", ""), ("eu", "eu")), (("ru", "ru"), ("eu", "us")), (("", ""), ("", "")),
+             (("us", "eu"), ("", "asia"))]
+    for refused in REFUSED_MAPS:
+        for (mr, orr), (mh, oh) in pairs:
+            for seat in (1, 2):
+                main._REGION_SEEN.clear()
+                held = (refused, other) if seat == 1 else (other, refused)
+                got = main._pick_room_region(mr, mh, orr, oh, "r", p1_pings=held[0], p2_pings=held[1],
+                                             p1_pings_at=at, p2_pings_at=at, now=now)
+                got_lines = _region_lines(capsys)
+                absent = (None, other) if seat == 1 else (other, None)
+                want = main._pick_room_region(mr, mh, orr, oh, "r", p1_pings=absent[0], p2_pings=absent[1],
+                                              p1_pings_at=at, p2_pings_at=at, now=now)
+                assert (got, got_lines) == (want, _region_lines(capsys)), (refused, mr, orr, mh, oh, seat)
+                assert got and "rung=ladder why=no-maps" in got_lines[0], (refused, got, got_lines)
+
+
 def test_pick_room_region_stays_swap_invariant_with_maps():
     rng = random.Random(11)
     now = _now()
@@ -718,12 +798,28 @@ def test_validator_admits_a_well_formed_map_and_normalises_its_text():
     ({}, 12),                                              # no information
     ({chr(97 + i // 26) + chr(97 + i % 26): 1 for i in range(25)}, 12),   # cap
     ({"US": 42}, 12), ({"u": 42}, 12), ({"usa1": 42}, 12), ({"useast": 42}, 12), ({" us": 42}, 12),
+    ({"": 42}, 12), ({"": 42, "us": 42}, 12), ({"us": 42, "": 42}, 12),   # an empty key
     ({"us": 0}, 12), ({"us": 5001}, 12), ({"us": 42.0}, 12), ({"us": True}, 12), ({"us": "42"}, 12),
     ({"us": 42}, -1), ({"us": 42}, 901), ({"us": 42}, "12"), ({"us": 42}, 12.5), ({"us": 42}, True), ({"us": 42}, None),
     (["us", 42], 12), ("us=42", 12), (None, 12),
 ])
 def test_validator_refuses_everything_else(pings, age):
     assert main._region_pings_validate(pings, age) == (None, None)
+
+
+def test_the_shared_cleaner_refuses_a_map_with_an_empty_key():
+    """`_region_token` answers a refusal with the empty string, so an empty
+    key equals its own refusal and the cleaner has to name it. The join
+    validator and the header reader both end in this cleaner; the two
+    parametrised refusal lists around this test carry the same case through
+    each of them."""
+    assert main._region_token("") == ""
+    for pings in ({"": 1}, {"": 1, "eu": 90}, {"eu": 90, "": 1}):
+        assert main._region_pings_clean(pings) is None, pings
+    assert main._region_pings_clean({"eu": 90}) == {"eu": 90}
+    assert main._region_pings_validate({"": 1, "eu": 90}, 0) == (None, None)
+    assert main._region_pings_from_header("=1,eu=90;age=0") == (None, None)
+    assert main._region_pings_from_header("eu=90;age=0") == ('{"eu":90}', 0)
 
 
 def test_header_parser_feeds_the_join_validator():
@@ -735,6 +831,7 @@ def test_header_parser_feeds_the_join_validator():
     None, "", "us=42", "us=42;age=-5", "us=42;age=", "us=42;age=1.5", "us=42;age=901",
     "us=42,us=43;age=1", "us=4a;age=1", "us;age=1", "US=42;age=1", "us=42;age=1;x",
     ";age=1", "us=0;age=1", "x" * 600,
+    "=1;age=0", "=1,us=42;age=1", "us=42,=1;age=1",        # an entry with no code is an empty key
     ",".join(f"{chr(97 + i // 26)}{chr(97 + i % 26)}=1" for i in range(25)) + ";age=1",
 ])
 def test_header_parser_refuses_everything_else(value):

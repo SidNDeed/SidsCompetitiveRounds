@@ -192,6 +192,9 @@
   region the room would otherwise get, so the limit no longer keeps a pair
   from the best region they share when each game measured the other's
   lowest-ping region.
+- The server refuses a region ping map that carries an entry with no region
+  code, like every other malformed map. Before, such a map was stored and
+  could decide a ranked 1v1 room.
 
 **Connection trouble explains itself**
 

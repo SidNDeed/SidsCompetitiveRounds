@@ -7665,6 +7665,18 @@ _TZDATA_DECLARED_BUILD = 1
 # 794). A code constant, equal on both boxes by construction, probed by the
 # release train and read by nothing else (#306). Absent on any build before it.
 _FFA_LEAVE_FIGURE_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which the 1v1 room picker reads each seat's bound
+# from the two seats' home references (_pick_room_region,
+# _region_home_refs), reported on /health as `region_pick_build`. The batch
+# adds no route, and what it changes (the room a matched pair gets, and
+# which ping maps the validator admits) is seen by no phase of the train,
+# so without it the train could not tell a box on the new build from a
+# stale one (learnings 780, 794).
+# A code constant, equal on both boxes by construction, probed by the
+# release train and read by nothing else (#306). Absent on any build
+# before it.
+_REGION_PICK_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
@@ -7739,6 +7751,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               shop_floor=_SHOP_FLOOR_BUILD,
                               tzdata_declared=_TZDATA_DECLARED_BUILD,
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
+                              region_pick_build=_REGION_PICK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7798,6 +7811,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               shop_floor=_SHOP_FLOOR_BUILD,
                               tzdata_declared=_TZDATA_DECLARED_BUILD,
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
+                              region_pick_build=_REGION_PICK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -18356,10 +18370,12 @@ def _evict_region_tokens(now):
 
 def _region_corroborated(token, now=None):
     """Whether two distinct reporters have been connected to `token` inside the
-    TTL. `now` is passed in when two candidates are being compared, so both are
-    decided against one reading of the clock — otherwise a token can be fresh
-    for the first comparison and expired for the second, and which one loses
-    depends on where the TTL boundary fell between two statements."""
+    TTL. `now` is passed in whenever one decision asks more than once (two
+    candidates being compared; the homes, the rungs and the seen= field of
+    one room pick), so every answer is decided against one reading of the
+    clock — otherwise a token can be fresh for the first comparison and
+    expired for the second, and which one loses depends on where the TTL
+    boundary fell between two statements."""
     ids = _REGION_SEEN.get(_region_token(token))
     if not ids:
         return False
@@ -18369,7 +18385,7 @@ def _region_corroborated(token, now=None):
     return live >= _REGION_SEEN_MIN_PLAYERS
 
 
-def _region_agreed(a, b):
+def _region_agreed(a, b, now=None):
     """One region from two signals of the same kind, SYMMETRICALLY.
 
     The answer must not depend on the argument order, because the caller's
@@ -18391,11 +18407,18 @@ def _region_agreed(a, b):
     latency measurement reaches this rung: rung 0 runs after
     it, on the answer this rung produced, and only when both seats sent a
     fresh map.
+
+    `now` is one reading of the monotonic clock. The 1v1 room picker hands in
+    the reading it took for the whole pick, so that every question one pick
+    asks of the corroboration map is asked of the same instant; called
+    without one, the pair is still decided against a single reading, taken
+    here.
     """
     if a and b:
         if a == b:
             return a
-        now = time.monotonic()
+        if now is None:
+            now = time.monotonic()
         ca, cb = _region_corroborated(a, now), _region_corroborated(b, now)
         if ca != cb:
             return a if ca else b
@@ -18464,13 +18487,16 @@ _REGION_PINGS_DIGITS_RE = _re.compile(r"^[0-9]{1,6}$")
 def _region_pings_clean(pings):
     """The map as {token: ms}, or None unless EVERY entry is well-formed: a
     JSON object with 1..24 entries, every key already a canonical region token
-    (`_region_token(k) == k`), every value an int in 1..5000 (bool excluded).
-    An empty object carries no information and is treated as absent."""
+    (not empty, and `_region_token(k) == k`), every value an int in 1..5000
+    (bool excluded). An empty object carries no information and is treated as
+    absent. The key test names the empty string because `_region_token`
+    answers a refusal WITH the empty string: an empty key equals its own
+    refusal, so the comparison alone lets it through."""
     if not isinstance(pings, dict) or not (1 <= len(pings) <= REGION_PINGS_MAX_ENTRIES):
         return None
     clean = {}
     for key, ms in pings.items():
-        if not isinstance(key, str) or _region_token(key) != key:
+        if not isinstance(key, str) or not key or _region_token(key) != key:
             return None
         if isinstance(ms, bool) or not isinstance(ms, int) or not (1 <= ms <= REGION_PINGS_MAX_MS):
             return None
@@ -19017,7 +19043,10 @@ def _region_home_refs(my_home, opp_home, p1, p2):
     seats have one); a seat with neither a token nor a map contributes
     nothing; order is the caller's (my, opp), each seat's measured home
     before its token, and duplicates collapse, so the SET is the same
-    whichever seat asked."""
+    whichever seat asked. A clean map has no empty key (_region_pings_clean),
+    so the region a map measures lowest is always a token; for a seat that
+    has a map, the empty-token test below passes over only its home token
+    (not sent, or never measured by that map)."""
     out = []
     for home, pings in ((my_home, p1), (opp_home, p2)):
         if pings:
@@ -19155,10 +19184,14 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     # nothing confirms; then the default. _region_agreed answers a lone
     # signal with itself, two equal ones with that region and none with an
     # empty value, so each of its rungs is passed over only when it holds no
-    # signal. Both homes are judged against one clock reading, the same two
-    # snapshots and the same two maps, and the second rung reads the two
-    # snapshots and the two homes without regard to their order, so the
-    # answer does not depend on which seat asked.
+    # signal. Both homes are judged against the same two snapshots and the
+    # same two maps, and the second rung reads the two snapshots and the two
+    # homes without regard to their order, so the answer does not depend on
+    # which seat asked. `mono` is the ONE reading of the monotonic clock a
+    # pick takes: both confirmations, every rung that weighs two different
+    # regions and the seen= field of the second line below are answered
+    # against it, so no two of those answers can fall on different sides of
+    # the instant a sighting expires.
     mono = time.monotonic()
     lives, maps = (mr, orr), (m1, m2)
     mh_ok = _region_home_confirmed(mh, lives, maps, mono)
@@ -19168,8 +19201,8 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     elif mr and mr == orr and mr in (mh, oh):
         ladder = mr
     else:
-        ladder = (_region_agreed(mh if mh_ok else "", oh if oh_ok else "")
-                  or _region_agreed(mr, orr) or _region_agreed(mh, oh) or "us")
+        ladder = (_region_agreed(mh if mh_ok else "", oh if oh_ok else "", mono)
+                  or _region_agreed(mr, orr, mono) or _region_agreed(mh, oh, mono) or "us")
     # Rung 0 (Sept 7 item 3): the pair's own ping maps, judged AFTER the ladder
     # has answered — see _pick_region_by_pings for the acceptance rule. The two
     # seats' HOMES ride along as the references that bound how far each seat
@@ -19204,7 +19237,7 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     # n; - where the seat sent none), in the caller's seat order like home=.
     home_ok = ",".join("-" if not h else ("y" if ok else "n") for h, ok in ((mh, mh_ok), (oh, oh_ok)))
     print(f"[QUEUE-REGION] room={room_name} chosen={chosen} "
-          f"seen={'y' if _region_corroborated(chosen) else 'n'} "
+          f"seen={'y' if _region_corroborated(chosen, mono) else 'n'} "
           f"live=({mr},{orr}) home=({mh},{oh}) home_ok=({home_ok})")
     return chosen
 

@@ -70,6 +70,7 @@ import itertools
 import io
 import re
 import tokenize
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -397,6 +398,124 @@ def test_both_candidates_are_judged_against_one_clock_reading():
     )
 
 
+class _CountingClock:
+    """Stands in for main's `time` module. monotonic() answers `start`, then
+    one second more on every read, and counts its reads; `next` is what the
+    next read will answer. Everything else is the real module's."""
+
+    def __init__(self, real, start):
+        self._real, self.next, self.reads = real, float(start), 0
+
+    def monotonic(self):
+        self.reads += 1
+        value, self.next = self.next, self.next + 1.0
+        return value
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    stand_in = _CountingClock(main.time, 10 * main._REGION_SEEN_TTL_SECONDS)
+    monkeypatch.setattr(main, "time", stand_in)
+    return stand_in
+
+
+def _stamp_last_live(token, clock):
+    """Enough reporters for `token`, stamped on the stand-in clock's own
+    timeline so that the clock's NEXT reading is the last instant at which
+    they are live: one second later the sighting has expired."""
+    at = clock.next - main._REGION_SEEN_TTL_SECONDS
+    main._REGION_SEEN[token] = {f"7656119800000010{i}": at for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+
+
+def _pick(capsys, *args, **kwargs):
+    got = main._pick_room_region(*args, **kwargs)
+    return got, [line for line in capsys.readouterr().out.splitlines() if "[QUEUE-REGION]" in line]
+
+
+def test_one_pick_reads_the_monotonic_clock_once(clock, capsys):
+    """Every question a pick asks of the corroboration map (is this home
+    confirmed, which of two different regions has been seen live, was the
+    chosen one seen) is asked of ONE instant. A second reading anywhere in
+    the pick puts the instant a sighting expires between two of those
+    answers. Counted over shapes that reach every rung, with and without
+    sightings, with and without fresh maps."""
+    shapes = [
+        ("", "eu", "", "eu"),            # two homes that agree
+        ("ru", "ru", "ru", "us"),        # a home that both snapshots name
+        ("ru", "eu", "ru", "us"),        # two homes that differ, two snapshots that agree elsewhere
+        ("us", "", "eu", ""),            # two snapshots that differ, no home
+        ("", "eu", "", "us"),            # two homes that differ, no snapshot
+        ("", "", "", ""),                # no signal at all
+    ]
+    now = datetime.now(timezone.utc)
+    fresh = dict(p1_pings={"eu": 40, "us": 60}, p2_pings={"eu": 70, "us": 30},
+                 p1_pings_at=now - timedelta(seconds=30), p2_pings_at=now - timedelta(seconds=30), now=now)
+    for shape in shapes:
+        for seen in (False, True):
+            for kwargs in ({}, fresh):
+                main._REGION_SEEN.clear()
+                if seen:
+                    _stamp_last_live("eu", clock)
+                    _stamp_last_live("us", clock)
+                before = clock.reads
+                main._pick_room_region(*shape, "r", **kwargs)
+                assert clock.reads - before == 1, (shape, seen, bool(kwargs), clock.reads - before)
+    capsys.readouterr()
+
+
+def test_both_homes_are_confirmed_against_the_picks_one_reading(clock, capsys):
+    """Codex round REGION-R1's scenario. Each home has its reporters, stamped
+    so that the pick's reading is the last instant at which they are live;
+    the two snapshots name a third region. Both homes are confirmed whichever
+    seat asked. A reading per home would confirm only the home that is read
+    first, and the room would follow the seat order."""
+    answers = []
+    for args in (("ru", "eu", "ru", "us"), ("ru", "us", "ru", "eu")):
+        _stamp_last_live("eu", clock)
+        _stamp_last_live("us", clock)
+        got, (first, second) = _pick(capsys, *args, "r")
+        answers.append(got)
+        assert "home_ok=(y,y)" in second and "seen=y" in second, second
+    assert answers == ["eu", "eu"]
+
+
+def test_two_different_snapshots_are_weighed_at_the_picks_reading(clock, capsys):
+    """Two live snapshots that differ and no home: the region seen live wins
+    (_region_agreed), and "seen live" is judged at the pick's one reading. A
+    reading of its own, one second later on this clock, would find the
+    sighting expired and fall back to the fixed order, which names the other
+    region."""
+    for args in (("us", "", "eu", ""), ("eu", "", "us", "")):
+        main._REGION_SEEN.clear()
+        _stamp_last_live("us", clock)
+        got, (first, second) = _pick(capsys, *args, "r")
+        assert got == "us", (args, got)
+        assert "seen=y" in second, second
+
+
+def test_a_reading_that_is_handed_in_is_the_reading_that_is_used(monkeypatch):
+    """_region_corroborated, _region_home_confirmed and _region_agreed answer
+    against the reading they are handed and take none of their own."""
+    class _NoClock:
+        def monotonic(self):
+            raise AssertionError("a reading was handed in; the clock must not be read")
+
+    ttl = main._REGION_SEEN_TTL_SECONDS
+    main._REGION_SEEN["us"] = {f"7656119800000010{i}": 0.0 for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+    monkeypatch.setattr(main, "time", _NoClock())
+    assert main._region_corroborated("us", ttl) is True
+    assert main._region_corroborated("us", ttl + 1) is False
+    assert main._region_home_confirmed("us", ("", ""), (None, None), ttl) is True
+    assert main._region_home_confirmed("us", ("", ""), (None, None), ttl + 1) is False
+    # us is seen at the first reading and wins the disagreement; one second
+    # later neither is seen and the fixed order names eu
+    assert main._region_agreed("eu", "us", ttl) == "us" == main._region_agreed("us", "eu", ttl)
+    assert main._region_agreed("eu", "us", ttl + 1) == "eu" == main._region_agreed("us", "eu", ttl + 1)
+
+
 def test_a_sighting_needs_a_reporter_and_an_established_session():
     """The map's claim is about PLAYERS, so it is worth exactly as much as the
     binding behind the ids. _check_steam_session soft-fails by design in several
@@ -533,13 +652,17 @@ def test_the_issued_binding_is_written_where_the_room_is_issued():
     assert src.count("INSERT INTO issued_room_regions") == 1
 
 
-def test_the_log_line_says_whether_the_choice_was_corroborated():
+def test_the_log_line_says_whether_the_choice_was_corroborated(capsys):
     """"Both cached regions disagree and neither has been seen live" is the
     case that strands a pair behind a series that already exists. It is
     invisible unless the line says so."""
-    picker = inspect.getsource(main._pick_room_region)
-    assert "seen=" in picker
-    assert "_region_corroborated(chosen)" in picker
+    def second_line():
+        main._pick_room_region("", "eu", "", "us", "r")
+        return [line for line in capsys.readouterr().out.splitlines() if "chosen=" in line][-1]
+
+    assert "chosen=eu seen=n " in second_line()       # two homes that differ, neither seen live
+    _corroborate("eu")
+    assert "chosen=eu seen=y " in second_line()
 
 
 def test_the_monotonic_clock_is_what_ages_a_sighting():
