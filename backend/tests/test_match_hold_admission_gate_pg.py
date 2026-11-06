@@ -2744,6 +2744,12 @@ def test_r11_gate_hook_discharges_receivers():
 _R11_VALUE_TYPES = frozenset({str, int, bool, type(None), uuid.UUID,
                               _cw._cw_datetime.datetime, list})
 _R11_LIST_ELEMENTS = frozenset({int, type(None)})
+# The driver's UUID class (run 3: every PostgreSQL UUID value in a seat row
+# is asyncpg.pgproto.pgproto.UUID, a C subclass of uuid.UUID, which probe
+# P10 printed only by its short name). Named here by module and name, read
+# from the loaded module (never imported: the DSN census freezes import
+# forms), and admitted only as a direct subclass of uuid.UUID.
+_R11_DRIVER_UUID = ("asyncpg.pgproto.pgproto", "UUID")
 _R11_NAMED = {"ctx.lobby": "row", "ctx.prints": "list",
               "ctx.now": "datetime", "me": "deep-row"}
 # The measured flows that reach the marked sites through main's own path
@@ -2762,11 +2768,42 @@ def _r11_named_ok(kind, v):
     if kind == "datetime":
         return type(v) is _cw._cw_datetime.datetime
     if kind == "deep-row":
-        return type(v) is dict and all(
-            type(x) in _R11_VALUE_TYPES and (type(x) is not list or all(
-                type(y) in _R11_LIST_ELEMENTS for y in x))
-            for x in v.values())
+        return type(v) is dict and not _r11_outside(v)
     return False
+
+
+def _r11_value_types():
+    """_R11_VALUE_TYPES plus the driver's UUID class once its module is
+    loaded; a class there that is not a direct subclass of uuid.UUID fails."""
+    mod = sys.modules.get(_R11_DRIVER_UUID[0])
+    if mod is None:
+        return _R11_VALUE_TYPES
+    cls = vars(mod).get(_R11_DRIVER_UUID[1])
+    if type(cls) is not type or cls.__mro__ != (cls, uuid.UUID, object):
+        raise AssertionError(("the driver UUID class", cls))
+    return _R11_VALUE_TYPES | {cls}
+
+
+def _r11_outside(v):
+    """For a dict value, the sorted (key, type name) pairs outside the frozen
+    sets (a value's type, or a list element's), each type by module and
+    qualified name; else []."""
+    if type(v) is not dict:
+        return []
+    allowed = _r11_value_types()
+    out = set()
+    for k, x in v.items():
+        if type(x) not in allowed:
+            out.add((str(k), _r11_type_name(x)))
+        elif type(x) is list:
+            out |= {(str(k), "list of " + _r11_type_name(y)) for y in x
+                    if type(y) not in _R11_LIST_ELEMENTS}
+    return sorted(out)
+
+
+def _r11_type_name(x):
+    t = type(x)
+    return t.__module__ + "." + t.__qualname__
 
 
 def _r11_record(marks, flows, monkeypatch):
@@ -2838,7 +2875,7 @@ def _r11_record(marks, flows, monkeypatch):
             kind = _R11_NAMED.get(m[4])
             if kind is None or not _r11_named_ok(kind, v):
                 bad.append(("named type", m[2], m[4], kind,
-                            type(v).__name__))
+                            type(v).__name__, _r11_outside(v)))
                 continue
             seen.add(m)
         return None

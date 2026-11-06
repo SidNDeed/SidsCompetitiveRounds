@@ -4959,12 +4959,13 @@ def test_r8_the_walker_grammar_is_the_round_7_freeze_less_three():
     assert digest == ("073ed1959c7a09552e6d372d62988636"
                       "c8c77e90fe0d1157f57e276279648822"), digest
     # re-frozen once more for rules W, P and K (ruling FOUR-R11-A4): 364
-    # shapes (75e1c16e) -> 608, three of the 364 no longer in the code
-    assert len(r11) == 608, len(r11)
+    # shapes (75e1c16e) -> 608, three of the 364 no longer in the code;
+    # -> 621 with the recorder's driver-UUID reading and type names (run 3)
+    assert len(r11) == 621, len(r11)
     digest = hashlib.sha256("\n".join(sorted(r11)).encode(
         "utf-8")).hexdigest()
-    assert digest == ("df17bf1639bb7e5b5729f5382282e4be"
-                      "6f198a7dcddb0a6f37722976b3c734a4"), digest
+    assert digest == ("e3752fcf6bc9cd82c41920a0f248ace3"
+                      "38eb5e242761e2b22e2ead7a09887188"), digest
     assert not (r7 & r11) and _gs.WALKER_SHAPES == r7 | r11
 
 
