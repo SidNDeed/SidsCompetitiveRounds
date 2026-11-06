@@ -1883,7 +1883,7 @@ def receiver_provenance(expr, b, policy=None, depth=0):
         j = _join(receiver_provenance(x, b, policy, d) for x in parts)
         if isinstance(expr, _ast.BoolOp):
             return j                        # one of the operands
-        return "B" if j == "B" else ("P", j[1], True) if _is_p(j) else None
+        return _operated(expr, j)
     if isinstance(expr, _ast.IfExp):
         return _join([receiver_provenance(expr.body, b, policy, d),
                       receiver_provenance(expr.orelse, b, policy, d)])
@@ -1932,6 +1932,9 @@ def _call_provenance(call, b, policy, d):
             return _container([receiver_provenance(a, b, policy, d)
                                for a in list(call.args)
                                + [k.value for k in call.keywords]])
+        nested = _nested_def(f, b, call)
+        if nested is not None:
+            return _nested_returns(nested, b, policy, d)
         return _returned(call, b, policy, d, awaited=False)
     if kind == "B":
         return "B"
@@ -1949,6 +1952,74 @@ def _call_provenance(call, b, policy, d):
             parts = ["B"] + parts
         return _container([_container(parts)])
     return None
+
+
+def _nested_def(f, b, at):
+    """The plain (not async) definition nested in the walked function that
+    plain name `f` denotes at node `at` by Python's scoping (its one
+    visible binding, a `def` statement inside the walked function), or
+    None (round 11, run 18: region_pick._pick's `state(s)`)."""
+    if not isinstance(f, _ast.Name):
+        return None
+    got, _sc = _visible_sites(f.id, b, at)
+    if len(got) != 1:
+        return None
+    kind, node = got[0]
+    if (kind == "def" and isinstance(node, _ast.FunctionDef)
+            and node is not b.where):
+        return node
+    return None
+
+
+def _nested_returns(fn, b, policy, d):
+    """The join of every value nested definition `fn` returns (the
+    implicit None included), read in the walked function's own bindings
+    (a read inside `fn` sees `fn`'s scope first, so its parameters are
+    unproven); a definition reached again while its returns are read is
+    unproven (None)."""
+    seen = b.__dict__.setdefault("_nested_reading", set())
+    if id(fn) in seen:
+        return None
+    seen.add(id(fn))
+    try:
+        rets, todo = [], list(fn.body)
+        while todo:
+            n = todo.pop()
+            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                              _ast.Lambda, _ast.ClassDef)):
+                continue
+            if isinstance(n, _ast.Return):
+                rets.append(n.value)
+            todo.extend(_ast.iter_child_nodes(n))
+        return _join(["B" if r is None else receiver_provenance(r, b, policy, d)
+                      for r in rets] + ["B"])
+    finally:
+        seen.discard(id(fn))
+
+
+def _operated(expr, j):
+    """The provenance of an operator's result over operands joined as `j`
+    (round 11, run 18): an identity test is a bool whatever its operands
+    (it runs no operand code); otherwise the operands' own operator code
+    runs, so every alternative must be builtin whole or an exact builtin
+    container (a comparison of such values is a bool; arithmetic over a
+    container is a container of the same elements), and a parameter
+    alternative makes the result derived from it."""
+    if isinstance(expr, _ast.Compare) and all(
+            isinstance(o, (_ast.Is, _ast.IsNot)) for o in expr.ops):
+        return "B"
+    alts = _alts(j)
+    if j is None or not all(_is_p(a) or a == "B" or _is_c(a) for a in alts):
+        return None
+    names = sorted({n for a in alts if _is_p(a) for n in a[1]})
+    cs = [a for a in alts if _is_c(a)]
+    if isinstance(expr, _ast.BinOp) and cs:
+        out = ("C", _join([a[1] for a in cs] + ["B"]))
+    else:
+        out = "B"
+    if names:
+        return _join([out, ("P", tuple(names), True)])
+    return out
 
 
 def _method_result(r, m, call, b, policy, d):
