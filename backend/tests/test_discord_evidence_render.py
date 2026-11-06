@@ -106,6 +106,21 @@ def api_fields(body):
                         for slot in ae.AER_WIRE["1a"]["seat"]]
         for fi, f in enumerate(g["flags"]):
             out += [("games", gi, "flags", fi, k) for k in f]
+        # Phase 2 (B10): every leaf of each evidence section, facts as
+        # [name, value] pairs.
+        for xi, sec in enumerate(g.get("sections", [])):
+            at = ("games", gi, "sections", xi)
+            out += [at + (k,) for k in ("src", "state", "truncated")]
+            out += [at + ("game", i, j) for i in range(len(sec["game"])) for j in (0, 1)]
+            for si, seat in enumerate(sec["seats"]):
+                out += [at + ("seats", si, "subject"), at + ("seats", si, "state")]
+                out += [at + ("seats", si, "facts", i, j)
+                        for i in range(len(seat["facts"])) for j in (0, 1)]
+    for xi, sec in enumerate(body.get("sections_summary", [])):
+        at = ("sections_summary", xi)
+        out += [at + (k,) for k in ("oi", "src", "state", "truncated")]
+        out += [at + (part, i, j) for part in ("facts", "days30")
+                for i in range(len(sec[part])) for j in (0, 1)]
     for wi, w in enumerate(body.get("windows", [])):
         out += [("windows", wi, k) for k in w]
     for si, s in enumerate(body.get("summary", [])):

@@ -17983,7 +17983,6 @@ AER_ITEM_KINDS_1A = ("title", "status", "subject", "game", "seat", "cell", "flag
                      "summary_head", "summary", "label", "population", "baseline", "census",
                      "legend", "footer", "section", "facts")
 AER_FACTS_PER_LINE = 8
-_AER_SECTION_LABELS = {"card": "CARD", "combat": "COMBAT", "identity_clock": "IDENTITY-CLOCK"}
 AER_RENDER_TIMEOUT_S = 15
 AER_FALLBACK_MSG_MAX = 1900
 AER_WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aer_render_worker.py")
@@ -18067,15 +18066,18 @@ def _aer_cell_item(page, path, table, cell, phase="1a"):
 def _aer_fact_items(add, path, head, facts):
     """Facts as plan lines, AER_FACTS_PER_LINE to a line, in the api's order."""
     for start in range(0, len(facts), AER_FACTS_PER_LINE):
-        add(_aer_item("facts", head, tuple(
-            (path + (i,), name + "=", _aer_txt(text))
-            for i, (name, text) in enumerate(facts[start:start + AER_FACTS_PER_LINE], start))))
+        chunk = tuple(enumerate(facts[start:start + AER_FACTS_PER_LINE], start))
+        fields = tuple(f for i, _fact in chunk for f in (path + (i, 0), path + (i, 1)))
+        parts = tuple(p for _i, (name, value) in chunk for p in (name, _aer_txt(value)))
+        text = " ".join([head] + ["%s=%s" % (name, _aer_txt(value))
+                                  for _i, (name, value) in chunk]).strip()
+        add(AerItem("facts", fields, parts, text))
 
 
 def _aer_section_head(at, sec, window):
     """A section's line parts: source, the window on a summary page, state,
     truncated."""
-    return (((at + ("src",), "", _AER_SECTION_LABELS[sec["src"]]),) + window
+    return (((at + ("src",), "", _aer_txt(sec["src"])),) + window
             + ((at + ("state",), "", _aer_txt(sec["state"])),
                (at + ("truncated",), "truncated=", _aer_txt(sec["truncated"]))))
 
