@@ -536,14 +536,17 @@ class _FixedClock:
 # at `ts` counts while `now - ts <= _REGION_SEEN_TTL_SECONDS`
 # (_region_corroborated). Each case below is a stamp and a reading: the float
 # before the last instant at which the sighting counts, that instant, and the
-# float after it. There are two stamps, A and B; what distinguishes them, and
-# that the readings are the floats this note says they are, is asserted by
+# float after it. There are three stamps, A, B and C; what distinguishes them,
+# and that the readings are the floats this note says they are, is asserted by
 # test_the_cases_around_expiry_are_adjacent_floats_and_exact_ages.
 # test_no_moved_or_rounded_reading_passes_the_cases runs the same cases with
-# readings that have been moved or rounded.
+# readings that have been moved or rounded, and
+# test_the_third_stamp_is_what_catches_a_half_going_to_the_odd_step shows what
+# the third stamp is for.
 _TTL = main._REGION_SEEN_TTL_SECONDS
 _EXPIRES_A = 4 * _TTL + 0.375
 _EXPIRES_B = math.nextafter(_EXPIRES_A, -math.inf)
+_EXPIRES_C = math.nextafter(_EXPIRES_A, math.inf)
 
 
 def _around(name, expires):
@@ -557,7 +560,7 @@ def _around(name, expires):
     ]
 
 
-_AROUND_EXPIRY = _around("A", _EXPIRES_A) + _around("B", _EXPIRES_B)
+_AROUND_EXPIRY = _around("A", _EXPIRES_A) + _around("B", _EXPIRES_B) + _around("C", _EXPIRES_C)
 
 # (the pick's arguments, the region whose reporters are stamped, what the pick
 # says while the sighting is live, what it says once it has expired). Between
@@ -611,7 +614,7 @@ def _wrong(monkeypatch, capsys, case, shape, distort=None):
 @pytest.mark.parametrize("case", _AROUND_EXPIRY, ids=[case[0] for case in _AROUND_EXPIRY])
 def test_a_sighting_expires_at_its_own_instant_and_not_at_a_whole_second(monkeypatch, capsys, case, shape):
     """Nine shapes of a pick, each asked at the float before the last instant
-    its sighting counts, at that instant and at the float after it, with two
+    its sighting counts, at that instant and at the float after it, with three
     stamps: the pick answers as the shape says for a sighting that counts at
     the first two and not at the third, and reads the clock once."""
     assert _wrong(monkeypatch, capsys, case, shape) == []
@@ -638,26 +641,41 @@ def test_a_helper_that_reads_the_clock_itself_reads_it_to_the_fraction(monkeypat
 def test_the_cases_around_expiry_are_adjacent_floats_and_exact_ages():
     """What the cases rest on. Stamp A's last live instant is a whole number
     of eighths of a second, of milliseconds, of microseconds and of steps of
-    2**-30 s; stamp B's is the float below it. For each stamp the three
-    readings are neighbouring floats one last-place unit (2**-31 s) apart,
-    the sighting's age at the middle one is the TTL exactly, and at the other
-    two it is the TTL less, and plus, that one unit."""
+    2**-30 s; stamp B's is the float below it and stamp C's the float above
+    it. For each stamp the three readings are neighbouring floats one
+    last-place unit (2**-31 s) apart, the sighting's age at the middle one is
+    the TTL exactly, and at the other two it is the TTL less, and plus, that
+    one unit. Two neighbouring floats, A's and C's last live instants, are
+    each the reading at which one stamp's sighting last counts and the first
+    reading at which another's no longer does."""
     assert all((_EXPIRES_A * per_second).is_integer() for per_second in (8, 1000, 10 ** 6, 2 ** 30))
     assert _EXPIRES_B == math.nextafter(_EXPIRES_A, -math.inf) < _EXPIRES_A
+    assert _EXPIRES_C == math.nextafter(_EXPIRES_A, math.inf) > _EXPIRES_A
     unit = 2.0 ** -31
-    for name, expires in (("A", _EXPIRES_A), ("B", _EXPIRES_B)):
+    stamps = (("A", _EXPIRES_A), ("B", _EXPIRES_B), ("C", _EXPIRES_C))
+    for name, expires in stamps:
         (_, stamp, before, _), (_, _, at, _), (_, _, after, _) = cases = _around(name, expires)
         assert at == expires and [case[3] for case in cases] == [True, True, False]
         assert math.nextafter(before, math.inf) == at and math.nextafter(at, math.inf) == after
         assert at - before == unit == after - at
         assert (before - stamp, at - stamp, after - stamp) == (_TTL - unit, _TTL, _TTL + unit)
-    assert _AROUND_EXPIRY == _around("A", _EXPIRES_A) + _around("B", _EXPIRES_B)
+    assert _AROUND_EXPIRY == [case for name, expires in stamps for case in _around(name, expires)]
+    last_counts = {reading for label, _, reading, _ in _AROUND_EXPIRY if label.endswith("-at")}
+    first_expired = {reading for label, _, reading, _ in _AROUND_EXPIRY if label.endswith("-after")}
+    assert last_counts & first_expired == {_EXPIRES_A, _EXPIRES_C}
 
 
 def _rounded(rounding, per_second):
     """What a reading becomes when `rounding` (math.floor, math.ceil or round)
     puts it on a grid of `per_second` steps to the second."""
     return lambda t: rounding(t * per_second) / per_second
+
+
+def _half_to_odd(per_second):
+    """What a reading becomes on the nearest step of a grid of `per_second`
+    steps to the second when a half goes to the odd step (round, which
+    _rounded is given for the nearest step, sends a half to the even one)."""
+    return lambda t: (round(t * per_second + 1) - 1) / per_second
 
 
 # (what was done to the reading, the function that does it)
@@ -674,6 +692,7 @@ _MOVED_OR_ROUNDED = [
     ("cut down to steps of 2**-30 s", _rounded(math.floor, 2 ** 30)),
     ("rounded up to steps of 2**-30 s", _rounded(math.ceil, 2 ** 30)),
     ("rounded to the nearest step of 2**-30 s", _rounded(round, 2 ** 30)),
+    ("rounded to the nearest step of 2**-30 s, a half to the odd step", _half_to_odd(2 ** 30)),
     ("half a second later", lambda t: t + 0.5),
     ("half a second earlier", lambda t: t - 0.5),
     ("a thirty-second of a second later", lambda t: t + 0.03125),
@@ -696,6 +715,16 @@ def test_no_moved_or_rounded_reading_passes_the_cases(monkeypatch, capsys):
         assert wrong_cases(shape, None) == [], shape[0]
         for done, distort in _MOVED_OR_ROUNDED:
             assert wrong_cases(shape, distort), (done, shape[0])
+
+
+def test_the_third_stamp_is_what_catches_a_half_going_to_the_odd_step(monkeypatch, capsys):
+    """Why there are three stamps. The reading put on the nearest step of
+    2**-30 s with a half going to the odd step gets every case of stamps A
+    and B right, for every shape, and one case of stamp C wrong."""
+    distort = _half_to_odd(2 ** 30)
+    for shape in _FRACTION_SHAPES:
+        wrong = [case[0] for case in _AROUND_EXPIRY if _wrong(monkeypatch, capsys, case, shape, distort)]
+        assert wrong == ["C-at"], (shape[0], wrong)
 
 
 def test_a_sighting_needs_a_reporter_and_an_established_session():
