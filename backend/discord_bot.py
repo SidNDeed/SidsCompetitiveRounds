@@ -17983,6 +17983,13 @@ AER_ITEM_KINDS_1A = ("title", "status", "subject", "game", "seat", "cell", "flag
                      "summary_head", "summary", "label", "population", "baseline", "census",
                      "legend", "footer", "section", "facts")
 AER_FACTS_PER_LINE = 8
+# The longest facts line, in characters. aer_render_worker draws the facts
+# kind at 9 pt in DejaVu Sans Mono at 100 dpi (advance 0.602 em, 7.5 px,
+# hinted to 8 whole pixels: 160 characters measured 1280 px) from 1% of its
+# 1400-pixel width, so 173 characters reach the edge; 160 leaves room. A
+# single fact longer than this is a line of its own, and the drawn-box check
+# in `_aer_render` sends a page any line overflows to the text fallback.
+AER_FACTS_LINE_CHARS = 160
 AER_RENDER_TIMEOUT_S = 15
 AER_FALLBACK_MSG_MAX = 1900
 AER_WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aer_render_worker.py")
@@ -18064,18 +18071,31 @@ def _aer_cell_item(page, path, table, cell, phase="1a"):
 
 
 def _aer_fact_items(path, head, facts):
-    """Facts as plan lines, AER_FACTS_PER_LINE to a line, in the api's order;
-    each fact's name and value are their own plan fields."""
+    """Facts as plan lines in the api's order, each fact's name and value
+    their own plan fields: a line holds at most AER_FACTS_PER_LINE facts,
+    and a fact that would carry the line past AER_FACTS_LINE_CHARS
+    characters starts the next line (a fact longer than that on its own is
+    a line by itself)."""
+    lines, line = [], []
+    for i in range(len(facts)):
+        name, value = facts[i]
+        text = "%s=%s" % (name, _aer_txt(value))
+        wide = len(" ".join([head] + [t for _i, t in line] + [text]).strip())
+        if line and (len(line) == AER_FACTS_PER_LINE or wide > AER_FACTS_LINE_CHARS):
+            lines.append(line)
+            line = []
+        line.append((i, text))
+    if line:
+        lines.append(line)
     out = []
-    for start in range(0, len(facts), AER_FACTS_PER_LINE):
-        fields, parts, texts = [], [], []
-        for i in range(start, min(start + AER_FACTS_PER_LINE, len(facts))):
+    for line in lines:
+        fields, parts = [], []
+        for i, _text in line:
             name, value = facts[i]
             fields.extend((path + (i, 0), path + (i, 1)))
             parts.extend((name, _aer_txt(value)))
-            texts.append("%s=%s" % (name, _aer_txt(value)))
         out.append(AerItem("facts", tuple(fields), tuple(parts),
-                           " ".join([head] + texts).strip()))
+                           " ".join([head] + [t for _i, t in line]).strip()))
     return out
 
 
@@ -18220,7 +18240,9 @@ async def _aer_render(plan):
     """One PNG for the plan, or None: without matplotlib at once; otherwise
     from the long-lived worker within AER_RENDER_TIMEOUT_S. A worker that
     times out, dies or answers out of shape is killed and replaced on the
-    next call."""
+    next call. A drawing with any item's box outside the image's width (the
+    worker reports both) is None too, so the page takes the complete text
+    fallback; the worker is kept."""
     global _aer_worker_proc, _aer_worker_lock
     import base64
     if not _MPL_AVAILABLE:
@@ -18237,6 +18259,9 @@ async def _aer_render(plan):
             png = base64.b64decode(reply["png"])
             if not png.startswith(_AER_PNG_MAGIC) or len(reply["drawn"]) != len(plan):
                 raise ValueError("render reply out of shape")
+            width = reply["width"]
+            if not all(0 <= box[0] and box[2] <= width for _i, _t, box in reply["drawn"]):
+                return None
             return png
         except Exception:
             _aer_worker_proc = None

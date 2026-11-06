@@ -26,6 +26,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import os
 import sys
 import uuid
@@ -206,3 +207,140 @@ def test_h4_another_pairs_contribution_about_the_same_subject_is_not_this_games(
         assert f["self.hands"] == "5" and "meas.hands" not in f, f
     else:
         assert f["self.a1s.total"] == "5" and "meas.a1s.total" not in f, f
+
+
+# ── M1: fact lines inside the rendered width ──────────────────────────────
+
+DPI = 100                       # aer_render_worker.render's figure dpi
+MONO_ADVANCE = 1233 / 2048      # DejaVu Sans Mono's advance width in em, regular and bold
+TEXT_X = 0.01                   # the worker's text origin for an unfilled kind, in widths
+
+
+def _fit(kind):
+    """The characters of `kind` that fit between the worker's text origin
+    and the image's right edge: Agg hints each advance up to whole pixels
+    (the facts kind's 7.5 px draws as 8; 160 characters measured 1280 px)."""
+    width = worker.WIDTH_IN * DPI
+    per_char = math.ceil(worker.FONT_SIZES[kind] * MONO_ADVANCE * DPI / 72.0)
+    return int(width * (1 - TEXT_X) // per_char)
+
+
+def _long_body(profile, hands):
+    """The game page of game_body() whose card section's seat 0 carries a
+    record and one contribution with `profile`; every other section is
+    unavailable."""
+    a, b = _pair()
+    g = _game(a, b)
+    data = _data(records=[_rec("card", "k1", a, b, "room-1", pool_state="ok",
+                               deal_profile=profile, header_mod_version="1.41.0",
+                               received_at=T0)],
+                 games=[_grow("card", "k1", a, b, g["id"], processed_at=T0)],
+                 contrib=[_crow("card", "k1", a, b, a, deal_profile=profile, hands=hands)],
+                 switches=_on("card"))
+    body = game_body()
+    body["games"][0]["sections"] = [
+        ae.game_section(src, data if src == "card" else None, g, {a: 0, b: 1})
+        for src in ae.SECTION_SOURCES]
+    return body
+
+
+@pytest.mark.parametrize("profile,hands,line", (
+    ("p" * 48, 12, 217),            # the round's measured line: a 48-character profile
+    (None, 3, None)))               # a whole genuine profile
+def test_m1_a_long_fact_line_is_wrapped_to_the_rendered_width(profile, hands, line):
+    bot = bot_ns()
+    body = _long_body(profile or _profile("m1"), hands)
+    facts = body["games"][0]["sections"][0]["seats"][0]["facts"]
+    eight = " ".join("%s=%s" % (n, "-" if v is None else v) for n, v in facts[8:16])
+    if line is not None:
+        assert len(eight) == line, len(eight)
+    assert len(eight) > _fit("facts"), (len(eight), _fit("facts"))
+    _page, plan = check_plan(bot, body)
+    longest = max(len(i.text) for i in plan if i.kind == "facts")
+    assert longest <= _fit("facts"), (longest, _fit("facts"))
+
+
+EDGE_WORKER = '''
+import base64, json, sys
+OVER = None
+inp, out = sys.stdin.buffer, sys.stdout.buffer
+while True:
+    head = inp.read(4)
+    if len(head) < 4:
+        break
+    plan = json.loads(inp.read(int.from_bytes(head, "big")).decode("utf-8"))
+    width = 1400
+    longest = max(range(len(plan)), key=lambda i: len(plan[i][1]))
+    drawn = [[i, t, [14, 0, width + 1 if (OVER and i == longest) else 100, 10]]
+             for i, (k, t) in enumerate(plan)]
+    png = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) + b"fake"
+    reply = {"png": base64.b64encode(png).decode("ascii"), "drawn": drawn, "width": width}
+    data = json.dumps(reply).encode("utf-8")
+    out.write(len(data).to_bytes(4, "big") + data)
+    out.flush()
+'''
+
+
+@pytest.mark.parametrize("over", (False, True))
+def test_m1_a_drawing_past_the_image_edge_gives_the_complete_text_fallback(tmp_path, over):
+    """The worker reports each item's drawn box and the image width; a box
+    past the edge gives the complete text fallback (every plan line), and
+    the worker is kept for the next page. Inside the edge: the PNG."""
+    script = tmp_path / "edge_worker.py"
+    script.write_text(EDGE_WORKER.replace("OVER = None", "OVER = %r" % over), encoding="utf-8")
+    body = _long_body(_profile("m1-edge"), 3)
+    events = []
+    ns = bot_ns(_Api(lambda path, actor: (200, copy.deepcopy(body), {}), events), events,
+                mpl=True)
+    ns["AER_WORKER_PATH"] = str(script)
+    spawned = []
+    real_spawn = ns["_aer_worker_spawn"]
+
+    async def spawn():
+        proc = await real_spawn()
+        spawned.append(proc)
+        return proc
+
+    ns["_aer_worker_spawn"] = spawn
+
+    async def go():
+        try:
+            out = []
+            for _ in range(2):
+                it = _Interaction(events, ADMIN)
+                await ns["_aer_command"](it, dict(REQ))
+                out.append(it)
+            return out
+        finally:
+            for proc in spawned:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+
+    shown_items = asyncio.run(asyncio.wait_for(go(), 40))
+    plan = ns["_aer_plan"](ns["_aer_decode_response"](copy.deepcopy(body), "1a"))
+    for it in shown_items:
+        content, kw = it.channel.sent[0]
+        pngs = [f for f in kw["files"] if f.filename.endswith(".png")]
+        if not over:
+            assert len(pngs) == 1 and pngs[0].data.startswith(PNG)
+            continue
+        assert pngs == [], [f.filename for f in kw["files"]]
+        shown = content if not kw["files"] else kw["files"][0].data.decode("utf-8")
+        missing = [i.text for i in plan if i.text not in shown]
+        assert missing == [], missing[:3]
+    assert len(spawned) == 1
+
+
+def test_m1_the_worker_reports_the_image_width_with_its_drawing():
+    import io
+    from test_discord_evidence_render import _frame, _replies
+
+    def draw(plan):
+        return PNG + b"x", [(i, t, (0, 0, 1, 1)) for i, (_k, t) in enumerate(plan)]
+
+    out = io.BytesIO()
+    worker.serve(io.BytesIO(_frame([["title", "EVIDENCE game"]])), out, draw)
+    (reply,) = _replies(out.getvalue())
+    assert reply.get("width") == int(worker.WIDTH_IN * DPI), reply
+    assert getattr(worker, "DPI", None) == DPI
