@@ -71,9 +71,21 @@ PLANT_MAKERS = frozenset({"_r11_plant_unlisted_maker"})
 PLANT_STARTS = {"test_r11_cat_refuses_a_start_outside_the_set": "pg_dump",
                 "test_r11_cat_refuses_a_start_whose_environment_is_not_stated": "pg_dump"}
 ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
-# frozen from a whole-module run (None: not frozen yet, a whole run refuses)
-OPEN_COUNTS = None
-START_COUNTS = None
+# frozen from the whole-module run r11-rec-cat2-whole (seat-4, 648f12d5: 158
+# passed, 2 skipped, no violation; 1454 opens, 889 starts). A listed site
+# absent here opened nothing in that run (catalog_position.check opens its
+# monitor only when the session's own connection raises InterfaceError,
+# catalog_position.py:116-119; no measured program in that run did so).
+OPEN_COUNTS = {
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1114, "_fetchval": 6, "_orm": 1,
+    "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
+    "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
+    "_template_problem": 3, "_whoami": 3}
+START_COUNTS = {
+    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 426,
+    "_build.<locals>.run": 377, "_git": 2, "_route_run": 56,
+    "test_migrations_are_applied_from_the_object_store": 2,
+    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 22}
 
 REUSE_REFUSAL = ("D2_REUSE_DB is set: the chain was not built in this run, so the run is not "
                  "one the packet cites (ruling FOUR-R11-A17 (g))")
