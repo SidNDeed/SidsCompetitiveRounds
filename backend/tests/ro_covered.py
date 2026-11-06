@@ -954,8 +954,27 @@ COMPILED_LANGUAGES = ("c", "internal")
 # captured text that can reach it is residue), 'transaction' (it sets inside
 # the transaction only, the scope shown by each call's literal) or
 # 'neither' (why the word matched). NOTES-r11-res.md lists each.
-PROC_SIDES = {}
+#
+# Measured on seat-3 (16.15) at ec9ecef6 (RF11 log r11-res-p2-r8-ec9ecef6.log):
+# three matches, each a plpgsql trigger function of the case schema, each
+# matched by the word SET only, and none sets a setting; md5 of the body as
+# committed (r11/res/body_md5.py), equal to the census's for the one the log
+# printed whole.
+PROC_SIDES = {
+    "<case>.mail_inbox_rev_bump() f": (
+        "0b3bc33098b25519ea53ceb4ed4ac618", "neither",
+        "SET is the ON CONFLICT DO UPDATE SET clause (300_mail_inbox_rev.sql)"),
+    "<case>.pc_prints_immutable() f": (
+        "5a8f3ad588521922f61573a3c5b5785f", "neither",
+        "'set' is a word of a RAISE EXCEPTION message (353_pc_trades.sql)"),
+    "<case>.stamp_shop_item_catalog_release() f": (
+        "48387b17bcc54ebe16c7d446c24385fe", "neither",
+        "SET is an UPDATE ... SET clause"
+        " (148_cosmetic_placement_and_macro_evidence.sql)"),
+}
 # Compiled-language functions outside the system schemas: (extension, key).
+# Measured empty at ec9ecef6 (the same log); test_r11_res_proc_census asserts
+# the empty list.
 PROC_COMPILED = ()
 
 

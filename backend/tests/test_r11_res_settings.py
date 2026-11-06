@@ -365,3 +365,37 @@ def test_r11_res_temporary_function_moves_pg_proc_not_pg_class():
     before, after, res_before, res_after = _run(go())
     assert after[0] == before[0] and after[1] == before[1] + 1, (before, after)
     assert res_after == res_before + 1, (res_before, res_after)
+
+
+def test_r11_res_proc_census_diff_routes(monkeypatch):
+    """Each route of the census diff, on constructed PROC_CENSUS_SQL rows: a
+    frozen function whose source changed is named 'md5', a new match 'new',
+    a frozen one no longer matched 'gone', a compiled function not frozen
+    'compiled new' and a frozen one absent 'compiled gone'; a source carrying
+    the token's name is listed; the unchanged census is clean."""
+    import hashlib
+    src = "BEGIN PERFORM pg_catalog.set_config('a.b', 'v', true); END"
+    rows = [
+        ("public", "f", "", "f", "plpgsql", src, None, None),
+        ("public", "g", "x integer", "f", "c", "g", None, "ext1"),
+        ("s1", "t", "", "f", "sql", "SELECT current_setting('rf10.position')", None, None),
+    ]
+    md5 = hashlib.md5(src.encode("utf-8")).hexdigest()
+    monkeypatch.setattr(ro_covered, "PROC_SIDES", {
+        "public.f() f": (md5, "transaction", "literal true")})
+    monkeypatch.setattr(ro_covered, "PROC_COMPILED", (("ext1", "public.g(x integer) f"),))
+    matched, compiled, token = ro_covered.proc_census(rows, "s1")
+    assert ro_covered.proc_census_diff(matched, compiled) == ()
+    assert token == ("<case>.t() f",), token
+    assert matched["public.f() f"][2] == ("set_config",), matched
+    changed = [("public", "f", "", "f", "plpgsql", src + " ", None, None)] + rows[1:]
+    matched, compiled, _t = ro_covered.proc_census(changed, "s1")
+    assert ro_covered.proc_census_diff(matched, compiled) == ("md5 public.f() f",)
+    extra = rows + [("public", "h", "", "p", "plpgsql", "BEGIN EXECUTE 'x'; END", None, None),
+                    ("public", "k", "", "f", "internal", "k", None, None)]
+    matched, compiled, _t = ro_covered.proc_census(extra, "s1")
+    assert ro_covered.proc_census_diff(matched, compiled) == (
+        "compiled new - public.k() f", "new public.h() p")
+    matched, compiled, _t = ro_covered.proc_census(rows[2:], "s1")
+    assert ro_covered.proc_census_diff(matched, compiled) == (
+        "compiled gone ext1 public.g(x integer) f", "gone public.f() f")

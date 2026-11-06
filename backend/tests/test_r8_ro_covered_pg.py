@@ -600,7 +600,7 @@ CONTINUITY_CONTROLS = (
                      "setting hidden role=" + ro_role.ROLE})),
     ("transaction_read_only_at_16828_under_grant", "main._lease_admission_gate empty",
      E_16828, _then_own("SET transaction_read_only = on"), ("UPDATE players",),
-     ("continuity", {"not reset transaction_read_only=on"})),
+     ("continuity", {"not reset transaction_read_only=on (session)"})),
 )
 # The controls whose refusal must be exactly their parts (each identity part
 # or settings route decides alone).
@@ -1154,8 +1154,10 @@ def _r11_production_records(runs):
 
 
 # Ruling FOUR-R11-A6 (3a): every (name, class, scope) the program's own
-# captured texts set, measured (NOTES-r11-res.md lists each with its site).
-R11_SETTING_NAMES = ()
+# captured texts set, measured on seat-3 (16.15) at ec9ecef6 (RF11 log
+# r11-res-p2-r8-ec9ecef6.log): one name, the SET LOCAL lock_timeout of
+# main._identity_lock_many (main.py 17339-17370 at this tip; NOTES-r11-res.md).
+R11_SETTING_NAMES = (("lock_timeout", "server", "local"),)
 # (3b): the placeholders those texts set at session scope: frozen at none.
 R11_SESSION_PLACEHOLDERS = ()
 
@@ -1195,7 +1197,9 @@ def test_r11_res_proc_census(runs):
     census = runs["proc_census"]
     matched, compiled, _t = ro_covered.proc_census(census["rows"], census["schema"])
     diff = ro_covered.proc_census_diff(matched, compiled)
-    assert diff == (), (diff, _r11_census_report(matched, compiled))
+    # a str message, printed whole (a tuple's repr is shortened)
+    assert diff == (), "%r\n%s" % (diff, _r11_census_report(matched, compiled))
+    assert compiled == (), compiled
     assert not [k for k, v in ro_covered.PROC_SIDES.items() if v[1] == "session"]
     assert all(v[1] in ("transaction", "neither") for v in ro_covered.PROC_SIDES.values())
 
@@ -1581,9 +1585,13 @@ def test_r10_n_ro_census_193_forwarding_connect_args():
 # objects in 8 more catalogs, NAMED_SETTINGS_SQL, placeholder_residue's and
 # not_reset's docstrings) and 1 -> 2 here (the r11 negative's docstring);
 # each listed in RF11 r11/res/NOTES-r11-res.md.
+# FIX-R11-RES under ruling FOUR-R11-A6: catalog read 22 -> 23 in ro_covered.py
+# (docstrings of setting_classes, placeholder_residue, not_reset: three in,
+# two out) and transaction end 3 -> 4 here (_proc_census's rollback of the
+# planted function's own transaction, on its own connection).
 SWEEP_TXN = {'lock read': 'LOCKS_SQL|lock_read\\(', 'counter read': 'WRITES_SQL|\\.writes\\(\\)', 'continuity read': 'POSITION_(?:START|END)_SQL|RESIDUE_SQL|position_(?:start|end)\\(|\\.residue\\(\\)', 'catalog read': 'pg_locks|pg_stat_xact|pg_settings|pg_prepared_statements|pg_cursors|pg_listening_channels|pg_my_temp_schema|pg_prepared_xacts', 'outcome from a read': 'ran_outcome\\(|lock_outcome\\(|under_grant\\(|broken_continuity\\(|continuity_at\\(|locks_at\\(', 'transaction end or presence': 'rollback\\(|commit\\(|in_transaction|get_transaction|\\.begin\\('}
 SWEEP_CALLEE = {'callee read': '\\.func\\b', 'callee name': '_name_of\\(|_dotted\\(', 'callee class': '_constructed\\(|_classified_callee\\(|CLASSIFIED_(?:NAME|ATTR)_CALLS', 'call node': 'ast\\.Call\\b', 'forwarding binding': 'FORWARDING|_forwarding\\(|_arg_names\\(|_binds\\(|_stmt_binds\\(|_stmt_mutates\\(|_module_statements\\(|_own_nodes\\('}
-SWEEP_COUNTS = {'ro_covered.py': {'lock read': 5, 'counter read': 4, 'continuity read': 12, 'catalog read': 22, 'outcome from a read': 12, 'transaction end or presence': 0}, 'test_r8_ro_covered_pg.py': {'lock read': 0, 'counter read': 2, 'continuity read': 0, 'catalog read': 2, 'outcome from a read': 10, 'transaction end or presence': 3}, 'ro_census.py': {'callee read': 10, 'callee name': 9, 'callee class': 10, 'call node': 5, 'forwarding binding': 17}}
+SWEEP_COUNTS = {'ro_covered.py': {'lock read': 5, 'counter read': 4, 'continuity read': 12, 'catalog read': 23, 'outcome from a read': 12, 'transaction end or presence': 0}, 'test_r8_ro_covered_pg.py': {'lock read': 0, 'counter read': 2, 'continuity read': 0, 'catalog read': 2, 'outcome from a read': 10, 'transaction end or presence': 4}, 'ro_census.py': {'callee read': 10, 'callee name': 9, 'callee class': 10, 'call node': 5, 'forwarding binding': 17}}
 
 
 def _sweep_code(name):
