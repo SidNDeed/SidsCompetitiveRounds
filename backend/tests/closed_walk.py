@@ -1878,7 +1878,10 @@ class Bindings:
                     refused.append((n.lineno, f"a {f.id} whose name no constant "
                                               "gives"))
                 else:
-                    for s in names:
+                    # round 11 (ruling FOUR-R11-A10 (3)): `names` is a set;
+                    # the census table's keys are entered in text order,
+                    # never in the set's hash order
+                    for s in sorted(names):
                         stores.setdefault(s, []).append(n.lineno)
         census = {"stores": stores, "refused": sorted(refused)}
         _STORE_CENSUS[id(tree)] = (tree, census)
@@ -2344,8 +2347,32 @@ def _is_u(p):
 
 
 def _alts(p):
-    """The alternatives of provenance `p` (itself when it is not a union)."""
-    return sorted(p[1], key=repr) if _is_u(p) else [p]
+    """The alternatives of provenance `p` (itself when it is not a union),
+    in the order of their canonical text (_prov_text)."""
+    return sorted(p[1], key=_prov_text) if _is_u(p) else [p]
+
+
+def _prov_text(p):
+    """Round 11 (ruling FOUR-R11-A10 (3)): the sort key of a provenance:
+    its repr with every frozenset (a union's alternatives, at any depth)
+    written as its members ordered by their own canonical text. A plain
+    repr writes a frozenset in the set's iteration order, which follows the
+    process's string hash; the key does not. A provenance that holds no
+    frozenset keeps its repr, so alternatives that hold none keep the order
+    repr gave them."""
+    return repr(_prov_canon(p))
+
+
+def _prov_canon(p):
+    """`p` with each frozenset replaced by ("frozenset", its members in
+    canonical-text order), recursively (_prov_text)."""
+    if isinstance(p, frozenset):
+        items = [_prov_canon(x) for x in p]
+        items = sorted(items, key=repr)
+        return ("frozenset", tuple(items))
+    if isinstance(p, tuple):
+        return tuple(_prov_canon(x) for x in p)
+    return p
 
 
 def _is_a(p):
@@ -3748,11 +3775,15 @@ def checked_callbacks(call, fn, effects, line):
     callback parameter with a default other than None is refused at the
     helper (helper_effects)."""
     params = list(_inspect.signature(fn).parameters)
-    out = set()
-    for e in effects:
-        if not e.startswith("callback:"):
-            out.add(e)
-            continue
+    out = set(e for e in effects if not e.startswith("callback:"))
+    # round 11 (ruling FOUR-R11-A10 (3)): `effects` is a frozenset; the
+    # callback conditions ("callback:<param>") are refused in the helper's
+    # parameter order, then by their text (_CondOrder reads the parameter
+    # after the first colon), never in the set's hash order
+    order = _CondOrder(params)
+    conds = [e for e in effects if e.startswith("callback:")]
+    conds = sorted(conds, key=order)
+    for e in conds:
         name = e.split(":", 1)[1]
         at = params.index(name)
         if any(k.arg == name or k.arg is None for k in call.keywords) or len(
