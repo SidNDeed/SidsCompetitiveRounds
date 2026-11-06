@@ -5959,6 +5959,81 @@ def test_r11_n_closed_walk_1775_a_receiver_proven_by_provenance():
     assert mod.R11_MARKS, "the report's call changed no state"
 
 
+_R11_F10_MORE_SRC = '''def planted_scoped(rules, obj):
+    seen = [rules for rules in obj.items]
+    return _rules_normalize(rules), seen
+'''
+
+
+def test_r11_f10_unions_scalar_results_and_nested_scopes():
+    """F10, round 11 run 12's classes, each route with its own control:
+    (1) a name bound to a session row in one binding and to a parameter in
+    another is the union of both, judged per alternative: a builtin method
+    on it refuses (the row alternative), a row method carries the
+    parameter's condition; (2) `.scalars()` yields column values, builtin;
+    (3) a comprehension's own target is not the function's parameter of
+    the same spelling (Python's scoping)."""
+    def walk(src):
+        d = _ast.parse(src).body[0]
+        return _cw.def_effects(d, main, _r11_policy(grammar=False), d.name,
+                               receivers=True)
+    head = ("async def f(db, p):\n"
+            "    row = (await db.execute(text('SELECT 1'))).mappings().first()\n"
+            "    v = p if p else row\n")
+    with pytest.raises(Unclassified) as e:
+        walk(head + "    return v.lower()\n")
+    assert "a method call v.lower whose receiver the walk cannot prove builtin" in (
+        e.value.args[0][1]), e.value.args
+    assert "receiver:p:row" in walk(head + "    return v.get('k')\n")
+    got = walk("async def g(db):\n"
+               "    vals = (await db.execute(text('SELECT 1'))).scalars().all()\n"
+               "    return [x.lower() for x in vals]\n")
+    assert not any(x.startswith("receiver:") for x in got), got
+    mod = _r11_planted("f10more", _R11_F10_MORE_SRC)
+    assert _cw.plain_effects(mod.planted_scoped, _r11_policy(
+        mod, grammar=False)) == frozenset({"receiver:rules:row"})
+
+
+def test_r11_supplied_helper_bound_by_the_function():
+    """Round 11 (probe 4): a helper the caller supplies and reads
+    separately (the family pick of _relock_outcome_problems) is read at its
+    calls as that definition (Bindings.supplied), never through the
+    module's binding of a planted name; a function that binds the name
+    itself refuses, since its call is then not the supplied helper."""
+    pick = _ast.parse("async def pick(db):\n    return ('fresh', None)\n").body[0]
+    ok = _ast.parse("async def r(db):\n    x = await pick(db)\n").body[0]
+    bad = _ast.parse("async def r(db, other):\n    pick = other\n"
+                     "    x = await pick(db)\n").body[0]
+    b = _cw.Bindings(main, ok, grammar=None)
+    assert _calls_supplied(ok.body[0].value, pick, b)
+    b = _cw.Bindings(main, bad, grammar=None)
+    with pytest.raises(Unclassified) as e:
+        _calls_supplied(bad.body[1].value, pick, b)
+    assert "a supplied helper the walk reads separately, is bound by the " in (
+        e.value.args[0][1]), e.value.args
+
+
+def test_r11_binder_deps_hold_nested_reads():
+    """FIX-R11-ID, round 11 run 11: a Deps holds what a nested recording
+    read and what a carried cache hit read, by reference: rebinding a name
+    only the nested walk read drops the enclosing entry too."""
+    import types as _types
+    ns = _types.SimpleNamespace(x=1, y=2)
+    with _a1_ib.recording() as outer:
+        with _a1_ib.recording() as inner:
+            _a1_ib.observe(ns, "x", ns.x)
+    assert inner.valid() and outer.valid()
+    ns.x = 3
+    assert not inner.valid() and not outer.valid()
+    with _a1_ib.recording() as cached:
+        _a1_ib.observe(ns, "y", ns.y)
+    with _a1_ib.recording() as user:
+        _a1_ib.carry(cached)
+    assert user.valid()
+    ns.y = 4
+    assert not user.valid()
+
+
 def test_r11_n_a1_5655_json_loads_wrapper_before_the_table(monkeypatch):
     """F11: `json.loads` replaced by a functools.wraps wrapper (which copies
     __module__, __qualname__ and __name__) BEFORE a provider table is
