@@ -2695,7 +2695,8 @@ def test_r11_gate_hook_discharges_receivers():
     listed provider whose result the walk cannot prove builtin, refuses at
     the call."""
     lines = ["async def _r11_h(db, rules):",
-             "    return rules.get('x')",
+             "    v = rules.get('x')",
+             "    return v is not None",
              "",
              "",
              "async def _r11_ok(db):",

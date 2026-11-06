@@ -1916,6 +1916,18 @@ def _call_provenance(call, b, policy, d):
             return _over(lambda a: _method_result(a, f.attr, call, b, policy, d), r)
     kind = _listed_kind(f, b, policy)
     if kind is None:
+        try:
+            cls = b.namedtuple_class(f)
+        except Unclassified:
+            cls = None
+        if cls is not None:
+            # round 11 (run 16): a constructor-pure namedtuple class of a
+            # complete frozen definition scope (the walk's own route for
+            # admitting its call) makes an exact tuple of its arguments; a
+            # field read is one of them
+            return _container([receiver_provenance(a, b, policy, d)
+                               for a in list(call.args)
+                               + [k.value for k in call.keywords]])
         return _returned(call, b, policy, d, awaited=False)
     if kind == "B":
         return "B"
