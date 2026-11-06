@@ -2061,6 +2061,26 @@ K_PROTOCOL = ("__setattr__", "__getattr__", "__getattribute__",
 # BOUND_MARKS is ("T", F, site line, ".timestamp", receiver name,
 # "datetime", datetime.datetime, root statement line, (pair call lines)).
 T_PAIRS = {"timestamp": "B", "replace": "datetime"}
+# Round 11, rule N (rulings FOUR-R11-A10 (1), FOUR-R11-A14 (2)): the named
+# members, set by the walk's own tests as W_NAMED is: {(F, form, callee,
+# name): (label, spelled, group, binds, census)}. Form "arg": the argument a
+# call of function `callee` inside F hands to its parameter `name`, spelled
+# `spelled`; form "method": the receiver Name `name` of a method call whose
+# method is `callee` (".get") inside F. binds: ((module, name, object), ...)
+# held by identity; census: ((owner, name, frozen rows), ...), the static
+# half (_n_census) compared row by row. Nothing here gives a value a
+# provenance: a discharge is a mark ("N", F, site line, callee, name, group,
+# label) that the bound test observes, or a refusal.
+# Member (B) (ruling FOUR-R11-A20 (1)) adds two forms, each one expression of
+# F's body that the visitor does not classify, discharged by a CALLEE
+# identity the bound test asserts at run time: form "call", the call of the
+# Name `callee` ("sorted"), name the same Name, group "call"; form "result",
+# the method call `callee` (".all") whose receiver is a call of method
+# `name` ("mappings"), group "result". Spelled: the whole call, unparsed.
+# Their site line is the line of the call's CALL instruction (the call's own
+# line; for a method, the attribute's last line).
+N_MEMBERS = {}
+_N_CENSUS = {}
 _BOUND_ROOTS = {}
 _BOUND_STACK = set()
 _NAME_INDEX = {}
@@ -3354,6 +3374,10 @@ def discharge_receivers(call, fn, effects, line, visitor):
                                           f"parameter {p} has a default the "
                                           "walk cannot prove builtin"))
             continue
+        # round 11 (rule N, ruling FOUR-R11-A10 (1)): a named member's
+        # argument is discharged by its bound, marked for the bound test
+        if _member_arg(call, fn, arg, p, path, group, visitor):
+            continue
         # round 11 (rules W, P and K): at a span walked on its own, an
         # argument rooted at an exact frozen class instance is discharged
         # by rule K, marked for the bound test
@@ -3507,6 +3531,249 @@ def _bound_discharge(call, fn, arg, p, path, group, visitor):
         visitor.b.k_attr(K, mod, sub[0], call.lineno)
         BOUND_MARKS.append(("K-a", F, line, fn, var + "." + sub[0], g, K))
     return True
+
+
+# --- round 11, rule N (rulings FOUR-R11-A10 (1), FOUR-R11-A14 (2)) -------
+
+def _n_site(b):
+    """(F, d, off) for the definition d walked under bindings `b`: F the
+    module's binding of d's name, a plain function whose code is named so
+    and whose own source parses to d; off maps a line of the walked source
+    to F's file line. None for any other walk (a planted or composed
+    definition keeps today's refusals)."""
+    d = b.where if b.has_fn else b.span_def
+    mod = b.scope
+    if (not isinstance(d, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+            or type(mod) is not _types.ModuleType):
+        return None
+    F = vars(mod).get(d.name, _MISSING)
+    _ib.observe(mod, d.name, F)
+    if type(F) is not _types.FunctionType or F.__code__.co_name != d.name:
+        return None
+    mine = b.__dict__.get("_n_dump")
+    if mine is None or mine[0] is not d:
+        mine = b.__dict__["_n_dump"] = (d, _ast.dump(d))
+    code = F.__code__
+    own = _N_DUMPS.get(id(code))
+    if own is None or own[0] is not code:
+        try:
+            own = (code, _ast.dump(_helper_tree(F)))
+        except (Unclassified, OSError, TypeError, SyntaxError):
+            own = (code, None)
+        _N_DUMPS[id(code)] = own
+    if mine[1] != own[1]:
+        return None
+    first = d.decorator_list[0].lineno if d.decorator_list else d.lineno
+    return F, d, code.co_firstlineno - first
+
+
+_N_DUMPS = {}
+
+
+def _n_named(b, form, name):
+    """Whether a named member of form `form` names `name` in a function
+    spelled as the definition `b` walks (a cheap test before _n_site)."""
+    d = b.where if b.has_fn else b.span_def
+    dn = getattr(d, "name", None)
+    return any(k[1] == form and k[3] == name
+               and getattr(k[0], "__name__", None) == dn for k in N_MEMBERS)
+
+
+def _member_arg(call, fn, arg, p, path, group, visitor):
+    """Rule N at a receiver condition of callee `fn`'s parameter p: False
+    unless the call stands in a named member's function and hands that
+    parameter; else discharged by bound (_n_discharge) or refused."""
+    if not N_MEMBERS or path or not _n_named(visitor.b, "arg", p):
+        return False
+    site = _n_site(visitor.b)
+    if site is None:
+        return False
+    F, _d, off = site
+    key = (F, "arg", fn, p)
+    if key not in N_MEMBERS:
+        return False
+    return _n_discharge(key, call.lineno + off, _ast.unparse(arg), group)
+
+
+def _member_method(n, group, visitor):
+    """Rule N at method call `n`: False unless its receiver is a Name a
+    named member names in the walked function; else discharged by bound
+    (_n_discharge) or refused."""
+    if (not N_MEMBERS or not isinstance(n.func.value, _ast.Name)
+            or not _n_named(visitor.b, "method", n.func.value.id)):
+        return False
+    site = _n_site(visitor.b)
+    if site is None:
+        return False
+    F, _d, off = site
+    key = (F, "method", "." + n.func.attr, n.func.value.id)
+    if key not in N_MEMBERS:
+        return False
+    return _n_discharge(key, n.lineno + off, n.func.value.id, group)
+
+
+def _member_callee(n, form, visitor):
+    """Rule N member (B) (ruling FOUR-R11-A20 (1)) at call `n`, which the
+    visitor would refuse ("a call ..." / "a method call this walk does not
+    classify"): False unless a named member of form `form` names this
+    callee in the walked function (form "call": a Name callee; form
+    "result": a method whose receiver is a call of the member's method);
+    else discharged by bound (_n_discharge: spelling, bindings, census) and
+    marked, or refused. The caller then walks the arguments and the
+    receiver as for any call; no provenance is assigned."""
+    if not N_MEMBERS:
+        return False
+    if form == "call":
+        callee = name = n.func.id
+        line = n.lineno
+    else:
+        recv = n.func.value
+        if not (isinstance(recv, _ast.Call)
+                and isinstance(recv.func, _ast.Attribute)):
+            return False
+        callee, name = "." + n.func.attr, recv.func.attr
+        line = n.func.end_lineno
+    d = visitor.b.where if visitor.b.has_fn else visitor.b.span_def
+    dn = getattr(d, "name", None)
+    if not any(k[1] == form and k[2] == callee and k[3] == name
+               and getattr(k[0], "__name__", None) == dn for k in N_MEMBERS):
+        return False
+    site = _n_site(visitor.b)
+    if site is None:
+        return False
+    F, _d, off = site
+    key = (F, form, callee, name)
+    if key not in N_MEMBERS:
+        return False
+    return _n_discharge(key, line + off, _ast.unparse(n), form)
+
+
+def _n_discharge(key, line, spelled_got, group):
+    """The static half of rule N at a member's site, then its mark: the
+    member's spelling and group as named, each bound name holding its
+    object, each census equal to its frozen rows; any difference refuses.
+    No provenance is assigned (FOUR-R11-A10 (1)(a)); the mark is what the
+    bound test observes (FOUR-R11-A4 (2)(e))."""
+    F, _form, callee, name = key
+    label, spelled, want, binds, census = N_MEMBERS[key]
+    if spelled_got != spelled:
+        raise Unclassified((line, f"rule N {label}: the member is spelled "
+                                  f"{spelled_got}, not {spelled}"))
+    if group != want:
+        raise Unclassified((line, f"rule N {label}: the callee asks {group} "
+                                  f"of {name}, the member names {want}"))
+    for mod, nm, obj in binds:
+        got = vars(mod).get(nm, _MISSING)
+        # an absent binding is recorded as the binder's own absence, so the
+        # walk cache stays valid while the name stays unbound (member (B))
+        _ib.observe(mod, nm, _ib._MISSING if got is _MISSING else got)
+        if got is not obj:
+            raise Unclassified((line, f"rule N {label}: {nm} is not the "
+                                      "object the member names"))
+    for owner, nm, frozen in census:
+        rows = _n_census(owner, nm)
+        frozen = tuple(frozen)
+        if rows != frozen:
+            at = next((i for i, (x, y) in enumerate(zip(rows, frozen))
+                       if x != y), min(len(rows), len(frozen)))
+            got = rows[at] if at < len(rows) else "nothing"
+            was = frozen[at] if at < len(frozen) else "nothing"
+            raise Unclassified((line, f"rule N {label}: the census of {nm} in "
+                                      f"{owner.__name__} differs at row {at}: "
+                                      f"{got!r}, frozen {was!r}"))
+    BOUND_MARKS.append(("N", F, line, callee, name, group, label))
+    return True
+
+
+_N_BINDERS = (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)
+
+
+def _n_census(owner, name):
+    """Rule N's static half (FOUR-R11-A10 (1)(a)): the rows of `name` in
+    `owner`, read from source, no provenance assigned. A module: every
+    occurrence of the Name (the top definition it stands in, its line there
+    or 0 at module level, its context, its parent's text) and a row for
+    every attribute or string spelling of it. A function: every occurrence
+    of the Name in its own definition (line and column there, context, the
+    field it stands in, the use around it, the statement's text), every
+    other form that binds the name, or, for name "return", its own return
+    statements (nested definitions and lambdas excluded), or, for a name
+    ".m", every attribute m (member (B), FOUR-R11-A20 (1))."""
+    if isinstance(owner, _types.ModuleType):
+        tree = _module_tree(owner)
+        if tree is None:
+            raise Unclassified((0, f"rule N: {owner.__name__}: no source"))
+        hit = _N_CENSUS.get((id(tree), name))
+        if hit is not None and hit[0] is tree:
+            return hit[1]
+        idx = Bindings._name_index(None, tree)
+        rows = [(top.name if top is not None else "<module>",
+                 n.lineno - top.lineno if top is not None else 0,
+                 type(n.ctx).__name__, _ast.unparse(par)[:160])
+                for n, par, top, _nested in idx["name"].get(name, ())]
+        rows += [("attr", ln) for ln in idx["attr"].get(name, ())]
+        rows += [("str", c.lineno) for c, _s in idx["str"].get(name, ())]
+        out = tuple(sorted(rows, key=repr))
+        _N_CENSUS[(id(tree), name)] = (tree, out)
+        return out
+    code = owner.__code__
+    hit = _N_CENSUS.get((id(code), name))
+    if hit is not None and hit[0] is code:
+        return hit[1]
+    tree = _helper_tree(owner)
+    par = {}
+    for x in _ast.walk(tree):
+        for c in _ast.iter_child_nodes(x):
+            par[id(c)] = x
+    rows = []
+    if name == "return":
+        todo = list(tree.body)
+        while todo:
+            x = todo.pop()
+            if isinstance(x, _N_BINDERS + (_ast.Lambda,)):
+                continue
+            if isinstance(x, _ast.Return):
+                rows.append((x.lineno, "return", _ast.unparse(x)[:200]))
+            todo.extend(_ast.iter_child_nodes(x))
+    if name.startswith("."):
+        # member (B) (FOUR-R11-A20 (1)): every attribute spelled `name` in
+        # the function's own definition (its last line and column there,
+        # context, the expression around it)
+        rows += [(x.end_lineno, x.end_col_offset, type(x.ctx).__name__,
+                  _ast.unparse(par.get(id(x), x))[:200])
+                 for x in _ast.walk(tree)
+                 if isinstance(x, _ast.Attribute) and x.attr == name[1:]]
+    for x in (_ast.walk(tree) if name != "return"
+              and not name.startswith(".") else ()):
+        if isinstance(x, _ast.Name) and x.id == name:
+            u, p = x, par.get(id(x))
+            while p is not None and (
+                    (isinstance(p, (_ast.Attribute, _ast.Subscript))
+                     and p.value is u)
+                    or (isinstance(p, _ast.Call) and p.func is u)):
+                u, p = p, par.get(id(p))
+            field = next((f for f, v in _ast.iter_fields(p) if v is u or (
+                isinstance(v, list) and any(y is u for y in v))), "?")
+            st = p
+            while st is not None and not isinstance(st, _ast.stmt):
+                st = par.get(id(st))
+            rows.append((x.lineno, x.col_offset, type(x.ctx).__name__,
+                         type(p).__name__ + "." + field,
+                         _ast.unparse(u)[:200],
+                         _ast.unparse(st).split("\n")[0][:120]))
+        elif ((isinstance(x, _ast.arg) and x.arg == name)
+              or (isinstance(x, _N_BINDERS) and x.name == name)
+              or (isinstance(x, (_ast.Global, _ast.Nonlocal))
+                  and name in x.names)
+              or (isinstance(x, _ast.alias)
+                  and name in (x.name, x.asname))
+              or (isinstance(x, _ast.ExceptHandler) and x.name == name)
+              or (isinstance(x, (_ast.MatchAs, _ast.MatchStar))
+                  and x.name == name)):
+            rows.append((getattr(x, "lineno", 0), type(x).__name__))
+    out = tuple(sorted(rows, key=repr))
+    _N_CENSUS[(id(code), name)] = (code, out)
+    return out
 
 
 class Visitor:
@@ -3715,6 +3982,12 @@ class Visitor:
                 self.p.met["named tuple " + name] += 1
                 self.effects.append(("call", "pure"))
                 return
+            # round 11 (rule N member (B), ruling FOUR-R11-A20 (1)): a named
+            # call whose callee's identity the bound test asserts at run
+            # time; its arguments walked as any call's, marked
+            if kind == "module" and _member_callee(n, "call", self):
+                self._pure(n, name, written)
+                return
             fn = self._check(n, self.b.callee, n.func)
             if fn is None or _inspect.iscoroutinefunction(fn):
                 self.fail(n, f"a call this walk does not classify: {name}")
@@ -3777,7 +4050,12 @@ class Visitor:
                 self.p.met["plain function " + name] += 1
                 self.effects.append(("call", "pure"))
                 return
-            if n.func.attr not in self.p.pure_methods:
+            # round 11 (rule N member (B), ruling FOUR-R11-A20 (1)): a named
+            # method whose callee and receiver class the bound test asserts
+            # by identity at run time, marked; its receiver is still read
+            # below as any method's
+            if (n.func.attr not in self.p.pure_methods
+                    and not _member_callee(n, "result", self)):
                 self.fail(n, f"a method call this walk does not classify: {name}")
             self.p.met["method ." + n.func.attr] += 1
             self._walked_nodes.add(id(n.func))
@@ -3791,6 +4069,9 @@ class Visitor:
                 # walk that binds a handed instance, a receiver read from it
                 # carries its path's condition (the A5 clause)
                 bound = self.helper is None and _bound_method(n, group, self)
+                # round 11 (rule N, ruling FOUR-R11-A10 (1)): a named
+                # member's receiver is discharged by its bound, marked
+                bound = bound or _member_method(n, group, self)
                 prov = None if bound else receiver_provenance(
                     n.func.value, self.b, self.p)
                 # each alternative of a union on its own (round 11, run 12)
