@@ -25,7 +25,9 @@
 #     find no ROUNDS process, else the end is HELD and no disarm, VR6, revert or restore step runs.
 #     Then: the sentinel removed (proven absent); VR6 (ft_vr6_check); A3 the revert (ft_vm_install.sh revert, then
 #     the pre-image copied back if the installed DLL still differs; it ends with the installed DLL's digest equal to
-#     the pre-image's, else HELD); the restoration and the POST inventory (ft_restore_check).
+#     the pre-image's, else HELD); the restoration and the POST inventory (ft_restore_check). The revert's pre-image
+#     copy and the restoration each read the process table again first (ft_still_gone, R6-A3.11.48 M1): a ROUNDS
+#     present or a table unread there ends HELD with nothing more written.
 #   - A5: the release only on proof: no failure (bad=0), POST inventory equal to PRE over every file, the installed
 #     DLL's digest equal to its pre-image's and the sentinel absent. The release itself is proven by resume.ps1's
 #     exit code 0 AND a -Status reading (exit 0, its holder table printed) without the holder frame-time:
@@ -152,19 +154,35 @@ ft_exit_proven() {
   [ "$s" = unknown ] && GONE="process-table-unreadable" || GONE="rounds-still-running"
   return 1
 }
-# A3: the revert ends with the installed DLL's digest equal to the pre-image's
+# A2 at the writes after the exit was proven (R6-A3.11.48 M1): a ROUNDS can appear after ft_exit_proven's reading
+# (a Steam launch request still outstanding). ft_vm_install.sh revert refuses while ROUNDS runs (its line 59); the
+# copy below and the restoration must refuse the same way. ft_still_gone <step> reads the table once more with
+# rounds_state, this script's one reader of it, which reads a failed reading as "unknown", and returns 0 only on
+# "no". Otherwise it sets GONE to the step's reason token and returns 1, and the caller writes nothing more: the end
+# is HELD.
+ft_still_gone() {
+  local s; s=$(rounds_state)
+  [ "$s" = no ] && return 0
+  echo "$(st) FT-VM-LEASED $1 REFUSED: the process table reads '$s' (a ROUNDS process, or the table unread): nothing copied, no restoration step runs"
+  [ "$s" = unknown ] && GONE="process-table-unreadable-at-$1" || GONE="rounds-running-at-$1"
+  return 1
+}
+# A3: the revert ends with the installed DLL's digest equal to the pre-image's. Returns 2 when the pre-image copy is
+# refused by ft_still_gone (nothing copied); 0 otherwise.
 ft_revert() {
   local r now
   bash "$INSTALL" revert; r=$?
   echo "$(st) FT-VM-LEASED revert rc=$r"
   now=$(sha "$PLUG")
   if [ "$now" != "$PRE_DLL" ]; then
+    ft_still_gone revert || return 2
     echo "$(st) FT-VM-LEASED installed DLL $now is not the pre-image $PRE_DLL: the pre-image copied back"
     cp -p "$PRE/CompetitiveRounds.dll" "$PLUG"
     now=$(sha "$PLUG")
   fi
   if [ "$now" = "$PRE_DLL" ]; then DLL_EQ=1; echo "$(st) FT-VM-REVERT proven: the installed DLL $now equals its pre-image"
   else echo "$(st) FT-VM-REVERT FAILED: the installed DLL $now, its pre-image $PRE_DLL"; bad=1; fi
+  return 0
 }
 ft_exit_chain() {
   local why
@@ -178,7 +196,8 @@ ft_exit_chain() {
   bash "$INSTALL" disarm
   if [ -e "$ARM" ]; then echo "$(st) FT-VM-LEASED sentinel STILL PRESENT after the disarm"; bad=1; fi
   ft_vr6_check
-  ft_revert
+  ft_revert || { ft_hold "$GONE"; return 0; }
+  ft_still_gone restore || { ft_hold "$GONE"; return 0; }
   ft_restore_check
   if [ "$bad" = 0 ] && [ "$POST_EQ" = 1 ] && [ "$DLL_EQ" = 1 ] && [ ! -e "$ARM" ]; then
     echo "$(st) FT-VM-LEASED install proven equal to the pre-image: POST inventory equals PRE ($(wc -l < "$OUT/inventory-post.txt") files), DLL digest equal, sentinel absent"
