@@ -1719,14 +1719,16 @@ async def _language(dsn, extension, program):
     """The extension and the program, each in its own savepoint, inside one
     REPEATABLE READ transaction rolled back after. The position is bound to
     its transaction (catalog_position, round 10): res['ended'] is
-    'ENDED:...' when the program ended it, else None."""
+    'ENDED:...' when the program ended it, else None; res['outside'] the
+    shared catalogs whose rows outside RESTRICT differ (round 11)."""
     conn = await _connect(dsn)
     tr = conn.transaction(isolation="repeatable_read")
     await tr.start()
     try:
         pos = await catalog_position.start(conn)
         before = await cd.snapshot(conn)
-        res = {"extension": None, "refused": None, "ended": None}
+        shared = await ca.outside(conn)
+        res = {"extension": None, "refused": None, "ended": None, "outside": None}
         try:
             async with conn.transaction():
                 await conn.execute("CREATE EXTENSION IF NOT EXISTS %s" % extension)
@@ -1743,6 +1745,10 @@ async def _language(dsn, extension, program):
         if res["ended"]:
             await _after_ended(conn)
         res["diff"] = cd.diff(before, await cd.snapshot(conn))
+        if not res["ended"]:
+            # round 11 (FIX-R11-CAT, swept by class): the shared rows outside
+            # RESTRICT are compared in this position too
+            res["outside"] = sorted(ca.keys(ca.outside_diff(shared, await ca.outside(conn))))
         return res
     finally:
         await tr.rollback()
@@ -1759,6 +1765,7 @@ def test_language_control(chain, name, finding, extension, program):
     deleted."""
     res = asyncio.run(_language(chain.dsn, extension, program))
     assert res["ended"] is None, res
+    assert res["outside"] == [], res
     if res["extension"] is None:
         outcome = "caught" if cd.rows_on(res["diff"], MAIL) else "clean"
         _record_control(chain, name, finding, res, outcome)
