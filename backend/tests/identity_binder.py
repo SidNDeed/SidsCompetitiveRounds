@@ -72,7 +72,22 @@ _INDEX = {}
 # proof that reads the module's text freezes it, after which a registration
 # for that module (a second text, a re-registration) refuses.
 _REGISTERED = {}
-_TESTS_DIR = _os.path.normcase(_os.path.dirname(_os.path.realpath(__file__)))
+_REALPATHS = {}
+
+
+def _real(path):
+    """The normalised real path of path text `path`, resolved once per text
+    for the session (round 11, probe 5: a resolution per proof was millions
+    of filesystem queries, each recorded by the review tripwire, 1.8 GB of
+    records and most of a1's time). The bytes a proof compiles are still
+    checked by size, modification time and md5 (_fresh)."""
+    hit = _REALPATHS.get(path)
+    if hit is None:
+        hit = _REALPATHS[path] = _os.path.normcase(_os.path.realpath(path))
+    return hit
+
+
+_TESTS_DIR = _os.path.dirname(_real(__file__))
 _MEASURED = ("main",)
 
 
@@ -101,8 +116,7 @@ def register_source(mod, src, filename):
             if m is not None):
         raise RegistrationRefused("a registration from the measured module")
     cf = caller.get("__file__")
-    if not isinstance(cf, str) or _os.path.normcase(_os.path.dirname(
-            _os.path.realpath(cf))) != _TESTS_DIR:
+    if not isinstance(cf, str) or _os.path.dirname(_real(cf)) != _TESTS_DIR:
         raise RegistrationRefused("a registration from outside the tests")
     hit = _REGISTERED.get(id(mod))
     if hit is not None and hit[0] is mod:
@@ -136,7 +150,7 @@ def _origin(mod):
         return "frozen"
     if not isinstance(origin, str) or not origin.endswith(".py"):
         return None
-    return _os.path.normcase(_os.path.realpath(origin))
+    return _real(origin)
 
 
 def _code_file_ok(code, mod, origin):
@@ -144,7 +158,7 @@ def _code_file_ok(code, mod, origin):
         return True
     if isinstance(origin, tuple):
         return code.co_filename == origin[1]
-    return _os.path.normcase(_os.path.realpath(code.co_filename)) == origin
+    return _real(code.co_filename) == origin
 
 
 def _fresh(mod):
@@ -223,16 +237,21 @@ def _owner_module(fn):
 def code_defined(code, mod):
     """Whether code object `code` equals one compiled afresh from module
     `mod`'s own source (same qualified name, same first line; for a .py
-    module the same file)."""
+    module the same file).
+
+    Round 11 (ruling FOUR-R11-A1 (4), probe 5): the module's proof once,
+    then code objects by identity: a verdict kept for this code object of
+    this module is returned before any file is read again (a code object is
+    immutable; it equals what it was proven equal to)."""
+    key = (id(code), id(mod))
+    hit = _CODE_OK.get(key)
+    if hit is not None and hit[0] is code and hit[1] is mod:
+        return hit[2]
     codes = _fresh(mod)
     if codes is None:
         return False
     if not _code_file_ok(code, mod, _origin(mod)):
         return False
-    key = (id(code), id(mod))
-    hit = _CODE_OK.get(key)
-    if hit is not None and hit[0] is code and hit[1] is mod:
-        return hit[2]
     index = _INDEX.get(id(codes))
     if index is None or index[0] is not codes:
         table = {}
