@@ -183,6 +183,20 @@ def test_s1_text_values_are_encoded_and_names_match_the_bot_pattern():
         assert ae.FACT_NAME.fullmatch(name), name
 
 
+def test_s1_the_section_encoder_agrees_with_the_display_encoder():
+    """`_section_enc` is kept apart from `_aer_enc` only for the privacy
+    pass; on every code point of the escaped set and its neighbours, and on
+    the backslash, the two must write the same text."""
+    points = set(range(0, 0x300)) | {0x5C}
+    for cp in ae.AER_ESC:
+        points |= {cp - 1, cp, cp + 1}
+    points = sorted(p for p in points if 0 <= p <= 0x10FFFF and not 0xD800 <= p <= 0xDFFF)
+    for cp in points:
+        text = "a" + chr(cp) + chr(0x5C) + chr(cp)
+        assert ae._section_enc(text) == ae._aer_enc(text), hex(cp)
+    assert ae._section_enc("") == ae._aer_enc("") == ""
+
+
 # ── S2: the unhandled cases, in words ─────────────────────────────────────
 
 def test_s2_no_record_anywhere():
@@ -267,7 +281,7 @@ def test_s3_summary_counts_totals_and_days():
     s = ae.summary_section("card", data, [g1, g2, g3], a, 0)
     f, d = _facts(s["facts"]), _facts(s["days30"])
     assert (s["oi"], s["state"]) == (0, "ok")
-    assert (f["games"], f["with_record"], f["attached"], f["waiting"]) == ("3", "2", "1", "1")
+    assert (f["games"], f["with_record"], f["attached"], f["waiting"]) == ("3", "2", "1", "2")
     assert (f["conflict"], f["purged"]) == ("1", "0")
     assert f["self.hands"] == "4" and f["self.slots"] == "10" and f["meas.hands"] == "1"
     assert d["self.games"] == "2" and d["self.hands"] == "7"
@@ -290,6 +304,12 @@ def test_s3_identity_clock_summary_counts_stored_words_and_has_no_days():
     assert f["post_clock.ok"] == "1" and f["post_clock.other_proc"] == "1"
     assert f["conn_class.unknown"] == "1" and not any("BAD" in k for k in f)
     assert s["days30"] == [] and "contrib" not in f
+
+
+def test_s3_the_daily_window_is_pop_days_utc_days_today_included():
+    today = dt.datetime.now(dt.timezone.utc).date()
+    day0 = ae._section_day0()
+    assert (today - day0).days + 1 == ae.DISPLAY_DEFAULTS["pop_days"]
 
 
 def test_s3_audit_counts_states_per_source():
@@ -354,6 +374,9 @@ def test_s4_plan_shows_every_section_leaf_once(bot):
     assert [s["state"] for s in page.games[0]["sections"]] == ["ok", "unavailable", "ok"]
     kinds = [i.kind for i in plan]
     assert kinds.count("section") == 3 and "facts" in kinds
+    per_line = bot["AER_FACTS_PER_LINE"]
+    assert all(len(i.fields) <= 2 * per_line for i in plan if i.kind == "facts")
+    assert any(len(i.fields) == 2 * per_line for i in plan if i.kind == "facts")
     for shape in ("pair", "player"):
         sbody = _summary_sections_for(summary_body(shape=shape), a, b)
         spage, splan = check_plan(bot, sbody)
@@ -367,7 +390,7 @@ def test_s4_fallback_text_carries_the_facts(bot):
     page = bot["_aer_decode_response"](copy.deepcopy(body), "1a")
     plan = bot["_aer_plan"](page)
     text, files = bot["_aer_fallback"]("H", plan, "g", 1)
-    shown = text if not files else files[0].fp.getvalue().decode("utf-8")
+    shown = text if not files else files[0].data.decode("utf-8")
     assert "pool_state=ok" in shown and "contrib1.hands=3" in shown
     assert "conflict_kind=dup" in shown and "paired=waiting" in shown
 

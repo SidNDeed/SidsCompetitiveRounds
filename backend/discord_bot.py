@@ -18063,15 +18063,20 @@ def _aer_cell_item(page, path, table, cell, phase="1a"):
     return _aer_item("cell" if table == "seat" else "summary", head, tuple(pairs))
 
 
-def _aer_fact_items(add, path, head, facts):
-    """Facts as plan lines, AER_FACTS_PER_LINE to a line, in the api's order."""
+def _aer_fact_items(path, head, facts):
+    """Facts as plan lines, AER_FACTS_PER_LINE to a line, in the api's order;
+    each fact's name and value are their own plan fields."""
+    out = []
     for start in range(0, len(facts), AER_FACTS_PER_LINE):
-        chunk = tuple(enumerate(facts[start:start + AER_FACTS_PER_LINE], start))
-        fields = tuple(f for i, _fact in chunk for f in (path + (i, 0), path + (i, 1)))
-        parts = tuple(p for _i, (name, value) in chunk for p in (name, _aer_txt(value)))
-        text = " ".join([head] + ["%s=%s" % (name, _aer_txt(value))
-                                  for _i, (name, value) in chunk]).strip()
-        add(AerItem("facts", fields, parts, text))
+        fields, parts, texts = [], [], []
+        for i in range(start, min(start + AER_FACTS_PER_LINE, len(facts))):
+            name, value = facts[i]
+            fields.extend((path + (i, 0), path + (i, 1)))
+            parts.extend((name, _aer_txt(value)))
+            texts.append("%s=%s" % (name, _aer_txt(value)))
+        out.append(AerItem("facts", tuple(fields), tuple(parts),
+                           " ".join([head] + texts).strip()))
+    return out
 
 
 def _aer_section_head(at, sec, window):
@@ -18082,24 +18087,29 @@ def _aer_section_head(at, sec, window):
                (at + ("truncated",), "truncated=", _aer_txt(sec["truncated"]))))
 
 
-def _aer_game_section_items(add, at, sec):
+def _aer_game_section_items(at, sec):
     """One game section (phase 2): its line, its game facts, then each seat's
     state and facts."""
-    add(_aer_item("section", "EVIDENCE", _aer_section_head(at, sec, ())))
-    _aer_fact_items(add, at + ("game",), "", sec["game"])
-    for si, (subject, state, facts) in enumerate(sec["seats"]):
-        add(_aer_item("facts", "SEAT", ((at + ("seats", si, "subject"), "#", _aer_txt(subject)),
-                                        (at + ("seats", si, "state"), "", _aer_txt(state)))))
-        _aer_fact_items(add, at + ("seats", si, "facts"), "", facts)
+    out = [_aer_item("section", "EVIDENCE", _aer_section_head(at, sec, ()))]
+    out.extend(_aer_fact_items(at + ("game",), "", sec["game"]))
+    seats = sec["seats"]
+    for si in range(len(seats)):
+        subject, state, facts = seats[si]
+        out.append(_aer_item("facts", "SEAT", (
+            (at + ("seats", si, "subject"), "#", _aer_txt(subject)),
+            (at + ("seats", si, "state"), "", _aer_txt(state)))))
+        out.extend(_aer_fact_items(at + ("seats", si, "facts"), "", facts))
+    return out
 
 
-def _aer_summary_section_items(add, at, sec):
+def _aer_summary_section_items(at, sec):
     """One summary section (phase 2): its line with the window, its facts,
     then its 30-day facts."""
     window = ((at + ("oi",), "window #", _aer_txt(sec["oi"])),)
-    add(_aer_item("section", "EVIDENCE", _aer_section_head(at, sec, window)))
-    _aer_fact_items(add, at + ("facts",), "", sec["facts"])
-    _aer_fact_items(add, at + ("days30",), "30D", sec["days30"])
+    out = [_aer_item("section", "EVIDENCE", _aer_section_head(at, sec, window))]
+    out.extend(_aer_fact_items(at + ("facts",), "", sec["facts"]))
+    out.extend(_aer_fact_items(at + ("days30",), "30D", sec["days30"]))
+    return out
 
 
 def _aer_plan(page, phase="1a"):
@@ -18142,8 +18152,9 @@ def _aer_plan(page, phase="1a"):
                 (at + ("flags", fi, k), lbl,
                  _aer_txt(f[k]) if k != "subject" else ("-" if f[k] is None else "#%d" % f[k]))
                 for k, lbl in _AER_FLAG_LABELS)))
-        for xi, sec in enumerate(g.get("sections", ())):
-            _aer_game_section_items(add, at + ("sections", xi), sec)
+        sections = g["sections"]
+        for xi in range(len(sections)):
+            items.extend(_aer_game_section_items(at + ("sections", xi), sections[xi]))
     for wi, w in enumerate(page.windows):
         add(_aer_item("window", "WINDOW", tuple(
             (("windows", wi, k), lbl,
@@ -18153,8 +18164,8 @@ def _aer_plan(page, phase="1a"):
         add(_aer_item("summary_head", "SUMMARY", ((("summary", si, "oi"), "window #", _aer_txt(oi)),)))
         for ci, cell in enumerate(rows):
             add(_aer_cell_item(page, ("summary", si, "cells", ci), "summary", cell, phase))
-    for xi, sec in enumerate(page.sections):
-        _aer_summary_section_items(add, ("sections_summary", xi), sec)
+    for xi in range(len(page.sections)):
+        items.extend(_aer_summary_section_items(("sections_summary", xi), page.sections[xi]))
     for ki in sorted(page.catalog):
         row = page.catalog[ki]
         add(_aer_item("label", "KEY", tuple(

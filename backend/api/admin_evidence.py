@@ -1905,8 +1905,8 @@ async def _summary_page(rep, shape, rows, requested, subjects, accounts):
 # otherwise end it, lesson 235).
 
 # A page carries sections only when the caller asks for them: a 1a caller
-# (an older bot) receives the 1a body byte for byte, so either deploy order
-# of the api and the bot serves every page.
+# (an older bot) receives a body with no section key and a 1a audit row, so
+# either deploy order of the api and the bot serves every page.
 SECTIONS_HEADER = "X-Evidence-Sections"
 SECTIONS_PHASE = "2"
 SECTION_SOURCES = ("card", "combat", "identity_clock")
@@ -2072,7 +2072,24 @@ def _fact(name, value):
         return [name, "%r" % value]
     if isinstance(value, (_dt.datetime, _dt.date)):
         return [name, value.isoformat()]
-    return [name, _text("%s" % value)]
+    return [name, _section_enc(("%s" % value)[:AER_CONTRACT_BOUNDS["TEXT_MAX"]])]
+
+
+def _section_enc(value):
+    """A section value's encoder: the same reversible escape as `_aer_enc`
+    (test_admin_evidence_sections checks the two agree), kept as its own
+    function so section values never join `_aer_enc`'s analysed summary,
+    which the display slots `name`, `reason` and `invalidated` read."""
+    out = []
+    for ch in value:
+        cp = ord(ch)
+        if ch == _BACKSLASH:
+            out.append(_BACKSLASH * 2)
+        elif cp in AER_ESC:
+            out.append("%su{%x}" % (_BACKSLASH, cp))
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _pair_of(row, a, b):
@@ -2222,7 +2239,9 @@ def _contrib_add(src, totals, row, extra=()):
 def summary_section(src, data, games, account, oi):
     """One window subject's section over the window's covered games (B10
     phase 2): counts, contribution totals, and the account's daily totals over
-    its last `pop_days` UTC days."""
+    its last `pop_days` UTC days. `attached`, `waiting` and `other` count the
+    games by their pairing state (a record of either seat); `with_record`,
+    `conflict` and `purged` count the account's own records."""
     if data is None:
         return {"oi": oi, "src": src, "state": "unavailable", "truncated": False,
                 "facts": [], "days30": []}

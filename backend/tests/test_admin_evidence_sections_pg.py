@@ -212,9 +212,9 @@ def test_p2_every_report_kind_shows_the_stored_values_and_the_header_decides(rig
             headed = await get(rig, path, admin, HEADER)
             plain = await get(rig, path, admin)
             out[shape] = (headed, plain, (await rig.audits())[before:])
-        return out
+        return out, sa, sb
 
-    out = rig.run(go())
+    out, sa, sb = rig.run(go())
     old = old_bot_ns()
     for shape, ((hs, hc), (ps, pc), audits) in out.items():
         assert (hs, ps) == (200, 200), (shape, hc[:300], pc[:300])
@@ -304,9 +304,17 @@ def test_p2_unhandled_cases_are_words_and_the_page_answers(rig, monkeypatch):
         st, c = await get(rig, "%s/game/%s" % (ROOT, elsewhere.hex), admin, HEADER)
         audits = (await rig.audits())[before:]
         plain = await get(rig, "%s/game/%s" % (ROOT, elsewhere.hex), admin)
-        return ids, pages, (st, _body(c)), audits, plain
+        # a statement that returns exactly its LIMIT marks the section truncated
+        monkeypatch.setitem(ae.AER_CONTRACT_BOUNDS, "SECTION_ROWS_MAX", 2)
+        st2, c2 = await get(rig, "%s/game/%s" % (ROOT, mixed.hex), admin, HEADER)
+        monkeypatch.setitem(ae.AER_CONTRACT_BOUNDS, "SECTION_ROWS_MAX", 3)
+        st3, c3 = await get(rig, "%s/game/%s" % (ROOT, mixed.hex), admin, HEADER)
+        cut = (st2, _section(_body(c2), 0, "identity_clock")["truncated"],
+               st3, _section(_body(c3), 0, "identity_clock")["truncated"])
+        return ids, pages, (st, _body(c)), audits, plain, cut
 
-    (none, wait, other, mixed), pages, failed, audits, plain = rig.run(go())
+    (none, wait, other, mixed), pages, failed, audits, plain, cut = rig.run(go())
+    assert cut == (200, True, 200, False), cut
     assert all(st == 200 for st, _b in pages.values())
     body = pages[none][1]
     for src in ae.SECTION_SOURCES:
