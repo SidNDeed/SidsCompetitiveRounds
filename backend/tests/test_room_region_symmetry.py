@@ -516,6 +516,94 @@ def test_a_reading_that_is_handed_in_is_the_reading_that_is_used(monkeypatch):
     assert main._region_agreed("eu", "us", ttl + 1) == "eu" == main._region_agreed("us", "eu", ttl + 1)
 
 
+class _FixedClock:
+    """Stands in for main's `time` module. monotonic() answers `at` on every
+    read and counts its reads. Everything else is the real module's."""
+
+    def __init__(self, real, at):
+        self._real, self.at, self.reads = real, at, 0
+
+    def monotonic(self):
+        self.reads += 1
+        return self.at
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+# Codex round REGION-R2: every instant and every stamp above is a whole number
+# of seconds, so a reading that is cut down, rounded or moved by less than a
+# second answers the same there. Here the sightings are stamped off the whole
+# seconds, which puts the instant they expire off them too (at .375), and the
+# pick is asked a sixteenth of a second before that instant, at it, and a
+# sixteenth after it. The three lie inside one whole second and on one side of
+# its half, so a reading cut down, rounded up, rounded to the nearest or moved
+# by half a second falls on the wrong side of the expiry at one of them.
+_SIGHTED_AT = 3 * main._REGION_SEEN_TTL_SECONDS + 0.375
+_EXPIRES_AT = _SIGHTED_AT + main._REGION_SEEN_TTL_SECONDS
+_SIXTEENTH = 0.0625
+_AROUND_EXPIRY = [
+    ("a sixteenth before", _EXPIRES_AT - _SIXTEENTH, True),
+    ("at the instant", _EXPIRES_AT, True),
+    ("a sixteenth after", _EXPIRES_AT + _SIXTEENTH, False),
+]
+
+# (the pick's arguments, the region whose reporters are stamped, what the pick
+# says while the sighting is live, what it says once it has expired). Each
+# shape puts ONE use of the pick's reading in charge of the answer: the
+# confirmation of the first or the second home, each of the three weighings
+# of two different regions, the seen= field.
+_FRACTION_SHAPES = [
+    # a home that only the sighting confirms (REGION-R2's scenario), and its mirror
+    (("eu", "us", "eu", ""), "us", ("us", "seen=y", "home_ok=(y,-)"), ("eu", "seen=n", "home_ok=(n,-)")),
+    (("eu", "", "eu", "us"), "us", ("us", "seen=y", "home_ok=(-,y)"), ("eu", "seen=n", "home_ok=(-,n)")),
+    # two homes that differ, each confirmed by a live snapshot: the first weighing
+    (("eu", "eu", "us", "us"), "us", ("us", "seen=y", "home_ok=(y,y)"), ("eu", "seen=n", "home_ok=(y,y)")),
+    (("us", "us", "eu", "eu"), "us", ("us", "seen=y", "home_ok=(y,y)"), ("eu", "seen=n", "home_ok=(y,y)")),
+    # two live snapshots that differ and no home: the second weighing
+    (("us", "", "eu", ""), "us", ("us", "seen=y", "home_ok=(-,-)"), ("eu", "seen=n", "home_ok=(-,-)")),
+    (("eu", "", "us", ""), "us", ("us", "seen=y", "home_ok=(-,-)"), ("eu", "seen=n", "home_ok=(-,-)")),
+    # two homes that differ and no snapshot: confirmed while seen, the third weighing after
+    (("", "eu", "", "us"), "us", ("us", "seen=y", "home_ok=(n,y)"), ("eu", "seen=n", "home_ok=(n,n)")),
+    (("", "us", "", "eu"), "us", ("us", "seen=y", "home_ok=(y,n)"), ("eu", "seen=n", "home_ok=(n,n)")),
+    # two homes that agree: the room does not move, the two fields do
+    (("", "eu", "", "eu"), "eu", ("eu", "seen=y", "home_ok=(y,y)"), ("eu", "seen=n", "home_ok=(n,n)")),
+]
+
+
+@pytest.mark.parametrize("args, sighted, live, expired", _FRACTION_SHAPES)
+@pytest.mark.parametrize("label, instant, is_live", _AROUND_EXPIRY)
+def test_a_sighting_expires_at_its_own_instant_and_not_at_a_whole_second(
+        monkeypatch, capsys, label, instant, is_live, args, sighted, live, expired):
+    """The pick's reading is used as it was read, fraction included, at every
+    place that asks the corroboration map: a sighting counts up to and
+    including the instant it expires and not a sixteenth of a second longer."""
+    main._REGION_SEEN[sighted] = {
+        f"7656119800000010{i}": _SIGHTED_AT for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+    stand_in = _FixedClock(main.time, instant)
+    monkeypatch.setattr(main, "time", stand_in)
+    got, (first, second) = _pick(capsys, *args, "r")
+    region, seen, home_ok = live if is_live else expired
+    assert got == region, (label, args, got)
+    assert f"chosen={region} " in second and seen in second and home_ok in second, (label, args, second)
+    assert stand_in.reads == 1, (label, args, stand_in.reads)
+
+
+def test_a_helper_that_reads_the_clock_itself_reads_it_to_the_fraction(monkeypatch):
+    """Called without a reading, _region_corroborated and _region_agreed take
+    one of their own, once, and judge it as it was read."""
+    main._REGION_SEEN["us"] = {
+        f"7656119800000010{i}": _SIGHTED_AT for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+    for label, instant, is_live in _AROUND_EXPIRY:
+        stand_in = _FixedClock(main.time, instant)
+        monkeypatch.setattr(main, "time", stand_in)
+        assert main._region_corroborated("us") is is_live, label
+        assert stand_in.reads == 1, label
+        want = "us" if is_live else "eu"
+        assert main._region_agreed("eu", "us") == want == main._region_agreed("us", "eu"), label
+        assert stand_in.reads == 3, label
+
+
 def test_a_sighting_needs_a_reporter_and_an_established_session():
     """The map's claim is about PLAYERS, so it is worth exactly as much as the
     binding behind the ids. _check_steam_session soft-fails by design in several

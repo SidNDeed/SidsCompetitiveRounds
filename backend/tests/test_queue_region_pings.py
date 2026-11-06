@@ -386,6 +386,28 @@ def test_a_map_the_join_accepted_still_decides_the_room(capsys):
     assert "rung=ladder why=stale" in capsys.readouterr().out
 
 
+def test_the_room_window_is_judged_to_the_microsecond(capsys):
+    """Codex round REGION-R2, the class: the ages above are whole seconds, so
+    an age cut down to whole seconds, or a window half a second longer, would
+    answer the same there. A map decides the room up to and including 900 s
+    and not one microsecond longer, whichever seat's map it is."""
+    now = _now()
+    kw = dict(p1_pings=FRESH_MAP, p2_pings=FRESH_MAP_PARTNER, now=now)
+    window = timedelta(seconds=main.REGION_PINGS_ROOM_MAX_AGE_S)
+    recent = now - timedelta(seconds=60)
+    for inside in (window - timedelta(microseconds=1), window):
+        for p1_at, p2_at in ((now - inside, recent), (recent, now - inside), (now - inside, now - inside)):
+            got = main._pick_room_region("us", "us", "us", "us", "r", p1_pings_at=p1_at, p2_pings_at=p2_at, **kw)
+            assert got == "eu", inside
+            assert "rung=pings" in capsys.readouterr().out, inside
+    for outside in (window + timedelta(microseconds=1), window + timedelta(milliseconds=500),
+                    window + timedelta(microseconds=999999)):
+        for p1_at, p2_at in ((now - outside, recent), (recent, now - outside), (now - outside, now - outside)):
+            got = main._pick_room_region("us", "us", "us", "us", "r", p1_pings_at=p1_at, p2_pings_at=p2_at, **kw)
+            assert got == "us", outside
+            assert "rung=ladder why=stale" in capsys.readouterr().out, outside
+
+
 def test_the_refusal_line_records_the_candidate_and_both_seats_numbers(capsys):
     """The maps leave with the queue rows, so the pick line is the only record
     of what the rung saw. A margin refusal must therefore name the candidate
