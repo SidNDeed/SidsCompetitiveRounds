@@ -78,6 +78,7 @@ from pathlib import Path
 import pytest
 
 import main
+import tournaments
 
 
 MAIN_PY = Path(__file__).resolve().parents[1] / "api" / "main.py"
@@ -395,7 +396,8 @@ def test_eviction_drops_the_unevidenced_before_the_corroborated():
 # of the syntax tree of the functions that pass the reading on, whatever the
 # reading and whichever path: it reads the source it is handed, so the planted
 # sources of test_the_census_refuses_each_planted_source are read by the same
-# code as main's own.
+# code as main's own. The leaf, _region_corroborated, has a census of its own
+# (_census_of_the_leaf).
 #
 # The callees that may be handed the reading, each with the parameter that
 # receives it. Where that argument sits in a call is read from the callee's
@@ -419,7 +421,7 @@ _CENSUS = {
 }
 # What the census refuses, one rule per word. test_the_census_refuses_each_planted_source
 # has, for each rule, a planted source that only that rule refuses.
-_RULES = ("binding", "use", "argument", "alias", "nested")
+_RULES = ("binding", "use", "argument", "alias", "nested", "code", "reading")
 _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
                   ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
@@ -507,7 +509,8 @@ def _census(source, first_line=1):
         refusals.append((rule, node.lineno + first_line - 1, ast.unparse(node) if isinstance(node, ast.AST) else ""))
 
     if fn.name == _LEAF:
-        return _census_of_the_leaf(fn, parents, refuse), sites
+        _census_of_the_leaf(fn, parents, refuse)
+        return refusals, sites
     reading, binding, callees = _CENSUS[fn.name]
 
     # binding: the one binding the function is allowed, and no other
@@ -560,10 +563,62 @@ def _census(source, first_line=1):
     return refusals, sites
 
 
+def _is_name(node, name):
+    return isinstance(node, ast.Name) and node.id == name
+
+
 def _census_of_the_leaf(fn, parents, refuse):
-    """Placeholder until the leaf's own rules exist: the leaf is not one of
-    the functions that pass the reading on."""
-    raise AssertionError("no census of the leaf yet")
+    """The leaf's own census (ruling RP-5a (3)(b)), so that it treats every
+    code alike. Its code parameter is never bound and is read only as the key
+    of the lookup, folded: `_REGION_SEEN.get(_region_token(<code>))` (code).
+    Its reading is bound at most once, where none was handed in (binding), and
+    is read only in that fallback's test or as `<reading> - <stamp>` compared
+    by <= with _REGION_SEEN_TTL_SECONDS, the stamp being the target of the
+    comprehension whose condition that comparison is, over `<map>.values()`
+    (reading)."""
+    reading = _READING_CALLEES[_LEAF]
+    a = fn.args
+    names = [p.arg for p in a.posonlyargs + a.args + a.kwonlyargs]
+    others = [n for n in names if n != reading]
+    if reading not in names or len(others) != 1:
+        refuse("code", fn)
+        return
+    code = others[0]
+
+    for node in _binders(fn, code):
+        refuse("code", node)
+    for node in ast.walk(fn):
+        if _is_name(node, code) and isinstance(node.ctx, ast.Load):
+            fold = parents.get(node)
+            get = parents.get(fold)
+            if not (isinstance(fold, ast.Call) and _is_name(fold.func, "_region_token")
+                    and fold.args == [node] and not fold.keywords
+                    and isinstance(get, ast.Call) and get.args == [fold] and not get.keywords
+                    and isinstance(get.func, ast.Attribute) and get.func.attr == "get"
+                    and _is_name(get.func.value, "_REGION_SEEN")):
+                refuse("code", node)
+
+    allowed = [s.body[0].targets[0] for s in ast.walk(fn) if _is_fallback(s, reading)][:1]
+    for node in _binders(fn, reading):
+        if node not in allowed:
+            refuse("binding", node)
+    none_tests = {parents[parents[t]].test.left for t in allowed}
+    for node in ast.walk(fn):
+        if not (_is_name(node, reading) and isinstance(node.ctx, ast.Load)) or node in none_tests:
+            continue
+        diff = parents.get(node)
+        cmp = parents.get(diff)
+        loop = parents.get(cmp)
+        if not (isinstance(diff, ast.BinOp) and isinstance(diff.op, ast.Sub) and diff.left is node
+                and isinstance(diff.right, ast.Name)
+                and isinstance(cmp, ast.Compare) and cmp.left is diff and len(cmp.ops) == 1
+                and isinstance(cmp.ops[0], ast.LtE) and len(cmp.comparators) == 1
+                and _is_name(cmp.comparators[0], "_REGION_SEEN_TTL_SECONDS")
+                and isinstance(loop, ast.comprehension) and cmp in loop.ifs
+                and _is_name(loop.target, diff.right.id)
+                and isinstance(loop.iter, ast.Call) and not loop.iter.args
+                and isinstance(loop.iter.func, ast.Attribute) and loop.iter.func.attr == "values"):
+            refuse("reading", node)
 
 
 def _source_of(name):
@@ -581,12 +636,15 @@ def test_the_census_of_mains_own_functions_refuses_nothing():
     and nothing made from it, to every call of the homes' confirmation, of the
     weighing and of the leaf; the two functions between hand their parameter
     on to the leaf in the same way, the weighing binding it only when none was
-    handed in. Each function hands it to every callee it is allowed to."""
+    handed in. Each function hands it to every callee it is allowed to. The
+    leaf reads its code only as the folded key of its lookup and its reading
+    only in the comparison of a stamp's age with the time-to-live."""
     pairs = set()
     for name in _CENSUS:
         refusals, sites = _census_of(name)
         assert refusals == [], (name, refusals)
         pairs |= {(fn, callee) for fn, callee, _, _ in sites}
+    assert _census_of(_LEAF) == ([], [])
     assert pairs == {(name, callee) for name, (_, _, callees) in _CENSUS.items() for callee in callees}
     for callee, param in _READING_CALLEES.items():
         assert param in inspect.signature(getattr(main, callee)).parameters, (callee, param)
@@ -610,6 +668,9 @@ _SECOND = "_region_agreed(mr, orr, mono)"
 _SEEN = "_region_corroborated(chosen, mono)"
 _HOME_LEAF = "    return _region_corroborated(home, mono)\n"
 _AGREED_LEAF = "        ca, cb = _region_corroborated(a, now), _region_corroborated(b, now)\n"
+_LEAF_TTL = "now - ts <= _REGION_SEEN_TTL_SECONDS)"
+_LEAF_COUNT = "    return live >= _REGION_SEEN_MIN_PLAYERS\n"
+_LEAF_LIVE = "    live = sum("
 
 # (what was planted, the function, its edits as (old, new), the rules that refuse it)
 _PLANTED = [
@@ -665,6 +726,20 @@ _PLANTED = [
      [("        if now is None:\n", "        if not now:\n")], {"binding", "use"}),
     ("the weighing's own reading taken from another clock", "_region_agreed",
      [("            now = time.monotonic()\n", "            now = time.perf_counter()\n")], {"binding", "use"}),
+    ("the code read inside the leaf's comparison", _LEAF,
+     [(_LEAF_TTL, "now - ts <= _REGION_SEEN_TTL_SECONDS + len(token))")], {"code", "reading"}),
+    ("the code read in the leaf's count", _LEAF,
+     [(_LEAF_COUNT, "    return live >= _REGION_SEEN_MIN_PLAYERS + (token == \"us\")\n")], {"code"}),
+    ("the code looked up unfolded", _LEAF,
+     [("_REGION_SEEN.get(_region_token(token))", "_REGION_SEEN.get(token)")], {"code"}),
+    ("the reading changed before the leaf's comparison", _LEAF,
+     [(_LEAF_LIVE, "    now = round(now - 0.5) + 0.5\n" + _LEAF_LIVE)], {"binding", "reading"}),
+    ("the reading moved inside the leaf's comparison", _LEAF,
+     [("if now - ts <=", "if (now - 0.5) - ts <=")], {"reading"}),
+    ("the reading compared with another bound", _LEAF,
+     [(_LEAF_TTL, "now - ts <= _REGION_SEEN_TTL_SECONDS * 1.0)")], {"reading"}),
+    ("the reading compared with something other than a stamp", _LEAF,
+     [("if now - ts <=", "if now - 0.0 <=")], {"reading"}),
 ]
 
 
@@ -1039,6 +1114,34 @@ def test_a_helper_that_reads_the_clock_itself_reads_it_to_the_fraction(monkeypat
             want = "us" if is_live else "eu"
             assert main._region_agreed("eu", "us") == want == main._region_agreed("us", "eu"), label
             assert stand_in.reads == 3, label
+
+
+# The codes the leaf's arithmetic is asked about (ruling RP-5a (3)(a)). The 1v1
+# path keeps no list of region codes, by decision: a code is any token
+# _region_token accepts. So this is a sample: the codes of ROUNDS' own region
+# selector, read from the tournaments' list; hk and uae, the two codes main.py
+# names from match history; a two-letter and a five-letter code of the token
+# grammar that neither list has; and a form that _region_token folds.
+_LEAF_CODES = sorted(tournaments.ROUNDS_REGIONS) + ["hk", "uae", "qz", "qzqzq", " QzQ "]
+
+
+def test_the_leaf_counts_a_sighting_to_its_last_instant_for_every_code_asked():
+    """For every code of _LEAF_CODES and each of the three stamps, a sighting
+    of two reporters counts at the float before its last live instant and at
+    that instant, and not at the float after it, when the leaf is handed that
+    reading. That the leaf reads its code only as the key of its lookup is
+    the census's (test_the_census_of_mains_own_functions_refuses_nothing)."""
+    assert len(tournaments.ROUNDS_REGIONS) == 15
+    assert [len(main._region_token(c)) for c in ("qz", "qzqzq")] == [2, 5]
+    assert main._region_token(" QzQ ") == "qzq"
+    for code in _LEAF_CODES:
+        key = main._region_token(code)
+        assert key, code
+        for label, stamp, reading, is_live in _AROUND_EXPIRY:
+            main._REGION_SEEN.clear()
+            main._REGION_SEEN[key] = {
+                f"7656119800000010{i}": stamp for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+            assert main._region_corroborated(code, reading) is is_live, (code, label)
 
 
 def test_the_cases_around_expiry_are_adjacent_floats_and_exact_ages():
