@@ -6,22 +6,28 @@
 #   1  "NOT-RESTORED-KIND: <reasons>"  - a key added, a key removed, a value changed, the order of keys, a section,
 #      a blank line, a line ending or the BOM differs (or the two files are byte-identical: nothing to restore).
 #   2  "REFUSED: <why>"  - a file unreadable, not UTF-8, or a line that is no kind of line of the file's grammar.
+# THE LINES (R6-A3.11.48 M2): the file is cut into lines as .NET File.ReadAllLines cuts it, at CR LF, at LF and at
+# a lone CR; a terminator at the end of the file starts no further line. Each line keeps its terminator, so a changed
+# line ending still differs. A key written after a lone CR is its own KEY line, not part of a comment.
 # THE FILE'S GRAMMAR (the BepInEx 5 ConfigFile reader, which takes each line trimmed of white space): an empty line;
 # a COMMENT line (starts with "#"); a SECTION line ("[" ... "]"); a KEY line (holds "="; the key is the text before
 # the first "=", trimmed). The reader skips any other line without a word; here such a line is REFUSED (exit 2).
 # The caller (ft_vm_restore.sh) counts the restored kind only on exit 0 with exactly this one line; everything else
 # fails VR6, which ends HELD. Values are never printed.
 import sys
+import re
 import difflib
+
+LINE_END = re.compile(rb"\r\n|\r|\n")
 
 def lines_of(path):
     raw = open(path, "rb").read()
     out, start = [], 0
-    while start < len(raw):
-        nl = raw.find(b"\n", start)
-        end = len(raw) if nl < 0 else nl + 1
-        out.append(raw[start:end])
-        start = end
+    for m in LINE_END.finditer(raw):
+        out.append(raw[start:m.end()])
+        start = m.end()
+    if start < len(raw):
+        out.append(raw[start:])
     return raw, out
 
 def kind(b, first):
