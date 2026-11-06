@@ -1472,9 +1472,13 @@ def test_r10_n_ro_census_193_forwarding_connect_args():
 # reason) is listed in RF/r10/ro/NOTES-r10-ro.md (the sweep table); a new
 # site changes a count and fails here until the table and these counts are
 # changed together by a reviewed edit.
+# FIX-R11-RES: catalog read 11 -> 22 in ro_covered.py (RESIDUE_SQL's temporary
+# objects in 8 more catalogs, NAMED_SETTINGS_SQL, placeholder_residue's and
+# not_reset's docstrings) and 1 -> 2 here (the r11 negative's docstring);
+# each listed in RF11 r11/res/NOTES-r11-res.md.
 SWEEP_TXN = {'lock read': 'LOCKS_SQL|lock_read\\(', 'counter read': 'WRITES_SQL|\\.writes\\(\\)', 'continuity read': 'POSITION_(?:START|END)_SQL|RESIDUE_SQL|position_(?:start|end)\\(|\\.residue\\(\\)', 'catalog read': 'pg_locks|pg_stat_xact|pg_settings|pg_prepared_statements|pg_cursors|pg_listening_channels|pg_my_temp_schema|pg_prepared_xacts', 'outcome from a read': 'ran_outcome\\(|lock_outcome\\(|under_grant\\(|broken_continuity\\(|continuity_at\\(|locks_at\\(', 'transaction end or presence': 'rollback\\(|commit\\(|in_transaction|get_transaction|\\.begin\\('}
 SWEEP_CALLEE = {'callee read': '\\.func\\b', 'callee name': '_name_of\\(|_dotted\\(', 'callee class': '_constructed\\(|_classified_callee\\(|CLASSIFIED_(?:NAME|ATTR)_CALLS', 'call node': 'ast\\.Call\\b', 'forwarding binding': 'FORWARDING|_forwarding\\(|_arg_names\\(|_binds\\(|_stmt_binds\\(|_stmt_mutates\\(|_module_statements\\(|_own_nodes\\('}
-SWEEP_COUNTS = {'ro_covered.py': {'lock read': 5, 'counter read': 4, 'continuity read': 12, 'catalog read': 11, 'outcome from a read': 12, 'transaction end or presence': 0}, 'test_r8_ro_covered_pg.py': {'lock read': 0, 'counter read': 2, 'continuity read': 0, 'catalog read': 1, 'outcome from a read': 10, 'transaction end or presence': 3}, 'ro_census.py': {'callee read': 10, 'callee name': 9, 'callee class': 10, 'call node': 5, 'forwarding binding': 17}}
+SWEEP_COUNTS = {'ro_covered.py': {'lock read': 5, 'counter read': 4, 'continuity read': 12, 'catalog read': 22, 'outcome from a read': 12, 'transaction end or presence': 0}, 'test_r8_ro_covered_pg.py': {'lock read': 0, 'counter read': 2, 'continuity read': 0, 'catalog read': 2, 'outcome from a read': 10, 'transaction end or presence': 3}, 'ro_census.py': {'callee read': 10, 'callee name': 9, 'callee class': 10, 'call node': 5, 'forwarding binding': 17}}
 
 
 def _sweep_code(name):
