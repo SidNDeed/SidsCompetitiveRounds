@@ -1659,6 +1659,14 @@ def _planted(module, name, edits=(), helpers=(), helper_edits=()):
     lines = list(helpers)
     for edit in helper_edits:
         lines.extend(_helper_lines(module, edit))
+    if helper_edits:
+        # Round 11 (ruling FOUR-R11-A10 (D)): a real helper planted with edits
+        # gets its one call site in its planted module: the planted span
+        # itself, appended AFTER the helpers so their pinned line numbers
+        # stand. Without it rule P finds no call site of the planted helper
+        # and refuses its first parameter use before the line the case pins.
+        lines.append("")
+        lines.extend(src.splitlines())
     mod = _planted_module(module, name, lines)
     if len(lines) == 0:
         # nothing planted beside it: the real module, so the lookup places
