@@ -686,6 +686,14 @@ def _arg_names(a):
             + [y for y in (a.vararg, a.kwarg) if y is not None]]
 
 
+def rule_p_roots(b, F, pname, line):
+    """Rule P's root of parameter `pname` of function F, read by Bindings
+    `b` (Bindings.bound_root): the roots a body walk takes for its own
+    function. Round 11 (ruling FOUR-R11-A13 (2)): a Bindings' param_roots,
+    this unless its caller hands it another."""
+    return b.bound_root(F, pname, line)
+
+
 class Bindings:
     """THE resolver of the closed walk (ruling REHEARSAL-FOUR-R5 item 2).
 
@@ -719,9 +727,13 @@ class Bindings:
     inside this class, and asserts the two counts are equal."""
 
     def __init__(self, scope, fn=None, stmts=None, session="db",
-                 grammar=None):
+                 grammar=None, param_roots=rule_p_roots):
         self.scope = scope
         self.session = session
+        # round 11 (ruling FOUR-R11-A13 (2)): (b, F, pname, line) -> the
+        # root of the walked function's parameter at entry (_rooted); rule
+        # P's own unless the caller hands another
+        self.param_roots = param_roots
         # The walk's Grammar, when it has one: a callee outside the
         # module's own namespace resolves only through its frozen callee
         # table (round 8, M4; rule (1)(c): no import resolution by name);
@@ -1442,7 +1454,7 @@ class Bindings:
         param = (own == [("param", d)] if self.has_fn
                  else (not own and name in params))
         if param and name in params:
-            return self.bound_root(F, name, line), name
+            return self.param_roots(self, F, name, line), name
         if len(own) != 1 or own[0][0] != "local":
             return None
         node = own[0][1]
@@ -2172,6 +2184,9 @@ class Policy:
         # when set, every helper body def_effects reads is admitted by it
         # first. None for a file that has no grammar of its own yet.
         self.grammar = None
+        # round 11 (ruling FOUR-R11-A13 (2)): the param_roots of the
+        # Bindings def_effects builds for a body this policy walks
+        self.param_roots = rule_p_roots
         self.helpers = {}           # id(fn) -> (fn, effects, Deps); round 11
         self.walking = set()        # helpers being walked now
         self.met = _collections.Counter()
@@ -3856,7 +3871,8 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
             raise Unclassified((0, f"{fn.__name__}: a relative import"))
     # The helper's own bindings: every name the walk reads in it resolves
     # there, one binding per name (ruling REHEARSAL-FOUR-R5 item 2).
-    b = Bindings(scope, d, session=policy.session, grammar=policy.grammar)
+    b = Bindings(scope, d, session=policy.session, grammar=policy.grammar,
+                 param_roots=policy.param_roots)
     # round 11 (rule K's A5 clause): a parameter bound to a handed instance
     b.param_values = dict(param_values or {})
     params = [a.arg for a in d.args.posonlyargs + d.args.args + d.args.kwonlyargs]

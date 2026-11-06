@@ -39,6 +39,7 @@ from grammar_shapes_gate import (  # noqa: E402
     ADMITTED, Refusal, check_body, check_site, node_key, path_to, prefix_span)
 import shape_grammar as _sg  # noqa: E402
 from closed_walk import Unclassified  # noqa: E402
+from closed_walk import rule_p_roots  # noqa: E402
 from main import (  # noqa: E402
     LEASE_TTL_ASSEMBLY, _lease_acquire, _lease_admission_gate, _lease_release)
 # The match_hold the hold suite loaded: the MATCH_HOLD_SRC copy when set
@@ -355,6 +356,9 @@ def _gate_policy(scope):
         p.gate_kinds = {}
         p.helper_hook = lambda fn, p=p: _helper_kind(fn, p)
         p.grammar = _GATE_GRAMMAR
+        if _PLANT_SCOPES.get(key) is scope:
+            # round 11 (ruling FOUR-R11-A13 (2)): a plant's walk only
+            p.param_roots = _plant_roots
         _GATE_POLICIES[key] = (scope, p)
     return _GATE_POLICIES[key][1]
 
@@ -380,7 +384,9 @@ class _Walk:
 
     def __init__(self, scope, where, fn=None, stmts=None):
         self.scope = main if scope is None else scope
-        self.policy = _gate_policy(self.scope)
+        # round 11 (ruling FOUR-R11-A13 (2)): its policy's param_roots too
+        policy = _gate_policy(self.scope)
+        self.policy = policy
         # The walked function's one resolver (closed_walk.Bindings, ruling
         # REHEARSAL-FOUR-R5 fix 1): every name the walk reads is resolved
         # there, exactly one binding per name or refused; a callee the
@@ -388,7 +394,8 @@ class _Walk:
         self.b = _cw.Bindings(self.scope, fn,
                               stmts=[] if fn is None and stmts is None
                               else stmts, session=self.policy.session,
-                              grammar=_GATE_GRAMMAR)
+                              grammar=_GATE_GRAMMAR,
+                              param_roots=policy.param_roots)
         self.where = where
         self.problems, self.seen = [], []
 
@@ -1659,15 +1666,8 @@ def _planted(module, name, edits=(), helpers=(), helper_edits=()):
     lines = list(helpers)
     for edit in helper_edits:
         lines.extend(_helper_lines(module, edit))
-    if helper_edits:
-        # Round 11 (ruling FOUR-R11-A10 (D)): a real helper planted with edits
-        # gets its one call site in its planted module: the planted span
-        # itself, appended AFTER the helpers so their pinned line numbers
-        # stand. Without it rule P finds no call site of the planted helper
-        # and refuses its first parameter use before the line the case pins.
-        lines.append("")
-        lines.extend(src.splitlines())
     mod = _planted_module(module, name, lines)
+    _plant_record(mod, module, helper_edits)
     if len(lines) == 0:
         # nothing planted beside it: the real module, so the lookup places
         # the span's executes (an edited span still matches no definition)
@@ -1676,6 +1676,91 @@ def _planted(module, name, edits=(), helpers=(), helper_edits=()):
     tree = ast.parse(src)
     first = tree.body[0]
     return first, mod, at
+
+
+# Round 11 (ruling FOUR-R11-A13): a plant is main as it would be if one
+# helper's text read otherwise, so a planted helper's parameters are rooted
+# as the REAL helper's are: rule P, unchanged, at the real helper's call
+# sites in main, handed to the planted body's walk (closed_walk
+# Bindings.param_roots). The stand-in record is DERIVED by _planted, never
+# written by a test: id(planted function) -> (the planted function, the
+# real frozen function whose text it edited, the edits). An entry is
+# admitted at use only by (3)(a) and (3)(b) (_plant_admitted).
+_PLANT_RECORDS = {}
+_PLANT_SCOPES = {}
+
+
+def _plant_record(mod, module, helper_edits):
+    """Record each real helper of `helper_edits` ((name, pairs)) planted in
+    `mod` (_plant_entry), keyed by the planted function's identity."""
+    for edit in helper_edits:
+        entry = _plant_entry(mod, module, edit)
+        key = id(entry[0])
+        _PLANT_RECORDS[key] = entry
+
+
+def _plant_entry(mod, module, edit):
+    """(the planted function, `module`'s real function of that name, the
+    pairs) of helper edit (name, pairs) planted in `mod`; `mod` recorded as
+    a plant's scope (_gate_policy)."""
+    name, pairs = edit
+    planted = getattr(mod, name)
+    target = getattr(module, name)
+    kept = tuple(pairs)
+    _PLANT_SCOPES[id(mod)] = mod
+    return planted, target, kept
+
+
+def _plant_roots(b, F, pname, line):
+    """The param_roots of a plant's walks: a function with no record takes
+    rule P's root for itself (so a planted helper without one refuses with
+    rule P's own sentence, ruling FOUR-R11-A10 (4)(b)); a recorded planted
+    function, its record admitted, takes rule P's root of the same parameter
+    of the real function its record names."""
+    hit = _PLANT_RECORDS.get(id(F))
+    if hit is None or hit[0] is not F:
+        return rule_p_roots(b, F, pname, line)
+    target = _plant_admitted(F, hit, line)
+    return rule_p_roots(b, target, pname, line)
+
+
+def _plant_admitted(F, record, line):
+    """The real function `record` ((planted, target, pairs)) names, when
+    the record of planted function F is admitted, each refusal Unclassified
+    with its own sentence: (3)(a) F's text is target's frozen source (a
+    function its module's own source defines) with `pairs` applied, byte
+    for byte; (3)(b) F's parameter names, order and kinds are target's."""
+    _planted_fn, target, pairs = record
+    want = _frozen_edited(target, pairs)
+    got = textwrap.dedent(inspect.getsource(F.__code__))
+    if want != got or not _ib.trusted_function(target):
+        raise Unclassified((line, f"{F.__name__}: the planted text is not "
+                                  f"{target.__qualname__}'s frozen source with "
+                                  "its recorded edit applied (FOUR-R11-A13 "
+                                  "(3)(a))"))
+    if _param_kinds(F) != _param_kinds(target):
+        raise Unclassified((line, f"{F.__name__}: its parameters are not "
+                                  f"{target.__qualname__}'s in names, order "
+                                  "and kinds (FOUR-R11-A13 (3)(b))"))
+    return target
+
+
+def _frozen_edited(target, pairs):
+    """The dedented source of target's own code object with each (old, new)
+    of `pairs` applied, each old text found exactly once; None otherwise."""
+    text = textwrap.dedent(inspect.getsource(target.__code__))
+    for old, new in list(pairs):
+        if text.count(old) != 1:
+            return None
+        text = text.replace(old, new)
+    return text
+
+
+def _param_kinds(fn):
+    """fn's signature as text: its parameter names in order with their
+    kinds (the `/` and `*` markers), and with them its defaults and
+    annotations, so it can only refuse more than names, order and kinds."""
+    return str(inspect.signature(fn))
 
 
 def _helper_lines(module, edit):
@@ -2117,9 +2202,10 @@ def test_r7_prior_findings_are_refused(row):
         assert on is not None, (finding, label, on)
 
 
-# Round 11 (ruling FOUR-R11-A10 (4)): r2 gate:456's plant has one call site in
-# its planted module (_planted appends the planted span after the planted
-# helpers). Its two conditions:
+# Round 11 (rulings FOUR-R11-A10 (4), FOUR-R11-A13): r2 gate:456's planted
+# helper is walked with its parameters rooted as the real helper's are (rule
+# P at the real helper's call sites in main, _plant_roots); no call site
+# calls the planted body. Its two conditions:
 # (a) the same plant with its line-14 form made sound walks clean, so the
 #     pinned refusal comes from line 14 and not from the rooting: the helper
 #     planted through the same path with an edit that leaves its text as it is
@@ -2163,6 +2249,171 @@ def test_r11_d_a_planted_helper_without_a_call_site_refuses_by_rule_p():
     on = read()
     assert got is not None and _R11_D_RULE_P in got, (_R11_D_RULE_P, got)
     assert on is not None, on
+
+
+# Round 11 (ruling FOUR-R11-A13 (4)): R8's controls. The unedited helper
+# planted gives what the real helper gives; a record naming another real
+# function is refused by (3)(a); a plant that renames or adds a parameter
+# is refused by (3)(b); only the plant harness hands a body walk the roots
+# of another function.
+_R11_D_LAPSE_DEF = "async def _rdm_live_or_lapse(ctx, pid, me, step, n):"
+_R11_D_A = "(FOUR-R11-A13 (3)(a))"
+_R11_D_B = "(FOUR-R11-A13 (3)(b))"
+_R11_D_RENAME = [(_R11_D_LAPSE_DEF, _R11_D_LAPSE_DEF.replace("step", "phase"))] + [
+    (f'me, step, n, "{why}")', f'me, phase, n, "{why}")')
+    for why in ("lobby_closed", "departed", "not_held", "hold_lapsed")]
+_R11_D_ADD = [(_R11_D_LAPSE_DEF, _R11_D_LAPSE_DEF.replace("n):", "n, extra):"))]
+
+
+def test_r11_d_r8_the_unedited_helper_planted_walks_as_the_real_one():
+    """FOUR-R11-A13 (4)(b): the helper's unedited text planted gives, row
+    for row, what the real helper gives (the outputs and the helper's kind,
+    ORDER marker off and on), at both real spans that call it."""
+
+    def outputs(base, helper_edits):
+        # base's walk with helper_edits planted: [(problems or refusal, the
+        # scope's _rdm_live_or_lapse kind)], the ORDER marker off, then on
+        modname, name, entry, target = base
+        fn, scope, at = _planted(_R7_MODULES[modname], name, (), (), helper_edits)
+
+        def read():
+            if entry == "prefix":
+                got = claim_prefix_violations(fn, target, scope, name, at)[0]
+            else:
+                call = next(n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                            and isinstance(n.func, ast.Name) and n.func.id == target)
+                got = refusal_branch_violation(fn, call, entry.split(":")[1],
+                                               scope, at)
+            return got, _helper_kind(vars(scope)["_rdm_live_or_lapse"],
+                                     _gate_policy(scope))
+
+        _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+        try:
+            off = read()
+        finally:
+            _gg.ORDER_SWITCH["bindings"] = None
+        return [off, read()]
+
+    for base in (PREFIX_CLAIM, DIRECT):
+        real = outputs(base, ())
+        plant = outputs(base, [("_rdm_live_or_lapse", [])])
+        assert plant == real, (base, real, plant)
+        assert real[0][1] == ("refuses", None), (base, real)
+
+
+def test_r11_d_r8_a_record_naming_another_function_is_refused():
+    """FOUR-R11-A13 (4)(e), first half: _planted's derived record names the
+    real function whose text it planted and is admitted; the same planted
+    function presented with another real function of the same parameter
+    names, order and kinds (so only (3)(a) can refuse) is refused by (3)(a)
+    with its own sentence."""
+    _fn, scope, _at = _planted(main, "_rdm_claim", (), (), [("_rdm_bind", [])])
+    planted = vars(scope)["_rdm_bind"]
+    record = _PLANT_RECORDS[id(planted)]
+    assert record == (planted, main._rdm_bind, ()), record
+    assert _plant_admitted(planted, record, 0) is main._rdm_bind
+    assert _param_kinds(main._rdm_decline) == _param_kinds(planted)
+    with pytest.raises(Unclassified) as e:
+        _plant_admitted(planted, (planted, main._rdm_decline, ()), 0)
+    assert _R11_D_A in e.value.args[0][1], e.value.args
+
+
+@pytest.mark.parametrize("label,pairs", [("renames step", _R11_D_RENAME),
+                                         ("adds a parameter", _R11_D_ADD)])
+def test_r11_d_r8_a_plant_that_changes_parameters_is_refused(label, pairs):
+    """FOUR-R11-A13 (4)(e), second half: the 456 plant's helper with a
+    parameter renamed, or one added, is refused by (3)(b) with its own
+    sentence (its record passes (3)(a): the text is the real helper's with
+    the recorded edit), the ORDER marker off and on."""
+    modname, name, _entry, target = PREFIX_CLAIM
+    fn, scope, at = _planted(_R7_MODULES[modname], name, (), (),
+                             [("_rdm_live_or_lapse", pairs)])
+
+    def read():
+        got = claim_prefix_violations(fn, target, scope, name, at)[0]
+        return got[0] if got else None
+
+    _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+    try:
+        off = read()
+    finally:
+        _gg.ORDER_SWITCH["bindings"] = None
+    on = read()
+    assert off is not None and _R11_D_B in off, (label, off)
+    assert on is not None and _R11_D_B in on, (label, on)
+
+
+def test_r11_d_r8_only_the_plant_harness_hands_another_functions_roots():
+    """FOUR-R11-A13 (2), the census: over every test module of this
+    directory, every site that names a body walk's param_roots, rule P's
+    roots function or bound_root is one of the listed sites; and the one
+    call that hands a walk rule P's root of a function other than the one
+    it walks (`target`, not `F`) is the plant harness's _plant_roots."""
+    names = ("param_roots", "rule_p_roots", "bound_root")
+    sites = []
+    here = os.path.dirname(os.path.abspath(__file__))
+    for fname in sorted(os.listdir(here)):
+        if not fname.endswith(".py"):
+            continue
+        with open(os.path.join(here, fname), encoding="utf-8") as f:
+            text = f.read()
+        if not any(nm in text for nm in names):
+            continue
+        for top in ast.parse(text).body:
+            for node in ast.walk(top):
+                spelled = (node.attr if isinstance(node, ast.Attribute)
+                           else node.id if isinstance(node, ast.Name)
+                           else node.arg if isinstance(node, (ast.keyword, ast.arg))
+                           else node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.alias))
+                           else None)
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id in ("setattr", "getattr", "hasattr")
+                        and len(node.args) > 1
+                        and isinstance(node.args[1], ast.Constant)):
+                    spelled = node.args[1].value
+                if spelled in names:
+                    sites.append((fname, getattr(top, "name", "<module>"),
+                                  type(node).__name__, spelled))
+    assert sorted(sites) == sorted(_R11_D_ROOT_SITES), sorted(sites)
+    handed = []
+    for fname, top in (("closed_walk.py", "rule_p_roots"),
+                       ("test_match_hold_admission_gate_pg.py", "_plant_roots")):
+        with open(os.path.join(here, fname), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        d = next(n for n in tree.body if getattr(n, "name", None) == top)
+        for c in ast.walk(d):
+            callee = (c.func.attr if isinstance(c, ast.Call)
+                      and isinstance(c.func, ast.Attribute)
+                      else c.func.id if isinstance(c, ast.Call)
+                      and isinstance(c.func, ast.Name) else None)
+            if callee in names:
+                handed.append((top, ast.unparse(c)))
+    assert sorted(handed) == [
+        ("_plant_roots", "rule_p_roots(b, F, pname, line)"),
+        ("_plant_roots", "rule_p_roots(b, target, pname, line)"),
+        ("rule_p_roots", "b.bound_root(F, pname, line)")], handed
+
+
+_R11_D_ROOT_SITES = [
+    ("closed_walk.py", "rule_p_roots", "FunctionDef", "rule_p_roots"),
+    ("closed_walk.py", "rule_p_roots", "Attribute", "bound_root"),
+    ("closed_walk.py", "Bindings", "arg", "param_roots"),
+    ("closed_walk.py", "Bindings", "Name", "rule_p_roots"),
+    ("closed_walk.py", "Bindings", "Attribute", "param_roots"),
+    ("closed_walk.py", "Bindings", "Name", "param_roots"),
+    ("closed_walk.py", "Bindings", "Attribute", "param_roots"),
+    ("closed_walk.py", "Bindings", "FunctionDef", "bound_root"),
+    ("closed_walk.py", "Policy", "Attribute", "param_roots"),
+    ("closed_walk.py", "Policy", "Name", "rule_p_roots"),
+    ("closed_walk.py", "def_effects", "keyword", "param_roots"),
+    ("closed_walk.py", "def_effects", "Attribute", "param_roots"),
+    ("test_match_hold_admission_gate_pg.py", "<module>", "alias", "rule_p_roots"),
+    ("test_match_hold_admission_gate_pg.py", "_gate_policy", "Attribute", "param_roots"),
+    ("test_match_hold_admission_gate_pg.py", "_Walk", "keyword", "param_roots"),
+    ("test_match_hold_admission_gate_pg.py", "_Walk", "Attribute", "param_roots"),
+    ("test_match_hold_admission_gate_pg.py", "_plant_roots", "Name", "rule_p_roots"),
+    ("test_match_hold_admission_gate_pg.py", "_plant_roots", "Name", "rule_p_roots"),
+]
 
 
 def test_r7_grammar_covers_every_walked_span_and_body():
