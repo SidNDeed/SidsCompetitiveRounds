@@ -2117,6 +2117,54 @@ def test_r7_prior_findings_are_refused(row):
         assert on is not None, (finding, label, on)
 
 
+# Round 11 (ruling FOUR-R11-A10 (4)): r2 gate:456's plant has one call site in
+# its planted module (_planted appends the planted span after the planted
+# helpers). Its two conditions:
+# (a) the same plant with its line-14 form made sound walks clean, so the
+#     pinned refusal comes from line 14 and not from the rooting: the helper
+#     planted through the same path with an edit that leaves its text as it is
+#     (line 14 is then the real refusing return);
+# (b) a planted helper with NO call site in its planted module refuses at its
+#     first parameter use with rule P's own sentence.
+_R11_D_SOUND = ("r11 D(a)", "the r2 gate:456 plant with line 14 the real refusing return",
+                PREFIX_CLAIM, [], (), [("_rdm_live_or_lapse", [(_LAPSE, _LAPSE)])], None)
+_R11_D_RULE_P = "_rdm_live_or_lapse's parameter ctx: 0 call sites with no one root"
+
+
+def test_r11_d_the_456_plant_made_sound_walks_clean():
+    """FOUR-R11-A10 (4)(a): the plant of r2 gate:456 through the same
+    helper_edits path, with nothing added at line 14, is admitted with the
+    ORDER marker off and on."""
+    test_r7_prior_findings_are_refused(_R11_D_SOUND)
+
+
+def test_r11_d_a_planted_helper_without_a_call_site_refuses_by_rule_p():
+    """FOUR-R11-A10 (4)(b): r2 gate:456's planted helper in a planted module
+    that holds the helper lines only (no planted span, so no call site) is
+    refused at its first parameter use with rule P's sentence, with the ORDER
+    marker off; with the marker on it is refused too."""
+    modname, name, _entry, target = PREFIX_CLAIM
+    module = _R7_MODULES[modname]
+    lines = _helper_lines(module, ("_rdm_live_or_lapse",
+                                   [(_LAPSE, _LAPSE + "        return None" + chr(10))]))
+    scope = _planted_module(module, name, lines)
+    fn = ast.parse(_edited(module, name, [])).body[0]
+    at = (f"<planted {name}>", 0)
+
+    def read():
+        got = claim_prefix_violations(fn, target, scope, name, at)[0]
+        return got[0] if got else None
+
+    _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+    try:
+        got = read()
+    finally:
+        _gg.ORDER_SWITCH["bindings"] = None
+    on = read()
+    assert got is not None and _R11_D_RULE_P in got, (_R11_D_RULE_P, got)
+    assert on is not None, on
+
+
 def test_r7_grammar_covers_every_walked_span_and_body():
     """The completeness assertion (ruling REHEARSAL-FOUR-R6 (1)(b)): over the
     real walks (the census, the hold forms, the claim prefix, the replay),
