@@ -531,14 +531,16 @@ class _FixedClock:
         return getattr(self._real, name)
 
 
-# Codex round REGION-R2: every instant and every stamp above is a whole number
-# of seconds, so a reading that is cut down, rounded or moved by less than a
-# second answers the same there. Here the sightings are stamped off the whole
-# seconds, which puts the instant they expire off them too (at .375), and the
-# pick is asked a sixteenth of a second before that instant, at it, and a
-# sixteenth after it. The three lie inside one whole second and on one side of
-# its half, so a reading cut down, rounded up, rounded to the nearest or moved
-# by half a second falls on the wrong side of the expiry at one of them.
+# Codex round REGION-R2: the clock tests above (the stand-in clock of the
+# `clock` fixture, the readings handed in as `ttl` and `ttl + 1`, and every
+# stamp those tests set) stay on whole seconds, so a monotonic reading that is
+# cut down, rounded, or moved earlier by less than a second answers the same
+# there. Here the sightings are stamped off the whole seconds, which puts the
+# instant they expire off them too (at .375), and the pick is asked a
+# sixteenth of a second before that instant, at it, and a sixteenth after it.
+# The three lie inside one whole second and on one side of its half, so a
+# reading cut down, rounded up, rounded to the nearest or moved by half a
+# second falls on the wrong side of the expiry at one of them at least.
 _SIGHTED_AT = 3 * main._REGION_SEEN_TTL_SECONDS + 0.375
 _EXPIRES_AT = _SIGHTED_AT + main._REGION_SEEN_TTL_SECONDS
 _SIXTEENTH = 0.0625
@@ -549,10 +551,10 @@ _AROUND_EXPIRY = [
 ]
 
 # (the pick's arguments, the region whose reporters are stamped, what the pick
-# says while the sighting is live, what it says once it has expired). Each
-# shape puts ONE use of the pick's reading in charge of the answer: the
-# confirmation of the first or the second home, each of the three weighings
-# of two different regions, the seen= field.
+# says while the sighting is live, what it says once it has expired). Between
+# them the shapes put each use of the pick's reading in charge of something
+# the test asserts: the confirmation of the first and of the second home, each
+# of the three weighings of two different regions, the seen= field.
 _FRACTION_SHAPES = [
     # a home that only the sighting confirms (REGION-R2's scenario), and its mirror
     (("eu", "us", "eu", ""), "us", ("us", "seen=y", "home_ok=(y,-)"), ("eu", "seen=n", "home_ok=(n,-)")),

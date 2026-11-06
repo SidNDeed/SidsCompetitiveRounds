@@ -387,10 +387,11 @@ def test_a_map_the_join_accepted_still_decides_the_room(capsys):
 
 
 def test_the_room_window_is_judged_to_the_microsecond(capsys):
-    """Codex round REGION-R2, the class: the ages above are whole seconds, so
-    an age cut down to whole seconds, or a window half a second longer, would
-    answer the same there. A map decides the room up to and including 900 s
-    and not one microsecond longer, whichever seat's map it is."""
+    """Codex round REGION-R2, the class: the test above judges ages of whole
+    seconds (200, 900 and 901), so with an age cut down to whole seconds, or
+    with the comparison's window half a second longer, each of its picks
+    answers the same. A map decides the room up to and including 900 s and
+    not one microsecond longer, whichever seat's map it is."""
     now = _now()
     kw = dict(p1_pings=FRESH_MAP, p2_pings=FRESH_MAP_PARTNER, now=now)
     window = timedelta(seconds=main.REGION_PINGS_ROOM_MAX_AGE_S)
