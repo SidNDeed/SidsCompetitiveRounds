@@ -2905,8 +2905,8 @@ def test_r11_rules_bound_sites_are_observed(monkeypatch):
         async def body(env):
             lob = await R._held(env)
             await env.conn.execute(
-                "UPDATE ffa_seat_readmissions SET refused_at = now()"
-                " WHERE lobby_id = $1 AND player_id = $2",
+                "UPDATE ffa_seat_readmissions SET refused_at = now(),"
+                " refused_reason = 'declined' WHERE lobby_id = $1 AND player_id = $2",
                 lob.lid, lob.pids[1])
             r = await R._readmit(env, lob, 1, "claim", 1)
             assert r["reason"] == "not_held", ("row refused", r.body)

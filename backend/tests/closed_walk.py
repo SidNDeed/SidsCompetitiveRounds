@@ -1357,24 +1357,24 @@ class Bindings:
         """(F, d): the function object the walked definition d is the body
         of: the module binding of d's name, a trusted plain function of that
         name with no decorator, whose parameters, read from the function
-        object, are d's."""
+        object, are d's. None when d is no such body (a definition parsed on
+        its own, a scope that is not a module): no rule roots its
+        parameters, and the walk's own reading (a parameter's condition no
+        walked call site discharges) refuses as before."""
         d = self.where if self.has_fn else self.span_def
         if not isinstance(d, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
             raise Unclassified((line, "a bound discharge outside a walked "
                                       "definition"))
         mod = self.scope
         if type(mod) is not _types.ModuleType:
-            raise Unclassified((line, f"{d.name}: a span whose scope is not a "
-                                      "module"))
+            return None
         F = vars(mod).get(d.name, _MISSING)
         _ib.observe(mod, d.name, F)
         if (not _ib.trusted_function(F) or F.__code__.co_name != d.name
                 or d.decorator_list or d.args.vararg or d.args.kwarg
                 or F.__code__.co_flags & 0x0C
                 or _param_table(F)[0] != _param_table(d)[0]):
-            raise Unclassified((line, f"{d.name}: the walked definition is "
-                                      "not the body of a trusted function "
-                                      "of its module with its parameters"))
+            return None
         return F, d
 
     def bound_value(self, expr, line):
@@ -1387,7 +1387,10 @@ class Bindings:
             return None
         if self._local_root(expr, d) is None:
             return None
-        F, d = self.span_function(line)
+        span = self.span_function(line)
+        if span is None:
+            return None
+        F, d = span
         got = self._rooted(expr, F, d, line)
         if got is None:
             return None
