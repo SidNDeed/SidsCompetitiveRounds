@@ -6023,6 +6023,27 @@ def test_r11_supplied_helper_bound_by_the_function():
         e.value.args[0][1]), e.value.args
 
 
+def test_r11_f10_operator_over_a_container():
+    """Round 11 (run 17, _operated): an operator over exact containers of
+    builtin values is a container of builtin values (`['a'] + ['b']`), and
+    an identity test is a bool; a method of an element is then admitted.
+    An operator over a session result stays unproven."""
+    def walk(src):
+        d = _ast.parse(src).body[0]
+        return _cw.def_effects(d, main, _r11_policy(grammar=False), d.name,
+                               receivers=True)
+    got = walk("async def g(db):\n"
+               "    xs = ['a'] + ['b']\n"
+               "    same = xs is None\n"
+               "    return [x.lower() for x in xs], same\n")
+    assert not any(x.startswith("receiver:") for x in got), got
+    with pytest.raises(Unclassified):
+        walk("async def g(db):\n"
+             "    rows = (await db.execute(text('SELECT 1'))).mappings().all()\n"
+             "    xs = rows + ['b']\n"
+             "    return [x.lower() for x in xs]\n")
+
+
 def test_r11_nested_def_through_the_resolver():
     """Round 11 (run 20): a nested definition's call is read through the
     resolver (Bindings.nested_def): its one binding, a `def` that binds in
