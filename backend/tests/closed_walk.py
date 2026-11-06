@@ -492,20 +492,30 @@ def _one_top_binding(tree, name):
 
 
 _MODULE_TREES = {}
+_SOURCE_TREES = {}
 
 
 def _module_tree(scope):
-    """The parsed source of module `scope` (cached), or None. Keyed by the
-    scope OBJECT (round 11): a composed scope answers `__name__` with its
-    module's, and a key by name made the two evict each other, so main.py
-    was parsed again at every alternation (run 8's MemoryError, probe 3)."""
+    """The parsed source of module `scope` (cached), or None. Looked up by
+    the scope OBJECT and shared by the source TEXT (round 11): a composed
+    scope answers `__name__` with its module's, and a key by name made the
+    two evict each other, so main.py was parsed again at every alternation
+    (run 8's MemoryError, probe 3); a tree per scope object kept one parse
+    of main.py per composed scope for the whole session (run 10's oom-kill).
+    Equal source text is one tree, so a scope can never read another's."""
     key = id(scope)
     if key in _MODULE_TREES and _MODULE_TREES[key][0] is scope:
         return _MODULE_TREES[key][1]
     try:
-        tree = _ast.parse(_inspect.getsource(scope))
+        src = _inspect.getsource(scope)
     except (OSError, TypeError):
+        src = None
+    if src is None:
         tree = None
+    else:
+        tree = _SOURCE_TREES.get(src)
+        if tree is None:
+            tree = _SOURCE_TREES[src] = _ast.parse(src)
     _MODULE_TREES[key] = (scope, tree)
     return tree
 
