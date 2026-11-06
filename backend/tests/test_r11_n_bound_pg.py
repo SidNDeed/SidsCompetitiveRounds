@@ -34,8 +34,10 @@ reaches a .get (the try rebinds it or its except does). _group_region's
 except binding arrives on the error flow (_ovt_error_flow), the one flow that
 reaches the .get at main:18767.
 
-Member (2) of the brief, the result of match_hold._guard_identities, is not
-built: its premise failed (NOTES r11 n, P-B4).
+Member (B), match_hold._guard_identities (ruling FOUR-R11-A20 (1)), is a
+callee-identity bound at the two expressions of the helper's body the
+visitor does not classify (N2 sorted at its sorted call, N2 all at its .all
+call): test_r11_n_b_guard_identities_callees_are_observed below.
 
 Runs under CF_TEST_PG_DSN as the other PostgreSQL suites. Needs
 sys.monitoring (CPython 3.12+): without it the test fails, it never skips.
@@ -470,3 +472,264 @@ def test_r11_n_bound_sites_are_observed(monkeypatch):
     stray = sorted(k for k in origin
                    if k[1] not in _N_MUST[k[0]] + _N_MAY.get(k[0], ()))
     assert not stray, ("rule N: observations from rows outside the census", stray)
+
+
+# --- member (B), ruling FOUR-R11-A20 (1) -----------------------------------
+# The named callees, frozen before the code (NOTES r11 n, section 3a). S254
+# "N2 sorted": the callee IS builtins.sorted as closed_walk's plain-body
+# table holds it (grammar_providers.PROVIDERS["sorted"]), resolved through
+# match_hold's own globals (no binding there) to its builtins. S263 "N2 all":
+# the receiver's type IS the driver's result class, taken from the loaded
+# module (never imported) and held by frozen module name, qualified name and
+# MRO as rule K holds the driver's UUID class, and the callee IS that class's
+# own function `all` by identity.
+import types as _n_types  # noqa: E402
+
+_N_B_SORTED = _cw.PLAIN_BODY_CALLS["sorted"][0]
+_N_B_RESULT = ("sqlalchemy.engine.result", "MappingResult")
+_N_B_RESULT_MRO = ("sqlalchemy.engine.result.MappingResult",
+                   "sqlalchemy.engine.result._WithKeys",
+                   "sqlalchemy.engine.result.FilterResult",
+                   "sqlalchemy.engine.result.ResultInternal",
+                   "sqlalchemy.sql.base.InPlaceGenerative",
+                   "sqlalchemy.util.langhelpers.HasMemoized",
+                   "typing.Generic", "builtins.object")
+_N_B_ALL = ("sqlalchemy.engine.result", "MappingResult.all", "all")
+_N_B_LABELS = ("N2 sorted", "N2 all")
+
+
+def _n_b_result_class():
+    """The driver's result class, from the loaded module, by the frozen
+    module name, qualified name and MRO."""
+    mod = sys.modules.get(_N_B_RESULT[0])
+    assert mod is not None, ("the driver's result module is not loaded",
+                             _N_B_RESULT[0])
+    cls = vars(mod).get(_N_B_RESULT[1])
+    assert type(cls) is type, ("the driver's result class", cls)
+    names = tuple(_tname(c) for c in cls.__mro__)
+    got = (cls.__module__, cls.__qualname__)
+    assert got == _N_B_RESULT and names == _N_B_RESULT_MRO, (
+        "rule N: the driver's result class moved", got, names)
+    return cls
+
+
+def _n_b_all(cls):
+    """The class's own function `all`, by its frozen description."""
+    f = vars(cls).get("all")
+    assert type(f) is _n_types.FunctionType, ("rule N: the result class's all", f)
+    desc = (f.__module__, f.__qualname__, f.__code__.co_name)
+    assert desc == _N_B_ALL, ("rule N: the result class's all moved", desc)
+    assert _cw._ib.trusted_function(f, sys.modules[f.__module__]), (
+        "rule N: the result class's all is not its module's own function")
+    return f
+
+
+def _n_b_sites():
+    """The two expressions of the helper by its own source: label -> (file
+    line, column) of the call's CALL instruction (the sorted call's own
+    position; the .all attribute's last line and its name's column)."""
+    F = G.match_hold._guard_identities
+    d = _tree(F)
+    off = F.__code__.co_firstlineno - d.lineno
+    srt = [n for n in ast.walk(d) if isinstance(n, ast.Call)
+           and isinstance(n.func, ast.Name) and n.func.id == "sorted"]
+    alls = [n for n in ast.walk(d) if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute) and n.func.attr == "all"]
+    assert len(srt) == 1 and len(alls) == 1, ("the helper's two calls",
+                                              len(srt), len(alls))
+    a = alls[0].func
+    return {"N2 sorted": (srt[0].lineno + off, srt[0].col_offset),
+            "N2 all": (a.end_lineno + off, a.end_col_offset - len("all"))}
+
+
+def _n_b_walk():
+    """The gate's open and claim rows walked from a fresh start (the h3
+    hold refusal walk): their refusals, and the rule N marks the walk made
+    in _guard_identities as (label, function, line, callee, name, group)."""
+    mh = G.match_hold
+    _cw.reset_bound()
+    G._GATE_POLICIES.clear()
+    problems = []
+    for name, obj in (("open", mh.match_hold_open), ("claim", mh.match_hold_claim)):
+        fn = ast.parse(textwrap.dedent(inspect.getsource(obj))).body[0]
+        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name)
+                 and n.func.id == "_lease_admission_gate"]
+        why = G.refusal_branch_violation(fn, calls[0], "hold", mh,
+                                         G._source_at(obj))
+        if why is not None:
+            problems.append((name, why))
+    marks = {(m[6], m[1], m[2], m[3], m[4], m[5]) for m in _cw.BOUND_MARKS
+             if m[0] == "N" and m[1] is mh._guard_identities}
+    G._GATE_POLICIES.clear()
+    return problems, marks
+
+
+class _HoldEnv:
+    """test_match_hold_pg's env shape over main.app (ASGI): every call goes
+    through main's own routes, the case's PostgreSQL schema behind them."""
+
+    def __init__(self, w):
+        self.w, self.conn, self.sm = w, w.conn, w.sm
+
+    async def call(self, method, path, steam, body=None, params=None):
+        headers = {"X-Mod-Version": R.wiring.VERSION,
+                   "X-Session-Token": "tok:" + steam}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),
+                                     base_url="http://w", timeout=120) as cl:
+            return await cl.request(method, path, json=body, params=params,
+                                    headers=headers)
+
+    async def post(self, path, steam, body, **kw):
+        return await self.call("POST", path, steam, body=body)
+
+    async def get(self, path, steam, params=None, **kw):
+        return await self.call("GET", path, steam, params=params)
+
+
+def _n_b_open_flow(refuse, mp):
+    """POST /api/v1/match/hold/open over main.app on a team series opened by
+    test_match_hold_pg's helpers. refuse: a queue lease of another mode on
+    the held player, so the gate refuses other_mode and the refusal branch
+    writes its ledger row (_write_open_attempt -> _guard_open_identities ->
+    _guard_identities); else the open succeeds."""
+    H = R.hold_test
+
+    async def body(w, sm):
+        mp.setattr(main, "MATCH_HMAC_SECRET", H.SECRET)
+        mp.setattr(main, "_check_steam_session", H._fake_session)
+        env = _HoldEnv(w)
+        series, game, _ = await H.opened_series(env, "team", held=1)
+        if refuse:
+            await w.conn.execute(
+                "INSERT INTO queue_leases (player_id, mode, group_id, generation,"
+                " expires_at) VALUES ($1, 'ffa', gen_random_uuid(), gen_random_uuid(),"
+                " clock_timestamp() + interval '5 min')", series.pid(1))
+        r = await H.open_hold(env, series, 1, 0, game)
+        assert r.status_code == 200, ("hold open", r.status_code, r.text[:300])
+        want = ({"status": "refused", "reason": "other_mode"} if refuse
+                else None)
+        if want is not None:
+            assert r.json() == want, ("hold open refused", r.text[:300])
+        else:
+            assert r.json().get("status") == "opened", ("hold open", r.text[:300])
+    return body
+
+
+_N_B_FLOWS = (("hold open refused", True), ("hold open", False))
+
+
+def test_r11_n_b_guard_identities_callees_are_observed(monkeypatch):
+    """Rule N member (B) (ruling FOUR-R11-A20 (1)). (1) The interpreter has
+    sys.monitoring. (2) The gate's open and claim rows walk with no
+    refusal, and the walk's rule N marks in match_hold._guard_identities
+    are exactly the two named sites (N2 sorted, N2 all). (3) The open flows
+    run through main.app with rows read from PostgreSQL under a recorder on
+    the helper's code: at the sorted call the callee IS builtins.sorted,
+    resolved through match_hold's globals (no binding there) to its
+    builtins; at the .all call the receiver's type IS the driver's result
+    class and the callee IS that class's own `all`; each site is observed
+    on the chain the open row walks (match_hold_open's other_mode refusal
+    -> _write_open_attempt -> _guard_open_identities -> the helper). A
+    marked site no flow observed fails."""
+    assert hasattr(sys, "monitoring"), (
+        "rule N's recorder needs sys.monitoring; this interpreter has none",
+        sys.version)
+    mh = G.match_hold
+    F = mh._guard_identities
+    problems, marks = _n_b_walk()
+    assert not problems, ("rule N (B): the gate's hold rows refuse", problems)
+    sites = _n_b_sites()
+    named = {("N2 sorted", F, sites["N2 sorted"][0], "sorted", "sorted", "call"),
+             ("N2 all", F, sites["N2 all"][0], ".all", "mappings", "result")}
+    assert marks == named, ("rule N (B): marks outside the named table",
+                            sorted(map(repr, marks ^ named)))
+    cls = _n_b_result_class()
+    all0 = _n_b_all(cls)
+    # the chain the open row walks, by the callers' own source
+    g_line = _calls(mh._guard_open_identities, lambda n: isinstance(
+        n.func, ast.Name) and n.func.id == "_guard_identities")
+    w_line = _calls(mh._write_open_attempt, lambda n: isinstance(
+        n.func, ast.Name) and n.func.id == "_guard_open_identities")
+    o_line = _calls(mh.match_hold_open, lambda n: isinstance(
+        n.func, ast.Name) and n.func.id == "_write_open_attempt" and any(
+        isinstance(a, ast.Constant) and a.value == "other_mode" for a in n.args))
+    assert len(g_line) == 1 and len(w_line) == 1 and len(o_line) == 1, (
+        "the open row's chain", g_line, w_line, o_line)
+    walked = (("_guard_open_identities", g_line[0]),
+              ("_write_open_attempt", w_line[0]),
+              ("match_hold_open", o_line[0]))
+    mon = sys.monitoring
+    assert mon.get_tool(_N_TOOL) is None, ("sys.monitoring tool id in use",
+                                           mon.get_tool(_N_TOOL))
+    code = F.__code__
+    pos = list(code.co_positions())
+    at = {v: k for k, v in sites.items()}
+    seen, bad, chains = collections.Counter(), [], collections.Counter()
+
+    def chain_of(frame):
+        out, f = [], frame.f_back
+        for _ in range(3):
+            if f is None:
+                break
+            out.append((f.f_code.co_name, f.f_lineno))
+            f = f.f_back
+        return tuple(out)
+
+    def on_call(c, off, callee, arg0):
+        try:
+            if c is not code:
+                return None
+            p = pos[off // 2]
+            label = at.get((p[0], p[2]))
+            if label is None:
+                return None
+            frame = sys._getframe(1)
+            if frame.f_code is not code:
+                bad.append(("rule N (B): not the monitored frame", label))
+                return None
+            if label == "N2 sorted":
+                g = frame.f_globals
+                if callee is not _N_B_SORTED:
+                    bad.append(("rule N (B): sorted is not builtins.sorted",
+                                repr(callee)[:80]))
+                if g is not vars(mh) or "sorted" in g:
+                    bad.append(("rule N (B): sorted resolves outside "
+                                "match_hold's builtins", "sorted" in g))
+                if frame.f_builtins.get("sorted") is not _N_B_SORTED:
+                    bad.append(("rule N (B): the builtins' sorted is not "
+                                "builtins.sorted",))
+            else:
+                func, recv = callee, arg0
+                if type(callee) is _n_types.MethodType:
+                    func, recv = callee.__func__, callee.__self__
+                if func is not all0 or vars(cls).get("all") is not all0:
+                    bad.append(("rule N (B): all is not the result class's own",
+                                getattr(func, "__qualname__", repr(func)[:80])))
+                if type(recv) is not cls:
+                    bad.append(("rule N (B): a receiver outside the driver's "
+                                "result class", _tname(type(recv))))
+            chains[(label, chain_of(frame))] += 1
+            seen[label] += 1
+        except Exception as exc:
+            bad.append(("rule N (B): recorder error", repr(exc)))
+        return None
+
+    mon.use_tool_id(_N_TOOL, "r11 rule N bound (B)")
+    try:
+        mon.register_callback(_N_TOOL, mon.events.CALL, on_call)
+        mon.set_local_events(_N_TOOL, code, mon.events.CALL)
+        for _name, refuse in _N_B_FLOWS:
+            R._run(monkeypatch, _n_b_open_flow(refuse, monkeypatch))
+    finally:
+        mon.set_local_events(_N_TOOL, code, 0)
+        mon.register_callback(_N_TOOL, mon.events.CALL, None)
+        mon.free_tool_id(_N_TOOL)
+    table = sorted(f"R11-N-B-CHAIN {k[0]} {k[1]} {n}" for k, n in chains.items())
+    warnings.warn("; ".join(table) or "R11-N-B-CHAIN none", UserWarning)
+    assert not bad, bad[:10]
+    unreached = sorted(lb for lb in _N_B_LABELS if not seen[lb])
+    assert not unreached, ("rule N (B): marked sites no flow observed", unreached)
+    off_chain = sorted(lb for lb in _N_B_LABELS if not chains[(lb, walked)])
+    assert not off_chain, ("rule N (B): sites not observed on the walked "
+                           "chain", off_chain, walked, table)

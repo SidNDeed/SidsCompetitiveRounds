@@ -298,6 +298,66 @@ _GATE_GRAMMAR = types.SimpleNamespace(
 # every call at that site (test_r11_rules_bound_sites_are_observed).
 _cw.W_NAMED[main._asm_readmit_work] = {"ctx": main._AsmCtx}
 
+# Round 11, rule N member (B) (ruling FOUR-R11-A20 (1); NOTES r11 n, section
+# 3): the two expressions of match_hold._guard_identities' body that the
+# visitor does not classify, each discharged by a callee-identity bound. The
+# walk marks the site (closed_walk._member_callee); test_r11_n_bound_pg
+# asserts at run time, by identity, the named callee and receiver class at
+# each (its _N_B_NAMED, frozen before the code). The static half: the
+# bindings by identity and the census rows (closed_walk._n_census), FROZEN
+# here at 04084fc0. Rows of rule N's table of bounds: nothing here gives a
+# value a provenance, and no other body expression is discharged.
+_N_B_FN = match_hold._guard_identities
+_N_B_ALL = ("(await db.execute(text('SELECT id, steam_id FROM players WHERE"
+            " steam_id = ANY(CAST(:steams AS varchar[])) AND deleted_at IS"
+            " NULL'), {'steams': keys})).mappings().all()")
+_N_B_SORTED = "sorted({str(s) for s in steam_ids if s is not None})"
+_N_B_CENSUS_ROWS = {
+    ("F", "sorted"): (
+        (9, 11, "Load", "Assign.value", _N_B_SORTED, "keys = " + _N_B_SORTED),),
+    ("F", ".all"): ((18, 41, "Load", _N_B_ALL),),
+    ("F", "rows"): (
+        (15, 4, "Store", "Assign.targets", "rows",
+         "rows = (await db.execute(text('SELECT id, steam_id FROM players WHERE"
+         " steam_id = ANY(CAST(:steams AS varchar[])) AND del"),
+        (19, 44, "Load", "comprehension.iter", "rows",
+         "return {r['steam_id']: r['id'] for r in rows}")),
+    ("F", "return"): (
+        (14, "return", "return {}"),
+        (19, "return", "return {r['steam_id']: r['id'] for r in rows}")),
+    ("match_hold", "_guard_identities"): (
+        ("_guard_open_identities", 2, "Load",
+         "_guard_identities(db, (req.held_steam_id, req.opener_steam_id))"),
+        ("_guard_player_ids", 10, "Load",
+         "_guard_identities(db, [*extra_steams, *(r['steam_id'] for r in rows)])"),
+        ("match_hold_beat", 11, "Load",
+         "_guard_identities(db, [req.steam_id, *(s.u_id for s in req.seen)])")),
+    ("match_hold", "sorted"): (
+        ("_guard_identities", 8, "Load", _N_B_SORTED),
+        ("_guard_player_ids", 6, "Load",
+         "sorted({str(p) for p in player_ids if p is not None})"),
+        ("_roster", 12, "Load", "sorted(seats.items(), key=lambda kv: kv[1][0])")),
+}
+# (label, site function, form, callee, name, spelling, group, binds, census)
+_N_B_TABLE = (
+    ("N2 sorted", _N_B_FN, "call", "sorted", "sorted", _N_B_SORTED, "call",
+     ((match_hold, "_guard_identities", _N_B_FN),
+      (match_hold, "sorted", _cw._MISSING),
+      (_gate_builtins, "sorted", _cw.PLAIN_BODY_CALLS["sorted"][0])),
+     (("F", "sorted"), ("match_hold", "sorted"),
+      ("match_hold", "_guard_identities"), ("F", "return"))),
+    ("N2 all", _N_B_FN, "result", ".all", "mappings", _N_B_ALL, "result",
+     ((match_hold, "_guard_identities", _N_B_FN),),
+     (("F", ".all"), ("F", "rows"), ("match_hold", "_guard_identities"),
+      ("F", "return"))),
+)
+_N_B_OWNERS = {"F": _N_B_FN, "match_hold": match_hold}
+for _n_b in _N_B_TABLE:
+    _cw.N_MEMBERS[(_n_b[1], _n_b[2], _n_b[3], _n_b[4])] = (
+        _n_b[0], _n_b[5], _n_b[6], _n_b[7],
+        tuple((_N_B_OWNERS[_o], _nm, _N_B_CENSUS_ROWS[(_o, _nm)])
+              for _o, _nm in _n_b[8]))
+
 
 def _check_site(fn, stmts, at):
     """Site span `stmts` of fn (grammar_shapes_gate.check_site); `at` is
