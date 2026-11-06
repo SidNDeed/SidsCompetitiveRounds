@@ -527,28 +527,40 @@ def same_chain(a, b):
 class Deps:
     """The bindings and chains one cached walk read (see the module
     docstring), each kept once: reads by (namespace, name), chains by the
-    function object."""
+    function object. A walk's own reads are its own; what a nested walk
+    read, or a cached hit it honoured, is HELD by reference (`subs`) and
+    checked with it, never copied (round 11, run 11's oom-kill: a copy per
+    enclosing walk made every cache entry hold its whole closure)."""
 
-    __slots__ = ("reads", "chains")
+    __slots__ = ("reads", "chains", "subs")
 
     def __init__(self):
         self.reads = {}
         self.chains = {}
+        self.subs = {}
 
     def valid(self):
-        for ns, name, obj in self.reads.values():
-            if _lookup(ns, name) is not obj:
-                return False
-        for fn, ch in self.chains.values():
-            if not same_chain(chain(fn), ch):
-                return False
+        """Whether every read and chain of this Deps and of every Deps it
+        holds, transitively, still binds the recorded object."""
+        seen, todo = set(), [self]
+        while todo:
+            d = todo.pop()
+            if id(d) in seen:
+                continue
+            seen.add(id(d))
+            for ns, name, obj in d.reads.values():
+                if _lookup(ns, name) is not obj:
+                    return False
+            for fn, ch in d.chains.values():
+                if not same_chain(chain(fn), ch):
+                    return False
+            todo.extend(d.subs.values())
         return True
 
     def extend(self, other):
-        for k, v in other.reads.items():
-            self.reads.setdefault(k, v)
-        for k, v in other.chains.items():
-            self.chains.setdefault(k, v)
+        """This Deps depends on `other` too (held, checked by valid)."""
+        if other is not self:
+            self.subs.setdefault(id(other), other)
 
 
 _STACK = []
@@ -562,32 +574,33 @@ def _lookup(ns, name):
 
 def observe(ns, name, obj):
     """A module-scope read by a walk (ns a module or a builtins mapping):
-    every active Deps records it (the first object read is kept; the
-    namespace object is held, so its id stays its own)."""
-    key = (id(ns), name)
-    for d in _STACK:
-        d.reads.setdefault(key, (ns, name, obj))
+    the innermost active Deps records it (the first object read is kept;
+    the namespace object is held, so its id stays its own); every
+    enclosing Deps holds that one when its recording ends."""
+    if _STACK:
+        _STACK[-1].reads.setdefault((id(ns), name), (ns, name, obj))
 
 
 def observe_chain(fn):
-    """A callee chain the walk walked: every active Deps records it."""
+    """A callee chain the walk walked: the innermost active Deps records
+    it (held by the enclosing ones as observe says)."""
     ch = chain(fn)
-    for d in _STACK:
-        d.chains.setdefault(id(fn), (fn, ch))
+    if _STACK:
+        _STACK[-1].chains.setdefault(id(fn), (fn, ch))
     return ch
 
 
 def carry(deps):
-    """A cached walk's Deps, honoured as a hit: every active Deps takes
-    them over, so an enclosing cached walk depends on them too."""
-    for d in _STACK:
-        if d is not deps:
-            d.extend(deps)
+    """A cached walk's Deps, honoured as a hit: the innermost active Deps
+    holds it, so every enclosing cached walk depends on it too."""
+    if _STACK:
+        _STACK[-1].extend(deps)
 
 
 class recording:
-    """with recording() as deps: the walk's reads go into `deps` (and into
-    every enclosing recording)."""
+    """with recording() as deps: the walk's reads go into `deps`; when it
+    ends (normally or by an exception), the enclosing recording holds
+    `deps`, so it depends on everything `deps` read."""
 
     def __enter__(self):
         self.deps = Deps()
@@ -596,4 +609,6 @@ class recording:
 
     def __exit__(self, *exc):
         _STACK.remove(self.deps)
+        if _STACK:
+            _STACK[-1].extend(self.deps)
         return False

@@ -1151,6 +1151,27 @@ class Bindings:
             return opaque.get(func.id)
         return None
 
+    def supplied(self, node, d, line=0):
+        """Round 11: whether `node` is the plain name of definition `d`, a
+        definition the caller supplies and reads separately (a walk's opaque
+        helper), as the walk's opaque branch reads it; refused when the
+        walked function binds that name (then it is not `d`). When the
+        module binds the name (a live helper), that binding must be the
+        definition it names (bound_identity, as `spelled`); a name the
+        module does not bind at all is a planted program's helper, read only
+        as `d`."""
+        if self.opaque_def(node, {d.name: d}) is not d:
+            return False
+        line = line or getattr(node, "lineno", 0)
+        kind, v = self.resolve(d.name, line)
+        if kind != "module":
+            raise Unclassified((line, f"{d.name}, a supplied helper the walk "
+                                      "reads separately, is bound by the "
+                                      "function"))
+        if v is not _MISSING or hasattr(_builtins, d.name):
+            self.bound_identity(d.name, line)
+        return True
+
     def session_argument(self, call, arg, fn, line=0):
         """A session value passed as an argument of call `call` of function
         `fn` is classified only when it binds `fn`'s parameter of the same
@@ -1596,7 +1617,15 @@ PLAIN_BODY_METHODS = frozenset({
 def plain_effects(fn, policy):
     """The effects of plain function `fn`'s body, walked by def_effects under
     `policy`'s lists plus the plain-body lists (one sub-policy per policy,
-    sharing its met counter)."""
+    sharing its met counter).
+
+    Round 11: the sub-policy lives on the policy's OWNER, the policy a
+    def_effects sub-policy was made from (its lists are the owner's), so
+    every walk under one policy shares one plain sub-policy and its helper
+    cache; a sub-policy made per walk had its own, and every plain helper
+    was walked again under every function that calls it (probe 4:
+    _admission_key 392 times in one test)."""
+    policy = getattr(policy, "_plain_owner", policy)
     sub = getattr(policy, "_plain_sub", None)
     if sub is None:
         sub = Policy(policy.scope, policy.pure_calls | PLAIN_BODY_CALLS,
@@ -1604,6 +1633,7 @@ def plain_effects(fn, policy):
                      policy.pure_awaits, policy.sql, policy.session)
         sub.met = policy.met
         sub.grammar = policy.grammar
+        sub._plain_owner = policy           # its own plain helpers: the same lists
         policy._plain_sub = sub
     return helper_effects(fn, sub)
 
@@ -1696,12 +1726,33 @@ def _is_c(p):
     return isinstance(p, tuple) and p[0] == "C"
 
 
+def _is_u(p):
+    """One of several provenances ("U", frozenset of alternatives): a name
+    bound in ways no single provenance covers (a session row in one
+    binding, a parameter's element in another). Every use is judged per
+    alternative: each must meet the use, and each parameter alternative
+    carries its own condition (round 11, run 12)."""
+    return isinstance(p, tuple) and p[0] == "U"
+
+
+def _alts(p):
+    """The alternatives of provenance `p` (itself when it is not a union)."""
+    return sorted(p[1], key=repr) if _is_u(p) else [p]
+
+
+def _over(f, p):
+    """The join of `f` applied to each alternative of `p`."""
+    return _join([f(a) for a in _alts(p)]) if _is_u(p) else f(p)
+
+
 ROWS = ("C", "ROW")                         # a list of session rows
 
 
 def _derive(p):
     """The provenance of a value READ from a value of provenance `p` (an
     attribute, a subscript, a method result)."""
+    if _is_u(p):
+        return _over(_derive, p)
     if p in ("B", "ROW"):
         return "B"
     if _is_p(p):
@@ -1713,8 +1764,10 @@ def _derive(p):
 
 def _elements(p):
     """The provenance of an element a value of provenance `p` yields."""
-    if p == "B":
-        return "B"
+    if _is_u(p):
+        return _over(_elements, p)
+    if p in ("B", "RS"):
+        return "B"                          # a scalar result yields values
     if p == "R":
         return "ROW"
     if _is_c(p):
@@ -1728,10 +1781,36 @@ def _join(ps):
     """The provenance of a value that is one of values of provenances
     `ps`: equal provenances are themselves; parameters join with builtin
     values; exact containers join with builtin values and with each other,
-    their elements joined."""
+    their elements joined; anything else that is no single provenance is
+    the union of the alternatives (round 11, run 12: a name bound once to
+    a session row and once to a parameter's element), each judged on its
+    own wherever the value is used."""
     ps = list(ps)
     if not ps or any(p is None for p in ps):
         return None
+    flat = [a for p in ps for a in _alts(p)]
+    got = _join_one(flat)
+    if got is not None:
+        return got
+    alts = {p for p in flat if p in ("ROW", "R", "RS")}
+    if "B" in flat and not any(_is_p(p) or _is_c(p) or p == "ROW"
+                               for p in flat):
+        alts.add("B")                       # beside a result, kept itself
+    cs = [p[1] for p in flat if _is_c(p)]
+    if cs:
+        alts.add(("C", _join(cs + (["B"] if "B" in flat else []))))
+    names = sorted({n for p in flat if _is_p(p) for n in p[1]})
+    if names:
+        alts.add(("P", tuple(names), any(p[2] for p in flat if _is_p(p))))
+    if any(not (_is_p(p) or _is_c(p) or p in ("B", "ROW", "R", "RS"))
+           for p in flat):
+        return None
+    return next(iter(alts)) if len(alts) == 1 else ("U", frozenset(alts))
+
+
+def _join_one(ps):
+    """_join's single-provenance rules over alternatives `ps` (no union,
+    no None), or None when no single provenance covers them."""
     params = sorted({n for p in ps if _is_p(p) for n in p[1]})
     rest = [p for p in ps if not _is_p(p)]
     if params:
@@ -1810,15 +1889,15 @@ def receiver_provenance(expr, b, policy=None, depth=0):
         return _returned(call, b, policy, d, awaited=True)
     if isinstance(expr, _ast.Subscript):
         v = receiver_provenance(expr.value, b, policy, d)
-        if _is_c(v) and isinstance(expr.slice, _ast.Slice):
-            return v                        # a slice of a list is one
-        return _derive(v)
+        sl = isinstance(expr.slice, _ast.Slice)
+        # a slice of a list is one
+        return _over(lambda a: a if (_is_c(a) and sl) else _derive(a), v)
     if isinstance(expr, _ast.Attribute):
         return _derive(receiver_provenance(expr.value, b, policy, d))
     if isinstance(expr, _ast.Call):
         return _call_provenance(expr, b, policy, d)
     if isinstance(expr, _ast.Name):
-        return _name_provenance(expr.id, b, policy, d)
+        return _name_provenance(expr.id, b, policy, d, expr)
     return None
 
 
@@ -1830,34 +1909,7 @@ def _call_provenance(call, b, policy, d):
         listed = _listed_kind(f, b, policy)
         if listed is None:
             r = receiver_provenance(f.value, b, policy, d)
-            m = f.attr
-            if r == "R":
-                if m in ("mappings", "scalars"):
-                    return "R"
-                if m in ("first", "one", "scalar", "scalar_one"):
-                    return "ROW"
-                if m in ("all", "fetchall"):
-                    return ROWS
-                return None
-            if r == "ROW":
-                return "B" if m in ROW_METHODS else None
-            if _is_c(r):
-                if m in ("get", "pop", "setdefault") and len(call.args) > 1:
-                    return _join([r[1], receiver_provenance(
-                        call.args[1], b, policy, d)])
-                if m in ("get", "pop", "setdefault"):
-                    return _join([r[1], "B"])       # or None
-                if m in ("copy", "keys", "values", "items"):
-                    return r
-                if m == "join":
-                    return "B"
-                return None
-            if r == "B" or _is_p(r):
-                if m in ("get", "pop", "setdefault") and len(call.args) > 1:
-                    return _join([_derive(r), receiver_provenance(
-                        call.args[1], b, policy, d)])
-                return _derive(r)
-            return None
+            return _over(lambda a: _method_result(a, f.attr, call, b, policy, d), r)
     kind = _listed_kind(f, b, policy)
     if kind is None:
         return _returned(call, b, policy, d, awaited=False)
@@ -1871,6 +1923,51 @@ def _call_provenance(call, b, policy, d):
         if not call.args:
             return "B"
         return _container([_arg_elements(a, b, policy, d) for a in call.args])
+    return None
+
+
+def _method_result(r, m, call, b, policy, d):
+    """The provenance of method `m`'s result on a receiver of (single)
+    provenance `r`, for `call`. A session result's .scalars() is a scalar
+    result ("RS"), whose rows are column values; a column value is builtin
+    (round 11, run 12: `.scalars().all()` read as rows refused
+    `(v or "0").lstrip` over its values)."""
+    if r == "R":
+        if m == "mappings":
+            return "R"
+        if m == "scalars":
+            return "RS"
+        if m in ("first", "one"):
+            return "ROW"
+        if m in ("scalar", "scalar_one"):
+            return "B"
+        if m in ("all", "fetchall"):
+            return ROWS
+        return None
+    if r == "RS":
+        if m in ("first", "one", "scalar", "scalar_one"):
+            return "B"
+        if m in ("all", "fetchall"):
+            return "B"                      # a list of column values
+        return None
+    if r == "ROW":
+        return "B" if m in ROW_METHODS else None
+    if _is_c(r):
+        if m in ("get", "pop", "setdefault") and len(call.args) > 1:
+            return _join([r[1], receiver_provenance(
+                call.args[1], b, policy, d)])
+        if m in ("get", "pop", "setdefault"):
+            return _join([r[1], "B"])       # or None
+        if m in ("copy", "keys", "values", "items"):
+            return r
+        if m == "join":
+            return "B"
+        return None
+    if r == "B" or _is_p(r):
+        if m in ("get", "pop", "setdefault") and len(call.args) > 1:
+            return _join([_derive(r), receiver_provenance(
+                call.args[1], b, policy, d)])
+        return _derive(r)
     return None
 
 
@@ -1926,24 +2023,38 @@ def _returned(call, b, policy, d, awaited):
     if fn is None or _inspect.iscoroutinefunction(fn) is not awaited:
         return None
     j = _returns_cached(fn, b, policy)
-    if not _is_p(j):
-        return j
-    params = list(_inspect.signature(fn).parameters)
-    if any(isinstance(a, _ast.Starred) for a in call.args) or any(
-            k.arg is None for k in call.keywords):
-        return None
-    out = []
-    for name in j[1]:
-        if name not in params:
+
+    def mapped(p):
+        # the callee's parameter-derived parts, wherever they stand (an
+        # alternative, a container's elements), read as this call's
+        # arguments (round 11: a container of a parameter was returned
+        # with the CALLEE's parameter names)
+        if _is_u(p):
+            return _over(mapped, p)
+        if _is_c(p):
+            if p[1] is None:
+                return p
+            e = mapped(p[1])
+            return None if e is None else _container([e])
+        if not _is_p(p):
+            return p
+        params = list(_inspect.signature(fn).parameters)
+        if any(isinstance(a, _ast.Starred) for a in call.args) or any(
+                k.arg is None for k in call.keywords):
             return None
-        at = params.index(name)
-        arg = call.args[at] if at < len(call.args) else next(
-            (k.value for k in call.keywords if k.arg == name), None)
-        if arg is None:
-            return None
-        a = receiver_provenance(arg, b, policy, d)
-        out.append(_derive(a) if j[2] else a)
-    return _join(out)
+        out = []
+        for name in p[1]:
+            if name not in params:
+                return None
+            at = params.index(name)
+            arg = call.args[at] if at < len(call.args) else next(
+                (k.value for k in call.keywords if k.arg == name), None)
+            if arg is None:
+                return None
+            a = receiver_provenance(arg, b, policy, d)
+            out.append(_derive(a) if p[2] else a)
+        return _join(out)
+    return mapped(j)
 
 
 _RET_READING = set()
@@ -2003,8 +2114,8 @@ def _returns_join(fn, b, policy, d):
     return _join(provs)
 
 
-def _name_provenance(name, b, policy, d):
-    got = b.sites.get(name, ())
+def _name_provenance(name, b, policy, d, at=None):
+    got, sc = _visible_sites(name, b, at)
     if not got:
         mod = b.scope if type(b.scope) is _types.ModuleType else None
         v = vars(mod).get(name, _MISSING) if mod is not None else _MISSING
@@ -2016,15 +2127,16 @@ def _name_provenance(name, b, policy, d):
     # 1`): the cycle adds nothing to the join ("B" is the join's identity
     # among builtin values; a non-builtin binding still decides it)
     memo = b.__dict__.setdefault("_prov_memo", {})
-    if name in memo:
-        return memo[name]
+    key = (name, sc)
+    if key in memo:
+        return memo[key]
     visiting = b.__dict__.setdefault("_prov_visiting", set())
     hits = b.__dict__.setdefault("_prov_hits", [])
-    if name in visiting:
-        hits.append(name)
+    if key in visiting:
+        hits.append(key)
         return "B"
-    at = len(hits)
-    visiting.add(name)
+    mark = len(hits)
+    visiting.add(key)
     try:
         provs, ins = [], []
         for kind, node in got:
@@ -2033,7 +2145,7 @@ def _name_provenance(name, b, policy, d):
             else:
                 provs.append(_binding_provenance(name, kind, node, b, policy, d))
     finally:
-        visiting.discard(name)
+        visiting.discard(key)
     base = _join(provs)
     if not ins or all(p == "B" for p in ins):
         out = base
@@ -2042,10 +2154,75 @@ def _name_provenance(name, b, policy, d):
         out = ("C", _join([base[1] if _is_c(base) else "B"] + ins))
     else:
         out = None
-    if all(h == name for h in hits[at:]):
-        memo[name] = out                    # no other name's provisional value
-    hits[at:] = [h for h in hits[at:] if h != name]   # an ancestor's stay
+    if all(h == key for h in hits[mark:]):
+        memo[key] = out                     # no other name's provisional value
+    hits[mark:] = [h for h in hits[mark:] if h != key]   # an ancestor's stay
     return out
+
+
+_SCOPES = (_ast.Lambda, _ast.FunctionDef, _ast.AsyncFunctionDef,
+           _ast.ListComp, _ast.SetComp, _ast.DictComp, _ast.GeneratorExp)
+
+
+def _scope_chain(node, b, outward=False):
+    """The nested scopes of the walked function that enclose `node`,
+    innermost first (a lambda's or nested definition's body, a
+    comprehension past its first iterable), by Python's scoping: a
+    lambda's defaults, a definition's decorators, defaults and annotations,
+    and a comprehension's first iterable are read in the enclosing scope.
+    With `outward` (an assignment expression's target), comprehensions are
+    skipped: it binds the scope around them."""
+    out, c, came = [], node, None
+    p = b.parent.get(id(c))
+    while p is not None and p is not b.where:
+        if isinstance(p, _ast.Lambda) and c is p.body:
+            out.append(p)
+        elif (isinstance(p, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+              and any(c is s for s in p.body)):
+            out.append(p)
+        elif isinstance(p, (_ast.ListComp, _ast.SetComp, _ast.DictComp,
+                            _ast.GeneratorExp)) and not outward:
+            first = p.generators[0]
+            if not (c is first and came is first.iter):
+                out.append(p)
+        came, c = c, p
+        p = b.parent.get(id(c))
+    return out
+
+
+def _binding_scope(kind, node, b):
+    """The nested scope a binding of the walked function binds in (None for
+    the function's own), or "all" for a mutation or a global declaration
+    (read wherever the name is)."""
+    if kind in ("mutated", "global"):
+        return "all"
+    if kind == "param":
+        return None if node is b.where else node
+    if kind == "import":
+        node = node[0]
+    outward = isinstance(b.parent.get(id(node)), _ast.NamedExpr)
+    if kind == "def":
+        ch = _scope_chain(node, b)
+    else:
+        ch = _scope_chain(node, b, outward=outward)
+    return ch[0] if ch else None
+
+
+def _visible_sites(name, b, at):
+    """Round 11 (run 12): the bindings of `name` a read at node `at`
+    sees, by Python's scoping (a lambda's parameter is not the function's
+    name of the same spelling), and the scope they bind in (None for the
+    function's own); every binding when the read's place is unknown."""
+    got = b.sites.get(name, ())
+    if at is None or not got:
+        return got, None
+    by = [(_binding_scope(k, n, b), (k, n)) for k, n in got]
+    shared = [kn for s, kn in by if s == "all"]
+    for s in _scope_chain(at, b) + [None]:
+        own = [kn for t, kn in by if t is s]
+        if own:
+            return own + shared, (None if s is None else id(s))
+    return shared, None
 
 
 def _inserted(name, node, b, policy, d):
@@ -2116,13 +2293,18 @@ def receiver_group(method):
 
 def receiver_meets(p, group):
     """Whether provenance `p` discharges a receiver of type group `group`
-    ("deep": the parameter is read from, so it must be builtin whole)."""
+    ("deep": the parameter is read from, so it must be builtin whole). A
+    union meets a group when every alternative does; a parameter
+    alternative never does here (its condition is the caller's to carry)."""
+    if _is_u(p):
+        return all(receiver_meets(a, group) for a in _alts(p))
     if group == "result":
-        return p == "R"
+        return p in ("R", "RS")
     if group == "row":
         return p in ("B", "ROW") or _is_c(p)
     if group == "deep":
-        return p in ("B", "ROW", "R") or (_is_c(p) and receiver_meets(p[1], "deep"))
+        return p in ("B", "ROW", "R", "RS") or (
+            _is_c(p) and receiver_meets(p[1], "deep"))
     return p == "B" or _is_c(p)
 
 
@@ -2186,23 +2368,27 @@ def discharge_receivers(call, fn, effects, line, visitor):
                                           "walk cannot prove builtin"))
             continue
         prov = receiver_provenance(arg, visitor.b, visitor.p)
-        if _is_p(prov):
-            if visitor.helper is None:
-                raise Unclassified((line, f"a call of {co} "
-                                          f"whose {p}, a receiver, is "
-                                          f"{_ast.unparse(arg)}, read from the "
-                                          f"parameter {', '.join(prov[1])}, "
-                                          "which no walked call site "
-                                          "discharges"))
-            g = "deep" if (prov[2] or group == "deep") else group
-            for q in prov[1]:
-                visitor.effects.append((f"receiver:{q}:{g}", "pure"))
-            continue
-        if not receiver_meets(prov, group):
+        # each alternative of a union on its own (round 11, run 12): every
+        # other one must meet the group, every parameter one carries on
+        alts = _alts(prov)
+        if not all(_is_p(a) or receiver_meets(a, group) for a in alts):
             raise Unclassified((line, f"a call of {co} whose "
                                       f"{p}, a receiver of its {group} "
                                       f"methods, is {_ast.unparse(arg)}, which "
                                       "the walk cannot prove builtin"))
+        for a in alts:
+            if not _is_p(a):
+                continue
+            if visitor.helper is None:
+                raise Unclassified((line, f"a call of {co} "
+                                          f"whose {p}, a receiver, is "
+                                          f"{_ast.unparse(arg)}, read from the "
+                                          f"parameter {', '.join(a[1])}, "
+                                          "which no walked call site "
+                                          "discharges"))
+            g = "deep" if (a[2] or group == "deep") else group
+            for q in a[1]:
+                visitor.effects.append((f"receiver:{q}:{g}", "pure"))
     return frozenset(x for x in effects if not x.startswith("receiver:"))
 
 
@@ -2483,22 +2669,25 @@ class Visitor:
                 # be exactly the type the method belongs to, by provenance
                 group = receiver_group(n.func.attr)
                 prov = receiver_provenance(n.func.value, self.b, self.p)
-                if _is_p(prov):
-                    if prov[2]:
-                        group = "deep"
+                # each alternative of a union on its own (round 11, run 12)
+                alts = _alts(prov)
+                if not all(_is_p(a) or receiver_meets(a, group) for a in alts):
+                    self.fail(n, f"a method call {name} whose receiver the "
+                                 "walk cannot prove builtin")
+                for a in alts:
+                    if not _is_p(a):
+                        continue
+                    g = "deep" if a[2] else group
                     if self.helper is None:
                         # a span walked on its own (no def_effects around
                         # it): no call site of it is walked to discharge
                         # the condition, so it is refused here, never
                         # dropped by a consumer that reads other shapes
                         self.fail(n, f"a method call {name} on the parameter "
-                                     f"{', '.join(prov[1])}, a receiver no "
+                                     f"{', '.join(a[1])}, a receiver no "
                                      "walked call site discharges")
-                    for q in prov[1]:
-                        self.effects.append((f"receiver:{q}:{group}", "pure"))
-                elif not receiver_meets(prov, group):
-                    self.fail(n, f"a method call {name} whose receiver the "
-                                 "walk cannot prove builtin")
+                    for q in a[1]:
+                        self.effects.append((f"receiver:{q}:{g}", "pure"))
             if self.b.is_root(n.func.value):
                 # a listed method of a session root (`ctx.seat_of(pid)`):
                 # the root is the function's own parameter, read whole as
@@ -2755,6 +2944,7 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
     sub.met = policy.met
     sub._ret_joins = policy.__dict__.setdefault("_ret_joins", {})
     sub.opaque_receivers = policy.__dict__.setdefault("opaque_receivers", {})
+    sub._plain_owner = getattr(policy, "_plain_owner", policy)
     for n in _ast.walk(d):
         if isinstance(n, _ast.ImportFrom) and (not n.module or n.level):
             raise Unclassified((0, f"{fn.__name__}: a relative import"))

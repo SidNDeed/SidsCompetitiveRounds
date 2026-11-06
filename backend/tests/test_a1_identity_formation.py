@@ -849,6 +849,15 @@ def _calls_named(node, name, b):
                for n in _ast.walk(node))
 
 
+def _calls_supplied(node, d, b):
+    """Round 11: whether `node` holds a call of definition `d`, a helper
+    the caller supplies and reads separately (the family pick), read
+    through `b` (Bindings.supplied, as the walk's opaque branch reads it):
+    a planted pick is no definition of the module's."""
+    return any(isinstance(n, _ast.Call) and b.supplied(n.func, d)
+               for n in _ast.walk(node))
+
+
 def _is_team_answer(node, status, b):
     """Whether `node` is `return TeamQueuePollResponse(status=<status>, ...)`,
     the answer class the module's (read through `b`)."""
@@ -2294,7 +2303,7 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
               and isinstance(st.targets[0], _ast.Tuple)
               and isinstance(st.targets[0].elts[0], _ast.Name)
               and isinstance(st.value, _ast.Await)
-              and _calls_named(st.value, pick.name, rb)}
+              and _calls_supplied(st.value, pick, rb)}
     for nm in sorted(picked):
         try:
             rb.spelled_once(_ast.Name(id=nm, ctx=_ast.Load()), nm, ("local",))
@@ -2315,7 +2324,7 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
             out.append(f"{resolve.name} line {st.lineno}: an answer this read "
                        "does not place")
     relocks = [n for n in _ast.walk(resolve) if isinstance(n, _ast.Call)
-               and rb.spelled(n.func, relock.name)]
+               and rb.supplied(n.func, relock)]
     if len(relocks) != 1:
         out.append(f"{resolve.name} calls {relock.name} {len(relocks)} "
                    "times; the read takes the one its 'relocked' answer "
@@ -2337,7 +2346,7 @@ def _relock_outcome_problems(resolve_src, pick_src, relock_src, scope=None):
             same = False
         if not (same and isinstance(prev.value, _ast.Await)
                 and isinstance(call, _ast.Call)
-                and rb.spelled(call.func, relock.name)):
+                and rb.supplied(call.func, relock)):
             out.append(f"{resolve.name}'s 'relocked' answer is not "
                        f"{relock.name}'s, bound in the statement before it")
     body = [st for st in relock.body if not (
