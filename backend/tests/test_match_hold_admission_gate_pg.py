@@ -2270,10 +2270,9 @@ def test_r11_d_r8_the_unedited_helper_planted_walks_as_the_real_one():
     planted (its record derived by _planted) gives what the real helper
     gives: the same effects (closed_walk.helper_effects) and the same kind
     (_helper_kind: its refusing-path walk), each read inside a gate walk,
-    ORDER marker off and on. The span around it is not compared here: a
-    span walked in a planted module places none of its executes (round 8,
-    M1), so its rows differ from the real span's for that reason alone
-    (NOTES-r11-d, the line-15 finding)."""
+    ORDER marker off and on. The span around it, row by row, is
+    test_r11_d_a18_the_unedited_helper_planted_gives_the_real_span (ruling
+    FOUR-R11-A18 (2)(c))."""
 
     def outputs(fn, scope):
         def read():
@@ -2336,6 +2335,114 @@ def test_r11_d_r8_a_plant_that_changes_parameters_is_refused(label, pairs):
     with pytest.raises(Unclassified) as e:
         _plant_admitted(planted, record, 0)
     assert _R11_D_B in e.value.args[0][1], (label, e.value.args)
+
+
+# Round 11 (ruling FOUR-R11-A18): an execute is placed by the source of the
+# module that DEFINES the function whose body holds it (closed_walk
+# _defining_module), so a span walked in a planted module is placed in main
+# when main defines it. (2)(c): the span row by row; (2)(e): the cautious
+# default; (4): which check refuses a changed signature first through the walk.
+_R11_D_ORDER_HEAD = "outside its frozen order (header"
+_R11_D_LINE_15 = "line 15: writes before the gate"
+
+
+@pytest.mark.parametrize("base", [PREFIX_CLAIM, DIRECT],
+                         ids=["prefix _rdm_claim", "branch:direct _rdm_claim"])
+def test_r11_d_a18_the_unedited_helper_planted_gives_the_real_span(base):
+    """FOUR-R11-A18 (2)(c): the span around the helper, row by row: the real
+    span walked in a module holding the unedited helper planted (its record
+    derived by _planted) gives exactly what the real span gives in main (the
+    kept row): the whole list of prefix refusals, or the branch sentence,
+    with the ORDER marker off and on."""
+    modname, name, entry, target = base
+    module = _R7_MODULES[modname]
+
+    def outputs(helper_edits):
+        fn, scope, at = _planted(module, name, (), (), helper_edits)
+
+        def read():
+            if entry == "prefix":
+                return claim_prefix_violations(fn, target, scope, name, at)[0]
+            call = next(n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Name) and n.func.id == target)
+            return refusal_branch_violation(fn, call, entry.split(":")[1], scope, at)
+
+        _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+        try:
+            off = read()
+        finally:
+            _gg.ORDER_SWITCH["bindings"] = None
+        return [scope, off, read()]
+
+    real = outputs([])
+    plant = outputs([("_rdm_live_or_lapse", [])])
+    assert real[0] is module and plant[0] is not module, (real[0], plant[0])
+    assert plant[1:] == real[1:], (real[1:], plant[1:])
+    assert not real[1] and not real[2], real
+
+
+def test_r11_d_a18_an_unregistered_definition_reads_as_a_write():
+    """FOUR-R11-A18 (2)(e): the cautious default stays. _rdm_claim's span
+    walked in a module whose _rdm_claim has no registered source (its code
+    bound in a fresh module that nothing registered, so the binder cannot
+    prove it) has no defining module; every execute in it reads as a write,
+    and the walk refuses at line 15 with its sentence, ORDER marker off;
+    with the marker on it is refused too."""
+    modname, name, _entry, target = PREFIX_CLAIM
+    module = _R7_MODULES[modname]
+    _synth_next()
+    scope = types.ModuleType(f"gate_unregistered_{_SYNTH[0]}")
+    scope.__dict__.update({k: v for k, v in module.__dict__.items()
+                           if not k.startswith("__")})
+    sys.modules[scope.__name__] = scope
+    unproven = types.FunctionType(getattr(module, name).__code__,
+                                  scope.__dict__, name)
+    setattr(scope, name, unproven)
+    assert _ib._owner_module(unproven) is scope
+    assert not _ib.trusted_function(unproven)
+    fn = ast.parse(_edited(module, name, [])).body[0]
+    at = (f"<planted {name}>", 0)
+
+    def read():
+        got = claim_prefix_violations(fn, target, scope, name, at)[0]
+        return got[0] if got else None
+
+    _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+    try:
+        got = read()
+    finally:
+        _gg.ORDER_SWITCH["bindings"] = None
+    on = read()
+    assert got is not None and _R11_D_LINE_15 in got, (_R11_D_LINE_15, got)
+    assert on is not None, on
+
+
+@pytest.mark.parametrize("label,pairs", [("renames step", _R11_D_RENAME),
+                                         ("adds a parameter", _R11_D_ADD)])
+def test_r11_d_a18_a_changed_signature_is_refused_first_by_the_order_header(label, pairs):
+    """FOUR-R11-A18 (4): through the prefix walk, the 456 plant's helper with
+    a parameter renamed or added is refused first by the gate grammar's
+    frozen ORDER header of the helper's definition, with the ORDER marker
+    off; with it on it is refused too; in neither state is (3)(b)'s sentence
+    the first refusal: (3)(b) is a second line, shown at the admission."""
+    modname, name, _entry, target = PREFIX_CLAIM
+    fn, scope, at = _planted(_R7_MODULES[modname], name, (), (),
+                             [("_rdm_live_or_lapse", pairs)])
+
+    def read():
+        got = claim_prefix_violations(fn, target, scope, name, at)[0]
+        return got[0] if got else None
+
+    _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
+    try:
+        got = read()
+    finally:
+        _gg.ORDER_SWITCH["bindings"] = None
+    on = read()
+    assert got is not None and _R11_D_ORDER_HEAD in got, (label, got)
+    assert "in _rdm_live_or_lapse at ()" in got, (label, got)
+    assert on is not None, (label, on)
+    assert _R11_D_B not in got and _R11_D_B not in on, (label, got, on)
 
 
 def test_r11_d_r8_only_the_plant_harness_hands_another_functions_roots():
