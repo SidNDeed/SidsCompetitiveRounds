@@ -657,6 +657,281 @@ from ro_covered import text  # noqa: E402
 import match_report_window as _a1_mrw  # noqa: E402
 import tournaments as _a1_tournaments  # noqa: E402
 
+# Round 11, rule N (rulings FOUR-R11-A10 (1), FOUR-R11-A14 (2); NOTES r11 n):
+# the static half of each named member, its census rows FROZEN here
+# (closed_walk._n_census, taken at 2ddb7112 and checked against the premises
+# before they were frozen). Keyed (owner's spelling, name).
+_N_CENSUS_ROWS = {
+    ('main._group_region', 'volumes'):
+        ((65, 8, 'Store', 'Assign.targets', 'volumes', 'volumes = await _region_volumes(db)'),
+         (67,
+          27,
+          'Load',
+          'Call.args',
+          'volumes',
+          'pick, why, detail = _pick_region_for_group(members, live, volumes, legacy_pick, '
+          'margin_ms=REGION_PINGS_MARGIN_MS, regret')),
+    ('main._region_volumes', 'cache'):
+        ((11,
+          29,
+          'Load',
+          'BinOp.right',
+          "cache['at']",
+          "if cache['at'] and now - cache['at'] < REGION_VOLUMES_CACHE_S:"),
+         (11,
+          7,
+          'Load',
+          'BoolOp.values',
+          "cache['at']",
+          "if cache['at'] and now - cache['at'] < REGION_VOLUMES_CACHE_S:"),
+         (12, 15, 'Load', 'Return.value', "cache['volumes']", "return cache['volumes']"),
+         (17,
+          21,
+          'Load',
+          'Tuple.elts',
+          "cache['volumes']",
+          "cache['at'], cache['volumes'] = (now, dict(vols))"),
+         (17, 8, 'Load', 'Tuple.elts', "cache['at']", "cache['at'], cache['volumes'] = (now, dict(vols))"),
+         (20, 11, 'Load', 'Return.value', "cache['volumes']", "return cache['volumes']"),
+         (9, 4, 'Store', 'Assign.targets', 'cache', 'cache = _REGION_VOLUMES_CACHE')),
+    ('main._region_volumes', 'return'):
+        ((12, 'return', "return cache['volumes']"), (20, 'return', "return cache['volumes']")),
+    ('main', '_REGION_VOLUMES_CACHE'):
+        (('<module>', 0, 'Store', "_REGION_VOLUMES_CACHE = {'at': 0.0, 'volumes': {}}"),
+         ('_region_volumes', 8, 'Load', 'cache = _REGION_VOLUMES_CACHE')),
+    ('main._group_region', 'members'):
+        ((48, 8, 'Store', 'Assign.targets', 'members', 'members = []'),
+         (59,
+          12,
+          'Load',
+          'Expr.value',
+          "members.append({'id': str(r['player_id']), 'home': home, 'map': pmap, 'measured_at': "
+          'at.timestamp() if at is not None else None})',
+          "members.append({'id': str(r['player_id']), 'home': home, 'map': pmap, 'measured_at': "
+          'at.timestamp() if at is not None el'),
+         (62, 17, 'Load', 'For.iter', 'members', 'for m in members:'),
+         (67,
+          12,
+          'Load',
+          'Call.args',
+          'members',
+          'pick, why, detail = _pick_region_for_group(members, live, volumes, legacy_pick, '
+          'margin_ms=REGION_PINGS_MARGIN_MS, regret')),
+    ('main._group_region', 'detail'):
+        ((31, 15, 'Store', 'Tuple.elts', 'detail', "pick, why, detail = (legacy_pick, 'error', {})"),
+         (66,
+          19,
+          'Store',
+          'Tuple.elts',
+          'detail',
+          'pick, why, detail = _pick_region_for_group(members, live, volumes, legacy_pick, '
+          'margin_ms=REGION_PINGS_MARGIN_MS, regret'),
+         (71,
+          19,
+          'Store',
+          'Tuple.elts',
+          'detail',
+          "pick, why, detail = (legacy_pick, 'error', {'error': f'{type(exc).__name__}: {exc}'})"),
+         (75, 12, 'Load', 'BoolOp.values', "detail.get('seats')", "seats = detail.get('seats') or []"),
+         (80,
+          25,
+          'Load',
+          'Call.args',
+          "detail.get('baseline')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (80,
+          77,
+          'Load',
+          'Call.args',
+          "detail.get('n')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (81,
+          22,
+          'Load',
+          'Call.args',
+          "detail.get('sum_b')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (81,
+          57,
+          'Load',
+          'Call.args',
+          "detail.get('sum_pick')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (82,
+          24,
+          'Load',
+          'Call.args',
+          "detail.get('worst_b')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (82,
+          63,
+          'Load',
+          'Call.args',
+          "detail.get('worst_pick')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (83,
+          21,
+          'Load',
+          'Call.args',
+          "detail.get('gain')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (83,
+          53,
+          'Load',
+          'Call.args',
+          "detail.get('max_regret')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (84,
+          20,
+          'Load',
+          'Call.args',
+          "detail.get('tie')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (85,
+          23,
+          'Load',
+          'FormattedValue.value',
+          "detail.get('error')",
+          'print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} '
+          "baseline={_c(detail.get('baseline'))} legacy={legacy_pi"),
+         (91, 25, 'Load', 'Assign.value', 'detail', "explain['raw'] = detail")),
+    ('_n_rp.pick_region_for_group', 'return'):
+        ((80,
+          'return',
+          'return _pick(members, live_regions, volumes, legacy_pick, margin_ms, regret_ms, max_age_s, '
+          'now)'),
+         (83, 'return', "return (legacy_pick, WHY_ERROR, {'error': repr(exc)})")),
+    ('_n_rp._pick', 'return'):
+        ((48, 'return', 'return (baseline, WHY_QUORUM, detail)'),
+         (92, 'return', 'return (pick, why, detail)')),
+    ('_n_rp._pick', 'detail'):
+        ((42,
+          4,
+          'Store',
+          'Assign.targets',
+          'detail',
+          "detail = {'baseline': baseline, 'n': n, 'sum_b': None, 'sum_pick': None, 'worst_b': None, "
+          "'worst_pick': None, 'gain': No"),
+         (48, 37, 'Load', 'Tuple.elts', 'detail', 'return (baseline, WHY_QUORUM, detail)'),
+         (86,
+          4,
+          'Load',
+          'Expr.value',
+          "detail.update({'sum_b': sum_b, 'sum_pick': sum_pick, 'worst_b': worst_b, 'worst_pick': "
+          "worst_pick, 'gain': gain, 'max_regret': max_regret, 'candidates': [c._asdict() for c in cands], "
+          "'seats': seat_row",
+          "detail.update({'sum_b': sum_b, 'sum_pick': sum_pick, 'worst_b': worst_b, 'worst_pick': "
+          "worst_pick, 'gain': gain, 'max_re"),
+         (92, 22, 'Load', 'Tuple.elts', 'detail', 'return (pick, why, detail)')),
+    ('main._group_region', 's'):
+        ((77,
+          11,
+          'Load',
+          'FormattedValue.value',
+          "s.get('id')",
+          'members_txt = '
+          '\',\'.join((f"{s.get(\'id\')}:{s.get(\'state\')}:{_c(s.get(\'cost_b\'))}/{_c(s.get(\'cost_pick\'))}" '
+          'for s in seats)'),
+         (77,
+          25,
+          'Load',
+          'FormattedValue.value',
+          "s.get('state')",
+          'members_txt = '
+          '\',\'.join((f"{s.get(\'id\')}:{s.get(\'state\')}:{_c(s.get(\'cost_b\'))}/{_c(s.get(\'cost_pick\'))}" '
+          'for s in seats)'),
+         (77,
+          45,
+          'Load',
+          'Call.args',
+          "s.get('cost_b')",
+          'members_txt = '
+          '\',\'.join((f"{s.get(\'id\')}:{s.get(\'state\')}:{_c(s.get(\'cost_b\'))}/{_c(s.get(\'cost_pick\'))}" '
+          'for s in seats)'),
+         (77,
+          67,
+          'Load',
+          'Call.args',
+          "s.get('cost_pick')",
+          'members_txt = '
+          '\',\'.join((f"{s.get(\'id\')}:{s.get(\'state\')}:{_c(s.get(\'cost_b\'))}/{_c(s.get(\'cost_pick\'))}" '
+          'for s in seats)'),
+         (78,
+          12,
+          'Store',
+          'comprehension.target',
+          's',
+          'members_txt = '
+          '\',\'.join((f"{s.get(\'id\')}:{s.get(\'state\')}:{_c(s.get(\'cost_b\'))}/{_c(s.get(\'cost_pick\'))}" '
+          'for s in seats)')),
+    ('main._group_region', 'seats'):
+        ((75, 4, 'Store', 'Assign.targets', 'seats', "seats = detail.get('seats') or []"),
+         (78,
+          17,
+          'Load',
+          'comprehension.iter',
+          'seats',
+          'members_txt = '
+          '\',\'.join((f"{s.get(\'id\')}:{s.get(\'state\')}:{_c(s.get(\'cost_b\'))}/{_c(s.get(\'cost_pick\'))}" '
+          'for s in seats)')),
+    ('main._region_current', 'return'):
+        ((5, 'return', 'return None'), (6, 'return', 'return (player_id, stored[0], stored[1], stored[2])')),
+}
+_n_rp = _inspect.getmodule(main._pick_region_for_group)
+# Rule N's named members, and nothing else (FOUR-R11-A10 (1)(c), A14 (2)):
+# (label, site function, form, callee, name, spelling, group, binds, census).
+# Member (2) of the brief, the result of match_hold._guard_identities, is NOT
+# here: its premise P-B4 failed (NOTES r11 n, section 1).
+_N_PICK = main._pick_region_for_group
+_N_BINDS_PICK = ((main, "_pick_region_for_group", _N_PICK),
+                 (_n_rp, "_pick", _n_rp._pick))
+_N_TABLE = (
+    ("N1 volumes", main._group_region, "arg", _N_PICK, "volumes", "volumes",
+     "row", _N_BINDS_PICK + ((main, "_region_volumes", main._region_volumes),
+                             (main, "_REGION_VOLUMES_CACHE",
+                              main._REGION_VOLUMES_CACHE)),
+     (("main._group_region", "volumes"), ("main._region_volumes", "cache"),
+      ("main._region_volumes", "return"), ("main", "_REGION_VOLUMES_CACHE"))),
+    ("N3 members", main._group_region, "arg", _N_PICK, "members", "members",
+     "deep", _N_BINDS_PICK, (("main._group_region", "members"),)),
+    ("N4 detail", main._group_region, "method", ".get", "detail", "detail",
+     "row", _N_BINDS_PICK,
+     (("main._group_region", "detail"), ("_n_rp.pick_region_for_group", "return"),
+      ("_n_rp._pick", "return"), ("_n_rp._pick", "detail"))),
+    ("N4 seats", main._group_region, "method", ".get", "s", "s", "row",
+     _N_BINDS_PICK, (("main._group_region", "s"), ("main._group_region", "seats"),
+                     ("main._group_region", "detail"))),
+    ("N5 current ovt", main.ovt_queue_poll, "arg", main._group_region, "current",
+     "_region_current(me['player_id'], _cur_pings)", "deep",
+     ((main, "_group_region", main._group_region),
+      (main, "_region_current", main._region_current)),
+     (("main._region_current", "return"),)),
+    ("N5 current ffa", main._ffa_queue_poll_inner, "arg", main._group_region,
+     "current", "_region_current(me['player_id'], _cur_pings)", "deep",
+     ((main, "_group_region", main._group_region),
+      (main, "_region_current", main._region_current)),
+     (("main._region_current", "return"),)),
+)
+_N_OWNERS = {"main": main, "main._group_region": main._group_region,
+             "main._region_volumes": main._region_volumes,
+             "main._region_current": main._region_current,
+             "_n_rp.pick_region_for_group": _n_rp.pick_region_for_group,
+             "_n_rp._pick": _n_rp._pick}
+for _n_row in _N_TABLE:
+    _cw.N_MEMBERS[(_n_row[1], _n_row[2], _n_row[3], _n_row[4])] = (
+        _n_row[0], _n_row[5], _n_row[6], _n_row[7],
+        tuple((_N_OWNERS[_o], _nm, _N_CENSUS_ROWS[(_o, _nm)])
+              for _o, _nm in _n_row[8]))
+
 # The frozen callee table (round 8, ruling REHEARSAL-FOUR-R7-A1, M4):
 # grammar_shapes_a1.A1_CALLEES names each form and its frozen span; the
 # functions are bound HERE, by this file's static imports, and the two are
