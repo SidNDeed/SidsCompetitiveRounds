@@ -3231,6 +3231,41 @@ def _r11_count(counts, m, v):
                 counts[(m[0], m[2], m[4], "element", _r11_type_name(y))] += 1
 
 
+def _r11_mark_text(m):
+    """A bound mark as text: the order of the bound test's marks (ruling
+    FOUR-R11-A15 (5), the sweep's disposition of this sort). A function is
+    written by module, qualified name and first line, a class by module and
+    qualified name, a set by its members' texts in text order, a tuple by
+    its parts in place, anything else by repr. No part is an object
+    address or a set's iteration order, so neither the order of the marks
+    nor the order in which _r11_record checks the marks met at one call
+    (and so lists their violations) depends on an address or a set's
+    order; test_r11_bound_marks_are_ordered_by_text checks that no part
+    of a real mark is written with an address and that no two real marks
+    share a text."""
+    parts = [_r11_part_text(x) for x in m]
+    return " | ".join(parts)
+
+
+def _r11_part_text(x):
+    """One part of a bound mark as text (_r11_mark_text)."""
+    if isinstance(x, (set, frozenset)):
+        inner = ", ".join(sorted(_r11_part_text(y) for y in x))
+        return f"{{{inner}}}"
+    if isinstance(x, (tuple, list)):
+        inner = ", ".join(_r11_part_text(y) for y in x)
+        return f"({inner})"
+    if isinstance(x, type):
+        return x.__module__ + "." + x.__qualname__
+    code = getattr(x, "__code__", None)
+    if code is None:
+        return repr(x)
+    mod = getattr(x, "__module__", None)
+    qual = getattr(x, "__qualname__", None)
+    line = getattr(code, "co_firstlineno", None)
+    return f"{mod}.{qual}:{line}"
+
+
 def test_r11_rules_bound_sites_are_observed(monkeypatch):
     """Rules W, P and K (ruling FOUR-R11-A4 (2)(a) to (2)(g)): every bound
     discharge the real gate walks of S1 (_asm_readmit_work's
@@ -3263,7 +3298,7 @@ def test_r11_rules_bound_sites_are_observed(monkeypatch):
                                            scope, at)
             got = [one] if one is not None else []
         problems.extend((name, entry, p) for p in got)
-    marks = sorted(set(_cw.BOUND_MARKS), key=repr)
+    marks = sorted(set(_cw.BOUND_MARKS), key=_r11_mark_text)
     assert not problems, problems
     rules = {m[0] for m in marks}
     assert {"W", "K-a", "K-m"} <= rules, sorted(rules)
@@ -3311,6 +3346,75 @@ def test_r11_rules_bound_sites_are_observed(monkeypatch):
                          getattr(m[3], "__name__", m[3]), m[4])
                         for m in marks if m not in seen})
     assert not unreached, ("marked sites no flow observed", unreached)
+
+
+def test_r11_bound_marks_are_ordered_by_text():
+    """FOUR-R11-A15 (5), the control of the bound test's order: its marks
+    are sorted by _r11_mark_text, a text with no object address and no set
+    iteration order. (a) Every sort of BOUND_MARKS in this file is keyed by
+    _r11_mark_text, and the bound test has one (read from this file's own
+    source). (b) The real marks of the three site walks each have a text
+    with no address, and no two marks share a text, so the text orders
+    them totally. (c) Two functions of one qualified name, and a set of
+    both, are written without an address and ordered by their first lines,
+    whatever their addresses."""
+    import re
+    addr = re.compile(r"0x[0-9a-fA-F]+")
+    tree = ast.parse(inspect.getsource(sys.modules[__name__]))
+    sorts = {}
+    for d in tree.body:
+        if isinstance(d, ast.FunctionDef):
+            for n in ast.walk(d):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                        and n.func.id == "sorted" and n.args
+                        and "BOUND_MARKS" in ast.unparse(n.args[0])):
+                    sorts.setdefault(d.name, []).append(
+                        [ast.unparse(k.value) for k in n.keywords
+                         if k.arg == "key"])
+    assert sorts.get("test_r11_rules_bound_sites_are_observed") == [
+        ["_r11_mark_text"]], sorts
+    assert all(k == ["_r11_mark_text"] for ks in sorts.values()
+               for k in ks), sorts
+
+    _cw.reset_bound()
+    _GATE_POLICIES.clear()
+    try:
+        for base in (PREFIX_WORK, PREFIX_CLAIM, DIRECT):
+            _modname, name, entry, target = base
+            fn, scope, at = _planted(main, name)
+            if entry == "prefix":
+                claim_prefix_violations(fn, target, scope, name, at)
+            else:
+                call = next(n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                            and isinstance(n.func, ast.Name)
+                            and n.func.id == target)
+                refusal_branch_violation(fn, call, entry.split(":")[1],
+                                         scope, at)
+        marks = set(_cw.BOUND_MARKS)
+    finally:
+        _cw.reset_bound()
+        _GATE_POLICIES.clear()
+    texts = sorted(_r11_mark_text(m) for m in marks)
+    assert len(texts) >= 3, texts
+    assert not [t for t in texts if addr.search(t)], [
+        t for t in texts if addr.search(t)]
+    assert len(set(texts)) == len(texts), [
+        t for t in texts if texts.count(t) > 1]
+
+    late, early = {"__name__": "r11order"}, {"__name__": "r11order"}
+    exec(compile(chr(10) * 2 + "def f():" + chr(10) + "    return 1" + chr(10),
+                 "<r11 order>", "exec"), late)
+    exec(compile("def f():" + chr(10) + "    return 2" + chr(10),
+                 "<r11 order>", "exec"), early)
+    both = frozenset({late["f"], early["f"]})
+    a = ("K-a", late["f"], 5, "x", both, int)
+    b = ("K-a", early["f"], 5, "x", both, int)
+    assert _r11_mark_text(a) == ("'K-a' | r11order.f:3 | 5 | 'x' | "
+                                 "{r11order.f:1, r11order.f:3} | builtins.int"), (
+        _r11_mark_text(a))
+    for pair in ([a, b], [b, a]):
+        assert sorted(pair, key=_r11_mark_text) == [b, a], [
+            _r11_mark_text(m) for m in sorted(pair, key=_r11_mark_text)]
 
 
 def _r11_names(classes):
