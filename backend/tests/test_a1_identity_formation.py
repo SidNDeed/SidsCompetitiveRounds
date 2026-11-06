@@ -4962,12 +4962,16 @@ def test_r8_the_walker_grammar_is_the_round_7_freeze_less_three():
     # shapes (75e1c16e) -> 608, three of the 364 no longer in the code;
     # -> 621 with the recorder's driver-UUID reading and type names (run 3)
     # -> 645 with FOUR-R11-A9's table amendment, counts and operation test
-    # (history and each shape's line: NOTES r11 rules, "walker shapes")
-    assert len(r11) == 645, len(r11)
+    # -> 693 with rule T (FOUR-R11-A5, A14 (1)): 40 shapes of rule T's
+    # code and 8 of the order key at the group picker's call (FOUR-R11-A10
+    # (C)), which the 645 block did not hold
+    # (history and each shape's line: NOTES r11 rules, "walker shapes";
+    # NOTES r11 t, "Walker shapes")
+    assert len(r11) == 693, len(r11)
     digest = hashlib.sha256("\n".join(sorted(r11)).encode(
         "utf-8")).hexdigest()
-    assert digest == ("f5df4287a40246b5445c29cc36d3f39e"
-                      "71e3851cf0d32bdda9dc257d1ddc4ec8"), digest
+    assert digest == ("cbd4c6575fd282b3b2f9a23f1de49970"
+                      "7b255d8bf9cc99b11ca6b2e9bb407fba"), digest
     assert not (r7 & r11) and _gs.WALKER_SHAPES == r7 | r11
 
 

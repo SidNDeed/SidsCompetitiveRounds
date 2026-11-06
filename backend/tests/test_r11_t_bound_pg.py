@@ -19,6 +19,18 @@ reach fails this test (condition (ii)).
 A bound is an assertion that stays in the suite and held on the measured
 flows, not a statement about every input.
 
+What rule T claims, and what this test asserts, is the timestamp receiver
+only: no walk refuses at rule T, and the walks' marks are the named table.
+The a1 row's call of the group picker in _group_region still refuses after
+rule T (ruling FOUR-R11-A14 (2), (3)): "a call of pick_region_for_group
+whose members, a receiver of its deep methods, is members, which the walk
+cannot prove builtin". That refusal is the first entry of a new kind in the
+list of FOUR-R11-A10 (0): a parameter-derived value inside a container
+(pmap from the parameters rows and current, home from rows, written into
+the members dicts), handed to a receiver whose callee asks deep. It stays
+open until that kind is ruled and built; this test neither asserts that the
+row walks clean nor hides the refusal.
+
 Runs under CF_TEST_PG_DSN as the other PostgreSQL suites. Needs
 sys.monitoring (CPython 3.12+): without it the test fails, it never skips.
 """
@@ -146,10 +158,11 @@ def test_r11_t_bound_site_is_observed(monkeypatch):
     on its own under a recording grammar (the walker's own rules, the a1
     controls' structural route; the frozen grammar's order rule refuses any
     change to the function's statements before a walker rule speaks): no
-    refusal of rule T or of members. (3) T2, the census of the site's
-    function, then W2's one rule T mark is the named one.
+    refusal of rule T. (3) T2, the census of the site's function, then
+    W2's one rule T mark is the named one.
     (5) W1: the real a1 walks under the frozen grammar: the same mark, and
-    no refusal of rule T or of members. (6) The flows of premise T4 run with
+    no refusal of rule T (the row's members refusal is the A10 (0) list's
+    entry, see the module docstring). (6) The flows of premise T4 run with
     a sys.monitoring CALL recorder on _group_region's code: at the site, the
     callable IS the class's timestamp, the receiver's type IS
     datetime.datetime, and each root is observed at least once; the pair
@@ -181,7 +194,7 @@ def test_r11_t_bound_site_is_observed(monkeypatch):
         w2 = None
     except _cw.Unclassified as e:
         w2 = e.args[0]
-    assert w2 is None or not ("rule T" in str(w2) or "whose members" in str(w2)), (
+    assert w2 is None or "rule T" not in str(w2), (
         "T W2: _group_region's own walk refuses at rule T's site", w2)
     w2_marks = _t_marks()
     # (3) T2
@@ -199,7 +212,7 @@ def test_r11_t_bound_site_is_observed(monkeypatch):
     _cw.reset_bound()
     walks = A1._a1_real_walks()
     hit = [(w, str(p)) for w, ps in walks for p in ps
-           if "rule T" in str(p) or "whose members" in str(p)]
+           if "rule T" in str(p)]
     assert not hit, ("T W1: a real a1 walk refuses at rule T's site", hit)
     w1_marks = _t_marks()
     assert w1_marks == w2_marks, ("T W1: rule T marks", w1_marks, w2_marks)
