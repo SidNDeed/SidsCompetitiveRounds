@@ -5544,11 +5544,13 @@ def test_r10_receiver_store_and_sources_are_frozen():
     base = {m: (here / f"{m}.py").read_text(encoding="utf-8") for m in (
         "closed_walk", "test_a1_identity_formation",
         "test_match_hold_admission_gate_pg")}
+    # re-frozen once (FOUR-R11-A19 (1)): _Walk and def_effects for R8's param_roots,
+    # derived (NOTES r11 w30h, section 2; w30h/receiver_pins.py)
     assert _rs.RECEIVER_STORES == {"Visitor": "deb50a21d5de8fad",
-                                   "_Walk": "36214a5241768ebf"}
+                                   "_Walk": "23ee8cbc2100af4b"}
     rows = sorted(repr(x) for x in _rs.RECEIVER_SOURCES)
     assert (len(rows), hashlib.sha256("\n".join(rows).encode("utf-8"))
-            .hexdigest()[:16]) == (10, "3cdfac8bc1d0f4ed"), rows
+            .hexdigest()[:16]) == (10, "5df3c6c739eab822"), rows
     real = {m: _ast.parse(t) for m, t in base.items()}
     assert _rs.receiver_source_problems(real) == []
     # the alternative-source route: the statement unchanged, its provider
