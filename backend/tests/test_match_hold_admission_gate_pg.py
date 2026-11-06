@@ -290,6 +290,13 @@ _GATE_CALLEES = {
 _GATE_GRAMMAR = types.SimpleNamespace(
     imports=_GATE_CALLEES, namedtuples=frozenset(), admit=_admitted_body)
 
+# Round 11, rule W (ruling FOUR-R11-A4 (2)(a)): the named table, by
+# identity: the readmission work's first parameter is the assembly context
+# _asm_run builds (census_w: its one reference is the argument _asm_run
+# receives as `work`, only ever called there). The bound test observes
+# every call at that site (test_r11_rules_bound_sites_are_observed).
+_cw.W_NAMED[main._asm_readmit_work] = {"ctx": main._AsmCtx}
+
 
 def _check_site(fn, stmts, at):
     """Site span `stmts` of fn (grammar_shapes_gate.check_site); `at` is
@@ -1400,6 +1407,8 @@ def _prefix_walk(fn, stop, scope, where, at, admitted, inspected):
         _sink_off(ADMITTED)
     stmts = fn.body
     w = _Walk(scope, where, None, stmts)
+    # round 11 (rules W and P): the statements are fn's body
+    w.b.span_def = fn
     filename, offset = at
     _INSPECTED["sink"] = inspected
     _INSPECTED["file"] = filename
@@ -2724,3 +2733,348 @@ def test_r11_gate_hook_discharges_receivers():
     assert ("a call of _r11_h whose rules, a receiver of its row methods, "
             "is text('x'), which the walk cannot prove builtin"
             ) in e.value.args[0][1], e.value.args
+
+
+# Round 11, rule K (ruling FOUR-R11-A4 (2)(c), read by FOUR-R11-A9 (1)(f)
+# as concrete classes named by identity): the classes a bound discharge's
+# value must have, by frame path, frozen before the code (NOTES r11 rules,
+# 08:14:12Z, premise K-v): "row" type IS dict; "list" type IS list;
+# "datetime" type IS datetime.datetime; "deep-row" type IS dict with every
+# value's type one of _R11_VALUE_TYPES or the driver's UUID class, and a
+# list value's elements of _R11_LIST_ELEMENTS. A marked path outside the
+# table fails.
+_R11_VALUE_TYPES = frozenset({str, int, bool, type(None),
+                              _cw._cw_datetime.datetime, list})
+_R11_LIST_ELEMENTS = frozenset({int, type(None)})
+# AMENDED AFTER A RUN (FOUR-R11-A9 (1); NOTES r11 rules, "K table
+# amendment"): the row uuid.UUID is replaced by the driver's own class,
+# asyncpg.pgproto.pgproto.UUID, the class every PostgreSQL UUID value of a
+# seat row has (run 3). Taken from the loaded driver module (never imported:
+# the DSN census freezes import forms) and held by the frozen module name,
+# qualified name and MRO; anything else there fails the run.
+_R11_DRIVER_UUID = ("asyncpg.pgproto.pgproto", "UUID")
+_R11_DRIVER_UUID_MRO = ("asyncpg.pgproto.pgproto.UUID", "uuid.UUID",
+                        "builtins.object")
+_R11_NAMED = {"ctx.lobby": "row", "ctx.prints": "list",
+              "ctx.now": "datetime", "me": "deep-row"}
+# The measured flows that reach the marked sites through main's own path
+# with PostgreSQL rows (premise K-o; probe P10).
+_R11_FLOWS = ("test_nx0c_claim_takes_the_admission_gate_over_an_open_match_hold",
+              "test_t4_5_every_refusal_reason")
+_R11_TOOL = 4
+
+
+def _r11_named_ok(kind, v):
+    """Whether value v has the named type `kind` (_R11_NAMED)."""
+    if kind == "row":
+        return type(v) is dict
+    if kind == "list":
+        return type(v) is list
+    if kind == "datetime":
+        return type(v) is _cw._cw_datetime.datetime
+    if kind == "deep-row":
+        return type(v) is dict and not _r11_outside(v)
+    return False
+
+
+def _r11_driver_uuid():
+    """The driver's UUID class, from the loaded driver module, held by the
+    frozen module name, qualified name and MRO (uuid.UUID its one base)."""
+    mod = sys.modules.get(_R11_DRIVER_UUID[0])
+    if mod is None:
+        raise AssertionError(("the driver module is not loaded",
+                              _R11_DRIVER_UUID[0]))
+    cls = vars(mod).get(_R11_DRIVER_UUID[1])
+    if type(cls) is not type:
+        raise AssertionError(("the driver UUID class", cls))
+    names = tuple(c.__module__ + "." + c.__qualname__ for c in cls.__mro__)
+    got = (cls.__module__, cls.__qualname__)
+    if got != _R11_DRIVER_UUID or names != _R11_DRIVER_UUID_MRO:
+        raise AssertionError(("the driver UUID class moved", got, names))
+    if cls.__mro__[1] is not uuid.UUID:
+        raise AssertionError(("the driver UUID class's base", cls.__mro__))
+    return cls
+
+
+def _r11_value_types():
+    """_R11_VALUE_TYPES plus the driver's UUID class (_r11_driver_uuid)."""
+    return _R11_VALUE_TYPES | {_r11_driver_uuid()}
+
+
+def _r11_outside(v):
+    """For a dict value, the sorted (key, type name) pairs outside the frozen
+    sets (a value's type, or a list element's), each type by module and
+    qualified name; else []."""
+    if type(v) is not dict:
+        return []
+    allowed = _r11_value_types()
+    out = set()
+    for k, x in v.items():
+        if type(x) not in allowed:
+            out.add((str(k), _r11_type_name(x)))
+        elif type(x) is list:
+            out |= {(str(k), "list of " + _r11_type_name(y)) for y in x
+                    if type(y) not in _R11_LIST_ELEMENTS}
+    return sorted(out)
+
+
+def _r11_type_name(x):
+    t = type(x)
+    return t.__module__ + "." + t.__qualname__
+
+
+def _r11_record(marks, flows, monkeypatch):
+    """Run `flows` with a sys.monitoring CALL recorder on every marked
+    caller: (observed marks, violations). At a K mark's line, a call of
+    its callee reads the frame path from the monitored frame (the root
+    IS K for rule K-a); at a W mark's line, the object called IS one of
+    the census's handed functions and, when it IS the named function, its
+    first argument's type IS K."""
+    mon = sys.monitoring
+    if mon.get_tool(_R11_TOOL) is not None:
+        raise AssertionError(("sys.monitoring tool id in use",
+                              mon.get_tool(_R11_TOOL)))
+    by_code = collections.defaultdict(list)
+    for m in marks:
+        by_code[m[1].__code__].append(m)
+    seen, bad = set(), []
+    counts = collections.Counter()
+
+    def line_of(code, off):
+        for s, e, ln in code.co_lines():
+            if s <= off and off < e:
+                return ln
+        return None
+
+    def on_call(code, off, callee, arg0):
+        here = by_code.get(code)
+        if not here:
+            return None
+        ln = line_of(code, off)
+        for m in here:
+            if m[2] != ln:
+                continue
+            if m[0] == "W":
+                if not any(callee is f for f in m[5]):
+                    bad.append(("W: an object outside the census called", m[2],
+                                repr(callee)))
+                elif callee is m[3]:
+                    counts[("W", m[2], m[4], "value", _r11_type_name(arg0))] += 1
+                    if type(arg0) is not m[6]:
+                        bad.append(("W: first argument type", m[2],
+                                    type(arg0).__name__))
+                    seen.add(m)
+                continue
+            method = isinstance(m[3], str)
+            if method and getattr(callee, "__name__", None) != m[3][1:]:
+                continue
+            if not method and callee is not m[3]:
+                continue
+            frame = sys._getframe(1)
+            if frame.f_code is not code:
+                bad.append(("not the monitored frame", m[2]))
+                continue
+            var, *path = m[4].split(".")
+            v = frame.f_locals.get(var)
+            if method:
+                # the method's receiver IS the frame value read below (a
+                # method descriptor's first argument, or a bound method's
+                # __self__)
+                recv = v if not path or type(v) is not m[6] else vars(v).get(
+                    path[0])
+                if arg0 is not recv and getattr(callee, "__self__",
+                                                None) is not recv:
+                    continue
+            if path:
+                if type(v) is not m[6]:
+                    bad.append(("K-a: root type", m[2], m[4],
+                                type(v).__name__))
+                    continue
+                v = vars(v).get(path[0])
+            _r11_count(counts, m, v)
+            kind = _R11_NAMED.get(m[4])
+            if kind is None or not _r11_named_ok(kind, v):
+                bad.append(("named type", m[2], m[4], kind,
+                            type(v).__name__, _r11_outside(v)))
+                continue
+            seen.add(m)
+        return None
+
+    mon.use_tool_id(_R11_TOOL, "r11 rules bound")
+    try:
+        mon.register_callback(_R11_TOOL, mon.events.CALL, on_call)
+        for code in by_code:
+            mon.set_local_events(_R11_TOOL, code, mon.events.CALL)
+        for flow in flows:
+            flow(monkeypatch)
+    finally:
+        for code in by_code:
+            mon.set_local_events(_R11_TOOL, code, 0)
+        mon.register_callback(_R11_TOOL, mon.events.CALL, None)
+        mon.free_tool_id(_R11_TOOL)
+    return seen, bad, counts
+
+
+def _r11_count(counts, m, v):
+    """One observation at mark m, by class identity (module and qualified
+    name): the value; for a dict, each item's value; for a list item, each
+    element."""
+    counts[(m[0], m[2], m[4], "value", _r11_type_name(v))] += 1
+    if type(v) is not dict:
+        return
+    for x in v.values():
+        counts[(m[0], m[2], m[4], "item", _r11_type_name(x))] += 1
+        if type(x) is list:
+            for y in x:
+                counts[(m[0], m[2], m[4], "element", _r11_type_name(y))] += 1
+
+
+def test_r11_rules_bound_sites_are_observed(monkeypatch):
+    """Rules W, P and K (ruling FOUR-R11-A4 (2)(a) to (2)(g)): every bound
+    discharge the real gate walks of S1 (_asm_readmit_work's
+    _asm_readmit_on), S2 (_rdm_claim's _rdm_live_or_lapse) and S3
+    (_rdm_claim's gate refusal) make is marked by the walk (site, rule);
+    each marked site is observed on the measured flows (main's own
+    construction path, PostgreSQL rows), its value of the named type and
+    its root an instance of K by type identity; every call at rule W's site
+    calls a function of the census, the named one with a K first argument.
+    An unreached marked site fails, listed. The interpreter must provide
+    sys.monitoring (CPython 3.12+): without it the test fails, it never
+    skips or passes (ruling FOUR-R11-A5 (4))."""
+    assert hasattr(sys, "monitoring"), (
+        "rule W/K's recorder needs sys.monitoring; this interpreter has none",
+        sys.version)
+    # the real gate walks of the three sites from a fresh start (no cached
+    # walk), their bound discharges collected
+    _cw.reset_bound()
+    _GATE_POLICIES.clear()
+    problems = []
+    for base in (PREFIX_WORK, PREFIX_CLAIM, DIRECT):
+        _modname, name, entry, target = base
+        fn, scope, at = _planted(main, name)
+        if entry == "prefix":
+            got = claim_prefix_violations(fn, target, scope, name, at)[0]
+        else:
+            call = next(n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Name) and n.func.id == target)
+            one = refusal_branch_violation(fn, call, entry.split(":")[1],
+                                           scope, at)
+            got = [one] if one is not None else []
+        problems.extend((name, entry, p) for p in got)
+    marks = sorted(set(_cw.BOUND_MARKS), key=repr)
+    assert not problems, problems
+    rules = {m[0] for m in marks}
+    assert {"W", "K-a", "K-m"} <= rules, sorted(rules)
+    outside = sorted({m[4] for m in marks if m[0] != "W"} - set(_R11_NAMED))
+    assert not outside, ("marked paths outside the named table", outside)
+    import test_ffa_readmit_pg as R
+
+    def row_refused(mp):
+        # S-prefix site main:63708: a live hold whose readmission row is
+        # already refused (its row through PostgreSQL, the claim through
+        # the route)
+        async def body(env):
+            lob = await R._held(env)
+            await env.conn.execute(
+                "UPDATE ffa_seat_readmissions SET refused_at = now(),"
+                " refused_reason = 'declined' WHERE lobby_id = $1 AND player_id = $2",
+                lob.lid, lob.pids[1])
+            r = await R._readmit(env, lob, 1, "claim", 1)
+            assert r["reason"] == "not_held", ("row refused", r.body)
+        R.run_env(mp, body)
+
+    def queue_elsewhere(mp):
+        # main:63724: the caller's own queue row ready to join another
+        # lobby, its lease this lobby's
+        async def body(env):
+            lob = await R._held(env)
+            other = await env.lobby(4, t=30.0)
+            await env.conn.execute(
+                "INSERT INTO ffa_queue (player_id, steam_id, status, series_id)"
+                " VALUES ($1, $2, 'ready_join', $3) ON CONFLICT (player_id) DO"
+                " UPDATE SET status = 'ready_join', series_id = $3",
+                lob.pids[1], lob.sids[1], other.lid)
+            r = await R._readmit(env, lob, 1, "claim", 1)
+            assert r["reason"] == "other_lobby", ("queue elsewhere", r.body)
+        R.run_env(mp, body)
+
+    flows = [getattr(R, n) for n in _R11_FLOWS] + [row_refused, queue_elsewhere]
+    seen, bad, counts = _r11_record(marks, flows, monkeypatch)
+    # FOUR-R11-A9 (1)(e): the observations by class identity, and every
+    # named class no observation had (shown by -rP; NOTES copy the table)
+    for line in _r11_table(marks, counts):
+        print(line)
+    assert not bad, bad[:10]
+    unreached = sorted({(m[0], m[1].__name__, m[2],
+                         getattr(m[3], "__name__", m[3]), m[4])
+                        for m in marks if m not in seen})
+    assert not unreached, ("marked sites no flow observed", unreached)
+
+
+def _r11_names(classes):
+    return {c.__module__ + "." + c.__qualname__ for c in classes}
+
+
+def _r11_named_classes(m):
+    """The classes the table names at mark m, by part (value, item,
+    element), each by module and qualified name."""
+    if m[0] == "W":
+        return {"value": _r11_names([m[6]])}
+    kind = _R11_NAMED.get(m[4])
+    if kind == "deep-row":
+        return {"value": {"builtins.dict"},
+                "item": _r11_names(_r11_value_types()),
+                "element": _r11_names(_R11_LIST_ELEMENTS)}
+    one = {"row": dict, "list": list, "datetime": _cw._cw_datetime.datetime}
+    return {"value": _r11_names([one[kind]])} if kind in one else {}
+
+
+def _r11_table(marks, counts):
+    """R11-COUNT lines (rule, line, path, part, class, observations) and
+    R11-NAMED-NOT-OBSERVED lines for every class the table names at a
+    mark that no observation had."""
+    out = []
+    for m in sorted(set(marks), key=lambda m: (m[2], m[0], m[4])):
+        key = (m[0], m[2], m[4])
+        named = _r11_named_classes(m)
+        for (r, ln, p, part, cls), n in sorted(counts.items()):
+            if (r, ln, p) == key:
+                out.append(f"R11-COUNT {r} {ln} {p} {part} {cls} {n}")
+        for part in sorted(named):
+            for cls in sorted(named[part]):
+                if counts[key + (part, cls)] == 0:
+                    out.append(f"R11-NAMED-NOT-OBSERVED {m[0]} {m[2]} {m[4]} "
+                               f"{part} {cls}")
+    return sorted(set(out))
+
+
+def test_r11_driver_uuid_operations_match_uuid(monkeypatch):
+    """FOUR-R11-A9 (1)(c): the operations the S2 and S3 conditions use on a
+    UUID value of a seat row (NOTES r11 rules, "K table amendment"): str()
+    (_asm_deferred_departure's pidt) and binding as a statement parameter
+    through main's session (every seat["player_id"] bind). Each is executed
+    on a value read through main's own session from PostgreSQL (the
+    driver's class) and on a uuid.UUID of the same value, and must agree;
+    str() is the driver's own implementation (read from the class)."""
+    import test_ffa_readmit_pg as R
+    cls = _r11_driver_uuid()
+    assert "__str__" in vars(cls), sorted(vars(cls))
+    got = []
+
+    async def body(env):
+        lob = await R._held(env)
+        async with env.sm() as db:
+            v = (await db.execute(ro_covered.text(
+                "SELECT player_id FROM ffa_assembly_seats WHERE lobby_id = :lid"
+                " ORDER BY slot LIMIT 1"), {"lid": lob.lid})).scalar()
+            u = uuid.UUID(str(v))
+            got.append(("classes", type(v) is cls, type(u) is uuid.UUID))
+            got.append(("str", str(v), str(u)))
+            for x in (v, u):
+                t = (await db.execute(ro_covered.text(
+                    "SELECT CAST(:p AS uuid)::text AS t"), {"p": x})).scalar()
+                got.append(("bind", t))
+    R.run_env(monkeypatch, body)
+    assert got[0] == ("classes", True, True), got
+    assert got[1][1] == got[1][2], got
+    assert got[2][1] == got[3][1] and got[2][1] == got[1][2], got

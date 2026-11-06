@@ -735,6 +735,13 @@ class Bindings:
         # round 11 (F10): the parent of every walked node, for the
         # provenance of a local's one binding (receiver_provenance)
         self.parent = {}
+        # round 11 (rule K's A5 clause, ruling FOUR-R11-A4 (2)(g)): a
+        # parameter bound to ("A", q, (), False) while a walk carries a
+        # handed instance's per-attribute conditions (def_effects)
+        self.param_values = {}
+        # round 11 (rules W and P): the definition a statement span is the
+        # body of (a prefix walk's statements), set by the span's walker
+        self.span_def = None
         nodes = []
         if fn is not None:
             for x in _arg_names(fn.args):
@@ -1333,6 +1340,571 @@ class Bindings:
             return table[pos]
         return "write"
 
+    # --- round 11: rules W, P and K (ruling FOUR-R11-A4 (2)) -------------
+    #
+    # A receiver condition met at a span walked on its own (Visitor.helper
+    # None) on a value rooted at one of the span's parameters, or at a local
+    # it binds once by `<root>.<m>(...)`, is discharged here when that root
+    # is an instance of an exact frozen class K, reached by rule W (the
+    # function is handed whole to one walked caller, which calls it at
+    # sites the recorder observes, its class named in W_NAMED) or by rule P
+    # (every call site of the function passes, for the parameter, the
+    # caller's own parameter rooted the same way, or a local the caller
+    # binds once by such a call). Every discharge is marked (BOUND_MARKS)
+    # and observed by the bound test, never assumed.
+
+    def span_function(self, line):
+        """(F, d): the function object the walked definition d is the body
+        of: the module binding of d's name, a trusted plain function of that
+        name with no decorator, whose parameters, read from the function
+        object, are d's. None when d is no such body (a definition parsed on
+        its own, a scope that is not a module): no rule roots its
+        parameters, and the walk's own reading (a parameter's condition no
+        walked call site discharges) refuses as before."""
+        d = self.where if self.has_fn else self.span_def
+        if not isinstance(d, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            raise Unclassified((line, "a bound discharge outside a walked "
+                                      "definition"))
+        mod = self.scope
+        if type(mod) is not _types.ModuleType:
+            return None
+        F = vars(mod).get(d.name, _MISSING)
+        _ib.observe(mod, d.name, F)
+        if (not _ib.trusted_function(F) or F.__code__.co_name != d.name
+                or d.decorator_list or d.args.vararg or d.args.kwarg
+                or F.__code__.co_flags & 0x0C
+                or _param_table(F)[0] != _param_table(d)[0]):
+            return None
+        return F, d
+
+    def bound_value(self, expr, line):
+        """(F, d, root, var) for argument `expr` of the walked span when it
+        is a bound form (a parameter of the span, one attribute of one, or a
+        local bound once by `<root>.<m>(...)`), else None; root is ("K", K,
+        mod, path) or ("KM", K, mod, m) (_rooted)."""
+        d = self.where if self.has_fn else self.span_def
+        if not isinstance(d, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            return None
+        if self._local_root(expr, d) is None:
+            return None
+        span = self.span_function(line)
+        if span is None:
+            return None
+        F, d = span
+        got = self._rooted(expr, F, d, line)
+        if got is None:
+            return None
+        return F, d, got[0], got[1]
+
+    def _local_root(self, expr, d):
+        """The parameter of definition d (the walked one) that `expr` is
+        spelled from as a bound form: the parameter (bound only as one), one
+        attribute of it, or a local bound once by a method call of it; None
+        for any other spelling."""
+        if isinstance(expr, _ast.Attribute):
+            return (self._local_root(expr.value, d)
+                    if isinstance(expr.value, _ast.Name) else None)
+        if not isinstance(expr, _ast.Name):
+            return None
+        name = expr.id
+        own = [(k, n) for k, n in self.sites.get(name, ()) if k != "mutated"]
+        params = _param_table(d)[0]
+        if name in params and (own == [("param", d)] if self.has_fn
+                               else not own):
+            return name
+        if len(own) != 1 or own[0][0] != "local":
+            return None
+        par = self.parent.get(id(own[0][1]))
+        if (isinstance(par, _ast.Assign) and len(par.targets) == 1
+                and isinstance(par.value, _ast.Call)
+                and isinstance(par.value.func, _ast.Attribute)
+                and isinstance(par.value.func.value, _ast.Name)):
+            return self._local_root(par.value.func.value, d)
+        return None
+
+    def _rooted(self, expr, F, d, line):
+        """(root, var): the bound root of `expr` in function F (definition
+        d, these its bindings) and the frame variable it is read from, or
+        None when expr is not a bound form."""
+        if isinstance(expr, _ast.Attribute):
+            if not isinstance(expr.value, _ast.Name):
+                return None
+            got = self._rooted(expr.value, F, d, line)
+            if got is None or got[0][0] != "K" or got[0][3]:
+                return None
+            r = got[0]
+            return ("K", r[1], r[2], (expr.attr,)), got[1]
+        if not isinstance(expr, _ast.Name):
+            return None
+        name = expr.id
+        own = [(k, n) for k, n in self.sites.get(name, ()) if k != "mutated"]
+        params = _param_table(d)[0]
+        param = (own == [("param", d)] if self.has_fn
+                 else (not own and name in params))
+        if param and name in params:
+            return self.bound_root(F, name, line), name
+        if len(own) != 1 or own[0][0] != "local":
+            return None
+        node = own[0][1]
+        par = self.parent.get(id(node))
+        if not (isinstance(par, _ast.Assign) and len(par.targets) == 1
+                and par.targets[0] is node and isinstance(par.value, _ast.Call)
+                and isinstance(par.value.func, _ast.Attribute)
+                and isinstance(par.value.func.value, _ast.Name)):
+            return None
+        call = par.value
+        if any(isinstance(a, _ast.Starred) for a in call.args) or any(
+                k.arg is None for k in call.keywords):
+            return None
+        got = self._rooted(call.func.value, F, d, line)
+        if got is None or got[0][0] != "K" or got[0][3]:
+            return None
+        K, mod = got[0][1], got[0][2]
+        self.k_method(K, mod, call.func.attr, line)
+        return ("KM", K, mod, call.func.attr), name
+
+    def bound_root(self, F, pname, line):
+        """The root of parameter `pname` of function F at entry, over every
+        reference to F in its own module (_call_sites): ("K", K, mod, ())
+        by rule W at a handed site, or the one root every direct call site's
+        argument has (rule P). Refused for no site, for sites that disagree,
+        and for a cycle."""
+        key = (id(F), pname)
+        hit = _BOUND_ROOTS.get(key)
+        if hit is not None and hit[0] is F and hit[3].valid():
+            _ib.carry(hit[3])
+            BOUND_MARKS.extend(hit[2])
+            return hit[1]
+        if key in _BOUND_STACK:
+            raise Unclassified((line, f"{F.__name__}'s parameter {pname} is "
+                                      "rooted through itself, a cycle rule P "
+                                      "refuses"))
+        start = len(BOUND_MARKS)
+        _BOUND_STACK.add(key)
+        try:
+            with _ib.recording() as deps:
+                out = self._root_over_sites(F, pname, line)
+        finally:
+            _BOUND_STACK.discard(key)
+        _BOUND_ROOTS[key] = (F, out, list(BOUND_MARKS[start:]), deps)
+        return out
+
+    def _root_over_sites(self, F, pname, line):
+        mod = _ib._owner_module(F)
+        got = []
+        for site in self._call_sites(F, line):
+            if site[0] == "handed":
+                got.append(self._w_root(F, pname, site, mod, line))
+                continue
+            _k, C, cdef, call = site
+            params = _param_table(F)[0]
+            at = params.index(pname)
+            if any(isinstance(a, _ast.Starred) for a in call.args) or any(
+                    k.arg is None for k in call.keywords):
+                raise Unclassified((line, f"a call of {F.__name__} with "
+                                          "unpacked arguments, which rule P "
+                                          "does not read"))
+            arg = call.args[at] if at < len(call.args) else next(
+                (k.value for k in call.keywords if k.arg == pname), None)
+            cb = Bindings(mod, cdef, session=self.session, grammar=self.grammar)
+            r = cb._rooted(arg, C, cdef, line) if arg is not None else None
+            if r is None:
+                raise Unclassified((line, f"{F.__name__}'s parameter {pname} "
+                                          f"at its call in {C.__name__} (line "
+                                          f"{call.lineno}) is no form rule P "
+                                          "roots"))
+            got.append(r[0])
+        if not got or any(r != got[0] for r in got):
+            raise Unclassified((line, f"{F.__name__}'s parameter {pname}: "
+                                      f"{len(got)} call sites with no one root"))
+        return got[0]
+
+    def _w_root(self, F, pname, site, mod, line):
+        """Rule W at a handed site: F's parameter `pname` is the first one,
+        its class named in W_NAMED (identity), the caller's parameter that
+        receives F only ever called (_param_calls); one mark per call."""
+        _k, G, gdef, wname, wcalls, handed = site
+        K = W_NAMED.get(F, {}).get(pname)
+        params = _param_table(F)[0]
+        if K is None or not params or params[0] != pname:
+            raise Unclassified((line, f"{F.__name__} is handed to "
+                                      f"{G.__name__} and rule W names no "
+                                      f"class for its first parameter "
+                                      f"{pname}"))
+        self.k_class(K, line)
+        if vars(mod).get(K.__name__, _MISSING) is not K:
+            raise Unclassified((line, f"{K.__qualname__} is not the module's "
+                                      "binding of its name"))
+        _ib.observe(mod, K.__name__, K)
+        for wc in wcalls:
+            BOUND_MARKS.append(("W", G, wc.lineno, F, pname, handed, K))
+        return ("K", K, mod, ())
+
+    def _call_sites(self, F, line):
+        """Every reference to F in its own module's source, each a direct
+        call ("direct", C, its definition, the call) or an argument handed
+        to a module function G whose receiving parameter is only ever
+        called ("handed", G, its definition, the parameter, its calls, the
+        functions handed there). Any other reference refuses: a store of
+        the name, a reference outside a module function or inside a nested
+        one, an attribute or string of the name, a caller that binds it."""
+        mod = _ib._owner_module(F)
+        tree = _module_tree(mod)
+        name = F.__name__
+        if tree is None or _one_top_binding(tree, name) is None:
+            raise Unclassified((line, f"{name}: a function its module's source "
+                                      "does not bind exactly once"))
+        idx = self._name_index(tree)
+        if idx["attr"].get(name) or not all(
+                self._inert_string(idx, c, stmt)
+                for c, stmt in idx["str"].get(name, ())):
+            raise Unclassified((line, f"{name} is spelled as an attribute or a "
+                                      "string in its module, a reference rule "
+                                      "P does not read"))
+        out = []
+        for n, par, top, nested in idx["name"].get(name, ()):
+            if not isinstance(n.ctx, _ast.Load) or top is None or nested:
+                raise Unclassified((line, f"a reference to {name} at line "
+                                          f"{n.lineno} outside a direct call "
+                                          "in a module function"))
+            C = self._module_function(mod, top, line)
+            if Bindings(mod, top).count(name):
+                raise Unclassified((line, f"{top.name} binds {name}, a caller "
+                                          "rule P does not read"))
+            if isinstance(par, _ast.Call) and par.func is n:
+                out.append(("direct", C, top, par))
+            elif (isinstance(par, _ast.Call) and isinstance(par.func, _ast.Name)
+                  and any(a is n for a in par.args)):
+                out.append(self._handed(mod, idx, par, n, line))
+            else:
+                raise Unclassified((line, f"a reference to {name} at line "
+                                          f"{n.lineno} that is neither a "
+                                          "direct call nor a handed argument"))
+        return out
+
+    def _inert_string(self, idx, c, stmt):
+        """Whether string constant `c` (in module statement `stmt`) is a
+        name compared and never looked up: an element of a row of a tuple
+        table bound once at module level by `stmt`, whose every read is the
+        iterable of a comprehension that unpacks each row into names and
+        uses the name at c's place only as the left operand of `in` or
+        `not in`."""
+        if not (isinstance(stmt, _ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], _ast.Name)
+                and isinstance(stmt.value, _ast.Tuple)):
+            return False
+        rows = [r for r in stmt.value.elts if isinstance(r, _ast.Tuple)
+                and any(x is c for x in r.elts)]
+        if len(rows) != 1 or any(not isinstance(r, _ast.Tuple)
+                                 for r in stmt.value.elts):
+            return False
+        at = next(i for i, x in enumerate(rows[0].elts) if x is c)
+        table = stmt.targets[0].id
+        uses = idx["name"].get(table, ())
+        for n, par, top, nested in uses:
+            if n is stmt.targets[0]:
+                continue
+            if not (isinstance(n.ctx, _ast.Load)
+                    and isinstance(par, _ast.comprehension) and par.iter is n
+                    and isinstance(par.target, _ast.Tuple)
+                    and len(par.target.elts) > at
+                    and all(isinstance(t, _ast.Name) for t in par.target.elts)):
+                return False
+            tgt = par.target.elts[at].id
+            outer = idx["stmt"].get(id(n))
+            comp = next((x for x in _ast.walk(outer) if isinstance(
+                x, (_ast.GeneratorExp, _ast.ListComp, _ast.SetComp))
+                and any(g is par for g in x.generators)), None)
+            if comp is None or len(comp.generators) != 1:
+                return False
+            reads = [x for x in _ast.walk(comp) if isinstance(x, _ast.Name)
+                     and x.id == tgt and x is not par.target.elts[at]]
+            tests = [t for t in par.ifs for t in _ast.walk(t)
+                     if isinstance(t, _ast.Compare)]
+            for x in reads:
+                if not any(t.left is x and len(t.ops) == 1
+                           and isinstance(t.ops[0], (_ast.In, _ast.NotIn))
+                           for t in tests):
+                    return False
+        return True
+
+    def _module_function(self, mod, d, line):
+        fn = vars(mod).get(d.name, _MISSING)
+        _ib.observe(mod, d.name, fn)
+        if not _ib.trusted_function(fn) or fn.__code__.co_name != d.name:
+            raise Unclassified((line, f"{d.name}: not a trusted function of "
+                                      "its module"))
+        return fn
+
+    def _handed(self, mod, idx, call, n, line):
+        """("handed", G, gdef, w, w's calls, handed set) for argument `n` of
+        `call`, a call of module function G."""
+        gname = call.func.id
+        gdef = _one_top_binding(_module_tree(mod), gname)
+        if not isinstance(gdef, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            raise Unclassified((line, f"{gname}: a receiver of a handed "
+                                      "function that is not a module function"))
+        G = self._module_function(mod, gdef, line)
+        at = next(i for i, a in enumerate(call.args) if a is n)
+        params = [a.arg for a in gdef.args.posonlyargs + gdef.args.args]
+        if at >= len(params):
+            raise Unclassified((line, f"{gname}: a handed argument past its "
+                                      "positional parameters"))
+        w = params[at]
+        wcalls = self._param_calls(gdef, w, mod, line)
+        handed = set()
+        for x, par, top, nested in idx["name"].get(gname, ()):
+            if not (isinstance(par, _ast.Call) and par.func is x
+                    and isinstance(x.ctx, _ast.Load) and not nested):
+                raise Unclassified((line, f"a reference to {gname} at line "
+                                          f"{x.lineno} that is not a direct "
+                                          "call"))
+            if any(isinstance(a, _ast.Starred) for a in par.args) or any(
+                    k.arg is None for k in par.keywords):
+                raise Unclassified((line, f"a call of {gname} with unpacked "
+                                          "arguments"))
+            arg = par.args[at] if at < len(par.args) else next(
+                (k.value for k in par.keywords if k.arg == w), None)
+            if not isinstance(arg, _ast.Name):
+                raise Unclassified((line, f"{gname}'s {w} at line {x.lineno} "
+                                          "is not a module function by name"))
+            fd = _one_top_binding(_module_tree(mod), arg.id)
+            if not isinstance(fd, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                raise Unclassified((line, f"{gname}'s {w} at line {x.lineno} "
+                                          "is not a module function by name"))
+            handed.add(self._module_function(mod, fd, line))
+        return ("handed", G, gdef, w, wcalls, frozenset(handed))
+
+    def _param_calls(self, gdef, w, mod, line):
+        """The calls of parameter `w` in G (definition gdef): w bound only as
+        the parameter, every read of it the callee of a call in G's own
+        scope, and nothing in G that reads names dynamically."""
+        gb = Bindings(mod, gdef)
+        own = gb.sites.get(w, ())
+        if list(own) != [("param", gdef)]:
+            raise Unclassified((line, f"{gdef.name}'s {w}, a handed function, "
+                                      "is bound or stored other than as its "
+                                      "parameter"))
+        calls = []
+        for n in _ast.walk(gdef):
+            if (isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
+                    and n.func.id in ("locals", "vars", "globals", "eval",
+                                      "exec")):
+                raise Unclassified((line, f"{gdef.name} reads names "
+                                          "dynamically"))
+            if isinstance(n, _ast.Name) and n.id == w:
+                par = gb.parent.get(id(n))
+                if not (isinstance(par, _ast.Call) and par.func is n
+                        and not _scope_chain(n, gb)):
+                    raise Unclassified((line, f"{gdef.name}'s {w}, a handed "
+                                              f"function, at line {n.lineno} "
+                                              "is used other than called"))
+                calls.append(par)
+        if not calls:
+            raise Unclassified((line, f"{gdef.name} never calls {w}"))
+        return calls
+
+    # --- rule K's class checks --------------------------------------------
+
+    def k_class(self, K, line):
+        """K is an exact frozen class: a trusted class whose type IS type,
+        with no subclass, and no class of its MRO but object defining the
+        attribute protocol or __slots__ (read from the class objects)."""
+        name = getattr(K, "__qualname__", repr(K))
+        if (type(K) is not type or not _ib.trusted_class(K)
+                or K.__mro__[-1] is not object):
+            raise Unclassified((line, f"{name} is not a trusted class whose "
+                                      "type IS type, the class rule K reads"))
+        if K.__subclasses__():
+            raise Unclassified((line, f"{name} has a subclass "
+                                      f"({K.__subclasses__()[0].__qualname__}), "
+                                      "so rule K cannot read its instances "
+                                      "by identity"))
+        got = [f"{c.__qualname__}.{p}" for c in K.__mro__[:-1]
+               for p in K_PROTOCOL if p in vars(c)]
+        if got:
+            raise Unclassified((line, f"{name}'s MRO defines {got[0]}, an "
+                                      "attribute protocol rule K does not "
+                                      "read"))
+
+    def k_attr(self, K, mod, attr, line):
+        """Rule K-a: `attr` is a plain instance attribute of K (no class of
+        its MRO holds the name) and the module's store census is complete
+        (_dynamic_forms finds no refusing form)."""
+        self.k_class(K, line)
+        if any(attr in vars(c) for c in K.__mro__):
+            raise Unclassified((line, f"{K.__qualname__}.{attr} is held by a "
+                                      "class of its MRO, not an instance "
+                                      "attribute rule K-a reads"))
+        self._k_census(mod, line)
+
+    def k_method(self, K, mod, m, line):
+        """Rule K-m: `m` is a plain trusted function on the class object K
+        itself, and no store of the NAME m exists in the module."""
+        self.k_class(K, line)
+        fn = next((vars(c)[m] for c in K.__mro__ if m in vars(c)), _MISSING)
+        if (vars(K).get(m, _MISSING) is not fn or type(fn) is not _types.FunctionType
+                or not _ib.trusted_function(fn)):
+            raise Unclassified((line, f"{K.__qualname__}.{m} is not a plain "
+                                      "function on the class object"))
+        census = self._k_census(mod, line)
+        if census["stores"].get(m):
+            raise Unclassified((line, f"an attribute store of the name {m} at "
+                                      f"line {census['stores'][m][0]}, the "
+                                      "method rule K-m reads"))
+
+    def _k_census(self, mod, line):
+        tree = _module_tree(mod)
+        if tree is None:
+            raise Unclassified((line, f"{mod!r}: no source for rule K's census"))
+        census = self._store_census(tree)
+        if census["refused"]:
+            ln, what = census["refused"][0]
+            raise Unclassified((line, f"{what} at line {ln}, a store rule K's "
+                                      "census does not read"))
+        return census
+
+    def _name_index(self, tree):
+        """{"name": {id: [(node, parent, top definition or None, nested)]},
+        "attr": {attr: [line]}, "str": {text: [line]}} of a module tree."""
+        hit = _NAME_INDEX.get(id(tree))
+        if hit is not None and hit[0] is tree:
+            return hit[1]
+        idx = {"name": {}, "attr": {}, "str": {}, "stmt": {}}
+        todo = [(c, tree, None, False, c) for c in _ast.iter_child_nodes(tree)]
+        while todo:
+            n, par, top, nested, stmt = todo.pop()
+            if isinstance(n, _ast.Name):
+                idx["name"].setdefault(n.id, []).append((n, par, top, nested))
+                idx["stmt"][id(n)] = stmt
+            elif isinstance(n, _ast.Attribute):
+                idx["attr"].setdefault(n.attr, []).append(n.lineno)
+            elif isinstance(n, _ast.Constant) and isinstance(n.value, str):
+                idx["str"].setdefault(n.value, []).append((n, stmt))
+            scope = isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                   _ast.Lambda, _ast.ClassDef))
+            kid_top, kid_nested = top, nested
+            if scope and top is None and par is tree and not isinstance(
+                    n, (_ast.Lambda, _ast.ClassDef)):
+                kid_top = n
+            elif scope:
+                kid_nested = True
+            for c in _ast.iter_child_nodes(n):
+                todo.append((c, n, kid_top, kid_nested, stmt))
+        _NAME_INDEX[id(tree)] = (tree, idx)
+        return idx
+
+
+    def _const_names(self, expr, fdef):
+        """The strings `expr` can be, read from constants only (a constant, a
+        conditional of two, `<dict display>.get(<x>, <constant>)`, a subscript
+        of a dict display, or a name `fdef` binds once to one), or None."""
+        if isinstance(expr, _ast.Constant) and isinstance(expr.value, str):
+            return {expr.value}
+        if isinstance(expr, _ast.IfExp):
+            a, c = self._const_names(expr.body, fdef), self._const_names(expr.orelse, fdef)
+            return None if a is None or c is None else a | c
+        if (isinstance(expr, _ast.Call) and isinstance(expr.func, _ast.Attribute)
+                and expr.func.attr == "get" and isinstance(expr.func.value, _ast.Dict)
+                and len(expr.args) == 2 and not expr.keywords):
+            vals = self._const_names(expr.func.value, fdef)
+            dft = self._const_names(expr.args[1], fdef)
+            return None if vals is None or dft is None else vals | dft
+        if isinstance(expr, _ast.Subscript) and isinstance(expr.value, _ast.Dict):
+            return self._const_names(expr.value, fdef)
+        if isinstance(expr, _ast.Dict):
+            out = set()
+            for v in expr.values:
+                got = self._const_names(v, fdef)
+                if got is None:
+                    return None
+                out |= got
+            return out
+        if isinstance(expr, _ast.Name) and fdef is not None:
+            sets = [n for n in _ast.walk(fdef) if isinstance(n, _ast.Assign)
+                    and any(isinstance(t, _ast.Name) and t.id == expr.id
+                            for t in n.targets)]
+            stores = [n for n in _ast.walk(fdef) if isinstance(n, _ast.Name)
+                      and n.id == expr.id and not isinstance(n.ctx, _ast.Load)]
+            if len(sets) == 1 and len(stores) == 1 and len(sets[0].targets) == 1:
+                return self._const_names(sets[0].value, None)
+        return None
+
+
+    def _store_census(self, tree):
+        """Rule K's store census of a module: {"stores": {attribute name:
+        [line]} (attribute stores and deletes, and setattr/delattr names read
+        from constants), "refused": [(line, form)]} where a refusing form is a
+        setattr/delattr whose name no constant gives, a call of __setattr__ or
+        __delattr__, a store through __dict__ or vars(), or a store of
+        __class__ or __dict__."""
+        hit = _STORE_CENSUS.get(id(tree))
+        if hit is not None and hit[0] is tree:
+            return hit[1]
+        stores, refused = {}, []
+        tops = {}
+        for st in tree.body:
+            for n in _ast.walk(st):
+                tops[id(n)] = st if isinstance(st, (_ast.FunctionDef,
+                                                    _ast.AsyncFunctionDef)) else None
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.Attribute) and not isinstance(n.ctx, _ast.Load):
+                stores.setdefault(n.attr, []).append(n.lineno)
+                if n.attr in ("__class__", "__dict__"):
+                    refused.append((n.lineno, f"a store of {n.attr}"))
+            if isinstance(n, _ast.Subscript) and not isinstance(n.ctx, _ast.Load):
+                v = n.value
+                if ((isinstance(v, _ast.Attribute) and v.attr == "__dict__")
+                        or (isinstance(v, _ast.Call) and isinstance(v.func, _ast.Name)
+                            and v.func.id == "vars")):
+                    refused.append((n.lineno, "a store through a namespace"))
+            if not isinstance(n, _ast.Call):
+                continue
+            f = n.func
+            if isinstance(f, _ast.Attribute) and f.attr in ("__setattr__",
+                                                             "__delattr__"):
+                refused.append((n.lineno, f"a call of {f.attr}"))
+            if (isinstance(f, _ast.Attribute) and f.attr in MUTATING_METHODS
+                    and ((isinstance(f.value, _ast.Attribute)
+                          and f.value.attr == "__dict__")
+                         or (isinstance(f.value, _ast.Call)
+                             and isinstance(f.value.func, _ast.Name)
+                             and f.value.func.id == "vars"))):
+                refused.append((n.lineno, "a store through a namespace"))
+            if isinstance(f, _ast.Name) and f.id in ("setattr", "delattr"):
+                names = (self._const_names(n.args[1], tops.get(id(n)))
+                         if len(n.args) >= 2 else None)
+                if names is None:
+                    refused.append((n.lineno, f"a {f.id} whose name no constant "
+                                              "gives"))
+                else:
+                    for s in names:
+                        stores.setdefault(s, []).append(n.lineno)
+        census = {"stores": stores, "refused": sorted(refused)}
+        _STORE_CENSUS[id(tree)] = (tree, census)
+        return census
+
+
+# Round 11, rules W, P and K (ruling FOUR-R11-A4 (2)): W_NAMED is rule W's
+# named table, {F (a function object): {its first parameter: K}}, set by the
+# walk's own test; BOUND_MARKS lists every bound discharge (2)(e):
+# ("W", G, line, F, parameter, handed functions, K) and (rule, F, line,
+# callee, frame path, group, K) for rule "K-a" or "K-m".
+W_NAMED = {}
+BOUND_MARKS = []
+K_PROTOCOL = ("__setattr__", "__getattr__", "__getattribute__",
+              "__delattr__", "__slots__")
+_BOUND_ROOTS = {}
+_BOUND_STACK = set()
+_NAME_INDEX = {}
+_STORE_CENSUS = {}
+
+
+def reset_bound():
+    """Forget every bound mark and root (the bound test's fresh start)."""
+    BOUND_MARKS.clear()
+    _BOUND_ROOTS.clear()
+
 
 _EXECUTES = {}
 _DEFS = {}
@@ -1647,6 +2219,12 @@ def plain_effects(fn, policy):
     cache; a sub-policy made per walk had its own, and every plain helper
     was walked again under every function that calls it (probe 4:
     _admission_key 392 times in one test)."""
+    return helper_effects(fn, _plain_policy(policy))
+
+
+def _plain_policy(policy):
+    """The plain-body sub-policy of `policy` (plain_effects); round 11:
+    rule K's A5 walk of a plain callee reads it under the same one."""
     policy = getattr(policy, "_plain_owner", policy)
     sub = getattr(policy, "_plain_sub", None)
     if sub is None:
@@ -1657,7 +2235,7 @@ def plain_effects(fn, policy):
         sub.grammar = policy.grammar
         sub._plain_owner = policy           # its own plain helpers: the same lists
         policy._plain_sub = sub
-    return helper_effects(fn, sub)
+    return sub
 
 
 def call_arguments(call):
@@ -1770,6 +2348,34 @@ def _alts(p):
     return sorted(p[1], key=repr) if _is_u(p) else [p]
 
 
+def _is_a(p):
+    """Round 11 (rule K's A5 clause): ("A", q, path, deep), a value read from
+    parameter q at attribute `path` of it, q bound to an instance whose
+    per-attribute conditions the walk carries (deep: read from that value,
+    so it must be builtin whole)."""
+    return isinstance(p, tuple) and p[0] == "A"
+
+
+def _attr_of(p, attr):
+    """The provenance of attribute `attr` of a value of provenance `p`: an
+    A value's path extended, else _derive."""
+    return _over(lambda a: ("A", a[1], a[2] + (attr,), False)
+                 if _is_a(a) and not a[3] else _derive(a), p)
+
+
+def _at_path(p, path):
+    """The provenance of the value at attribute `path` of a value of `p`."""
+    for attr in path:
+        p = _attr_of(p, attr)
+    return p
+
+
+def _a_condition(a, group):
+    """The condition an A alternative carries, on its parameter's path."""
+    g = "deep" if (a[3] or group == "deep") else group
+    return "receiver:" + ".".join((a[1],) + a[2]) + ":" + g
+
+
 def _over(f, p):
     """The join of `f` applied to each alternative of `p`."""
     return _join([f(a) for a in _alts(p)]) if _is_u(p) else f(p)
@@ -1787,6 +2393,8 @@ def _derive(p):
         return "B"
     if _is_p(p):
         return ("P", p[1], True)
+    if _is_a(p):
+        return ("A", p[1], p[2], True)
     if _is_c(p):
         return p[1]                         # one of its elements
     return None
@@ -1804,6 +2412,8 @@ def _elements(p):
         return p[1]
     if _is_p(p):
         return ("P", p[1], True)
+    if _is_a(p):
+        return ("A", p[1], p[2], True)
     return None
 
 
@@ -1819,6 +2429,16 @@ def _join(ps):
     if not ps or any(p is None for p in ps):
         return None
     flat = [a for p in ps for a in _alts(p)]
+    if any(_is_a(p) for p in flat):
+        # round 11 (rule K's A5 clause): an A alternative is kept beside
+        # the join of the rest, as a parameter one is (a builtin value
+        # beside it adds no condition)
+        rest = [p for p in flat if not _is_a(p) and p != "B"]
+        j = _join(rest) if rest else None
+        if rest and j is None:
+            return None
+        alts = {p for p in flat if _is_a(p)} | (set(_alts(j)) if rest else set())
+        return next(iter(alts)) if len(alts) == 1 else ("U", frozenset(alts))
     got = _join_one(flat)
     if got is not None:
         return got
@@ -1923,7 +2543,8 @@ def receiver_provenance(expr, b, policy=None, depth=0):
         # a slice of a list is one
         return _over(lambda a: a if (_is_c(a) and sl) else _derive(a), v)
     if isinstance(expr, _ast.Attribute):
-        return _derive(receiver_provenance(expr.value, b, policy, d))
+        return _attr_of(receiver_provenance(expr.value, b, policy, d),
+                        expr.attr)
     if isinstance(expr, _ast.Call):
         return _call_provenance(expr, b, policy, d)
     if isinstance(expr, _ast.Name):
@@ -2015,6 +2636,10 @@ def _operated(expr, j):
             isinstance(o, (_ast.Is, _ast.IsNot)) for o in expr.ops):
         return "B"
     alts = _alts(j)
+    # round 11 (rule K's A5 clause): an operand read from a handed
+    # instance's attribute is kept aside, then read whole
+    handed = [a for a in alts if _is_a(a)]
+    alts = [a for a in alts if not _is_a(a)] or ["B"]
     if j is None or not all(_is_p(a) or a == "B" or _is_c(a) for a in alts):
         return None
     names = sorted({n for a in alts if _is_p(a) for n in a[1]})
@@ -2023,9 +2648,12 @@ def _operated(expr, j):
         out = ("C", _join([a[1] for a in cs] + ["B"]))
     else:
         out = "B"
+    parts = [out]
     if names:
-        return _join([out, ("P", tuple(names), True)])
-    return out
+        parts.append(("P", tuple(names), True))
+    # its operator code runs, so a handed operand is read whole
+    parts += [("A", a[1], a[2], True) for a in handed]
+    return _join(parts) if len(parts) > 1 else out
 
 
 def _method_result(r, m, call, b, policy, d):
@@ -2065,7 +2693,7 @@ def _method_result(r, m, call, b, policy, d):
         if m == "join":
             return "B"
         return None
-    if r == "B" or _is_p(r):
+    if r == "B" or _is_p(r) or _is_a(r):
         if m in ("get", "pop", "setdefault") and len(call.args) > 1:
             return _join([_derive(r), receiver_provenance(
                 call.args[1], b, policy, d)])
@@ -2353,6 +2981,8 @@ def _inserted(name, node, b, policy, d):
 def _binding_provenance(name, kind, node, b, policy, d):
     if kind == "param":
         if node is b.where:
+            if name in b.param_values:
+                return b.param_values[name]
             return ("P", (name,), False)
         return None
     if kind != "local" or not isinstance(node, _ast.Name):
@@ -2448,7 +3078,11 @@ def discharge_receivers(call, fn, effects, line, visitor):
           else fn.__code__.co_name)
     names, defaults = _param_table(fn)
     for e in conds:
-        _r, p, group = e.split(":", 2)
+        # round 11 (rule K's A5 clause): a condition may name a path of the
+        # parameter ("receiver:<param>.<attr>...:<group>")
+        _r, dotted, group = e.split(":", 2)
+        p, *rest = dotted.split(".")
+        path = tuple(rest)
         at = names.index(p)
         if any(isinstance(a, _ast.Starred) for a in call.args) or any(
                 k.arg is None for k in call.keywords):
@@ -2469,16 +3103,39 @@ def discharge_receivers(call, fn, effects, line, visitor):
                                           f"parameter {p} has a default the "
                                           "walk cannot prove builtin"))
             continue
-        prov = receiver_provenance(arg, visitor.b, visitor.p)
+        # round 11 (rules W, P and K): at a span walked on its own, an
+        # argument rooted at an exact frozen class instance is discharged
+        # by rule K, marked for the bound test
+        if visitor.helper is None and _bound_discharge(
+                call, fn, arg, p, path, group, visitor):
+            continue
+        prov = _at_path(receiver_provenance(arg, visitor.b, visitor.p), path)
         # each alternative of a union on its own (round 11, run 12): every
         # other one must meet the group, every parameter one carries on
         alts = _alts(prov)
+        handed = [a for a in alts if _is_a(a)]
+        alts = [a for a in alts if not _is_a(a)]
         if not all(_is_p(a) or receiver_meets(a, group) for a in alts):
             raise Unclassified((line, f"a call of {co} whose "
-                                      f"{p}, a receiver of its {group} "
+                                      f"{dotted}, a receiver of its {group} "
                                       f"methods, is {_ast.unparse(arg)}, which "
                                       "the walk cannot prove builtin"))
-        for a in alts:
+        for a in handed + alts:
+            if _is_a(a) and visitor.helper is None:
+                raise Unclassified((line, f"a call of {co} whose {dotted} is "
+                                          "read from a handed instance outside "
+                                          "the walk that binds it"))
+            if _is_a(a) and not a[2] and not a[3] and not path:
+                # the handed instance whole, at a receiver parameter: its
+                # per-attribute conditions, walked (the A5 clause)
+                for c in _bound_conditions(fn, visitor.p, p, line):
+                    visitor.effects.append((
+                        "receiver:" + ".".join((a[1],) + c[0]) + ":" + c[1],
+                        "pure"))
+                continue
+            if _is_a(a):
+                visitor.effects.append((_a_condition(a, group), "pure"))
+                continue
             if not _is_p(a):
                 continue
             if visitor.helper is None:
@@ -2492,6 +3149,113 @@ def discharge_receivers(call, fn, effects, line, visitor):
             for q in a[1]:
                 visitor.effects.append((f"receiver:{q}:{g}", "pure"))
     return frozenset(x for x in effects if not x.startswith("receiver:"))
+
+
+def _bound_conditions(fn, policy, q, line):
+    """Rule K's A5 clause (ruling FOUR-R11-A4 (2)(g)): [(path, group)], the
+    conditions callee `fn` puts on its parameter q when q is bound to a
+    handed instance ("A", q, (), False): its body walked again, q's
+    conditions per attribute path (path () when it reads q whole), each
+    read from the walk; cached per policy with the walk's Deps; a callee
+    reached again inside its own walk refuses."""
+    if not isinstance(fn, _types.FunctionType):
+        raise Unclassified((line, f"{getattr(fn, 'name', fn)!r} takes a handed "
+                                  "instance whole, a definition rule K's A5 "
+                                  "clause does not walk"))
+    pol = policy if _inspect.iscoroutinefunction(fn) else _plain_policy(policy)
+    memo = pol.__dict__.setdefault("_bound_fx", {})
+    key = (id(fn), q)
+    hit = memo.get(key)
+    if hit is not None and hit[0] is fn and hit[2].valid():
+        _ib.carry(hit[2])
+        return hit[1]
+    stack = pol.__dict__.setdefault("_bound_stack", set())
+    if key in stack:
+        raise Unclassified((line, f"{fn.__name__}'s parameter {q} is handed "
+                                  "whole into its own walk, a cycle rule K's "
+                                  "A5 clause refuses"))
+    scope = _ib._owner_module(fn)
+    if scope is None:
+        raise Unclassified((line, f"{fn.__name__}: not a function of a module"))
+    stack.add(key)
+    try:
+        with _ib.recording() as deps:
+            _ib.observe_chain(fn)
+            eff = def_effects(_helper_tree(fn), scope, pol, fn.__name__,
+                              source=source_of(fn), receivers=True,
+                              param_values={q: ("A", q, (), False)})
+    finally:
+        stack.discard(key)
+    out = []
+    for e in sorted(eff):
+        if not e.startswith("receiver:"):
+            continue
+        _r, dotted, g = e.split(":", 2)
+        root, *rest = dotted.split(".")
+        if root == q:
+            out.append((tuple(rest), g))
+    memo[key] = (fn, out, deps)
+    return out
+
+
+def _bound_method(n, group, visitor):
+    """Rules W, P and K at a method call `n` of a span walked on its own:
+    False when its receiver is no bound form; else the receiver discharged
+    (a local bound by rule K-m, or one attribute of a K instance by rule
+    K-a), marked with the method's name as ".<name>" for the callee, or
+    refused."""
+    got = visitor.b.bound_value(n.func.value, n.lineno)
+    if got is None:
+        return False
+    F, d, root, var = got
+    line = F.__code__.co_firstlineno + n.lineno - d.lineno
+    callee = "." + n.func.attr
+    if root[0] == "KM":
+        BOUND_MARKS.append(("K-m", F, line, callee, var, group, root[1]))
+        return True
+    K, mod = root[1], root[2]
+    if len(root[3]) != 1:
+        raise Unclassified((n.lineno, f"a method call {_ast.unparse(n.func)} "
+                                      f"on {var}, an instance of "
+                                      f"{K.__qualname__}, at a path rule K-a "
+                                      "does not read"))
+    visitor.b.k_attr(K, mod, root[3][0], n.lineno)
+    BOUND_MARKS.append(("K-a", F, line, callee, var + "." + root[3][0], group,
+                        K))
+    return True
+
+
+def _bound_discharge(call, fn, arg, p, path, group, visitor):
+    """Rules W, P and K at a span walked on its own: False when `arg` is no
+    bound form (Bindings.bound_value); else its condition on callee `fn`'s
+    parameter p at `path` discharged, every discharge marked in BOUND_MARKS
+    with the span's function, the call's line in its source, the callee,
+    the rule, the frame path and the group, or refused."""
+    got = visitor.b.bound_value(arg, call.lineno)
+    if got is None:
+        return False
+    F, d, root, var = got
+    line = F.__code__.co_firstlineno + call.lineno - d.lineno
+    if root[0] == "KM":
+        g = "deep" if path else group
+        BOUND_MARKS.append(("K-m", F, line, fn, var, g, root[1]))
+        return True
+    K, mod = root[1], root[2]
+    full = root[3] + path
+    if full:
+        items = [(full, group)]
+    else:
+        items = _bound_conditions(fn, visitor.p, p, call.lineno)
+    for sub, g in items:
+        if len(sub) != 1:
+            raise Unclassified((call.lineno, f"a call of {fn.__name__} whose "
+                                             f"{p} at {'.'.join(sub) or 'whole'}"
+                                             f" is read from {var}, an instance"
+                                             f" of {K.__qualname__}, at a path "
+                                             "rule K-a does not read"))
+        visitor.b.k_attr(K, mod, sub[0], call.lineno)
+        BOUND_MARKS.append(("K-a", F, line, fn, var + "." + sub[0], g, K))
+    return True
 
 
 class Visitor:
@@ -2770,13 +3534,31 @@ class Visitor:
                 # round 11 (F10, ruling FOUR-R11-A1 (3)): the receiver must
                 # be exactly the type the method belongs to, by provenance
                 group = receiver_group(n.func.attr)
-                prov = receiver_provenance(n.func.value, self.b, self.p)
+                # round 11 (rules W, P and K): at a span walked on its own,
+                # a receiver rooted at an exact frozen class instance is
+                # discharged by rule K, marked (_bound_method); within a
+                # walk that binds a handed instance, a receiver read from it
+                # carries its path's condition (the A5 clause)
+                bound = self.helper is None and _bound_method(n, group, self)
+                prov = None if bound else receiver_provenance(
+                    n.func.value, self.b, self.p)
                 # each alternative of a union on its own (round 11, run 12)
-                alts = _alts(prov)
+                alts = [] if bound else _alts(prov)
+                handed = [a for a in alts if _is_a(a)]
+                alts = [a for a in alts if not _is_a(a)]
                 if not all(_is_p(a) or receiver_meets(a, group) for a in alts):
                     self.fail(n, f"a method call {name} whose receiver the "
                                  "walk cannot prove builtin")
-                for a in alts:
+                for a in handed + alts:
+                    if _is_a(a):
+                        # round 11 (rule K's A5 clause): on the handed
+                        # instance's path, carried to the walk's caller
+                        if self.helper is None:
+                            self.fail(n, f"a method call {name} on a handed "
+                                         "instance outside the walk that "
+                                         "binds it")
+                        self.effects.append((_a_condition(a, group), "pure"))
+                        continue
                     if not _is_p(a):
                         continue
                     g = "deep" if a[2] else group
@@ -3012,7 +3794,8 @@ def helper_effects(fn, policy, stack=()):
 
 
 def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
-                ends=frozenset(), source=None, receivers=False):
+                ends=frozenset(), source=None, receivers=False,
+                param_values=None):
     """The effects of an awaited helper, read from its own body statement by
     statement through the table: a frozenset drawn from 'read', 'lock',
     'write', 'await', 'savepoint', 'rollback-then-raise' and
@@ -3053,6 +3836,8 @@ def def_effects(d, scope, policy, label, opaque=frozenset(), rollbacks=False,
     # The helper's own bindings: every name the walk reads in it resolves
     # there, one binding per name (ruling REHEARSAL-FOUR-R5 item 2).
     b = Bindings(scope, d, session=policy.session, grammar=policy.grammar)
+    # round 11 (rule K's A5 clause): a parameter bound to a handed instance
+    b.param_values = dict(param_values or {})
     params = [a.arg for a in d.args.posonlyargs + d.args.args + d.args.kwonlyargs]
     if d.args.vararg or d.args.kwarg:
         raise Unclassified((0, f"{fn.__name__} takes *args or **kwargs"))
