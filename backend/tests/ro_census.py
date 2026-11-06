@@ -1025,7 +1025,7 @@ class OpenRecorder:
         return None, dsn
 
     async def identity_line(self, conn):
-        row = await conn.fetchrow(IDENTITY_SQL)
+        row = await conn.fetchrow(IDENTITY_LINE_SQL)
         return {"database": row["database"], "port": row["port"],
                 "system_identifier": str(row["system_identifier"])}
 
@@ -1033,7 +1033,7 @@ class OpenRecorder:
         """The identity line through the start's own connection arguments: psql
         on the same DSN with the same environment."""
         proc = self._real_run([self.psql, "-X", "-q", "-A", "-t", "-F", "|", "-d", dsn,
-                               "-c", IDENTITY_SQL], capture_output=True, env=env, timeout=120)
+                               "-c", IDENTITY_LINE_SQL], capture_output=True, env=env, timeout=120)
         out = proc.stdout.decode("utf-8", "replace").strip().split("|")
         if proc.returncode or len(out) != 3:
             return {"database": None, "port": None, "system_identifier": None,
@@ -1093,7 +1093,7 @@ class OpenRecorder:
 
 
 _CREATE_DB = re.compile(r'\s*CREATE\s+DATABASE\s+"([^"]+)"', re.I)
-IDENTITY_SQL = ("SELECT pg_catalog.current_database() AS database, "
+IDENTITY_LINE_SQL = ("SELECT pg_catalog.current_database() AS database, "
                 "pg_catalog.inet_server_port() AS port, "
                 "(SELECT s.system_identifier FROM pg_catalog.pg_control_system() s)::text "
                 "AS system_identifier")

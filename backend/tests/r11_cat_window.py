@@ -95,7 +95,7 @@ async def _cluster(admin):
     import asyncpg
     conn = await asyncpg.connect(admin)
     try:
-        row = await conn.fetchrow(ro_census.IDENTITY_SQL)
+        row = await conn.fetchrow(ro_census.IDENTITY_LINE_SQL)
         return {"database": row["database"], "port": row["port"],
                 "system_identifier": str(row["system_identifier"])}
     finally:
