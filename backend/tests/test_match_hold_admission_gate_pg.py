@@ -2708,13 +2708,14 @@ def test_r11_gate_hook_discharges_receivers():
     tree = ast.parse(chr(10).join(lines) + chr(10))
     defs = {d.name: d for d in tree.body}
     w = _Walk(mod, "r11 F10 hook", fn=defs["_r11_ok"])
-    eff = _cw.expr_effects(defs["_r11_ok"].body[0].value, w.policy,
-                           bindings=w.b)
+    # read as every gate walk reads: each body through the gate's check
+    eff = _in_grammar_walk(lambda: _cw.expr_effects(
+        defs["_r11_ok"].body[0].value, w.policy, bindings=w.b))
     assert ("helper:_r11_h", w.policy.helper_hook(mod._r11_h)) in eff, eff
     w = _Walk(mod, "r11 F10 hook", fn=defs["_r11_bad"])
     with pytest.raises(Unclassified) as e:
-        _cw.expr_effects(defs["_r11_bad"].body[0].value, w.policy,
-                         bindings=w.b)
+        _in_grammar_walk(lambda: _cw.expr_effects(
+            defs["_r11_bad"].body[0].value, w.policy, bindings=w.b))
     assert ("a call of _r11_h whose rules, a receiver of its row methods, "
             "is text('x'), which the walk cannot prove builtin"
             ) in e.value.args[0][1], e.value.args

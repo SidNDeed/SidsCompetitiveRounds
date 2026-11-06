@@ -1709,6 +1709,10 @@ RESULT_BUILTIN = {
     "sum": "B", "any": "B", "all": "B",
     "list": "C", "tuple": "C", "set": "C", "dict": "C", "sorted": "C",
     "frozenset": "C", "min": "E", "max": "E", "random.choice": "E",
+    # round 11 (run 13): an exact collections.Counter, the frozen provider's
+    # own class (a dict whose methods are dict's or the frozen stdlib
+    # class's own), counting its argument's elements
+    "Counter": "C", "collections.Counter": "C",
 }
 _DISPLAYS = (_ast.List, _ast.Tuple, _ast.Set)
 _INSERTING = {"append": (0,), "add": (0,), "insert": (1,),
