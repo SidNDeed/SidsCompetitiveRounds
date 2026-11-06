@@ -142,10 +142,12 @@ def _t_marks():
 
 def test_r11_t_bound_site_is_observed(monkeypatch):
     """Rule T's walk and its bound. (1) The interpreter has sys.monitoring.
-    (2) T1 again under the suite, by identity. (3) T2, the census of the
-    site's function. (4) W2: _group_region walked on its own under a
-    recording grammar (the walker's own rules, the a1 controls' structural
-    route): no refusal of rule T or of members, the one named rule T mark.
+    (2) T1 again under the suite, by identity. (4) W2: _group_region walked
+    on its own under a recording grammar (the walker's own rules, the a1
+    controls' structural route; the frozen grammar's order rule refuses any
+    change to the function's statements before a walker rule speaks): no
+    refusal of rule T or of members. (3) T2, the census of the site's
+    function, then W2's one rule T mark is the named one.
     (5) W1: the real a1 walks under the frozen grammar: the same mark, and
     no refusal of rule T or of members. (6) The flows of premise T4 run with
     a sys.monitoring CALL recorder on _group_region's code: at the site, the
@@ -167,14 +169,8 @@ def test_r11_t_bound_site_is_observed(monkeypatch):
         assert desc.__objclass__ is cls and _ib.trusted(
             desc, "datetime", "datetime." + m), ("T1", m)
         _cw.Bindings(main).t_pair(m, 0)
-    # (3) T2
-    c = _t_census()
-    named = (main._group_region, c["site"], _T_SITE[2], _T_SITE[1],
-             c["root"], (c["pair"],))
-
-    def as_named(marks):
-        return [(m[1], m[2], m[3], m[4], m[7], m[8]) for m in marks]
-    # (4) W2: the structural route
+    # (4) W2: the structural route, before the census of (3), so that a
+    # change to the site's function meets the walk's own rule first
     none = frozenset()
     rec = _cw.Grammar(none, none, none, A1._A1_CALLEES, record=True)
     monkeypatch.setattr(A1, "_A1_GRAMMAR", rec)
@@ -188,6 +184,13 @@ def test_r11_t_bound_site_is_observed(monkeypatch):
     assert w2 is None or not ("rule T" in str(w2) or "whose members" in str(w2)), (
         "T W2: _group_region's own walk refuses at rule T's site", w2)
     w2_marks = _t_marks()
+    # (3) T2
+    c = _t_census()
+    named = (main._group_region, c["site"], _T_SITE[2], _T_SITE[1],
+             c["root"], (c["pair"],))
+
+    def as_named(marks):
+        return [(m[1], m[2], m[3], m[4], m[7], m[8]) for m in marks]
     assert as_named(w2_marks) == [named], ("T W2: rule T marks outside the "
                                            "named table", w2_marks, named)
     # (5) W1: the real a1 walks under the frozen grammar
