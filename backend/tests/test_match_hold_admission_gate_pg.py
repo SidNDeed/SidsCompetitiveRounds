@@ -2387,9 +2387,10 @@ def test_r11_d_a18_an_unregistered_definition_reads_as_a_write():
     walked in a module whose _rdm_claim has no registered source (the real
     text compiled under a file name nothing registered, so the binder cannot
     prove it) has no defining module and no execute of it is placed (in
-    main every one is); the walk then reads them as writes and refuses at
-    line 15 with its sentence, ORDER marker off; with the marker on it is
-    refused too."""
+    main every one is); the walk then reads them as writes: line 15's
+    sentence is among its refusals (after line 8's receiver refusal), ORDER
+    marker off, and the same span walked in main has none; with the marker
+    on it is refused too."""
     modname, name, _entry, target = PREFIX_CLAIM
     module = _R7_MODULES[modname]
     src = _edited(module, name, [])
@@ -2412,18 +2413,23 @@ def test_r11_d_a18_an_unregistered_definition_reads_as_a_write():
     assert calls and all(_cw._position(unplaced, c) is None for c in calls)
     assert all(_cw._position(placed, c) is not None for c in calls)
 
-    def read():
-        got = claim_prefix_violations(fn, target, scope, name, at)[0]
-        return got[0] if got else None
+    def read(where):
+        return claim_prefix_violations(fn, target, where, name, at)[0]
 
+    # The walk in the unproven module refuses first at line 8 (the receiver
+    # rule meets ctx before any execute), so the write reading of the
+    # unplaced execute is read where it stands in the whole list: line 15's
+    # sentence is in it, and the same span walked in main has none.
     _gg.ORDER_SWITCH["bindings"] = _gg.ORDER_BINDINGS - {_gg.ORDERED}
     try:
-        got = read()
+        got = read(scope)
+        in_main = read(module)
     finally:
         _gg.ORDER_SWITCH["bindings"] = None
-    on = read()
-    assert got is not None and _R11_D_LINE_15 in got, (_R11_D_LINE_15, got)
-    assert on is not None, on
+    on = read(scope)
+    assert any(_R11_D_LINE_15 in str(g) for g in got), (_R11_D_LINE_15, got)
+    assert not any(_R11_D_LINE_15 in str(g) for g in in_main), in_main
+    assert on, on
 
 
 @pytest.mark.parametrize("label,pairs", [("renames step", _R11_D_RENAME),
