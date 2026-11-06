@@ -2660,11 +2660,19 @@ namespace CompetitiveRounds
             if (now - _lastLog < 10f) return;
             bool inRoom = false;
             int actors = 0;
+#if SCR_FRAMETIME
+            DateTime ftUtc = default(DateTime);
+#endif
             try
             {
                 inRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode;
                 if (inRoom && PhotonNetwork.CurrentRoom != null)
+#if SCR_FRAMETIME
+                    // R6-A3.11.20 (2): the sample's time is read in the same statement as its actor count
+                    actors = FtSampleClock.Count(PhotonNetwork.CurrentRoom.PlayerCount, out ftUtc);
+#else
                     actors = PhotonNetwork.CurrentRoom.PlayerCount;
+#endif
             }
             catch { }
             if (inRoom)
@@ -2677,7 +2685,15 @@ namespace CompetitiveRounds
                     $" rpcSwallow=+{_rpcSwallows - _lastRpcSwallows}" +
                     $" rpcReraise=+{_rpcReraises - _lastRpcReraises}" +
                     $" poolSwallow=+{_poolSwallows - _lastPoolSwallows}" +
-                    $" orphanSer=+{_orphanSkips - _lastOrphanSkips}");
+                    $" orphanSer=+{_orphanSkips - _lastOrphanSkips}"
+#if SCR_FRAMETIME
+                    // Frame-time lane only (rulings R6-A3.11.19 Q3, R6-A3.11.20): the sample's own wall-clock UTC
+                    // time, read with its actor count, so the F8 bar can judge that the hold span is covered (no
+                    // stretch longer than G between samples). Always last; "unread" when the count was not read.
+                    + " ft_utc=" + (ftUtc == default(DateTime) ? "unread"
+                        : ftUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture))
+#endif
+                    );
             }
             // Baselines re-sync every interval, in-room or not, so the first
             // in-room line after a menu stretch spans at most one interval.

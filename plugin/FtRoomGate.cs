@@ -215,6 +215,18 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>F8 bar B10 (rulings R6-A3.11.19 Q3, R6-A3.11.20 (2)): the occupancy sample's time. The count is the
+    /// argument, evaluated first; the wall-clock time is read in the same call, so the [NET] line's ft_utc is the
+    /// moment its actor count was read, not the moment the line was written.</summary>
+    internal static class FtSampleClock
+    {
+        internal static int Count(int playerCount, out DateTime utc)
+        {
+            utc = DateTime.UtcNow;
+            return playerCount;
+        }
+    }
+
     /// <summary>F8 (ii): while a sitting runs, vanilla's try-another-region timer is frozen on every online join,
     /// whatever the room. One line per join (OnJoinedRoom fires once per join), never per frame.</summary>
     [HarmonyPatch(typeof(NetworkConnectionHandler), "OnJoinedRoom")]

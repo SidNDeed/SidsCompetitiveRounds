@@ -6,7 +6,13 @@
 # running ROUNDS (pid, and a start inside [launch epoch, stamp]); a graceful close request (CloseMainWindow) first,
 # Stop-Process on that pid only at the lib's named bound. It never calls C:\broadcast\quit_game.ps1: that lever is the
 # broadcast rig's and keeps its full refusal.
-# Exit: 0 end line seen and log copied; 3 refused (ROUNDS already running); 4 no process; 5 end line not seen.
+# A1 (ruling R6-A3.11.18): the launched game is ONE process object. It is captured from a reading of the whole
+# process table by image name (before any identity exists), its handle is taken at once and kept, and every later
+# question about it (has it exited) goes through that object; the close goes through the lib's one identity read.
+# While the handle is held, Windows never gives the captured id to another process. No process is read by number
+# here. A process-table reading that fails is never "no ROUNDS": the pre-launch check refuses on it.
+# Exit: 0 end line seen and log copied; 3 refused (ROUNDS already running, or the process table unreadable);
+# 4 no process; 5 end line not seen (also when the captured process's handle could not be held).
 # The moment the pid is captured it writes <dir of -Out>\launch-<Mode>.pid, one line
 # "FT-VM-LAUNCH-PID pid=<pid> epoch=<launch epoch s> stamp=<utc>" (temp file, then rename): the signal a watcher
 # starts from (ruling R6-A3.11.4; this script's stdout reaches its caller through a buffered pipe).
@@ -26,19 +32,27 @@ function EndSeen($t) {
     $i = $t.IndexOf('[FRAME-TIME] menu_done ')
     return ($i -ge 0) -and ($t.IndexOf('[FRAME-TIME] settled g=-1 ', $i) -ge 0)
 }
-$before = @(Get-Process -Name ROUNDS -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+function RoundsNow {
+    # one reading of the whole table by image name; throws when the table cannot be read (never an empty answer)
+    return @(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -eq 'ROUNDS' })
+}
+try { $before = @(RoundsNow | ForEach-Object { $_.Id }) } catch { echo "$(St) FT-VM-LAUNCH REFUSED: the process table could not be read ($($_.Exception.Message))"; exit 3 }
 if ($before.Count -gt 0) { echo "$(St) FT-VM-LAUNCH REFUSED: ROUNDS already running ($($before -join ','))"; exit 3 }
 $t0 = (Get-Date).ToUniversalTime()
 echo "$(St) FT-VM-LAUNCH $Mode Start-Process steam://rungameid/1557740"
 Start-Process 'steam://rungameid/1557740'
-$procId = $null
+$procId = $null; $p = $null
 for ($i = 0; $i -lt 60 -and -not $procId; $i++) {
     Start-Sleep -Seconds 3
-    $p = Get-Process -Name ROUNDS -ErrorAction SilentlyContinue | Select-Object -First 1
+    try { $p = RoundsNow | Select-Object -First 1 } catch { echo "$(St) FT-VM-LAUNCH capture read failed ($($_.Exception.Message)); reading again"; $p = $null }
     if ($p) { $procId = $p.Id }
 }
 if (-not $procId) { echo "$(St) FT-VM-LAUNCH no ROUNDS process within 180 s"; exit 4 }
-echo "$(St) FT-VM-LAUNCH captured ROUNDS pid $procId"
+# the object's handle, taken now and kept: every later HasExited reads through it
+$held = $true
+try { $null = $p.Handle } catch { $held = $false; echo "$(St) FT-VM-LAUNCH handle of pid $procId NOT held ($($_.Exception.Message)): no wait on it; straight to the close" }
+function Exited { if (-not $held) { return $false }; try { return [bool]$p.HasExited } catch { return $false } }
+echo "$(St) FT-VM-LAUNCH captured ROUNDS pid $procId (handle held: $held)"
 $pidFile = Join-Path (Split-Path -Parent $Out) "launch-$Mode.pid"
 try {
     $epoch = ([DateTimeOffset]$t0).ToUnixTimeSeconds()
@@ -47,9 +61,9 @@ try {
     echo "$(St) FT-VM-LAUNCH pid file written: $pidFile"
 } catch { echo "$(St) FT-VM-LAUNCH pid file FAILED: $($_.Exception.Message)" }
 $seen = $false
-for ($i = 1; $i -le $polls; $i++) {
+for ($i = 1; $i -le $polls -and $held; $i++) {
     Start-Sleep -Seconds 15
-    if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { echo "$(St) FT-VM-LAUNCH poll ${i}: pid $procId exited early"; break }
+    if (Exited) { echo "$(St) FT-VM-LAUNCH poll ${i}: pid $procId exited early"; break }
     # only the new run's log: BepInEx recreates LogOutput.log at the game's start, and nothing else writes it, so a
     # write time after the launch means the new run's text (an older run's end line never counts)
     try { if ((Get-Item -LiteralPath $log).LastWriteTimeUtc -le $t0) { continue }; $t = ReadShared $log } catch { continue }
@@ -58,7 +72,7 @@ for ($i = 1; $i -le $polls; $i++) {
 Start-Sleep -Seconds 5
 try { $t = ReadShared $log; [System.IO.File]::WriteAllText($Out, $t); echo "$(St) FT-VM-LAUNCH log copied: $Out" }
 catch { echo "$(St) FT-VM-LAUNCH log copy FAILED: $($_.Exception.Message)"; $seen = $false }
-if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+if (-not (Exited)) {
     . (Join-Path $PSScriptRoot 'ft_close_lib.ps1')
     # the emitter writes to the console directly: a Write-Output inside it would join the function's return value
     $crc = Close-FtLeasedGame $pidFile { param($s) [Console]::Out.WriteLine("$(St) FT-VM-LAUNCH $s") }
