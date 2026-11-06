@@ -406,3 +406,49 @@ def test_r11_cat_f3_direct_update_of_another_database(other):
         return
     assert refused is None
     assert sorted(ca.keys(ca.outside_diff(before, after))) == ["pg_database"], ca.outside_diff(before, after)
+
+
+# --- the complement is another database's: never named by the measured one --
+
+
+async def _complement(dsn):
+    conn = await r7._connect(dsn)
+    try:
+        return await ca.complement(conn)
+    finally:
+        await conn.close()
+
+
+def test_r11_cat_complement_rows_carry_no_measured_names(r11_db):
+    """A complement row belongs to another database (or to none), so the
+    measured database's relation names and temporary relations neither name
+    nor filter it (round 11 t3: test_zz_rollback_and_resume_files... read
+    the chain database's pg_shdepend rows as changed when its _aux clone,
+    the measured database, changed the relation of the same oid). Measured:
+    a clone of r11_db; rf11_t has one oid in both. The clone renames, then
+    drops, its rf11_t; r11_db's pg_shdepend row for its own rf11_t is the
+    same complement row throughout."""
+    src = r11_db.rsplit("/", 1)[1]
+    name = _name("r11m")
+    asyncio.run(r7._clone_with_oid(name, src))
+    try:
+        dsn = r7._dsn(name)
+        relid = asyncio.run(_val(dsn, "SELECT 'public.rf11_t'::pg_catalog.regclass::pg_catalog.oid::text"))
+        src_oid = asyncio.run(_val(dsn, "SELECT oid::text FROM pg_catalog.pg_database WHERE datname = $1", src))
+        before = asyncio.run(_complement(dsn))
+
+        def theirs(rows):
+            return sorted(r for r in rows if r[2].startswith("pg_shdepend/")
+                          and ca.fields(r[3])[:3] == [src_oid, "1259", relid])
+
+        if not theirs(before):
+            pytest.skip("rf11_t's owner in %s is the bootstrap superuser: pg_shdepend records no "
+                        "dependency for it, so no complement row carries its oid" % src)
+        for sql in ("ALTER TABLE public.rf11_t RENAME TO rf11_moved", "DROP TABLE public.rf11_moved"):
+            asyncio.run(_exec(dsn, sql))
+            after = asyncio.run(_complement(dsn))
+            print("r11 complement, %s: %d of %s's rows before, %d after, same %s"
+                  % (sql, len(theirs(before)), src, len(theirs(after)), theirs(before) == theirs(after)))
+            assert theirs(after) == theirs(before), (sql, theirs(before), theirs(after))
+    finally:
+        asyncio.run(r7._drop_db(name))

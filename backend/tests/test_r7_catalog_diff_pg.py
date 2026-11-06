@@ -2486,7 +2486,8 @@ def test_r10_sweep_counts():
     site (complement(), the chain's whole reading of the rows outside
     RESTRICT)."""
     import catalog_r10_sweep as sw
-    frozen = dict(sw.FROZEN, **{("explanation", "catalog_all.py"): 13, ("shared", "catalog_all.py"): 19})
+    frozen = dict(sw.FROZEN)
+    frozen.update({("explanation", "catalog_all.py"): 13, ("shared", "catalog_all.py"): 19})
     got = {k: len(v) for k, v in sw.sweep(HERE).items()}
     assert got == frozen, {k: (got.get(k), frozen.get(k)) for k in set(got) | set(frozen)
                            if got.get(k) != frozen.get(k)}

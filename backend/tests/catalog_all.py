@@ -405,7 +405,7 @@ _CLASS = (("class", S),)
 # the changed object AND to its event. The modes below name the event; each
 # is checked on the objects of the same diff by identity (an oid, or the
 # relation the row's own identity lies in), never by a kind alone:
-OWNER = "owner"        # the class object of the row's identity changed its
+OWNER = "owner_event"  # the class object of the row's identity changed its
 #                        'owner=' (ALTER ... OWNER, REASSIGN OWNED)
 OWNER_R = "owner_rel"  # that owner event on the relation the row's identity
 #                        lies in ('%')
@@ -426,6 +426,11 @@ OWN_DROP = "own_drop"  # the row's own change sets attisdropped, and the
 #                        attribute object of its identity changed (S)
 # {(key, column): (before, after)}: the only transition a column may make in
 # place, whatever explains it. ANY_SET: any non-NULL value; None: NULL.
+# every binding mode is a distinct value (bound() tests them in order; a
+# repeated value makes the later mode unreachable: O and OWNER once shared
+# "owner", so an owner binding was read as O, by relation)
+_MODES = (S, R, O, OWNER, OWNER_R, OWNER_O, ADDED_R, PM_R, NEW_REL, REWRITE, OWN_DROP)
+assert len(set(_MODES)) == len(_MODES), _MODES
 ANY_SET = "<any value>"
 TRANSITIONS = {
     # a column's stored missing value is set when the column is added (its
@@ -810,7 +815,13 @@ def rows_from(rows, names, temp, part=""):
     """The snapshot rows (module docstring) of query() rows. `part` is
     OUTSIDE_MARK for rows of the complement of RESTRICT (each row carries it,
     so cluster_rows() reports every such row), else ''. A row read with its
-    physical identity carries '&<ctid>'."""
+    physical identity carries '&<ctid>'. A row of the complement belongs
+    to another database or to none, so the measured database's relation
+    names and temporary relations neither name nor filter it (an oid there
+    is another database's: a clone's own rename re-marked its template's
+    pg_shdepend rows)."""
+    if part:
+        names, temp = {}, ()
     tempset = set(temp)
     grew = True
     while grew:
