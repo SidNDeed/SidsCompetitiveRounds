@@ -68,6 +68,7 @@ import ast
 import inspect
 import itertools
 import io
+import math
 import re
 import tokenize
 from datetime import datetime, timedelta, timezone
@@ -531,24 +532,32 @@ class _FixedClock:
         return getattr(self._real, name)
 
 
-# Codex round REGION-R2: the clock tests above (the stand-in clock of the
-# `clock` fixture, the readings handed in as `ttl` and `ttl + 1`, and every
-# stamp those tests set) stay on whole seconds, so a monotonic reading that is
-# cut down, rounded, or moved earlier by less than a second answers the same
-# there. Here the sightings are stamped off the whole seconds, which puts the
-# instant they expire off them too (at .375), and the pick is asked a
-# sixteenth of a second before that instant, at it, and a sixteenth after it.
-# The three lie inside one whole second and on one side of its half, so a
-# reading cut down, rounded up, rounded to the nearest or moved by half a
-# second falls on the wrong side of the expiry at one of them at least.
-_SIGHTED_AT = 3 * main._REGION_SEEN_TTL_SECONDS + 0.375
-_EXPIRES_AT = _SIGHTED_AT + main._REGION_SEEN_TTL_SECONDS
-_SIXTEENTH = 0.0625
-_AROUND_EXPIRY = [
-    ("a sixteenth before", _EXPIRES_AT - _SIXTEENTH, True),
-    ("at the instant", _EXPIRES_AT, True),
-    ("a sixteenth after", _EXPIRES_AT + _SIXTEENTH, False),
-]
+# The instant a sighting expires, asked to the last bit. A sighting stamped
+# at `ts` counts while `now - ts <= _REGION_SEEN_TTL_SECONDS`
+# (_region_corroborated). Each case below is a stamp and a reading: the float
+# before the last instant at which the sighting counts, that instant, and the
+# float after it. There are two stamps, A and B; what distinguishes them, and
+# that the readings are the floats this note says they are, is asserted by
+# test_the_cases_around_expiry_are_adjacent_floats_and_exact_ages.
+# test_no_moved_or_rounded_reading_passes_the_cases runs the same cases with
+# readings that have been moved or rounded.
+_TTL = main._REGION_SEEN_TTL_SECONDS
+_EXPIRES_A = 4 * _TTL + 0.375
+_EXPIRES_B = math.nextafter(_EXPIRES_A, -math.inf)
+
+
+def _around(name, expires):
+    """Three cases for a sighting whose last live instant is `expires`: (a
+    label, the stamp, the reading, whether the sighting counts at it)."""
+    stamp = expires - _TTL
+    return [
+        (f"{name}-before", stamp, math.nextafter(expires, -math.inf), True),
+        (f"{name}-at", stamp, expires, True),
+        (f"{name}-after", stamp, math.nextafter(expires, math.inf), False),
+    ]
+
+
+_AROUND_EXPIRY = _around("A", _EXPIRES_A) + _around("B", _EXPIRES_B)
 
 # (the pick's arguments, the region whose reporters are stamped, what the pick
 # says while the sighting is live, what it says once it has expired). Between
@@ -573,37 +582,120 @@ _FRACTION_SHAPES = [
 ]
 
 
-@pytest.mark.parametrize("args, sighted, live, expired", _FRACTION_SHAPES)
-@pytest.mark.parametrize("label, instant, is_live", _AROUND_EXPIRY)
-def test_a_sighting_expires_at_its_own_instant_and_not_at_a_whole_second(
-        monkeypatch, capsys, label, instant, is_live, args, sighted, live, expired):
-    """The pick's reading is used as it was read, fraction included, at every
-    place that asks the corroboration map: a sighting counts up to and
-    including the instant it expires and not a sixteenth of a second longer."""
+def _wrong(monkeypatch, capsys, case, shape, distort=None):
+    """One pick of `shape`, its sighting stamped as `case` says and the clock
+    answering `case`'s reading (what `distort` makes of it, when given).
+    Returns what the pick got wrong against the shape's expectation for that
+    case: an empty list when nothing."""
+    label, stamp, reading, is_live = case
+    args, sighted, live, expired = shape
+    main._REGION_SEEN.clear()
     main._REGION_SEEN[sighted] = {
-        f"7656119800000010{i}": _SIGHTED_AT for i in range(main._REGION_SEEN_MIN_PLAYERS)}
-    stand_in = _FixedClock(main.time, instant)
-    monkeypatch.setattr(main, "time", stand_in)
-    got, (first, second) = _pick(capsys, *args, "r")
+        f"7656119800000010{i}": stamp for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+    stand_in = _FixedClock(main.time, reading if distort is None else distort(reading))
+    with monkeypatch.context() as patch:
+        patch.setattr(main, "time", stand_in)
+        got, (first, second) = _pick(capsys, *args, "r")
     region, seen, home_ok = live if is_live else expired
-    assert got == region, (label, args, got)
-    assert f"chosen={region} " in second and seen in second and home_ok in second, (label, args, second)
-    assert stand_in.reads == 1, (label, args, stand_in.reads)
+    wrong = []
+    if got != region:
+        wrong.append(("room", got))
+    if f"chosen={region} " not in second or seen not in second or home_ok not in second:
+        wrong.append(("line", second))
+    if stand_in.reads != 1:
+        wrong.append(("reads", stand_in.reads))
+    return wrong
+
+
+@pytest.mark.parametrize("shape", _FRACTION_SHAPES, ids=[f"shape{n}" for n in range(1, len(_FRACTION_SHAPES) + 1)])
+@pytest.mark.parametrize("case", _AROUND_EXPIRY, ids=[case[0] for case in _AROUND_EXPIRY])
+def test_a_sighting_expires_at_its_own_instant_and_not_at_a_whole_second(monkeypatch, capsys, case, shape):
+    """Nine shapes of a pick, each asked at the float before the last instant
+    its sighting counts, at that instant and at the float after it, with two
+    stamps: the pick answers as the shape says for a sighting that counts at
+    the first two and not at the third, and reads the clock once."""
+    assert _wrong(monkeypatch, capsys, case, shape) == []
 
 
 def test_a_helper_that_reads_the_clock_itself_reads_it_to_the_fraction(monkeypatch):
     """Called without a reading, _region_corroborated and _region_agreed take
-    one of their own, once, and judge it as it was read."""
-    main._REGION_SEEN["us"] = {
-        f"7656119800000010{i}": _SIGHTED_AT for i in range(main._REGION_SEEN_MIN_PLAYERS)}
-    for label, instant, is_live in _AROUND_EXPIRY:
-        stand_in = _FixedClock(main.time, instant)
-        monkeypatch.setattr(main, "time", stand_in)
-        assert main._region_corroborated("us") is is_live, label
-        assert stand_in.reads == 1, label
-        want = "us" if is_live else "eu"
-        assert main._region_agreed("eu", "us") == want == main._region_agreed("us", "eu"), label
-        assert stand_in.reads == 3, label
+    one of their own, once, and judge it as it was read: asked with the same
+    stamps and readings as the picks above."""
+    for label, stamp, reading, is_live in _AROUND_EXPIRY:
+        main._REGION_SEEN.clear()
+        main._REGION_SEEN["us"] = {
+            f"7656119800000010{i}": stamp for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+        stand_in = _FixedClock(main.time, reading)
+        with monkeypatch.context() as patch:
+            patch.setattr(main, "time", stand_in)
+            assert main._region_corroborated("us") is is_live, label
+            assert stand_in.reads == 1, label
+            want = "us" if is_live else "eu"
+            assert main._region_agreed("eu", "us") == want == main._region_agreed("us", "eu"), label
+            assert stand_in.reads == 3, label
+
+
+def test_the_cases_around_expiry_are_adjacent_floats_and_exact_ages():
+    """What the cases rest on. Stamp A's last live instant is a whole number
+    of eighths of a second, of milliseconds, of microseconds and of steps of
+    2**-30 s; stamp B's is the float below it. For each stamp the three
+    readings are neighbouring floats one last-place unit (2**-31 s) apart,
+    the sighting's age at the middle one is the TTL exactly, and at the other
+    two it is the TTL less, and plus, that one unit."""
+    assert all((_EXPIRES_A * per_second).is_integer() for per_second in (8, 1000, 10 ** 6, 2 ** 30))
+    assert _EXPIRES_B == math.nextafter(_EXPIRES_A, -math.inf) < _EXPIRES_A
+    unit = 2.0 ** -31
+    for name, expires in (("A", _EXPIRES_A), ("B", _EXPIRES_B)):
+        (_, stamp, before, _), (_, _, at, _), (_, _, after, _) = cases = _around(name, expires)
+        assert at == expires and [case[3] for case in cases] == [True, True, False]
+        assert math.nextafter(before, math.inf) == at and math.nextafter(at, math.inf) == after
+        assert at - before == unit == after - at
+        assert (before - stamp, at - stamp, after - stamp) == (_TTL - unit, _TTL, _TTL + unit)
+    assert _AROUND_EXPIRY == _around("A", _EXPIRES_A) + _around("B", _EXPIRES_B)
+
+
+def _rounded(rounding, per_second):
+    """What a reading becomes when `rounding` (math.floor, math.ceil or round)
+    puts it on a grid of `per_second` steps to the second."""
+    return lambda t: rounding(t * per_second) / per_second
+
+
+# (what was done to the reading, the function that does it)
+_MOVED_OR_ROUNDED = [
+    ("cut down to whole seconds", _rounded(math.floor, 1)),
+    ("rounded up to whole seconds", _rounded(math.ceil, 1)),
+    ("rounded to the nearest whole second", _rounded(round, 1)),
+    ("cut down to milliseconds", _rounded(math.floor, 1000)),
+    ("rounded up to milliseconds", _rounded(math.ceil, 1000)),
+    ("rounded to the nearest millisecond", _rounded(round, 1000)),
+    ("cut down to microseconds", _rounded(math.floor, 10 ** 6)),
+    ("rounded up to microseconds", _rounded(math.ceil, 10 ** 6)),
+    ("rounded to the nearest microsecond", _rounded(round, 10 ** 6)),
+    ("cut down to steps of 2**-30 s", _rounded(math.floor, 2 ** 30)),
+    ("rounded up to steps of 2**-30 s", _rounded(math.ceil, 2 ** 30)),
+    ("rounded to the nearest step of 2**-30 s", _rounded(round, 2 ** 30)),
+    ("half a second later", lambda t: t + 0.5),
+    ("half a second earlier", lambda t: t - 0.5),
+    ("a thirty-second of a second later", lambda t: t + 0.03125),
+    ("a thirty-second of a second earlier", lambda t: t - 0.03125),
+    ("a microsecond later", lambda t: t + 1e-6),
+    ("a microsecond earlier", lambda t: t - 1e-6),
+    ("one last-place unit later", lambda t: math.nextafter(t, math.inf)),
+    ("one last-place unit earlier", lambda t: math.nextafter(t, -math.inf)),
+]
+
+
+def test_no_moved_or_rounded_reading_passes_the_cases(monkeypatch, capsys):
+    """With the reading left as it was read, every shape gets every case
+    right. With any reading of _MOVED_OR_ROUNDED in its place, every shape
+    gets some case wrong."""
+    def wrong_cases(shape, distort):
+        return [case[0] for case in _AROUND_EXPIRY if _wrong(monkeypatch, capsys, case, shape, distort)]
+
+    for shape in _FRACTION_SHAPES:
+        assert wrong_cases(shape, None) == [], shape[0]
+        for done, distort in _MOVED_OR_ROUNDED:
+            assert wrong_cases(shape, distort), (done, shape[0])
 
 
 def test_a_sighting_needs_a_reporter_and_an_established_session():
