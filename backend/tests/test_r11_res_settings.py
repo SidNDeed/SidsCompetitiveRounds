@@ -1,14 +1,15 @@
-"""Ruling FOUR-R10-A2 (3) FIX-R11-RES: the settings pg_settings omits.
+"""Ruling FOUR-R10-A2 (3) FIX-R11-RES: settings with no pg_settings row.
 
 The read-only bound's residue reading (ro_covered.RESIDUE_SQL) compared
-pg_settings at both ends of a position; pg_settings omits every setting
-flagged GUC_NO_SHOW_ALL, custom placeholders among them, so a session-scope
-set_config of a placeholder left the position 'ok' (round-10 report,
-ro_covered.py:515). The fix, in ro_covered: the text reading counts every
-session-scope settings form as residue (a filter, refusing direction), the
-names the texts set are read on the session (the measurement), and every
-measured position is followed by RESET ALL with the proof that each name
-reads its reset value (not_reset).
+pg_settings at both ends of a position; on PostgreSQL 16.9 (55432, RF11 log
+r11-res-probe-55432-20261106T065356Z.log) a custom placeholder the session
+set had no pg_settings row, so a session-scope set_config of a placeholder
+left the position 'ok' (round-10 report, ro_covered.py:515). The fix, in
+ro_covered: the text reading counts every session-scope settings form as
+residue (a filter, refusing direction), the names the texts set are read on
+the session (the measurement), and every measured position is followed by
+RESET ALL and a check that each name reads its reset value by class
+(not_reset, ruling FOUR-R11-A6 (2)).
 
 This module holds the parts that need no driver run: the text reading, the
 sweep of every production statement that sets a setting, and, on the
@@ -272,8 +273,9 @@ def test_r11_res_session_set_config_survives_its_transaction_until_reset():
 
 
 def test_r11_res_hidden_settings_are_read():
-    """The settings array carries the hidden settings pg_settings omits
-    (role, session_authorization, is_superuser) and the connection's
+    """The settings array carries role, session_authorization and
+    is_superuser, which had no pg_settings row on 16.9 (RF11 log
+    r11-res-probe2-55432-20261106T090205Z.log), and the connection's
     identity, so a SET ROLE moves the residue reading."""
     async def go():
         conn = await asyncpg.connect(_dsn())
@@ -299,3 +301,67 @@ def test_r11_res_hidden_settings_are_read():
     assert set(ro_covered.residue_changes((tuple(before), 0, 0, 0, 0),
                                           (tuple(after), 0, 0, 0, 0))) == {
         "setting hidden role=%s" % me, "setting hidden role=none"}
+
+
+def test_r11_res_server_setting_reset_by_reset_val_and_source():
+    """Ruling FOUR-R11-A6 (2), the server-setting class: a session-scope SET
+    of a setting with a pg_settings row reads source 'session' and is named
+    by the reset check; after RESET ALL it reads setting = reset_val with a
+    source other than 'session' and the check is clean. The token and a
+    placeholder are classed by name."""
+    async def go():
+        conn = await asyncpg.connect(_dsn())
+        try:
+            await conn.execute("SET lock_timeout = '1234ms'")
+            kept = await _rows(conn, ["lock_timeout"])
+            await conn.execute(ro_covered.RESET_SQL)
+            return kept, await _rows(conn, ["lock_timeout"])
+        finally:
+            await conn.close()
+    kept, reset = _run(go())
+    assert kept[0][5] == "session", kept
+    assert ro_covered.not_reset(kept) == ("not reset lock_timeout=1234 (session)",), kept
+    assert ro_covered.not_reset(reset) == (), reset
+    assert reset[0][2] == reset[0][3] and reset[0][5] != "session", reset
+    texts = ["SET lock_timeout = '1s'",
+             "SELECT set_config('rf10.position', 'p', false)",
+             "SELECT set_config('rf11res.p', 'v', true)"]
+    scoped = ro_covered.settings_scoped(texts)
+    assert scoped == (("lock_timeout", "session"), ("rf10.position", "session"),
+                      ("rf11res.p", "local")), scoped
+    assert ro_covered.setting_classes(scoped, kept) == (
+        ("lock_timeout", "server", "session"), ("rf10.position", "token", "session"),
+        ("rf11res.p", "placeholder", "local"))
+
+
+def test_r11_res_temporary_function_moves_pg_proc_not_pg_class():
+    """A temporary function adds a pg_proc row in the session's temporary
+    schema and no pg_class row, and the residue reading's temporary-object
+    count moves by it. One transaction, rolled back."""
+    async def go():
+        conn = await asyncpg.connect(_dsn())
+        try:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                await conn.execute("CREATE TEMPORARY TABLE rf11res_t (i int)")
+                count_sql = (
+                    "SELECT (SELECT count(*) FROM pg_catalog.pg_class"
+                    " WHERE relnamespace = pg_catalog.pg_my_temp_schema()),"
+                    " (SELECT count(*) FROM pg_catalog.pg_proc"
+                    " WHERE pronamespace = pg_catalog.pg_my_temp_schema())")
+                before = tuple(await conn.fetchrow(count_sql))
+                res_before = tuple(await conn.fetchrow(ro_covered.RESIDUE_SQL))[4]
+                await conn.execute(
+                    "CREATE FUNCTION pg_temp.rf11res_f() RETURNS int"
+                    " LANGUAGE sql AS 'SELECT 1'")
+                after = tuple(await conn.fetchrow(count_sql))
+                res_after = tuple(await conn.fetchrow(ro_covered.RESIDUE_SQL))[4]
+            finally:
+                await tr.rollback()
+            return before, after, res_before, res_after
+        finally:
+            await conn.close()
+    before, after, res_before, res_after = _run(go())
+    assert after[0] == before[0] and after[1] == before[1] + 1, (before, after)
+    assert res_after == res_before + 1, (res_before, res_after)

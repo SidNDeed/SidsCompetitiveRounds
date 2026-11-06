@@ -523,17 +523,18 @@ def _in(site, spans):
 # session failed continuity or left residue, every later measured position
 # on that session is refused too ('after txn ended', the first failing site):
 # whatever it ran in is no longer the transaction the driver began.
-# Ruling FOUR-R10-A2 (3) FIX-R11-RES: pg_settings does not show every
-# setting (custom placeholders, role, session_authorization, seed), so the
-# residue is measured where pg_settings shows it and refused where it does
-# not: the text reading counts every session-scope settings form as residue
-# (settings_forms), every name the texts set is read on the session
-# (placeholder_residue), and every measured position is followed by RESET
-# ALL with the proof that each such name and the position token read their
-# reset value (not_reset; recorded in self.info['gone']). RESET ALL is
-# transactional: if the transaction later rolls back, it rolls back with
-# the settings it reset (both were made inside it). A statement that fails
-# aborts the transaction, and its rollback undoes every SET made in it.
+# Ruling FOUR-R10-A2 (3) FIX-R11-RES (rulings FOUR-R11-A6 (2) to (5)): on
+# PostgreSQL 16.9 (55432; RF11 logs r11-res-probe-55432-20261106T065356Z.log
+# and r11-res-probe2-55432-20261106T090205Z.log) pg_settings had no row for a
+# custom placeholder the session set, nor for role, session_authorization,
+# is_superuser or seed. The residue is therefore compared through pg_settings
+# for the names it carries, and otherwise: the text reading counts every
+# session-scope settings form as residue (settings_forms), every name the
+# texts set is read on the session (placeholder_residue), and every measured
+# position is followed by RESET ALL and a check that each such name and the
+# position token read their reset value (not_reset; recorded in
+# self.info['gone']). pg_settings itself is compared at both ends of every
+# measured position, whatever statement or function changed it.
 POSITION_GUC = "rf10.position"
 POSITION_START_SQL = (
     "SELECT pg_catalog.set_config('rf10.position', :token, true),"
@@ -547,18 +548,20 @@ POSITION_END_SQL = (
     " ARRAY(SELECT virtualxid FROM pg_catalog.pg_locks"
     " WHERE pid = pg_catalog.pg_backend_pid() AND locktype = 'virtualxid'"
     " AND virtualxid = virtualtransaction AND granted ORDER BY 1)")
-# Ruling FOUR-R10-A2 (3) FIX-R11-RES: pg_settings omits every setting flagged
-# GUC_NO_SHOW_ALL. Measured on PostgreSQL 16.9 (55432, one rolled-back
-# transaction; RF11 log r11-res-probe-55432-20261106T065356Z.log): a custom
-# placeholder set by set_config(name, value, false), by SET, or by
-# set_config(..., true) has 0 rows in pg_settings and in
-# pg_show_all_settings(); current_setting(name, true) reads it. The same flag
-# hides role, session_authorization and is_superuser (and seed, whose
-# current_setting always reads 'unavailable'), so the settings array also
-# carries their values ('hidden <name>=<value>') and the connection's
-# current_user and session_user: a SET ROLE is measured, not only spelled.
-# Temporary objects are counted in every catalog with a namespace column a
-# session can create into (a temporary function or type is not in pg_class).
+# FIX-R11-RES, measured on PostgreSQL 16.9 (55432, rolled-back transactions;
+# RF11 logs r11-res-probe-55432-20261106T065356Z.log, 900c03a0, and
+# r11-res-probe2-55432-20261106T090205Z.log, 077d97c1): a custom placeholder
+# set by set_config(name, value, false), by SET, or by set_config(..., true)
+# had 0 rows in pg_settings and in pg_show_all_settings(), and
+# current_setting(name, true) read it; role, session_authorization,
+# is_superuser and seed had no pg_settings row either (current_setting read
+# 'none', the session user, 'on', 'unavailable'; seed read 'unavailable'
+# after setseed(0.5) too). So the settings array also carries role,
+# session_authorization and is_superuser ('hidden <name>=<value>') and the
+# connection's current_user and session_user; seed is refused by the text
+# reading only. On the seat's 16.15, test_r11_res_settings asserts the same
+# placeholder reading and that a temporary function moves pg_proc and not
+# pg_class; temporary objects are counted in nine catalogs.
 HIDDEN_MEASURED = ("role", "session_authorization", "is_superuser", "seed")
 RESIDUE_SQL = (
     "SELECT ARRAY(SELECT x FROM ("
@@ -590,11 +593,12 @@ RESIDUE_SQL = (
     "  WHERE stxnamespace = pg_catalog.pg_my_temp_schema())")
 
 # The settings a measured text names, read on the session: each name, its
-# current_setting(name, true) (NULL when the session never defined it), and
-# its pg_settings row (setting, reset_val; NULL when pg_settings omits it).
+# current_setting(name, true) (NULL for a name the session never defined, in
+# the 16.9 probe), and its pg_settings row (setting, reset_val, source; NULL
+# when pg_settings has no row for it).
 NAMED_SETTINGS_SQL = (
     "SELECT n, pg_catalog.current_setting(n, true), s.setting, s.reset_val,"
-    " s.name IS NOT NULL"
+    " s.name IS NOT NULL, s.source"
     " FROM pg_catalog.unnest(CAST(:names AS text[])) AS n"
     " LEFT JOIN pg_catalog.pg_settings AS s"
     " ON pg_catalog.lower(s.name) = pg_catalog.lower(n)"
@@ -616,7 +620,8 @@ RESET_SQL = "RESET ALL"
 #       (SET, SET SESSION, SET ROLE, SET SESSION AUTHORIZATION, SET TIME
 #       ZONE, SET SCHEMA, SET NAMES, ...); a SET is a settings statement
 #       unless an UPDATE, ALTER or CREATE precedes it in its statement;
-#   setseed(...) (seed: hidden, unreadable, and not reset by RESET ALL);
+#   setseed(...) (seed: no pg_settings row, and current_setting read
+#       'unavailable' before and after setseed in the 16.9 probe);
 #   EXECUTE (dynamic SQL: its text is a value, never read) and a U&
 #       unicode-escaped spelling (a name no literal reading can see).
 # The names: every set_config literal name and every SET name, local or not,
@@ -776,7 +781,7 @@ def _is_settings_set(toks, k):
     return True
 
 
-def _set_statement(toks, k, forms, names):
+def _set_statement(toks, k, forms, names, scoped):
     rest = toks[k + 1:]
     scope = "session"
     if rest and rest[0] in (("word", "local"), ("word", "session")):
@@ -808,14 +813,15 @@ def _set_statement(toks, k, forms, names):
         forms.add("SET name unreadable")
         return
     names.add(name.lower())
+    scoped.add((name.lower(), "local" if scope == "local" else "session"))
     if scope != "local":
         forms.add("session SET " + name.lower())
 
 
-def _scan_settings(toks, forms, names):
+def _scan_settings(toks, forms, names, scoped):
     for k, (kind, val) in enumerate(toks):
         if kind == "body":
-            _scan_settings(val, forms, names)
+            _scan_settings(val, forms, names, scoped)
         elif kind == "uident":
             forms.add("unreadable unicode-escaped spelling")
         elif kind == "word" and val == "execute":
@@ -832,47 +838,172 @@ def _scan_settings(toks, forms, names):
                 forms.add("set_config name unreadable")
             else:
                 names.add(name)
-            if args[2] != [("word", "true")]:
+            local = args[2] == [("word", "true")]
+            if name is not None:
+                scoped.add((name, "local" if local else "session"))
+            if not local:
                 forms.add("session set_config " + (name or "?"))
         if (kind, val) == ("word", "set") and _is_settings_set(toks, k):
-            _set_statement(toks, k, forms, names)
+            _set_statement(toks, k, forms, names, scoped)
+
+
+def _read_settings(texts):
+    forms, names, scoped = set(), set(), set()
+    for t in texts:
+        _scan_settings(sql_tokens(t), forms, names, scoped)
+    return forms, names, scoped
 
 
 def settings_forms(texts):
     """(forms, names) of the statement texts a position ran: the residue
     forms the text reading counts (sorted) and every setting name the texts
     set (sorted, lowercased)."""
-    forms, names = set(), set()
-    for t in texts:
-        _scan_settings(sql_tokens(t), forms, names)
+    forms, names, _scoped = _read_settings(texts)
     return tuple(sorted(forms)), tuple(sorted(names))
+
+
+def settings_scoped(texts):
+    """Every (name, scope) the texts set, scope 'local' (SET LOCAL, or
+    set_config with the literal is_local `true`) or 'session' (any other
+    form), sorted (ruling FOUR-R11-A6 (3a))."""
+    return tuple(sorted(_read_settings(texts)[2]))
+
+
+def setting_classes(scoped, rows):
+    """(name, class, scope) for every (name, scope) the texts set: class
+    'token' for the harness's position token, 'server' for a name with a
+    pg_settings row in `rows` (NAMED_SETTINGS_SQL, read on the session),
+    'hidden' for HIDDEN_MEASURED, else 'placeholder'."""
+    shown = {r[0] for r in rows if r[4]}
+    out = []
+    for name, scope in scoped:
+        cls = ("token" if name == POSITION_GUC else "server" if name in shown
+               else "hidden" if name in HIDDEN_MEASURED else "placeholder")
+        out.append((name, cls, scope))
+    return tuple(sorted(out))
 
 
 def placeholder_residue(rows):
     """The residue NAMED_SETTINGS_SQL rows show before RESET ALL: every name
-    pg_settings omits (a custom placeholder) that reads a value, other than
-    the position token (measured by identity) and the hidden settings the
-    settings array carries."""
+    with no pg_settings row (a custom placeholder) that reads a value, other
+    than the position token (checked by its own token) and the hidden
+    settings the settings array carries."""
     return tuple(sorted(
-        "placeholder %s=%s" % (n, val) for n, val, _s, _r, shown in rows
+        "placeholder %s=%s" % (n, val) for n, val, _s, _r, shown, _src in rows
         if not shown and n not in HIDDEN_MEASURED and n != POSITION_GUC
         and val is not None and val != ""))
 
 
 def not_reset(rows):
-    """The names NAMED_SETTINGS_SQL rows show still set after RESET ALL: a
-    pg_settings row whose setting is not its reset value, or an omitted name
-    (a placeholder: its boot and reset values are NULL, read as '') reading
-    anything but NULL or ''. Measured on 16.9 (the probe above): after RESET
-    ALL a placeholder the session defined reads '' (it stays defined; IS NULL
-    holds only for a name the session never defined)."""
+    """The names NAMED_SETTINGS_SQL rows show away from their reset value
+    after RESET ALL (ruling FOUR-R11-A6 (2)), by class of name: a server
+    setting (a pg_settings row) must read setting = reset_val with a source
+    other than 'session'; the position token must read ''; a placeholder
+    must read '' (what the 16.9 probe read after RESET ALL for a placeholder
+    the session had set, r11-res-probe-55432-20261106T065356Z.log) or NULL
+    (what the probe read for a name the session never defined). Hidden
+    settings are compared by the settings array instead."""
     out = set()
-    for n, val, setting, reset, shown in rows:
-        if shown:
-            if setting != reset:
-                out.add("not reset %s=%s" % (n, setting))
+    for n, val, setting, reset, shown, source in rows:
+        if n == POSITION_GUC:
+            if val != "":
+                out.add("not reset %s=%s" % (n, val))
+        elif shown:
+            if setting != reset or source == "session":
+                out.add("not reset %s=%s (%s)" % (n, setting, source))
         elif n not in HIDDEN_MEASURED and val is not None and val != "":
             out.add("not reset %s=%s" % (n, val))
+    return tuple(sorted(out))
+
+
+# ---- ruling FOUR-R11-A6 (4): the census of the database's functions --------
+#
+# A placeholder set at session scope inside a function is reset by RESET ALL
+# after the position but no reading lists it (the 16.9 probe: no pg_settings
+# row). The bound is a census of every function of the measured database
+# outside pg_catalog and information_schema (every kind, trigger functions
+# among them): each one whose source carries set_config, SET, RESET, DISCARD
+# or EXECUTE, or that carries SET attributes (proconfig), is listed with its
+# language and the md5 of its source and has its side frozen in PROC_SIDES;
+# a function in a compiled language (c, internal) is listed by its owning
+# extension in PROC_COMPILED. A new match, a changed md5, or a new compiled
+# function fails test_r11_res_proc_census with its name. A source that
+# carries the harness token's name fails it too (ruling FOUR-R11-A6 (3c)).
+PROC_CENSUS_SQL = (
+    "SELECT n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid),"
+    " p.prokind::text, l.lanname,"
+    " CASE WHEN p.prosqlbody IS NOT NULL THEN pg_catalog.pg_get_functiondef(p.oid)"
+    " ELSE p.prosrc END,"
+    " pg_catalog.array_to_string(p.proconfig, ','),"
+    " (SELECT e.extname FROM pg_catalog.pg_depend AS d"
+    "  JOIN pg_catalog.pg_extension AS e ON e.oid = d.refobjid"
+    "  WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND d.objid = p.oid"
+    "  AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass"
+    "  AND d.deptype = 'e' LIMIT 1)"
+    " FROM pg_catalog.pg_proc AS p"
+    " JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace"
+    " JOIN pg_catalog.pg_language AS l ON l.oid = p.prolang"
+    " WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')"
+    " ORDER BY 1, 2, 3")
+PROC_WORDS = re.compile(r"\b(set_config|set|reset|discard|execute)\b", re.IGNORECASE)
+COMPILED_LANGUAGES = ("c", "internal")
+
+# Frozen from the census of the measured database (the clone and its case
+# schema, test_r8's runs fixture), each function read once: key -> (md5 of
+# its source, side, reason); side 'session' (it sets at session scope: every
+# captured text that can reach it is residue), 'transaction' (it sets inside
+# the transaction only, the scope shown by each call's literal) or
+# 'neither' (why the word matched). NOTES-r11-res.md lists each.
+PROC_SIDES = {}
+# Compiled-language functions outside the system schemas: (extension, key).
+PROC_COMPILED = ()
+
+
+def _proc_key(row, case_schema):
+    nsp, name, args, kind = row[0], row[1], row[2], row[3]
+    if case_schema is not None and nsp == case_schema:
+        nsp = "<case>"
+    elif nsp.startswith("pg_temp"):
+        nsp = "<temp>"
+    return "%s.%s(%s) %s" % (nsp, name, args, kind)
+
+
+def proc_census(rows, case_schema=None):
+    """PROC_CENSUS_SQL rows -> (matched, compiled, token_sources): matched
+    {key: (language, md5 of the source, the words matched, proconfig)} for
+    every function whose source carries a PROC_WORDS word or that has SET
+    attributes; compiled, sorted (extension or '-', key) for every function
+    in a COMPILED_LANGUAGES language; token_sources, sorted keys whose
+    source carries the position token's name."""
+    import hashlib
+    matched, compiled, token_sources = {}, set(), set()
+    for row in rows:
+        key = _proc_key(row, case_schema)
+        lang, src, config, ext = row[4], row[5] or "", row[6], row[7]
+        if POSITION_GUC in src.lower():
+            token_sources.add(key)
+        if lang in COMPILED_LANGUAGES:
+            compiled.add((ext or "-", key))
+            continue
+        words = tuple(sorted({w.lower() for w in PROC_WORDS.findall(src)}))
+        if words or config:
+            matched[key] = (lang, hashlib.md5(src.encode("utf-8")).hexdigest(), words,
+                            config)
+    return matched, tuple(sorted(compiled)), tuple(sorted(token_sources))
+
+
+def proc_census_diff(matched, compiled):
+    """What the census finds against the frozen PROC_SIDES / PROC_COMPILED:
+    sorted 'new <key>', 'md5 <key>', 'gone <key>', 'compiled new|gone ...'."""
+    out = set()
+    for key, (_lang, md5, _w, _c) in matched.items():
+        if key not in PROC_SIDES:
+            out.add("new " + key)
+        elif PROC_SIDES[key][0] != md5:
+            out.add("md5 " + key)
+    out |= {"gone " + k for k in PROC_SIDES if k not in matched}
+    out |= {"compiled new %s %s" % c for c in compiled if c not in PROC_COMPILED}
+    out |= {"compiled gone %s %s" % c for c in PROC_COMPILED if c not in compiled}
     return tuple(sorted(out))
 
 
@@ -984,11 +1115,12 @@ class RecordingSession(AsyncSession):
 
     async def reset_all(self, names):
         """FIX-R11-RES: RESET ALL after the position's measurement reads, then
-        the proof it took: every name the measured texts set, and the
-        position token, read at its reset value (not_reset); then the
+        the check: every name the measured texts set, and the position
+        token, read against its reset value by class (not_reset); then the
         engine's own session setup replayed (the grant run's READ WRITE
-        characteristics, which RESET ALL returns to the role's default).
-        Returns the names still set, or ('reset unmeasured <sqlstate>',)."""
+        characteristics, a session-sourced default_transaction_read_only
+        the check would otherwise see reset). Returns the names away from
+        their reset value, or ('reset unmeasured <sqlstate>',)."""
         try:
             await AsyncSession.execute(self, text(RESET_SQL))
             gone = not_reset(await self.named_settings(
@@ -1002,11 +1134,16 @@ class RecordingSession(AsyncSession):
     async def position_end(self, site, start, texts=None):
         # FIX-R11-RES: the text reading of everything the position ran (a
         # filter: forms counted as residue) and its setting names (read on
-        # the session: the measurement, where pg_settings omits them)
+        # the session: the measurement for names with no pg_settings row)
         if texts is None:
-            forms, names = ("unmeasured capture",), ()
+            forms, names, scoped = ("unmeasured capture",), (), ()
         else:
             forms, names = settings_forms(texts)
+            scoped = settings_scoped(texts)
+        # ruling FOUR-R11-A6 (3c): whether the harness token's name stands
+        # in any text the position ran
+        token_in_text = any(POSITION_GUC in t.lower() for t in texts or ())
+        rows = ()
         if start[0] == "unmeasured":
             same, detail, left = False, (start[1],), ()
         else:
@@ -1014,11 +1151,15 @@ class RecordingSession(AsyncSession):
                 row = (await AsyncSession.execute(self, text(POSITION_END_SQL))).one()
                 same, detail = same_transaction(start[0], (row[0], list(row[1])))
                 left = residue_changes(start[1], await self.residue())
-                left += placeholder_residue(await self.named_settings(names))
+                rows = await self.named_settings(names)
+                left += placeholder_residue(rows)
             except DBAPIError as e:
                 same, detail, left = False, ("unmeasured " + (_sqlstate(e) or "error"),), ()
         gone = await self.reset_all(names)
-        self.info.setdefault("gone", []).append((site[0], site[1], names, gone))
+        # (file, line, names, not reset, (name, class, scope) per name the
+        # texts set (ruling FOUR-R11-A6 (3a)), the token's name in a text)
+        self.info.setdefault("gone", []).append(
+            (site[0], site[1], names, gone, setting_classes(scoped, rows), token_in_text))
         left = tuple(sorted(set(left) | set(forms) | set(gone)))
         tainted = self.info.get("tainted")
         if tainted is not None and same and not left:

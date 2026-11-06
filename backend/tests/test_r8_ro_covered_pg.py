@@ -301,6 +301,33 @@ def _prepare(mp):
     mp.setattr(main, "_strict_steam_session_ok", _session_ok)
 
 
+R11_PLANTED_FN = "rf11res_planted"
+
+
+async def _proc_census(clone_dsn, schema):
+    """Ruling FOUR-R11-A6 (4): PROC_CENSUS_SQL on the clone as the admin
+    role, then again inside a transaction that plants a function carrying
+    set_config(..., false) in the case schema and is rolled back, then once
+    more after the rollback."""
+    conn = await asyncpg.connect(clone_dsn)
+    try:
+        rows = [tuple(r) for r in await conn.fetch(ro_covered.PROC_CENSUS_SQL)]
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute(
+                "CREATE FUNCTION %s.%s() RETURNS text LANGUAGE sql AS $f$"
+                " SELECT pg_catalog.set_config('rf11res.planted', '1', false) $f$"
+                % (ro_role._q(schema), R11_PLANTED_FN))
+            planted = [tuple(r) for r in await conn.fetch(ro_covered.PROC_CENSUS_SQL)]
+        finally:
+            await tr.rollback()
+        after = [tuple(r) for r in await conn.fetch(ro_covered.PROC_CENSUS_SQL)]
+    finally:
+        await conn.close()
+    return {"rows": rows, "planted": planted, "after": after, "schema": schema}
+
+
 async def _run_all(admin_dsn, clone, mp, only=None):
     out = {"logs": {}, "locks": {}, "conts": {}, "pids": {}, "gone": {}, "errors": {},
            "checked": [],
@@ -310,6 +337,9 @@ async def _run_all(admin_dsn, clone, mp, only=None):
         env = cf_asm.Env(c, sm, mp)
         try:
             s = await seed(env)
+            # ruling FOUR-R11-A6 (4): the function census of the measured
+            # database, and its control (a planted function, rolled back)
+            out["proc_census"] = await _proc_census(clone_dsn, c.schema)
             out["grant"] = await ro_role.grant(admin_dsn, clone)
             out["census"] = await ro_role.privilege_census(admin_dsn, clone)
             _prepare(mp)
@@ -538,16 +568,18 @@ CONTINUITY_CONTROLS = (
     # the negative control: the same bracket, nothing planted
     ("unplanted_16828_under_role", "main._lease_admission_gate empty", E_16828,
      None, None, ("ok", set())),
-    # Ruling FOUR-R10-A2 (3) FIX-R11-RES: settings pg_settings omits. The
-    # round-10 report's case (ro_covered.py:515): a session-scope custom
-    # placeholder at main.py:16828, both drivers and the replacing route;
-    # then one control per route, each refused by that route alone
-    # (R11_EXACT): the text reading (a session set_config whose value is the
-    # placeholder's reset value, and setseed, both invisible to every
-    # reading), the placeholder reading (a transaction-local placeholder,
-    # which the text reading does not count), the hidden settings reading
-    # (SET ROLE), and the RESET ALL proof (transaction_read_only, which RESET
-    # ALL does not reset).
+    # Ruling FOUR-R10-A2 (3) FIX-R11-RES: settings with no pg_settings row
+    # (the 16.9 probes, RF11 logs r11-res-probe-55432-20261106T065356Z.log and
+    # r11-res-probe2-55432-20261106T090205Z.log). The round-10 report's case
+    # (ro_covered.py:515): a session-scope custom placeholder at
+    # main.py:16828, both drivers and the replacing route; then one control
+    # per route, each refused by that route alone (R11_EXACT): the text
+    # reading (a session set_config of '', and setseed, which no reading of
+    # the session moves), the placeholder reading (a transaction-local
+    # placeholder, which the text reading does not count), the hidden
+    # settings reading (SET ROLE), and the RESET ALL check
+    # (transaction_read_only, which read 'on' with source 'session' after
+    # RESET ALL in the second 16.9 probe).
     ("set_config_hidden_at_16828_under_role", "main._lease_admission_gate empty", E_16828,
      _then_own(R11_HIDDEN), None, ("continuity", R11_HIDDEN_PARTS)),
     ("set_config_hidden_at_16828_under_grant", "main._lease_admission_gate empty", E_16828,
@@ -1043,13 +1075,14 @@ def test_r10_driver_connections_discarded(runs):
 def test_r11_n_ro_covered_515_hidden_set_config_at_16828_refused(runs, driver):
     """The round-10 report's case (ro_covered.py:515): `SELECT
     set_config('rf10.hidden','yes',false)` at main.py:16828 must refuse as
-    session residue; pg_settings omits the placeholder (measured on 16.9,
-    ruling FOUR-R10-A2 (3)). Executed at the control's route (planted
-    program then the position's own statement, and the replacing text),
-    under the read-only role and under a grant: refused by the text reading
-    (a session-scope set_config) AND by the placeholder reading (the name
-    read on the session), never green; RESET ALL then returns the
-    placeholder to its reset value (the gone record names it, clean)."""
+    session residue; pg_settings had no row for such a placeholder on 16.9
+    (RF11 log r11-res-probe-55432-20261106T065356Z.log). Executed at the
+    control's route (planted program then the position's own statement, and
+    the replacing text), under the read-only role and under a grant: refused
+    by the text reading (a session-scope set_config) AND by the placeholder
+    reading (the name read on the session), never green; after RESET ALL the
+    placeholder reads '' (the gone record names it, with no name away from
+    its reset value)."""
     name = {"role": "set_config_hidden_at_16828_under_role",
             "grant": "set_config_hidden_at_16828_under_grant",
             "replaces_role": "set_config_hidden_replaces_16828_under_role"}[driver]
@@ -1070,9 +1103,10 @@ def test_r11_every_measured_position_is_reset(runs):
     """FIX-R11-RES: every bracketed position of every run (the role run, the
     grant runs and every control) is followed by RESET ALL with its proof:
     one gone record per continuity record, and every record clean (each name
-    its texts set, and the position token, at its reset value), except the
-    one control whose setting RESET ALL does not reset, where the proof
-    names exactly that setting."""
+    its texts set, and the position token, at its reset value by class),
+    except the transaction_read_only control (on, source 'session', after
+    RESET ALL in the second 16.9 probe), where the check names exactly that
+    setting."""
     total = 0
     for name, conts in runs["conts"].items():
         gone = runs["gone"][name]
@@ -1108,6 +1142,77 @@ def test_r11_res_capture_reads_every_planted_text(runs):
     for cname, n in want.items():
         rec = runs["grant_runs"]["continuity_controls"][cname]
         assert n in _r11_control_names(rec["gone"]), (cname, rec["gone"])
+
+
+def _r11_production_records(runs):
+    """The gone records of every run that planted nothing (the role run's
+    drivers and the unplanted grant and control runs): the program's own
+    texts only."""
+    out = [g for gone in runs["gone"].values() for g in gone]
+    out += [g for _targets, planted, gone in GONE if not planted for g in gone]
+    return out
+
+
+# Ruling FOUR-R11-A6 (3a): every (name, class, scope) the program's own
+# captured texts set, measured (NOTES-r11-res.md lists each with its site).
+R11_SETTING_NAMES = ()
+# (3b): the placeholders those texts set at session scope: frozen at none.
+R11_SESSION_PLACEHOLDERS = ()
+
+
+def test_r11_res_settings_census(runs):
+    """Ruling FOUR-R11-A6 (3): (a) every setting name the program's own
+    captured texts set, with its class and scope, equals the frozen list;
+    (b) the placeholders they set at session scope are the frozen ones
+    (none), named otherwise; (c) the harness token's name stands in no
+    captured text of any run (planted controls aside: they plant it on
+    purpose) and in no function source of the measured database."""
+    recs = _r11_production_records(runs)
+    assert recs, "no production position was measured"
+    got = tuple(sorted({e for g in recs for e in g[4]}))
+    assert got == R11_SETTING_NAMES, got
+    sess = tuple(sorted({e[0] for e in got if e[1] == "placeholder" and e[2] == "session"}))
+    assert sess == R11_SESSION_PLACEHOLDERS, sess
+    assert not [g for g in recs if g[5]], [g for g in recs if g[5]]
+    census = runs["proc_census"]
+    _m, _c, token_sources = ro_covered.proc_census(census["rows"], census["schema"])
+    assert token_sources == (), token_sources
+
+
+def _r11_census_report(matched, compiled):
+    """The census as text, for the failure message: each match with its
+    language, md5, words, proconfig; each compiled function."""
+    return json.dumps({"matched": {k: list(v) for k, v in sorted(matched.items())},
+                       "compiled": [list(c) for c in compiled]}, indent=0)
+
+
+def test_r11_res_proc_census(runs):
+    """Ruling FOUR-R11-A6 (4): the census of the measured database's
+    functions outside the system schemas equals the frozen PROC_SIDES (each
+    match by its md5) and PROC_COMPILED; a new match, a changed md5 or a new
+    compiled function fails with its name. No frozen function sets at
+    session scope."""
+    census = runs["proc_census"]
+    matched, compiled, _t = ro_covered.proc_census(census["rows"], census["schema"])
+    diff = ro_covered.proc_census_diff(matched, compiled)
+    assert diff == (), (diff, _r11_census_report(matched, compiled))
+    assert not [k for k, v in ro_covered.PROC_SIDES.items() if v[1] == "session"]
+    assert all(v[1] in ("transaction", "neither") for v in ro_covered.PROC_SIDES.values())
+
+
+def test_r11_res_proc_census_control(runs):
+    """The control: a function planted in the case schema inside a
+    transaction that is rolled back, its body set_config(..., false), is
+    reported by name, and only it; after the rollback the census is the
+    frozen one again."""
+    census = runs["proc_census"]
+    matched, compiled, _t = ro_covered.proc_census(census["planted"], census["schema"])
+    key = "<case>.%s() f" % R11_PLANTED_FN
+    assert ro_covered.proc_census_diff(matched, compiled) == ("new " + key,), (
+        ro_covered.proc_census_diff(matched, compiled))
+    assert "set_config" in matched[key][2], matched[key]
+    matched, compiled, _t = ro_covered.proc_census(census["after"], census["schema"])
+    assert ro_covered.proc_census_diff(matched, compiled) == ()
 
 
 def test_r10_every_position_is_bracketed(runs):
