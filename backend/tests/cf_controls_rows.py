@@ -2531,7 +2531,13 @@ row("S63", "test_s63_the_kept_epoch", [
     classes=[C("comment_only_mention", E(MAIN, _EPI, _EPI + ('            await ctx.db.execute(text(\n'
                                           '                "SELECT 1 /* UPDATE ffa_kept_epochs SET chain = chain */"))\n')),
                note="A7-R4 job 045 (commit e6883e84, tree 772ef50e0437c3e647aef2f08ac3d7066c028f08), registered by A7-R4-A1: the UPDATE's text "
-                    "only inside a block comment of an executed SELECT; S63 stays green")])
+                    "only inside a block comment of an executed SELECT; S63 stays green"),
+             C("plain_alias_on_the_epoch_read",
+               E(MAIN, _PREV, _PREV.replace(
+                   '"SELECT epoch_no, chain FROM ffa_kept_epochs WHERE lobby_id = :lid"',
+                   '"SELECT epoch_no, chain, 1 AS \\"x\U0001f600\\" FROM ffa_kept_epochs WHERE lobby_id = :lid"')),
+               note="the bound's other way (A7-R5-A1 (2)(b)): the surrogate control's alias written as a "
+                    "quoted identifier holding the decoded character; the model reads it, S63 stays green")])
 
 # -- S64: one node per fixture test --------------------------------------------
 _S64 = ["test_s64_i_ii_the_false_mark_and_the_refuted_tally",
