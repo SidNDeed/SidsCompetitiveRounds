@@ -84,6 +84,8 @@ import catalog_position  # noqa: E402
 import d2_seed  # noqa: E402
 import models  # noqa: E402
 from migration_table_ddl import table_ddl  # noqa: E402
+# ruling FOUR-R11-A17: the module's one open window (module-scoped, autouse)
+from r11_cat_window import _cat_open_window  # noqa: E402,F401
 
 try:
     import asyncpg
@@ -2648,3 +2650,129 @@ def test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev(chain):
         assert not [(r["file"], c) for r in rows for c in r["commands"] if "mail_inbox_rev" in c[2]]
     finally:
         asyncio.run(_drop_db(copy))
+
+
+# ---- ruling FOUR-R11-A17: the controls of the module's open window ---------
+# The window is r11_cat_window._cat_open_window (imported above). Each
+# control plants inside the window's planted_entries(): the planted entries
+# are collected apart from the run's, so the verdict at the thaw never sees
+# them, and each plant must be refused with its own message. The two plant
+# functions are off the window's lists by construction
+# (r11_cat_window.PLANT_SITES and PLANT_MAKERS; the census in test_r11_rec_pg
+# admits them as plants only).
+
+async def _r11_plant_admin_off_list():
+    """An admin open from a function that is not an admin site."""
+    return await asyncpg.connect(ADMIN)
+
+
+async def _r11_plant_unlisted_maker(name):
+    """A database made by a function that is not a listed maker, opened at a
+    listed clone site (_connect), then dropped."""
+    await _admin('CREATE DATABASE "%s"' % name)
+    try:
+        conn = await _connect(_dsn(name))
+        await conn.close()
+    finally:
+        await _drop_db(name)
+
+
+def _r11_rule_probe(fn):
+    return fn()
+
+
+def test_r11_cat_window_is_active(_cat_open_window):
+    opens, starts = _cat_open_window.set_installed()
+    assert opens and starts, (opens, starts)
+
+
+def test_r11_cat_site_rule(_cat_open_window):
+    """The site rule: the innermost frame whose code file is this module.
+    Called from ro_census (not this file) through _r11_rule_probe (this
+    file) from this test (this file), the site is _r11_rule_probe at its
+    call line, neither this test nor the ro_census frame; with no frame of
+    this file on the stack (a thread started on an ro_census method) there
+    is no site; a real open through _fetchval is taken at _fetchval."""
+    import threading
+    w = _cat_open_window
+    line = _r11_rule_probe.__code__.co_firstlineno + 1
+    assert _r11_rule_probe(w.site_here) == ("_r11_rule_probe", line)
+    out = []
+    t = threading.Thread(target=w.site_here_into, args=(out,))
+    t.start()
+    t.join(30)
+    assert out == [None]
+    with w.planted_entries() as got:
+        asyncio.run(_fetchval("SELECT 1"))
+    assert [(e["kind"], e["site"][0], e["refusal"]) for e in got()] == [("open", "_fetchval", None)]
+
+
+def test_r11_cat_refuses_an_admin_open_off_the_list(_cat_open_window):
+    with _cat_open_window.planted_entries() as got:
+        with pytest.raises(AssertionError) as exc:
+            asyncio.run(_r11_plant_admin_off_list())
+    msg = str(exc.value)
+    assert msg.startswith("open at a site off the list: _r11_plant_admin_off_list line "), msg
+    assert [e["refusal"][0] for e in got() if e["refusal"]] == ["open at a site off the list"]
+
+
+def test_r11_cat_refuses_a_clone_not_made_by_a_listed_maker(_cat_open_window):
+    name = "rf11cat_unlisted_%d" % os.getpid()
+    with _cat_open_window.planted_entries() as got:
+        with pytest.raises(AssertionError) as exc:
+            asyncio.run(_r11_plant_unlisted_maker(name))
+    msg = str(exc.value)
+    assert msg == ("open not in the set: database %r was made by _r11_plant_unlisted_maker, "
+                   "not a listed maker" % name), msg
+    assert [e["refusal"][0] for e in got() if e["refusal"]] == ["open not in the set"]
+
+
+def test_r11_cat_refuses_an_open_outside_the_set(_cat_open_window):
+    with _cat_open_window.planted_entries() as got:
+        with pytest.raises(AssertionError) as exc:
+            asyncio.run(_connect(_dsn("postgres")))
+    msg = str(exc.value)
+    assert msg.startswith("open not in the set: database 'postgres' at _connect line "), msg
+    assert [e["refusal"][0] for e in got() if e["refusal"]] == ["open not in the set"]
+
+
+def test_r11_cat_refuses_a_start_outside_the_set(_cat_open_window):
+    pg_dump = cd.client("D2_TEST_PG_DUMP", "pg_dump") or "pg_dump"
+    with _cat_open_window.planted_entries() as got:
+        with pytest.raises(AssertionError) as exc:
+            cd.dump(pg_dump, _dsn("postgres"))
+    msg = str(exc.value)
+    assert msg.startswith("start with a target outside the set: database 'postgres' at "
+                          "test_r11_cat_refuses_a_start_outside_the_set line "), msg
+    assert [e["refusal"][0] for e in got() if e["refusal"]] == ["start with a target outside the set"]
+
+
+def test_r11_cat_refuses_a_start_whose_environment_is_not_stated(_cat_open_window, monkeypatch):
+    pg_dump = cd.client("D2_TEST_PG_DUMP", "pg_dump") or "pg_dump"
+    monkeypatch.setenv("PGSERVICE", "rf11cat_never")
+    with _cat_open_window.planted_entries() as got:
+        with pytest.raises(AssertionError) as exc:
+            cd.dump(pg_dump, _dsn("postgres"))
+    msg = str(exc.value)
+    assert msg == ("start whose environment carries a connection variable the command line "
+                   "does not override: ['PGSERVICE']"), msg
+    assert len([e for e in got() if e["refusal"]]) == 1
+
+
+def test_r11_cat_refuses_an_identity_line_from_another_database(_cat_open_window):
+    """The identity check the window applies at each member's first open and
+    first start, given a line read from one database for another member:
+    refused, by the asyncpg path (the line the planted open took) and by the
+    psql path (the same DSN and environment a start uses)."""
+    w = _cat_open_window
+    with w.planted_entries() as got:
+        asyncio.run(_fetchval("SELECT 1"))
+    line = got()[0]["line"]
+    admin_db = ADMIN.rsplit("/", 1)[1]
+    assert w.identity_refusal(line, admin_db) is None, line
+    refused = w.identity_refusal(line, "rf11cat_another")
+    assert refused and refused[0] == "identity line from another database", refused
+    by_psql = w.psql_identity(ADMIN, os.environ)
+    assert w.identity_refusal(by_psql, admin_db) is None, by_psql
+    refused = w.identity_refusal(by_psql, "rf11cat_another")
+    assert refused and refused[0] == "identity line from another database", refused
