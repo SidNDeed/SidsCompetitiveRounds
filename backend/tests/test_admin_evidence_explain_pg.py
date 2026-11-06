@@ -250,6 +250,36 @@ def _ids(n):
     return [uuid.uuid4() for _ in range(n)]
 
 
+HORIZON_WAIT_S = 60.0
+
+HOLDERS_SQL = """
+    SELECT pid, backend_type, backend_xid::text AS xid, backend_xmin::text AS xmin
+      FROM pg_stat_activity
+     WHERE datname = current_database() AND pid <> pg_backend_pid()
+       AND (age(backend_xmin) > age(CAST($1 AS xid))
+            OR age(backend_xid) > age(CAST($1 AS xid)))"""
+
+
+async def _await_horizon(conn, bound=HORIZON_WAIT_S):
+    """Return once no other backend of this database holds a snapshot or a
+    transaction older than the first transaction id not yet completed when
+    the seed finished; fail after `bound` seconds naming the holders."""
+    horizon = await conn.fetchval(
+        "SELECT pg_snapshot_xmax(pg_current_snapshot())::text::bigint"
+        " % 4294967296")
+    deadline = asyncio.get_running_loop().time() + bound
+    while True:
+        holders = await conn.fetch(HOLDERS_SQL, horizon)
+        if not holders:
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            pytest.fail("the seed's VACUUM cannot set the visibility map: after "
+                        "%.0f s these backends still hold a snapshot older than "
+                        "the seed (horizon %s): %s" % (
+                            bound, horizon, [dict(r) for r in holders]))
+        await asyncio.sleep(0.2)
+
+
 async def _seed(conn):
     s = Seeded()
     s.D, s.R, s.X, s.Y, s.X2, s.Y2, s.P, s.Q, s.E = _ids(9)
@@ -307,20 +337,20 @@ async def _seed(conn):
     # loaded table is vacuumed and analysed, one statement per call so no
     # VACUUM runs inside an implicit transaction block.
     s.loaded = ("matches", "ranked_series")
+    # The visibility map is this seed's postcondition (the gate reads
+    # relallvisible == relpages). VACUUM marks a page all-visible only when
+    # every row's inserting transaction is committed with its hint bit set and
+    # is older than the oldest snapshot any backend of THIS database holds.
+    # The first is the fixture's synchronous commits (see `db`). The second is
+    # waited for here: autovacuum is off on both tables, but an autovacuum
+    # worker on other tables of the database (the catalogs every test file's
+    # schema create and drop churns) holds a snapshot while it analyses, and
+    # one taken mid-seed holds the later pages back. A snapshot taken after
+    # the seed finished cannot hold a seed row back, so once no backend's xmin
+    # or xid precedes the seed's horizon, one VACUUM sets every page.
+    await _await_horizon(conn)
     for table in s.loaded:
         await conn.execute("VACUUM (ANALYZE) %s" % table)
-    # The visibility map is this seed's postcondition (the gate reads
-    # relallvisible == relpages). With autovacuum off on both tables, only
-    # another backend's snapshot can hold a page back; exactly one re-run
-    # covers a transient one, and the gate still asserts.
-    for table in s.loaded:
-        row = await conn.fetchrow("""
-            SELECT c.relpages, c.relallvisible
-              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE n.nspname = current_schema() AND c.relname = $1""", table)
-        if row["relallvisible"] != row["relpages"]:
-            await asyncio.sleep(1.0)
-            await conn.execute("VACUUM (ANALYZE) %s" % table)
     s.stats_target = await conn.fetchval("SHOW default_statistics_target")
     return s
 
@@ -347,6 +377,11 @@ def db():
 
     async def up():
         d.conn = await asyncpg.connect(DSN)
+        # A server running synchronous_commit=off (the suite seats do) commits
+        # asynchronously: a row's committed hint bit cannot be set until the
+        # commit's WAL record is flushed, and VACUUM leaves a page whose rows
+        # lack it not all-visible. The fixture's commits wait for their flush.
+        await d.conn.execute("SET synchronous_commit = on")
         await d.conn.execute('CREATE SCHEMA "%s"' % d.schema)
         await d.conn.execute('SET search_path TO "%s"' % d.schema)
         await d.conn.execute(PREREQ)
@@ -855,3 +890,49 @@ def test_the_file_analyses_matches_after_creating_the_statistics_object():
         "the statistics object has no most-common-values list after the file "
         "ran over a loaded table: the file's ANALYZE did not build it", stats)
     print("GATE the file's ANALYZE built stx_matches_pair: mcv_items=%d" % stats[4])
+
+
+def test_seed_visibility_premise_a_held_snapshot_is_waited_for_then_one_vacuum_sets_the_map():
+    """The seed's two premises, on a table of its own: a snapshot another
+    backend took before the rows were written makes the horizon wait refuse
+    and name that backend; once it ends the wait returns, and one VACUUM of
+    synchronously committed rows marks every page all-visible."""
+    require_pg()
+
+    async def go():
+        a = await asyncpg.connect(DSN)
+        b = await asyncpg.connect(DSN)
+        schema = "ae_horizon_%s" % uuid.uuid4().hex[:10]
+        try:
+            await a.execute("SET synchronous_commit = on")
+            await b.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+            await b.fetchval("SELECT 1")
+            held = await b.fetchval("SELECT pg_backend_pid()")
+            await a.execute('CREATE SCHEMA "%s"' % schema)
+            await a.execute('CREATE TABLE "%s".t (x int, pad text)' % schema)
+            await a.execute('ALTER TABLE "%s".t SET (autovacuum_enabled = false)' % schema)
+            await a.execute('INSERT INTO "%s".t SELECT i, repeat(\'x\', 200) '
+                            'FROM generate_series(1, 5000) AS i' % schema)
+            with pytest.raises(pytest.fail.Exception) as refused:
+                await _await_horizon(a, bound=1.0)
+            assert "'pid': %d" % held in str(refused.value), str(refused.value)
+            await b.execute("COMMIT")
+            await _await_horizon(a)
+            await a.execute('VACUUM "%s".t' % schema)
+            row = await a.fetchrow("""
+                SELECT c.relpages, c.relallvisible
+                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = $1 AND c.relname = 't'""", schema)
+            assert row["relpages"] > 1 and row["relallvisible"] == row["relpages"], dict(row)
+            print("GATE seed premise: held snapshot pid %d named; after it ended one "
+                  "VACUUM set %d of %d pages" % (held, row["relallvisible"], row["relpages"]))
+        finally:
+            await b.close()
+            await a.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            await a.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(go())
+    finally:
+        loop.close()
