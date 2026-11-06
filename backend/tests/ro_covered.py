@@ -21,6 +21,7 @@ and the outcome ('ok' or the SQLSTATE).
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -380,7 +381,8 @@ def role_engine(dsn, schema, expect, checked, read_write=False):
     connection asserts its identity is `expect` (appending to `checked`).
     `read_write` (the grant run, ruling R-B) sets the session's transactions
     READ WRITE after the identity check, so the grant layer (42501) is what
-    refuses a write the run did not grant."""
+    refuses a write the run did not grant (and again after every RESET ALL
+    a measured position is followed by, FIX-R11-RES)."""
     engine = create_async_engine(
         dsn.replace("postgresql://", "postgresql+asyncpg://"), poolclass=NullPool,
         connect_args={"server_settings": {"search_path": '"%s"' % schema}})
@@ -394,11 +396,33 @@ def role_engine(dsn, schema, expect, checked, read_write=False):
                 "a covered connection runs as current_user=%s session_user=%s, "
                 "not as %s" % (got[0], got[1], expect))
         checked.append(got)
-        if read_write:
-            dbapi_conn.run_async(lambda c: c.execute(
-                "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE"))
+        for stmt in state["setup"]:
+            dbapi_conn.run_async(lambda c, stmt=stmt: c.execute(stmt))
+
+    # FIX-R11-RES: the engine's capture of every statement text any of its
+    # connections runs while a position's capture window is open (bound to
+    # this engine object; a session on an engine without it measures nothing
+    # and is never 'ok'), and the session setup RESET ALL must not undo.
+    state = {"texts": None,
+             "setup": (READ_WRITE_SQL,) if read_write else ()}
+    engine.sync_engine.rf11_capture = state
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _capture(_conn, _cursor, statement, _params, _context, _many):
+        texts = state["texts"]
+        if texts is not None:
+            texts.append(statement)
 
     return engine
+
+
+READ_WRITE_SQL = "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE"
+
+
+def _capture_state(session):
+    """The capture state of the engine `session` is bound to (role_engine's),
+    or None."""
+    return getattr(getattr(session.bind, "sync_engine", None), "rf11_capture", None)
 
 
 def _site():
@@ -499,6 +523,17 @@ def _in(site, spans):
 # session failed continuity or left residue, every later measured position
 # on that session is refused too ('after txn ended', the first failing site):
 # whatever it ran in is no longer the transaction the driver began.
+# Ruling FOUR-R10-A2 (3) FIX-R11-RES: pg_settings does not show every
+# setting (custom placeholders, role, session_authorization, seed), so the
+# residue is measured where pg_settings shows it and refused where it does
+# not: the text reading counts every session-scope settings form as residue
+# (settings_forms), every name the texts set is read on the session
+# (placeholder_residue), and every measured position is followed by RESET
+# ALL with the proof that each such name and the position token read their
+# reset value (not_reset; recorded in self.info['gone']). RESET ALL is
+# transactional: if the transaction later rolls back, it rolls back with
+# the settings it reset (both were made inside it). A statement that fails
+# aborts the transaction, and its rollback undoes every SET made in it.
 POSITION_GUC = "rf10.position"
 POSITION_START_SQL = (
     "SELECT pg_catalog.set_config('rf10.position', :token, true),"
@@ -512,13 +547,333 @@ POSITION_END_SQL = (
     " ARRAY(SELECT virtualxid FROM pg_catalog.pg_locks"
     " WHERE pid = pg_catalog.pg_backend_pid() AND locktype = 'virtualxid'"
     " AND virtualxid = virtualtransaction AND granted ORDER BY 1)")
+# Ruling FOUR-R10-A2 (3) FIX-R11-RES: pg_settings omits every setting flagged
+# GUC_NO_SHOW_ALL. Measured on PostgreSQL 16.9 (55432, one rolled-back
+# transaction; RF11 log r11-res-probe-55432-20261106T065356Z.log): a custom
+# placeholder set by set_config(name, value, false), by SET, or by
+# set_config(..., true) has 0 rows in pg_settings and in
+# pg_show_all_settings(); current_setting(name, true) reads it. The same flag
+# hides role, session_authorization and is_superuser (and seed, whose
+# current_setting always reads 'unavailable'), so the settings array also
+# carries their values ('hidden <name>=<value>') and the connection's
+# current_user and session_user: a SET ROLE is measured, not only spelled.
+# Temporary objects are counted in every catalog with a namespace column a
+# session can create into (a temporary function or type is not in pg_class).
+HIDDEN_MEASURED = ("role", "session_authorization", "is_superuser", "seed")
 RESIDUE_SQL = (
-    "SELECT ARRAY(SELECT name || '=' || setting FROM pg_catalog.pg_settings ORDER BY 1),"
+    "SELECT ARRAY(SELECT x FROM ("
+    " SELECT name || '=' || setting AS x FROM pg_catalog.pg_settings"
+    " UNION ALL SELECT 'hidden role=' || pg_catalog.current_setting('role')"
+    " UNION ALL SELECT 'hidden session_authorization='"
+    "  || pg_catalog.current_setting('session_authorization')"
+    " UNION ALL SELECT 'hidden is_superuser=' || pg_catalog.current_setting('is_superuser')"
+    " UNION ALL SELECT 'hidden current_user=' || current_user"
+    " UNION ALL SELECT 'hidden session_user=' || session_user) AS r ORDER BY 1),"
     " (SELECT count(*) FROM pg_catalog.pg_prepared_statements WHERE from_sql),"
     " (SELECT count(*) FROM pg_catalog.pg_cursors WHERE is_holdable),"
     " (SELECT count(*) FROM pg_catalog.pg_listening_channels()),"
     " (SELECT count(*) FROM pg_catalog.pg_class"
-    "  WHERE relnamespace = pg_catalog.pg_my_temp_schema())")
+    "  WHERE relnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_proc WHERE pronamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_type WHERE typnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_operator"
+    "  WHERE oprnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_collation"
+    "  WHERE collnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_conversion"
+    "  WHERE connamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_ts_config"
+    "  WHERE cfgnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_ts_dict"
+    "  WHERE dictnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_statistic_ext"
+    "  WHERE stxnamespace = pg_catalog.pg_my_temp_schema())")
+
+# The settings a measured text names, read on the session: each name, its
+# current_setting(name, true) (NULL when the session never defined it), and
+# its pg_settings row (setting, reset_val; NULL when pg_settings omits it).
+NAMED_SETTINGS_SQL = (
+    "SELECT n, pg_catalog.current_setting(n, true), s.setting, s.reset_val,"
+    " s.name IS NOT NULL"
+    " FROM pg_catalog.unnest(CAST(:names AS text[])) AS n"
+    " LEFT JOIN pg_catalog.pg_settings AS s"
+    " ON pg_catalog.lower(s.name) = pg_catalog.lower(n)"
+    " ORDER BY 1")
+RESET_SQL = "RESET ALL"
+
+# ---- the text reading (a FILTER in the refusing direction) ----------------
+#
+# Every statement text the connection ran inside the position (captured at
+# the engine's before_cursor_execute, so a planted program's statements are
+# read as well as the production statement) is tokenised (comments skipped,
+# strings and quoted identifiers as single tokens, dollar-quoted bodies read
+# as SQL too). Forms counted as residue, never `ok`:
+#   set_config(name, value, is_local) unless is_local is the literal `true`
+#       (false, a parameter, an expression: session scope or unknowable);
+#   set_config whose name is not one plain string literal (the name cannot be
+#       measured), or whose argument list is not three arguments;
+#   a SET statement of any scope but LOCAL, TRANSACTION or CONSTRAINTS
+#       (SET, SET SESSION, SET ROLE, SET SESSION AUTHORIZATION, SET TIME
+#       ZONE, SET SCHEMA, SET NAMES, ...); a SET is a settings statement
+#       unless an UPDATE, ALTER or CREATE precedes it in its statement;
+#   setseed(...) (seed: hidden, unreadable, and not reset by RESET ALL);
+#   EXECUTE (dynamic SQL: its text is a value, never read) and a U&
+#       unicode-escaped spelling (a name no literal reading can see).
+# The names: every set_config literal name and every SET name, local or not,
+# lowercased; the measurement reads each on the session.
+
+_SQL_WORD = re.compile(r"[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*")
+_SQL_DOLLAR = re.compile(r"\$([A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$")
+_SQL_PARAM = re.compile(r"\$\d+")
+_SQL_NUMBER = re.compile(r"\d+(\.\d*)?([eE][+-]?\d+)?|\.\d+([eE][+-]?\d+)?")
+
+
+def _close_quote(sql, i, q):
+    """The index after the quote that closes a token opened before `i`
+    (a doubled quote is an escaped one); the text's end when unclosed."""
+    n = len(sql)
+    while i < n:
+        if sql[i] == q:
+            if i + 1 < n and sql[i + 1] == q:
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return n
+
+
+def _close_estring(sql, i):
+    n = len(sql)
+    while i < n:
+        if sql[i] == "\\":
+            i += 2
+            continue
+        if sql[i] == "'":
+            if i + 1 < n and sql[i + 1] == "'":
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return n
+
+
+def sql_tokens(sql):
+    """The tokens of one SQL text: ('word', lowercased), ('qident', exact),
+    ('str', value), ('estr', raw), ('uident', raw), ('param', raw), ('num',
+    raw), ('body', tokens of a dollar-quoted body), ('punct', one char).
+    Comments are skipped."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c.isspace():
+            i += 1
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j + 1
+        elif sql.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if sql.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif sql.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            i = j
+        elif c in "uU" and sql.startswith("&", i + 1) and i + 2 < n and sql[i + 2] in "'\"":
+            j = _close_quote(sql, i + 3, sql[i + 2])
+            out.append(("uident", sql[i:j]))
+            i = j
+        elif c in "eE" and i + 1 < n and sql[i + 1] == "'":
+            j = _close_estring(sql, i + 2)
+            out.append(("estr", sql[i:j]))
+            i = j
+        elif c == "'":
+            j = _close_quote(sql, i + 1, "'")
+            out.append(("str", sql[i + 1:j - 1].replace("''", "'")))
+            i = j
+        elif c == '"':
+            j = _close_quote(sql, i + 1, '"')
+            out.append(("qident", sql[i + 1:j - 1].replace('""', '"')))
+            i = j
+        elif c == "$" and _SQL_DOLLAR.match(sql, i):
+            m = _SQL_DOLLAR.match(sql, i)
+            end = sql.find(m.group(0), m.end())
+            out.append(("body", sql_tokens(sql[m.end():n if end < 0 else end])))
+            i = n if end < 0 else end + len(m.group(0))
+        elif c == "$" and _SQL_PARAM.match(sql, i):
+            m = _SQL_PARAM.match(sql, i)
+            out.append(("param", m.group(0)))
+            i = m.end()
+        elif _SQL_WORD.match(sql, i):
+            m = _SQL_WORD.match(sql, i)
+            out.append(("word", m.group(0).lower()))
+            i = m.end()
+        elif _SQL_NUMBER.match(sql, i):
+            m = _SQL_NUMBER.match(sql, i)
+            out.append(("num", m.group(0)))
+            i = m.end()
+        else:
+            out.append(("punct", c))
+            i += 1
+    return out
+
+
+_STATEMENT_STOPS = {("punct", ";"), ("word", "begin"), ("word", "then"),
+                    ("word", "else"), ("word", "loop"), ("word", "declare")}
+_NOT_SETTINGS_SET = {"update", "alter", "create"}
+_TXN_SCOPES = {"transaction", "constraints"}
+_SET_SPECIAL = {"role": "role", "schema": "search_path", "names": "client_encoding"}
+
+
+def _is_call(toks, k, fname):
+    kind, val = toks[k]
+    return (kind in ("word", "qident") and val == fname and k + 1 < len(toks)
+            and toks[k + 1] == ("punct", "("))
+
+
+def _call_args(toks, k):
+    """The arguments of the call whose name is toks[k] (toks[k+1] is its
+    opening parenthesis): a list of token lists split at depth-0 commas;
+    None when the call is not closed."""
+    args, cur, depth = [], [], 0
+    for tok in toks[k + 2:]:
+        if tok == ("punct", "(") :
+            depth += 1
+        elif tok == ("punct", ")"):
+            if depth == 0:
+                args.append(cur)
+                return args
+            depth -= 1
+        elif tok == ("punct", ",") and depth == 0:
+            args.append(cur)
+            cur = []
+            continue
+        cur.append(tok)
+    return None
+
+
+def _literal_name(arg):
+    """The setting name an argument spells as one plain string literal,
+    optionally cast to text; None otherwise."""
+    if not arg or arg[0][0] != "str":
+        return None
+    rest = arg[1:]
+    if rest and rest[:2] == [("punct", ":"), ("punct", ":")] and rest[2:] in (
+            [("word", "text")], [("word", "pg_catalog"), ("punct", "."), ("word", "text")]):
+        rest = []
+    return arg[0][1].lower() if not rest else None
+
+
+def _is_settings_set(toks, k):
+    """Whether the SET at toks[k] is a settings statement: no UPDATE, ALTER
+    or CREATE between it and its statement's start."""
+    j = k - 1
+    while j >= 0 and toks[j] not in _STATEMENT_STOPS and toks[j][0] != "body":
+        if toks[j][0] == "word" and toks[j][1] in _NOT_SETTINGS_SET:
+            return False
+        j -= 1
+    return True
+
+
+def _set_statement(toks, k, forms, names):
+    rest = toks[k + 1:]
+    scope = "session"
+    if rest and rest[0] in (("word", "local"), ("word", "session")):
+        scope = rest[0][1]
+        rest = rest[1:]
+    if rest and rest[0][0] == "word" and rest[0][1] in _TXN_SCOPES:
+        return                      # SET TRANSACTION / SET CONSTRAINTS: this transaction's
+    name = None
+    if rest and rest[0] == ("word", "authorization"):
+        name = "session_authorization"
+    elif rest and rest[0] == ("word", "characteristics"):
+        name = "default_transaction_isolation"
+    elif rest[:2] == [("word", "time"), ("word", "zone")]:
+        name = "timezone"
+    elif rest[:2] == [("word", "xml"), ("word", "option")]:
+        name = "xmloption"
+    elif rest and rest[0][0] == "word" and rest[0][1] in _SET_SPECIAL:
+        name = _SET_SPECIAL[rest[0][1]]
+    else:
+        parts, j = [], 0
+        while j < len(rest) and rest[j][0] in ("word", "qident"):
+            parts.append(rest[j][1].lower() if rest[j][0] == "word" else rest[j][1])
+            if j + 1 < len(rest) and rest[j + 1] == ("punct", "."):
+                j += 2
+                continue
+            break
+        name = ".".join(parts) if parts else None
+    if name is None:
+        forms.add("SET name unreadable")
+        return
+    names.add(name.lower())
+    if scope != "local":
+        forms.add("session SET " + name.lower())
+
+
+def _scan_settings(toks, forms, names):
+    for k, (kind, val) in enumerate(toks):
+        if kind == "body":
+            _scan_settings(val, forms, names)
+        elif kind == "uident":
+            forms.add("unreadable unicode-escaped spelling")
+        elif kind == "word" and val == "execute":
+            forms.add("dynamic sql")
+        if _is_call(toks, k, "setseed"):
+            forms.add("session setseed")
+        if _is_call(toks, k, "set_config"):
+            args = _call_args(toks, k)
+            if args is None or len(args) != 3:
+                forms.add("set_config arguments unreadable")
+                continue
+            name = _literal_name(args[0])
+            if name is None:
+                forms.add("set_config name unreadable")
+            else:
+                names.add(name)
+            if args[2] != [("word", "true")]:
+                forms.add("session set_config " + (name or "?"))
+        if (kind, val) == ("word", "set") and _is_settings_set(toks, k):
+            _set_statement(toks, k, forms, names)
+
+
+def settings_forms(texts):
+    """(forms, names) of the statement texts a position ran: the residue
+    forms the text reading counts (sorted) and every setting name the texts
+    set (sorted, lowercased)."""
+    forms, names = set(), set()
+    for t in texts:
+        _scan_settings(sql_tokens(t), forms, names)
+    return tuple(sorted(forms)), tuple(sorted(names))
+
+
+def placeholder_residue(rows):
+    """The residue NAMED_SETTINGS_SQL rows show before RESET ALL: every name
+    pg_settings omits (a custom placeholder) that reads a value, other than
+    the position token (measured by identity) and the hidden settings the
+    settings array carries."""
+    return tuple(sorted(
+        "placeholder %s=%s" % (n, val) for n, val, _s, _r, shown in rows
+        if not shown and n not in HIDDEN_MEASURED and n != POSITION_GUC
+        and val is not None and val != ""))
+
+
+def not_reset(rows):
+    """The names NAMED_SETTINGS_SQL rows show still set after RESET ALL: a
+    pg_settings row whose setting is not its reset value, or an omitted name
+    (a placeholder: its boot and reset values are NULL, read as '') reading
+    anything but NULL or ''. Measured on 16.9 (the probe above): after RESET
+    ALL a placeholder the session defined reads '' (it stays defined; IS NULL
+    holds only for a name the session never defined)."""
+    out = set()
+    for n, val, setting, reset, shown in rows:
+        if shown:
+            if setting != reset:
+                out.add("not reset %s=%s" % (n, setting))
+        elif n not in HIDDEN_MEASURED and val is not None and val != "":
+            out.add("not reset %s=%s" % (n, val))
+    return tuple(sorted(out))
 
 
 def same_transaction(start, end):
@@ -580,11 +935,21 @@ class RecordingSession(AsyncSession):
                 start = ("unmeasured", "unmeasured " + (_sqlstate(e) or "error"))
                 count_at = False
         before = await self.writes() if count_at else None
+        # FIX-R11-RES: every statement text the connection runs while the
+        # position's statement (or a planted program) runs, captured at the
+        # engine (role_engine's before_cursor_execute); never a harness read
+        capture = _capture_state(self) if start is not None else None
+        if capture is not None:
+            capture["texts"] = []
         try:
             res = await self.run_statement(site, statement, params, **kw)
         except DBAPIError as e:
             log.append((site[0], site[1], _sqlstate(e) or "error"))
             raise
+        finally:
+            texts = capture.pop("texts", None) if capture is not None else None
+            if capture is not None:
+                capture["texts"] = None
         log.append((site[0], site[1], "ok"))
         if count_at:
             self.info.setdefault("deltas", []).append(
@@ -592,7 +957,7 @@ class RecordingSession(AsyncSession):
         if lock_at:
             await self.lock_read(site)
         if start is not None:
-            await self.position_end(site, start)
+            await self.position_end(site, start, texts)
         return res
 
     async def run_statement(self, site, statement, params=None, **kw):
@@ -613,7 +978,35 @@ class RecordingSession(AsyncSession):
         row = (await AsyncSession.execute(self, text(RESIDUE_SQL))).one()
         return (tuple(row[0]),) + tuple(int(x) for x in row[1:])
 
-    async def position_end(self, site, start):
+    async def named_settings(self, names):
+        return [tuple(r) for r in (await AsyncSession.execute(
+            self, text(NAMED_SETTINGS_SQL), {"names": list(names)})).all()]
+
+    async def reset_all(self, names):
+        """FIX-R11-RES: RESET ALL after the position's measurement reads, then
+        the proof it took: every name the measured texts set, and the
+        position token, read at its reset value (not_reset); then the
+        engine's own session setup replayed (the grant run's READ WRITE
+        characteristics, which RESET ALL returns to the role's default).
+        Returns the names still set, or ('reset unmeasured <sqlstate>',)."""
+        try:
+            await AsyncSession.execute(self, text(RESET_SQL))
+            gone = not_reset(await self.named_settings(
+                tuple(sorted(set(names) | {POSITION_GUC}))))
+            for stmt in (_capture_state(self) or {}).get("setup", ()):
+                await AsyncSession.execute(self, text(stmt))
+            return gone
+        except DBAPIError as e:
+            return ("reset unmeasured " + (_sqlstate(e) or "error"),)
+
+    async def position_end(self, site, start, texts=None):
+        # FIX-R11-RES: the text reading of everything the position ran (a
+        # filter: forms counted as residue) and its setting names (read on
+        # the session: the measurement, where pg_settings omits them)
+        if texts is None:
+            forms, names = ("unmeasured capture",), ()
+        else:
+            forms, names = settings_forms(texts)
         if start[0] == "unmeasured":
             same, detail, left = False, (start[1],), ()
         else:
@@ -621,8 +1014,12 @@ class RecordingSession(AsyncSession):
                 row = (await AsyncSession.execute(self, text(POSITION_END_SQL))).one()
                 same, detail = same_transaction(start[0], (row[0], list(row[1])))
                 left = residue_changes(start[1], await self.residue())
+                left += placeholder_residue(await self.named_settings(names))
             except DBAPIError as e:
                 same, detail, left = False, ("unmeasured " + (_sqlstate(e) or "error"),), ()
+        gone = await self.reset_all(names)
+        self.info.setdefault("gone", []).append((site[0], site[1], names, gone))
+        left = tuple(sorted(set(left) | set(forms) | set(gone)))
         tainted = self.info.get("tainted")
         if tainted is not None and same and not left:
             same, detail = False, ("after txn ended at " + tainted,)

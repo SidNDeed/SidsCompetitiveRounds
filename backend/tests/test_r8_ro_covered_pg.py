@@ -302,7 +302,8 @@ def _prepare(mp):
 
 
 async def _run_all(admin_dsn, clone, mp, only=None):
-    out = {"logs": {}, "locks": {}, "conts": {}, "pids": {}, "errors": {}, "checked": [],
+    out = {"logs": {}, "locks": {}, "conts": {}, "pids": {}, "gone": {}, "errors": {},
+           "checked": [],
            "identity_control": None, "grant": None, "census": None, "harness_sites": []}
     clone_dsn = ro_role.dsn_for(admin_dsn, clone)
     async with cf_pg.case("rf8ro", dsn=clone_dsn) as (c, sm):
@@ -335,6 +336,8 @@ async def _run_all(admin_dsn, clone, mp, only=None):
                             # REHEARSAL-R9-A1 (B): every position's continuity
                             out["conts"][name] = list(db.info.get("continuity", []))
                             out["pids"][name] = sorted(db.info.get("pids", ()))
+                            # FIX-R11-RES: every position's RESET ALL proof
+                            out["gone"][name] = list(db.info.get("gone", []))
                             await db.rollback()
                 finally:
                     await engine.dispose()
@@ -461,6 +464,9 @@ async def _token_overwritten(ex, statement, params):
 
 
 PREPARED_GID = "rf10_ro_" + os.urandom(4).hex()
+# The round-10 report's exact text (codex-rehearsal-four-r10.out, F4).
+R11_HIDDEN = "SELECT set_config('rf10.hidden','yes',false)"
+R11_HIDDEN_PARTS = {"session set_config rf10.hidden", "placeholder rf10.hidden=yes"}
 E_16886 = _entry("main.py", 16886)
 LEASE_GRANT_TARGETS = [e for e in ro_covered.COVERED if e[4] == "_lease_admission_gate"
                        and e[2] >= 16868]
@@ -532,7 +538,44 @@ CONTINUITY_CONTROLS = (
     # the negative control: the same bracket, nothing planted
     ("unplanted_16828_under_role", "main._lease_admission_gate empty", E_16828,
      None, None, ("ok", set())),
+    # Ruling FOUR-R10-A2 (3) FIX-R11-RES: settings pg_settings omits. The
+    # round-10 report's case (ro_covered.py:515): a session-scope custom
+    # placeholder at main.py:16828, both drivers and the replacing route;
+    # then one control per route, each refused by that route alone
+    # (R11_EXACT): the text reading (a session set_config whose value is the
+    # placeholder's reset value, and setseed, both invisible to every
+    # reading), the placeholder reading (a transaction-local placeholder,
+    # which the text reading does not count), the hidden settings reading
+    # (SET ROLE), and the RESET ALL proof (transaction_read_only, which RESET
+    # ALL does not reset).
+    ("set_config_hidden_at_16828_under_role", "main._lease_admission_gate empty", E_16828,
+     _then_own(R11_HIDDEN), None, ("continuity", R11_HIDDEN_PARTS)),
+    ("set_config_hidden_at_16828_under_grant", "main._lease_admission_gate empty", E_16828,
+     _then_own(R11_HIDDEN), ("UPDATE players",), ("continuity", R11_HIDDEN_PARTS)),
+    ("set_config_hidden_replaces_16828_under_role", "main._lease_admission_gate empty",
+     E_16828, R11_HIDDEN, None, ("continuity", R11_HIDDEN_PARTS)),
+    ("set_config_blank_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("SELECT pg_catalog.set_config('rf11res.blank', '', false)"), None,
+     ("continuity", {"session set_config rf11res.blank"})),
+    ("setseed_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("SELECT pg_catalog.setseed(0.5)"), None, ("continuity", {"session setseed"})),
+    ("set_config_local_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("SELECT pg_catalog.set_config('rf11res.local', 'v', true)"), None,
+     ("continuity", {"placeholder rf11res.local=v"})),
+    ("set_role_at_16828", "main._lease_admission_gate empty", E_16828,
+     _then_own("SET ROLE " + ro_role.ROLE), None,
+     ("continuity", {"session SET role", "setting hidden role=none",
+                     "setting hidden role=" + ro_role.ROLE})),
+    ("transaction_read_only_at_16828_under_grant", "main._lease_admission_gate empty",
+     E_16828, _then_own("SET transaction_read_only = on"), ("UPDATE players",),
+     ("continuity", {"not reset transaction_read_only=on"})),
 )
+# The controls whose refusal must be exactly their parts (each identity part
+# or settings route decides alone).
+R11_EXACT = ("set_config_blank_at_16828", "setseed_at_16828", "set_config_local_at_16828")
+# The control whose RESET ALL proof must refuse (transaction_read_only is
+# not reset by RESET ALL); every other measured position's proof is clean.
+R11_NOT_RESET = {"transaction_read_only_at_16828_under_grant": ("transaction_read_only",)}
 # The plant's site when it is not the measured entry's own; the measured
 # targets when they are more than the entry (the grant driver's positions).
 PLANT_AT = {"chain_at_16871_then_16886_under_grant": E_16871}
@@ -572,6 +615,9 @@ async def _counted(role_dsn, schema, checked, drive, s, mp, targets, plant=None,
                 deltas = list(db.info.get("deltas", []))
                 locks = list(db.info.get("locks", []))
                 conts = list(db.info.get("continuity", []))
+                # FIX-R11-RES: every measured position's RESET ALL proof
+                GONE.append((tuple(sorted(targets)), plant is not None,
+                             list(db.info.get("gone", []))))
                 try:
                     await db.rollback()
                 except BaseException:   # noqa: BLE001 -- a planted end left no transaction
@@ -580,6 +626,10 @@ async def _counted(role_dsn, schema, checked, drive, s, mp, targets, plant=None,
         await engine.dispose()
     return log, deltas, locks, conts
 
+
+# FIX-R11-RES: (targets, planted, the session's gone records) of every
+# _counted run, in run order (the grant runs and the controls).
+GONE = []
 
 MERGE_ORDER = {"refused under grant": 0, "continuity under grant": 1, "lock under grant": 2}
 
@@ -692,7 +742,7 @@ async def _grant_runs(admin_dsn, clone, schema, s, mp):
                     await _grants(admin, schema, set(grants), "REVOKE")
             got = _control_outcome(log, deltas, locks, conts, entry, grants)
             out["continuity_controls"][cname] = {
-                "outcome": got, "log": log, "conts": conts,
+                "outcome": got, "log": log, "conts": conts, "gone": GONE[-1][2],
                 "prepared_left": await _prepared_left(role_dsn)}
         save = os.environ.get("RO8_GRANT_SAVE")
         if save:
@@ -949,7 +999,7 @@ def test_continuity_control(runs, name):
     if grants:
         assert got[1] == tuple(grants), got
     assert parts <= refused, (got, parts)
-    if name in ("token_overwritten_at_16828", "token_restored_after_chain_at_16828"):
+    if name in ("token_overwritten_at_16828", "token_restored_after_chain_at_16828") + R11_EXACT:
         assert refused == parts, (got, parts)
 
 
@@ -987,6 +1037,77 @@ def test_r10_driver_connections_discarded(runs):
             assert pid not in seen, (name, seen.get(pid), pid)
             seen[pid] = name
     assert seen, "no driver measured a position"
+
+
+@pytest.mark.parametrize("driver", ["role", "grant", "replaces_role"])
+def test_r11_n_ro_covered_515_hidden_set_config_at_16828_refused(runs, driver):
+    """The round-10 report's case (ro_covered.py:515): `SELECT
+    set_config('rf10.hidden','yes',false)` at main.py:16828 must refuse as
+    session residue; pg_settings omits the placeholder (measured on 16.9,
+    ruling FOUR-R10-A2 (3)). Executed at the control's route (planted
+    program then the position's own statement, and the replacing text),
+    under the read-only role and under a grant: refused by the text reading
+    (a session-scope set_config) AND by the placeholder reading (the name
+    read on the session), never green; RESET ALL then returns the
+    placeholder to its reset value (the gone record names it, clean)."""
+    name = {"role": "set_config_hidden_at_16828_under_role",
+            "grant": "set_config_hidden_at_16828_under_grant",
+            "replaces_role": "set_config_hidden_replaces_16828_under_role"}[driver]
+    rec = runs["grant_runs"]["continuity_controls"][name]
+    got = rec["outcome"]
+    assert not ro_covered.green(got), got
+    assert R11_HIDDEN_PARTS <= (_refused_parts(got) or set()), got
+    at = [g for g in rec["gone"] if g[0] == E_16828[1] and g[1] == E_16828[2]]
+    assert at and all("rf10.hidden" in g[2] and g[3] == () for g in at), rec["gone"]
+    assert ro_covered.green(ro_covered.OUTCOME[E_16828])
+
+
+def _r11_control_names(gone_rows):
+    return {n for g in gone_rows for n in g[2]}
+
+
+def test_r11_every_measured_position_is_reset(runs):
+    """FIX-R11-RES: every bracketed position of every run (the role run, the
+    grant runs and every control) is followed by RESET ALL with its proof:
+    one gone record per continuity record, and every record clean (each name
+    its texts set, and the position token, at its reset value), except the
+    one control whose setting RESET ALL does not reset, where the proof
+    names exactly that setting."""
+    total = 0
+    for name, conts in runs["conts"].items():
+        gone = runs["gone"][name]
+        assert len(gone) == len(conts), (name, len(gone), len(conts))
+        assert all(g[3] == () for g in gone), (name, [g for g in gone if g[3]])
+        total += len(gone)
+    for cname, rec in runs["grant_runs"]["continuity_controls"].items():
+        assert len(rec["gone"]) == len(rec["conts"]), (cname, rec["gone"], rec["conts"])
+        want = R11_NOT_RESET.get(cname)
+        for g in rec["gone"]:
+            if want and (g[0], g[1]) == tuple(E_16828[1:3]):
+                assert tuple(sorted({x.split("=", 1)[0][len("not reset "):]
+                                     for x in g[3]})) == want, (cname, g)
+            else:
+                assert g[3] == (), (cname, g)
+        total += len(rec["gone"])
+    for targets, planted, gone in GONE:
+        if not planted:
+            assert all(g[3] == () for g in gone), (targets, gone)
+    assert total > 0
+
+
+def test_r11_res_capture_reads_every_planted_text(runs):
+    """FIX-R11-RES: the names the measurement read at a planted position
+    come from the planted program's own statements (captured at the engine,
+    not only the production statement): each settings control's gone record
+    names the setting its plant sets."""
+    want = {"set_config_hidden_at_16828_under_role": "rf10.hidden",
+            "set_config_blank_at_16828": "rf11res.blank",
+            "set_config_local_at_16828": "rf11res.local",
+            "set_role_at_16828": "role",
+            "transaction_read_only_at_16828_under_grant": "transaction_read_only"}
+    for cname, n in want.items():
+        rec = runs["grant_runs"]["continuity_controls"][cname]
+        assert n in _r11_control_names(rec["gone"]), (cname, rec["gone"])
 
 
 def test_r10_every_position_is_bracketed(runs):
