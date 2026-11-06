@@ -401,3 +401,25 @@ def test_r11_comprehension_target_is_not_a_module_binding():
     assert src.count(ENGINE_LINE) == 1
     refused, _frozen = _refused(DATABASE, src.replace(ENGINE_LINE, "\n" + plant + ENGINE_LINE[1:]))
     assert not [r for r in refused if r[2] == "argdef"], refused
+
+
+DYNAMIC_REBINDINGS = (
+    ("except_as", "try:\n    pass\nexcept Exception as getattr:\n    pass\n",
+     ("alias", "bind ExceptHandler getattr")),
+    ("match_capture", "match 0:\n    case vars:\n        pass\n", ("alias", "bind MatchAs vars")),
+    ("match_star", "match []:\n    case [*globals]:\n        pass\n",
+     ("alias", "bind MatchStar globals")),
+    ("match_rest", "match {}:\n    case {**builtins}:\n        pass\n",
+     ("alias", "bind MatchMapping builtins")),
+)
+
+
+@pytest.mark.parametrize("name", [r[0] for r in DYNAMIC_REBINDINGS])
+def test_r11_grammar_refuses_a_dynamic_name_rebinding(name):
+    """The F6 class in the alias kind: a binding form that binds a
+    dynamic-access name by an identifier field (not a Name, def, class,
+    parameter or import, the round-10 rows) is an alias form."""
+    _n, plant, form = next(r for r in DYNAMIC_REBINDINGS if r[0] == name)
+    src = _src(CF_PG)
+    refused, frozen = _refused(CF_PG, src + "\n\n" + plant)
+    assert (CF_PG + ro_census.COMPLETE, "+") + form in refused, refused

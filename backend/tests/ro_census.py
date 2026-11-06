@@ -364,6 +364,18 @@ def _bound_by(node, inner=True):
     return out
 
 
+def _bound_ids(node):
+    """The names `node` binds through an IDENTIFIER field of BINDING_FIELDS
+    (not through a stored Name, which is a node of its own)."""
+    cname = type(node).__name__
+    out = set()
+    for f in _BINDING_OF.get(cname, ()):
+        v = getattr(node, f, None)
+        if isinstance(v, str) and not (cname == "alias" and f == "name" and node.asname):
+            out.add(v.split(".")[0])
+    return out
+
+
 def _region(s):
     """The nodes of statement `s` evaluated in the statement's own scope: not
     its child statements (each is a statement of its own) and not the body of
@@ -521,6 +533,15 @@ def _aliases(tree, parent):
             out.append(("alias", "def " + node.name))
         elif isinstance(node, ast.arg) and node.arg in DYNAMIC_NAMES:
             out.append(("alias", "arg " + node.arg))
+        elif not isinstance(node, ast.alias) and _bound_ids(node) & (DYNAMIC_NAMES
+                                                                     | DYNAMIC_MODULES):
+            # round 11 (the F6 class): every other binding form that binds a
+            # dynamic-access name by an identifier field of BINDING_FIELDS
+            # (an except-as name, a match capture, a type parameter); the
+            # Name, def, class, parameter and import forms are the rows above
+            out.append(("alias", "bind %s %s" % (
+                type(node).__name__,
+                " ".join(sorted(_bound_ids(node) & (DYNAMIC_NAMES | DYNAMIC_MODULES))))))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and (
                 node.value in DYNAMIC_NAMES or node.value in DYNAMIC_MODULES
                 or _reflective(node.value)):
