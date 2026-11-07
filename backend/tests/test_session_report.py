@@ -3047,7 +3047,7 @@ def test_the_team_telemetry_blob_names_exactly_the_servers_fields():
     assert keys == fields, sorted(keys ^ fields)
     assert _cs_json_keys(facts) == {"damage_dealt", "kills", "deaths", "kill_timeline", "death_times"}
     ffa = _cs_body(api, "public static void ReportFfaMatch(")
-    tele_open = ffa.index('"telemetry":{')
+    tele_open = ffa.index('\\"telemetry\\":{')   # the C# literal, read as text
     assert tele_open < ffa.index("AppendCombatFacts(sb, t);") < ffa.index("AppendEndStats(sb, p.endStats);")
 
 
