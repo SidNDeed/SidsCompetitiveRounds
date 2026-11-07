@@ -4643,6 +4643,18 @@ _CENSUS_EXEMPT = {
     # env leaves the test undecided (None), the walk's refusing direction,
     # and the check decides no binding the walk reads as the module's.
     ("test_a1_identity_formation", "formation_loop_exits.decide"): 1,
+    # Rule N (FOUR-R11-A10 (1), A20 (1)): its spelling reads decide no
+    # binding. _member_method (1) and _member_callee (3) read a call's
+    # spelling only to pick the named member whose bound then applies: the
+    # member's bindings are proven by identity (`vars(mod).get(nm) is obj`)
+    # and its names by the census equal to frozen rows, and a spelling no
+    # member names returns False, so the visitor refuses the call as
+    # before. _n_census (3) lists every spelling of the member's name in its
+    # owner (a superset, compared whole to frozen rows): it over-counts
+    # only, and any difference refuses. Each span has a control mutant below.
+    ("closed_walk", "_member_method"): 1,
+    ("closed_walk", "_member_callee"): 3,
+    ("closed_walk", "_n_census"): 3,
 }
 # One bypassing site per walker, each put where the census must count it:
 # (module, the exact text replaced, its replacement, the span it lands in).
@@ -4663,6 +4675,21 @@ _CENSUS_MUTANTS = [
      '''        if isinstance(n, ast.Call) and w.b.named(n.func, (stop,)) is not None:''',
      '''        if isinstance(n, ast.Call) and n.func.id == stop:''',
      "_calls"),
+    # rule N's exempt spans: one more bypass in each is still counted
+    ("closed_walk",
+     '''    key = (F, "method", "." + n.func.attr, n.func.value.id)''',
+     '''    F = getattr(visitor.p.scope, n.func.value.id, None) or F
+    key = (F, "method", "." + n.func.attr, n.func.value.id)''',
+     "_member_method"),
+    ("closed_walk",
+     '''        callee = name = n.func.id''',
+     '''        callee = name = n.func.id
+        name = getattr(visitor.p.scope, n.func.id, None) or name''',
+     "_member_callee"),
+    ("closed_walk",
+     '''            if isinstance(x, _ast.Return):''',
+     '''            if isinstance(x, _ast.Return) or getattr(x, "id", None) == name:''',
+     "_n_census"),
 ]
 
 
