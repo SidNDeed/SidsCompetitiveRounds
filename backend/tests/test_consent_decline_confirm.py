@@ -64,6 +64,15 @@ SET_ANY = "ConsentSetting.Set("
 ASSIGN = re.compile(r"\.Value\s*=(?![=>])")
 FLAG_TRUE = re.compile(r"\bconsentDeclineConfirmOpen\s*=\s*true\s*;")
 FLAG_FALSE = re.compile(r"\bconsentDeclineConfirmOpen\s*=\s*false\s*;")
+# CONSENT-R1 LOW-1: Allow's write is pinned to its button block, and the Decline and Back
+# blocks may not reach the writer indirectly (a method group, a delegate, reflection, the
+# consent hook or the flag) any more than directly.
+ALLOW_IF = re.compile(r"if \(GUI\.Button\([^;{}]*\ballowLabel\)\)")
+SET_TRUE = "ConsentSetting.Set(true)"
+SET_TOKEN = re.compile(r"\bConsentSetting\.Set\b")
+INDIRECT = re.compile(r"\bConsentSetting\b|\bOnConsentChanged\b|\bDataConsentAsked\s*=(?!=)|\bInvoke\(|"
+                      r"\bGetMethod\(|\bDataConsent\b")
+DRAW_UI = "public static void DrawUI()"
 
 
 def _block_from(masked: str, at: int) -> tuple:
@@ -116,6 +125,19 @@ def findings(src: str) -> list:
     sets_any = len(re.findall(re.escape(SET_ANY), masked))
     if sets_any != 2:
         out.append("CompetitiveUI.cs calls ConsentSetting.Set %d times; Allow and Decline anyway are the two" % sets_any)
+    tokens = len(SET_TOKEN.findall(masked))
+    if tokens != 2:
+        out.append("ConsentSetting.Set is named %d times in CompetitiveUI.cs (calls or method groups), not twice" % tokens)
+    sets_true = [m.start() for m in re.finditer(re.escape(SET_TRUE), masked)]
+    if len(sets_true) != 1:
+        out.append("ConsentSetting.Set(true) occurs %d times in CompetitiveUI.cs, not once" % len(sets_true))
+    allow = ALLOW_IF.search(masked, modal[0], modal[1])
+    if allow is None:
+        out.append("DrawConsentModal has no Allow button block")
+    else:
+        lo, hi = _block_from(masked, allow.end())
+        if not any(lo < s < hi for s in sets_true):
+            out.append("ConsentSetting.Set(true) is not inside the Allow button block")
     anyway = span(ANYWAY_IF, *confirm)
     if anyway is None:
         out.append("DrawConsentDeclineConfirm has no 'Decline anyway' block on the Decline ClickGuard key")
@@ -137,7 +159,7 @@ def findings(src: str) -> list:
     else:
         lo, hi = _block_from(masked, m.end())
         block = masked[lo:hi]
-        if SET_ANY in block or ASSIGN.search(block):
+        if SET_ANY in block or ASSIGN.search(block) or INDIRECT.search(block):
             out.append("the Decline button writes the consent row")
         if not FLAG_TRUE.search(block):
             out.append("the Decline button does not open the confirmation")
@@ -150,7 +172,7 @@ def findings(src: str) -> list:
         out.append("DrawConsentDeclineConfirm has no 'Back' block on the Decline ClickGuard key")
     else:
         block = masked[back[0]:back[1]]
-        if SET_ANY in block or ASSIGN.search(block):
+        if SET_ANY in block or ASSIGN.search(block) or INDIRECT.search(block):
             out.append("'Back' writes the consent row")
         if not FLAG_FALSE.search(block):
             out.append("'Back' does not close the confirmation")
@@ -202,6 +224,13 @@ def findings(src: str) -> list:
     destroy = span(DESTROY)
     if destroy is None or not FLAG_FALSE.search(masked[destroy[0]:destroy[1]]):
         out.append("closing the modal does not clear the confirmation")
+
+    # 6. the consent modal is DrawUI's last draw (LOW-1: the overlay guard describes it, this enforces it)
+    draw_ui = span(DRAW_UI)
+    if draw_ui is None:
+        out.append("DrawUI is missing")
+    elif not re.search(r"DrawConsentModal\(\);\s*\}\s*$", literal[draw_ui[0]:draw_ui[1]]):
+        out.append("DrawConsentModal is not the last statement of DrawUI")
     return out
 
 
@@ -269,3 +298,36 @@ def test_control_a_sticky_confirmation_is_caught():
                   r"consentDeclineConfirmOpen = false;", src)
     assert m
     _red(src[:m.start()] + src[m.end():], "a scene change does not send the modal back")
+
+
+# CONSENT-R1 LOW-1 controls: the writer reached around its guards, and a draw after the consent modal.
+def test_control_allow_writing_outside_its_button_is_caught():
+    src = _ui()
+    allow = re.search(r"\n[ \t]*if \(GUI\.Button\([^\n]*\ballowLabel\)\)", src)
+    assert allow
+    m = re.search(r"\n([ \t]*)ConsentSetting\.Set\(true\);[^\n]*", src)
+    assert m and allow.start() < m.start()
+    moved = (src[:allow.start()] + "\n" + m.group(1) + "ConsentSetting.Set(true);"
+             + src[allow.start():m.start()] + src[m.end():])
+    _red(moved, "not inside the Allow button block")
+
+
+def test_control_a_method_group_on_back_is_caught():
+    src = _ui()
+    m = re.search(re.escape(BACK_IF) + r"\s*\{", src)
+    assert m
+    _red(src[:m.end()] + " System.Action<bool> write = ConsentSetting.Set; write(false); " + src[m.end():],
+         "'Back' writes the consent row")
+
+
+def test_control_a_reflection_call_on_decline_is_caught():
+    _red(_mutant("consentDeclineConfirmOpen = true;",
+                 "consentDeclineConfirmOpen = true; "
+                 "typeof(ConsentSetting).GetMethod(\"Set\").Invoke(null, new object[] { false });"),
+         "the Decline button writes the consent row")
+
+
+def test_control_a_draw_after_the_consent_modal_is_caught():
+    _red(_mutant("            DrawConsentModal();\n        }",
+                 "            DrawConsentModal();\n            DrawLeaverBanner();\n        }"),
+         "not the last statement of DrawUI")

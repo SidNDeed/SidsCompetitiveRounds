@@ -8764,10 +8764,12 @@ namespace CompetitiveRounds
             string warning = I18n.Tr("Without data consent the mod will not work properly: the leaderboard, ranked matchmaking, chat, player cards and bug reports with logs all stop working.");
 
             // The panel is sized to its text (translations run longer than the
-            // English) so neither the body nor the warning is clipped against
-            // the buttons: the body rect starts 50 px down and ends 8 px above
-            // the warning, the warning ends 8 px above the buttons, and the
-            // buttons sit 56 px above the bottom edge.
+            // English): the body rect starts 50 px down and ends 8 px above the
+            // warning, the warning ends 8 px above the buttons, and the buttons
+            // sit 56 px above the bottom edge. The height is clamped to the
+            // screen (Screen.height - 40), so when the texts need more than that
+            // it is the BODY's allocation that shrinks (its tail is cut); the
+            // warning and the buttons keep their rows (CONSENT-R1 L2).
             float w = 680;
             float bodyH = consentBodyStyle.CalcHeight(new GUIContent(body), w - 48);
             float warnH = consentWarnStyle.CalcHeight(new GUIContent(warning), w - 48);
@@ -8821,6 +8823,8 @@ namespace CompetitiveRounds
                 new Color(0.10f, 0.11f, 0.16f, 0.97f), 0, 0);
             GUI.Label(new Rect(x, y + 14, w, 30),
                 I18n.Tr("Competitive ROUNDS — Data Consent"), consentTitleStyle);
+            // Clamped to the screen like the first page: a question longer than the
+            // panel is cut at its tail; the buttons keep their row (CONSENT-R1 L2).
             GUI.Label(new Rect(x + 24, y + 50, w - 48, h - 120), question, consentBodyStyle);
 
             string declineAnywayLabel = I18n.Tr("Decline anyway");
