@@ -55,15 +55,23 @@
 -- COMMIT; statement_timeout bounds each statement; synchronous_commit = local
 -- keeps the COMMIT from waiting on a standby (as 391 and 401 explain).
 --
--- RE-RUNS. Every ADD COLUMN and the CREATE TABLE are GUARDED ON THE CATALOG
--- and issued only when the object is absent, so a second run issues none of
--- them and takes no lock on any of the tables (an IF NOT EXISTS spelling
--- alone takes the table lock before it checks). The statements inside the
--- guards keep IF NOT EXISTS.
+-- SHAPE. Every ADD COLUMN and the CREATE TABLE are LITERAL top-level
+-- statements with IF NOT EXISTS, the shape of the earlier column additions on
+-- these tables (142, 201, the end stats, the room rules), because the test
+-- suite rebuilds the 1v2 tables FROM THE MIGRATION TEXT: test_ovt_abandoned_
+-- horizon._schema_sql reads every top-level `ALTER TABLE ovt_... ADD COLUMN IF
+-- NOT EXISTS ...;` in backend/sql and replays it on the throwaway database. A
+-- column added through a DO block's EXECUTE is invisible to that replay, so
+-- the live 1v2 tests ran against a table without point_timeline and every
+-- settle failed (seat-4, 7 Nov). The cost of the literal form: a RE-RUN of
+-- this file still takes each table's ACCESS EXCLUSIVE lock for the
+-- milliseconds the no-op ALTER needs (IF NOT EXISTS checks after it locks),
+-- bounded by lock_timeout; the first run takes the same locks anyway.
 --
--- POST-CHECK. After the guards, one pass compares every column with the type
--- this file states and aborts the file naming the first difference, because a
--- guard alone would accept a same-named column of another type.
+-- POST-CHECK. After the statements, one pass compares every column with the
+-- type this file states and aborts the file naming the first difference,
+-- because IF NOT EXISTS alone would accept a same-named column of another
+-- type.
 --
 -- Rollback: rollback_403_report_mode_parity.sql (drops the table and the
 -- columns; discards what they recorded).
@@ -74,83 +82,87 @@ SET LOCAL idle_in_transaction_session_timeout = '5s';
 SET LOCAL statement_timeout = '25s';
 SET LOCAL synchronous_commit = local;
 
+-- The per-seat 1v2 telemetry table (the team_match_telemetry shape, 142 + 201,
+-- plus the five combat columns).
+CREATE TABLE IF NOT EXISTS ovt_match_telemetry (
+    match_id  UUID NOT NULL REFERENCES ovt_matches(id) ON DELETE CASCADE,
+    player_id UUID NOT NULL REFERENCES players(id),
+    fps_timeline           VARCHAR(512),
+    ping_timeline          VARCHAR(512),
+    ping_avg               SMALLINT,
+    hit_timeline           VARCHAR(1024),
+    block_timeline         VARCHAR(1024),
+    damage_dealt_timeline  VARCHAR(1024),
+    bullets_fired          INTEGER,
+    bullets_hit            INTEGER,
+    blocks_activated       INTEGER,
+    blocks_successful      INTEGER,
+    keys_pressed           INTEGER,
+    active_seconds         DOUBLE PRECISION,
+    damage_dealt           INTEGER,
+    kills                  SMALLINT,
+    deaths                 SMALLINT,
+    kill_timeline          VARCHAR(512),
+    death_times            VARCHAR(512),
+    PRIMARY KEY (match_id, player_id)
+);
+COMMENT ON TABLE ovt_match_telemetry IS
+  'Per-seat 1v2 telemetry (migration 403), the team_match_telemetry shape plus '
+  'damage_dealt, kills, deaths, kill_timeline and death_times. Rows exist only '
+  'for seats whose blob reached the reporter; NULL = not recorded (#257).';
+CREATE INDEX IF NOT EXISTS idx_omt_match ON ovt_match_telemetry (match_id);
+
+-- The 2v2 seat's combat facts.
+ALTER TABLE team_match_telemetry ADD COLUMN IF NOT EXISTS damage_dealt INTEGER;
+ALTER TABLE team_match_telemetry ADD COLUMN IF NOT EXISTS kills SMALLINT;
+ALTER TABLE team_match_telemetry ADD COLUMN IF NOT EXISTS deaths SMALLINT;
+ALTER TABLE team_match_telemetry ADD COLUMN IF NOT EXISTS kill_timeline VARCHAR(512);
+ALTER TABLE team_match_telemetry ADD COLUMN IF NOT EXISTS death_times VARCHAR(512);
+
+-- The 2v2 game's point events (team 1 is the left side).
+ALTER TABLE team_matches ADD COLUMN IF NOT EXISTS point_timeline VARCHAR(512);
+ALTER TABLE team_matches ADD COLUMN IF NOT EXISTS point_times VARCHAR(512);
+
+-- The 1v2 game's point events (the solo is the left side).
+ALTER TABLE ovt_matches ADD COLUMN IF NOT EXISTS point_timeline VARCHAR(512);
+ALTER TABLE ovt_matches ADD COLUMN IF NOT EXISTS point_times VARCHAR(512);
+
+-- The FFA player's deaths and death marks.
+ALTER TABLE ffa_match_players ADD COLUMN IF NOT EXISTS deaths SMALLINT;
+ALTER TABLE ffa_match_players ADD COLUMN IF NOT EXISTS death_times VARCHAR(512);
+
+-- The post-check: IF NOT EXISTS only asked whether the names exist.
 DO $m403$
 DECLARE
   spec text[];
   got  text;
   specs text[][] := ARRAY[
-    ARRAY['team_match_telemetry', 'damage_dealt',   'INTEGER',      'integer'],
-    ARRAY['team_match_telemetry', 'kills',          'SMALLINT',     'smallint'],
-    ARRAY['team_match_telemetry', 'deaths',         'SMALLINT',     'smallint'],
-    ARRAY['team_match_telemetry', 'kill_timeline',  'VARCHAR(512)', 'character varying(512)'],
-    ARRAY['team_match_telemetry', 'death_times',    'VARCHAR(512)', 'character varying(512)'],
-    ARRAY['team_matches',         'point_timeline', 'VARCHAR(512)', 'character varying(512)'],
-    ARRAY['team_matches',         'point_times',    'VARCHAR(512)', 'character varying(512)'],
-    ARRAY['ovt_matches',          'point_timeline', 'VARCHAR(512)', 'character varying(512)'],
-    ARRAY['ovt_matches',          'point_times',    'VARCHAR(512)', 'character varying(512)'],
-    ARRAY['ffa_match_players',    'deaths',         'SMALLINT',     'smallint'],
-    ARRAY['ffa_match_players',    'death_times',    'VARCHAR(512)', 'character varying(512)']
+    ARRAY['team_match_telemetry', 'damage_dealt',   'integer'],
+    ARRAY['team_match_telemetry', 'kills',          'smallint'],
+    ARRAY['team_match_telemetry', 'deaths',         'smallint'],
+    ARRAY['team_match_telemetry', 'kill_timeline',  'character varying(512)'],
+    ARRAY['team_match_telemetry', 'death_times',    'character varying(512)'],
+    ARRAY['team_matches',         'point_timeline', 'character varying(512)'],
+    ARRAY['team_matches',         'point_times',    'character varying(512)'],
+    ARRAY['ovt_matches',          'point_timeline', 'character varying(512)'],
+    ARRAY['ovt_matches',          'point_times',    'character varying(512)'],
+    ARRAY['ffa_match_players',    'deaths',         'smallint'],
+    ARRAY['ffa_match_players',    'death_times',    'character varying(512)']
   ];
 BEGIN
-  -- The per-seat 1v2 telemetry table, guarded on the catalog.
-  IF to_regclass(format('%I.ovt_match_telemetry', current_schema())) IS NULL THEN
-    CREATE TABLE IF NOT EXISTS ovt_match_telemetry (
-        match_id  UUID NOT NULL REFERENCES ovt_matches(id) ON DELETE CASCADE,
-        player_id UUID NOT NULL REFERENCES players(id),
-        fps_timeline           VARCHAR(512),
-        ping_timeline          VARCHAR(512),
-        ping_avg               SMALLINT,
-        hit_timeline           VARCHAR(1024),
-        block_timeline         VARCHAR(1024),
-        damage_dealt_timeline  VARCHAR(1024),
-        bullets_fired          INTEGER,
-        bullets_hit            INTEGER,
-        blocks_activated       INTEGER,
-        blocks_successful      INTEGER,
-        keys_pressed           INTEGER,
-        active_seconds         DOUBLE PRECISION,
-        damage_dealt           INTEGER,
-        kills                  SMALLINT,
-        deaths                 SMALLINT,
-        kill_timeline          VARCHAR(512),
-        death_times            VARCHAR(512),
-        PRIMARY KEY (match_id, player_id)
-    );
-    COMMENT ON TABLE ovt_match_telemetry IS
-      'Per-seat 1v2 telemetry (migration 403), the team_match_telemetry shape plus '
-      'damage_dealt, kills, deaths, kill_timeline and death_times. Rows exist only '
-      'for seats whose blob reached the reporter; NULL = not recorded (#257).';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema() AND c.relname = 'idx_omt_match') THEN
-    CREATE INDEX IF NOT EXISTS idx_omt_match ON ovt_match_telemetry (match_id);
-  END IF;
-
-  -- The columns, each guarded on the catalog.
-  FOREACH spec SLICE 1 IN ARRAY specs LOOP
-    IF NOT EXISTS (SELECT 1 FROM pg_attribute a
-                    WHERE a.attrelid = to_regclass(format('%I.%I', current_schema(), spec[1]))
-                      AND a.attname = spec[2]
-                      AND NOT a.attisdropped) THEN
-      EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS %I %s', spec[1], spec[2], spec[3]);
-    END IF;
-  END LOOP;
-
-  -- The post-check: the guards only asked whether the names exist.
   FOREACH spec SLICE 1 IN ARRAY specs LOOP
     SELECT format_type(a.atttypid, a.atttypmod) INTO got
       FROM pg_attribute a
      WHERE a.attrelid = to_regclass(format('%I.%I', current_schema(), spec[1]))
        AND a.attname = spec[2]
        AND NOT a.attisdropped;
-    IF got IS DISTINCT FROM spec[4] THEN
+    IF got IS DISTINCT FROM spec[3] THEN
       RAISE EXCEPTION 'report mode parity: %.% is %, not %',
-        spec[1], spec[2], coalesce(got, 'missing'), spec[4];
+        spec[1], spec[2], coalesce(got, 'missing'), spec[3];
     END IF;
   END LOOP;
   IF to_regclass(format('%I.ovt_match_telemetry', current_schema())) IS NULL THEN
-    RAISE EXCEPTION 'report mode parity: ovt_match_telemetry is missing after its guard';
+    RAISE EXCEPTION 'report mode parity: ovt_match_telemetry is missing';
   END IF;
   RAISE NOTICE 'report mode parity: 11 column(s) and ovt_match_telemetry present';
 END $m403$;

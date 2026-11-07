@@ -1235,7 +1235,8 @@ def _worst_1v1_world(n_games=30, card_prefix=None):
 
 def _worst_team_world():
     """24 2v2 games of one series, four players, every telemetry row 300
-    samples, 400 cards each."""
+    samples (the migration-403 kills series and 300 death marks too), 300
+    point events per game, 400 cards each."""
     series = str(uuid.uuid4())
     team_row = dict(TEAM_SERIES_ROW, id=series, t1a_id=PID_A, t1b_id=PID_C, t2a_id=PID_B, t2b_id=PID_X)
     matches, tele = [], []
@@ -1246,13 +1247,18 @@ def _worst_team_world():
                         "invalidated_at": None, "t1a_id": PID_A, "t1b_id": PID_C, "t2a_id": PID_B, "t2b_id": PID_X,
                         "t1_rounds_won": 3, "t2_rounds_won": 2, "t1_points_total": 9, "t2_points_total": 8,
                         "t1a_end_stats": BIG_END_STATS, "t1b_end_stats": BIG_END_STATS,
-                        "t2a_end_stats": BIG_END_STATS, "t2b_end_stats": BIG_END_STATS, **_room_cols()})
+                        "t2a_end_stats": BIG_END_STATS, "t2b_end_stats": BIG_END_STATS,
+                        "point_timeline": _big_pairs(300, 3), "point_times": _big_stream(300, 12),
+                        **_room_cols()})
         for pid in (PID_A, PID_B, PID_C, PID_X):
             tele.append({"match_id": mid, "player_id": pid, "fps_timeline": _big_stream(300, 333),
                          "ping_timeline": _big_stream(300, 333), "hit_timeline": _big_pairs(300, 3333),
                          "block_timeline": _big_pairs(300, 3333), "damage_dealt_timeline": _big_stream(300, 3333),
                          "bullets_fired": 999999, "bullets_hit": 999999, "blocks_activated": 999999,
-                         "blocks_successful": 999999, "keys_pressed": 9999999, "active_seconds": 3599.9})
+                         "blocks_successful": 999999, "keys_pressed": 9999999, "active_seconds": 3599.9,
+                         "damage_dealt": 9999999, "kills": 1999, "deaths": 1999,
+                         "kill_timeline": _big_stream(300, 3),
+                         "death_times": ",".join(str(i * 12) for i in range(300))})
     players = [{"id": p, "steam_id": s, "display_name": LONG_NAME}
                for p, s in ((PID_A, CALLER), (PID_B, OPP), (PID_C, OTHER), (PID_X, XSTEAM))]
     return FakeDb(team_series_row=team_row, team_matches=matches, team_tele=tele, players=players, gold=[]), series
@@ -1295,7 +1301,7 @@ def test_envelope_stays_under_the_documented_bound_for_worst_case_shapes(session
     in main.py must fail THIS line, not move it (#391)."""
     assert main._REPORT_MAX_BYTES == 512 * 1024
     assert main._REPORT_MAX_GAMES == 24
-    assert main._REPORT_SAMPLE_PAIRS_BUDGET == 12288 and main._REPORT_SAMPLES_MAX == 128 and main._REPORT_SAMPLES_MIN == 16
+    assert main._REPORT_SAMPLE_PAIRS_BUDGET == 13824 and main._REPORT_SAMPLES_MAX == 128 and main._REPORT_SAMPLES_MIN == 16
     assert main._REPORT_CARD_BUDGET == 1024 and main._REPORT_CARDS_MAX == 32 and main._REPORT_CARDS_MIN == 8
     assert main._REPORT_DEATHS_MAX == 48 and main._REPORT_CARD_NAME_MAX == 40 and main._REPORT_NAME_MAX == 32
 
@@ -1311,7 +1317,7 @@ def test_envelope_stays_under_the_documented_bound_for_worst_case_shapes(session
         assert len(g["deaths"]) <= main._REPORT_DEATHS_MAX
         for tls in g["timelines"].values():
             for name, v in tls.items():
-                assert len(v) <= 32, (name, len(v))          # 12288 // (24 x 2 x 8)
+                assert len(v) <= 32, (name, len(v))          # 13824 // (24 x 2 x 9)
                 assert v[-1][0] == 3600.0, "decimation keeps the last sample (#318)"
         for cards in g["end_build"].values():
             assert len(cards) <= main._REPORT_CARDS_MAX and all(len(c) <= 40 for c in cards)
@@ -3002,6 +3008,36 @@ def test_recorded_death_marks_are_time_ordered_and_capped():
     assert main._report_death_events([{"pid": "a", "death_times": "x,,5"}], sid_of) == [{"t": 5.0, "id": "1"}]
     many = [{"pid": "a", "death_times": ",".join(str(i) for i in range(100))}]
     assert len(main._report_death_events(many, sid_of)) == main._REPORT_DEATHS_MAX
+    # Codex ASK9-R1 M3: "nan"/"inf"/"1e999" parse as floats strict JSON cannot carry
+    assert main._report_death_events([{"pid": "a", "death_times": "nan,inf,-inf,1e999,5"}], sid_of) \
+        == [{"t": 5.0, "id": "1"}]
+    sa, sb, d = main._report_points("nan,47,inf,1e999", "1:0,1:1,2:1,2:2", "1", "2")
+    assert sa == [[47.0, 1]] and sb == [[47.0, 1]]
+    assert len(d) == 2 and all(e["t"] == 47.0 for e in d), d
+
+
+def test_a_class_r_blob_keeps_the_seats_own_telemetry_and_drops_the_reporters_observations():
+    """Codex ASK9-R1 M2: a readmitted reporter's partial view covers the new
+    facts too, so a class R settle NULLs them (and the point events) in both
+    team modes, while a peer's own heartbeat telemetry stays."""
+    import inspect
+    import schemas
+    t = schemas.TeamPlayerTelemetry(fps_timeline="60,61", ping_avg=20, bullets_fired=10,
+                                    damage_dealt_timeline="0,50", damage_dealt=50, kills=1, deaths=2,
+                                    kill_timeline="0,1", death_times="30,90")
+    r = main._class_r_blob(t)
+    assert (r.fps_timeline, r.ping_avg, r.bullets_fired) == ("60,61", 20, 10)
+    assert (r.damage_dealt_timeline, r.damage_dealt, r.kills, r.deaths, r.kill_timeline, r.death_times) \
+        == (None,) * 6
+    assert t.kills == 1, "a copy, never in place"
+    assert main._class_r_blob(None) is None
+    assert set(main._CLASS_R_BLOB_FIELDS) == {"damage_dealt_timeline", "damage_dealt", "kills", "deaths",
+                                             "kill_timeline", "death_times"}
+    src = inspect.getsource(main._class_r_report)
+    assert '"point_timeline": None, "point_times": None' in src
+    for k in ("t1a_telemetry", "t1b_telemetry", "t2a_telemetry", "t2b_telemetry",
+              "solo_telemetry", "duo_a_telemetry", "duo_b_telemetry"):
+        assert k in src, k
 
 
 def test_the_sides_of_a_game_follow_the_slots_teams():

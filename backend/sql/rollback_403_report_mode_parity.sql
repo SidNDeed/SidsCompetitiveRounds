@@ -7,13 +7,17 @@
 -- file. An api from the lane fails every 2v2, 1v2 and FFA report and submit
 -- once the columns are gone.
 --
--- DATA. Dropping the table and the columns DISCARDS every point event,
--- damage total, kill, death and death time recorded since the migration;
--- there is no copy. A deliberate, documented loss: the rows these facts hang
--- off (the matches, the telemetry counters) stay.
+-- DATA. Dropping the table and the columns DISCARDS, with no copy: every
+-- point event, damage total, kill, death and death time recorded since the
+-- migration in every mode, AND the whole 1v2 telemetry table, whose fps,
+-- ping, hit, block and damage streams and bullets/blocks/keys/active-seconds
+-- counters only exist since this migration. What stays: the match rows, the
+-- 2v2 telemetry rows' pre-existing columns and the FFA player rows'
+-- pre-existing columns. A deliberate, documented loss.
 --
--- Guarded on the catalog like the forward file, so a rerun after success
--- issues nothing and takes no lock. The lock bounds are the forward file's:
+-- Guarded on the catalog (unlike the forward file, whose statements are
+-- literal so the test suite's migration replays can read them; see its SHAPE
+-- note), so a rerun after success issues nothing and takes no lock. The lock bounds are the forward file's:
 -- lock_timeout for the wait, statement_timeout per statement,
 -- idle_in_transaction_session_timeout for a stopped runner,
 -- synchronous_commit = local for the COMMIT (391 explains each).

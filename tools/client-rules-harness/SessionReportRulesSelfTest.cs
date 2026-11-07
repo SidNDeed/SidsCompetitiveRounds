@@ -278,14 +278,21 @@ namespace CompetitiveRounds
             // Control: a metric no set of the mode can carry reads 'not
             // supported for this mode'; the same metric in a mode that carries
             // it reads 'not recorded for this set'; an unknown kind claims nothing.
+            // Since migration 403 (ask 9) 2v2 and 1v2 carry what 1v1 carries
+            // except XP, so XP is the one metric left that no set of theirs can
+            // carry, and the four pairs that once read 'not supported' (1v2
+            // ping and combat counters, 2v2 kills and damage total) now read
+            // 'not recorded for this set'.
             int[] got = {
-                MissingReason("ovt", MET_PING), MissingReason("ovt", MET_COMBAT), MissingReason("ovt", MET_XP),
-                MissingReason("team", MET_KILLS), MissingReason("team", MET_DAMAGE_TOTAL), MissingReason("team", MET_XP),
+                MissingReason("ovt", MET_XP), MissingReason("team", MET_XP),
+                MissingReason("ovt", MET_PING), MissingReason("ovt", MET_COMBAT),
+                MissingReason("team", MET_KILLS), MissingReason("team", MET_DAMAGE_TOTAL),
                 MissingReason("ranked", MET_PING), MissingReason("casual", MET_KILLS), MissingReason("ffa", MET_SCORE),
                 MissingReason("team", MET_HIT), MissingReason("sometime-later", MET_PING),
                 MissingReason("team", MET_SCORE), MissingReason("ovt", MET_SCORE),
             };
-            int[] want = { MISSING_MODE, MISSING_MODE, MISSING_MODE, MISSING_MODE, MISSING_MODE, MISSING_MODE,
+            int[] want = { MISSING_MODE, MISSING_MODE,
+                           MISSING_SET, MISSING_SET, MISSING_SET, MISSING_SET,
                            MISSING_SET, MISSING_SET, MISSING_SET, MISSING_SET, MISSING_SET,
                            MISSING_SET, MISSING_SET };
             bool same = got.Length == want.Length;

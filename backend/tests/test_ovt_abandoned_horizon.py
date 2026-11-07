@@ -2499,6 +2499,15 @@ def test_the_duo_pair_is_put_in_one_order_and_every_seat_field_travels_with_it()
     assert (arrived.duo_a.steam_id, arrived.duo_b.steam_id) == (hi, lo)
     # ...and a report already in order comes back as the SAME object.
     assert main._ovt_canonical_duo(canon) is canon
+    # Ask 9 (Codex ASK9-R1 M1): the two telemetry blobs, when DISTINCT, travel
+    # with their seats too (the derived-field check above passes on None==None).
+    blobs = arrived.model_copy(update={
+        "duo_a_telemetry": schemas.TeamPlayerTelemetry(fps_timeline="60,61", kills=2, death_times="30"),
+        "duo_b_telemetry": schemas.TeamPlayerTelemetry(fps_timeline="30,31", kills=0, death_times="12,47")})
+    swapped = main._ovt_canonical_duo(blobs)
+    assert swapped.duo_a_telemetry == blobs.duo_b_telemetry
+    assert swapped.duo_b_telemetry == blobs.duo_a_telemetry
+    assert swapped.duo_a_telemetry.kills == 0 and swapped.duo_b_telemetry.kills == 2
 
     # Ordinal, not numeric: "95..." sorts after "900..." as strings.
     short, longer = "9500000000000391", "90000000000003912"
@@ -2507,6 +2516,28 @@ def test_the_duo_pair_is_put_in_one_order_and_every_seat_field_travels_with_it()
         "duo_a": arrived.duo_a.model_copy(update={"steam_id": short}),
         "duo_b": arrived.duo_b.model_copy(update={"steam_id": longer})})
     assert main._ovt_canonical_duo(mixed).duo_a.steam_id == longer
+
+
+def test_a_class_r_1v2_report_settles_with_every_observational_fact_null():
+    """Codex ASK9-R1 M2: a readmitted reporter's 1v2 report settles with the
+    legacy damage CSVs, every seat blob's observational facts and the point
+    events NULL; each seat's own heartbeat telemetry stays; a copy."""
+    import schemas
+    blob = schemas.TeamPlayerTelemetry(fps_timeline="60,61", ping_avg=20, damage_dealt_timeline="0,50",
+                                       damage_dealt=50, kills=1, deaths=2, kill_timeline="0,1",
+                                       death_times="30,90")
+    arrived = _sink_report(str(uuid.uuid4()), _game_room(1), SIDS[0], SIDS[1], SIDS[2]).model_copy(update={
+        "solo_telemetry": blob, "duo_a_telemetry": blob, "solo_damage_timeline": "0,50",
+        "point_timeline": "0:1,1:1", "point_times": "30,90"})
+    r = main._class_r_report("ovt", arrived)
+    assert (r.point_timeline, r.point_times, r.solo_damage_timeline) == (None, None, None)
+    for seat in ("solo_telemetry", "duo_a_telemetry"):
+        t = getattr(r, seat)
+        assert (t.fps_timeline, t.ping_avg) == ("60,61", 20), "the seat's own heartbeat stays"
+        assert (t.damage_dealt_timeline, t.damage_dealt, t.kills, t.deaths, t.kill_timeline,
+                t.death_times) == (None,) * 6, seat
+    assert r.duo_b_telemetry is None
+    assert arrived.solo_telemetry.kills == 1 and arrived.point_times == "30,90", "a copy, never in place"
 
 
 def test_the_report_is_canonicalised_before_any_slot_comparison_or_write():
