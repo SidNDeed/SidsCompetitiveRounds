@@ -15,8 +15,9 @@
 -- 2v2 telemetry rows' pre-existing columns and the FFA player rows'
 -- pre-existing columns. A deliberate, documented loss.
 --
--- Guarded on the catalog like the forward file, so a rerun after success
--- issues nothing and takes no lock. The lock bounds are the forward file's:
+-- Guarded on the catalog (unlike the forward file, whose statements are
+-- literal so the test suite's migration replays can read them; see its SHAPE
+-- note), so a rerun after success issues nothing and takes no lock. The lock bounds are the forward file's:
 -- lock_timeout for the wait, statement_timeout per statement,
 -- idle_in_transaction_session_timeout for a stopped runner,
 -- synchronous_commit = local for the COMMIT (391 explains each).
