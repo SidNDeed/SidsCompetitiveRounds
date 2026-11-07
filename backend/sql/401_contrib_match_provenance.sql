@@ -46,12 +46,15 @@
 -- deploy. An api build without this lane ignores the column and the indexes.
 --
 -- LOCKS. On a first run, ADD COLUMN of a nullable column with no default
--- changes the catalog only (no table rewrite) under a short ACCESS EXCLUSIVE
--- lock on combat_contrib; each CREATE INDEX holds SHARE on its table while it
--- builds, so the worker's writes to that table wait until the build ends
--- (readers continue). `lock_timeout` bounds how long the file waits to START
--- each step behind a transaction already in flight; if it expires the whole
--- file rolls back with nothing changed and is re-applied.
+-- changes the catalog only (no table rewrite), but its ACCESS EXCLUSIVE lock
+-- on combat_contrib is held from that statement until COMMIT: combat_contrib
+-- readers and writers wait through BOTH index builds (the combat index and
+-- then the card index) until the file commits. Each CREATE INDEX holds SHARE
+-- on its own table while it builds, so the worker's writes to card_contrib
+-- wait during the card index build while card_contrib readers continue.
+-- `lock_timeout` bounds only how long the file waits to START each step
+-- behind a transaction already in flight, not the build durations; if it
+-- expires the whole file rolls back with nothing changed and is re-applied.
 --
 -- RE-RUNS. Each step is guarded on the catalog and issued only when its
 -- object is absent from the current schema, so a second run issues none of
