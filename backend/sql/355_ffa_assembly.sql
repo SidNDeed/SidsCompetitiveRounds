@@ -7,7 +7,12 @@
 --                      seats observed, and the verdict the server reached.
 --                      Written only by the eight I2 writers in main.py.
 -- ffa_g3_seats         the G3 enrolment (admission before production);
---                      the production-enabling release drops it.
+--                      the production-enabling release was to drop it.
+--                      Superseded by ruling A7-R1-PRE (2026-11-04): 1.41.0
+--                      keeps it as the server-side rollback (with
+--                      ADM_PRODUCTION_ENABLED False, only a room whose every
+--                      member is enrolled here is admitted); the drop is a
+--                      post-release cleanup item. Comment only.
 -- ffa_kept_epochs      the kept epoch, one immutable row per late
 --                      admission, insert-only.
 -- ffa_lobbies          18 columns: the re-form links, the two capability
