@@ -717,6 +717,10 @@ _EVERY_STATEMENT_GUARDED = {
         "holding CREATE STATISTICS and its ANALYZE, and a read-only post-check, "
         "between BEGIN, SET LOCAL lock_timeout and COMMIT; a re-run issues no "
         "DDL and no ANALYZE",
+    "401_contrib_match_provenance.sql":
+        "one catalog-guarded ADD COLUMN block, two catalog-guarded CREATE INDEX "
+        "blocks and a read-only post-check, between BEGIN, SET LOCAL "
+        "lock_timeout and COMMIT; a re-run issues no DDL",
 }
 _EVERY_STATEMENT_GUARDED_KINDS = {"BEGIN", "COMMIT", "SET LOCAL", "DO"}
 
