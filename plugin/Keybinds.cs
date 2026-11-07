@@ -1087,6 +1087,9 @@ namespace CompetitiveRounds
             [DllImport("kernel32.dll")]
             private static extern uint GetCurrentThreadId();
 
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
             private const int WH_GETMESSAGE = 3, HC_ACTION = 0, PM_REMOVE = 1;
             private const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
 
@@ -1095,6 +1098,28 @@ namespace CompetitiveRounds
             private static IntPtr hook;
             private static bool installTried, liveLogged, unavailableLogged;
             private static int firstVk = -1;
+
+            /// <summary>Quit: the hook is removed before Unity tears the scripting
+            /// runtime down. A thread hook left installed outlives the delegate it
+            /// points at, and DestroyWindow's own message pumping (the IME teardown,
+            /// the Steam overlay's PeekMessage hook) then calls freed code: the
+            /// player crashed on every quit from the hook's first build (10 Oct 2026)
+            /// until this, and a crashed quit keeps the game "running" for Steam
+            /// while the crash handler and Windows Error Reporting work. Main thread,
+            /// from Application.quitting and OnApplicationQuit; idempotent; the hook
+            /// is never re-installed afterwards (installTried stays set).</summary>
+            internal static void Uninstall()
+            {
+                IntPtr h = hook;
+                if (h == IntPtr.Zero) return;
+                hook = IntPtr.Zero;
+                bool ok = false;
+                int err = 0;
+                try { ok = UnhookWindowsHookEx(h); if (!ok) err = Marshal.GetLastWin32Error(); } catch (Exception e) { Plugin.Log.LogWarning("[KEYBIND] keyboard-event source removal threw: " + e.Message); }
+                if (ok) Plugin.Log.LogInfo("[KEYBIND] keyboard-event source removed at quit");
+                else Plugin.Log.LogWarning("[KEYBIND] keyboard-event source removal failed at quit (error " + err + ")");
+                proc = null;   // native code no longer holds the pointer
+            }
 
             private static void EnsureInstalled()
             {

@@ -336,6 +336,14 @@ namespace CompetitiveRounds
 
         private static bool spawned = false;
         internal static bool modDisabled = false;
+        // The application is shutting down: set by the first Application.quitting
+        // hook (before any quit-time work) and by OnApplicationQuit on the host.
+        // OnDestroy reads it: nothing may be created during Unity's teardown. The
+        // respawn there attached the letterbox clearing camera (d6f5ce9f) to a new
+        // object inside the teardown and the player crashed on every quit since
+        // (output_log: Destroyed -> Respawned -> Crash!!!), which left the crash
+        // handler running after the window was gone.
+        internal static volatile bool Quitting = false;
         /// <summary>True once DoInitialize's other-mods check has produced its
         /// verdict (either way). GrowNormalize refuses to advertise cr_grow2
         /// before this — an advertise-then-revoke-in-room sequence reaches
@@ -517,6 +525,10 @@ namespace CompetitiveRounds
             {
                 UnityEngine.Application.quitting += () =>
                 {
+                    Quitting = true;   // first: before any quit-time work that can throw
+                    // The keyboard-event thread hook goes before anything else: a hook
+                    // still installed when the window is destroyed crashes the player.
+                    try { Keybinds.KeyboardEvents.Uninstall(); } catch { }
                     try
                     {
                         string src = CompetitiveUI.BepInExLogPathPublic();
@@ -4037,6 +4049,15 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Unity sends this to every live behaviour before it destroys
+        /// them at shutdown; the Application.quitting hook sets the same flag, and
+        /// whichever reaches OnDestroy first is enough.</summary>
+        private void OnApplicationQuit()
+        {
+            Plugin.Quitting = true;
+            try { Keybinds.KeyboardEvents.Uninstall(); } catch { }
+        }
+
         private void OnDestroy()
         {
             // First, and on its own: the portrait renderer releases a run this
@@ -4046,6 +4067,15 @@ namespace CompetitiveRounds
             try { PlayerColorCosmetic.OnHostDestroyed(this); } catch { }
             // Finalize this host's entered request before this teardown creates its replacement.
             try { FfaReadmit.OnHostDestroyed(this); } catch { }
+            if (Plugin.Quitting)
+            {
+                // Application shutdown destroys this host too, and nothing may be
+                // created now: the respawn below ran inside Unity's teardown and the
+                // player crashed on every quit (output_log: Destroyed -> Respawned
+                // -> Crash!!!). A scene change is the only destroy that respawns.
+                Plugin.Log.LogInfo("[PERSIST] host destroyed at application quit; no respawn");
+                return;
+            }
             Plugin.Log.LogWarning("[PERSIST] Destroyed! Attempting respawn...");
             MainMenuInjector.Reset();
 
