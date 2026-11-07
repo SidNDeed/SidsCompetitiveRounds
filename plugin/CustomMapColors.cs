@@ -529,12 +529,15 @@ namespace CompetitiveRounds
                 // feed the swatch only, and GradingColor carries Underworld's primary so
                 // BuildOrGetClone derives the SAME colorFilter lean and saturation rule
                 // for both skins (Codex ASK4-R1 M1).
-                // Reference phase (Codex ASK4-R1 M2): the window with Underworld's
-                // persistent ember emitter alive, which is every map after a session's
-                // first and what both captured screenshots show (embers rising). On the
-                // very first map of a session Underworld's own window has no emitter
-                // yet; Purgatory keeps Effect = Embers on purpose, and with Animated
-                // Cosmetics off neither skin has them.
+                // Reference phase (Codex ASK4-R1 M2, wording ASK4-R2 LOW): the window
+                // with Underworld's ember emitter already alive when the map loads,
+                // which is any map that follows an Underworld map (MapSkinEffects.Apply
+                // keeps a same-skin emitter across maps) and what both captured
+                // screenshots show (embers rising). Underworld's own window has no
+                // emitter yet on a session's first map and on the first Underworld map
+                // after vanilla or another skin (the restore clears it) until the
+                // deferred Apply lands; Purgatory keeps Effect = Embers on purpose, and
+                // with Animated Cosmetics off neither skin has them.
                 { "mapcolor_purgatory", new Preset {
                     BaseArt = "Soviet",
                     KeepBaseArtColors = true,
