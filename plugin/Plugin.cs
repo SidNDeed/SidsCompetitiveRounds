@@ -11736,8 +11736,21 @@ namespace CompetitiveRounds
                     bool light = Plugin.MapLightingEnabled == null || Plugin.MapLightingEnabled.Value;
                     if (!light)
                     {
-                        PaintFlatBackdrop();
-                        _flatBackdropActive = true;
+                        // Ask 4: a KeepBaseArtColors skin shows the art's OWN sky with
+                        // lighting off as well (its reference frame predates the slate
+                        // pass), so undo any slate and leave the sky vanilla instead of
+                        // painting it (Codex ASK4-R1 M3).
+                        var keepSku = MapColorState.CurrentSku;
+                        if (!string.IsNullOrEmpty(keepSku) && CustomMapColors.KeepsBaseArtColors(keepSku))
+                        {
+                            RestoreVanillaSky();
+                            _flatBackdropActive = false;
+                        }
+                        else
+                        {
+                            PaintFlatBackdrop();
+                            _flatBackdropActive = true;
+                        }
                     }
                     else if (_flatBackdropActive)
                     {
@@ -12307,7 +12320,11 @@ namespace CompetitiveRounds
 
         private static System.Collections.IEnumerator DelayedBackdrop(int hostId)
         {
-            while (Time.time < _tintNotBefore) yield return null;
+            // Also re-check the transition state at wake, as DelayedApplyTints does
+            // (Codex ASK4-R1 HIGH): the deadline is pushed only by NextArt CALLS, and a
+            // Move can begin up to ~0.1 s before its NextArt, so a deadline expiring in
+            // that window used to reach ApplyBackdropNow's particle writes mid-move.
+            while (Time.time < _tintNotBefore || InMapTransition()) yield return null;
             // A newer host claimed the slot while we slept — it owns the apply.
             if (_backdropPassHostId != hostId) yield break;
             _backdropPassPending = false;
@@ -12327,7 +12344,10 @@ namespace CompetitiveRounds
 
         private static System.Collections.IEnumerator DelayedRestoreVanillaSky(int gen, string why)
         {
-            while (Time.time < _tintNotBefore) yield return null;
+            // Same wake-time transition check as DelayedApplyTints and DelayedBackdrop
+            // (Codex ASK4-R1 HIGH): RestoreVanillaSky and RestoreVanillaArtParts write
+            // particles and must not land inside a Move.
+            while (Time.time < _tintNotBefore || InMapTransition()) yield return null;
             if (gen != _pendingTintGen) yield break;          // a skin claimed the slot
             var live = MapColorState.CurrentSku;
             if (!string.IsNullOrEmpty(live) && CustomMapColors.IsCustomSku(live)) yield break;

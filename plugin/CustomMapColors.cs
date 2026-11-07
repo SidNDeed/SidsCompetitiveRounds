@@ -78,6 +78,11 @@ namespace CompetitiveRounds
             // canvas, lighting and ambient effect still apply. MapBlockColor and
             // SecondaryColor then feed the shop swatch only.
             public bool KeepBaseArtColors;
+            // Ask 4: the primary BuildOrGetClone derives the clone's colorFilter lean
+            // from, when it is not MapBlockColor (null = MapBlockColor, every other
+            // skin). Lets a skin carry swatch colours of its own while grading exactly
+            // like another skin (Codex ASK4-R1 M1).
+            public Color? GradingColor;
         }
 
         /// <summary>Ambient effect kinds MapSkinEffects knows how to build.</summary>
@@ -520,12 +525,22 @@ namespace CompetitiveRounds
                 // held: same base art, canvas colour, grading and effect as Underworld,
                 // and KeepBaseArtColors makes the deferred pass restore the art instead
                 // of recolouring it. The two swatch colours are measured from the
-                // captured screenshots (whole-frame #4C1648, wall glow #B55D2A).
+                // captured screenshots (whole-frame #4C1648, wall glow #B55D2A); they
+                // feed the swatch only, and GradingColor carries Underworld's primary so
+                // BuildOrGetClone derives the SAME colorFilter lean and saturation rule
+                // for both skins (Codex ASK4-R1 M1).
+                // Reference phase (Codex ASK4-R1 M2): the window with Underworld's
+                // persistent ember emitter alive, which is every map after a session's
+                // first and what both captured screenshots show (embers rising). On the
+                // very first map of a session Underworld's own window has no emitter
+                // yet; Purgatory keeps Effect = Embers on purpose, and with Animated
+                // Cosmetics off neither skin has them.
                 { "mapcolor_purgatory", new Preset {
                     BaseArt = "Soviet",
                     KeepBaseArtColors = true,
                     MapBlockColor = new Color(0.30f, 0.09f, 0.28f),
                     SecondaryColor = new Color(0.71f, 0.36f, 0.16f),
+                    GradingColor = new Color(0.36f, 0.30f, 0.30f),   // Underworld's MapBlockColor
                     Effect = SkinEffect.Embers,
                     EffectColor = new Color(1.00f, 0.30f, 0.10f),
                     EffectColor2 = new Color(1.00f, 0.62f, 0.20f),
@@ -679,6 +694,14 @@ namespace CompetitiveRounds
         public static Color? GetMapBlockColor(string sku)
         {
             if (sku != null && _presets.TryGetValue(sku, out var p)) return p.MapBlockColor;
+            return null;
+        }
+
+        /// <summary>The primary the grading clone leans its colorFilter toward: a preset's
+        /// GradingColor when set, else null (the caller falls back to MapBlockColor).</summary>
+        private static Color? GetGradingColor(string sku)
+        {
+            if (sku != null && _presets.TryGetValue(sku, out var p)) return p.GradingColor;
             return null;
         }
 
@@ -915,7 +938,7 @@ namespace CompetitiveRounds
                     // carries the designed BACKGROUND (set in Plugin.cs,
                     // ApplyCameraBackground), and the filter stays NEAR-NEUTRAL with a
                     // mild primary lean so walls/geometry keep their own colors.
-                    Color prim = GetMapBlockColor(sku) ?? new Color(0.5f, 0.5f, 0.5f);
+                    Color prim = GetGradingColor(sku) ?? GetMapBlockColor(sku) ?? new Color(0.5f, 0.5f, 0.5f);
                     Color litPrim = new Color(
                         Mathf.Clamp01(0.35f + prim.r * 0.75f),
                         Mathf.Clamp01(0.35f + prim.g * 0.75f),

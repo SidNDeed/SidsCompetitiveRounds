@@ -13283,7 +13283,7 @@ namespace CompetitiveRounds
             ["2v2 Podium"] = "2v2-pallen",
             ["Ash Gradient"] = "Askgradient",
             ["Ash walls with a dark crimson accent over a deep blood-red dark, red embers rising."] = "Askgrå väggar med en mörk karmosinröd accent över ett djupt blodrött mörker, med röd glöd som stiger.",
-            ["Plum-violet haze over a blood-dark sky, indigo at the edges, the walls glowing rust, red embers rising."] = "Plommonviolett dis över en bloddunkel himmel, indigo i kanterna, väggarna glöder rostiga och röda glöd stiger.",
+            ["Plum-violet haze over a blood-dark sky, indigo at the edges, the walls glowing rust, red embers rising."] = "Plommonviolett dis över en bloddunkel himmel, indigo i kanterna, väggarna glöder rostfärgat och röd glöd stiger.",
             ["Blood Gradient"] = "Blodgradient",
             ["Blood Moon"] = "Blodmåne",
             ["Cat Eyes"] = "Kattögon",

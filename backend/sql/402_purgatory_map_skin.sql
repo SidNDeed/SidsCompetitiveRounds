@@ -1,5 +1,7 @@
 -- 402_purgatory_map_skin.sql
 -- The Purgatory map skin: one shop_items row (ask 4 of the 2026-11-04 batch).
+-- The number is provisional (the integrator assigns the final one at landing);
+-- nothing in this file depends on it.
 --
 -- Purgatory is Underworld's load-order state, held: for the first seconds
 -- after an art switch the client's deferred tint pass has not run, so an
@@ -43,6 +45,7 @@
 BEGIN;
 
 SET LOCAL lock_timeout = '5s';
+SET LOCAL idle_in_transaction_session_timeout = '5s';
 SET LOCAL statement_timeout = '25s';
 SET LOCAL synchronous_commit = local;
 
