@@ -1087,6 +1087,9 @@ namespace CompetitiveRounds
             [DllImport("kernel32.dll")]
             private static extern uint GetCurrentThreadId();
 
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
             private const int WH_GETMESSAGE = 3, HC_ACTION = 0, PM_REMOVE = 1;
             private const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
 
@@ -1095,6 +1098,41 @@ namespace CompetitiveRounds
             private static IntPtr hook;
             private static bool installTried, liveLogged, unavailableLogged;
             private static int firstVk = -1;
+
+            /// <summary>Quit: the hook is removed before Unity tears the scripting
+            /// runtime down. A thread hook left installed outlives the delegate it
+            /// points at, and DestroyWindow's own message pumping (the IME teardown,
+            /// the Steam overlay's PeekMessage hook) then calls freed code: every
+            /// retained crashed session since the hook's first builds (crash reports
+            /// from 13 Oct 2026) ends in that teardown, and a crashed quit keeps the
+            /// game "running" for Steam while the crash handler and Windows Error
+            /// Reporting work. Main thread (the installing thread), from the
+            /// Application.quitting hook, which Unity raises only for a quit that can
+            /// no longer be cancelled, and once more from the host's OnDestroy at
+            /// shutdown. Idempotent: a no-op once the hook is gone. A failed removal
+            /// keeps the handle and the delegate (the delegate must stay reachable
+            /// while the hook may still be installed) so the second call retries;
+            /// two attempts per quit at most. The hook is never re-installed
+            /// afterwards (installTried stays set).</summary>
+            internal static void Uninstall()
+            {
+                IntPtr h = hook;
+                if (h == IntPtr.Zero) return;
+                bool ok = false;
+                int err = 0;
+                try { ok = UnhookWindowsHookEx(h); if (!ok) err = Marshal.GetLastWin32Error(); } catch (Exception e) { Plugin.Log.LogWarning("[KEYBIND] keyboard-event source removal threw: " + e.Message); }
+                if (ok)
+                {
+                    hook = IntPtr.Zero;
+                    proc = null;   // removed: native code no longer holds the pointer
+                    Plugin.Log.LogInfo("[KEYBIND] keyboard-event source removed at quit");
+                }
+                else
+                {
+                    // Ownership retained: hook and proc stay until a removal succeeds.
+                    Plugin.Log.LogWarning("[KEYBIND] keyboard-event source removal failed at quit (error " + err + "); retried once at host teardown");
+                }
+            }
 
             private static void EnsureInstalled()
             {
