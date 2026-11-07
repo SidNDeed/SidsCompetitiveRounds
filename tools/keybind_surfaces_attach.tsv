@@ -161,6 +161,7 @@ hop	ApiClient.cs:Create	3f5d3fb63292c102	AvatarDefaults.cs:RingSprite	ref>Avatar
 hop	ApiClient.cs:Create	437826d6370648bd	PortraitGrade.cs:SpawnSwatches	ref[Own(#0)]>PortraitGrade.cs:SpawnSwatches
 hop	ApiClient.cs:Create	442de037887f7988	IdentityClockCore.cs:LdirUnit	ref>IdentityClockCore.cs:LdirUnit
 hop	ApiClient.cs:Create	4a81b4f18cc5fdf4	PcTradeRules.cs:TradeDigest	ref>PcTradeRules.cs:TradeDigest
+hop	ApiClient.cs:Create	4c5768e1d5741fe6	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#1)/&]>LogSnapshot.cs:Write
 hop	ApiClient.cs:Create	4f20422c7742dc06	SeatEvidence.cs:Save	delegate[new FileStream(#1)/&]>SeatEvidence.cs:Save
 hop	ApiClient.cs:Create	5904d0bf5b285b59	NativeUI.cs:GetBodyGlyphSprite	ref>NativeUI.cs:GetBodyGlyphSprite
 hop	ApiClient.cs:Create	5b2273852379c054	TrailRenderer.cs:EnsureSprite	ref>TrailRenderer.cs:EnsureSprite
@@ -4230,7 +4231,6 @@ hop	CombatEvidenceCore.cs:Concat	b61f189d60c42799	CombatEvidenceCore.cs:HiOf	ref
 hop	CombatEvidenceCore.cs:Concat	ee3c1685a84d2615	CombatEvidenceCore.cs:LoOf	ref>CombatEvidenceCore.cs:LoOf
 hop	CombatEvidenceCore.cs:Copy	0bb37f081598da8c	CombatEvidenceCore.cs:Add#2	ref>CombatEvidenceCore.cs:Add#2
 hop	CombatEvidenceCore.cs:Copy	0f6e6f2701f4a4e5	CardDrawEvidence.cs:SealGame	ref>CardDrawEvidence.cs:SealGame
-hop	CombatEvidenceCore.cs:Copy	2f553aca5b7a2a32	Plugin.cs:Awake#1	delegate[=>{}]>Plugin.cs:Awake#1
 hop	CombatEvidenceCore.cs:Copy	3198d506701cf2ab	CombatEvidence.cs:StatBlock	ref>CombatEvidence.cs:StatBlock
 hop	CombatEvidenceCore.cs:Copy	37854b3f06f02288	GameStateWatcher.cs:OnGameOver	ref>GameStateWatcher.cs:OnGameOver
 hop	CombatEvidenceCore.cs:Copy	4250864c105aec67	SeatEvidence.cs:Dispatch	ref>SeatEvidence.cs:Dispatch
@@ -4470,6 +4470,7 @@ hop	CompetitiveUI.cs:DrawCardStatsSearch	79825c8deb948178	CompetitiveUI.cs:DrawU
 hop	CompetitiveUI.cs:DrawChatInput	37a043ebdd200757	CompetitiveUI.cs:DrawUI	ref>CompetitiveUI.cs:DrawUI
 hop	CompetitiveUI.cs:DrawCompareSearch	83b980a03ac6061c	CompetitiveUI.cs:DrawUI	ref>CompetitiveUI.cs:DrawUI
 hop	CompetitiveUI.cs:DrawConfirm	185f1ce922c633b0	CompetitiveUI.cs:DrawUI	ref>CompetitiveUI.cs:DrawUI
+hop	CompetitiveUI.cs:DrawConsentDeclineConfirm	28f0566d4941195a	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	CompetitiveUI.cs:DrawConsentModal	f6c6f89431463021	CompetitiveUI.cs:DrawUI	ref>CompetitiveUI.cs:DrawUI
 hop	CompetitiveUI.cs:DrawCosmeticReleaseQueue	09988ed39e7f4283	CompetitiveUI.cs:DrawUI	ref>CompetitiveUI.cs:DrawUI
 hop	CompetitiveUI.cs:DrawCosmeticReview	5ca2fea5804f19b0	CompetitiveUI.cs:DrawUI	ref>CompetitiveUI.cs:DrawUI
@@ -4514,6 +4515,7 @@ hop	CompetitiveUI.cs:DrawSpectatorRoster	73264a3e3c234060	CompetitiveUI.cs:DrawU
 hop	CompetitiveUI.cs:DrawTournamentBanner	ade02c7f64e602a3	CompetitiveUI.cs:DrawUI	ref>CompetitiveUI.cs:DrawUI
 hop	CompetitiveUI.cs:DropChatOnAccountChange	8ad6c8c957b642eb	GameStateWatcher.cs:NoteIdentityTransition	ref>GameStateWatcher.cs:NoteIdentityTransition
 hop	CompetitiveUI.cs:DwSend	877503aa65cbac17	CompetitiveUI.cs:DrawDanceWheel	ref>CompetitiveUI.cs:DrawDanceWheel
+hop	CompetitiveUI.cs:EatConsentInput	3c8750aa4201d181	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	CompetitiveUI.cs:EnsureBugLogLayout	c4e78e9ada325dd6	CompetitiveUI.cs:DrawBugReportAdminViewer	ref>CompetitiveUI.cs:DrawBugReportAdminViewer
 hop	CompetitiveUI.cs:EnsureFfaHudResources	ea3b6f49e24a20b8	CompetitiveUI.cs:DrawFfaScoreStrip	ref>CompetitiveUI.cs:DrawFfaScoreStrip
 hop	CompetitiveUI.cs:EnsureTipLayout	7bf9f440f1dbcb14	CompetitiveUI.cs:DrawCardHoverTooltip	ref>CompetitiveUI.cs:DrawCardHoverTooltip
@@ -6693,6 +6695,7 @@ hop	DamageNumberRules.cs:Text#1	81e1db1bc0c38779	ApiClient.cs:TournamentTimeVote
 hop	DamageNumberRules.cs:Text#1	863b52acd6709f59	CardTextLocalizer.cs:PrettyCase	delegate[&]>CardTextLocalizer.cs:PrettyCase
 hop	DamageNumberRules.cs:Text#1	8668ca2e9c761f83	NativeUI.SettingsDrive.cs:DrvCfgRestored	delegate[DrvHex(#0)/&]>NativeUI.SettingsDrive.cs:DrvCfgRestored
 hop	DamageNumberRules.cs:Text#1	8713622a57c81bab	field:SpectatorHud.cs:?	field[?]>SpectatorHud.cs:(file scope)
+hop	DamageNumberRules.cs:Text#1	886392e6e134473d	LogSnapshot.cs:Write	delegate[&]>LogSnapshot.cs:Write
 hop	DamageNumberRules.cs:Text#1	88c3eb7bce056aa4	field:NameGlyphs.cs:?	field[?]>NameGlyphs.cs:(file scope)
 hop	DamageNumberRules.cs:Text#1	88e3a7134743d6a6	field:MusicEngine.cs:?	field[?]>MusicEngine.cs:(file scope)
 hop	DamageNumberRules.cs:Text#1	89ec7a369c0f00d3	ApiClient.cs:JsonEscapeFull	delegate[&]>ApiClient.cs:JsonEscapeFull
@@ -16743,6 +16746,7 @@ hop	I18n.cs:Tr	8a0cd08e92a7f932	AvatarDefaults.cs:RecoveryInstruction	ref>Avatar
 hop	I18n.cs:Tr	8a203871b0d0dc40	NativeUI.cs:RefreshTournaments	dispatch[case "voting"]{voting}>NativeUI.cs:RefreshTournaments
 hop	I18n.cs:Tr	8a45c09dfe148452	NativeUI.Settings.cs:BuildSettingsChrome	ref[UIFactory.SetTextNoHook(#1)]>NativeUI.Settings.cs:BuildSettingsChrome
 hop	I18n.cs:Tr	8a4d25f7e4014fb2	FfaMode.cs:OnGameStart	ref>FfaMode.cs:OnGameStart
+hop	I18n.cs:Tr	8a57edefec3425d5	CompetitiveUI.cs:DrawConsentDeclineConfirm	ref>CompetitiveUI.cs:DrawConsentDeclineConfirm
 hop	I18n.cs:Tr	8a6cd4ec9a5c7607	NativeUI.cs:GROUP_LABELS	entry[[3]]>NativeUI.cs:GROUP_LABELS
 hop	I18n.cs:Tr	8a70af23b8691602	NativeUI.SettingsDrive.cs:DriveT5e	ref>NativeUI.SettingsDrive.cs:DriveT5e
 hop	I18n.cs:Tr	8a918ddf893a944a	SpectatorHud.cs:DrawLeaveMenu	ref[GUI.Button(#1)]>SpectatorHud.cs:DrawLeaveMenu
@@ -16894,6 +16898,7 @@ hop	I18n.cs:Tr	a6700a75c6d465a1	PlayerCardsUI.cs:ReasonText	dispatch[case "rever
 hop	I18n.cs:Tr	a6c2cf36169c2070	ApiClient.cs:KickRefusalText	dispatch[case "cannot_kick_yourself"]{cannot_kick_yourself}>ApiClient.cs:KickRefusalText
 hop	I18n.cs:Tr	a6caefb2dff67063	SettingsDescriptors.g.cs:HelpBodyTr	dispatch[case "SInfoOpen"]{SInfoOpen}>SettingsDescriptors.g.cs:HelpBodyTr
 hop	I18n.cs:Tr	a6e0090eeca1d759	NativeUI.cs:BuildCardStatsTab	entry[[0]]>NativeUI.cs:BuildCardStatsTab
+hop	I18n.cs:Tr	a6eebcc349d38787	CompetitiveUI.cs:DrawConsentDeclineConfirm	ref[GUI.Label(#1)]>CompetitiveUI.cs:DrawConsentDeclineConfirm
 hop	I18n.cs:Tr	a704a831c40f5889	CompetitiveUI.cs:QcSend	ref[ShowNotification(#0)]>CompetitiveUI.cs:QcSend
 hop	I18n.cs:Tr	a71508ee07017df5	NativeUI.cs:TrKindWord	dispatch[case "utility"]{utility}>NativeUI.cs:TrKindWord
 hop	I18n.cs:Tr	a765fccfe7ac2f76	NativeUI.cs:BuildRecordHoverBody	ref[.Append(#0)]>NativeUI.cs:BuildRecordHoverBody
@@ -17006,6 +17011,7 @@ hop	I18n.cs:Tr	be8d634933040c4d	InfoViz.cs:BuildRankLadder	ref[Header(#2)]>InfoV
 hop	I18n.cs:Tr	bf36dae7ecbd3ba2	PlayerCardsUI.cs:RecentLine	ref>PlayerCardsUI.cs:RecentLine
 hop	I18n.cs:Tr	bf677292945148d5	NativeUI.cs:TrMetric	dispatch[case "Times Picked"]{Times Picked}>NativeUI.cs:TrMetric
 hop	I18n.cs:Tr	bf7b94018a997267	NativeUI.cs:TrMetric	dispatch[case "Avg Cards / Game"]{Avg Cards / Game}>NativeUI.cs:TrMetric
+hop	I18n.cs:Tr	bfe3f56f7a048b17	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	I18n.cs:Tr	bfe9e6b5a8285e42	NativeUI.Keybinds.cs:KeybindRowLabel	ref[case KeybindRules.ChatOverlayMode]>NativeUI.Keybinds.cs:KeybindRowLabel
 hop	I18n.cs:Tr	c0162b33ecbda877	TitleLaddersUI.cs:OnWearClicked	delegate[ApiClient.SetActiveTitle(#2=>)/=>{}/SetMsg(#0)]>TitleLaddersUI.cs:OnWearClicked
 hop	I18n.cs:Tr	c0522eeccbd515aa	NativeUI.cs:TrMetric	dispatch[case "FFA Elo"]{FFA Elo}>NativeUI.cs:TrMetric
@@ -17104,7 +17110,6 @@ hop	I18n.cs:Tr	d1617a2c2e74f85a	TeamHoldReturn.cs:End	ref>TeamHoldReturn.cs:End
 hop	I18n.cs:Tr	d178c0399695f12d	NativeUI.cs:RefreshTeamTab	ref[case ApiClient.TeamQueueState.Leaving]>NativeUI.cs:RefreshTeamTab
 hop	I18n.cs:Tr	d1a48bfbe4bd9b16	InfoLibrary.cs:AchievementsP2	ref>InfoLibrary.cs:AchievementsP2
 hop	I18n.cs:Tr	d1aaf947d3eb0553	NativeUI.cs:InactiveName	ref>NativeUI.cs:InactiveName
-hop	I18n.cs:Tr	d2182cc67f2c852f	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	I18n.cs:Tr	d233f618d6505c29	NativeUI.Keybinds.cs:KeybindKeyName	dispatch[case "Pad4"]{Pad4}>NativeUI.Keybinds.cs:KeybindKeyName
 hop	I18n.cs:Tr	d2584333d1661348	NativeUI.Keybinds.cs:KeybindOverlayCap	ref[case KeybindRules.MoveRight]>NativeUI.Keybinds.cs:KeybindOverlayCap
 hop	I18n.cs:Tr	d278b1e93d131aa5	NativeUI.Keybinds.cs:KeybindKeyName	dispatch[case "RightArrow"]{RightArrow}>NativeUI.Keybinds.cs:KeybindKeyName
@@ -22134,6 +22139,7 @@ hop	IdentityClockCore.cs:Open#1	cf877e7d885fe327	PlayerCardsUI.cs:DevSeedTiles	d
 hop	IdentityClockCore.cs:Open#1	d1996e88b57a5feb	PlayerCardsUI.cs:Refresh	delegate[openRoot.SetActive(#0)/&]>PlayerCardsUI.cs:Refresh
 hop	IdentityClockCore.cs:Open#1	d30a9d190b9bbe4f	PcQuickShardRules.cs:MeDemandCases	delegate[Check(#2)/&]>PcQuickShardRules.cs:MeDemandCases
 hop	IdentityClockCore.cs:Open#1	da2c92accc5dbeb6	PlayerCardsUI.cs:HandleAnswer	delegate[&]>PlayerCardsUI.cs:HandleAnswer
+hop	IdentityClockCore.cs:Open#1	db840bdf9458e3ba	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#1)/&]>LogSnapshot.cs:Write
 hop	IdentityClockCore.cs:Open#1	e54c15615cdb9617	field:PlayerCardsUI.cs:view	field[view]>PlayerCardsUI.cs:(file scope)
 hop	IdentityClockCore.cs:Open#1	e6545810b2df510c	CompetitiveUI.cs:OpenTopStrip	ref>CompetitiveUI.cs:OpenTopStrip
 hop	IdentityClockCore.cs:Open#1	ed429e62033fa264	PlayerCardsUI.cs:DevAct	delegate[&]>PlayerCardsUI.cs:DevAct
@@ -22145,6 +22151,7 @@ hop	IdentityClockCore.cs:Open#2	0650fff6de3237d6	IdentityClockCore.cs:GdigUnit	r
 hop	IdentityClockCore.cs:Open#2	0f51570ce641be55	MusicAssets.cs:ExtractAndVerify	ref>MusicAssets.cs:ExtractAndVerify
 hop	IdentityClockCore.cs:Open#2	1197462ac6cce9f9	TopStripBand.cs:SelfTest	ref>TopStripBand.cs:SelfTest
 hop	IdentityClockCore.cs:Open#2	1f84b93654a890a9	PlayerCardsUI.cs:MotionTick	delegate[&]>PlayerCardsUI.cs:MotionTick
+hop	IdentityClockCore.cs:Open#2	22da13082c53e94d	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#1)/&]>LogSnapshot.cs:Write
 hop	IdentityClockCore.cs:Open#2	2d05eb1c33abed2f	ChatClient.cs:SendLoop	delegate[&]>ChatClient.cs:SendLoop
 hop	IdentityClockCore.cs:Open#2	32e4d1f81d45df2c	DamageNumberRules.cs:Note	delegate[&]>DamageNumberRules.cs:Note
 hop	IdentityClockCore.cs:Open#2	38ff26574f998aec	DamageNumberRules.cs:Tick#1	delegate[&]>DamageNumberRules.cs:Tick#1
@@ -22195,6 +22202,7 @@ hop	IdentityClockCore.cs:Read#2	3f5e66db70909d02	NativeUI.cs:GetEmbeddedSprite	r
 hop	IdentityClockCore.cs:Read#2	405a21d15236cd72	LogBundleCore.cs:CaptureFile	delegate[new FileStream(#2)/&]>LogBundleCore.cs:CaptureFile
 hop	IdentityClockCore.cs:Read#2	4344384103b65340	ApiClient.cs:ReadLogTail	delegate[new System.IO.FileStream(#2)/&]>ApiClient.cs:ReadLogTail
 hop	IdentityClockCore.cs:Read#2	498a38a8c93798a7	LogBundleCore.cs:ReadExactly	ref>LogBundleCore.cs:ReadExactly
+hop	IdentityClockCore.cs:Read#2	4ca333ea3fb6425d	LogSnapshot.cs:CopyRange	ref>LogSnapshot.cs:CopyRange
 hop	IdentityClockCore.cs:Read#2	519faced5bacdc31	IdentityClockCore.cs:GdigUnit	ref>IdentityClockCore.cs:GdigUnit
 hop	IdentityClockCore.cs:Read#2	5bdf40bacaa8bf32	TeamGameNumber.cs:SimulateF29	ref>TeamGameNumber.cs:SimulateF29
 hop	IdentityClockCore.cs:Read#2	66a8ce1decf68d5a	ScrPng.cs:ReadFully	ref>ScrPng.cs:ReadFully
@@ -22216,6 +22224,7 @@ hop	IdentityClockCore.cs:Read#2	c2a094d5ad76c6e4	MusicAssets.cs:DownloadWithCap	
 hop	IdentityClockCore.cs:Read#2	c568808375962e4c	PortraitRender.cs:Run	ref>PortraitRender.cs:Run
 hop	IdentityClockCore.cs:Read#2	c784c74f2833ea6f	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
 hop	IdentityClockCore.cs:Read#2	ca52859db9f912dc	IdentityClockCore.cs:Bytes	ref>IdentityClockCore.cs:Bytes
+hop	IdentityClockCore.cs:Read#2	cac38c6499f87de0	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#2)/&]>LogSnapshot.cs:Write
 hop	IdentityClockCore.cs:Read#2	d3e262fa17a3c178	EmojiSprites.cs:DownloadOnce	ref>EmojiSprites.cs:DownloadOnce
 hop	IdentityClockCore.cs:Read#2	dd2c55288711bdbc	TeamGameNumber.cs:SimulateF27	ref>TeamGameNumber.cs:SimulateF27
 hop	IdentityClockCore.cs:Read#2	e5d5f83ca0703f15	IdentityClockEvidence.cs:CheckRun	ref>IdentityClockEvidence.cs:CheckRun
@@ -22224,6 +22233,7 @@ hop	IdentityClockCore.cs:Read#2	f0c0386298bf99df	TeamGameNumber.cs:SimulateF31En
 hop	IdentityClockCore.cs:Read#2	f2d97ebb169c3066	TeamGameNumber.cs:Ask	delegate[&]>TeamGameNumber.cs:Ask
 hop	IdentityClockCore.cs:Read#2	f3a335d18c04aab7	TeamGameNumber.cs:SimulateF30Sweep	ref>TeamGameNumber.cs:SimulateF30Sweep
 hop	IdentityClockCore.cs:Read#2	f9aea296c326c4e2	EmojiSprites.cs:ExtractAndVerify	delegate[new ZipArchive(#1)/&]>EmojiSprites.cs:ExtractAndVerify
+hop	IdentityClockCore.cs:Read#2	fab6388ac8cd4d7e	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#3)/&]>LogSnapshot.cs:Write
 hop	IdentityClockCore.cs:Read#2	fba1e6f01160e07b	TeamGameNumber.cs:ScoreRefusal	delegate[&]>TeamGameNumber.cs:ScoreRefusal
 hop	IdentityClockCore.cs:ReadStr	34286bf73b03ac25	IdentityClockCore.cs:SkipValue#2	ref>IdentityClockCore.cs:SkipValue#2
 hop	IdentityClockCore.cs:ReadStr	3afdd9332376e8b1	IdentityClockCore.cs:SeriesBodyShape	ref>IdentityClockCore.cs:SeriesBodyShape
@@ -24130,7 +24140,6 @@ hop	Keybinds.cs:KeyDown	56e761ebd6327fc7	CompetitiveUI.cs:DrawConfirm	delegate[&
 hop	Keybinds.cs:KeyDown	59a93175e5ab3bd5	CompetitiveUI.cs:DrawDanceWheel	delegate[&]>CompetitiveUI.cs:DrawDanceWheel
 hop	Keybinds.cs:KeyDown	60386987e18b04da	SpectatorHud.cs:Draw	delegate[&]>SpectatorHud.cs:Draw
 hop	Keybinds.cs:KeyDown	6a0589f2448d225f	CompetitiveUI.cs:DrawBugReportModal	delegate[&]>CompetitiveUI.cs:DrawBugReportModal
-hop	Keybinds.cs:KeyDown	6fe93322fb28aec6	CompetitiveUI.cs:DrawConsentModal	delegate[&]>CompetitiveUI.cs:DrawConsentModal
 hop	Keybinds.cs:KeyDown	7a33820dbe43d7c9	CompetitiveUI.cs:DrawLogViewerModal	delegate[&]>CompetitiveUI.cs:DrawLogViewerModal
 hop	Keybinds.cs:KeyDown	7cce07c75d58df1c	CompetitiveUI.cs:DrawArtistPicker	delegate[&]>CompetitiveUI.cs:DrawArtistPicker
 hop	Keybinds.cs:KeyDown	84fab9fac96405ae	KeybindRules.cs:Attribute#2	ref>KeybindRules.cs:Attribute#2
@@ -24141,6 +24150,7 @@ hop	Keybinds.cs:KeyDown	9618043d2f714fb4	CompetitiveUI.cs:DrawLfpPrompt	delegate
 hop	Keybinds.cs:KeyDown	ad0fd12d625f2d4a	CompetitiveUI.cs:DrawCosmeticTestPreview	delegate[&]>CompetitiveUI.cs:DrawCosmeticTestPreview
 hop	Keybinds.cs:KeyDown	ba7019819d4a66ff	MailUI.cs:DrawReportModal	delegate[&]>MailUI.cs:DrawReportModal
 hop	Keybinds.cs:KeyDown	bef7e45e5c795640	CompetitiveUI.cs:DrawAdminPrompt	delegate[&]>CompetitiveUI.cs:DrawAdminPrompt
+hop	Keybinds.cs:KeyDown	c27490d788ab843c	CompetitiveUI.cs:EatConsentInput	delegate[&]>CompetitiveUI.cs:EatConsentInput
 hop	Keybinds.cs:KeyDown	e8471c4b01eb58d4	CompetitiveUI.cs:DrawQuickChat	delegate[&]>CompetitiveUI.cs:DrawQuickChat
 hop	Keybinds.cs:KeyDown	f4550b41443eb6fb	Keybinds.cs:Matches	delegate[&]>Keybinds.cs:Matches
 hop	Keybinds.cs:KeyboardEdges	49e101914626484b	KeybindRules.cs:Attribute#2	ref>KeybindRules.cs:Attribute#2
@@ -25324,6 +25334,8 @@ hop	LogScrub.cs:SelfTest	4b7895d10ec487e3	AutoLogUpload.cs:EnsureStartup	ref>Aut
 hop	LogScrub.cs:SyntheticHex	2dda74dc3fd99431	LogScrub.cs:SelfTest	ref>LogScrub.cs:SelfTest
 hop	LogScrub.cs:TryRedactSteamTicketLine	8fa02570cbfbddd4	LogScrub.cs:SelfTest	ref>LogScrub.cs:SelfTest
 hop	LogScrub.cs:TryRedactSteamTicketLine	f0a5f96e137d3724	SteamTicketLogRedaction.cs:Prefix	ref>SteamTicketLogRedaction.cs:Prefix
+hop	LogSnapshot.cs:CopyRange	d0df6b11b22d879f	LogSnapshot.cs:Write	ref>LogSnapshot.cs:Write
+hop	LogSnapshot.cs:Write	66a124737d3d868a	Plugin.cs:Awake#1	delegate[=>{}]>Plugin.cs:Awake#1
 hop	MailClient.cs:DoPoll	4664e79707fa30f9	MailClient.cs:StatusLoop	ref>MailClient.cs:StatusLoop
 hop	MailClient.cs:DoPoll	9a9f591bbbf8c11c	MailClient.cs:PollNow	ref>MailClient.cs:PollNow
 hop	MailClient.cs:Elements	5c61f059123c3d03	MailClient.cs:ParsePage	ref>MailClient.cs:ParsePage
@@ -27004,6 +27016,7 @@ hop	NativeUI.cs:Claim#1	01bb065e589971ef	NativeUI.cs:ShowRecentTournamentsPopup	
 hop	NativeUI.cs:Claim#1	05d9559fa88e9f41	NativeUI.cs:WireButton	delegate[=>{}]>NativeUI.cs:WireButton
 hop	NativeUI.cs:Claim#1	119c8ea6524f4748	NativeUI.cs:ShowInfoPopup#2	delegate[=>{}]>NativeUI.cs:ShowInfoPopup#2
 hop	NativeUI.cs:Claim#1	172214941bed9ba4	NativeUI.cs:BuildSettingsTab	delegate[SettingsDestructive(#6=>)/=>{}]>NativeUI.cs:BuildSettingsTab
+hop	NativeUI.cs:Claim#1	239a0224ec82af76	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	NativeUI.cs:Claim#1	3ba69897b0463493	NativeUI.cs:CreateCardRow	delegate[=>{}]>NativeUI.cs:CreateCardRow
 hop	NativeUI.cs:Claim#1	3e50ecca3bf030a0	NativeUI.cs:CreateButton	delegate[=>{}]>NativeUI.cs:CreateButton
 hop	NativeUI.cs:Claim#1	4144632b44e309f6	NativeUI.cs:CreateTeamHistRow	delegate[=>{}]>NativeUI.cs:CreateTeamHistRow
@@ -27019,9 +27032,11 @@ hop	NativeUI.cs:Claim#1	d53c2f1cf27f76cc	PlayerCardsUI.cs:ShowCard	delegate[=>{}
 hop	NativeUI.cs:Claim#1	d6254ab38cdea1fb	NativeUI.cs:BuildTournamentsTab	delegate[=>{}]>NativeUI.cs:BuildTournamentsTab
 hop	NativeUI.cs:Claim#1	e9bfb47e99ff7f08	NativeUI.cs:CreateButton	delegate[new UnityEngine.Events.UnityAction(#0=>)/=>{}]>NativeUI.cs:CreateButton
 hop	NativeUI.cs:Claim#1	eb1eaf3ecbe1e4ec	NativeUI.cs:BuildUtilityPopup	delegate[=>{}]>NativeUI.cs:BuildUtilityPopup
+hop	NativeUI.cs:Claim#1	ee8345dce7040563	CompetitiveUI.cs:DrawConsentDeclineConfirm	ref>CompetitiveUI.cs:DrawConsentDeclineConfirm
 hop	NativeUI.cs:Claim#1	fd8523a7d36ed10e	NativeUI.cs:AddClick	delegate[=>{}]>NativeUI.cs:AddClick
 hop	NativeUI.cs:Claim#2	049ca323360381a5	NativeUI.cs:CreateTeamHistRow	delegate[=>{}]>NativeUI.cs:CreateTeamHistRow
 hop	NativeUI.cs:Claim#2	067d20ca90d16179	NativeUI.cs:BuildSettingsTab	delegate[SettingsDestructive(#6=>)/=>{}]>NativeUI.cs:BuildSettingsTab
+hop	NativeUI.cs:Claim#2	0a2d0b0d7f6c2213	CompetitiveUI.cs:DrawConsentDeclineConfirm	ref>CompetitiveUI.cs:DrawConsentDeclineConfirm
 hop	NativeUI.cs:Claim#2	233ddd3ec60c4545	PlayerCardsUI.cs:ShowCard	delegate[=>{}]>PlayerCardsUI.cs:ShowCard
 hop	NativeUI.cs:Claim#2	29908c3a82b275c9	NativeUI.cs:CreateLBRow	delegate[=>{}]>NativeUI.cs:CreateLBRow
 hop	NativeUI.cs:Claim#2	2fa8e6d7335d8e77	NativeUI.cs:ShowRecentTournamentsPopup	delegate[=>{}]>NativeUI.cs:ShowRecentTournamentsPopup
@@ -27036,6 +27051,7 @@ hop	NativeUI.cs:Claim#2	afa458d5a139e0f3	NativeUI.cs:BuildUtilityPopup	delegate[
 hop	NativeUI.cs:Claim#2	c1c2a49856b82438	NativeUI.cs:AddClick	delegate[=>{}]>NativeUI.cs:AddClick
 hop	NativeUI.cs:Claim#2	ca7137c6b53a6c5f	NativeUI.cs:ShowTournamentBetsPopup	delegate[=>{}]>NativeUI.cs:ShowTournamentBetsPopup
 hop	NativeUI.cs:Claim#2	d8707e6b08f0659b	NativeUI.cs:ShowCardPreview	delegate[=>{}]>NativeUI.cs:ShowCardPreview
+hop	NativeUI.cs:Claim#2	dbd8fe468aca2fcb	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	NativeUI.cs:Claim#2	ee322a7a56786080	PlayerCardsUI.cs:OnTileClick	ref>PlayerCardsUI.cs:OnTileClick
 hop	NativeUI.cs:Claim#2	ef569aac9560db01	NativeUI.cs:WireButton	delegate[=>{}]>NativeUI.cs:WireButton
 hop	NativeUI.cs:Claim#2	f3588f013ef90b14	NativeUI.cs:CreateButton	delegate[new UnityEngine.Events.UnityAction(#0=>)/=>{}]>NativeUI.cs:CreateButton
@@ -40441,6 +40457,7 @@ hop	PoisonLedgerCore.cs:Create	7dabeb11eb4d10dd	PortraitRenderDance.cs:DanceRun	
 hop	PoisonLedgerCore.cs:Create	821c904b65029216	GameStateWatcher.cs:MaybeSendLivePoints	ref>GameStateWatcher.cs:MaybeSendLivePoints
 hop	PoisonLedgerCore.cs:Create	84abff80ca862198	MailUI.cs:PlayMailSound	ref>MailUI.cs:PlayMailSound
 hop	PoisonLedgerCore.cs:Create	85dbff449a8b876a	PoisonLedgerCore.cs:OnHeader	ref>PoisonLedgerCore.cs:OnHeader
+hop	PoisonLedgerCore.cs:Create	872b40ba6f0ef04c	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#1)/&]>LogSnapshot.cs:Write
 hop	PoisonLedgerCore.cs:Create	87cfee229cc38f48	FfaMode.cs:DetectAheadPickIdentity	ref>FfaMode.cs:DetectAheadPickIdentity
 hop	PoisonLedgerCore.cs:Create	8fe1958b0d0db27f	PlayerCardMotionDev.cs:DevT51	ref>PlayerCardMotionDev.cs:DevT51
 hop	PoisonLedgerCore.cs:Create	9186fa078410962d	MusicAssets.cs:TryRepairUnmarkedTier	ref>MusicAssets.cs:TryRepairUnmarkedTier
@@ -41908,6 +41925,7 @@ hop	PortraitRender.cs:Read	2e70293371da8100	TeamGameNumber.cs:SimulateF30	ref>Te
 hop	PortraitRender.cs:Read	35e84bedb32ff17a	ScrPng.cs:DecodeBandsRgba8	ref>ScrPng.cs:DecodeBandsRgba8
 hop	PortraitRender.cs:Read	3ad63de25421020e	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
 hop	PortraitRender.cs:Read	3db93bb0b7f366ab	ScrPng.cs:ReadFully	ref>ScrPng.cs:ReadFully
+hop	PortraitRender.cs:Read	40b956161014fff8	LogSnapshot.cs:CopyRange	ref>LogSnapshot.cs:CopyRange
 hop	PortraitRender.cs:Read	62a28723dfbfc157	GameStateWatcher.cs:TickTeamToken	delegate[&]>GameStateWatcher.cs:TickTeamToken
 hop	PortraitRender.cs:Read	687a0891019e59a6	TeamGameNumber.cs:SimulateF29	ref>TeamGameNumber.cs:SimulateF29
 hop	PortraitRender.cs:Read	8083cf3c2774552f	IdentityClockCore.cs:GdigUnit	ref>IdentityClockCore.cs:GdigUnit
@@ -41916,6 +41934,7 @@ hop	PortraitRender.cs:Read	8408db3752a64d2c	PortraitRender.cs:Run	ref>PortraitRe
 hop	PortraitRender.cs:Read	856600b9aa7f49bf	IdentityClockCore.cs:Bytes	ref>IdentityClockCore.cs:Bytes
 hop	PortraitRender.cs:Read	89e18902393259b5	TeamGameNumber.cs:SimulateF30Sweep	ref>TeamGameNumber.cs:SimulateF30Sweep
 hop	PortraitRender.cs:Read	8c836de8e91c9562	MusicStreamProbe.cs:QuiesceTap	ref>MusicStreamProbe.cs:QuiesceTap
+hop	PortraitRender.cs:Read	8de669fc320685af	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#3)/&]>LogSnapshot.cs:Write
 hop	PortraitRender.cs:Read	9add679f3f54de64	CustomCosmetics.cs:ArtDownloadWorker	delegate[new System.IO.Compression.ZipArchive(#1)/&]>CustomCosmetics.cs:ArtDownloadWorker
 hop	PortraitRender.cs:Read	9e720568d258ff54	TeamGameNumber.cs:BeginGameToken	delegate[&]>TeamGameNumber.cs:BeginGameToken
 hop	PortraitRender.cs:Read	9f61075a3d2ab1b6	TeamGameNumber.cs:SimulateF28	ref>TeamGameNumber.cs:SimulateF28
@@ -41931,6 +41950,7 @@ hop	PortraitRender.cs:Read	e009ac053fbe6723	TeamGameNumber.cs:SimulateToken	ref>
 hop	PortraitRender.cs:Read	e0ab3b92c76e7bd3	MusicEngine.cs:SilentFrames	ref>MusicEngine.cs:SilentFrames
 hop	PortraitRender.cs:Read	e4922fdce2e0f067	MusicEngine.cs:FramesDelivered	ref>MusicEngine.cs:FramesDelivered
 hop	PortraitRender.cs:Read	e5657257970eed82	LogBundleCore.cs:ReadExactly	ref>LogBundleCore.cs:ReadExactly
+hop	PortraitRender.cs:Read	e6cb36396b2582f5	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#2)/&]>LogSnapshot.cs:Write
 hop	PortraitRender.cs:Read	f1bff9ca765c3db3	IdentityClockEvidence.cs:CheckRun	ref>IdentityClockEvidence.cs:CheckRun
 hop	PortraitRender.cs:Read	f83c59c1a0232b25	IdentityClockCore.cs:Read#2	ref>IdentityClockCore.cs:Read#2
 hop	PortraitRender.cs:Read	f8dc09a098f5028a	TeamGameNumber.cs:SimulateF31Entry	ref>TeamGameNumber.cs:SimulateF31Entry
@@ -52732,9 +52752,9 @@ hop	SeatEvidenceCore.cs:Percentile	e8b360404d86a12f	SeatEvidenceCore.cs:Five	ent
 hop	SeatEvidenceCore.cs:QueueHash	4ddf59a9d04c5280	SeatEvidenceCore.cs:ParseQueue	ref>SeatEvidenceCore.cs:ParseQueue
 hop	SeatEvidenceCore.cs:QueueHash	dc8f16607845815b	SeatEvidenceCore.cs:QueueText	ref>SeatEvidenceCore.cs:QueueText
 hop	SeatEvidenceCore.cs:Set#1	0c876d8eb8a39a27	SettingsDescriptorWriters.g.cs:InvokeReset	dispatch[case "SShake"]{SShake}>SettingsDescriptorWriters.g.cs:InvokeReset
-hop	SeatEvidenceCore.cs:Set#1	102e8fa218397f64	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	SeatEvidenceCore.cs:Set#1	14d53400053fbf5d	PoisonLedgerCore.cs:SameAs	delegate[&]>PoisonLedgerCore.cs:SameAs
 hop	SeatEvidenceCore.cs:Set#1	1abe0144b754d78c	PoisonLedgerCore.cs:Classify	delegate[&]>PoisonLedgerCore.cs:Classify
+hop	SeatEvidenceCore.cs:Set#1	1def0a3bcc0b8a1f	CompetitiveUI.cs:DrawConsentDeclineConfirm	ref>CompetitiveUI.cs:DrawConsentDeclineConfirm
 hop	SeatEvidenceCore.cs:Set#1	211a3659455bb87e	PoisonLedgerCore.cs:Life#2	entry[[5]/&]>PoisonLedgerCore.cs:Life#2
 hop	SeatEvidenceCore.cs:Set#1	215ed62e80b7e737	HitEvidence.cs:NoteSpawn	ref>HitEvidence.cs:NoteSpawn
 hop	SeatEvidenceCore.cs:Set#1	26b8fc202c343b29	PoisonSync.cs:SawAfter	ref>PoisonSync.cs:SawAfter
@@ -52747,6 +52767,7 @@ hop	SeatEvidenceCore.cs:Set#1	58da1a40d5859e06	PoisonLedgerCore.cs:OnPoint#2	del
 hop	SeatEvidenceCore.cs:Set#1	590c1945f564533b	PoisonLedgerCore.cs:Claim	entry[[8]/&]>PoisonLedgerCore.cs:Claim
 hop	SeatEvidenceCore.cs:Set#1	5c240cab32d392a3	SettingsDescriptorWriters.g.cs:InvokeReset	dispatch[case "SHpPrec"]{SHpPrec}>SettingsDescriptorWriters.g.cs:InvokeReset
 hop	SeatEvidenceCore.cs:Set#1	5e6cee81b328c618	NativeUI.cs:BuildSettingsTab	delegate[SettingsSegmented(#5=>)/=>{}]>NativeUI.cs:BuildSettingsTab
+hop	SeatEvidenceCore.cs:Set#1	69055190a5343ba3	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	SeatEvidenceCore.cs:Set#1	6cfe5d65aa270637	SettingsDescriptorWriters.g.cs:InvokeReset	dispatch[case "SChromAb"]{SChromAb}>SettingsDescriptorWriters.g.cs:InvokeReset
 hop	SeatEvidenceCore.cs:Set#1	8c3bc0530d55c945	PoisonSync.cs:NoteSilence	ref>PoisonSync.cs:NoteSilence
 hop	SeatEvidenceCore.cs:Set#1	91cc9807e2e2d59f	PoisonLedgerCore.cs:AdoptLife	delegate[&]>PoisonLedgerCore.cs:AdoptLife
@@ -52793,7 +52814,9 @@ hop	SeatEvidenceCore.cs:Set#2	8636a74f53c5fdfd	PoisonSync.cs:OnActivate	delegate
 hop	SeatEvidenceCore.cs:Set#2	894054fd163d12d7	PoisonLedgerCore.cs:Summary	entry[[5]/&]>PoisonLedgerCore.cs:Summary
 hop	SeatEvidenceCore.cs:Set#2	8b755d6d662e8e03	PoisonLedgerCore.cs:Classify	delegate[&]>PoisonLedgerCore.cs:Classify
 hop	SeatEvidenceCore.cs:Set#2	91373e1629f62bd5	FfaLateRules.cs:K45xiN7	delegate[&]>FfaLateRules.cs:K45xiN7
+hop	SeatEvidenceCore.cs:Set#2	946e8102307844ab	CompetitiveUI.cs:DrawConsentDeclineConfirm	ref>CompetitiveUI.cs:DrawConsentDeclineConfirm
 hop	SeatEvidenceCore.cs:Set#2	9546f93fba0d0e3f	NativeUI.cs:BuildFormGraph	delegate[UIFactory.CreateButton(#6=>)/=>{}]>NativeUI.cs:BuildFormGraph
+hop	SeatEvidenceCore.cs:Set#2	c205613e4fe7361f	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	SeatEvidenceCore.cs:Set#2	d25ad500b9ddd6b4	HitEvidence.cs:P	ref>HitEvidence.cs:P
 hop	SeatEvidenceCore.cs:Set#2	d37099d04a1a216b	CardDrawEvidenceCore.cs:Budget	ref>CardDrawEvidenceCore.cs:Budget
 hop	SeatEvidenceCore.cs:Set#2	d55ea97ad8125af5	SettingsDescriptorWriters.g.cs:InvokeReset	dispatch[case "SChromAb"]{SChromAb}>SettingsDescriptorWriters.g.cs:InvokeReset
@@ -52802,7 +52825,6 @@ hop	SeatEvidenceCore.cs:Set#2	e09ee7cf0d756862	NativeUI.cs:DrawCompareAxisContro
 hop	SeatEvidenceCore.cs:Set#2	e2926e25f2c1be98	SettingsDescriptorWriters.g.cs:InvokeReset	dispatch[case "SBloom"]{SBloom}>SettingsDescriptorWriters.g.cs:InvokeReset
 hop	SeatEvidenceCore.cs:Set#2	ec06adc0aae8ce8c	SettingsDescriptorWriters.g.cs:InvokeReset	dispatch[case "SHpPrec"]{SHpPrec}>SettingsDescriptorWriters.g.cs:InvokeReset
 hop	SeatEvidenceCore.cs:Set#2	ec4cbee49063e428	PoisonLedgerCore.cs:OnPoint#2	delegate[&]>PoisonLedgerCore.cs:OnPoint#2
-hop	SeatEvidenceCore.cs:Set#2	ee1c3cc756dbc601	CompetitiveUI.cs:DrawConsentModal	ref>CompetitiveUI.cs:DrawConsentModal
 hop	SeatEvidenceCore.cs:Set#2	f85ef25a1c142710	HitEvidence.cs:NoteSpawn	ref>HitEvidence.cs:NoteSpawn
 hop	SeatEvidenceCore.cs:Set#2	fcf5aeb41c664129	PoisonSync.cs:SawAfter	ref>PoisonSync.cs:SawAfter
 hop	SeatEvidenceCore.cs:Sha256Hex	66948483dddc16bf	CardDrawEvidenceCore.cs:Canonical	ref>CardDrawEvidenceCore.cs:Canonical
@@ -54010,10 +54032,10 @@ hop	TeamGameNumber.cs:File	89df6ecb6e186e03	TeamGameNumber.cs:Post	ref>TeamGameN
 hop	TeamGameNumber.cs:File	908b3ac215c1db7a	EmojiSprites.cs:ParseSheets	delegate[&]>EmojiSprites.cs:ParseSheets
 hop	TeamGameNumber.cs:File	90fdb87e0b817629	NativeUI.cs:ValidateAndNameCosmetic	delegate[&]>NativeUI.cs:ValidateAndNameCosmetic
 hop	TeamGameNumber.cs:File	921f9b42bde92efe	EmojiSprites.cs:Build	delegate[File.ReadAllBytes(#0)/Path.Combine(#1)/&]>EmojiSprites.cs:Build
+hop	TeamGameNumber.cs:File	9898c7dea5c80609	Plugin.cs:Awake#1	delegate[=>{}/&]>Plugin.cs:Awake#1
 hop	TeamGameNumber.cs:File	a1eb5f117c43f2e6	EmojiSprites.cs:ParseSheets	delegate[ReadString(#2)/&]>EmojiSprites.cs:ParseSheets
 hop	TeamGameNumber.cs:File	afbd26720db8a74d	CustomCosmetics.cs:BuildFromDisk	delegate[&]>CustomCosmetics.cs:BuildFromDisk
 hop	TeamGameNumber.cs:File	bf69d75a9dd83a77	NativeUI.cs:ExportTierListCoroutine	delegate[&]>NativeUI.cs:ExportTierListCoroutine
-hop	TeamGameNumber.cs:File	c14d1ca957efb61f	Plugin.cs:Awake#1	delegate[=>{}/&]>Plugin.cs:Awake#1
 hop	TeamGameNumber.cs:File	c84189d09a404e5f	EmojiSprites.cs:AtlasOnDisk	delegate[new FileInfo(#0)/Path.Combine(#1)/&]>EmojiSprites.cs:AtlasOnDisk
 hop	TeamGameNumber.cs:File	c9c9bb2d01bede00	NativeUI.cs:ValidateAndNameGifCosmetic	delegate[&]>NativeUI.cs:ValidateAndNameGifCosmetic
 hop	TeamGameNumber.cs:File	e2a0cf7b3108cf31	NametagFontRenderer.cs:EnsureBundleLoaded	delegate[&]>NametagFontRenderer.cs:EnsureBundleLoaded
@@ -54201,10 +54223,12 @@ hop	TeamGameNumber.cs:PrefixPublish	d0706055235ba3b5	TeamGameNumber.cs:SimulateF
 hop	TeamGameNumber.cs:QueryPair	0ea5ec7dac89acb6	TeamGameNumber.cs:RunSentinel	ref>TeamGameNumber.cs:RunSentinel
 hop	TeamGameNumber.cs:QueryPair	4b91db03a24dc3f5	ApiClient.cs:PostTeamLivePoints	ref>ApiClient.cs:PostTeamLivePoints
 hop	TeamGameNumber.cs:Read#1	0b405a3abf0830bd	MusicAssets.cs:DownloadWithCap	ref>MusicAssets.cs:DownloadWithCap
+hop	TeamGameNumber.cs:Read#1	1877582811970d2e	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#3)/&]>LogSnapshot.cs:Write
 hop	TeamGameNumber.cs:Read#1	1b88bcd624405664	TeamGameNumber.cs:SimulateF30	ref>TeamGameNumber.cs:SimulateF30
 hop	TeamGameNumber.cs:Read#1	1c0961cfc977f9e8	TeamGameNumber.cs:Simulate	ref>TeamGameNumber.cs:Simulate
 hop	TeamGameNumber.cs:Read#1	202948d7a0038f08	TeamGameNumber.cs:Ask	delegate[&]>TeamGameNumber.cs:Ask
 hop	TeamGameNumber.cs:Read#1	22ab9d5e22b435d8	ApiClient.cs:ReadLogTail	delegate[new System.IO.FileStream(#2)/&]>ApiClient.cs:ReadLogTail
+hop	TeamGameNumber.cs:Read#1	26642676108dcafe	LogSnapshot.cs:CopyRange	ref>LogSnapshot.cs:CopyRange
 hop	TeamGameNumber.cs:Read#1	279c9b2b2190307b	TeamGameNumber.cs:SimulateF27	ref>TeamGameNumber.cs:SimulateF27
 hop	TeamGameNumber.cs:Read#1	2e36517223e9fa86	TeamGameNumber.cs:SimulateF31#2	ref>TeamGameNumber.cs:SimulateF31#2
 hop	TeamGameNumber.cs:Read#1	30d26c5270144d80	EmojiSprites.cs:DownloadOnce	ref>EmojiSprites.cs:DownloadOnce
@@ -54235,6 +54259,7 @@ hop	TeamGameNumber.cs:Read#1	baba59563acc43b3	TeamGameNumber.cs:SimulateF30Sweep
 hop	TeamGameNumber.cs:Read#1	ca7b20564cc8d30b	IdentityClockCore.cs:LdirUnit	ref>IdentityClockCore.cs:LdirUnit
 hop	TeamGameNumber.cs:Read#1	ca8d86a238aab401	EmojiSprites.cs:ExtractAndVerify	delegate[new ZipArchive(#1)/&]>EmojiSprites.cs:ExtractAndVerify
 hop	TeamGameNumber.cs:Read#1	e151860b7b2110d5	TeamGameNumber.cs:SimulateF28	ref>TeamGameNumber.cs:SimulateF28
+hop	TeamGameNumber.cs:Read#1	e5bd53ace6d148c1	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#2)/&]>LogSnapshot.cs:Write
 hop	TeamGameNumber.cs:Read#1	e6339d016e597782	IdentityClockCore.cs:GdigUnit	ref>IdentityClockCore.cs:GdigUnit
 hop	TeamGameNumber.cs:Read#1	e6590489f4391626	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
 hop	TeamGameNumber.cs:Read#1	ec19cbb354dd9e51	TeamGameNumber.cs:SimulateF29	ref>TeamGameNumber.cs:SimulateF29
@@ -54266,6 +54291,7 @@ hop	TeamGameNumber.cs:Read#5	6fe90f60ec12ccf0	ScrPng.cs:ReadFully	ref>ScrPng.cs:
 hop	TeamGameNumber.cs:Read#5	73fe1198b692cd38	IdentityClockCore.cs:Open#1	delegate[new FileStream(#2)/&]>IdentityClockCore.cs:Open#1
 hop	TeamGameNumber.cs:Read#5	74e955bef5fa8032	TeamGameNumber.cs:SimulateF31#2	ref>TeamGameNumber.cs:SimulateF31#2
 hop	TeamGameNumber.cs:Read#5	74f06bc2695614d3	MusicEngine.cs:SilentFrames	ref>MusicEngine.cs:SilentFrames
+hop	TeamGameNumber.cs:Read#5	760d128227148f5e	LogSnapshot.cs:CopyRange	ref>LogSnapshot.cs:CopyRange
 hop	TeamGameNumber.cs:Read#5	78476af8c90367a5	TeamGameNumber.cs:SimulateF31Fresh	ref>TeamGameNumber.cs:SimulateF31Fresh
 hop	TeamGameNumber.cs:Read#5	8aeea2571def7695	EmojiSprites.cs:DownloadOnce	ref>EmojiSprites.cs:DownloadOnce
 hop	TeamGameNumber.cs:Read#5	8ff606d32c2f49b9	IdentityClockEvidence.cs:CheckRun	ref>IdentityClockEvidence.cs:CheckRun
@@ -54274,6 +54300,7 @@ hop	TeamGameNumber.cs:Read#5	a7f5c08a07b892b5	MusicAssets.cs:ExtractAndVerify	re
 hop	TeamGameNumber.cs:Read#5	bd3330c6b1c5b408	CustomCosmetics.cs:ArtDownloadWorker	delegate[new System.IO.Compression.ZipArchive(#1)/&]>CustomCosmetics.cs:ArtDownloadWorker
 hop	TeamGameNumber.cs:Read#5	c2a2c20f7c8a77ba	TeamGameNumber.cs:SimulateF28	ref>TeamGameNumber.cs:SimulateF28
 hop	TeamGameNumber.cs:Read#5	c2d2545c0f04c159	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
+hop	TeamGameNumber.cs:Read#5	c51fec7b86698d0e	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#2)/&]>LogSnapshot.cs:Write
 hop	TeamGameNumber.cs:Read#5	c578fe7f39c28dd0	TeamGameNumber.cs:SimulateF27	ref>TeamGameNumber.cs:SimulateF27
 hop	TeamGameNumber.cs:Read#5	c6576d3f84f4996d	TeamGameNumber.cs:Enter	ref>TeamGameNumber.cs:Enter
 hop	TeamGameNumber.cs:Read#5	cbb2f0e8292f1024	MusicStreamProbe.cs:QuiesceTap	ref>MusicStreamProbe.cs:QuiesceTap
@@ -54284,6 +54311,7 @@ hop	TeamGameNumber.cs:Read#5	e25022c8e6fd5637	MusicEngine.cs:FramesDelivered	ref
 hop	TeamGameNumber.cs:Read#5	e2f38d781369a6d1	TeamGameNumber.cs:SimulateF31Entry	ref>TeamGameNumber.cs:SimulateF31Entry
 hop	TeamGameNumber.cs:Read#5	e4f289ed86092024	TeamGameNumber.cs:SimulateToken	ref>TeamGameNumber.cs:SimulateToken
 hop	TeamGameNumber.cs:Read#5	e7257c0d0bc76c81	TeamGameNumber.cs:Ask	delegate[&]>TeamGameNumber.cs:Ask
+hop	TeamGameNumber.cs:Read#5	f24aa1e6be09ea39	LogSnapshot.cs:Write	delegate[new System.IO.FileStream(#3)/&]>LogSnapshot.cs:Write
 hop	TeamGameNumber.cs:Read#5	fd70e39aba59d3ee	NativeUI.cs:GetEmbeddedSprite	ref>NativeUI.cs:GetEmbeddedSprite
 hop	TeamGameNumber.cs:Rematch	3e9920f82edfea7d	TeamGameNumber.cs:SimulateF31Fresh	ref>TeamGameNumber.cs:SimulateF31Fresh
 hop	TeamGameNumber.cs:Rematch	475df2cdabe18a50	TeamGameNumber.cs:SimulateF31Entry	ref>TeamGameNumber.cs:SimulateF31Entry
@@ -64821,7 +64849,8 @@ member	CompetitiveUI.cs:DrawCardStatsSearch	c5e4c3de11aa8ee8
 member	CompetitiveUI.cs:DrawChatInput	a46fd4d07cfbec76
 member	CompetitiveUI.cs:DrawCompareSearch	9e2a117bbc26d1e5
 member	CompetitiveUI.cs:DrawConfirm	b55e6e48d72033ca
-member	CompetitiveUI.cs:DrawConsentModal	ace0b90f2740c4d0
+member	CompetitiveUI.cs:DrawConsentDeclineConfirm	9bd2bae0c51810c7
+member	CompetitiveUI.cs:DrawConsentModal	5cd6b1be675aade8
 member	CompetitiveUI.cs:DrawCosmeticReleaseQueue	c0314cec1278e397
 member	CompetitiveUI.cs:DrawCosmeticReview	83289a42895f7012
 member	CompetitiveUI.cs:DrawCosmeticTestPreview	dca78cd1eb61ea20
@@ -64867,6 +64896,7 @@ member	CompetitiveUI.cs:DrawTournamentBanner	014dd54c9d202fa4
 member	CompetitiveUI.cs:DrawUI	f8bdef5da5fd49f4
 member	CompetitiveUI.cs:DropChatOnAccountChange	32018ba7019de104
 member	CompetitiveUI.cs:DwSend	beba16deb9ad7e3a
+member	CompetitiveUI.cs:EatConsentInput	2272635d102a69be
 member	CompetitiveUI.cs:EnsureBugLogLayout	5739261e160aadf6
 member	CompetitiveUI.cs:EnsureFfaHudResources	31af789b017a3c4c
 member	CompetitiveUI.cs:EnsureTipLayout	8a3b36bb02274ba7
@@ -66422,6 +66452,8 @@ member	LogScrub.cs:Scrub#2	73a36f2dfa42488e
 member	LogScrub.cs:SelfTest	acd96d667b9e1a91
 member	LogScrub.cs:SyntheticHex	adb80fe2572c8a02
 member	LogScrub.cs:TryRedactSteamTicketLine	72fe5c5cad6065db
+member	LogSnapshot.cs:CopyRange	ce5e3c1e7fb736a1
+member	LogSnapshot.cs:Write	80d509c1594075fe
 member	MailClient.cs:DoPoll	da445512cc84e390
 member	MailClient.cs:Elements	0b572dcd11a86e8a
 member	MailClient.cs:ErrorDetail	57b10d9e3efea86e
@@ -68053,7 +68085,7 @@ member	Plugin.cs:ApplyPhysicalTintsForSku	928539a9f8f5e2d6
 member	Plugin.cs:Arrived	8d0281082740f361
 member	Plugin.cs:AttachPersistentCompanions	1f4834fa73674c7b
 member	Plugin.cs:Auto2v2SpawnCoroutine	bf0e8d544792bfb7
-member	Plugin.cs:Awake#1	2de617fb214fd3de
+member	Plugin.cs:Awake#1	d31e5feea547832c
 member	Plugin.cs:BuildDcPlan	3706f495964a910b
 member	Plugin.cs:CapBrightness	e5aa3ea0a748e529
 member	Plugin.cs:ChatOverlaySecondsLabel#1	d118941127d92392
@@ -68103,7 +68135,7 @@ member	Plugin.cs:LogLiveColorGrading	bb5665e40ac064b1
 member	Plugin.cs:MaybeRigDump	d6be30413707a2dd
 member	Plugin.cs:NextSpectatorCycleSku	2ec49c89f057eb66
 member	Plugin.cs:OnButtonClick	e869116bead1e742
-member	Plugin.cs:OnDestroy	e82e7b694954a7b5
+member	Plugin.cs:OnDestroy	0947e023a45a41fb
 member	Plugin.cs:OnDisconnected	252548aefb2ba074
 member	Plugin.cs:OnFriendListUpdate	2f653c0a33ccf8b1
 member	Plugin.cs:OnGUI	264f9497a4dacf60
@@ -69725,12 +69757,12 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	5412be93d9435cb0	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	5916	57385	e26ae6ed7164a332	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	5916	57385	e26ae6ed7164a332	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	5916	57385	e26ae6ed7164a332	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	5916	57385	e26ae6ed7164a332	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	5916	57385	e26ae6ed7164a332	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	5916	57385	e26ae6ed7164a332	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	5920	57413	fff1147d6286976e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	5920	57413	fff1147d6286976e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	5920	57413	fff1147d6286976e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	5920	57413	fff1147d6286976e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	5920	57413	fff1147d6286976e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	5920	57413	fff1147d6286976e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:OnRoundStart	9	9	fc1f4abd24c0772a	attached	GameStateWatcher.cs:PollMatchState
