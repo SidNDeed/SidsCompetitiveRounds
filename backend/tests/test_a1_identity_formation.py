@@ -4887,8 +4887,8 @@ def _r7_src(name):
     return _textwrap.dedent(_inspect.getsource(getattr(main, name)))
 
 
-# Round 9 (G2, G3): queue_poll's admission refusal (main.py:20552), its
-# success commit (:20554) and the lease acquire both stand under.
+# Round 9 (G2, G3): queue_poll's admission refusal (main.py:20745), its
+# success commit (:20747) and the lease acquire both stand under.
 _R9_Q_ADMISSION = ("            await db.rollback()\n"
                    "            raise HTTPException(status_code=503, "
                    "detail=\"admission_contended\")\n")
@@ -5012,7 +5012,7 @@ def _r7_programs():
              "        return None\n\n\n"
              "class Evil(tuple, metaclass=Meta):\n    __new__ = _Nt.__new__\n",))),
         # round 9 (ruling REHEARSAL-R8-A1, G2): the reviewer's live mutant, a
-        # commit in place of the admission refusal's rollback (main.py:20552)
+        # commit in place of the admission refusal's rollback (main.py:20745)
         ("r8 grammar_shapes_a1:2106 a commit in place of the admission "
          "refusal's rollback", "return",
          _r7_put(q, _R9_Q_ADMISSION, _R9_Q_ADMISSION.replace(
@@ -5419,8 +5419,8 @@ def test_r9_the_gate_receiver_chain_is_checked():
 def test_r9_queue_poll_refusals_roll_back():
     """Production conformation (round 9, ruling REHEARSAL-R8-A1, G2; finding
     grammar_shapes_a1:2106). queue_poll's two committing refusals, the
-    pair-inversion give-up (main.py:20059) and the formation loop's
-    status re-read (:20446), each `await db.commit()` then `raise
+    pair-inversion give-up (main.py:20252) and the formation loop's
+    status re-read (:20639), each `await db.commit()` then `raise
     HTTPException(503, "queue_contended")`, now roll back: their
     transactions hold only reads and locks since the last end (the
     discovery and identity locks of the inversion loop; the loop's own
@@ -5676,7 +5676,7 @@ def test_r8_frozen_callee_picks_one_name_of_a_frozen_statement():
 # --- round 8, M1: the static S analysis retired; a frozen execute lookup ----
 # Ruling REHEARSAL-FOUR-R7-A1 M1 and W30b's rulings (a) and (b): an execute
 # is 'read' only at a ro_covered.COVERED position whose OUTCOME is 'ok';
-# WRITERS (main.py:16839 and :51703 included: grammar/lookup writers, not
+# WRITERS (main.py:16867 and :51896 included: grammar/lookup writers, not
 # role-bound), the covered positions the role did not reach, and every
 # position in neither table are 'write'.
 
@@ -5691,7 +5691,7 @@ _SR_RETIRED = ("SqlLists", "_SQL_END_WORDS", "_SQL_OTHER_COMMANDS", "_DML",
 def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
     """The lookup, position by position (ruling R-A): every COVERED
     position whose OUTCOME is green reads; every WRITERS position locks
-    (main.py:16839 and :51703 named: 'ok' under the role, so the walk's lock
+    (main.py:16867 and :51896 named: 'ok' under the role, so the walk's lock
     rule alone bounds them); every other COVERED position (the reads the
     role did not reach) and a real execute in no table is a write; the key
     holds the file (a WRITERS line under another file's name is a write)."""

@@ -23,9 +23,9 @@ REHEARSAL-FOUR-R7-A1 M1, R7-A2).
    claim; each is a QUESTION in the hand-back). Each WRITERS position the
    drivers reach must equal WRITER_OUTCOME: refused (25006), the writer
    proof by the role, or, for the two statements the role cannot refuse,
-   the effect the harness measures: main.py:16839, a transaction-local
+   the effect the harness measures: main.py:16867, a transaction-local
    set_config of lock_timeout, ('continuity', the changed setting) by the
-   round-10 residue reading, and main.py:51703, pg_advisory_xact_lock,
+   round-10 residue reading, and main.py:51896, pg_advisory_xact_lock,
    ('lock', advisory) by the lock read.
 
 4. Transaction continuity (ruling REHEARSAL-R9-A1 (B)): every measured
@@ -431,8 +431,8 @@ LOCK_TARGETS = frozenset(e[1:4] for e in ro_covered.COVERED + ro_covered.WRITERS
 class _Planting:
     """A control's session: at a production site named in
     self.info['plant'] ({(file, line): plant}) the statement the position
-    runs is the planted one, the way the round-8 report changed main.py:16871
-    and :16828 (main.py itself is never changed: the program a position runs
+    runs is the planted one, the way the round-8 report changed main.py:16899
+    and :16856 (main.py itself is never changed: the program a position runs
     is the harness's input). A plant is SQL text (run with no parameters in
     place of the production statement), or a planted PROGRAM: an async
     callable (ex, statement, params) whose statements run at the position,
@@ -494,7 +494,7 @@ LOCK_CONTROLS = (
 # session's continuity bracket. A planted program `_then_own(sql)` runs `sql`
 # and then the position's own production statement, so the program continues
 # exactly as written (the round-9 report's case: COMMIT AND CHAIN at
-# main.py:16828, the drivers then return normally).
+# main.py:16856, the drivers then return normally).
 
 def _then_own(sql):
     async def program(ex, statement, params):
@@ -593,7 +593,7 @@ CONTINUITY_CONTROLS = (
     # and with a zero delta, in the replacement transaction)
     ("chain_at_16871_then_16886_under_grant", "main._lease_admission_gate", E_16886,
      _then_own("COMMIT AND CHAIN"), ("UPDATE players",),
-     ("continuity", {"after txn ended at main.py:16871"})),
+     ("continuity", {"after txn ended at main.py:16899"})),
     # the negative control: the same bracket, nothing planted
     ("unplanted_16828_under_role", "main._lease_admission_gate empty", E_16828,
      None, None, ("ok", set())),
@@ -601,7 +601,7 @@ CONTINUITY_CONTROLS = (
     # (the 16.9 probes, RF11 logs r11-res-probe-55432-20261106T065356Z.log and
     # r11-res-probe2-55432-20261106T090205Z.log). The round-10 report's case
     # (ro_covered.py:515): a session-scope custom placeholder at
-    # main.py:16828, both drivers and the replacing route; then one control
+    # main.py:16856, both drivers and the replacing route; then one control
     # per route, each refused by that route alone (R11_EXACT): the text
     # reading (a session set_config of '', and setseed, which no reading of
     # the session moves), the placeholder reading (a transaction-local
@@ -1115,7 +1115,7 @@ def test_continuity_control(runs, name):
 @pytest.mark.parametrize("driver", ["role", "grant", "replaces_role", "replaces_grant"])
 def test_r10_n_ro_covered_488_commit_and_chain_at_16828_refused(runs, driver):
     """The round-9 report's case (ro_covered.py:488): `COMMIT AND CHAIN` at
-    main.py:16828 must not classify as a read; the lock and counter
+    main.py:16856 must not classify as a read; the lock and counter
     measurements must not read the replacement transaction. Executed at the
     control's route (a planted program at the position: COMMIT AND CHAIN,
     then the position's own statement; main.py unchanged), under the
@@ -1151,7 +1151,7 @@ def test_r10_driver_connections_discarded(runs):
 @pytest.mark.parametrize("driver", ["role", "grant", "replaces_role"])
 def test_r11_n_ro_covered_515_hidden_set_config_at_16828_refused(runs, driver):
     """The round-10 report's case (ro_covered.py:515): `SELECT
-    set_config('rf10.hidden','yes',false)` at main.py:16828 must refuse as
+    set_config('rf10.hidden','yes',false)` at main.py:16856 must refuse as
     session residue; pg_settings had no row for such a placeholder on 16.9
     (RF11 log r11-res-probe-55432-20261106T065356Z.log). Executed at the
     control's route (planted program then the position's own statement, and

@@ -16,7 +16,7 @@ sweep of every production statement that sets a setting, and, on the
 cluster CF_TEST_PG_DSN names (never skipped), the pg_settings answer itself,
 the GREEN control (a transaction-local set_config inside an ended
 transaction leaves nothing) and its session-scope counterpart. The driver
-controls (the report's case at main.py:16828 and one control per route) are
+controls (the report's case at main.py:16856 and one control per route) are
 in test_r8_ro_covered_pg.py.
 """
 
