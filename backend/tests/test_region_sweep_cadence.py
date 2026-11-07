@@ -294,3 +294,21 @@ def test_a_sweep_in_flight_is_never_silently_replaced():
     assert guard.start() < assign, (
         "the in-flight guard runs after the replacement it exists to prevent"
     )
+
+
+def test_the_room_window_is_the_acceptance_bound_and_the_header_cap_lies_inside_it():
+    """Since 2026-11-05 the 1v1 room decision reads REGION_PINGS_ROOM_MAX_AGE_S
+    (the acceptance bound), no longer the 180 s window the tests above pin.
+    Those inequalities still say what they said about the poll header and the
+    group picker, which read REGION_PINGS_ISSUANCE_MAX_AGE_S; for the 1v1 room
+    they are now sufficient rather than necessary, because a header the client
+    is willing to send is always inside the room window. Both constants are
+    READ here, and so is the function that applies one of them."""
+    import inspect
+
+    reader = inspect.getsource(main._region_pings_at_issuance)
+    assert "REGION_PINGS_ROOM_MAX_AGE_S" in reader
+    assert "REGION_PINGS_ISSUANCE_MAX_AGE_S" not in reader
+    assert main.REGION_PINGS_ROOM_MAX_AGE_S == main.REGION_PINGS_MAX_AGE_S
+    assert main.REGION_PINGS_ISSUANCE_MAX_AGE_S < main.REGION_PINGS_ROOM_MAX_AGE_S
+    assert _const("const float HEADER_MAX_AGE_S") <= float(main.REGION_PINGS_ROOM_MAX_AGE_S)
