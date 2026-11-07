@@ -621,6 +621,12 @@ COMPOSED = {
         'MAPPED bets ledger, team arm bet_on_name: ServerTextRules.BetOnName -> "Team {0}"',
     ('admin_evidence.py', 'branches', 'UNION ALL'):
         'query text, not a label',
+    ('admin_evidence.py', 'games', 'SELECT stable game key pair lo pair hi match id FROM WHERE stable game'):
+        'query text, not a label',
+    ('admin_evidence.py', 'keys', 'SELECT DISTINCT stable game key FROM WHERE attach key ANY CAST rooms A'):
+        'query text, not a label',
+    ('admin_evidence.py', 'records', 'SELECT stable game key attach key seat player id other player id confl'):
+        'query text, not a label',
     ('card_evidence.py', 'k', 'card daily'):
         'an internal cache, limit or room key, never shown',
     ('card_evidence.py', 'k', 'card evidence'):
