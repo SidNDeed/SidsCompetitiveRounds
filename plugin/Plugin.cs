@@ -337,13 +337,59 @@ namespace CompetitiveRounds
         private static bool spawned = false;
         internal static bool modDisabled = false;
         // The application is shutting down: set by the first Application.quitting
-        // hook (before any quit-time work) and by OnApplicationQuit on the host.
-        // OnDestroy reads it: nothing may be created during Unity's teardown. The
-        // respawn there attached the letterbox clearing camera (d6f5ce9f) to a new
-        // object inside the teardown and the player crashed on every quit since
-        // (output_log: Destroyed -> Respawned -> Crash!!!), which left the crash
-        // handler running after the window was gone.
+        // hook, before any other quit-time work, and nowhere else. Unity raises
+        // Application.quitting only for a quit that can no longer be cancelled,
+        // so the flag never becomes true while the game continues (a vetoed
+        // wantsToQuit never reaches it). OnDestroy reads it: nothing may be
+        // created during Unity's teardown. The respawn there attached the
+        // letterbox clearing camera (d6f5ce9f) to a new object inside the
+        // teardown in every retained crashed session (output_log: Destroyed ->
+        // Respawned -> Crash!!!); the crash itself came from the keyboard-event
+        // message hook (Keybinds.KeyboardEvents.Uninstall), and this gate is
+        // teardown hygiene.
         internal static volatile bool Quitting = false;
+
+        /// <summary>The quit-time copy of the BepInEx log, bounded: a log of at
+        /// most SNAPSHOT_CAP bytes is copied whole; a longer one keeps its first
+        /// SNAPSHOT_HEAD bytes (the banner, the plugin list) and its last
+        /// SNAPSHOT_CAP - SNAPSHOT_HEAD bytes with a marker line naming the omitted
+        /// byte range, so the copy on Unity's main thread at quit never reads more
+        /// than SNAPSHOT_CAP bytes however long the session was. One code path for
+        /// both cases. The bug-report bundle reads the result through its own capped
+        /// head-and-tail reader (LogBundleCore.ReadCapped).</summary>
+        internal const long SNAPSHOT_CAP = 8L * 1024 * 1024;
+        internal const int SNAPSHOT_HEAD = 64 * 1024;
+        internal static void SnapshotLog(string src, string dst)
+        {
+            var buf = new byte[64 * 1024];
+            using (var input = new System.IO.FileStream(src, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                                                        System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete))
+            using (var output = new System.IO.FileStream(dst, System.IO.FileMode.Create, System.IO.FileAccess.Write,
+                                                         System.IO.FileShare.Read))
+            {
+                long len = input.Length;
+                if (len <= SNAPSHOT_CAP) { CopyRange(input, output, 0, len, buf); return; }
+                long tailStart = len - (SNAPSHOT_CAP - SNAPSHOT_HEAD);
+                CopyRange(input, output, 0, SNAPSHOT_HEAD, buf);
+                byte[] marker = System.Text.Encoding.UTF8.GetBytes(
+                    "\n[BUG-REPORT] snapshot bounded at quit: bytes " + SNAPSHOT_HEAD + " to " + tailStart
+                    + " of " + len + " omitted (cap " + SNAPSHOT_CAP + ")\n");
+                output.Write(marker, 0, marker.Length);
+                CopyRange(input, output, tailStart, len - tailStart, buf);
+            }
+        }
+
+        private static void CopyRange(System.IO.FileStream input, System.IO.FileStream output, long offset, long count, byte[] buf)
+        {
+            input.Position = offset;
+            while (count > 0)
+            {
+                int n = input.Read(buf, 0, (int)System.Math.Min(buf.Length, count));
+                if (n <= 0) break;   // the writer truncated it meanwhile: keep what was read
+                output.Write(buf, 0, n);
+                count -= n;
+            }
+        }
         /// <summary>True once DoInitialize's other-mods check has produced its
         /// verdict (either way). GrowNormalize refuses to advertise cr_grow2
         /// before this — an advertise-then-revoke-in-room sequence reaches
@@ -535,7 +581,7 @@ namespace CompetitiveRounds
                         string dst = CompetitiveUI.BepInExLogPreviousPath();
                         if (!string.IsNullOrEmpty(src) && !string.IsNullOrEmpty(dst) && System.IO.File.Exists(src))
                         {
-                            System.IO.File.Copy(src, dst, overwrite: true);
+                            SnapshotLog(src, dst);   // bounded: at most SNAPSHOT_CAP bytes read on the main thread
                             Log.LogInfo($"[BUG-REPORT] log snapshot saved: {dst}");
                         }
                     }
@@ -4049,15 +4095,6 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>Unity sends this to every live behaviour before it destroys
-        /// them at shutdown; the Application.quitting hook sets the same flag, and
-        /// whichever reaches OnDestroy first is enough.</summary>
-        private void OnApplicationQuit()
-        {
-            Plugin.Quitting = true;
-            try { Keybinds.KeyboardEvents.Uninstall(); } catch { }
-        }
-
         private void OnDestroy()
         {
             // First, and on its own: the portrait renderer releases a run this
@@ -4070,9 +4107,14 @@ namespace CompetitiveRounds
             if (Plugin.Quitting)
             {
                 // Application shutdown destroys this host too, and nothing may be
-                // created now: the respawn below ran inside Unity's teardown and the
-                // player crashed on every quit (output_log: Destroyed -> Respawned
-                // -> Crash!!!). A scene change is the only destroy that respawns.
+                // created now: the respawn below ran inside Unity's teardown in every
+                // retained crashed session (output_log: Destroyed -> Respawned ->
+                // Crash!!!). Gating it alone did not stop the crash, which the
+                // keyboard-event message hook caused; this gate is teardown hygiene.
+                // Every other destroy (a scene change, an explicit destroy during
+                // play) respawns below as before. The hook's removal is retried here
+                // once when the quitting hook's attempt failed (a no-op after success).
+                try { Keybinds.KeyboardEvents.Uninstall(); } catch { }
                 Plugin.Log.LogInfo("[PERSIST] host destroyed at application quit; no respawn");
                 return;
             }
