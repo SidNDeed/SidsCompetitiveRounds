@@ -2190,8 +2190,8 @@ def _game_records(src, data, game):
 
 
 def _utc_day(ended):
-    """A match's UTC end day: the day the workers stamp on its contributions
-    (combat_evidence._write_contributions, card_evidence's utc_day)."""
+    """A match's UTC end day: the day combat_evidence._write_contributions
+    stamps on the contributions it derives for that match (:424-425)."""
     if ended.tzinfo is not None:
         ended = ended.astimezone(_dt.timezone.utc)
     return ended.date()
@@ -2210,8 +2210,8 @@ def _combat_derived_here(c, game, derived_from):
     from a record whose attach key IS the attached match's room (:356-358),
     stamped with that match's UTC end day (`utc_day`, :424-425), in a
     transaction that began after that match ended (the attach query admits
-    only ended matches; computed_at is the transaction's now()). All four
-    must agree with this game: the record is one of the game's records under
+    only ended matches; computed_at is the transaction's now()). Each must
+    agree with this game: the record is one of the game's records under
     the contribution's own identity naming the game's room, the day is the
     game's UTC end day, and computed_at is not before the game ended."""
     ended = game.get("ended")
