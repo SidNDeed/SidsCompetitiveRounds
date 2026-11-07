@@ -106,6 +106,21 @@ def api_fields(body):
                         for slot in ae.AER_WIRE["1a"]["seat"]]
         for fi, f in enumerate(g["flags"]):
             out += [("games", gi, "flags", fi, k) for k in f]
+        # Phase 2 (B10): every leaf of each evidence section, facts as
+        # [name, value] pairs.
+        for xi, sec in enumerate(g.get("sections", [])):
+            at = ("games", gi, "sections", xi)
+            out += [at + (k,) for k in ("src", "state", "truncated")]
+            out += [at + ("game", i, j) for i in range(len(sec["game"])) for j in (0, 1)]
+            for si, seat in enumerate(sec["seats"]):
+                out += [at + ("seats", si, "subject"), at + ("seats", si, "state")]
+                out += [at + ("seats", si, "facts", i, j)
+                        for i in range(len(seat["facts"])) for j in (0, 1)]
+    for xi, sec in enumerate(body.get("sections_summary", [])):
+        at = ("sections_summary", xi)
+        out += [at + (k,) for k in ("oi", "src", "state", "truncated")]
+        out += [at + (part, i, j) for part in ("facts", "days30")
+                for i in range(len(sec[part])) for j in (0, 1)]
     for wi, w in enumerate(body.get("windows", [])):
         out += [("windows", wi, k) for k in w]
     for si, s in enumerate(body.get("summary", [])):
@@ -241,7 +256,8 @@ while True:
         time.sleep(600)
     png = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) + b"fake"
     reply = {"png": base64.b64encode(png).decode("ascii"),
-             "drawn": [[i, t, [0, 0, 1, 1]] for i, (k, t) in enumerate(plan)]}
+             "drawn": [[i, t, [0, 0, 1, 1]] for i, (k, t) in enumerate(plan)],
+             "width": 1400}
     data = json.dumps(reply).encode("utf-8")
     out.write(len(data).to_bytes(4, "big") + data)
     out.flush()
@@ -395,3 +411,17 @@ def test_p12_p14_the_png_draws_the_plan_on_fixed_chrome():
             assert height0 == pytest.approx(height1), (height0, height1)
         status = next(i for i in plan if i.kind == "status")
         assert status.text.startswith("STATUS UNCOLORED (absent)")
+    # B10-R1 M1: every drawn box lies inside the image's width, wrapped
+    # section facts with a whole 64-character profile included (the bot's
+    # `_aer_render` refuses a drawing that reaches past it), and one fact
+    # longer than a facts line is drawn past the edge, the case that check
+    # sends to the text fallback.
+    from test_admin_evidence_sections_r1 import _long_body, _profile
+    page = ns["_aer_decode_response"](_long_body(_profile("p14"), 3), "1a")
+    plan = ns["_aer_plan"](page)
+    png, drawn = worker.render([(i.kind, i.text) for i in plan])
+    assert mpimg.imread(io.BytesIO(png)).shape[1] == worker.WIDTH_PX
+    outside = [(t, b) for _i, t, b in drawn if not (0 <= b[0] and b[2] <= worker.WIDTH_PX)]
+    assert outside == [], outside[:2]
+    _png, over = worker.render([("facts", "x" * 2 * ns["AER_FACTS_LINE_CHARS"])])
+    assert over[0][2][2] > worker.WIDTH_PX, over

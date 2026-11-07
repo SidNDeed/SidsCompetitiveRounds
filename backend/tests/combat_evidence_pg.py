@@ -30,6 +30,7 @@ import seat_evidence_pg as sp  # noqa: E402
 M390_NAME = "390_combat_evidence.sql"
 M390 = os.path.join(cf_pg.SQL_DIR, M390_NAME)
 R390 = os.path.join(cf_pg.SQL_DIR, "rollback_390_combat_evidence.sql")
+M401 = os.path.join(cf_pg.SQL_DIR, sp.M401_NAME)
 CEV_TABLES = ("combat_contrib", "combat_evidence", "combat_games", "combat_player_daily")
 CEV_SWITCHES = ("combat_evidence_accept", "combat_evidence_purge", "combat_evidence_worker")
 
@@ -42,6 +43,13 @@ def read_390():
 
 def read_rollback():
     return io.open(R390, encoding="utf-8").read()
+
+
+def read_401():
+    """The contribution provenance migration (combat_contrib.match_id and the
+    two match_id indexes): held out of the seat build with 370 and 390, run
+    whole after the 390 cycle, twice, the order production takes."""
+    return io.open(M401, encoding="utf-8").read()
 
 
 M370 = os.path.join(cf_pg.SQL_DIR, sp.M370_NAME)
@@ -118,8 +126,13 @@ async def build(case, dsn):
     await conn.execute(read_390())
     fourth = await snapshot(conn)
     await conn.execute("DELETE FROM seat_evidence_findings WHERE rules_rev = 'r0000plant'")
+    await conn.execute(read_401())
+    m401 = await snapshot(conn)
+    await conn.execute(read_401())
+    m401_again = await snapshot(conn)
     return {"before": before, "first": first, "again": again, "rolled": rolled, "third": third,
-            "planted": planted, "planted_rolled": planted_rolled, "fourth": fourth}
+            "planted": planted, "planted_rolled": planted_rolled, "fourth": fourth,
+            "m401": m401, "m401_again": m401_again}
 
 
 # (scope, dedup key, rule id) planted around the namespace cycle. Seat keys

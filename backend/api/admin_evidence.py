@@ -76,6 +76,14 @@ AER_CONTRACT_BOUNDS = {
     "RATE_MAX": 20,
     "RATE_WINDOW_S": 600,
     "ACTOR_ID_MAX_DIGITS": 32,
+    # Evidence sections (phase 2, B10): the per-statement row limits of the
+    # card, combat and identity-clock reads, the contribution rows shown per
+    # seat of a game, and the longest fact name.
+    "SECTION_KEYS_MAX": 64,
+    "SECTION_ROWS_MAX": 512,
+    "SECTION_CONTRIB_MAX": 4,
+    "SECTION_DAILY_ROWS_MAX": 512,
+    "FACT_NAME_MAX": 48,
 }
 
 DISPLAY_DEFAULTS = {
@@ -1605,7 +1613,7 @@ SELECT f.id, f.match_id, f.flag_reason, f.flag_details, f.reviewed_at, f.created
  WHERE f.match_id = ANY(CAST(:ids AS uuid[]))
  ORDER BY f.id"""
 
-GAME_ROWS_SQL = ("SELECT %s, m.p1_rounds_won, m.p2_rounds_won FROM matches m "
+GAME_ROWS_SQL = ("SELECT %s, m.p1_rounds_won, m.p2_rounds_won, m.photon_room_id FROM matches m "
                  "WHERE m.id = ANY(CAST(:ids AS uuid[]))" % _SELECT_LIST)
 
 AUDIT_SQL = """
@@ -1885,6 +1893,575 @@ async def _summary_page(rep, shape, rows, requested, subjects, accounts):
     return windows, summary, win_at
 
 
+# ── Evidence sections (phase 2, B10) ───────────────────────────────────────
+#
+# The report also reads the card-draw, combat and identity-clock evidence
+# tables and shows what they store, under the stored column names (a combat
+# sums entry under its stored key). Uncolored, as 1a: no class, no rank, no
+# rule, and no rules revision id is shown. Each source is read inside its own
+# SAVEPOINT, so a failed read leaves that section `unavailable` and the
+# transaction usable for the rest of the page (a caught asyncpg error would
+# otherwise end it, lesson 235).
+
+# A page carries sections only when the caller asks for them: a 1a caller
+# (an older bot) receives a body with no section key and a 1a audit row, so
+# either deploy order of the api and the bot serves every page.
+SECTIONS_HEADER = "X-Evidence-Sections"
+SECTIONS_PHASE = "2"
+SECTION_SOURCES = ("card", "combat", "identity_clock")
+SECTION_STATES = ("ok", "no_record", "unavailable")
+SECTION_SEAT_STATES = ("ok", "no_record", "conflict", "purged")
+SECTION_SWITCHES = ("accept", "worker", "purge")
+# A seat's contribution groups: `contribN.` the contributions whose stored
+# match_id is the game's match (shown and totalled), `unattributedN.` the
+# combat contributions under the game's identity whose stored match_id is
+# not (another match's, or NULL from before migration 401: shown, in no
+# total; B10-R2 H1, B10-R3 H1).
+SECTION_CONTRIB_WORDS = ("contrib", "unattributed")
+_CARD_COUNTERS = ("hands", "slots", "notrun_hands") + tuple(
+    "%s_%s" % (m, r) for m in ("obs", "exp", "var") for r in ("common", "uncommon", "rare"))
+_SECTION_SPEC = {
+    "card": {"ev": "card_evidence", "games": "card_games", "contrib": "card_contrib",
+             "daily": "card_player_daily", "day": "day", "by_match": True,
+             "seat": ("pool_state", "deal_profile", "header_mod_version", "received_at"),
+             "game": ("series_sc", "processed_at", "finalized_at", "derive_fault",
+                      "fault_attempts", "parked_at", "retry_at"),
+             "contrib_cols": ("deal_profile",) + _CARD_COUNTERS,
+             "provenance": ("match_id",),
+             "daily_cols": ("games",) + _CARD_COUNTERS},
+    "combat": {"ev": "combat_evidence", "games": "combat_games", "contrib": "combat_contrib",
+               "daily": "combat_player_daily", "day": "utc_day", "by_match": True,
+               "seat": ("consts_version", "header_mod_version", "received_at"),
+               "game": ("coverage", "records_n", "record_faults", "processed_at",
+                        "finalized_at"),
+               "contrib_cols": ("consts_version", "sums"),
+               "provenance": ("match_id",),
+               "daily_cols": ("games", "sums")},
+    "identity_clock": {"ev": "identity_clock_evidence", "games": "identity_clock_games",
+                       "contrib": None, "daily": None, "day": None, "by_match": False,
+                       "seat": ("consts_version", "post_clock", "post_proc", "post_sw_ms",
+                                "post_unity_ms", "post_photon_ts", "conn_class",
+                                "conn_ranges", "received_at"),
+                       "game": ("records_n", "paired_points", "processed_at", "finalized_at"),
+                       "contrib_cols": (), "provenance": (), "daily_cols": ()},
+}
+# A stored jsonb key or a stored word shown as part of a fact name: 1 to 24
+# of a-z, 0-9 and `_`. A character test, not a regular expression: importing
+# `re` into this module moved the route manifest pins of eleven routes outside
+# it (measured with repin_route_manifest.py). Every fact name matches
+# FACT_NAME_PATTERN, the bot's `_AER_FACT_NAME`.
+_FACT_KEY_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+FACT_NAME_PATTERN = "[a-z0-9_.]{1,%d}" % AER_CONTRACT_BOUNDS["FACT_NAME_MAX"]
+
+
+def _fact_key(word):
+    return isinstance(word, str) and 0 < len(word) <= 24 and all(
+        ch in _FACT_KEY_CHARS for ch in word)
+
+
+def section_sql(src):
+    """One source's statements. Each is keyed (an index prefix) and LIMITed
+    by a bound, every bind typed by CAST; no LATERAL."""
+    s = _SECTION_SPEC[src]
+    out = {
+        "keys": ("SELECT DISTINCT e.stable_game_key FROM %s e "
+                 "WHERE e.attach_key = ANY(CAST(:rooms AS varchar[])) "
+                 "AND e.seat_player_id = ANY(CAST(:pids AS uuid[])) "
+                 "LIMIT CAST(:n AS integer)" % s["ev"]),
+        "records": ("SELECT e.stable_game_key, e.attach_key, e.seat_player_id, "
+                    "e.other_player_id, e.conflict_at, e.conflict_kind, e.lists_purged_at, %s "
+                    "FROM %s e WHERE e.stable_game_key = ANY(CAST(:keys AS varchar[])) "
+                    "ORDER BY e.stable_game_key, e.seat_player_id LIMIT CAST(:n AS integer)"
+                    % (", ".join("e." + c for c in s["seat"]), s["ev"])),
+        "games": ("SELECT g.stable_game_key, g.pair_lo, g.pair_hi, g.match_id, %s "
+                  "FROM %s g WHERE g.stable_game_key = ANY(CAST(:keys AS varchar[])) "
+                  "ORDER BY g.stable_game_key, g.pair_lo, g.pair_hi LIMIT CAST(:n AS integer)"
+                  % (", ".join("g." + c for c in s["game"]), s["games"])),
+        "switches": ("SELECT r.key, r.value FROM runtime_settings r "
+                     "WHERE r.key = ANY(CAST(:keys AS varchar[])) ORDER BY r.key "
+                     "LIMIT CAST(:n AS integer)"),
+    }
+    if s["by_match"]:
+        out["by_match"] = ("SELECT g.stable_game_key FROM %s g "
+                           "WHERE g.match_id = ANY(CAST(:ids AS uuid[])) "
+                           "ORDER BY g.stable_game_key LIMIT CAST(:n AS integer)" % s["games"])
+    if s["contrib"]:
+        # the contributions stored for the page's matches, found by their own
+        # match_id (ix_<contrib>_match, migration 401) whether or not a record
+        # or a games row names the game (B10-R3 H2)
+        out["contrib_keys"] = ("SELECT DISTINCT c.stable_game_key FROM %s c "
+                               "WHERE c.match_id = ANY(CAST(:ids AS uuid[])) "
+                               "ORDER BY c.stable_game_key LIMIT CAST(:n AS integer)"
+                               % s["contrib"])
+        out["contrib"] = (
+            "SELECT c.stable_game_key, c.pair_lo, c.pair_hi, c.subject_player_id, c.source, "
+            "c.coverage, c.computed_at, %s FROM %s c "
+            "WHERE c.stable_game_key = ANY(CAST(:keys AS varchar[])) "
+            "ORDER BY c.stable_game_key, c.pair_lo, c.pair_hi, c.subject_player_id, "
+            "c.computed_at DESC, c.source LIMIT CAST(:n AS integer)"
+            % (", ".join("c." + c for c in s["provenance"] + s["contrib_cols"]),
+               s["contrib"]))
+        out["daily"] = (
+            "SELECT d.source, d.coverage, %s FROM %s d "
+            "WHERE d.subject_player_id = CAST(:s AS uuid) AND d.%s >= CAST(:d0 AS date) "
+            "ORDER BY d.%s DESC, d.source, d.coverage LIMIT CAST(:n AS integer)"
+            % (", ".join("d." + c for c in s["daily_cols"]), s["daily"], s["day"], s["day"]))
+    return out
+
+
+SECTION_SQL = {src: section_sql(src) for src in SECTION_SOURCES}
+
+
+def _jsonb(raw):
+    """A jsonb value as a dict: a text() read returns JSONB as text."""
+    if isinstance(raw, str):
+        raw = json.loads(raw) if raw else {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _section_day0():
+    """The first UTC day of the account's `pop_days` days, today included."""
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    return today - _dt.timedelta(days=DISPLAY_DEFAULTS["pop_days"] - 1)
+
+
+async def _section_rows(db, sql, params):
+    """The sections' row reader: the body of `_aer_rows`, kept as its own
+    function so the privacy pass's joined summary of `_aer_rows`, whose rows
+    the 1a display slots show, never takes on the sections' calling context
+    (a condition on the page's game rows)."""
+    from sqlalchemy import text
+    result = await db.execute(text(sql), params)
+    return [dict(r) for r in result.mappings().all()]
+
+
+async def _section_read(db, src, games, accounts, day0):
+    """One source's stored rows for the page's games and, on a summary page,
+    the subjects' daily rows. The stable keys come from three lookups: the
+    records naming a game's room and seat (`keys`), the games rows attached
+    to a game's match (`by_match`), and the contributions whose stored
+    match_id is a game's match (`contrib_keys`, B10-R3 H2); the records,
+    games rows and contributions are then read by those keys. `truncated` is
+    set when one of the capped reads (keys, by_match, contrib_keys, records,
+    games, contrib, daily) returned exactly its LIMIT. The switch read is outside that rule: it asks for its three
+    named keys under LIMIT 3, so three rows are every switch, never a cut."""
+    sql, b = SECTION_SQL[src], AER_CONTRACT_BOUNDS
+    data = {"records": [], "games": [], "contrib": [], "daily": {}, "switches": {},
+            "truncated": False}
+    rooms = sorted({g["room"] for g in games if g["room"]})
+    pids = sorted({p for g in games for p in (g["p1"], g["p2"])})
+    keys = set()
+    if rooms:
+        found = await _section_rows(db, sql["keys"], {"rooms": rooms, "pids": pids,
+                                                  "n": b["SECTION_KEYS_MAX"]})
+        keys.update(r["stable_game_key"] for r in found)
+        data["truncated"] |= len(found) == b["SECTION_KEYS_MAX"]
+    if "by_match" in sql:
+        found = await _section_rows(db, sql["by_match"], {"ids": [g["id"] for g in games],
+                                                      "n": b["SECTION_KEYS_MAX"]})
+        keys.update(r["stable_game_key"] for r in found)
+        data["truncated"] |= len(found) == b["SECTION_KEYS_MAX"]
+    if "contrib_keys" in sql:
+        found = await _section_rows(db, sql["contrib_keys"], {"ids": [g["id"] for g in games],
+                                                          "n": b["SECTION_KEYS_MAX"]})
+        keys.update(r["stable_game_key"] for r in found)
+        data["truncated"] |= len(found) == b["SECTION_KEYS_MAX"]
+    if keys:
+        for part in ("records", "games") + (("contrib",) if "contrib" in sql else ()):
+            rows = await _section_rows(db, sql[part], {"keys": sorted(keys),
+                                                   "n": b["SECTION_ROWS_MAX"]})
+            data[part] = rows
+            data["truncated"] |= len(rows) == b["SECTION_ROWS_MAX"]
+    names = ["%s_evidence_%s" % (src, w) for w in SECTION_SWITCHES]
+    data["switches"] = {r["key"]: r["value"] for r in await _section_rows(
+        db, sql["switches"], {"keys": names, "n": len(names)})}
+    if "daily" in sql:
+        for acc in accounts:
+            rows = await _section_rows(db, sql["daily"], {"s": acc, "d0": day0,
+                                                      "n": b["SECTION_DAILY_ROWS_MAX"]})
+            data["daily"][acc] = rows
+            data["truncated"] |= len(rows) == b["SECTION_DAILY_ROWS_MAX"]
+    return data
+
+
+async def read_sections(db, games, accounts=()):
+    """Every source's data for `games` (`_section_games` dicts), or None for a
+    source whose read failed: that section alone reads `unavailable`."""
+    day0 = _section_day0()
+    out = {}
+    for src in SECTION_SOURCES:
+        try:
+            async with db.begin_nested():
+                out[src] = await _section_read(db, src, games, [str(a) for a in accounts], day0)
+        except Exception as exc:  # noqa: BLE001 -- the section says so; the page answers
+            _aer_log.warning("admin_evidence section %s unavailable: %s", src,
+                             type(exc).__name__)
+            out[src] = None
+    return out
+
+
+def _section_games(rows):
+    return [{"id": str(r["id"]), "room": r.get("photon_room_id"),
+             "p1": str(r["player1_id"]), "p2": str(r["player2_id"]),
+             "ended": r.get("ended_at")} for r in rows]
+
+
+def _fact(name, value):
+    """One `[name, value]` fact: None stays None (not recorded), a bool is
+    yes or no, a number its decimal text, a time its ISO text, text encoded
+    and whole. No section value is shortened: of the text columns the
+    sections show, the widest stored one is 64 characters (deal_profile,
+    VARCHAR(64) in card_evidence and card_contrib, migration 370), and the
+    two without a stored width (a switch's runtime_settings value, TEXT, and
+    `_fault_words`' joined words) are bounded only by RESPONSE_BYTES_MAX,
+    which refuses the whole report rather than cut a value."""
+    if value is None:
+        return [name, None]
+    if isinstance(value, bool):
+        return [name, "yes" if value else "no"]
+    if isinstance(value, int):
+        return [name, "%d" % value]
+    if isinstance(value, float):
+        return [name, "%r" % value]
+    if isinstance(value, (_dt.datetime, _dt.date)):
+        return [name, value.isoformat()]
+    return [name, _section_enc("%s" % value)]
+
+
+def _section_enc(value):
+    """A section value's encoder: the same reversible escape as `_aer_enc`
+    (test_admin_evidence_sections checks the two agree), kept as its own
+    function so section values never join `_aer_enc`'s analysed summary,
+    which the display slots `name`, `reason` and `invalidated` read."""
+    out = []
+    for ch in value:
+        cp = ord(ch)
+        if ch == _BACKSLASH:
+            out.append(_BACKSLASH * 2)
+        elif cp in AER_ESC:
+            out.append("%su{%x}" % (_BACKSLASH, cp))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _record_ident(row):
+    """An evidence record's game identity: (stable_game_key, lo, hi), its two
+    seats with the lower first, as the workers key a record (LEAST/GREATEST
+    of seat_player_id and other_player_id). Records are the only rows whose
+    identity is derived; a games or contribution row's is `_stored_ident`."""
+    lo, hi = sorted((str(row["seat_player_id"]), str(row["other_player_id"])))
+    return row["stable_game_key"], lo, hi
+
+
+def _stored_ident(row):
+    """A games or contribution row's identity exactly as stored:
+    (stable_game_key, pair_lo, pair_hi), the tables' key prefix, never
+    reordered (B10-R2 H2). The games tables require pair_lo < pair_hi; the
+    contribution tables do not, so a contribution stored as (K, B, A) is
+    another identity than the game's (K, A, B) and is not the game's."""
+    return row["stable_game_key"], str(row["pair_lo"]), str(row["pair_hi"])
+
+
+def _game_records(src, data, game):
+    """The source's records, games rows and contributions that belong to
+    `game`, associated by stored identity (stable_game_key, pair_lo,
+    pair_hi) with the game's own pair, never by stable key alone (one stable
+    key can carry several pairs): the identities whose games row the pairing
+    worker attached to this match; when none is attached yet, the identities
+    under which a record names the game's room and whose games row is not
+    attached to another match (`waiting`). Of the selected identities'
+    records, only those whose OWN attach key is the game's room are the
+    game's (the workers' rule, seat_evidence.attached_records: a record is
+    never evidence about a match its own key does not name). `other` counts
+    the pair's records that are another attachment's: under a selected
+    identity but naming another room, or naming this room under an identity
+    whose games row is attached to another match. The contributions are
+    `_game_contrib`'s: `contrib` those whose stored match_id is this match,
+    under any stable key of the game's pair; `loose` the combat ones under a
+    selected identity whose stored match_id is not; each seat takes those
+    whose subject it is."""
+    pair = tuple(sorted((game["p1"], game["p2"])))
+    room = game["room"]
+    recs = [(_record_ident(r), r) for r in data["records"]]
+    recs = [(i, r) for i, r in recs if i[1:] == pair]
+    allrows = [(_stored_ident(g), g) for g in data["games"]]
+    grows = [(i, g) for i, g in allrows if i[1:] == pair]
+    attached = {i for i, g in grows
+                if g["match_id"] is not None and str(g["match_id"]) == game["id"]}
+    elsewhere = {i for i, g in grows
+                 if g["match_id"] is not None and str(g["match_id"]) != game["id"]}
+    roomed = {i for i, r in recs if r["attach_key"] == room}
+    if attached:
+        idents, paired = attached, "attached"
+    else:
+        idents = roomed - elsewhere
+        paired = "waiting" if idents else None
+    rows = [g for i, g in grows if i in idents]
+    shown = [r for i, r in recs if i in idents and r["attach_key"] == room]
+    other = [r for i, r in recs if (i in idents and r["attach_key"] != room)
+             or (i in (roomed & elsewhere) - idents and r["attach_key"] == room)]
+    contrib, loose = _game_contrib(src, data, game, pair, idents)
+    return paired, shown, rows, len(other), contrib, loose
+
+
+def _derived_for(c, game):
+    """Whether contribution row `c` stores `game`'s match as the match it
+    was derived for: its match_id equals the game's id. card_contrib.match_id
+    is written by card_evidence._write_contrib (370) and
+    combat_contrib.match_id by combat_evidence._write_contributions (401),
+    each in the INSERT that creates the row, from the match the worker
+    attached in that transaction; neither worker's re-attachment of a games
+    row writes it. NULL (a combat row written before 401) is no match."""
+    return c["match_id"] is not None and str(c["match_id"]) == game["id"]
+
+
+def _game_contrib(src, data, game, pair, idents):
+    """`game`'s contributions, `(contrib, loose)`. `contrib`: every row of
+    the game's exact stored pair whose stored match_id is this game's
+    (`_derived_for`), whatever match the games row is attached to now and
+    whether or not a record names the game; shown and totalled. `loose`
+    (combat only): the rows under a selected identity whose stored match_id
+    is another match's or NULL, shown under the word `unattributed` and in
+    no total (B10-R3 H1: neither the games row's attachment nor a read-time
+    condition establishes which match a kept row was derived for; the
+    stored match_id does). Card keeps `loose` empty, as before: a card row
+    of another or no match_id is not this game's. Identity-clock stores no
+    contributions."""
+    mine = [c for c in data["contrib"] if _stored_ident(c)[1:] == pair and _derived_for(c, game)]
+    if src == "card":
+        return mine, []
+    held = [c for c in data["contrib"] if _stored_ident(c) in idents]
+    return mine, [c for c in held if not _derived_for(c, game)]
+
+
+def _seat_state(rec):
+    if rec["conflict_at"] is not None or rec["conflict_kind"] is not None:
+        return "conflict"
+    if rec["lists_purged_at"] is not None:
+        return "purged"
+    return "ok"
+
+
+def _sums_facts(prefix, raw):
+    """A stored sums object: per admitted key its bin count and plain total,
+    then the count of keys or values that are not a named list of numbers."""
+    sums = _jsonb(raw)
+    out, unnamed = [], 0
+    for k in sorted(sums):
+        v = sums[k]
+        if (_fact_key(k) and isinstance(v, list) and all(
+                isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)):
+            out += [_fact("%s%s.bins" % (prefix, k), len(v)),
+                    _fact("%s%s.total" % (prefix, k), sum(v))]
+        else:
+            unnamed += 1
+    if unnamed:
+        out.append(_fact(prefix + "unnamed", unnamed))
+    return out
+
+
+def _contrib_facts(src, rows, word="contrib"):
+    """A seat's contribution facts under one of SECTION_CONTRIB_WORDS: each
+    row's group `<word><n>.`, then `<word>_more` for the rows past the cap.
+    No row: `contrib=not_derived` for the attributed group, nothing for
+    `unattributed`."""
+    spec = _SECTION_SPEC[src]
+    if spec["contrib"] is None:
+        return []
+    if not rows:
+        return [_fact("contrib", "not_derived")] if word == "contrib" else []
+    cap = AER_CONTRACT_BOUNDS["SECTION_CONTRIB_MAX"]
+    out = []
+    for i, c in enumerate(rows[:cap]):
+        prefix = "%s%d." % (word, i + 1)
+        out += [_fact(prefix + "source", c["source"]), _fact(prefix + "coverage", c["coverage"])]
+        for col in spec["contrib_cols"]:
+            if col == "sums":
+                out += _sums_facts(prefix, c[col])
+            else:
+                out.append(_fact(prefix + col, c[col]))
+    if rows[cap:]:
+        out.append(_fact(word + "_more", len(rows[cap:])))
+    return out
+
+
+def _fault_words(raw):
+    words = sorted(k for k in _jsonb(raw) if _fact_key(k))
+    return ",".join(words) if words else "none"
+
+
+def _seat_section(src, account, recs, contrib, loose=()):
+    """One seat's state and facts. `contrib` and `loose` are the game's
+    contributions (`_game_records`): those about `account` are shown whether
+    or not the account sent a record of its own (the other seat's record can
+    produce a `meas` contribution about it), `contrib`'s under `contribN.`,
+    `loose`'s under `unattributedN.`. The state is the account's own record's:
+    `no_record` without one, its facts then the contributions alone."""
+    mine = [r for r in recs if str(r["seat_player_id"]) == account]
+    about = [c for c in contrib if str(c["subject_player_id"]) == account]
+    held = _contrib_facts(src, [c for c in loose if str(c["subject_player_id"]) == account],
+                          "unattributed")
+    if not mine:
+        return "no_record", (_contrib_facts(src, about) if about else []) + held
+    rec = mine[0]
+    facts = [_fact("conflict_kind", rec["conflict_kind"]),
+             _fact("lists_purged", rec["lists_purged_at"] is not None)]
+    facts += [_fact(c, rec[c]) for c in _SECTION_SPEC[src]["seat"]]
+    if mine[1:]:
+        facts.append(_fact("records", len(mine)))
+    facts += _contrib_facts(src, about) + held
+    return _seat_state(rec), facts
+
+
+def _game_facts(src, data, paired, rows, other):
+    sw = data["switches"]
+    facts = [_fact("paired", paired)]
+    facts += [_fact(w, sw.get("%s_evidence_%s" % (src, w))) for w in SECTION_SWITCHES]
+    if other:
+        facts.append(_fact("other_game", other))
+    if rows[1:]:
+        facts.append(_fact("games_rows", len(rows)))
+    if rows:
+        g = rows[0]
+        for c in _SECTION_SPEC[src]["game"]:
+            facts.append(_fact(c, _fault_words(g[c]) if c == "record_faults" else g[c]))
+    return facts
+
+
+def game_section(src, data, game, index):
+    """One game's section for one source (B10 phase 2): the game facts, then
+    per seat (p1, p2) its state word and facts."""
+    if data is None:
+        return {"src": src, "state": "unavailable", "truncated": False, "game": [],
+                "seats": []}
+    paired, recs, rows, other, contrib, loose = _game_records(src, data, game)
+    seats = []
+    for account in (game["p1"], game["p2"]):
+        state, facts = _seat_section(src, account, recs, contrib, loose)
+        seats.append({"subject": index[account], "state": state, "facts": facts})
+    return {"src": src, "state": "ok" if recs else "no_record",
+            "truncated": data["truncated"], "game": _game_facts(src, data, paired, rows, other),
+            "seats": seats}
+
+
+def _contrib_add(src, totals, row, extra=()):
+    """Add one contribution or daily row into `totals`, by stored source."""
+    source = row["source"] if _fact_key(row["source"]) else "unnamed"
+    if src == "card":
+        for col in tuple(extra) + _CARD_COUNTERS:
+            totals["%s.%s" % (source, col)] += row[col] or 0
+        return
+    for col in extra:
+        totals["%s.%s" % (source, col)] += row[col] or 0
+    for k, v in _jsonb(row["sums"]).items():
+        if _fact_key(k) and isinstance(v, list) and all(
+                isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+            totals["%s.%s.total" % (source, k)] += sum(v)
+
+
+def _contrib_row_key(c):
+    """One stored contribution row's key within a window: its stored
+    identity, subject and source (combat_contrib's primary key, 390), with
+    the deal profile and stored match_id where the row carries them."""
+    return _stored_ident(c) + (str(c["subject_player_id"]), c["source"],
+                               c.get("deal_profile"), str(c.get("match_id")))
+
+
+def summary_section(src, data, games, account, oi):
+    """One window subject's section over the window's covered games (B10
+    phase 2): counts, contribution totals, and the account's daily totals over
+    its last `pop_days` UTC days. The counts are `games` (the covered games),
+    `attached` and `waiting` (the games by their pairing state, from a
+    record of either seat; a game with neither, for want of records or
+    because its rows are another match's, is in neither count, and no
+    summary count names another match's rows: the game section's
+    `other_game` does), `with_record`, `conflict` and `purged` (the account's own
+    records), and on identity-clock the account's stored `post_clock` and
+    `conn_class` words. The
+    contribution totals add every contribution about the account that
+    `_game_records` attributes to a covered game (its stored match_id is that
+    game's match), with or without the account's own record; `unattributed`
+    counts the distinct contributions about the account shown as
+    `unattributed` on a covered game and attributed to none of the covered
+    games, which no total includes (a row stored for one covered game and
+    held under another's identity is in that game's total and not counted
+    again here)."""
+    if data is None:
+        return {"oi": oi, "src": src, "state": "unavailable", "truncated": False,
+                "facts": [], "days30": []}
+    counts, totals = collections.Counter(), collections.Counter()
+    attributed, held = set(), set()
+    for game in games:
+        paired, recs, _rows, _other, contrib, loose = _game_records(src, data, game)
+        held.update(_contrib_row_key(c) for c in loose if str(c["subject_player_id"]) == account)
+        mine = [r for r in recs if str(r["seat_player_id"]) == account]
+        counts["games"] += 1
+        if paired:
+            counts[paired] += 1
+        for c in contrib:
+            if str(c["subject_player_id"]) == account:
+                _contrib_add(src, totals, c)
+                attributed.add(_contrib_row_key(c))
+        if not mine:
+            continue
+        counts["with_record"] += 1
+        state = _seat_state(mine[0])
+        if state != "ok":
+            counts[state] += 1
+        if src == "identity_clock":
+            for col in ("post_clock", "conn_class"):
+                word = mine[0][col]
+                if word and _fact_key(word):
+                    counts["%s.%s" % (col, word)] += 1
+    facts = [_fact(k, counts[k]) for k in ("games", "with_record", "attached", "waiting",
+                                           "conflict", "purged")]
+    facts += [_fact(k, counts[k]) for k in sorted(counts) if "." in k]
+    if _SECTION_SPEC[src]["contrib"] is not None:
+        facts += [_fact(k, totals[k]) for k in sorted(totals)] or [
+            _fact("contrib", "not_derived")]
+        unattributed = len(held - attributed)
+        if unattributed:
+            facts.append(_fact("unattributed", unattributed))
+    days = []
+    if _SECTION_SPEC[src]["daily"] is not None:
+        daily = collections.Counter()
+        for row in data["daily"].get(account, ()):
+            _contrib_add(src, daily, row, ("games",))
+        days = [_fact(k, daily[k]) for k in sorted(daily)] or [_fact("daily", "not_derived")]
+    return {"oi": oi, "src": src, "state": "ok" if counts["with_record"] else "no_record",
+            "truncated": data["truncated"], "facts": facts, "days30": days}
+
+
+async def _page_sections(db, body, rows, subjects, accounts, summary_page):
+    """Add the page's evidence sections to `body` (each game's `sections`, or
+    page 1's `sections_summary`) and return the audit's state counts."""
+    games = _section_games(rows)
+    index = {pid: s["i"] for pid, s in subjects.items()}
+    if summary_page:
+        data = await read_sections(db, games, accounts)
+        body["sections_summary"] = [summary_section(src, data[src], games, str(acc), oi)
+                                    for oi, acc in enumerate(accounts)
+                                    for src in SECTION_SOURCES]
+        return section_audit(body["sections_summary"])
+    data = await read_sections(db, games)
+    by_id = {g["id"]: g for g in games}
+    made = []
+    for g in body["games"]:
+        g["sections"] = [game_section(src, data[src], by_id[g["match_id"]], index)
+                         for src in SECTION_SOURCES]
+        made += g["sections"]
+    return section_audit(made)
+
+
+def section_audit(sections):
+    """The audit's per-source state counts of a page's sections."""
+    out = {src: {} for src in SECTION_SOURCES}
+    for s in sections:
+        out[s["src"]][s["state"]] = out[s["src"]].get(s["state"], 0) + 1
+    return out
+
+
 async def _audit(db, actor, shape, target, details):
     """The one `admin_actions` row (design 4.4), in its own short transaction.
     A failed insert is `503 audit_unavailable`, no body."""
@@ -1920,6 +2497,7 @@ async def _aer_serve(shape, request, db, actor):
                 - AER_CONTRACT_BOUNDS["AUDIT_RESERVE_S"])
     gmax = AER_CONTRACT_BOUNDS["GAMES_MAX"]
     page = _aer_int(request, "page", 1, 1, 10 ** 6)
+    sections_on = request.headers.get(SECTIONS_HEADER) == SECTIONS_PHASE
     games_arg = None
     if shape in ("game", "series"):
         ident = _aer_ident(request.path_params.get("code"))
@@ -2005,15 +2583,21 @@ async def _aer_serve(shape, request, db, actor):
                                             if e.ranked else None)
                                for e in REPORT_REGISTRY if not e.is_window]
             body["games"] = await _game_page(rep, rows, ids, subjects, game_set)
+        audit_sections = None
+        if sections_on:
+            audit_sections = await _page_sections(db, body, rows, subjects, accounts,
+                                                  summary_page)
         encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         if len(encoded) > AER_CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]:
             _aer_fail(500, "too_large")
-        details = {"schema": "1a", "shape": shape, "games": games_arg if games_arg else c,
+        details = {"schema": SECTIONS_PHASE if sections_on else "1a", "shape": shape, "games": games_arg if games_arg else c,
                    "page": page, "pages": pages, "b_pid": b_pid,
                    "rules": dict(body["rules"]),
                    "registry": body["registry"]["fingerprint"],
                    "pop_computed_at": body["population"]["computed_at"],
                    "codes": [_code(i) for i in (page_ids or ids)], "via": "discord"}
+        if sections_on:
+            details["sections"] = audit_sections
         if _aer_clock() > deadline:
             _aer_fail(503, "deadline")
         await _audit(db, actor, shape, target, details)
