@@ -1424,8 +1424,9 @@ def test_census_complete_layer_frozen_whole():
     """G1: the complete layer is frozen for every census file, holds no
     refuse form, and each declared FORWARDING exception is frozen exactly
     once as a call; the count is the coarse 365 (363, plus the two coarse forms
-    of the round-11 merge, re-frozen once from the seat derivation) plus the
-    complete layer."""
+    of the round-11 merge, re-frozen once from the seat derivation), plus the
+    one coarse form of the B10 merge (B10_MERGE_FROZEN, frozen by hand), plus
+    the complete layer."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1437,7 +1438,12 @@ def test_census_complete_layer_frozen_whole():
     # freeze lists only the files with a coarse form
     assert complete == {k + ro_census.COMPLETE for k in r7.CENSUS_FILES}
     assert coarse <= set(r7.CENSUS_FILES)
-    assert sum(len(fz.FROZEN[k]) for k in coarse) == fz.COARSE_COUNT == 365
+    assert sum(len(fz.FROZEN[k]) for k in coarse) == fz.COARSE_COUNT + fz.B10_MERGE_COUNT == 366
+    assert fz.COARSE_COUNT == 365
+    # the B10 merge: one hand-frozen coarse import form (W30k)
+    assert sum(len(v) for v in fz.B10_MERGE_FROZEN.values()) == fz.B10_MERGE_COUNT == 1
+    assert set(fz.B10_MERGE_FROZEN) <= coarse
+    assert {f[0] for v in fz.B10_MERGE_FROZEN.values() for f in v} == {"import"}
     assert sum(len(fz.COMPLETE_FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT == 218
     assert sum(len(fz.R10_FROZEN[k]) for k in complete) == fz.R10_COUNT == 114
     # round 10's merge: the hand-frozen block (W30b), fifteen forms of the gr child's providers
@@ -1455,7 +1461,8 @@ def test_census_complete_layer_frozen_whole():
                                                         + fz.R10_MERGE_COUNT
                                                         + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT)
     assert fz.FROZEN_COUNT == (fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
-                               + fz.R10_MERGE_COUNT + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT)
+                               + fz.R10_MERGE_COUNT + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT
+                               + fz.B10_MERGE_COUNT) == 855
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once

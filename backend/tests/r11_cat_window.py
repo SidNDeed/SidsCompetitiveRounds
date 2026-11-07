@@ -76,16 +76,27 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # absent here opened nothing in that run (catalog_position.check opens its
 # monitor only when the session's own connection raises InterfaceError,
 # catalog_position.py:116-119; no measured program in that run did so).
+# Re-frozen at the B10 merge (W30k, ruling FOUR-R11-A23 (4)(b)): the merge's
+# only backend/sql change is migration 401 and its rollback file (numbered
+# files 377 -> 378, the others 22 -> 23), and the whole-module run on seat-3
+# after it differs from the run before it (0bc9bd2f) at exactly four sites,
+# each by what one more file costs: _build applies 401 (run: one psql start)
+# and records it (record: one pg_dump start, and two _connect opens, one in
+# _snap and one in _internal_not_enabled); test_zz applies
+# rollback_401_contrib_match_provenance.sql (one psql start) and reads after
+# it (two _connect opens, _snap and _internal_not_enabled). Neither file has
+# a d2_seed prerequisite. So _connect 1114 -> 1118, record 426 -> 427, run
+# 377 -> 378, test_zz 22 -> 23; every other count is unchanged.
 OPEN_COUNTS = {
-    "_admin": 315, "_clone_with_oid": 2, "_connect": 1114, "_fetchval": 6, "_orm": 1,
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1118, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
     "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
     "_template_problem": 3, "_whoami": 3}
 START_COUNTS = {
-    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 426,
-    "_build.<locals>.run": 377, "_git": 2, "_route_run": 56,
+    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 427,
+    "_build.<locals>.run": 378, "_git": 2, "_route_run": 56,
     "test_migrations_are_applied_from_the_object_store": 2,
-    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 22}
+    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 23}
 
 REUSE_REFUSAL = ("D2_REUSE_DB is set: the chain was not built in this run, so the run is not "
                  "one the packet cites (ruling FOUR-R11-A17 (g))")

@@ -3706,3 +3706,21 @@ for _k, _v in list(R11_ID_FROZEN.items()) + list(R11_OPEN_FROZEN.items()):
     FROZEN[_k] = list(FROZEN[_k]) + list(_v)
 FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT)
+
+
+# Hand edit at the B10 merge (W30k, ruling FOUR-R11-A23 (4)(a)): one coarse
+# form main's B10 landing (merge ad02fa4f, the admin evidence report phase 2)
+# adds to a census file, brought into the lane by its merge of main (c226a8cf).
+# It is the function-local `from sqlalchemy import text` in
+# admin_evidence._section_rows, the sections' row reader: it wraps the
+# statements of SECTION_SQL (sources card, combat and identity_clock; 20
+# statements, every one a SELECT with no write, lock, role or identity text)
+# and executes them on the session its caller passes. It reaches no opener, no
+# DSN and no role, and it is an import form, not an identity form. Frozen by
+# hand at the merge, not by a re-derivation; FROZEN_COUNT is 855.
+B10_MERGE_FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text')]}
+B10_MERGE_COUNT = 1
+for _k, _v in B10_MERGE_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT)
