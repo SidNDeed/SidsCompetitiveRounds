@@ -113,11 +113,11 @@ WRITERS = (
 # the transaction at the end of every run of the position found no row
 # beyond the declared expected ones (unexpected_locks); a position that ran
 # but whose read found one is ('lock', rows) and leaves the claim: measured
-# at 51761 (the advisory transaction lock 51703 took earlier in the same
+# at 51954 (the advisory transaction lock 51896 took earlier in the same
 # transaction; r9-ro-measure1, RF/r9/ro). A position read under a grant whose
 # read found one keeps its role outcome here and its grant outcome in
-# GRANT_OUTCOME ('lock under grant'): 16871, 16886, 16897, 16924 (the
-# FOR NO KEY UPDATE of 16851), 51793 (51768's FOR UPDATE), 65184 (an
+# GRANT_OUTCOME ('lock under grant'): 16899, 16914, 16925, 16952 (the
+# FOR NO KEY UPDATE of 16879), 51986 (51961's FOR UPDATE), 65381 (an
 # advisory lock and ffa_queue row locks) and match_hold.py:381 (380's
 # UPDATE).
 OUTCOME = {
@@ -164,14 +164,14 @@ OUTCOME = {
 # those two are writers by S whose bound the role does not measure.
 # Ruling R-A: every WRITERS position answers 'lock' in the walks' lookup,
 # and each lock moves to the bound measured here: refused under the role
-# (25006) for the 10 reached (16390, 16393, 16396, 16399, 16851, 17406,
-# 51089, 51768, 63719, match_hold.py:569); not reached for 16857 (after
-# 16851) and 51112 (after 51089); and for main.py:16867 (a transaction-local
+# (25006) for the 10 reached (16418, 16421, 16424, 16427, 16879, 17434,
+# 51282, 51961, 63915, match_hold.py:569); not reached for 16885 (after
+# 16879) and 51305 (after 51282); and for main.py:16867 (a transaction-local
 # set_config of lock_timeout) and main.py:51896 (pg_advisory_xact_lock),
 # 'ok' under the role, so their bound is the walk's lock rule alone (a
 # QUESTION for the reviewer). Round 9 (E2): the lock read now measures the
-# writers too: 51703 is ('lock', ('advisory ExclusiveLock',)), its advisory
-# lock measured; 16839 holds no lock beyond the expected rows. Round 10
+# writers too: 51896 is ('lock', ('advisory ExclusiveLock',)), its advisory
+# lock measured; 16867 holds no lock beyond the expected rows. Round 10
 # (REHEARSAL-R9-A1 (B)): its transaction-local set_config of lock_timeout
 # is now MEASURED as an effect by the continuity bracket's residue reading
 # (pg_settings lock_timeout 0 -> 1000 across the position; r10-ro-measure1,
@@ -1258,7 +1258,7 @@ REFUSER_GRANTS = {
         "DELETE ffa_queue",
         "UPDATE ffa_assembly_seats",
     ),
-    # 19936 is a DELETE whose subquery locks FOR UPDATE SKIP LOCKED: 42501
+    # 20129 is a DELETE whose subquery locks FOR UPDATE SKIP LOCKED: 42501
     # under DELETE queue_blocks alone (rb-measure-2), so UPDATE too; then
     # main.py:16418 (ranked_queue FOR UPDATE, a WRITERS lock), 42501 under
     # those two (r8-w30b-sr-widen-measure-1)

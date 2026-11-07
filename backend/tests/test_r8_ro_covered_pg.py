@@ -466,8 +466,8 @@ def _entry(f, line):
     return next(e for e in ro_covered.COVERED if e[1] == f and e[2] == line)
 
 
-E_16828 = _entry("main.py", 16828)
-E_16871 = _entry("main.py", 16871)
+E_16828 = _entry("main.py", 16856)
+E_16871 = _entry("main.py", 16899)
 FOR_UPDATE = "SELECT clock_timestamp() FROM players LIMIT 1 FOR UPDATE"
 ADVISORY = ("SELECT clock_timestamp() FROM (SELECT pg_catalog.pg_advisory_xact_lock(808))"
             " AS planted")
@@ -526,9 +526,9 @@ PREPARED_GID = "rf10_ro_" + os.urandom(4).hex()
 # The round-10 report's exact text (codex-rehearsal-four-r10.out, F4).
 R11_HIDDEN = "SELECT set_config('rf10.hidden','yes',false)"
 R11_HIDDEN_PARTS = {"session set_config rf10.hidden", "placeholder rf10.hidden=yes"}
-E_16886 = _entry("main.py", 16886)
+E_16886 = _entry("main.py", 16914)
 LEASE_GRANT_TARGETS = [e for e in ro_covered.COVERED if e[4] == "_lease_admission_gate"
-                       and e[2] >= 16868]
+                       and e[2] >= 16896]
 
 # Each control: (name, driver, entry, plant, grants or None, want). want is
 # 'continuity' (the run stayed 'ok' and the bracket refused it, with
@@ -589,7 +589,7 @@ CONTINUITY_CONTROLS = (
      _then_own("DECLARE rf10_ro_c CURSOR WITH HOLD FOR SELECT 1"), None,
      ("continuity", {"holdable cursors 0->1"})),
     # a later position on a session an earlier position broke (under grant:
-    # 16871 ends the transaction 16851 locked; 16886 then runs, lock-clean
+    # 16899 ends the transaction 16879 locked; 16914 then runs, lock-clean
     # and with a zero delta, in the replacement transaction)
     ("chain_at_16871_then_16886_under_grant", "main._lease_admission_gate", E_16886,
      _then_own("COMMIT AND CHAIN"), ("UPDATE players",),
@@ -1233,7 +1233,7 @@ def _r11_production_records(runs):
 # Ruling FOUR-R11-A6 (3a): every (name, class, scope) the program's own
 # captured texts set, measured on seat-3 (16.15) at ec9ecef6 (RF11 log
 # r11-res-p2-r8-ec9ecef6.log): one name, the SET LOCAL lock_timeout of
-# main._identity_lock_many (main.py 17339-17370 at this tip; NOTES-r11-res.md).
+# main._identity_lock_many (main.py 17367-17398 at this tip; NOTES-r11-res.md).
 R11_SETTING_NAMES = (("lock_timeout", "server", "local"),)
 # (3b): the placeholders those texts set at session scope: frozen at none.
 R11_SESSION_PLACEHOLDERS = ()

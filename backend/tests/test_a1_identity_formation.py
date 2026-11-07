@@ -5724,7 +5724,7 @@ def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
         b, c = _sr_placed(e)
         want = "read" if e[1:4] in ok else "lock" if e[1:4] in locks else "write"
         assert b.execute_kind(c, _A1_TABLE) == want, (e, want)
-    for ln in (16839, 51703):
+    for ln in (16867, 51896):
         e = [w for w in _ro.WRITERS if w[1] == "main.py" and w[2] == ln][0]
         b, c = _sr_placed(e)
         assert b.execute_kind(c, _A1_TABLE) == "lock", e
