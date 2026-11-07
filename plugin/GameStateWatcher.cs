@@ -2151,6 +2151,8 @@ namespace CompetitiveRounds
                 // FFA kills + damage-dealt, all players, same 3s x-axis as
                 // hit/block so the /game chart panels line up (#127/#130).
                 try { FfaMode.SampleTimelines(); } catch { }
+                // Ask 9 stage B: cumulative kills per seat, every mode, same grid.
+                try { CombatLedger.Sample(); } catch { }
             }
             TickInputSampling(dt);
         }
@@ -3082,6 +3084,8 @@ namespace CompetitiveRounds
             public int[] Fps = new int[4];
             public ApiClient.TeamTelemetry[] Tele = new ApiClient.TeamTelemetry[4];
             public string[] EndStats = new string[4];
+            // Ask 9 stage B: the game's point events (PointEventsCsv), side 1 left.
+            public string PointTimeline, PointTimes;
         }
 
         /// <summary>Index one captured build under every spelling of its
@@ -3199,10 +3203,38 @@ namespace CompetitiveRounds
         private static void StampPointTime()
         {
             if (pointTimes.Count >= 64) return;
-            int secs = 0;
-            try { secs = (int)Math.Max(0, (DateTime.UtcNow - matchStartTime).TotalSeconds); }
-            catch { }
-            pointTimes.Add(secs);
+            pointTimes.Add(SecondsSinceMatchStart());
+        }
+
+        /// <summary>Seconds since match start on the point markers' clock; the
+        /// death marks (ask 9, CombatLedger) share it so both sit on one axis.</summary>
+        internal static int SecondsSinceMatchStart()
+        {
+            try { return (int)Math.Max(0, (DateTime.UtcNow - matchStartTime).TotalSeconds); }
+            catch { return 0; }
+        }
+
+        /// <summary>Ask 9 stage B: the game's point events as the 2v2 and 1v2
+        /// reports carry them (migration 403), the same two CSVs the 1v1 report
+        /// sends: "a:b" cumulative totals with ROUNDS team 0 on the left, and
+        /// their stamps. swapSides puts team 1 on the left (the 1v2 report wants
+        /// the solo there). Both empty when nothing was recorded.</summary>
+        private static void PointEventsCsv(bool swapSides, out string timeline, out string times)
+        {
+            timeline = ""; times = "";
+            try
+            {
+                if (matchPointTimeline.Count == 0) return;
+                var parts = new List<string>(matchPointTimeline.Count);
+                foreach (var e in matchPointTimeline)
+                {
+                    int c = e.IndexOf(':');
+                    parts.Add(swapSides && c >= 0 ? e.Substring(c + 1) + ":" + e.Substring(0, c) : e);
+                }
+                timeline = string.Join(",", parts);
+                times = string.Join(",", pointTimes);
+            }
+            catch { timeline = ""; times = ""; }
         }
 
         // \u2500\u2500 Room state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -6999,6 +7031,57 @@ namespace CompetitiveRounds
         /// other two are the duo. A live held seat comes from the pinned roster.
         /// Files selects the lowest id in an unflagged room and every present
         /// fighter in a flagged room.</summary>
+        /// <summary>Ask 9 stage B: one seat's telemetry blob in the 2v2 shape, the
+        /// local seat from its own counters, a peer from its cr_gstats harvest
+        /// (null when the peer published none). The 1v2 report fills
+        /// ovt_match_telemetry with it; the 2v2 and FFA builders keep their
+        /// inline twins (the FFA one drops the peer's damage series on purpose).</summary>
+        private static ApiClient.TeamTelemetry BuildSeatTelemetry(Photon.Realtime.Player pp)
+        {
+            if (pp == null) return null;
+            if (pp.IsLocal)
+            {
+                return new ApiClient.TeamTelemetry
+                {
+                    fpsTimeline = string.Join(",", localFps3sTimeline.Items),
+                    pingTimeline = string.Join(",", pingSamples),
+                    pingAvg = pingSamples.Count > 0 ? (int)Math.Round(pingSamples.Average()) : 0,
+                    hitTimeline = string.Join(",", localHitTimeline.Items),
+                    blockTimeline = localBlockTimeline.Count > 0
+                        ? "v2|" + string.Join(",", localBlockTimeline.Items) : "",
+                    damageTimeline = string.Join(",", localDamage3sTimeline.Items),
+                    bulletsFired = LocalBulletsFiredThisMatch,
+                    bulletsHit = LocalBulletsHitThisMatch,
+                    blocksActivated = LocalBlocksActivatedThisMatch,
+                    blocksSuccessful = LocalBlocksSuccessfulThisMatch,
+                    keysPressed = LocalKeysThisMatch,
+                    activeSeconds = LocalActiveSecondsThisMatch,
+                };
+            }
+            if (!TryGetPeerTelemetry(pp.ActorNumber,
+                    out string pFps, out string pPing, out string pHit, out string pBlock,
+                    out string pDamage, out int[] pCounters, out bool pBulletsKnown))
+                return null;
+            int pingAvg = 0;
+            try
+            {
+                var pings = new List<int>();
+                foreach (var s in (pPing ?? "").Split(','))
+                    if (int.TryParse(s, out int v) && v > 0) pings.Add(v);
+                if (pings.Count > 0) pingAvg = (int)Math.Round(pings.Average());
+            }
+            catch { }
+            return new ApiClient.TeamTelemetry
+            {
+                fpsTimeline = pFps, pingTimeline = pPing, pingAvg = pingAvg,
+                hitTimeline = pHit, blockTimeline = pBlock, damageTimeline = pDamage,
+                bulletsFired = pCounters[0], bulletsHit = pCounters[1],
+                bulletStatsKnown = pBulletsKnown,
+                blocksActivated = pCounters[2], blocksSuccessful = pCounters[3],
+                keysPressed = pCounters[4], activeSeconds = pCounters[5],
+            };
+        }
+
         private static bool TryReportOvtMatch(string reportRoomId, int duration)
         {
             // Census: gate + roster from ONE fighter view (converted together
@@ -7016,6 +7099,7 @@ namespace CompetitiveRounds
             }
             // Resolve each FIGHTER actor → Steam ID + in-game TeamID + cards + fps + damage series.
             var info = new Dictionary<string, (string name, int teamId, List<MatchTracker.CardPickData> cards, int fps, string dmgTl)>();
+            var teleBySid = new Dictionary<string, ApiClient.TeamTelemetry>();   // ask 9 stage B: per-seat blobs
             foreach (var pp in reportFighters)
             {
                 if (pp == null) continue;
@@ -7046,6 +7130,10 @@ namespace CompetitiveRounds
                 if (pp.IsLocal) { if (localCards != null && localCards.Count > 0) picks = new List<MatchTracker.CardPickData>(localCards); int myFps = LocalAvgFps; if (myFps > 0) fps = myFps; dmgTl = string.Join(",", localDamage3sTimeline.Items); }
                 else if (TryGetPeerTelemetry(pp.ActorNumber, out _, out _, out _, out _, out string pDmg, out _, out _)) dmgTl = pDmg ?? "";
                 info[sid] = (name, teamId, picks, fps, dmgTl);
+                // Ask 9 stage B: the seat's blob (the 2v2 shape) with the ledger's
+                // kills, deaths, death marks and foe damage; none = nothing sent.
+                var seatTele = BuildSeatTelemetry(pp);
+                if (seatTele != null) { CombatLedger.Fill(pp.ActorNumber, seatTele); teleBySid[sid] = seatTele; }
             }
             if (heldSid != null && !info.ContainsKey(heldSid))
                 info[heldSid] = (heldSid, heldTeam, new List<MatchTracker.CardPickData>(), 0, "");
@@ -7081,6 +7169,10 @@ namespace CompetitiveRounds
             //   EndStatsFor(duoBSid) -> duo_b.end_stats
             // Any may be null ("not recorded") — omit the field then (#257).
             // ADVISORY — the 10-field 1v2 HMAC canonical does not change.
+            // Ask 9 stage B: the point events with the solo on the left (the
+            // watcher records ROUNDS team 0 on the left), and the seat blobs.
+            PointEventsCsv(soloTeam != 0, out string ovtPointTl, out string ovtPointTs);
+            ApiClient.TeamTelemetry seatOf(string s) => teleBySid.TryGetValue(s, out var tb) ? tb : null;
             ApiClient.ReportOvtMatch(
                 ApiClient.ActiveOvt1v2SeriesId, reportRoomId, photonRegion, duration,
                 soloSid, info[soloSid].name, info[soloSid].cards,
@@ -7091,7 +7183,9 @@ namespace CompetitiveRounds
                 info[soloSid].dmgTl, info[duoASid].dmgTl, info[duoBSid].dmgTl,
                 soloEndStats: EndStatsFor(soloSid),
                 duoAEndStats: EndStatsFor(duoASid),
-                duoBEndStats: EndStatsFor(duoBSid));
+                duoBEndStats: EndStatsFor(duoBSid),
+                soloTele: seatOf(soloSid), duoATele: seatOf(duoASid), duoBTele: seatOf(duoBSid),
+                pointTimeline: ovtPointTl, pointTimes: ovtPointTs);
             Plugin.Log.LogInfo($"[1v2-REPORT] submitted solo={soloSid} duo={duoASid},{duoBSid} {soloRounds}-{duoRounds}");
             return true;
         }
@@ -7189,6 +7283,7 @@ namespace CompetitiveRounds
             localDamageTimeline.Clear(); oppDamageTimeline.Clear();
             OppDamageDealt = 0f; OppMaxSingleHit = 0f; OppMaxHealthSeen = 0f; OppBestBounceKill = 0;
             OppExpandedTelemetrySeen = false;
+            CombatLedger.Reset();   // ask 9 stage B: the per-seat combat ledger is per game
             // The end-of-game build stash belongs to exactly ONE game. This is
             // its only clear site, and BOTH game-start hooks (OnMatchStarted
             // and OnFfaMatchStarted) call this method — so a report can never
@@ -7770,6 +7865,10 @@ namespace CompetitiveRounds
                         keysPressed = pCounters[4], activeSeconds = pCounters[5],
                     };
                 }
+                // Ask 9 stage B: this seat's deaths and death marks from the ledger
+                // (FFA's kills stay the signed FfaMode tally and its damage rides
+                // at entry level), only onto a blob that exists (#257).
+                if (tele != null) CombatLedger.Fill(pp.ActorNumber, tele, deathsOnly: true);
                 // Build stats: EndStatsFor(sid) -> this entry's end_stats.
                 // ADVISORY — outside the "ffa:"-tagged HMAC canonical.
                 entries.Add(new ApiClient.FfaReportPlayer
@@ -8111,6 +8210,10 @@ namespace CompetitiveRounds
                         activeSeconds = pCounters[5],
                     };
                 }
+                // Ask 9 stage B: this seat's kills, deaths, death marks and foe
+                // damage as the reporter observed them (CombatLedger), onto a
+                // blob that exists; a seat without a blob sends nothing (#257).
+                if (teleBySid.TryGetValue(sid, out var seatBlob)) CombatLedger.Fill(pp.ActorNumber, seatBlob);
                 bySteam[sid] = (name, peerTeamId, pickList, fps);
             }
 
@@ -8162,9 +8265,11 @@ namespace CompetitiveRounds
 
             var slots = new string[] { team0Sids[0], team0Sids[1], team1Sids[0], team1Sids[1] };
 
+            PointEventsCsv(false, out string pointTl, out string pointTs);   // ask 9 stage B
             var payload = new TeamReportPayload
             {
                 RoomId = reportRoomId,
+                PointTimeline = pointTl, PointTimes = pointTs,
                 // Room-scoped, but frozen with the rest so that a reader of this
                 // type never has to ask which fields are live and which are not.
                 Region = photonRegion,
@@ -8217,7 +8322,8 @@ namespace CompetitiveRounds
                 t1aFps: p.Fps[0], t1bFps: p.Fps[1], t2aFps: p.Fps[2], t2bFps: p.Fps[3],
                 t1aTele: p.Tele[0], t1bTele: p.Tele[1], t2aTele: p.Tele[2], t2bTele: p.Tele[3],
                 t1aEndStats: p.EndStats[0], t1bEndStats: p.EndStats[1],
-                t2aEndStats: p.EndStats[2], t2bEndStats: p.EndStats[3]
+                t2aEndStats: p.EndStats[2], t2bEndStats: p.EndStats[3],
+                pointTimeline: p.PointTimeline, pointTimes: p.PointTimes
             );
             Plugin.Log.LogInfo($"[2v2-REPORT] submitted: t1={p.Steam[0]},{p.Steam[1]} t2={p.Steam[2]},{p.Steam[3]} winner=T{p.WinnerTeam}");
         }
@@ -9334,6 +9440,7 @@ namespace CompetitiveRounds
             localDamageTimeline.Clear(); oppDamageTimeline.Clear();
             OppDamageDealt = 0f; OppMaxSingleHit = 0f; OppMaxHealthSeen = 0f; OppBestBounceKill = 0;
             OppExpandedTelemetrySeen = false;
+            CombatLedger.Reset();   // ask 9 stage B: the per-seat combat ledger is per game
             CombatTelemetry.ClearMatchState();
             OppStatMacroSuspectSeconds = 0;
             OppStatMacroPeakKeysPerSecond = 0;

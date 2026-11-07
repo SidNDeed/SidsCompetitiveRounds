@@ -17974,6 +17974,13 @@ namespace CompetitiveRounds
             /// era's numbers.</summary>
             public bool bulletStatsKnown = true;
             public float activeSeconds;
+            // Ask 9 stage B (migration 403): the reporter's observation of this
+            // seat's foe damage total, kills, deaths, cumulative-kills series
+            // (the 3 s grid) and death marks (seconds since match start, the
+            // point markers' clock). Null = not recorded, omitted on the wire
+            // (#257). Advisory: outside every frozen canonical.
+            public int? damageDealt, kills, deaths;
+            public string killTimeline, deathTimes;
         }
 
         private static void AppendTeamTelemetry(StringBuilder sb, string slot, TeamTelemetry t)

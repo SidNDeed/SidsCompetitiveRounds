@@ -39,6 +39,10 @@ namespace CompetitiveRounds
         {
             public int kind;      // 0 normal, 1 out-of-bounds, 2 own bullet
             public float time;    // Time.unscaledTime
+            // Ask 9 stage B: who dealt it (Photon actor, -1 none) and their
+            // team, so a death can credit a kill in every mode.
+            public int damagerActor;
+            public int damagerTeam;
         }
         internal static readonly Dictionary<int, DamageStamp> LastDamageByView =
             new Dictionary<int, DamageStamp>();
@@ -72,10 +76,13 @@ namespace CompetitiveRounds
                     if (!VanillaFixSupport.AnyGameScope()) return;
                     var dealer = __instance != null ? __instance.GetComponent<Player>() : null;
                     if (dealer == null || dealer.data == null || dealer.data.view == null) return;
-                    if (!dealer.data.view.IsMine) return;
                     // Same-team damage (2v2 friendly fire) still shouldn't
                     // count toward DPS — mirror the FFA tracker's foe gate.
                     if (damagedPlayer.TeamID == dealer.TeamID) return;
+                    // Ask 9 stage B: every dealer's foe damage into the per-seat
+                    // ledger (this hook runs on every client for every dealer).
+                    CombatLedger.RecordDamage(dealer.data.view.OwnerActorNr, damage.magnitude);
+                    if (!dealer.data.view.IsMine) return;
                     GameStateWatcher.RecordLocalDamageDealt(damage.magnitude);
                 }
                 catch { }
@@ -160,10 +167,18 @@ namespace CompetitiveRounds
                     int kind = 0;
                     if (damageSource == HealthHandler.DamageSource.OutOfBounds) kind = 1;
                     else if (damagingPlayer != null && victim != null && damagingPlayer == victim) kind = 2;
+                    int dActor = -1, dTeam = -1;
+                    if (damagingPlayer != null && damagingPlayer.data != null && damagingPlayer.data.view != null)
+                    {
+                        dActor = damagingPlayer.data.view.OwnerActorNr;
+                        dTeam = damagingPlayer.TeamID;
+                    }
                     LastDamageByView[data.view.ViewID] = new DamageStamp
                     {
                         kind = kind,
                         time = Time.unscaledTime,
+                        damagerActor = dActor,
+                        damagerTeam = dTeam,
                     };
                 }
                 catch { }
@@ -224,10 +239,20 @@ namespace CompetitiveRounds
 
                     int kind = 0;
                     DamageStamp stamp;
-                    if (LastDamageByView.TryGetValue(data.view.ViewID, out stamp)
-                        && Time.unscaledTime - stamp.time < STAMP_FRESH_SECONDS)
-                        kind = stamp.kind;
+                    bool fresh = LastDamageByView.TryGetValue(data.view.ViewID, out stamp)
+                        && Time.unscaledTime - stamp.time < STAMP_FRESH_SECONDS;
+                    if (fresh) kind = stamp.kind;
                     GameStateWatcher.RecordDeathObserved(data.view.IsMine, kind);
+                    // Ask 9 stage B: the per-seat ledger the team-mode reports
+                    // read. A kind-0 death credits the fresh damager of another
+                    // team; a boundary or own-bullet death credits nobody (the
+                    // server's 1v1 convention, so `kills` means one thing).
+                    var victim = data.player;
+                    int killer = -1;
+                    if (kind == 0 && fresh && stamp.damagerActor >= 0
+                        && victim != null && stamp.damagerTeam != victim.TeamID)
+                        killer = stamp.damagerActor;
+                    CombatLedger.RecordDeath(data.view.OwnerActorNr, killer);
 
                 }
                 catch { }
