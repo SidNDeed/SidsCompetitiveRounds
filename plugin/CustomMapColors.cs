@@ -73,6 +73,11 @@ namespace CompetitiveRounds
             public Color? EffectColor;    // particle colour (start)
             public Color? EffectColor2;   // optional second colour (random-between)
             public Action<ColorGrading> Configure;
+            // Ask 4 (Nov 2026): the deferred tint pass hands the base art's parts and
+            // the sky back to the art's OWN colours instead of two-toning them; the
+            // canvas, lighting and ambient effect still apply. MapBlockColor and
+            // SecondaryColor then feed the shop swatch only.
+            public bool KeepBaseArtColors;
         }
 
         /// <summary>Ambient effect kinds MapSkinEffects knows how to build.</summary>
@@ -507,6 +512,30 @@ namespace CompetitiveRounds
                         cg.colorFilter.Override(new Color(0.40f, 0.32f, 0.32f));
                     }
                 }},
+                // Purgatory (ask 4, Nov 2026) — Underworld's load-order state, kept on
+                // purpose: for the first seconds after an art switch the deferred tint
+                // pass has not run yet, so the Soviet base art shows its OWN colours
+                // (plum-violet haze, indigo edges, rust wall glow) over Underworld's
+                // painted canvas, grading, lighting and embers. This skin is that frame,
+                // held: same base art, canvas colour, grading and effect as Underworld,
+                // and KeepBaseArtColors makes the deferred pass restore the art instead
+                // of recolouring it. The two swatch colours are measured from the
+                // captured screenshots (whole-frame #4C1648, wall glow #B55D2A).
+                { "mapcolor_purgatory", new Preset {
+                    BaseArt = "Soviet",
+                    KeepBaseArtColors = true,
+                    MapBlockColor = new Color(0.30f, 0.09f, 0.28f),
+                    SecondaryColor = new Color(0.71f, 0.36f, 0.16f),
+                    Effect = SkinEffect.Embers,
+                    EffectColor = new Color(1.00f, 0.30f, 0.10f),
+                    EffectColor2 = new Color(1.00f, 0.62f, 0.20f),
+                    Configure = cg => {
+                        cg.saturation.Override(-6f);
+                        cg.temperature.Override(18f);
+                        cg.postExposure.Override(-0.68f);
+                        cg.colorFilter.Override(new Color(0.40f, 0.32f, 0.32f));
+                    }
+                }},
                 // Night City — black navy sky, dark steel walls with amber window
                 // glow, city lights twinkling in the backdrop.
                 { "mapcolor_night_city", new Preset {
@@ -597,6 +626,12 @@ namespace CompetitiveRounds
         /// future caller outside the grading path can ask the same question without
         /// re-deriving it from colour values, which is how this got wrong twice.</summary>
         public static bool IsNeutralSku(string sku) => sku != null && NEUTRAL_SKUS.Contains(sku);
+
+        /// <summary>True for a skin that shows its base art at the art's own colours
+        /// (ask 4, Nov 2026): the deferred pass restores the art parts and the sky
+        /// instead of tinting them; the canvas, lighting and effect still apply.</summary>
+        public static bool KeepsBaseArtColors(string sku)
+            => sku != null && _presets.TryGetValue(sku, out var p) && p.KeepBaseArtColors;
 
         /// <summary>True for skins that ARE a vanilla ROUNDS art (Sky, Poison, Gold,
         /// ...) rather than a custom-designed palette — the preset's display name
@@ -718,6 +753,7 @@ namespace CompetitiveRounds
                 { "mapcolor_moonlit",     new Color(0.02f, 0.02f, 0.05f) }, // pitch black, faint blue
                 { "mapcolor_eclipse",     new Color(0.01f, 0.01f, 0.015f) }, // true black
                 { "mapcolor_underworld",  new Color(0.16f, 0.03f, 0.03f) }, // deep blood red
+                { "mapcolor_purgatory",   new Color(0.16f, 0.03f, 0.03f) }, // Underworld's canvas and lighting, kept (ask 4)
                 { "mapcolor_night_city",  new Color(0.02f, 0.02f, 0.06f) }, // black navy
                 { "mapcolor_night_park",  new Color(0.10f, 0.06f, 0.03f) }, // dark brown night
                 { "mapcolor_rainy_day",   new Color(0.07f, 0.08f, 0.09f) }, // overcast slate, darker

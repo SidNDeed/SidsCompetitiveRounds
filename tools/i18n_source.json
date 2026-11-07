@@ -2153,6 +2153,7 @@
   "Player totals",
   "Player {0}",
   "Players",
+  "Plum-violet haze over a blood-dark sky, indigo at the edges, the walls glowing rust, red embers rising.",
   "Point to the sky, point to the floor, sway those hips. Dancing locks your controls for the duration.",
   "Points lost",
   "Points won",
@@ -2217,6 +2218,7 @@
   "Pup",
   "Pure aggression",
   "Pure greyscale — minimum visual distraction.",
+  "Purgatory",
   "Purple Cursor",
   "Purple Name",
   "Purple-black shadow trail. Feels wrong in the best way.",
@@ -14542,6 +14544,11 @@
    "location": "BuildCompareTab, BuildHomeTab",
    "kind": "CreateButton, CreateText"
   },
+  "Plum-violet haze over a blood-dark sky, indigo at the edges, the walls glowing rust, red embers rising.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Point to the sky, point to the floor, sway those hips. Dancing locks your controls for the duration.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -14858,6 +14865,11 @@
    "kind": "shop"
   },
   "Pure greyscale — minimum visual distraction.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Purgatory": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"

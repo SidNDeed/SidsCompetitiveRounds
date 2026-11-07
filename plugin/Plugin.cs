@@ -10974,6 +10974,7 @@ namespace CompetitiveRounds
                 {
                     Color secondary = CustomMapColors.GetSecondaryColor(sku);
                     string baseArt = CustomMapColors.GetBaseArt(sku);
+                    bool keepBase = CustomMapColors.KeepsBaseArtColors(sku);   // ask 4: Purgatory
                     var ah = ArtHandler.instance;
                     if (ah != null && ah.arts != null)
                     {
@@ -11056,6 +11057,20 @@ namespace CompetitiveRounds
                             // Premium sparkle skins: the atmosphere particles ARE the visible
                             // glitter (the wall border systems are thin edge strips), so they
                             // get the full-brightness two-color glint instead of the dim haze.
+                            // Ask 4 (Nov 2026): a KeepBaseArtColors skin shows the base art
+                            // at its OWN colours (Purgatory = Underworld's load-order state,
+                            // held), so its wall and backdrop slabs are handed back to
+                            // vanilla here instead of being two-toned. The restore matters:
+                            // these systems are shared across arts and keep the previous
+                            // skin's tint until something repaints them. The art-disable
+                            // pass above, and the canvas, lighting and embers below, still
+                            // run for this skin.
+                            if (keepBase)
+                            {
+                                RestoreVanillaArtParts();
+                                Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: base art '{baseArt}' kept at its own colours (no slab tint)");
+                                continue;
+                            }
                             Color? atmoSparkle = CustomMapColors.GetSparkleColor(sku);
                             for (int i = 0; i < partsArr.Length; i++)
                             {
@@ -12070,6 +12085,9 @@ namespace CompetitiveRounds
                 var ah = ArtHandler.instance;
                 var bgGO = ah != null ? ah.m_background : null;
                 if (bgGO == null) return 0;
+                // Ask 4 (Nov 2026): a KeepBaseArtColors skin keeps the vanilla sky as well;
+                // undo any earlier skin's tint on these shared systems and stop here.
+                if (CustomMapColors.KeepsBaseArtColors(sku)) { RestoreVanillaSky(); return 0; }
                 Color? bgN = CustomMapColors.GetBackgroundColor(sku) ?? CustomMapColors.GetMapBlockColor(sku);
                 if (!bgN.HasValue) return 0;
                 Color bg = SaturateColor(bgN.Value, 1.15f);
