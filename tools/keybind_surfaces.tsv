@@ -1139,6 +1139,8 @@ a10292c3bb3a1332	N	rule:N1	Decent
 58eca18787c3b157	P	rule:P	Decimals on the HP readout in the hold-{0} board, the spectator seat and the broadcaster HUD. Both h
 b59cf9ed55bb5bd9	N	rule:N1	Decline
 bbe6a0d4c7d69d24	N	rule:N1	Decline (offline mode)
+77c54610ab3afb94	N	rule:N1	Decline anyway
+929a764676ff507f	F	rev:c37bba6ff7f4b421 fixed:F5 F5 always opens the mod menu; no Controls row moves it	Decline data consent? The mod will run offline: no leaderboard, no ranked matchmaking, no chat, no player cards. You can allow it later in F5 → Settings → Privacy & account.
 1f5163259bd36ff5	O	rule:O	Declined 1v1 match - you joined a game
 698769e3384f77f8	N	rule:N1	Deep blood-red body color.
 bda30be42cb140a9	N	rule:N1	Deep blue-violet of the moment after sunset.
@@ -3868,6 +3870,7 @@ b6c015d12e1b59bd	N	rule:N1	Wins
 6f3c2cb5e1f2e4a0	N	rule:N1	Wisps of grey smoke drift off your body.
 504f4643d13463af	N	rule:N1	Wisps of living shadow crown your head. ANIMATED.
 9f4886eed410ac61	N	rule:N1	With a linked Discord account, mail also reaches you there while the game is closed, and a reply wri
+a762f270b7420721	N	rule:N1	Without data consent the mod will not work properly: the leaderboard, ranked matchmaking, chat, player cards and bug reports with logs all stop working.
 b273fb2877081794	N	rule:N1	Won
 1380373170e60661	N	rule:N1	World Turtle
 bca16e3079936dcb	N	rule:N1	Worn by those who climbed the mountain.
