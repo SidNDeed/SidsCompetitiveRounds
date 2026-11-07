@@ -1063,14 +1063,18 @@ namespace CompetitiveRounds
         // (MET_SCORE) is carried by every mode: 1v1 and FFA games carry its
         // point stream, and every game's end scores are drawn as the race's
         // dots (SessionReportModel.FinishRace) - for 2v2 and 1v2 those dots are
-        // the whole race (round 3 L1).
+        // the whole race (round 3 L1) until a game recorded under migration 403
+        // (ask 9): the server then carries each side's point stream, per-player
+        // damage, kills and deaths, and 1v2's full telemetry, in the 1v1 keys,
+        // so 2v2 and 1v2 carry what 1v1 carries except XP.
         // backend/tests/test_session_report.py executes the four loaders on
         // saturated rows and compares with these lists, in both directions.
         private static readonly string[] CARRIES_1V1 = { MET_DAMAGE, MET_SCORE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
             MET_DAMAGE_TOTAL, MET_KILLS, MET_XP, MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
         private static readonly string[] CARRIES_TEAM = { MET_DAMAGE, MET_SCORE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
-            MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
-        private static readonly string[] CARRIES_OVT = { MET_DAMAGE, MET_SCORE, MET_GOLD, MET_PLAY, MET_DURATION };
+            MET_DAMAGE_TOTAL, MET_KILLS, MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
+        private static readonly string[] CARRIES_OVT = { MET_DAMAGE, MET_SCORE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
+            MET_DAMAGE_TOTAL, MET_KILLS, MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
         private static readonly string[] CARRIES_FFA = { MET_DAMAGE, MET_SCORE, MET_HIT, MET_BLOCK, MET_PING, MET_FPS,
             MET_DAMAGE_TOTAL, MET_KILLS, MET_XP, MET_COMBAT, MET_GOLD, MET_PLAY, MET_DURATION };
 

@@ -1802,6 +1802,21 @@ class TeamPlayerTelemetry(BaseModel):
     blocks_successful: int | None = Field(None, ge=0, le=1000000)
     keys_pressed: int | None = Field(None, ge=0, le=10000000)
     active_seconds: float | None = Field(None, ge=0, le=86400)
+    # Ask 9 (Nov 2026, migration 403): the combat facts every mode's session
+    # report needs on every slot, so the report has ONE data model instead of a
+    # 1v1 shape the other modes only partly fill. Advisory, outside every HMAC
+    # canonical; None from clients that predate them, and NULL in the row is
+    # "not recorded", never zero (#257). damage_dealt is this player's total
+    # (the 1v1 and FFA entries already carry theirs); kills and deaths are the
+    # reporter's observation of this player (FFA's SIGNED kills stay on the
+    # entry); kill_timeline is cumulative on the fps grid like
+    # damage_dealt_timeline; death_times is the seconds since match start of
+    # each death ("12.4,47.0"), the grammar matches.point_times uses.
+    damage_dealt: int | None = Field(None, ge=0, le=10000000)
+    kills: int | None = Field(None, ge=0, le=2000)
+    deaths: int | None = Field(None, ge=0, le=2000)
+    kill_timeline: str | None = Field(None, max_length=512)
+    death_times: str | None = Field(None, max_length=512)
 
 
 class TeamMatchReport(BaseModel):
@@ -1845,6 +1860,13 @@ class TeamMatchReport(BaseModel):
     # the frozen eleven-field canonical. None from every other report.
     game_id: str | None = Field(None, max_length=64)
     game_id_sig: str | None = Field(None, max_length=128)
+    # Ask 9 (migration 403): the game's point events, the pair
+    # matches.point_timeline / point_times carries for 1v1 ("1:0,1:1": the two
+    # sides' totals after each point; the seconds of each). The reporter's
+    # GameStateWatcher polls them in every room; team 1 is the left side.
+    # Advisory, outside the frozen 11-field canonical.
+    point_timeline: str | None = Field(None, max_length=512)
+    point_times: str | None = Field(None, max_length=512)
 
 
 class TeamMatchResponse(BaseModel):
@@ -1938,6 +1960,16 @@ class OvtMatchReport(BaseModel):
     # the frozen ten-field canonical. None from every other report.
     game_id: str | None = Field(None, max_length=64)
     game_id_sig: str | None = Field(None, max_length=128)
+    # Ask 9 (migration 403): per-seat telemetry blobs like the 2v2 report's
+    # (fps/ping/hit/block/damage timelines, counters, kills, deaths), stored
+    # in ovt_match_telemetry, plus the game's point events (solo is the left
+    # side). None from clients that predate them. Advisory, outside the
+    # frozen 10-field canonical.
+    solo_telemetry: TeamPlayerTelemetry | None = None
+    duo_a_telemetry: TeamPlayerTelemetry | None = None
+    duo_b_telemetry: TeamPlayerTelemetry | None = None
+    point_timeline: str | None = Field(None, max_length=512)
+    point_times: str | None = Field(None, max_length=512)
 
 
 class OvtMatchResponse(BaseModel):

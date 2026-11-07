@@ -55079,10 +55079,12 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
                 is_ranked, started_at, ended_at,
                 solo_rating_at, duo_a_rating_at, duo_b_rating_at,
                 solo_damage_timeline, duo_a_damage_timeline, duo_b_damage_timeline,
-                solo_end_stats, duo_a_end_stats, duo_b_end_stats)
+                solo_end_stats, duo_a_end_stats, duo_b_end_stats,
+                point_timeline, point_times)
             VALUES (:id, :sid, :solo, :da, :db, :sr, :dr, :sp, :dp, :ws,
                     :sf, :daf, :dbf, :dur, :room, :gv, :reg, :hmac, :rep, false, :started, NOW(),
-                    :sra, :dar, :dbr, :sdt, :dadt, :dbdt, :ses, :daes, :dbes)
+                    :sra, :dar, :dbr, :sdt, :dadt, :dbdt, :ses, :daes, :dbes,
+                    :ptl, :pts)
         """), {"id": match_id, "sid": series_uuid, "solo": solo_id, "da": duo_a_id, "db": duo_b_id,
                # Aug 12 item 1 (migration 216) — per-seat end-of-game build,
                # read off each seat's PlayerMatchData so no seat mapping is
@@ -55103,6 +55105,9 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
                "sdt": (report.solo_damage_timeline or None),
                "dadt": (report.duo_a_damage_timeline or None),
                "dbdt": (report.duo_b_damage_timeline or None),
+               # Ask 9 (migration 403): the point events, solo on the left; advisory.
+               "ptl": (report.point_timeline or None),
+               "pts": (report.point_times or None),
                # Snapshot the ratings the multiplier was computed from — these
                # three columns were dead (NULL on all 11 legacy rows) and without
                # them no audit or back-pay can reproduce what was actually paid
@@ -55125,6 +55130,30 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
         return await _already_recorded()
     if _insert_savepoint is not None:
         await _insert_savepoint.commit()
+
+    # Ask 9 (migration 403): per-seat telemetry rows, the 2v2 shape. Seats whose
+    # blob never reached the reporter (old-client peers, old clients) arrive as
+    # None: no row, and the report falls back to the match row's damage CSV.
+    for pid_t, tele in ((solo_id, report.solo_telemetry), (duo_a_id, report.duo_a_telemetry),
+                        (duo_b_id, report.duo_b_telemetry)):
+        if tele is None or pid_t is None:
+            continue
+        await db.execute(text("""
+            INSERT INTO ovt_match_telemetry (match_id, player_id, fps_timeline, ping_timeline, ping_avg,
+                hit_timeline, block_timeline, damage_dealt_timeline, bullets_fired, bullets_hit,
+                blocks_activated, blocks_successful, keys_pressed, active_seconds,
+                damage_dealt, kills, deaths, kill_timeline, death_times)
+            VALUES (:m, :p, :ft, :pt, :pa, :ht, :bt, :dt, :bf, :bh, :ba, :bs, :kp, :asec,
+                    :dmg, :k, :d, :ktl, :dtl)
+            ON CONFLICT (match_id, player_id) DO NOTHING
+        """), {"m": match_id, "p": pid_t,
+               "ft": tele.fps_timeline or None, "pt": tele.ping_timeline or None, "pa": tele.ping_avg,
+               "ht": tele.hit_timeline or None, "bt": tele.block_timeline or None,
+               "dt": tele.damage_dealt_timeline or None,
+               "bf": tele.bullets_fired, "bh": tele.bullets_hit, "ba": tele.blocks_activated,
+               "bs": tele.blocks_successful, "kp": tele.keys_pressed, "asec": tele.active_seconds,
+               "dmg": tele.damage_dealt, "k": tele.kills, "d": tele.deaths,
+               "ktl": tele.kill_timeline or None, "dtl": tele.death_times or None})
 
     if outcome is not None:
         outcome.update(new_settlement=True,
@@ -67680,10 +67709,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 blocks_activated, blocks_successful, keys_pressed, active_seconds,
                 fps_timeline, ping_timeline, hit_timeline, block_timeline,
                 damage_dealt, damage_dealt_timeline, kill_timeline, absent, exclusion_reasons, end_stats,
-                game_points_at_leave, left_early_involuntary)
+                game_points_at_leave, left_early_involuntary, deaths, death_times)
             VALUES (:m, :p, :slot, :rw, :pt, :k, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,
                     :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt,
-                    :dmg, :dmgtl, :killtl, :absent, CAST(:er AS text[]), :estats, :gpal, :lei)
+                    :dmg, :dmgtl, :killtl, :absent, CAST(:er AS text[]), :estats, :gpal, :lei,
+                    :deaths, :dtl)
         """), {"m": match_id, "p": pid, "slot": p.slot, "rw": p.rounds_won, "pt": p.points_total,
                "k": int(getattr(p, "kills", 0) or 0),
                # Aug 12 item 1 (migration 216) — this player's end-of-game
@@ -67733,6 +67763,12 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                          else (getattr(p, "damage_dealt_timeline", None) or None)),
                "killtl": (None if _rdm_settle in ("r", "l")
                           else (getattr(p, "kill_timeline", None) or None)),
+               # Ask 9 (migration 403): deaths observed by the reporter, from the
+               # entry's telemetry blob (the signed kills stay on the entry); the
+               # same partial-observation NULLing as the timelines above.
+               "deaths": (None if (_rdm_settle in ("r", "l") or tel is None) else tel.deaths),
+               "dtl": (None if (_rdm_settle in ("r", "l") or tel is None)
+                       else (tel.death_times or None)),
                "pl": placements[p.steam_id], "le": bool(p.left_early),
                "rb": old_r, "ra": (old_r + chg) if (old_r is not None and chg is not None) else None,
                "rc": chg, "xp": xp_g, "g": gold_g,
@@ -70725,6 +70761,10 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
         t1b_end_stats=_clean_end_stats(report.t1b.end_stats),
         t2a_end_stats=_clean_end_stats(report.t2a.end_stats),
         t2b_end_stats=_clean_end_stats(report.t2b.end_stats),
+        # Ask 9 (migration 403): the point events; advisory, outside the HMAC.
+        # Empty collapses to NULL: "not recorded", never an empty game (#257).
+        point_timeline=(report.point_timeline or None),
+        point_times=(report.point_times or None),
     )
     db.add(new_match)
     await db.flush()
@@ -70777,6 +70817,12 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
             blocks_successful=tele.blocks_successful,
             keys_pressed=tele.keys_pressed,
             active_seconds=tele.active_seconds,
+            # Ask 9 (migration 403): combat facts per slot, same NULL rule.
+            damage_dealt=tele.damage_dealt,
+            kills=tele.kills,
+            deaths=tele.deaths,
+            kill_timeline=(tele.kill_timeline or None),
+            death_times=(tele.death_times or None),
         ))
 
     # Per-match XP awards. Higher base than 1v1 so wins land in user's
@@ -76245,7 +76291,7 @@ _REPORT_SLOT_STREAMS = (
     ("shots", "hit", 0), ("hits", "hit", 1),
     ("blocks", "block", 0), ("blocks_ok", "block", 1),
     ("fps", "fps", None), ("ping", "ping", None),
-    ("kills", "killtl", None),          # FFA only (ffa_match_players.kill_timeline)
+    ("kills", "killtl", None),          # ffa_match_players.kill_timeline; 2v2/1v2 telemetry (ask 9)
 )
 
 # The caller's player row, resolved BEFORE any games statement so every loader
@@ -76273,8 +76319,10 @@ _REPORT_1V1_SQL = """
            m.p1_end_stats, m.p2_end_stats,
            m.p1_bullets_fired, m.p1_bullets_hit, m.p1_blocks_activated, m.p1_blocks_successful,
            m.p1_keys_pressed, m.p1_active_seconds, m.p1_damage_dealt, m.p1_deaths,
+           m.p1_deaths_boundary, m.p1_deaths_own_bullet,
            m.p2_bullets_fired, m.p2_bullets_hit, m.p2_blocks_activated, m.p2_blocks_successful,
            m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths,
+           m.p2_deaths_boundary, m.p2_deaths_own_bullet,
            m.p1_xp_gained, m.p2_xp_gained,
            rs.rules AS rules,
            BOOL_AND(m.is_ranked) OVER () AS all_ranked,
@@ -76336,6 +76384,7 @@ _REPORT_TEAM_SQL = """
            tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id,
            tm.t1_rounds_won, tm.t2_rounds_won, tm.t1_points_total, tm.t2_points_total,
            tm.t1a_end_stats, tm.t1b_end_stats, tm.t2a_end_stats, tm.t2b_end_stats,
+           tm.point_timeline, tm.point_times,
            ts.rules AS rules,
            COUNT(*) OVER () AS total_rows
       FROM team_matches tm
@@ -76353,7 +76402,8 @@ _REPORT_TEAM_TELE_SQL = """
     SELECT tt.match_id, tt.player_id, tt.fps_timeline, tt.ping_timeline,
            tt.hit_timeline, tt.block_timeline, tt.damage_dealt_timeline,
            tt.bullets_fired, tt.bullets_hit, tt.blocks_activated, tt.blocks_successful,
-           tt.keys_pressed, tt.active_seconds
+           tt.keys_pressed, tt.active_seconds,
+           tt.damage_dealt, tt.kills, tt.deaths, tt.kill_timeline, tt.death_times
       FROM team_match_telemetry tt
      WHERE tt.match_id = ANY(CAST(:mids AS uuid[]))
 """
@@ -76373,6 +76423,7 @@ _REPORT_OVT_SQL = """
            om.solo_rounds_won, om.duo_rounds_won, om.solo_points_total, om.duo_points_total,
            om.solo_damage_timeline, om.duo_a_damage_timeline, om.duo_b_damage_timeline,
            om.solo_end_stats, om.duo_a_end_stats, om.duo_b_end_stats,
+           om.point_timeline, om.point_times,
            os.rules AS rules, os.solo_extra_pick AS solo_extra_pick,
            COUNT(*) OVER () AS total_rows
       FROM ovt_matches om
@@ -76386,6 +76437,17 @@ _REPORT_OVT_WHERE = {
     "series": "om.series_id = CAST(:key AS uuid)",
     "match": "om.id = CAST(:key AS uuid)",
 }
+# Ask 9 (migration 403): the 1v2 seats' telemetry rows, the 2v2 statement's
+# shape plus the five combat columns; one statement for every game.
+_REPORT_OVT_TELE_SQL = """
+    SELECT ot.match_id, ot.player_id, ot.fps_timeline, ot.ping_timeline,
+           ot.hit_timeline, ot.block_timeline, ot.damage_dealt_timeline,
+           ot.bullets_fired, ot.bullets_hit, ot.blocks_activated, ot.blocks_successful,
+           ot.keys_pressed, ot.active_seconds,
+           ot.damage_dealt, ot.kills, ot.deaths, ot.kill_timeline, ot.death_times
+      FROM ovt_match_telemetry ot
+     WHERE ot.match_id = ANY(CAST(:mids AS uuid[]))
+"""
 # The FFA match row counts for the caller only when the caller PLAYED it: an
 # `absent` roster row is a frozen-roster ghost (left in an earlier game of the
 # sitting, #227) — the same predicate the profile card uses.
@@ -76408,7 +76470,7 @@ _REPORT_FFA_PLAYERS_SQL = """
            fp.damage_dealt_timeline, fp.kill_timeline, fp.damage_dealt,
            fp.end_stats, fp.color_hex,
            fp.bullets_fired, fp.bullets_hit, fp.blocks_activated, fp.blocks_successful,
-           fp.keys_pressed, fp.active_seconds, fp.kills
+           fp.keys_pressed, fp.active_seconds, fp.kills, fp.deaths, fp.death_times
       FROM ffa_match_players fp
      WHERE fp.match_id = ANY(CAST(:mids AS uuid[])) AND NOT fp.absent
      ORDER BY fp.match_id, fp.placement ASC, fp.slot ASC
@@ -76782,10 +76844,15 @@ def _report_ffa_scores(timeline, slots, duration_s, cap=_REPORT_SAMPLES_MAX):
 
 
 def _report_slot(pid, rounds, points, fps=None, ping=None, hit=None, block=None,
-                 dmg=None, end_stats=None, totals=None, killtl=None, xp=None):
+                 dmg=None, end_stats=None, totals=None, killtl=None, xp=None, death_times=None):
+    """ONE slot shape for every mode (ask 9): a loader that lacks a fact leaves
+    its key None, so the per-player keys of the envelope are the same in 1v1,
+    2v2, 1v2 and FFA and the client needs no per-mode shape. `death_times` is
+    the stored CSV of this player's death seconds (migration 403); the game
+    JSON turns it into the `deaths` events."""
     return {"pid": str(pid) if pid is not None else None, "rounds": rounds, "points": points,
             "fps": fps, "ping": ping, "hit": hit, "block": block, "dmg": dmg, "killtl": killtl,
-            "end_stats": end_stats, "totals": totals or {}, "xp": xp}
+            "end_stats": end_stats, "totals": totals or {}, "xp": xp, "death_times": death_times}
 
 
 def _report_totals(shots=None, hits=None, blocks=None, blocks_ok=None, keys=None,
@@ -76810,6 +76877,54 @@ def _report_totals(shots=None, hits=None, blocks=None, blocks_ok=None, keys=None
         except (TypeError, ValueError):
             pass
     return out
+
+
+def _report_sides(slots, sid_of):
+    """The two sides of a game as steam-id lists: the `team` the mode's loader
+    put on each slot (2v2: 1 and 2; 1v2: solo 1, duo 2), else the two slots of
+    a 1v1. FFA has no sides (its scores come from the half-point event list)."""
+    if slots and all(s.get("team") in (1, 2) for s in slots):
+        a = [sid_of[s["pid"]] for s in slots if s["team"] == 1 and sid_of.get(s["pid"]) is not None]
+        b = [sid_of[s["pid"]] for s in slots if s["team"] == 2 and sid_of.get(s["pid"]) is not None]
+        return a, b
+    if len(slots) == 2:
+        a, b = sid_of.get(slots[0]["pid"]), sid_of.get(slots[1]["pid"])
+        return ([a] if a else []), ([b] if b else [])
+    return [], []
+
+
+def _report_death_events(slots, sid_of, cap=_REPORT_DEATHS_MAX):
+    """Recorded deaths (migration 403 `death_times`: seconds since match start,
+    per slot) -> the game's `deaths` events in time order, the first `cap`.
+    Empty when no slot carries the column (older games), so the caller keeps
+    the 1v1 inference from the point events."""
+    out = []
+    for s in slots:
+        sid = sid_of.get(s.get("pid"))
+        raw = s.get("death_times")
+        if sid is None or not raw or not isinstance(raw, str):
+            continue
+        for tok in raw.split(","):
+            try:
+                out.append({"t": round(float(tok), 1), "id": sid})
+            except (TypeError, ValueError):
+                continue
+    out.sort(key=lambda e: e["t"])
+    return out[:cap]
+
+
+def _report_1v1_kills(opp_deaths, opp_boundary, opp_own_bullet):
+    """1v1 kills derived from the OTHER fighter's deaths (migration 191): a
+    death that was neither the boundary nor the fighter's own bullet was this
+    player's kill, the only other damage source in a 1v1. None when the
+    opponent's deaths were not recorded; the boundary and own-bullet counters
+    are NULL on games before 191 and then count as zero."""
+    if opp_deaths is None:
+        return None
+    try:
+        return max(0, int(opp_deaths) - int(opp_boundary or 0) - int(opp_own_bullet or 0))
+    except (TypeError, ValueError):
+        return None
 
 
 def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_MAX,
@@ -76852,15 +76967,26 @@ def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_M
         if sid is not None:
             gold[sid] = int(amt)
     deaths = []
-    if game.get("point_times") and len(slots) == 2:
-        sid_a, sid_b = sid_of.get(slots[0]["pid"]), sid_of.get(slots[1]["pid"])
-        if sid_a and sid_b:
-            sa, sb, deaths = _report_points(game.get("point_times"), game.get("point_timeline"),
-                                            sid_a, sid_b, sample_cap)
-            if sa:
-                timelines.setdefault(sid_a, {})["score"] = sa
-                timelines.setdefault(sid_b, {})["score"] = sb
-                available.add("score")
+    # Ask 9: the score streams are per SIDE (1v1's two fighters, 2v2's two
+    # teams, 1v2's solo and duo), every player of a side carrying its stream,
+    # so the client's race reads the same in every two-sided mode.
+    side_a, side_b = _report_sides(slots, sid_of)
+    if game.get("point_times") and side_a and side_b:
+        sa, sb, inferred = _report_points(game.get("point_times"), game.get("point_timeline"),
+                                          side_a[0], side_b[0], sample_cap)
+        if sa:
+            for sid in side_a:
+                timelines.setdefault(sid, {})["score"] = sa
+            for sid in side_b:
+                timelines.setdefault(sid, {})["score"] = sb
+            available.add("score")
+        # Only a 1v1 point implies a death (the other fighter's); a team's point
+        # ends on its LAST death, so the team modes report death_times instead.
+        if len(side_a) == 1 and len(side_b) == 1:
+            deaths = inferred
+    recorded = _report_death_events(slots, sid_of)
+    if recorded:
+        deaths = recorded
     if game.get("ffa_timeline"):
         # FFA: the match row's half-point event list, one score stream per
         # PLAYING slot (absent rows never reach `slots`).
@@ -77003,7 +77129,9 @@ async def _report_load_1v1(db, selector, key, cpid):
                              _report_totals(r["p1_bullets_fired"], r["p1_bullets_hit"],
                                             r["p1_blocks_activated"], r["p1_blocks_successful"],
                                             r["p1_keys_pressed"], r["p1_active_seconds"],
-                                            r["p1_damage_dealt"], r["p1_deaths"]),
+                                            r["p1_damage_dealt"], r["p1_deaths"],
+                                            kills=_report_1v1_kills(r["p2_deaths"], r.get("p2_deaths_boundary"),
+                                                                    r.get("p2_deaths_own_bullet"))),
                              xp=r.get("p1_xp_gained")),
                 _report_slot(r["player2_id"], r["p2_rounds_won"], r["p2_points_total"],
                              r["p2_fps_timeline"], r["p2_ping_timeline"], r["p2_hit_timeline"],
@@ -77011,7 +77139,9 @@ async def _report_load_1v1(db, selector, key, cpid):
                              _report_totals(r["p2_bullets_fired"], r["p2_bullets_hit"],
                                             r["p2_blocks_activated"], r["p2_blocks_successful"],
                                             r["p2_keys_pressed"], r["p2_active_seconds"],
-                                            r["p2_damage_dealt"], r["p2_deaths"]),
+                                            r["p2_damage_dealt"], r["p2_deaths"],
+                                            kills=_report_1v1_kills(r["p1_deaths"], r.get("p1_deaths_boundary"),
+                                                                    r.get("p1_deaths_own_bullet"))),
                              xp=r.get("p2_xp_gained")),
             ],
         })
@@ -77043,11 +77173,17 @@ async def _report_load_team(db, selector, key, cpid):
                              t.get("damage_dealt_timeline"), r[f"{slot}_end_stats"],
                              _report_totals(t.get("bullets_fired"), t.get("bullets_hit"),
                                             t.get("blocks_activated"), t.get("blocks_successful"),
-                                            t.get("keys_pressed"), t.get("active_seconds")))
+                                            t.get("keys_pressed"), t.get("active_seconds"),
+                                            damage=t.get("damage_dealt"), deaths=t.get("deaths"),
+                                            kills=t.get("kills")),
+                             killtl=t.get("kill_timeline"), death_times=t.get("death_times"))
             s["team"] = team
             slots.append(s)
         games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
                       "series_id": r["series_id"], "rules": _rules_history(r["rules"]),
+                      # Ask 9 (migration 403): the point events, team 1 on the left;
+                      # None on games reported before the columns existed
+                      "point_times": r.get("point_times"), "point_timeline": r.get("point_timeline"),
                       "slots": slots})
     return games, total
 
@@ -77057,6 +77193,12 @@ async def _report_load_ovt(db, selector, key, cpid):
                               {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
     rows, total = _report_take(rows)
     games = []
+    if rows:
+        # Ask 9 (migration 403): per-seat telemetry rows like the 2v2 loader's;
+        # a seat without a row (an older game) keeps the match row's damage CSV.
+        tele = await _report_rows(db, _REPORT_OVT_TELE_SQL,
+                                  {"mids": [str(r["id"]) for r in rows]})
+        tele_by = {(str(t["match_id"]), str(t["player_id"])): t for t in tele}
     for r in rows:
         slots = []
         for slot, team, rounds, points in (
@@ -77066,13 +77208,24 @@ async def _report_load_ovt(db, selector, key, cpid):
             pid = r[f"{slot}_id"]
             if pid is None:
                 continue
-            s = _report_slot(pid, rounds, points, dmg=r[f"{slot}_damage_timeline"],
-                             end_stats=r[f"{slot}_end_stats"])
+            t = tele_by.get((str(r["id"]), str(pid))) or {}
+            s = _report_slot(pid, rounds, points, t.get("fps_timeline"), t.get("ping_timeline"),
+                             t.get("hit_timeline"), t.get("block_timeline"),
+                             t.get("damage_dealt_timeline") or r[f"{slot}_damage_timeline"],
+                             r[f"{slot}_end_stats"],
+                             _report_totals(t.get("bullets_fired"), t.get("bullets_hit"),
+                                            t.get("blocks_activated"), t.get("blocks_successful"),
+                                            t.get("keys_pressed"), t.get("active_seconds"),
+                                            damage=t.get("damage_dealt"), deaths=t.get("deaths"),
+                                            kills=t.get("kills")),
+                             killtl=t.get("kill_timeline"), death_times=t.get("death_times"))
             s["team"] = team
             slots.append(s)
         games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
                       "series_id": r["series_id"],
                       "rules": _rules_history(r["rules"], r["solo_extra_pick"]),
+                      # Ask 9 (migration 403): the point events, solo on the left
+                      "point_times": r.get("point_times"), "point_timeline": r.get("point_timeline"),
                       "slots": slots})
     return games, total
 
@@ -77135,8 +77288,10 @@ def _report_ffa_slot(fp):
                      _report_totals(fp["bullets_fired"], fp["bullets_hit"],
                                     fp["blocks_activated"], fp["blocks_successful"],
                                     fp["keys_pressed"], fp["active_seconds"],
-                                    damage=fp["damage_dealt"], kills=fp["kills"]),
-                     killtl=fp["kill_timeline"], xp=fp.get("xp_gained"))
+                                    damage=fp["damage_dealt"], kills=fp["kills"],
+                                    deaths=fp.get("deaths")),
+                     killtl=fp["kill_timeline"], xp=fp.get("xp_gained"),
+                     death_times=fp.get("death_times"))
     s["slot"] = fp["slot"]
     s["placement"] = fp["placement"]
     s["rating_before"] = fp["rating_before"]

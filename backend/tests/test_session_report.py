@@ -272,7 +272,7 @@ class FakeDb:
     def __init__(self, *, matches=None, players=None, cards=None, ffa_cards=None, gold=None,
                  rating_history=None, team_matches=None, team_tele=None, ffa_match=None,
                  ffa_players=None, series_row=None, team_series_row=None, fail_rating=False,
-                 watched=None):
+                 watched=None, ovt_matches=None, ovt_tele=None):
         self.statements = []
         # Round 2 M4: spectate games with the accounts holding a watched grant of each
         self.watched = WATCHED if watched is None else watched
@@ -284,6 +284,10 @@ class FakeDb:
         self.rating_history = RATING_HISTORY if rating_history is None else rating_history
         self.team_matches = TEAM_MATCHES if team_matches is None else team_matches
         self.team_tele = TEAM_TELE if team_tele is None else team_tele
+        # ask 9: 1v2 games and their per-seat telemetry rows (migration 403);
+        # none in the stock world, so every older test keeps its 1v2 miss
+        self.ovt_matches = [] if ovt_matches is None else ovt_matches
+        self.ovt_tele = [] if ovt_tele is None else ovt_tele
         self.ffa_match = FFA_MATCH if ffa_match is None else ffa_match
         self.ffa_players = FFA_PLAYERS if ffa_players is None else ffa_players
         self.series_row = SERIES_ROW if series_row is None else series_row
@@ -384,6 +388,11 @@ class FakeDb:
                 if str(m["id"]) == key and m["invalidated_at"] is None and cpid in seats:
                     sid_ = str(m["series_id"]) if m["series_id"] is not None else None
                     return _Res([{"report_kind": "team", "series_id": sid_}])
+            for m in self.ovt_matches:
+                seats = {str(m[k]) for k in ("solo_id", "duo_a_id", "duo_b_id") if m[k] is not None}
+                if str(m["id"]) == key and m["invalidated_at"] is None and cpid in seats:
+                    sid_ = str(m["series_id"]) if m["series_id"] is not None else None
+                    return _Res([{"report_kind": "ovt", "series_id": sid_}])
             if (str(self.ffa_match["id"]) == key and self.ffa_match["invalidated_at"] is None
                     and any(str(p["player_id"]) == cpid and not p["absent"] for p in self.ffa_players)):
                 return _Res([{"report_kind": "ffa", "series_id": None}])
@@ -476,7 +485,19 @@ class FakeDb:
         if "FROM ovt_matches om" in sql:
             assert "CAST(:cpid AS uuid) IN (om.solo_id, om.duo_a_id, om.duo_b_id)" in sql, \
                 "1v2 statement lost the participant predicate"
-            return _Res([])
+            assert "om.invalidated_at IS NULL" in sql and "COUNT(*) OVER () AS total_rows" in sql
+            key, cpid = params["key"], params["cpid"]
+            if "om.series_id = CAST(:key AS uuid)" in sql:
+                rows = [m for m in self.ovt_matches if str(m["series_id"]) == key]
+            else:
+                rows = [m for m in self.ovt_matches if str(m["id"]) == key]
+            rows = [m for m in rows if m["invalidated_at"] is None
+                    and cpid in {str(m[k]) for k in ("solo_id", "duo_a_id", "duo_b_id") if m[k] is not None}]
+            rows.sort(key=lambda m: m["started_at"], reverse=True)
+            return _Res(self._with_total(rows)[: int(params["lim"])])
+        if "FROM ovt_match_telemetry ot" in sql:
+            mids = set(params["mids"])
+            return _Res([t for t in self.ovt_tele if str(t["match_id"]) in mids])
         if "FROM ffa_matches fm" in sql:
             assert "fm.invalidated_at IS NULL" in sql
             assert ("EXISTS (SELECT 1 FROM ffa_match_players fpx WHERE fpx.match_id = fm.id "
@@ -711,11 +732,13 @@ def test_ranked_series_envelope(session_ok):
     assert "picks_capped" not in g1
     assert g1["end_build"] == {CALLER: ["BombsAway", "Barrage"], OPP: ["Leach"]}
     assert g1["end_stats"] == {CALLER: END_STATS, OPP: END_STATS}
+    # ask 9: 1v1 kills are the OTHER fighter's recorded deaths, derived on the
+    # server now (the client used to), so `kills` reads the same in every mode
     assert g1["totals"] == {
         CALLER: {"shots": 30, "hits": 15, "blocks": 6, "blocks_ok": 4, "keys": 500,
-                 "damage": 250, "deaths": 1, "active_s": 100.5},
+                 "damage": 250, "deaths": 1, "kills": 2, "active_s": 100.5},
         OPP: {"shots": 36, "hits": 10, "blocks": 3, "blocks_ok": 1, "keys": 400,
-              "damage": 120, "deaths": 2, "active_s": 90.0}}
+              "damage": 120, "deaths": 2, "kills": 1, "active_s": 90.0}}
     # game 2 was reported with the players swapped: still keyed by steam id
     assert resp["games"][1]["scores"] == {OPP: 2, CALLER: 1}
     # set_summary ONCE per set, from the series row + the linked snapshot
@@ -2749,11 +2772,14 @@ def _sat_value(k):
 class _Saturated(dict):
     """A row in which every column is populated, except the `drop` suffixes."""
 
-    def __init__(self, drop=()):
+    def __init__(self, drop=(), **over):
         super().__init__()
         self.drop = tuple(drop)
+        self.over = over      # ask 9: a column pinned to one value (the 1v2 telemetry seat)
 
     def __getitem__(self, k):
+        if k in self.over:
+            return self.over[k]
         return None if self.drop and k.endswith(self.drop) else _sat_value(k)
 
     def get(self, k, default=None):
@@ -2773,6 +2799,10 @@ def _loader_metrics(monkeypatch, consts, mode, drop=(), strip=()):
     loaders name every seat in `scores`, so an envelope without scores is
     built by emptying that key)."""
     async def _rows(db, sql, params):
+        if "FROM ovt_match_telemetry ot" in sql:
+            # ask 9 (migration 403): the 1v2 telemetry row is the SOLO seat's;
+            # the shared saturated player_id is 2v2's t1a, no 1v2 seat
+            return [_Saturated(drop, player_id=str(uuid.uuid5(_SAT_NS, "solo_id")))]
         return [_Saturated(drop)]
     monkeypatch.setattr(main, "_report_rows", _rows)
     key, cpid = _SAT_MID, str(uuid.uuid5(_SAT_NS, "caller"))
@@ -2833,14 +2863,17 @@ def test_the_modes_carry_lists_are_what_the_server_loaders_read(monkeypatch):
                                     "client only", sorted(lists[mode] - got))
     # Control: the saturation is what produces a metric - the 1v2 loader with
     # its damage timelines empty carries no damage at all.
-    bare = _loader_metrics(monkeypatch, consts, "OVT", drop=("_damage_timeline",))
+    # ask 9: a 1v2 game has two damage sources now, the match row's CSVs and the
+    # telemetry row's damage_dealt_timeline (migration 403); both empty = no damage
+    bare = _loader_metrics(monkeypatch, consts, "OVT", drop=("_damage_timeline", "damage_dealt_timeline"))
     assert consts["MET_DAMAGE"] not in bare and consts["MET_DAMAGE"] in lists["OVT"], sorted(bare)
 
 
 def test_a_team_or_1v2_set_without_scores_reads_not_recorded_for_this_set(monkeypatch):
     """Round 3 L1: the 2v2 and 1v2 loaders put end scores on every game, and
-    those scores are the whole of those modes' score race (FinishRace's
-    dots), so both modes carry MET_SCORE. An envelope of either mode whose
+    those scores are the race's dots (FinishRace) - the whole race until a
+    game recorded under migration 403 brings the sides' point stream (ask 9)
+    - so both modes carry MET_SCORE. An envelope of either mode whose
     games carry no scores (the loader's own envelope with `scores` emptied)
     has no score race, and the race panel's text is MissingText(kind,
     MET_SCORE): with the metric in the mode's list that is "not recorded for
@@ -2850,7 +2883,10 @@ def test_a_team_or_1v2_set_without_scores_reads_not_recorded_for_this_set(monkey
     score = consts["MET_SCORE"]
     for mode in ("TEAM", "OVT"):
         full = _loader_metrics(monkeypatch, consts, mode)
-        bare = _loader_metrics(monkeypatch, consts, mode, strip=("scores",))
+        # ask 9: a game recorded under migration 403 also carries the sides' point
+        # stream, so the scoreless envelope has those columns empty as well
+        bare = _loader_metrics(monkeypatch, consts, mode, drop=("point_times", "point_timeline"),
+                               strip=("scores",))
         assert score in full, (mode, "control: the loader's envelope carries scores")
         assert score not in bare, (mode, sorted(bare))
         assert score in lists[mode], (mode, "the race would read 'not supported for this mode'")
@@ -2860,3 +2896,129 @@ def test_a_team_or_1v2_set_without_scores_reads_not_recorded_for_this_set(monkey
                     "private static void FinishRace(Model m, Envelope env, string missing)")
     assert "if (p.Lines.Count == 0 && p.Dots.Count == 0) { p.Missing = missing; return; }" in race
     assert "g.Scores.TryGetValue(pid, out v)" in race, "the dots are the games' end scores"
+
+
+# ── ask 9: one data model for every mode (migration 403) ─────────────────────
+
+OVT1 = str(uuid.uuid4())
+OVT_MATCH_ROW = {
+    "id": OVT1, "series_id": None, "started_at": T0, "ended_at": T0 + timedelta(seconds=300),
+    "duration_s": 300, "invalidated_at": None,
+    "solo_id": PID_A, "duo_a_id": PID_B, "duo_b_id": PID_C,
+    "solo_rounds_won": 2, "duo_rounds_won": 3, "solo_points_total": 6, "duo_points_total": 9,
+    "solo_damage_timeline": "0,50,80", "duo_a_damage_timeline": None, "duo_b_damage_timeline": None,
+    "solo_end_stats": END_STATS, "duo_a_end_stats": None, "duo_b_end_stats": None,
+    "rules": None, "solo_extra_pick": False,
+    # the point events, solo on the left (migration 403)
+    "point_timeline": "0:1,1:1,1:2", "point_times": "30,120,210",
+    **_room_cols(),
+}
+OVT_TELE_ROW = {"match_id": OVT1, "player_id": PID_A, "fps_timeline": "60,61", "ping_timeline": "20,22",
+                "hit_timeline": "4:2,8:5", "block_timeline": "1:1,2:1", "damage_dealt_timeline": "0,100",
+                "bullets_fired": 8, "bullets_hit": 5, "blocks_activated": 2, "blocks_successful": 1,
+                "keys_pressed": 40, "active_seconds": 150.0,
+                "damage_dealt": 100, "kills": 1, "deaths": 2, "kill_timeline": "0,1", "death_times": "30,210"}
+
+
+def test_a_2v2_game_carries_the_1v1_facts_once_recorded(session_ok):
+    """Ask 9: a 2v2 game recorded under migration 403 carries each team's score
+    stream on every member, the recorded death marks, and per-player damage,
+    kills and deaths in `totals` - the 1v1 facts, in the 1v1 keys."""
+    tm = dict(TEAM_MATCHES[0], point_timeline="1:0,1:1,2:1", point_times="40,95,150")
+    tele = dict(TEAM_TELE[0], damage_dealt=300, kills=2, deaths=1, kill_timeline="0,1,2", death_times="95")
+    resp = _call(FakeDb(team_matches=[tm], team_tele=[tele]), CALLER, series=TEAM_SERIES)
+    g = resp["games"][0]
+    assert g["timelines"][CALLER]["score"] == [[40.0, 1], [95.0, 1], [150.0, 2]]
+    assert g["timelines"][OTHER]["score"] == g["timelines"][CALLER]["score"], "a team-mate carries the team's stream"
+    assert g["timelines"][OPP]["score"] == [[40.0, 0], [95.0, 1], [150.0, 1]]
+    assert g["timelines"][CALLER]["kills"] == [[100.0, 0], [200.0, 1], [300.0, 2]]
+    assert "score" in g["available"] and "kills" in g["available"]
+    assert g["totals"][CALLER] == {"shots": 10, "hits": 6, "keys": 80, "active_s": 200.0,
+                                   "damage": 300, "deaths": 1, "kills": 2}
+    # the recorded marks, not the 1v1 inference (a team's point ends on its LAST death)
+    assert g["deaths"] == [{"t": 95.0, "id": CALLER}]
+
+
+def test_a_2v2_game_before_the_columns_reads_as_before(session_ok):
+    """Control (#391): the stock fixture rows carry none of the new columns, so
+    the game has no score stream, no marks and counters only - what every 2v2
+    game recorded before migration 403 still reads as."""
+    g = _call(FakeDb(), CALLER, series=TEAM_SERIES)["games"][0]
+    assert "score" not in g["timelines"][CALLER] and g["deaths"] == []
+    assert g["totals"] == {CALLER: {"shots": 10, "hits": 6, "keys": 80, "active_s": 200.0}}
+
+
+def test_a_1v2_game_fills_the_same_slot_shape(session_ok):
+    """Ask 9: the 1v2 loader reads ovt_match_telemetry as the 2v2 loader reads
+    its table (fps, ping, hit, block and damage streams, counters, kills,
+    deaths); the point events give the solo and the duo their score streams;
+    a seat without a telemetry row keeps the match row's damage CSV."""
+    resp = _call(FakeDb(ovt_matches=[OVT_MATCH_ROW], ovt_tele=[OVT_TELE_ROW]), CALLER, match=OVT1)
+    assert _no_room_leak(resp)
+    assert resp["kind"] == "ovt"
+    assert {p["id"]: p["team"] for p in resp["players"]} == {CALLER: 1, OPP: 2, OTHER: 2}
+    g = resp["games"][0]
+    assert g["match_id"] == OVT1 and g["scores"] == {CALLER: 2, OPP: 3, OTHER: 3}
+    tl = g["timelines"][CALLER]
+    assert tl["fps"] == [[150.0, 60], [300.0, 61]] and tl["ping"] == [[150.0, 20], [300.0, 22]]
+    assert tl["shots"] == [[150.0, 4], [300.0, 8]] and tl["blocks_ok"] == [[150.0, 1], [300.0, 1]]
+    assert tl["damage"] == [[150.0, 0], [300.0, 100]], "the telemetry row's stream wins over the match row's"
+    assert tl["kills"] == [[150.0, 0], [300.0, 1]]
+    assert tl["score"] == [[30.0, 0], [120.0, 1], [210.0, 1]]
+    assert g["timelines"][OPP]["score"] == [[30.0, 1], [120.0, 1], [210.0, 2]]
+    assert g["timelines"][OPP]["score"] == g["timelines"][OTHER]["score"], "both duo seats carry the duo's stream"
+    assert g["totals"][CALLER] == {"shots": 8, "hits": 5, "blocks": 2, "blocks_ok": 1, "keys": 40,
+                                   "active_s": 150.0, "damage": 100, "kills": 1, "deaths": 2}
+    assert OPP not in g["totals"], "a seat without a row has no counters (NULL is absent, #257)"
+    assert g["deaths"] == [{"t": 30.0, "id": CALLER}, {"t": 210.0, "id": CALLER}]
+    assert g["available"] == ["blocks", "blocks_ok", "damage", "fps", "hits", "kills", "ping", "score", "shots"]
+
+
+def test_a_1v2_seat_without_telemetry_keeps_the_match_rows_damage(session_ok):
+    g = _call(FakeDb(ovt_matches=[OVT_MATCH_ROW]), CALLER, match=OVT1)["games"][0]
+    assert g["timelines"][CALLER]["damage"] == [[100.0, 0], [200.0, 50], [300.0, 80]]
+    assert g["totals"] == {} and "score" in g["available"] and g["deaths"] == []
+
+
+def test_1v1_kills_are_the_opponents_deaths_minus_the_boundary_and_own_bullet(session_ok):
+    """Ask 9: the server derives 1v1 kills so `kills` reads the same in every
+    mode; a death the boundary or the fighter's own bullet caused is nobody's
+    kill, and no recorded deaths means no kills claim."""
+    rows = [dict(MATCHES[0], p2_deaths=5, p2_deaths_boundary=2, p2_deaths_own_bullet=1, p1_deaths=None)]
+    g = _call(FakeDb(matches=rows), CALLER, match=M1)["games"][0]
+    assert g["totals"][CALLER]["kills"] == 2
+    assert "kills" not in g["totals"][OPP], "unknown while this fighter's deaths were not recorded"
+    assert main._report_1v1_kills(1, 3, 0) == 0, "never negative"
+    assert main._report_1v1_kills(None, 0, 0) is None
+    assert main._report_1v1_kills(4, None, None) == 4, "pre-191 counters count as zero"
+
+
+def test_recorded_death_marks_are_time_ordered_and_capped():
+    sid_of = {"a": "1", "b": "2"}
+    slots = [{"pid": "a", "death_times": "12.4,47"}, {"pid": "b", "death_times": "30"}]
+    assert main._report_death_events(slots, sid_of) == [{"t": 12.4, "id": "1"}, {"t": 30.0, "id": "2"},
+                                                        {"t": 47.0, "id": "1"}]
+    assert main._report_death_events([{"pid": "a", "death_times": None}], sid_of) == []
+    assert main._report_death_events([{"pid": "a", "death_times": "x,,5"}], sid_of) == [{"t": 5.0, "id": "1"}]
+    many = [{"pid": "a", "death_times": ",".join(str(i) for i in range(100))}]
+    assert len(main._report_death_events(many, sid_of)) == main._REPORT_DEATHS_MAX
+
+
+def test_the_sides_of_a_game_follow_the_slots_teams():
+    sid_of = {"a": "1", "b": "2", "c": "3"}
+    assert main._report_sides([{"pid": "a", "team": 1}, {"pid": "b", "team": 2}, {"pid": "c", "team": 2}],
+                              sid_of) == (["1"], ["2", "3"])
+    assert main._report_sides([{"pid": "a"}, {"pid": "b"}], sid_of) == (["1"], ["2"])
+    assert main._report_sides([{"pid": "a"}, {"pid": "b"}, {"pid": "c"}], sid_of) == ([], []), "FFA has no sides"
+    assert main._report_sides([{"pid": "a"}, {"pid": "zz"}], sid_of) == (["1"], []), "an unknown pid is no side"
+
+
+def test_every_mode_builds_the_same_slot_keys():
+    """Ask 9: the slot a loader builds has the same keys in every mode; a fact a
+    mode lacks is None, never a missing key, and a full totals strip has the
+    same nine counters whichever mode recorded them."""
+    assert set(main._report_slot("p", 1, 2).keys()) == {
+        "pid", "rounds", "points", "fps", "ping", "hit", "block", "dmg", "killtl",
+        "end_stats", "totals", "xp", "death_times"}
+    assert set(main._report_totals(1, 1, 1, 1, 1, 1.0, 1, 1, 1).keys()) == {
+        "shots", "hits", "blocks", "blocks_ok", "keys", "active_s", "damage", "deaths", "kills"}

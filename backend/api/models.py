@@ -1210,6 +1210,10 @@ class TeamMatch(Base):
     # Migration 383 (Stage 2 readmission, V3 S5): the server class of the
     # report that settled this game; NULL for a report outside a flagged room.
     fallback_cls = Column(String(1), nullable=True)
+    # Ask 9 (migration 403): the game's point events, the 1v1 pair's shape
+    # (Match.point_timeline / point_times); NULL from clients that predate it.
+    point_timeline = Column(String(512), nullable=True)
+    point_times = Column(String(512), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("photon_room_id", "t1a_id", "t1b_id", "t2a_id", "t2b_id", name="uq_team_match"),
@@ -1258,6 +1262,12 @@ class TeamMatchTelemetry(Base):
     blocks_successful = Column(Integer, nullable=True)
     keys_pressed = Column(Integer, nullable=True)
     active_seconds = Column(Double, nullable=True)
+    # Ask 9 (migration 403): combat facts per slot; NULL = not recorded (#257).
+    damage_dealt = Column(Integer, nullable=True)
+    kills = Column(SmallInteger, nullable=True)
+    deaths = Column(SmallInteger, nullable=True)
+    kill_timeline = Column(String(512), nullable=True)
+    death_times = Column(String(512), nullable=True)
 
 
 class ArtistUser(Base):
