@@ -32,7 +32,7 @@ the query raises); N4's pick_region_for_group except return (only on an
 exception inside the picker); _group_region's first binding of detail never
 reaches a .get (the try rebinds it or its except does). _group_region's
 except binding arrives on the error flow (_ovt_error_flow), the one flow that
-reaches the .get at main:18767.
+reaches the .get at main:18836.
 
 Member (B), match_hold._guard_identities (ruling FOUR-R11-A20 (1)), is a
 callee-identity bound at the two expressions of the helper's body the
@@ -221,7 +221,7 @@ def _ovt_error_flow(header, mp):
     check) and the store's upsert keeps (its WHERE is not true for a NULL
     sequence): _region_pings_newer then compares None with the header's
     sequence, the TypeError is caught by _group_region's except, and the
-    pick line reads detail.get('error') (main:18767), the one .get site that
+    pick line reads detail.get('error') (main:18836), the one .get site that
     only that branch reaches."""
     async def body(w, sm):
         ps = await R.hold_test.seed_players(w.conn, 3)
