@@ -4656,7 +4656,15 @@ namespace CompetitiveRounds
             }
             if (muteLine.Length > 0)
                 ChatOverlayTmp.Add(muteLine, maxAlpha * 0.75f, new Color(0.72f, 0.76f, 0.84f));
-            ChatOverlayTmp.End(0.55f * maxAlpha);
+            // Ask 2 (Nov 2026): while the SCR menu is open (every tab but Home,
+            // whose own chat pane hides this panel above) the backdrop is
+            // SOLID, so the lines read over the menu chrome instead of showing
+            // it through. Keyed on NativeUI.IsOpen alone - never on room state
+            // (#122: OfflineMode keeps InRoom true at the main menu). The fade
+            // is untouched: each line's alpha still comes from the TTL and the
+            // 10 s tail above, menu open or not, and with the menu closed the
+            // 0.55 backdrop still follows the most visible line as before.
+            ChatOverlayTmp.End(NativeUI.IsOpen ? 1f : 0.55f * maxAlpha);
         }
 
         // ── Admin prompt (IMGUI overlay) ─────────────────────────
