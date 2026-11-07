@@ -336,6 +336,21 @@ namespace CompetitiveRounds
 
         private static bool spawned = false;
         internal static bool modDisabled = false;
+        // The application is shutting down: set by the first Application.quitting
+        // hook, before any other quit-time work, and by OnDestroy on the host
+        // when Unity's exit token is cancelled (the same fact by a second route:
+        // Internal_ApplicationQuit cancels Application.exitCancellationToken
+        // before it invokes the quitting subscribers); nowhere else. Unity reaches
+        // both only for a quit that can no longer be cancelled, so the flag never
+        // becomes true while the game continues (a vetoed wantsToQuit reaches
+        // neither). OnDestroy reads it: nothing may be created during Unity's
+        // teardown. The respawn there attached the
+        // letterbox clearing camera (d6f5ce9f) to a new object inside the
+        // teardown in every retained crashed session (output_log: Destroyed ->
+        // Respawned -> Crash!!!); the crash itself came from the keyboard-event
+        // message hook (Keybinds.KeyboardEvents.Uninstall), and this gate is
+        // teardown hygiene.
+        internal static volatile bool Quitting = false;
         /// <summary>True once DoInitialize's other-mods check has produced its
         /// verdict (either way). GrowNormalize refuses to advertise cr_grow2
         /// before this — an advertise-then-revoke-in-room sequence reaches
@@ -517,13 +532,17 @@ namespace CompetitiveRounds
             {
                 UnityEngine.Application.quitting += () =>
                 {
+                    Quitting = true;   // first: before any quit-time work that can throw
+                    // The keyboard-event thread hook goes before anything else: a hook
+                    // still installed when the window is destroyed crashes the player.
+                    try { Keybinds.KeyboardEvents.Uninstall(); } catch { }
                     try
                     {
                         string src = CompetitiveUI.BepInExLogPathPublic();
                         string dst = CompetitiveUI.BepInExLogPreviousPath();
                         if (!string.IsNullOrEmpty(src) && !string.IsNullOrEmpty(dst) && System.IO.File.Exists(src))
                         {
-                            System.IO.File.Copy(src, dst, overwrite: true);
+                            LogSnapshot.Write(src, dst);   // bounded: at most LogSnapshot.CAP bytes read on the main thread
                             Log.LogInfo($"[BUG-REPORT] log snapshot saved: {dst}");
                         }
                     }
@@ -4046,6 +4065,29 @@ namespace CompetitiveRounds
             try { PlayerColorCosmetic.OnHostDestroyed(this); } catch { }
             // Finalize this host's entered request before this teardown creates its replacement.
             try { FfaReadmit.OnHostDestroyed(this); } catch { }
+            // The same fact by a second route: Unity cancels Application.exitCancellationToken
+            // in Internal_ApplicationQuit before it invokes the quitting subscribers, and only
+            // after wantsToQuit let the quit through, so a quitting subscriber of another mod
+            // that throws before this mod's handler (a multicast stops at the first exception)
+            // cannot hide an irrevocable quit from this host; a vetoed quit cancels nothing.
+            if (!Plugin.Quitting)
+            {
+                try { if (UnityEngine.Application.exitCancellationToken.IsCancellationRequested) Plugin.Quitting = true; } catch { }
+            }
+            if (Plugin.Quitting)
+            {
+                // Application shutdown destroys this host too, and nothing may be
+                // created now: the respawn below ran inside Unity's teardown in every
+                // retained crashed session (output_log: Destroyed -> Respawned ->
+                // Crash!!!). Gating it alone did not stop the crash, which the
+                // keyboard-event message hook caused; this gate is teardown hygiene.
+                // Every other destroy (a scene change, an explicit destroy during
+                // play) respawns below as before. The hook's removal is retried here
+                // once when the quitting hook's attempt failed (a no-op after success).
+                try { Keybinds.KeyboardEvents.Uninstall(); } catch { }
+                Plugin.Log.LogInfo("[PERSIST] host destroyed at application quit; no respawn");
+                return;
+            }
             Plugin.Log.LogWarning("[PERSIST] Destroyed! Attempting respawn...");
             MainMenuInjector.Reset();
 
