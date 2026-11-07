@@ -795,8 +795,14 @@ namespace CompetitiveRounds
 
         /// <summary>The enroll call's caps, comma-joined ("" when there is no
         /// assembly): ffa_adm1 only together with ffa_rdm1, and ffa_rdm1 never
-        /// without ffa_adm1, so every admission lobby this build joins is a
-        /// readmission lobby (V3:252).</summary>
+        /// without ffa_adm1 (V3:252). This is what THIS seat advertises, not
+        /// what its room becomes: the server writes admission_v1 at lock only
+        /// when every member meets the admission conditions (ffa_adm1 among
+        /// them), and readmit_v1 only when the room is an admission lobby and
+        /// every member also carries ffa_rdm1. A room with a member that
+        /// advertises ffa_adm1 without ffa_rdm1 therefore locks as an admission
+        /// lobby that is not a readmission lobby (server test T2.6). The sitting
+        /// reads the server's flag (FfaAssembly.ReadmitPin), never this list.</summary>
         internal static string CapsList(bool asm, bool adm, string asmToken, string admToken)
         {
             if (asm && adm) return asmToken + "," + admToken + "," + RdmCapsToken;

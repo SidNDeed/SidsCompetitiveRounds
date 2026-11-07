@@ -6,6 +6,10 @@
 # production-enabling release; it reaches the five enrolled seats through a lane
 # folder only, never through a publisher. Every publisher runs this gate as its
 # first check and publishes nothing unless it exits 0.
+# Since 1.41.0 (decision A7) Release advertises the token too. Ruling A7-R1-PRE
+# (2026-11-04) keeps the G3 configuration with the server's enrolment as the
+# rollback, so this gate still refuses the G3 marker; removing the configuration
+# and this gate is a post-release cleanup item.
 #
 # METHOD (the scanner's, tools/scan-build-markers.ps1): the raw bytes are mapped
 # through Latin-1, a lossless byte-to-char mapping, and searched for the needle
