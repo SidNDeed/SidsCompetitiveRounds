@@ -13,7 +13,8 @@
 # the room), or when ft_absent.py does not find the FrameTime build in it. It backs the installed DLL up into a fresh
 # folder under ai-collab/frame-time/vm-install/ with its digest, copies, and proves the copy by digest. revert copies
 # that backup back, proves the digest, removes the sentinel and closes the record (renamed, never deleted).
-# The sentinel keys match the laptop runner's defaults (frame_time_seat.ps1: seed 1, f18 A).
+# The match sentinel arms seed 2, f18 A: each seat its own seed (METHOD-V4 3.3; ruling R6-A3.11.54 Q3); the laptop
+# runner keeps frame_time_seat.ps1's defaults, seed 1, f18 A. The menu sentinel is one seat's self-check and keeps seed 1.
 # Exit: 0 done; 2 usage or refused; 3 a digest check failed.
 set -u
 R=C:/Users/Sid/Documents/SidsCompetitiveRounds
@@ -72,7 +73,7 @@ case "$cmd" in
     mkdir -p "$(dirname "$ARM")"
     case "$mode" in
       menu)  printf 'seed=1\nforce=none\nmenu=1\n' > "$ARM";;
-      match) printf 'seed=1\nf18=A\n' > "$ARM";;
+      match) printf 'seed=2\nf18=A\n' > "$ARM";;
       *) refuse "usage: arm <menu|match>";;
     esac
     echo "$(st) FT-VM-ARM $mode written: $(tr '\n' ' ' < "$ARM")"
