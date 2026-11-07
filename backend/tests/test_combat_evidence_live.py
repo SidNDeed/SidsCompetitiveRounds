@@ -887,3 +887,18 @@ def test_l9_deleting_a_player_removes_their_aggregate_rows_only(live):
     assert [(r["t"], r["confdeltype"]) for r in fk] == [("combat_contrib", "c"),
                                                         ("combat_player_daily", "c")]
     assert left == {"combat_contrib": [str(ids[b])], "combat_player_daily": [str(ids[b])]}
+
+
+# -- B10-R3 H1: the match a contribution was derived for (migration 401) -------------------
+
+CONTRIB_SQL = ("SELECT subject_player_id, source, coverage, match_id, computed_at FROM combat_contrib "
+               "WHERE stable_game_key = :k ORDER BY subject_player_id, source")
+
+
+def test_migration_401_applies_after_390_and_a_second_run_writes_nothing(live):
+    s = live.snaps
+    assert s["m401"] == s["m401_again"]                              # a re-run writes nothing
+    names = {r[0] for r in s["m401"]["indexes"]}
+    assert {"ix_combat_contrib_match", "ix_card_contrib_match"} <= names
+    assert not {"ix_combat_contrib_match", "ix_card_contrib_match"} & {
+        r[0] for r in s["fourth"]["indexes"]}

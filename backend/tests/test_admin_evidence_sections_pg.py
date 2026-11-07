@@ -45,7 +45,8 @@ from test_admin_evidence_sections import old_bot_ns  # noqa: E402
 
 SQL_DIR = os.path.join(HERE, "..", "sql")
 MIGRATIONS = ("242_runtime_settings.sql", "370_card_evidence.sql",
-              "372_identity_clock_evidence.sql", "390_combat_evidence.sql")
+              "372_identity_clock_evidence.sql", "390_combat_evidence.sql",
+              "401_contrib_match_provenance.sql")
 EVIDENCE_TABLES = ("runtime_settings", "card_evidence", "card_games", "card_contrib",
                    "card_player_daily", "combat_evidence", "combat_games", "combat_contrib",
                    "combat_player_daily", "identity_clock_evidence", "identity_clock_games")
@@ -414,14 +415,14 @@ _DISTRACT_SQL = {
         "SELECT 'd' || lpad(i::text, 5, '0'), %(lo)s, %(hi)s, gen_random_uuid() %(rows)s"),
     "card_contrib": (
         "INSERT INTO card_contrib (stable_game_key, pair_lo, pair_hi, recorder_player_id, "
-        "subject_player_id, source, coverage, deal_profile, rules_rev, utc_day) "
+        "subject_player_id, source, coverage, deal_profile, rules_rev, utc_day, match_id) "
         "SELECT 'd' || lpad(i::text, 5, '0'), %(lo)s, %(hi)s, %(seat)s, %(seat)s, 'self', "
-        "'one', 'prof', 'r1', CAST(:day AS date) %(rows)s"),
+        "'one', 'prof', 'r1', CAST(:day AS date), gen_random_uuid() %(rows)s"),
     "combat_contrib": (
         "INSERT INTO combat_contrib (stable_game_key, pair_lo, pair_hi, subject_player_id, "
-        "source, coverage, utc_day) "
+        "source, coverage, utc_day, match_id) "
         "SELECT 'd' || lpad(i::text, 5, '0'), %(lo)s, %(hi)s, %(seat)s, 'self', 'one', "
-        "CAST(:day AS date) %(rows)s"),
+        "CAST(:day AS date), gen_random_uuid() %(rows)s"),
     "card_player_daily": (
         "INSERT INTO card_player_daily (subject_player_id, day, source, coverage, "
         "deal_profile, rules_rev) "
