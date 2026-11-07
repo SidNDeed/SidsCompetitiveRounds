@@ -2880,6 +2880,9 @@ def test_r9_admission_order_and_sql_text_are_bound():
             assert got is not None and want in got, (want, got)
 
 
+_R9_COLD_MEMOS = ("_RET_TREES", "_N_DUMPS", "_N_CENSUS")
+
+
 def test_r9_gate_statement_order_is_bound():
     """The ORDER rule over the gate walks (ruling REHEARSAL-R9-PRE (1), W30b).
     SEQUENCES binds the order of an admission span; every other statement a
@@ -2892,7 +2895,8 @@ def test_r9_gate_statement_order_is_bound():
     included) with different headers is swapped in a copy. With the marker
     off (the round-8 grammar plus SEQUENCES and the SQL-text binding) the
     swaps no other rule refuses are the free pairs, counted and frozen here
-    (185 before the rule); with the marker on each of them is refused, by the
+    (185 before the rule; 692 once the open row walks, rule N (B), and the trace is
+    taken from cold memos); with the marker on each of them is refused, by the
     order rule (it runs after every other check of a unit). The real units are
     admitted with the marker on (test_r7_grammar_covers_every_walked_span_and_body)."""
     import copy
@@ -2907,6 +2911,14 @@ def test_r9_gate_statement_order_is_bound():
     trace = []
     admission_sites()
     _GATE_POLICIES.clear()
+    # round 11 (rule N's freeze step, W30h): closed_walk's module memos that
+    # read a body through _helper_tree only on a miss are emptied for the
+    # trace and put back after it, so the traced units (and the count below)
+    # do not depend on which walks ran earlier in the process
+    cold = {n: getattr(_cw, n) for n in _R9_COLD_MEMOS}
+    kept = {n: dict(c) for n, c in cold.items()}
+    for c in cold.values():
+        c.clear()
     _G["trace"] = trace
     try:
         test_h3_every_admission_site_uses_shared_gate_recheck_and_rollback()
@@ -2916,6 +2928,9 @@ def test_r9_gate_statement_order_is_bound():
     finally:
         _G["trace"] = None
         _GATE_POLICIES.clear()
+        for n, c in cold.items():
+            c.clear()
+            c.update(kept[n])
 
     def check(role, fn, stmts, bindings):
         _gg.ORDER_SWITCH["bindings"] = bindings
@@ -2970,7 +2985,7 @@ def test_r9_gate_statement_order_is_bound():
             assert got_on is not None and "outside its frozen order" in got_on, (
                 role, fn.name, i, got_on)
             free += 1
-    assert free == 185, free
+    assert free == 692, free
     print(f"r9 gate order: {len(orders)} keys, {len(units)} units, {free} free pairs refused")
 
 
