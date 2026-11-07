@@ -12,7 +12,8 @@
 # While the handle is held, Windows never gives the captured id to another process. No process is read by number
 # here. A process-table reading that fails is never "no ROUNDS": the pre-launch check refuses on it.
 # Exit: 0 end line seen and log copied; 3 refused (ROUNDS already running, or the process table unreadable);
-# 4 no process; 5 end line not seen (also when the captured process's handle could not be held).
+# 4 no process; 5 end line not seen (also when the captured process's handle could not be held); 6 the pid file could
+# not be written (the game closed through the held object; the caller's exit chain proves its exit and restores).
 # The moment the pid is captured it writes <dir of -Out>\launch-<Mode>.pid, one line
 # "FT-VM-LAUNCH-PID pid=<pid> epoch=<launch epoch s> stamp=<utc>" (temp file, then rename): the signal a watcher
 # starts from (ruling R6-A3.11.4; this script's stdout reaches its caller through a buffered pipe).
@@ -59,7 +60,18 @@ try {
     Set-Content -LiteralPath ($pidFile + '.tmp') -Value ("FT-VM-LAUNCH-PID pid={0} epoch={1} stamp={2}" -f $procId, $epoch, (St)) -Encoding ASCII
     Move-Item -LiteralPath ($pidFile + '.tmp') -Destination $pidFile -Force
     echo "$(St) FT-VM-LAUNCH pid file written: $pidFile"
-} catch { echo "$(St) FT-VM-LAUNCH pid file FAILED: $($_.Exception.Message)" }
+} catch {
+    # without the pid file no caller can close this game by identity and window 9's +20 CHECK has no input (F9-R2
+    # finding 3, sitting W32h): the launcher does not go on to the match; it closes the game it launched through the
+    # held object (a graceful close request, then Kill on that object at the bound) and exits 6
+    echo "$(St) FT-VM-LAUNCH pid file FAILED: $($_.Exception.Message); no identity: the game is closed through the held object"
+    if ($held) {
+        try { $null = $p.CloseMainWindow() } catch { }
+        try { if (-not $p.WaitForExit(60000)) { $p.Kill(); $null = $p.WaitForExit(30000) } } catch { echo "$(St) FT-VM-LAUNCH close through the held object failed ($($_.Exception.Message))" }
+    }
+    echo "$(St) FT-VM-LAUNCH exit 6 (pid file not written; captured process exited: $(Exited))"
+    exit 6
+}
 $seen = $false
 for ($i = 1; $i -le $polls -and $held; $i++) {
     Start-Sleep -Seconds 15
