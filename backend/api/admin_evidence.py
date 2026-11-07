@@ -2128,12 +2128,22 @@ def _section_enc(value):
     return "".join(out)
 
 
-def _ident(row, a, b):
-    """A row's stored game identity: (stable_game_key, pair_lo, pair_hi), the
-    games and contribution tables' key prefix. A record's pair is its two
-    seats, the lower first, as the workers key it (LEAST/GREATEST)."""
-    lo, hi = sorted((str(row[a]), str(row[b])))
+def _record_ident(row):
+    """An evidence record's game identity: (stable_game_key, lo, hi), its two
+    seats with the lower first, as the workers key a record (LEAST/GREATEST
+    of seat_player_id and other_player_id). Records are the only rows whose
+    identity is derived; a games or contribution row's is `_stored_ident`."""
+    lo, hi = sorted((str(row["seat_player_id"]), str(row["other_player_id"])))
     return row["stable_game_key"], lo, hi
+
+
+def _stored_ident(row):
+    """A games or contribution row's identity exactly as stored:
+    (stable_game_key, pair_lo, pair_hi), the tables' key prefix, never
+    reordered (B10-R2 H2). The games tables require pair_lo < pair_hi; the
+    contribution tables do not, so a contribution stored as (K, B, A) is
+    another identity than the game's (K, A, B) and is not the game's."""
+    return row["stable_game_key"], str(row["pair_lo"]), str(row["pair_hi"])
 
 
 def _game_records(src, data, game):
@@ -2156,9 +2166,9 @@ def _game_records(src, data, game):
     subject it is."""
     pair = tuple(sorted((game["p1"], game["p2"])))
     room = game["room"]
-    recs = [(_ident(r, "seat_player_id", "other_player_id"), r) for r in data["records"]]
+    recs = [(_record_ident(r), r) for r in data["records"]]
     recs = [(i, r) for i, r in recs if i[1:] == pair]
-    allrows = [(_ident(g, "pair_lo", "pair_hi"), g) for g in data["games"]]
+    allrows = [(_stored_ident(g), g) for g in data["games"]]
     grows = [(i, g) for i, g in allrows if i[1:] == pair]
     attached = {i for i, g in grows
                 if g["match_id"] is not None and str(g["match_id"]) == game["id"]}
@@ -2207,7 +2217,7 @@ def _combat_derived_here(c, game, derived_from):
     ended = game.get("ended")
     if ended is None or c["utc_day"] != _utc_day(ended) or c["computed_at"] < ended:
         return False
-    ident, subject = _ident(c, "pair_lo", "pair_hi"), str(c["subject_player_id"])
+    ident, subject = _stored_ident(c), str(c["subject_player_id"])
     for i, r in derived_from:
         seat, other = str(r["seat_player_id"]), str(r["other_player_id"])
         if i == ident and ((c["source"] == "self" and seat == subject) or (
@@ -2229,10 +2239,10 @@ def _game_contrib(src, data, game, pair, idents, derived_from):
     over the rows under the selected identities. Identity-clock stores no
     contributions."""
     if src == "card":
-        mine = [c for c in data["contrib"] if _ident(c, "pair_lo", "pair_hi")[1:] == pair
+        mine = [c for c in data["contrib"] if _stored_ident(c)[1:] == pair
                 and c["match_id"] is not None and str(c["match_id"]) == game["id"]]
         return mine, []
-    held = [c for c in data["contrib"] if _ident(c, "pair_lo", "pair_hi") in idents]
+    held = [c for c in data["contrib"] if _stored_ident(c) in idents]
     here = [_combat_derived_here(c, game, derived_from) for c in held]
     return ([c for c, ok in zip(held, here) if ok],
             [c for c, ok in zip(held, here) if not ok])
