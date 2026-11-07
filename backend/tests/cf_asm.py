@@ -25,6 +25,7 @@ test_cf_fixture_steam_ids.py asserts that decode.
 import contextvars
 import copy
 import datetime as _dt
+import functools
 import decimal as _decimal
 import io
 import json
@@ -84,7 +85,7 @@ for _name, _val in list(vars(main).items()):
     _MAIN_STATE[_name] = copy.deepcopy(_val)
 
 _LOCKS_SQL = (
-    "SELECT /*cf-locks*/ l.locktype, COALESCE(c.relname, ''), l.mode FROM pg_locks l"
+    "SELECT l.locktype, COALESCE(c.relname, ''), l.mode FROM pg_locks l"
     "  LEFT JOIN pg_class c ON c.oid = l.relation"
     " WHERE l.pid = pg_backend_pid() AND l.granted"
     "   AND l.locktype IN ('relation', 'tuple', 'advisory')"
@@ -96,6 +97,12 @@ _LOCKS_SQL = (
     " ORDER BY 1, 2, 3")
 
 _REC = {"on": None}
+
+# The lock probe's mark (A7-R4-A1, FIX-A7-R5-PROV): RecSession.commit sets it
+# in the connection's info while the probe runs and removes it after, and the
+# Recorder leaves out a statement only while its connection carries it. What
+# identifies the probe is where it runs, never what its SQL says.
+_PROBE_MARK = "cf_lock_probe"
 
 # The buffer of the route call running in the current task (Env._call).
 _OUT = contextvars.ContextVar("cf_out", default=None)
@@ -127,90 +134,750 @@ class RecSession(AsyncSession):
     async def commit(self):
         rec = _REC["on"]
         if rec is not None and self.in_transaction():
+            info = (await self.connection()).sync_connection.info
+            info[_PROBE_MARK] = True
             try:
                 rows = (await self.execute(text(_LOCKS_SQL))).all()
                 rec.locks.append(sorted({(r[0], r[1], r[2]) for r in rows}))
             except Exception as exc:                   # pragma: no cover
                 rec.locks.append([("error", type(exc).__name__, "")])
+            finally:
+                info.pop(_PROBE_MARK, None)
         await super().commit()
 
 
-_VERB = re.compile(r"^\s*(?:/\*.*?\*/\s*)?(\w+)", re.S)
-_UPD = re.compile(r"^\s*UPDATE\s+(\w+)\s+SET\s+(.*?)(?:\sWHERE\s|\sRETURNING\s|$)", re.S | re.I)
-_INS = re.compile(r"^\s*INSERT\s+INTO\s+(\w+)\s*\(([^)]*)\)", re.S | re.I)
-_DEL = re.compile(r"^\s*DELETE\s+FROM\s+(\w+)", re.S | re.I)
-_FROM = re.compile(r"\sFROM\s+(\w+)", re.S | re.I)
-_LOCKCL = re.compile(r"FOR\s+(?:NO\s+KEY\s+)?(?:UPDATE|SHARE)(?:\s+SKIP\s+LOCKED|\s+NOWAIT)?", re.I)
+# -- The one SQL lexer (A7-R3, rule set completed under A7-R4-A1) ------------
+#
+# THE SCANNER REGION begins here and ends at the marker "end of the scanner
+# region" below (A7-R5-A1 (2)(a)): it is the only code of this lane's test
+# files that reads a statement's text. Everything after it reads the token
+# model (code_tokens, statements, mentions, insert_parts, find_all, shape),
+# and the generated sweep (cf_controls.py sweep, run by
+# test_the_only_raw_sql_reader_is_the_scanner) proves it by operation.
+#
+# sql_tokens is PostgreSQL's own scanner, src/backend/parser/scan.l of
+# REL_16_STABLE (the seats' and production's server is PostgreSQL 16), rule
+# for rule, with flex's choice between rules: the longest match wins, and of
+# two matches of one length the rule scan.l writes first. The number beside
+# each rule is its line in scan.l (REL_16_STABLE, md5 1d86a8c3). NOTES.md
+# "Round 5" lists every token class with its anchor and its disposition.
+#
+# scan.l's [\200-\377] admits every byte of a non-ASCII character in UTF-8
+# (the server encoding), so in a str every character from U+0080 up is an
+# identifier and dollar-tag character here.
+_HI = "\u0080-\U0010ffff"
+_ID = "[A-Za-z_%s][A-Za-z0-9_$%s]*" % (_HI, _HI)          # identifier       :346-349
+_DQ = "[A-Za-z_%s][A-Za-z0-9_%s]*" % (_HI, _HI)           # dolq_start/_cont :299-300
+_OPC = r"~!@#^&|`?+\-*/%<>="                              # op_chars         :381
+_SPACE = " \t\n\r\f"                                      # space            :222
+_HSPACE = " \t\f"                                         # horiz_space      :223
+_NEWLINE = "\n\r"                                         # newline          :224
+_DEC = r"[0-9](?:_?[0-9])*"                               # decinteger       :400
+_NUM = r"(?:%s\.(?:%s)?|\.%s)" % (_DEC, _DEC, _DEC)       # numeric          :409
+_REAL = r"(?:%s|%s)[Ee][-+]?%s" % (_DEC, _NUM, _DEC)      # real             :412
+
+# The INITIAL state's rules, in scan.l's order (the tie-break).
+_RULES = [(name, re.compile(pat)) for name, pat in (
+    ("whitespace", r"[ \t\n\r\f]+|--[^\n\r]*"),           # :457, {space}+|{comment} :227-229
+    ("xcstart", r"/\*[%s]*" % _OPC),                      # :461, :342
+    ("xbstart", r"[bB]'"),                                # :501, :264
+    ("xhstart", r"[xX]'"),                                # :519, :268
+    ("xnstart", r"[nN]'"),                                # :533, :272
+    ("xqstart", r"'"),                                    # :559, :286
+    ("xestart", r"[eE]'"),                                # :569, :275
+    ("xusstart", r"[uU]&'"),                              # :576, :318
+    ("dolqdelim", r"\$(?:%s)?\$" % _DQ),                  # :758, :301
+    ("dolqfailed", r"\$%s" % _DQ),                        # :764, :302
+    ("xdstart", r'"'),                                    # :803, :309
+    ("xuistart", r'[uU]&"'),                              # :808, :315
+    ("xufailed", r"[uU]&"),                               # :841, :321
+    ("typecast", r"::"),                                  # :853
+    ("dot_dot", r"\.\."),                                 # :858
+    ("colon_equals", r":="),                              # :863
+    ("equals_greater", r"=>"),                            # :868
+    ("less_equals", r"<="),                               # :873
+    ("greater_equals", r">="),                            # :878
+    ("less_greater", r"<>"),                              # :883
+    ("not_equals", r"!="),                                # :889
+    ("self", r"[,()\[\].;:+\-*/%^<>=]"),                  # :895, :380
+    ("operator", r"[%s]+" % _OPC),                        # :900, :382
+    ("param", r"\$[0-9]+"),                               # :1008, :416
+    ("param_junk", r"\$[0-9]+" + _ID),                    # :1013, :438
+    ("decinteger", _DEC),                                 # :1018
+    ("hexinteger", r"0[xX](?:_?[0-9A-Fa-f])+"),           # :1022, :401
+    ("octinteger", r"0[oO](?:_?[0-7])+"),                 # :1026, :402
+    ("bininteger", r"0[bB](?:_?[01])+"),                  # :1030, :403
+    ("hexfail", r"0[xX]_?"),                              # :1034, :405
+    ("octfail", r"0[oO]_?"),                              # :1038, :406
+    ("binfail", r"0[bB]_?"),                              # :1042, :407
+    ("numeric", _NUM),                                    # :1046
+    ("numericfail", _DEC + r"\.\."),                      # :1051, :410
+    ("real", _REAL),                                      # :1057
+    ("realfail", r"(?:%s|%s)[Ee][-+]" % (_DEC, _NUM)),    # :1062, :413
+    ("integer_junk", _DEC + _ID),                         # :1066, :435
+    ("numeric_junk", _NUM + _ID),                         # :1070, :436
+    ("real_junk", _REAL + _ID),                           # :1074, :437
+    ("identifier", _ID),                                  # :1080
+    ("other", r"."),                                      # :1105 (flex's . : not \n)
+)]
+_KIND = {"typecast": "op", "dot_dot": "op", "colon_equals": "op", "equals_greater": "op",
+         "less_equals": "op", "greater_equals": "op", "less_greater": "op",
+         "not_equals": "op", "self": "op", "param": "param", "identifier": "ident",
+         "other": "other"}
+_DOLQ = re.compile(r"\$(?:%s)?\$" % _DQ)
+_DOLQFAILED = re.compile(r"\$%s" % _DQ)
 
 
-def _set_columns(body):
-    """The column names a SET list assigns, at parenthesis depth 0."""
-    cols, depth, cur = [], 0, []
-    for ch in body:
-        if ch == "(":
+def _string_end(sql, i, state):
+    """The end of a string constant whose opening quote is at sql[i - 1]
+    (scan.l :588-756), in exclusive state xb, xh, xq, xe or xus, and its
+    segments. A closing quote enters xqs (:588); there {quotecontinue}
+    (:244, :600), a newline among horizontal whitespace and comments and then
+    a quote, returns to the SAME state (so an E'' string keeps its escapes),
+    and anything else ends the constant at the closing quote (:608-645).
+    xqdouble (:287, :647) is a quote inside xq, xe and xus only: in xb and xh
+    a second quote ends the constant. In xe a backslash and the character
+    after it are one unit (xeescape :277, :720 and the longer escapes
+    :278-281, whose extra characters are digits, never a quote)."""
+    n = len(sql)
+    segs, seg0, j = [], i - 1, i
+    while True:
+        while j < n:
+            c = sql[j]
+            if c == "\\" and state == "xe":
+                j += 2
+                continue
+            if c == "'":
+                if state in ("xq", "xe", "xus") and sql.startswith("''", j):
+                    j += 2
+                    continue
+                break
+            j += 1
+        if j >= n:                       # unterminated (:756): the server refuses it
+            segs.append(sql[seg0:n])
+            return n, segs, False
+        j += 1
+        segs.append(sql[seg0:j])
+        # xqs: {whitespace_with_newline}{quote} (:238-244)
+        k = j
+        while k < n:
+            if sql[k] in _HSPACE:
+                k += 1
+            elif sql.startswith("--", k):
+                k = _line_end(sql, k)
+            else:
+                break
+        if k >= n or sql[k] not in _NEWLINE:
+            return j, segs, True
+        k += 1
+        while k < n:                     # {special_whitespace}* (:238)
+            if sql[k] in _SPACE:
+                k += 1
+            elif sql.startswith("--", k):
+                e = _line_end(sql, k)
+                if e >= n:
+                    break
+                k = e + 1
+            else:
+                break
+        if k >= n or sql[k] != "'":
+            return j, segs, True
+        seg0, j = k, k + 1
+
+
+def _line_end(sql, i):
+    """The end of a `--` comment at i: the first CR or LF, or the end
+    ({comment} is "--"{non_newline}*, :227, :225)."""
+    ends = [e for e in (sql.find("\n", i), sql.find("\r", i)) if e >= 0]
+    return min(ends) if ends else len(sql)
+
+
+def _block_end(sql, i):
+    """The end of a /* */ comment opened at i (:461-499), and whether it
+    closed: nested openers count, `*`-runs followed by `/` close, an
+    unterminated comment runs to the end (:470, the server refuses it)."""
+    n, depth, j = len(sql), 0, i + 2
+    while j < n:
+        if sql.startswith("/*", j):
             depth += 1
-        elif ch == ")":
+            j += 2
+        elif sql[j] == "*":
+            k = j
+            while k < n and sql[k] == "*":
+                k += 1
+            if k < n and sql[k] == "/":
+                j = k + 1
+                if depth <= 0:
+                    return j, True
+                depth -= 1
+            else:
+                j = k
+        else:
+            j += 1
+    return n, False
+
+
+def _operator_len(text):
+    """{operator}'s action (:900-1006): stop before an embedded /* or --,
+    then drop trailing + and - unless the operator holds one of ~!@#^&|`?%."""
+    cut = [p for p in (text.find("/*"), text.find("--")) if p >= 0]
+    n = min(cut) if cut else len(text)
+    if n > 1 and text[n - 1] in "+-":
+        if not any(c in "~!@#^&|`?%" for c in text[:n - 1]):
+            while n > 1 and text[n - 1] in "+-":
+                n -= 1
+    return n
+
+
+@functools.lru_cache(maxsize=None)
+def sql_tokens(sql):
+    """The one SQL tokenizer of these tests: PostgreSQL 16's scanner (see the
+    table above). A tuple of (kind, text): "space" and "comment" (`--` to CR
+    or LF, nested /* */), "string" (every string constant: '', E'', B'', X'',
+    U&''; text is its segments byte for byte, a continued constant's segments
+    joined by one newline, the separator PostgreSQL requires, so the text
+    lexes again as the same constant), "dollar" (a $tag$ body, byte for byte),
+    "qident" (a double-quoted or U&"" identifier), "ident", "number",
+    "param", "op" and "other"; a string, dollar body, quoted identifier or
+    block comment that reaches the end of the input unclosed is
+    "unterminated string", "unterminated dollar", "unterminated qident" or
+    "unterminated comment" (A7-R5-A1 (1)(b): the server refuses it, and the
+    token model names it)."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        best, name = 0, None
+        for rule, rx in _RULES:
+            m = rx.match(sql, i)
+            if m and m.end() - i > best:
+                best, name = m.end() - i, rule
+        text = sql[i:i + best]
+        if name == "whitespace":
+            out.append(("comment" if text.startswith("--") else "space", text))
+            i += best
+        elif name == "xcstart":
+            e, closed = _block_end(sql, i)
+            out.append(("comment" if closed else "unterminated comment", sql[i:e]))
+            i = e
+        elif name in ("xbstart", "xhstart", "xqstart", "xestart", "xusstart"):
+            state = {"xbstart": "xb", "xhstart": "xh", "xqstart": "xq",
+                     "xestart": "xe", "xusstart": "xus"}[name]
+            q = i + best - 1                               # the opening quote
+            e, segs, closed = _string_end(sql, q + 1, state)
+            out.append(("string" if closed else "unterminated string", sql[i:q] + "\n".join(segs)))
+            i = e
+        elif name in ("xnstart", "xufailed", "dolqfailed"):
+            out.append(("ident" if name != "dolqfailed" else "other", sql[i]))  # yyless(1)
+            i += 1
+        elif name == "dolqdelim":
+            closed, j = False, i + best
+            while j < n:
+                k = sql.find("$", j)
+                if k < 0:
+                    j = n
+                    break
+                m = _DOLQ.match(sql, k)
+                if m and m.group(0) == text:
+                    j, closed = m.end(), True
+                    break
+                if m:
+                    j = m.end() - 1                        # :788, the final $ again
+                else:
+                    m = _DOLQFAILED.match(sql, k)
+                    j = m.end() if m else k + 1
+            out.append(("dollar" if closed else "unterminated dollar", sql[i:j]))
+            i = j
+        elif name in ("xdstart", "xuistart"):
+            j, closed = i + best, False
+            while j < n:
+                k = sql.find('"', j)
+                if k < 0:
+                    j = n
+                    break
+                if sql.startswith('""', k):
+                    j = k + 2
+                    continue
+                j, closed = k + 1, True
+                break
+            out.append(("qident" if closed else "unterminated qident", sql[i:j]))
+            i = j
+        elif name == "operator":
+            k = _operator_len(text)
+            out.append(("op", text[:k]))
+            i += k
+        elif name == "numericfail":
+            out.append(("number", text[:-2]))              # :1053, yyless(yyleng - 2)
+            i += best - 2
+        else:
+            out.append((_KIND.get(name, "number"), text))
+            i += best
+    return tuple(out)
+
+
+def sql_code(sql, *, mask_literals=False):
+    """A statement as the server parses it, from sql_tokens: each run of
+    whitespace and comments one space, the ends trimmed, every other token
+    byte for byte. mask_literals=True writes each string constant and
+    dollar-quoted body as '' (a quoted identifier stays), so a reader of the
+    result never reads a literal's contents."""
+    parts = []
+    for kind, text in sql_tokens(sql):
+        if kind in ("space", "comment"):
+            if parts and parts[-1] != " ":
+                parts.append(" ")
+        elif mask_literals and kind in ("string", "dollar"):
+            parts.append("''")
+        else:
+            parts.append(text)
+    return "".join(parts).strip(" ")
+
+
+def sql_split_top(code, sep=","):
+    """sql_code output split at the token `sep` where parentheses are
+    balanced (through sql_tokens, so a quoted comma or parenthesis never
+    splits), each part stripped."""
+    parts, cur, depth = [], [], 0
+    for kind, text in sql_tokens(code):
+        if kind == "op" and text == "(":
+            depth += 1
+        elif kind == "op" and text == ")":
             depth -= 1
-        if ch == "," and depth == 0:
-            cols.append("".join(cur))
+        if kind == "op" and text == sep and depth == 0:
+            parts.append("".join(cur).strip(" "))
             cur = []
         else:
-            cur.append(ch)
-    cols.append("".join(cur))
+            cur.append(" " if kind == "comment" else text)
+    parts.append("".join(cur).strip(" "))
+    return parts
+
+
+# -- shape(): the recorder's reading of a statement, on the tokens -----------
+
+def _truncate(name):
+    """NAMEDATALEN - 1 = 63 bytes, cut at a character boundary
+    (truncate_identifier, pg_mbcliplen)."""
+    b = name.encode("utf-8", "surrogatepass")
+    if len(b) <= 63:
+        return name
+    return b[:63].decode("utf-8", "ignore")
+
+
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+# -- The token model (A7-R5-A1 (2)): what every reader consumes --------------
+#
+# A reader of SQL takes its decision from (kind, value) tokens of the one
+# scanner, never from a statement's text. The value of an identifier is the
+# name PostgreSQL resolves (A-Z folded to a-z only, as downcase_identifier
+# does for UTF-8, cut to 63 bytes); of a quoted identifier its body with
+# doubled quotes undoubled, cut to 63 bytes; of every other token its
+# text. A string constant's value is the VALUE the
+# server makes from it (_string_value: each form of string constant is read
+# so or refused by name, A7-R6-PRE (2)); a dollar-quoted constant's value
+# is its body. Comments and whitespace are not tokens of the model. A value
+# built by an operator or a function ('started' || '_at', concat(), chr())
+# is no constant and is outside the model: no reader here evaluates one.
+#
+# THE BOUND (A7-R5-A1 (2)(b)): a form the model does not read exactly is
+# never resolved approximately. The model raises Unmodelled naming it, and
+# the assertion that reads the statement fails with that name: any U& token
+# (identifier or string: no UESCAPE decoding, no surrogate pairs, no next
+# form), an E'' string holding a backslash escape, a B'' or X'' bit string,
+# the "other" token, an unterminated string, dollar body, quoted
+# identifier or block comment, and a second statement after a `;` where one
+# statement is read. The Recorder counts what it met among the recorded
+# product statements (Recorder.unmodelled), and run_env asserts the count
+# is 0 in every test it runs (test_ffa_assembly_pg.py run_env).
+
+class Unmodelled(Exception):
+    """A form the token model does not read exactly: `form` names it."""
+
+    def __init__(self, form, text=""):
+        Exception.__init__(self, form, text[:120])
+        self.form = form
+
+
+def _string_value(text):
+    """The value PostgreSQL 16 makes from a string constant (its token text
+    from sql_tokens), each form of scan.l read by value or refused by name
+    (A7-R6-PRE (2)); standard_conforming_strings is on (the server default,
+    which main.py never sets; run_env asserts it):
+      '...'  xq (:559): the body, each '' one quote (xqdouble :287, :647);
+      N'...' xn (:533): the keyword NCHAR (sql_tokens gives the N as an
+             identifier), then an xq constant, read as above;
+      continued (:238-244, :600): each segment read so, the segments
+             joined with NOTHING between them;
+      E'...' xe (:569): read as xq when it holds no backslash; with one,
+             Unmodelled("E'' escape"): an escape writes any character;
+      B'...', X'...' xb, xh (:501, :519): Unmodelled("bit string"): the
+             value is bits, not characters;
+      U&'...' xus (:576): Unmodelled("U& string") (_model raises it first).
+    A dollar-quoted constant is no string token: _dollar_body reads it."""
+    if text[:2] in ("U&", "u&"):
+        raise Unmodelled("U& string", text)
+    if text[:1] in "bBxX":
+        raise Unmodelled("bit string", text)
+    state = "xq"
+    if text[:1] in "eE":
+        if "\\" in text:
+            raise Unmodelled("E'' escape", text)
+        state = "xe"
+    q = text.index("'")
+    _e, segs, _closed = _string_end(text, q + 1, state)
+    return "".join(s[1:-1].replace("''", "'") for s in segs)
+
+
+def _dollar_body(text):
+    """A dollar-quoted constant's value: its body, the text between its two
+    delimiters, byte for byte (xdolq :758-801 applies no escape)."""
+    tag = _DOLQ.match(text).group(0)
+    return text[len(tag):len(text) - len(tag)]
+
+
+def _model(sql):
+    """The significant tokens of sql as (kind, value), checked against the
+    bound (see above); `;` tokens included."""
     out = []
-    for c in cols:
-        m = re.match(r"\s*(\w+)\s*=", c)
-        if m:
-            out.append(m.group(1).lower())
-    return sorted(out)
+    for kind, text in sql_tokens(sql):
+        if kind in ("space", "comment"):
+            continue
+        if kind.startswith("unterminated "):
+            raise Unmodelled(kind, text)
+        if kind == "other":
+            raise Unmodelled("other", text)
+        if kind in ("qident", "string") and text[:2] in ("U&", "u&"):
+            raise Unmodelled("U& identifier" if kind == "qident" else "U& string", text)
+        if kind == "ident":
+            name = _truncate(text.translate(_ASCII_LOWER))
+        elif kind == "qident":
+            name = _truncate(text[1:-1].replace('""', '"'))
+        elif kind == "string":
+            name = _string_value(text)
+        elif kind == "dollar":
+            name = _dollar_body(text)
+        else:
+            name = text
+        out.append((kind, name))
+    return out
 
 
-def _main_statement(s):
-    """The statement a leading WITH list prefixes: the text from the first
-    SELECT/INSERT/UPDATE/DELETE at parenthesis depth 0 after the WITH, or s
-    itself when it has no WITH list."""
-    if not re.match(r"^\s*WITH\b", s, re.I):
-        return s
-    depth = 0
-    i = re.match(r"^\s*WITH\b", s, re.I).end()
-    while i < len(s):
-        ch = s[i]
-        if ch == "(":
+def statements(sql):
+    """A script's statements, each a tuple of (kind, value) tokens, split at
+    every `;` token (scan.l's self `;`); empty statements are dropped."""
+    out, cur = [], []
+    for tok in _model(sql):
+        if tok == ("op", ";"):
+            if cur:
+                out.append(tuple(cur))
+            cur = []
+        else:
+            cur.append(tok)
+    if cur:
+        out.append(tuple(cur))
+    return out
+
+
+def code_tokens(sql):
+    """One statement's (kind, value) tokens: Unmodelled("multiple
+    statements") when a `;` is followed by more code."""
+    st = statements(sql)
+    if len(st) > 1:
+        raise Unmodelled("multiple statements", sql)
+    return st[0] if st else ()
+
+
+def name_of(tok):
+    """A token's name: the value of an identifier or quoted identifier."""
+    return tok[1] if tok[0] in ("ident", "qident") else None
+
+
+def find_all(toks, pattern):
+    """Every contiguous match of `pattern` in `toks`, as (start, captured):
+    a pattern item (kind, value) matches a token of that kind and value; a
+    value None matches any value of that kind (and is captured), a kind
+    None any token."""
+    out, m = [], len(pattern)
+    for i in range(len(toks) - m + 1):
+        cap = []
+        for (pk, pv), tok in zip(pattern, toks[i:i + m]):
+            if (pk is not None and tok[0] != pk) or (pv is not None and tok[1] != pv):
+                break
+            if pv is None:
+                cap.append(tok)
+        else:
+            out.append((i, cap))
+    return out
+
+
+def split_depth0(toks, sep=("op", ",")):
+    """toks split at `sep` where parentheses and brackets are balanced."""
+    parts, cur, depth = [], [], 0
+    for tok in toks:
+        if tok in (("op", "("), ("op", "[")):
             depth += 1
-        elif ch == ")":
+        elif tok in (("op", ")"), ("op", "]")):
             depth -= 1
-        elif depth == 0:
-            m = re.match(r"(SELECT|INSERT|UPDATE|DELETE)\b", s[i:], re.I)
-            if m and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] == "_")):
-                return s[i:]
-        i += 1
-    return s
+        if tok == sep and depth == 0:
+            parts.append(tuple(cur))
+            cur = []
+        else:
+            cur.append(tok)
+    parts.append(tuple(cur))
+    return parts
+
+
+def _paren_end(toks, k):
+    """The index of the `)` closing the `(` at toks[k]."""
+    depth = 0
+    for j in range(k, len(toks)):
+        if toks[j] == ("op", "("):
+            depth += 1
+        elif toks[j] == ("op", ")"):
+            depth -= 1
+            if depth == 0:
+                return j
+    raise Unmodelled("unbalanced parentheses")
+
+
+def insert_parts(toks):
+    """INSERT INTO t [AS a] (columns) VALUES (row), ... read from code
+    tokens: (table, [column names], [[value token tuples] per row]). Any
+    other form (no column list, a SELECT or DEFAULT VALUES source, a column
+    that is no single name) raises Unmodelled naming it."""
+    if [t for t in toks[:2]] != [("ident", "insert"), ("ident", "into")]:
+        raise Unmodelled("not INSERT INTO")
+    table, k = _qualified([(t[0], t[1], name_of(t)) for t in toks], 2)
+    if not table:
+        raise Unmodelled("INSERT target")
+    if k + 1 < len(toks) and toks[k] == ("ident", "as") and name_of(toks[k + 1]):
+        k += 2
+    if k >= len(toks) or toks[k] != ("op", "("):
+        raise Unmodelled("INSERT without a column list")
+    e = _paren_end(toks, k)
+    cols = []
+    for part in split_depth0(toks[k + 1:e]):
+        if len(part) != 1 or name_of(part[0]) is None:
+            raise Unmodelled("INSERT column", repr(part))
+        cols.append(name_of(part[0]))
+    k = e + 1
+    if k >= len(toks) or toks[k] != ("ident", "values"):
+        raise Unmodelled("INSERT source other than VALUES")
+    rows, k = [], k + 1
+    while k < len(toks) and toks[k] == ("op", "("):
+        e = _paren_end(toks, k)
+        rows.append(split_depth0(toks[k + 1:e]))
+        k = e + 1
+        if k < len(toks) and toks[k] == ("op", ","):
+            k += 1
+            continue
+        break
+    if not rows:
+        raise Unmodelled("INSERT VALUES without a row")
+    return table, cols, rows
+
+
+def mentions(sql, name):
+    """Whether sql (a statement, a script or a fragment) names `name` (a
+    name without quotes), read conservatively for a check that it must
+    NOT: an identifier or quoted identifier whose value is `name`, or
+    `name` inside the VALUE of a string constant or dollar body or inside a
+    comment's text, compared case-insensitively. A form the model refuses
+    (the bound, above) raises Unmodelled.
+    A text holding none of these is False without being read: `name` in
+    any letter case, U& in any case, a backslash, a quote together with a
+    line break. Then a value holding `name` means a text holding it: an
+    identifier is folded A-Z only and cut; undoubling a quoted identifier
+    or a string constant drops one quote of a pair and keeps the other, so
+    a quote-free run of a value is a run of the text; only a continued
+    string constant joins runs of the text into one value, and its
+    segments stand on different lines (a quote and a line break); only a
+    U& or backslash escape writes a character without the character. A
+    route path or message is then no refusal (the S49 constants)."""
+    low = name.lower()
+    t = sql.lower()
+    if low not in t and "u&" not in t and "\\" not in sql:
+        if "'" not in sql or ("\n" not in sql and "\r" not in sql):
+            return False
+    for kind, value in _model(sql):                 # the bound, by name
+        if kind in ("ident", "qident") and value == name:
+            return True
+        if kind in ("string", "dollar") and low in value.lower():
+            return True
+    return any(kind == "comment" and low in text.lower() for kind, text in sql_tokens(sql))
+
+
+def _words(sql):
+    """shape()'s words, from the token model: (kind, value, name)."""
+    return [(k, v, name_of((k, v))) for k, v in code_tokens(sql)]
+
+
+def _kw(w, *names):
+    return w[0] == "ident" and w[2] in names
+
+
+def _is_op(w, text):
+    return w[0] == "op" and w[1] == text
+
+
+def _qualified(ws, k):
+    """The (possibly schema-qualified) relation name starting at ws[k], and
+    the index after it; ("", k) when ws[k] is no name."""
+    if k >= len(ws) or ws[k][2] is None:
+        return "", k
+    parts, k = [ws[k][2]], k + 1
+    while k + 1 < len(ws) and _is_op(ws[k], ".") and ws[k + 1][2] is not None:
+        parts.append(ws[k + 1][2])
+        k += 2
+    return ".".join(parts), k
+
+
+def _first_from(ws):
+    """The first name after an unquoted FROM anywhere in the statement (ONLY
+    skipped), the table a SELECT's shape names."""
+    for k, w in enumerate(ws):
+        if _kw(w, "from"):
+            j = k + 1
+            if j < len(ws) and _kw(ws[j], "only"):
+                j += 1
+            name, _ = _qualified(ws, j)
+            if name:
+                return name
+    return ""
+
+
+def _depth0(ws, k, stop):
+    """Indices from k up to the first unquoted keyword in `stop` at
+    parenthesis depth 0 (or the end), with each index's depth."""
+    out, depth = [], 0
+    while k < len(ws):
+        w = ws[k]
+        if depth == 0 and w[0] == "ident" and w[2] in stop:
+            break
+        if _is_op(w, "(") or _is_op(w, "["):
+            depth += 1
+        elif _is_op(w, ")") or _is_op(w, "]"):
+            depth -= 1
+        out.append((k, depth))
+        k += 1
+    return out
+
+
+def _set_columns(ws, k):
+    """The column names an UPDATE's SET list assigns (`col = ...`,
+    `col[i] = ...`, `col.f = ...` and `(a, b) = ...`), the list ending at
+    FROM, WHERE or RETURNING at depth 0."""
+    span = _depth0(ws, k, ("from", "where", "returning"))
+    items, cur = [], []
+    for idx, depth in span:
+        if depth == 0 and _is_op(ws[idx], ","):
+            items.append(cur)
+            cur = []
+        else:
+            cur.append(idx)
+    items.append(cur)
+    cols = []
+    for item in items:
+        if not item:
+            continue
+        w = ws[item[0]]
+        if _is_op(w, "("):
+            for idx in item[1:]:
+                if _is_op(ws[idx], ")"):
+                    break
+                if ws[idx][2] is not None:
+                    cols.append(ws[idx][2])
+        elif w[2] is not None:
+            cols.append(w[2])
+    return sorted(cols)
 
 
 def shape(sql):
-    """verb, table, written columns, lock clause: a statement's shape. A
-    statement wrapped in a WITH list has the shape of the statement the list
-    prefixes (its verb, and for a SELECT the first table its text reads), so
-    a twin that moves a predicate into a named CTE "inside the same
-    statement" (evidence section 8) leaves the shape unchanged."""
-    whole = sql.strip()
-    s = _main_statement(whole)
-    verb = (_VERB.match(s).group(1) if _VERB.match(s) else "?").upper()
+    """verb, table, written columns, lock clause: a statement's shape, read
+    from the token model (comments are whitespace, literals are never read, a
+    quoted identifier is a name and never a keyword; a form outside the model
+    raises Unmodelled). A statement wrapped in
+    a WITH list has the shape of the statement the list prefixes (the first
+    SELECT, INSERT, UPDATE or DELETE at depth 0 after WITH), so a twin that
+    moves a predicate into a named CTE "inside the same statement" (evidence
+    section 8) leaves the shape unchanged. UPDATE [ONLY] t, INSERT INTO t and
+    DELETE FROM [ONLY] t name t (schema-qualified names whole); any other
+    verb names the first name after a FROM anywhere in the statement. The
+    lock clause is the first FOR [NO KEY] UPDATE | FOR [KEY] SHARE, with a
+    NOWAIT or SKIP LOCKED after it or after its OF list."""
+    ws = _words(sql)
+    main_k = 0
+    if ws and _kw(ws[0], "with"):
+        depth = 0
+        for k in range(1, len(ws)):
+            if _is_op(ws[k], "("):
+                depth += 1
+            elif _is_op(ws[k], ")"):
+                depth -= 1
+            elif depth == 0 and _kw(ws[k], "select", "insert", "update", "delete"):
+                main_k = k
+                break
+    verb = ws[main_k][1].upper() if ws and ws[main_k][0] == "ident" else "?"
     table, cols = "", []
-    m = _UPD.match(s)
-    if m:
-        table, cols = m.group(1).lower(), _set_columns(m.group(2))
+    k = main_k + 1
+    if verb == "UPDATE":
+        if k < len(ws) and _kw(ws[k], "only"):
+            k += 1
+        table, k = _qualified(ws, k)
+        while k < len(ws) and not _kw(ws[k], "set"):
+            k += 1
+        cols = _set_columns(ws, k + 1) if k < len(ws) else []
+    elif verb == "INSERT" and k < len(ws) and _kw(ws[k], "into"):
+        table, k = _qualified(ws, k + 1)
+        if k + 1 < len(ws) and _kw(ws[k], "as") and ws[k + 1][2] is not None:
+            k += 2
+        if (k + 1 < len(ws) and _is_op(ws[k], "(")
+                and not _kw(ws[k + 1], "select", "values", "with", "table")):
+            for idx in range(k + 1, len(ws)):
+                if _is_op(ws[idx], ")"):
+                    break
+                if (ws[idx][2] is not None and idx + 1 < len(ws)
+                        and (_is_op(ws[idx + 1], ",") or _is_op(ws[idx + 1], ")"))):
+                    cols.append(ws[idx][2])
+            cols = sorted(cols)
+    elif verb == "DELETE" and k < len(ws) and _kw(ws[k], "from"):
+        k += 1
+        if k < len(ws) and _kw(ws[k], "only"):
+            k += 1
+        table, _ = _qualified(ws, k)
     else:
-        m = _INS.match(s)
-        if m:
-            table = m.group(1).lower()
-            cols = sorted(c.strip().lower() for c in m.group(2).split(","))
+        table = _first_from(ws)
+    lock = ""
+    for k, w in enumerate(ws):
+        if not _kw(w, "for"):
+            continue
+        rest = [x[2] if x[0] == "ident" else None for x in ws[k + 1:k + 4]]
+        if rest[:1] == ["update"] or rest[:1] == ["share"]:
+            words, j = ["FOR", rest[0].upper()], k + 2
+        elif rest[:3] == ["no", "key", "update"]:
+            words, j = ["FOR", "NO", "KEY", "UPDATE"], k + 4
+        elif rest[:2] == ["key", "share"]:
+            words, j = ["FOR", "KEY", "SHARE"], k + 3
         else:
-            m = _DEL.match(s) or _FROM.search(whole)
-            if m:
-                table = m.group(1).lower()
-    lk = _LOCKCL.search(whole)
-    return [verb, table, cols, re.sub(r"\s+", " ", lk.group(0).upper()) if lk else ""]
+            continue
+        if j < len(ws) and _kw(ws[j], "of"):
+            j += 1
+            while j < len(ws):
+                _, j2 = _qualified(ws, j)
+                j = j2 if j2 > j else j + 1
+                if j < len(ws) and _is_op(ws[j], ","):
+                    j += 1
+                    continue
+                break
+        if j < len(ws) and _kw(ws[j], "nowait"):
+            words.append("NOWAIT")
+        elif j + 1 < len(ws) and _kw(ws[j], "skip") and _kw(ws[j + 1], "locked"):
+            words += ["SKIP", "LOCKED"]
+        lock = " ".join(words)
+        break
+    return [verb, table, cols, lock]
+
+
+# -- end of the scanner region ------------------------------------------------
 
 
 class Recorder:
@@ -218,11 +885,19 @@ class Recorder:
         self.stmts = []
         self.locks = []
         self.txn = 0
+        # A7-R5-A1 (2)(b): the forms of the recorded statements the token
+        # model refused, by name; run_env asserts it stays empty.
+        self.unmodelled = []
 
     def before(self, conn, cursor, statement, parameters, context, executemany):
-        if "/*cf-locks*/" in statement:
+        if conn.info.get(_PROBE_MARK):
             return
-        self.stmts.append(shape(statement) + [self.txn])
+        try:
+            row = shape(statement)
+        except Unmodelled as exc:
+            self.unmodelled.append(exc.form)
+            row = ["UNMODELLED", exc.form, [], ""]
+        self.stmts.append(row + [self.txn])
 
     def on_commit(self, conn):
         self.txn += 1
@@ -292,6 +967,12 @@ class Env:
         self.engine = sm.kw["bind"]
         self.sm = async_sessionmaker(self.engine, expire_on_commit=False, class_=RecSession)
         self.mp = mp
+        # Decision A7 made ADM_PRODUCTION_ENABLED True in main.py. Every case
+        # here was written for the False position (its queue rows carry
+        # ffa_adm1 by default, so the switch would turn every lock and re-form
+        # into an admission lobby); the case pins it, never the module default
+        # deciding. S57 sets each position itself.
+        mp.setattr(main, "ADM_PRODUCTION_ENABLED", False)
         self.now = None
         # Far past process start, so _in_match_evidence_trustworthy() holds and
         # no young-process veto depends on when the test runs.

@@ -30,11 +30,22 @@ def T(mid, *edits, note="", nodes=None):
     return {"id": mid, "tag": None, "edits": list(edits), "note": note, "nodes": nodes}
 
 
-def row(rid, nodes, mutants, twin, extra=()):
+def C(cid, *edits, note="", nodes=None):
+    """A class control (A7-R4-A1): an edit under which the row's test must
+    stay GREEN (a near miss of a mutant, such as the mutant's text in a
+    comment). cf_controls.py checks its edits with the rest and runs it with
+    --only classes; unlike a twin, it is not compared with the baseline's
+    trace, because it executes something the baseline does not."""
+    return {"id": cid, "tag": None, "edits": list(edits), "note": note, "nodes": nodes,
+            "kind": "class"}
+
+
+def row(rid, nodes, mutants, twin, extra=(), classes=()):
     if isinstance(nodes, str):
         nodes = [nodes]
     ROWS.append({"row": rid, "nodes": [PG + n if "::" not in n else n for n in nodes],
-                 "mutants": mutants, "twin": twin, "extra": tuple(extra)})
+                 "mutants": mutants, "twin": twin, "extra": tuple(extra),
+                 "classes": list(classes)})
     ORDER[rid] = len(ORDER)
 
 
@@ -194,6 +205,14 @@ row("S9", "test_s9_labels_cannot_change_a_decision", [
         '    left = [p for p in ctx.seats if cls.get(p["player_id"]) == "LEFT"\n'
         '            and p.get("left_label") != "menu_leave"]\n'
         '    admission = bool(lob.get("admission_v1"))\n')),
+    M("verdict_names_a_label_in_sql", "S9 verdict reads a label",
+      E(MAIN, '    left = [p for p in ctx.seats if cls.get(p["player_id"]) == "LEFT"]\n'
+              '    admission = bool(lob.get("admission_v1"))\n',
+        '    left = [p for p in ctx.seats if cls.get(p["player_id"]) == "LEFT"]\n'
+        '    _cf_unused = "SELECT LEFT_LABEL FROM ffa_assembly_seats WHERE false"\n'
+        '    admission = bool(lob.get("admission_v1"))\n'),
+      note="A7-R6-PRE (3): the verdict holds a statement naming the label in upper case; a raw count of the "
+           "source (round 6) does not see it"),
 ], T("cause_through_helper",
      E(MAIN, '{"now": ctx.now, "lc": _persistable_exit_cause(cause),',
        '{"now": ctx.now, "lc": (lambda c: _persistable_exit_cause(c))(cause),')))
@@ -597,9 +616,15 @@ _BIND_GUARD = ('    shape of #204."""\n'
 _BIND_CALL = ('            "steam_by_pid": {r["player_id"]: r["steam_id"] for r in ordered},\n'
               '        })\n')
 row("S25", "test_s25_lobby_phase_wagers_after_a_reform", [
-    M("bind_on_reform", "S25 no lobby_bets statement",
+    M("bind_on_reform", "S25 REFORM step lobby_bets locks",
       E(MAIN, _BIND, _BIND.replace("if reform_of is None:", "if True:")),
       note="_bind_lobby_bets called on the reform path"),
+    M('u_and_update_on_reform', 'S25 REFORM step writes',
+      E(MAIN, _BIND, '    if reform_of is not None:\n        await db.execute(text("UPDATE U&\\"lobby!005fbets\\" UESCAPE E\'!\' SET status = status WHERE false"))\n' + _BIND),
+      note='A7-R5 reviewer input 1 (A7-R5-A1.1, a database-record control): the REFORM updates lobby_bets through U&"lobby!005fbets" UESCAPE E\'!\', zero rows'),
+    M('operator_built_read_on_reform', 'S25 REFORM step lobby_bets locks',
+      E(MAIN, _BIND, '    if reform_of is not None:\n        await db.execute(text("DO $c$BEGIN EXECUTE \'SELECT 1 FROM lobby\' || \'_bets WHERE false\'; END$c$"))\n' + _BIND),
+      note="A7-R6-PRE (4): the REFORM reads lobby_bets through a name built by an operator inside a DO block, which no text reader reads; the lock record holds AccessShareLock on it at the transaction's end"),
 ], T("skip_keyword",
      E(MAIN, _BIND_SIG, _BIND_SIG.replace(
          "refund_all_reason: str | None = None) -> None:",
@@ -690,6 +715,9 @@ row("S27", "test_s27_the_schema_census_both_directions", [
     M("class_keeps_live_top_points", "S27 class not live",
       E(MAIN, _RESET_END, _RESET_END.replace('"arrived_at_dissolve"),',
                                              '"arrived_at_dissolve", "live_top_points"),'))),
+    M('a_literal_spells_the_column_list', 'S27 insert',
+      E(MAIN, '"""\n# The four classes the INSERT above writes, by name (S27 asserts them against\n', '"""\n_ASM_REFORM_INSERT_SQL = ("SELECT \'(" + _ASM_REFORM_INSERT_SQL.split("(", 1)[1].split(")", 1)[0] + ")VALUES\'")\n# The four classes the INSERT above writes, by name (S27 asserts them against\n'),
+      note="A7-R5 reviewer input 4: the INSERT text becomes one string literal holding the 47 columns and ')VALUES'; round 5's split on VALUES read the literal as the column list"),
 ], T("class_order",
      E(MAIN, _COPY_AND_LINE, _COPY_AND_LINE.replace('"kills_tiebreak", "sudden_death")',
                                                    '"sudden_death", "kills_tiebreak")'))))
@@ -1748,52 +1776,604 @@ row("S57", "test_s57_the_g3_server_gate", [
      note="the queue rows' CTE comes first so the statement still reads ffa_queue first"))
 
 
-# -- S58: structural, both states ----------------------------------------------
-_G3_FLAG = ("ADM_PRODUCTION_ENABLED = False    # while False, admission_v1 also needs every"
-            " member in ffa_g3_seats\n")
-# The readmission lane rewrapped _ffa_asm_gates' docstring; this is the line
-# that now names the table (the mutants below replace it with the same words
-# less the table name).
-_G3_DOC = '    ffa_g3_seats enrolment. readmit_v1: admission_v1 and every member carries\n'
-_G3_DOC_GONE = '    G3 enrolment. readmit_v1: admission_v1 and every member carries\n'
-_G3_INS = '        "INSERT INTO ffa_g3_seats (player_id, added_at, expires_at)"\n'
+# -- S58: structural, both switch positions ------------------------------------
+# Decision A7 (2026-11-04) kept the enrolment as the server's rollback, so the
+# clause, the route and the G3 configuration exist in both positions; the
+# pre-A7 rows (the production release with the clause, the route or the
+# configuration still in) planted a True switch and are retired with that reading.
 _G3_ROUTE = '@app.post("/api/v1/admin/ffa-g3-seats", tags=["Admin"])\n'
+_G3_CLAUSE = '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"\n'
+_G3_SELECT = '        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled"\n'
 _S58_ASSERTS = (
-    '        assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \\\n'
-    '            in src, "S58 clause"\n'
+    '        assert clause, "S58 clause"\n'
     '        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n')
+_G3_DEFINE = "    <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants>\n"
+_G3_GROUP = "  <PropertyGroup Condition=\"'$(Configuration)' == 'G3'\">\n"
 row("S58", "test_s58_the_g3_fence", [
-    M("clause_left_in_production", "S58 production query",
-      E(MAIN, _G3_FLAG, "ADM_PRODUCTION_ENABLED = True\n"),
-      note="the production release with the enrolment clause (and the route) still in"),
-    M("route_left_in_production", "S58 production route",
-      E(MAIN, _G3_FLAG, "ADM_PRODUCTION_ENABLED = True\n"),
-      E(MAIN, _G3_DOC, _G3_DOC_GONE),
-      E(MAIN, _G3_Q, '        "SELECT q.player_id, q.caps, FALSE AS enrolled"\n'
-                     '        "  FROM ffa_queue q"\n'
-                     '        " WHERE q.player_id = ANY(:ids)"), {"ids": ids})).mappings().all()\n'),
-      E(MAIN, _G3_INS, '        "INSERT INTO ffa_g3_enrolment (player_id, added_at, expires_at)"\n'),
-      note="the clause and every ffa_g3_seats query gone, the route path still registered"),
-    M("route_deleted_before_it", "S58 route", E(MAIN, _G3_ROUTE, "")),
-    M("configuration_kept_after_release", "S58 production configuration",
-      E(MAIN, _G3_FLAG, "ADM_PRODUCTION_ENABLED = True\n"),
-      E(MAIN, _G3_DOC, _G3_DOC_GONE),
-      E(MAIN, _G3_Q, '        "SELECT q.player_id, q.caps, FALSE AS enrolled"\n'
-                     '        "  FROM ffa_queue q"\n'
-                     '        " WHERE q.player_id = ANY(:ids)"), {"ids": ids})).mappings().all()\n'),
-      E(MAIN, _G3_INS, '        "INSERT INTO ffa_g3_enrolment (player_id, added_at, expires_at)"\n'),
-      E(MAIN, _G3_ROUTE, ""),
-      E("backend/sql/355_ffa_assembly.sql", "\nCOMMIT;\n",
-        "\nCOMMIT;\n-- planted by the S58 control: the release's DROP TABLE IF EXISTS ffa_g3_seats;\n"),
-      note="K46's post-release mutant, paired with S58 (V11:2944): the production release with no"
-           " ffa_g3_seats query, no route and a drop, and the csproj's G3 configuration kept"),
+    M("clause_without_expiry", "S58 clause",
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note="the rollback's clause no longer reads expires_at"),
+    M("clause_only_in_a_comment", "S58 clause",
+      E(MAIN, _G3_CLAUSE, '        # "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"\n'),
+      note="A7-R1 finding 2's class: the clause survives only as a comment beside the SQL"),
+    M("clause_in_an_sql_comment", "S58 clause",
+      E(MAIN, _G3_CLAUSE,
+        '        "  /* LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now() */"\n'),
+      note="A7-R2: the JOIN only inside an SQL comment of the executed string"),
+    M("clause_after_a_sentinel_identifier", "S58 clause",
+      E(MAIN, _G3_SELECT,
+        '        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled, 1 AS sentinel$q$"\n'
+        '        " /* LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now() */"\n'),
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note="A7-R3 finding 1: the identifier sentinel$q$ is no dollar-quote opener, so the "
+           "clause after it is a comment; the executed JOIN reads no expiry"),
+    M('clause_after_a_non_ascii_sentinel', "S58 clause",
+      E(MAIN, _G3_SELECT,
+        ('        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled, 1 AS sentinelé$q$"\n'
+         '        " -- LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()\\n"\n')),
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note='A7-R4 finding 1: a non-ASCII identifier continues through $q$, so the clause after it is a comment; the executed JOIN reads no expiry'),
+    M('clause_after_a_continued_escape_string', "S58 clause",
+      E(MAIN, _G3_SELECT,
+        '        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled, E\'a\'\\n\'b\\\\\'\' AS x -- LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()\\n"\n'),
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note="A7-R4 finding 2: the continued E'' string keeps its escapes, so the clause after it is a comment; the executed JOIN reads no expiry"),
+    M('clause_inside_a_literal', "S58 clause",
+      E(MAIN, _G3_SELECT,
+        '        "SELECT q.player_id, q.caps, (g.player_id IS NOT NULL) AS enrolled, \'LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()\' AS note"\n'),
+      E(MAIN, _G3_CLAUSE, '        "  LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id"\n'),
+      note='A7-R4-A1 class sweep: the clause only inside a string constant of the executed statement; the executed JOIN reads no expiry'),
+    M("route_deleted", "S58 route", E(MAIN, _G3_ROUTE, "")),
+    M("configuration_deleted", "S58 G3 configuration",
+      E("plugin/CompetitiveRounds.csproj", _G3_DEFINE, ""),
+      note="A7-R1 finding 2: survived the raw-text check, which the csproj comment satisfied"),
+    M("configuration_only_in_a_comment", "S58 G3 configuration",
+      E("plugin/CompetitiveRounds.csproj", _G3_DEFINE,
+        "    <!-- <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants> -->\n")),
+    M("configuration_condition_renamed", "S58 G3 configuration",
+      E("plugin/CompetitiveRounds.csproj", _G3_GROUP,
+        "  <PropertyGroup Condition=\"'$(Configuration)' == 'G3x'\">\n")),
 ], T("assertions_reordered",
      E(TST, _S58_ASSERTS,
        '        assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"\n'
-       '        assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \\\n'
-       '            in src, "S58 clause"\n'),
+       '        assert clause, "S58 clause"\n'),
      note="a structural test: the twin reorders its assertions (V11's twin)"),
     extra=("plugin",))
+
+# -- FIX2-S2: the stored exclusion set's sources, read through what executes
+# (A7-R2): the two vector reads executed, the INSERT recorded as a real report
+# sends it. The two mutants are the A7-R2 finding's reproductions.
+_PRIOR_PROJ = "           fmp.left_early, fmp.absent, fmp.exclusion_reasons\n"
+_TRIAGE_PROJ = "           fmp.kills, fmp.left_early, fmp.absent, fmp.exclusion_reasons\n"
+_FMP_INSERT = (
+    '        await db.execute(text("""\n'
+    '            INSERT INTO ffa_match_players (match_id, player_id, slot, rounds_won, points_total,\n'
+    '                kills, placement, left_early, rating_before, rating_after, rating_change,\n'
+    '                xp_gained, gold_gained, fps_avg, ping_avg, bullets_fired, bullets_hit,\n'
+    '                blocks_activated, blocks_successful, keys_pressed, active_seconds,\n'
+    '                fps_timeline, ping_timeline, hit_timeline, block_timeline,\n'
+    '                damage_dealt, damage_dealt_timeline, kill_timeline, absent, exclusion_reasons, end_stats,\n'
+    '                game_points_at_leave, left_early_involuntary)\n'
+    '            VALUES (:m, :p, :slot, :rw, :pt, :k, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,\n'
+    '                    :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt,\n'
+    '                    :dmg, :dmgtl, :killtl, :absent, CAST(:er AS text[]), :estats, :gpal, :lei)\n'
+    '        """), {"m": match_id,')
+_FMP_VALUES = "                    :dmg, :dmgtl, :killtl, :absent, CAST(:er AS text[]), :estats, :gpal, :lei)\n"
+_FMP_ER = '               "er": sorted(_exclusion_reasons[p.steam_id]),\n'
+_SUBMIT_DOC = '    """Record one FFA game and apply pairwise Glicko + XP/gold inline (an FFA\n'
+_FMP_INSERT_SQL = _FMP_INSERT[len('        await db.execute(text("""\n'):-len('        """), {"m": match_id,')]
+row("FIX2-S2", "test_fix2_s2_snapshot_sources_are_complete", [
+    M("projections_in_sql_comments", "S2 prior projection",
+      E(MAIN, _PRIOR_PROJ, "           fmp.left_early, fmp.absent -- , fmp.exclusion_reasons\n"),
+      E(MAIN, _TRIAGE_PROJ,
+        "           fmp.kills, fmp.left_early, fmp.absent -- , fmp.exclusion_reasons\n"),
+      note="A7-R2: both exclusion_reasons projections only in -- comments"),
+    M("insert_as_select_one_original_in_docstring", "S2 insert",
+      E(MAIN, _FMP_INSERT, '        await db.execute(text("SELECT 1"), {"m": match_id,'),
+      E(MAIN, _SUBMIT_DOC, '    """' + _FMP_INSERT_SQL + "\n" + _SUBMIT_DOC[len('    """'):]),
+      note="A7-R2: the executed INSERT is SELECT 1, the original survives in submit_ffa_match's docstring"),
+    M("dead_cast_in_a_case", "S2 insert cast",
+      E(MAIN, _FMP_VALUES,
+        "                    :dmg, :dmgtl, :killtl, :absent,"
+        " CASE WHEN FALSE THEN CAST(:er AS text[]) ELSE ARRAY[]::text[] END, :estats, :gpal, :lei)\n"),
+      note="A7-R3 finding 2: a cast in the INSERT that never supplies the column's value"),
+    M("reasons_bound_empty", "S2 insert bound",
+      E(MAIN, _FMP_ER, '               "er": [],\n'),
+      note="the cast intact, the bound value a constant: the bound and stored values differ "
+           "from the distinct reasons"),
+    M("prior_reader_placeholder", "S2 prior projection rows",
+      E(MAIN, _PRIOR_PROJ, "           fmp.left_early, fmp.absent, ARRAY['x']::text[] AS exclusion_reasons\n"),
+      note="A7-R3 finding 2: the prior reader returns a non-null placeholder, not the stored set"),
+    M("triage_reader_placeholder", "S2 triage projection rows",
+      E(MAIN, _TRIAGE_PROJ,
+        "           fmp.kills, fmp.left_early, fmp.absent, ARRAY['x']::text[] AS exclusion_reasons\n"),
+      note="the triage reader returns a non-null placeholder, not the stored set"),
+], T("comments_beside_the_real_statements",
+     E(MAIN, _PRIOR_PROJ, "           fmp.left_early, fmp.absent, /* the stored set */ fmp.exclusion_reasons\n"),
+     E(MAIN, _TRIAGE_PROJ,
+       "           fmp.kills, fmp.left_early, fmp.absent, fmp.exclusion_reasons -- the stored set\n"),
+     note="the positive control: comments beside the real projections leave every check green"))
+
+# -- WP11-X: the missing-game guard, executed (A7-R3 finding 3) ---------------
+_WP11_GUARD = ('    if s in ("entered", "lag") and req.game is None:\n'
+               '        return "game"\n')
+row("WP11-X", "test_wp11_a_game_step_without_a_game_is_refused", [
+    M("guard_inside_if_false", "WP11 refused",
+      E(MAIN, _WP11_GUARD, '    if False:\n'
+                           '        if s in ("entered", "lag") and req.game is None:\n'
+                           '            return "game"\n'),
+      note="A7-R3 finding 3: the guard is present in the AST and never runs; the structural "
+           "WP11 check stays green on it"),
+], T("guard_split_in_two",
+     E(MAIN, _WP11_GUARD, '    if s == "entered" and req.game is None:\n'
+                          '        return "game"\n'
+                          '    if s == "lag" and req.game is None:\n'
+                          '        return "game"\n'),
+     note="the same refusal written as two guards"))
+
+# -- WP34-X: the lock-answer and answer keys, executed (A7-R3 sweep) ---------
+_WP3_FENCE = '        "fence_s": ASM_FENCE_S,\n    }\n'
+row("WP34-X", "test_wp3_wp4_keys_are_sent", [
+    M("lock_key_in_dead_code", "WP3 sent",
+      E(MAIN, _WP3_FENCE, '    }\n    if False:\n        out["fence_s"] = ASM_FENCE_S\n'),
+      note="the key named in the builder's AST, never sent; the structural WP3 check stays "
+           "green on it"),
+], T("lock_keys_reordered",
+     E(MAIN, '        "stamp_wait_s": ASM_STAMP_WAIT_S,\n' + _WP3_FENCE,
+       '        "fence_s": ASM_FENCE_S,\n        "stamp_wait_s": ASM_STAMP_WAIT_S,\n    }\n'),
+     note="the same lock answer with two entries in the other order"))
+
+# -- SQL-TOKENS: the one tokenizer's probe (A7-R3 findings 1 and 4; A7-R4-A1) ---
+# Each class mutant takes one rule of scan.l away from cf_asm's lexer; the
+# probe's class table must then name exactly the classes that rule carries
+# (the note's "expect"). round_4_tokenizer puts round 4's tokenizer back over
+# the new one (later definitions win), and the table must name the twelve
+# classes round 4 lacked.
+_CFA = "backend/tests/cf_asm.py"
+_R4_TOKENIZER = ('_IDENT_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$")\n'
+                '_DOLLAR_TAG = re.compile(r"\\$([A-Za-z_][A-Za-z0-9_]*)?\\$")\n'
+                '\n'
+                '\n'
+                'def sql_tokens(sql):\n'
+                '    """The one SQL tokenizer of these tests (A7-R3): [(kind, text)] with kind\n'
+                '    "quoted" for a single-quoted literal (E\'\' strings honour backslash\n'
+                '    escapes), a double-quoted identifier or a dollar-quoted body, each kept\n'
+                '    byte for byte; "code" for everything else, comments removed. `--` runs to\n'
+                '    the end of the line and `/* */` blocks nest, as PostgreSQL lexes them. A\n'
+                '    dollar-quote delimiter opens only at a token boundary: after an\n'
+                '    identifier character (letters, digits, `_`, `$`), `$` continues the\n'
+                '    identifier, so `sentinel$q$` is one name and opens nothing."""\n'
+                '    toks, code = [], []\n'
+                '    i, n = 0, len(sql)\n'
+                '\n'
+                '    def flush():\n'
+                '        if code:\n'
+                '            toks.append(("code", "".join(code)))\n'
+                '            code.clear()\n'
+                '\n'
+                '    while i < n:\n'
+                '        c = sql[i]\n'
+                '        prev = sql[i - 1] if i else ""\n'
+                '        if c in ("\'", \'"\'):\n'
+                '            esc = c == "\'" and prev in ("E", "e") and (i < 2 or sql[i - 2] not in _IDENT_CHARS)\n'
+                '            j = i + 1\n'
+                '            while j < n:\n'
+                '                if esc and sql[j] == "\\\\":\n'
+                '                    j += 2\n'
+                '                    continue\n'
+                '                if sql[j] == c:\n'
+                '                    if j + 1 < n and sql[j + 1] == c:\n'
+                '                        j += 2\n'
+                '                        continue\n'
+                '                    break\n'
+                '                j += 1\n'
+                '            flush()\n'
+                '            toks.append(("quoted", sql[i:j + 1]))\n'
+                '            i = j + 1\n'
+                '            continue\n'
+                '        if c == "$" and prev not in _IDENT_CHARS:\n'
+                '            m = _DOLLAR_TAG.match(sql, i)\n'
+                '            if m:\n'
+                '                tag = m.group(0)\n'
+                '                end = sql.find(tag, m.end())\n'
+                '                end = n if end < 0 else end + len(tag)\n'
+                '                flush()\n'
+                '                toks.append(("quoted", sql[i:end]))\n'
+                '                i = end\n'
+                '                continue\n'
+                '        if sql.startswith("--", i):\n'
+                '            j = sql.find("\\n", i)\n'
+                '            i = n if j < 0 else j\n'
+                '            code.append(" ")\n'
+                '            continue\n'
+                '        if sql.startswith("/*", i):\n'
+                '            depth, j = 1, i + 2\n'
+                '            while j < n and depth:\n'
+                '                if sql.startswith("/*", j):\n'
+                '                    depth, j = depth + 1, j + 2\n'
+                '                elif sql.startswith("*/", j):\n'
+                '                    depth, j = depth - 1, j + 2\n'
+                '                else:\n'
+                '                    j += 1\n'
+                '            code.append(" ")\n'
+                '            i = j\n'
+                '            continue\n'
+                '        code.append(c)\n'
+                '        i += 1\n'
+                '    flush()\n'
+                '    return toks\n'
+                '\n'
+                '\n'
+                'def sql_code(sql, *, mask_literals=False):\n'
+                '    """A statement as the server parses it, from sql_tokens: comments removed,\n'
+                '    each a single space; runs of whitespace OUTSIDE quoted spans collapse to\n'
+                '    one space and the ends are trimmed; every quoted span is kept byte for\n'
+                '    byte. mask_literals=True writes each single-quoted literal and\n'
+                "    dollar-quoted body as '' (a double-quoted identifier stays), so a\n"
+                '    classifier reading the result never reads a literal\'s contents."""\n'
+                '    parts = []\n'
+                '    for kind, text in sql_tokens(sql):\n'
+                '        if kind == "code":\n'
+                '            parts.append(re.sub(r"\\s+", " ", text))\n'
+                '        elif mask_literals and not text.startswith(\'"\'):\n'
+                '            parts.append("\'\'")\n'
+                '        else:\n'
+                '            parts.append(text)\n'
+                '    return "".join(parts).strip()\n'
+                '\n'
+                '\n'
+                'def sql_split_top(code, sep=","):\n'
+                '    """sql_code output split at `sep` where parentheses are balanced and\n'
+                '    outside every quoted span (through sql_tokens, so a quoted comma or\n'
+                '    parenthesis never splits), each part stripped."""\n'
+                '    parts, cur, depth = [], [], 0\n'
+                '    for kind, text in sql_tokens(code):\n'
+                '        if kind == "quoted":\n'
+                '            cur.append(text)\n'
+                '            continue\n'
+                '        for ch in text:\n'
+                '            if ch == "(":\n'
+                '                depth += 1\n'
+                '            elif ch == ")":\n'
+                '                depth -= 1\n'
+                '            if ch == sep and depth == 0:\n'
+                '                parts.append("".join(cur).strip())\n'
+                '                cur = []\n'
+                '            else:\n'
+                '                cur.append(ch)\n'
+                '    parts.append("".join(cur).strip())\n'
+                '    return parts\n'
+                '\n'
+                '\n'
+                '_VERB = re.compile(r"^\\s*(\\w+)", re.S)\n'
+                '_UPD = re.compile(r"^\\s*UPDATE\\s+(\\w+)\\s+SET\\s+(.*?)(?:\\sWHERE\\s|\\sRETURNING\\s|$)", re.S | re.I)\n'
+                '_INS = re.compile(r"^\\s*INSERT\\s+INTO\\s+(\\w+)\\s*\\(([^)]*)\\)", re.S | re.I)\n'
+                '_DEL = re.compile(r"^\\s*DELETE\\s+FROM\\s+(\\w+)", re.S | re.I)\n'
+                '_FROM = re.compile(r"\\sFROM\\s+(\\w+)", re.S | re.I)\n'
+                '_LOCKCL = re.compile(r"FOR\\s+(?:NO\\s+KEY\\s+)?(?:UPDATE|SHARE)(?:\\s+SKIP\\s+LOCKED|\\s+NOWAIT)?", re.I)\n'
+                '\n'
+                '\n'
+                'def _set_columns(body):\n'
+                '    """The column names a SET list assigns, at parenthesis depth 0."""\n'
+                '    cols, depth, cur = [], 0, []\n'
+                '    for ch in body:\n'
+                '        if ch == "(":\n'
+                '            depth += 1\n'
+                '        elif ch == ")":\n'
+                '            depth -= 1\n'
+                '        if ch == "," and depth == 0:\n'
+                '            cols.append("".join(cur))\n'
+                '            cur = []\n'
+                '        else:\n'
+                '            cur.append(ch)\n'
+                '    cols.append("".join(cur))\n'
+                '    out = []\n'
+                '    for c in cols:\n'
+                '        m = re.match(r"\\s*(\\w+)\\s*=", c)\n'
+                '        if m:\n'
+                '            out.append(m.group(1).lower())\n'
+                '    return sorted(out)\n'
+                '\n'
+                '\n'
+                'def _main_statement(s):\n'
+                '    """The statement a leading WITH list prefixes: the text from the first\n'
+                '    SELECT/INSERT/UPDATE/DELETE at parenthesis depth 0 after the WITH, or s\n'
+                '    itself when it has no WITH list."""\n'
+                '    if not re.match(r"^\\s*WITH\\b", s, re.I):\n'
+                '        return s\n'
+                '    depth = 0\n'
+                '    i = re.match(r"^\\s*WITH\\b", s, re.I).end()\n'
+                '    while i < len(s):\n'
+                '        ch = s[i]\n'
+                '        if ch == "(":\n'
+                '            depth += 1\n'
+                '        elif ch == ")":\n'
+                '            depth -= 1\n'
+                '        elif depth == 0:\n'
+                '            m = re.match(r"(SELECT|INSERT|UPDATE|DELETE)\\b", s[i:], re.I)\n'
+                '            if m and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] == "_")):\n'
+                '                return s[i:]\n'
+                '        i += 1\n'
+                '    return s\n'
+                '\n'
+                '\n'
+                'def shape(sql):\n'
+                '    """verb, table, written columns, lock clause: a statement\'s shape. A\n'
+                '    statement wrapped in a WITH list has the shape of the statement the list\n'
+                '    prefixes (its verb, and for a SELECT the first table its text reads), so\n'
+                '    a twin that moves a predicate into a named CTE "inside the same\n'
+                '    statement" (evidence section 8) leaves the shape unchanged. Classified\n'
+                '    after sql_tokens (A7-R3), the one tokenizer: comments removed and\n'
+                '    literals masked, so a comment beside or inside a statement changes no\n'
+                '    field of its shape and a literal\'s text is never read as a table."""\n'
+                '    whole = sql_code(sql, mask_literals=True)\n'
+                '    s = _main_statement(whole)\n'
+                '    verb = (_VERB.match(s).group(1) if _VERB.match(s) else "?").upper()\n'
+                '    table, cols = "", []\n'
+                '    m = _UPD.match(s)\n'
+                '    if m:\n'
+                '        table, cols = m.group(1).lower(), _set_columns(m.group(2))\n'
+                '    else:\n'
+                '        m = _INS.match(s)\n'
+                '        if m:\n'
+                '            table = m.group(1).lower()\n'
+                '            cols = sorted(c.strip().lower() for c in m.group(2).split(","))\n'
+                '        else:\n'
+                '            m = _DEL.match(s) or _FROM.search(whole)\n'
+                '            if m:\n'
+                '                table = m.group(1).lower()\n'
+                '    lk = _LOCKCL.search(whole)\n'
+                '    return [verb, table, cols, re.sub(r"\\s+", " ", lk.group(0).upper()) if lk else ""]\n')
+row("SQL-TOKENS", "test_sql_code_strips_comments_and_keeps_literals", [
+    M("dollar_opens_after_an_identifier", "probe boundary",
+      E(_CFA, '_ID = "[A-Za-z_%s][A-Za-z0-9_$%s]*" % (_HI, _HI)', '_ID = "[A-Za-z_%s][A-Za-z0-9_%s]*" % (_HI, _HI)'),
+      note="A7-R3 finding 1: `$` no longer continues an identifier"),
+    M("quoted_whitespace_collapsed", "probe dollar body",
+      E(_CFA, '    return "".join(parts).strip(" ")\n', '    return " ".join("".join(parts).split())\n'),
+      note="A7-R3 finding 1: whitespace collapsed inside quoted spans"),
+    M("shape_on_raw_sql", "probe shape update",
+      E(_CFA, '    for kind, text in sql_tokens(sql):\n        if kind in ("space", "comment"):\n            continue\n        if kind.startswith("unterminated "):\n',
+        '    for kind, text in sql_tokens(sql):\n        if kind == "space":\n            continue\n        if kind.startswith("unterminated "):\n'),
+      note="A7-R3 finding 4: shape() reading comments as words (round 6: the token model keeps them)"),
+], T("dollar_delimiter_group_capturing",
+     E(_CFA, '_DOLQ = re.compile(r"\\$(?:%s)?\\$" % _DQ)\n', '_DOLQ = re.compile(r"\\$(%s)?\\$" % _DQ)\n'),
+     note="the same delimiter pattern with a capturing group"))
+
+# -- SQL-CLASSES: the class table in a selected test of its own (A7-R5-A1 (4)) --
+# Every mutant takes one rule of the scanner region away; the class test must
+# then name exactly the classes the note's expect lists (computed in memory
+# by r6/inmem/classes.py, run on a seat). Moved from SQL-TOKENS in round 6,
+# with the ledger's rows (A7-R5-A1 (1)) after them.
+row("SQL-CLASSES", "test_sql_scanner_classes", [
+    M("round_4_tokenizer", "probe classes",
+      E(_CFA, "\n# -- end of the scanner region", "\n" + _R4_TOKENIZER + "\n# -- end of the scanner region"),
+      note="A7-R4-A1: the round 4 tokenizer; expect ['cr comment', 'non-ascii ident', 'non-ascii tag', 'escape continued', 'cr continued', 'string continued', 'quoted ident', 'unicode ident', 'case folding', 'qualified name', 'dollar boundary', 'space set', 'self ,', 'self (', 'self )', 'self [', 'self ]', 'self .', 'self ;', 'self :', 'self +', 'self -', 'self *', 'self /', 'self %', 'self ^', 'self <', 'self >', 'self =', 'other', 'end of input', 'unterminated string', 'unterminated dollar', 'unterminated qident', 'unterminated comment', 'multiple statements', 'mentions', 'string value', 'dollar value', 'e string escape', 'bit string', 'mentions continued']"),
+    M('comment_ends_at_lf_only', "probe classes",
+      E(_CFA, '("whitespace", r"[ \\t\\n\\r\\f]+|--[^\\n\\r]*"),',
+        '("whitespace", r"[ \\t\\n\\r\\f]+|--[^\\n]*"),'),
+      E(_CFA, '    ends = [e for e in (sql.find("\\n", i), sql.find("\\r", i)) if e >= 0]\n',
+        '    ends = [e for e in (sql.find("\\n", i),) if e >= 0]\n'),
+      note="A7-R4-A1 class: expect ['cr comment', 'string value']"),
+    M('identifier_ascii_only', "probe classes",
+      E(_CFA, '_ID = "[A-Za-z_%s][A-Za-z0-9_$%s]*" % (_HI, _HI)',
+        '_ID = "[A-Za-z_][A-Za-z0-9_$]*"'),
+      note="A7-R4-A1 class: expect ['non-ascii ident', 'case folding']"),
+    M('dollar_tag_ascii_only', "probe classes",
+      E(_CFA, '_DQ = "[A-Za-z_%s][A-Za-z0-9_%s]*" % (_HI, _HI)',
+        '_DQ = "[A-Za-z_][A-Za-z0-9_]*"'),
+      note="A7-R4-A1 class: expect ['non-ascii tag']"),
+    M('continuation_drops_escapes', "probe classes",
+      E(_CFA, '        seg0, j = k, k + 1\n',
+        '        seg0, j, state = k, k + 1, "xq"\n'),
+      note="A7-R4-A1 class: expect ['escape continued', 'cr continued']"),
+    M('newline_is_lf_only', "probe classes",
+      E(_CFA, '_NEWLINE = "\\n\\r"',
+        '_NEWLINE = "\\n"'),
+      note="A7-R4-A1 class: expect ['cr continued', 'string value']"),
+    M('no_continuation', "probe classes",
+      E(_CFA, '        if k >= n or sql[k] not in _NEWLINE:\n',
+        '        if True:\n'),
+      note="A7-R4-A1 class: expect ['escape continued', 'cr continued', 'string continued', 'string value', 'e string escape', 'mentions continued']"),
+    M('no_escapes', "probe classes",
+      E(_CFA, '            if c == "\\\\" and state == "xe":\n',
+        '            if False:\n'),
+      note="A7-R4-A1 class: expect ['escape continued', 'cr continued', 'escape string', 'doubled quote', 'unterminated string']"),
+    M('no_doubled_quote', "probe classes",
+      E(_CFA, '                if state in ("xq", "xe", "xus") and sql.startswith("\'\'", j):\n',
+        '                if False and sql.startswith("\'\'", j):\n'),
+      note="A7-R4-A1 class: expect ['doubled quote', 'string value']"),
+    M('bit_hex_take_escapes', "probe classes",
+      E(_CFA, '            if c == "\\\\" and state == "xe":\n',
+        '            if c == "\\\\" and state in ("xe", "xb", "xh"):\n'),
+      note="A7-R4-A1 class: expect ['bit hex string']"),
+    M('unicode_string_takes_escapes', "probe classes",
+      E(_CFA, '            if c == "\\\\" and state == "xe":\n',
+        '            if c == "\\\\" and state in ("xe", "xus"):\n'),
+      note="A7-R4-A1 class: expect ['unicode string']"),
+    M('quoted_identifier_no_name', "probe classes",
+      E(_CFA, '        elif kind == "qident":\n',
+        '        elif False:\n'),
+      note="A7-R4-A1 class: expect ['quoted ident', 'mentions']"),
+    M('unicode_escapes_unresolved', "probe classes",
+      E(_CFA, '        if kind in ("qident", "string") and text[:2] in ("U&", "u&"):\n            raise Unmodelled("U& identifier" if kind == "qident" else "U& string", text)\n', ''),
+      note="A7-R4-A1 class: expect ['unicode ident', 'mentions']"),
+    M('folding_beyond_ascii', "probe classes",
+      E(_CFA, '            name = _truncate(text.translate(_ASCII_LOWER))\n',
+        '            name = _truncate(text.lower())\n'),
+      note="A7-R4-A1 class: expect ['case folding']"),
+    M('qualified_name_cut', "probe classes",
+      E(_CFA, '    while k + 1 < len(ws) and _is_op(ws[k], ".") and ws[k + 1][2] is not None:\n',
+        '    while False:\n'),
+      note="A7-R4-A1 class: expect ['qualified name']"),
+    M('block_comments_flat', "probe classes",
+      E(_CFA, '        if sql.startswith("/*", j):\n            depth += 1\n',
+        '        if sql.startswith("/*", j):\n            depth += 0\n'),
+      note="A7-R4-A1 class: expect ['nested comment', 'unterminated comment']"),
+    M('operator_keeps_comment_start', "probe classes",
+      E(_CFA, '    cut = [p for p in (text.find("/*"), text.find("--")) if p >= 0]\n',
+        '    cut = []\n'),
+      note="A7-R4-A1 class: expect ['operator comment']"),
+    M('dollar_never_after_a_digit', "probe classes",
+      E(_CFA, '("dolqdelim", r"\\$(?:%s)?\\$" % _DQ),',
+        '("dolqdelim", r"(?<![0-9])\\$(?:%s)?\\$" % _DQ),'),
+      note="A7-R4-A1 class: expect ['dollar boundary']"),
+    M('dollar_final_sign_consumed', "probe classes",
+      E(_CFA, '                    j = m.end() - 1',
+        '                    j = m.end()'),
+      note="A7-R4-A1 class: expect ['dollar inner tags']"),
+    M('python_whitespace', "probe classes",
+      E(_CFA, '("whitespace", r"[ \\t\\n\\r\\f]+|--[^\\n\\r]*"),',
+        '("whitespace", r"\\s+|--[^\\n\\r]*"),'),
+      note="A7-R4-A1 class: expect ['space set']"),
+    M('self_drops_comma', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[()\\[\\].;:+\\-*/%^<>=]"),'),
+      note="A7-R5-A1 (1) ledger: the mark , leaves the self rule (it lexes as other); expect ['self ,', 'string value', 'dollar value']"),
+    M('self_drops_lparen', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,)\\[\\].;:+\\-*/%^<>=]"),'),
+      note="A7-R5-A1 (1) ledger: the mark ( leaves the self rule (it lexes as other); expect ['self (']"),
+    M('self_drops_rparen', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,(\\[\\].;:+\\-*/%^<>=]"),'),
+      note="A7-R5-A1 (1) ledger: the mark ) leaves the self rule (it lexes as other); expect ['self )']"),
+    M('self_drops_lbracket', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\].;:+\\-*/%^<>=]"),'),
+      note="A7-R5-A1 (1) ledger: the mark [ leaves the self rule (it lexes as other); expect ['self [']"),
+    M('self_drops_rbracket', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[.;:+\\-*/%^<>=]"),'),
+      note="A7-R5-A1 (1) ledger: the mark ] leaves the self rule (it lexes as other); expect ['self ]']"),
+    M('self_drops_dot', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\];:+\\-*/%^<>=]"),'),
+      note="A7-R5-A1 (1) ledger: the mark . leaves the self rule (it lexes as other); expect ['qualified name', 'self .']"),
+    M('self_drops_semicolon', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].:+\\-*/%^<>=]"),'),
+      note="A7-R5-A1 (1) ledger: the mark ; leaves the self rule (it lexes as other); expect ['self ;', 'end of input', 'multiple statements']"),
+    M('self_drops_colon', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;+\\-*/%^<>=]"),'),
+      note="A7-R5-A1 (1) ledger: the mark : leaves the self rule (it lexes as other); expect ['self :']"),
+    M('self_drops_plus', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;:\\-*/%^<>=]"),'),
+      E(_CFA, '_OPC = r"~!@#^&|`?+\\-*/%<>="', '_OPC = r"~!@#^&|`?\\-*/%<>="'),
+      note="A7-R5-A1 (1) ledger: the operator character + leaves both the self and the operator rule; expect ['self +']"),
+    M('self_drops_minus', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;:+*/%^<>=]"),'),
+      E(_CFA, '_OPC = r"~!@#^&|`?+\\-*/%<>="', '_OPC = r"~!@#^&|`?+*/%<>="'),
+      note="A7-R5-A1 (1) ledger: the operator character - leaves both the self and the operator rule; expect ['self -']"),
+    M('self_drops_star', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;:+\\-/%^<>=]"),'),
+      E(_CFA, '_OPC = r"~!@#^&|`?+\\-*/%<>="', '_OPC = r"~!@#^&|`?+\\-/%<>="'),
+      note="A7-R5-A1 (1) ledger: the operator character * leaves both the self and the operator rule; expect ['self *']"),
+    M('self_drops_slash', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;:+\\-*%^<>=]"),'),
+      E(_CFA, '_OPC = r"~!@#^&|`?+\\-*/%<>="', '_OPC = r"~!@#^&|`?+\\-*%<>="'),
+      note="A7-R5-A1 (1) ledger: the operator character / leaves both the self and the operator rule; expect ['self /']"),
+    M('self_drops_percent', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;:+\\-*/^<>=]"),'),
+      E(_CFA, '_OPC = r"~!@#^&|`?+\\-*/%<>="', '_OPC = r"~!@#^&|`?+\\-*/<>="'),
+      note="A7-R5-A1 (1) ledger: the operator character % leaves both the self and the operator rule; expect ['self %']"),
+    M('self_drops_caret', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;:+\\-*/%<>=]"),'),
+      E(_CFA, '_OPC = r"~!@#^&|`?+\\-*/%<>="', '_OPC = r"~!@#&|`?+\\-*/%<>="'),
+      note="A7-R5-A1 (1) ledger: the operator character ^ leaves both the self and the operator rule; expect ['self ^']"),
+    M('self_drops_less', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;:+\\-*/%^>=]"),'),
+      E(_CFA, '_OPC = r"~!@#^&|`?+\\-*/%<>="', '_OPC = r"~!@#^&|`?+\\-*/%>="'),
+      note="A7-R5-A1 (1) ledger: the operator character < leaves both the self and the operator rule; expect ['self <']"),
+    M('self_drops_greater', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;:+\\-*/%^<=]"),'),
+      E(_CFA, '_OPC = r"~!@#^&|`?+\\-*/%<>="', '_OPC = r"~!@#^&|`?+\\-*/%<="'),
+      note="A7-R5-A1 (1) ledger: the operator character > leaves both the self and the operator rule; expect ['self >']"),
+    M('self_drops_equals', 'probe classes',
+      E(_CFA, '("self", r"[,()\\[\\].;:+\\-*/%^<>=]"),', '("self", r"[,()\\[\\].;:+\\-*/%^<>]"),'),
+      E(_CFA, '_OPC = r"~!@#^&|`?+\\-*/%<>="', '_OPC = r"~!@#^&|`?+\\-*/%<>"'),
+      note="A7-R5-A1 (1) ledger: the operator character = leaves both the self and the operator rule; expect ['cr comment', 'quoted ident', 'case folding', 'qualified name', 'self =']"),
+    M('other_read_as_a_token', 'probe classes',
+      E(_CFA, '        if kind == "other":\n            raise Unmodelled("other", text)\n', ''),
+      note="A7-R5-A1 (1) ledger: the other token admitted as a value; expect ['other', 'mentions']"),
+    M('last_token_dropped', 'probe classes',
+      E(_CFA, '    out, i, n = [], 0, len(sql)\n', '    out, i, n = [], 0, max(len(sql) - 1, 0)\n'),
+      note="A7-R5-A1 (1) ledger: the normal end of input: the scan stops one character early; expect ['cr comment', 'non-ascii ident', 'string continued', 'bit hex string', 'unicode string', 'quoted ident', 'nested comment', 'operator comment', 'space set', 'self ,', 'self (', 'self )', 'self [', 'self ]', 'self .', 'self ;', 'self :', 'self +', 'self -', 'self *', 'self /', 'self %', 'self ^', 'self <', 'self >', 'self =', 'end of input']"),
+    M('unterminated_comment_closed', 'probe classes',
+      E(_CFA, '("comment" if closed else "unterminated comment", ', '("comment", '),
+      note="A7-R5-A1 (1) ledger: an unclosed block comment read as a comment; expect ['unterminated comment']"),
+    M('unterminated_string_closed', 'probe classes',
+      E(_CFA, '("string" if closed else "unterminated string", ', '("string", '),
+      note="A7-R5-A1 (1) ledger: an unclosed string read as a string; expect ['unterminated string']"),
+    M('unterminated_dollar_closed', 'probe classes',
+      E(_CFA, '            closed, j = False, i + best\n', '            closed, j = True, i + best\n'),
+      note="A7-R5-A1 (1) ledger: an unclosed dollar body read as a dollar body; expect ['unterminated dollar']"),
+    M('unterminated_qident_closed', 'probe classes',
+      E(_CFA, '            j, closed = i + best, False\n', '            j, closed = i + best, True\n'),
+      note="A7-R5-A1 (1) ledger: an unclosed quoted identifier read as one; expect ['unterminated qident']"),
+    M('second_statement_admitted', 'probe classes',
+      E(_CFA, '    if len(st) > 1:', '    if len(st) > 99:'),
+      note="A7-R5-A1 (1) ledger: a second statement after `;` read as part of one; expect ['multiple statements']"),
+    M('mentions_skips_u_and_unread', 'probe classes',
+      E(_CFA, '    if low not in t and "u&" not in t and "\\\\" not in sql:', '    if low not in t and "\\\\" not in sql:'),
+      note="A7-R5-A1 (1) ledger: mentions() decides a U& text False without reading it; expect ['mentions']"),
+    M('mentions_skips_escapes_unread', 'probe classes',
+      E(_CFA, '    if low not in t and "u&" not in t and "\\\\" not in sql:', '    if low not in t and "u&" not in t:'),
+      note="A7-R5-A1 (1) ledger: mentions() decides a backslash text False without reading it; expect ['mentions']"),
+    M('mentions_skips_by_escapes_only', 'probe classes',
+      E(_CFA, '    if low not in t and "u&" not in t and "\\\\" not in sql:', '    if "u&" not in t and "\\\\" not in sql:'),
+      note="A7-R5-A1 (1) ledger: mentions() decides every escape-free text False without reading it; expect ['mentions']"),
+    M('mentions_reads_e_escapes_as_text', 'probe classes',
+      E(_CFA, '            raise Unmodelled("E\'\' escape", text)\n', '            pass\n'),
+      note="A7-R5-A1 (1) ledger, moved by A7-R6-PRE (2): the model reads an E'' escape as its text (the refusal is _string_value's now, so every reader meets it); expect ['mentions', 'e string escape']"),
+    M('continued_value_keeps_the_line_break', 'probe classes',
+      E(_CFA, '    return "".join(s[1:-1].replace("\'\'", "\'") for s in segs)\n',
+        '    return "\\n".join(s[1:-1].replace("\'\'", "\'") for s in segs)\n'),
+      note="A7-R6-PRE (2): a continued constant's segments joined by a line break, as round 6 read them; expect ['string value', 'mentions continued']"),
+    M('string_value_is_its_source_text', 'probe classes',
+      E(_CFA, '            name = _string_value(text)\n', '            name = text\n'),
+      note="A7-R6-PRE (2): a string constant's value is its source text again; expect ['mentions', 'string value', 'e string escape', 'bit string', 'mentions continued']"),
+    M('bit_string_read_as_text', 'probe classes',
+      E(_CFA, '        raise Unmodelled("bit string", text)\n', '        pass\n'),
+      note="A7-R6-PRE (2): a B'' or X'' bit string read as characters; expect ['bit string']"),
+    M('dollar_value_keeps_its_tags', 'probe classes',
+      E(_CFA, '    return text[len(tag):len(text) - len(tag)]\n', '    return text\n'),
+      note="A7-R6-PRE (2): a dollar-quoted constant's value keeps its delimiters; expect ['dollar value']"),
+    M('mentions_skips_continued_unread', 'probe classes',
+      E(_CFA, '        if "\'" not in sql or ("\\n" not in sql and "\\r" not in sql):\n', '        if True:\n'),
+      note="A7-R6-PRE (2): mentions() decides a text False unread although a continued constant joins the name across a line break; expect ['mentions continued']"),
+], T('other_by_membership',
+     E(_CFA, '        if kind == "other":\n', '        if kind in ("other",):\n'),
+     note='the same test written as a membership'))
+
+# -- SQL-SWEEP: the generated raw-text sweep (A7-R5-A1 (2)(a)) ---------------
+row("SQL-SWEEP", "test_the_only_raw_sql_reader_is_the_scanner", [
+    M('raw_reader_back', 'raw sql sweep',
+      E(TST, '                named = [i for i, s in enumerate(strings) if cf_asm.mentions(s, "ffa_assembly_seats")]\n',
+        '                named = [i for i, s in enumerate(strings) if "ffa_assembly_seats" in s]\n'),
+      note="S2's reader of the readers' string constants reads their raw text again (round 6 put this control on S25's spy, which A7-R6-PRE (5) removed)"),
+    M('raw_reader_through_a_helper', 'raw sql sweep',
+      E(TST, '                named = [i for i, s in enumerate(strings) if cf_asm.mentions(s, "ffa_assembly_seats")]\n',
+        '                named = [i for i, s in enumerate(strings) if _cf_has(s, "ffa_assembly_seats")]\n'),
+      E(TST, 'def test_fix2_s2_stored_reasons_comparison_and_triage():\n', 'def _cf_has(s, w):\n    t = s\n    return w in t\n\n\ndef test_fix2_s2_stored_reasons_comparison_and_triage():\n'),
+      note='the same reading laundered through a local and a helper function'),
+], T('mentions_is_true',
+     E(TST, '                named = [i for i, s in enumerate(strings) if cf_asm.mentions(s, "ffa_assembly_seats")]\n',
+       '                named = [i for i, s in enumerate(strings) if cf_asm.mentions(s, "ffa_assembly_seats") is True]\n'),
+     note="the token model's reader, compared with True"))
+
+# -- CENSUS: the closers' census literal read by the token model -------------
+row("CENSUS", "test_the_census_fresh_literal_is_the_constant", [
+    M('make_interval_with_the_old_text_in_a_dollar_body', 'census literal',
+      E(MAIN, "AND pf.census_at >= NOW() - interval '6 seconds')", "AND pf.census_at >= NOW() - make_interval(secs => 7) AND $o$census_at >= NOW() - interval '6 seconds'$o$ IS NOT NULL)"),
+      note="A7-R5 reviewer input 3: the predicate moves to make_interval and its old text stays in a dollar body; round 5's regex over sql_code found it there"),
+], T('interval_keyword_upper',
+     E(MAIN, "AND af.census_at >= NOW() - interval '6 seconds')", "AND af.census_at >= NOW() - INTERVAL '6 seconds')"),
+     note='the same predicate with the keyword in capitals'))
+
+# -- REC-PROBE: the recorder leaves out the lock probe by where it runs --------
+row("REC-PROBE", "test_recorder_leaves_out_only_the_lock_probe", [
+    M("probe_unmarked", "probe unrecorded",
+      E(_CFA, "            info[_PROBE_MARK] = True\n", "            pass\n"),
+      note="A7-R4-A1 FIX-A7-R5-PROV: the probe runs without its mark"),
+    M("exemption_by_the_comment", "probe marker recorded",
+      E(_CFA, "        if conn.info.get(_PROBE_MARK):\n", '        if "/*cf-locks*/" in statement:\n'),
+      note="A7-R4 finding 4: round 4's exemption, by the SQL's text"),
+], T("mark_through_update",
+     E(_CFA, "            info[_PROBE_MARK] = True\n", "            info.update({_PROBE_MARK: True})\n"),
+     note="the same mark set through dict.update"))
 
 # -- S59 -------------------------------------------------------------------
 _B_LINE = '        elif some and t >= ASM_BASE_S and not spawning and not hold_adm:\n'
@@ -1944,13 +2524,68 @@ row("S63", "test_s63_the_kept_epoch", [
                      '            " ORDER BY epoch_no DESC LIMIT 1"), {"lid": ctx.lid})).mappings().first())\n'),
       note="both concurrent admissions read no row before the lobby lock; the second one's "
            "epoch_no 1 is refused by the primary key"),
+    M("update_behind_a_block_comment", "S63 iii writes",
+      E(MAIN, _EPI, _EPI + '            await ctx.db.execute(text(\n'
+                           '                "UPDATE /* note */ ffa_kept_epochs SET chain = chain"\n'
+                           '                " WHERE lobby_id = :lid"), {"lid": ctx.lid})\n'),
+      note="A7-R3 finding 4: the comment after the verb hid the table from the raw-text shape"),
+    M('update_after_a_cr_comment', 'S63 iii writes',
+      E(MAIN, _EPI, _EPI + ('            await ctx.db.execute(text(\n'
+                            '                "-- note\\rUPDATE ffa_kept_epochs SET chain = chain"\n'
+                            '                " WHERE lobby_id = :lid"), {"lid": ctx.lid})\n')),
+      note='A7-R4 finding 3: a line comment ends at CR, so the UPDATE after it executes'),
+    M('update_carrying_the_old_probe_marker', 'S63 iii writes',
+      E(MAIN, _EPI, _EPI + ('            await ctx.db.execute(text(\n'
+                            '                "UPDATE /*cf-locks*/ ffa_kept_epochs SET chain = chain"\n'
+                            '                " WHERE lobby_id = :lid"), {"lid": ctx.lid})\n')),
+      note="A7-R4 finding 4: round 4's probe comment on an UPDATE the server executes"),
+    M('update_in_a_writable_cte', 'S63 iii writes',
+      E(MAIN, _EPI, _EPI + ('            await ctx.db.execute(text(\n'
+                            '                "WITH u AS (UPDATE ffa_kept_epochs SET chain = chain"\n'
+                            '                " WHERE lobby_id = :lid RETURNING 1) SELECT count(*) FROM u"),\n'
+                            '                {"lid": ctx.lid})\n')),
+      note='A7-R4-A1 class sweep: an UPDATE inside a data-modifying WITH, whose statement shape is its SELECT; the write log reads it'),
+    M('surrogate_alias_on_the_epoch_read', 'unmodelled statement',
+      E(MAIN, _PREV, _PREV.replace('"SELECT epoch_no, chain FROM ffa_kept_epochs WHERE lobby_id = :lid"', '"SELECT epoch_no, chain, 1 AS U&\\"x\\\\D83D\\\\DE00\\" FROM ffa_kept_epochs WHERE lobby_id = :lid"')),
+      note='A7-R5 reviewer input 2 (the bound): the epoch read gains AS U&"x\\D83D\\DE00" (a surrogate pair); the recorder names the form and run_env\'s count is not 0'),
+    M('late_update_on_the_second_epoch', 'S63 iii writes',
+      E(MAIN, _EPI, _EPI + '            if n == 2 and ctx.t_ms() < 46000:\n                await ctx.db.execute(text(\n                    "UPDATE ffa_kept_epochs SET chain = chain WHERE lobby_id = :lid"), {"lid": ctx.lid})\n'),
+      note="A7-R5 F4 (the reviewer's mutant): the epoch writer UPDATEs its own table when n == 2 and t_ms() < 46000, which only the scenario after round 5's scan reaches"),
+    M('e_escape_alias_on_the_epoch_read', 'unmodelled statement',
+      E(MAIN, _PREV, _PREV.replace('"SELECT epoch_no, chain FROM ffa_kept_epochs WHERE lobby_id = :lid"', '"SELECT epoch_no, chain, E\'\\\\x61\' AS x FROM ffa_kept_epochs WHERE lobby_id = :lid"')),
+      note="A7-R6-PRE (2), the bound: the epoch read gains E'\\x61' AS x (an E'' escape); the recorder names the form and run_env's count is not 0"),
+    M('bit_string_on_the_epoch_read', 'unmodelled statement',
+      E(MAIN, _PREV, _PREV.replace('"SELECT epoch_no, chain FROM ffa_kept_epochs WHERE lobby_id = :lid"', '"SELECT epoch_no, chain, B\'1\' AS x FROM ffa_kept_epochs WHERE lobby_id = :lid"')),
+      note="A7-R6-PRE (2), the bound: the epoch read gains B'1' AS x (a bit string); the recorder names the form and run_env's count is not 0"),
 ], T("chain_through_a_helper",
      E(MAIN, _CHAIN, '            chain = _asm_next_chain(prev, ctx.lid, n, p["slot"], claim[0])\n'),
      E(MAIN, "\n\nasync def _ffa_admission_check(ctx) -> list:\n",
        "\n\ndef _asm_next_chain(prev, lid, n, slot, actor) -> str:\n"
        "    return _ffa_epoch_chain(prev[\"chain\"] if prev is not None else \"0\",\n"
        "                            _asm_id8(lid), n, int(slot), int(actor))\n"
-       "\n\nasync def _ffa_admission_check(ctx) -> list:\n")))
+       "\n\nasync def _ffa_admission_check(ctx) -> list:\n")),
+    classes=[C("comment_only_mention", E(MAIN, _EPI, _EPI + ('            await ctx.db.execute(text(\n'
+                                          '                "SELECT 1 /* UPDATE ffa_kept_epochs SET chain = chain */"))\n')),
+               note="A7-R4 job 045 (commit e6883e84, tree 772ef50e0437c3e647aef2f08ac3d7066c028f08), registered by A7-R4-A1: the UPDATE's text "
+                    "only inside a block comment of an executed SELECT; S63 stays green"),
+             C("plain_alias_on_the_epoch_read",
+               E(MAIN, _PREV, _PREV.replace(
+                   '"SELECT epoch_no, chain FROM ffa_kept_epochs WHERE lobby_id = :lid"',
+                   '"SELECT epoch_no, chain, 1 AS \\"x\U0001f600\\" FROM ffa_kept_epochs WHERE lobby_id = :lid"')),
+               note="the bound's other way (A7-R5-A1 (2)(b)): the surrogate control's alias written as a "
+                    "quoted identifier holding the decoded character; the model reads it, S63 stays green"),
+             C("e_plain_alias_on_the_epoch_read",
+               E(MAIN, _PREV, _PREV.replace(
+                   '"SELECT epoch_no, chain FROM ffa_kept_epochs WHERE lobby_id = :lid"',
+                   '"SELECT epoch_no, chain, E\'a\' AS x FROM ffa_kept_epochs WHERE lobby_id = :lid"')),
+               note="the E'' bound's other way (A7-R6-PRE (2)): the same alias as an E'' string with no escape; "
+                    "the model reads its value, S63 stays green"),
+             C("bit_as_plain_string_on_the_epoch_read",
+               E(MAIN, _PREV, _PREV.replace(
+                   '"SELECT epoch_no, chain FROM ffa_kept_epochs WHERE lobby_id = :lid"',
+                   '"SELECT epoch_no, chain, \'1\' AS x FROM ffa_kept_epochs WHERE lobby_id = :lid"')),
+               note="the bit-string bound's other way (A7-R6-PRE (2)): the same alias as a plain string; "
+                    "the model reads its value, S63 stays green")])
 
 # -- S64: one node per fixture test --------------------------------------------
 _S64 = ["test_s64_i_ii_the_false_mark_and_the_refuted_tally",

@@ -18,8 +18,11 @@ The tie-break asks which region this process has evidence two players have
 actually played in. That is corroboration, not an allowlist — a static list was
 refused with a good argument (`hk` and `uae` are in this project's own match
 history and the game's own selector does not offer them) — and it only ever
-breaks a tie between two candidates already in play, so it cannot reject a
-region outright.
+ORDERS candidates already in play, so it cannot reject a region outright: it
+breaks a tie between two signals of the same kind, and since 2026-11-05 it is
+one of the signs that a cached home region is still in service (the others
+are a live snapshot naming the region and a fresh ping map that measured
+it), which is what lets a home be read ahead of the live snapshots.
 
 WHERE THAT EVIDENCE COMES FROM has been rewritten twice, and the current answer
 is the only one that is not a client's word for it. First it was the join-time
@@ -41,22 +44,23 @@ bias (learning #597) that rung 0 exists to correct. A test below pins that the
 changelog describes the fallback as the fixed order it is.
 
 What none of this claims: that the chosen region is the BEST one for a
-cross-region pair. Steering on a stored home region was refused because an
-untimestamped best-region cache steers a player who relocated by where they
-used to be. A real measurement now exists as rung 0
+cross-region pair. A home is an untimestamped best-region cache: it places a
+player who relocated by where they used to be, and a confirmed home is only
+a region still in service. A real measurement exists as rung 0
 (`_pick_region_by_pings`): when BOTH seats have sent a ping map no older
-than 180 s it may replace the ladder's answer with the region that minimises
-the pair's WORST ping, taken when it beats the ladder's worst by more than
-20 ms and lies within each seat's own bound -- the worst that seat measured
-among the candidates the ladder's active rung was choosing between, plus
-20 ms (bounded minimax since 2026-09-09; the earlier "costs neither seat more
-than 20 ms over its own baseline" test left every cross-region pair observed
-that day on one seat's home, learning #597). Whenever either map is absent, stale or malformed (a client
-without the ping sweep sends none at all), whenever the two maps share no
-region, whenever a seat measured none of the ladder's candidates or every
-shared region lies above a bound, and whenever the gain is inside the
-margin, the ladder decides the room by itself, which is why the ladder is
-what every test in this file is about. Rung 0 has its own file,
+than 900 s (180 s until 2026-11-05) it may replace the ladder's answer with
+the region that minimises the pair's WORST ping, taken when it beats the
+ladder's worst by more than 20 ms and lies within each seat's own bound --
+the worst that seat measured among the two seats' homes and the ladder's
+answer, plus 20 ms (bounded minimax since 2026-09-09; the earlier "costs
+neither seat more than 20 ms over its own baseline" test left every
+cross-region pair observed that day on one seat's home, learning #597; the
+homes as the references since 2026-11-05, learning #1112). Whenever either
+map is absent, stale or malformed (a client without the ping sweep sends
+none at all), whenever the two maps share no region, whenever every shared
+region lies above a bound, and whenever the gain is inside the margin, the
+ladder decides the room by itself, which is why the ladder is what every
+test in this file is about. Rung 0 has its own file,
 test_queue_region_pings.py.
 """
 
@@ -64,13 +68,17 @@ import ast
 import inspect
 import itertools
 import io
+import math
 import re
+import sys
 import tokenize
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 import main
+import tournaments
 from changelog_release import one_bullet, release_section
 
 
@@ -141,8 +149,55 @@ def test_one_signal_is_used_whichever_seat_it_came_from():
     assert main._pick_room_region("", "", "", "asia", "r") == "asia"
 
 
-def test_a_live_snapshot_outranks_a_cached_home_region():
+def test_a_confirmed_home_region_outranks_a_live_snapshot():
+    """Reversed on 2026-11-05 (bug 457, learning #1112): a live snapshot is
+    where the client was connected at join, which after quick play is
+    wherever the vanilla sweep left it. A home that something confirms is
+    still in service is read first, a lone one included. Here two reporters
+    have been seen on asia and on eu; in the last line the map is empty and a
+    live snapshot names the home's own region."""
+    _corroborate("asia")
+    _corroborate("eu")
+    assert main._pick_room_region("us", "asia", "", "eu", "r") == "asia"
+    assert main._pick_room_region("us", "", "", "eu", "r") == "eu"
+    assert main._pick_room_region("us", "eu", "", "", "r") == "eu"
+    main._REGION_SEEN.clear()
+    assert main._pick_room_region("us", "us", "asia", "", "r") == "us"
+    assert main._pick_room_region("asia", "us", "us", "", "r") == "us"
+
+
+def test_a_home_region_nothing_confirms_ranks_below_a_live_snapshot():
+    """A home token is an untimestamped cache and can name a region since
+    retired; a room issued there is one neither client can reach. On an empty
+    corroboration map, with no ping map and no snapshot naming it, nothing
+    says the region is still in service, so the live snapshots are read
+    first, as they were before 2026-11-05. The home is still a candidate: it
+    decides when there is no snapshot, and two homes that agree win
+    outright."""
     assert main._pick_room_region("us", "asia", "", "eu", "r") == "us"
+    assert main._pick_room_region("us", "", "", "eu", "r") == "us"
+    assert main._pick_room_region("us", "", "eu", "", "r") == "eu"
+    assert main._pick_room_region("", "asia", "", "eu", "r") == "asia"
+    assert main._pick_room_region("us", "asia", "", "asia", "r") == "asia"
+
+
+def test_a_home_both_live_snapshots_name_is_read_before_the_other_home():
+    """Both clients were connected to one region at join and one of them
+    calls it home: that region, ahead of the other seat's home even when
+    that one is confirmed and would win the tie between the two (here two
+    reporters have been seen on eu and none on asia). The ladder answered
+    this shape the same way before 2026-11-05, when the snapshots were read
+    before any home that did not agree. The controls keep the rung narrow:
+    one snapshot alone (either seat's), two snapshots that differ, and two
+    that agree on a region NEITHER seat calls home all leave the confirmed
+    home first."""
+    _corroborate("eu")
+    assert main._pick_room_region("asia", "eu", "asia", "asia", "r") == "asia"
+    assert main._pick_room_region("asia", "asia", "asia", "eu", "r") == "asia"
+    assert main._pick_room_region("asia", "eu", "", "asia", "r") == "eu"
+    assert main._pick_room_region("", "eu", "asia", "asia", "r") == "eu"
+    assert main._pick_room_region("asia", "eu", "us", "asia", "r") == "eu"
+    assert main._pick_room_region("us", "eu", "us", "asia", "r") == "eu"
 
 
 # ── corroboration ────────────────────────────────────────────────────────────
@@ -168,10 +223,11 @@ def test_with_both_sides_corroborated_the_tie_is_still_stable():
     assert main._pick_room_region("", "asia", "", "us", "r") == "asia"
 
 
-def test_corroboration_never_rejects_a_region_it_only_breaks_a_tie():
-    """The bound on what this mechanism can do. A region nobody has been seen
-    in is still used when it is the only signal — otherwise a cold process
-    would move every pair to the default."""
+def test_corroboration_never_rejects_a_region_it_only_orders_candidates():
+    """The bound on what this mechanism can do, in both of its uses (the
+    tie-break, and confirming a home). A region nobody has been seen in is
+    still used when it is the only signal — otherwise a cold process would
+    move every pair to the default."""
     _corroborate("us")
     assert main._pick_room_region("", "asia", "", "", "r") == "asia"
     assert main._pick_room_region("asia", "", "", "", "r") == "asia"
@@ -333,17 +389,911 @@ def test_eviction_drops_the_unevidenced_before_the_corroborated():
     )
 
 
+# ── the census of the pick's reading (ruling RP-5 (3)(a)) ────────────────────
+#
+# A pick takes ONE reading of the monotonic clock and hands it on to every
+# question it asks of the corroboration map. The cases further down ask that
+# at chosen readings, through the paths their shapes take. The census asks it
+# of the syntax tree of the functions that pass the reading on, whatever the
+# reading and whichever path: it reads the source it is handed, so the planted
+# sources of test_the_census_refuses_each_planted_source are read by the same
+# code as main's own. The leaf, _region_corroborated, has a census of its own
+# (_census_of_the_leaf).
+#
+# The callees that may be handed the reading, each with the parameter that
+# receives it. Where that argument sits in a call is read from the callee's
+# own signature. A callee that is not on this list and is handed the reading
+# is refused by the census until it is added here.
+_READING_CALLEES = {
+    "_region_home_confirmed": "mono",
+    "_region_agreed": "now",
+    "_region_corroborated": "now",
+}
+_LEAF = "_region_corroborated"
+# The functions that pass the reading on: the name the reading has in each,
+# how it may be bound there, and the callees it may be handed to there.
+# "clock": exactly once, a statement of the body itself (not inside a branch
+# or a loop) `<name> = time.monotonic()`. "fallback": at most once,
+# `if <name> is None: <name> = time.monotonic()`. "none": never.
+_CENSUS = {
+    "_pick_room_region": ("mono", "clock", tuple(_READING_CALLEES)),
+    "_region_home_confirmed": ("mono", "none", (_LEAF,)),
+    "_region_agreed": ("now", "fallback", (_LEAF,)),
+}
+# What the census refuses, one rule per word. test_the_census_refuses_each_planted_source
+# has, for each rule, a planted source that only that rule refuses.
+_RULES = ("binding", "use", "argument", "alias", "nested", "code", "reading")
+# The module-level names the rules read as main's own: the clock's module and,
+# in the leaf, the fold, the map and the time-to-live. A binding of any of
+# them inside a function the census reads is refused (binding). The callees
+# of _READING_CALLEES are held by the rule alias.
+_TRUSTED_NAMES = ("time", "_region_token", "_REGION_SEEN", "_REGION_SEEN_TTL_SECONDS")
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                  ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _is_clock_read(node):
+    """`node` is `time.monotonic()`, with no argument."""
+    return (isinstance(node, ast.Call) and not node.args and not node.keywords
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "monotonic"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "time")
+
+
+def _reads_the_clock_into(stmt, name):
+    """`stmt` is `<name> = time.monotonic()` and nothing else."""
+    return (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id == name
+            and _is_clock_read(stmt.value))
+
+
+def _is_none_test(test, name):
+    """`test` is `<name> is None`."""
+    return (isinstance(test, ast.Compare) and isinstance(test.left, ast.Name) and test.left.id == name
+            and len(test.ops) == 1 and isinstance(test.ops[0], ast.Is) and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant) and test.comparators[0].value is None)
+
+
+def _is_fallback(stmt, name):
+    """`stmt` is `if <name> is None: <name> = time.monotonic()` and nothing else."""
+    return (isinstance(stmt, ast.If) and not stmt.orelse and len(stmt.body) == 1
+            and _is_none_test(stmt.test, name) and _reads_the_clock_into(stmt.body[0], name))
+
+
+def _binders(fn, name):
+    """Every node inside `fn`, other than `fn`'s own parameters, that binds
+    `name`: the name stored to or deleted (which is how =, augmented and
+    annotated assignment, :=, unpacking, del, and for, with and comprehension
+    targets bind), a parameter or type parameter of a nested function, a
+    nested def or class, an import, an except clause, a match capture, a
+    global or nonlocal declaration. _PLANTED has a source for each form."""
+    a = fn.args
+    own = {p for p in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg] if p is not None}
+    found = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name):
+            hit = node.id == name and not isinstance(node.ctx, ast.Load)   # every assignment form, del
+        elif isinstance(node, ast.arg):
+            hit = node.arg == name and node not in own                      # a nested function's parameter
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            hit = node is not fn and node.name == name
+        elif isinstance(node, ast.alias):
+            hit = (node.asname or node.name.split(".")[0]) == name
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar,
+                               ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+            hit = node.name == name
+        elif isinstance(node, ast.MatchMapping):
+            hit = node.rest == name
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            hit = name in node.names
+        else:
+            hit = False
+        if hit:
+            found.append(node)
+    return found
+
+
+def _reading_argument(call):
+    """What a call to a callee of _READING_CALLEES passes for the reading: an
+    expression node, or None where the call leaves it out or passes a starred
+    or ** argument, from which the census cannot tell what it passes."""
+    callee = call.func.id
+    param = _READING_CALLEES[callee]
+    position = list(inspect.signature(getattr(main, callee)).parameters).index(param)
+    if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+        return None
+    if len(call.args) > position:
+        return call.args[position]
+    return next((k.value for k in call.keywords if k.arg == param), None)
+
+
+def _census(source, first_line=1):
+    """The census of the one function `source` defines: (refusals, sites).
+    A refusal is (rule, line, the code refused); a site is (the function, the
+    callee, line, column) of a call to a callee this function may hand the
+    reading to. Lines are main.py's when `first_line` is the line on which the
+    source starts there."""
+    fn = ast.parse(source).body[0]
+    parents = {child: node for node in ast.walk(fn) for child in ast.iter_child_nodes(node)}
+    refusals, sites = [], []
+
+    def refuse(rule, node):
+        refusals.append((rule, node.lineno + first_line - 1, ast.unparse(node) if isinstance(node, ast.AST) else ""))
+
+    # binding: the module-level names the rules below read as main's own are
+    # not rebound inside the function
+    for trusted in _TRUSTED_NAMES:
+        for node in _binders(fn, trusted):
+            refuse("binding", node)
+
+    if fn.name == _LEAF:
+        _census_of_the_leaf(fn, parents, refuse)
+        return refusals, sites
+    reading, binding, callees = _CENSUS[fn.name]
+
+    # binding: the one binding the function is allowed, and no other
+    if binding == "clock":
+        allowed = [s.targets[0] for s in fn.body if _reads_the_clock_into(s, reading)][:1]
+        if not allowed:
+            refuse("binding", fn)
+    elif binding == "fallback":
+        allowed = [s.body[0].targets[0] for s in ast.walk(fn) if _is_fallback(s, reading)][:1]
+    else:
+        allowed = []
+    for node in _binders(fn, reading):
+        if node not in allowed:
+            refuse("binding", node)
+    none_tests = {parents[parents[t]].test.left for t in allowed if binding == "fallback"}
+
+    # argument: every call to a callee of the list hands it the bare name
+    handed = set()
+    for call in ast.walk(fn):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in _READING_CALLEES):
+            continue
+        arg = _reading_argument(call)
+        if not (isinstance(arg, ast.Name) and arg.id == reading):
+            refuse("argument", call)
+        elif call.func.id in callees:
+            handed.add(arg)
+        if call.func.id in callees:
+            sites.append((fn.name, call.func.id, call.lineno + first_line - 1, call.col_offset))
+
+    # use: every other mention of the name is that argument, or the fallback's test
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id == reading and isinstance(node.ctx, ast.Load):
+            if node not in handed and node not in none_tests:
+                refuse("use", node)
+
+    # alias: a callee of the list is named only to be called, by its own name
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id in _READING_CALLEES:
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                refuse("alias", node)
+        elif isinstance(node, ast.Attribute) and node.attr in _READING_CALLEES:
+            refuse("alias", node)
+
+    # nested: no nested function, lambda, class or comprehension mentions it
+    for node in ast.walk(fn):
+        if node is not fn and isinstance(node, _NESTED_SCOPES):
+            if any(isinstance(n, ast.Name) and n.id == reading for n in ast.walk(node)):
+                refuse("nested", node)
+    return refusals, sites
+
+
+def _is_name(node, name):
+    return isinstance(node, ast.Name) and node.id == name
+
+
+def _census_of_the_leaf(fn, parents, refuse):
+    """The leaf's own census (ruling RP-5a (3)(b)), so that the code never
+    enters its arithmetic. Its code parameter is never bound and is read only as the key
+    of the lookup, folded: `_REGION_SEEN.get(_region_token(<code>))` (code).
+    Its reading is bound at most once, where none was handed in (binding), and
+    is read only in that fallback's test or as `<reading> - <stamp>` compared
+    by <= with _REGION_SEEN_TTL_SECONDS, the stamp being the target of the
+    comprehension whose condition that comparison is, over `<map>.values()`
+    (reading)."""
+    reading = _READING_CALLEES[_LEAF]
+    a = fn.args
+    names = [p.arg for p in a.posonlyargs + a.args + a.kwonlyargs]
+    others = [n for n in names if n != reading]
+    if reading not in names or len(others) != 1:
+        refuse("code", fn)
+        return
+    code = others[0]
+
+    for node in _binders(fn, code):
+        refuse("code", node)
+    for node in ast.walk(fn):
+        if _is_name(node, code) and isinstance(node.ctx, ast.Load):
+            fold = parents.get(node)
+            get = parents.get(fold)
+            if not (isinstance(fold, ast.Call) and _is_name(fold.func, "_region_token")
+                    and fold.args == [node] and not fold.keywords
+                    and isinstance(get, ast.Call) and get.args == [fold] and not get.keywords
+                    and isinstance(get.func, ast.Attribute) and get.func.attr == "get"
+                    and _is_name(get.func.value, "_REGION_SEEN")):
+                refuse("code", node)
+
+    allowed = [s.body[0].targets[0] for s in ast.walk(fn) if _is_fallback(s, reading)][:1]
+    for node in _binders(fn, reading):
+        if node not in allowed:
+            refuse("binding", node)
+    none_tests = {parents[parents[t]].test.left for t in allowed}
+    for node in ast.walk(fn):
+        if not (_is_name(node, reading) and isinstance(node.ctx, ast.Load)) or node in none_tests:
+            continue
+        diff = parents.get(node)
+        cmp = parents.get(diff)
+        loop = parents.get(cmp)
+        if not (isinstance(diff, ast.BinOp) and isinstance(diff.op, ast.Sub) and diff.left is node
+                and isinstance(diff.right, ast.Name)
+                and isinstance(cmp, ast.Compare) and cmp.left is diff and len(cmp.ops) == 1
+                and isinstance(cmp.ops[0], ast.LtE) and len(cmp.comparators) == 1
+                and _is_name(cmp.comparators[0], "_REGION_SEEN_TTL_SECONDS")
+                and isinstance(loop, ast.comprehension) and cmp in loop.ifs
+                and _is_name(loop.target, diff.right.id)
+                and isinstance(loop.iter, ast.Call) and not loop.iter.args
+                and isinstance(loop.iter.func, ast.Attribute) and loop.iter.func.attr == "values"):
+            refuse("reading", node)
+
+
+def _source_of(name):
+    """main.py's source of function `name` and the line it starts on."""
+    lines, first = inspect.getsourcelines(getattr(main, name))
+    return "".join(lines), first
+
+
+def _census_of(name):
+    return _census(*_source_of(name))
+
+
+def test_the_census_of_mains_own_functions_refuses_nothing():
+    """The pick binds its reading once, from the clock, and hands that name,
+    and nothing made from it, to every call of the homes' confirmation, of the
+    weighing and of the leaf; the two functions between hand their parameter
+    on to the leaf in the same way, the weighing binding it only when none was
+    handed in. Each function hands it to every callee it is allowed to. The
+    leaf reads its code only as the folded key of its lookup and its reading
+    only in the comparison of a stamp's age with the time-to-live."""
+    pairs = set()
+    for name in _CENSUS:
+        refusals, sites = _census_of(name)
+        assert refusals == [], (name, refusals)
+        pairs |= {(fn, callee) for fn, callee, _, _ in sites}
+    assert _census_of(_LEAF) == ([], [])
+    assert pairs == {(name, callee) for name, (_, _, callees) in _CENSUS.items() for callee in callees}
+    for callee, param in _READING_CALLEES.items():
+        assert param in inspect.signature(getattr(main, callee)).parameters, (callee, param)
+
+
 def test_both_candidates_are_judged_against_one_clock_reading():
     """Two separate time.monotonic() calls put the TTL boundary between the two
     comparisons, so at the moment both sightings expire, whichever is read first
-    can still be live and win a tie it should not have been in."""
-    agreed = inspect.getsource(main._region_agreed)
-    assert "now = time.monotonic()" in agreed
-    assert "_region_corroborated(a, now)" in agreed
-    assert "_region_corroborated(b, now)" in agreed
-    assert agreed.count("time.monotonic()") == 1, (
-        "the pair must be decided against a single reading"
-    )
+    can still be live and win a tie it should not have been in. Read by the
+    census: _region_agreed binds its reading at most once, only where none was
+    handed in, and hands that name to both of its questions to the leaf."""
+    refusals, sites = _census_of("_region_agreed")
+    assert refusals == []
+    assert [callee for _, callee, _, _ in sites] == [_LEAF, _LEAF]
+
+
+_BIND = "    mono = time.monotonic()\n"
+_RETURN = "    return chosen\n"
+_THIRD = "_region_agreed(mh, oh, mono) or"
+_SECOND = "_region_agreed(mr, orr, mono)"
+_SEEN = "_region_corroborated(chosen, mono)"
+_HOME_LEAF = "    return _region_corroborated(home, mono)\n"
+_AGREED_LEAF = "        ca, cb = _region_corroborated(a, now), _region_corroborated(b, now)\n"
+_LEAF_TTL = "now - ts <= _REGION_SEEN_TTL_SECONDS)"
+_LEAF_COUNT = "    return live >= _REGION_SEEN_MIN_PLAYERS\n"
+_LEAF_LIVE = "    live = sum("
+
+# (what was planted, the function, its edits as (old, new), the rules that refuse it)
+_PLANTED = [
+    ("the rounding at the third weighing of Codex round REGION-R4", "_pick_room_region",
+     [(_THIRD, "_region_agreed(mh, oh, round(mono - 0.5) + 0.5) or")], {"argument", "use"}),
+    ("a second reading", "_pick_room_region", [(_BIND, _BIND + _BIND)], {"binding"}),
+    ("the reading moved in place", "_pick_room_region", [(_BIND, _BIND + "    mono += 0.5\n")], {"binding"}),
+    ("the reading rebound inside an argument", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr, (mono := mono + 0.5))")], {"binding", "use", "argument"}),
+    ("the reading deleted", "_pick_room_region", [(_RETURN, "    del mono\n" + _RETURN)], {"binding"}),
+    ("the clock's module rebound", "_pick_room_region",
+     [(_BIND, "    time = datetime\n" + _BIND)], {"binding"}),
+    ("the time-to-live rebound inside the leaf", _LEAF,
+     [(_LEAF_LIVE, "    _REGION_SEEN_TTL_SECONDS = 0\n" + _LEAF_LIVE)], {"binding"}),
+    ("the fold rebound inside the leaf", _LEAF,
+     [("    ids = ", "    _region_token = str\n    ids = ")], {"binding"}),
+    ("the reading taken from another clock", "_pick_room_region",
+     [(_BIND, "    mono = time.time()\n")], {"binding"}),
+    ("the reading rounded where it is taken", "_pick_room_region",
+     [(_BIND, "    mono = round(time.monotonic())\n")], {"binding"}),
+    ("the reading taken inside a branch", "_pick_room_region",
+     [(_BIND, "    if True:\n        mono = time.monotonic()\n")], {"binding"}),
+    ("the reading bound by an annotated assignment", "_pick_room_region",
+     [(_RETURN, "    mono: float = 0.0\n" + _RETURN)], {"binding"}),
+    ("the reading bound by unpacking", "_pick_room_region",
+     [(_RETURN, "    (mono, other) = (0.0, 0.0)\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a for loop", "_pick_room_region",
+     [(_RETURN, "    for mono in ():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a with statement", "_pick_room_region",
+     [(_RETURN, "    with open(room_name) as mono:\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by an except clause", "_pick_room_region",
+     [(_RETURN, "    try:\n        pass\n    except ValueError as mono:\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by an import", "_pick_room_region",
+     [(_RETURN, "    import time as mono\n" + _RETURN)], {"binding"}),
+    ("the reading declared global", "_pick_room_region",
+     [(_RETURN, "    global mono\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a match capture", "_pick_room_region",
+     [(_RETURN, "    match chosen:\n        case mono:\n            pass\n" + _RETURN)], {"binding"}),
+    ("the reading declared nonlocal", "_pick_room_region",
+     [(_RETURN, "    nonlocal mono\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a starred match capture", "_pick_room_region",
+     [(_RETURN, "    match chosen:\n        case [*mono]:\n            pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a mapping match's rest", "_pick_room_region",
+     [(_RETURN, "    match chosen:\n        case {**mono}:\n            pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function", "_pick_room_region",
+     [(_RETURN, "    def mono():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function's starred type parameter", "_pick_room_region",
+     [(_RETURN, "    def later[*mono]():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function's ** type parameter", "_pick_room_region",
+     [(_RETURN, "    def later[**mono]():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested class", "_pick_room_region",
+     [(_RETURN, "    class mono:\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function's parameter", "_pick_room_region",
+     [(_RETURN, "    def later(mono=None):\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a nested function's type parameter", "_pick_room_region",
+     [(_RETURN, "    def later[mono]():\n        pass\n" + _RETURN)], {"binding"}),
+    ("the reading bound by a comprehension's target", "_pick_room_region",
+     [(_RETURN, "    [0 for mono in ()]\n" + _RETURN)], {"binding", "nested"}),
+    ("the reading handed to the weighing starred", "_pick_room_region",
+     [(_SECOND, "_region_agreed(*(mr, orr, mono))")], {"argument", "use"}),
+    ("the reading handed to the weighing in a ** mapping", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr, **{\"now\": mono})")], {"argument", "use"}),
+    ("a weighing that leaves the reading out", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr)")], {"argument"}),
+    ("the wall-clock instant handed in its place", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr, now)")], {"argument"}),
+    ("the reading handed to the weighing by keyword", "_pick_room_region",
+     [(_SECOND, "_region_agreed(mr, orr, now=mono)")], set()),
+    ("the reading handed to a home by keyword", "_pick_room_region",
+     [("_region_home_confirmed(mh, lives, maps, mono)", "_region_home_confirmed(mh, lives, maps, mono=mono)")], set()),
+    ("a weighing called through another name", "_pick_room_region",
+     [(_BIND, _BIND + "    weigh = _region_agreed\n"), (_SECOND, "weigh(mr, orr, mono)")], {"alias", "use"}),
+    ("a weighing called through the module", "_pick_room_region",
+     [(_SECOND, "sys.modules[__name__]._region_agreed(mr, orr, mono)")], {"alias", "use"}),
+    ("a weighing kept under another name", "_pick_room_region",
+     [(_BIND, _BIND + "    weigh = _region_agreed\n")], {"alias"}),
+    ("a lambda that mentions the reading", "_pick_room_region",
+     [(_THIRD, "(lambda: _region_agreed(mh, oh, mono))() or")], {"nested"}),
+    ("a nested function that mentions the reading", "_pick_room_region",
+     [(_BIND, _BIND + "    def later():\n        return mono\n")], {"nested", "use"}),
+    ("a comprehension that mentions the reading", "_pick_room_region",
+     [(_SEEN, "all(_region_corroborated(c, mono) for c in (chosen,))")], {"nested"}),
+    ("the reading handed to a callee that is not on the list", "_pick_room_region",
+     [(_SEEN, "_region_seen_at(chosen, mono)")], {"use"}),
+    ("the reading printed", "_pick_room_region", [(_RETURN, "    print(mono)\n" + _RETURN)], {"use"}),
+    ("a home's confirmation hands on an expression", "_region_home_confirmed",
+     [(_HOME_LEAF, "    return _region_corroborated(home, mono + 0.0)\n")], {"argument", "use"}),
+    ("a home's confirmation leaves the reading out", "_region_home_confirmed",
+     [(_HOME_LEAF, "    return _region_corroborated(home)\n")], {"argument"}),
+    ("a home's confirmation takes a reading of its own", "_region_home_confirmed",
+     [("    if not home:\n", "    mono = time.monotonic()\n    if not home:\n")], {"binding"}),
+    ("a home's confirmation hands the reading to the weighing", "_region_home_confirmed",
+     [(_HOME_LEAF, "    return _region_agreed(home, home, mono)\n")], {"use"}),
+    ("a second reading in the weighing", "_region_agreed",
+     [(_AGREED_LEAF, "        now = time.monotonic()\n" + _AGREED_LEAF)], {"binding"}),
+    ("the weighing asks about its second candidate at an expression", "_region_agreed",
+     [("_region_corroborated(b, now)", "_region_corroborated(b, float(now))")], {"argument", "use"}),
+    ("the weighing's own reading taken on any false value", "_region_agreed",
+     [("        if now is None:\n", "        if not now:\n")], {"binding", "use"}),
+    ("the weighing's own reading taken from another clock", "_region_agreed",
+     [("            now = time.monotonic()\n", "            now = time.perf_counter()\n")], {"binding", "use"}),
+    ("the code read inside the leaf's comparison", _LEAF,
+     [(_LEAF_TTL, "now - ts <= _REGION_SEEN_TTL_SECONDS + len(token))")], {"code", "reading"}),
+    ("the code read in the leaf's count", _LEAF,
+     [(_LEAF_COUNT, "    return live >= _REGION_SEEN_MIN_PLAYERS + (token == \"us\")\n")], {"code"}),
+    ("the code looked up unfolded", _LEAF,
+     [("_REGION_SEEN.get(_region_token(token))", "_REGION_SEEN.get(token)")], {"code"}),
+    ("the reading changed before the leaf's comparison", _LEAF,
+     [(_LEAF_LIVE, "    now = round(now - 0.5) + 0.5\n" + _LEAF_LIVE)], {"binding", "reading"}),
+    ("the reading moved inside the leaf's comparison", _LEAF,
+     [("if now - ts <=", "if (now - 0.5) - ts <=")], {"reading"}),
+    ("the reading compared with another bound", _LEAF,
+     [(_LEAF_TTL, "now - ts <= _REGION_SEEN_TTL_SECONDS * 1.0)")], {"reading"}),
+    ("the reading compared with something other than a stamp", _LEAF,
+     [("if now - ts <=", "if now - 0.0 <=")], {"reading"}),
+]
+
+
+def test_the_census_refuses_each_planted_source():
+    """Each planted source is main's own function with the edits written
+    beside it, and the census refuses it by exactly the rules written there:
+    none for the two that hand the reading by keyword, which is the same
+    reading. Every rule is the only one to refuse at least one of them, so a
+    rule that stopped refusing would leave a source it alone refuses
+    accepted."""
+    for label, name, edits, refused in _PLANTED:
+        source, first = _source_of(name)
+        for old, new in edits:
+            assert source.count(old) == 1, (label, old)
+            source = source.replace(old, new)
+        got = {rule for rule, _, _ in _census(source, first)[0]}
+        assert got == refused, (label, got)
+    alone = {next(iter(refused)) for _, _, _, refused in _PLANTED if len(refused) == 1}
+    assert alone == set(_RULES), set(_RULES) - alone
+
+
+class _CountingClock:
+    """Stands in for main's `time` module. monotonic() answers `start`, then
+    one second more on every read, and counts its reads; `next` is what the
+    next read will answer. Everything else is the real module's."""
+
+    def __init__(self, real, start):
+        self._real, self.next, self.reads = real, float(start), 0
+
+    def monotonic(self):
+        self.reads += 1
+        value, self.next = self.next, self.next + 1.0
+        return value
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    stand_in = _CountingClock(main.time, 10 * main._REGION_SEEN_TTL_SECONDS)
+    monkeypatch.setattr(main, "time", stand_in)
+    return stand_in
+
+
+def _stamp_last_live(token, clock):
+    """Enough reporters for `token`, stamped on the stand-in clock's own
+    timeline so that the clock's NEXT reading is the last instant at which
+    they are live: one second later the sighting has expired."""
+    at = clock.next - main._REGION_SEEN_TTL_SECONDS
+    main._REGION_SEEN[token] = {f"7656119800000010{i}": at for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+
+
+def _pick(capsys, *args, **kwargs):
+    got = main._pick_room_region(*args, **kwargs)
+    return got, [line for line in capsys.readouterr().out.splitlines() if "[QUEUE-REGION]" in line]
+
+
+def test_one_pick_reads_the_monotonic_clock_once(clock, capsys):
+    """Every question a pick asks of the corroboration map (is this home
+    confirmed, which of two different regions has been seen live, was the
+    chosen one seen) is asked of ONE instant. A second reading anywhere in
+    the pick puts the instant a sighting expires between two of those
+    answers. Counted over shapes that reach every rung, with and without
+    sightings, with and without fresh maps."""
+    shapes = [
+        ("", "eu", "", "eu"),            # two homes that agree
+        ("ru", "ru", "ru", "us"),        # a home that both snapshots name
+        ("ru", "eu", "ru", "us"),        # two homes that differ, two snapshots that agree elsewhere
+        ("us", "", "eu", ""),            # two snapshots that differ, no home
+        ("", "eu", "", "us"),            # two homes that differ, no snapshot
+        ("", "", "", ""),                # no signal at all
+    ]
+    now = datetime.now(timezone.utc)
+    fresh = dict(p1_pings={"eu": 40, "us": 60}, p2_pings={"eu": 70, "us": 30},
+                 p1_pings_at=now - timedelta(seconds=30), p2_pings_at=now - timedelta(seconds=30), now=now)
+    for shape in shapes:
+        for seen in (False, True):
+            for kwargs in ({}, fresh):
+                main._REGION_SEEN.clear()
+                if seen:
+                    _stamp_last_live("eu", clock)
+                    _stamp_last_live("us", clock)
+                before = clock.reads
+                main._pick_room_region(*shape, "r", **kwargs)
+                assert clock.reads - before == 1, (shape, seen, bool(kwargs), clock.reads - before)
+    capsys.readouterr()
+
+
+def test_both_homes_are_confirmed_against_the_picks_one_reading(clock, capsys):
+    """Codex round REGION-R1's scenario. Each home has its reporters, stamped
+    so that the pick's reading is the last instant at which they are live;
+    the two snapshots name a third region. Both homes are confirmed whichever
+    seat asked. A reading per home would confirm only the home that is read
+    first, and the room would follow the seat order."""
+    answers = []
+    for args in (("ru", "eu", "ru", "us"), ("ru", "us", "ru", "eu")):
+        _stamp_last_live("eu", clock)
+        _stamp_last_live("us", clock)
+        got, (first, second) = _pick(capsys, *args, "r")
+        answers.append(got)
+        assert "home_ok=(y,y)" in second and "seen=y" in second, second
+    assert answers == ["eu", "eu"]
+
+
+def test_two_different_snapshots_are_weighed_at_the_picks_reading(clock, capsys):
+    """Two live snapshots that differ and no home: the region seen live wins
+    (_region_agreed), and "seen live" is judged at the pick's one reading. A
+    reading of its own, one second later on this clock, would find the
+    sighting expired and fall back to the fixed order, which names the other
+    region."""
+    for args in (("us", "", "eu", ""), ("eu", "", "us", "")):
+        main._REGION_SEEN.clear()
+        _stamp_last_live("us", clock)
+        got, (first, second) = _pick(capsys, *args, "r")
+        assert got == "us", (args, got)
+        assert "seen=y" in second, second
+
+
+def test_a_reading_that_is_handed_in_is_the_reading_that_is_used(monkeypatch):
+    """_region_corroborated, _region_home_confirmed and _region_agreed answer
+    against the reading they are handed and take none of their own."""
+    class _NoClock:
+        def monotonic(self):
+            raise AssertionError("a reading was handed in; the clock must not be read")
+
+    ttl = main._REGION_SEEN_TTL_SECONDS
+    main._REGION_SEEN["us"] = {f"7656119800000010{i}": 0.0 for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+    monkeypatch.setattr(main, "time", _NoClock())
+    assert main._region_corroborated("us", ttl) is True
+    assert main._region_corroborated("us", ttl + 1) is False
+    assert main._region_home_confirmed("us", ("", ""), (None, None), ttl) is True
+    assert main._region_home_confirmed("us", ("", ""), (None, None), ttl + 1) is False
+    # us is seen at the first reading and wins the disagreement; one second
+    # later neither is seen and the fixed order names eu
+    assert main._region_agreed("eu", "us", ttl) == "us" == main._region_agreed("us", "eu", ttl)
+    assert main._region_agreed("eu", "us", ttl + 1) == "eu" == main._region_agreed("us", "eu", ttl + 1)
+
+
+class _FixedClock:
+    """Stands in for main's `time` module. monotonic() answers `at` on every
+    read and counts its reads. Everything else is the real module's."""
+
+    def __init__(self, real, at):
+        self._real, self.at, self.reads = real, at, 0
+
+    def monotonic(self):
+        self.reads += 1
+        return self.at
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+# The instant a sighting expires, asked to the last bit. A sighting stamped
+# at `ts` counts while `now - ts <= _REGION_SEEN_TTL_SECONDS`
+# (_region_corroborated). Each case below is a stamp and a reading: the float
+# before the last instant at which the sighting counts, that instant, and the
+# float after it. There are three stamps, A, B and C; what distinguishes them,
+# and that the readings are the floats this note says they are, is asserted by
+# test_the_cases_around_expiry_are_adjacent_floats_and_exact_ages.
+# test_every_listed_moved_or_rounded_reading_gets_a_case_wrong runs the same
+# cases with readings that have been moved or rounded, and
+# test_the_third_stamp_is_what_catches_a_half_going_to_the_odd_step shows what
+# the third stamp is for.
+_TTL = main._REGION_SEEN_TTL_SECONDS
+_EXPIRES_A = 4 * _TTL + 0.375
+_EXPIRES_B = math.nextafter(_EXPIRES_A, -math.inf)
+_EXPIRES_C = math.nextafter(_EXPIRES_A, math.inf)
+
+
+def _around(name, expires):
+    """Three cases for a sighting whose last live instant is `expires`: (a
+    label, the stamp, the reading, whether the sighting counts at it)."""
+    stamp = expires - _TTL
+    return [
+        (f"{name}-before", stamp, math.nextafter(expires, -math.inf), True),
+        (f"{name}-at", stamp, expires, True),
+        (f"{name}-after", stamp, math.nextafter(expires, math.inf), False),
+    ]
+
+
+_AROUND_EXPIRY = _around("A", _EXPIRES_A) + _around("B", _EXPIRES_B) + _around("C", _EXPIRES_C)
+
+# (the pick's arguments, the region whose reporters are stamped, what the pick
+# says while the sighting is live, what it says once it has expired). Between
+# them the shapes put each use of the pick's reading in charge of something
+# the test asserts: the confirmation of the first and of the second home, each
+# of the three weighings of two different regions, the seen= field.
+_FRACTION_SHAPES = [
+    # a home that only the sighting confirms (REGION-R2's scenario), and its mirror
+    (("eu", "us", "eu", ""), "us", ("us", "seen=y", "home_ok=(y,-)"), ("eu", "seen=n", "home_ok=(n,-)")),
+    (("eu", "", "eu", "us"), "us", ("us", "seen=y", "home_ok=(-,y)"), ("eu", "seen=n", "home_ok=(-,n)")),
+    # two homes that differ, each confirmed by a live snapshot: the first weighing
+    (("eu", "eu", "us", "us"), "us", ("us", "seen=y", "home_ok=(y,y)"), ("eu", "seen=n", "home_ok=(y,y)")),
+    (("us", "us", "eu", "eu"), "us", ("us", "seen=y", "home_ok=(y,y)"), ("eu", "seen=n", "home_ok=(y,y)")),
+    # two live snapshots that differ and no home: the second weighing
+    (("us", "", "eu", ""), "us", ("us", "seen=y", "home_ok=(-,-)"), ("eu", "seen=n", "home_ok=(-,-)")),
+    (("eu", "", "us", ""), "us", ("us", "seen=y", "home_ok=(-,-)"), ("eu", "seen=n", "home_ok=(-,-)")),
+    # two homes that differ and no snapshot: confirmed while seen, the third weighing after
+    (("", "eu", "", "us"), "us", ("us", "seen=y", "home_ok=(n,y)"), ("eu", "seen=n", "home_ok=(n,n)")),
+    (("", "us", "", "eu"), "us", ("us", "seen=y", "home_ok=(y,n)"), ("eu", "seen=n", "home_ok=(n,n)")),
+    # two homes that agree: the room does not move, the two fields do
+    (("", "eu", "", "eu"), "eu", ("eu", "seen=y", "home_ok=(y,y)"), ("eu", "seen=n", "home_ok=(n,n)")),
+]
+
+
+class _Recorder:
+    """Installed as the profile function for one pick, it records every call
+    of the leaf (_region_corroborated) and of the two functions that hand it
+    the reading: (the callee, where it was called from, where that caller was
+    called from, what it received for the reading). A place is (function,
+    line, column) of the call, read from the calling frame's own instruction."""
+
+    def __init__(self):
+        self.codes = {getattr(main, name).__code__: name for name in _READING_CALLEES}
+        self.calls = []
+
+    @staticmethod
+    def _place(frame):
+        if frame is None:
+            return None
+        line, _, col, _ = list(frame.f_code.co_positions())[frame.f_lasti // 2]
+        return frame.f_code.co_name, line, col
+
+    def __call__(self, frame, event, arg):
+        name = self.codes.get(frame.f_code) if event == "call" else None
+        if name is not None:
+            caller = frame.f_back
+            self.calls.append((name, self._place(caller), self._place(caller.f_back),
+                               frame.f_locals.get(_READING_CALLEES[name])))
+        if self.previous is not None:
+            self.previous(frame, event, arg)
+
+    def __enter__(self):
+        self.previous = sys.getprofile()
+        sys.setprofile(self)
+        return self
+
+    def __exit__(self, *exc):
+        sys.setprofile(self.previous)
+        return False
+
+
+def _same_bits(received, reading):
+    """`received` is a float with the bits of `reading`."""
+    return type(received) is float and type(reading) is float and received.hex() == reading.hex()
+
+
+def _wrong(monkeypatch, capsys, case, shape, distort=None, record=None):
+    """One pick of `shape`, its sighting stamped as `case` says and the clock
+    answering `case`'s reading (what `distort` makes of it, when given).
+    Returns what the pick got wrong, an empty list when nothing: the room,
+    where it is not the one the shape expects for that case; the count of log
+    lines, where it is not two; the second log line, where it lacks a field
+    the shape expects; the count of clock reads, where it is not one; every
+    call of the leaf that received, for the reading, anything but the one
+    value the clock gave, bit for bit (ruling RP-5 (3)(b)). `record`, a list
+    when given, gets the pick's recorded calls appended."""
+    label, stamp, reading, is_live = case
+    args, sighted, live, expired = shape
+    main._REGION_SEEN.clear()
+    main._REGION_SEEN[sighted] = {
+        f"7656119800000010{i}": stamp for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+    stand_in = _FixedClock(main.time, reading if distort is None else distort(reading))
+    with monkeypatch.context() as patch, _Recorder() as recorder:
+        patch.setattr(main, "time", stand_in)
+        got, lines = _pick(capsys, *args, "r")
+    if record is not None:
+        record.append(recorder.calls)
+    region, seen, home_ok = live if is_live else expired
+    wrong = []
+    if got != region:
+        wrong.append(("room", got))
+    if len(lines) != 2:
+        wrong.append(("lines", lines))
+    elif f"chosen={region} " not in lines[1] or seen not in lines[1] or home_ok not in lines[1]:
+        wrong.append(("line", lines[1]))
+    if stand_in.reads != 1:
+        wrong.append(("reads", stand_in.reads))
+    leaf = [call for call in recorder.calls if call[0] == _LEAF and not _same_bits(call[3], stand_in.at)]
+    if leaf:
+        wrong.append(("leaf", leaf))
+    return wrong
+
+
+@pytest.mark.parametrize("shape", _FRACTION_SHAPES, ids=[f"shape{n}" for n in range(1, len(_FRACTION_SHAPES) + 1)])
+@pytest.mark.parametrize("case", _AROUND_EXPIRY, ids=[case[0] for case in _AROUND_EXPIRY])
+def test_a_sighting_expires_at_its_own_instant_and_not_at_a_whole_second(monkeypatch, capsys, case, shape):
+    """Nine shapes of a pick, each asked at the float before the last instant
+    its sighting counts, at that instant and at the float after it, with three
+    stamps: the pick answers as the shape says for a sighting that counts at
+    the first two and not at the third, reads the clock once, and hands the
+    leaf that one reading, bit for bit, at every call."""
+    assert _wrong(monkeypatch, capsys, case, shape) == []
+
+
+def test_every_site_of_the_census_is_reached_by_the_cases(monkeypatch, capsys):
+    """Over the cases around expiry, the places the recorder sees calls come
+    from are exactly the census's sites: every call of the leaf in the three
+    functions, and every call of the two between in the pick, is reached by
+    some case, and no recorded call comes from anywhere else. In one case at
+    least the pick enters _region_agreed three times."""
+    record = []
+    for case in _AROUND_EXPIRY:
+        for shape in _FRACTION_SHAPES:
+            assert _wrong(monkeypatch, capsys, case, shape, record=record) == [], (case[0], shape[0])
+    reached = {call[1] for calls in record for call in calls}
+    sites = {(fn, line, col) for name in _CENSUS for fn, _, line, col in _census_of(name)[1]}
+    assert reached == sites, (sorted(sites - reached), sorted(reached - sites))
+    assert max(sum(1 for call in calls if call[0] == "_region_agreed") for calls in record) == 3
+
+
+# Codex round REGION-R4's scenario: two us reporters stamped 1814400.5 and the
+# clock at 2419200.75, a quarter of a second after their sighting expired,
+# asked with the seventh shape (two homes that differ, no snapshot).
+_REGION_R4_CASE = ("REGION-R4", 1814400.5, 2419200.75, False)
+
+
+def _planted_pick(label):
+    """The function of _PLANTED's source `label`, compiled from that source
+    with main.py's line numbers and run in main's own globals; and the (line,
+    column) of each call in it whose reading argument is not a bare name."""
+    _, name, edits, _ = next(planted for planted in _PLANTED if planted[0] == label)
+    source, first = _source_of(name)
+    for old, new in edits:
+        source = source.replace(old, new)
+    tree = ast.parse(source)
+    ast.increment_lineno(tree, first - 1)
+    changed = [(c.lineno, c.col_offset) for c in ast.walk(tree)
+               if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in _READING_CALLEES
+               and not isinstance(_reading_argument(c), ast.Name)]
+    namespace = {}
+    exec(compile(tree, str(MAIN_PY), "exec"), main.__dict__, namespace)
+    return namespace[name], changed
+
+
+def test_the_leaf_refuses_the_rounding_of_codex_round_region_r4(monkeypatch, capsys):
+    """Main's own pick gets nothing wrong in the reviewer's scenario. The pick
+    whose third weighing is handed the reading rounded on a grid of whole
+    seconds that starts at a half (the first planted source of the census,
+    compiled) hands the leaf 2419200.5 where the clock gave 2419200.75, and
+    _wrong reports each of those calls, every one from the third weighing."""
+    shape = _FRACTION_SHAPES[6]
+    assert shape[:2] == (("", "eu", "", "us"), "us")
+    assert _wrong(monkeypatch, capsys, _REGION_R4_CASE, shape) == []
+    planted, changed = _planted_pick(_PLANTED[0][0])
+    assert len(changed) == 1
+    with monkeypatch.context() as patch:
+        patch.setattr(main, "_pick_room_region", planted)
+        wrong = dict(_wrong(monkeypatch, capsys, _REGION_R4_CASE, shape))
+    leaf = wrong.get("leaf")
+    assert leaf, wrong
+    assert {call[2][1:] for call in leaf} == set(changed), leaf
+    assert {call[3] for call in leaf} == {2419200.5}, leaf
+
+
+def test_a_helper_that_reads_the_clock_itself_reads_it_to_the_fraction(monkeypatch):
+    """Called without a reading, _region_corroborated and _region_agreed take
+    one of their own, once, and judge it as it was read: asked with the same
+    stamps and readings as the picks above."""
+    for label, stamp, reading, is_live in _AROUND_EXPIRY:
+        main._REGION_SEEN.clear()
+        main._REGION_SEEN["us"] = {
+            f"7656119800000010{i}": stamp for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+        stand_in = _FixedClock(main.time, reading)
+        with monkeypatch.context() as patch:
+            patch.setattr(main, "time", stand_in)
+            assert main._region_corroborated("us") is is_live, label
+            assert stand_in.reads == 1, label
+            want = "us" if is_live else "eu"
+            assert main._region_agreed("eu", "us") == want == main._region_agreed("us", "eu"), label
+            assert stand_in.reads == 3, label
+
+
+# The codes the leaf's arithmetic is asked about (ruling RP-5a (3)(a)). The 1v1
+# path keeps no list of region codes, by decision: a code is any token
+# _region_token accepts. So this is a sample: the codes of ROUNDS' own region
+# selector, read from the tournaments' list; hk and uae, the two codes main.py
+# names from match history; a two-letter and a five-letter code of the token
+# grammar that neither list has; and a form that _region_token folds.
+_LEAF_CODES = sorted(tournaments.ROUNDS_REGIONS) + ["hk", "uae", "qz", "qzqzq", " QzQ "]
+
+
+def test_the_leaf_counts_a_sighting_to_its_last_instant_for_every_code_asked():
+    """For every code of _LEAF_CODES and each of the three stamps, a sighting
+    of two reporters counts at the float before its last live instant and at
+    that instant, and not at the float after it, when the leaf is handed that
+    reading. That the leaf reads its code only as the key of its lookup is
+    the census's (test_the_census_of_mains_own_functions_refuses_nothing)."""
+    assert len(tournaments.ROUNDS_REGIONS) == 15
+    assert [len(main._region_token(c)) for c in ("qz", "qzqzq")] == [2, 5]
+    assert not {"hk", "uae", "qz", "qzqzq", "qzq"} & tournaments.ROUNDS_REGIONS
+    assert main._region_token(" QzQ ") == "qzq"
+    for code in _LEAF_CODES:
+        key = main._region_token(code)
+        assert key, code
+        for label, stamp, reading, is_live in _AROUND_EXPIRY:
+            main._REGION_SEEN.clear()
+            main._REGION_SEEN[key] = {
+                f"7656119800000010{i}": stamp for i in range(main._REGION_SEEN_MIN_PLAYERS)}
+            assert main._region_corroborated(code, reading) is is_live, (code, label)
+
+
+def test_the_cases_around_expiry_are_adjacent_floats_and_exact_ages():
+    """What the cases rest on. Stamp A's last live instant is a whole number
+    of eighths of a second, of milliseconds, of microseconds and of steps of
+    2**-30 s; stamp B's is the float below it and stamp C's the float above
+    it. For each stamp the three readings are neighbouring floats one
+    last-place unit (2**-31 s) apart, the sighting's age at the middle one is
+    the TTL exactly, and at the other two it is the TTL less, and plus, that
+    one unit. Two neighbouring floats, A's and C's last live instants, are
+    each the reading at which one stamp's sighting last counts and the first
+    reading at which another's no longer does."""
+    assert all((_EXPIRES_A * per_second).is_integer() for per_second in (8, 1000, 10 ** 6, 2 ** 30))
+    assert _EXPIRES_B == math.nextafter(_EXPIRES_A, -math.inf) < _EXPIRES_A
+    assert _EXPIRES_C == math.nextafter(_EXPIRES_A, math.inf) > _EXPIRES_A
+    unit = 2.0 ** -31
+    stamps = (("A", _EXPIRES_A), ("B", _EXPIRES_B), ("C", _EXPIRES_C))
+    for name, expires in stamps:
+        (_, stamp, before, _), (_, _, at, _), (_, _, after, _) = cases = _around(name, expires)
+        assert at == expires and [case[3] for case in cases] == [True, True, False]
+        assert math.nextafter(before, math.inf) == at and math.nextafter(at, math.inf) == after
+        assert at - before == unit == after - at
+        assert (before - stamp, at - stamp, after - stamp) == (_TTL - unit, _TTL, _TTL + unit)
+    assert _AROUND_EXPIRY == [case for name, expires in stamps for case in _around(name, expires)]
+    last_counts = {reading for label, _, reading, _ in _AROUND_EXPIRY if label.endswith("-at")}
+    first_expired = {reading for label, _, reading, _ in _AROUND_EXPIRY if label.endswith("-after")}
+    assert last_counts & first_expired == {_EXPIRES_A, _EXPIRES_C}
+
+
+def _rounded(rounding, per_second):
+    """What a reading becomes when `rounding` (math.floor, math.ceil or round)
+    puts it on a grid of `per_second` steps to the second."""
+    return lambda t: rounding(t * per_second) / per_second
+
+
+def _half_to_odd(per_second):
+    """What a reading becomes on the nearest step of a grid of `per_second`
+    steps to the second when a half goes to the odd step (round, which
+    _rounded is given for the nearest step, sends a half to the even one)."""
+    return lambda t: (round(t * per_second + 1) - 1) / per_second
+
+
+# (what was done to the reading, the function that does it)
+_MOVED_OR_ROUNDED = [
+    ("cut down to whole seconds", _rounded(math.floor, 1)),
+    ("rounded up to whole seconds", _rounded(math.ceil, 1)),
+    ("rounded to the nearest whole second", _rounded(round, 1)),
+    ("cut down to milliseconds", _rounded(math.floor, 1000)),
+    ("rounded up to milliseconds", _rounded(math.ceil, 1000)),
+    ("rounded to the nearest millisecond", _rounded(round, 1000)),
+    ("cut down to microseconds", _rounded(math.floor, 10 ** 6)),
+    ("rounded up to microseconds", _rounded(math.ceil, 10 ** 6)),
+    ("rounded to the nearest microsecond", _rounded(round, 10 ** 6)),
+    ("cut down to steps of 2**-30 s", _rounded(math.floor, 2 ** 30)),
+    ("rounded up to steps of 2**-30 s", _rounded(math.ceil, 2 ** 30)),
+    ("rounded to the nearest step of 2**-30 s", _rounded(round, 2 ** 30)),
+    ("rounded to the nearest step of 2**-30 s, a half to the odd step", _half_to_odd(2 ** 30)),
+    ("half a second later", lambda t: t + 0.5),
+    ("half a second earlier", lambda t: t - 0.5),
+    ("a thirty-second of a second later", lambda t: t + 0.03125),
+    ("a thirty-second of a second earlier", lambda t: t - 0.03125),
+    ("a microsecond later", lambda t: t + 1e-6),
+    ("a microsecond earlier", lambda t: t - 1e-6),
+    ("one last-place unit later", lambda t: math.nextafter(t, math.inf)),
+    ("one last-place unit earlier", lambda t: math.nextafter(t, -math.inf)),
+]
+
+
+def test_every_listed_moved_or_rounded_reading_gets_a_case_wrong(monkeypatch, capsys):
+    """With the reading left as it was read, every shape gets every case
+    right. With any reading of _MOVED_OR_ROUNDED in its place, every shape
+    gets some case wrong."""
+    def wrong_cases(shape, distort):
+        return [case[0] for case in _AROUND_EXPIRY if _wrong(monkeypatch, capsys, case, shape, distort)]
+
+    for shape in _FRACTION_SHAPES:
+        assert wrong_cases(shape, None) == [], shape[0]
+        for done, distort in _MOVED_OR_ROUNDED:
+            assert wrong_cases(shape, distort), (done, shape[0])
+
+
+def test_the_third_stamp_is_what_catches_a_half_going_to_the_odd_step(monkeypatch, capsys):
+    """Why there are three stamps. The reading put on the nearest step of
+    2**-30 s with a half going to the odd step gets every case of stamps A
+    and B right, for every shape, and one case of stamp C wrong."""
+    distort = _half_to_odd(2 ** 30)
+    for shape in _FRACTION_SHAPES:
+        wrong = [case[0] for case in _AROUND_EXPIRY if _wrong(monkeypatch, capsys, case, shape, distort)]
+        assert wrong == ["C-at"], (shape[0], wrong)
 
 
 def test_a_sighting_needs_a_reporter_and_an_established_session():
@@ -482,13 +1432,17 @@ def test_the_issued_binding_is_written_where_the_room_is_issued():
     assert src.count("INSERT INTO issued_room_regions") == 1
 
 
-def test_the_log_line_says_whether_the_choice_was_corroborated():
+def test_the_log_line_says_whether_the_choice_was_corroborated(capsys):
     """"Both cached regions disagree and neither has been seen live" is the
     case that strands a pair behind a series that already exists. It is
     invisible unless the line says so."""
-    picker = inspect.getsource(main._pick_room_region)
-    assert "seen=" in picker
-    assert "_region_corroborated(chosen)" in picker
+    def second_line():
+        main._pick_room_region("", "eu", "", "us", "r")
+        return [line for line in capsys.readouterr().out.splitlines() if "chosen=" in line][-1]
+
+    assert "chosen=eu seen=n " in second_line()       # two homes that differ, neither seen live
+    _corroborate("eu")
+    assert "chosen=eu seen=y " in second_line()
 
 
 def test_the_monotonic_clock_is_what_ages_a_sighting():

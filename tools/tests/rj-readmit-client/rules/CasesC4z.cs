@@ -1,7 +1,10 @@
 // C4z: RJ readmission P4.6, the capability flip (V3:252). The enroll call's
 // caps come from FfaReadmitEntryRules.CapsList: ffa_adm1 is advertised only
-// together with ffa_rdm1, and ffa_rdm1 never without ffa_adm1, so every
-// admission lobby a build of this lane joins is a readmission lobby.
+// together with ffa_rdm1, and ffa_rdm1 never without ffa_adm1. That is one
+// seat's advertisement: the room's admission and readmission flags are the
+// server's, written at lock from every member's tokens, so a room with a
+// member advertising ffa_adm1 without ffa_rdm1 can lock as an admission
+// lobby that is not a readmission lobby (server test T2.6).
 namespace CompetitiveRounds
 {
     internal static class CasesC4z

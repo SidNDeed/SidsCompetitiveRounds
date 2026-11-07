@@ -194,6 +194,13 @@ def run_env(monkeypatch, body, prefix="cf_s", skip=SKIP_REFORM, fresh=False):
             env = cf_asm.Env(c, sm, monkeypatch)
             try:
                 await body(env)
+                # A7-R5-A1 (2)(b): a recorded statement the token model does
+                # not read exactly fails here, by its form's name.
+                assert env.rec.unmodelled == [], ("unmodelled statement", env.rec.unmodelled)
+                # A7-R6-PRE (2): a plain string constant's value is read with
+                # standard_conforming_strings on (cf_asm._string_value).
+                assert await c.conn.fetchval("SHOW standard_conforming_strings") == "on", \
+                    "standard_conforming_strings"
                 inv = await cf_pg.standing_invariants(c.conn, skip=skip)
                 assert inv == {k: 0 for k in inv}, ("standing invariants", inv)
                 # The node id without its directory: the same name whatever
@@ -1062,11 +1069,14 @@ def test_s8_rule_c_honours_the_admission_hold_and_k_does_not(monkeypatch):
 def test_s9_labels_cannot_change_a_decision(monkeypatch):
     """S9: cause "" with label in_room_exit takes the gated pre-room path;
     cause in_room_exit with label menu_leave takes the departure path; the
-    verdict reads no label."""
-    import inspect
-    src = inspect.getsource(main._ffa_assembly_verdict)
-    assert src.count("left_label") == 0 and src.count("first_leave_label") == 0, \
-        "S9 verdict reads a label"
+    verdict reads no label. A7-R6-PRE (3): read as S49 is, Python names and
+    attributes from the syntax tree and each string constant by
+    cf_asm.mentions (a statement in the function names a label however it
+    is spelled), the docstring excluded; never the source's raw text."""
+    uses = {lab: _s49_count(main._ffa_assembly_verdict, lab) for lab in ("left_label", "first_leave_label")}
+    assert uses == {"left_label": (0, []), "first_leave_label": (0, [])}, ("S9 verdict reads a label", uses)
+    assert _s49_count_src("def _cf_probe():\n    x = 'SELECT LEFT_LABEL FROM t'\n", "left_label") == (1, []), \
+        "S9 probe counts"
 
     async def body(env):
         lob = await env.lobby(5, t=8.0)
@@ -1235,6 +1245,385 @@ import re as _re  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 
+
+def _sql_code(sql):
+    """SQL as the server parses it (A7-R2), through cf_asm.sql_tokens, the one
+    tokenizer of these tests (A7-R3), which is PostgreSQL 16's scanner rule
+    for rule (A7-R4-A1): comments removed, every string constant, quoted
+    identifier and dollar-quoted body kept byte for byte, each run of
+    whitespace and comments one space. cf_asm.shape classifies the same
+    tokens, so a check here and the recorder read one statement the same way."""
+    return cf_asm.sql_code(sql)
+
+
+def test_sql_code_strips_comments_and_keeps_literals():
+    """The probe for _sql_code: comments of both forms go, nested blocks go
+    whole, and a comment marker inside a literal, an identifier or a
+    dollar-quoted body is code, not a comment."""
+    assert _sql_code("SELECT a, -- b\n c FROM t") == "SELECT a, c FROM t"
+    assert _sql_code("SELECT a /* b /* c */ d */ FROM t") == "SELECT a FROM t"
+    assert _sql_code("SELECT '--x', '/*y*/', 'it''s' FROM t") == "SELECT '--x', '/*y*/', 'it''s' FROM t"
+    assert _sql_code('SELECT "a--b" FROM t') == 'SELECT "a--b" FROM t'
+    assert _sql_code("SELECT $q$ -- kept $q$, $1 -- gone\n FROM t") == "SELECT $q$ -- kept $q$, $1 FROM t"
+    assert _sql_code("  LEFT JOIN g\n   ON x  ") == "LEFT JOIN g ON x"
+    # A7-R3: a dollar-quote delimiter opens only at a token boundary, so the
+    # identifier sentinel$q$ opens nothing and the comment after it goes.
+    probe = "SELECT 1 AS sentinel$q$ -- " + _G3_CLAUSE_SQL
+    assert _sql_code(probe) == "SELECT 1 AS sentinel$q$", "probe boundary"
+    assert _G3_CLAUSE_SQL not in _sql_code(probe), "probe boundary clause"
+    assert _sql_code("SELECT x, $q$ a  -- b $q$ /* c */ FROM t") == "SELECT x, $q$ a  -- b $q$ FROM t", \
+        "probe dollar body"
+    # A7-R3: quoted spans are kept byte for byte; only code whitespace collapses.
+    assert _sql_code("SELECT 'a  b',  \"c\n d\"   FROM t") == "SELECT 'a  b', \"c\n d\" FROM t", \
+        "probe quoted bytes"
+    assert _sql_code("SELECT E'it\\'s -- kept' -- gone") == "SELECT E'it\\'s -- kept'", "probe E string"
+    assert cf_asm.sql_split_top("a, f(b, c), 'x,y)', d") == ["a", "f(b, c)", "'x,y)'", "d"], \
+        "probe split"
+    # The recorder's shape reads the same tokens (A7-R3 finding 4).
+    assert cf_asm.shape("UPDATE /* note */ ffa_kept_epochs SET chain = chain")[:3] == \
+        ["UPDATE", "ffa_kept_epochs", ["chain"]], "probe shape update"
+    assert cf_asm.shape("SELECT 1 /* UPDATE ffa_kept_epochs SET chain = chain */")[:3] == \
+        ["SELECT", "", []], "probe shape mention"
+    assert cf_asm.shape("SELECT 'UPDATE x FROM ffa_kept_epochs' AS a FROM players")[1] == "players", \
+        "probe shape literal"
+
+
+def _unmodelled(fn):
+    """The form fn() raises cf_asm.Unmodelled with, or None when it returns."""
+    try:
+        fn()
+    except cf_asm.Unmodelled as exc:
+        return exc.form
+    return None
+
+
+def test_sql_scanner_classes():
+    """A7-R4-A1 (FIX-A7-R5-LEX), in a selected test of its own since
+    A7-R5-A1 (4): one case per token class of PostgreSQL's scanner that these
+    checks and the recorder read, each with its scan.l line (REL_16_STABLE),
+    and one per row of the round-6 ledger (A7-R5-A1 (1)): every punctuation
+    mark of scan.l's self rule that is no operator character, the "other"
+    token, the normal end of input, and the forms the token model refuses by
+    name (A7-R5-A1 (2)(b)). NOTES.md "Round 6" lists every class and its
+    disposition. Every case runs and the failures are named together, so one
+    run shows exactly which classes a tokenizer lacks; the message is a str,
+    so no list is cut."""
+    def toks(sql):
+        return cf_asm.code_tokens(sql)
+    cases = [
+        # scan.l :224-227: a -- comment ends at CR or LF.
+        ("cr comment", lambda: _sql_code("SELECT a -- b\rFROM t") == "SELECT a FROM t"
+         and cf_asm.shape("-- note\rUPDATE ffa_kept_epochs SET chain = chain")[:3]
+         == ["UPDATE", "ffa_kept_epochs", ["chain"]]),
+        # :346-349: identifiers admit every non-ASCII character, and `$` after the
+        # first; an identifier ending in E is no E'' prefix.
+        ("non-ascii ident", lambda: _sql_code("SELECT 1 AS sentinelé$q$ -- " + _G3_CLAUSE_SQL)
+         == "SELECT 1 AS sentinelé$q$"
+         and _sql_code("SELECT éE'a\\' -- x\n FROM t") == "SELECT éE'a\\' FROM t"),
+        # :299-301: dollar tags admit non-ASCII characters.
+        ("non-ascii tag", lambda: cf_asm.shape("SELECT $é$ FROM ffa_kept_epochs $é$ AS a FROM players")[1]
+         == "players"),
+        # :588-607: a continued E'' string keeps its escapes.
+        ("escape continued", lambda: _sql_code("SELECT E'a'\n'b\\'' AS x -- " + _G3_CLAUSE_SQL)
+         == "SELECT E'a'\n'b\\'' AS x"),
+        # :224, :240: CR is a newline for a continuation too.
+        ("cr continued", lambda: _sql_code("SELECT E'a'\r'b\\'' AS x -- " + _G3_CLAUSE_SQL)
+         == "SELECT E'a'\n'b\\'' AS x"),
+        # :238-244, :600: a standard string continues across a newline and comments.
+        ("string continued", lambda: _sql_code("SELECT 'a'  -- c\n  -- d\n 'b' FROM t")
+         == "SELECT 'a'\n'b' FROM t"),
+        # :275-281, :720: E'' escapes.
+        ("escape string", lambda: _sql_code("SELECT e'a\\' -- x' -- gone") == "SELECT e'a\\' -- x'"),
+        # :287, :647: a doubled quote stays inside the string (in E'' it keeps the
+        # escapes after it).
+        ("doubled quote", lambda: _sql_code("SELECT E'a''\\' -- x' -- gone") == "SELECT E'a''\\' -- x'"),
+        # :264-269, :513-516: B'' and X'' take no escapes.
+        ("bit hex string", lambda: _sql_code("SELECT B'1\\', X'f\\' -- x\n FROM t")
+         == "SELECT B'1\\', X'f\\' FROM t"),
+        # :318, :650: U&'' takes no backslash escapes in the scanner.
+        ("unicode string", lambda: _sql_code("SELECT U&'a\\' -- x\n FROM t") == "SELECT U&'a\\' FROM t"),
+        # :308-312, :813-838: a double-quoted identifier is a name, never a keyword.
+        ("quoted ident", lambda: cf_asm.shape('UPDATE "ffa_kept_epochs" SET "chain" = chain')[:3]
+         == ["UPDATE", "ffa_kept_epochs", ["chain"]]
+         and cf_asm.shape('SELECT 1 AS "from" FROM players')[:2] == ["SELECT", "players"]
+         and _sql_code('SELECT "a"" -- b" FROM t') == 'SELECT "a"" -- b" FROM t'),
+        # :315, :318, :825: THE BOUND (A7-R5-A1 (2)(b)): any U& identifier or
+        # string fails by name, whatever its escapes, UESCAPE or surrogates.
+        ("unicode ident", lambda: _unmodelled(lambda: cf_asm.shape(
+            'UPDATE U&"ffa\\005fkept\\005fepochs" SET chain = chain')) == "U& identifier"
+         and _unmodelled(lambda: cf_asm.shape(
+             "UPDATE U&\"ffa!005fkept!005fepochs\" UESCAPE E'!' SET chain = chain")) == "U& identifier"
+         and _unmodelled(lambda: toks('SELECT 1 AS U&"x\\D83D\\DE00"')) == "U& identifier"
+         and _unmodelled(lambda: toks("SELECT U&'a'")) == "U& string"),
+        # :1100: an unquoted identifier folds A-Z only.
+        ("case folding", lambda: cf_asm.shape("update FFA_Kept_Epochs set CHAIN = chain")[:3]
+         == ["UPDATE", "ffa_kept_epochs", ["chain"]]
+         and cf_asm.shape("UPDATE tÉ SET a = 1")[1] == "tÉ"),
+        # names: a qualified relation keeps its schema.
+        ("qualified name", lambda: cf_asm.shape("UPDATE public.ffa_kept_epochs SET chain = chain")[1]
+         == "public.ffa_kept_epochs"),
+        # :342-343, :461-499: nested blocks; /*/ opens without closing; **/ closes.
+        ("nested comment", lambda: _sql_code("SELECT a /* b /* c */ d */ FROM t") == "SELECT a FROM t"
+         and _sql_code("SELECT a /*/ b */ FROM t") == "SELECT a FROM t"
+         and _sql_code("SELECT a /* b **/ FROM t") == "SELECT a FROM t"),
+        # :900-920: an operator stops before an embedded -- or /*.
+        ("operator comment", lambda: _sql_code("SELECT 1 +-- x\n2, 3 */* y */ 4") == "SELECT 1 + 2, 3 * 4"),
+        # :758, :1018: after a number a $tag$ opens a dollar quote (no identifier).
+        ("dollar boundary", lambda: _sql_code("SELECT x$q$ -- a\n, 1$q$ -- b $q$")
+         == "SELECT x$q$ , 1$q$ -- b $q$"),
+        # :771-790: another tag inside a body is text, its final $ scanned again.
+        ("dollar inner tags", lambda: _sql_code("SELECT $a$ $b$a$ -- gone") == "SELECT $a$ $b$a$"),
+        # :222: whitespace is space, tab, LF, CR and form feed only; U+00A0 is an
+        # identifier character and \v is no space in PostgreSQL 16.
+        ("space set", lambda: _sql_code("SELECT\fa, b, c\vd FROM t") == "SELECT a, b, c\vd FROM t"
+         and _sql_code("SELECT   FROM t") == "SELECT   FROM t"),
+        # The round-6 ledger (A7-R5-A1 (1)). :380, :895: each mark of the self
+        # rule that no operator character covers is one op token of the model.
+        ("self ,", lambda: toks("a,b") == (("ident", "a"), ("op", ","), ("ident", "b"))),
+        ("self (", lambda: toks("a(") == (("ident", "a"), ("op", "("))),
+        ("self )", lambda: toks("a)") == (("ident", "a"), ("op", ")"))),
+        ("self [", lambda: toks("a[") == (("ident", "a"), ("op", "["))),
+        ("self ]", lambda: toks("a]") == (("ident", "a"), ("op", "]"))),
+        ("self .", lambda: toks("a.b") == (("ident", "a"), ("op", "."), ("ident", "b"))),
+        ("self ;", lambda: cf_asm.statements("a;b") == [(("ident", "a"),), (("ident", "b"),)]
+         and toks("a;") == (("ident", "a"),)),
+        ("self :", lambda: toks("a:b") == (("ident", "a"), ("op", ":"), ("ident", "b"))),
+        # :380-382: the self marks that are also operator characters; alone,
+        # each is one op token (self and operator match the same length and
+        # self comes first in scan.l, the same token either way).
+        ("self +", lambda: toks("a+b") == (("ident", "a"), ("op", "+"), ("ident", "b"))),
+        ("self -", lambda: toks("a-b") == (("ident", "a"), ("op", "-"), ("ident", "b"))),
+        ("self *", lambda: toks("a*b") == (("ident", "a"), ("op", "*"), ("ident", "b"))),
+        ("self /", lambda: toks("a/b") == (("ident", "a"), ("op", "/"), ("ident", "b"))),
+        ("self %", lambda: toks("a%b") == (("ident", "a"), ("op", "%"), ("ident", "b"))),
+        ("self ^", lambda: toks("a^b") == (("ident", "a"), ("op", "^"), ("ident", "b"))),
+        ("self <", lambda: toks("a<b") == (("ident", "a"), ("op", "<"), ("ident", "b"))),
+        ("self >", lambda: toks("a>b") == (("ident", "a"), ("op", ">"), ("ident", "b"))),
+        ("self =", lambda: toks("a=b") == (("ident", "a"), ("op", "="), ("ident", "b"))),
+        # :1105: "other" (a character no rule takes) fails by name.
+        ("other", lambda: _unmodelled(lambda: toks("SELECT a \\ b")) == "other"
+         and _unmodelled(lambda: toks("SELECT {a}")) == "other"),
+        # <<EOF>> in INITIAL: the input ends after a complete last token.
+        ("end of input", lambda: toks("SELECT a") == (("ident", "select"), ("ident", "a"))
+         and toks("") == () and cf_asm.statements("a; ;") == [(("ident", "a"),)]),
+        # :517, :531, :756, :801, :839 (the <<EOF>> rules of xb, xh, xq, xe,
+        # xus, xdolq, xd, xui and xc): each unterminated form fails by name.
+        ("unterminated string", lambda: _unmodelled(lambda: toks("SELECT 'a")) == "unterminated string"
+         and _unmodelled(lambda: toks("SELECT E'a\\'")) == "unterminated string"
+         and _unmodelled(lambda: toks("SELECT B'1")) == "unterminated string"),
+        ("unterminated dollar", lambda: _unmodelled(lambda: toks("SELECT $q$ a $r$")) == "unterminated dollar"),
+        ("unterminated qident", lambda: _unmodelled(lambda: toks('SELECT "a""')) == "unterminated qident"),
+        ("unterminated comment", lambda: _unmodelled(lambda: toks("SELECT a /* b")) == "unterminated comment"
+         and _unmodelled(lambda: toks("SELECT a /* b /* c */")) == "unterminated comment"),
+        # gram.y stmtmulti: where one statement is read, a second one after a
+        # `;` fails by name; a trailing `;` is no second statement.
+        ("multiple statements", lambda: _unmodelled(lambda: toks("SELECT 1; SELECT 2")) == "multiple statements"
+         and toks("SELECT 1;") == (("ident", "select"), ("number", "1"))),
+        # mentions() (the S2, S9 and S49 reader): the name as an identifier,
+        # a quoted identifier, in a literal or a comment, never inside a
+        # longer name; a text that cannot carry it in any form is False
+        # unread; a U& or E'' escape that could spell it fails by name.
+        ("mentions", lambda: cf_asm.mentions("SELECT Started_At FROM t", "started_at") is True
+         and cf_asm.mentions('SELECT "started_at" FROM t', "started_at") is True
+         and cf_asm.mentions("SELECT 'a started_at'", "started_at") is True
+         and cf_asm.mentions("SELECT 1 -- started_at", "started_at") is True
+         and cf_asm.mentions("SELECT short_started_at FROM t", "started_at") is False
+         and cf_asm.mentions("/api/v1/players/{steam_id}/data", "started_at") is False
+         and _unmodelled(lambda: cf_asm.mentions("SELECT {started_at}", "started_at")) == "other"
+         and _unmodelled(lambda: cf_asm.mentions(
+             "SELECT U&\"st!0061rted_at\" UESCAPE '!' FROM t", "started_at")) == "U& identifier"
+         and _unmodelled(lambda: cf_asm.mentions("SELECT E'st\\x61rted_at'", "started_at")) == "E'' escape"),
+        # A7-R6-PRE (2): each form of string constant read by the VALUE the
+        # server makes (:559, :533 then xq, :238-244 and :600 joined with
+        # nothing between, :569 with no escape, :647), or refused by name (E''
+        # with an escape, B'' and X'' bit strings); a dollar-quoted
+        # constant's value is its body (:758-801).
+        ("string value", lambda: toks("SELECT 'it''s', 'started'\n'_at', N'ab', E'a''b'")
+         == (("ident", "select"), ("string", "it's"), ("op", ","), ("string", "started_at"),
+             ("op", ","), ("ident", "n"), ("string", "ab"), ("op", ","), ("string", "a'b"))
+         and toks("SELECT 'a' -- c\r'b'") == (("ident", "select"), ("string", "ab"))),
+        ("dollar value", lambda: toks("SELECT $q$a'b$q$, $$c$$")
+         == (("ident", "select"), ("dollar", "a'b"), ("op", ","), ("dollar", "c"))),
+        ("e string escape", lambda: _unmodelled(lambda: toks("SELECT E'st\\x61rted_at'")) == "E'' escape"
+         and _unmodelled(lambda: toks("SELECT e'a'\n'\\x62'")) == "E'' escape"),
+        ("bit string", lambda: _unmodelled(lambda: toks("SELECT B'1'")) == "bit string"
+         and _unmodelled(lambda: toks("SELECT x'1F'")) == "bit string"),
+        # mentions() reads a continued constant by its value, also where the
+        # text holds the name's letters only across the line break.
+        ("mentions continued", lambda: cf_asm.mentions("SELECT 'started'\n'_at'", "started_at") is True
+         and cf_asm.mentions("SELECT 'start' -- c\n  'ed_at' FROM t", "started_at") is True
+         and cf_asm.mentions("SELECT 'started', '_at'", "started_at") is False),
+    ]
+    bad = []
+    for tag, case in cases:
+        try:
+            ok = case() is True
+        except Exception:
+            ok = False
+        if not ok:
+            bad.append(tag)
+    assert bad == [], "('probe classes', %r)" % (bad,)
+
+
+def test_recorder_leaves_out_only_the_lock_probe(monkeypatch):
+    """A7-R4-A1 (FIX-A7-R5-PROV): the recorder leaves a statement out only
+    while its connection carries the lock probe's mark, which
+    RecSession.commit sets around the probe and removes after it: what
+    identifies the probe is where it runs, never its SQL. A statement that
+    carries round 4's `/*cf-locks*/` comment from anywhere else is recorded;
+    the probe still runs (one lock set for the COMMIT) and is not recorded."""
+    async def body(env):
+        async with env.sm() as db:
+            await db.execute(main.text(
+                "UPDATE /*cf-locks*/ ffa_kept_epochs SET chain = chain WHERE false"))
+            await db.commit()
+        got = [s[:3] for s in env.rec.stmts]
+        assert ["UPDATE", "ffa_kept_epochs", ["chain"]] in got, ("probe marker recorded", got)
+        assert len(env.rec.locks) == 1 and env.rec.locks[0] \
+            and not [s for s in env.rec.stmts if s[1] in ("pg_locks", "pg_class")], \
+            ("probe unrecorded", env.rec.locks, got)
+    run_env(monkeypatch, body)
+
+
+async def _executed(env, run, binds=None):
+    """The statements `run()` sends to the server through the case's engine,
+    as SQLAlchemy hands them to the driver (before_cursor_execute), and the
+    exception it raised, if any. A7-R2: a check of SQL reads what executes;
+    the statement is recorded before the server sees it, so one the server
+    refuses is still in the list. A list passed as `binds` receives each
+    statement's driver parameters, index for index with the statements."""
+    from sqlalchemy import event
+    seen = []
+
+    def before(conn, cursor, statement, parameters, context, executemany):
+        seen.append(statement)
+        if binds is not None:
+            binds.append(parameters)
+
+    event.listen(env.engine.sync_engine, "before_cursor_execute", before)
+    err = None
+    try:
+        await run()
+    except Exception as exc:  # recorded for the caller's facts; its asserts decide
+        err = exc
+    finally:
+        event.remove(env.engine.sync_engine, "before_cursor_execute", before)
+    return seen, err
+
+
+class _WriteLog:
+    """The database's own record of writes (A7-R5-A1.1), read through the
+    harness connection: since(mark) gives the committed log rows (label,
+    TG_OP, writing transaction id) logged after `mark`, and how many writes
+    were logged since, a rolled-back one too (the log's serial is a sequence,
+    and a sequence never rolls back)."""
+
+    def __init__(self, conn, tab):
+        self.conn, self.tab = conn, tab
+
+    async def mark(self):
+        r = await self.conn.fetchrow("SELECT last_value, is_called FROM %s_seq_seq" % self.tab)
+        return int(r["last_value"]) if r["is_called"] else 0
+
+    async def since(self, mark):
+        rows = [tuple(r) for r in await self.conn.fetch(
+            "SELECT label, op, xid FROM %s WHERE seq > $1 ORDER BY seq" % self.tab, mark)]
+        return rows, await self.mark() - mark
+
+
+async def _write_log(env, name, specs):
+    """A7-R5-A1.1: a KIND D question (was this table written, in which
+    transaction) asked of the database, not of statement text. For each
+    (label, event, table) of `specs` an AFTER <event> ON <table> FOR EACH
+    STATEMENT trigger logs (label, TG_OP, pg_current_xact_id()) into
+    cf_<name>_writes, for every backend but the harness's own (env.conn: its
+    clock shifts and fixtures). A statement trigger fires whatever spelling
+    the statement used and whatever statement carried the write (a
+    data-modifying WITH, MERGE, ON CONFLICT DO UPDATE), and fires for a
+    statement that matched no row; `UPDATE OF c` fires when c is a target of
+    the statement's SET. seal() declares the objects, so the case's end drops
+    them."""
+    tab, fn = "cf_%s_writes" % name, "cf_%s_log" % name
+    pid = env.conn.get_server_pid()
+    await env.conn.execute(
+        "CREATE TABLE %s (seq bigserial, label text, op text, xid text)" % tab)
+    await env.conn.execute(
+        "CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN"
+        " IF pg_backend_pid() <> CAST(TG_ARGV[0] AS int) THEN"
+        " INSERT INTO %s (label, op, xid)"
+        " VALUES (TG_ARGV[1], TG_OP, CAST(pg_current_xact_id() AS text));"
+        " END IF; RETURN NULL; END $f$" % (fn, tab))
+    for i, (label, event, table) in enumerate(specs):
+        await env.conn.execute(
+            "CREATE TRIGGER cf_%s_w%d AFTER %s ON %s FOR EACH STATEMENT"
+            " EXECUTE FUNCTION %s('%d', '%s')" % (name, i, event, table, fn, pid, label))
+    await env.c.seal()
+    return _WriteLog(env.conn, tab)
+
+
+_TXN_LOCKS_SQL = ("SELECT COALESCE(c.relname, ''), l.mode FROM pg_locks l"
+                  " LEFT JOIN pg_class c ON c.oid = l.relation"
+                  " WHERE l.pid = pg_backend_pid() AND l.locktype = 'relation'")
+
+
+class _TxnLocks:
+    """A7-R6-PRE (4): a KIND D record of every table a step's transactions
+    referenced, taken DURING the step on the product's own connection: at
+    each COMMIT, ROLLBACK and ROLLBACK TO SAVEPOINT the engine issues while
+    the block runs, before the server releases anything, the relation locks
+    of the connection's own backend (pg_locks). A statement that references
+    a table holds a lock on it to its transaction's end (parse analysis
+    takes AccessShareLock for a read whose plan scans nothing; a write
+    takes RowExclusiveLock; a foreign key check takes its own), and only a
+    rollback to a savepoint releases one earlier, which is read before it
+    too. `open` lists the connections that ran a statement with no such
+    end after it, so a transaction left open past the block is seen. A
+    probe that fails is kept as ("error", its exception's name)."""
+
+    def __init__(self, env):
+        self.engine, self.ends, self._open = env.engine.sync_engine, [], {}
+
+    def _stmt(self, conn, *_a):
+        self._open[id(conn.connection.dbapi_connection)] = True
+
+    def _end(self, conn, *_a):
+        try:
+            dbapi = conn.connection.dbapi_connection
+            cur = dbapi.cursor()
+            try:
+                cur.execute(_TXN_LOCKS_SQL)
+                rows = sorted({(r[0], r[1]) for r in cur.fetchall()})
+            finally:
+                cur.close()
+            self._open.pop(id(dbapi), None)
+        except Exception as exc:
+            rows = [("error", type(exc).__name__)]
+        self.ends.append(rows)
+
+    def _hooks(self):
+        return (("before_cursor_execute", self._stmt), ("commit", self._end),
+                ("rollback", self._end), ("rollback_savepoint", self._end))
+
+    def __enter__(self):
+        from sqlalchemy import event
+        for name, fn in self._hooks():
+            event.listen(self.engine, name, fn)
+        return self
+
+    def __exit__(self, *_exc):
+        from sqlalchemy import event
+        for name, fn in self._hooks():
+            event.remove(self.engine, name, fn)
+        return False
+
+    @property
+    def open(self):
+        return sorted(self._open)
+
+    def held(self, table):
+        """Each recorded lock on `table`, and each failed probe."""
+        return sorted({r for end in self.ends for r in end if r[0] in (table, "error")})
+
 BASE_COMMIT = "9a1dd9d"
 _BET_SECRET = "cf-bet-secret"
 
@@ -1244,9 +1633,14 @@ def _sig(msg):
 
 
 def _new_lobby_columns():
-    """The ffa_lobbies columns migration 355 adds."""
-    return set(_re.findall(r"ALTER TABLE ffa_lobbies ADD COLUMN IF NOT EXISTS\s+(\w+)",
-                           cf_pg.read_355()))
+    """The ffa_lobbies columns migration 355 adds: each statement of the
+    script (cf_asm.statements, the token model) that begins ALTER TABLE
+    ffa_lobbies ADD COLUMN IF NOT EXISTS, by its tokens' values; the name is
+    the token after them. A DO body is one dollar token and never searched."""
+    head = tuple(("ident", w) for w in
+                 ("alter", "table", "ffa_lobbies", "add", "column", "if", "not", "exists"))
+    return {cf_asm.name_of(st[len(head)]) for st in cf_asm.statements(cf_pg.read_355())
+            if st[:len(head)] == head and len(st) > len(head)}
 
 
 _PRE = {}
@@ -1710,18 +2104,21 @@ def test_s12_start_short_is_one_transaction_and_refunds_none(monkeypatch):
 def test_s12b_reform_is_one_transaction(monkeypatch):
     """S12b: with the carry patched to raise, the old lobby stays active, no
     row names it in reformed_from, every carried queue row still names it,
-    and every wager still names it, unsettled."""
-    from sqlalchemy import event as _event
-
+    and every wager still names it, unsettled. A7-R5-A1.1: the fault comes
+    from the database, a BEFORE UPDATE OF lobby_id trigger on ffa_bets that
+    raises at the carry's own statement whatever its spelling; no statement
+    text is read to find the carry."""
     async def body(env):
         lob = await env.lobby(5, t=40.0)
         b1, _ = await env.bettor()
         await env.wager(lob, b1, lob.pids[0])
-
-        def carry_fault(conn, cursor, statement, parameters, context, executemany):
-            if statement.lstrip().startswith("UPDATE ffa_bets SET lobby_id"):
-                raise RuntimeError("cf fault at the carry")
-        _event.listen(env.engine.sync_engine, "before_cursor_execute", carry_fault)
+        await env.conn.execute(
+            "CREATE FUNCTION cf_s12b_fault() RETURNS trigger LANGUAGE plpgsql AS"
+            " $f$ BEGIN RAISE EXCEPTION 'cf fault at the carry'; END $f$")
+        await env.conn.execute(
+            "CREATE TRIGGER cf_s12b_carry BEFORE UPDATE OF lobby_id ON ffa_bets"
+            " FOR EACH STATEMENT EXECUTE FUNCTION cf_s12b_fault()")
+        await env.c.seal()
         try:
             await env.ready_all(lob, [0, 1, 2, 3])
             try:
@@ -1730,7 +2127,7 @@ def test_s12b_reform_is_one_transaction(monkeypatch):
             except Exception:
                 raised = True
         finally:
-            _event.remove(env.engine.sync_engine, "before_cursor_execute", carry_fault)
+            await env.conn.execute("DROP TRIGGER cf_s12b_carry ON ffa_bets")
         assert raised, "S12b fault raised"
         row = await env.lobby_row(lob)
         assert row["status"] == "active" and row["reformed_to"] is None, \
@@ -1983,12 +2380,24 @@ def test_s24_the_bet_post_refuses_from_the_locked_row(monkeypatch):
 def test_s25_lobby_phase_wagers_after_a_reform(monkeypatch):
     """S25: after a REFORM of a lobby whose Start bound lobby-phase wagers, no
     lobby_bets row names L', the bound wager's ffa_bets row names L' with
-    every other column unchanged, no refund is written, the REFORM issues no
-    statement on lobby_bets, and a lobby-bet POST for L' is refused."""
-    from sqlalchemy import event as _event
+    every other column unchanged, no refund is written, the REFORM step
+    references lobby_bets in none of its transactions, and a lobby-bet POST
+    for L' answers 409.
+
+    The REFORM step is env.census_of between log.mark() and the end of the
+    _TxnLocks block (A7-R6-PRE (7)): the call returns after its last
+    transaction ends (the record's `open` is empty) and starts no writer.
+    Both of its questions are read from the database's record, none from
+    statement text (A7-R5-A1.1 (2), A7-R6-PRE (4) and (5)): its WRITES on
+    lobby_bets from _write_log (a statement-level trigger, counting a
+    rolled-back write too); every statement of it on lobby_bets, a read
+    included, from _TxnLocks (each transaction's relation locks at its
+    end, read on the product's own connection)."""
 
     async def body(env):
         env.mp.setattr(main, "MATCH_HMAC_SECRET", _BET_SECRET)
+        log = await _write_log(env, "s25", [("lobby_bets", "INSERT OR UPDATE OR DELETE OR TRUNCATE",
+                                             "lobby_bets")])
         lob = await env.lobby(5, t=39.9)
         b3, b3sid = await env.bettor()
         w3 = await env.wager(lob, b3, lob.pids[1])
@@ -1996,18 +2405,14 @@ def test_s25_lobby_phase_wagers_after_a_reform(monkeypatch):
         snap = (await env.bets(lob))[0]
         await env.at(lob, 40.0)
         await env.ready_all(lob, [0, 1, 2, 3])
-        seen = []
-
-        def spy(conn, cursor, statement, parameters, context, executemany):
-            if "lobby_bets" in statement:
-                seen.append(statement)
-        _event.listen(env.engine.sync_engine, "before_cursor_execute", spy)
-        try:
+        mark = await log.mark()
+        with _TxnLocks(env) as locks:
             a = await env.census_of(lob, 0, [0, 1, 2, 3])
-        finally:
-            _event.remove(env.engine.sync_engine, "before_cursor_execute", spy)
+        writes = await log.since(mark)
         assert a["status"] == "reformed", ("S25 reform", a)
-        assert seen == [], ("S25 no lobby_bets statement", seen)
+        assert writes == ([], 0), ("S25 REFORM step writes", writes)
+        assert locks.open == [] and locks.ends, ("S25 REFORM step ended", locks.open, len(locks.ends))
+        assert locks.held("lobby_bets") == [], ("S25 REFORM step lobby_bets locks", locks.held("lobby_bets"))
         new = (await env.lobby_row(lob))["reformed_to"]
         assert await env.conn.fetchval(
             "SELECT count(*) FROM lobby_bets WHERE lobby_id = $1", new) == 0, "S25 lobby_bets"
@@ -2142,10 +2547,15 @@ def test_s26_the_reform_copies_every_field(monkeypatch):
 
 
 def _insert_columns():
-    import re as _r
-    head = main._ASM_REFORM_INSERT_SQL.split("VALUES")[0]
-    return [c.strip() for c in _r.sub(r"^.*?\(", "", head, count=1, flags=_r.S)
-            .rstrip().rstrip(")").split(",") if c.strip()]
+    """The REFORM INSERT's own column list, read by the token model
+    (A7-R5-A1 (2)): cf_asm.insert_parts reads INSERT INTO t (columns) VALUES
+    from code tokens and fails by name on any other form, so a literal that
+    spells a column list is one string token and names no column."""
+    try:
+        _table, cols, _rows = cf_asm.insert_parts(cf_asm.code_tokens(main._ASM_REFORM_INSERT_SQL))
+    except cf_asm.Unmodelled as exc:
+        return ["UNMODELLED", exc.form]
+    return cols
 
 
 def test_s27_the_schema_census_both_directions(monkeypatch):
@@ -2689,16 +3099,21 @@ def test_s11c_the_connect_receipts(monkeypatch):
             assert got == (env.now if want is None else want), ("S11c", step, col, got)
         lob = await env.lobby(5, t=30.0)
         await env.ready_all(lob, [0, 1, 2, 3, 4])
-        mark = len(env.rec.stmts)
+        # A7-R5-A1.1: which transaction wrote each column, from the database.
+        log = await _write_log(env, "s11c", [
+            ("grant", "UPDATE OF start_granted_at", "ffa_lobbies"),
+            ("stamp", "UPDATE OF start_ok_at", "ffa_assembly_seats")])
+        # The step (A7-R6-PRE (7)): env.connect(lob, 0, "start") between
+        # log.mark() and log.since(mark); the call returns after its
+        # transaction ends and starts no writer.
+        mark = await log.mark()
         a = await env.connect(lob, 0, "start")
         assert a["status"] == "start_ok", ("S11c grant", a)
         assert (await env.seat(lob, 0))["start_ok_at"] == env.now, "S11c start_ok_at"
-        stm = env.rec.stmts[mark:]
-        grant = {x[4] for x in stm if x[0] == "UPDATE" and x[1] == "ffa_lobbies"
-                 and "start_granted_at" in x[2]}
-        stamp = {x[4] for x in stm if x[0] == "UPDATE" and x[1] == "ffa_assembly_seats"
-                 and "start_ok_at" in x[2]}
-        assert len(grant) == 1 and stamp == grant, ("S11c one transaction", grant, stamp)
+        rows, _n = await log.since(mark)
+        grant = {x for lab, _op, x in rows if lab == "grant"}
+        stamp = {x for lab, _op, x in rows if lab == "stamp"}
+        assert len(grant) == 1 and stamp == grant, ("S11c start step: one transaction", grant, stamp)
         a = await env.connect(lob, 1, "started")
         assert a["status"] == "start_ok", ("S11c started", a)
         assert (await env.seat(lob, 1))["started_at"] == env.now, "S11c started_at"
@@ -2829,17 +3244,23 @@ def test_s11h_the_admission_columns(monkeypatch):
     async def body(env):
         lob = await _short(env)
         await env.at(lob, 50.0)
-        mark = len(env.rec.stmts)
+        # A7-R5-A1.1: which transaction wrote each, from the database.
+        log = await _write_log(env, "s11h", [
+            ("adm", "UPDATE OF late_admitted_at", "ffa_assembly_seats"),
+            ("ep", "INSERT", "ffa_kept_epochs")])
+        # The step (A7-R6-PRE (7)): the admission _admit drives, between
+        # log.mark() and log.since(mark); it returns after its transactions
+        # end and starts no writer.
+        mark = await log.mark()
         await _admit(env, lob, 4, 5, 0, [0, 1, 2, 3], check=False)
         s = await env.seat(lob, 4)
         got = (s["actor_nr"], s["actor_region"], s["verdict"], s["late_admitted_at"],
                s["late_game"], s["verdict_at"])
         assert got == (5, "eu", "admitted_late", env.now, 1, env.now), ("S11h", got)
-        stm = env.rec.stmts[mark:]
-        adm = {x[4] for x in stm if x[0] == "UPDATE" and x[1] == "ffa_assembly_seats"
-               and "late_admitted_at" in x[2]}
-        ep = {x[4] for x in stm if x[0] == "INSERT" and x[1] == "ffa_kept_epochs"}
-        assert len(adm) == 1 and ep == adm, ("S11h one transaction", adm, ep)
+        rows, _n = await log.since(mark)
+        adm = {x for lab, _op, x in rows if lab == "adm"}
+        ep = {x for lab, _op, x in rows if lab == "ep"}
+        assert len(adm) == 1 and ep == adm, ("S11h admission step: one transaction", adm, ep)
     run_env(monkeypatch, body)
 
 
@@ -3714,10 +4135,11 @@ def test_s47_entered_is_telemetry(monkeypatch):
     run_env(monkeypatch, body)
 
 
-def _s49_count(fn):
-    """Uses of the identifier started_at in a function's own code: string
-    constants (the SQL), names and attributes; its docstring excluded and
-    short_started_at not counted (#432: the count within the function span)."""
+def _s49_count(fn, name="started_at"):
+    """Uses of the identifier `name` (S49: started_at; S9: a label) in a
+    function's own code: string constants (the SQL), names and attributes;
+    its docstring excluded and short_started_at not counted (#432: the count
+    within the function span)."""
     import inspect
     import textwrap
     src = textwrap.dedent(inspect.getsource(fn))
@@ -3728,18 +4150,33 @@ def _s49_count(fn):
             and isinstance(getattr(node.body[0], "value", None), _ast.Constant) \
             and isinstance(node.body[0].value.value, str):
         doc = node.body[0].value
-    rx = _re.compile(r"(?<![A-Za-z0-9_])started_at(?![A-Za-z0-9_])")
-    n = 0
-    for x in _ast.walk(node):
+    return _s49_uses(_ast.walk(node), doc, name)
+
+
+def _s49_uses(nodes, doc=None, name="started_at"):
+    """(uses, forms): started_at uses among nodes (A7-R5-A1 (2), the string
+    constants read by the token model, never by a text pattern). A string
+    constant counts one use when cf_asm.mentions finds started_at in it (an
+    identifier whose value is started_at, or a literal or comment naming it),
+    and one use, its form kept in forms, when the token model refuses it
+    (Unmodelled), so a check that wants 0 fails by name (mentions decides a
+    text that cannot carry the name, such as a route path, False unread).
+    Every Python name or attribute started_at counts one use."""
+    n, forms = 0, []
+    for x in nodes:
         if x is doc:
             continue
         if isinstance(x, _ast.Constant) and isinstance(x.value, str):
-            n += len(rx.findall(x.value))
-        elif isinstance(x, _ast.Name) and x.id == "started_at":
+            try:
+                n += 1 if cf_asm.mentions(x.value, name) else 0
+            except cf_asm.Unmodelled as exc:
+                n += 1
+                forms.append(exc.form)
+        elif isinstance(x, _ast.Name) and x.id == name:
             n += 1
-        elif isinstance(x, _ast.Attribute) and x.attr == "started_at":
+        elif isinstance(x, _ast.Attribute) and x.attr == name:
             n += 1
-    return n
+    return n, forms
 
 
 def test_s49_an_unbacked_started(monkeypatch):
@@ -3759,9 +4196,9 @@ def test_s49_an_unbacked_started(monkeypatch):
                      main._in_match_evidence_trustworthy, main._asm_deferred_departure,
                      main._ffa_expire_admissions, main._asm_answer_lists]
     counts = {f.__name__: _s49_count(f) for f in fns}
-    assert all(v == 0 for v in counts.values()), ("S49 iii", counts)
+    assert all(v == (0, []) for v in counts.values()), ("S49 iii", counts)
     probe = "async def _cf_probe():\n    x = 'SELECT started_at FROM t'\n"
-    assert _s49_count_src(probe) == 1, "S49 iii probe counts"
+    assert _s49_count_src(probe) == (1, []), "S49 iii probe counts"
 
     async def body(env):
         # At 16.0 an uncorroborated seat's answer carries spawn_ok = 0, so the
@@ -3783,13 +4220,10 @@ def test_s49_an_unbacked_started(monkeypatch):
     run_env(monkeypatch, body)
 
 
-def _s49_count_src(src):
-    """_s49_count over a source text (the probe that proves the count can
-    move)."""
-    tree = _ast.parse(src)
-    rx = _re.compile(r"(?<![A-Za-z0-9_])started_at(?![A-Za-z0-9_])")
-    return sum(len(rx.findall(x.value)) for x in _ast.walk(tree)
-               if isinstance(x, _ast.Constant) and isinstance(x.value, str))
+def _s49_count_src(src, name="started_at"):
+    """_s49_count's reading over a source text (the probe that proves the
+    count can move)."""
+    return _s49_uses(_ast.walk(_ast.parse(src)), None, name)
 
 
 def test_s50_ready_needs_the_seats_own_census(monkeypatch):
@@ -4029,10 +4463,17 @@ def test_s63_the_kept_epoch(monkeypatch):
         "b92769aebf890e59", "S63 v 3"
 
     async def body(env):
+        # (iii) is read from the database's record only (A7-R5-A1.1): a
+        # statement-level trigger logs every UPDATE, DELETE and TRUNCATE of
+        # ffa_kept_epochs by any backend but the harness's (whose clock shifts
+        # run on env.conn), whatever statement carried it, a rolled-back one
+        # counted too. The scan runs after (iv), the test's last scenario
+        # that can write (A7-R5-A1 (3)).
+        log = await _write_log(env, "s63", [("kept", "UPDATE OR DELETE OR TRUNCATE",
+                                             "ffa_kept_epochs")])
         lid = uuid.UUID("1a2b3c4d-0000-4000-8000-%012x" % (os.getpid() & 0xFFFFFFFFFFFF))
         lob = await _short(env, roster=(0, 1, 3), lid=lid)
         await env.at(lob, 45.0)
-        mark = len(env.rec.stmts)
         ent = [env.entry(lob, s, 1 + s) for s in (0, 1, 3)]
         a = await env.assembly(lob, 2, 7, ent + [env.entry(lob, 2, 7)])
         assert a["status"] == "admitting" and "epoch" not in a.body, ("S63 before", a)
@@ -4064,9 +4505,6 @@ def test_s63_the_kept_epoch(monkeypatch):
         for slot in (0, 2, 4):
             b = await env.connect(lob, slot, "lock_seen")
             assert b["epoch"] == ep2, ("S63 ii later answer", slot, b)
-        touched = [x for x in env.rec.stmts[mark:]
-                   if x[1] == "ffa_kept_epochs" and x[0] in ("UPDATE", "DELETE")]
-        assert touched == [], ("S63 iii", touched)
         # (iv) two admissions of one lobby at once: numbered 1 and 2.
         lob = await _short(env, roster=(0, 1, 3))
         await env.at(lob, 45.0)
@@ -4121,6 +4559,9 @@ def test_s63_the_kept_epoch(monkeypatch):
         first = main._ffa_epoch_chain("0", id8, 1, rows[0]["slot"], rows[0]["actor_nr"])
         assert rows[0]["chain"] == first and rows[1]["chain"] == main._ffa_epoch_chain(
             first, id8, 2, rows[1]["slot"], rows[1]["actor_nr"]), ("S63 iv chain", rows)
+        # (iii), after every scenario of this test that can write.
+        writes = await log.since(0)
+        assert writes == ([], 0), ("S63 iii writes", writes)
     run_env(monkeypatch, body)
 
 
@@ -4847,7 +5288,13 @@ def test_s56_the_late_body_rule_and_the_lone_report(monkeypatch):
 def test_s57_the_g3_server_gate(monkeypatch):
     """S57: while ADM_PRODUCTION_ENABLED is False a lock is an admission
     lobby only when every member advertises ffa_adm1 and holds an unexpired
-    ffa_g3_seats row; patched True, the rows are not needed. The admin route:
+    ffa_g3_seats row; patched True, the rows are not needed. The case sets
+    the switch itself in both positions and never reads the module default
+    (decision A7: the server switch is the authority whatever the client
+    advertises). A room of 1.41.0 production clients (ffa_asm1, ffa_adm1,
+    ffa_rdm1, nobody enrolled) locks with admission_v1 and readmit_v1 false
+    while the switch is False and true once it is True; with the switch True
+    a member without ffa_adm1 still makes admission_v1 false. The admin route:
     403 for a non-admin, a bad signature, or a signature over another
     duration; 422 for hours 73; hours 0 expires the row; a valid call upserts
     expires_at = now + hours."""
@@ -4861,25 +5308,35 @@ def test_s57_the_g3_server_gate(monkeypatch):
                     " ON CONFLICT (player_id) DO UPDATE SET expires_at = EXCLUDED.expires_at",
                     p, p in expired)
 
-        async def lock(pick, expired=()):
-            lob = await _open_lobby(env, 4, ["ffa_asm1,ffa_adm1"] * 4)
+        prod = "ffa_asm1,ffa_adm1,ffa_rdm1"   # what a 1.41.0 Release client advertises
+
+        async def lock(pick, expired=(), caps=("ffa_asm1,ffa_adm1",) * 4):
+            lob = await _open_lobby(env, 4, list(caps))
             await enrol(pick(lob), [lob.pids[i] for i in expired])
             a = await _start(env, main, lob)
             assert a.status == 200, ("S57 lock", a)
             row = await env.lobby_row(lob)
-            return row["assembly_v1"], row["admission_v1"]
+            return row["assembly_v1"], row["admission_v1"], row["readmit_v1"]
 
-        assert main.ADM_PRODUCTION_ENABLED is False, "S57 constant"
+        env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", False)
         got = await lock(lambda lob: lob.pids)
-        assert got == (True, True), ("S57 enrolled", got)
+        assert got == (True, True, False), ("S57 enrolled", got)
         got = await lock(lambda lob: lob.pids[:3])
-        assert got == (True, False), ("S57 unenrolled", got)
+        assert got == (True, False, False), ("S57 unenrolled", got)
         got = await lock(lambda lob: lob.pids, expired=(2,))
-        assert got == (True, False), ("S57 expired", got)
+        assert got == (True, False, False), ("S57 expired", got)
+        got = await lock(lambda lob: [], caps=(prod,) * 4)
+        assert got == (True, False, False), ("S57 off: production clients refused", got)
+        got = await lock(lambda lob: lob.pids, caps=(prod,) * 4)
+        assert got == (True, True, True), ("S57 off: production clients enrolled", got)
         env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", True)
         got = await lock(lambda lob: [])
+        assert got == (True, True, False), ("S57 production", got)
+        got = await lock(lambda lob: [], caps=(prod,) * 4)
+        assert got == (True, True, True), ("S57 on: production clients admitted", got)
+        got = await lock(lambda lob: [], caps=(prod,) * 3 + ("ffa_asm1",))
+        assert got == (True, False, False), ("S57 on: the token still required", got)
         env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", False)
-        assert got == (True, True), ("S57 production", got)
 
         secret = "cf-g3-secret"
         env.mp.setattr(main, "ADMIN_HMAC_SECRET", secret)
@@ -4949,36 +5406,87 @@ def _write_facts(facts):
 
 
 _CSPROJ = os.path.join(HERE, "..", "..", "plugin", "CompetitiveRounds.csproj")
-_SQL_DIR = os.path.join(HERE, "..", "sql")
+_G3_CLAUSE_SQL = "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()"
 
 
-def test_s58_the_g3_fence():
-    """S58 (structural, both states): while ADM_PRODUCTION_ENABLED is False
-    the enrolment clause, the route and the csproj's G3 configuration exist;
-    once it is True, ffa_g3_seats is in no route, predicate or query of
-    main.py, no route path names ffa-g3-seats, a migration drops the table,
-    and the csproj has no G3 configuration."""
-    src = open(main.__file__, encoding="utf-8").read()
-    csproj = open(_CSPROJ, encoding="utf-8").read()
+def _code_has(sql, clause):
+    """Whether the clause's code tokens occur, contiguous and in order, among
+    the statement's (A7-R5-A1 (2)): compared by kind and value, so a clause in
+    a comment (no token) or inside a literal (one string or dollar token) is
+    absent. A form outside the token model raises cf_asm.Unmodelled."""
+    return bool(cf_asm.find_all(cf_asm.code_tokens(sql), cf_asm.code_tokens(clause)))
+
+
+async def _s58_clause_executed(env):
+    """Whether the statement _ffa_asm_gates sends to the server carries the
+    enrolment clause in its code, in each switch position (A7-R2): recorded
+    as it executes and read by tokens with its comments and literals out
+    (_code_has), so neither a Python comment, a docstring, an SQL comment
+    nor a string constant naming the clause can satisfy it."""
+    got = {}
+    env.mp.setattr(main, "FFA_ASSEMBLY_ENABLED", True)
+    for production in (False, True):
+        env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", production)
+
+        async def gate():
+            async with env.sm() as db:
+                await main._ffa_asm_gates(db, [uuid.uuid4()])
+
+        seen, err = await _executed(env, gate)
+        try:
+            clause, form = any(_code_has(s, _G3_CLAUSE_SQL) for s in seen), None
+        except cf_asm.Unmodelled as exc:   # fails S58 by the form's name
+            clause, form = False, exc.form
+        got[production] = {"clause": clause, "unmodelled": form,
+                           "statements": len(seen), "error": repr(err) if err else None}
+    env.mp.setattr(main, "ADM_PRODUCTION_ENABLED", False)
+    return all(v["clause"] for v in got.values()), got
+
+
+def _s58_g3_configuration():
+    """Whether the csproj declares the G3 configuration as MSBuild reads it:
+    a PropertyGroup whose Condition is '$(Configuration)' == 'G3' and whose
+    DefineConstants defines SCR_G3. Read through the parsed XML, where a
+    comment is not an element, so a comment naming either cannot satisfy
+    it (A7-R1)."""
+    import xml.etree.ElementTree as ET
+    with open(_CSPROJ, "rb") as fh:
+        root = ET.fromstring(fh.read())
+    for el in root.iter():
+        if not isinstance(el.tag, str) or el.tag.rsplit("}", 1)[-1] != "PropertyGroup":
+            continue
+        if _re.sub(r"\s+", "", el.get("Condition", "")) != "'$(Configuration)'=='G3'":
+            continue
+        for d in el:
+            if isinstance(d.tag, str) and d.tag.rsplit("}", 1)[-1] == "DefineConstants" \
+                    and "SCR_G3" in [t.strip() for t in (d.text or "").split(";")]:
+                return True
+    return False
+
+
+def test_s58_the_g3_fence(monkeypatch):
+    """S58 (structural, both switch positions): the enrolment clause, the
+    route and the csproj's G3 configuration exist whatever
+    ADM_PRODUCTION_ENABLED is. Decision A7 (2026-11-04) made 1.41.0 the
+    production-enabling release and kept the enrolment as the server's
+    rollback: setting the switch False again admits only enrolled rooms,
+    which needs the clause and the route. The pre-A7 reading (the release
+    deletes them, the table and the configuration) is retired. The clause
+    is read from the statement the gate executes, comments removed (A7-R2),
+    and the configuration from the parsed csproj (A7-R1), so no comment,
+    SQL comment or docstring satisfies either."""
     paths = [getattr(r, "path", "") for r in main.app.routes]
-    g3_config = bool(_re.search(r"'\$\(Configuration\)'\s*==\s*'G3'", csproj)) and \
-        "SCR_G3" in csproj
-    _write_facts({"production": bool(main.ADM_PRODUCTION_ENABLED), "g3_config": g3_config,
-                  "clause": "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" in src,
-                  "route": "/api/v1/admin/ffa-g3-seats" in paths})
-    if not main.ADM_PRODUCTION_ENABLED:
-        assert "LEFT JOIN ffa_g3_seats g ON g.player_id = q.player_id AND g.expires_at > now()" \
-            in src, "S58 clause"
+    g3_config = _s58_g3_configuration()
+
+    async def body(env):
+        clause, by_position = await _s58_clause_executed(env)
+        _write_facts({"production": bool(main.ADM_PRODUCTION_ENABLED), "g3_config": g3_config,
+                      "clause": clause, "by_position": {str(k): v for k, v in by_position.items()},
+                      "route": "/api/v1/admin/ffa-g3-seats" in paths})
+        assert clause, "S58 clause"
         assert "/api/v1/admin/ffa-g3-seats" in paths, "S58 route"
         assert g3_config, "S58 G3 configuration"
-    else:
-        assert "ffa_g3_seats" not in src, "S58 production query"
-        assert not any("ffa-g3-seats" in p for p in paths), "S58 production route"
-        drops = [f for f in os.listdir(_SQL_DIR) if f.endswith(".sql") and _re.search(
-            r"DROP\s+TABLE\s+(IF\s+EXISTS\s+)?ffa_g3_seats",
-            open(os.path.join(_SQL_DIR, f), encoding="utf-8").read(), _re.I)]
-        assert drops, "S58 production drop"
-        assert not g3_config and "SCR_G3" not in csproj, "S58 production configuration"
+    run_env(monkeypatch, body)
 
 
 # -- writer 7 (d) and the gone record (S64), the release (S66), section 12's
@@ -5641,25 +6149,225 @@ def test_fix2_s2_stored_reasons_comparison_and_triage():
                                           stored_reasons={ghost.steam_id: ["asm_a"]}) is None
 
 
-def test_fix2_s2_snapshot_sources_are_complete():
-    """S2: every reader carries the stored set and never rebuilds assembly state."""
-    import ast
+def _code_of(fn):
+    """A function's code as the interpreter runs it (A7-R2): the names it
+    calls and its string constants, every docstring excluded (the leading
+    string of the function and of each nested def or class)."""
     import inspect
     import textwrap
+    tree = _ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    docs = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef, _ast.Module)) \
+                and node.body and isinstance(node.body[0], _ast.Expr) \
+                and isinstance(node.body[0].value, _ast.Constant) \
+                and isinstance(node.body[0].value.value, str):
+            docs.add(id(node.body[0].value))
+    called = set()
+    strings = []
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Call):
+            f = node.func
+            called.add(f.id if isinstance(f, _ast.Name) else getattr(f, "attr", ""))
+        elif isinstance(node, _ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+            strings.append(node.value)
+    return called, strings
 
-    for fn in (main._ffa_report_contradiction, main._ffa_prior_field_disagreement,
-               main._triage_row_verdict, main._triage_capture_verdict):
-        source = inspect.getsource(fn)
-        assert source.count("_asm_report_rules(") == 0, fn.__name__
-        assert source.count("ffa_assembly_seats") == 0, fn.__name__
-    for sql in (main._FFA_PRIOR_VECTOR_SQL, main._TRIAGE_SQL_V2_VECTORS):
-        assert sql.count("exclusion_reasons") == 1
-    tree = ast.parse(textwrap.dedent(inspect.getsource(main.submit_ffa_match)))
-    inserts = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
-               and isinstance(n.value, str) and "INSERT INTO ffa_match_players" in n.value]
-    assert len(inserts) == 1
-    assert inserts[0].count("exclusion_reasons") == 1
-    assert inserts[0].count("CAST(:er AS text[])") == 1
+
+def _bound_param(expr, cast=False):
+    """The parameter number of a value expression read from code tokens
+    (A7-R5-A1 (2)): `$n`, optionally `::type words`; with cast=True exactly
+    CAST($n[::type words[[]]] AS text[]) and nothing around it. None for
+    any other expression."""
+    toks, arr = list(expr), False
+    if cast:
+        tail = [("ident", "as"), ("ident", "text"), ("op", "["), ("op", "]"), ("op", ")")]
+        if toks[:2] != [("ident", "cast"), ("op", "(")] or toks[-5:] != tail:
+            return None
+        toks, arr = toks[2:-5], True
+    if not toks or toks[0][0] != "param":
+        return None
+    rest = toks[1:]
+    if rest:
+        if rest[0] != ("op", "::"):
+            return None
+        rest = rest[1:]
+        if arr and rest[-2:] == [("op", "["), ("op", "]")]:
+            rest = rest[:-2]
+        if not rest or any(t[0] != "ident" for t in rest):
+            return None
+    return int(toks[0][1].lstrip("$"))
+
+
+def test_fix2_s2_snapshot_sources_are_complete(monkeypatch):
+    """S2: every reader carries the stored set and never rebuilds assembly
+    state. Read through what executes (A7-R2): the readers' code through the
+    AST with docstrings excluded and SQL comments removed; the two vector
+    reads executed, their result columns and rows as the server returns
+    them; the stored set's INSERT recorded as a real report sends it. So an
+    SQL comment, a Python comment or a docstring satisfies none of it."""
+    async def body(env):
+        for fn in (main._ffa_report_contradiction, main._ffa_prior_field_disagreement,
+                   main._triage_row_verdict, main._triage_capture_verdict):
+            called, strings = _code_of(fn)
+            assert "_asm_report_rules" not in called, ("S2 reader rebuilds", fn.__name__)
+            try:
+                named = [i for i, s in enumerate(strings) if cf_asm.mentions(s, "ffa_assembly_seats")]
+            except cf_asm.Unmodelled as exc:
+                named = ["UNMODELLED", exc.form]
+            assert not named, ("S2 reader reads seats", fn.__name__, named)
+        reads = (("S2 prior projection", main._FFA_PRIOR_VECTOR_SQL, lambda m: {"m": m}),
+                 ("S2 triage projection", main._TRIAGE_SQL_V2_VECTORS, lambda m: {"ids": [m]}))
+
+        async def columns(sql, params):
+            from sqlalchemy import text
+            async with env.sm() as db:
+                res = await db.execute(text(sql), params)
+                return list(res.keys()), [dict(r) for r in res.mappings().all()]
+
+        for tag, sql, params in reads:
+            keys, _rows = await columns(sql, params(uuid.uuid4()))
+            assert keys.count("exclusion_reasons") == 1, (tag, keys)
+
+        lob = await _s64_lobby(env)
+        s, res = lob.sids, _s64_res(lob)
+        res[s[5]] = res[s[6]] = (0, 0)
+        await env.ready_all(lob, list(range(7)))
+        # Distinct, non-empty reasons (A7-R3): seat 5 a ghost, seat 6 graced,
+        # every other seat none, so no constant the INSERT or a reader could
+        # substitute equals the stored set.
+        want = {sid: [] for sid in s}
+        want[s[5]], want[s[6]] = ["ghost"], ["grace"]
+        box = {}
+
+        async def report():
+            box["r"] = await env.report(lob, 1, res, reporter=s[0], left={s[5], s[6]},
+                                        absent={s[5]}, gp_leave={s[6]: 0})
+
+        binds = []
+        seen, err = await _executed(env, report, binds)
+        r = box.get("r")
+        # A7-R5-A1 (2): every executed statement read by the token model;
+        # the INSERT's columns and each value's tokens by insert_parts.
+        target = (("ident", "insert"), ("ident", "into"), ("ident", "ffa_match_players"))
+        inserts, refused = [], []
+        for st, b in zip(seen, binds):
+            try:
+                toks = cf_asm.code_tokens(st)
+                if toks[:3] == target:
+                    inserts.append((cf_asm.insert_parts(toks), b))
+            except cf_asm.Unmodelled as exc:
+                refused.append(exc.form)
+        assert inserts and not refused, ("S2 insert", r, repr(err), refused)
+        sid_of = {str(pid): sid for pid, sid in zip(lob.pids, s)}
+        bound = {}
+        for (_table, cols, rows), b in inserts:
+            vals = rows[0] if len(rows) == 1 else ()
+            assert cols.count("exclusion_reasons") == 1 and len(vals) == len(cols), \
+                ("S2 insert reasons", cols, rows)
+            # The value expression bound to the column, as a whole: the cast
+            # of one parameter, nothing around it (A7-R3 finding 2), by tokens.
+            expr = vals[cols.index("exclusion_reasons")]
+            m = _bound_param(expr, cast=True)
+            assert m is not None, ("S2 insert cast", expr)
+            pm = _bound_param(vals[cols.index("player_id")])
+            assert pm is not None, ("S2 insert player", vals[cols.index("player_id")])
+            bound[sid_of.get(str(b[pm - 1]))] = list(b[m - 1])
+        assert bound == want, ("S2 insert bound", bound, want)
+        assert err is None and r is not None and r.status == 200, ("S2 report", r, repr(err))
+        rows = await _mp(env, lob, 1)
+        stored = {s[slot]: row["exclusion_reasons"] for slot, row in rows.items()}
+        assert stored == want, ("S2 stored", stored, want)
+        mid = next(iter(rows.values()))["match_id"]
+        for tag, sql, params in reads:
+            _keys, got = await columns(sql, params(mid))
+            read = {g["steam_id"]: g["exclusion_reasons"] for g in got}
+            assert len(read) == len(got) and read == stored, (tag + " rows", read, stored)
+    run_env(monkeypatch, body)
+
+
+def test_wp11_a_game_step_without_a_game_is_refused(monkeypatch):
+    """WP11, executed (A7-R3 finding 3): the connect route refuses a lag or an
+    entered step that names no game with a 422 naming the game field, before
+    any statement and with no seat row changed; the same lag step naming its
+    game is accepted, so the refusal is the guard's and not the fixture's."""
+    async def body(env):
+        lob = await _short(env, 6)
+        await env.at(lob, 50.0)
+        await _admit(env, lob, 4, 5, 0, [0, 1, 2, 3])
+        await env.at(lob, 55.0)
+        a = await env.connect(lob, 1, "lock_seen")
+        assert a.status == 200, ("WP11 prime", a)
+        before = await env.seats(lob)
+        for step, kw in (("lag", {"k": 1, "why": "timeout"}), ("entered", {})):
+            box = {}
+
+            async def go():
+                box["a"] = await env.connect(lob, 1, step, **kw)
+
+            seen, err = await _executed(env, go)
+            a = box.get("a")
+            assert err is None and a is not None and \
+                (a.status, a.body) == (422, "invalid connect field: game"), \
+                ("WP11 refused", step, a, repr(err))
+            assert not seen, ("WP11 no statement", step, seen)
+        assert await env.seats(lob) == before, "WP11 no write"
+        a = await env.connect(lob, 1, "lag", game=1, k=1, why="timeout")
+        assert a.status == 200, ("WP11 accepted", a)
+    run_env(monkeypatch, body)
+
+
+def _answer_keys(o, out):
+    """Every dict key at any depth of an answer body."""
+    if isinstance(o, dict):
+        for k, v in o.items():
+            out.add(k)
+            _answer_keys(v, out)
+    elif isinstance(o, (list, tuple)):
+        for v in o:
+            _answer_keys(v, out)
+    return out
+
+
+def test_wp3_wp4_keys_are_sent(monkeypatch):
+    """WP3/WP4, executed (A7-R3 sweep): the keys the client reads, which the
+    client-structure file finds named in the server's builders, are in the
+    answers the routes send. The answer tour drives every answer shape and
+    polls the lock answer; every answer the poll route returns is recorded,
+    WP3's keys are read from those and WP4's (and the entry keys) from the
+    connect and assembly answers. The tour polls no reformed lobby, so one
+    more poll reads reformed_from from a lobby whose row names a
+    predecessor, its bets disabled as a reformed lobby's are
+    (ck_ffa_lobby_reform_no_bets)."""
+    import test_ffa_assembly_client_structure as cst
+
+    async def body(env):
+        polled = []
+        poll = env.poll
+
+        async def recording_poll(*args, **kw):
+            answer = await poll(*args, **kw)
+            polled.append(answer)
+            return answer
+
+        env.poll = recording_poll
+        tour = await _answer_tour(env, monkeypatch)
+        lock_keys, answers = set(), set()
+        for _label, a, _t, _kind, _st in tour:
+            _answer_keys(a.body, lock_keys if any(a is x for x in polled) else answers)
+        lob = await env.lobby(5, admission=True, t=12.5)
+        await env.conn.execute(
+            "UPDATE ffa_lobbies SET reformed_from = gen_random_uuid(), bets_disabled = true"
+            " WHERE id = $1", lob.lid)
+        p = await env.poll(lob, 0)
+        assert p.status == 200 and p["status"] == "ready_join", ("WP3 reformed poll", p)
+        assert any(p is x for x in polled), ("WP3 poll recorded", len(polled))
+        _answer_keys(p.body, lock_keys)
+        lacking3 = sorted(set(cst.WP3_KEYS) - lock_keys)
+        lacking4 = sorted(set(cst.WP4_KEYS + cst.WP4_ENTRY) - answers)
+        assert lacking3 == [], ("WP3 sent", lacking3, sorted(lock_keys))
+        assert lacking4 == [], ("WP4 sent", lacking4, sorted(answers))
+    run_env(monkeypatch, body, skip=("reform_rows_left",))
 
 
 def test_fix2_s2_assembly_reason_recording_includes_ghosts():
@@ -6673,6 +7381,14 @@ def test_m1b_a_release_racing_the_start_closes_under_the_lock(monkeypatch):
                 await asyncio.sleep(0.02)
             return n
 
+        async def waiting_pids():
+            return set(await env.conn.fetchval(
+                "WITH RECURSIVE w(pid) AS ("
+                "  SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))"
+                "  UNION SELECT a.pid FROM pg_stat_activity a JOIN w"
+                "    ON w.pid = ANY(pg_blocking_pids(a.pid)))"
+                " SELECT COALESCE(array_agg(pid), '{}') FROM w", held["spid"]))
+
         entries = [env.entry(lob, s, 1 + s) for s in range(4)]
         start = asyncio.ensure_future(_start(env, main, lob))
         waiter = release = None
@@ -6680,17 +7396,42 @@ def test_m1b_a_release_racing_the_start_closes_under_the_lock(monkeypatch):
             await asyncio.wait_for(gate["paused"].wait(), 60)
             waiter = asyncio.ensure_future(env.assembly(lob, 0, 1, entries, seen_age_ms=30000))
             first = await queued(1)
-            mark = len(env.rec.stmts)
+            w1 = await waiting_pids()
+            ended = env.rec.txn
             release = asyncio.ensure_future(env.release(lob, 3, "fence_expired"))
             both = await queued(2)
-            pre = [s[:2] for s in env.rec.stmts[mark:]]
-            last = env.rec.stmts[-1]
             assert first >= 1 and both >= 2 and not start.done() and not waiter.done() \
                 and not release.done(), ("M1b premise queued", first, both)
-            assert not [s for s in pre if s[0] in ("INSERT", "DELETE", "COMMIT")] \
-                and ["SELECT", "ffa_assembly_seats"] in pre \
-                and last[:2] == ["SELECT", "ffa_lobbies"] and last[3] == "FOR NO KEY UPDATE", \
-                ("M1b premise pre-step", pre, last)
+            # The release's pre-step, from the database (A7-R5-A1.1): its
+            # backend is the new waiter; no transaction ended since the mark
+            # (the engine's commit and rollback events); its open transaction
+            # holds no transaction id, so it has written nothing (PostgreSQL
+            # assigns one at a transaction's first write, and a waiting
+            # FOR NO KEY UPDATE takes it only once the row is granted); it
+            # holds a lock on ffa_assembly_seats, so it read the seats in this
+            # transaction before it began to wait; and it queues for a row of
+            # ffa_lobbies in FOR NO KEY UPDATE's tuple mode (ExclusiveLock)
+            # under a RowShareLock on the table. The modes of its other relation
+            # locks are not read: a statement that changed no row (de70bb4's
+            # marking UPDATE, the M1b round_two control) takes RowExclusiveLock
+            # and still writes nothing, which the transaction id already shows.
+            rel = sorted(await waiting_pids() - w1)
+            facts = {"pids": rel, "ended": env.rec.txn - ended, "xid": "?", "locks": []}
+            if len(rel) == 1:
+                facts["xid"] = await env.conn.fetchval(
+                    "SELECT CAST(backend_xid AS text) FROM pg_stat_activity WHERE pid = $1", rel[0])
+                facts["locks"] = sorted(tuple(r) for r in await env.conn.fetch(
+                    "SELECT l.locktype, COALESCE(c.relname, ''), l.mode, l.granted FROM pg_locks l"
+                    "  LEFT JOIN pg_class c ON c.oid = l.relation"
+                    " WHERE l.pid = $1 AND l.locktype IN ('relation', 'tuple')"
+                    "   AND COALESCE(c.relkind, 'r') NOT IN ('i', 'I')", rel[0]))
+            rels = {(t, n, m) for t, n, m, _g in facts["locks"] if t == "relation"}
+            assert len(rel) == 1 and facts["ended"] == 0 and facts["xid"] is None \
+                and any(n == "ffa_assembly_seats" for _t, n, _m in rels) \
+                and ("relation", "ffa_lobbies", "RowShareLock") in rels \
+                and any(t == "tuple" and n == "ffa_lobbies" and m == "ExclusiveLock"
+                        for t, n, m, _g in facts["locks"]), \
+                ("M1b premise pre-step", facts)
             gate["start"].set()
             a = await asyncio.wait_for(release, 60)
             seat = await env.seat(lob, 3)
@@ -6835,12 +7576,42 @@ def test_n12_the_gated_leave_branch_order(monkeypatch):
 
 def test_the_census_fresh_literal_is_the_constant():
     """The closers' record fragment cannot name the Python constant, so its
-    four literal intervals must equal ASM_CENSUS_FRESH_S."""
-    found = _re.findall(r"census_at >= NOW\(\) - interval '(\d+) seconds'",
-                        main._FFA_CLOSE_RECORD_SET)
+    four literal intervals must equal ASM_CENSUS_FRESH_S. Read by the token
+    model (A7-R5-A1 (2)): the predicate census_at >= NOW() - interval '<N>
+    seconds' as a sequence of code tokens, its interval one string token
+    compared by value; a dollar body is one token and never searched."""
+    pat = [("ident", "census_at"), ("op", ">="), ("ident", "now"), ("op", "("), ("op", ")"),
+           ("op", "-"), ("ident", "interval"), ("string", None)]
+    try:
+        found = [cap[0][1] for _i, cap in
+                 cf_asm.find_all(cf_asm.code_tokens(main._FFA_CLOSE_RECORD_SET), pat)]
+    except cf_asm.Unmodelled as exc:
+        found = ["UNMODELLED", exc.form]
+    want = "%d seconds" % main.ASM_CENSUS_FRESH_S
     _write_facts({"found": found, "constant": main.ASM_CENSUS_FRESH_S})
-    assert len(found) == 4 and all(int(x) == main.ASM_CENSUS_FRESH_S for x in found), \
-        ("census literal", found)
+    assert len(found) == 4 and all(x == want for x in found), ("census literal", found, want)
+
+
+def test_the_only_raw_sql_reader_is_the_scanner():
+    """A7-R5-A1 (2)(a): the generated sweep (cf_controls.raw_sql_sweep, by
+    operation over the four files of this lane) lists every place that
+    searches, counts, matches, compares or slices a statement's raw text; the
+    only expected places are cf_asm.py's scanner region and the scanner's own
+    probe tests. Every main.X the files read is checked here against the
+    imported module: a string the sweep did not take as a source fails."""
+    import cf_controls
+    found, main_names, sources = cf_controls.raw_sql_sweep()
+    sql = [f for f in found if f["subject"] == "sql"]
+    outside = [f for f in sql if not f["expected"]]
+    assert outside == [], "('raw sql sweep', %r)" % ([cf_controls.sweep_line(f) for f in outside],)
+    # The sweep sees the scanner itself (the region and its probes), so it can find a reader.
+    assert {f["file"] for f in sql} == {"cf_asm.py", "test_ffa_assembly_pg.py"}, \
+        ("raw sql sweep sees the scanner", len(sql))
+    def sql_of(v):
+        return v if isinstance(v, str) else getattr(v, "text", None)
+    missed = sorted(n for n in main_names
+                    if cf_controls._sw_sql_text(sql_of(getattr(main, n, None))) and n not in sources)
+    assert missed == [], ("raw sql sweep main", missed)
 
 
 def test_the_assembly_pool_and_its_connect_timeout():
