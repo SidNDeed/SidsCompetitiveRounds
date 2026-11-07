@@ -196,7 +196,8 @@ WRITER_OUTCOME = {
 }
 
 # Ruling R-C: the 28 execute positions the walks visit that are in neither
-# table. Each answers 'write' (the conservative default, no bound needed).
+# table (31 since round 11's rule N (B), the three at the end).
+# Each answers 'write' (the conservative default, no bound needed).
 # Evidence that the retired S analysis answered 'write' at each: ro's
 # baseline spy records at 3130bb9d (RF/r8/ro/spy-a1.json, spy-gate.json;
 # main.py and match_hold.py unchanged at these lines since) hold only
@@ -231,6 +232,16 @@ VISITED_WRITES = (
     ('gate', 'main.py', 63439, 63443, '_rdm_end_hold'),
     ('gate', 'main.py', 63448, 63452, '_rdm_end_hold'),
     ('gate', 'main.py', 63454, 63459, '_rdm_end_hold'),
+    # Round 11, rule N member (B) (ruling FOUR-R11-A20 (1)): the gate walk
+    # discharges _guard_identities' sorted and .mappings().all by their bound
+    # and now walks on, reaching three more executes (the live enumeration at
+    # c26c04f4): the advisory lock and the players read of _guard_identities
+    # and the attempt INSERT of _write_open_attempt. In neither table, each
+    # answers 'write' in the lookup (lookup_table: an absent position is a
+    # write), the conservative answer; none enters the read-only claim.
+    ('gate', 'match_hold.py', 256, 257, '_guard_identities'),
+    ('gate', 'match_hold.py', 260, 263, '_guard_identities'),
+    ('gate', 'match_hold.py', 767, 777, '_write_open_attempt'),
 )
 
 
