@@ -7,10 +7,13 @@
 -- file. An api from the lane fails every 2v2, 1v2 and FFA report and submit
 -- once the columns are gone.
 --
--- DATA. Dropping the table and the columns DISCARDS every point event,
--- damage total, kill, death and death time recorded since the migration;
--- there is no copy. A deliberate, documented loss: the rows these facts hang
--- off (the matches, the telemetry counters) stay.
+-- DATA. Dropping the table and the columns DISCARDS, with no copy: every
+-- point event, damage total, kill, death and death time recorded since the
+-- migration in every mode, AND the whole 1v2 telemetry table, whose fps,
+-- ping, hit, block and damage streams and bullets/blocks/keys/active-seconds
+-- counters only exist since this migration. What stays: the match rows, the
+-- 2v2 telemetry rows' pre-existing columns and the FFA player rows'
+-- pre-existing columns. A deliberate, documented loss.
 --
 -- Guarded on the catalog like the forward file, so a rerun after success
 -- issues nothing and takes no lock. The lock bounds are the forward file's:

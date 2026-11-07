@@ -53225,8 +53225,9 @@ def _ovt_canonical_duo(report):
     the client sent) and before any comparison or write, so everything after
     it reads one order. Every seat-keyed field travels with its own player:
     the two PlayerMatchData records (steam id, name, cards, end stats), the
-    two fps averages and the two damage timelines. A copy, never an in-place
-    edit, so the caller's object keeps the order it arrived in.
+    two fps averages, the two damage timelines and the two telemetry blobs
+    (migration 403; Codex ASK9-R1 M1). A copy, never an in-place edit, so
+    the caller's object keeps the order it arrived in.
     """
     if report.duo_a.steam_id <= report.duo_b.steam_id:
         return report
@@ -53235,6 +53236,8 @@ def _ovt_canonical_duo(report):
         "duo_a_fps": report.duo_b_fps, "duo_b_fps": report.duo_a_fps,
         "duo_a_damage_timeline": report.duo_b_damage_timeline,
         "duo_b_damage_timeline": report.duo_a_damage_timeline,
+        "duo_a_telemetry": report.duo_b_telemetry,
+        "duo_b_telemetry": report.duo_a_telemetry,
     })
 
 
@@ -54426,17 +54429,38 @@ def _report_steams(mode, report):
     return {report.solo.steam_id, report.duo_a.steam_id, report.duo_b.steam_id}
 
 
+# The reporter's OBSERVATIONAL facts in a seat blob: the damage stream (V3 S5)
+# and, since migration 403, the damage total, kills, deaths, kill series and
+# death marks (ask 9). The seat's own telemetry (fps, ping, hit, block, the
+# counters) is a peer's heartbeat, not the reporter's view, and stays.
+_CLASS_R_BLOB_FIELDS = ("damage_dealt_timeline", "damage_dealt", "kills", "deaths",
+                        "kill_timeline", "death_times")
+
+
+def _class_r_blob(t):
+    """A seat blob with the reporter's observational facts NULL (Codex
+    ASK9-R1 M2); None stays None."""
+    if t is None:
+        return None
+    return t.model_copy(update={k: None for k in _CLASS_R_BLOB_FIELDS})
+
+
 def _class_r_report(mode, report):
-    """A class R report settles with its damage timelines NULL (V3 S5)."""
+    """A class R report settles with the reporter's observational fields NULL
+    (V3 S5; ask 9): the legacy damage CSVs, every seat blob's observational
+    facts (_CLASS_R_BLOB_FIELDS) and the game's point events, which are the
+    reporter's partial view of the score as well."""
+    upd = {"point_timeline": None, "point_times": None}
     if mode == "ovt":
-        return report.model_copy(update={"solo_damage_timeline": None,
-                                         "duo_a_damage_timeline": None,
-                                         "duo_b_damage_timeline": None})
-    upd = {}
-    for k in ("t1a_telemetry", "t1b_telemetry", "t2a_telemetry", "t2b_telemetry"):
+        upd.update({"solo_damage_timeline": None, "duo_a_damage_timeline": None,
+                    "duo_b_damage_timeline": None})
+        seats = ("solo_telemetry", "duo_a_telemetry", "duo_b_telemetry")
+    else:
+        seats = ("t1a_telemetry", "t1b_telemetry", "t2a_telemetry", "t2b_telemetry")
+    for k in seats:
         t = getattr(report, k)
         if t is not None:
-            upd[k] = t.model_copy(update={"damage_dealt_timeline": None})
+            upd[k] = _class_r_blob(t)
     return report.model_copy(update=upd)
 
 
@@ -76244,11 +76268,13 @@ _REPORT_NOT_FOUND = "not_found"
 # code points, not bytes, so 40 four-byte code points per card name put the
 # 1v1 worst case far past 512 KB - cap arithmetic can only estimate; the fit
 # step is what makes the number true.) A typical BO3 is ~40 KB; the sizing:
-#   sample pairs  <= _REPORT_SAMPLE_PAIRS_BUDGET (12,288 x <= 17 B = ~209 KB).
+#   sample pairs  <= _REPORT_SAMPLE_PAIRS_BUDGET (13,824 x <= 17 B = ~235 KB).
 #       Per stream per game the cap is
-#       clamp(budget // (games x players x 8), _REPORT_SAMPLES_MIN, _REPORT_SAMPLES_MAX):
+#       clamp(budget // (games x players x 9), _REPORT_SAMPLES_MIN, _REPORT_SAMPLES_MAX):
 #       1 game 1v1 -> 128 samples; 24 games 1v1 -> 32; 24 games 2v2 -> 16
-#       (16 x 24 x 4 x 7 streams = 10,752 pairs); FFA is one game of <= 10
+#       (16 x 24 x 4 x 9 streams = 13,824 pairs, the budget: since migration
+#       403 a 2v2/1v2 seat carries kills and score beside the seven, ask 9 /
+#       Codex ASK9-R1); FFA is one game of <= 10
 #       players x 9 streams x 128 = 11,520 pairs. A stream longer than its
 #       cap is DECIMATED (evenly spaced indices, first and last kept — #318),
 #       never head- or tail-truncated.
@@ -76270,7 +76296,7 @@ _REPORT_NOT_FOUND = "not_found"
 # Change a constant here and the
 # test's literal bound is what tells you the truth.
 _REPORT_MAX_BYTES = 512 * 1024
-_REPORT_SAMPLE_PAIRS_BUDGET = 12288
+_REPORT_SAMPLE_PAIRS_BUDGET = 13824
 _REPORT_SAMPLES_MAX = 128
 _REPORT_SAMPLES_MIN = 16
 _REPORT_CARD_BUDGET = 1024
@@ -76280,9 +76306,10 @@ _REPORT_CARD_NAME_MAX = 40
 _REPORT_DEATHS_MAX = 48
 _REPORT_NAME_MAX = 32
 # The divisor in the sample cap: the largest stream count a 2-to-4 player
-# mode carries (1v1: 8 incl. score). FFA carries 9 but is always ONE game,
-# which the budget arithmetic above absorbs (11,520 < 12,288).
-_REPORT_STREAMS_PER_PLAYER = 8
+# mode carries (2v2/1v2 since migration 403: 9 incl. score and kills; 1v1: 8).
+# FFA carries 9 but is always ONE game, which the budget arithmetic above
+# absorbs (11,520 < 13,824).
+_REPORT_STREAMS_PER_PLAYER = 9
 
 # (stream name, slot column, pair index) — the pair index selects one side of
 # a "left:right" cumulative pair series; None means a plain integer series.
@@ -76782,6 +76809,8 @@ def _report_points(point_times, point_timeline, sid_a, sid_b, cap=_REPORT_SAMPLE
             a, b = int(a_s), int(b_s)
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(t):
+            continue   # "nan"/"inf" parse as floats JSON cannot carry (Codex ASK9-R1 M3)
         score_a.append([t, a])
         score_b.append([t, b])
         if a > prev_a and len(deaths) < _REPORT_DEATHS_MAX:
@@ -76906,9 +76935,12 @@ def _report_death_events(slots, sid_of, cap=_REPORT_DEATHS_MAX):
             continue
         for tok in raw.split(","):
             try:
-                out.append({"t": round(float(tok), 1), "id": sid})
+                t = round(float(tok), 1)
             except (TypeError, ValueError):
                 continue
+            if not math.isfinite(t):
+                continue   # "nan"/"inf" parse as floats JSON cannot carry (Codex ASK9-R1 M3)
+            out.append({"t": t, "id": sid})
     out.sort(key=lambda e: e["t"])
     return out[:cap]
 
@@ -77901,6 +77933,7 @@ _SESSION_REPORT_NAMED = {
     "_REPORT_OS_SQL": _REPORT_OS_SQL,
     "_REPORT_OVT_SQL": _REPORT_OVT_SQL,
     "_REPORT_OVT_WHERE": _REPORT_OVT_WHERE,
+    "_REPORT_OVT_TELE_SQL": _REPORT_OVT_TELE_SQL,
     "_REPORT_FFA_SQL": _REPORT_FFA_SQL,
     "_REPORT_FFA_PLAYERS_SQL": _REPORT_FFA_PLAYERS_SQL,
     "_REPORT_KIND_SQL": _REPORT_KIND_SQL,
