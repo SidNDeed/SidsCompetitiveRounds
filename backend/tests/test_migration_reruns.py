@@ -104,6 +104,35 @@ def _run(coro):
 # a prerequisite block that drifts into being a copy of the whole schema is a
 # second source of truth for it.
 
+def _contrib_tables_prereq():
+    """401's prerequisites: `players` and the two contribution tables exactly
+    as 370 and 390 create them (their CREATE TABLE statements read out of
+    those files, not retyped), with one stored row in each, so the second
+    run is measured beside rows the first run's ADD COLUMN left NULL."""
+    out = ["CREATE TABLE players (id UUID PRIMARY KEY);",
+           "INSERT INTO players (id) VALUES ('00000000-0000-0000-0000-0000000004a1'), "
+           "('00000000-0000-0000-0000-0000000004b2');"]
+    for name, table in (("370_card_evidence.sql", "card_contrib"),
+                        ("390_combat_evidence.sql", "combat_contrib")):
+        text = (SQL_DIR / name).read_text(encoding="utf-8")
+        found = re.search(r"CREATE TABLE IF NOT EXISTS %s \(.*?\n\);" % table, text, re.S)
+        assert found, (name, table)
+        out.append(found.group(0))
+    out.append(
+        "INSERT INTO card_contrib (stable_game_key, pair_lo, pair_hi, recorder_player_id, "
+        "subject_player_id, source, coverage, deal_profile, rules_rev, utc_day, match_id) "
+        "VALUES ('k401', '00000000-0000-0000-0000-0000000004a1', "
+        "'00000000-0000-0000-0000-0000000004b2', '00000000-0000-0000-0000-0000000004a1', "
+        "'00000000-0000-0000-0000-0000000004a1', 'self', 'one', 'prof', 'r1', "
+        "DATE '2026-11-01', gen_random_uuid());")
+    out.append(
+        "INSERT INTO combat_contrib (stable_game_key, pair_lo, pair_hi, subject_player_id, "
+        "source, utc_day) VALUES ('k401', '00000000-0000-0000-0000-0000000004a1', "
+        "'00000000-0000-0000-0000-0000000004b2', '00000000-0000-0000-0000-0000000004a1', "
+        "'self', DATE '2026-11-01');")
+    return "\n".join(out)
+
+
 PREREQ = {
     "331": """
         CREATE TABLE players (
@@ -231,6 +260,9 @@ PREREQ = {
         INSERT INTO i18n_entries (key_id, language_code, target, state)
         VALUES ('3bb08fc59139b367', 'ru', 'a machine entry', 'machine');
     """),
+    # 401 adds a column to combat_contrib and indexes both contribution
+    # tables on match_id (_contrib_tables_prereq).
+    "401": _contrib_tables_prereq(),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -248,6 +280,7 @@ TABLES = {
     "377": ("matches",),
     "391": ("dc_events",),
     "396": ("i18n_keys", "i18n_entries", "i18n_proposals"),
+    "401": ("card_contrib", "combat_contrib"),
 }
 
 MIGRATION_FILES = {
@@ -261,6 +294,7 @@ MIGRATION_FILES = {
     "377": "377_admin_evidence_indexes.sql",
     "391": "391_dc_events_leave_anchor.sql",
     "396": "396_faq_early_leave_keys.sql",
+    "401": "401_contrib_match_provenance.sql",
 }
 
 
@@ -425,7 +459,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -437,7 +471,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -450,7 +484,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -469,7 +503,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -953,7 +987,7 @@ _HOLDERS = {
 }
 
 _LOCK_CASES = [(number, table, who)
-               for number in ("331", "332", "333", "336", "377", "391", "396")
+               for number in ("331", "332", "333", "336", "377", "391", "396", "401")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 

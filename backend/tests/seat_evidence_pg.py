@@ -49,6 +49,10 @@ M368_NAME = "368_seat_evidence.sql"
 M368 = os.path.join(cf_pg.SQL_DIR, M368_NAME)
 M370_NAME = "370_card_evidence.sql"
 M390_NAME = "390_combat_evidence.sql"
+# 401 adds combat_contrib.match_id and indexes card_contrib and combat_contrib
+# on match_id, so it cannot replay before 370 and 390 have run; held out with
+# them, and applied whole by the combat evidence build after 390.
+M401_NAME = "401_contrib_match_provenance.sql"
 SEV_TABLES = frozenset({"seat_evidence", "seat_evidence_games", "seat_evidence_findings",
                         "mod_release_digests", "client_compat_events",
                         "review_sitting_dirty", "review_cursor", "review_seen",
@@ -81,7 +85,7 @@ def ddl_statements():
     evidence build applies 370 itself, after; the combat evidence build
     applies 370 and then 390."""
     saved = cf_pg.HELD_OUT
-    cf_pg.HELD_OUT = frozenset(saved | {M368_NAME, M370_NAME, M390_NAME})
+    cf_pg.HELD_OUT = frozenset(saved | {M368_NAME, M370_NAME, M390_NAME, M401_NAME})
     try:
         return cf_pg.ddl_statements()
     finally:
