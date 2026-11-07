@@ -36,8 +36,10 @@ MIGRATION = (pathlib.Path(__file__).resolve().parents[1]
 # default and emits no server default, and this repo has already shipped a bug
 # where the SQL default and the ORM default disagreed (ranked_enabled). What
 # 337 relies on is the SERVER default, so it is spelled out here, and
-# test_the_harness_covers_every_model_column fails if the model grows a column
-# this table does not have.
+# test_the_harness_covers_every_model_column fails if the model and this table
+# disagree on any column's name or nullability. min_client_version is spelled
+# as migration 397 adds it (VARCHAR(16), NULL, the dotted-number CHECK): 337
+# writes no value there, so the column takes NULL, which the CHECK admits.
 DDL = """
 CREATE TABLE shop_items (
     id              BIGSERIAL PRIMARY KEY,
@@ -53,7 +55,10 @@ CREATE TABLE shop_items (
     artist_steam_id VARCHAR(20),
     stock_limit     INTEGER,
     released_at     TIMESTAMPTZ,
-    catalog_ready   BOOLEAN NOT NULL DEFAULT TRUE
+    catalog_ready   BOOLEAN NOT NULL DEFAULT TRUE,
+    min_client_version VARCHAR(16)
+        CONSTRAINT ck_shop_items_min_client_version
+        CHECK (min_client_version ~ '^[0-9]+(\\.[0-9]+)*$')
 );
 """
 
@@ -111,15 +116,42 @@ def _apply(pre_existing=None, applies=2):
     return asyncio.run(_run_case(pre_existing, applies))
 
 
+async def _harness_columns():
+    """The harness table's columns as PostgreSQL created them from DDL:
+    {name: nullable}."""
+    import asyncpg
+    schema = "s337_columns"
+    conn = await asyncpg.connect(_raw_dsn())
+    try:
+        await conn.execute(f'DROP SCHEMA IF EXISTS {schema} CASCADE')
+        await conn.execute(f'CREATE SCHEMA {schema}')
+        await conn.execute(f'SET search_path TO {schema}')
+        await conn.execute(DDL)
+        rows = await conn.fetch(
+            "SELECT column_name, is_nullable FROM information_schema.columns"
+            " WHERE table_schema = $1 AND table_name = 'shop_items'", schema)
+        return {r["column_name"]: r["is_nullable"] == "YES" for r in rows}
+    finally:
+        await _cleanup(conn, schema)
+
+
 def test_the_harness_covers_every_model_column():
-    """If ShopItem grows a NOT NULL column, this table stops being the shape
-    the migration really writes into and every result below is about a table
-    production does not have."""
+    """If ShopItem grows a column, this table stops being the shape the
+    migration really writes into and every result below is about a table
+    production does not have. Both sides are READ, never listed: the model's
+    columns from models.ShopItem, the harness's from DDL as PostgreSQL
+    created it. A third, hand-kept list (the earlier form of this test) could
+    only say the model had moved; it would stay green with a column dropped
+    from DDL. Nullability is compared too, so a column that turns NOT NULL in
+    the model and not here reds as well."""
     import models
-    assert set(models.ShopItem.__table__.columns.keys()) == {
-        "id", "sku", "kind", "name", "description", "price", "rarity",
-        "rotation_pool", "preview_color", "created_at", "artist_steam_id",
-        "stock_limit", "released_at", "catalog_ready"}
+    model = {c.name: c.nullable for c in models.ShopItem.__table__.columns}
+    harness = asyncio.run(_harness_columns())
+    assert harness == model, {
+        "model only": sorted(set(model) - set(harness)),
+        "harness only": sorted(set(harness) - set(model)),
+        "nullability differs": sorted(
+            c for c in set(model) & set(harness) if model[c] != harness[c])}
 
 
 def test_the_migration_applies_and_is_idempotent():

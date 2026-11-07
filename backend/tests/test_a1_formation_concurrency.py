@@ -35,11 +35,16 @@ import os
 import time
 import uuid
 
+import sys
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import main
+from migration_table_ddl import table_ddl
 
 DSN = os.environ.get("A1_TEST_PG_DSN")
 pytestmark = pytest.mark.skipif(
@@ -51,6 +56,11 @@ SID_A = "90000000000000001"
 SID_B = "90000000000000002"
 
 SCHEMA = """
+DROP TABLE IF EXISTS match_seat_holds;
+DROP TABLE IF EXISTS match_games;
+DROP TABLE IF EXISTS team_queue;
+DROP TABLE IF EXISTS ovt_queue;
+DROP TABLE IF EXISTS ffa_queue;
 DROP TABLE IF EXISTS queue_leases;
 DROP TABLE IF EXISTS ranked_queue;
 DROP TABLE IF EXISTS players;
@@ -79,6 +89,20 @@ CREATE TABLE queue_leases (
 );
 """
 
+# The tables main.py reads on this file's path beyond the three above, created
+# from the migration that defines each one (never a hand copy, which drifts).
+# Since the readmission landing 1eb1aac6, _lease_acquire and
+# _lease_acquire_many pass the shared admission gate (_lease_admission_gate),
+# which reads every queue family's row for the roster and the roster's open
+# match_seat_holds. Each references players(id), which SCHEMA creates first;
+# match_seat_holds also references match_games. The DROPs at the head of
+# SCHEMA remove them before players, in dependency order.
+DERIVED = (table_ddl("053_2v2_schema.sql", "team_queue")
+           + table_ddl("120_1v2_schema.sql", "ovt_queue")
+           + table_ddl("154_ffa_schema.sql", "ffa_queue")
+           + table_ddl("383_match_hold_stage2.sql", "match_games")
+           + table_ddl("383_match_hold_stage2.sql", "match_seat_holds"))
+
 
 def run(coro):
     return asyncio.run(coro)
@@ -89,6 +113,8 @@ async def _setup():
     sm = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
         for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
+            await conn.execute(text(stmt))
+        for stmt in DERIVED:
             await conn.execute(text(stmt))
     pid_a, pid_b = uuid.uuid4(), uuid.uuid4()
     async with sm() as db:

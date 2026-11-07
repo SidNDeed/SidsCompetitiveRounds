@@ -2346,8 +2346,14 @@ def test_migration_300_matches_the_orm_and_the_readers():
         sql = f.read()
     assert "CREATE TABLE IF NOT EXISTS mail_inbox_rev" in sql and "ON CONFLICT (recipient_id) DO NOTHING" in sql
     assert sql.count("BEGIN;") == 1 and sql.count("COMMIT;") == 1
-    cols = {c.name for c in models.MailInboxRev.__table__.columns}
-    assert cols == {"recipient_id", "rev", "updated_at"} and all(c in sql for c in cols)
+    # What 300's DDL does to mail_inbox_rev, that it equals the model
+    # (columns, types, nullability, defaults, constraints) after 300 and
+    # after the whole chain, and that no other migration changes it, are
+    # EFFECT claims: test_r7_catalog_diff_pg.py measures them at a database
+    # by applying backend/sql and diffing the catalog (ruling
+    # REHEARSAL-FOUR-R6 (1)(a)); the text readers that stood here are deleted.
+    model = {c.name: c.nullable for c in models.MailInboxRev.__table__.columns}
+    assert model == {"recipient_id": False, "rev": False, "updated_at": False}, model
     assert models.MailInboxRev.__tablename__ == "mail_inbox_rev"
     assert "INSERT INTO mail_inbox_rev" in main._MAIL_REV_BUMP_SQL
     assert "FROM mail_inbox_rev" in inspect.getsource(main.mail_status)

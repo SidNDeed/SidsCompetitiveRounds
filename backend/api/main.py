@@ -4760,7 +4760,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:54525 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:55084 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4826,7 +4826,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:54326 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:54885 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4896,7 +4896,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:53657 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:54216 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7677,6 +7677,18 @@ _FFA_LEAVE_FIGURE_BUILD = 1
 # release train and read by nothing else (#306). Absent on any build
 # before it.
 _REGION_PICK_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the rehearsal-four batch (queue_poll's two contended give-ups
+# roll back before their 503, match_hold's refusals commit their audit row
+# through _commit_fresh, the readmit route acts only on a step it names),
+# reported on /health as `rehearsal_four_build`. It names build identity
+# only. The batch adds no route, and what it changes is seen by no phase of
+# the train, so without it the train could not tell a box on the new build
+# from a stale one (learnings 780, 794).
+# A code constant, equal on both boxes by construction, probed by the
+# release train and read by nothing else (#306). Absent on any build
+# before it.
+_REHEARSAL_FOUR_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
@@ -7753,6 +7765,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               tzdata_declared=_TZDATA_DECLARED_BUILD,
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               region_pick_build=_REGION_PICK_BUILD,
+                              rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7814,6 +7827,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               tzdata_declared=_TZDATA_DECLARED_BUILD,
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               region_pick_build=_REGION_PICK_BUILD,
+                              rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -20237,7 +20251,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         # the client's next 3s poll re-enters cleanly; a 5xx leaves client state
         # untouched, whereas any 200 body would be acted on.
         print(f"[QUEUE-POLL] {steam_id} pair kept changing under lock acquisition; asking for a retry")
-        await db.commit()
+        await db.rollback()
         raise HTTPException(status_code=503, detail="queue_contended")
 
     now = datetime.now(timezone.utc)
@@ -20624,7 +20638,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             # honest answer is a retry: the client's next 3 s poll enters it
             # cleanly. Same precedent, and same status, as the pair-inversion
             # give-up above; any 200 body would be acted on instead.
-            await db.commit()
+            await db.rollback()
             raise HTTPException(status_code=503, detail="queue_contended")
 
         wait_seconds = int((datetime.now(timezone.utc)
@@ -64062,7 +64076,7 @@ async def _asm_readmit_work(ctx, pid, req) -> dict:
         return await _rdm_bind(ctx, pid, me, req)
     if req.step == "decline":
         return await _rdm_decline(ctx, pid, me, req)
-    return await _rdm_entered(ctx, pid, me, req)
+    if req.step == "entered": return await _rdm_entered(ctx, pid, me, req)  # noqa: E701
 
 
 class _AsmReadmitReq(BaseModel):

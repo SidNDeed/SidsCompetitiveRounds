@@ -18,6 +18,8 @@ current, and the notice becomes false and this test goes red.
 import re
 from pathlib import Path
 
+from changelog_release import one_bullet
+
 REPO = Path(__file__).resolve().parents[2]
 PORTRAIT = (REPO / "plugin" / "PortraitRender.cs").read_text(encoding="utf-8")
 CHANGELOG = (REPO / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -37,8 +39,9 @@ def test_a_stored_picture_is_current_only_when_its_descriptor_matches():
 
 
 def test_the_notes_say_so_under_v1410():
-    head = CHANGELOG[:CHANGELOG.index("## v1.40.3")]
-    assert "## v1.41.0" in head
-    flat = " ".join(head.split())
-    assert "every stored card picture is out of date" in flat
-    assert "the first time you open Player Cards on this version" in flat
+    # The v1.41.0 bullet itself, not everything above v1.40.3: once a newer
+    # release sits above v1.41.0, its prose would satisfy a reader of that
+    # whole head while v1.41.0's own bullet said something else (the class of
+    # REHEARSAL-FOUR round 1, finding 4).
+    bullet = one_bullet("1.41.0", "every stored card picture is out of date", CHANGELOG)
+    assert "the first time you open Player Cards on this version" in bullet

@@ -1,0 +1,1367 @@
+"""The covered set of the read-only bound and its role harness (ruling
+REHEARSAL-FOUR-R7-A1 M1).
+
+COVERED is the frozen list of every SQL position the (since retired) S
+analysis classified as 'read' inside a span the a1 walk or the gate walk
+walks, enumerated mechanically at 3130bb9d by the ro_spy plugin while those
+walks ran. WRITERS is the same enumeration's 'lock' positions: a lock is a
+writer, so none is in the read-only claim. Each entry: (walk, file, line,
+end_line, span). Round 8 (M1): the walks classify an execute by a frozen
+lookup over these tables (an execute reads only at a COVERED position whose
+OUTCOME is 'ok'); test_r8_ro_covered_pg re-enumerates every position the
+walks ask the lookup about and asserts that set equals COVERED and WRITERS
+together, both ways.
+
+The harness: a role engine whose every new connection asserts SELECT
+current_user, session_user equals the role before any statement, and a
+session class that records, for every execute the production code issues,
+the production frame's file and line (the first frame under backend/api)
+and the outcome ('ok' or the SQLSTATE).
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+from sqlalchemy import event, text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+API_DIR = os.path.normcase(os.path.normpath(os.path.join(HERE, "..", "api")))
+
+# The two walks, as pytest node ids relative to backend/tests: the tests
+# whose walks the enumeration runs (every test of the a1 file and the gate
+# file's source walks; the gate file's live cases open a database and walk
+# nothing).
+A1_WALK = ("test_a1_identity_formation.py",)
+GATE_WALK = (
+    "test_match_hold_admission_gate_pg.py::test_h3_every_admission_site_uses_shared_gate_recheck_and_rollback",
+    "test_match_hold_admission_gate_pg.py::test_h3_direct_refusal_is_the_claims_first_write",
+    "test_match_hold_admission_gate_pg.py::test_h3_real_hold_replay_is_read_and_classified",
+    "test_match_hold_admission_gate_pg.py::test_r7_prior_findings_are_refused",
+    "test_match_hold_admission_gate_pg.py::test_r7_grammar_covers_every_walked_span_and_body",
+)
+
+# Frozen at 3130bb9d from the ro_spy enumeration of both walks (35 positions).
+COVERED = (
+    ('a1', 'main.py', 16858, 16858, '_lease_admission_gate'),
+    ('a1', 'main.py', 16898, 16898, '_lease_admission_gate'),
+    ('a1', 'main.py', 16901, 16901, '_lease_admission_gate'),
+    ('a1', 'main.py', 16916, 16921, '_lease_admission_gate'),
+    ('a1', 'main.py', 16927, 16939, '_lease_admission_gate'),
+    ('a1', 'main.py', 16954, 16964, '_lease_admission_gate'),
+    ('a1', 'main.py', 17463, 17466, '_lease_live_claim_strict'),
+    ('a1', 'main.py', 18787, 18790, '_group_region'),
+    ('a1', 'main.py', 20674, 20676, 'queue_poll'),
+    ('a1', 'main.py', 20677, 20679, 'queue_poll'),
+    ('a1', 'main.py', 49986, 49989, 'team_queue_poll'),
+    ('a1', 'main.py', 50017, 50019, 'team_queue_poll'),
+    ('a1', 'main.py', 50141, 50145, 'team_queue_poll'),
+    ('a1', 'main.py', 50146, 50147, 'team_queue_poll'),
+    ('a1', 'main.py', 50196, 50198, 'team_queue_poll'),
+    ('a1', 'main.py', 51310, 51314, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 51956, 51958, '_team_lock_family_pick'),
+    ('a1', 'main.py', 51988, 51988, '_team_lock_family_pick'),
+    ('a1', 'main.py', 52054, 52056, '_team_resolve_live_family'),
+    ('a1', 'main.py', 53963, 53965, 'ovt_queue_poll'),
+    ('a1', 'main.py', 54003, 54006, 'ovt_queue_poll'),
+    ('a1', 'main.py', 56558, 56563, '_rules_members'),
+    ('a1', 'main.py', 57390, 57396, '_player_body_color'),
+    ('a1', 'main.py', 65383, 65385, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 65405, 65407, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 65448, 65452, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 65462, 65464, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 73732, 73735, '_service_player_uuids'),
+    ('a1', 'match_hold.py', 381, 384, '_hold_latch'),
+    ('a1', 'match_report_window.py', 87, 89, 'series_holds'),
+    ('a1', 'tournaments.py', 301, 307, '_region_candidate_volumes'),
+    ('gate', 'main.py', 63821, 63824, '_rdm_row'),
+    ('gate', 'main.py', 63907, 63910, '_rdm_claim'),
+    ('gate', 'match_hold.py', 243, 243, '_ctx_now'),
+    ('gate', 'match_hold.py', 818, 821, '_open_attempt_row'),
+)
+
+# The same enumeration's 'lock' positions (14): writers, never in the claim.
+WRITERS = (
+    ('a1', 'main.py', 16420, 16421, '_lock_queue_rows_ordered'),
+    ('a1', 'main.py', 16423, 16424, '_lock_queue_rows_ordered'),
+    ('a1', 'main.py', 16426, 16427, '_lock_queue_rows_ordered'),
+    ('a1', 'main.py', 16429, 16430, '_lock_queue_rows_ordered'),
+    ('a1', 'main.py', 16869, 16879, '_lease_admission_gate'),
+    ('a1', 'main.py', 16881, 16883, '_lease_admission_gate'),
+    ('a1', 'main.py', 16887, 16889, '_lease_admission_gate'),
+    ('a1', 'main.py', 17436, 17439, '_lock_snapshot_rows'),
+    ('a1', 'main.py', 51284, 51288, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 51307, 51309, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 51898, 51900, '_team_quartet_lock'),
+    ('a1', 'main.py', 51963, 51978, '_team_lock_family_pick'),
+    ('gate', 'main.py', 63917, 63919, '_rdm_claim'),
+    ('gate', 'match_hold.py', 569, 569, '_hold_row'),
+)
+
+
+# Measured (test_r8_ro_covered_pg, under scr_seat_ro on a granted clone of
+# scr_seat_ro_tmpl): 'ok', or ('not reached', <the statement that the role
+# refused first on the driven path>, SQLSTATE). A 'not reached' position
+# leaves the read-only claim (a QUESTION in the hand-back).
+# Ruling REHEARSAL-R8-A1 E2: 'ok' also requires that the lock read inside
+# the transaction at the end of every run of the position found no row
+# beyond the declared expected ones (unexpected_locks); a position that ran
+# but whose read found one is ('lock', rows) and leaves the claim: measured
+# at 51956 (the advisory transaction lock 51898 took earlier in the same
+# transaction; r9-ro-measure1, RF/r9/ro). A position read under a grant whose
+# read found one keeps its role outcome here and its grant outcome in
+# GRANT_OUTCOME ('lock under grant'): 16901, 16916, 16927, 16954 (the
+# FOR NO KEY UPDATE of 16881), 51988 (51963's FOR UPDATE), 65383 (an
+# advisory lock and ffa_queue row locks) and match_hold.py:381 (380's
+# UPDATE).
+OUTCOME = {
+    ('a1', 'main.py', 16858, 16858, '_lease_admission_gate'): 'ok',
+    ('a1', 'main.py', 16898, 16898, '_lease_admission_gate'): ('not reached', 'main.py:16881', '25006'),
+    ('a1', 'main.py', 16901, 16901, '_lease_admission_gate'): ('not reached', 'main.py:16881', '25006'),
+    ('a1', 'main.py', 16916, 16921, '_lease_admission_gate'): ('not reached', 'main.py:16881', '25006'),
+    ('a1', 'main.py', 16927, 16939, '_lease_admission_gate'): ('not reached', 'main.py:16881', '25006'),
+    ('a1', 'main.py', 16954, 16964, '_lease_admission_gate'): ('not reached', 'main.py:16881', '25006'),
+    ('a1', 'main.py', 17463, 17466, '_lease_live_claim_strict'): 'ok',
+    ('a1', 'main.py', 18787, 18790, '_group_region'): 'ok',
+    ('a1', 'main.py', 20674, 20676, 'queue_poll'): ('not reached', 'main.py:20131', '25006'),
+    ('a1', 'main.py', 20677, 20679, 'queue_poll'): ('not reached', 'main.py:20131', '25006'),
+    ('a1', 'main.py', 49986, 49989, 'team_queue_poll'): ('not reached', 'main.py:16423', '25006'),
+    ('a1', 'main.py', 50017, 50019, 'team_queue_poll'): ('not reached', 'main.py:16423', '25006'),
+    ('a1', 'main.py', 50141, 50145, 'team_queue_poll'): ('not reached', 'main.py:16423', '25006'),
+    ('a1', 'main.py', 50146, 50147, 'team_queue_poll'): ('not reached', 'main.py:16423', '25006'),
+    ('a1', 'main.py', 50196, 50198, 'team_queue_poll'): ('ok-under-grant', ('UPDATE team_queue',), 0, ('not reached', 'main.py:16423', '25006')),
+    ('a1', 'main.py', 51310, 51314, '_reconcile_team_series_bets'): ('not reached', 'main.py:51284', '25006'),
+    ('a1', 'main.py', 51956, 51958, '_team_lock_family_pick'): ('lock', ('advisory ExclusiveLock',)),
+    ('a1', 'main.py', 51988, 51988, '_team_lock_family_pick'): ('not reached', 'main.py:51963', '25006'),
+    ('a1', 'main.py', 52054, 52056, '_team_resolve_live_family'): ('not reached', 'main.py:51963', '25006'),
+    ('a1', 'main.py', 53963, 53965, 'ovt_queue_poll'): ('not reached', 'main.py:16426', '25006'),
+    ('a1', 'main.py', 54003, 54006, 'ovt_queue_poll'): ('ok-under-grant', ('DELETE ovt_queue', 'UPDATE ovt_queue'), 0, ('not reached', 'main.py:16426', '25006')),
+    ('a1', 'main.py', 56558, 56563, '_rules_members'): 'ok',
+    ('a1', 'main.py', 57390, 57396, '_player_body_color'): 'ok',
+    ('a1', 'main.py', 65383, 65385, '_ffa_queue_poll_inner'): ('not reached', 'main.py:17436', '25006'),
+    ('a1', 'main.py', 65405, 65407, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:17436', '25006')),
+    ('a1', 'main.py', 65448, 65452, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:17436', '25006')),
+    ('a1', 'main.py', 65462, 65464, '_ffa_queue_poll_inner'): ('not reached', 'main.py:17436', '25006'),
+    ('a1', 'main.py', 73732, 73735, '_service_player_uuids'): 'ok',
+    ('a1', 'match_hold.py', 381, 384, '_hold_latch'): ('not reached', 'match_hold.py:380', '25006'),
+    ('a1', 'match_report_window.py', 87, 89, 'series_holds'): 'ok',
+    ('a1', 'tournaments.py', 301, 307, '_region_candidate_volumes'): 'ok',
+    ('gate', 'main.py', 63821, 63824, '_rdm_row'): 'ok',
+    ('gate', 'main.py', 63907, 63910, '_rdm_claim'): 'ok',
+    ('gate', 'match_hold.py', 243, 243, '_ctx_now'): 'ok',
+    ('gate', 'match_hold.py', 818, 821, '_open_attempt_row'): 'ok',
+}
+
+# Measured for the writer positions: the role's refusal (25006), a position
+# the driven path did not reach, or 'ok' where the role cannot refuse the
+# statement (a transaction-local set_config, an advisory transaction lock):
+# those two are writers by S whose bound the role does not measure.
+# Ruling R-A: every WRITERS position answers 'lock' in the walks' lookup,
+# and each lock moves to the bound measured here: refused under the role
+# (25006) for the 10 reached (16420, 16423, 16426, 16429, 16881, 17436,
+# 51284, 51963, 63917, match_hold.py:569); not reached for 16887 (after
+# 16881) and 51307 (after 51284); and for main.py:16869 (a transaction-local
+# set_config of lock_timeout) and main.py:51898 (pg_advisory_xact_lock),
+# 'ok' under the role, so their bound is the walk's lock rule alone (a
+# QUESTION for the reviewer). Round 9 (E2): the lock read now measures the
+# writers too: 51898 is ('lock', ('advisory ExclusiveLock',)), its advisory
+# lock measured; 16869 holds no lock beyond the expected rows. Round 10
+# (REHEARSAL-R9-A1 (B)): its transaction-local set_config of lock_timeout
+# is now MEASURED as an effect by the continuity bracket's residue reading
+# (pg_settings lock_timeout 0 -> 1000 across the position; r10-ro-measure1,
+# RF/r10/ro), so its bound is a measurement, no longer the walk's lock rule
+# alone; it stays 'lock' in the lookup (every WRITERS position does).
+WRITER_OUTCOME = {
+    ('a1', 'main.py', 16420, 16421, '_lock_queue_rows_ordered'): '25006',
+    ('a1', 'main.py', 16423, 16424, '_lock_queue_rows_ordered'): '25006',
+    ('a1', 'main.py', 16426, 16427, '_lock_queue_rows_ordered'): '25006',
+    ('a1', 'main.py', 16429, 16430, '_lock_queue_rows_ordered'): '25006',
+    ('a1', 'main.py', 16869, 16879, '_lease_admission_gate'):
+        ('continuity', ('setting lock_timeout=0', 'setting lock_timeout=1000')),
+    ('a1', 'main.py', 16881, 16883, '_lease_admission_gate'): '25006',
+    ('a1', 'main.py', 16887, 16889, '_lease_admission_gate'): ('not reached', 'main.py:16881', '25006'),
+    ('a1', 'main.py', 17436, 17439, '_lock_snapshot_rows'): '25006',
+    ('a1', 'main.py', 51284, 51288, '_reconcile_team_series_bets'): '25006',
+    ('a1', 'main.py', 51307, 51309, '_reconcile_team_series_bets'): ('not reached', 'main.py:51284', '25006'),
+    ('a1', 'main.py', 51898, 51900, '_team_quartet_lock'): ('lock', ('advisory ExclusiveLock',)),
+    ('a1', 'main.py', 51963, 51978, '_team_lock_family_pick'): '25006',
+    ('gate', 'main.py', 63917, 63919, '_rdm_claim'): '25006',
+    ('gate', 'match_hold.py', 569, 569, '_hold_row'): '25006',
+}
+
+# Ruling R-C: the 28 execute positions the walks visit that are in neither
+# table (31 since round 11's rule N (B), the three at the end).
+# Each answers 'write' (the conservative default, no bound needed).
+# Evidence that the retired S analysis answered 'write' at each: ro's
+# baseline spy records at 3130bb9d (RF/r8/ro/spy-a1.json, spy-gate.json;
+# main.py and match_hold.py unchanged at these lines since) hold only
+# 'write' for every one; the visited set is the round-8 enumeration
+# (RF/r8/sr/enum-sr.json at 0ef7ccbf).
+VISITED_WRITES = (
+    ('a1', 'main.py', 4342, 4346, '_team_clear_dc_fallback_marker'),
+    ('a1', 'main.py', 16988, 17008, '_lease_acquire'),
+    ('a1', 'main.py', 20720, 20728, 'queue_poll'),
+    ('a1', 'main.py', 28534, 28536, '_credit_bet_fighter_tax'),
+    ('a1', 'main.py', 38046, 38050, '_return_stake_exactly'),
+    ('a1', 'main.py', 50299, 50313, 'team_queue_poll'),
+    ('a1', 'main.py', 50332, 50340, 'team_queue_poll'),
+    ('a1', 'main.py', 50343, 50362, 'team_queue_poll'),
+    ('a1', 'main.py', 51331, 51336, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 51339, 51342, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 51348, 51350, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 52016, 52021, '_team_lock_family_pick'),
+    ('a1', 'main.py', 52106, 52117, '_team_relock_existing_series'),
+    ('a1', 'main.py', 52126, 52148, '_team_relock_existing_series'),
+    ('a1', 'main.py', 52155, 52157, '_team_relock_existing_series'),
+    ('a1', 'main.py', 54034, 54041, 'ovt_queue_poll'),
+    ('a1', 'main.py', 54047, 54052, 'ovt_queue_poll'),
+    ('a1', 'main.py', 57463, 57469, '_stamp_team_series_colors'),
+    ('a1', 'main.py', 65479, 65487, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 65489, 65495, '_ffa_queue_poll_inner'),
+    ('a1', 'match_hold.py', 380, 380, '_hold_latch'),
+    ('gate', 'main.py', 61452, 61464, '_asm_deferred_departure'),
+    ('gate', 'main.py', 61467, 61469, '_asm_deferred_departure'),
+    ('gate', 'main.py', 61470, 61472, '_asm_deferred_departure'),
+    ('gate', 'main.py', 63536, 63538, '_rdm_attempt'),
+    ('gate', 'main.py', 63637, 63641, '_rdm_end_hold'),
+    ('gate', 'main.py', 63646, 63650, '_rdm_end_hold'),
+    ('gate', 'main.py', 63652, 63657, '_rdm_end_hold'),
+    # Round 11, rule N member (B) (ruling FOUR-R11-A20 (1)): the gate walk
+    # discharges _guard_identities' sorted and .mappings().all by their bound
+    # and now walks on, reaching three more executes (the live enumeration at
+    # c26c04f4): the advisory lock and the players read of _guard_identities
+    # and the attempt INSERT of _write_open_attempt. In neither table, each
+    # answers 'write' in the lookup (lookup_table: an absent position is a
+    # write), the conservative answer; none enters the read-only claim.
+    ('gate', 'match_hold.py', 256, 257, '_guard_identities'),
+    ('gate', 'match_hold.py', 260, 263, '_guard_identities'),
+    ('gate', 'match_hold.py', 767, 777, '_write_open_attempt'),
+)
+
+
+def green(outcome):
+    """Whether a COVERED position's OUTCOME admits it as a read: 'ok' under
+    the read-only role, or ('ok-under-grant', grants, delta) measured with
+    the path's refusing statements granted and a zero write delta around the
+    position (ruling R-B). Both are measured outcomes that already carry the
+    lock read (ruling REHEARSAL-R8-A1 E2): 'ok' and 'ok-under-grant' are
+    given only when every run of the position was followed by a lock read
+    inside its transaction that found no row beyond the declared expected
+    ones (unexpected_locks); a position whose read found one is ('lock',
+    rows) or ('lock under grant', grants, rows), never green."""
+    return outcome == "ok" or (isinstance(outcome, tuple) and outcome[0] == "ok-under-grant"
+                               and outcome[2] == 0)
+
+
+def lookup_table():
+    """The walks' frozen lookup table (ruling R-A): {(file, line, end):
+    'read' | 'lock'}; 'lock' for every WRITERS position, 'read' for every
+    COVERED position whose OUTCOME is green. An absent position is a write."""
+    table = {e[1:4]: "lock" for e in WRITERS}
+    table.update({e[1:4]: "read" for e in COVERED if green(OUTCOME[e])})
+    return table
+
+
+def role_outcome(entry):
+    """A COVERED position's outcome under the read-only role itself: OUTCOME,
+    or, for a position read under a grant (ruling R-B), the role outcome it
+    carries as its last element."""
+    o = OUTCOME[entry]
+    return o[3] if isinstance(o, tuple) and o[0] == "ok-under-grant" else o
+
+
+# Ruling R-B: the grant run's measured outcome at every position the role
+# did not reach that stays a write (not reached, refused, or a nonzero
+# delta under its grants): the reason, as measured. Ruling REHEARSAL-R8-A1
+# E2: or reached with a zero delta but holding, at the end of the position
+# inside its transaction, a lock beyond the declared expected rows ('lock
+# under grant', grants, the unexpected rows as measured on PostgreSQL 16.9:
+# a row-locking SELECT holds RowShareLock on the table AND on every index of
+# it, plus the transaction id the row lock assigned; no tuple row appears
+# without a waiter). The first seven entries were 'ok-under-grant' in
+# round 8 and leave the read-only claim (r9-ro-measure1, RF/r9/ro).
+GRANT_OUTCOME = {
+    ('a1', 'main.py', 16901, 16901, '_lease_admission_gate'):
+        ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 16916, 16921, '_lease_admission_gate'):
+        ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 16927, 16939, '_lease_admission_gate'):
+        ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 16954, 16964, '_lease_admission_gate'):
+        ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 51988, 51988, '_team_lock_family_pick'):
+        ('lock under grant', ('UPDATE team_series',), ('relation RowShareLock idx_team_series_dc_fallback_at', 'relation RowShareLock idx_team_series_dc_grace', 'relation RowShareLock idx_team_series_status', 'relation RowShareLock idx_team_series_t1a', 'relation RowShareLock idx_team_series_t1b', 'relation RowShareLock idx_team_series_t2a', 'relation RowShareLock idx_team_series_t2b', 'relation RowShareLock team_series', 'relation RowShareLock team_series_pkey', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 65383, 65385, '_ffa_queue_poll_inner'):
+        ('lock under grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), ('advisory ExclusiveLock', 'relation RowShareLock ffa_queue', 'relation RowShareLock ffa_queue_pkey', 'relation RowShareLock idx_ffa_queue_held_until', 'relation RowShareLock idx_ffa_queue_lobby', 'relation RowShareLock idx_ffa_queue_status', 'transactionid ExclusiveLock')),
+    ('a1', 'match_hold.py', 381, 384, '_hold_latch'):
+        ('lock under grant', ('UPDATE team_series',), ('relation RowExclusiveLock idx_team_series_dc_fallback_at', 'relation RowExclusiveLock idx_team_series_dc_grace', 'relation RowExclusiveLock idx_team_series_status', 'relation RowExclusiveLock idx_team_series_t1a', 'relation RowExclusiveLock idx_team_series_t1b', 'relation RowExclusiveLock idx_team_series_t2a', 'relation RowExclusiveLock idx_team_series_t2b', 'relation RowExclusiveLock team_series', 'relation RowExclusiveLock team_series_pkey', 'transactionid ExclusiveLock')),
+    ('a1', 'main.py', 16898, 16898, '_lease_admission_gate'):
+        ('not reached under grant', ('UPDATE players',), None),
+    ('a1', 'main.py', 20674, 20676, 'queue_poll'):
+        ('not reached under grant', ('DELETE queue_blocks', 'UPDATE queue_blocks', 'UPDATE ranked_queue'), None),
+    ('a1', 'main.py', 20677, 20679, 'queue_poll'):
+        ('not reached under grant', ('DELETE queue_blocks', 'UPDATE queue_blocks', 'UPDATE ranked_queue'), None),
+    ('a1', 'main.py', 49986, 49989, 'team_queue_poll'):
+        ('not reached under grant', ('UPDATE team_queue',), None),
+    ('a1', 'main.py', 50017, 50019, 'team_queue_poll'):
+        ('not reached under grant', ('UPDATE team_queue',), None),
+    ('a1', 'main.py', 50141, 50145, 'team_queue_poll'):
+        ('not reached under grant', ('UPDATE team_queue',), None),
+    ('a1', 'main.py', 50146, 50147, 'team_queue_poll'):
+        ('not reached under grant', ('UPDATE team_queue',), None),
+    ('a1', 'main.py', 51310, 51314, '_reconcile_team_series_bets'):
+        ('not reached under grant', ('UPDATE team_series',), None),
+    ('a1', 'main.py', 52054, 52056, '_team_resolve_live_family'):
+        ('not reached under grant', ('UPDATE team_series',), None),
+    ('a1', 'main.py', 53963, 53965, 'ovt_queue_poll'):
+        ('not reached under grant', ('DELETE ovt_queue', 'UPDATE ovt_queue'), None),
+    ('a1', 'main.py', 65462, 65464, '_ffa_queue_poll_inner'):
+        ('not reached under grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), None),
+}
+
+
+SKIP_TESTS = ("::test_r8_sr_the_lookup_reads_only_the_covered_ok_positions",)
+
+
+def enumerate_positions(python=sys.executable, timeout=7200):
+    """Run both walks under the ro_spy plugin (a subprocess pytest in this
+    directory) and return (positions, ambiguous, synthetic_count, rc):
+    positions the set of (walk, file, line, end_line, span, kind) of every
+    'real' record whose module is under backend/api, whatever the lookup
+    answered; ambiguous the 'ambiguous' records under backend/api and every
+    record whose kind is not the answer of the table the walk passed for
+    its position ('write' when absent).
+    The lookup's own unit test (SKIP_TESTS) asks about every table position
+    by construction and walks nothing; its records are left out.
+    RO8_ENUM_SAVE names a file the enumeration is also written to (the
+    mutant runs read it back through RO8_ENUM_FROM)."""
+    fd, out = tempfile.mkstemp(prefix="ro_spy_", suffix=".json")
+    os.close(fd)
+    env = dict(os.environ, RO_SPY_OUT=out)
+    env.pop("PYTEST_ADDOPTS", None)
+    try:
+        proc = subprocess.run(
+            [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "ro_spy"]
+            + list(A1_WALK) + list(GATE_WALK),
+            cwd=HERE, env=env, capture_output=True, text=True, timeout=timeout)
+        with open(out, encoding="utf-8") as fh:
+            data = json.load(fh)
+    finally:
+        os.unlink(out)
+    positions, ambiguous, synthetic = set(), [], 0
+    for r in data["records"]:
+        test = r["test"] or ""
+        walk = "gate" if test.startswith("test_match_hold_admission_gate_pg") else "a1"
+        path = os.path.normcase(os.path.normpath(r["path"] or ""))
+        under_api = path.startswith(API_DIR + os.sep)
+        if r["status"] == "synthetic":
+            synthetic += 1
+            continue
+        if r["status"] == "ambiguous":
+            if under_api:
+                ambiguous.append(r)
+            continue
+        if not under_api or test.split("[")[0].endswith(SKIP_TESTS):
+            continue
+        if r["kind"] != r["table_kind"]:
+            ambiguous.append(r)
+        positions.add((walk, os.path.basename(path), r["line"], r["end"], r["span"],
+                       r["kind"]))
+    save = os.environ.get("RO8_ENUM_SAVE")
+    if save:
+        with open(save, "w", encoding="utf-8") as fh:
+            json.dump({"positions": sorted(positions), "ambiguous": ambiguous}, fh)
+    return positions, ambiguous, synthetic, (proc.returncode, proc.stdout[-2000:])
+
+
+WHO_SQL = "SELECT current_user, session_user"
+
+
+class IdentityError(AssertionError):
+    pass
+
+
+def role_engine(dsn, schema, expect, checked, read_write=False):
+    """A NullPool engine on `dsn` with search_path `schema`; every new
+    connection asserts its identity is `expect` (appending to `checked`).
+    `read_write` (the grant run, ruling R-B) sets the session's transactions
+    READ WRITE after the identity check, so the grant layer (42501) is what
+    refuses a write the run did not grant (and again after every RESET ALL
+    a measured position is followed by, FIX-R11-RES)."""
+    engine = create_async_engine(
+        dsn.replace("postgresql://", "postgresql+asyncpg://"), poolclass=NullPool,
+        connect_args={"server_settings": {"search_path": '"%s"' % schema}})
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _who(dbapi_conn, _rec):
+        row = dbapi_conn.run_async(lambda c: c.fetchrow(WHO_SQL))
+        got = (row[0], row[1])
+        if got != (expect, expect):
+            raise IdentityError(
+                "a covered connection runs as current_user=%s session_user=%s, "
+                "not as %s" % (got[0], got[1], expect))
+        checked.append(got)
+        for stmt in state["setup"]:
+            dbapi_conn.run_async(lambda c, stmt=stmt: c.execute(stmt))
+
+    # FIX-R11-RES: the engine's capture of every statement text any of its
+    # connections runs while a position's capture window is open (bound to
+    # this engine object; a session on an engine without it measures nothing
+    # and is never 'ok'), and the session setup RESET ALL must not undo.
+    state = {"texts": None,
+             "setup": (READ_WRITE_SQL,) if read_write else ()}
+    engine.sync_engine.rf11_capture = state
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _capture(_conn, _cursor, statement, _params, _context, _many):
+        texts = state["texts"]
+        if texts is not None:
+            texts.append(statement)
+
+    return engine
+
+
+READ_WRITE_SQL = "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE"
+
+
+def _capture_state(session):
+    """The capture state of the engine `session` is bound to (role_engine's),
+    or None."""
+    return getattr(getattr(session.bind, "sync_engine", None), "rf11_capture", None)
+
+
+def _site():
+    f = sys._getframe(2)
+    while f is not None:
+        path = os.path.normcase(os.path.normpath(f.f_code.co_filename))
+        if path.startswith(API_DIR + os.sep):
+            return os.path.basename(path), f.f_lineno
+        f = f.f_back
+    return None, None
+
+
+def _sqlstate(exc):
+    for e in (exc, getattr(exc, "orig", None),
+              getattr(getattr(exc, "orig", None), "__cause__", None)):
+        s = getattr(e, "sqlstate", None)
+        if isinstance(s, str) and len(s) == 5:
+            return s
+    return None
+
+
+# Ruling REHEARSAL-R8-A1 E2: the locks the backend holds, read inside the
+# transaction at the end of every measured position (after its statement,
+# before the transaction ends).
+LOCKS_SQL = (
+    "SELECT locktype, mode, granted, relation::pg_catalog.regclass::text,"
+    " virtualxid, virtualtransaction"
+    " FROM pg_catalog.pg_locks WHERE pid = pg_catalog.pg_backend_pid()")
+
+# The declared expected rows, one by one with the reason; every other row
+# refuses the read classification (the direction rule: refuse by default):
+#   virtualxid ExclusiveLock on the backend's OWN virtual transaction id
+#       (virtualxid = virtualtransaction): every transaction holds it from
+#       its first statement; it locks nothing another session uses;
+#   relation AccessShareLock (granted): the lock every plain SELECT takes on
+#       each relation it reads (pg_locks itself included); it conflicts only
+#       with ACCESS EXCLUSIVE.
+# Refused, among the rest: RowShareLock (SELECT FOR UPDATE / FOR NO KEY
+# UPDATE / FOR SHARE / FOR KEY SHARE), RowExclusiveLock and stronger
+# relation locks, tuple and transactionid locks (a row lock assigns the
+# transaction an id), advisory locks (pg_advisory_lock and
+# pg_advisory_xact_lock, either key form), object, page and extend locks,
+# another backend's virtualxid, and any row not granted.
+
+
+def unexpected_locks(rows):
+    """The rows of a LOCKS_SQL read that refuse a read classification, each
+    as 'locktype mode[ relation][ waiting]', sorted and distinct."""
+    out = set()
+    for locktype, mode, granted, rel, vxid, vtx in rows:
+        if (granted and locktype == "virtualxid" and mode == "ExclusiveLock"
+                and vxid is not None and vxid == vtx):
+            continue
+        if granted and locktype == "relation" and mode == "AccessShareLock":
+            continue
+        desc = "%s %s" % (locktype, mode)
+        if rel is not None:
+            desc += " " + rel
+        if locktype == "virtualxid":
+            desc += " (another backend's)"
+        if not granted:
+            desc += " waiting"
+        out.add(desc)
+    return tuple(sorted(out))
+
+
+def _in(site, spans):
+    return site[0] is not None and site[1] is not None and any(
+        site[0] == t[0] and t[1] <= site[1] <= t[2] for t in spans)
+
+
+# Ruling REHEARSAL-R9-A1 (B), transaction continuity: IDENTITY, never
+# presence. A measured position is one production statement at a site in
+# self.info['lock_targets'] or self.info['targets']. Inside its transaction,
+# before the statement, the harness sets a position token the program cannot
+# know (a transaction-local setting, POSITION_GUC, to a fresh random value)
+# and reads the backend's own virtual transaction id (pg_locks, locktype
+# virtualxid, this pid, virtualxid = virtualtransaction) and the session's
+# residue; after the statement and after every measurement read of the
+# position (the write counters, the lock read), still before any harness
+# rollback, it reads all three again. The position is the SAME transaction
+# only when the token reads back unchanged AND exactly one own virtualxid row
+# was read at each end AND they are equal. A transaction-local setting ends
+# with its transaction, and every transaction has a new virtual transaction
+# id, so COMMIT, COMMIT AND CHAIN, ROLLBACK, ROLLBACK AND CHAIN, END, ABORT,
+# PREPARE TRANSACTION (and any other form that ends the transaction) all fail
+# it, whatever the program does next. Such a position is an EFFECT
+# (('txn ended', ...) / ('txn ended under grant', ...)), never a read and
+# never 'ok'.
+# Session residue: each driver runs on its own NullPool engine, disposed
+# after the driver (the connection a driver's positions ran on is never
+# reused by another driver: discarded). Within one driver the residue is
+# MEASURED at both ends of every position and a difference refuses it
+# ('residue'): every server setting (pg_settings: a SET, SET LOCAL or
+# set_config by the program, RESET), SQL-level prepared statements, holdable
+# cursors, LISTEN channels and objects in the session's temporary schema;
+# session-level advisory locks are the lock read's. And once a position on a
+# session failed continuity or left residue, every later measured position
+# on that session is refused too ('after txn ended', the first failing site):
+# whatever it ran in is no longer the transaction the driver began.
+# Ruling FOUR-R10-A2 (3) FIX-R11-RES (rulings FOUR-R11-A6 (2) to (5)): on
+# PostgreSQL 16.9 (55432; RF11 logs r11-res-probe-55432-20261106T065356Z.log
+# and r11-res-probe2-55432-20261106T090205Z.log) pg_settings had no row for a
+# custom placeholder the session set, nor for role, session_authorization,
+# is_superuser or seed. The residue is therefore compared through pg_settings
+# for the names it carries, and otherwise: the text reading counts every
+# session-scope settings form as residue (settings_forms), every name the
+# texts set is read on the session (placeholder_residue), and every measured
+# position is followed by RESET ALL and a check that each such name and the
+# position token read their reset value (not_reset; recorded in
+# self.info['gone']). pg_settings itself is compared at both ends of every
+# measured position, whatever statement or function changed it.
+POSITION_GUC = "rf10.position"
+POSITION_START_SQL = (
+    "SELECT pg_catalog.set_config('rf10.position', :token, true),"
+    " ARRAY(SELECT virtualxid FROM pg_catalog.pg_locks"
+    " WHERE pid = pg_catalog.pg_backend_pid() AND locktype = 'virtualxid'"
+    " AND virtualxid = virtualtransaction AND granted ORDER BY 1),"
+    " pg_catalog.pg_backend_pid() || ' ' || (SELECT backend_start::text"
+    " FROM pg_catalog.pg_stat_activity WHERE pid = pg_catalog.pg_backend_pid())")
+POSITION_END_SQL = (
+    "SELECT pg_catalog.current_setting('rf10.position', true),"
+    " ARRAY(SELECT virtualxid FROM pg_catalog.pg_locks"
+    " WHERE pid = pg_catalog.pg_backend_pid() AND locktype = 'virtualxid'"
+    " AND virtualxid = virtualtransaction AND granted ORDER BY 1)")
+# FIX-R11-RES, measured on PostgreSQL 16.9 (55432, rolled-back transactions;
+# RF11 logs r11-res-probe-55432-20261106T065356Z.log, 900c03a0, and
+# r11-res-probe2-55432-20261106T090205Z.log, 077d97c1): a custom placeholder
+# set by set_config(name, value, false), by SET, or by set_config(..., true)
+# had 0 rows in pg_settings and in pg_show_all_settings(), and
+# current_setting(name, true) read it; role, session_authorization,
+# is_superuser and seed had no pg_settings row either (current_setting read
+# 'none', the session user, 'on', 'unavailable'; seed read 'unavailable'
+# after setseed(0.5) too). So the settings array also carries role,
+# session_authorization and is_superuser ('hidden <name>=<value>') and the
+# connection's current_user and session_user; seed is refused by the text
+# reading only. On the seat's 16.15, test_r11_res_settings asserts the same
+# placeholder reading and that a temporary function moves pg_proc and not
+# pg_class; temporary objects are counted in nine catalogs.
+HIDDEN_MEASURED = ("role", "session_authorization", "is_superuser", "seed")
+RESIDUE_SQL = (
+    "SELECT ARRAY(SELECT x FROM ("
+    " SELECT name || '=' || setting AS x FROM pg_catalog.pg_settings"
+    " UNION ALL SELECT 'hidden role=' || pg_catalog.current_setting('role')"
+    " UNION ALL SELECT 'hidden session_authorization='"
+    "  || pg_catalog.current_setting('session_authorization')"
+    " UNION ALL SELECT 'hidden is_superuser=' || pg_catalog.current_setting('is_superuser')"
+    " UNION ALL SELECT 'hidden current_user=' || current_user"
+    " UNION ALL SELECT 'hidden session_user=' || session_user) AS r ORDER BY 1),"
+    " (SELECT count(*) FROM pg_catalog.pg_prepared_statements WHERE from_sql),"
+    " (SELECT count(*) FROM pg_catalog.pg_cursors WHERE is_holdable),"
+    " (SELECT count(*) FROM pg_catalog.pg_listening_channels()),"
+    " (SELECT count(*) FROM pg_catalog.pg_class"
+    "  WHERE relnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_proc WHERE pronamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_type WHERE typnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_operator"
+    "  WHERE oprnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_collation"
+    "  WHERE collnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_conversion"
+    "  WHERE connamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_ts_config"
+    "  WHERE cfgnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_ts_dict"
+    "  WHERE dictnamespace = pg_catalog.pg_my_temp_schema())"
+    " + (SELECT count(*) FROM pg_catalog.pg_statistic_ext"
+    "  WHERE stxnamespace = pg_catalog.pg_my_temp_schema())")
+
+# The settings a measured text names, read on the session: each name, its
+# current_setting(name, true) (NULL for a name the session never defined, in
+# the 16.9 probe), and its pg_settings row (setting, reset_val, source; NULL
+# when pg_settings has no row for it).
+NAMED_SETTINGS_SQL = (
+    "SELECT n, pg_catalog.current_setting(n, true), s.setting, s.reset_val,"
+    " s.name IS NOT NULL, s.source"
+    " FROM pg_catalog.unnest(CAST(:names AS text[])) AS n"
+    " LEFT JOIN pg_catalog.pg_settings AS s"
+    " ON pg_catalog.lower(s.name) = pg_catalog.lower(n)"
+    " ORDER BY 1")
+RESET_SQL = "RESET ALL"
+
+# ---- the text reading (a FILTER in the refusing direction) ----------------
+#
+# Every statement text the connection ran inside the position (captured at
+# the engine's before_cursor_execute, so a planted program's statements are
+# read as well as the production statement) is tokenised (comments skipped,
+# strings and quoted identifiers as single tokens, dollar-quoted bodies read
+# as SQL too). Forms counted as residue, never `ok`:
+#   set_config(name, value, is_local) unless is_local is the literal `true`
+#       (false, a parameter, an expression: session scope or unknowable);
+#   set_config whose name is not one plain string literal (the name cannot be
+#       measured), or whose argument list is not three arguments;
+#   a SET statement of any scope but LOCAL, TRANSACTION or CONSTRAINTS
+#       (SET, SET SESSION, SET ROLE, SET SESSION AUTHORIZATION, SET TIME
+#       ZONE, SET SCHEMA, SET NAMES, ...); a SET is a settings statement
+#       unless an UPDATE, ALTER or CREATE precedes it in its statement;
+#   setseed(...) (seed: no pg_settings row, and current_setting read
+#       'unavailable' before and after setseed in the 16.9 probe);
+#   EXECUTE (dynamic SQL: its text is a value, never read) and a U&
+#       unicode-escaped spelling (a name no literal reading can see).
+# The names: every set_config literal name and every SET name, local or not,
+# lowercased; the measurement reads each on the session.
+
+_SQL_WORD = re.compile(r"[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*")
+_SQL_DOLLAR = re.compile(r"\$([A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$")
+_SQL_PARAM = re.compile(r"\$\d+")
+_SQL_NUMBER = re.compile(r"\d+(\.\d*)?([eE][+-]?\d+)?|\.\d+([eE][+-]?\d+)?")
+
+
+def _close_quote(sql, i, q):
+    """The index after the quote that closes a token opened before `i`
+    (a doubled quote is an escaped one); the text's end when unclosed."""
+    n = len(sql)
+    while i < n:
+        if sql[i] == q:
+            if i + 1 < n and sql[i + 1] == q:
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return n
+
+
+def _close_estring(sql, i):
+    n = len(sql)
+    while i < n:
+        if sql[i] == "\\":
+            i += 2
+            continue
+        if sql[i] == "'":
+            if i + 1 < n and sql[i + 1] == "'":
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return n
+
+
+def sql_tokens(sql):
+    """The tokens of one SQL text: ('word', lowercased), ('qident', exact),
+    ('str', value), ('estr', raw), ('uident', raw), ('param', raw), ('num',
+    raw), ('body', tokens of a dollar-quoted body), ('punct', one char).
+    Comments are skipped."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c.isspace():
+            i += 1
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j + 1
+        elif sql.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if sql.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif sql.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            i = j
+        elif c in "uU" and sql.startswith("&", i + 1) and i + 2 < n and sql[i + 2] in "'\"":
+            j = _close_quote(sql, i + 3, sql[i + 2])
+            out.append(("uident", sql[i:j]))
+            i = j
+        elif c in "eE" and i + 1 < n and sql[i + 1] == "'":
+            j = _close_estring(sql, i + 2)
+            out.append(("estr", sql[i:j]))
+            i = j
+        elif c == "'":
+            j = _close_quote(sql, i + 1, "'")
+            out.append(("str", sql[i + 1:j - 1].replace("''", "'")))
+            i = j
+        elif c == '"':
+            j = _close_quote(sql, i + 1, '"')
+            out.append(("qident", sql[i + 1:j - 1].replace('""', '"')))
+            i = j
+        elif c == "$" and _SQL_DOLLAR.match(sql, i):
+            m = _SQL_DOLLAR.match(sql, i)
+            end = sql.find(m.group(0), m.end())
+            out.append(("body", sql_tokens(sql[m.end():n if end < 0 else end])))
+            i = n if end < 0 else end + len(m.group(0))
+        elif c == "$" and _SQL_PARAM.match(sql, i):
+            m = _SQL_PARAM.match(sql, i)
+            out.append(("param", m.group(0)))
+            i = m.end()
+        elif _SQL_WORD.match(sql, i):
+            m = _SQL_WORD.match(sql, i)
+            out.append(("word", m.group(0).lower()))
+            i = m.end()
+        elif _SQL_NUMBER.match(sql, i):
+            m = _SQL_NUMBER.match(sql, i)
+            out.append(("num", m.group(0)))
+            i = m.end()
+        else:
+            out.append(("punct", c))
+            i += 1
+    return out
+
+
+_STATEMENT_STOPS = {("punct", ";"), ("word", "begin"), ("word", "then"),
+                    ("word", "else"), ("word", "loop"), ("word", "declare")}
+_NOT_SETTINGS_SET = {"update", "alter", "create"}
+_TXN_SCOPES = {"transaction", "constraints"}
+_SET_SPECIAL = {"role": "role", "schema": "search_path", "names": "client_encoding"}
+
+
+def _is_call(toks, k, fname):
+    kind, val = toks[k]
+    return (kind in ("word", "qident") and val == fname and k + 1 < len(toks)
+            and toks[k + 1] == ("punct", "("))
+
+
+def _call_args(toks, k):
+    """The arguments of the call whose name is toks[k] (toks[k+1] is its
+    opening parenthesis): a list of token lists split at depth-0 commas;
+    None when the call is not closed."""
+    args, cur, depth = [], [], 0
+    for tok in toks[k + 2:]:
+        if tok == ("punct", "(") :
+            depth += 1
+        elif tok == ("punct", ")"):
+            if depth == 0:
+                args.append(cur)
+                return args
+            depth -= 1
+        elif tok == ("punct", ",") and depth == 0:
+            args.append(cur)
+            cur = []
+            continue
+        cur.append(tok)
+    return None
+
+
+def _literal_name(arg):
+    """The setting name an argument spells as one plain string literal,
+    optionally cast to text; None otherwise."""
+    if not arg or arg[0][0] != "str":
+        return None
+    rest = arg[1:]
+    if rest and rest[:2] == [("punct", ":"), ("punct", ":")] and rest[2:] in (
+            [("word", "text")], [("word", "pg_catalog"), ("punct", "."), ("word", "text")]):
+        rest = []
+    return arg[0][1].lower() if not rest else None
+
+
+def _is_settings_set(toks, k):
+    """Whether the SET at toks[k] is a settings statement: no UPDATE, ALTER
+    or CREATE between it and its statement's start."""
+    j = k - 1
+    while j >= 0 and toks[j] not in _STATEMENT_STOPS and toks[j][0] != "body":
+        if toks[j][0] == "word" and toks[j][1] in _NOT_SETTINGS_SET:
+            return False
+        j -= 1
+    return True
+
+
+def _set_statement(toks, k, forms, names, scoped):
+    rest = toks[k + 1:]
+    scope = "session"
+    if rest and rest[0] in (("word", "local"), ("word", "session")):
+        scope = rest[0][1]
+        rest = rest[1:]
+    if rest and rest[0][0] == "word" and rest[0][1] in _TXN_SCOPES:
+        return                      # SET TRANSACTION / SET CONSTRAINTS: this transaction's
+    name = None
+    if rest and rest[0] == ("word", "authorization"):
+        name = "session_authorization"
+    elif rest and rest[0] == ("word", "characteristics"):
+        name = "default_transaction_isolation"
+    elif rest[:2] == [("word", "time"), ("word", "zone")]:
+        name = "timezone"
+    elif rest[:2] == [("word", "xml"), ("word", "option")]:
+        name = "xmloption"
+    elif rest and rest[0][0] == "word" and rest[0][1] in _SET_SPECIAL:
+        name = _SET_SPECIAL[rest[0][1]]
+    else:
+        parts, j = [], 0
+        while j < len(rest) and rest[j][0] in ("word", "qident"):
+            parts.append(rest[j][1].lower() if rest[j][0] == "word" else rest[j][1])
+            if j + 1 < len(rest) and rest[j + 1] == ("punct", "."):
+                j += 2
+                continue
+            break
+        name = ".".join(parts) if parts else None
+    if name is None:
+        forms.add("SET name unreadable")
+        return
+    names.add(name.lower())
+    scoped.add((name.lower(), "local" if scope == "local" else "session"))
+    if scope != "local":
+        forms.add("session SET " + name.lower())
+
+
+def _scan_settings(toks, forms, names, scoped):
+    for k, (kind, val) in enumerate(toks):
+        if kind == "body":
+            _scan_settings(val, forms, names, scoped)
+        elif kind == "uident":
+            forms.add("unreadable unicode-escaped spelling")
+        elif kind == "word" and val == "execute":
+            forms.add("dynamic sql")
+        if _is_call(toks, k, "setseed"):
+            forms.add("session setseed")
+        if _is_call(toks, k, "set_config"):
+            args = _call_args(toks, k)
+            if args is None or len(args) != 3:
+                forms.add("set_config arguments unreadable")
+                continue
+            name = _literal_name(args[0])
+            if name is None:
+                forms.add("set_config name unreadable")
+            else:
+                names.add(name)
+            local = args[2] == [("word", "true")]
+            if name is not None:
+                scoped.add((name, "local" if local else "session"))
+            if not local:
+                forms.add("session set_config " + (name or "?"))
+        if (kind, val) == ("word", "set") and _is_settings_set(toks, k):
+            _set_statement(toks, k, forms, names, scoped)
+
+
+def _read_settings(texts):
+    forms, names, scoped = set(), set(), set()
+    for t in texts:
+        _scan_settings(sql_tokens(t), forms, names, scoped)
+    return forms, names, scoped
+
+
+def settings_forms(texts):
+    """(forms, names) of the statement texts a position ran: the residue
+    forms the text reading counts (sorted) and every setting name the texts
+    set (sorted, lowercased)."""
+    forms, names, _scoped = _read_settings(texts)
+    return tuple(sorted(forms)), tuple(sorted(names))
+
+
+def settings_scoped(texts):
+    """Every (name, scope) the texts set, scope 'local' (SET LOCAL, or
+    set_config with the literal is_local `true`) or 'session' (any other
+    form), sorted (ruling FOUR-R11-A6 (3a))."""
+    return tuple(sorted(_read_settings(texts)[2]))
+
+
+def setting_classes(scoped, rows):
+    """(name, class, scope) for every (name, scope) the texts set: class
+    'token' for the harness's position token, 'server' for a name with a
+    pg_settings row in `rows` (NAMED_SETTINGS_SQL, read on the session),
+    'hidden' for HIDDEN_MEASURED, else 'placeholder'."""
+    shown = {r[0] for r in rows if r[4]}
+    out = []
+    for name, scope in scoped:
+        cls = ("token" if name == POSITION_GUC else "server" if name in shown
+               else "hidden" if name in HIDDEN_MEASURED else "placeholder")
+        out.append((name, cls, scope))
+    return tuple(sorted(out))
+
+
+def placeholder_residue(rows):
+    """The residue NAMED_SETTINGS_SQL rows show before RESET ALL: every name
+    with no pg_settings row (a custom placeholder) that reads a value, other
+    than the position token (checked by its own token) and the hidden
+    settings the settings array carries."""
+    return tuple(sorted(
+        "placeholder %s=%s" % (n, val) for n, val, _s, _r, shown, _src in rows
+        if not shown and n not in HIDDEN_MEASURED and n != POSITION_GUC
+        and val is not None and val != ""))
+
+
+def not_reset(rows):
+    """The names NAMED_SETTINGS_SQL rows show away from their reset value
+    after RESET ALL (ruling FOUR-R11-A6 (2)), by class of name: a server
+    setting (a pg_settings row) must read setting = reset_val with a source
+    other than 'session'; the position token must read ''; a placeholder
+    must read '' (what the 16.9 probe read after RESET ALL for a placeholder
+    the session had set, r11-res-probe-55432-20261106T065356Z.log) or NULL
+    (what the probe read for a name the session never defined). Hidden
+    settings are compared by the settings array instead."""
+    out = set()
+    for n, val, setting, reset, shown, source in rows:
+        if n == POSITION_GUC:
+            if val != "":
+                out.add("not reset %s=%s" % (n, val))
+        elif shown:
+            if setting != reset or source == "session":
+                out.add("not reset %s=%s (%s)" % (n, setting, source))
+        elif n not in HIDDEN_MEASURED and val is not None and val != "":
+            out.add("not reset %s=%s" % (n, val))
+    return tuple(sorted(out))
+
+
+# ---- ruling FOUR-R11-A6 (4): the census of the database's functions --------
+#
+# A placeholder set at session scope inside a function is reset by RESET ALL
+# after the position but no reading lists it (the 16.9 probe: no pg_settings
+# row). The bound is a census of every function of the measured database
+# outside pg_catalog and information_schema (every kind, trigger functions
+# among them): each one whose source carries set_config, SET, RESET, DISCARD
+# or EXECUTE, or that carries SET attributes (proconfig), is listed with its
+# language and the md5 of its source and has its side frozen in PROC_SIDES;
+# a function in a compiled language (c, internal) is listed by its owning
+# extension in PROC_COMPILED. A new match, a changed md5, or a new compiled
+# function fails test_r11_res_proc_census with its name. A source that
+# carries the harness token's name fails it too (ruling FOUR-R11-A6 (3c)).
+PROC_CENSUS_SQL = (
+    "SELECT n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid),"
+    " p.prokind::text, l.lanname,"
+    " CASE WHEN p.prosqlbody IS NOT NULL THEN pg_catalog.pg_get_functiondef(p.oid)"
+    " ELSE p.prosrc END,"
+    " pg_catalog.array_to_string(p.proconfig, ','),"
+    " (SELECT e.extname FROM pg_catalog.pg_depend AS d"
+    "  JOIN pg_catalog.pg_extension AS e ON e.oid = d.refobjid"
+    "  WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND d.objid = p.oid"
+    "  AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass"
+    "  AND d.deptype = 'e' LIMIT 1)"
+    " FROM pg_catalog.pg_proc AS p"
+    " JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace"
+    " JOIN pg_catalog.pg_language AS l ON l.oid = p.prolang"
+    " WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')"
+    " ORDER BY 1, 2, 3")
+PROC_WORDS = re.compile(r"\b(set_config|set|reset|discard|execute)\b", re.IGNORECASE)
+COMPILED_LANGUAGES = ("c", "internal")
+
+# Frozen from the census of the measured database (the clone and its case
+# schema, test_r8's runs fixture), each function read once: key -> (md5 of
+# its source, side, reason); side 'session' (it sets at session scope: every
+# captured text that can reach it is residue), 'transaction' (it sets inside
+# the transaction only, the scope shown by each call's literal) or
+# 'neither' (why the word matched). NOTES-r11-res.md lists each.
+#
+# Measured on seat-3 (16.15) at ec9ecef6 (RF11 log r11-res-p2-r8-ec9ecef6.log):
+# three matches, each a plpgsql trigger function of the case schema, each
+# matched by the word SET only, and none sets a setting; md5 of the body as
+# committed (r11/res/body_md5.py), equal to the census's for the one the log
+# printed whole.
+PROC_SIDES = {
+    "<case>.mail_inbox_rev_bump() f": (
+        "0b3bc33098b25519ea53ceb4ed4ac618", "neither",
+        "SET is the ON CONFLICT DO UPDATE SET clause (300_mail_inbox_rev.sql)"),
+    "<case>.pc_prints_immutable() f": (
+        "5a8f3ad588521922f61573a3c5b5785f", "neither",
+        "'set' is a word of a RAISE EXCEPTION message (353_pc_trades.sql)"),
+    "<case>.stamp_shop_item_catalog_release() f": (
+        "48387b17bcc54ebe16c7d446c24385fe", "neither",
+        "SET is an UPDATE ... SET clause"
+        " (148_cosmetic_placement_and_macro_evidence.sql)"),
+}
+# Compiled-language functions outside the system schemas: (extension, key).
+# Measured empty at ec9ecef6 (the same log); test_r11_res_proc_census asserts
+# the empty list.
+PROC_COMPILED = ()
+
+
+def _proc_key(row, case_schema):
+    nsp, name, args, kind = row[0], row[1], row[2], row[3]
+    if case_schema is not None and nsp == case_schema:
+        nsp = "<case>"
+    elif nsp.startswith("pg_temp"):
+        nsp = "<temp>"
+    return "%s.%s(%s) %s" % (nsp, name, args, kind)
+
+
+def proc_census(rows, case_schema=None):
+    """PROC_CENSUS_SQL rows -> (matched, compiled, token_sources): matched
+    {key: (language, md5 of the source, the words matched, proconfig)} for
+    every function whose source carries a PROC_WORDS word or that has SET
+    attributes; compiled, sorted (extension or '-', key) for every function
+    in a COMPILED_LANGUAGES language; token_sources, sorted keys whose
+    source carries the position token's name."""
+    import hashlib
+    matched, compiled, token_sources = {}, set(), set()
+    for row in rows:
+        key = _proc_key(row, case_schema)
+        lang, src, config, ext = row[4], row[5] or "", row[6], row[7]
+        if POSITION_GUC in src.lower():
+            token_sources.add(key)
+        if lang in COMPILED_LANGUAGES:
+            compiled.add((ext or "-", key))
+            continue
+        words = tuple(sorted({w.lower() for w in PROC_WORDS.findall(src)}))
+        if words or config:
+            matched[key] = (lang, hashlib.md5(src.encode("utf-8")).hexdigest(), words,
+                            config)
+    return matched, tuple(sorted(compiled)), tuple(sorted(token_sources))
+
+
+def proc_census_diff(matched, compiled):
+    """What the census finds against the frozen PROC_SIDES / PROC_COMPILED:
+    sorted 'new <key>', 'md5 <key>', 'gone <key>', 'compiled new|gone ...'."""
+    out = set()
+    for key, (_lang, md5, _w, _c) in matched.items():
+        if key not in PROC_SIDES:
+            out.add("new " + key)
+        elif PROC_SIDES[key][0] != md5:
+            out.add("md5 " + key)
+    out |= {"gone " + k for k in PROC_SIDES if k not in matched}
+    out |= {"compiled new %s %s" % c for c in compiled if c not in PROC_COMPILED}
+    out |= {"compiled gone %s %s" % c for c in PROC_COMPILED if c not in compiled}
+    return tuple(sorted(out))
+
+
+def same_transaction(start, end):
+    """Continuity of one position from its two readings, each (token,
+    [own virtualxid rows]): (same, detail). `same` only when the token read
+    at the end is the one set at the start and the own virtualxid was read
+    exactly once at each end and is equal."""
+    token_ok = end[0] == start[0]
+    vxid_ok = len(start[1]) == 1 and len(end[1]) == 1 and start[1] == end[1]
+    detail = tuple(n for n, ok in (("token", token_ok), ("virtualxid", vxid_ok)) if not ok)
+    return token_ok and vxid_ok, detail
+
+
+def residue_changes(start, end):
+    """The residue a position left: every pg_settings row that differs and
+    every residue count that differs, sorted ('setting name=value' for a
+    changed or added setting, 'prepared'/'holdable cursors'/'listen'/'temp
+    objects' for a count)."""
+    out = set()
+    s0, s1 = set(start[0]), set(end[0])
+    out |= {"setting " + r for r in s1 ^ s0}
+    for name, a, b in zip(("prepared", "holdable cursors", "listen", "temp objects"),
+                          start[1:], end[1:]):
+        if a != b:
+            out.add("%s %s->%s" % (name, a, b))
+    return tuple(sorted(out))
+
+
+class RecordingSession(AsyncSession):
+    """Every execute records (file, line, outcome) in self.info['log']. At a
+    measured position (a statement whose production site is in one of
+    self.info['lock_targets'] or, on a COUNTING session, self.info['targets'],
+    (file, line, end) spans) the statement runs inside the continuity bracket
+    (ruling REHEARSAL-R9-A1 (B)): position start, then (COUNTING, at a
+    target) the write counters, the statement, the counters again
+    (self.info['deltas'] gets (file, line, delta)), then (at a lock target)
+    the lock read (self.info['locks'] gets (file, line, unexpected_locks);
+    ruling REHEARSAL-R8-A1 E2), then the position end: self.info['continuity']
+    gets (file, line, same, detail), detail the failed identity parts, the
+    residue changes, or ('after txn ended', first failing site). A statement
+    that fails records its SQLSTATE and no measurement."""
+
+    COUNTING = False
+
+    async def execute(self, statement, params=None, **kw):
+        site = _site()
+        log = self.info.setdefault("log", [])
+        lock_at = _in(site, self.info.get("lock_targets", ()))
+        count_at = self.COUNTING and _in(site, self.info.get("targets", ()))
+        start = None
+        if lock_at or count_at:
+            try:
+                start = await self.position_start()
+            except DBAPIError as e:
+                # the transaction refuses any statement (an earlier refusal
+                # aborted it): the position cannot be bracketed, so it is
+                # unmeasured and never 'ok' (the statement itself is run
+                # and recorded as the program issued it)
+                start = ("unmeasured", "unmeasured " + (_sqlstate(e) or "error"))
+                count_at = False
+        before = await self.writes() if count_at else None
+        # FIX-R11-RES: every statement text the connection runs while the
+        # position's statement (or a planted program) runs, captured at the
+        # engine (role_engine's before_cursor_execute); never a harness read
+        capture = _capture_state(self) if start is not None else None
+        if capture is not None:
+            capture["texts"] = []
+        try:
+            res = await self.run_statement(site, statement, params, **kw)
+        except DBAPIError as e:
+            log.append((site[0], site[1], _sqlstate(e) or "error"))
+            raise
+        finally:
+            texts = capture.pop("texts", None) if capture is not None else None
+            if capture is not None:
+                capture["texts"] = None
+        log.append((site[0], site[1], "ok"))
+        if count_at:
+            self.info.setdefault("deltas", []).append(
+                (site[0], site[1], await self.writes() - before))
+        if lock_at:
+            await self.lock_read(site)
+        if start is not None:
+            await self.position_end(site, start, texts)
+        return res
+
+    async def run_statement(self, site, statement, params=None, **kw):
+        """The production statement itself (a control's session plants here)."""
+        return await AsyncSession.execute(self, statement, params, **kw)
+
+    async def position_start(self):
+        token = os.urandom(16).hex()
+        row = (await AsyncSession.execute(self, text(POSITION_START_SQL),
+                                          {"token": token})).one()
+        # the connections a session's positions ran on (backend pid and its
+        # start time: a connection's identity), never one another driver's
+        # (test_r10_driver_connections_discarded)
+        self.info.setdefault("pids", set()).add(row[2])
+        return (token, list(row[1])), await self.residue()
+
+    async def residue(self):
+        row = (await AsyncSession.execute(self, text(RESIDUE_SQL))).one()
+        return (tuple(row[0]),) + tuple(int(x) for x in row[1:])
+
+    async def named_settings(self, names):
+        return [tuple(r) for r in (await AsyncSession.execute(
+            self, text(NAMED_SETTINGS_SQL), {"names": list(names)})).all()]
+
+    async def reset_all(self, names):
+        """FIX-R11-RES: RESET ALL after the position's measurement reads, then
+        the check: every name the measured texts set, and the position
+        token, read against its reset value by class (not_reset); then the
+        engine's own session setup replayed (the grant run's READ WRITE
+        characteristics, a session-sourced default_transaction_read_only
+        the check would otherwise see reset). Returns the names away from
+        their reset value, or ('reset unmeasured <sqlstate>',)."""
+        try:
+            await AsyncSession.execute(self, text(RESET_SQL))
+            gone = not_reset(await self.named_settings(
+                tuple(sorted(set(names) | {POSITION_GUC}))))
+            for stmt in (_capture_state(self) or {}).get("setup", ()):
+                await AsyncSession.execute(self, text(stmt))
+            return gone
+        except DBAPIError as e:
+            return ("reset unmeasured " + (_sqlstate(e) or "error"),)
+
+    async def position_end(self, site, start, texts=None):
+        # FIX-R11-RES: the text reading of everything the position ran (a
+        # filter: forms counted as residue) and its setting names (read on
+        # the session: the measurement for names with no pg_settings row)
+        if texts is None:
+            forms, names, scoped = ("unmeasured capture",), (), ()
+        else:
+            forms, names = settings_forms(texts)
+            scoped = settings_scoped(texts)
+        # ruling FOUR-R11-A6 (3c): whether the harness token's name stands
+        # in any text the position ran
+        token_in_text = any(POSITION_GUC in t.lower() for t in texts or ())
+        rows = ()
+        if start[0] == "unmeasured":
+            same, detail, left = False, (start[1],), ()
+        else:
+            try:
+                row = (await AsyncSession.execute(self, text(POSITION_END_SQL))).one()
+                same, detail = same_transaction(start[0], (row[0], list(row[1])))
+                left = residue_changes(start[1], await self.residue())
+                rows = await self.named_settings(names)
+                left += placeholder_residue(rows)
+            except DBAPIError as e:
+                same, detail, left = False, ("unmeasured " + (_sqlstate(e) or "error"),), ()
+        gone = await self.reset_all(names)
+        # (file, line, names, not reset, (name, class, scope) per name the
+        # texts set (ruling FOUR-R11-A6 (3a)), the token's name in a text)
+        self.info.setdefault("gone", []).append(
+            (site[0], site[1], names, gone, setting_classes(scoped, rows), token_in_text))
+        left = tuple(sorted(set(left) | set(forms) | set(gone)))
+        tainted = self.info.get("tainted")
+        if tainted is not None and same and not left:
+            same, detail = False, ("after txn ended at " + tainted,)
+        elif not same or left:
+            same, detail = False, detail + left
+        if not same and tainted is None:
+            self.info["tainted"] = "%s:%s" % site
+        self.info.setdefault("continuity", []).append((site[0], site[1], same, detail))
+
+    async def lock_read(self, site):
+        rows = (await AsyncSession.execute(self, text(LOCKS_SQL))).all()
+        self.info.setdefault("locks", []).append(
+            (site[0], site[1], unexpected_locks(rows)))
+
+
+def role_sessionmaker(engine, cls=None):
+    return async_sessionmaker(engine, class_=cls or RecordingSession,
+                              expire_on_commit=False)
+
+
+# Ruling R-B: the transaction's own write counters, read on the session's
+# connection immediately before and after a target position's statement.
+WRITES_SQL = (
+    "SELECT (SELECT COALESCE(SUM(n_tup_ins + n_tup_upd + n_tup_del), 0)"
+    " FROM pg_catalog.pg_stat_xact_user_tables)"
+    " + (SELECT COALESCE(SUM(n_tup_ins + n_tup_upd + n_tup_del), 0)"
+    " FROM pg_catalog.pg_stat_xact_sys_tables)")
+
+
+class CountingSession(RecordingSession):
+    """A RecordingSession that, at a statement whose production site is in
+    one of self.info['targets'] ((file, line, end) spans), records the write
+    delta of the transaction around it in self.info['deltas'] as (file,
+    line, delta), inside the position's continuity bracket (the delta is
+    admitted only with a 'same' continuity record); a statement that fails
+    records no delta."""
+
+    COUNTING = True
+
+    async def writes(self):
+        return int((await AsyncSession.execute(self, text(WRITES_SQL))).scalar())
+
+
+# Ruling R-B: the table privileges of each statement that refused first on a
+# path holding an unreached COVERED position (the sites OUTCOME names), each
+# granted to the role in the clone, as its owner, for that path's run only.
+# The ruling extends this along the same path: each successive statement
+# refused with 42501 gets its exact privileges, one at a time, until the
+# position is reached or a refusal other than 42501 occurs; each added
+# grant carries the measured refusal that required it.
+REFUSER_GRANTS = {
+    "main.py:16881": ("UPDATE players",),
+    "main.py:16423": ("UPDATE team_queue",),
+    # then main.py:53731 (DELETE ovt_queue ... FOR UPDATE), 42501 under
+    # UPDATE ovt_queue alone (rb-measure-2)
+    "main.py:16426": ("UPDATE ovt_queue", "DELETE ovt_queue"),
+    # then main.py:16429 (ffa_queue FOR UPDATE, a WRITERS lock), 42501
+    # under UPDATE ffa_lobbies alone (rb-measure-2); then main.py:64891
+    # (DELETE FROM ffa_queue ... FOR UPDATE SKIP LOCKED), 42501 under those
+    # two (r8-w30b-sr-widen-measure-1)
+    # then main.py:63173 (UPDATE ffa_assembly_seats), 42501 under the grants before it (r8-w30b-sr-widen-measure-2)
+    "main.py:17436": (
+        "UPDATE ffa_lobbies",
+        "UPDATE ffa_queue",
+        "DELETE ffa_queue",
+        "UPDATE ffa_assembly_seats",
+    ),
+    # 20131 is a DELETE whose subquery locks FOR UPDATE SKIP LOCKED: 42501
+    # under DELETE queue_blocks alone (rb-measure-2), so UPDATE too; then
+    # main.py:16420 (ranked_queue FOR UPDATE, a WRITERS lock), 42501 under
+    # those two (r8-w30b-sr-widen-measure-1)
+    "main.py:20131": ("DELETE queue_blocks", "UPDATE queue_blocks", "UPDATE ranked_queue"),
+    "main.py:51284": ("UPDATE team_series",),
+    "main.py:51963": ("UPDATE team_series",),
+    "match_hold.py:380": ("UPDATE team_series",),
+}
+
+
+def locks_at(locks, entry):
+    """The lock reads recorded at the position `entry`: one tuple of
+    unexpected rows per successful run of it."""
+    _walk, f, line, end, _span = entry
+    return [u for (lf, ll, u) in locks if lf == f and ll is not None and line <= ll <= end]
+
+
+def continuity_at(conts, entry):
+    """The continuity records at the position `entry`: one (same, detail)
+    per successful run of it (ruling REHEARSAL-R9-A1 (B))."""
+    _walk, f, line, end, _span = entry
+    return [(same, d) for (cf, cl, same, d) in conts
+            if cf == f and cl is not None and line <= cl <= end]
+
+
+def broken_continuity(conts, runs):
+    """None when every one of `runs` successful runs has a continuity record
+    and each says the SAME transaction; otherwise the refusal's detail: the
+    sorted failed parts of every record, or ('unmeasured', records, runs)."""
+    if len(conts) != runs:
+        return ("unmeasured", len(conts), runs)
+    broken = tuple(sorted({x for same, d in conts if not same for x in d}))
+    if any(not same for same, _d in conts):
+        return broken or ("not the same transaction",)
+    return None
+
+
+def ran_outcome(outs, reads, conts):
+    """The outcome of a position every run of which succeeded (`outs`, all
+    'ok'), from its continuity records (`conts`, one per run; ruling
+    REHEARSAL-R9-A1 (B)) and its lock reads (`reads`, one per run; ruling
+    REHEARSAL-R8-A1 E2): ('continuity', detail) when a run did not stay in
+    the transaction it began in (a transaction-ending statement, a replaced
+    token, residue, or a session a previous position already broke): an
+    effect, checked FIRST because a lock read of a replacement transaction
+    measures nothing about the position; then 'ok' only when every run was
+    read and no read found an unexpected row; ('lock', rows) when a read
+    found one; ('lock unmeasured', reads, runs) when a run has no lock
+    read."""
+    broken = broken_continuity(conts, len(outs))
+    if broken is not None:
+        return ("continuity", broken)
+    return lock_outcome(outs, reads)
+
+
+def lock_outcome(outs, reads):
+    """The lock decision of a position whose runs all succeeded and stayed
+    in their transaction (ruling REHEARSAL-R8-A1 E2): 'ok' only when every
+    run was read and no read found an unexpected row; ('lock', rows) when a
+    read found one; ('lock unmeasured', reads, runs) when a run has no lock
+    read. Callers decide continuity first (ran_outcome, under_grant)."""
+    if len(reads) != len(outs):
+        return ("lock unmeasured", len(reads), len(outs))
+    held = tuple(sorted({row for u in reads for row in u}))
+    return ("lock", held) if held else "ok"
+
+
+def under_grant(log, deltas, entry, grants, locks, conts):
+    """The grant run's outcome at `entry`: ('continuity under grant', grants,
+    detail) when every run succeeded but a run did not stay in the
+    transaction it began in (ruling REHEARSAL-R9-A1 (B); see ran_outcome);
+    ('ok-under-grant', grants, delta) when every run of the position
+    succeeded, stayed in its transaction and every run's lock read found
+    only expected rows, delta the largest write delta measured around it;
+    ('lock under grant', grants, rows) when a lock read found an unexpected
+    row (or ('lock under grant', grants, ('unmeasured', reads, runs)));
+    otherwise ('refused under grant', grants, sqlstate) when a run of it was
+    refused, or ('not reached under grant', grants, the first refused
+    statement 'file:line sqlstate' of the run, or None)."""
+    _walk, f, line, end, _span = entry
+    outs = outcome_at(log, entry)
+    ds = [d for (df, dl, d) in deltas if df == f and line <= dl <= end]
+    if outs and all(o == "ok" for o in outs):
+        # REHEARSAL-R9-A1 (B): continuity first; a delta or a lock read of a
+        # replacement transaction measures nothing about the position
+        broken = broken_continuity(continuity_at(conts, entry), len(outs))
+        if broken is not None:
+            return ("continuity under grant", tuple(grants), broken)
+    if outs and all(o == "ok" for o in outs) and len(ds) == len(outs):
+        ran = lock_outcome(outs, locks_at(locks, entry))
+        if ran == "ok":
+            return ("ok-under-grant", tuple(grants), max(ds))
+        rows = ran[1] if ran[0] == "lock" else ("unmeasured",) + ran[1:]
+        return ("lock under grant", tuple(grants), rows)
+    if outs:
+        return ("refused under grant", tuple(grants), sorted(set(outs))[0])
+    refused = [(lf, ll, o) for (lf, ll, o) in log if o != "ok"]
+    first = "%s:%s %s" % refused[0] if refused else None
+    return ("not reached under grant", tuple(grants), first)
+
+
+def outcome_at(log, entry):
+    """The outcomes recorded at the position `entry` (its file and line
+    span)."""
+    _walk, f, line, end, _span = entry
+    return [o for (lf, ll, o) in log if lf == f and ll is not None and line <= ll <= end]

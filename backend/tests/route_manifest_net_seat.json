@@ -1795,7 +1795,7 @@
           ],
           "main",
           "ffa_lobby_readmit",
-          "6166263d14e7485ab327d6ad985092058cdc89ed"
+          "d356b2955ac4e708b9374501ec650f64ee03fa89"
         ],
         [
           "/api/v1/ffa/readmit/offer",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "bce019405171a3ff75ce7feccef881ba1172778c"
+          "24555bdccffe305e4ceb789739bc96ce3ecdbbf8"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2506,7 +2506,7 @@
           ],
           "main",
           "queue_poll",
-          "8d0e106957bf89b7b7a65a52b1dcce39509a8654"
+          "44d29c3f62557e7397c8f8ad70fbcc9d4e62257c"
         ],
         [
           "/api/v1/queue/ready",
@@ -3833,7 +3833,7 @@
           ],
           "match_hold",
           "match_hold_open",
-          "8214b94c79af10af985a63233aed5372e5a701da"
+          "75947609f550a6f2bd11dcd31861e6b7cff4c8ad"
         ],
         [
           "/api/v1/match/hold/{hold_id}/bind",
@@ -3842,7 +3842,7 @@
           ],
           "match_hold",
           "match_hold_bind",
-          "e6a5232a49ff6778a10243a72dee1191a6be03e7"
+          "4806766ca3a193ac5c557793fb0da7e88404265f"
         ],
         [
           "/api/v1/match/hold/{hold_id}/claim",
@@ -3851,7 +3851,7 @@
           ],
           "match_hold",
           "match_hold_claim",
-          "bfd8b60a2d7078df331feefcc5b5d15ea41ff1f2"
+          "a6368cff9cccdac4b9a339e5e94004292af8fadc"
         ],
         [
           "/api/v1/match/hold/{hold_id}/end",
@@ -3869,7 +3869,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "b412becd8c1c9672722449c73cc9cb377b2ef88b"
+          "570502ae1e024693de67207eab8153da26279f72"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -4017,7 +4017,7 @@
       [
         "main",
         "lifespan",
-        "d2e6418f430f06a1948e553763d9d346010225f3"
+        "924b708d4ed7fe9b8c393bddfee372bb655b4a76"
       ]
     ]
   },

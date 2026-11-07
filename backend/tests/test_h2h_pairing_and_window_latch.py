@@ -34,6 +34,7 @@ import re
 from pathlib import Path
 
 from _cs_structure import method_spans, strip_comments_only
+from changelog_release import one_bullet
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -100,14 +101,20 @@ def test_the_changelog_states_what_the_line_actually_rests_on():
     id matches, and a Steam id is public, so a game that claims the assigned
     player's id before the assigned player's own game does would be believed.
     Suppression on a seat change applies only once something is bound."""
-    text = _prose(CHANGELOG)
-    assert "appears only when that name matches the one the queue assigned" in text
-    assert "it then follows the first game that matched" in text
+    # The v1.40.2 bullet that makes the claim, not the whole file: a phrase
+    # found anywhere is satisfied by a newer release repeating it while this
+    # release's own bullet says something else (REHEARSAL-FOUR round 1,
+    # finding 4's class).
+    bullet = one_bullet("1.40.2", "Joining a two-player room")
+    assert "appears only when that name matches the one the queue assigned" in bullet
+    assert "it then follows the first game that matched" in bullet
     assert (
         "It is an agreement between two games about who is present, not a "
-        "check of who really is." in text
+        "check of who really is." in bullet
     )
-    # the overclaim r9 killed must not come back in either wording
+    # the overclaim r9 killed must not come back in either wording, in any
+    # release: this one stays a whole-file absence
+    text = _prose(CHANGELOG)
     assert "if a different player takes that seat, there is no line at all" not in text
 
 
@@ -392,6 +399,10 @@ def test_the_changelog_scopes_the_line_to_the_room_the_seat_is_in():
     did not assign. The player-facing sentence has to say which room it is
     about."""
     changelog = (Path(__file__).parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "In the room the ranked queue most recently issued" in changelog
+    # The two statements are read from the v1.40.2 bullet that makes them, not
+    # from the whole file (REHEARSAL-FOUR round 1, finding 4's class); the
+    # retired wording stays a whole-file absence: no release may say it.
+    bullet = one_bullet("1.40.2", "Joining a two-player room", changelog)
+    assert "In the room the ranked queue most recently issued" in bullet
     assert "In a room the ranked queue issued, the line waits" not in changelog
-    assert "the room you are actually sitting in keeps that" in changelog
+    assert "the room you are actually sitting in keeps that" in bullet
