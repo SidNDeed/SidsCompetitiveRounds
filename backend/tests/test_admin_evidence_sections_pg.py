@@ -386,7 +386,8 @@ DISTRACTORS = 5000
 # rows.
 EXPECTED_INDEX = {
     "keys": "ix_%(ev)s_attach", "records": "%(ev)s_one_per_seat", "games": "%(games)s_pk",
-    "by_match": "ix_%(games)s_match", "contrib": "%(contrib)s_pk", "daily": "%(daily)s_pk"}
+    "by_match": "ix_%(games)s_match", "contrib_keys": "ix_%(contrib)s_match",
+    "contrib": "%(contrib)s_pk", "daily": "%(daily)s_pk"}
 PERMITTED_SCANS = frozenset({"Index Scan", "Index Only Scan", "Bitmap Index Scan",
                              "Bitmap Heap Scan"})
 _DISTRACT_SQL = {

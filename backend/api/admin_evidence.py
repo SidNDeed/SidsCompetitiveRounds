@@ -1986,6 +1986,13 @@ def section_sql(src):
                            "WHERE g.match_id = ANY(CAST(:ids AS uuid[])) "
                            "ORDER BY g.stable_game_key LIMIT CAST(:n AS integer)" % s["games"])
     if s["contrib"]:
+        # the contributions stored for the page's matches, found by their own
+        # match_id (ix_<contrib>_match, migration 401) whether or not a record
+        # or a games row names the game (B10-R3 H2)
+        out["contrib_keys"] = ("SELECT DISTINCT c.stable_game_key FROM %s c "
+                               "WHERE c.match_id = ANY(CAST(:ids AS uuid[])) "
+                               "ORDER BY c.stable_game_key LIMIT CAST(:n AS integer)"
+                               % s["contrib"])
         out["contrib"] = (
             "SELECT c.stable_game_key, c.pair_lo, c.pair_hi, c.subject_player_id, c.source, "
             "c.coverage, c.computed_at, %s FROM %s c "
@@ -2030,9 +2037,13 @@ async def _section_rows(db, sql, params):
 
 async def _section_read(db, src, games, accounts, day0):
     """One source's stored rows for the page's games and, on a summary page,
-    the subjects' daily rows. `truncated` is set when one of the capped
-    reads (keys, by_match, records, games, contrib, daily) returned exactly
-    its LIMIT. The switch read is outside that rule: it asks for its three
+    the subjects' daily rows. The stable keys come from three lookups: the
+    records naming a game's room and seat (`keys`), the games rows attached
+    to a game's match (`by_match`), and the contributions whose stored
+    match_id is a game's match (`contrib_keys`, B10-R3 H2); the records,
+    games rows and contributions are then read by those keys. `truncated` is
+    set when one of the capped reads (keys, by_match, contrib_keys, records,
+    games, contrib, daily) returned exactly its LIMIT. The switch read is outside that rule: it asks for its three
     named keys under LIMIT 3, so three rows are every switch, never a cut."""
     sql, b = SECTION_SQL[src], AER_CONTRACT_BOUNDS
     data = {"records": [], "games": [], "contrib": [], "daily": {}, "switches": {},
@@ -2048,6 +2059,11 @@ async def _section_read(db, src, games, accounts, day0):
     if "by_match" in sql:
         found = await _section_rows(db, sql["by_match"], {"ids": [g["id"] for g in games],
                                                       "n": b["SECTION_KEYS_MAX"]})
+        keys.update(r["stable_game_key"] for r in found)
+        data["truncated"] |= len(found) == b["SECTION_KEYS_MAX"]
+    if "contrib_keys" in sql:
+        found = await _section_rows(db, sql["contrib_keys"], {"ids": [g["id"] for g in games],
+                                                          "n": b["SECTION_KEYS_MAX"]})
         keys.update(r["stable_game_key"] for r in found)
         data["truncated"] |= len(found) == b["SECTION_KEYS_MAX"]
     if keys:

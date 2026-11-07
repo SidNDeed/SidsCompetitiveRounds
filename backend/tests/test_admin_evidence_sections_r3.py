@@ -20,6 +20,7 @@ on the reviewed tip b2bc9643 and passes at the fix.
          the game's room and without a games row attached to the game.
 """
 
+import asyncio
 import datetime as dt
 import os
 import sys
@@ -136,12 +137,96 @@ def test_r3h1_a_row_without_a_stored_match_is_unattributed():
     assert "self.a1s.total" not in w and w.get("unattributed") == "1", w
 
 
+# ── R3-H2: discovery through the stored match id (statement level) ────────
+
+class _Db:
+    """A stand-in for the session `_section_read` reads through: each
+    statement of the source answers the rows given for it by name."""
+
+    def __init__(self, src, answers):
+        self.names = {v: k for k, v in ae.SECTION_SQL[src].items()}
+        self.answers = answers
+        self.calls = []
+
+    async def execute(self, clause, params):
+        name = self.names[str(clause)]
+        self.calls.append((name, params))
+        rows = self.answers.get(name, [])
+        return type("R", (), {"mappings": lambda _s: type(
+            "M", (), {"all": lambda _m: [dict(r) for r in rows]})()})()
+
+
+@pytest.mark.parametrize("src", ("card", "combat"))
+def test_r3h2_a_key_found_only_by_a_contribution_s_match_is_read(src):
+    a, b = _pair()
+    m9 = _g(a, b, "R", ENDED9)
+    row = _crow(src, "K", a, b, a, m9["id"])
+    db = _Db(src, {"contrib_keys": [{"stable_game_key": "K"}], "contrib": [row]})
+    data = asyncio.run(ae._section_read(db, src, [m9], [], T0.date()))
+    asked = dict(db.calls)
+    assert asked["contrib_keys"]["ids"] == [m9["id"]], db.calls
+    assert asked["contrib"]["keys"] == ["K"], db.calls
+    assert data["contrib"] == [row] and data["truncated"] is False, data
+
+
+@pytest.mark.parametrize("src", ("card", "combat"))
+def test_r3h2_a_full_contribution_key_read_marks_the_section_truncated(src):
+    a, b = _pair()
+    m9 = _g(a, b, "R", ENDED9)
+    full = [{"stable_game_key": "K%03d" % i}
+            for i in range(ae.AER_CONTRACT_BOUNDS["SECTION_KEYS_MAX"])]
+    data = asyncio.run(ae._section_read(_Db(src, {"contrib_keys": full}), src, [m9], [],
+                                        T0.date()))
+    assert data["truncated"] is True
+
+
 # ── Both through the routes, live PostgreSQL ──────────────────────────────
 
 def _seat_of(body, src, steam):
     s = sp._section(body, 0, src)
     seat = next(x for x in s["seats"] if body["subjects"][x["subject"]]["steam_id"] == steam)
     return s, seat["state"], _facts(seat["facts"])
+
+
+@pytest.mark.parametrize("src", ("card", "combat"))
+@pytest.mark.parametrize("games_row", ("absent", "elsewhere"))
+def test_r3h2_pg_a_contribution_with_no_record_and_no_games_row_for_the_game(rig, src,
+                                                                         games_row):
+    """M9 (A, B) has one stored contribution of `src`, subject A, match_id M9;
+    no evidence record of `src` names any room, and the games row of its
+    identity is absent or attached to M8. M9's report and an M9-only pair
+    window show it; nothing is truncated."""
+    async def go():
+        await sp._up(rig)
+        admin = await sp._admin(rig)
+        a, sa, _d = await rig.player()
+        b, sb, _d = await rig.player()
+        m8 = await rig.match(b, a, sp.NOW - dt.timedelta(hours=3), photon_room_id="r8",
+                             is_ranked=True)
+        m9 = await rig.match(a, b, sp.NOW - dt.timedelta(hours=2), photon_room_id="r9",
+                             is_ranked=True)
+        if games_row == "elsewhere":
+            await sp.grow(rig, src, "K", a, b, m8)
+        cols = {"hands": 5} if src == "card" else {"sums": '{"a1s": [1, 2, 3]}'}
+        await sp.contrib(rig, src, "K", a, b, a, match_id=m9, **cols)
+        await rig.commit()
+        out = {}
+        for name, path in (("m9", "%s/game/%s" % (sp.ROOT, m9.hex)),
+                           ("pair", "%s/pair?a=%s&b=%s&games=1" % (sp.ROOT, sa, sb))):
+            st, c = await sp.get(rig, path, admin, sp.HEADER)
+            out[name] = (st, sp._body(c))
+        return sa, out
+
+    sa, out = rig.run(go())
+    assert all(st == 200 for st, _b in out.values()), {k: v[0] for k, v in out.items()}
+    sec, state, fa = _seat_of(out["m9"][1], src, sa)
+    want = ("contrib1.hands", "5") if src == "card" else ("contrib1.a1s.total", "6")
+    assert state == "no_record" and fa.get(want[0]) == want[1], (state, fa)
+    assert sec["truncated"] is False, sec
+    entries = {(e["oi"], e["src"]): e for e in out["pair"][1]["sections_summary"]}
+    w = entries[(0, src)]
+    total = ("self.hands", "5") if src == "card" else ("self.a1s.total", "6")
+    assert _facts(w["facts"]).get(total[0]) == total[1] and w["truncated"] is False, w
 
 
 def test_r3h1_pg_the_review_scenario_through_the_game_and_pair_routes(rig):
