@@ -55633,7 +55633,7 @@ ASM_FENCE_S = 3                   # the fence's retry period (V10, N7)
 JOIN_REGION_GUARD = False         # the shipped value: a differing region is recorded, not refused
 ASM_CAPS_TOKEN = "ffa_asm1"       # assembly_v1 capability token (ffa_queue.caps)
 ADM_CAPS_TOKEN = "ffa_adm1"       # admission_v1 capability token
-ADM_PRODUCTION_ENABLED = False    # while False, admission_v1 also needs every member in ffa_g3_seats
+ADM_PRODUCTION_ENABLED = True     # production from 1.41.0 (A7); False is the rollback: admission_v1 then also needs every member in ffa_g3_seats
 RDM_CAPS_TOKEN = "ffa_rdm1"       # readmit_v1 capability token (FFA mid-game readmission, V3 P4.6)
 # Values the design states in prose without a sec3.2 name. Named here so no
 # literal repeats; none of them substitutes for a sec3.2 name above.
@@ -59663,7 +59663,10 @@ async def _ffa_asm_gates(db, player_ids) -> tuple:
     ffa_g3_seats enrolment. readmit_v1: admission_v1 and every member carries
     RDM_CAPS_TOKEN. A member with no queue row, or no token, makes the gate
     false: the safe direction (#288). The lock writes the three once; nothing
-    re-derives them after the lock, so a member that leaves cannot change them."""
+    re-derives them after the lock, so a member that leaves cannot change them.
+    ADM_PRODUCTION_ENABLED is True from 1.41.0 (decision A7), so the enrolment
+    does not decide admission_v1; setting it False is the server's rollback,
+    after which only a room whose every member is enrolled is admitted."""
     ids = [p for p in player_ids if p is not None]
     if not FFA_ASSEMBLY_ENABLED or not ids:
         return False, False, False
@@ -64534,12 +64537,13 @@ async def _ffa_readmit_janitor(session_factory) -> None:
 
 @app.post("/api/v1/admin/ffa-g3-seats", tags=["Admin"])
 async def admin_ffa_g3_seat(payload: dict, db: AsyncSession = Depends(get_db)):
-    """Enrol one test seat for G3 (the admission path's pre-release walk):
-    while ADM_PRODUCTION_ENABLED is False, admission_v1 also needs every member
-    enrolled here. Admin-HMAC canonical:
+    """Enrol one seat in ffa_g3_seats: while ADM_PRODUCTION_ENABLED is False,
+    admission_v1 also needs every member enrolled here. The switch is True
+    from 1.41.0 (decision A7), so an enrolment decides nothing until the switch
+    is set False again (the server's rollback, under which only enrolled rooms
+    are admitted); the route and the table stay for that. Admin-HMAC canonical:
     admin:{admin}:ffa_g3_seat:{target}:{hours}, so the duration is signed too.
-    hours is an integer 0-72; 0 expires the row at once. The production-
-    enabling release deletes this route with the table."""
+    hours is an integer 0-72; 0 expires the row at once."""
     admin_id = str(payload.get("admin_steam_id", ""))[:20]
     target = str(payload.get("target_steam_id", ""))[:20]
     if not _pg_text_ok(target):   # G3 enrolment: the target's key, before the admin check
