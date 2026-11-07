@@ -204,8 +204,12 @@ def test_h4_another_pairs_contribution_about_the_same_subject_is_not_this_games(
     s = ae.game_section(src, data, g, {a: 0, b: 1})
     _sa, fa = _seat(s, 0)
     assert fa["contrib1.source"] == "self" and "contrib2.source" not in fa, fa
+    # nor is it shown on this game under any other word (W36d: `unattributed`
+    # is for this game's own identity only)
+    assert not any(k.startswith("unattributed") for k in fa), fa
     assert "games_rows" not in _facts(s["game"])
     f = _facts(ae.summary_section(src, data, [g], a, 0)["facts"])
+    assert "unattributed" not in f, f
     if src == "card":
         assert f["self.hands"] == "5" and "meas.hands" not in f, f
     else:
