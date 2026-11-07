@@ -331,6 +331,10 @@ namespace CompetitiveRounds
 
         private static Target HitTest(Vector3 mp)
         {
+            // Ask 2 (Nov 2026): a SOLID chat panel (SCR menu open) hides the rows under
+            // it, so no hover card opens for a name the player cannot see (the same
+            // rule ClickHandler.Update applies to clicks). False while translucent.
+            if (ChatOverlayTmp.OwnsScreenPoint(mp)) return null;
             // Last-registered first so newer rows on top of stacked layouts win.
             for (int i = targets.Count - 1; i >= 0; i--)
             {

@@ -1335,6 +1335,7 @@ namespace CompetitiveRounds
             if(!Input.GetMouseButtonDown(0))return;
             if(!cameraResolved)ResolveCamera();
             Vector3 mp=Input.mousePosition;
+            if(ChatOverlayTmp.OwnsScreenPoint(mp))return;/* Ask 2 (Nov 2026): a SOLID chat panel (SCR menu open) owns the clicks over its body, like the pinned card below; without this a control hidden under the opaque panel still fired (Codex ASK2-R1 M1). False whenever the panel is translucent, so rounds are unchanged. */
             if(ProfileCard.SwallowsClickAt(mp))return;/* Sept 6 item a: a PINNED profile card owns the clicks over its own body and nothing else (design v2 A-1); this poll never saw uGUI raycasts (#141) */
             if(ContainsScreenPoint(rt,mp)&&IsInsideAncestorMasks(mp))onClick.Invoke();
         }
@@ -14081,6 +14082,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (rt == null) return;
                 var c = new Vector3[4]; rt.GetWorldCorners(c);
                 Vector3 mp = Input.mousePosition;
+                if (ChatOverlayTmp.OwnsScreenPoint(mp)) return;   // Ask 2: a solid chat panel over the article owns the click (sibling of ClickHandler.Update)
                 if (mp.x < c[0].x || mp.x > c[2].x || mp.y < c[0].y || mp.y > c[1].y) return;
                 string key = TmpLinkAtScreenPoint(infoBodyTxt, mp);
                 // Segmented articles carry cross-refs in their extra text

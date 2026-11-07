@@ -44,6 +44,14 @@ namespace CompetitiveRounds
         private static readonly float[] lineY = new float[MaxLines], lineH = new float[MaxLines];
         private static float shownPanelH = -1f, shownBackdropA = -1f;
         private static bool panelVisible;
+        // Ask 2 (Nov 2026): true while the backdrop is SOLID (today: the SCR menu
+        // open). A solid panel is a surface and owns the clicks over its body
+        // through both click paths: the EventSystem via this canvas's raycaster
+        // (enabled only then) and the mod's polling ClickHandler via
+        // OwnsScreenPoint. A translucent panel (menu closed) stays the
+        // display-only, click-through surface it has always been.
+        private static bool solidSurface;
+        private static Behaviour raycaster;
         private static int lastFedFrame = -1;
         private static float singleLineH = -1f;
 
@@ -110,6 +118,9 @@ namespace CompetitiveRounds
                     shownBackdropA = backdropAlpha;
                 }
                 if (!panelVisible) { panelGO.SetActive(true); panelVisible = true; }
+                // Solid iff the caller asked for an opaque backdrop: what the player
+                // sees as a box behaves as one (Codex ASK2-R1 M1).
+                SetSolidSurface(backdropAlpha >= 0.999f);
             }
             catch (Exception ex)
             {
@@ -121,6 +132,37 @@ namespace CompetitiveRounds
         {
             if (panelVisible && panelGO != null) { try { panelGO.SetActive(false); } catch { } }
             panelVisible = false;
+            SetSolidSurface(false);
+        }
+
+        private static void SetSolidSurface(bool solid)
+        {
+            if (solidSurface == solid) return;
+            solidSurface = solid;
+            if (raycaster != null) { try { raycaster.enabled = solid; } catch { } }
+        }
+
+        /// <summary>Ask 2 (Nov 2026): true when a SOLID, visible panel covers this
+        /// screen point, so a polling click handler or hover test under it must not react (the
+        /// same rule as ProfileCard.SwallowsClickAt for the pinned card). The
+        /// canvas is ScreenSpaceOverlay at ConstantPixelSize, so the panel's world
+        /// corners ARE screen pixels. Always false while the backdrop is
+        /// translucent (menu closed): nothing in a round changes.</summary>
+        internal static bool OwnsScreenPoint(Vector3 screenPoint)
+        {
+            if (!solidSurface || !panelVisible || panelRT == null) return false;
+            try
+            {
+                var corners = new Vector3[4];
+                panelRT.GetWorldCorners(corners);
+                float minX = Mathf.Min(Mathf.Min(corners[0].x, corners[1].x), Mathf.Min(corners[2].x, corners[3].x));
+                float maxX = Mathf.Max(Mathf.Max(corners[0].x, corners[1].x), Mathf.Max(corners[2].x, corners[3].x));
+                float minY = Mathf.Min(Mathf.Min(corners[0].y, corners[1].y), Mathf.Min(corners[2].y, corners[3].y));
+                float maxY = Mathf.Max(Mathf.Max(corners[0].y, corners[1].y), Mathf.Max(corners[2].y, corners[3].y));
+                return screenPoint.x >= minX && screenPoint.x <= maxX
+                    && screenPoint.y >= minY && screenPoint.y <= maxY;
+            }
+            catch { return false; }
         }
 
         /// <summary>LateUpdate on the canvas (ChatOverlayWatchdog): when
@@ -171,7 +213,14 @@ namespace CompetitiveRounds
                     var smp = UIFactory.tCanvasScaler.GetProperty("uiScaleMode", bf);
                     if (smp != null) smp.SetValue(sc, Enum.ToObject(smp.PropertyType, 0));    // ConstantPixelSize: 1 unit = 1 px
                 }
-                // No GraphicRaycaster: display-only, click-through.
+                // Ask 2 (Nov 2026): the GraphicRaycaster exists so a SOLID panel can own
+                // the EventSystem clicks over it (menu open); it starts disabled and
+                // SetSolidSurface toggles it, so the translucent panel stays click-through.
+                if (UIFactory.tGR != null)
+                {
+                    try { raycaster = canvasGO.AddComponent(UIFactory.tGR) as Behaviour; } catch { raycaster = null; }
+                    if (raycaster != null) raycaster.enabled = false;
+                }
                 canvasGO.AddComponent<ChatOverlayWatchdog>();
                 Plugin.Log.LogInfo("[CHAT-TMP] created the minimised-chat canvas");
             }

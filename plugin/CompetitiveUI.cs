@@ -4661,9 +4661,13 @@ namespace CompetitiveRounds
             // SOLID, so the lines read over the menu chrome instead of showing
             // it through. Keyed on NativeUI.IsOpen alone - never on room state
             // (#122: OfflineMode keeps InRoom true at the main menu). The fade
-            // is untouched: each line's alpha still comes from the TTL and the
-            // 10 s tail above, menu open or not, and with the menu closed the
-            // 0.55 backdrop still follows the most visible line as before.
+            // is untouched: a normal-mode line's alpha still comes from the TTL
+            // and the 10 s tail above, Pinned still holds every line at 1 and
+            // the muted-players row stays at 0.75 x the most visible line, menu
+            // open or not; with the menu closed the 0.55 backdrop still follows
+            // the most visible line as before. A solid panel also owns the
+            // clicks over its body (ChatOverlayTmp.OwnsScreenPoint plus its
+            // raycaster), so nothing hidden under it can fire.
             ChatOverlayTmp.End(NativeUI.IsOpen ? 1f : 0.55f * maxAlpha);
         }
 
