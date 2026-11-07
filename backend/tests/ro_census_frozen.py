@@ -2104,7 +2104,53 @@ COMPLETE_FROZEN = {'api/admin_evidence.py#complete': [],
                                            'schema}}, poolclass=None)'),
                                           ('dynamic', 'self.__dict__')],
  'tests/title_ladders_lane_schema.py#complete': []}
-COARSE_COUNT = 363
+# Coarse layer re-frozen ONCE at the round-11 merge (FOUR-R11-A16 (5)) from the
+# seat derivation test_zz_r11_rec_derive (never-merged branch
+# claude/rehearsal-four-r11-rec-derive) at 21aaf7f2: 2 coarse forms the round-10
+# grammar finds beyond FROZEN, each text (listed with file and line in the
+# round-11 notes); they join FROZEN's coarse keys.
+R11_COARSE_FROZEN = {'tests/test_match_hold_admission_gate_pg.py': [('dsntext',
+                                                 'FOUR-R11-A9 (1)(c): the operations the '
+                                                 'S2 and S3 conditions use on a\n'
+                                                 '    UUID value of a seat row (NOTES r11 '
+                                                 'rules, "K table amendment"): str()\n'
+                                                 "    (_asm_deferred_departure's pidt) and "
+                                                 'binding as a statement parameter\n'
+                                                 "    through main's session (every "
+                                                 'seat["player_id"] bind). Each is '
+                                                 'executed\n'
+                                                 "    on a value read through main's own "
+                                                 'session from PostgreSQL (the\n'
+                                                 "    driver's class) and on a uuid.UUID "
+                                                 'of the same value, and must agree;\n'
+                                                 "    str() is the driver's own "
+                                                 'implementation (read from the class).'),
+                                                ('dsntext',
+                                                 'Rules W, P and K (ruling FOUR-R11-A4 '
+                                                 '(2)(a) to (2)(g)): every bound\n'
+                                                 '    discharge the real gate walks of S1 '
+                                                 "(_asm_readmit_work's\n"
+                                                 "    _asm_readmit_on), S2 (_rdm_claim's "
+                                                 '_rdm_live_or_lapse) and S3\n'
+                                                 "    (_rdm_claim's gate refusal) make is "
+                                                 'marked by the walk (site, rule);\n'
+                                                 '    each marked site is observed on the '
+                                                 "measured flows (main's own\n"
+                                                 '    construction path, PostgreSQL rows), '
+                                                 'its value of the named type and\n'
+                                                 '    its root an instance of K by type '
+                                                 "identity; every call at rule W's site\n"
+                                                 '    calls a function of the census, the '
+                                                 'named one with a K first argument.\n'
+                                                 '    An unreached marked site fails, '
+                                                 'listed. The interpreter must provide\n'
+                                                 '    sys.monitoring (CPython 3.12+): '
+                                                 'without it the test fails, it never\n'
+                                                 '    skips or passes (ruling FOUR-R11-A5 '
+                                                 '(4)).')]}
+for _k, _v in R11_COARSE_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+COARSE_COUNT = 365
 COMPLETE_COUNT = 218
 # Hand edit at the round-9 merge (W30b; the ro child's question 1; reviewed
 # in the round-9 notes): two dynamic forms the gr child's G2/G3 code adds,
@@ -3498,7 +3544,18 @@ FROZEN_COUNT = COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
 # one a reflective literal (a string constant spelled __x__, finding F5).
 # The round-11 binding forms (finding F6) add no form at 5b18949a.
 R11_ID_FROZEN = {'tests/closed_walk.py#complete': [('alias', 'str __builtins__'),
+                                   ('alias', 'str delattr'),
+                                   ('alias', 'str eval'),
+                                   ('alias', 'str exec'),
+                                   ('alias', 'str globals'),
                                    ('alias', 'str hasattr'),
+                                   ('alias', 'str locals'),
+                                   ('alias', 'str setattr'),
+                                   ('alias', 'str vars'),
+                                   ('alias', 'str vars'),
+                                   ('alias', 'str vars'),
+                                   ('dynamic', 'b.__dict__'),
+                                   ('dynamic', 'b.__dict__'),
                                    ('dynamic', 'b.__dict__'),
                                    ('dynamic', 'b.__dict__'),
                                    ('dynamic', 'b.__dict__'),
@@ -3506,11 +3563,25 @@ R11_ID_FROZEN = {'tests/closed_walk.py#complete': [('alias', 'str __builtins__')
                                    ('dynamic', 'getattr(bi, name, _MISSING)'),
                                    ('dynamic', 'getattr(self.scope, name, _MISSING)'),
                                    ('dynamic', 'hasattr(_builtins, d.name)'),
+                                   ('dynamic', 'pol.__dict__'),
+                                   ('dynamic', 'pol.__dict__'),
                                    ('dynamic', 'policy.__dict__'),
                                    ('dynamic', 'policy.__dict__'),
                                    ('dynamic', 'policy.__dict__'),
                                    ('dynamic', 'self.p.__dict__'),
+                                   ('dynamic', 'vars(K)'),
+                                   ('dynamic', 'vars(c)'),
+                                   ('dynamic', 'vars(c)'),
+                                   ('dynamic', 'vars(c)'),
+                                   ('dynamic', 'vars(c)'),
+                                   ('dynamic', 'vars(cls)'),
                                    ('dynamic', 'vars(mod)'),
+                                   ('dynamic', 'vars(mod)'),
+                                   ('dynamic', 'vars(mod)'),
+                                   ('dynamic', 'vars(mod)'),
+                                   ('dynamic', 'vars(mod)'),
+                                   ('dynamic', 'vars(mod)'),
+                                   ('dynamic', 'vars(scope)'),
                                    ('dynamic', 'vars(type(self.scope))')],
  'tests/test_a1_identity_formation.py#complete': [('alias', 'builtins.int'),
                                                   ('alias', 'import builtins'),
@@ -3537,8 +3608,45 @@ R11_ID_FROZEN = {'tests/closed_walk.py#complete': [('alias', 'str __builtins__')
                                                   ('dynamic', 'mod.__dict__'),
                                                   ('dynamic', 'other.__dict__'),
                                                   ('dynamic', 'pol.__dict__'),
-                                                  ('dynamic', 'vars(main)')]}
-R11_ID_COUNT = 33
+                                                  ('dynamic', 'vars(main)')],
+ 'tests/test_match_hold_admission_gate_pg.py#complete': [('alias', 'str exec'),
+                                                         ('alias', 'str exec'),
+                                                         ('alias', 'str exec'),
+                                                         ('alias', 'str getattr'),
+                                                         ('alias', 'str hasattr'),
+                                                         ('alias', 'str setattr'),
+                                                         ('dynamic',
+                                                          "exec(compile('def f():' + chr(10) + "
+                                                          "'    return 2' + chr(10), '<r11 "
+                                                          "order>', 'exec'), early)"),
+                                                         ('dynamic',
+                                                          "exec(compile(chr(10) * 2 + 'def "
+                                                          "f():' + chr(10) + '    return 1' + "
+                                                          "chr(10), '<r11 order>', 'exec'), "
+                                                          'late)'),
+                                                         ('dynamic',
+                                                          "exec(compile(src, f'<unregistered "
+                                                          "{name}>', 'exec'), scope.__dict__)"),
+                                                         ('dynamic', 'getattr(R, n)'),
+                                                         ('dynamic', 'getattr(_cw, n)'),
+                                                         ('dynamic', 'getattr(mod, name)'),
+                                                         ('dynamic', 'getattr(module, name)'),
+                                                         ('dynamic', 'module.__dict__'),
+                                                         ('dynamic', 'scope.__dict__'),
+                                                         ('dynamic', 'scope.__dict__'),
+                                                         ('dynamic', 'sys.modules'),
+                                                         ('dynamic', 'sys.modules'),
+                                                         ('dynamic', 'sys.modules'),
+                                                         ('dynamic', 'vars(cls)'),
+                                                         ('dynamic', 'vars(cls)'),
+                                                         ('dynamic', 'vars(mod)'),
+                                                         ('dynamic', 'vars(scope)'),
+                                                         ('dynamic', 'vars(scope)'),
+                                                         ('dynamic', 'vars(scope)'),
+                                                         ('dynamic', 'vars(scope)'),
+                                                         ('dynamic', 'vars(v)'),
+                                                         ('dynamic', 'vars(v)')]}
+R11_ID_COUNT = 86
 R11_OPEN_FROZEN = {'api/build_manifest.py#complete': [('alias', 'str __main__')],
  'api/conn_ranges.py#complete': [('alias', 'str __main__')],
  'api/log_redaction.py#complete': [('alias', 'str __main__')],
@@ -3555,22 +3663,45 @@ R11_OPEN_FROZEN = {'api/build_manifest.py#complete': [('alias', 'str __main__')]
  'api/review_rules.py#complete': [('alias', 'str __main__'), ('alias', 'str __main__')],
  'api/tournament_bracket.py#complete': [('alias', 'str __main__')],
  'tests/closed_walk.py#complete': [('alias', 'str __binder_address__'),
+                                   ('alias', 'str __class__'),
+                                   ('alias', 'str __delattr__'),
+                                   ('alias', 'str __delattr__'),
+                                   ('alias', 'str __dict__'),
+                                   ('alias', 'str __dict__'),
+                                   ('alias', 'str __dict__'),
                                    ('alias', 'str __file__'),
                                    ('alias', 'str __file__'),
+                                   ('alias', 'str __getattr__'),
+                                   ('alias', 'str __getattribute__'),
                                    ('alias', 'str __name__'),
                                    ('alias', 'str __name__'),
                                    ('alias', 'str __name__'),
                                    ('alias', 'str __name__'),
                                    ('alias', 'str __name__'),
+                                   ('alias', 'str __name__'),
+                                   ('alias', 'str __name__'),
+                                   ('alias', 'str __qualname__'),
                                    ('alias', 'str __self__'),
-                                   ('alias', 'str __self__')],
+                                   ('alias', 'str __self__'),
+                                   ('alias', 'str __setattr__'),
+                                   ('alias', 'str __setattr__'),
+                                   ('alias', 'str __slots__')],
  'tests/resolution_sites.py#complete': [('alias', 'str __init__'),
                                         ('alias', 'str __init__'),
                                         ('alias', 'str __main__')],
  'tests/test_a1_identity_formation.py#complete': [('alias', 'str __file__')],
- 'tests/test_match_hold_admission_gate_pg.py#complete': [('alias', 'str __file__'),
-                                                         ('alias', 'str __name__')]}
-R11_OPEN_COUNT = 33
+ 'tests/test_match_hold_admission_gate_pg.py#complete': [('alias', 'str __code__'),
+                                                         ('alias', 'str __file__'),
+                                                         ('alias', 'str __module__'),
+                                                         ('alias', 'str __name__'),
+                                                         ('alias', 'str __name__'),
+                                                         ('alias', 'str __name__'),
+                                                         ('alias', 'str __name__'),
+                                                         ('alias', 'str __name__'),
+                                                         ('alias', 'str __qualname__'),
+                                                         ('alias', 'str __self__'),
+                                                         ('alias', 'str __str__')]}
+R11_OPEN_COUNT = 56
 for _k, _v in list(R11_ID_FROZEN.items()) + list(R11_OPEN_FROZEN.items()):
     FROZEN[_k] = list(FROZEN[_k]) + list(_v)
 FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT

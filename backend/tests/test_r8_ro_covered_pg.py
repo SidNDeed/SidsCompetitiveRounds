@@ -1423,7 +1423,9 @@ def test_census_refuses_incomplete_opener_form(name):
 def test_census_complete_layer_frozen_whole():
     """G1: the complete layer is frozen for every census file, holds no
     refuse form, and each declared FORWARDING exception is frozen exactly
-    once as a call; the count is the coarse 363 plus the complete layer."""
+    once as a call; the count is the coarse 365 (363, plus the two coarse forms
+    of the round-11 merge, re-frozen once from the seat derivation) plus the
+    complete layer."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1435,7 +1437,7 @@ def test_census_complete_layer_frozen_whole():
     # freeze lists only the files with a coarse form
     assert complete == {k + ro_census.COMPLETE for k in r7.CENSUS_FILES}
     assert coarse <= set(r7.CENSUS_FILES)
-    assert sum(len(fz.FROZEN[k]) for k in coarse) == fz.COARSE_COUNT == 363
+    assert sum(len(fz.FROZEN[k]) for k in coarse) == fz.COARSE_COUNT == 365
     assert sum(len(fz.COMPLETE_FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT == 218
     assert sum(len(fz.R10_FROZEN[k]) for k in complete) == fz.R10_COUNT == 114
     # round 10's merge: the hand-frozen block (W30b), fifteen forms of the gr child's providers
