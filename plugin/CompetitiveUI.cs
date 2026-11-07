@@ -8626,9 +8626,28 @@ namespace CompetitiveRounds
         // DataConsent is "" / unset). Until the user makes a choice, every
         // ApiClient call short-circuits at the helper level, so nothing leaves
         // the box. Decline → all reporting stays disabled. Allow → normal mode.
+        //
+        // Ask item 12 (7 Nov): Decline is two steps. The first click on
+        // "Decline (offline mode)" only swaps the modal to a confirmation; the
+        // cfg row is written by "Decline anyway" (or by Allow on the first
+        // page) and by nothing else, so DataConsentAsked still turns true only
+        // after a write. "Back" returns to the first page and writes nothing.
 
         private static GUIStyle consentTitleStyle;
         private static GUIStyle consentBodyStyle;
+        private static GUIStyle consentWarnStyle;
+
+        // True between the first Decline click and "Decline anyway" / "Back".
+        // Never sticky: it is cleared whenever the modal starts fresh (the
+        // blocker is built, i.e. the first draw or a draw after a scene change
+        // destroyed it), when the modal closes (DestroyConsentBlocker), and
+        // when the active scene is no longer the one it was opened in.
+        private static bool consentDeclineConfirmOpen;
+        private static int consentDeclineConfirmScene;
+        // One ClickGuard key for the Decline route's three buttons, so a
+        // double-click on "Decline (offline mode)" cannot land its second half
+        // on the confirmation's buttons inside the 0.2 s window.
+        private static readonly object consentDeclineClickKey = new object();
 
         // Full-screen uGUI raycast blocker that exists only while the consent modal is open.
         // IMGUI Event.Use() doesn't stop uGUI/main-menu clicks behind the modal — this Image
@@ -8638,6 +8657,7 @@ namespace CompetitiveRounds
         private static void EnsureConsentBlocker()
         {
             if (consentBlockerGO != null) return;
+            consentDeclineConfirmOpen = false;   // ask item 12: a fresh modal opens on its first page
             try
             {
                 consentBlockerGO = new GameObject("CR_ConsentBlocker");
@@ -8669,6 +8689,7 @@ namespace CompetitiveRounds
 
         private static void DestroyConsentBlocker()
         {
+            consentDeclineConfirmOpen = false;   // ask item 12: no confirmation outlives the modal
             if (consentBlockerGO == null) return;
             try { UnityEngine.Object.Destroy(consentBlockerGO); } catch { }
             consentBlockerGO = null;
@@ -8689,6 +8710,26 @@ namespace CompetitiveRounds
                 consentTitleStyle = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
             if (consentBodyStyle == null)
                 consentBodyStyle = new GUIStyle(GUI.skin.label) { fontSize = 14, wordWrap = true, alignment = TextAnchor.UpperLeft };
+            if (consentWarnStyle == null)
+            {
+                // The mod's error red (ShowNotification's failure colour), bold per
+                // the UI text rule.
+                consentWarnStyle = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, wordWrap = true, alignment = TextAnchor.MiddleCenter };
+                consentWarnStyle.normal.textColor = new Color(1f, 0.45f, 0.4f);
+            }
+
+            // Ask item 12: the confirmation replaces the first page in the same
+            // place, under the same blocker, inside this one draw (still DrawUI's
+            // last). A scene change since it opened sends the modal back to its
+            // first page.
+            if (consentDeclineConfirmOpen && consentDeclineConfirmScene != ConsentSceneHandle())
+                consentDeclineConfirmOpen = false;
+            if (consentDeclineConfirmOpen)
+            {
+                DrawConsentDeclineConfirm(bg);
+                EatConsentInput();
+                return;
+            }
 
             // i18n: IMGUI has no Tr chokepoint (GUI.Label/GUI.Button draw the raw
             // string), so every consent string is translated here explicitly.
@@ -8719,13 +8760,18 @@ namespace CompetitiveRounds
             // profile picture on a card of you; its own key, as above.
             body += "\n" + I18n.Tr("Other players can collect a Player Card of you showing your name, rank, rating, ranked record and your public Steam profile picture (your in-game character replaces the picture once this PC has sent it). Deleting your data removes every card of you.");
 
+            // Ask item 12: one red line under the body, above the buttons.
+            string warning = I18n.Tr("Without data consent the mod will not work properly: the leaderboard, ranked matchmaking, chat, player cards and bug reports with logs all stop working.");
+
             // The panel is sized to its text (translations run longer than the
-            // English) so the body is never clipped against the buttons: the
-            // body rect is h - 120 tall and starts 50 px down, the buttons sit
-            // 56 px above the bottom edge.
+            // English) so neither the body nor the warning is clipped against
+            // the buttons: the body rect starts 50 px down and ends 8 px above
+            // the warning, the warning ends 8 px above the buttons, and the
+            // buttons sit 56 px above the bottom edge.
             float w = 680;
             float bodyH = consentBodyStyle.CalcHeight(new GUIContent(body), w - 48);
-            float h = Mathf.Clamp(bodyH + 136f, 420f, Screen.height - 40f);
+            float warnH = consentWarnStyle.CalcHeight(new GUIContent(warning), w - 48);
+            float h = Mathf.Clamp(bodyH + warnH + 144f, 420f, Screen.height - 40f);
             float x = (Screen.width - w) / 2f;
             float y = (Screen.height - h) / 2f;
 
@@ -8733,7 +8779,8 @@ namespace CompetitiveRounds
                 new Color(0.10f, 0.11f, 0.16f, 0.97f), 0, 0);
             GUI.Label(new Rect(x, y + 14, w, 30),
                 I18n.Tr("Competitive ROUNDS — Data Consent"), consentTitleStyle);
-            GUI.Label(new Rect(x + 24, y + 50, w - 48, h - 120), body, consentBodyStyle);
+            GUI.Label(new Rect(x + 24, y + 50, w - 48, h - 122f - warnH), body, consentBodyStyle);
+            GUI.Label(new Rect(x + 24, y + h - 64f - warnH, w - 48, warnH), warning, consentWarnStyle);
 
             string allowLabel = I18n.Tr("Allow data reporting");
             string declineLabel = I18n.Tr("Decline (offline mode)");
@@ -8742,13 +8789,72 @@ namespace CompetitiveRounds
                 ConsentSetting.Set(true);   // round-2 L1: the consent row's one writer
                 Plugin.Log.LogInfo("[CONSENT] User granted data reporting");
             }
-            if (GUI.Button(new Rect(x + w - 310, y + h - 56, 260, 38), declineLabel))
+            // Ask item 12: Decline writes nothing; it opens the confirmation.
+            if (GUI.Button(new Rect(x + w - 310, y + h - 56, 260, 38), declineLabel)
+                && ClickGuard.Claim(consentDeclineClickKey))
             {
+                consentDeclineConfirmOpen = true;
+                consentDeclineConfirmScene = ConsentSceneHandle();
+                Plugin.Log.LogInfo("[CONSENT] Decline clicked: asking for confirmation");
+            }
+
+            EatConsentInput();
+        }
+
+        /// <summary>Ask item 12: the Decline confirmation, drawn by
+        /// DrawConsentModal in the first page's place. "Decline anyway" is the
+        /// only route to ConsentSetting.Set(false) in this file; "Back" returns
+        /// to the first page and writes nothing.</summary>
+        private static void DrawConsentDeclineConfirm(Texture2D bg)
+        {
+            if (Plugin.DataConsentAsked) { consentDeclineConfirmOpen = false; return; }
+
+            string question = I18n.Tr("Decline data consent? The mod will run offline: no leaderboard, no ranked matchmaking, no chat, no player cards. You can allow it later in F5 → Settings → Privacy & account.");
+
+            float w = 560;
+            float qH = consentBodyStyle.CalcHeight(new GUIContent(question), w - 48);
+            float h = Mathf.Clamp(qH + 136f, 220f, Screen.height - 40f);
+            float x = (Screen.width - w) / 2f;
+            float y = (Screen.height - h) / 2f;
+
+            GUI.DrawTexture(new Rect(x, y, w, h), bg, ScaleMode.StretchToFill, true, 0,
+                new Color(0.10f, 0.11f, 0.16f, 0.97f), 0, 0);
+            GUI.Label(new Rect(x, y + 14, w, 30),
+                I18n.Tr("Competitive ROUNDS — Data Consent"), consentTitleStyle);
+            GUI.Label(new Rect(x + 24, y + 50, w - 48, h - 120), question, consentBodyStyle);
+
+            string declineAnywayLabel = I18n.Tr("Decline anyway");
+            string backLabel = I18n.Tr("Back");
+            // "Back" takes Decline's side (right), "Decline anyway" takes Allow's.
+            // Both buttons are drawn every pass (stable IMGUI control order);
+            // the shared ClickGuard key refuses either inside 0.2 s of the
+            // Decline click that opened this page.
+            bool anyway = GUI.Button(new Rect(x + 40, y + h - 56, 220, 38), declineAnywayLabel);
+            bool back = GUI.Button(new Rect(x + w - 260, y + h - 56, 220, 38), backLabel);
+            if (anyway && ClickGuard.Claim(consentDeclineClickKey))
+            {
+                consentDeclineConfirmOpen = false;
                 ConsentSetting.Set(false);   // round-2 L1: the consent row's one writer
                 Plugin.Log.LogInfo("[CONSENT] User declined data reporting");
             }
+            else if (back && ClickGuard.Claim(consentDeclineClickKey))
+            {
+                consentDeclineConfirmOpen = false;
+                Plugin.Log.LogInfo("[CONSENT] Decline not confirmed: back to the consent choice");
+            }
+        }
 
-            // Eat mouse / keyboard so the click doesn't pass through to the menu underneath
+        // The active scene's handle, read once per use; the confirmation is
+        // tied to the scene it opened in.
+        private static int ConsentSceneHandle()
+        {
+            try { return UnityEngine.SceneManagement.SceneManager.GetActiveScene().handle; }
+            catch { return 0; }
+        }
+
+        // Eat mouse / keyboard so the click doesn't pass through to the menu underneath
+        private static void EatConsentInput()
+        {
             if (Event.current != null)
             {
                 var t = Event.current.type;

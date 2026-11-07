@@ -1069,6 +1069,8 @@
   "Decimals on the HP readout in the hold-{0} board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes.",
   "Decline",
   "Decline (offline mode)",
+  "Decline anyway",
+  "Decline data consent? The mod will run offline: no leaderboard, no ranked matchmaking, no chat, no player cards. You can allow it later in F5 → Settings → Privacy & account.",
   "Deep blood-red body color.",
   "Deep blue-violet of the moment after sunset.",
   "Deep cool dusk blues with dimmed exposure.",
@@ -3246,6 +3248,7 @@
   "Wisps of grey smoke drift off your body.",
   "Wisps of living shadow crown your head. ANIMATED.",
   "With a linked Discord account, mail also reaches you there while the game is closed, and a reply written from Discord lands back in this inbox.",
+  "Without data consent the mod will not work properly: the leaderboard, ranked matchmaking, chat, player cards and bug reports with logs all stop working.",
   "Won",
   "World Turtle",
   "Worn by those who climbed the mountain.",
@@ -6980,8 +6983,8 @@
    "kind": "shop"
   },
   "Back": {
-   "surface": "MailUI, PlayerCardsUI",
-   "location": "BuildCompose, BuildReaderView",
+   "surface": "CompetitiveUI, MailUI, PlayerCardsUI",
+   "location": "BuildCompose, BuildReaderView, DrawConsentDeclineConfirm",
    "kind": "CreateButton, Tr"
   },
   "Back in the Quick Match queue — searching for an opponent.": {
@@ -8381,7 +8384,7 @@
   },
   "Competitive ROUNDS — Data Consent": {
    "surface": "CompetitiveUI",
-   "location": "DrawConsentModal",
+   "location": "DrawConsentDeclineConfirm, DrawConsentModal",
    "kind": "Tr"
   },
   "Competitor": {
@@ -9117,6 +9120,16 @@
   "Decline (offline mode)": {
    "surface": "CompetitiveUI",
    "location": "DrawConsentModal",
+   "kind": "Tr"
+  },
+  "Decline anyway": {
+   "surface": "CompetitiveUI",
+   "location": "DrawConsentDeclineConfirm",
+   "kind": "Tr"
+  },
+  "Decline data consent? The mod will run offline: no leaderboard, no ranked matchmaking, no chat, no player cards. You can allow it later in F5 → Settings → Privacy & account.": {
+   "surface": "CompetitiveUI",
+   "location": "DrawConsentDeclineConfirm",
    "kind": "Tr"
   },
   "Deep blood-red body color.": {
@@ -20002,6 +20015,11 @@
   "With a linked Discord account, mail also reaches you there while the game is closed, and a reply written from Discord lands back in this inbox.": {
    "surface": "SettingsDescriptors.g",
    "location": "HelpBodyTr",
+   "kind": "Tr"
+  },
+  "Without data consent the mod will not work properly: the leaderboard, ranked matchmaking, chat, player cards and bug reports with logs all stop working.": {
+   "surface": "CompetitiveUI",
+   "location": "DrawConsentModal",
    "kind": "Tr"
   },
   "Won": {
