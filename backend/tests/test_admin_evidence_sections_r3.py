@@ -60,7 +60,10 @@ def _crow(src, key, lo, hi, subject, match_id, **cols):
 
 
 def _seat(section, i):
-    return section["seats"][i]["state"], _facts(section["seats"][i]["facts"])
+    """The seat whose subject index is `i` (M8 lists B first: seats follow the
+    match row's p1, p2 order)."""
+    seat = next(s for s in section["seats"] if s["subject"] == i)
+    return seat["state"], _facts(seat["facts"])
 
 
 def _scenario():

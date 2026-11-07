@@ -962,7 +962,7 @@ def test_r3h1_the_worker_stamps_the_match_and_a_kept_contribution_keeps_it(live,
 
     def seat_facts(mid, i):
         sec = ae.game_section("combat", data, games[str(mid)], index)
-        return dict(sec["seats"][i]["facts"])
+        return dict(next(s for s in sec["seats"] if s["subject"] == i)["facts"])
     fa8, fb8 = seat_facts(m8, 0), seat_facts(m8, 1)
     assert not any(k.startswith("contrib1.") for k in fa8 | fb8), (fa8, fb8)
     assert fa8.get("unattributed1.source") == "self" and fb8.get("unattributed1.source") == "meas"

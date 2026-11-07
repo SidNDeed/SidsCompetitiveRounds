@@ -423,15 +423,16 @@ async def _write_contributions(db, key, lo, hi, records, match, paired):
     one-sided game becomes a paired one when its second record arrives.
 
     Each row is stamped with `match_id`, the match these contributions are
-    derived for (the one evaluate_game attached in this transaction; 401).
+    derived for (the one evaluate_game attached in this transaction; the
+    contribution provenance migration adds the column).
     This INSERT is the only statement that writes combat_contrib.match_id,
     and no statement updates a stored contribution: evaluate_game's UPDATEs
     write combat_games only, every pass that does not derive (a derivation
     fault, no rules revision, no attached match, an unchanged readiness
     signature, a final game, a record without its lists) leaves the stored rows as they are,
     and the purge only deletes rows past the retention. So a kept row keeps
-    the match it was derived for while the games row may name another
-    (B10-R3 H1)."""
+    the match it was derived for while the games row may name another,
+    and the admin report attributes the row by this stored match alone."""
     day = (await db.execute(text("SELECT (CAST(:t AS timestamptz) AT TIME ZONE 'UTC')::date"),
                             {"t": match["ended_at"]})).scalar_one()
     cov = "paired" if paired else "one"
