@@ -77,16 +77,16 @@ def _grow(src, key, a, b, match_id, **cols):
 
 
 def _contrib(src, key, a, b, subject, **cols):
-    """A stored contribution row; card rows name their match in `match_id`
-    (None unless given), combat rows carry the UTC day of `_game`'s end."""
+    """A stored contribution row; both sources name the match it was
+    derived for in `match_id` (None unless given: card since 370, combat
+    since 401)."""
     lo, hi = sorted((a, b))
     row = {"stable_game_key": key, "pair_lo": lo, "pair_hi": hi, "subject_player_id": subject,
            "source": "self", "coverage": "one", "computed_at": T0, "utc_day": T0.date()}
     row.update({c: 0 for c in ae._SECTION_SPEC[src]["contrib_cols"]})
     if src == "combat":
         row["sums"] = "{}"
-    else:
-        row["match_id"] = None
+    row["match_id"] = None
     row.update(cols)
     return row
 
@@ -144,7 +144,7 @@ def test_s1_combat_sums_show_bins_and_totals_by_stored_key():
     data = _data(records=[_rec("combat", "k1", a, b, "room-1", consts_version=3)],
                  games=[_grow("combat", "k1", a, b, g["id"], coverage="one", records_n=1,
                               record_faults='{"derive": 1, "BAD KEY": 2}')],
-                 contrib=[_contrib("combat", "k1", a, b, a, consts_version=3,
+                 contrib=[_contrib("combat", "k1", a, b, a, consts_version=3, match_id=g["id"],
                                    sums='{"a1s": [1, 2, 3], "a1p": [], "x y": [1], '
                                         '"p3dp0": [1, "no"]}')],
                  switches=_on("combat"))

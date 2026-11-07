@@ -55,8 +55,7 @@ def _crow(src, key, a, b, subject, **cols):
     row.update({c: 0 for c in ae._SECTION_SPEC[src]["contrib_cols"]})
     if src == "combat":
         row["sums"] = "{}"
-    else:
-        row["match_id"] = None
+    row["match_id"] = None
     row.update(cols)
     return row
 
@@ -106,7 +105,8 @@ def test_h2_a_contribution_about_a_seat_with_no_record_is_shown(src):
     window total carries it; A's seat shows none of it."""
     a, b = _pair()
     g = _game(a, b)
-    cols = {"hands": 4, "match_id": g["id"]} if src == "card" else {"sums": '{"a1s": [1, 2, 3]}'}
+    cols = ({"hands": 4, "match_id": g["id"]} if src == "card"
+            else {"sums": '{"a1s": [1, 2, 3]}', "match_id": g["id"]})
     data = _data(records=[_rec(src, "k1", a, b, "room-1")],
                  games=[_grow(src, "k1", a, b, g["id"])],
                  contrib=[_crow(src, "k1", a, b, b, source="meas", **cols)],
@@ -193,8 +193,10 @@ def test_h4_another_pairs_contribution_about_the_same_subject_is_not_this_games(
     a, b, c, _d = _four()
     g = _game(a, b, room="room-ab")
     other = str(uuid.uuid4())
-    mine = {"hands": 5, "match_id": g["id"]} if src == "card" else {"sums": '{"a1s": [5]}'}
-    theirs = {"hands": 7, "match_id": other} if src == "card" else {"sums": '{"a1s": [7]}'}
+    mine = ({"hands": 5, "match_id": g["id"]} if src == "card"
+            else {"sums": '{"a1s": [5]}', "match_id": g["id"]})
+    theirs = ({"hands": 7, "match_id": other} if src == "card"
+              else {"sums": '{"a1s": [7]}', "match_id": other})
     data = _data(records=[_rec(src, "K", a, b, "room-ab"), _rec(src, "K", b, a, "room-ab"),
                           _rec(src, "K", c, a, "room-ac")],
                  games=[_grow(src, "K", a, b, g["id"]), _grow(src, "K", a, c, other)],

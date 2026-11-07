@@ -3,15 +3,13 @@ of review round B10-R2 (ruling B10-A4), each proven by a test here that fails
 on the reviewed tip afd9493b and passes at the fix.
 
   R2-H1  a contribution is shown or totalled for a match only when its
-         provenance against that match is established from stored state.
-         Card: card_contrib.match_id equals the reported game's id. Combat
-         (combat_contrib stores no match): the contribution's own record
-         (`self`: the subject's record; `meas`: the other seat's record about
-         the subject) is one of the game's records (same stored identity,
-         attach key = the game's room), its utc_day is the match's UTC end day
-         and it was computed no earlier than the match ended; any other
-         combat contribution under the game's identity is shown under the
-         word `unattributed` and is in no total.
+         provenance against that match is established from stored state:
+         its stored match_id equals the reported game's id
+         (card_contrib.match_id since 370; combat_contrib.match_id since 401,
+         ruling B10-A7, which replaced the read-time combat conditions this
+         round first used; test_admin_evidence_sections_r3 carries the
+         B10-R3 cases); any other combat contribution under the game's
+         identity is shown under the word `unattributed` and is in no total.
   R2-H2  a games or contribution row's stored identity (stable_game_key,
          pair_lo, pair_hi) is compared exactly as stored, never reordered;
          only an evidence record's two seats are put lower first.
@@ -58,8 +56,7 @@ def _row(src, key, lo, hi, subject, match_id=None, utc_day=None, computed_at=COM
     row.update({c: 0 for c in ae._SECTION_SPEC[src]["contrib_cols"]})
     if src == "combat":
         row["sums"] = "{}"
-    else:
-        row["match_id"] = match_id
+    row["match_id"] = match_id
     row.update(cols)
     return row
 
@@ -130,17 +127,23 @@ def test_r2h1_combat_a_retained_contribution_is_unattributed_on_the_new_match():
     w8 = _facts(ae.summary_section("combat", data, [m8], a, 0)["facts"])
     assert "self.a1s.total" not in w8 and w8.get("unattributed") == "1", w8
     assert w8.get("contrib") == "not_derived", w8
-    # M9: the games row is another match's, so nothing of it is M9's here
+    # M9 keeps them: combat_contrib.match_id is M9 (401; B10-R3 H1 replaced
+    # the games-row and read-time rule that withheld them here)
     s9 = ae.game_section("combat", data, m9, {a: 0, b: 1})
-    assert not any(k.startswith(("contrib1.", "unattributed1."))
-                   for i in (0, 1) for k in _seat(s9, i)[1]), s9
+    _sa9, fa9 = _seat(s9, 0)
+    _sb9, fb9 = _seat(s9, 1)
+    assert (fa9.get("contrib1.source"), fa9.get("contrib1.a1s.total")) == ("self", "6"), fa9
+    assert (fb9.get("contrib1.source"), fb9.get("contrib1.a1s.total")) == ("meas", "6"), fb9
+    assert not any(k.startswith("unattributed") for k in fa9 | fb9), (fa9, fb9)
+    w9 = _facts(ae.summary_section("combat", data, [m9], a, 0)["facts"])
+    assert w9.get("self.a1s.total") == "6" and "unattributed" not in w9, w9
 
 
-def test_r2h1_combat_attributed_when_its_record_names_the_room_and_the_day_agrees():
+def test_r2h1_combat_attributed_by_its_stored_match():
     a, b = _pair()
     m9 = _g(a, b, "r9", ENDED9)
-    good = _row("combat", "K", a, b, a, sums='{"a1s": [1, 2, 3]}')
-    meas = _row("combat", "K", a, b, b, source="meas", sums='{"a1s": [4]}')
+    good = _row("combat", "K", a, b, a, match_id=m9["id"], sums='{"a1s": [1, 2, 3]}')
+    meas = _row("combat", "K", a, b, b, source="meas", match_id=m9["id"], sums='{"a1s": [4]}')
     recs = [_rec("combat", "K", a, b, "r9")]
     games = [_grow("combat", "K", a, b, m9["id"])]
     s = ae.game_section("combat", _data(records=recs, games=games, contrib=[good, meas]),
@@ -149,14 +152,14 @@ def test_r2h1_combat_attributed_when_its_record_names_the_room_and_the_day_agree
     _sb, fb = _seat(s, 1)
     assert fa.get("contrib1.a1s.total") == "6" and "unattributed1.source" not in fa, fa
     assert fb.get("contrib1.a1s.total") == "4" and "unattributed1.source" not in fb, fb
-    # each provenance condition on its own: a `self` row about B with no
-    # record of B, a row of another UTC day, a row computed before the match
-    # ended; each is unattributed and in no total
+    # the stored match decides, nothing read at report time: a row with no
+    # stored match (written before 401) and a row stored for another match
+    # are unattributed and in no total, whatever their day, time or record
     other_day = T0.date() - dt.timedelta(days=1)
-    for bad in (_row("combat", "K", a, b, b, sums='{"a1s": [9]}'),
-                _row("combat", "K", a, b, a, utc_day=other_day, sums='{"a1s": [9]}'),
-                _row("combat", "K", a, b, a, computed_at=ENDED9 - dt.timedelta(minutes=1),
-                     sums='{"a1s": [9]}')):
+    for bad in (_row("combat", "K", a, b, a, match_id=None, sums='{"a1s": [9]}'),
+                _row("combat", "K", a, b, b, match_id=str(uuid.uuid4()), sums='{"a1s": [9]}'),
+                _row("combat", "K", a, b, a, match_id=str(uuid.uuid4()), utc_day=other_day,
+                     computed_at=ENDED9 - dt.timedelta(minutes=1), sums='{"a1s": [9]}')):
         d = _data(records=recs, games=games, contrib=[bad])
         sub = 0 if bad["subject_player_id"] == a else 1
         _st, f = _seat(ae.game_section("combat", d, m9, {a: 0, b: 1}), sub)
@@ -217,9 +220,11 @@ def test_bot_decodes_an_unattributed_group_and_refuses_an_unknown_one(bot):
 
 def test_r2h1_pg_the_reattachment_through_the_game_and_pair_routes(rig):
     """The R2-H1 scenario in the production tables, read by the production
-    statements: the card select carries card_contrib.match_id and the combat
-    select carries combat_contrib.utc_day, and M8's report and the pair
-    window over M8 and M9 count the retained contributions for M9 only."""
+    statements: the card select carries card_contrib.match_id, and M8's
+    report and the pair window over M8 and M9 count the retained card
+    contribution for M9 only. The combat row here has no stored match_id (a
+    row written before 401), so it is `unattributed` on M8 and in no total;
+    the stored-match cases are test_admin_evidence_sections_r3's."""
     async def go():
         await sp._up(rig)
         admin = await sp._admin(rig)

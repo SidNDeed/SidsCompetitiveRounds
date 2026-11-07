@@ -902,3 +902,78 @@ def test_migration_401_applies_after_390_and_a_second_run_writes_nothing(live):
     assert {"ix_combat_contrib_match", "ix_card_contrib_match"} <= names
     assert not {"ix_combat_contrib_match", "ix_card_contrib_match"} & {
         r[0] for r in s["fourth"]["indexes"]}
+
+
+def test_r3h1_the_worker_stamps_the_match_and_a_kept_contribution_keeps_it(live, signing, revs,
+                                                                         monkeypatch):
+    """B10-R3 H1 end to end, the review's scenario: M9 (A, B) in room R is the
+    only visible match when A's record is derived, so A's contributions are
+    stored for M9. M8 (B, A: the opposite column order), same room and pair,
+    ended earlier and becomes visible after; B's record arrives, the worker
+    selects M8, the derivation faults, the contributions are kept and the
+    games row moves to M8 with paired coverage. The kept rows still name M9,
+    and the report attributes them to M9 only: on M8 they are `unattributed`
+    and in no total, and a window over both counts them once, for M9."""
+    import admin_evidence as ae
+    a, b = seat(61), seat(62)
+    key = "ranked_cevw_000061"
+    room = key + "_r8"
+
+    def boom(rec, side):
+        raise RuntimeError("planted")
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b)
+        ta, tb = await _session(sm, a), await _session(sm, b)
+        m9 = await _match(sm, ids, a, b, room, minutes_ago=10)
+        oa, mb = _pair_bodies(a, b, key)
+        await _post(sm, oa, ta)
+        s1 = await ce.games_pass(sm, revs.shadow)
+        g1 = await _rows(sm, GAMES_SQL, k=key)
+        c1 = await _rows(sm, CONTRIB_SQL, k=key)
+        m8 = await _match(sm, ids, b, a, room, minutes_ago=20)       # earlier, visible only now
+        await _post(sm, mb, tb)
+        real = cm.rebuild_faults
+        monkeypatch.setattr(cm, "rebuild_faults", boom)
+        s2 = await ce.games_pass(sm, revs.shadow)
+        monkeypatch.setattr(cm, "rebuild_faults", real)
+        g2 = await _rows(sm, GAMES_SQL, k=key)
+        c2 = await _rows(sm, CONTRIB_SQL, k=key)
+        async with sm() as db:
+            rows = (await db.execute(text(
+                "SELECT id, photon_room_id, player1_id, player2_id, ended_at FROM matches "
+                "WHERE id = ANY(CAST(:i AS uuid[]))"), {"i": [str(m9), str(m8)]})).mappings().all()
+            games = {g["id"]: g for g in ae._section_games(rows)}
+            data = (await ae.read_sections(db, list(games.values())))["combat"]
+        return s1, g1, c1, s2, g2, c2, games, data, m9, m8, ids
+    s1, g1, c1, s2, g2, c2, games, data, m9, m8, ids = live.run(go())
+    assert not _errors(s1) and not _errors(s2) and s2["rule_errors"] >= 1
+    assert g1[0]["match_id"] == m9 and g1[0]["coverage"] == "one"
+    # the worker stamped M9 on every contribution it derived from A's record
+    assert len(c1) == 2 and all(r["match_id"] == m9 for r in c1), c1
+    # the fault kept them exactly (same rows, same stamp) and moved the games row
+    assert ce._jsonv(g2[0]["record_faults"])["derive"] == "RuntimeError"
+    assert g2[0]["match_id"] == m8 and g2[0]["coverage"] == "paired"
+    assert c2 == c1, (c1, c2)
+    assert data is not None                                       # the combat read answered
+    ga, gb = str(ids[a]), str(ids[b])
+    index = {ga: 0, gb: 1}
+
+    def seat_facts(mid, i):
+        sec = ae.game_section("combat", data, games[str(mid)], index)
+        return dict(sec["seats"][i]["facts"])
+    fa8, fb8 = seat_facts(m8, 0), seat_facts(m8, 1)
+    assert not any(k.startswith("contrib1.") for k in fa8 | fb8), (fa8, fb8)
+    assert fa8.get("unattributed1.source") == "self" and fb8.get("unattributed1.source") == "meas"
+    fa9, fb9 = seat_facts(m9, 0), seat_facts(m9, 1)
+    assert fa9.get("contrib1.source") == "self" and fb9.get("contrib1.source") == "meas", (fa9, fb9)
+    assert not any(k.startswith("unattributed") for k in fa9 | fb9), (fa9, fb9)
+    only8 = dict(ae.summary_section("combat", data, [games[str(m8)]], ga, 0)["facts"])
+    assert only8.get("unattributed") == "1" and only8.get("contrib") == "not_derived", only8
+    both = dict(ae.summary_section("combat", data, [games[str(m8)], games[str(m9)]], ga, 0)["facts"])
+    assert "unattributed" not in both and "contrib" not in both, both
+    assert any(k.startswith("self.") and k.endswith(".total") for k in both), both
+    only9 = dict(ae.summary_section("combat", data, [games[str(m9)]], ga, 0)["facts"])
+    assert {k: v for k, v in only9.items() if k.startswith("self.")} == {
+        k: v for k, v in both.items() if k.startswith("self.")}, (only9, both)
