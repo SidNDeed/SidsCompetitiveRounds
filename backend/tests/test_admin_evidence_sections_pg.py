@@ -174,11 +174,13 @@ async def _world(rig):
               deal_profile="prof-b")
     await grow(rig, "card", "k1", a, b, g1, series_sc="1-0", processed_at=NOW,
                derive_fault="ValueError", parked_at=NOW)
-    await contrib(rig, "card", "k1", a, b, a, hands=5, slots=12, obs_rare=2)
+    await contrib(rig, "card", "k1", a, b, a, hands=5, slots=12, obs_rare=2, match_id=g1)
     await rec(rig, "combat", "k1", a, b, "room-g1", consts_version=3)
     await grow(rig, "combat", "k1", a, b, g1, coverage="one", records_n=1,
                record_faults='{"derive": 1}')
-    await contrib(rig, "combat", "k1", a, b, a, sums='{"a1s": [1, 2, 3]}')
+    # derived for g1 from A's record naming g1's room, stamped with g1's UTC end day
+    await contrib(rig, "combat", "k1", a, b, a, sums='{"a1s": [1, 2, 3]}',
+                  utc_day=(NOW - dt.timedelta(hours=1)).date())
     await rec(rig, "identity_clock", "k1", b, a, "room-g1", post_clock="ok", post_proc="abc",
               post_sw_ms=10, post_unity_ms=11, post_photon_ts=12, conn_class="lan")
     await grow(rig, "identity_clock", "k1", a, b, g1, records_n=1, paired_points=4)

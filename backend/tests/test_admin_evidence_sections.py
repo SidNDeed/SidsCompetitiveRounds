@@ -55,7 +55,8 @@ def _pair():
 
 
 def _game(a, b, room="room-1", mid=None):
-    return {"id": mid or str(uuid.uuid4()), "room": room, "p1": a, "p2": b}
+    return {"id": mid or str(uuid.uuid4()), "room": room, "p1": a, "p2": b,
+            "ended": T0 - dt.timedelta(hours=1)}
 
 
 def _rec(src, key, seat, other, room, **cols):
@@ -76,12 +77,16 @@ def _grow(src, key, a, b, match_id, **cols):
 
 
 def _contrib(src, key, a, b, subject, **cols):
+    """A stored contribution row; card rows name their match in `match_id`
+    (None unless given), combat rows carry the UTC day of `_game`'s end."""
     lo, hi = sorted((a, b))
     row = {"stable_game_key": key, "pair_lo": lo, "pair_hi": hi, "subject_player_id": subject,
-           "source": "self", "coverage": "one", "computed_at": T0}
+           "source": "self", "coverage": "one", "computed_at": T0, "utc_day": T0.date()}
     row.update({c: 0 for c in ae._SECTION_SPEC[src]["contrib_cols"]})
     if src == "combat":
         row["sums"] = "{}"
+    else:
+        row["match_id"] = None
     row.update(cols)
     return row
 
@@ -113,7 +118,7 @@ def test_s1_card_values_land_at_their_seat_under_their_names():
         games=[_grow("card", "k1", a, b, g["id"], series_sc="1-0", processed_at=T0,
                      derive_fault="ValueError", fault_attempts=2, parked_at=T0)],
         contrib=[_contrib("card", "k1", a, b, a, hands=5, slots=12, obs_rare=1, exp_rare=3,
-                          deal_profile="prof-a")],
+                          deal_profile="prof-a", match_id=g["id"])],
         switches=dict(_on("card"), card_evidence_accept="0"))
     s = ae.game_section("card", data, g, {a: 0, b: 1})
     assert (s["src"], s["state"], s["truncated"]) == ("card", "ok", False)
@@ -259,8 +264,8 @@ def test_s2_contribution_rows_beyond_the_cap_are_counted():
     cap = ae.AER_CONTRACT_BOUNDS["SECTION_CONTRIB_MAX"]
     data = _data(records=[_rec("card", "k1", a, b, "room-1")],
                  games=[_grow("card", "k1", a, b, g["id"])],
-                 contrib=[_contrib("card", "k1", a, b, a, hands=i, source="meas")
-                          for i in range(cap + 2)])
+                 contrib=[_contrib("card", "k1", a, b, a, hands=i, source="meas",
+                                   match_id=g["id"]) for i in range(cap + 2)])
     fa = _facts(ae.game_section("card", data, g, {a: 0, b: 1})["seats"][0]["facts"])
     assert ("contrib%d.hands" % cap) in fa and ("contrib%d.hands" % (cap + 1)) not in fa
     assert fa["contrib_more"] == "2"
@@ -276,8 +281,8 @@ def test_s3_summary_counts_totals_and_days():
                                                       conflict_kind="payload"),
                  _rec("card", "k3", b, a, "r3")],
         games=[_grow("card", "k1", a, b, g1["id"]), _grow("card", "k2", a, b, None)],
-        contrib=[_contrib("card", "k1", a, b, a, hands=4, slots=10),
-                 _contrib("card", "k2", a, b, a, hands=1, source="meas")],
+        contrib=[_contrib("card", "k1", a, b, a, hands=4, slots=10, match_id=g1["id"]),
+                 _contrib("card", "k2", a, b, a, hands=1, source="meas", match_id=g2["id"])],
         daily={a: [{"source": "self", "coverage": "one", "games": 2, "hands": 7,
                     **{c: 0 for c in ae._CARD_COUNTERS if c != "hands"}}]})
     s = ae.summary_section("card", data, [g1, g2, g3], a, 0)
@@ -330,7 +335,8 @@ def _sections_for(body, a, b):
         "card": _data(records=[_rec("card", "k1", a, b, "room-1", pool_state="ok",
                                     received_at=T0)],
                       games=[_grow("card", "k1", a, b, g["id"], processed_at=T0)],
-                      contrib=[_contrib("card", "k1", a, b, a, hands=3)], switches=_on("card")),
+                      contrib=[_contrib("card", "k1", a, b, a, hands=3, match_id=g["id"])],
+                      switches=_on("card")),
         "combat": None,
         "identity_clock": _data(records=[_rec("identity_clock", "k1", b, a, "room-1",
                                               post_clock="ok", conflict_kind="dup")],

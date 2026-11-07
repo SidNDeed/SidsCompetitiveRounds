@@ -17404,6 +17404,10 @@ AER_SECTIONS_PHASE = "2"
 AER_SECTION_SOURCES = ("card", "combat", "identity_clock")
 AER_SECTION_STATES = ("ok", "no_record", "unavailable")
 AER_SECTION_SEAT_STATES = ("ok", "no_record", "conflict", "purged")
+# A seat fact with a `.` belongs to a contribution group `<word><n>.`:
+# `contrib` (attributed to the game) or `unattributed` (stored under the
+# game's identity, provenance not established, in no total).
+AER_SECTION_CONTRIB_WORDS = ("contrib", "unattributed")
 AER_FACT_NAME_MAX = 48
 _AER_SECTION_KEYS = frozenset({"src", "state", "truncated", "game", "seats"})
 _AER_SECTION_SEAT_KEYS = frozenset({"subject", "state", "facts"})
@@ -17507,6 +17511,19 @@ def _aer_facts(value):
     return tuple(out)
 
 
+def _aer_seat_facts(value):
+    """A seat's fact list: `_aer_facts`, and every name with a `.` opens with
+    a contribution group `<word><n>.` of AER_SECTION_CONTRIB_WORDS."""
+    facts = _aer_facts(value)
+    for name, _text in facts:
+        if "." in name:
+            group = name.split(".", 1)[0]
+            word = group.rstrip("0123456789")
+            if word not in AER_SECTION_CONTRIB_WORDS or word == group:
+                raise AerSchemaError("seat fact group")
+    return facts
+
+
 def _aer_game_sections(value, seat_subjects):
     """A game's `sections` (phase 2): one per source in AER_SECTION_SOURCES
     order; an unavailable section has no facts and no seats, any other has
@@ -17526,7 +17543,7 @@ def _aer_game_sections(value, seat_subjects):
             if seat["state"] not in AER_SECTION_SEAT_STATES:
                 raise AerSchemaError("section seat state")
             seats.append((_aer_check_int(seat["subject"], 0), seat["state"],
-                          _aer_facts(seat["facts"])))
+                          _aer_seat_facts(seat["facts"])))
         if s["state"] == "unavailable":
             if game or seats:
                 raise AerSchemaError("unavailable section with facts")

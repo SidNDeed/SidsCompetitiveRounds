@@ -51,10 +51,12 @@ def _crow(src, key, a, b, subject, **cols):
     table's identity columns (stable_game_key, pair_lo, pair_hi)."""
     lo, hi = sorted((a, b))
     row = {"stable_game_key": key, "pair_lo": lo, "pair_hi": hi, "subject_player_id": subject,
-           "source": "self", "coverage": "one", "computed_at": T0}
+           "source": "self", "coverage": "one", "computed_at": T0, "utc_day": T0.date()}
     row.update({c: 0 for c in ae._SECTION_SPEC[src]["contrib_cols"]})
     if src == "combat":
         row["sums"] = "{}"
+    else:
+        row["match_id"] = None
     row.update(cols)
     return row
 
@@ -81,7 +83,8 @@ def test_h1_a_64_character_deal_profile_reaches_the_body_whole():
     faults = {"f%02d_%s" % (i, "x" * 20): 1 for i in range(6)}
     data = _data(records=[_rec("card", "k1", a, b, "room-1", deal_profile=pa)],
                  games=[_grow("card", "k1", a, b, g["id"])],
-                 contrib=[_crow("card", "k1", a, b, a, deal_profile=pc, hands=3)],
+                 contrib=[_crow("card", "k1", a, b, a, deal_profile=pc, hands=3,
+                                match_id=g["id"])],
                  switches=dict(_on("card"), card_evidence_worker=long_switch))
     s = ae.game_section("card", data, g, {a: 0, b: 1})
     _state, fa = _seat(s, 0)
@@ -103,7 +106,7 @@ def test_h2_a_contribution_about_a_seat_with_no_record_is_shown(src):
     window total carries it; A's seat shows none of it."""
     a, b = _pair()
     g = _game(a, b)
-    cols = {"hands": 4} if src == "card" else {"sums": '{"a1s": [1, 2, 3]}'}
+    cols = {"hands": 4, "match_id": g["id"]} if src == "card" else {"sums": '{"a1s": [1, 2, 3]}'}
     data = _data(records=[_rec(src, "k1", a, b, "room-1")],
                  games=[_grow(src, "k1", a, b, g["id"])],
                  contrib=[_crow(src, "k1", a, b, b, source="meas", **cols)],
@@ -190,8 +193,8 @@ def test_h4_another_pairs_contribution_about_the_same_subject_is_not_this_games(
     a, b, c, _d = _four()
     g = _game(a, b, room="room-ab")
     other = str(uuid.uuid4())
-    mine = {"hands": 5} if src == "card" else {"sums": '{"a1s": [5]}'}
-    theirs = {"hands": 7} if src == "card" else {"sums": '{"a1s": [7]}'}
+    mine = {"hands": 5, "match_id": g["id"]} if src == "card" else {"sums": '{"a1s": [5]}'}
+    theirs = {"hands": 7, "match_id": other} if src == "card" else {"sums": '{"a1s": [7]}'}
     data = _data(records=[_rec(src, "K", a, b, "room-ab"), _rec(src, "K", b, a, "room-ab"),
                           _rec(src, "K", c, a, "room-ac")],
                  games=[_grow(src, "K", a, b, g["id"]), _grow(src, "K", a, c, other)],
@@ -235,7 +238,8 @@ def _long_body(profile, hands):
                                deal_profile=profile, header_mod_version="1.41.0",
                                received_at=T0)],
                  games=[_grow("card", "k1", a, b, g["id"], processed_at=T0)],
-                 contrib=[_crow("card", "k1", a, b, a, deal_profile=profile, hands=hands)],
+                 contrib=[_crow("card", "k1", a, b, a, deal_profile=profile, hands=hands,
+                                match_id=g["id"])],
                  switches=_on("card"))
     body = game_body()
     body["games"][0]["sections"] = [

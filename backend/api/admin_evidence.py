@@ -1912,6 +1912,11 @@ SECTION_SOURCES = ("card", "combat", "identity_clock")
 SECTION_STATES = ("ok", "no_record", "unavailable")
 SECTION_SEAT_STATES = ("ok", "no_record", "conflict", "purged")
 SECTION_SWITCHES = ("accept", "worker", "purge")
+# A seat's contribution groups: `contribN.` the contributions whose
+# provenance against the game's match the stored rows establish (shown and
+# totalled), `unattributedN.` the ones under the game's identity whose
+# provenance they do not (shown, in no total; B10-R2 H1).
+SECTION_CONTRIB_WORDS = ("contrib", "unattributed")
 _CARD_COUNTERS = ("hands", "slots", "notrun_hands") + tuple(
     "%s_%s" % (m, r) for m in ("obs", "exp", "var") for r in ("common", "uncommon", "rare"))
 _SECTION_SPEC = {
@@ -1921,6 +1926,7 @@ _SECTION_SPEC = {
              "game": ("series_sc", "processed_at", "finalized_at", "derive_fault",
                       "fault_attempts", "parked_at", "retry_at"),
              "contrib_cols": ("deal_profile",) + _CARD_COUNTERS,
+             "provenance": ("match_id",),
              "daily_cols": ("games",) + _CARD_COUNTERS},
     "combat": {"ev": "combat_evidence", "games": "combat_games", "contrib": "combat_contrib",
                "daily": "combat_player_daily", "day": "utc_day", "by_match": True,
@@ -1928,6 +1934,7 @@ _SECTION_SPEC = {
                "game": ("coverage", "records_n", "record_faults", "processed_at",
                         "finalized_at"),
                "contrib_cols": ("consts_version", "sums"),
+               "provenance": ("utc_day",),
                "daily_cols": ("games", "sums")},
     "identity_clock": {"ev": "identity_clock_evidence", "games": "identity_clock_games",
                        "contrib": None, "daily": None, "day": None, "by_match": False,
@@ -1935,7 +1942,7 @@ _SECTION_SPEC = {
                                 "post_unity_ms", "post_photon_ts", "conn_class",
                                 "conn_ranges", "received_at"),
                        "game": ("records_n", "paired_points", "processed_at", "finalized_at"),
-                       "contrib_cols": (), "daily_cols": ()},
+                       "contrib_cols": (), "provenance": (), "daily_cols": ()},
 }
 # A stored jsonb key or a stored word shown as part of a fact name: 1 to 24
 # of a-z, 0-9 and `_`. A character test, not a regular expression: importing
@@ -1984,7 +1991,8 @@ def section_sql(src):
             "WHERE c.stable_game_key = ANY(CAST(:keys AS varchar[])) "
             "ORDER BY c.stable_game_key, c.pair_lo, c.pair_hi, c.subject_player_id, "
             "c.computed_at DESC, c.source LIMIT CAST(:n AS integer)"
-            % (", ".join("c." + c for c in s["contrib_cols"]), s["contrib"]))
+            % (", ".join("c." + c for c in s["provenance"] + s["contrib_cols"]),
+               s["contrib"]))
         out["daily"] = (
             "SELECT d.source, d.coverage, %s FROM %s d "
             "WHERE d.subject_player_id = CAST(:s AS uuid) AND d.%s >= CAST(:d0 AS date) "
@@ -2077,7 +2085,8 @@ async def read_sections(db, games, accounts=()):
 
 def _section_games(rows):
     return [{"id": str(r["id"]), "room": r.get("photon_room_id"),
-             "p1": str(r["player1_id"]), "p2": str(r["player2_id"])} for r in rows]
+             "p1": str(r["player1_id"]), "p2": str(r["player2_id"]),
+             "ended": r.get("ended_at")} for r in rows]
 
 
 def _fact(name, value):
@@ -2127,7 +2136,7 @@ def _ident(row, a, b):
     return row["stable_game_key"], lo, hi
 
 
-def _game_records(data, game):
+def _game_records(src, data, game):
     """The source's records, games rows and contributions that belong to
     `game`, associated by stored identity (stable_game_key, pair_lo,
     pair_hi) with the game's own pair, never by stable key alone (one stable
@@ -2140,9 +2149,11 @@ def _game_records(data, game):
     never evidence about a match its own key does not name). `other` counts
     the pair's records that are another attachment's: under a selected
     identity but naming another room, or naming this room under an identity
-    whose games row is attached to another match. The contributions are the
-    ones stored under the selected identities, whichever seat's record they
-    were derived from; each seat takes those whose subject it is."""
+    whose games row is attached to another match. The contributions are
+    `_game_contrib`'s: `contrib` those whose provenance against this match
+    the stored rows establish, `loose` the ones under a selected identity
+    whose provenance they do not (combat only); each seat takes those whose
+    subject it is."""
     pair = tuple(sorted((game["p1"], game["p2"])))
     room = game["room"]
     recs = [(_ident(r, "seat_player_id", "other_player_id"), r) for r in data["records"]]
@@ -2163,8 +2174,68 @@ def _game_records(data, game):
     shown = [r for i, r in recs if i in idents and r["attach_key"] == room]
     other = [r for i, r in recs if (i in idents and r["attach_key"] != room)
              or (i in (roomed & elsewhere) - idents and r["attach_key"] == room)]
-    contrib = [c for c in data["contrib"] if _ident(c, "pair_lo", "pair_hi") in idents]
-    return paired, shown, rows, len(other), contrib
+    derived_from = [(i, r) for i, r in recs if i in idents and r["attach_key"] == room]
+    contrib, loose = _game_contrib(src, data, game, pair, idents, derived_from)
+    return paired, shown, rows, len(other), contrib, loose
+
+
+def _utc_day(ended):
+    """A match's UTC end day: the day the workers stamp on its contributions
+    (combat_evidence._write_contributions, card_evidence's utc_day)."""
+    if ended.tzinfo is not None:
+        ended = ended.astimezone(_dt.timezone.utc)
+    return ended.date()
+
+
+def _combat_derived_here(c, game, derived_from):
+    """Whether the stored rows establish that combat contribution `c` was
+    derived for `game`. combat_contrib stores no match id, and the worker
+    keeps a game's contributions while it moves the games row to another
+    match (a derivation fault, combat_evidence.py:379-385 and the UPDATE at
+    :404-414; a pass with no revision, :326-342), so the games row's match
+    is no evidence. What the
+    worker does store: a contribution is derived from one record (`self`: the
+    subject's own record; `meas`: the other seat's record about the subject;
+    one record per stable key and seat, combat_evidence_one_per_seat), only
+    from a record whose attach key IS the attached match's room (:356-358),
+    stamped with that match's UTC end day (`utc_day`, :424-425), in a
+    transaction that began after that match ended (the attach query admits
+    only ended matches; computed_at is the transaction's now()). All four
+    must agree with this game: the record is one of the game's records under
+    the contribution's own identity naming the game's room, the day is the
+    game's UTC end day, and computed_at is not before the game ended."""
+    ended = game.get("ended")
+    if ended is None or c["utc_day"] != _utc_day(ended) or c["computed_at"] < ended:
+        return False
+    ident, subject = _ident(c, "pair_lo", "pair_hi"), str(c["subject_player_id"])
+    for i, r in derived_from:
+        seat, other = str(r["seat_player_id"]), str(r["other_player_id"])
+        if i == ident and ((c["source"] == "self" and seat == subject) or (
+                c["source"] == "meas" and other == subject and seat != subject)):
+            return True
+    return False
+
+
+def _game_contrib(src, data, game, pair, idents, derived_from):
+    """`game`'s contributions, `(contrib, loose)`: `contrib` the ones whose
+    provenance against this match the stored rows establish, shown and
+    totalled; `loose` the ones under a selected identity whose provenance
+    they do not establish, shown under the word `unattributed` and in no
+    total (B10-R2 H1). Card: card_contrib.match_id is the match the worker
+    derived the row for (card_evidence._write_contrib, :431-434), so `contrib` is every
+    row of the game's pair whose match_id is this game's, whatever match the
+    games row is attached to now, and a row with another or no match_id is
+    not this game's (`loose` stays empty). Combat: `_combat_derived_here`
+    over the rows under the selected identities. Identity-clock stores no
+    contributions."""
+    if src == "card":
+        mine = [c for c in data["contrib"] if _ident(c, "pair_lo", "pair_hi")[1:] == pair
+                and c["match_id"] is not None and str(c["match_id"]) == game["id"]]
+        return mine, []
+    held = [c for c in data["contrib"] if _ident(c, "pair_lo", "pair_hi") in idents]
+    here = [_combat_derived_here(c, game, derived_from) for c in held]
+    return ([c for c, ok in zip(held, here) if ok],
+            [c for c, ok in zip(held, here) if not ok])
 
 
 def _seat_state(rec):
@@ -2193,16 +2264,20 @@ def _sums_facts(prefix, raw):
     return out
 
 
-def _contrib_facts(src, rows):
+def _contrib_facts(src, rows, word="contrib"):
+    """A seat's contribution facts under one of SECTION_CONTRIB_WORDS: each
+    row's group `<word><n>.`, then `<word>_more` for the rows past the cap.
+    No row: `contrib=not_derived` for the attributed group, nothing for
+    `unattributed`."""
     spec = _SECTION_SPEC[src]
     if spec["contrib"] is None:
         return []
     if not rows:
-        return [_fact("contrib", "not_derived")]
+        return [_fact("contrib", "not_derived")] if word == "contrib" else []
     cap = AER_CONTRACT_BOUNDS["SECTION_CONTRIB_MAX"]
     out = []
     for i, c in enumerate(rows[:cap]):
-        prefix = "contrib%d." % (i + 1)
+        prefix = "%s%d." % (word, i + 1)
         out += [_fact(prefix + "source", c["source"]), _fact(prefix + "coverage", c["coverage"])]
         for col in spec["contrib_cols"]:
             if col == "sums":
@@ -2210,7 +2285,7 @@ def _contrib_facts(src, rows):
             else:
                 out.append(_fact(prefix + col, c[col]))
     if rows[cap:]:
-        out.append(_fact("contrib_more", len(rows[cap:])))
+        out.append(_fact(word + "_more", len(rows[cap:])))
     return out
 
 
@@ -2219,23 +2294,26 @@ def _fault_words(raw):
     return ",".join(words) if words else "none"
 
 
-def _seat_section(src, account, recs, contrib):
-    """One seat's state and facts. `contrib` is the game's contributions
-    (`_game_records`); the ones about `account` are shown whether or not the
-    account sent a record of its own (the other seat's record can produce a
-    `meas` contribution about it). The state is the account's own record's:
+def _seat_section(src, account, recs, contrib, loose=()):
+    """One seat's state and facts. `contrib` and `loose` are the game's
+    contributions (`_game_records`): those about `account` are shown whether
+    or not the account sent a record of its own (the other seat's record can
+    produce a `meas` contribution about it), `contrib`'s under `contribN.`,
+    `loose`'s under `unattributedN.`. The state is the account's own record's:
     `no_record` without one, its facts then the contributions alone."""
     mine = [r for r in recs if str(r["seat_player_id"]) == account]
     about = [c for c in contrib if str(c["subject_player_id"]) == account]
+    held = _contrib_facts(src, [c for c in loose if str(c["subject_player_id"]) == account],
+                          "unattributed")
     if not mine:
-        return "no_record", (_contrib_facts(src, about) if about else [])
+        return "no_record", (_contrib_facts(src, about) if about else []) + held
     rec = mine[0]
     facts = [_fact("conflict_kind", rec["conflict_kind"]),
              _fact("lists_purged", rec["lists_purged_at"] is not None)]
     facts += [_fact(c, rec[c]) for c in _SECTION_SPEC[src]["seat"]]
     if mine[1:]:
         facts.append(_fact("records", len(mine)))
-    facts += _contrib_facts(src, about)
+    facts += _contrib_facts(src, about) + held
     return _seat_state(rec), facts
 
 
@@ -2260,10 +2338,10 @@ def game_section(src, data, game, index):
     if data is None:
         return {"src": src, "state": "unavailable", "truncated": False, "game": [],
                 "seats": []}
-    paired, recs, rows, other, contrib = _game_records(data, game)
+    paired, recs, rows, other, contrib, loose = _game_records(src, data, game)
     seats = []
     for account in (game["p1"], game["p2"]):
-        state, facts = _seat_section(src, account, recs, contrib)
+        state, facts = _seat_section(src, account, recs, contrib, loose)
         seats.append({"subject": index[account], "state": state, "facts": facts})
     return {"src": src, "state": "ok" if recs else "no_record",
             "truncated": data["truncated"], "game": _game_facts(src, data, paired, rows, other),
@@ -2296,15 +2374,20 @@ def summary_section(src, data, games, account, oi):
     `other_game` does), `with_record`, `conflict` and `purged` (the account's own
     records), and on identity-clock the account's stored `post_clock` and
     `conn_class` words. The
-    contribution totals add every contribution about the account stored
-    under a covered game's identities (`_game_records`), with or without the
-    account's own record."""
+    contribution totals add every contribution about the account that
+    `_game_records` attributes to a covered game (its provenance against that
+    match established from the stored rows), with or without the account's
+    own record; `unattributed` counts the account's contributions under a
+    covered game's identities whose provenance is not established, which no
+    total includes."""
     if data is None:
         return {"oi": oi, "src": src, "state": "unavailable", "truncated": False,
                 "facts": [], "days30": []}
     counts, totals = collections.Counter(), collections.Counter()
+    unattributed = 0
     for game in games:
-        paired, recs, _rows, _other, contrib = _game_records(data, game)
+        paired, recs, _rows, _other, contrib, loose = _game_records(src, data, game)
+        unattributed += sum(1 for c in loose if str(c["subject_player_id"]) == account)
         mine = [r for r in recs if str(r["seat_player_id"]) == account]
         counts["games"] += 1
         if paired:
@@ -2329,6 +2412,8 @@ def summary_section(src, data, games, account, oi):
     if _SECTION_SPEC[src]["contrib"] is not None:
         facts += [_fact(k, totals[k]) for k in sorted(totals)] or [
             _fact("contrib", "not_derived")]
+        if unattributed:
+            facts.append(_fact("unattributed", unattributed))
     days = []
     if _SECTION_SPEC[src]["daily"] is not None:
         daily = collections.Counter()
