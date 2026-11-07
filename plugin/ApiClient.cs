@@ -17983,6 +17983,32 @@ namespace CompetitiveRounds
             public string killTimeline, deathTimes;
         }
 
+        /// <summary>Ask 9 stage B (migration 403): the five combat facts of a seat
+        /// blob, each only when recorded (null = omitted, #257). Shared by the
+        /// 2v2/1v2 blob writer and the FFA entry's inline blob.</summary>
+        private static void AppendCombatFacts(StringBuilder sb, TeamTelemetry t)
+        {
+            if (t.damageDealt.HasValue)
+                sb.Append($"\"damage_dealt\":{Math.Max(0, Math.Min(10000000, t.damageDealt.Value))},");
+            if (t.kills.HasValue)
+                sb.Append($"\"kills\":{Math.Max(0, Math.Min(2000, t.kills.Value))},");
+            if (t.deaths.HasValue)
+                sb.Append($"\"deaths\":{Math.Max(0, Math.Min(2000, t.deaths.Value))},");
+            if (!string.IsNullOrEmpty(t.killTimeline))
+                sb.Append($"\"kill_timeline\":\"{Escape(ClampTimeline(t.killTimeline, 512))}\",");
+            if (!string.IsNullOrEmpty(t.deathTimes))
+                sb.Append($"\"death_times\":\"{Escape(ClampTimeline(t.deathTimes, 512))}\",");
+        }
+
+        /// <summary>Ask 9 stage B: the 2v2 and 1v2 reports' point events, the
+        /// 1v1 report's two CSVs (512-char columns). Nothing when unrecorded.</summary>
+        private static void AppendPointEvents(StringBuilder sb, string pointTimeline, string pointTimes)
+        {
+            if (string.IsNullOrEmpty(pointTimeline) || string.IsNullOrEmpty(pointTimes)) return;
+            sb.Append($"\"point_timeline\":\"{Escape(ClampTimeline(pointTimeline, 512))}\",");
+            sb.Append($"\"point_times\":\"{Escape(ClampTimeline(pointTimes, 512))}\",");
+        }
+
         private static void AppendTeamTelemetry(StringBuilder sb, string slot, TeamTelemetry t)
         {
             if (t == null) return;
@@ -18007,6 +18033,7 @@ namespace CompetitiveRounds
             sb.Append($"\"blocks_activated\":{Math.Max(0, t.blocksActivated)},");
             sb.Append($"\"blocks_successful\":{Math.Max(0, t.blocksSuccessful)},");
             sb.Append($"\"keys_pressed\":{Math.Max(0, t.keysPressed)},");
+            AppendCombatFacts(sb, t);   // ask 9 stage B
             sb.Append($"\"active_seconds\":{Math.Max(0f, t.activeSeconds).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
             sb.Append("},");
         }
@@ -18045,7 +18072,11 @@ namespace CompetitiveRounds
             // ordering as the fps/telemetry args above. Null = not captured
             // (field omitted). ADVISORY: outside the frozen 11-field canonical.
             string t1aEndStats = null, string t1bEndStats = null,
-            string t2aEndStats = null, string t2bEndStats = null)
+            string t2aEndStats = null, string t2bEndStats = null,
+            // Ask 9 stage B (migration 403): the game's point events, side 1 on
+            // the left, the two CSVs the 1v1 report sends. Null/empty = omitted.
+            // ADVISORY: outside the frozen 11-field canonical.
+            string pointTimeline = null, string pointTimes = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             // §2c identity fence: the broadcast account never reports.
@@ -18084,6 +18115,7 @@ namespace CompetitiveRounds
             AppendTeamTelemetry(sb, "t1b", t1bTele);
             AppendTeamTelemetry(sb, "t2a", t2aTele);
             AppendTeamTelemetry(sb, "t2b", t2bTele);
+            AppendPointEvents(sb, pointTimeline, pointTimes);   // ask 9 stage B
 
             string canonical =
                 $"{t1aSteam}:{t1bSteam}:{t2aSteam}:{t2bSteam}:" +
@@ -19324,7 +19356,12 @@ namespace CompetitiveRounds
             // 10-field canonical below.
             string soloEndStats = null,
             string duoAEndStats = null,
-            string duoBEndStats = null)
+            string duoBEndStats = null,
+            // Ask 9 stage B (migration 403): per-seat telemetry blobs (the 2v2
+            // shape, ovt_match_telemetry) and the point events, solo on the
+            // left. Null = omitted. ADVISORY: outside the frozen 10-field canonical.
+            TeamTelemetry soloTele = null, TeamTelemetry duoATele = null, TeamTelemetry duoBTele = null,
+            string pointTimeline = null, string pointTimes = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             // §2c identity fence: the broadcast account never reports.
@@ -19359,6 +19396,11 @@ namespace CompetitiveRounds
             sb.Append($"\"solo_damage_timeline\":\"{Escape(ClampTimeline(soloDamageTimeline, 1024))}\",");
             sb.Append($"\"duo_a_damage_timeline\":\"{Escape(ClampTimeline(duoADamageTimeline, 1024))}\",");
             sb.Append($"\"duo_b_damage_timeline\":\"{Escape(ClampTimeline(duoBDamageTimeline, 1024))}\",");
+            // Ask 9 stage B: the seat blobs and the point events (advisory).
+            AppendTeamTelemetry(sb, "solo", soloTele);
+            AppendTeamTelemetry(sb, "duo_a", duoATele);
+            AppendTeamTelemetry(sb, "duo_b", duoBTele);
+            AppendPointEvents(sb, pointTimeline, pointTimes);
             string canonical = $"{soloSteam}:{duoASteam}:{duoBSteam}:{soloRounds}:{duoRounds}:" +
                                $"{(isRanked ? "true" : "false")}:{reporterSteam}:{room ?? ""}:{winnerSide}:{seriesId}";
             sb.Append(GameIdAdvisory(reporterSteam, room));   // KX6, advisory
@@ -24189,6 +24231,7 @@ namespace CompetitiveRounds
                     sb.Append($"\"blocks_activated\":{Math.Max(0, t.blocksActivated)},");
                     sb.Append($"\"blocks_successful\":{Math.Max(0, t.blocksSuccessful)},");
                     sb.Append($"\"keys_pressed\":{Math.Max(0, t.keysPressed)},");
+                    AppendCombatFacts(sb, t);   // ask 9 stage B: deaths and death marks (the ledger fills only those for FFA)
                     sb.Append($"\"active_seconds\":{Math.Max(0f, t.activeSeconds).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
                     sb.Append("}");
                 }

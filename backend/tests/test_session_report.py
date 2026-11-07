@@ -3022,3 +3022,98 @@ def test_every_mode_builds_the_same_slot_keys():
         "end_stats", "totals", "xp", "death_times"}
     assert set(main._report_totals(1, 1, 1, 1, 1, 1.0, 1, 1, 1).keys()) == {
         "shots", "hits", "blocks", "blocks_ok", "keys", "active_s", "damage", "deaths", "kills"}
+
+
+# ── ask 9 stage B: the client sends what migration 403 stores (#635) ─────────
+
+def _cs_json_keys(body):
+    """The JSON keys a StringBuilder writer emits: the \\"key\\": fragments of its
+    interpolated strings, read as TEXT (#635: both sides' literals, not two
+    careful readings)."""
+    return set(re.findall(r'\\"([a-z_0-9]+)\\":', body))
+
+
+def test_the_team_telemetry_blob_names_exactly_the_servers_fields():
+    """#635: the keys the 2v2/1v2 blob writer emits (its own plus the shared
+    combat-facts helper's) and TeamPlayerTelemetry's fields are ONE list; the
+    FFA entry's inline blob calls the same helper inside its telemetry object."""
+    import schemas
+    api = PLUGIN / "ApiClient.cs"
+    blob = _cs_body(api, "private static void AppendTeamTelemetry(StringBuilder sb, string slot, TeamTelemetry t)")
+    facts = _cs_body(api, "private static void AppendCombatFacts(StringBuilder sb, TeamTelemetry t)")
+    assert "AppendCombatFacts(sb, t);" in blob
+    keys = _cs_json_keys(blob) | _cs_json_keys(facts)
+    fields = set(schemas.TeamPlayerTelemetry.model_fields)
+    assert keys == fields, sorted(keys ^ fields)
+    assert _cs_json_keys(facts) == {"damage_dealt", "kills", "deaths", "kill_timeline", "death_times"}
+    ffa = _cs_body(api, "public static void ReportFfaMatch(")
+    tele_open = ffa.index('"telemetry":{')
+    assert tele_open < ffa.index("AppendCombatFacts(sb, t);") < ffa.index("AppendEndStats(sb, p.endStats);")
+
+
+def test_the_2v2_and_1v2_reports_carry_the_point_events_and_the_1v2_seat_blobs():
+    """#635 for the report bodies: the point pair the writers emit is a field of
+    the matching server model, and the 1v2 report writes one blob per seat
+    under the schema's slot names, all before the frozen canonicals."""
+    import schemas
+    api = PLUGIN / "ApiClient.cs"
+    points = _cs_body(api, "private static void AppendPointEvents(StringBuilder sb, string pointTimeline, string pointTimes)")
+    assert _cs_json_keys(points) == {"point_timeline", "point_times"}
+    team = _cs_body(api, "public static void ReportTeamMatch(")
+    ovt = _cs_body(api, "public static void ReportOvtMatch(")
+    assert "AppendPointEvents(sb, pointTimeline, pointTimes);" in team
+    assert "AppendPointEvents(sb, pointTimeline, pointTimes);" in ovt
+    for model in (schemas.TeamMatchReport, schemas.OvtMatchReport):
+        assert {"point_timeline", "point_times"} <= set(model.model_fields)
+    for seat in ("solo", "duo_a", "duo_b"):
+        assert f'AppendTeamTelemetry(sb, "{seat}", ' in ovt
+        assert f"{seat}_telemetry" in schemas.OvtMatchReport.model_fields
+    assert team.index("AppendPointEvents(") < team.index("string canonical =")
+    assert ovt.index("AppendPointEvents(") < ovt.index("string canonical =")
+
+
+def test_the_combat_ledger_credits_kills_the_way_the_server_derives_1v1_kills():
+    """A kind-0 death credits the FRESH damager of another team; a boundary or
+    own-bullet death credits nobody (_report_1v1_kills); every death is a mark
+    on the point markers' clock; the series samples on the 3 s tick and the
+    ledger resets at both game-start hooks."""
+    die = _cs_body(PLUGIN / "CombatTelemetry.cs", "private static void Prefix(HealthHandler __instance)")
+    assert "CombatLedger.RecordDeath(data.view.OwnerActorNr, killer);" in die
+    assert "if (kind == 0 && fresh && stamp.damagerActor >= 0" in die
+    assert "stamp.damagerTeam != victim.TeamID" in die
+    ledger = (PLUGIN / "CombatLedger.cs").read_text(encoding="utf-8")
+    assert "DeathTimes.Add(GameStateWatcher.SecondsSinceMatchStart())" in ledger
+    assert "if (killerActor >= 0 && killerActor != victimActor) SeatFor(killerActor).Kills++;" in ledger
+    assert "s.KillTimeline.Add(s.Kills);" in ledger
+    watcher = (PLUGIN / "GameStateWatcher.cs").read_text(encoding="utf-8")
+    assert "try { CombatLedger.Sample(); } catch { }" in watcher
+    assert watcher.count("CombatLedger.Reset();") == 2, "both game-start resets"
+    stamp = _cs_body(PLUGIN / "CombatTelemetry.cs",
+                     "private static void Prefix(HealthHandler __instance, Player damagingPlayer,")
+    assert "damagerActor = dActor," in stamp and "damagerTeam = dTeam," in stamp
+    dealt = _cs_body(PLUGIN / "CombatTelemetry.cs",
+                     "private static void AfterDealtDamage(CharacterStatModifiers __instance, Vector2 damage,")
+    assert dealt.index("if (damagedPlayer.TeamID == dealer.TeamID) return;") \
+        < dealt.index("CombatLedger.RecordDamage(") < dealt.index("if (!dealer.data.view.IsMine) return;"), \
+        "foe gate, then every dealer into the ledger, then the local-only tracker"
+
+
+def test_the_report_builders_fill_every_seat_blob_from_the_ledger():
+    """2v2 fills every seat that has a blob; 1v2 builds a blob per seat and
+    passes the three with the point pair (solo on the left); FFA fills deaths
+    only, keeping its signed kills; no builder invents a blob for a seat
+    without one (#257)."""
+    src = PLUGIN / "GameStateWatcher.cs"
+    team = _cs_body(src, "private static TeamReportPayload BuildTeamReportPayload(string reportRoomId, int duration)")
+    assert "CombatLedger.Fill(pp.ActorNumber, seatBlob)" in team
+    assert "PointEventsCsv(false, out string pointTl, out string pointTs);" in team
+    ovt = _cs_body(src, "private static bool TryReportOvtMatch(string reportRoomId, int duration)")
+    assert "CombatLedger.Fill(pp.ActorNumber, seatTele)" in ovt
+    assert "PointEventsCsv(soloTeam != 0, out string ovtPointTl, out string ovtPointTs);" in ovt
+    assert "soloTele: seatOf(soloSid), duoATele: seatOf(duoASid), duoBTele: seatOf(duoBSid)," in ovt
+    ffa = _cs_body(src, "private static bool TryReportFfaMatch(")
+    assert "if (tele != null) CombatLedger.Fill(pp.ActorNumber, tele, deathsOnly: true);" in ffa
+    submit = _cs_body(src, "private static void SubmitTeamReport(TeamReportPayload p)")
+    assert "pointTimeline: p.PointTimeline, pointTimes: p.PointTimes" in submit
+    swap = _cs_body(src, "private static void PointEventsCsv(bool swapSides, out string timeline, out string times)")
+    assert 'e.Substring(c + 1) + ":" + e.Substring(0, c)' in swap, "the swap keeps the stamps, flips the sides"
