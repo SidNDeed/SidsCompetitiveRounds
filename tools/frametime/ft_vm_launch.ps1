@@ -57,8 +57,13 @@ echo "$(St) FT-VM-LAUNCH captured ROUNDS pid $procId (handle held: $held)"
 $pidFile = Join-Path (Split-Path -Parent $Out) "launch-$Mode.pid"
 try {
     $epoch = ([DateTimeOffset]$t0).ToUnixTimeSeconds()
-    Set-Content -LiteralPath ($pidFile + '.tmp') -Value ("FT-VM-LAUNCH-PID pid={0} epoch={1} stamp={2}" -f $procId, $epoch, (St)) -Encoding ASCII
-    Move-Item -LiteralPath ($pidFile + '.tmp') -Destination $pidFile -Force
+    # every write error is terminating (-ErrorAction Stop: under the default Continue a failed write would print and
+    # go on), and the file is read back and compared before "pid file written" (F9-R3 finding 4, sitting W32i)
+    $pidLine = "FT-VM-LAUNCH-PID pid={0} epoch={1} stamp={2}" -f $procId, $epoch, (St)
+    Set-Content -LiteralPath ($pidFile + '.tmp') -Value $pidLine -Encoding ASCII -ErrorAction Stop
+    Move-Item -LiteralPath ($pidFile + '.tmp') -Destination $pidFile -Force -ErrorAction Stop
+    $back = @(Get-Content -LiteralPath $pidFile -ErrorAction Stop)
+    if ($back.Count -ne 1 -or $back[0] -ne $pidLine) { throw "the pid file read back differs ('$($back -join '|')')" }
     echo "$(St) FT-VM-LAUNCH pid file written: $pidFile"
 } catch {
     # without the pid file no caller can close this game by identity and window 9's +20 CHECK has no input (F9-R2
