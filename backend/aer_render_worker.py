@@ -10,8 +10,10 @@ Protocol, one plan at a time: the bot writes a 4-byte big-endian length and
 that many bytes of UTF-8 JSON, a list of `[kind, text]` items (the bot's
 `_aer_plan`, whose text is already encoded display text); the worker answers
 the same way with `{"png": <base64>, "drawn": [[i, text, [x0, y0, x1, y1]],
-...]}` or `{"error": <exception class name>}`. `drawn` is each item's drawn
-text and bounding box, so a test can compare what was drawn with the plan.
+...], "width": <image width in pixels>}` or `{"error": <exception class
+name>}`. `drawn` is each item's drawn text and bounding box in the image's
+pixels, so a test can compare what was drawn with the plan and the bot can
+refuse a drawing that reaches past the image's edge.
 
 Phase 1a: one neutral fill for every cell, no class, mark or swatch item
 kind; font, sizes, weight and colors are fixed chrome, never read from the
@@ -29,10 +31,13 @@ TEXT_COLOR = "#e6e6e6"
 FONT_FAMILY = "DejaVu Sans Mono"
 FONT_SIZES = {"title": 13, "status": 9, "subject": 9, "game": 11, "seat": 10, "cell": 9,
               "flag": 9, "window": 10, "summary_head": 10, "summary": 9, "label": 8,
-              "population": 9, "baseline": 9, "census": 8, "legend": 8, "footer": 8}
+              "population": 9, "baseline": 9, "census": 8, "legend": 8, "footer": 8,
+              "section": 10, "facts": 9}
 FILLED_KINDS = frozenset({"cell", "summary"})
 LINE_H = 0.22                  # inches per plan line
 WIDTH_IN = 14.0
+DPI = 100
+WIDTH_PX = int(WIDTH_IN * DPI)
 
 
 def render(plan):
@@ -47,7 +52,7 @@ def render(plan):
         if kind not in FONT_SIZES:
             raise ValueError("unknown item kind %r" % (kind,))
     n = max(len(plan), 1)
-    fig = plt.figure(figsize=(WIDTH_IN, 0.6 + n * LINE_H), dpi=100)
+    fig = plt.figure(figsize=(WIDTH_IN, 0.6 + n * LINE_H), dpi=DPI)
     try:
         fig.patch.set_facecolor(BACKGROUND)
         ax = fig.add_axes((0, 0, 1, 1))
@@ -99,7 +104,8 @@ def serve(inp, out, draw=render):
             plan = [(str(kind), str(text)) for kind, text in json.loads(body.decode("utf-8"))]
             png, drawn = draw(plan)
             reply = {"png": base64.b64encode(png).decode("ascii"),
-                     "drawn": [[i, text, list(box)] for i, text, box in drawn]}
+                     "drawn": [[i, text, list(box)] for i, text, box in drawn],
+                     "width": WIDTH_PX}
         except Exception as ex:
             reply = {"error": type(ex).__name__}
         data = json.dumps(reply).encode("utf-8")

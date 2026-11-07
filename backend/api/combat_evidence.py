@@ -420,7 +420,19 @@ async def _write_contributions(db, key, lo, hi, records, match, paired):
     game's coverage and the contributing record's measurement version), then
     re-roll every daily row of each affected (subject, UTC day) from the
     contributions in the same transaction, so a game is counted once and a
-    one-sided game becomes a paired one when its second record arrives."""
+    one-sided game becomes a paired one when its second record arrives.
+
+    Each row is stamped with `match_id`, the match these contributions are
+    derived for (the one evaluate_game attached in this transaction; the
+    contribution provenance migration adds the column).
+    This INSERT is the only statement that writes combat_contrib.match_id,
+    and no statement updates a stored contribution: evaluate_game's UPDATEs
+    write combat_games only, every pass that does not derive (a derivation
+    fault, no rules revision, no attached match, an unchanged readiness
+    signature, a final game, a record without its lists) leaves the stored rows as they are,
+    and the purge only deletes rows past the retention. So a kept row keeps
+    the match it was derived for while the games row may name another,
+    and the admin report attributes the row by this stored match alone."""
     day = (await db.execute(text("SELECT (CAST(:t AS timestamptz) AT TIME ZONE 'UTC')::date"),
                             {"t": match["ended_at"]})).scalar_one()
     cov = "paired" if paired else "one"
@@ -431,10 +443,11 @@ async def _write_contributions(db, key, lo, hi, records, match, paired):
     for c in cm.contributions(records):
         await db.execute(text(
             "INSERT INTO combat_contrib (stable_game_key, pair_lo, pair_hi, subject_player_id, source, "
-            "  coverage, consts_version, utc_day, sums) "
-            "VALUES (:k, :lo, :hi, :sub, :src, :cov, CAST(:cv AS smallint), :d, CAST(:sums AS jsonb))"),
+            "  coverage, consts_version, utc_day, sums, match_id) "
+            "VALUES (:k, :lo, :hi, :sub, :src, :cov, CAST(:cv AS smallint), :d, CAST(:sums AS jsonb), "
+            "        CAST(:m AS uuid))"),
             {"k": key, "lo": lo, "hi": hi, "sub": c["subject"], "src": c["source"], "cov": cov,
-             "cv": c["consts"], "d": day, "sums": json.dumps(c["sums"])})
+             "cv": c["consts"], "d": day, "sums": json.dumps(c["sums"]), "m": str(match["id"])})
         touched.add((str(c["subject"]), day))
     for subject, d in sorted(touched):
         await _reroll_daily(db, subject, d)

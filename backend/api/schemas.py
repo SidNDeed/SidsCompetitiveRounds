@@ -1179,6 +1179,14 @@ class HealthResponse(BaseModel):
     # landing's build discriminator, since the report routes answer 403 on
     # every build (the internal prefix) and cannot be probed for presence.
     admin_evidence: int
+    # admin_report_p2_build: release-train verification plumbing, not a
+    # design mechanism (main._admin_report_p2_build_health_word; 1 = this
+    # build's admin evidence report carries phase 2, the evidence sections,
+    # else 0). Derived on every request; equal on both roles, so the train can
+    # read it through the edge (learning 794): phase 2 adds no route, and the
+    # report routes answer 403 on every build. No default, as above. Absent on
+    # any build before phase 2.
+    admin_report_p2_build: int
     # leave_anchor: release-train verification plumbing, not a design
     # mechanism (main._LEAVE_ANCHOR_BUILD; 1 = this build carries the
     # small-abc lane: dc_events.leave_anchor_at, migration 391). A code

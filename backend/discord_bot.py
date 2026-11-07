@@ -17394,12 +17394,31 @@ _AER_WINDOW_KEYS = frozenset({"oi", "basis", "subj", "games", "covered", "flag_o
 _AER_CATALOG_KEYS = frozenset({"ki", "key", "base", "fam", "unit", "kind"})
 _AER_SPREAD_KEYS = frozenset({"p50", "p90", "p99"})
 _AER_FLAG_KEYS = frozenset({"reason", "subject", "reviewed", "current", "created_at"})
+# Phase 2 evidence sections (B10): the card-draw, combat and identity-clock
+# tables' stored values. The bot asks for them by header; the api then adds
+# `sections` to each game and `sections_summary` to page 1 of a pair or
+# player report. Both keys are optional here, so a 1a api's page decodes too.
+# The words and the header equal the api's under an equality test.
+AER_SECTIONS_HEADER = "X-Evidence-Sections"
+AER_SECTIONS_PHASE = "2"
+AER_SECTION_SOURCES = ("card", "combat", "identity_clock")
+AER_SECTION_STATES = ("ok", "no_record", "unavailable")
+AER_SECTION_SEAT_STATES = ("ok", "no_record", "conflict", "purged")
+# A seat fact with a `.` belongs to a contribution group `<word><n>.`:
+# `contrib` (attributed to the game) or `unattributed` (stored under the
+# game's identity, provenance not established, in no total).
+AER_SECTION_CONTRIB_WORDS = ("contrib", "unattributed")
+AER_FACT_NAME_MAX = 48
+_AER_SECTION_KEYS = frozenset({"src", "state", "truncated", "game", "seats"})
+_AER_SECTION_SEAT_KEYS = frozenset({"subject", "state", "facts"})
+_AER_SECTION_SUMMARY_KEYS = frozenset({"oi", "src", "state", "truncated", "facts", "days30"})
+_AER_FACT_NAME = re.compile(r"[a-z0-9_.]{1,%d}" % AER_FACT_NAME_MAX)
 
 # The decoded page (design 3.3): immutable, built only from a response that
 # passed the 1a closed schema. Cells are tuples in their AER_WIRE slot order.
 BotPage = collections.namedtuple("BotPage", (
     "shape", "page", "pages", "subjects", "population", "baseline", "registry",
-    "catalog", "games", "windows", "summary"))
+    "catalog", "games", "windows", "summary", "sections"), defaults=((),))
 
 
 class AerSchemaError(ValueError):
@@ -17478,6 +17497,83 @@ def _aer_cell(row, table, catalog, phase="1a"):
     return tuple(row)
 
 
+def _aer_facts(value):
+    """A checked fact list: `[name, value]` pairs, the name a stored name
+    (lower case, digits, `_` and `.`), the value encoded text or null."""
+    if not isinstance(value, list):
+        raise AerSchemaError("facts")
+    out = []
+    for fact in value:
+        name, text = _aer_check_list(fact, 2)
+        if not isinstance(name, str) or not _AER_FACT_NAME.fullmatch(name):
+            raise AerSchemaError("fact name")
+        out.append((name, _aer_check_text(text, nullable=True)))
+    return tuple(out)
+
+
+def _aer_seat_facts(value):
+    """A seat's fact list: `_aer_facts`, and every name with a `.` opens with
+    a contribution group `<word><n>.` of AER_SECTION_CONTRIB_WORDS."""
+    facts = _aer_facts(value)
+    for name, _text in facts:
+        if "." in name:
+            group = name.split(".", 1)[0]
+            word = group.rstrip("0123456789")
+            if word not in AER_SECTION_CONTRIB_WORDS or word == group:
+                raise AerSchemaError("seat fact group")
+    return facts
+
+
+def _aer_game_sections(value, seat_subjects):
+    """A game's `sections` (phase 2): one per source in AER_SECTION_SOURCES
+    order; an unavailable section has no facts and no seats, any other has
+    the game's two seats in the game's seat order."""
+    if not isinstance(value, list) or len(value) != len(AER_SECTION_SOURCES):
+        raise AerSchemaError("sections")
+    out = []
+    for src, s in zip(AER_SECTION_SOURCES, value):
+        _aer_keys(s, _AER_SECTION_KEYS)
+        if s["src"] != src or s["state"] not in AER_SECTION_STATES or not isinstance(
+                s["truncated"], bool) or not isinstance(s["seats"], list):
+            raise AerSchemaError("section")
+        game = _aer_facts(s["game"])
+        seats = []
+        for seat in s["seats"]:
+            _aer_keys(seat, _AER_SECTION_SEAT_KEYS)
+            if seat["state"] not in AER_SECTION_SEAT_STATES:
+                raise AerSchemaError("section seat state")
+            seats.append((_aer_check_int(seat["subject"], 0), seat["state"],
+                          _aer_seat_facts(seat["facts"])))
+        if s["state"] == "unavailable":
+            if game or seats:
+                raise AerSchemaError("unavailable section with facts")
+        elif tuple(seat[0] for seat in seats) != tuple(seat_subjects):
+            raise AerSchemaError("section seats")
+        out.append({"src": src, "state": s["state"], "truncated": s["truncated"],
+                    "game": game, "seats": tuple(seats)})
+    return tuple(out)
+
+
+def _aer_summary_sections(value, windows):
+    """Page 1's `sections_summary` (phase 2): for each window in order, one
+    entry per source in AER_SECTION_SOURCES order."""
+    plan = [(w["oi"], src) for w in windows for src in AER_SECTION_SOURCES]
+    if not isinstance(value, list) or len(value) != len(plan):
+        raise AerSchemaError("sections summary")
+    out = []
+    for (oi, src), s in zip(plan, value):
+        _aer_keys(s, _AER_SECTION_SUMMARY_KEYS)
+        if (_aer_check_int(s["oi"], 0) != oi or s["src"] != src
+                or s["state"] not in AER_SECTION_STATES or not isinstance(s["truncated"], bool)):
+            raise AerSchemaError("summary section")
+        facts, days = _aer_facts(s["facts"]), _aer_facts(s["days30"])
+        if s["state"] == "unavailable" and (facts or days):
+            raise AerSchemaError("unavailable summary section with facts")
+        out.append({"oi": oi, "src": src, "state": s["state"], "truncated": s["truncated"],
+                    "facts": facts, "days30": days})
+    return tuple(out)
+
+
 def _aer_decode_response(body, phase="1a", *, expected=None):
     """`_aer_fetch`'s parsed JSON checked against the phase's closed schema
     (design 3.3) and returned as a BotPage; any other shape raises
@@ -17494,7 +17590,8 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
         raise AerSchemaError("shape")
     page = _aer_check_int(body.get("page"), 1)
     summary_page = shape in ("pair", "player") and page == 1
-    _aer_keys(body, _AER_TOP_KEYS | (_AER_SUMMARY_KEYS if summary_page else frozenset()))
+    _aer_keys(body, _AER_TOP_KEYS | (_AER_SUMMARY_KEYS if summary_page else frozenset()),
+              frozenset({"sections_summary"}) if summary_page else frozenset())
     pages = _aer_check_int(body["pages"], 1)
     if page > pages or body["rules"] != {"report": "absent"}:
         raise AerSchemaError("page or rules")
@@ -17580,7 +17677,7 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
     if not isinstance(body["games"], list):
         raise AerSchemaError("games")
     for g in body["games"]:
-        _aer_keys(g, _AER_GAME_KEYS)
+        _aer_keys(g, _AER_GAME_KEYS, frozenset({"sections"}))
         seats = []
         if not isinstance(g["seats"], list) or g["pair_cells"] != []:
             raise AerSchemaError("seats")
@@ -17618,7 +17715,9 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
             _aer_check_text(f["reason"])
             _aer_check_text(f["created_at"])
             flags.append(dict(f))
-        games.append(dict(g, seats=tuple(seats), flags=tuple(flags)))
+        sections = (_aer_game_sections(g["sections"], [seat[0] for seat in seats])
+                    if "sections" in g else ())
+        games.append(dict(g, seats=tuple(seats), flags=tuple(flags), sections=sections))
     windows, summary = (), ()
     if summary_page:
         if games or not isinstance(body["windows"], list) or not isinstance(body["summary"], list):
@@ -17675,9 +17774,11 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
         if len(cells) != len(wins) or {row[0] for row in cells} != set(range(len(wins))):
             raise AerSchemaError("summary row coverage")
         windows, summary = tuple(wins), tuple(cells)
+    sections = (_aer_summary_sections(body["sections_summary"], windows)
+                if "sections_summary" in body else ())
     return BotPage(shape, page, pages, tuple(subjects), dict(body["population"]),
                    dict(body["baseline"]), dict(body["registry"]), catalog, tuple(games),
-                   windows, summary)
+                   windows, summary, sections)
 
 
 def _aer_word(status, body, headers=None):
@@ -17821,7 +17922,8 @@ async def _aer_fetch(path, actor_id):
         async with http_session.get(
                 API_BASE_URL + path,
                 headers={"X-Internal-Key": API_SECRET_KEY,
-                         "X-Actor-Discord-Id": str(actor_id)},
+                         "X-Actor-Discord-Id": str(actor_id),
+                         AER_SECTIONS_HEADER: AER_SECTIONS_PHASE},
                 timeout=aiohttp.ClientTimeout(total=AER_TIMEOUT_S)) as resp:
             raw = await resp.read()
             headers = {str(k): str(v) for k, v in resp.headers.items()}
@@ -17896,7 +17998,15 @@ AER_LEGEND_1A = (
 )
 AER_ITEM_KINDS_1A = ("title", "status", "subject", "game", "seat", "cell", "flag", "window",
                      "summary_head", "summary", "label", "population", "baseline", "census",
-                     "legend", "footer")
+                     "legend", "footer", "section", "facts")
+AER_FACTS_PER_LINE = 8
+# The longest facts line, in characters. aer_render_worker draws the facts
+# kind at 9 pt in DejaVu Sans Mono at 100 dpi (advance 0.602 em, 7.5 px,
+# hinted to 8 whole pixels: 160 characters measured 1280 px) from 1% of its
+# 1400-pixel width, so 173 characters reach the edge; 160 leaves room. A
+# single fact longer than this is a line of its own, and the drawn-box check
+# in `_aer_render` sends a page any line overflows to the text fallback.
+AER_FACTS_LINE_CHARS = 160
 AER_RENDER_TIMEOUT_S = 15
 AER_FALLBACK_MSG_MAX = 1900
 AER_WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aer_render_worker.py")
@@ -17977,6 +18087,68 @@ def _aer_cell_item(page, path, table, cell, phase="1a"):
     return _aer_item("cell" if table == "seat" else "summary", head, tuple(pairs))
 
 
+def _aer_fact_items(path, head, facts):
+    """Facts as plan lines in the api's order, each fact's name and value
+    their own plan fields: a line holds at most AER_FACTS_PER_LINE facts,
+    and a fact that would carry the line past AER_FACTS_LINE_CHARS
+    characters starts the next line (a fact longer than that on its own is
+    a line by itself)."""
+    lines, line = [], []
+    for i in range(len(facts)):
+        name, value = facts[i]
+        text = "%s=%s" % (name, _aer_txt(value))
+        wide = len(" ".join([head] + [t for _i, t in line] + [text]).strip())
+        if line and (len(line) == AER_FACTS_PER_LINE or wide > AER_FACTS_LINE_CHARS):
+            lines.append(line)
+            line = []
+        line.append((i, text))
+    if line:
+        lines.append(line)
+    out = []
+    for line in lines:
+        fields, parts = [], []
+        for i, _text in line:
+            name, value = facts[i]
+            fields.extend((path + (i, 0), path + (i, 1)))
+            parts.extend((name, _aer_txt(value)))
+        out.append(AerItem("facts", tuple(fields), tuple(parts),
+                           " ".join([head] + [t for _i, t in line]).strip()))
+    return out
+
+
+def _aer_section_head(at, sec, window):
+    """A section's line parts: source, the window on a summary page, state,
+    truncated."""
+    return (((at + ("src",), "", _aer_txt(sec["src"])),) + window
+            + ((at + ("state",), "", _aer_txt(sec["state"])),
+               (at + ("truncated",), "truncated=", _aer_txt(sec["truncated"]))))
+
+
+def _aer_game_section_items(at, sec):
+    """One game section (phase 2): its line, its game facts, then each seat's
+    state and facts."""
+    out = [_aer_item("section", "EVIDENCE", _aer_section_head(at, sec, ()))]
+    out.extend(_aer_fact_items(at + ("game",), "", sec["game"]))
+    seats = sec["seats"]
+    for si in range(len(seats)):
+        subject, state, facts = seats[si]
+        out.append(_aer_item("facts", "SEAT", (
+            (at + ("seats", si, "subject"), "#", _aer_txt(subject)),
+            (at + ("seats", si, "state"), "", _aer_txt(state)))))
+        out.extend(_aer_fact_items(at + ("seats", si, "facts"), "", facts))
+    return out
+
+
+def _aer_summary_section_items(at, sec):
+    """One summary section (phase 2): its line with the window, its facts,
+    then its 30-day facts."""
+    window = ((at + ("oi",), "window #", _aer_txt(sec["oi"])),)
+    out = [_aer_item("section", "EVIDENCE", _aer_section_head(at, sec, window))]
+    out.extend(_aer_fact_items(at + ("facts",), "", sec["facts"]))
+    out.extend(_aer_fact_items(at + ("days30",), "30D", sec["days30"]))
+    return out
+
+
 def _aer_plan(page, phase="1a"):
     """The render plan of one BotPage (design 5.2): a tuple of AerItems in
     registry and subject order, never value order. Pure: the same page always
@@ -18017,6 +18189,9 @@ def _aer_plan(page, phase="1a"):
                 (at + ("flags", fi, k), lbl,
                  _aer_txt(f[k]) if k != "subject" else ("-" if f[k] is None else "#%d" % f[k]))
                 for k, lbl in _AER_FLAG_LABELS)))
+        sections = g["sections"]
+        for xi in range(len(sections)):
+            items.extend(_aer_game_section_items(at + ("sections", xi), sections[xi]))
     for wi, w in enumerate(page.windows):
         add(_aer_item("window", "WINDOW", tuple(
             (("windows", wi, k), lbl,
@@ -18026,6 +18201,8 @@ def _aer_plan(page, phase="1a"):
         add(_aer_item("summary_head", "SUMMARY", ((("summary", si, "oi"), "window #", _aer_txt(oi)),)))
         for ci, cell in enumerate(rows):
             add(_aer_cell_item(page, ("summary", si, "cells", ci), "summary", cell, phase))
+    for xi in range(len(page.sections)):
+        items.extend(_aer_summary_section_items(("sections_summary", xi), page.sections[xi]))
     for ki in sorted(page.catalog):
         row = page.catalog[ki]
         add(_aer_item("label", "KEY", tuple(
@@ -18080,7 +18257,9 @@ async def _aer_render(plan):
     """One PNG for the plan, or None: without matplotlib at once; otherwise
     from the long-lived worker within AER_RENDER_TIMEOUT_S. A worker that
     times out, dies or answers out of shape is killed and replaced on the
-    next call."""
+    next call. A drawing with any item's box outside the image's width (the
+    worker reports both) is None too, so the page takes the complete text
+    fallback; the worker is kept."""
     global _aer_worker_proc, _aer_worker_lock
     import base64
     if not _MPL_AVAILABLE:
@@ -18097,6 +18276,9 @@ async def _aer_render(plan):
             png = base64.b64decode(reply["png"])
             if not png.startswith(_AER_PNG_MAGIC) or len(reply["drawn"]) != len(plan):
                 raise ValueError("render reply out of shape")
+            width = reply["width"]
+            if not all(0 <= box[0] and box[2] <= width for _i, _t, box in reply["drawn"]):
+                return None
             return png
         except Exception:
             _aer_worker_proc = None

@@ -28,12 +28,14 @@ API_DIR = pathlib.Path(__file__).resolve().parents[1] / "api"
 # a neighbouring lane's file fails for reasons its owner has not seen.
 #
 # 377 (admin evidence report order indexes) is held to the same header rules:
-# a deploy-order line, and catalog guards stated as such.
+# a deploy-order line, and catalog guards stated as such. 401 (the
+# contribution match_id column and indexes, B10-R3) likewise.
 OWNED = ("331_animal_title_ladders.sql",
          "332_pc_edition_schedule.sql",
          "333_pc_card_themes.sql",
          "336_bug_reports_kind.sql",
-         "377_admin_evidence_indexes.sql")
+         "377_admin_evidence_indexes.sql",
+         "401_contrib_match_provenance.sql")
 
 _ORDER_LINE = re.compile(r"^--\s*DEPLOY ORDER:\s*(.+)$", re.MULTILINE)
 
@@ -715,6 +717,10 @@ _EVERY_STATEMENT_GUARDED = {
         "holding CREATE STATISTICS and its ANALYZE, and a read-only post-check, "
         "between BEGIN, SET LOCAL lock_timeout and COMMIT; a re-run issues no "
         "DDL and no ANALYZE",
+    "401_contrib_match_provenance.sql":
+        "one catalog-guarded ADD COLUMN block, two catalog-guarded CREATE INDEX "
+        "blocks and a read-only post-check, between BEGIN, SET LOCAL "
+        "lock_timeout and COMMIT; a re-run issues no DDL",
 }
 _EVERY_STATEMENT_GUARDED_KINDS = {"BEGIN", "COMMIT", "SET LOCAL", "DO"}
 

@@ -7759,6 +7759,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               combat_evidence=_combat_evidence_health_word(),
                               admin_evidence=_admin_evidence_health_word(),
+                              admin_report_p2_build=_admin_report_p2_build_health_word(),
                               leave_anchor=_LEAVE_ANCHOR_BUILD,
                               shop_floor=_SHOP_FLOOR_BUILD,
                               tzdata_declared=_TZDATA_DECLARED_BUILD,
@@ -7820,6 +7821,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               card_evidence_parked_oldest_s=_cev.parked_oldest_s(),
                               combat_evidence=_combat_evidence_health_word(),
                               admin_evidence=_admin_evidence_health_word(),
+                              admin_report_p2_build=_admin_report_p2_build_health_word(),
                               leave_anchor=_LEAVE_ANCHOR_BUILD,
                               shop_floor=_SHOP_FLOOR_BUILD,
                               tzdata_declared=_TZDATA_DECLARED_BUILD,
@@ -71520,6 +71522,17 @@ def _admin_evidence_health_word() -> int:
     answers 403 before routing on every build (the internal key check)."""
     registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
     return 1 if all(id(fn) in registered for fn in _ADMIN_EVIDENCE_ROUTES) else 0
+
+
+def _admin_report_p2_build_health_word() -> int:
+    """1 when this build's admin evidence report carries phase 2 (the
+    evidence sections: admin_evidence.read_sections), else 0; both
+    health_check arms call it on every request, as admin_evidence above. It
+    states build identity only, and is equal on both roles: the release
+    train's build discriminator for the phase 2 landing (learning 794), since
+    phase 2 adds no route and the report routes answer 403 before routing on
+    every build."""
+    return 1 if callable(getattr(_admin_evidence, "read_sections", None)) else 0
 
 
 def _pc_motion_health_word() -> int:
