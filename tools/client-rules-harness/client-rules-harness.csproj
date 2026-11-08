@@ -178,6 +178,8 @@
     <Compile Include="../../plugin/NameGlyphs.cs" />
     <Compile Include="../../plugin/SessionReportRules.cs" />
     <Compile Include="SessionReportRulesSelfTest.cs" />
+    <Compile Include="../../plugin/KillCreditRules.cs" />
+    <Compile Include="KillCreditRulesSelfTest.cs" />
     <Compile Include="../../plugin/ShowcaseRules.cs" />
     <Compile Include="../../plugin/FfaNumberingRules.cs" />
     <Compile Include="../../plugin/DamageNumberRules.cs" />

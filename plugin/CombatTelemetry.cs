@@ -43,17 +43,54 @@ namespace CompetitiveRounds
             // team, so a death can credit a kill in every mode.
             public int damagerActor;
             public int damagerTeam;
+            // Round 1 F1: the frame it was written in. The death callback's
+            // frame is compared with it for IDENTITY (KillCreditRules.Credit):
+            // a lethal DoDamage runs RPCA_Die synchronously from its own body,
+            // so the record of the same frame is the lethal event's.
+            public int frame;
         }
         internal static readonly Dictionary<int, DamageStamp> LastDamageByView =
             new Dictionary<int, DamageStamp>();
 
-        // How fresh a stamp must be to explain a death. OOB kills apply damage
-        // and die in the same call chain; DOT deaths tick within 1s windows.
+        // How fresh a stamp must be to explain a death's KIND (boundary, own
+        // bullet) for the self-death statistics. OOB kills apply damage and die
+        // in the same call chain; DOT deaths tick within 1s windows. The KILL
+        // CREDIT never reads this window (round 1 F1): it reads the frame.
         private const float STAMP_FRESH_SECONDS = 2f;
+
+        // Round 1 F1: the views whose DoDamage is applying right now (depth per
+        // view id: a dealer's effects may nest a call for another view). A death
+        // callback that runs while the victim's own call is applying belongs to
+        // THAT event: a lethal DoDamage sends RPCA_Die(All) from inside its body
+        // and PUN runs an All RPC locally at once. Paired by the stamp patch's
+        // prefix and postfix; cleared with the stamps.
+        internal static readonly Dictionary<int, int> ApplyingByView = new Dictionary<int, int>();
+
+        /// <summary>The fighters' actors and teams for KillCreditRules.SoleOpponent
+        /// (round 1 F5): PlayerManager's roster; the rules skip the victim.</summary>
+        private static readonly List<int> soleActors = new List<int>(), soleTeams = new List<int>();
+        private static int SoleOpponentOf(int victimActor, int victimTeam)
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return -1;
+                soleActors.Clear(); soleTeams.Clear();
+                for (int i = 0; i < pm.players.Count; i++)
+                {
+                    var p = pm.players[i];
+                    if (p == null || p.data == null || p.data.view == null) continue;
+                    soleActors.Add(p.data.view.OwnerActorNr);
+                    soleTeams.Add(p.TeamID);
+                }
+                return KillCreditRules.SoleOpponent(soleActors, soleTeams, victimActor, victimTeam);
+            }
+            catch { return -1; }
+        }
 
         internal static void ClearMatchState()
         {
-            try { LastDamageByView.Clear(); } catch { }
+            try { LastDamageByView.Clear(); ApplyingByView.Clear(); } catch { }
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -162,6 +199,10 @@ namespace CompetitiveRounds
                     var data = __instance != null ? __instance.data : null;
                     if (data == null || data.view == null) return;
                     __state = data.health;
+                    // Round 1 F1: this view's damage call is applying until the
+                    // postfix below (paired through __state).
+                    int depth; ApplyingByView.TryGetValue(data.view.ViewID, out depth);
+                    ApplyingByView[data.view.ViewID] = depth + 1;
                     if (!VanillaFixSupport.AnyGameScope()) return;
                     var victim = data.player;
                     int kind = 0;
@@ -179,6 +220,7 @@ namespace CompetitiveRounds
                         time = Time.unscaledTime,
                         damagerActor = dActor,
                         damagerTeam = dTeam,
+                        frame = Time.frameCount,
                     };
                 }
                 catch { }
@@ -192,6 +234,12 @@ namespace CompetitiveRounds
                     if (__state == float.MinValue) return;
                     var data = __instance != null ? __instance.data : null;
                     if (data == null || data.view == null) return;
+                    int depth;
+                    if (ApplyingByView.TryGetValue(data.view.ViewID, out depth))
+                    {
+                        if (depth <= 1) ApplyingByView.Remove(data.view.ViewID);
+                        else ApplyingByView[data.view.ViewID] = depth - 1;
+                    }
                     // Nothing landed (blocked / not playing / already dead):
                     // retract the speculative stamp so it can never explain a
                     // LATER death. A death that really happened has already
@@ -239,19 +287,28 @@ namespace CompetitiveRounds
 
                     int kind = 0;
                     DamageStamp stamp;
-                    bool fresh = LastDamageByView.TryGetValue(data.view.ViewID, out stamp)
-                        && Time.unscaledTime - stamp.time < STAMP_FRESH_SECONDS;
+                    bool has = LastDamageByView.TryGetValue(data.view.ViewID, out stamp);
+                    bool fresh = has && Time.unscaledTime - stamp.time < STAMP_FRESH_SECONDS;
                     if (fresh) kind = stamp.kind;
                     GameStateWatcher.RecordDeathObserved(data.view.IsMine, kind);
                     // Ask 9 stage B: the per-seat ledger the team-mode reports
-                    // read. A kind-0 death credits the fresh damager of another
-                    // team; a boundary or own-bullet death credits nobody (the
-                    // server's 1v1 convention, so `kills` means one thing).
+                    // read. Round 1 F1: the kill credit is bound to the damage
+                    // event that took the health to zero - the victim's record
+                    // of THIS frame whose DoDamage is still applying (a lethal
+                    // DoDamage sends RPCA_Die(All) from inside its own body,
+                    // HealthHandler.cs:294, and this prefix runs there at once;
+                    // RPCA_Die itself carries no source, :366) - never a time
+                    // window. F5: an unattributed normal death credits the
+                    // victim's sole opponent, the server's 1v1 rule. Both in
+                    // KillCreditRules, which the client harness executes
+                    // (suite killcredit).
                     var victim = data.player;
-                    int killer = -1;
-                    if (kind == 0 && fresh && stamp.damagerActor >= 0
-                        && victim != null && stamp.damagerTeam != victim.TeamID)
-                        killer = stamp.damagerActor;
+                    int victimTeam = victim != null ? victim.TeamID : -1;
+                    int depth;
+                    bool applying = has && ApplyingByView.TryGetValue(data.view.ViewID, out depth) && depth > 0;
+                    int sole = FfaMode.InFfaMatch ? -1 : SoleOpponentOf(data.view.OwnerActorNr, victimTeam);
+                    int killer = KillCreditRules.Credit(kind, has, stamp.frame, Time.frameCount, applying,
+                                                        stamp.damagerActor, stamp.damagerTeam, victimTeam, sole);
                     CombatLedger.RecordDeath(data.view.OwnerActorNr, killer);
 
                 }

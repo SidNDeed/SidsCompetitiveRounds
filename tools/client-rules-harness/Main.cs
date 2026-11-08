@@ -128,6 +128,14 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            if (!RunSuite("killcredit", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = KillCreditRules.SelfTest();
+                              return new Suite(r.Passed + r.Failed, r.Failed, r.Report.ToString());
+                          }))
+                return 2;
+
             if (!RunSuite("showcase", quiet, ref totalRun, ref totalFail, ref suites,
                           () =>
                           {

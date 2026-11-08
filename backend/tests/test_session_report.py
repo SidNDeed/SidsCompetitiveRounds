@@ -3109,24 +3109,61 @@ def test_the_2v2_and_1v2_reports_carry_the_point_events_and_the_1v2_seat_blobs()
 
 
 def test_the_combat_ledger_credits_kills_the_way_the_server_derives_1v1_kills():
-    """A kind-0 death credits the FRESH damager of another team; a boundary or
-    own-bullet death credits nobody (_report_1v1_kills); every death is a mark
-    on the point markers' clock; the series samples on the 3 s tick and the
-    ledger resets at both game-start hooks."""
+    """A kind-0 death credits the damager whose record is the health-zero
+    frame's own (round 1 F1: identity with the frame, never a time window), an
+    unattributed one the victim's sole opponent (round 1 F5: the server's 1v1
+    rule); a boundary or own-bullet death credits nobody (_report_1v1_kills);
+    every death is a mark on the point markers' clock; every seat samples on
+    the 3 s tick from one origin (round 1 F4); a held seat's return moves its
+    facts to the new actor (round 1 F3); the ledger resets at both game-start
+    hooks."""
     die = _cs_body(PLUGIN / "CombatTelemetry.cs", "private static void Prefix(HealthHandler __instance)")
     assert "CombatLedger.RecordDeath(data.view.OwnerActorNr, killer);" in die
-    assert "if (kind == 0 && fresh && stamp.damagerActor >= 0" in die
-    assert "stamp.damagerTeam != victim.TeamID" in die
+    assert "KillCreditRules.Credit(kind, has, stamp.frame, Time.frameCount, applying," in die
+    assert "bool applying = has && ApplyingByView.TryGetValue(data.view.ViewID, out depth) && depth > 0;" in die
+    assert "fresh && stamp.damagerActor" not in die, "no time-window credit (round 1 F1)"
+    assert "int sole = FfaMode.InFfaMatch ? -1 : SoleOpponentOf(data.view.OwnerActorNr, victimTeam);" in die
+    rules = (PLUGIN / "KillCreditRules.cs").read_text(encoding="utf-8")
+    assert "if (hasRecord && recordApplying && recordFrame == deathFrame && recordActor >= 0)" in rules
+    assert "return recordTeam != victimTeam ? recordActor : -1;" in rules
+    assert "return soleOpponentActor;" in rules
     ledger = (PLUGIN / "CombatLedger.cs").read_text(encoding="utf-8")
     assert "DeathTimes.Add(GameStateWatcher.SecondsSinceMatchStart())" in ledger
     assert "if (killerActor >= 0 && killerActor != victimActor) SeatFor(killerActor).Kills++;" in ledger
-    assert "s.KillTimeline.Add(s.Kills);" in ledger
+    assert "foreach (var kv in seats) kv.Value.KillTimeline.Add(kv.Value.Kills);" in ledger
+    assert "for (int i = 0; i < ticks; i++) s.KillTimeline.Add(0);" in ledger, "a late seat is backfilled to the shared origin (round 1 F4)"
+    assert "internal static void Rebind(int oldActor, int newActor)" in ledger
+    hold = (PLUGIN / "TeamHoldWriter.cs").read_text(encoding="utf-8")
+    assert "CombatLedger.Rebind(cut.Actor, k.BoundActor);" in hold, "the ledger follows a held seat's return (round 1 F3)"
     watcher = (PLUGIN / "GameStateWatcher.cs").read_text(encoding="utf-8")
     assert "try { CombatLedger.Sample(); } catch { }" in watcher
     assert watcher.count("CombatLedger.Reset();") == 2, "both game-start resets"
     stamp = _cs_body(PLUGIN / "CombatTelemetry.cs",
                      "private static void Prefix(HealthHandler __instance, Player damagingPlayer,")
     assert "damagerActor = dActor," in stamp and "damagerTeam = dTeam," in stamp
+    assert "frame = Time.frameCount," in stamp, "the record carries its frame (round 1 F1)"
+    assert "ApplyingByView[data.view.ViewID] = depth + 1;" in stamp, "the call is applying from the prefix (round 1 F1)"
+    post = _cs_body(PLUGIN / "CombatTelemetry.cs", "private static void Postfix(HealthHandler __instance, float __state)")
+    assert "if (depth <= 1) ApplyingByView.Remove(data.view.ViewID);" in post, "and finished at the postfix"
+
+
+def test_the_telemetry_counters_are_clamped_to_the_schemas_upper_bounds():
+    """Round 1 F2: the 2v2/1v2 blob writer and the FFA inline blob clamp every
+    counter to TeamPlayerTelemetry's upper bound, so one wild peer counter
+    cannot reject the whole report."""
+    import schemas
+    bounds = {"bullets_fired": 1000000, "bullets_hit": 1000000, "blocks_activated": 1000000,
+              "blocks_successful": 1000000, "keys_pressed": 10000000, "active_seconds": 86400}
+    for field, bound in bounds.items():
+        meta = schemas.TeamPlayerTelemetry.model_fields[field].metadata
+        assert any(getattr(m, "le", None) == bound for m in meta), (field, meta)
+    api = (PLUGIN / "ApiClient.cs").read_text(encoding="utf-8")
+    assert api.count("Math.Min(1000000, Math.Max(0, t.bulletsFired))") == 2
+    assert api.count("Math.Min(1000000, Math.Max(0, t.bulletsHit))") == 2
+    assert api.count("Math.Min(1000000, Math.Max(0, t.blocksActivated))") == 2
+    assert api.count("Math.Min(1000000, Math.Max(0, t.blocksSuccessful))") == 2
+    assert api.count("Math.Min(10000000, Math.Max(0, t.keysPressed))") == 2
+    assert api.count("Math.Min(86400f, Math.Max(0f, t.activeSeconds))") == 2
     dealt = _cs_body(PLUGIN / "CombatTelemetry.cs",
                      "private static void AfterDealtDamage(CharacterStatModifiers __instance, Vector2 damage,")
     assert dealt.index("if (damagedPlayer.TeamID == dealer.TeamID) return;") \
