@@ -162,6 +162,16 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            // Ask 5 (avatar presets in the main menu): the picker's tile
+            // states, click actions and preview geometry, Unity-free.
+            if (!RunSuite("avatarpicker", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = AvatarPickerRules.SelfTest();
+                              return new Suite(r.Passed + r.Failed, r.Failed, r.Report.ToString());
+                          }))
+                return 2;
+
             // v1.41.0 late i18n round 3: shop, ladder and artist refusals read
             // structurally, and the Recent Series FFA labels.
             if (!RunSuite("servertext", quiet, ref totalRun, ref totalFail, ref suites,

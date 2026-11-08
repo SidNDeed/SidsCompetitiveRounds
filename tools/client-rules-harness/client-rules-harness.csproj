@@ -183,6 +183,8 @@
     <Compile Include="../../plugin/DamageNumberRules.cs" />
     <Compile Include="../../plugin/AvatarDefaultRules.cs" />
     <Compile Include="AvatarDefaultRulesSelfTest.cs" />
+    <Compile Include="../../plugin/AvatarPickerRules.cs" />
+    <Compile Include="AvatarPickerRulesSelfTest.cs" />
     <Compile Include="../../plugin/ServerTextRules.cs" />
     <Compile Include="ServerTextRulesSelfTest.cs" />
     <Compile Include="KeybindFix2Controls.cs" />
