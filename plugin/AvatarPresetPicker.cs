@@ -289,6 +289,11 @@ namespace CompetitiveRounds
                 if (smp != null) smp.SetValue(sc, Enum.ToObject(smp.PropertyType, 1));
                 var rr = UIFactory.tCanvasScaler.GetProperty("referenceResolution", bf);
                 if (rr != null) rr.SetValue(sc, new Vector2(1920, 1080));
+                // Match the screen HEIGHT: the picker is 1000 reference px tall, so an
+                // ultrawide screen (1080 reference px high this way) shows all of it;
+                // a 4:3 screen trims the 1600-px root's sides a little instead.
+                var mw = UIFactory.tCanvasScaler.GetProperty("matchWidthOrHeight", bf);
+                if (mw != null) mw.SetValue(sc, 1f);
             }
             if (UIFactory.tGR != null) canvasGO.AddComponent(UIFactory.tGR);
             canvasGO.AddComponent<AvatarPickerEscape>();
@@ -298,13 +303,13 @@ namespace CompetitiveRounds
             // The background: CreatePanel gives its Image raycastTarget = true.
             UIFactory.CreatePanel("BG", canvasGO.transform, new Color(0f, 0f, 0f, 0.86f));
 
-            rootPanel = UIFactory.CreatePanel("Root", canvasGO.transform, PanelColor, new Vector2(1600f, 940f));
+            rootPanel = UIFactory.CreatePanel("Root", canvasGO.transform, PanelColor, new Vector2(1600f, 1000f));
             var rrt = rootPanel.GetComponent<RectTransform>();
             rrt.anchorMin = rrt.anchorMax = new Vector2(0.5f, 0.5f);
             rrt.pivot = new Vector2(0.5f, 0.5f);
-            rrt.sizeDelta = new Vector2(1600f, 940f);
+            rrt.sizeDelta = new Vector2(1600f, 1000f);
             rrt.anchoredPosition = Vector2.zero;
-            UIFactory.AddVLG(rootPanel, spacing: 10, padL: 32, padR: 32, padT: 22, padB: 22, forceExpandW: true, forceExpandH: false);
+            UIFactory.AddVLG(rootPanel, spacing: 10, padL: 32, padR: 32, padT: 18, padB: 18, forceExpandW: true, forceExpandH: false);
         }
 
         private static void ClearContent()
@@ -327,28 +332,34 @@ namespace CompetitiveRounds
             var faces = cch != null ? cch.playerFaces : null;
             float k = CalibrateK(TileFace);
 
-            // Header: title, the auto-switch, the two choices with their Clear buttons, Back.
-            var header = Panel("Header", rootPanel.transform, new Color(0f, 0f, 0f, 0f), 0f, 56f);
+            // Header row 1: title, the auto-switch, a spacer, Back at the right edge.
+            var header = Panel("Header", rootPanel.transform, new Color(0f, 0f, 0f, 0f), 0f, 48f);
             UIFactory.AddHLG(header, spacing: 18, forceExpandW: false, forceExpandH: true);
-            UIFactory.CreateText("Title", header.transform, "Avatar presets", 34f, Color.white, UIFactory.AlignMidLeft, new Vector2(330f, 56f));
+            UIFactory.CreateText("Title", header.transform, "Avatar presets", 34f, Color.white, UIFactory.AlignMidLeft, new Vector2(420f, 48f));
             bool auto = setting.Auto;
             UIFactory.CreateButton("AutoToggle", header.transform,
                 auto ? "Avatar auto-switch: <color=#88CCFF>ON</color>" : "Avatar auto-switch: <color=#88CCFF>OFF</color>",
                 20f, Color.white, ButtonColor, () => { AvatarDefaults.SetAuto(!AvatarDefaults.ReadSetting().Auto); Rebuild(); }, new Vector2(360f, 44f));
-            var modded = UIFactory.CreateText("ModdedReadout", header.transform, "", 20f, Color.white, UIFactory.AlignMidLeft, new Vector2(290f, 56f));
-            UIFactory.SetTextRaw(modded, "<b>" + I18n.TrF("Modded avatar: <color=#88CCFF>{0}</color>", AvatarDefaults.PresetLabel(setting.Modded)) + "</b>");
-            UIFactory.CreateButton("ClearModded", header.transform, "Clear", 18f, Color.white,
-                setting.Modded >= 0 ? ButtonColor : DeadColor,
-                setting.Modded >= 0 ? new UnityEngine.Events.UnityAction(() => Apply(PickerAction.ClearModded, -1)) : null, new Vector2(96f, 40f));
-            var vanilla = UIFactory.CreateText("VanillaReadout", header.transform, "", 20f, Color.white, UIFactory.AlignMidLeft, new Vector2(290f, 56f));
-            UIFactory.SetTextRaw(vanilla, "<b>" + I18n.TrF("Vanilla avatar: <color=#88CCFF>{0}</color>", AvatarDefaults.PresetLabel(setting.Vanilla)) + "</b>");
-            UIFactory.CreateButton("ClearVanilla", header.transform, "Clear", 18f, Color.white,
-                setting.Vanilla >= 0 ? ButtonColor : DeadColor,
-                setting.Vanilla >= 0 ? new UnityEngine.Events.UnityAction(() => Apply(PickerAction.ClearVanilla, -1)) : null, new Vector2(96f, 40f));
+            var spacer = UIFactory.CreatePanel("Spacer", header.transform, new Color(0f, 0f, 0f, 0f));
+            UIFactory.AddLE(spacer, flexW: 1f);
             UIFactory.CreateButton("Back", header.transform, "Back", 22f, Color.white, ButtonColor, () => Close(), new Vector2(140f, 44f));
 
+            // Header row 2: the two choices with their Clear buttons.
+            var choices = Panel("Choices", rootPanel.transform, new Color(0f, 0f, 0f, 0f), 0f, 44f);
+            UIFactory.AddHLG(choices, spacing: 18, forceExpandW: false, forceExpandH: true);
+            var modded = UIFactory.CreateText("ModdedReadout", choices.transform, "", 20f, Color.white, UIFactory.AlignMidLeft, new Vector2(340f, 44f));
+            UIFactory.SetTextRaw(modded, "<b>" + I18n.TrF("Modded avatar: <color=#88CCFF>{0}</color>", AvatarDefaults.PresetLabel(setting.Modded)) + "</b>");
+            UIFactory.CreateButton("ClearModded", choices.transform, "Clear", 18f, Color.white,
+                setting.Modded >= 0 ? ButtonColor : DeadColor,
+                setting.Modded >= 0 ? new UnityEngine.Events.UnityAction(() => Apply(PickerAction.ClearModded, -1)) : null, new Vector2(96f, 40f));
+            var vanilla = UIFactory.CreateText("VanillaReadout", choices.transform, "", 20f, Color.white, UIFactory.AlignMidLeft, new Vector2(340f, 44f));
+            UIFactory.SetTextRaw(vanilla, "<b>" + I18n.TrF("Vanilla avatar: <color=#88CCFF>{0}</color>", AvatarDefaults.PresetLabel(setting.Vanilla)) + "</b>");
+            UIFactory.CreateButton("ClearVanilla", choices.transform, "Clear", 18f, Color.white,
+                setting.Vanilla >= 0 ? ButtonColor : DeadColor,
+                setting.Vanilla >= 0 ? new UnityEngine.Events.UnityAction(() => Apply(PickerAction.ClearVanilla, -1)) : null, new Vector2(96f, 40f));
+
             // The legend: item 19's own ring words, in its colours.
-            var legend = UIFactory.CreateText("Legend", rootPanel.transform, "", 17f, new Color(0.85f, 0.85f, 0.88f, 1f), UIFactory.AlignTopLeft, new Vector2(1536f, 54f));
+            var legend = UIFactory.CreateText("Legend", rootPanel.transform, "", 17f, new Color(0.85f, 0.85f, 0.88f, 1f), UIFactory.AlignTopLeft, new Vector2(1536f, 76f));
             UIFactory.SetTextRaw(legend,
                 "<b><color=#FFD94D>" + I18n.Tr("Gold ring: your modded default") + "</color>   "
                 + "<color=#7FD4FF>" + I18n.Tr("Blue ring: your vanilla default") + "</color>   "
