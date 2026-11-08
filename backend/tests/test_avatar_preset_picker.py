@@ -133,6 +133,18 @@ def _replace(src, fname, old, new):
     return s
 
 
+def _replace_within(src, fname, sig, old, new, within=None):
+    """`_replace`, but the anchor is sought only inside the block after `sig`."""
+    s = dict(src)
+    t = s[fname]
+    a, b = _span(t, sig, within)
+    block = t[a:b]
+    assert block.count(old) == 1, "edit anchor %r occurs %d times inside %r in %s" % (old, block.count(old), sig, fname)
+    s[fname] = t[:a] + block.replace(old, new, 1) + t[b:]
+    assert s[fname] != t
+    return s
+
+
 def _insert_after_open(src, fname, sig, text, within=None):
     """Insert `text` right after the opening brace of the block after `sig`."""
     s = dict(src)
@@ -284,8 +296,9 @@ def test_p5_the_row_click_is_guarded():
 
 def test_p5_the_factory_button_is_guarded():
     _check(_p5,
-           lambda s: _replace(s, NU, "var guarded=new UnityEngine.Events.UnityAction(()=>{if(ClickGuard.Claim(go))onClick();});",
-                              "var guarded=new UnityEngine.Events.UnityAction(()=>{onClick();});"),
+           lambda s: _replace_within(s, NU, CREATE_BUTTON,
+                                     "var guarded=new UnityEngine.Events.UnityAction(()=>{if(ClickGuard.Claim(go))onClick();});",
+                                     "var guarded=new UnityEngine.Events.UnityAction(()=>{onClick();});"),
            _control_comment(PP, ONCLICK, within=ROW_BUTTON))
 
 
@@ -460,7 +473,9 @@ def _p13(src):
     m = re.search(r"^FILES\s*=\s*\[", t, re.M)
     assert m, "the extractor's FILES list is gone"
     end = t.index("\n]", m.end())
-    assert '"AvatarPresetPicker.cs",' in t[m.end():end], "the picker is not in the extractor's FILES list"
+    # Only live entries count: a commented-out name is still a substring of the block.
+    live = [ln.split("#", 1)[0] for ln in t[m.end():end].splitlines()]
+    assert any('"AvatarPresetPicker.cs"' in ln for ln in live), "the picker is not a live entry of the extractor's FILES list"
 
 
 def test_p13_the_extractor_scans_the_picker():
