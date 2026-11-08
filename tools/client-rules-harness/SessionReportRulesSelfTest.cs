@@ -731,6 +731,15 @@ namespace CompetitiveRounds
             @"{""match_id"":""o1"",""duration_s"":90,""scores"":{""" + A + @""":5,""" + B + @""":2,""" + C + @""":2},"
             + @"""totals"":{""" + A + @""":{""deaths"":4},""" + B + @""":{""deaths"":3},""" + C + @""":{""deaths"":2}}}");
 
+        // Two 1v2 games: the solo's kills recorded in the first, derived from the
+        // duo's deaths in the second (round 1 M1: the set total adds both).
+        private static readonly string OVT_MIXED = Env("ovt",
+            Pl(A, "Alpha", 1) + "," + Pl(B, "Bravo", 2) + "," + Pl(C, "Charlie", 2),
+            @"{""match_id"":""o1"",""duration_s"":90,""scores"":{""" + A + @""":5,""" + B + @""":2,""" + C + @""":2},"
+            + @"""totals"":{""" + A + @""":{""kills"":4,""deaths"":1},""" + B + @""":{""deaths"":3},""" + C + @""":{""deaths"":2}}},"
+            + @"{""match_id"":""o2"",""duration_s"":80,""scores"":{""" + A + @""":3,""" + B + @""":5,""" + C + @""":5},"
+            + @"""totals"":{""" + A + @""":{""deaths"":4},""" + B + @""":{""deaths"":1},""" + C + @""":{""deaths"":2}}}");
+
         private static string SideText(IList<Side> sides)
         {
             var parts = new List<string>();
@@ -814,6 +823,12 @@ namespace CompetitiveRounds
                   && Seq(od.Players[1].KillsByGame) == "-" && Seq(od.Players[1].DeathsByGame) == "3",
                   od == null ? "unparsed" : "solo " + F(od.Players[0].Kills) + ", duo " + F(od.Players[1].Kills) + " deaths " + Seq(od.Players[1].DeathsByGame));
 
+            var mx = Parse(OVT_MIXED);
+            var mxd = mx == null ? null : Derive(mx, mx.Players);
+            Check(r, "sides: a 1v2 solo's set kills add the recorded and the derived games",
+                  mxd != null && Seq(mxd.Players[0].KillsByGame) == "4,3" && Near(mxd.Players[0].Kills, 7f) && mxd.Players[1].Kills == null,
+                  mxd == null ? "unparsed" : "solo " + Seq(mxd.Players[0].KillsByGame) + " = " + F(mxd.Players[0].Kills) + ", duo " + F(mxd.Players[1].Kills));
+
             // The O(n) rolling pass equals the sample-by-sample definition.
             var cum = new List<Pt>();
             float acc = 0f;
@@ -847,6 +862,9 @@ namespace CompetitiveRounds
             Check(r, "rolling: the window follows a decimated stride (five median gaps) and never shrinks below the minimum",
                   StrideWindow(cum, 15f) == 15f && StrideWindow(sparse, 15f) == 30f && StrideWindow(new List<Pt> { new Pt(1f, 1f) }, 15f) == 15f,
                   "3 s grid " + StrideWindow(cum, 15f).ToString(INV) + ", 6 s grid " + StrideWindow(sparse, 15f).ToString(INV));
+            Check(r, "rolling: the median gap is the stream's stride; a gap past 1.5 strides is a skipped sample",
+                  MedianGap(cum) == 3f && MedianGap(sparse) == 6f && MedianGap(new List<Pt> { new Pt(1f, 1f) }) == 0f && 1.5f * MedianGap(cum) < 6f,
+                  "3 s grid " + MedianGap(cum).ToString(INV) + ", 6 s grid " + MedianGap(sparse).ToString(INV));
         }
 
         /// <summary>The per-sample definition the rules' one-pass AtFrom is held

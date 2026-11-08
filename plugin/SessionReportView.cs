@@ -431,7 +431,10 @@ namespace CompetitiveRounds
             if (r.xMax - x > 120f) GUI.Label(new Rect(x, r.y, r.xMax - x, r.height), m.ToggleHint, stHint);
         }
 
-        private static bool SlotHidden(int pi) => pi >= 0 && pi < hidden.Count && hidden[pi];
+        /// <summary>The legend toggles belong to the F5 sitting: the broadcast
+        /// playback shows no toggles and hides nothing (round 1 M3: a slot hidden
+        /// in F5 stayed hidden on the broadcast seat's report).</summary>
+        private static bool SlotHidden(int pi) => interactive && pi >= 0 && pi < hidden.Count && hidden[pi];
 
         /// <summary>A side's line hides when every member of the side is hidden;
         /// a player's line with its player.</summary>
@@ -594,17 +597,28 @@ namespace CompetitiveRounds
                 var line = p.Lines[li];
                 if (IsHidden(m, line)) continue;
                 var pts = line.Pts;
-                for (int i = 1; i < pts.Count; i++)
+                for (int i = 0; i < pts.Count; i++)
                 {
-                    var a = Map(pts[i - 1], plot, scale, p.MaxY);
-                    var b = Map(pts[i], plot, scale, p.MaxY);
-                    if (line.Step)
+                    // A rate line's skipped samples are a gap, not a segment (round
+                    // 1 M5); a point with a gap on both sides is a dot, not nothing.
+                    bool gapBefore = i == 0 || (line.MaxGap > 0f && pts[i].x - pts[i - 1].x > line.MaxGap);
+                    if (!gapBefore)
                     {
-                        var corner = new Vector2(b.x, a.y);
-                        CompetitiveUI.GuiLine(a, corner, line.Tint, 2.5f);
-                        CompetitiveUI.GuiLine(corner, b, line.Tint, 2.5f);
+                        var a = Map(pts[i - 1], plot, scale, p.MaxY);
+                        var b = Map(pts[i], plot, scale, p.MaxY);
+                        if (line.Step)
+                        {
+                            var corner = new Vector2(b.x, a.y);
+                            CompetitiveUI.GuiLine(a, corner, line.Tint, 2.5f);
+                            CompetitiveUI.GuiLine(corner, b, line.Tint, 2.5f);
+                        }
+                        else CompetitiveUI.GuiLine(a, b, line.Tint, 2f);
                     }
-                    else CompetitiveUI.GuiLine(a, b, line.Tint, 2f);
+                    else if (line.MaxGap > 0f && (i + 1 >= pts.Count || pts[i + 1].x - pts[i].x > line.MaxGap))
+                    {
+                        var c = Map(pts[i], plot, scale, p.MaxY);
+                        Fill(new Rect(c.x - 1.5f, c.y - 1.5f, 3f, 3f), line.Tint);
+                    }
                 }
             }
             // End scores of games with no point events, at each game's end.
@@ -659,7 +673,7 @@ namespace CompetitiveRounds
                 {
                     var line = p.Lines[li];
                     if (IsHidden(m, line)) continue;
-                    float v = ValueAt(line.Pts, snap, line.Step);
+                    float v = ValueAt(line.Pts, snap, line.Step, line.MaxGap);
                     if (float.IsNaN(v)) continue;
                     crossLine.Add(li);
                     crossY.Add(v);
@@ -686,8 +700,12 @@ namespace CompetitiveRounds
         }
 
         /// <summary>A line's value at x: the sample's value held until the next
-        /// (a step line) or interpolated; NaN outside the line's span.</summary>
-        private static float ValueAt(List<Vector2> pts, float x, bool step)
+        /// (a step line) or interpolated; NaN outside the line's span, and NaN
+        /// strictly between two points further apart than the line's MaxGap (a
+        /// rate line's gap is no data, not a ramp - round 1 M5). At a sample's
+        /// own x the value is that sample's (round 1 M4: a step line's last
+        /// sample read as the one before it).</summary>
+        private static float ValueAt(List<Vector2> pts, float x, bool step, float maxGap)
         {
             int n = pts.Count;
             if (n == 0 || x < pts[0].x || x > pts[n - 1].x) return float.NaN;
@@ -697,7 +715,9 @@ namespace CompetitiveRounds
                 int mid = (lo + hi) >> 1;
                 if (pts[mid].x <= x) lo = mid; else hi = mid;
             }
-            if (step || pts[hi].x <= pts[lo].x) return pts[lo].y;
+            if (pts[hi].x <= x) return pts[hi].y;
+            if (maxGap > 0f && pts[hi].x - pts[lo].x > maxGap) return x <= pts[lo].x ? pts[lo].y : float.NaN;
+            if (step) return pts[lo].y;
             float f = (x - pts[lo].x) / (pts[hi].x - pts[lo].x);
             return pts[lo].y + f * (pts[hi].y - pts[lo].y);
         }
@@ -1141,6 +1161,13 @@ namespace CompetitiveRounds
         {
             private static readonly Dictionary<string, Texture2D> cache = new Dictionary<string, Texture2D>();
             private static readonly Dictionary<string, float> retryAt = new Dictionary<string, float>();
+            // By the chip's own card string (round 1 M6): a chip returns here with
+            // no canonical name and no snapshot key, where every draw of every
+            // chip composed both before. A snapshot's texture is final until the
+            // snapshots' generation turns (InvalidateAll destroys them); the PNG
+            // fallback is re-checked for a snapshot every 2 s, a miss every 5 s.
+            private static readonly Dictionary<string, Texture2D> byCard = new Dictionary<string, Texture2D>();
+            private static readonly Dictionary<string, float> recheckAt = new Dictionary<string, float>();
             private static int generation;
 
             internal static Texture2D Get(string card)
@@ -1151,26 +1178,46 @@ namespace CompetitiveRounds
                     generation = CardSnapshot.Generation;
                     cache.Clear();
                     retryAt.Clear();
+                    byCard.Clear();
+                    recheckAt.Clear();
                 }
+                Texture2D known;
+                float until;
+                if (byCard.TryGetValue(card, out known) && recheckAt.TryGetValue(card, out until) && Time.realtimeSinceStartup < until)
+                    return known;
                 string name = CardRarityLookup.GetCanonicalName(card) ?? card;
                 Sprite snap;
                 if (CardSnapshot.TryGetSprite(name, out snap) && snap != null && snap.texture != null)
                 {
                     cache[name] = snap.texture;
+                    byCard[card] = snap.texture;
+                    recheckAt[card] = float.MaxValue;
                     return snap.texture;
                 }
                 if (!CardSnapshot.IsFailed(name)) CardSnapshot.RequestSnapshot(name);
                 Texture2D tex;
                 if (cache.TryGetValue(name, out tex))
                 {
-                    if (tex != null) return tex;
+                    if (tex != null)
+                    {
+                        byCard[card] = tex;
+                        recheckAt[card] = Time.realtimeSinceStartup + 2f;
+                        return tex;
+                    }
                     float at;
-                    if (retryAt.TryGetValue(name, out at) && Time.realtimeSinceStartup < at) return null;
+                    if (retryAt.TryGetValue(name, out at) && Time.realtimeSinceStartup < at)
+                    {
+                        byCard[card] = null;
+                        recheckAt[card] = at;
+                        return null;
+                    }
                 }
                 Sprite sprite = CardImageLoader.GetSprite(name, prioritize: true);
                 tex = sprite != null ? sprite.texture : null;
                 cache[name] = tex;
+                byCard[card] = tex;
                 if (tex == null) retryAt[name] = Time.realtimeSinceStartup + 5f;
+                recheckAt[card] = Time.realtimeSinceStartup + (tex == null ? 5f : 2f);
                 return tex;
             }
         }

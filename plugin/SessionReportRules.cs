@@ -927,8 +927,11 @@ namespace CompetitiveRounds
                     line.GoldByGame.Add(played && g.Gold.TryGetValue(pid, out gv) ? gv : (float?)null);
                     line.XpByGame.Add(played && g.Xp.TryGetValue(pid, out gv) ? gv : (float?)null);
                 }
-                if (killsRecorded) line.Kills = kills;
-                else if (killsDerived) line.Kills = derivedKills;
+                // The set total is the per-game column's sum: a game's recorded
+                // kills and a game's derived kills (a lone fighter's, from the
+                // other side's deaths) both count (round 1 M1: a set with one game
+                // of each totalled the recorded game alone).
+                if (killsRecorded || killsDerived) line.Kills = kills + derivedKills;
                 if (line.Games > 0 && !capped) line.CardsPicked = picks;
                 if (wonKnown) line.PointsWon = won;
                 if (lostKnown && line.Games > 0) line.PointsLost = lost;
@@ -1421,10 +1424,21 @@ namespace CompetitiveRounds
         internal static float StrideWindow(List<Pt> s, float minWindow)
         {
             if (s == null || s.Count < 3) return minWindow;
+            return Math.Max(minWindow, 5f * MedianGap(s));
+        }
+
+        /// <summary>A stream's stride: the median spacing of its samples (0 for
+        /// fewer than two). A rate line whose consecutive points sit further
+        /// apart than 1.5 strides skipped a sample between them (too few shots
+        /// or blocks in that window): the view draws and reads a GAP there, never
+        /// a bridge (round 1 M5).</summary>
+        internal static float MedianGap(List<Pt> s)
+        {
+            if (s == null || s.Count < 2) return 0f;
             var gaps = new List<float>(s.Count - 1);
             for (int i = 1; i < s.Count; i++) gaps.Add(Math.Max(0f, s[i].X - s[i - 1].X));
             gaps.Sort();
-            return Math.Max(minWindow, 5f * gaps[gaps.Count / 2]);
+            return gaps[gaps.Count / 2];
         }
 
         // -- ask 9 stage C: colour, Unity-free (OKLab) ------------------------------

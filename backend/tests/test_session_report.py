@@ -1525,8 +1525,15 @@ def test_dividers_and_diagnostics_are_translated():
     assert "ScoreLine(" in build and "FfaScoreLabel(" in build
     # ask 9 stage C: one score line for every two-sided kind - the sides' own
     # coloured names (SideNames), the winner's score in the side's tint
-    score = _cs_body(model, "private static string ScoreLine(Model m, int sa, int sb)")
-    assert "m.SideNames" in score and "Tinted(m.SideTints[0], a)" in score and "Tinted(m.SideTints[1], b)" in score
+    score = _cs_body(model, "private static string ScoreLine(Model m, int sa, int sb, Game g = null)")
+    assert "SideNameIn(m, 0, g)" in score and "Tinted(m.SideTints[0], a)" in score and "Tinted(m.SideTints[1], b)" in score
+    # round 1 L1: a game's heading names the members who played that game
+    side_in = _cs_body(model, "private static string SideNameIn(Model m, int si, Game g)")
+    assert "m.SideNames[si]" in side_in and "HasCards(g, id)" in side_in
+    assert "ScoreLine(m, sa, sb, g)" in build, "the game dividers name the game's own players"
+    # round 1 M2: one window per rate panel, named under its own title
+    assert 'I18n.TrF("{0} s window", Mathf.RoundToInt(wHit))' in build and "RollingRatio(hits, shots, wHit, MIN_SHOTS)" in build
+    assert "windowNote" not in build, "no shared window note across the rate panels"
     ffa = _cs_body(model, "private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)")
     assert "I18n.TrF(" in ffa
     # rolled picks: parsed (the parser lives in the Unity-free rules file since
@@ -1860,7 +1867,7 @@ def test_a_game_names_only_the_players_who_played_it():
     ffa = _cs_body(model, "private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)")
     assert "var order = Standings(g, m.Players);" in ffa
     assert "m.Players.Count; i++" not in ffa, "the label enumerates the game's standings, not the roster"
-    score = _cs_body(model, "private static string ScoreLine(Model m, int sa, int sb)")
+    score = _cs_body(model, "private static string ScoreLine(Model m, int sa, int sb, Game g = null)")
     assert "Scores" not in score, "the score line prints the side scores it is handed; it reads no key itself"
     header = _cs_body(model, "private static string BlockHeader(Model m, Game g, int number)")
     assert "if (SideScores(m.Kind, g, m.Players, m.Sides, out sa, out sb, out ia, out ib))" in header
@@ -3161,3 +3168,21 @@ def test_the_report_builders_fill_every_seat_blob_from_the_ledger():
     assert "pointTimeline: p.PointTimeline, pointTimes: p.PointTimes" in submit
     swap = _cs_body(src, "private static void PointEventsCsv(bool swapSides, out string timeline, out string times)")
     assert 'e.Substring(c + 1) + ":" + e.Substring(0, c)' in swap, "the swap keeps the stamps, flips the sides"
+
+
+def test_the_report_view_keeps_its_toggles_to_f5_and_reads_gaps_and_last_samples():
+    """Ask 9 stage C round 1: M3 the legend toggles are the F5 sitting's (the
+    broadcast playback hides nothing); M4/M5 the crosshair reads a sample's own
+    value at its x and no value across a rate line's gap; M6 card art is looked
+    up by the chip's own string, the canonical name not composed per draw."""
+    view = PLUGIN / "SessionReportView.cs"
+    whole = view.read_text(encoding="utf-8")
+    assert "private static bool SlotHidden(int pi) => interactive && pi >= 0" in whole
+    value_at = _cs_body(view, "private static float ValueAt(List<Vector2> pts, float x, bool step, float maxGap)")
+    assert "if (pts[hi].x <= x) return pts[hi].y;" in value_at
+    assert "pts[hi].x - pts[lo].x > maxGap" in value_at
+    assert "ValueAt(line.Pts, snap, line.Step, line.MaxGap)" in whole
+    get = _cs_body(view, "internal static Texture2D Get(string card)")
+    assert get.index("byCard.TryGetValue(card, out known)") < get.index("CardRarityLookup.GetCanonicalName(card)")
+    model = PLUGIN / "SessionReportModel.cs"
+    assert "public float MaxGap;" in model.read_text(encoding="utf-8")

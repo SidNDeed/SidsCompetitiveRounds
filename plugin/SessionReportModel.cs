@@ -66,6 +66,7 @@ namespace CompetitiveRounds
             public bool Step;            // drawn as steps: a count that jumps, never ramps
             public int Player = -1;      // roster index of the player whose series this is (-1: a side's)
             public int Side = -1;        // index into Model.Sides for a side's series (the race)
+            public float MaxGap;         // > 0: points further apart than this are a gap (a rate line skipped samples), not a segment
         }
 
         /// <summary>A recorded end score placed at its game's end (a race whose
@@ -385,7 +386,7 @@ namespace CompetitiveRounds
                     // missing key is never a 0; the standings below omit it).
                     if (sa > sb) setWins[0]++; else if (sb > sa) setWins[1]++;
                     sp.LabelShort = sa.ToString(INV) + "-" + sb.ToString(INV);
-                    sp.LabelLong = ScoreLine(m, sa, sb);
+                    sp.LabelLong = ScoreLine(m, sa, sb, g);
                 }
                 else
                 {
@@ -436,7 +437,20 @@ namespace CompetitiveRounds
             m.Ping = new Panel { Title = I18n.Tr("Ping"), Unit = I18n.Tr("ms") };
             m.Fps = new Panel { Title = I18n.Tr("FPS"), Unit = I18n.Tr("fps") };
             bool legacyBlocks = false;
-            float window = WINDOW_S;
+            // One window per rate panel, the widest any of its streams needs, and
+            // every line of the panel is rolled with it, so the note under the
+            // title is exact for every line (round 1 M2: one shared note named a
+            // sparse damage stream's 60 s on the hit panel's 20 s lines).
+            float wDps = WINDOW_S, wHit = WINDOW_S, wBlock = WINDOW_S;
+            foreach (var g0 in env.Games)
+                foreach (var kv in g0.Timelines)
+                {
+                    if (kv.Value == null) continue;
+                    List<Pt> s0;
+                    if (kv.Value.TryGetValue("damage", out s0)) wDps = Mathf.Max(wDps, StrideWindow(s0, WINDOW_S));
+                    if (kv.Value.TryGetValue("shots", out s0)) wHit = Mathf.Max(wHit, StrideWindow(s0, WINDOW_S));
+                    if (kv.Value.TryGetValue("blocks", out s0)) wBlock = Mathf.Max(wBlock, StrideWindow(s0, WINDOW_S));
+                }
 
             for (int gi = 0; gi < env.Games.Count; gi++)
             {
@@ -478,17 +492,17 @@ namespace CompetitiveRounds
                     if (dmg != null && dmg.Count > 0)
                     {
                         AddLine(m.Damage, pid, m.Tints[pi], Shift(dmg, sp.X0, true), pi, -1);
-                        float w = StrideWindow(dmg, WINDOW_S);
-                        window = Mathf.Max(window, w);
-                        var dps = Rolling(dmg, w);
+                        var dps = Rolling(dmg, wDps);
                         if (dps.Count > 0) AddLine(m.Dps, pid, m.Tints[pi], Shift(dps, sp.X0, false), pi, -1);
                     }
                     if (shots != null && hits != null && shots.Count > 0)
                     {
-                        float w = StrideWindow(shots, WINDOW_S);
-                        window = Mathf.Max(window, w);
-                        var hp = RollingRatio(hits, shots, w, MIN_SHOTS);
-                        if (hp.Count > 0) AddLine(m.HitPct, pid, m.Tints[pi], Shift(hp, sp.X0, false), pi, -1);
+                        var hp = RollingRatio(hits, shots, wHit, MIN_SHOTS);
+                        if (hp.Count > 0)
+                        {
+                            AddLine(m.HitPct, pid, m.Tints[pi], Shift(hp, sp.X0, false), pi, -1);
+                            m.HitPct.Lines[m.HitPct.Lines.Count - 1].MaxGap = 1.5f * MedianGap(shots);
+                        }
                     }
                     if (blocks != null && blocksOk != null && blocks.Count > 0)
                     {
@@ -505,10 +519,12 @@ namespace CompetitiveRounds
                         if (legacy) legacyBlocks = true;
                         else
                         {
-                            float w = StrideWindow(blocks, WINDOW_S);
-                            window = Mathf.Max(window, w);
-                            var bp = RollingRatio(blocksOk, blocks, w, MIN_BLOCKS);
-                            if (bp.Count > 0) AddLine(m.BlockPct, pid, m.Tints[pi], Shift(bp, sp.X0, false), pi, -1);
+                            var bp = RollingRatio(blocksOk, blocks, wBlock, MIN_BLOCKS);
+                            if (bp.Count > 0)
+                            {
+                                AddLine(m.BlockPct, pid, m.Tints[pi], Shift(bp, sp.X0, false), pi, -1);
+                                m.BlockPct.Lines[m.BlockPct.Lines.Count - 1].MaxGap = 1.5f * MedianGap(blocks);
+                            }
                         }
                     }
                     if (ping != null && ping.Count > 0) AddLine(m.Ping, pid, m.Tints[pi], Shift(ping, sp.X0, false), pi, -1);
@@ -526,11 +542,10 @@ namespace CompetitiveRounds
             m.StripMissing = MissingText(m.Kind, MET_DURATION);
             if (m.BlockPct.Missing != null && legacyBlocks)
                 m.BlockPct.Missing = I18n.Tr("not recorded (older block format)");
-            // The widest window any stream needed, named once under the rate titles.
-            string windowNote = I18n.TrF("{0} s window", Mathf.RoundToInt(window));
-            if (m.Dps.Missing == null) m.Dps.Note = windowNote;
-            if (m.HitPct.Missing == null) m.HitPct.Note = windowNote;
-            if (m.BlockPct.Missing == null) m.BlockPct.Note = windowNote;
+            // Each rate panel's own window, named once under its title.
+            if (m.Dps.Missing == null) m.Dps.Note = I18n.TrF("{0} s window", Mathf.RoundToInt(wDps));
+            if (m.HitPct.Missing == null) m.HitPct.Note = I18n.TrF("{0} s window", Mathf.RoundToInt(wHit));
+            if (m.BlockPct.Missing == null) m.BlockPct.Note = I18n.TrF("{0} s window", Mathf.RoundToInt(wBlock));
 
             // The Totals pages (board row 30d): derived by SessionReportRules.Derive,
             // which the client harness executes; rating, gold and XP are read
@@ -1141,7 +1156,7 @@ namespace CompetitiveRounds
         {
             int sa, sb, ia, ib;
             if (SideScores(m.Kind, g, m.Players, m.Sides, out sa, out sb, out ia, out ib))
-                return I18n.TrF("Game {0}: {1}", number, ScoreLine(m, sa, sb));
+                return I18n.TrF("Game {0}: {1}", number, ScoreLine(m, sa, sb, g));
             return FfaScoreLabel(m, g, number, true);
         }
 
@@ -1164,14 +1179,38 @@ namespace CompetitiveRounds
         /// 2's names (SideNames: each member in its colour, joined with " + ") -
         /// with the winning side's SCORE in that side's tint, the loser's in ink.
         /// Every two-sided kind reads the same: a 2v2's "team 1" and a 1v2's
-        /// "solo" / "duo" are the players' own names now.</summary>
-        private static string ScoreLine(Model m, int sa, int sb)
+        /// "solo" / "duo" are the players' own names now. Handed a game, it names
+        /// the members who played that game (SideNameIn); the set-wide names
+        /// otherwise. It prints the side totals it is handed and reads no key.</summary>
+        private static string ScoreLine(Model m, int sa, int sb, Game g = null)
         {
-            string na = m.SideNames.Count > 0 ? m.SideNames[0] : "?", nb = m.SideNames.Count > 1 ? m.SideNames[1] : "?";
+            string na = SideNameIn(m, 0, g), nb = SideNameIn(m, 1, g);
             string a = sa.ToString(INV), b = sb.ToString(INV);
             if (sa > sb) a = Tinted(m.SideTints[0], a);
             else if (sb > sa) b = Tinted(m.SideTints[1], b);
             return na + "  " + a + "-" + b + "  " + nb;
+        }
+
+        /// <summary>A side's name in one game: the members who played it (a key
+        /// in the game's scores, or cards), each in its colour, joined with " + ";
+        /// the set-wide name (SideNames) when no game is given or none of them
+        /// has a key there (round 1 L1: a game's heading named a teammate who
+        /// sat that game out).</summary>
+        private static string SideNameIn(Model m, int si, Game g)
+        {
+            if (si >= m.SideNames.Count) return "?";
+            if (g == null) return m.SideNames[si];
+            var slots = m.Sides[si].Slots;
+            StringBuilder names = null;
+            for (int k = 0; k < slots.Count; k++)
+            {
+                string id = m.Players[slots[k]].Id;
+                if (!g.Scores.ContainsKey(id) && !HasCards(g, id)) continue;
+                if (names == null) names = new StringBuilder();
+                else names.Append(" + ");
+                names.Append(Coloured(m, slots[k], Safe(m.Players[slots[k]].Name)));
+            }
+            return names == null ? m.SideNames[si] : names.ToString();
         }
 
         private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)
