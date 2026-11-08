@@ -722,7 +722,7 @@ namespace CompetitiveRounds
     /// <summary>The open picker's per-frame tick: Escape closes it; the F5 menu or
     /// any other input owner appearing closes it too (Codex r1/r2 H2: the surfaces
     /// never overlap); a catalogue change closes it (L1, Codex r2 H3: no rebuild on
-    /// this path). Three reads per frame, no lookup, no composition.</summary>
+    /// this path). Per frame: one predicate of boolean flags, one key, one int compare; no lookup, no composition.</summary>
     internal sealed class AvatarPickerEscape : MonoBehaviour
     {
         private void Update()
